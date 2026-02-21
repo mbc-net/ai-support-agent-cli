@@ -1,5 +1,5 @@
 {
-  "name": "ai-support-agent",
+  "name": "@ai-support-agent/cli",
   "version": "0.0.1",
   "description": "AI Support Agent CLI client",
   "main": "dist/index.js",
@@ -40,11 +40,12 @@
     "open": "^11.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.9.0",
-    "ts-node": "^10.9.0",
-    "jest": "^30.0.0",
     "@types/jest": "^30.0.0",
-    "ts-jest": "^29.0.0"
+    "@types/node": "^22.0.0",
+    "jest": "^30.0.0",
+    "jest-junit": "^16.0.0",
+    "ts-jest": "^29.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.9.0"
   }
 }

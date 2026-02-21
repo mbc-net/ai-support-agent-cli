@@ -137,13 +137,13 @@ jobs:
 
       - name: Publish to npm (Pre-release)
         if: steps.release-type.outputs.prerelease == 'true'
-        run: npm publish --tag ${{ steps.release-type.outputs.tag }}
+        run: npm publish --access public --tag ${{ steps.release-type.outputs.tag }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish to npm (Production)
         if: steps.release-type.outputs.prerelease == 'false'
-        run: npm publish
+        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -160,6 +160,6 @@ jobs:
 
             ## Installation
             ```bash
-            npm install ai-support-agent@${{ steps.release-type.outputs.tag }}
+            npm install @ai-support-agent/cli@${{ steps.release-type.outputs.tag }}
             ```
           token: ${{ secrets.GITHUB_TOKEN }}

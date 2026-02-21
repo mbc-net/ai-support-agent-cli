@@ -1,7 +1,7 @@
 # AI Support Agent CLI
 
-[![npm version](https://img.shields.io/npm/v/ai-support-agent.svg)](https://www.npmjs.com/package/ai-support-agent)
-[![license](https://img.shields.io/npm/l/ai-support-agent.svg)](https://github.com/mbc-net/ai-support-agent-client/blob/main/LICENSE)
+[![npm version](https://img.shields.io/npm/v/@ai-support-agent/cli.svg)](https://www.npmjs.com/package/@ai-support-agent/cli)
+[![license](https://img.shields.io/npm/l/@ai-support-agent/cli.svg)](https://github.com/mbc-net/ai-support-agent-client/blob/main/LICENSE)
 
 Multi-tenant AI support agent CLI that connects to your AI Support Agent server. It runs as a background agent on your machine, receiving and executing commands from the server while reporting results back in real time.
 
@@ -17,7 +17,7 @@ Multi-tenant AI support agent CLI that connects to your AI Support Agent server.
 
 ```bash
 # Install globally
-npm install -g ai-support-agent
+npm install -g @ai-support-agent/cli
 
 # Login via browser OAuth
 ai-support-agent login --url https://your-web-ui.example.com
