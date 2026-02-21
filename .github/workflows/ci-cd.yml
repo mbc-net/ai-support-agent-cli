@@ -1,0 +1,165 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: write
+  actions: read
+  checks: write
+  issues: write
+  pull-requests: write
+  security-events: write
+
+jobs:
+  unit_tests:
+    name: Unit Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20.x, 22.x, 24.x]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Verify lockfile integrity
+        run: git diff --exit-code package-lock.json
+
+      - name: Build
+        run: npm run build
+
+      - name: Type Check
+        run: npx tsc --noEmit
+        continue-on-error: true
+
+      - name: Security Audit (npm)
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+      - name: Security Scan (Trivy)
+        uses: aquasecurity/trivy-action@master
+        if: matrix.node-version == '20.x'
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'vuln,secret'
+          severity: 'HIGH,CRITICAL'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+        continue-on-error: true
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: matrix.node-version == '20.x' && (success() || failure())
+        with:
+          sarif_file: 'trivy-results.sarif'
+        continue-on-error: true
+
+      - name: Run Unit Tests with Coverage
+        run: npm run test:cov
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        if: matrix.node-version == '20.x'
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+          verbose: true
+
+      - name: Unit Test Report
+        uses: dorny/test-reporter@v1
+        if: (success() || failure()) && github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          name: Unit Tests Reporter-${{ matrix.node-version }}
+          path: report/unit.xml
+          reporter: jest-junit
+          fail-on-error: 'true'
+
+  publish:
+    name: Publish
+    needs: unit_tests
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      - name: Authenticate with npm
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG_NAME=${{ github.ref_name }}
+          VERSION=${TAG_NAME#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+
+      - name: Determine release type
+        id: release-type
+        run: |
+          if [[ "${{ steps.version.outputs.version }}" == *"beta"* ]]; then
+            echo "tag=beta" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ steps.version.outputs.version }}" == *"alpha"* ]]; then
+            echo "tag=alpha" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "tag=latest" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish to npm (Pre-release)
+        if: steps.release-type.outputs.prerelease == 'true'
+        run: npm publish --tag ${{ steps.release-type.outputs.tag }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to npm (Production)
+        if: steps.release-type.outputs.prerelease == 'false'
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ steps.release-type.outputs.prerelease }}
+          body: |
+            ## Changes
+            See the [CHANGELOG](./CHANGELOG.md) for details.
+
+            ## Installation
+            ```bash
+            npm install ai-support-agent@${{ steps.release-type.outputs.tag }}
+            ```
+          token: ${{ secrets.GITHUB_TOKEN }}

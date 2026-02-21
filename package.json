@@ -1,0 +1,50 @@
+{
+  "name": "ai-support-agent",
+  "version": "0.0.1",
+  "description": "AI Support Agent CLI client",
+  "main": "dist/index.js",
+  "bin": {
+    "ai-support-agent": "./dist/index.js"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mbc-net/ai-support-agent-client.git"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "support",
+    "multi-tenant"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "dev": "ts-node src/index.ts",
+    "build": "tsc && cp -r src/locales dist/locales",
+    "prepublishOnly": "npm run build && npm test",
+    "test": "jest",
+    "test:cov": "jest --coverage"
+  },
+  "dependencies": {
+    "axios": "^1.13.0",
+    "commander": "^14.0.0",
+    "open": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0",
+    "ts-node": "^10.9.0",
+    "jest": "^30.0.0",
+    "@types/jest": "^30.0.0",
+    "ts-jest": "^29.0.0"
+  }
+}
