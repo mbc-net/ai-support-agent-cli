@@ -6,6 +6,8 @@
   "cmd.start.pollInterval": "ポーリング間隔（ms）",
   "cmd.start.heartbeatInterval": "ハートビート間隔（ms）",
   "cmd.start.verbose": "詳細ログを出力",
+  "cmd.start.noAutoUpdate": "自動更新を無効化",
+  "cmd.start.updateChannel": "更新チャネル（latest, beta, alpha）",
   "cmd.login": "ブラウザ認証でプロジェクトを登録",
   "cmd.login.url": "Web UI URL（例: http://localhost:4030）",
   "cmd.login.apiUrl": "API URL",
@@ -74,5 +76,21 @@
   "status.noProjects": "プロジェクト: なし",
   "status.projectCount": "登録プロジェクト ({{count}}件):",
   "status.apiUrl": "API URL:  {{apiUrl}}",
-  "status.token": "トークン: {{token}}"
+  "status.token": "トークン: {{token}}",
+  "status.autoUpdate": "自動更新:     {{status}}",
+  "status.updateChannel": "チャネル:     {{channel}}",
+
+  "update.upToDate": "最新バージョンです ({{version}})",
+  "update.available": "更新があります: {{current}} -> {{latest}}",
+  "update.installing": "バージョン {{version}} をインストール中...",
+  "update.installSuccess": "バージョン {{version}} に更新しました",
+  "update.installFailed": "更新に失敗しました: {{message}}",
+  "update.permissionHint": "次のコマンドを実行してください: sudo npm install -g @ai-support-agent/cli@{{version}}",
+  "update.manualHint": "次のコマンドを実行してください: npm install -g @ai-support-agent/cli@{{version}}",
+  "update.stoppingAgents": "再起動のためエージェントを停止中...",
+  "update.restarting": "新しいバージョンで再起動中...",
+  "update.forced": "強制更新が必要です: 現在のバージョンが最低バージョン ({{minimumVersion}}) を下回っています。{{version}} に更新します...",
+  "update.disabled": "無効",
+  "update.enabled": "有効 (自動再起動: {{autoRestart}})",
+  "update.checkFailed": "バージョンチェックに失敗しました: {{message}}"
 }

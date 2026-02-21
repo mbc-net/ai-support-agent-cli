@@ -16,6 +16,9 @@ jest.mock('../src/api-client')
 jest.mock('../src/command-executor')
 jest.mock('../src/config-manager')
 jest.mock('../src/logger')
+jest.mock('../src/auto-updater', () => ({
+  startAutoUpdater: jest.fn().mockReturnValue({ stop: jest.fn() }),
+}))
 jest.mock('os', () => {
   const actual = jest.requireActual<typeof os>('os')
   return {
@@ -80,6 +83,7 @@ describe('agent-runner', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn(),
+      getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
     }
     MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
 
@@ -252,6 +256,7 @@ describe('startProjectAgent', () => {
     getPendingCommands: jest.Mock
     getCommand: jest.Mock
     submitResult: jest.Mock
+    getVersionInfo: jest.Mock
   }
 
   beforeEach(() => {
@@ -262,6 +267,7 @@ describe('startProjectAgent', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn().mockResolvedValue(undefined),
+      getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
     }
     ;(ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(
       () => mockClient as unknown as ApiClient,
