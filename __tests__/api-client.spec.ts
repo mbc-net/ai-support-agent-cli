@@ -72,6 +72,76 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getVersionInfo', () => {
+    it('should fetch version info with default channel', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          latestVersion: '1.2.0',
+          minimumVersion: '1.0.0',
+          channel: 'latest',
+          channels: { latest: '1.2.0' },
+        },
+      })
+
+      const result = await client.getVersionInfo()
+      expect(result.latestVersion).toBe('1.2.0')
+      expect(result.channel).toBe('latest')
+      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version?channel=latest')
+    })
+
+    it('should pass channel parameter', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          latestVersion: '1.3.0-beta.1',
+          minimumVersion: '1.0.0',
+          channel: 'beta',
+          channels: { beta: '1.3.0-beta.1' },
+        },
+      })
+
+      const result = await client.getVersionInfo('beta')
+      expect(result.latestVersion).toBe('1.3.0-beta.1')
+      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version?channel=beta')
+    })
+  })
+
+  describe('heartbeat with updateError', () => {
+    it('should include updateError when provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat('test-id', {
+        platform: 'darwin',
+        arch: 'arm64',
+        cpuUsage: 50,
+        memoryUsage: 60,
+        uptime: 1000,
+      }, 'EACCES: permission denied')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/agent/heartbeat',
+        expect.objectContaining({
+          agentId: 'test-id',
+          updateError: 'EACCES: permission denied',
+        }),
+      )
+    })
+
+    it('should not include updateError when not provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat('test-id', {
+        platform: 'darwin',
+        arch: 'arm64',
+        cpuUsage: 50,
+        memoryUsage: 60,
+        uptime: 1000,
+      })
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).not.toHaveProperty('updateError')
+    })
+  })
+
   describe('getPendingCommands', () => {
     it('should fetch pending commands', async () => {
       mockInstance.get.mockResolvedValue({

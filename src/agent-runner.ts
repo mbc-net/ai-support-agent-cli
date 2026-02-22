@@ -1,12 +1,13 @@
 import * as os from 'os'
 
 import { ApiClient } from './api-client'
+import { type AutoUpdaterHandle, startAutoUpdater } from './auto-updater'
 import { DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJECT_CODE_CLI_DIRECT, PROJECT_CODE_ENV_DEFAULT } from './constants'
 import { executeCommand } from './command-executor'
 import { getProjectList, loadConfig, saveConfig } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
-import type { ProjectRegistration, SystemInfo } from './types'
+import type { AutoUpdateConfig, ProjectRegistration, ReleaseChannel, SystemInfo } from './types'
 import { getErrorMessage, validateApiUrl } from './utils'
 
 export interface RunnerOptions {
@@ -15,6 +16,8 @@ export interface RunnerOptions {
   pollInterval?: number
   heartbeatInterval?: number
   verbose?: boolean
+  autoUpdate?: boolean
+  updateChannel?: ReleaseChannel
 }
 
 export function getSystemInfo(): SystemInfo {
@@ -47,7 +50,7 @@ export function startProjectAgent(
     pollInterval: number
     heartbeatInterval: number
   },
-): { stop: () => void } {
+): { stop: () => void; client: ApiClient } {
   const client = new ApiClient(project.apiUrl, project.token)
   const prefix = `[${project.projectCode}]`
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
@@ -145,6 +148,7 @@ export function startProjectAgent(
       if (heartbeatTimer) clearInterval(heartbeatTimer)
       if (pollTimer) clearInterval(pollTimer)
     },
+    client,
   }
 }
 
@@ -158,15 +162,31 @@ function resolveIntervals(options: RunnerOptions): {
   }
 }
 
-export function setupShutdownHandlers(agents: { stop: () => void }[]): void {
+export function setupShutdownHandlers(
+  agents: { stop: () => void }[],
+  updater?: AutoUpdaterHandle,
+): void {
   const shutdown = (): void => {
     logger.info(t('runner.shuttingDown'))
+    updater?.stop()
     agents.forEach((a) => a.stop())
     logger.success(t('runner.stopped'))
     process.exit(0)
   }
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
+}
+
+function resolveAutoUpdateConfig(options: RunnerOptions, config?: { autoUpdate?: AutoUpdateConfig } | null): AutoUpdateConfig {
+  return {
+    enabled: options.autoUpdate !== false,
+    autoRestart: true,
+    channel: options.updateChannel ?? config?.autoUpdate?.channel ?? 'latest',
+    ...config?.autoUpdate,
+    // CLI flags override config
+    ...(options.autoUpdate === false && { enabled: false }),
+    ...(options.updateChannel && { channel: options.updateChannel }),
+  }
 }
 
 function runSingleProject(
@@ -179,9 +199,22 @@ function runSingleProject(
   logger.info(t('runner.starting'))
   const agent = startProjectAgent(project, agentId, { pollInterval, heartbeatInterval })
 
+  const autoUpdateConfig = resolveAutoUpdateConfig(options)
+  let updater: AutoUpdaterHandle | undefined
+  if (autoUpdateConfig.enabled) {
+    updater = startAutoUpdater(
+      [agent.client],
+      autoUpdateConfig,
+      () => agent.stop(),
+      (error) => {
+        void agent.client.heartbeat(agentId, getSystemInfo(), error).catch(() => {})
+      },
+    )
+  }
+
   logger.info(t('runner.startedSingle', { pollInterval, heartbeatInterval }))
   logger.info(t('runner.stopHint'))
-  setupShutdownHandlers([agent])
+  setupShutdownHandlers([agent], updater)
 }
 
 export async function startAgent(options: RunnerOptions): Promise<void> {
@@ -256,6 +289,20 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
 
   saveConfig({ lastConnected: new Date().toISOString() })
 
+  const autoUpdateConfig = resolveAutoUpdateConfig(options, config)
+  let updater: AutoUpdaterHandle | undefined
+  if (autoUpdateConfig.enabled) {
+    const clients = agents.map((a) => a.client)
+    updater = startAutoUpdater(
+      clients,
+      autoUpdateConfig,
+      () => agents.forEach((a) => a.stop()),
+      (error) => {
+        void agents[0]?.client.heartbeat(agentId, getSystemInfo(), error).catch(() => {})
+      },
+    )
+  }
+
   logger.info(
     t('runner.startedMulti', { count: projects.length, pollInterval, heartbeatInterval }),
   )
@@ -263,5 +310,5 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     logger.info(`  - ${p.projectCode} (${p.apiUrl})`)
   }
   logger.info(t('runner.stopHint'))
-  setupShutdownHandlers(agents)
+  setupShutdownHandlers(agents, updater)
 }

@@ -16,6 +16,9 @@ jest.mock('../src/api-client')
 jest.mock('../src/command-executor')
 jest.mock('../src/config-manager')
 jest.mock('../src/logger')
+jest.mock('../src/auto-updater', () => ({
+  startAutoUpdater: jest.fn().mockReturnValue({ stop: jest.fn() }),
+}))
 jest.mock('os', () => {
   const actual = jest.requireActual<typeof os>('os')
   return {
@@ -80,6 +83,7 @@ describe('agent-runner', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn(),
+      getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
     }
     MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
 
@@ -168,6 +172,121 @@ describe('agent-runner', () => {
     },
   ))
 
+  it('should call process.exit(1) when CLI apiUrl is invalid', async () => {
+    mockedLoadConfig.mockReturnValue(null)
+
+    await expect(startAgent({
+      token: 'cli-token',
+      apiUrl: 'not-a-url',
+    })).rejects.toThrow('process.exit called')
+    expect(exitSpy).toHaveBeenCalledWith(1)
+  })
+
+  it('should call process.exit(1) when env apiUrl is invalid', withEnvVars(
+    { AI_SUPPORT_AGENT_TOKEN: 'env-token', AI_SUPPORT_AGENT_API_URL: 'not-a-url' },
+    async () => {
+      mockedLoadConfig.mockReturnValue(null)
+
+      await expect(startAgent({})).rejects.toThrow('process.exit called')
+      expect(exitSpy).toHaveBeenCalledWith(1)
+    },
+  ))
+
+  it('should not start auto-updater when --no-auto-update is passed', async () => {
+    const { startAutoUpdater } = require('../src/auto-updater')
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+      autoUpdate: false,
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startAutoUpdater).not.toHaveBeenCalled()
+  })
+
+  it('should start auto-updater with custom channel for multi-project config', async () => {
+    const { startAutoUpdater } = require('../src/auto-updater')
+    const mockConfig = {
+      agentId: 'multi-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({ updateChannel: 'beta' })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startAutoUpdater).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ channel: 'beta' }),
+      expect.any(Function),
+      expect.any(Function),
+    )
+  })
+
+  it('should invoke auto-updater stopAllAgents and sendUpdateError callbacks (single project)', async () => {
+    const { startAutoUpdater } = require('../src/auto-updater')
+    // Make startAutoUpdater call the callbacks to verify they work
+    startAutoUpdater.mockImplementation(
+      (_clients: unknown[], _config: unknown, stopAll: () => void, sendError?: (err: string) => void) => {
+        stopAll()
+        sendError?.('test error')
+        return { stop: jest.fn() }
+      },
+    )
+
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startAutoUpdater).toHaveBeenCalled()
+
+    // Reset mock to default behavior
+    startAutoUpdater.mockReturnValue({ stop: jest.fn() })
+  })
+
+  it('should invoke auto-updater stopAllAgents and sendUpdateError callbacks (multi project)', async () => {
+    const { startAutoUpdater } = require('../src/auto-updater')
+    startAutoUpdater.mockImplementation(
+      (_clients: unknown[], _config: unknown, stopAll: () => void, sendError?: (err: string) => void) => {
+        stopAll()
+        sendError?.('test error')
+        return { stop: jest.fn() }
+      },
+    )
+
+    const mockConfig = {
+      agentId: 'multi-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startAutoUpdater).toHaveBeenCalled()
+
+    // Reset mock to default behavior
+    startAutoUpdater.mockReturnValue({ stop: jest.fn() })
+  })
+
   it('should call process.exit(1) when config exists but has no projects', async () => {
     const mockConfig = {
       agentId: 'empty-agent',
@@ -252,6 +371,7 @@ describe('startProjectAgent', () => {
     getPendingCommands: jest.Mock
     getCommand: jest.Mock
     submitResult: jest.Mock
+    getVersionInfo: jest.Mock
   }
 
   beforeEach(() => {
@@ -262,6 +382,7 @@ describe('startProjectAgent', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn().mockResolvedValue(undefined),
+      getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
     }
     ;(ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(
       () => mockClient as unknown as ApiClient,
@@ -356,6 +477,20 @@ describe('startProjectAgent', () => {
     expect(logger.error).toHaveBeenCalledWith('runner.commandError')
     expect(logger.error).toHaveBeenCalledWith('runner.resultSendFailed')
 
+    agent.stop()
+  })
+
+  it('should handle polling error gracefully', async () => {
+    mockClient.getPendingCommands.mockRejectedValue(new Error('Network failure'))
+
+    const agent = startProjectAgent(project, 'agent-1', intervals)
+
+    await jest.advanceTimersByTimeAsync(100)
+
+    // Trigger poll interval — should not throw
+    await jest.advanceTimersByTimeAsync(intervals.pollInterval)
+
+    // Should continue running despite polling error
     agent.stop()
   })
 

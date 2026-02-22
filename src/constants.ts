@@ -43,6 +43,11 @@ export const PROJECT_CODE_DEFAULT = 'default'
 export const PROJECT_CODE_CLI_DIRECT = 'cli-direct'
 export const PROJECT_CODE_ENV_DEFAULT = 'env-default'
 
+// Auto-update constants
+export const UPDATE_CHECK_INTERVAL = 60 * 60 * 1000 // 1 hour
+export const UPDATE_CHECK_INITIAL_DELAY = 30_000 // 30 seconds
+export const NPM_INSTALL_TIMEOUT = 120_000 // 2 minutes
+
 // API endpoint paths
 export const API_ENDPOINTS = {
   REGISTER: '/api/agent/register',
@@ -50,4 +55,5 @@ export const API_ENDPOINTS = {
   COMMANDS_PENDING: '/api/agent/commands/pending',
   COMMAND: (commandId: string) => `/api/agent/commands/${commandId}`,
   COMMAND_RESULT: (commandId: string) => `/api/agent/commands/${commandId}/result`,
+  VERSION: '/api/agent/version',
 } as const

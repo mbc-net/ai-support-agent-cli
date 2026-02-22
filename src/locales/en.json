@@ -6,6 +6,8 @@
   "cmd.start.pollInterval": "Polling interval (ms)",
   "cmd.start.heartbeatInterval": "Heartbeat interval (ms)",
   "cmd.start.verbose": "Enable verbose logging",
+  "cmd.start.noAutoUpdate": "Disable automatic updates",
+  "cmd.start.updateChannel": "Update channel (latest, beta, alpha)",
   "cmd.login": "Register a project via browser authentication",
   "cmd.login.url": "Web UI URL (e.g. http://localhost:4030)",
   "cmd.login.apiUrl": "API URL",
@@ -74,5 +76,21 @@
   "status.noProjects": "Projects: none",
   "status.projectCount": "Registered projects ({{count}}):",
   "status.apiUrl": "API URL:  {{apiUrl}}",
-  "status.token": "Token:    {{token}}"
+  "status.token": "Token:    {{token}}",
+  "status.autoUpdate": "Auto-update: {{status}}",
+  "status.updateChannel": "Channel:     {{channel}}",
+
+  "update.upToDate": "Up to date ({{version}})",
+  "update.available": "Update available: {{current}} -> {{latest}}",
+  "update.installing": "Installing version {{version}}...",
+  "update.installSuccess": "Successfully updated to {{version}}",
+  "update.installFailed": "Update failed: {{message}}",
+  "update.permissionHint": "Try: sudo npm install -g @ai-support-agent/cli@{{version}}",
+  "update.manualHint": "Run: npm install -g @ai-support-agent/cli@{{version}}",
+  "update.stoppingAgents": "Stopping agents for restart...",
+  "update.restarting": "Restarting with new version...",
+  "update.forced": "Forced update required: current version is below minimum ({{minimumVersion}}). Updating to {{version}}...",
+  "update.disabled": "disabled",
+  "update.enabled": "enabled (auto-restart: {{autoRestart}})",
+  "update.checkFailed": "Version check failed: {{message}}"
 }

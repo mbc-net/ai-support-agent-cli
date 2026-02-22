@@ -1,3 +1,18 @@
+export type ReleaseChannel = 'latest' | 'beta' | 'alpha'
+
+export interface VersionInfo {
+  latestVersion: string
+  minimumVersion: string
+  channel: ReleaseChannel
+  channels: Record<string, string>
+}
+
+export interface AutoUpdateConfig {
+  enabled: boolean
+  autoRestart: boolean
+  channel: ReleaseChannel
+}
+
 export interface ProjectRegistration {
   projectCode: string
   token: string
@@ -10,6 +25,7 @@ export interface AgentConfig {
   lastConnected?: string
   language?: string
   projects?: ProjectRegistration[]
+  autoUpdate?: AutoUpdateConfig
 }
 
 /**

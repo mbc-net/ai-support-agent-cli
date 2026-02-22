@@ -6,9 +6,11 @@ import type {
   AgentCommand,
   CommandResult,
   PendingCommand,
+  ReleaseChannel,
   RegisterRequest,
   RegisterResponse,
   SystemInfo,
+  VersionInfo,
 } from './types'
 
 export class ApiClient {
@@ -81,7 +83,7 @@ export class ApiClient {
     })
   }
 
-  async heartbeat(agentId: string, systemInfo: SystemInfo): Promise<void> {
+  async heartbeat(agentId: string, systemInfo: SystemInfo, updateError?: string): Promise<void> {
     logger.debug('Sending heartbeat')
     await this.withRetry(async () => {
       await this.client.post(API_ENDPOINTS.HEARTBEAT, {
@@ -89,7 +91,17 @@ export class ApiClient {
         timestamp: Date.now(),
         version: AGENT_VERSION,
         systemInfo,
+        ...(updateError && { updateError }),
       })
+    })
+  }
+
+  async getVersionInfo(channel: ReleaseChannel = 'latest'): Promise<VersionInfo> {
+    return this.withRetry(async () => {
+      const { data } = await this.client.get<VersionInfo>(
+        `${API_ENDPOINTS.VERSION}?channel=${channel}`,
+      )
+      return data
     })
   }
 
