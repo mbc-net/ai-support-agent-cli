@@ -163,3 +163,12 @@ jobs:
             npm install @ai-support-agent/cli@${{ steps.release-type.outputs.tag }}
             ```
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify API of new version
+        if: success()
+        run: |
+          curl -s -X PUT "${{ secrets.AGENT_VERSION_API_URL }}/api/agent/version" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ secrets.AGENT_VERSION_API_KEY }}" \
+            -d "{\"channel\":\"${{ steps.release-type.outputs.tag }}\",\"latestVersion\":\"${{ steps.version.outputs.version }}\"}"
+        continue-on-error: true

@@ -5,7 +5,7 @@ import { Command } from 'commander'
 import { startAgent } from './agent-runner'
 import { startAuthServer } from './auth-server'
 import { AGENT_VERSION, MAX_INTERVAL, MIN_INTERVAL, PROJECT_CODE_DEFAULT } from './constants'
-import type { AgentConfig } from './types'
+import type { AgentConfig, ReleaseChannel } from './types'
 import {
   addProject,
   getProjectList,
@@ -95,8 +95,19 @@ function formatStatus(config: AgentConfig): string {
     `  ${t('status.header')}`,
     `    ${t('status.agentId', { agentId: config.agentId || t('status.notSet') })}`,
     `    ${t('status.lastConnected', { lastConnected: config.lastConnected || t('status.notConnected') })}`,
-    '',
   ]
+
+  // Auto-update status
+  const autoUpdate = config.autoUpdate
+  if (autoUpdate && autoUpdate.enabled === false) {
+    lines.push(`    ${t('status.autoUpdate', { status: t('update.disabled') })}`)
+  } else {
+    const autoRestart = autoUpdate?.autoRestart !== false ? 'true' : 'false'
+    lines.push(`    ${t('status.autoUpdate', { status: t('update.enabled', { autoRestart }) })}`)
+    lines.push(`    ${t('status.updateChannel', { channel: autoUpdate?.channel ?? 'latest' })}`)
+  }
+
+  lines.push('')
 
   if (projects.length === 0) {
     lines.push(`  ${t('status.noProjects')}`)
@@ -131,19 +142,30 @@ program
   .option('--poll-interval <ms>', t('cmd.start.pollInterval'), '3000')
   .option('--heartbeat-interval <ms>', t('cmd.start.heartbeatInterval'), '30000')
   .option('--verbose', t('cmd.start.verbose'))
+  .option('--no-auto-update', t('cmd.start.noAutoUpdate'))
+  .option('--update-channel <channel>', t('cmd.start.updateChannel'))
   .action(async (opts: {
     token?: string
     apiUrl?: string
     pollInterval: string
     heartbeatInterval: string
     verbose?: boolean
+    autoUpdate?: boolean
+    updateChannel?: string
   }) => {
+    const validChannels = ['latest', 'beta', 'alpha']
+    if (opts.updateChannel && !validChannels.includes(opts.updateChannel)) {
+      logger.error(`Invalid update channel: ${opts.updateChannel}. Must be one of: ${validChannels.join(', ')}`)
+      process.exit(1)
+    }
     await startAgent({
       token: opts.token,
       apiUrl: opts.apiUrl,
       pollInterval: parseIntervalOrExit(opts.pollInterval, 'poll-interval'),
       heartbeatInterval: parseIntervalOrExit(opts.heartbeatInterval, 'heartbeat-interval'),
       verbose: opts.verbose,
+      autoUpdate: opts.autoUpdate,
+      updateChannel: opts.updateChannel as ReleaseChannel | undefined,
     })
   })
 
