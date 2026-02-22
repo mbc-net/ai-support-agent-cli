@@ -216,6 +216,38 @@ describe('startAutoUpdater', () => {
     updater.stop()
   })
 
+  it('should log permission hint when update error contains Permission denied', async () => {
+    const client = createMockClient()
+    mockedIsNewerVersion.mockReturnValue(true)
+    mockedPerformUpdate.mockResolvedValue({
+      success: false,
+      error: 'Permission denied. Try: sudo npm install -g @ai-support-agent/cli@2.0.0',
+    })
+
+    const updater = startAutoUpdater([client], defaultConfig, jest.fn())
+
+    await jest.advanceTimersByTimeAsync(30_000)
+
+    // performUpdate was called and failed with permission error
+    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0')
+
+    updater.stop()
+  })
+
+  it('should handle getVersionInfo throwing an error gracefully', async () => {
+    const client = createMockClient()
+    ;(client.getVersionInfo as jest.Mock).mockRejectedValue(new Error('Network error'))
+
+    const updater = startAutoUpdater([client], defaultConfig, jest.fn())
+
+    // Should not throw
+    await jest.advanceTimersByTimeAsync(30_000)
+
+    expect(mockedPerformUpdate).not.toHaveBeenCalled()
+
+    updater.stop()
+  })
+
   it('should not crash when no clients provided', async () => {
     const updater = startAutoUpdater([], defaultConfig, jest.fn())
 
