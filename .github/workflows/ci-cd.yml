@@ -170,8 +170,21 @@ jobs:
       - name: Notify API of new version
         if: success()
         run: |
-          curl -s -X PUT "${{ secrets.AGENT_VERSION_API_URL }}/api/agent/version" \
+          if [ -z "$VERSION_API_URL" ] || [ -z "$VERSION_API_KEY" ]; then
+            echo "::warning::AGENT_VERSION_API_URL or AGENT_VERSION_API_KEY is not set. Skipping version notification."
+            exit 0
+          fi
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT "$VERSION_API_URL/api/agent/version" \
             -H "Content-Type: application/json" \
-            -H "X-API-Key: ${{ secrets.AGENT_VERSION_API_KEY }}" \
-            -d "{\"channel\":\"${{ steps.release-type.outputs.tag }}\",\"latestVersion\":\"${{ steps.version.outputs.version }}\"}"
-        continue-on-error: true
+            -H "X-API-Key: $VERSION_API_KEY" \
+            -d "{\"channel\":\"${{ steps.release-type.outputs.tag }}\",\"latestVersion\":\"${{ steps.version.outputs.version }}\"}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "Response: $BODY (HTTP $HTTP_CODE)"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Version notification failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+        env:
+          VERSION_API_URL: ${{ secrets.AGENT_VERSION_API_URL }}
+          VERSION_API_KEY: ${{ secrets.AGENT_VERSION_API_KEY }}
