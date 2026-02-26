@@ -34,7 +34,7 @@ export async function executeChatCommand(
       return executeApiChatCommand(payload, commandId, client, serverConfig, agentId)
     case 'claude_code':
     default:
-      return executeClaudeCodeChat(payload, commandId, client, agentId)
+      return executeClaudeCodeChat(payload, commandId, client, agentId, serverConfig)
   }
 }
 
@@ -48,6 +48,7 @@ async function executeClaudeCodeChat(
   commandId: string,
   client: ApiClient,
   agentId: string,
+  serverConfig?: AgentServerConfig,
 ): Promise<CommandResult> {
   const message = parseString(payload.message)
   if (!message) {
@@ -59,8 +60,9 @@ async function executeClaudeCodeChat(
   const { sendChunk, getChunkIndex } = createChunkSender(commandId, client, agentId, 'chat', { debugLog: true })
 
   try {
-    logger.debug(`[chat] Spawning claude CLI for command [${commandId}]`)
-    const result = await runClaudeCode(message, sendChunk)
+    const allowedTools = serverConfig?.claudeCodeConfig?.allowedTools
+    logger.debug(`[chat] Spawning claude CLI for command [${commandId}]${allowedTools?.length ? ` with allowedTools: ${allowedTools.join(', ')}` : ''}`)
+    const result = await runClaudeCode(message, sendChunk, allowedTools)
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.length} chars, ${getChunkIndex()} chunks sent`)
     // 完了チャンクを送信
     await sendChunk('done', result)
@@ -79,6 +81,7 @@ async function executeClaudeCodeChat(
 async function runClaudeCode(
   message: string,
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
+  allowedTools?: string[],
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     // claude CLI が利用可能か確認し、print モードで実行
@@ -89,7 +92,16 @@ async function runClaudeCode(
       if (key === 'CLAUDECODE' || key.startsWith('CLAUDE_CODE_')) continue
       if (value !== undefined) cleanEnv[key] = value
     }
-    const child = spawn('claude', ['-p', message], {
+
+    const args = ['-p']
+    if (allowedTools && allowedTools.length > 0) {
+      for (const tool of allowedTools) {
+        args.push('--allowedTools', tool)
+      }
+    }
+    args.push(message)
+
+    const child = spawn('claude', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanEnv,
     })

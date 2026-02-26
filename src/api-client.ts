@@ -2,6 +2,7 @@ import axios, { type AxiosInstance } from 'axios'
 
 import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT } from './constants'
 import { logger } from './logger'
+import { RetryStrategy } from './retry-strategy'
 import type {
   AgentCommand,
   AgentServerConfig,
@@ -17,6 +18,7 @@ import type {
 
 export class ApiClient {
   private readonly client: AxiosInstance
+  private readonly retry: RetryStrategy
 
   constructor(apiUrl: string, token: string) {
     const parsed = new URL(apiUrl)
@@ -32,46 +34,16 @@ export class ApiClient {
       },
       timeout: API_REQUEST_TIMEOUT,
     })
-  }
 
-  private shouldRetry(error: unknown): boolean {
-    if (!axios.isAxiosError(error) || !error.response) {
-      return true // Network error — retry
-    }
-    const status = error.response.status
-    if (status === 408 || status === 429) {
-      return true // Timeout / rate-limit — retry
-    }
-    if (status >= 500) {
-      return true // Server error — retry
-    }
-    return false // Other 4xx — do not retry
-  }
-
-  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
-    let lastError: unknown
-    for (let attempt = 0; attempt < API_MAX_RETRIES; attempt++) {
-      try {
-        return await fn()
-      } catch (error) {
-        lastError = error
-        if (!this.shouldRetry(error)) {
-          throw error
-        }
-        if (attempt < API_MAX_RETRIES - 1) {
-          const baseDelay = API_BASE_DELAY_MS * Math.pow(2, attempt)
-          const delay = Math.round(baseDelay * (0.5 + Math.random() * 0.5))
-          logger.debug(`Request failed (attempt ${attempt + 1}/${API_MAX_RETRIES}), retrying in ${delay}ms`)
-          await new Promise((resolve) => setTimeout(resolve, delay))
-        }
-      }
-    }
-    throw lastError
+    this.retry = new RetryStrategy({
+      maxRetries: API_MAX_RETRIES,
+      baseDelayMs: API_BASE_DELAY_MS,
+    })
   }
 
   async register(request: RegisterRequest): Promise<RegisterResponse> {
     logger.debug(`Registering agent: ${request.agentId}`)
-    return this.withRetry(async () => {
+    return this.retry.withRetry(async () => {
       const { ipAddress, availableChatModes, activeChatMode, ...rest } = request
       const { data } = await this.client.post<RegisterResponse>(
         API_ENDPOINTS.REGISTER,
@@ -95,7 +67,7 @@ export class ApiClient {
     activeChatMode?: string,
   ): Promise<void> {
     logger.debug('Sending heartbeat')
-    await this.withRetry(async () => {
+    await this.retry.withRetry(async () => {
       await this.client.post(API_ENDPOINTS.HEARTBEAT, {
         agentId,
         timestamp: Date.now(),
@@ -109,7 +81,7 @@ export class ApiClient {
   }
 
   async getVersionInfo(channel: ReleaseChannel = 'latest'): Promise<VersionInfo> {
-    return this.withRetry(async () => {
+    return this.retry.withRetry(async () => {
       const { data } = await this.client.get<VersionInfo>(
         `${API_ENDPOINTS.VERSION}?channel=${channel}`,
       )
@@ -119,7 +91,7 @@ export class ApiClient {
 
   async getPendingCommands(agentId: string): Promise<PendingCommand[]> {
     logger.debug('Polling for pending commands')
-    return this.withRetry(async () => {
+    return this.retry.withRetry(async () => {
       const { data } = await this.client.get<PendingCommand[]>(
         API_ENDPOINTS.COMMANDS_PENDING,
         { params: { agentId } },
@@ -137,7 +109,7 @@ export class ApiClient {
   async getCommand(commandId: string, agentId: string): Promise<AgentCommand> {
     this.validateCommandId(commandId)
     logger.debug(`Fetching command: ${commandId}`)
-    return this.withRetry(async () => {
+    return this.retry.withRetry(async () => {
       const { data } = await this.client.get<AgentCommand>(
         API_ENDPOINTS.COMMAND(commandId),
         { params: { agentId } },
@@ -153,7 +125,7 @@ export class ApiClient {
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting result for command: ${commandId}`)
-    await this.withRetry(async () => {
+    await this.retry.withRetry(async () => {
       await this.client.post(API_ENDPOINTS.COMMAND_RESULT(commandId), result, {
         params: { agentId },
       })
@@ -164,7 +136,7 @@ export class ApiClient {
     agentId: string,
     status: 'connected' | 'disconnected',
   ): Promise<void> {
-    await this.withRetry(async () => {
+    await this.retry.withRetry(async () => {
       await this.client.post(API_ENDPOINTS.CONNECTION_STATUS, {
         agentId,
         status,
@@ -175,7 +147,7 @@ export class ApiClient {
 
   async getConfig(): Promise<AgentServerConfig> {
     logger.debug('Fetching agent config from server')
-    return this.withRetry(async () => {
+    return this.retry.withRetry(async () => {
       const { data } = await this.client.get<AgentServerConfig>(
         API_ENDPOINTS.CONFIG,
       )
@@ -190,7 +162,7 @@ export class ApiClient {
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting chat chunk ${chunk.index} (${chunk.type}) for command: ${commandId}`)
-    await this.withRetry(async () => {
+    await this.retry.withRetry(async () => {
       await this.client.post(API_ENDPOINTS.COMMAND_CHUNKS(commandId), chunk, {
         params: { agentId },
       })

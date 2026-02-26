@@ -302,6 +302,96 @@ describe('chat-executor', () => {
       }), 'agent-1')
     })
 
+    it('should pass allowedTools from serverConfig to CLI args', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const serverConfig: AgentServerConfig = {
+        agentEnabled: true,
+        builtinAgentEnabled: true,
+        builtinFallbackEnabled: true,
+        externalAgentEnabled: true,
+        chatMode: 'agent',
+        claudeCodeConfig: {
+          allowedTools: ['WebFetch', 'WebSearch'],
+        },
+      }
+
+      const resultPromise = executeChatCommand(basePayload, 'cmd-tools', mockClient, serverConfig, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      expect(spawn).toHaveBeenCalledWith(
+        'claude',
+        ['-p', '--allowedTools', 'WebFetch', '--allowedTools', 'WebSearch', 'Hello, world!'],
+        expect.any(Object),
+      )
+    })
+
+    it('should not pass allowedTools when serverConfig has no claudeCodeConfig', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const serverConfig: AgentServerConfig = {
+        agentEnabled: true,
+        builtinAgentEnabled: true,
+        builtinFallbackEnabled: true,
+        externalAgentEnabled: true,
+        chatMode: 'agent',
+      }
+
+      const resultPromise = executeChatCommand(basePayload, 'cmd-no-tools', mockClient, serverConfig, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      expect(spawn).toHaveBeenCalledWith(
+        'claude',
+        ['-p', 'Hello, world!'],
+        expect.any(Object),
+      )
+    })
+
+    it('should not pass allowedTools when array is empty', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const serverConfig: AgentServerConfig = {
+        agentEnabled: true,
+        builtinAgentEnabled: true,
+        builtinFallbackEnabled: true,
+        externalAgentEnabled: true,
+        chatMode: 'agent',
+        claudeCodeConfig: {
+          allowedTools: [],
+        },
+      }
+
+      const resultPromise = executeChatCommand(basePayload, 'cmd-empty-tools', mockClient, serverConfig, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      expect(spawn).toHaveBeenCalledWith(
+        'claude',
+        ['-p', 'Hello, world!'],
+        expect.any(Object),
+      )
+    })
+
     it('should filter CLAUDECODE env vars from child process', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockProcess()
