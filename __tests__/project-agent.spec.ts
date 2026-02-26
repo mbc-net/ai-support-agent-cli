@@ -1,12 +1,12 @@
 import { ApiClient } from '../src/api-client'
 import { AppSyncSubscriber } from '../src/appsync-subscriber'
-import { executeCommand } from '../src/command-executor'
+import { executeCommand } from '../src/commands'
 import { logger } from '../src/logger'
 import { ProjectAgent } from '../src/project-agent'
 
 jest.mock('../src/api-client')
 jest.mock('../src/appsync-subscriber')
-jest.mock('../src/command-executor')
+jest.mock('../src/commands')
 jest.mock('../src/logger')
 jest.mock('../src/chat-mode-detector', () => ({
   detectAvailableChatModes: jest.fn().mockResolvedValue([]),

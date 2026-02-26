@@ -7,12 +7,12 @@ import {
 } from '../src/agent-runner'
 import { getSystemInfo, getLocalIpAddress } from '../src/system-info'
 import { ApiClient } from '../src/api-client'
-import { executeCommand } from '../src/command-executor'
+import { executeCommand } from '../src/commands'
 import { loadConfig, getProjectList, saveConfig } from '../src/config-manager'
 import { logger } from '../src/logger'
 
 jest.mock('../src/api-client')
-jest.mock('../src/command-executor')
+jest.mock('../src/commands')
 jest.mock('../src/config-manager')
 jest.mock('../src/logger')
 jest.mock('../src/auto-updater', () => ({

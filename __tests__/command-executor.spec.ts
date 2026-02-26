@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { executeCommand } from '../src/command-executor'
+import { executeCommand } from '../src/commands'
 import type { CommandResult } from '../src/types'
 
 jest.mock('../src/logger')
