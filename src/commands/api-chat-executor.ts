@@ -16,7 +16,12 @@ export async function executeApiChatCommand(
   commandId: string,
   client: ApiClient,
   config?: AgentServerConfig,
+  agentId?: string,
 ): Promise<CommandResult> {
+  if (!agentId) {
+    return { success: false, error: 'agentId is required for chat command' }
+  }
+
   const message = parseString(payload.message)
   if (!message) {
     return { success: false, error: 'message is required' }
@@ -45,7 +50,7 @@ export async function executeApiChatCommand(
         index: chunkIndex++,
         type,
         content,
-      })
+      }, agentId!)
     } catch (error) {
       logger.warn(
         `[api-chat] Failed to send chunk #${chunkIndex - 1}: ${getErrorMessage(error)}`,

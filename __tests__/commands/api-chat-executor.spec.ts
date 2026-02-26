@@ -50,11 +50,21 @@ describe('api-chat-executor', () => {
     process.env = originalEnv
   })
 
+  it('should return error when agentId is missing', async () => {
+    const result = await executeApiChatCommand(basePayload, 'cmd-0', mockClient)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBe('agentId is required for chat command')
+    }
+  })
+
   it('should return error when message is missing', async () => {
     const result = await executeApiChatCommand(
       { message: undefined } as ChatPayload,
       'cmd-1',
       mockClient,
+      undefined,
+      'agent-1',
     )
     expect(result.success).toBe(false)
     if (!result.success) {
@@ -65,7 +75,7 @@ describe('api-chat-executor', () => {
   it('should return error when ANTHROPIC_API_KEY is not set', async () => {
     delete process.env.ANTHROPIC_API_KEY
 
-    const result = await executeApiChatCommand(basePayload, 'cmd-2', mockClient)
+    const result = await executeApiChatCommand(basePayload, 'cmd-2', mockClient, undefined, 'agent-1')
     expect(result.success).toBe(false)
     if (!result.success) {
       expect(result.error).toContain('ANTHROPIC_API_KEY')
@@ -77,7 +87,7 @@ describe('api-chat-executor', () => {
     mockedAxiosPost.mockResolvedValue({ data: stream } as any)
 
     const resultPromise = executeApiChatCommand(
-      basePayload, 'cmd-3', mockClient, baseConfig,
+      basePayload, 'cmd-3', mockClient, baseConfig, 'agent-1',
     )
 
     // Wait for axios.post to be called
@@ -119,18 +129,18 @@ describe('api-chat-executor', () => {
       index: 0,
       type: 'delta',
       content: 'Hello',
-    })
+    }, 'agent-1')
     expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-3', {
       index: 1,
       type: 'delta',
       content: ' there',
-    })
+    }, 'agent-1')
     // done chunk
     expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-3', {
       index: 2,
       type: 'done',
       content: 'Hello there',
-    })
+    }, 'agent-1')
   })
 
   it('should use default maxTokens when config is not provided', async () => {
@@ -138,7 +148,7 @@ describe('api-chat-executor', () => {
     mockedAxiosPost.mockResolvedValue({ data: stream } as any)
 
     const resultPromise = executeApiChatCommand(
-      basePayload, 'cmd-4', mockClient,
+      basePayload, 'cmd-4', mockClient, undefined, 'agent-1',
     )
 
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -165,7 +175,7 @@ describe('api-chat-executor', () => {
     }
 
     const resultPromise = executeApiChatCommand(
-      basePayload, 'cmd-5', mockClient, configWithoutSystem,
+      basePayload, 'cmd-5', mockClient, configWithoutSystem, 'agent-1',
     )
 
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -184,7 +194,7 @@ describe('api-chat-executor', () => {
     mockedAxiosPost.mockResolvedValue({ data: stream } as any)
 
     const resultPromise = executeApiChatCommand(
-      basePayload, 'cmd-6', mockClient, baseConfig,
+      basePayload, 'cmd-6', mockClient, baseConfig, 'agent-1',
     )
 
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -201,7 +211,7 @@ describe('api-chat-executor', () => {
     mockedAxiosPost.mockRejectedValue(new Error('Network error'))
 
     const result = await executeApiChatCommand(
-      basePayload, 'cmd-7', mockClient, baseConfig,
+      basePayload, 'cmd-7', mockClient, baseConfig, 'agent-1',
     )
     expect(result.success).toBe(false)
     if (!result.success) {

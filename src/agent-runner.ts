@@ -126,6 +126,15 @@ function runSingleProject(
 }
 
 export async function startAgent(options: RunnerOptions): Promise<void> {
+  // グローバルエラーハンドラ（非同期エラーでの静かなクラッシュを防止）
+  process.on('uncaughtException', (error) => {
+    logger.error(`Uncaught exception: ${error.message}${error.stack ? `\n${error.stack}` : ''}`)
+    process.exit(1)
+  })
+  process.on('unhandledRejection', (reason) => {
+    logger.error(`Unhandled rejection: ${reason}`)
+  })
+
   if (options.verbose) {
     logger.setVerbose(true)
   }

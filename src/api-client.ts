@@ -117,11 +117,12 @@ export class ApiClient {
     })
   }
 
-  async getPendingCommands(): Promise<PendingCommand[]> {
+  async getPendingCommands(agentId: string): Promise<PendingCommand[]> {
     logger.debug('Polling for pending commands')
     return this.withRetry(async () => {
       const { data } = await this.client.get<PendingCommand[]>(
         API_ENDPOINTS.COMMANDS_PENDING,
+        { params: { agentId } },
       )
       return data
     })
@@ -133,12 +134,13 @@ export class ApiClient {
     }
   }
 
-  async getCommand(commandId: string): Promise<AgentCommand> {
+  async getCommand(commandId: string, agentId: string): Promise<AgentCommand> {
     this.validateCommandId(commandId)
     logger.debug(`Fetching command: ${commandId}`)
     return this.withRetry(async () => {
       const { data } = await this.client.get<AgentCommand>(
         API_ENDPOINTS.COMMAND(commandId),
+        { params: { agentId } },
       )
       return data
     })
@@ -147,11 +149,14 @@ export class ApiClient {
   async submitResult(
     commandId: string,
     result: CommandResult,
+    agentId: string,
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting result for command: ${commandId}`)
     await this.withRetry(async () => {
-      await this.client.post(API_ENDPOINTS.COMMAND_RESULT(commandId), result)
+      await this.client.post(API_ENDPOINTS.COMMAND_RESULT(commandId), result, {
+        params: { agentId },
+      })
     })
   }
 
@@ -181,11 +186,14 @@ export class ApiClient {
   async submitChatChunk(
     commandId: string,
     chunk: ChatChunk,
+    agentId: string,
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting chat chunk ${chunk.index} (${chunk.type}) for command: ${commandId}`)
     await this.withRetry(async () => {
-      await this.client.post(API_ENDPOINTS.COMMAND_CHUNKS(commandId), chunk)
+      await this.client.post(API_ENDPOINTS.COMMAND_CHUNKS(commandId), chunk, {
+        params: { agentId },
+      })
     })
   }
 }

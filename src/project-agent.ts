@@ -159,7 +159,7 @@ export class ProjectAgent {
       this.processing = true
 
       try {
-        const pending = await this.client.getPendingCommands()
+        const pending = await this.client.getPendingCommands(this.agentId)
         if (pending.length > 0) {
           logger.debug(`${this.prefix} Polling found ${pending.length} pending command(s)`)
         }
@@ -168,16 +168,17 @@ export class ProjectAgent {
           logger.info(t('runner.commandReceived', { prefix: this.prefix, type: cmd.type, commandId: cmd.commandId }))
 
           try {
-            const detail = await this.client.getCommand(cmd.commandId)
+            const detail = await this.client.getCommand(cmd.commandId, this.agentId)
             logger.debug(`${this.prefix} Command detail [${cmd.commandId}]: type=${detail.type}, payload=${JSON.stringify(detail.payload).substring(0, 500)}`)
             const result = await executeCommand(detail.type, detail.payload, {
               commandId: cmd.commandId,
               client: this.client,
               serverConfig: this.serverConfig ?? undefined,
               activeChatMode: this.activeChatMode,
+              agentId: this.agentId,
             })
             logger.debug(`${this.prefix} Command result [${cmd.commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, 300)}`)
-            await this.client.submitResult(cmd.commandId, result)
+            await this.client.submitResult(cmd.commandId, result, this.agentId)
             logger.info(
               t('runner.commandDone', {
                 prefix: this.prefix,
@@ -195,7 +196,7 @@ export class ProjectAgent {
               await this.client.submitResult(cmd.commandId, {
                 success: false,
                 error: message,
-              })
+              }, this.agentId)
             } catch {
               logger.error(t('runner.resultSendFailed', { prefix: this.prefix }))
             }
@@ -274,16 +275,17 @@ export class ProjectAgent {
     }))
 
     try {
-      const detail = await this.client.getCommand(commandId)
+      const detail = await this.client.getCommand(commandId, this.agentId)
       logger.debug(`${this.prefix} Command detail [${commandId}]: type=${detail.type}, payload=${JSON.stringify(detail.payload).substring(0, 500)}`)
       const result = await executeCommand(detail.type, detail.payload, {
         commandId,
         client: this.client,
         serverConfig: this.serverConfig ?? undefined,
         activeChatMode: this.activeChatMode,
+        agentId: this.agentId,
       })
       logger.debug(`${this.prefix} Command result [${commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, 300)}`)
-      await this.client.submitResult(commandId, result)
+      await this.client.submitResult(commandId, result, this.agentId)
       logger.info(t('runner.commandDone', {
         prefix: this.prefix,
         commandId,
@@ -299,7 +301,7 @@ export class ProjectAgent {
         await this.client.submitResult(commandId, {
           success: false,
           error: message,
-        })
+        }, this.agentId)
       } catch {
         logger.error(t('runner.resultSendFailed', { prefix: this.prefix }))
       }
@@ -308,7 +310,7 @@ export class ProjectAgent {
 
   private async checkPendingCommands(): Promise<void> {
     try {
-      const pending = await this.client.getPendingCommands()
+      const pending = await this.client.getPendingCommands(this.agentId)
       for (const cmd of pending) {
         await this.handleNotification({
           id: cmd.commandId,

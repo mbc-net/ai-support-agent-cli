@@ -52,7 +52,7 @@ describe('chat-executor', () => {
         }
       })
 
-      const result = await executeChatCommand(basePayload, 'cmd-1', mockClient)
+      const result = await executeChatCommand(basePayload, 'cmd-1', mockClient, undefined, undefined, 'agent-1')
       expect(result.success).toBe(true)
       expect(spawn).toHaveBeenCalledWith('claude', ['-p', 'Hello, world!'], expect.any(Object))
     })
@@ -73,7 +73,7 @@ describe('chat-executor', () => {
         if (event === 'close') cb(0)
       })
 
-      const result = await executeChatCommand(basePayload, 'cmd-2', mockClient, undefined, 'claude_code')
+      const result = await executeChatCommand(basePayload, 'cmd-2', mockClient, undefined, 'claude_code', 'agent-1')
       expect(result.success).toBe(true)
       expect(spawn).toHaveBeenCalled()
     })
@@ -89,11 +89,29 @@ describe('chat-executor', () => {
         chatMode: 'agent',
       }
 
-      const result = await executeChatCommand(basePayload, 'cmd-3', mockClient, serverConfig, 'api')
+      const result = await executeChatCommand(basePayload, 'cmd-3', mockClient, serverConfig, 'api', 'agent-1')
       expect(result.success).toBe(true)
       expect(executeApiChatCommand).toHaveBeenCalledWith(
-        basePayload, 'cmd-3', mockClient, serverConfig,
+        basePayload, 'cmd-3', mockClient, serverConfig, 'agent-1',
       )
+    })
+  })
+
+  describe('agentId validation', () => {
+    it('should return error when agentId is missing', async () => {
+      const result = await executeChatCommand(basePayload, 'cmd-no-agent', mockClient)
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toBe('agentId is required for chat command')
+      }
+    })
+
+    it('should return error when agentId is empty string', async () => {
+      const result = await executeChatCommand(basePayload, 'cmd-empty-agent', mockClient, undefined, undefined, '')
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toBe('agentId is required for chat command')
+      }
     })
   })
 
@@ -103,6 +121,9 @@ describe('chat-executor', () => {
         { message: undefined } as ChatPayload,
         'cmd-5',
         mockClient,
+        undefined,
+        undefined,
+        'agent-1',
       )
       expect(result.success).toBe(false)
       if (!result.success) {

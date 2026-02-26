@@ -148,9 +148,13 @@ describe('ApiClient', () => {
         data: [{ commandId: 'cmd-1', type: 'execute_command', createdAt: 123 }],
       })
 
-      const result = await client.getPendingCommands()
+      const result = await client.getPendingCommands('agent-1')
       expect(result).toHaveLength(1)
       expect(result[0].commandId).toBe('cmd-1')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/agent/commands/pending',
+        { params: { agentId: 'agent-1' } },
+      )
     })
   })
 
@@ -158,10 +162,11 @@ describe('ApiClient', () => {
     it('should submit command result', async () => {
       mockInstance.post.mockResolvedValue({ data: { success: true } })
 
-      await client.submitResult('cmd-1', { success: true, data: 'output' })
+      await client.submitResult('cmd-1', { success: true, data: 'output' }, 'agent-1')
       expect(mockInstance.post).toHaveBeenCalledWith(
         '/api/agent/commands/cmd-1/result',
         { success: true, data: 'output' },
+        { params: { agentId: 'agent-1' } },
       )
     })
   })
@@ -178,24 +183,27 @@ describe('ApiClient', () => {
         },
       })
 
-      const result = await client.getCommand('cmd-1')
+      const result = await client.getCommand('cmd-1', 'agent-1')
       expect(result.commandId).toBe('cmd-1')
       expect(result.type).toBe('execute_command')
-      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/commands/cmd-1')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/agent/commands/cmd-1',
+        { params: { agentId: 'agent-1' } },
+      )
     })
   })
 
   describe('commandId validation', () => {
     it('should reject commandId with path traversal', async () => {
-      await expect(client.getCommand('../../admin')).rejects.toThrow('Invalid command ID format')
+      await expect(client.getCommand('../../admin', 'agent-1')).rejects.toThrow('Invalid command ID format')
     })
 
     it('should reject commandId with special characters', async () => {
-      await expect(client.submitResult('cmd;drop', { success: true, data: '' })).rejects.toThrow('Invalid command ID format')
+      await expect(client.submitResult('cmd;drop', { success: true, data: '' }, 'agent-1')).rejects.toThrow('Invalid command ID format')
     })
 
     it('should reject commandId with slashes', async () => {
-      await expect(client.getCommand('cmd/delete')).rejects.toThrow('Invalid command ID format')
+      await expect(client.getCommand('cmd/delete', 'agent-1')).rejects.toThrow('Invalid command ID format')
     })
 
     it('should accept valid commandId with alphanumeric, hyphens, and underscores', async () => {
@@ -203,7 +211,7 @@ describe('ApiClient', () => {
         data: { commandId: 'abc-123_DEF', type: 'execute_command', payload: {}, status: 'PENDING', createdAt: 0 },
       })
 
-      const result = await client.getCommand('abc-123_DEF')
+      const result = await client.getCommand('abc-123_DEF', 'agent-1')
       expect(result.commandId).toBe('abc-123_DEF')
     })
   })
@@ -254,7 +262,7 @@ describe('ApiClient', () => {
           data: [{ commandId: 'cmd-1', type: 'execute_command', createdAt: 123 }],
         })
 
-      const promise = client.getPendingCommands()
+      const promise = client.getPendingCommands('agent-1')
       await jest.advanceTimersByTimeAsync(1000)
       const result = await promise
       expect(result).toHaveLength(1)
@@ -268,7 +276,7 @@ describe('ApiClient', () => {
         .mockRejectedValueOnce(new Error('Network Error'))
 
       const promise = client
-        .submitResult('cmd-1', { success: true, data: 'output' })
+        .submitResult('cmd-1', { success: true, data: 'output' }, 'agent-1')
         .catch((e: unknown) => e)
       await jest.advanceTimersByTimeAsync(1000)
       await jest.advanceTimersByTimeAsync(2000)
@@ -282,7 +290,7 @@ describe('ApiClient', () => {
       mockInstance.post.mockRejectedValueOnce(createAxiosError('Bad Request', 400))
 
       await expect(
-        client.submitResult('cmd-1', { success: true, data: 'output' }),
+        client.submitResult('cmd-1', { success: true, data: 'output' }, 'agent-1'),
       ).rejects.toThrow('Bad Request')
       expect(mockInstance.post).toHaveBeenCalledTimes(1)
     })
@@ -294,7 +302,7 @@ describe('ApiClient', () => {
           data: [{ commandId: 'cmd-1', type: 'execute_command', createdAt: 123 }],
         })
 
-      const promise = client.getPendingCommands()
+      const promise = client.getPendingCommands('agent-1')
       await jest.advanceTimersByTimeAsync(1000)
       const result = await promise
       expect(result).toHaveLength(1)
@@ -308,7 +316,7 @@ describe('ApiClient', () => {
           data: [{ commandId: 'cmd-1', type: 'execute_command', createdAt: 123 }],
         })
 
-      const promise = client.getPendingCommands()
+      const promise = client.getPendingCommands('agent-1')
       await jest.advanceTimersByTimeAsync(1000)
       const result = await promise
       expect(result).toHaveLength(1)
@@ -330,7 +338,7 @@ describe('ApiClient', () => {
             data: [{ commandId: 'cmd-1', type: 'execute_command', createdAt: 123 }],
           })
 
-        const promise = client.getPendingCommands()
+        const promise = client.getPendingCommands('agent-1')
         await jest.advanceTimersByTimeAsync(expectedDelays[i])
         await promise
 
@@ -351,7 +359,7 @@ describe('ApiClient', () => {
           data: [{ commandId: 'cmd-1', type: 'execute_command', createdAt: 123 }],
         })
 
-      const promise = client.getPendingCommands()
+      const promise = client.getPendingCommands('agent-1')
       await jest.advanceTimersByTimeAsync(1000)
       const result = await promise
       expect(result).toHaveLength(1)

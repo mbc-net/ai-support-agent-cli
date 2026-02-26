@@ -111,10 +111,10 @@ describe('ApiClient integration (real axios + real HTTP)', () => {
     nextResponse = { status: 200, body: [{ commandId: 'c1', type: 'execute_command', createdAt: 1 }] }
 
     const client = new ApiClient(baseUrl, TEST_TOKEN)
-    const commands = await client.getPendingCommands()
+    const commands = await client.getPendingCommands('agent-1')
 
     expect(lastReq.method).toBe('GET')
-    expect(lastReq.url).toBe(API_ENDPOINTS.COMMANDS_PENDING)
+    expect(lastReq.url).toContain(API_ENDPOINTS.COMMANDS_PENDING)
     expect(commands).toHaveLength(1)
     expect(commands[0].commandId).toBe('c1')
   })
@@ -123,10 +123,10 @@ describe('ApiClient integration (real axios + real HTTP)', () => {
     nextResponse = { status: 200, body: {} }
 
     const client = new ApiClient(baseUrl, TEST_TOKEN)
-    await client.submitResult('cmd-123', { success: true, data: { output: 'hello' } })
+    await client.submitResult('cmd-123', { success: true, data: { output: 'hello' } }, 'agent-1')
 
     expect(lastReq.method).toBe('POST')
-    expect(lastReq.url).toBe(API_ENDPOINTS.COMMAND_RESULT('cmd-123'))
+    expect(lastReq.url).toContain(API_ENDPOINTS.COMMAND_RESULT('cmd-123'))
     const body = JSON.parse(lastReq.body)
     expect(body).toEqual({ success: true, data: { output: 'hello' } })
   })
@@ -153,7 +153,7 @@ describe('ApiClient integration (real axios + real HTTP)', () => {
 
     try {
       const client = new ApiClient(baseUrl, TEST_TOKEN)
-      const result = await client.getPendingCommands()
+      const result = await client.getPendingCommands('agent-1')
       expect(result).toEqual([])
       expect(callCount).toBe(3) // 2 failures + 1 success
     } finally {
@@ -179,7 +179,7 @@ describe('ApiClient integration (real axios + real HTTP)', () => {
 
     try {
       const client = new ApiClient(baseUrl, TEST_TOKEN)
-      await expect(client.getPendingCommands()).rejects.toThrow()
+      await expect(client.getPendingCommands('agent-1')).rejects.toThrow()
       expect(callCount).toBe(1) // No retry
     } finally {
       server.removeAllListeners('request')
@@ -192,10 +192,10 @@ describe('ApiClient integration (real axios + real HTTP)', () => {
     nextResponse = { status: 200, body: command }
 
     const client = new ApiClient(baseUrl, TEST_TOKEN)
-    const result = await client.getCommand('cmd-456')
+    const result = await client.getCommand('cmd-456', 'agent-1')
 
     expect(lastReq.method).toBe('GET')
-    expect(lastReq.url).toBe(API_ENDPOINTS.COMMAND('cmd-456'))
+    expect(lastReq.url).toContain(API_ENDPOINTS.COMMAND('cmd-456'))
     expect(result).toEqual(command)
   })
 

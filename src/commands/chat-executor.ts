@@ -20,15 +20,20 @@ export async function executeChatCommand(
   client: ApiClient,
   serverConfig?: AgentServerConfig,
   activeChatMode?: AgentChatMode,
+  agentId?: string,
 ): Promise<CommandResult> {
+  if (!agentId) {
+    return { success: false, error: 'agentId is required for chat command' }
+  }
+
   const mode = activeChatMode ?? 'claude_code'
 
   switch (mode) {
     case 'api':
-      return executeApiChatCommand(payload, commandId, client, serverConfig)
+      return executeApiChatCommand(payload, commandId, client, serverConfig, agentId!)
     case 'claude_code':
     default:
-      return executeClaudeCodeChat(payload, commandId, client)
+      return executeClaudeCodeChat(payload, commandId, client, agentId!)
   }
 }
 
@@ -41,6 +46,7 @@ async function executeClaudeCodeChat(
   payload: ChatPayload,
   commandId: string,
   client: ApiClient,
+  agentId: string,
 ): Promise<CommandResult> {
   const message = parseString(payload.message)
   if (!message) {
@@ -61,7 +67,7 @@ async function executeClaudeCodeChat(
         index: chunkIndex++,
         type,
         content,
-      })
+      }, agentId)
     } catch (error) {
       logger.warn(`[chat] Failed to send chunk #${chunkIndex - 1}: ${getErrorMessage(error)}`)
     }
@@ -91,13 +97,35 @@ async function runClaudeCode(
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     // claude CLI が利用可能か確認し、print モードで実行
+    // Claude Code セッション内からの起動時にネスト検出やSSEポート干渉を回避するため、
+    // CLAUDECODE および CLAUDE_CODE_* 環境変数を除外
+    const cleanEnv: Record<string, string> = {}
+    for (const [key, value] of Object.entries(process.env)) {
+      if (key === 'CLAUDECODE' || key.startsWith('CLAUDE_CODE_')) continue
+      if (value !== undefined) cleanEnv[key] = value
+    }
     const child = spawn('claude', ['-p', message], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: cleanEnv,
     })
+
+    logger.debug(`[chat] claude CLI spawned (pid=${child.pid}, CLAUDECODE removed=${!cleanEnv['CLAUDECODE']})`)
 
     let fullOutput = ''
     let stderrOutput = ''
+
+    // タイムアウト: 120秒で応答がなければ強制終了
+    const timeout = setTimeout(() => {
+      logger.warn(`[chat] claude CLI timed out after 120s (pid=${child.pid}), sending SIGTERM`)
+      child.kill('SIGTERM')
+      // SIGTERM後5秒で応答なければSIGKILL
+      setTimeout(() => {
+        if (!child.killed) {
+          logger.warn(`[chat] claude CLI still running after SIGTERM, sending SIGKILL (pid=${child.pid})`)
+          child.kill('SIGKILL')
+        }
+      }, 5_000)
+    }, 120_000)
 
     child.stdout.on('data', (data: Buffer) => {
       const text = data.toString()
@@ -107,7 +135,9 @@ async function runClaudeCode(
     })
 
     child.stderr.on('data', (data: Buffer) => {
-      stderrOutput += data.toString()
+      const text = data.toString()
+      stderrOutput += text
+      logger.debug(`[chat] claude CLI stderr: ${text.substring(0, 200)}`)
     })
 
     child.on('error', (error) => {
@@ -123,6 +153,8 @@ async function runClaudeCode(
     })
 
     child.on('close', (code) => {
+      clearTimeout(timeout)
+      logger.debug(`[chat] claude CLI exited (pid=${child.pid}, code=${code}, stdout=${fullOutput.length}b, stderr=${stderrOutput.length}b)`)
       if (code === 0) {
         resolve(fullOutput)
       } else {

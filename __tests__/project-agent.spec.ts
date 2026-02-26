@@ -138,10 +138,10 @@ describe('ProjectAgent', () => {
       // Trigger poll interval
       await jest.advanceTimersByTimeAsync(options.pollInterval)
 
-      expect(mockClient.getPendingCommands).toHaveBeenCalled()
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1')
-      expect(mockedExecuteCommand).toHaveBeenCalledWith('execute_command', { command: 'echo hi' }, { commandId: 'cmd-1', client: mockClient, serverConfig: expect.any(Object), activeChatMode: undefined })
-      expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' })
+      expect(mockClient.getPendingCommands).toHaveBeenCalledWith('agent-1')
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'agent-1')
+      expect(mockedExecuteCommand).toHaveBeenCalledWith('execute_command', { command: 'echo hi' }, { commandId: 'cmd-1', client: mockClient, serverConfig: expect.any(Object), activeChatMode: undefined, agentId: 'agent-1' })
+      expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'agent-1')
 
       agent.stop()
     })
@@ -279,9 +279,9 @@ describe('ProjectAgent', () => {
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1')
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'agent-1')
       expect(mockedExecuteCommand).toHaveBeenCalled()
-      expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' })
+      expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'agent-1')
 
       agent.stop()
     })
@@ -333,8 +333,8 @@ describe('ProjectAgent', () => {
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getPendingCommands).toHaveBeenCalled()
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-pending')
+      expect(mockClient.getPendingCommands).toHaveBeenCalledWith('agent-1')
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-pending', 'agent-1')
       expect(mockedExecuteCommand).toHaveBeenCalled()
 
       agent.stop()

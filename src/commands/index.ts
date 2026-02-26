@@ -14,6 +14,7 @@ export interface ExecuteCommandOptions {
   client?: ApiClient
   serverConfig?: AgentServerConfig
   activeChatMode?: AgentChatMode
+  agentId?: string
 }
 
 // Overload: type-safe discriminated union
@@ -73,7 +74,7 @@ export async function executeCommand(
         if (!opts?.commandId || !opts?.client) {
           return { success: false, error: 'chat command requires commandId and client' }
         }
-        return await executeChatCommand(p, opts.commandId, opts.client, opts.serverConfig, opts.activeChatMode)
+        return await executeChatCommand(p, opts.commandId, opts.client, opts.serverConfig, opts.activeChatMode, opts.agentId)
       default:
         logger.warn(`Unknown command type: ${type}`)
         return { success: false, error: `Unknown command type: ${type}` }
