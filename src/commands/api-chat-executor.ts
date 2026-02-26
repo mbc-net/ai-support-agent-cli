@@ -50,7 +50,7 @@ export async function executeApiChatCommand(
         index: chunkIndex++,
         type,
         content,
-      }, agentId!)
+      }, agentId)
     } catch (error) {
       logger.warn(
         `[api-chat] Failed to send chunk #${chunkIndex - 1}: ${getErrorMessage(error)}`,

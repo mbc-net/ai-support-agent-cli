@@ -30,10 +30,10 @@ export async function executeChatCommand(
 
   switch (mode) {
     case 'api':
-      return executeApiChatCommand(payload, commandId, client, serverConfig, agentId!)
+      return executeApiChatCommand(payload, commandId, client, serverConfig, agentId)
     case 'claude_code':
     default:
-      return executeClaudeCodeChat(payload, commandId, client, agentId!)
+      return executeClaudeCodeChat(payload, commandId, client, agentId)
   }
 }
 
@@ -115,11 +115,12 @@ async function runClaudeCode(
     let stderrOutput = ''
 
     // タイムアウト: 120秒で応答がなければ強制終了
+    let sigkillTimer: NodeJS.Timeout | undefined
     const timeout = setTimeout(() => {
       logger.warn(`[chat] claude CLI timed out after 120s (pid=${child.pid}), sending SIGTERM`)
       child.kill('SIGTERM')
       // SIGTERM後5秒で応答なければSIGKILL
-      setTimeout(() => {
+      sigkillTimer = setTimeout(() => {
         if (!child.killed) {
           logger.warn(`[chat] claude CLI still running after SIGTERM, sending SIGKILL (pid=${child.pid})`)
           child.kill('SIGKILL')
@@ -141,6 +142,8 @@ async function runClaudeCode(
     })
 
     child.on('error', (error) => {
+      clearTimeout(timeout)
+      if (sigkillTimer) clearTimeout(sigkillTimer)
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         reject(
           new Error(
@@ -154,6 +157,7 @@ async function runClaudeCode(
 
     child.on('close', (code) => {
       clearTimeout(timeout)
+      if (sigkillTimer) clearTimeout(sigkillTimer)
       logger.debug(`[chat] claude CLI exited (pid=${child.pid}, code=${code}, stdout=${fullOutput.length}b, stderr=${stderrOutput.length}b)`)
       if (code === 0) {
         resolve(fullOutput)
