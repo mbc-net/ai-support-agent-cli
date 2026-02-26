@@ -2,11 +2,10 @@ import * as os from 'os'
 
 import {
   startAgent,
-  getSystemInfo,
-  getLocalIpAddress,
   startProjectAgent,
   setupShutdownHandlers,
 } from '../src/agent-runner'
+import { getSystemInfo, getLocalIpAddress } from '../src/system-info'
 import { ApiClient } from '../src/api-client'
 import { executeCommand } from '../src/command-executor'
 import { loadConfig, getProjectList, saveConfig } from '../src/config-manager'

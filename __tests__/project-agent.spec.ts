@@ -286,6 +286,32 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
+    it('should ignore notifications with missing commandId', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-no-cmdid',
+        table: 'commands',
+        pk: 'CMD#123',
+        sk: 'CMD#123',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { type: 'execute_command' }, // no commandId
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('missing commandId'))
+      expect(mockClient.getCommand).not.toHaveBeenCalled()
+
+      agent.stop()
+    })
+
     it('should ignore notifications with non-agent-command action', async () => {
       const agent = new ProjectAgent(project, 'agent-1', options)
       agent.start()
@@ -376,6 +402,104 @@ describe('ProjectAgent', () => {
       await jest.advanceTimersByTimeAsync(100)
 
       expect(MockAppSyncSubscriber).not.toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('should handle command error in subscription mode and submit error result', async () => {
+      mockClient.getCommand.mockRejectedValue(new Error('Command fetch failed'))
+      mockClient.submitResult.mockResolvedValue(undefined)
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-err',
+        table: 'commands',
+        pk: 'CMD#123',
+        sk: 'CMD#123',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-err', type: 'execute_command' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('runner.commandError'))
+      expect(mockClient.submitResult).toHaveBeenCalledWith(
+        'cmd-err',
+        expect.objectContaining({ success: false, error: expect.any(String) }),
+        'agent-1',
+      )
+
+      agent.stop()
+    })
+
+    it('should log resultSendFailed when submitResult fails after command error in subscription mode', async () => {
+      mockClient.getCommand.mockRejectedValue(new Error('Command fetch failed'))
+      mockClient.submitResult.mockRejectedValue(new Error('Submit failed'))
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-err2',
+        table: 'commands',
+        pk: 'CMD#456',
+        sk: 'CMD#456',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-err2', type: 'execute_command' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('runner.commandError'))
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('runner.resultSendFailed'))
+
+      agent.stop()
+    })
+
+    it('should handle checkPendingCommands error gracefully', async () => {
+      mockClient.getPendingCommands.mockRejectedValue(new Error('Network error'))
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const reconnectCallback = mockSubscriber.onReconnect.mock.calls[0][0] as () => void
+      reconnectCallback()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      // Should log warning and not crash
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to check pending commands'))
+
+      agent.stop()
+    })
+  })
+
+  describe('config loading', () => {
+    it('should continue when getConfig fails', async () => {
+      mockClient.getConfig.mockRejectedValue(new Error('Config fetch failed'))
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to load server config'))
+      // Should still register and start
+      expect(mockClient.register).toHaveBeenCalled()
 
       agent.stop()
     })

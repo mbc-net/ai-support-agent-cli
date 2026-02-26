@@ -39,6 +39,22 @@ describe('commands/dispatch', () => {
         expect(result.error).toContain('Unknown command type')
       }
     })
+
+    it('should return error for chat command without commandId and client', async () => {
+      const result = await executeCommand('chat' as any, { message: 'hello' })
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toBe('chat command requires commandId and client')
+      }
+    })
+
+    it('should return error for chat command with commandId but no client', async () => {
+      const result = await executeCommand('chat' as any, { message: 'hello' }, { commandId: 'cmd-1' })
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toBe('chat command requires commandId and client')
+      }
+    })
   })
 
   describe('re-exports', () => {

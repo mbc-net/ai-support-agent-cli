@@ -3,6 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { executeShellCommand } from '../../src/commands/shell-executor'
+import { MAX_OUTPUT_SIZE } from '../../src/constants'
 import type { CommandResult } from '../../src/types'
 
 function expectFailure(result: CommandResult): asserts result is { success: false; error: string; data?: unknown } {
@@ -146,6 +147,77 @@ describe('shell-executor', () => {
       const result = await resultPromise
       expectFailure(result)
       expect(result.error).toContain('Permission denied')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('should not resolve twice when error fires after close', async () => {
+      const fakeProc = createFakeProc()
+      const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
+
+      const resultPromise = executeShellCommand({ command: 'echo test' })
+      await waitForSpawn(spawnSpy)
+
+      // Close first (resolved=true), then error fires
+      fakeProc.emit('close', 0)
+      fakeProc.emit('error', new Error('Late error'))
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+
+      spawnSpy.mockRestore()
+    })
+
+    it('should truncate output exceeding MAX_OUTPUT_SIZE', async () => {
+      const fakeProc = createFakeProc()
+      const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
+
+      const resultPromise = executeShellCommand({ command: 'echo test' })
+      await waitForSpawn(spawnSpy)
+
+      // Emit data exceeding MAX_OUTPUT_SIZE (10MB)
+      const chunkSize = Math.ceil(MAX_OUTPUT_SIZE / 2) + 1
+      const largeData = Buffer.alloc(chunkSize, 'A')
+      fakeProc.stdout.emit('data', largeData)
+      fakeProc.stdout.emit('data', largeData)
+      fakeProc.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+      expect(result.data as string).toContain('[output truncated]')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('should include stderr in error on non-zero exit', async () => {
+      const fakeProc = createFakeProc()
+      const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
+
+      const resultPromise = executeShellCommand({ command: 'echo test' })
+      await waitForSpawn(spawnSpy)
+
+      fakeProc.stderr.emit('data', Buffer.from('error output'))
+      fakeProc.emit('close', 1)
+
+      const result = await resultPromise
+      expectFailure(result)
+      expect(result.error).toBe('error output')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('should show exit code when no stderr on non-zero exit', async () => {
+      const fakeProc = createFakeProc()
+      const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
+
+      const resultPromise = executeShellCommand({ command: 'echo test' })
+      await waitForSpawn(spawnSpy)
+
+      fakeProc.emit('close', 42)
+
+      const result = await resultPromise
+      expectFailure(result)
+      expect(result.error).toBe('Process exited with code 42')
 
       spawnSpy.mockRestore()
     })

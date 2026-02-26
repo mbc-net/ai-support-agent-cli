@@ -48,6 +48,12 @@ describe('isNewerVersion', () => {
   it('should handle major version difference regardless of pre-release', () => {
     expect(isNewerVersion('1.0.0-beta.1', '2.0.0-alpha.1')).toBe(true)
   })
+
+  it('should handle incomplete version strings with missing parts', () => {
+    // Triggers ?? 0 fallback for missing minor/patch
+    expect(isNewerVersion('1', '2')).toBe(true)
+    expect(isNewerVersion('1.0', '1.1')).toBe(true)
+  })
 })
 
 describe('isValidVersion', () => {
@@ -100,6 +106,18 @@ describe('performUpdate', () => {
 
     expect(result.success).toBe(false)
     expect(result.error).toContain('npm ERR! 404 Not Found')
+  })
+
+  it('should fallback to stderr when error.message is empty', async () => {
+    const error = new Error('')
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: Error, stdout: string, stderr: string) => void) => {
+      callback(error, '', 'stderr output here')
+    })
+
+    const result = await performUpdate('1.2.3')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toBe('stderr output here')
   })
 
   it('should detect EACCES permission errors', async () => {

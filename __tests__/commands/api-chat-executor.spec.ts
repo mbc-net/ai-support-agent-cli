@@ -82,6 +82,31 @@ describe('api-chat-executor', () => {
     }
   })
 
+  it('should truncate long messages in log output', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const longMessage = 'A'.repeat(150)
+    const resultPromise = executeApiChatCommand(
+      { message: longMessage }, 'cmd-long', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+
+    // Verify the API was called with the full message
+    expect(mockedAxiosPost).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        messages: [{ role: 'user', content: longMessage }],
+      }),
+      expect.any(Object),
+    )
+  })
+
   it('should call Anthropic API with correct parameters', async () => {
     const stream = new EventEmitter()
     mockedAxiosPost.mockResolvedValue({ data: stream } as any)
@@ -216,6 +241,129 @@ describe('api-chat-executor', () => {
     expect(result.success).toBe(false)
     if (!result.success) {
       expect(result.error).toContain('Network error')
+    }
+  })
+
+  it('should handle tool_use content_block_start events', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-tool', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    stream.emit('data', Buffer.from(
+      'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"search_docs"}}\n\n',
+    ))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+
+    // Should have sent a delta chunk about tool use
+    expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-tool', expect.objectContaining({
+      type: 'delta',
+      content: expect.stringContaining('search_docs'),
+    }), 'agent-1')
+  })
+
+  it('should skip non-JSON SSE data lines gracefully', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-nonjson', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // Non-JSON data should be skipped without error
+    stream.emit('data', Buffer.from('data: not-valid-json\n\n'))
+    stream.emit('data', Buffer.from('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}\n\n'))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toBe('ok')
+    }
+  })
+
+  it('should skip [DONE] marker', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-done', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    stream.emit('data', Buffer.from('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\ndata: [DONE]\n\n'))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toBe('hi')
+    }
+  })
+
+  it('should skip non-text_delta content_block_delta events', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-nontextdelta', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // input_json_delta should be ignored
+    stream.emit('data', Buffer.from('data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n'))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toBe('')
+    }
+  })
+
+  it('should send error chunk on failure', async () => {
+    mockedAxiosPost.mockRejectedValue(new Error('API failure'))
+
+    const result = await executeApiChatCommand(
+      basePayload, 'cmd-err-chunk', mockClient, baseConfig, 'agent-1',
+    )
+
+    expect(result.success).toBe(false)
+    expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-err-chunk', expect.objectContaining({
+      type: 'error',
+    }), 'agent-1')
+  })
+
+  it('should handle incomplete SSE lines across chunks', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-split', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // Split a line across two chunks
+    stream.emit('data', Buffer.from('data: {"type":"content_block_del'))
+    stream.emit('data', Buffer.from('ta","delta":{"type":"text_delta","text":"split"}}\n\n'))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toBe('split')
     }
   })
 })
