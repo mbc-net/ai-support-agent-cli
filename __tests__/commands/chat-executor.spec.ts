@@ -532,6 +532,86 @@ describe('chat-executor', () => {
       )
     })
 
+    it('should inject AWS credentials into env when awsAccountId is provided', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const clientWithAws = {
+        submitChatChunk: jest.fn().mockResolvedValue(undefined),
+        getAwsCredentials: jest.fn().mockResolvedValue({
+          accessKeyId: 'AKIATEST',
+          secretAccessKey: 'secretTest',
+          sessionToken: 'tokenTest',
+          region: 'ap-northeast-1',
+        }),
+      } as unknown as ApiClient
+
+      const payload: ChatPayload = { message: 'List S3 buckets', awsAccountId: 'prod' }
+
+      const resultPromise = executeChatCommand(payload, 'cmd-aws', clientWithAws, undefined, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      expect((clientWithAws as any).getAwsCredentials).toHaveBeenCalledWith('prod')
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const env = spawnCall[2].env
+      expect(env).toHaveProperty('AWS_ACCESS_KEY_ID', 'AKIATEST')
+      expect(env).toHaveProperty('AWS_SECRET_ACCESS_KEY', 'secretTest')
+      expect(env).toHaveProperty('AWS_SESSION_TOKEN', 'tokenTest')
+      expect(env).toHaveProperty('AWS_DEFAULT_REGION', 'ap-northeast-1')
+    })
+
+    it('should not inject AWS credentials when awsAccountId is not provided', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const resultPromise = executeChatCommand(basePayload, 'cmd-no-aws', mockClient, undefined, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const env = spawnCall[2].env
+      expect(env).not.toHaveProperty('AWS_ACCESS_KEY_ID')
+      expect(env).not.toHaveProperty('AWS_SECRET_ACCESS_KEY')
+    })
+
+    it('should continue without AWS credentials when getAwsCredentials fails', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const clientWithFailingAws = {
+        submitChatChunk: jest.fn().mockResolvedValue(undefined),
+        getAwsCredentials: jest.fn().mockRejectedValue(new Error('Not found')),
+      } as unknown as ApiClient
+
+      const payload: ChatPayload = { message: 'Hello', awsAccountId: 'invalid' }
+
+      const resultPromise = executeChatCommand(payload, 'cmd-aws-fail', clientWithFailingAws, undefined, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const env = spawnCall[2].env
+      expect(env).not.toHaveProperty('AWS_ACCESS_KEY_ID')
+    })
+
     it('should filter CLAUDECODE env vars from child process', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockProcess()

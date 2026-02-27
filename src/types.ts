@@ -135,6 +135,7 @@ export interface ChatPayload {
   projectCode?: unknown
   history?: unknown
   locale?: unknown
+  awsAccountId?: unknown
 }
 
 /**
@@ -165,6 +166,13 @@ export interface AgentServerConfig {
     allowedTools?: string[]
     addDirs?: string[]
   }
+}
+
+export interface AwsCredentials {
+  accessKeyId: string
+  secretAccessKey: string
+  sessionToken?: string
+  region: string
 }
 
 export type ChatChunkType =
