@@ -1,4 +1,5 @@
 import { spawn } from 'child_process'
+import os from 'os'
 
 import { ApiClient } from '../api-client'
 import { logger } from '../logger'
@@ -61,8 +62,10 @@ async function executeClaudeCodeChat(
 
   try {
     const allowedTools = serverConfig?.claudeCodeConfig?.allowedTools
-    logger.debug(`[chat] Spawning claude CLI for command [${commandId}]${allowedTools?.length ? ` with allowedTools: ${allowedTools.join(', ')}` : ''}`)
-    const result = await runClaudeCode(message, sendChunk, allowedTools)
+    const addDirs = serverConfig?.claudeCodeConfig?.addDirs
+    const locale = parseString(payload.locale) ?? undefined
+    logger.debug(`[chat] Spawning claude CLI for command [${commandId}]${allowedTools?.length ? ` with allowedTools: ${allowedTools.join(', ')}` : ''}${addDirs?.length ? ` with addDirs: ${addDirs.join(', ')}` : ''}${locale ? ` locale=${locale}` : ''}`)
+    const result = await runClaudeCode(message, sendChunk, allowedTools, addDirs, locale)
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.length} chars, ${getChunkIndex()} chunks sent`)
     // 完了チャンクを送信
     await sendChunk('done', result)
@@ -82,6 +85,8 @@ async function runClaudeCode(
   message: string,
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
   allowedTools?: string[],
+  addDirs?: string[],
+  locale?: string,
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     // claude CLI が利用可能か確認し、print モードで実行
@@ -99,6 +104,18 @@ async function runClaudeCode(
         args.push('--allowedTools', tool)
       }
     }
+    if (addDirs && addDirs.length > 0) {
+      for (const dir of addDirs) {
+        const resolved = dir.replace(/^~/, os.homedir())
+        args.push('--add-dir', resolved)
+      }
+    }
+    if (locale) {
+      const langPrompt = locale === 'ja'
+        ? 'Always respond in Japanese. Use Japanese for all explanations and communications.'
+        : 'Always respond in English. Use English for all explanations and communications.'
+      args.push('--append-system-prompt', langPrompt)
+    }
     args.push(message)
 
     const child = spawn('claude', args, {
@@ -106,7 +123,7 @@ async function runClaudeCode(
       env: cleanEnv,
     })
 
-    logger.debug(`[chat] claude CLI spawned (pid=${child.pid}, CLAUDECODE removed=${!cleanEnv['CLAUDECODE']})`)
+    logger.debug(`[chat] claude CLI spawned (pid=${child.pid}, cmd=claude ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')})`)
 
     let fullOutput = ''
     let stderrOutput = ''
