@@ -134,6 +134,7 @@ export interface ChatPayload {
   conversationId?: unknown
   projectCode?: unknown
   history?: unknown
+  locale?: unknown
 }
 
 /**
@@ -162,6 +163,7 @@ export interface AgentServerConfig {
     maxTokens?: number
     systemPrompt?: string
     allowedTools?: string[]
+    addDirs?: string[]
   }
 }
 
