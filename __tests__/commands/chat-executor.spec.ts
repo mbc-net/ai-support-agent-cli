@@ -392,6 +392,134 @@ describe('chat-executor', () => {
       )
     })
 
+    it('should pass addDirs from serverConfig as --add-dir args', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const serverConfig: AgentServerConfig = {
+        agentEnabled: true,
+        builtinAgentEnabled: true,
+        builtinFallbackEnabled: true,
+        externalAgentEnabled: true,
+        chatMode: 'agent',
+        claudeCodeConfig: {
+          addDirs: ['~/projects/MBC_01'],
+        },
+      }
+
+      const resultPromise = executeChatCommand(basePayload, 'cmd-dirs', mockClient, serverConfig, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const args = spawnCall[1] as string[]
+      expect(args).toContain('--add-dir')
+      // ~ should be resolved to homedir
+      const addDirIdx = args.indexOf('--add-dir')
+      expect(args[addDirIdx + 1]).not.toContain('~')
+      expect(args[addDirIdx + 1]).toContain('projects/MBC_01')
+    })
+
+    it('should not pass --add-dir when addDirs is empty', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const serverConfig: AgentServerConfig = {
+        agentEnabled: true,
+        builtinAgentEnabled: true,
+        builtinFallbackEnabled: true,
+        externalAgentEnabled: true,
+        chatMode: 'agent',
+        claudeCodeConfig: {
+          addDirs: [],
+        },
+      }
+
+      const resultPromise = executeChatCommand(basePayload, 'cmd-no-dirs', mockClient, serverConfig, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      expect(spawn).toHaveBeenCalledWith(
+        'claude',
+        ['-p', 'Hello, world!'],
+        expect.any(Object),
+      )
+    })
+
+    it('should pass --append-system-prompt for Japanese locale', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const payload: ChatPayload = { message: 'Hello', locale: 'ja' }
+
+      const resultPromise = executeChatCommand(payload, 'cmd-locale-ja', mockClient, undefined, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const args = spawnCall[1] as string[]
+      expect(args).toContain('--append-system-prompt')
+      const promptIdx = args.indexOf('--append-system-prompt')
+      expect(args[promptIdx + 1]).toContain('Japanese')
+    })
+
+    it('should pass --append-system-prompt for English locale', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const payload: ChatPayload = { message: 'Hello', locale: 'en' }
+
+      const resultPromise = executeChatCommand(payload, 'cmd-locale-en', mockClient, undefined, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const args = spawnCall[1] as string[]
+      expect(args).toContain('--append-system-prompt')
+      const promptIdx = args.indexOf('--append-system-prompt')
+      expect(args[promptIdx + 1]).toContain('English')
+    })
+
+    it('should not pass --append-system-prompt when locale is not provided', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const resultPromise = executeChatCommand(basePayload, 'cmd-no-locale', mockClient, undefined, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      expect(spawn).toHaveBeenCalledWith(
+        'claude',
+        ['-p', 'Hello, world!'],
+        expect.any(Object),
+      )
+    })
+
     it('should filter CLAUDECODE env vars from child process', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockProcess()
