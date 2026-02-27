@@ -229,6 +229,29 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getAwsCredentials', () => {
+    it('should fetch AWS credentials for an account', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          accessKeyId: 'AKIA...',
+          secretAccessKey: 'secret...',
+          sessionToken: 'token...',
+          region: 'ap-northeast-1',
+        },
+      })
+
+      const result = await client.getAwsCredentials('prod')
+      expect(result.accessKeyId).toBe('AKIA...')
+      expect(result.secretAccessKey).toBe('secret...')
+      expect(result.sessionToken).toBe('token...')
+      expect(result.region).toBe('ap-northeast-1')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/agent/aws-credentials',
+        { params: { awsAccountId: 'prod' } },
+      )
+    })
+  })
+
   describe('submitResult', () => {
     it('should submit command result', async () => {
       mockInstance.post.mockResolvedValue({ data: { success: true } })

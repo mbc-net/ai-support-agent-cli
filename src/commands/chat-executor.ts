@@ -76,9 +76,29 @@ async function executeClaudeCodeChat(
     const allowedTools = serverConfig?.claudeCodeConfig?.allowedTools
     const addDirs = serverConfig?.claudeCodeConfig?.addDirs
     const locale = parseString(payload.locale) ?? undefined
-    logger.debug(`[chat] Spawning claude CLI for command [${commandId}]${allowedTools?.length ? ` with allowedTools: ${allowedTools.join(', ')}` : ' (no allowedTools)'}${addDirs?.length ? ` with addDirs: ${addDirs.join(', ')}` : ''}${locale ? ` locale=${locale}` : ''}`)
+
+    // AWS認証情報をJust-In-Timeで取得
+    const awsAccountId = parseString(payload.awsAccountId) ?? undefined
+    let awsEnv: Record<string, string> | undefined
+    if (awsAccountId) {
+      try {
+        logger.info(`[chat] Fetching AWS credentials for account: ${awsAccountId}`)
+        const creds = await client.getAwsCredentials(awsAccountId)
+        awsEnv = {
+          AWS_ACCESS_KEY_ID: creds.accessKeyId,
+          AWS_SECRET_ACCESS_KEY: creds.secretAccessKey,
+          AWS_DEFAULT_REGION: creds.region,
+          ...(creds.sessionToken ? { AWS_SESSION_TOKEN: creds.sessionToken } : {}),
+        }
+        logger.info(`[chat] AWS credentials obtained for region=${creds.region}`)
+      } catch (error) {
+        logger.warn(`[chat] Failed to get AWS credentials: ${getErrorMessage(error)}`)
+      }
+    }
+
+    logger.debug(`[chat] Spawning claude CLI for command [${commandId}]${allowedTools?.length ? ` with allowedTools: ${allowedTools.join(', ')}` : ' (no allowedTools)'}${addDirs?.length ? ` with addDirs: ${addDirs.join(', ')}` : ''}${locale ? ` locale=${locale}` : ''}${awsEnv ? ' with AWS credentials' : ''}`)
     logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
-    const result = await runClaudeCode(message, sendChunk, allowedTools, addDirs, locale)
+    const result = await runClaudeCode(message, sendChunk, allowedTools, addDirs, locale, awsEnv)
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, duration=${result.metadata.durationMs}ms`)
     // 完了チャンクを送信（metadata を含める）
     const doneContent = JSON.stringify({
@@ -145,6 +165,7 @@ async function runClaudeCode(
   allowedTools?: string[],
   addDirs?: string[],
   locale?: string,
+  awsEnv?: Record<string, string>,
 ): Promise<ClaudeCodeResult> {
   return new Promise<ClaudeCodeResult>((resolve, reject) => {
     const startTime = Date.now()
@@ -152,11 +173,12 @@ async function runClaudeCode(
     // Claude Code セッション内からの起動時にネスト検出やSSEポート干渉を回避するため、
     // CLAUDECODE および CLAUDE_CODE_* 環境変数を除外
     const cleanEnv = buildCleanEnv()
+    const env = awsEnv ? { ...cleanEnv, ...awsEnv } : cleanEnv
     const args = buildClaudeArgs(message, { allowedTools, addDirs, locale })
 
     const child = spawn('claude', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: cleanEnv,
+      env,
     })
 
     logger.debug(`[chat] claude CLI spawned (pid=${child.pid}, cmd=claude ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')})`)

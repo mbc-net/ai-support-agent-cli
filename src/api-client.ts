@@ -6,6 +6,7 @@ import { RetryStrategy } from './retry-strategy'
 import type {
   AgentCommand,
   AgentServerConfig,
+  AwsCredentials,
   ChatChunk,
   CommandResult,
   PendingCommand,
@@ -152,6 +153,17 @@ export class ApiClient {
     return this.retry.withRetry(async () => {
       const { data } = await this.client.get<AgentServerConfig>(
         API_ENDPOINTS.CONFIG,
+      )
+      return data
+    })
+  }
+
+  async getAwsCredentials(awsAccountId: string): Promise<AwsCredentials> {
+    logger.debug(`Fetching AWS credentials for account: ${awsAccountId}`)
+    return this.retry.withRetry(async () => {
+      const { data } = await this.client.get<AwsCredentials>(
+        API_ENDPOINTS.AWS_CREDENTIALS,
+        { params: { awsAccountId } },
       )
       return data
     })

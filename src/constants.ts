@@ -87,4 +87,5 @@ export const API_ENDPOINTS = {
   VERSION: '/api/agent/version',
   CONNECTION_STATUS: '/api/agent/connection-status',
   CONFIG: '/api/agent/config',
+  AWS_CREDENTIALS: '/api/agent/aws-credentials',
 } as const
