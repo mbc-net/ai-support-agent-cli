@@ -64,7 +64,8 @@ async function executeClaudeCodeChat(
     const allowedTools = serverConfig?.claudeCodeConfig?.allowedTools
     const addDirs = serverConfig?.claudeCodeConfig?.addDirs
     const locale = parseString(payload.locale) ?? undefined
-    logger.debug(`[chat] Spawning claude CLI for command [${commandId}]${allowedTools?.length ? ` with allowedTools: ${allowedTools.join(', ')}` : ''}${addDirs?.length ? ` with addDirs: ${addDirs.join(', ')}` : ''}${locale ? ` locale=${locale}` : ''}`)
+    logger.debug(`[chat] Spawning claude CLI for command [${commandId}]${allowedTools?.length ? ` with allowedTools: ${allowedTools.join(', ')}` : ' (no allowedTools)'}${addDirs?.length ? ` with addDirs: ${addDirs.join(', ')}` : ''}${locale ? ` locale=${locale}` : ''}`)
+    logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
     const result = await runClaudeCode(message, sendChunk, allowedTools, addDirs, locale)
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.length} chars, ${getChunkIndex()} chunks sent`)
     // 完了チャンクを送信

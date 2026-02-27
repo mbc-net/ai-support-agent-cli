@@ -66,6 +66,9 @@ export class ProjectAgent {
     try {
       this.serverConfig = await this.client.getConfig()
       logger.info(`${this.prefix} Server config loaded: chatMode=${this.serverConfig.chatMode}`)
+      if (this.serverConfig.claudeCodeConfig) {
+        logger.debug(`${this.prefix} claudeCodeConfig: allowedTools=[${this.serverConfig.claudeCodeConfig.allowedTools?.join(', ') ?? ''}], addDirs=[${this.serverConfig.claudeCodeConfig.addDirs?.join(', ') ?? ''}]`)
+      }
     } catch (error) {
       logger.warn(`${this.prefix} Failed to load server config, using defaults: ${getErrorMessage(error)}`)
     }
