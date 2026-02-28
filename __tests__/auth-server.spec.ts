@@ -1,6 +1,7 @@
 import * as http from 'http'
 
 import { startAuthServer } from '../src/auth-server'
+import { ERR_AUTH_SERVER_START_FAILED } from '../src/constants'
 
 function httpRequest(
   url: string,
@@ -176,7 +177,7 @@ describe('auth-server', () => {
       return origListen.apply(this, args as Parameters<typeof origListen>)
     })
 
-    await expect(startAuthServer(0)).rejects.toThrow('Failed to start auth server')
+    await expect(startAuthServer(0)).rejects.toThrow(ERR_AUTH_SERVER_START_FAILED)
 
     if (capturedServer) (capturedServer as http.Server).close()
     jest.restoreAllMocks()

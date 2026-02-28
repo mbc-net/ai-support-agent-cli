@@ -1,7 +1,7 @@
 import * as crypto from 'crypto'
 import * as http from 'http'
 
-import { AUTH_TIMEOUT, MAX_AUTH_BODY_SIZE } from './constants'
+import { AUTH_TIMEOUT, ERR_AUTH_SERVER_START_FAILED, MAX_AUTH_BODY_SIZE } from './constants'
 import { t } from './i18n'
 import { parseString } from './utils'
 
@@ -104,7 +104,7 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
     server.listen(listenPort, '127.0.0.1', () => {
       const addr = server.address()
       if (!addr || typeof addr === 'string') {
-        reject(new Error('Failed to start auth server'))
+        reject(new Error(ERR_AUTH_SERVER_START_FAILED))
         return
       }
 

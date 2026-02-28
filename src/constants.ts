@@ -72,9 +72,19 @@ export const LOG_RESULT_LIMIT = 300
 export const LOG_DEBUG_LIMIT = 200
 export const CHUNK_LOG_LIMIT = 100
 
-// Chat validation error messages
+// Error messages
 export const ERR_AGENT_ID_REQUIRED = 'agentId is required for chat command'
 export const ERR_MESSAGE_REQUIRED = 'message is required'
+export const ERR_NO_COMMAND_SPECIFIED = 'No command specified'
+export const ERR_NO_CONTENT_SPECIFIED = 'No content specified'
+export const ERR_NO_FILE_PATH_SPECIFIED = 'No file path specified'
+export const ERR_INVALID_PID = 'Invalid PID: must be a positive integer'
+export const ERR_ANTHROPIC_API_KEY_NOT_SET = 'ANTHROPIC_API_KEY is not set. API chat mode requires an Anthropic API key.'
+export const ERR_AUTH_SERVER_START_FAILED = 'Failed to start auth server'
+export const ERR_CLAUDE_CLI_NOT_FOUND = 'claude CLI が見つかりません。Claude Code がインストールされていることを確認してください。'
+export const ERR_CHAT_REQUIRES_CLIENT = 'chat command requires commandId and client'
+export const ERR_SETUP_REQUIRES_CALLBACK = 'setup command requires onSetup callback'
+export const ERR_CONFIG_SYNC_REQUIRES_CALLBACK = 'config_sync command requires onConfigSync callback'
 
 // API endpoint paths
 export const API_ENDPOINTS = {

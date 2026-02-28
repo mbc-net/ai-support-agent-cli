@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { ERR_NO_FILE_PATH_SPECIFIED } from './constants'
 import type { CommandResult } from './types'
 import { parseString } from './utils'
 
@@ -84,7 +85,7 @@ export async function resolveAndValidatePath(
 ): Promise<string | CommandResult> {
   const filePath = parseString(payload.path) ?? defaultPath ?? null
   if (!filePath) {
-    return { success: false, error: 'No file path specified' }
+    return { success: false, error: ERR_NO_FILE_PATH_SPECIFIED }
   }
   const pathError = await validateFilePath(filePath)
   if (pathError) {

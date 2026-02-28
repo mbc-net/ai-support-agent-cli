@@ -3,7 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { executeShellCommand } from '../../src/commands/shell-executor'
-import { MAX_OUTPUT_SIZE } from '../../src/constants'
+import { ERR_NO_COMMAND_SPECIFIED, MAX_OUTPUT_SIZE } from '../../src/constants'
 import type { CommandResult } from '../../src/types'
 
 function expectFailure(result: CommandResult): asserts result is { success: false; error: string; data?: unknown } {
@@ -25,7 +25,7 @@ describe('shell-executor', () => {
   it('should return error when no command specified', async () => {
     const result = await executeShellCommand({})
     expectFailure(result)
-    expect(result.error).toBe('No command specified')
+    expect(result.error).toBe(ERR_NO_COMMAND_SPECIFIED)
   })
 
   it('should block dangerous rm -rf / command', async () => {

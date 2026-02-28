@@ -1,6 +1,7 @@
 import * as os from 'os'
 import * as path from 'path'
 
+import { ERR_NO_FILE_PATH_SPECIFIED } from '../src/constants'
 import {
   ALLOWED_SIGNALS,
   BLOCKED_COMMAND_PATTERNS,
@@ -80,7 +81,7 @@ describe('security', () => {
       if (typeof result !== 'string') {
         expect(result.success).toBe(false)
         if (!result.success) {
-          expect(result.error).toBe('No file path specified')
+          expect(result.error).toBe(ERR_NO_FILE_PATH_SPECIFIED)
         }
       }
     })

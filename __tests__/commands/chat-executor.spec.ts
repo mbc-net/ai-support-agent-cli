@@ -1,7 +1,5 @@
-import os from 'os'
-
 import type { ApiClient } from '../../src/api-client'
-import { buildClaudeArgs, buildCleanEnv, executeChatCommand } from '../../src/commands/chat-executor'
+import { executeChatCommand } from '../../src/commands/chat-executor'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED } from '../../src/constants'
 import type { AgentServerConfig, ChatPayload, ProjectConfigResponse } from '../../src/types'
 
@@ -12,15 +10,15 @@ jest.mock('../../src/project-dir', () => ({
   getAutoAddDirs: jest.fn().mockReturnValue(['/mock/repos', '/mock/docs']),
 }))
 
-// Mock aws-profile
-jest.mock('../../src/aws-profile', () => ({
-  writeAwsCredentials: jest.fn(),
-  buildAwsProfileEnv: jest.fn().mockReturnValue({
+// Mock aws-credential-builder
+jest.mock('../../src/aws-credential-builder', () => ({
+  buildAwsProfileCredentials: jest.fn().mockResolvedValue({
     AWS_CONFIG_FILE: '/mock/.ai-support-agent/aws/config',
     AWS_SHARED_CREDENTIALS_FILE: '/mock/.ai-support-agent/aws/credentials',
     AWS_PROFILE: 'TEST-dev',
     AWS_DEFAULT_REGION: 'ap-northeast-1',
   }),
+  buildSingleAccountAwsEnv: jest.fn().mockResolvedValue(undefined),
 }))
 
 // Mock api-chat-executor
@@ -553,19 +551,17 @@ describe('chat-executor', () => {
       const mockProcess = createMockProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const clientWithAws = {
-        submitChatChunk: jest.fn().mockResolvedValue(undefined),
-        getAwsCredentials: jest.fn().mockResolvedValue({
-          accessKeyId: 'AKIATEST',
-          secretAccessKey: 'secretTest',
-          sessionToken: 'tokenTest',
-          region: 'ap-northeast-1',
-        }),
-      } as unknown as ApiClient
+      const { buildSingleAccountAwsEnv } = require('../../src/aws-credential-builder')
+      ;(buildSingleAccountAwsEnv as jest.Mock).mockResolvedValueOnce({
+        AWS_ACCESS_KEY_ID: 'AKIATEST',
+        AWS_SECRET_ACCESS_KEY: 'secretTest',
+        AWS_SESSION_TOKEN: 'tokenTest',
+        AWS_DEFAULT_REGION: 'ap-northeast-1',
+      })
 
       const payload: ChatPayload = { message: 'List S3 buckets', awsAccountId: 'prod' }
 
-      const resultPromise = executeChatCommand(payload, 'cmd-aws', clientWithAws, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand(payload, 'cmd-aws', mockClient, undefined, 'claude_code', 'agent-1')
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from('response'))
@@ -573,7 +569,7 @@ describe('chat-executor', () => {
 
       await resultPromise
 
-      expect((clientWithAws as any).getAwsCredentials).toHaveBeenCalledWith('prod')
+      expect(buildSingleAccountAwsEnv).toHaveBeenCalledWith(mockClient, 'prod')
 
       const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
       const env = spawnCall[2].env
@@ -602,19 +598,17 @@ describe('chat-executor', () => {
       expect(env).not.toHaveProperty('AWS_SECRET_ACCESS_KEY')
     })
 
-    it('should continue without AWS credentials when getAwsCredentials fails', async () => {
+    it('should continue without AWS credentials when buildSingleAccountAwsEnv returns undefined', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const clientWithFailingAws = {
-        submitChatChunk: jest.fn().mockResolvedValue(undefined),
-        getAwsCredentials: jest.fn().mockRejectedValue(new Error('Not found')),
-      } as unknown as ApiClient
+      const { buildSingleAccountAwsEnv } = require('../../src/aws-credential-builder')
+      ;(buildSingleAccountAwsEnv as jest.Mock).mockResolvedValueOnce(undefined)
 
       const payload: ChatPayload = { message: 'Hello', awsAccountId: 'invalid' }
 
-      const resultPromise = executeChatCommand(payload, 'cmd-aws-fail', clientWithFailingAws, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand(payload, 'cmd-aws-fail', mockClient, undefined, 'claude_code', 'agent-1')
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from('response'))
@@ -649,119 +643,6 @@ describe('chat-executor', () => {
       expect(env).toHaveProperty('PATH')
 
       process.env = originalEnv
-    })
-  })
-
-  describe('buildCleanEnv', () => {
-    let originalEnv: NodeJS.ProcessEnv
-
-    beforeEach(() => {
-      originalEnv = process.env
-    })
-
-    afterEach(() => {
-      process.env = originalEnv
-    })
-
-    it('should exclude CLAUDECODE', () => {
-      process.env = { CLAUDECODE: '1', HOME: '/home/user' }
-      const result = buildCleanEnv()
-      expect(result).not.toHaveProperty('CLAUDECODE')
-      expect(result).toHaveProperty('HOME', '/home/user')
-    })
-
-    it('should exclude CLAUDE_CODE_* variables', () => {
-      process.env = { CLAUDE_CODE_SSE_PORT: '1234', CLAUDE_CODE_FOO: 'bar', PATH: '/usr/bin' }
-      const result = buildCleanEnv()
-      expect(result).not.toHaveProperty('CLAUDE_CODE_SSE_PORT')
-      expect(result).not.toHaveProperty('CLAUDE_CODE_FOO')
-      expect(result).toHaveProperty('PATH', '/usr/bin')
-    })
-
-    it('should keep other environment variables', () => {
-      process.env = { NODE_ENV: 'test', HOME: '/home/user', LANG: 'en_US.UTF-8' }
-      const result = buildCleanEnv()
-      expect(result).toEqual({ NODE_ENV: 'test', HOME: '/home/user', LANG: 'en_US.UTF-8' })
-    })
-
-    it('should exclude undefined values', () => {
-      // process.env can have undefined values when explicitly set
-      process.env = { DEFINED: 'yes' }
-      // Object.entries filters undefined naturally, but we test the contract
-      const result = buildCleanEnv()
-      expect(result).toHaveProperty('DEFINED', 'yes')
-      // Verify no undefined values exist
-      for (const value of Object.values(result)) {
-        expect(value).toBeDefined()
-      }
-    })
-  })
-
-  describe('buildClaudeArgs', () => {
-    it('should return ["-p", message] for basic message', () => {
-      const result = buildClaudeArgs('hello')
-      expect(result).toEqual(['-p', 'hello'])
-    })
-
-    it('should add --allowedTools for each tool', () => {
-      const result = buildClaudeArgs('hello', { allowedTools: ['WebFetch', 'WebSearch'] })
-      expect(result).toEqual(['-p', '--allowedTools', 'WebFetch', '--allowedTools', 'WebSearch', 'hello'])
-    })
-
-    it('should add --add-dir for each directory', () => {
-      const result = buildClaudeArgs('hello', { addDirs: ['/tmp/project'] })
-      expect(result).toEqual(['-p', '--add-dir', '/tmp/project', 'hello'])
-    })
-
-    it('should resolve ~ to homedir in addDirs', () => {
-      const result = buildClaudeArgs('hello', { addDirs: ['~/projects/MBC_01'] })
-      expect(result).toContain('--add-dir')
-      const addDirIdx = result.indexOf('--add-dir')
-      expect(result[addDirIdx + 1]).toBe(`${os.homedir()}/projects/MBC_01`)
-      expect(result[addDirIdx + 1]).not.toContain('~')
-    })
-
-    it('should add --append-system-prompt with Japanese prompt for locale "ja"', () => {
-      const result = buildClaudeArgs('hello', { locale: 'ja' })
-      expect(result).toContain('--append-system-prompt')
-      const promptIdx = result.indexOf('--append-system-prompt')
-      expect(result[promptIdx + 1]).toContain('Japanese')
-    })
-
-    it('should add --append-system-prompt with English prompt for locale "en"', () => {
-      const result = buildClaudeArgs('hello', { locale: 'en' })
-      expect(result).toContain('--append-system-prompt')
-      const promptIdx = result.indexOf('--append-system-prompt')
-      expect(result[promptIdx + 1]).toContain('English')
-    })
-
-    it('should not add --append-system-prompt when locale is not provided', () => {
-      const result = buildClaudeArgs('hello')
-      expect(result).not.toContain('--append-system-prompt')
-    })
-
-    it('should not add --allowedTools when array is empty', () => {
-      const result = buildClaudeArgs('hello', { allowedTools: [] })
-      expect(result).toEqual(['-p', 'hello'])
-    })
-
-    it('should not add --add-dir when array is empty', () => {
-      const result = buildClaudeArgs('hello', { addDirs: [] })
-      expect(result).toEqual(['-p', 'hello'])
-    })
-
-    it('should handle all options combined', () => {
-      const result = buildClaudeArgs('hello', {
-        allowedTools: ['WebFetch'],
-        addDirs: ['/tmp/dir'],
-        locale: 'ja',
-      })
-      expect(result).toContain('--allowedTools')
-      expect(result).toContain('WebFetch')
-      expect(result).toContain('--add-dir')
-      expect(result).toContain('/tmp/dir')
-      expect(result).toContain('--append-system-prompt')
-      expect(result[result.length - 1]).toBe('hello')
     })
   })
 
@@ -830,17 +711,16 @@ describe('chat-executor', () => {
       const mockProcess = createMockProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const clientWithAws = {
-        submitChatChunk: jest.fn().mockResolvedValue(undefined),
-        getAwsCredentials: jest.fn().mockResolvedValue({
-          accessKeyId: 'AKIAPROFILE',
-          secretAccessKey: 'secretProfile',
-          region: 'ap-northeast-1',
-        }),
-      } as unknown as ApiClient
+      const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
+      ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce({
+        AWS_CONFIG_FILE: '/mock/.ai-support-agent/aws/config',
+        AWS_SHARED_CREDENTIALS_FILE: '/mock/.ai-support-agent/aws/credentials',
+        AWS_PROFILE: 'TEST-dev',
+        AWS_DEFAULT_REGION: 'ap-northeast-1',
+      })
 
       const resultPromise = executeChatCommand(
-        basePayload, 'cmd-profile', clientWithAws, undefined, 'claude_code', 'agent-1',
+        basePayload, 'cmd-profile', mockClient, undefined, 'claude_code', 'agent-1',
         '/tmp/project', projectConfig,
       )
 
@@ -851,10 +731,10 @@ describe('chat-executor', () => {
       const result = await resultPromise
       expect(result.success).toBe(true)
 
-      // Should have called getAwsCredentials for the account
-      expect(clientWithAws.getAwsCredentials).toHaveBeenCalledWith('123456789012')
+      // Should have called buildAwsProfileCredentials
+      expect(buildAwsProfileCredentials).toHaveBeenCalledWith(mockClient, '/tmp/project', projectConfig)
 
-      // Should have used profile env (from mocked buildAwsProfileEnv)
+      // Should have used profile env
       const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
       const env = spawnCall[2].env
       expect(env).toHaveProperty('AWS_CONFIG_FILE')
@@ -867,20 +747,18 @@ describe('chat-executor', () => {
       const mockProcess = createMockProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const clientWithAws = {
-        submitChatChunk: jest.fn().mockResolvedValue(undefined),
-        getAwsCredentials: jest.fn().mockResolvedValue({
-          accessKeyId: 'AKIALEGACY',
-          secretAccessKey: 'secretLegacy',
-          sessionToken: 'tokenLegacy',
-          region: 'us-east-1',
-        }),
-      } as unknown as ApiClient
+      const { buildSingleAccountAwsEnv } = require('../../src/aws-credential-builder')
+      ;(buildSingleAccountAwsEnv as jest.Mock).mockResolvedValueOnce({
+        AWS_ACCESS_KEY_ID: 'AKIALEGACY',
+        AWS_SECRET_ACCESS_KEY: 'secretLegacy',
+        AWS_SESSION_TOKEN: 'tokenLegacy',
+        AWS_DEFAULT_REGION: 'us-east-1',
+      })
 
       const payload: ChatPayload = { message: 'Hello', awsAccountId: 'legacy-account' }
 
       const resultPromise = executeChatCommand(
-        payload, 'cmd-legacy', clientWithAws, undefined, 'claude_code', 'agent-1',
+        payload, 'cmd-legacy', mockClient, undefined, 'claude_code', 'agent-1',
         '/tmp/project', undefined, // no projectConfig
       )
 
@@ -889,6 +767,8 @@ describe('chat-executor', () => {
       mockProcess.emit('close', 0)
 
       await resultPromise
+
+      expect(buildSingleAccountAwsEnv).toHaveBeenCalledWith(mockClient, 'legacy-account')
 
       // Should use legacy env vars
       const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
@@ -902,13 +782,11 @@ describe('chat-executor', () => {
       const mockProcess = createMockProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const clientWithFailingAws = {
-        submitChatChunk: jest.fn().mockResolvedValue(undefined),
-        getAwsCredentials: jest.fn().mockRejectedValue(new Error('Not found')),
-      } as unknown as ApiClient
+      const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
+      ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce(undefined)
 
       const resultPromise = executeChatCommand(
-        basePayload, 'cmd-profile-fail', clientWithFailingAws, undefined, 'claude_code', 'agent-1',
+        basePayload, 'cmd-profile-fail', mockClient, undefined, 'claude_code', 'agent-1',
         '/tmp/project', projectConfig,
       )
 

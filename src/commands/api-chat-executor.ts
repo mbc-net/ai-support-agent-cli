@@ -8,6 +8,7 @@ import {
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_MAX_TOKENS,
   ERR_AGENT_ID_REQUIRED,
+  ERR_ANTHROPIC_API_KEY_NOT_SET,
   ERR_MESSAGE_REQUIRED,
   LOG_MESSAGE_LIMIT,
 } from '../constants'
@@ -53,7 +54,7 @@ export async function executeApiChatCommand(
   if (!apiKey) {
     return {
       success: false,
-      error: 'ANTHROPIC_API_KEY is not set. API chat mode requires an Anthropic API key.',
+      error: ERR_ANTHROPIC_API_KEY_NOT_SET,
     }
   }
 

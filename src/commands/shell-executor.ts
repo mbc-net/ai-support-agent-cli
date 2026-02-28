@@ -1,7 +1,7 @@
 import { spawn } from 'child_process'
 import * as os from 'os'
 
-import { CMD_DEFAULT_TIMEOUT, MAX_CMD_TIMEOUT, MAX_OUTPUT_SIZE } from '../constants'
+import { CMD_DEFAULT_TIMEOUT, ERR_NO_COMMAND_SPECIFIED, MAX_CMD_TIMEOUT, MAX_OUTPUT_SIZE } from '../constants'
 import { buildSafeEnv, validateCommand, validateFilePath } from '../security'
 import type { CommandResult, ShellCommandPayload } from '../types'
 import { parseNumber, parseString } from '../utils'
@@ -11,7 +11,7 @@ export async function executeShellCommand(
 ): Promise<CommandResult> {
   const command = parseString(payload.command)
   if (!command) {
-    return { success: false, error: 'No command specified' }
+    return { success: false, error: ERR_NO_COMMAND_SPECIFIED }
   }
 
   const validationError = validateCommand(command)

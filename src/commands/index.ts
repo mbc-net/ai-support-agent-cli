@@ -1,5 +1,5 @@
 import type { ApiClient } from '../api-client'
-import { LOG_DEBUG_LIMIT } from '../constants'
+import { ERR_CHAT_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import type { AgentChatMode, AgentCommandType, AgentServerConfig, CommandDispatch, CommandResult, ProjectConfigResponse } from '../types'
 import { getErrorMessage } from '../utils'
@@ -77,18 +77,18 @@ export async function executeCommand(
       }
       case 'chat':
         if (!opts?.commandId || !opts?.client) {
-          return { success: false, error: 'chat command requires commandId and client' }
+          return { success: false, error: ERR_CHAT_REQUIRES_CLIENT }
         }
         return await executeChatCommand(p, opts.commandId, opts.client, opts.serverConfig, opts.activeChatMode, opts.agentId, opts.projectDir, opts.projectConfig)
       case 'setup':
         if (!opts?.onSetup) {
-          return { success: false, error: 'setup command requires onSetup callback' }
+          return { success: false, error: ERR_SETUP_REQUIRES_CALLBACK }
         }
         await opts.onSetup()
         return { success: true, data: 'setup completed' }
       case 'config_sync':
         if (!opts?.onConfigSync) {
-          return { success: false, error: 'config_sync command requires onConfigSync callback' }
+          return { success: false, error: ERR_CONFIG_SYNC_REQUIRES_CALLBACK }
         }
         await opts.onConfigSync()
         return { success: true, data: 'config sync completed' }

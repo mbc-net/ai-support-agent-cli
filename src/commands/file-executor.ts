@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
-import { MAX_DIR_ENTRIES, MAX_FILE_READ_SIZE, MAX_FILE_WRITE_SIZE } from '../constants'
+import { ERR_NO_CONTENT_SPECIFIED, MAX_DIR_ENTRIES, MAX_FILE_READ_SIZE, MAX_FILE_WRITE_SIZE } from '../constants'
 import { resolveAndValidatePath } from '../security'
 import type { CommandResult, FileListPayload, FileReadPayload, FileWritePayload } from '../types'
 
@@ -33,7 +33,7 @@ export async function fileWrite(
 
   const content = typeof payload.content === 'string' ? payload.content : null
   if (content === null) {
-    return { success: false, error: 'No content specified' }
+    return { success: false, error: ERR_NO_CONTENT_SPECIFIED }
   }
   if (content.length > MAX_FILE_WRITE_SIZE) {
     return { success: false, error: `Content too large: ${content.length} bytes (limit: ${MAX_FILE_WRITE_SIZE} bytes)` }

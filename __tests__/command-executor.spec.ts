@@ -3,6 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { executeCommand } from '../src/commands'
+import { ERR_NO_COMMAND_SPECIFIED, ERR_NO_CONTENT_SPECIFIED, ERR_NO_FILE_PATH_SPECIFIED } from '../src/constants'
 import type { CommandResult } from '../src/types'
 
 jest.mock('../src/logger')
@@ -29,7 +30,7 @@ describe('command-executor', () => {
     it('should return error when no command specified', async () => {
       const result = await executeCommand('execute_command', {})
       expectFailure(result)
-      expect(result.error).toBe('No command specified')
+      expect(result.error).toBe(ERR_NO_COMMAND_SPECIFIED)
     })
 
     it('should block dangerous rm -rf / command', async () => {
@@ -115,7 +116,7 @@ describe('command-executor', () => {
     it('should return error for missing path', async () => {
       const result = await executeCommand('file_read', {})
       expectFailure(result)
-      expect(result.error).toBe('No file path specified')
+      expect(result.error).toBe(ERR_NO_FILE_PATH_SPECIFIED)
     })
 
     it('should block reading /etc/shadow', async () => {
@@ -247,7 +248,7 @@ describe('command-executor', () => {
         path: tmpFile,
       })
       expectFailure(result)
-      expect(result.error).toBe('No content specified')
+      expect(result.error).toBe(ERR_NO_CONTENT_SPECIFIED)
     })
   })
 

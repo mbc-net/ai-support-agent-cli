@@ -1,6 +1,6 @@
 import * as os from 'os'
 
-import { PROCESS_LIST_TIMEOUT } from '../constants'
+import { ERR_INVALID_PID, PROCESS_LIST_TIMEOUT } from '../constants'
 import { ALLOWED_SIGNALS } from '../security'
 import type { CommandResult, ProcessKillPayload } from '../types'
 import { getErrorMessage, parseNumber, parseString } from '../utils'
@@ -20,7 +20,7 @@ export async function processKill(
 ): Promise<CommandResult> {
   const pid = parseNumber(payload.pid)
   if (!pid || pid < 1 || !Number.isInteger(pid)) {
-    return { success: false, error: 'Invalid PID: must be a positive integer' }
+    return { success: false, error: ERR_INVALID_PID }
   }
 
   const signal = parseString(payload.signal) ?? 'SIGTERM'

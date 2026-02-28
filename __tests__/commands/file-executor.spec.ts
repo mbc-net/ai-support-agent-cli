@@ -3,6 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { fileList, fileRead, fileWrite } from '../../src/commands/file-executor'
+import { ERR_NO_CONTENT_SPECIFIED, ERR_NO_FILE_PATH_SPECIFIED } from '../../src/constants'
 import type { CommandResult } from '../../src/types'
 
 function expectFailure(result: CommandResult): asserts result is { success: false; error: string; data?: unknown } {
@@ -25,7 +26,7 @@ describe('file-executor', () => {
     it('should return error for missing path', async () => {
       const result = await fileRead({})
       expectFailure(result)
-      expect(result.error).toBe('No file path specified')
+      expect(result.error).toBe(ERR_NO_FILE_PATH_SPECIFIED)
     })
 
     it('should block reading /etc/shadow', async () => {
@@ -57,7 +58,7 @@ describe('file-executor', () => {
 
       const result = await fileWrite({ path: tmpFile })
       expectFailure(result)
-      expect(result.error).toBe('No content specified')
+      expect(result.error).toBe(ERR_NO_CONTENT_SPECIFIED)
     })
   })
 
