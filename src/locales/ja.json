@@ -104,5 +104,13 @@
   "projectDir.noProject": "プロジェクト \"{{projectCode}}\" は登録されていません。",
   "projectDir.initialized": "プロジェクトディレクトリを初期化しました: {{projectDir}} ({{projectCode}})",
   "projectDir.usageHint": "使い方: set-project-dir --project <code> --path <path> または --default <template>",
-  "projectDir.cleaned": "メタデータディレクトリを削除しました: {{metadataDir}}"
+  "projectDir.cleaned": "メタデータディレクトリを削除しました: {{metadataDir}}",
+
+  "cmd.start.docker": "Dockerコンテナ内で実行",
+  "docker.notAvailable": "Dockerが利用できません。Docker Desktopが起動していることを確認してください。",
+  "docker.building": "Dockerイメージをビルド中...",
+  "docker.buildComplete": "Dockerイメージのビルドが完了しました",
+  "docker.imageFound": "既存のDockerイメージを使用します ({{version}})",
+  "docker.starting": "Dockerコンテナを起動中...",
+  "docker.runFailed": "Dockerコンテナの実行に失敗しました: {{message}}"
 }

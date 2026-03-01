@@ -40,6 +40,7 @@ program
   .option('--verbose', t('cmd.start.verbose'))
   .option('--no-auto-update', t('cmd.start.noAutoUpdate'))
   .option('--update-channel <channel>', t('cmd.start.updateChannel'))
+  .option('--docker', t('cmd.start.docker'))
   .action(async (opts: {
     token?: string
     apiUrl?: string
@@ -48,7 +49,21 @@ program
     verbose?: boolean
     autoUpdate?: boolean
     updateChannel?: string
+    docker?: boolean
   }) => {
+    if (opts.docker) {
+      const { runInDocker } = await import('./docker/docker-runner')
+      runInDocker({
+        token: opts.token,
+        apiUrl: opts.apiUrl,
+        pollInterval: parseIntervalOrExit(opts.pollInterval, 'poll-interval'),
+        heartbeatInterval: parseIntervalOrExit(opts.heartbeatInterval, 'heartbeat-interval'),
+        verbose: opts.verbose,
+        autoUpdate: opts.autoUpdate,
+        updateChannel: opts.updateChannel,
+      })
+      return
+    }
     const updateChannel = validateUpdateChannel(opts.updateChannel)
     await startAgent({
       token: opts.token,

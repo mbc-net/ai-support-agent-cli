@@ -23,6 +23,7 @@
   },
   "files": [
     "dist",
+    "docker",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"
