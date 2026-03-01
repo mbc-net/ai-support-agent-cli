@@ -1,6 +1,6 @@
 import { readFileSync } from 'fs'
 import * as os from 'os'
-import { join } from 'path'
+import { join, resolve } from 'path'
 
 function getPackageVersion(): string {
   try {
@@ -14,7 +14,8 @@ function getPackageVersion(): string {
 export const CONFIG_DIR = (() => {
   const envDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
   if (!envDir) return '.ai-support-agent'
-  return envDir.replace(/^~(?=$|\/)/, os.homedir())
+  const expanded = envDir.replace(/^~(?=$|\/)/, os.homedir())
+  return resolve(expanded)
 })()
 export const CONFIG_FILE = 'config.json'
 export const DEFAULT_POLL_INTERVAL = 3000

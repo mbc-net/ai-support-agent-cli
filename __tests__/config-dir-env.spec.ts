@@ -47,6 +47,20 @@ describe('CONFIG_DIR with AI_SUPPORT_AGENT_CONFIG_DIR env', () => {
     const { CONFIG_DIR } = require('../src/constants')
     expect(CONFIG_DIR).toBe(os.homedir())
   })
+
+  it('should resolve relative path with ./ to CWD-based absolute path', () => {
+    process.env.AI_SUPPORT_AGENT_CONFIG_DIR = './ai-support-agent-beta'
+    const { CONFIG_DIR } = require('../src/constants')
+    expect(CONFIG_DIR).toBe(path.resolve('./ai-support-agent-beta'))
+    expect(path.isAbsolute(CONFIG_DIR)).toBe(true)
+  })
+
+  it('should resolve relative path without ./ to CWD-based absolute path', () => {
+    process.env.AI_SUPPORT_AGENT_CONFIG_DIR = 'my-config'
+    const { CONFIG_DIR } = require('../src/constants')
+    expect(CONFIG_DIR).toBe(path.resolve('my-config'))
+    expect(path.isAbsolute(CONFIG_DIR)).toBe(true)
+  })
 })
 
 describe('config-manager with absolute CONFIG_DIR', () => {
