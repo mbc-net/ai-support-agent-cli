@@ -37,6 +37,14 @@ describe('claude-code-runner', () => {
       expect(result).toHaveProperty('PATH', '/usr/bin')
     })
 
+    it('should keep CLAUDE_CODE_OAUTH_TOKEN', () => {
+      process.env = { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-xxx', CLAUDE_CODE_SSE_PORT: '1234', PATH: '/usr/bin' }
+      const result = buildCleanEnv()
+      expect(result).toHaveProperty('CLAUDE_CODE_OAUTH_TOKEN', 'sk-ant-xxx')
+      expect(result).not.toHaveProperty('CLAUDE_CODE_SSE_PORT')
+      expect(result).toHaveProperty('PATH', '/usr/bin')
+    })
+
     it('should keep other environment variables', () => {
       process.env = { NODE_ENV: 'test', HOME: '/home/user', LANG: 'en_US.UTF-8' }
       const result = buildCleanEnv()
