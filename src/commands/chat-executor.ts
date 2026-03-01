@@ -85,6 +85,7 @@ async function executeClaudeCodeChat(
 
     // AWS認証情報を取得（プロファイル方式 or 環境変数直接注入）
     let awsEnv: Record<string, string> | undefined
+    const projectCode = parseString(payload.projectCode) ?? projectConfig?.project.projectCode
     if (projectDir && projectConfig?.aws?.accounts?.length) {
       // プロファイル方式: 全アカウントの認証情報を取得してプロファイルファイルに書き込み
       const awsResult = await buildAwsProfileCredentials(client, projectDir, projectConfig)
@@ -92,6 +93,15 @@ async function executeClaudeCodeChat(
       if (awsResult.errors.length > 0) {
         const notice = `⚠️ ${awsResult.errors.join('\n')}\n\n`
         await sendChunk('delta', notice)
+      }
+      // SSO再認証が必要なアカウントの情報を system チャンクで送信
+      for (const ssoInfo of awsResult.ssoAuthRequired) {
+        await sendChunk('system', JSON.stringify({
+          type: 'sso_auth_required',
+          accountId: ssoInfo.accountId,
+          accountName: ssoInfo.accountName,
+          projectCode,
+        }))
       }
     } else {
       // フォールバック: 単一アカウントの環境変数直接注入（従来方式）
@@ -101,6 +111,15 @@ async function executeClaudeCodeChat(
       if (awsResult.errors.length > 0) {
         const notice = `⚠️ ${awsResult.errors.join('\n')}\n\n`
         await sendChunk('delta', notice)
+      }
+      // SSO再認証が必要なアカウントの情報を system チャンクで送信
+      for (const ssoInfo of awsResult.ssoAuthRequired) {
+        await sendChunk('system', JSON.stringify({
+          type: 'sso_auth_required',
+          accountId: ssoInfo.accountId,
+          accountName: ssoInfo.accountName,
+          projectCode,
+        }))
       }
     }
 

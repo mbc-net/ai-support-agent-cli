@@ -65,7 +65,7 @@ describe('aws-credential-builder', () => {
       }
 
       const result = await buildAwsProfileCredentials(client, '/tmp/project', config)
-      expect(result).toEqual({ errors: [] })
+      expect(result).toEqual({ errors: [], ssoAuthRequired: [] })
       expect(result.env).toBeUndefined()
     })
 
@@ -77,7 +77,7 @@ describe('aws-credential-builder', () => {
       }
 
       const result = await buildAwsProfileCredentials(client, '/tmp/project', config)
-      expect(result).toEqual({ errors: [] })
+      expect(result).toEqual({ errors: [], ssoAuthRequired: [] })
       expect(result.env).toBeUndefined()
     })
 
@@ -130,6 +130,7 @@ describe('aws-credential-builder', () => {
         AWS_DEFAULT_REGION: 'ap-northeast-1',
       })
       expect(result.errors).toEqual([])
+      expect(result.ssoAuthRequired).toEqual([])
     })
 
     it('should return errors when all credential fetches fail', async () => {
@@ -142,6 +143,7 @@ describe('aws-credential-builder', () => {
       expect(result.errors).toHaveLength(2)
       expect(result.errors[0]).toContain('dev')
       expect(result.errors[1]).toContain('staging')
+      expect(result.ssoAuthRequired).toEqual([])
     })
 
     it('should skip failed accounts and continue with successful ones', async () => {
@@ -162,6 +164,7 @@ describe('aws-credential-builder', () => {
       expect(result.env).toBeDefined()
       expect(result.errors).toHaveLength(1)
       expect(result.errors[0]).toContain('dev')
+      expect(result.ssoAuthRequired).toEqual([])
       const credMap = writeAwsCredentials.mock.calls[0][2] as Map<string, unknown>
       expect(credMap.size).toBe(1)
       expect(credMap.has('staging')).toBe(true)
@@ -253,6 +256,9 @@ describe('aws-credential-builder', () => {
       expect(result.errors[0]).toContain('SSO認証の有効期限が切れています')
       expect(result.errors[0]).toContain('dev')
       expect(result.errors[0]).toContain('管理画面からSSO再認証')
+      expect(result.ssoAuthRequired).toEqual([
+        { accountId: '123456789012', accountName: 'dev' },
+      ])
     })
 
     it('should include response details for non-SSO 422 errors', async () => {
@@ -291,6 +297,7 @@ describe('aws-credential-builder', () => {
       expect(result.errors[0]).toContain('dev')
       expect(result.errors[0]).toContain('[422]')
       expect(result.errors[0]).toContain('Account configuration is invalid')
+      expect(result.ssoAuthRequired).toEqual([])
     })
 
     it('should handle HTTP error with no response body', async () => {
@@ -324,6 +331,7 @@ describe('aws-credential-builder', () => {
       expect(result.errors).toHaveLength(1)
       expect(result.errors[0]).toContain('dev')
       expect(result.errors[0]).toContain('HTTP 500')
+      expect(result.ssoAuthRequired).toEqual([])
     })
   })
 
@@ -331,7 +339,7 @@ describe('aws-credential-builder', () => {
     it('should return empty result when awsAccountId is undefined', async () => {
       const client = {} as ApiClient
       const result = await buildSingleAccountAwsEnv(client, undefined)
-      expect(result).toEqual({ errors: [] })
+      expect(result).toEqual({ errors: [], ssoAuthRequired: [] })
       expect(result.env).toBeUndefined()
     })
 
@@ -355,6 +363,7 @@ describe('aws-credential-builder', () => {
         AWS_DEFAULT_REGION: 'ap-northeast-1',
       })
       expect(result.errors).toEqual([])
+      expect(result.ssoAuthRequired).toEqual([])
     })
 
     it('should not include AWS_SESSION_TOKEN when sessionToken is not provided', async () => {
@@ -375,6 +384,7 @@ describe('aws-credential-builder', () => {
       })
       expect(result.env).not.toHaveProperty('AWS_SESSION_TOKEN')
       expect(result.errors).toEqual([])
+      expect(result.ssoAuthRequired).toEqual([])
     })
 
     it('should return error when getAwsCredentials fails', async () => {
@@ -387,6 +397,7 @@ describe('aws-credential-builder', () => {
       expect(result.env).toBeUndefined()
       expect(result.errors).toHaveLength(1)
       expect(result.errors[0]).toContain('bad-account')
+      expect(result.ssoAuthRequired).toEqual([])
     })
 
     it('should detect SSO_AUTH_REQUIRED error from API response', async () => {
@@ -421,6 +432,9 @@ describe('aws-credential-builder', () => {
       expect(result.errors[0]).toContain('SSO認証の有効期限が切れています')
       expect(result.errors[0]).toContain('prod-account')
       expect(result.errors[0]).toContain('管理画面からSSO再認証')
+      expect(result.ssoAuthRequired).toEqual([
+        { accountId: '123456789012', accountName: 'prod-account' },
+      ])
     })
 
     it('should include response details for non-SSO API errors', async () => {
@@ -452,6 +466,7 @@ describe('aws-credential-builder', () => {
       expect(result.errors[0]).toContain('my-account')
       expect(result.errors[0]).toContain('[422]')
       expect(result.errors[0]).toContain('Access key is expired')
+      expect(result.ssoAuthRequired).toEqual([])
     })
 
     it('should handle HTTP error with no response body', async () => {
@@ -479,6 +494,7 @@ describe('aws-credential-builder', () => {
       expect(result.errors).toHaveLength(1)
       expect(result.errors[0]).toContain('my-account')
       expect(result.errors[0]).toContain('HTTP 503')
+      expect(result.ssoAuthRequired).toEqual([])
     })
   })
 })

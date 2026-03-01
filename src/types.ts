@@ -263,6 +263,7 @@ export type ChatChunkType =
   | 'tool_result'
   | 'done'
   | 'error'
+  | 'system'
 
 export interface ChatChunk {
   index: number

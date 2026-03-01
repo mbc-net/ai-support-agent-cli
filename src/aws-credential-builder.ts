@@ -5,34 +5,49 @@ import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
 import { getErrorMessage } from './utils'
 
+export interface SsoAuthRequiredInfo {
+  accountId: string
+  accountName: string
+}
+
 export interface AwsCredentialResult {
   env?: Record<string, string>
   errors: string[]
+  ssoAuthRequired: SsoAuthRequiredInfo[]
+}
+
+interface CredentialError {
+  errorMessage: string
+  ssoInfo?: SsoAuthRequiredInfo
 }
 
 /**
  * HTTPエラーレスポンスからAWS認証エラーメッセージを抽出する
  */
-function extractAwsCredentialError(error: unknown, accountName: string): string {
+function extractAwsCredentialError(error: unknown, accountName: string): CredentialError {
   if (axios.isAxiosError(error) && error.response) {
     const status = error.response.status
     const data = error.response.data as Record<string, unknown> | undefined
 
     if (data) {
-      // SSO認証切れの場合は専用メッセージ
+      // SSO認証切れの場合は専用メッセージ + SSO情報
       if (data.error === 'SSO_AUTH_REQUIRED') {
-        return `AWS SSO認証の有効期限が切れています（${accountName}）。管理画面からSSO再認証を実行してください。`
+        const accountId = typeof data.accountId === 'string' ? data.accountId : ''
+        return {
+          errorMessage: `AWS SSO認証の有効期限が切れています（${accountName}）。管理画面からSSO再認証を実行してください。`,
+          ssoInfo: { accountId, accountName },
+        }
       }
 
       // その他のAPIエラー（422含む）はレスポンス詳細を含める
       const serverMessage = data.message ?? data.error ?? 'Unknown error'
       logger.debug(`[aws-cred] API error response (status=${status}): ${JSON.stringify(data)}`)
-      return `AWS認証情報の取得に失敗しました（${accountName}）: [${status}] ${serverMessage}`
+      return { errorMessage: `AWS認証情報の取得に失敗しました（${accountName}）: [${status}] ${serverMessage}` }
     }
 
-    return `AWS認証情報の取得に失敗しました（${accountName}）: HTTP ${status}`
+    return { errorMessage: `AWS認証情報の取得に失敗しました（${accountName}）: HTTP ${status}` }
   }
-  return `AWS認証情報の取得に失敗しました（${accountName}）: ${getErrorMessage(error)}`
+  return { errorMessage: `AWS認証情報の取得に失敗しました（${accountName}）: ${getErrorMessage(error)}` }
 }
 
 /**
@@ -46,12 +61,13 @@ export async function buildAwsProfileCredentials(
   projectConfig: ProjectConfigResponse,
 ): Promise<AwsCredentialResult> {
   const accounts = projectConfig.aws?.accounts
-  if (!accounts?.length) return { errors: [] }
+  if (!accounts?.length) return { errors: [], ssoAuthRequired: [] }
 
   const projectCode = projectConfig.project.projectCode
   const { writeAwsCredentials, buildAwsProfileEnv } = await import('./aws-profile')
   const credentialMap = new Map<string, import('./types').AwsCredentials>()
   const errors: string[] = []
+  const ssoAuthRequired: SsoAuthRequiredInfo[] = []
 
   for (const account of accounts) {
     try {
@@ -59,13 +75,16 @@ export async function buildAwsProfileCredentials(
       const creds = await client.getAwsCredentials(account.id)
       credentialMap.set(account.name, creds)
     } catch (error) {
-      const errorMsg = extractAwsCredentialError(error, account.name)
-      errors.push(errorMsg)
+      const { errorMessage, ssoInfo } = extractAwsCredentialError(error, account.name)
+      errors.push(errorMessage)
+      if (ssoInfo) {
+        ssoAuthRequired.push(ssoInfo)
+      }
       logger.warn(`[chat] Failed to get AWS credentials for ${account.name}: ${getErrorMessage(error)}`)
     }
   }
 
-  if (credentialMap.size === 0) return { errors }
+  if (credentialMap.size === 0) return { errors, ssoAuthRequired }
 
   // credentials ファイルに書き込み
   writeAwsCredentials(projectDir, projectCode, credentialMap)
@@ -80,7 +99,7 @@ export async function buildAwsProfileCredentials(
     defaultAccount.region,
   )
 
-  return { env, errors }
+  return { env, errors, ssoAuthRequired }
 }
 
 /**
@@ -92,7 +111,7 @@ export async function buildSingleAccountAwsEnv(
   client: ApiClient,
   awsAccountId: string | undefined,
 ): Promise<AwsCredentialResult> {
-  if (!awsAccountId) return { errors: [] }
+  if (!awsAccountId) return { errors: [], ssoAuthRequired: [] }
 
   try {
     logger.info(`[chat] Fetching AWS credentials for account: ${awsAccountId}`)
@@ -104,10 +123,11 @@ export async function buildSingleAccountAwsEnv(
       ...(creds.sessionToken ? { AWS_SESSION_TOKEN: creds.sessionToken } : {}),
     }
     logger.info(`[chat] AWS credentials obtained for region=${creds.region}`)
-    return { env, errors: [] }
+    return { env, errors: [], ssoAuthRequired: [] }
   } catch (error) {
-    const errorMsg = extractAwsCredentialError(error, awsAccountId)
+    const { errorMessage, ssoInfo } = extractAwsCredentialError(error, awsAccountId)
+    const ssoAuthRequired: SsoAuthRequiredInfo[] = ssoInfo ? [ssoInfo] : []
     logger.warn(`[chat] Failed to get AWS credentials: ${getErrorMessage(error)}`)
-    return { errors: [errorMsg] }
+    return { errors: [errorMessage], ssoAuthRequired }
   }
 }

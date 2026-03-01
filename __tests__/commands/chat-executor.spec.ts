@@ -21,8 +21,9 @@ jest.mock('../../src/aws-credential-builder', () => ({
       AWS_DEFAULT_REGION: 'ap-northeast-1',
     },
     errors: [],
+    ssoAuthRequired: [],
   }),
-  buildSingleAccountAwsEnv: jest.fn().mockResolvedValue({ errors: [] }),
+  buildSingleAccountAwsEnv: jest.fn().mockResolvedValue({ errors: [], ssoAuthRequired: [] }),
 }))
 
 // Mock api-chat-executor
@@ -527,6 +528,7 @@ describe('chat-executor', () => {
           AWS_DEFAULT_REGION: 'ap-northeast-1',
         },
         errors: [],
+        ssoAuthRequired: [],
       })
 
       const payload: ChatPayload = { message: 'List S3 buckets', awsAccountId: 'prod' }
@@ -574,7 +576,7 @@ describe('chat-executor', () => {
       spawn.mockReturnValue(mockProcess)
 
       const { buildSingleAccountAwsEnv } = require('../../src/aws-credential-builder')
-      ;(buildSingleAccountAwsEnv as jest.Mock).mockResolvedValueOnce({ errors: [] })
+      ;(buildSingleAccountAwsEnv as jest.Mock).mockResolvedValueOnce({ errors: [], ssoAuthRequired: [] })
 
       const payload: ChatPayload = { message: 'Hello', awsAccountId: 'invalid' }
 
@@ -656,6 +658,7 @@ describe('chat-executor', () => {
           AWS_DEFAULT_REGION: 'ap-northeast-1',
         },
         errors: [],
+        ssoAuthRequired: [],
       })
 
       const resultPromise = executeChatCommand(
@@ -695,6 +698,7 @@ describe('chat-executor', () => {
           AWS_DEFAULT_REGION: 'us-east-1',
         },
         errors: [],
+        ssoAuthRequired: [],
       })
 
       const payload: ChatPayload = { message: 'Hello', awsAccountId: 'legacy-account' }
@@ -725,7 +729,7 @@ describe('chat-executor', () => {
       spawn.mockReturnValue(mockProcess)
 
       const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
-      ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce({ errors: ['Credential fetch failed'] })
+      ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce({ errors: ['Credential fetch failed'], ssoAuthRequired: [] })
 
       const resultPromise = executeChatCommand(
         basePayload, 'cmd-profile-fail', mockClient, undefined, 'claude_code', 'agent-1',
@@ -743,6 +747,107 @@ describe('chat-executor', () => {
       const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
       const env = spawnCall[2].env
       expect(env).not.toHaveProperty('AWS_PROFILE')
+    })
+
+    it('should send system chunk when SSO auth is required in profile mode', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
+      ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce({
+        errors: ['SSO auth expired'],
+        ssoAuthRequired: [{ accountId: '123456789012', accountName: 'dev' }],
+      })
+
+      const resultPromise = executeChatCommand(
+        basePayload, 'cmd-sso-system', mockClient, undefined, 'claude_code', 'agent-1',
+        '/tmp/project', projectConfig,
+      )
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+
+      // Should have sent a system chunk with sso_auth_required info
+      const systemCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) => (call[1] as { type: string }).type === 'system',
+      )
+      expect(systemCall).toBeTruthy()
+      const systemContent = JSON.parse((systemCall[1] as { content: string }).content)
+      expect(systemContent.type).toBe('sso_auth_required')
+      expect(systemContent.accountId).toBe('123456789012')
+      expect(systemContent.accountName).toBe('dev')
+      expect(systemContent.projectCode).toBe('TEST')
+    })
+
+    it('should send system chunk when SSO auth is required in legacy mode', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { buildSingleAccountAwsEnv } = require('../../src/aws-credential-builder')
+      ;(buildSingleAccountAwsEnv as jest.Mock).mockResolvedValueOnce({
+        errors: ['SSO auth expired'],
+        ssoAuthRequired: [{ accountId: '987654321098', accountName: 'prod-account' }],
+      })
+
+      const payload: ChatPayload = { message: 'Hello', awsAccountId: 'prod-account', projectCode: 'PROJ_01' }
+
+      const resultPromise = executeChatCommand(
+        payload, 'cmd-sso-legacy', mockClient, undefined, 'claude_code', 'agent-1',
+      )
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+
+      // Should have sent a system chunk with sso_auth_required info
+      const systemCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) => (call[1] as { type: string }).type === 'system',
+      )
+      expect(systemCall).toBeTruthy()
+      const systemContent = JSON.parse((systemCall[1] as { content: string }).content)
+      expect(systemContent.type).toBe('sso_auth_required')
+      expect(systemContent.accountId).toBe('987654321098')
+      expect(systemContent.accountName).toBe('prod-account')
+      expect(systemContent.projectCode).toBe('PROJ_01')
+    })
+
+    it('should not send system chunk when no SSO auth is required', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
+      ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce({
+        env: { AWS_PROFILE: 'TEST-dev' },
+        errors: [],
+        ssoAuthRequired: [],
+      })
+
+      const resultPromise = executeChatCommand(
+        basePayload, 'cmd-no-sso', mockClient, undefined, 'claude_code', 'agent-1',
+        '/tmp/project', projectConfig,
+      )
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from('response'))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      // Should NOT have sent any system chunk
+      const systemCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) => (call[1] as { type: string }).type === 'system',
+      )
+      expect(systemCall).toBeUndefined()
     })
   })
 
