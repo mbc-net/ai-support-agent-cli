@@ -5,7 +5,7 @@ import * as fs from 'fs'
 
 import { getDockerfilePath, getDockerContextDir } from './dockerfile-path'
 import { AGENT_VERSION } from '../constants'
-import { loadConfig } from '../config-manager'
+import { getConfigDir, loadConfig } from '../config-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
 
@@ -66,8 +66,8 @@ export function buildVolumeMounts(): string[] {
     mounts.push('-v', `${claudeDir}:${claudeDir}:rw`)
   }
 
-  // Agent config
-  const agentConfigDir = path.join(home, '.ai-support-agent')
+  // Agent config (resolves custom AI_SUPPORT_AGENT_CONFIG_DIR)
+  const agentConfigDir = getConfigDir()
   if (fs.existsSync(agentConfigDir)) {
     mounts.push('-v', `${agentConfigDir}:${agentConfigDir}:rw`)
   }
@@ -101,7 +101,12 @@ export function buildEnvArgs(): string[] {
 
   for (const key of PASSTHROUGH_ENV_VARS) {
     if (process.env[key]) {
-      args.push('-e', `${key}=${process.env[key]}`)
+      // Resolve CONFIG_DIR to absolute path so it matches the volume mount inside the container
+      if (key === 'AI_SUPPORT_AGENT_CONFIG_DIR') {
+        args.push('-e', `${key}=${getConfigDir()}`)
+      } else {
+        args.push('-e', `${key}=${process.env[key]}`)
+      }
     }
   }
 
