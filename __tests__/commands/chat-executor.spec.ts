@@ -13,12 +13,15 @@ jest.mock('../../src/project-dir', () => ({
 // Mock aws-credential-builder
 jest.mock('../../src/aws-credential-builder', () => ({
   buildAwsProfileCredentials: jest.fn().mockResolvedValue({
-    AWS_CONFIG_FILE: '/mock/.ai-support-agent/aws/config',
-    AWS_SHARED_CREDENTIALS_FILE: '/mock/.ai-support-agent/aws/credentials',
-    AWS_PROFILE: 'TEST-dev',
-    AWS_DEFAULT_REGION: 'ap-northeast-1',
+    env: {
+      AWS_CONFIG_FILE: '/mock/.ai-support-agent/aws/config',
+      AWS_SHARED_CREDENTIALS_FILE: '/mock/.ai-support-agent/aws/credentials',
+      AWS_PROFILE: 'TEST-dev',
+      AWS_DEFAULT_REGION: 'ap-northeast-1',
+    },
+    errors: [],
   }),
-  buildSingleAccountAwsEnv: jest.fn().mockResolvedValue(undefined),
+  buildSingleAccountAwsEnv: jest.fn().mockResolvedValue({ errors: [] }),
 }))
 
 // Mock api-chat-executor
@@ -553,10 +556,13 @@ describe('chat-executor', () => {
 
       const { buildSingleAccountAwsEnv } = require('../../src/aws-credential-builder')
       ;(buildSingleAccountAwsEnv as jest.Mock).mockResolvedValueOnce({
-        AWS_ACCESS_KEY_ID: 'AKIATEST',
-        AWS_SECRET_ACCESS_KEY: 'secretTest',
-        AWS_SESSION_TOKEN: 'tokenTest',
-        AWS_DEFAULT_REGION: 'ap-northeast-1',
+        env: {
+          AWS_ACCESS_KEY_ID: 'AKIATEST',
+          AWS_SECRET_ACCESS_KEY: 'secretTest',
+          AWS_SESSION_TOKEN: 'tokenTest',
+          AWS_DEFAULT_REGION: 'ap-northeast-1',
+        },
+        errors: [],
       })
 
       const payload: ChatPayload = { message: 'List S3 buckets', awsAccountId: 'prod' }
@@ -604,7 +610,7 @@ describe('chat-executor', () => {
       spawn.mockReturnValue(mockProcess)
 
       const { buildSingleAccountAwsEnv } = require('../../src/aws-credential-builder')
-      ;(buildSingleAccountAwsEnv as jest.Mock).mockResolvedValueOnce(undefined)
+      ;(buildSingleAccountAwsEnv as jest.Mock).mockResolvedValueOnce({ errors: [] })
 
       const payload: ChatPayload = { message: 'Hello', awsAccountId: 'invalid' }
 
@@ -713,10 +719,13 @@ describe('chat-executor', () => {
 
       const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
       ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce({
-        AWS_CONFIG_FILE: '/mock/.ai-support-agent/aws/config',
-        AWS_SHARED_CREDENTIALS_FILE: '/mock/.ai-support-agent/aws/credentials',
-        AWS_PROFILE: 'TEST-dev',
-        AWS_DEFAULT_REGION: 'ap-northeast-1',
+        env: {
+          AWS_CONFIG_FILE: '/mock/.ai-support-agent/aws/config',
+          AWS_SHARED_CREDENTIALS_FILE: '/mock/.ai-support-agent/aws/credentials',
+          AWS_PROFILE: 'TEST-dev',
+          AWS_DEFAULT_REGION: 'ap-northeast-1',
+        },
+        errors: [],
       })
 
       const resultPromise = executeChatCommand(
@@ -749,10 +758,13 @@ describe('chat-executor', () => {
 
       const { buildSingleAccountAwsEnv } = require('../../src/aws-credential-builder')
       ;(buildSingleAccountAwsEnv as jest.Mock).mockResolvedValueOnce({
-        AWS_ACCESS_KEY_ID: 'AKIALEGACY',
-        AWS_SECRET_ACCESS_KEY: 'secretLegacy',
-        AWS_SESSION_TOKEN: 'tokenLegacy',
-        AWS_DEFAULT_REGION: 'us-east-1',
+        env: {
+          AWS_ACCESS_KEY_ID: 'AKIALEGACY',
+          AWS_SECRET_ACCESS_KEY: 'secretLegacy',
+          AWS_SESSION_TOKEN: 'tokenLegacy',
+          AWS_DEFAULT_REGION: 'us-east-1',
+        },
+        errors: [],
       })
 
       const payload: ChatPayload = { message: 'Hello', awsAccountId: 'legacy-account' }
@@ -783,7 +795,7 @@ describe('chat-executor', () => {
       spawn.mockReturnValue(mockProcess)
 
       const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
-      ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce(undefined)
+      ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce({ errors: ['Credential fetch failed'] })
 
       const resultPromise = executeChatCommand(
         basePayload, 'cmd-profile-fail', mockClient, undefined, 'claude_code', 'agent-1',

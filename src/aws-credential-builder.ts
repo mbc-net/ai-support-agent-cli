@@ -1,7 +1,27 @@
+import axios from 'axios'
+
 import type { ApiClient } from './api-client'
 import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
 import { getErrorMessage } from './utils'
+
+export interface AwsCredentialResult {
+  env?: Record<string, string>
+  errors: string[]
+}
+
+/**
+ * HTTPエラーレスポンスからAWS認証エラーメッセージを抽出する
+ */
+function extractAwsCredentialError(error: unknown, accountName: string): string {
+  if (axios.isAxiosError(error) && error.response?.data) {
+    const data = error.response.data as Record<string, unknown>
+    if (data.error === 'SSO_AUTH_REQUIRED') {
+      return `AWS SSO認証の有効期限が切れています（${accountName}）。管理画面からSSO再認証を実行してください。`
+    }
+  }
+  return `AWS認証情報の取得に失敗しました（${accountName}）: ${getErrorMessage(error)}`
+}
 
 /**
  * プロファイル方式でAWS認証情報を構築する。
@@ -12,13 +32,14 @@ export async function buildAwsProfileCredentials(
   client: ApiClient,
   projectDir: string,
   projectConfig: ProjectConfigResponse,
-): Promise<Record<string, string> | undefined> {
+): Promise<AwsCredentialResult> {
   const accounts = projectConfig.aws?.accounts
-  if (!accounts?.length) return undefined
+  if (!accounts?.length) return { errors: [] }
 
   const projectCode = projectConfig.project.projectCode
   const { writeAwsCredentials, buildAwsProfileEnv } = await import('./aws-profile')
   const credentialMap = new Map<string, import('./types').AwsCredentials>()
+  const errors: string[] = []
 
   for (const account of accounts) {
     try {
@@ -26,11 +47,13 @@ export async function buildAwsProfileCredentials(
       const creds = await client.getAwsCredentials(account.id)
       credentialMap.set(account.name, creds)
     } catch (error) {
+      const errorMsg = extractAwsCredentialError(error, account.name)
+      errors.push(errorMsg)
       logger.warn(`[chat] Failed to get AWS credentials for ${account.name}: ${getErrorMessage(error)}`)
     }
   }
 
-  if (credentialMap.size === 0) return undefined
+  if (credentialMap.size === 0) return { errors }
 
   // credentials ファイルに書き込み
   writeAwsCredentials(projectDir, projectCode, credentialMap)
@@ -38,12 +61,14 @@ export async function buildAwsProfileCredentials(
   // デフォルトアカウントを特定
   const defaultAccount = accounts.find((a) => a.isDefault) ?? accounts[0]
 
-  return buildAwsProfileEnv(
+  const env = buildAwsProfileEnv(
     projectDir,
     projectCode,
     defaultAccount.name,
     defaultAccount.region,
   )
+
+  return { env, errors }
 }
 
 /**
@@ -54,8 +79,8 @@ export async function buildAwsProfileCredentials(
 export async function buildSingleAccountAwsEnv(
   client: ApiClient,
   awsAccountId: string | undefined,
-): Promise<Record<string, string> | undefined> {
-  if (!awsAccountId) return undefined
+): Promise<AwsCredentialResult> {
+  if (!awsAccountId) return { errors: [] }
 
   try {
     logger.info(`[chat] Fetching AWS credentials for account: ${awsAccountId}`)
@@ -67,9 +92,10 @@ export async function buildSingleAccountAwsEnv(
       ...(creds.sessionToken ? { AWS_SESSION_TOKEN: creds.sessionToken } : {}),
     }
     logger.info(`[chat] AWS credentials obtained for region=${creds.region}`)
-    return env
+    return { env, errors: [] }
   } catch (error) {
+    const errorMsg = extractAwsCredentialError(error, awsAccountId)
     logger.warn(`[chat] Failed to get AWS credentials: ${getErrorMessage(error)}`)
-    return undefined
+    return { errors: [errorMsg] }
   }
 }

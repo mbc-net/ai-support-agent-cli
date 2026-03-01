@@ -85,11 +85,21 @@ async function executeClaudeCodeChat(
     let awsEnv: Record<string, string> | undefined
     if (projectDir && projectConfig?.aws?.accounts?.length) {
       // プロファイル方式: 全アカウントの認証情報を取得してプロファイルファイルに書き込み
-      awsEnv = await buildAwsProfileCredentials(client, projectDir, projectConfig)
+      const awsResult = await buildAwsProfileCredentials(client, projectDir, projectConfig)
+      awsEnv = awsResult.env
+      if (awsResult.errors.length > 0) {
+        const notice = `⚠️ ${awsResult.errors.join('\n')}\n\n`
+        await sendChunk('delta', notice)
+      }
     } else {
       // フォールバック: 単一アカウントの環境変数直接注入（従来方式）
       const awsAccountId = parseString(payload.awsAccountId) ?? undefined
-      awsEnv = await buildSingleAccountAwsEnv(client, awsAccountId)
+      const awsResult = await buildSingleAccountAwsEnv(client, awsAccountId)
+      awsEnv = awsResult.env
+      if (awsResult.errors.length > 0) {
+        const notice = `⚠️ ${awsResult.errors.join('\n')}\n\n`
+        await sendChunk('delta', notice)
+      }
     }
 
     logger.debug(`[chat] Spawning claude CLI for command [${commandId}]${allowedTools?.length ? ` with allowedTools: ${allowedTools.join(', ')}` : ' (no allowedTools)'}${addDirs?.length ? ` with addDirs: ${addDirs.join(', ')}` : ''}${locale ? ` locale=${locale}` : ''}${awsEnv ? ' with AWS credentials' : ''}`)

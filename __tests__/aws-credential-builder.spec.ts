@@ -1,3 +1,5 @@
+import axios from 'axios'
+
 import type { ApiClient } from '../src/api-client'
 import { buildAwsProfileCredentials, buildSingleAccountAwsEnv } from '../src/aws-credential-builder'
 import type { ProjectConfigResponse } from '../src/types'
@@ -55,7 +57,7 @@ describe('aws-credential-builder', () => {
       },
     }
 
-    it('should return undefined when accounts is empty', async () => {
+    it('should return empty result when accounts is empty', async () => {
       const client = {} as ApiClient
       const config: ProjectConfigResponse = {
         ...projectConfig,
@@ -63,10 +65,11 @@ describe('aws-credential-builder', () => {
       }
 
       const result = await buildAwsProfileCredentials(client, '/tmp/project', config)
-      expect(result).toBeUndefined()
+      expect(result).toEqual({ errors: [] })
+      expect(result.env).toBeUndefined()
     })
 
-    it('should return undefined when aws is undefined', async () => {
+    it('should return empty result when aws is undefined', async () => {
       const client = {} as ApiClient
       const config: ProjectConfigResponse = {
         ...projectConfig,
@@ -74,7 +77,8 @@ describe('aws-credential-builder', () => {
       }
 
       const result = await buildAwsProfileCredentials(client, '/tmp/project', config)
-      expect(result).toBeUndefined()
+      expect(result).toEqual({ errors: [] })
+      expect(result.env).toBeUndefined()
     })
 
     it('should fetch credentials for all accounts and return profile env', async () => {
@@ -119,21 +123,25 @@ describe('aws-credential-builder', () => {
         'ap-northeast-1', // default account region
       )
 
-      expect(result).toEqual({
+      expect(result.env).toEqual({
         AWS_CONFIG_FILE: '/mock/.ai-support-agent/aws/config',
         AWS_SHARED_CREDENTIALS_FILE: '/mock/.ai-support-agent/aws/credentials',
         AWS_PROFILE: 'TEST-dev',
         AWS_DEFAULT_REGION: 'ap-northeast-1',
       })
+      expect(result.errors).toEqual([])
     })
 
-    it('should return undefined when all credential fetches fail', async () => {
+    it('should return errors when all credential fetches fail', async () => {
       const client = {
         getAwsCredentials: jest.fn().mockRejectedValue(new Error('Not found')),
       } as unknown as ApiClient
 
       const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
-      expect(result).toBeUndefined()
+      expect(result.env).toBeUndefined()
+      expect(result.errors).toHaveLength(2)
+      expect(result.errors[0]).toContain('dev')
+      expect(result.errors[1]).toContain('staging')
     })
 
     it('should skip failed accounts and continue with successful ones', async () => {
@@ -151,7 +159,9 @@ describe('aws-credential-builder', () => {
 
       const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
 
-      expect(result).toBeDefined()
+      expect(result.env).toBeDefined()
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toContain('dev')
       const credMap = writeAwsCredentials.mock.calls[0][2] as Map<string, unknown>
       expect(credMap.size).toBe(1)
       expect(credMap.has('staging')).toBe(true)
@@ -204,13 +214,54 @@ describe('aws-credential-builder', () => {
         'eu-west-1',
       )
     })
+
+    it('should detect SSO_AUTH_REQUIRED error from API response', async () => {
+      const ssoError = new axios.AxiosError(
+        'Request failed',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        {
+          status: 422,
+          statusText: 'Unprocessable Entity',
+          data: {
+            statusCode: 422,
+            error: 'SSO_AUTH_REQUIRED',
+            message: 'SSO token expired',
+            accountId: '123456789012',
+            accountName: 'dev',
+          },
+          headers: {},
+          config: {} as never,
+        },
+      )
+
+      const client = {
+        getAwsCredentials: jest.fn()
+          .mockRejectedValueOnce(ssoError)
+          .mockResolvedValueOnce({
+            accessKeyId: 'AKIA_STG',
+            secretAccessKey: 'secret_stg',
+            region: 'us-east-1',
+          }),
+      } as unknown as ApiClient
+
+      const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+
+      expect(result.env).toBeDefined()
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toContain('SSO認証の有効期限が切れています')
+      expect(result.errors[0]).toContain('dev')
+      expect(result.errors[0]).toContain('管理画面からSSO再認証')
+    })
   })
 
   describe('buildSingleAccountAwsEnv', () => {
-    it('should return undefined when awsAccountId is undefined', async () => {
+    it('should return empty result when awsAccountId is undefined', async () => {
       const client = {} as ApiClient
       const result = await buildSingleAccountAwsEnv(client, undefined)
-      expect(result).toBeUndefined()
+      expect(result).toEqual({ errors: [] })
+      expect(result.env).toBeUndefined()
     })
 
     it('should fetch credentials and return env map', async () => {
@@ -226,12 +277,13 @@ describe('aws-credential-builder', () => {
       const result = await buildSingleAccountAwsEnv(client, 'prod-account')
 
       expect(client.getAwsCredentials).toHaveBeenCalledWith('prod-account')
-      expect(result).toEqual({
+      expect(result.env).toEqual({
         AWS_ACCESS_KEY_ID: 'AKIATEST',
         AWS_SECRET_ACCESS_KEY: 'secretTest',
         AWS_SESSION_TOKEN: 'tokenTest',
         AWS_DEFAULT_REGION: 'ap-northeast-1',
       })
+      expect(result.errors).toEqual([])
     })
 
     it('should not include AWS_SESSION_TOKEN when sessionToken is not provided', async () => {
@@ -245,22 +297,59 @@ describe('aws-credential-builder', () => {
 
       const result = await buildSingleAccountAwsEnv(client, 'dev-account')
 
-      expect(result).toEqual({
+      expect(result.env).toEqual({
         AWS_ACCESS_KEY_ID: 'AKIATEST',
         AWS_SECRET_ACCESS_KEY: 'secretTest',
         AWS_DEFAULT_REGION: 'us-east-1',
       })
-      expect(result).not.toHaveProperty('AWS_SESSION_TOKEN')
+      expect(result.env).not.toHaveProperty('AWS_SESSION_TOKEN')
+      expect(result.errors).toEqual([])
     })
 
-    it('should return undefined when getAwsCredentials fails', async () => {
+    it('should return error when getAwsCredentials fails', async () => {
       const client = {
         getAwsCredentials: jest.fn().mockRejectedValue(new Error('Access denied')),
       } as unknown as ApiClient
 
       const result = await buildSingleAccountAwsEnv(client, 'bad-account')
 
-      expect(result).toBeUndefined()
+      expect(result.env).toBeUndefined()
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toContain('bad-account')
+    })
+
+    it('should detect SSO_AUTH_REQUIRED error from API response', async () => {
+      const ssoError = new axios.AxiosError(
+        'Request failed',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        {
+          status: 422,
+          statusText: 'Unprocessable Entity',
+          data: {
+            statusCode: 422,
+            error: 'SSO_AUTH_REQUIRED',
+            message: 'SSO token expired',
+            accountId: '123456789012',
+            accountName: 'prod',
+          },
+          headers: {},
+          config: {} as never,
+        },
+      )
+
+      const client = {
+        getAwsCredentials: jest.fn().mockRejectedValue(ssoError),
+      } as unknown as ApiClient
+
+      const result = await buildSingleAccountAwsEnv(client, 'prod-account')
+
+      expect(result.env).toBeUndefined()
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toContain('SSO認証の有効期限が切れています')
+      expect(result.errors[0]).toContain('prod-account')
+      expect(result.errors[0]).toContain('管理画面からSSO再認証')
     })
   })
 })
