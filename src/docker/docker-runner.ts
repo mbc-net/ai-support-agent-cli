@@ -60,10 +60,14 @@ export function buildVolumeMounts(): string[] {
   const home = os.homedir()
   const mounts: string[] = []
 
-  // Claude Code OAuth tokens
+  // Claude Code OAuth tokens and config
   const claudeDir = path.join(home, '.claude')
   if (fs.existsSync(claudeDir)) {
     mounts.push('-v', `${claudeDir}:${claudeDir}:rw`)
+  }
+  const claudeJson = path.join(home, '.claude.json')
+  if (fs.existsSync(claudeJson)) {
+    mounts.push('-v', `${claudeJson}:${claudeJson}:rw`)
   }
 
   // Agent config (resolves custom AI_SUPPORT_AGENT_CONFIG_DIR)

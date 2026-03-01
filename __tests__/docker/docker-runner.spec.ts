@@ -126,6 +126,7 @@ describe('docker-runner', () => {
       mockExistsSync.mockImplementation((p: unknown) => {
         const existing = [
           `${home}/.claude`,
+          `${home}/.claude.json`,
           `${home}/.ai-support-agent`,
           `${home}/.aws`,
         ]
@@ -135,6 +136,7 @@ describe('docker-runner', () => {
 
       const mounts = buildVolumeMounts()
       expect(mounts).toContain(`${home}/.claude:${home}/.claude:rw`)
+      expect(mounts).toContain(`${home}/.claude.json:${home}/.claude.json:rw`)
       expect(mounts).toContain(`${home}/.ai-support-agent:${home}/.ai-support-agent:rw`)
       expect(mounts).toContain(`${home}/.aws:${home}/.aws:ro`)
     })
