@@ -15,6 +15,7 @@ jest.mock('../../src/docker/dockerfile-path', () => ({
 }))
 
 jest.mock('../../src/config-manager', () => ({
+  getConfigDir: jest.fn(() => '/mock/config-dir'),
   loadConfig: jest.fn(),
 }))
 
@@ -45,7 +46,7 @@ jest.mock('../../src/logger', () => ({
 import { execSync, spawn } from 'child_process'
 import * as os from 'os'
 import { existsSync } from 'fs'
-import { loadConfig } from '../../src/config-manager'
+import { getConfigDir, loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
 import {
   checkDockerAvailable,
@@ -59,6 +60,7 @@ import {
 
 const mockExecSync = execSync as jest.MockedFunction<typeof execSync>
 const mockSpawn = spawn as jest.MockedFunction<typeof spawn>
+const mockGetConfigDir = getConfigDir as jest.MockedFunction<typeof getConfigDir>
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>
 
@@ -120,6 +122,7 @@ describe('docker-runner', () => {
   describe('buildVolumeMounts', () => {
     it('should mount existing directories', () => {
       const home = os.homedir()
+      mockGetConfigDir.mockReturnValue(`${home}/.ai-support-agent`)
       mockExistsSync.mockImplementation((p: unknown) => {
         const existing = [
           `${home}/.claude`,
@@ -134,6 +137,17 @@ describe('docker-runner', () => {
       expect(mounts).toContain(`${home}/.claude:${home}/.claude:rw`)
       expect(mounts).toContain(`${home}/.ai-support-agent:${home}/.ai-support-agent:rw`)
       expect(mounts).toContain(`${home}/.aws:${home}/.aws:ro`)
+    })
+
+    it('should mount custom config directory from AI_SUPPORT_AGENT_CONFIG_DIR', () => {
+      mockGetConfigDir.mockReturnValue('/custom/config/dir')
+      mockExistsSync.mockImplementation((p: unknown) => {
+        return p === '/custom/config/dir'
+      })
+      mockLoadConfig.mockReturnValue(null)
+
+      const mounts = buildVolumeMounts()
+      expect(mounts).toContain('/custom/config/dir:/custom/config/dir:rw')
     })
 
     it('should skip non-existing directories', () => {
@@ -211,6 +225,15 @@ describe('docker-runner', () => {
       expect(args).toContain('AI_SUPPORT_AGENT_TOKEN=test-token')
       expect(args).toContain('AI_SUPPORT_AGENT_API_URL=http://test.api')
       expect(args).toContain('ANTHROPIC_API_KEY=sk-test')
+    })
+
+    it('should resolve AI_SUPPORT_AGENT_CONFIG_DIR to absolute path', () => {
+      process.env.AI_SUPPORT_AGENT_CONFIG_DIR = './relative/path'
+      mockGetConfigDir.mockReturnValue('/resolved/absolute/path')
+
+      const args = buildEnvArgs()
+      expect(args).toContain('AI_SUPPORT_AGENT_CONFIG_DIR=/resolved/absolute/path')
+      expect(args).not.toContain('AI_SUPPORT_AGENT_CONFIG_DIR=./relative/path')
     })
 
     it('should skip unset environment variables', () => {
