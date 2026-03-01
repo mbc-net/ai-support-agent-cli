@@ -1,10 +1,11 @@
 import { ApiClient } from '../api-client'
-import { buildAwsProfileCredentials, buildSingleAccountAwsEnv } from '../aws-credential-builder'
+import { type AwsCredentialResult, buildAwsProfileCredentials, buildSingleAccountAwsEnv } from '../aws-credential-builder'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, LOG_MESSAGE_LIMIT } from '../constants'
 import { logger } from '../logger'
-import type { AgentChatMode, AgentServerConfig, ChatPayload, CommandResult, ProjectConfigResponse } from '../types'
+import type { AgentChatMode, AgentServerConfig, ChatChunkType, ChatPayload, CommandResult, ProjectConfigResponse } from '../types'
 import { getErrorMessage, parseString, truncateString } from '../utils'
 
+import { getAutoAddDirs } from '../project-dir'
 import { executeApiChatCommand } from './api-chat-executor'
 import { runClaudeCode } from './claude-code-runner'
 import { createChunkSender, formatHistoryForClaudeCode, parseHistory } from './shared-chat-utils'
@@ -75,7 +76,6 @@ async function executeClaudeCodeChat(
     // Merge project directory auto-add dirs with server-configured dirs
     let addDirs: string[] | undefined
     if (projectDir) {
-      const { getAutoAddDirs } = await import('../project-dir')
       const autoAddDirs = getAutoAddDirs(projectDir)
       addDirs = [...autoAddDirs, ...serverAddDirs]
     } else {
@@ -90,44 +90,28 @@ async function executeClaudeCodeChat(
       // プロファイル方式: 全アカウントの認証情報を取得してプロファイルファイルに書き込み
       const awsResult = await buildAwsProfileCredentials(client, projectDir, projectConfig)
       awsEnv = awsResult.env
-      if (awsResult.errors.length > 0) {
-        const notice = `⚠️ ${awsResult.errors.join('\n')}\n\n`
-        await sendChunk('delta', notice)
-      }
-      // SSO再認証が必要なアカウントの情報を system チャンクで送信
-      for (const ssoInfo of awsResult.ssoAuthRequired) {
-        await sendChunk('system', JSON.stringify({
-          type: 'sso_auth_required',
-          accountId: ssoInfo.accountId,
-          accountName: ssoInfo.accountName,
-          projectCode,
-        }))
-      }
+      await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
     } else {
       // フォールバック: 単一アカウントの環境変数直接注入（従来方式）
       const awsAccountId = parseString(payload.awsAccountId) ?? undefined
       const awsResult = await buildSingleAccountAwsEnv(client, awsAccountId)
       awsEnv = awsResult.env
-      if (awsResult.errors.length > 0) {
-        const notice = `⚠️ ${awsResult.errors.join('\n')}\n\n`
-        await sendChunk('delta', notice)
-      }
-      // SSO再認証が必要なアカウントの情報を system チャンクで送信
-      for (const ssoInfo of awsResult.ssoAuthRequired) {
-        await sendChunk('system', JSON.stringify({
-          type: 'sso_auth_required',
-          accountId: ssoInfo.accountId,
-          accountName: ssoInfo.accountName,
-          projectCode,
-        }))
-      }
+      await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
     }
 
     // 会話履歴をメッセージに埋め込む（Claude Code CLI用）
     const history = parseHistory(payload.history)
     const messageWithHistory = formatHistoryForClaudeCode(history, message)
 
-    logger.debug(`[chat] Spawning claude CLI for command [${commandId}]${allowedTools?.length ? ` with allowedTools: ${allowedTools.join(', ')}` : ' (no allowedTools)'}${addDirs?.length ? ` with addDirs: ${addDirs.join(', ')}` : ''}${locale ? ` locale=${locale}` : ''}${awsEnv ? ' with AWS credentials' : ''}${mcpConfigPath ? ' with MCP config' : ''}${history.length > 0 ? ` with ${history.length} history messages` : ''}`)
+    const logDetails = [
+      allowedTools?.length ? `allowedTools: ${allowedTools.join(', ')}` : '(no allowedTools)',
+      addDirs?.length ? `addDirs: ${addDirs.join(', ')}` : null,
+      locale ? `locale=${locale}` : null,
+      awsEnv ? 'AWS credentials' : null,
+      mcpConfigPath ? 'MCP config' : null,
+      history.length > 0 ? `${history.length} history messages` : null,
+    ].filter(Boolean).join(', ')
+    logger.debug(`[chat] Spawning claude CLI for command [${commandId}]: ${logDetails}`)
     logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
     const result = await runClaudeCode(messageWithHistory, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath)
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, duration=${result.metadata.durationMs}ms`)
@@ -143,5 +127,25 @@ async function executeClaudeCodeChat(
     logger.error(`[chat] Chat command failed [${commandId}]: ${errorMessage}`)
     await sendChunk('error', errorMessage)
     return { success: false, error: errorMessage }
+  }
+}
+
+async function sendAwsCredentialNotices(
+  awsResult: AwsCredentialResult,
+  projectCode: string | undefined,
+  sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
+): Promise<void> {
+  if (awsResult.errors.length > 0) {
+    const notice = `⚠️ ${awsResult.errors.join('\n')}\n\n`
+    await sendChunk('delta', notice)
+  }
+  // SSO再認証が必要なアカウントの情報を system チャンクで送信
+  for (const ssoInfo of awsResult.ssoAuthRequired) {
+    await sendChunk('system', JSON.stringify({
+      type: 'sso_auth_required',
+      accountId: ssoInfo.accountId,
+      accountName: ssoInfo.accountName,
+      projectCode,
+    }))
   }
 }
