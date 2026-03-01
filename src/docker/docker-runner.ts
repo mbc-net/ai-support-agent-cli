@@ -15,6 +15,7 @@ const PASSTHROUGH_ENV_VARS = [
   'AI_SUPPORT_AGENT_API_URL',
   'AI_SUPPORT_AGENT_CONFIG_DIR',
   'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_OAUTH_TOKEN',
 ]
 
 export interface DockerRunOptions {
@@ -156,40 +157,16 @@ export function ensureImage(): string {
 }
 
 export function dockerLogin(): void {
-  if (!checkDockerAvailable()) {
-    logger.error(t('docker.notAvailable'))
-    process.exit(1)
-    return
-  }
-
-  const version = ensureImage()
-
-  const home = os.homedir()
-  const claudeDir = path.join(home, '.claude')
-  const claudeJson = path.join(home, '.claude.json')
-
-  // Ensure ~/.claude/ directory exists for credential storage
-  if (!fs.existsSync(claudeDir)) {
-    fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 })
-  }
-
-  const parts = [
-    'docker run --rm -it',
-    `-v ${claudeDir}:${claudeDir}:rw`,
-    ...(fs.existsSync(claudeJson) ? [`-v ${claudeJson}:${claudeJson}:rw`] : []),
-    `-e HOME=${home}`,
-    '--entrypoint claude',
-    `${IMAGE_NAME}:${version}`,
-    'auth login',
-  ]
-
-  const command = parts.join(' \\\n  ')
-
-  logger.info(t('docker.loginInstruction'))
+  logger.info(t('docker.loginStep1'))
   console.log('')
-  console.log(command)
+  console.log('  claude setup-token')
   console.log('')
-  logger.info(t('docker.loginHint'))
+  logger.info(t('docker.loginStep2'))
+  console.log('')
+  console.log('  export CLAUDE_CODE_OAUTH_TOKEN=<token>')
+  console.log('  ai-support-agent start --docker')
+  console.log('')
+  logger.info(t('docker.loginStep3'))
 }
 
 export function runInDocker(opts: DockerRunOptions): void {

@@ -7,7 +7,6 @@ jest.mock('child_process', () => ({
 
 jest.mock('fs', () => ({
   existsSync: jest.fn(),
-  mkdirSync: jest.fn(),
 }))
 
 jest.mock('../../src/docker/dockerfile-path', () => ({
@@ -46,7 +45,7 @@ jest.mock('../../src/logger', () => ({
 
 import { execSync, spawn } from 'child_process'
 import * as os from 'os'
-import { existsSync, mkdirSync } from 'fs'
+import { existsSync } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
 import {
@@ -66,7 +65,6 @@ const mockSpawn = spawn as jest.MockedFunction<typeof spawn>
 const mockGetConfigDir = getConfigDir as jest.MockedFunction<typeof getConfigDir>
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>
-const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>
 
 describe('docker-runner', () => {
   const originalEnv = process.env
@@ -346,72 +344,27 @@ describe('docker-runner', () => {
       consoleSpy.mockRestore()
     })
 
-    it('should exit with error when Docker is not available', () => {
-      mockExecSync.mockImplementation(() => { throw new Error('not found') })
-
-      dockerLogin()
-
-      expect(logger.error).toHaveBeenCalled()
-      expect(mockExit).toHaveBeenCalledWith(1)
-    })
-
-    it('should print docker run command with claude auth login', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
-      mockExistsSync.mockReturnValue(true)
-
+    it('should print setup-token instruction', () => {
       dockerLogin()
 
       const output = consoleSpy.mock.calls.map(c => c[0]).join('\n')
-      expect(output).toContain('docker run --rm -it')
-      expect(output).toContain('--entrypoint claude')
-      expect(output).toContain('auth login')
-      expect(output).toContain('.claude')
+      expect(output).toContain('claude setup-token')
     })
 
-    it('should create ~/.claude directory if it does not exist', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
-      mockExistsSync.mockReturnValue(false)
-
-      dockerLogin()
-
-      expect(mockMkdirSync).toHaveBeenCalledWith(
-        expect.stringContaining('.claude'),
-        { recursive: true, mode: 0o700 },
-      )
-    })
-
-    it('should include .claude.json mount when file exists', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
-      mockExistsSync.mockReturnValue(true)
-
+    it('should print CLAUDE_CODE_OAUTH_TOKEN usage', () => {
       dockerLogin()
 
       const output = consoleSpy.mock.calls.map(c => c[0]).join('\n')
-      expect(output).toContain('.claude.json')
+      expect(output).toContain('CLAUDE_CODE_OAUTH_TOKEN')
+      expect(output).toContain('ai-support-agent start --docker')
     })
 
-    it('should omit .claude.json mount when file does not exist', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
-      // First call: claudeDir exists, second call: claudeJson does not exist
-      mockExistsSync.mockImplementation((p: unknown) => {
-        return !String(p).endsWith('.claude.json')
-      })
-
+    it('should show step messages', () => {
       dockerLogin()
 
-      const output = consoleSpy.mock.calls.map(c => c[0]).join('\n')
-      expect(output).toContain('.claude:')
-      expect(output).not.toContain('.claude.json')
-    })
-
-    it('should show instruction and hint messages', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
-      mockExistsSync.mockReturnValue(true)
-
-      dockerLogin()
-
-      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.loginInstruction'))
-      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.loginHint'))
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.loginStep1'))
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.loginStep2'))
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.loginStep3'))
     })
   })
 

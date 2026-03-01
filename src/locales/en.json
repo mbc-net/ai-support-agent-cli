@@ -114,6 +114,7 @@
   "docker.imageFound": "Using existing Docker image ({{version}})",
   "docker.starting": "Starting Docker container...",
   "docker.runFailed": "Failed to run Docker container: {{message}}",
-  "docker.loginInstruction": "Run the following command directly in your terminal:",
-  "docker.loginHint": "After logging in via browser, paste the auth code into the terminal and press Enter."
+  "docker.loginStep1": "Step 1: Run the following in your host terminal to get an OAuth token:",
+  "docker.loginStep2": "Step 2: Set the token as an environment variable and start in Docker mode:",
+  "docker.loginStep3": "The token is long-lived. Add the export to .bashrc or .zshrc to persist it."
 }

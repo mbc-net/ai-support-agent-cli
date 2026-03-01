@@ -114,6 +114,7 @@
   "docker.imageFound": "既存のDockerイメージを使用します ({{version}})",
   "docker.starting": "Dockerコンテナを起動中...",
   "docker.runFailed": "Dockerコンテナの実行に失敗しました: {{message}}",
-  "docker.loginInstruction": "以下のコマンドをターミナルで直接実行してください:",
-  "docker.loginHint": "ブラウザでログイン後、表示された認証コードをターミナルに貼り付けてEnterを押してください。"
+  "docker.loginStep1": "Step 1: ホスト側のターミナルで以下を実行し、OAuthトークンを取得してください:",
+  "docker.loginStep2": "Step 2: 取得したトークンを環境変数に設定してDockerモードで起動:",
+  "docker.loginStep3": "トークンは長期間有効です。毎回設定が必要な場合は .bashrc や .zshrc に export を追加してください。"
 }
