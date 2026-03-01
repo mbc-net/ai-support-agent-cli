@@ -2,6 +2,7 @@ import type { ApiClient } from '../../src/api-client'
 import { executeChatCommand } from '../../src/commands/chat-executor'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED } from '../../src/constants'
 import type { AgentServerConfig, ChatPayload, ProjectConfigResponse } from '../../src/types'
+import { createMockChildProcess } from '../helpers/mock-factory'
 
 jest.mock('../../src/logger')
 
@@ -153,46 +154,9 @@ describe('chat-executor', () => {
   })
 
   describe('Claude Code CLI error handling', () => {
-    function createMockProcess() {
-      const handlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-      const stdoutHandlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-      const stderrHandlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-
-      return {
-        pid: 12345,
-        killed: false,
-        kill: jest.fn(),
-        stdout: {
-          on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-            stdoutHandlers[event] = stdoutHandlers[event] || []
-            stdoutHandlers[event].push(cb)
-          }),
-        },
-        stderr: {
-          on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-            stderrHandlers[event] = stderrHandlers[event] || []
-            stderrHandlers[event].push(cb)
-          }),
-        },
-        on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-          handlers[event] = handlers[event] || []
-          handlers[event].push(cb)
-        }),
-        emit(event: string, ...args: unknown[]) {
-          for (const cb of handlers[event] || []) cb(...args)
-        },
-        emitStdout(event: string, ...args: unknown[]) {
-          for (const cb of stdoutHandlers[event] || []) cb(...args)
-        },
-        emitStderr(event: string, ...args: unknown[]) {
-          for (const cb of stderrHandlers[event] || []) cb(...args)
-        },
-      }
-    }
-
     it('should return error when CLI exits with non-zero code', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const resultPromise = executeChatCommand(basePayload, 'cmd-err-1', mockClient, undefined, undefined, 'agent-1')
@@ -209,7 +173,7 @@ describe('chat-executor', () => {
 
     it('should include stderr in error when CLI exits with non-zero code', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const resultPromise = executeChatCommand(basePayload, 'cmd-err-2', mockClient, undefined, undefined, 'agent-1')
@@ -227,7 +191,7 @@ describe('chat-executor', () => {
 
     it('should return ENOENT error when claude CLI is not found', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const resultPromise = executeChatCommand(basePayload, 'cmd-enoent', mockClient, undefined, undefined, 'agent-1')
@@ -246,7 +210,7 @@ describe('chat-executor', () => {
 
     it('should return generic error for non-ENOENT spawn errors', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const resultPromise = executeChatCommand(basePayload, 'cmd-generic-err', mockClient, undefined, undefined, 'agent-1')
@@ -263,7 +227,7 @@ describe('chat-executor', () => {
 
     it('should send error chunk on failure', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const resultPromise = executeChatCommand(basePayload, 'cmd-err-chunk', mockClient, undefined, undefined, 'agent-1')
@@ -280,7 +244,7 @@ describe('chat-executor', () => {
 
     it('should send done chunk on success', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const resultPromise = executeChatCommand(basePayload, 'cmd-done', mockClient, undefined, undefined, 'agent-1')
@@ -309,7 +273,7 @@ describe('chat-executor', () => {
 
     it('should send delta chunks for stdout data', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const resultPromise = executeChatCommand(basePayload, 'cmd-delta', mockClient, undefined, undefined, 'agent-1')
@@ -333,7 +297,7 @@ describe('chat-executor', () => {
 
     it('should pass allowedTools from serverConfig to CLI args', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const serverConfig: AgentServerConfig = {
@@ -364,7 +328,7 @@ describe('chat-executor', () => {
 
     it('should not pass allowedTools when serverConfig has no claudeCodeConfig', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const serverConfig: AgentServerConfig = {
@@ -392,7 +356,7 @@ describe('chat-executor', () => {
 
     it('should not pass allowedTools when array is empty', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const serverConfig: AgentServerConfig = {
@@ -423,7 +387,7 @@ describe('chat-executor', () => {
 
     it('should pass addDirs from serverConfig as --add-dir args', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const serverConfig: AgentServerConfig = {
@@ -456,7 +420,7 @@ describe('chat-executor', () => {
 
     it('should not pass --add-dir when addDirs is empty', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const serverConfig: AgentServerConfig = {
@@ -487,7 +451,7 @@ describe('chat-executor', () => {
 
     it('should pass --append-system-prompt for Japanese locale', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const payload: ChatPayload = { message: 'Hello', locale: 'ja' }
@@ -509,7 +473,7 @@ describe('chat-executor', () => {
 
     it('should pass --append-system-prompt for English locale', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const payload: ChatPayload = { message: 'Hello', locale: 'en' }
@@ -531,7 +495,7 @@ describe('chat-executor', () => {
 
     it('should not pass --append-system-prompt when locale is not provided', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const resultPromise = executeChatCommand(basePayload, 'cmd-no-locale', mockClient, undefined, 'claude_code', 'agent-1')
@@ -551,7 +515,7 @@ describe('chat-executor', () => {
 
     it('should inject AWS credentials into env when awsAccountId is provided', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const { buildSingleAccountAwsEnv } = require('../../src/aws-credential-builder')
@@ -587,7 +551,7 @@ describe('chat-executor', () => {
 
     it('should not inject AWS credentials when awsAccountId is not provided', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const resultPromise = executeChatCommand(basePayload, 'cmd-no-aws', mockClient, undefined, 'claude_code', 'agent-1')
@@ -606,7 +570,7 @@ describe('chat-executor', () => {
 
     it('should continue without AWS credentials when buildSingleAccountAwsEnv returns undefined', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const { buildSingleAccountAwsEnv } = require('../../src/aws-credential-builder')
@@ -630,7 +594,7 @@ describe('chat-executor', () => {
 
     it('should filter CLAUDECODE env vars from child process', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const originalEnv = process.env
@@ -653,40 +617,6 @@ describe('chat-executor', () => {
   })
 
   describe('AWS profile mode', () => {
-    function createMockProcess() {
-      const handlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-      const stdoutHandlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-      const stderrHandlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-
-      return {
-        pid: 12345,
-        killed: false,
-        kill: jest.fn(),
-        stdout: {
-          on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-            stdoutHandlers[event] = stdoutHandlers[event] || []
-            stdoutHandlers[event].push(cb)
-          }),
-        },
-        stderr: {
-          on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-            stderrHandlers[event] = stderrHandlers[event] || []
-            stderrHandlers[event].push(cb)
-          }),
-        },
-        on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-          handlers[event] = handlers[event] || []
-          handlers[event].push(cb)
-        }),
-        emit(event: string, ...args: unknown[]) {
-          for (const cb of handlers[event] || []) cb(...args)
-        },
-        emitStdout(event: string, ...args: unknown[]) {
-          for (const cb of stdoutHandlers[event] || []) cb(...args)
-        },
-      }
-    }
-
     const projectConfig: ProjectConfigResponse = {
       configHash: 'test-hash',
       project: { projectCode: 'TEST', projectName: 'Test Project' },
@@ -714,7 +644,7 @@ describe('chat-executor', () => {
 
     it('should use profile mode when projectDir and projectConfig.aws.accounts are present', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
@@ -753,7 +683,7 @@ describe('chat-executor', () => {
 
     it('should fall back to legacy mode when no projectConfig', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const { buildSingleAccountAwsEnv } = require('../../src/aws-credential-builder')
@@ -791,7 +721,7 @@ describe('chat-executor', () => {
 
     it('should continue without AWS env when all credential fetches fail in profile mode', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
@@ -817,43 +747,9 @@ describe('chat-executor', () => {
   })
 
   describe('conversation history', () => {
-    function createMockProcess() {
-      const handlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-      const stdoutHandlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-      const stderrHandlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-
-      return {
-        pid: 12345,
-        killed: false,
-        kill: jest.fn(),
-        stdout: {
-          on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-            stdoutHandlers[event] = stdoutHandlers[event] || []
-            stdoutHandlers[event].push(cb)
-          }),
-        },
-        stderr: {
-          on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-            stderrHandlers[event] = stderrHandlers[event] || []
-            stderrHandlers[event].push(cb)
-          }),
-        },
-        on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-          handlers[event] = handlers[event] || []
-          handlers[event].push(cb)
-        }),
-        emit(event: string, ...args: unknown[]) {
-          for (const cb of handlers[event] || []) cb(...args)
-        },
-        emitStdout(event: string, ...args: unknown[]) {
-          for (const cb of stdoutHandlers[event] || []) cb(...args)
-        },
-      }
-    }
-
     it('should include conversation history in message for claude_code mode', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const payload: ChatPayload = {
@@ -884,7 +780,7 @@ describe('chat-executor', () => {
 
     it('should pass original message without history when history is empty', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const payload: ChatPayload = {
@@ -909,7 +805,7 @@ describe('chat-executor', () => {
 
     it('should pass original message when history is not provided', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const resultPromise = executeChatCommand(basePayload, 'cmd-no-history-field', mockClient, undefined, 'claude_code', 'agent-1')
@@ -928,43 +824,9 @@ describe('chat-executor', () => {
   })
 
   describe('project directory auto-add dirs', () => {
-    function createMockProcess() {
-      const handlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-      const stdoutHandlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-      const stderrHandlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-
-      return {
-        pid: 12345,
-        killed: false,
-        kill: jest.fn(),
-        stdout: {
-          on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-            stdoutHandlers[event] = stdoutHandlers[event] || []
-            stdoutHandlers[event].push(cb)
-          }),
-        },
-        stderr: {
-          on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-            stderrHandlers[event] = stderrHandlers[event] || []
-            stderrHandlers[event].push(cb)
-          }),
-        },
-        on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-          handlers[event] = handlers[event] || []
-          handlers[event].push(cb)
-        }),
-        emit(event: string, ...args: unknown[]) {
-          for (const cb of handlers[event] || []) cb(...args)
-        },
-        emitStdout(event: string, ...args: unknown[]) {
-          for (const cb of stdoutHandlers[event] || []) cb(...args)
-        },
-      }
-    }
-
     it('should merge auto-add dirs with server addDirs when projectDir is set', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const serverConfig: AgentServerConfig = {

@@ -2,6 +2,7 @@ import os from 'os'
 
 import { ERR_CLAUDE_CLI_NOT_FOUND } from '../../src/constants'
 import { buildClaudeArgs, buildCleanEnv, runClaudeCode } from '../../src/commands/claude-code-runner'
+import { createMockChildProcess } from '../helpers/mock-factory'
 
 jest.mock('../../src/logger')
 
@@ -121,43 +122,6 @@ describe('claude-code-runner', () => {
   })
 
   describe('runClaudeCode', () => {
-    function createMockProcess() {
-      const handlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-      const stdoutHandlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-      const stderrHandlers: Record<string, ((...args: unknown[]) => void)[]> = {}
-
-      return {
-        pid: 12345,
-        killed: false,
-        kill: jest.fn(),
-        stdout: {
-          on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-            stdoutHandlers[event] = stdoutHandlers[event] || []
-            stdoutHandlers[event].push(cb)
-          }),
-        },
-        stderr: {
-          on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-            stderrHandlers[event] = stderrHandlers[event] || []
-            stderrHandlers[event].push(cb)
-          }),
-        },
-        on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
-          handlers[event] = handlers[event] || []
-          handlers[event].push(cb)
-        }),
-        emit(event: string, ...args: unknown[]) {
-          for (const cb of handlers[event] || []) cb(...args)
-        },
-        emitStdout(event: string, ...args: unknown[]) {
-          for (const cb of stdoutHandlers[event] || []) cb(...args)
-        },
-        emitStderr(event: string, ...args: unknown[]) {
-          for (const cb of stderrHandlers[event] || []) cb(...args)
-        },
-      }
-    }
-
     beforeEach(() => {
       jest.clearAllMocks()
       jest.useFakeTimers()
@@ -169,7 +133,7 @@ describe('claude-code-runner', () => {
 
     it('should resolve with text and metadata on success', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
@@ -189,7 +153,7 @@ describe('claude-code-runner', () => {
 
     it('should send delta chunks for stdout data', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
@@ -207,7 +171,7 @@ describe('claude-code-runner', () => {
 
     it('should reject when CLI exits with non-zero code', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
@@ -221,7 +185,7 @@ describe('claude-code-runner', () => {
 
     it('should include stderr in error message when CLI exits with non-zero code', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
@@ -236,7 +200,7 @@ describe('claude-code-runner', () => {
 
     it('should reject with ENOENT error when claude CLI is not found', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
@@ -252,7 +216,7 @@ describe('claude-code-runner', () => {
 
     it('should reject with original error for non-ENOENT errors', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
@@ -266,7 +230,7 @@ describe('claude-code-runner', () => {
 
     it('should pass awsEnv to spawn environment', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
@@ -286,7 +250,7 @@ describe('claude-code-runner', () => {
 
     it('should detect stderr output in metadata', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
@@ -303,7 +267,7 @@ describe('claude-code-runner', () => {
 
     it('should send SIGTERM on timeout and SIGKILL if still running', async () => {
       const { spawn } = require('child_process')
-      const mockProcess = createMockProcess()
+      const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)

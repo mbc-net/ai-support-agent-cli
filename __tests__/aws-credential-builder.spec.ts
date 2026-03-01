@@ -254,6 +254,77 @@ describe('aws-credential-builder', () => {
       expect(result.errors[0]).toContain('dev')
       expect(result.errors[0]).toContain('管理画面からSSO再認証')
     })
+
+    it('should include response details for non-SSO 422 errors', async () => {
+      const apiError = new axios.AxiosError(
+        'Request failed',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        {
+          status: 422,
+          statusText: 'Unprocessable Entity',
+          data: {
+            statusCode: 422,
+            error: 'INVALID_ACCOUNT',
+            message: 'Account configuration is invalid',
+          },
+          headers: {},
+          config: {} as never,
+        },
+      )
+
+      const client = {
+        getAwsCredentials: jest.fn()
+          .mockRejectedValueOnce(apiError)
+          .mockResolvedValueOnce({
+            accessKeyId: 'AKIA_STG',
+            secretAccessKey: 'secret_stg',
+            region: 'us-east-1',
+          }),
+      } as unknown as ApiClient
+
+      const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+
+      expect(result.env).toBeDefined()
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toContain('dev')
+      expect(result.errors[0]).toContain('[422]')
+      expect(result.errors[0]).toContain('Account configuration is invalid')
+    })
+
+    it('should handle HTTP error with no response body', async () => {
+      const httpError = new axios.AxiosError(
+        'Request failed',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        {
+          status: 500,
+          statusText: 'Internal Server Error',
+          data: undefined,
+          headers: {},
+          config: {} as never,
+        },
+      )
+
+      const client = {
+        getAwsCredentials: jest.fn()
+          .mockRejectedValueOnce(httpError)
+          .mockResolvedValueOnce({
+            accessKeyId: 'AKIA_STG',
+            secretAccessKey: 'secret_stg',
+            region: 'us-east-1',
+          }),
+      } as unknown as ApiClient
+
+      const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+
+      expect(result.env).toBeDefined()
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toContain('dev')
+      expect(result.errors[0]).toContain('HTTP 500')
+    })
   })
 
   describe('buildSingleAccountAwsEnv', () => {
@@ -350,6 +421,64 @@ describe('aws-credential-builder', () => {
       expect(result.errors[0]).toContain('SSO認証の有効期限が切れています')
       expect(result.errors[0]).toContain('prod-account')
       expect(result.errors[0]).toContain('管理画面からSSO再認証')
+    })
+
+    it('should include response details for non-SSO API errors', async () => {
+      const apiError = new axios.AxiosError(
+        'Request failed',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        {
+          status: 422,
+          statusText: 'Unprocessable Entity',
+          data: {
+            statusCode: 422,
+            message: 'Access key is expired',
+          },
+          headers: {},
+          config: {} as never,
+        },
+      )
+
+      const client = {
+        getAwsCredentials: jest.fn().mockRejectedValue(apiError),
+      } as unknown as ApiClient
+
+      const result = await buildSingleAccountAwsEnv(client, 'my-account')
+
+      expect(result.env).toBeUndefined()
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toContain('my-account')
+      expect(result.errors[0]).toContain('[422]')
+      expect(result.errors[0]).toContain('Access key is expired')
+    })
+
+    it('should handle HTTP error with no response body', async () => {
+      const httpError = new axios.AxiosError(
+        'Request failed',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        {
+          status: 503,
+          statusText: 'Service Unavailable',
+          data: undefined,
+          headers: {},
+          config: {} as never,
+        },
+      )
+
+      const client = {
+        getAwsCredentials: jest.fn().mockRejectedValue(httpError),
+      } as unknown as ApiClient
+
+      const result = await buildSingleAccountAwsEnv(client, 'my-account')
+
+      expect(result.env).toBeUndefined()
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toContain('my-account')
+      expect(result.errors[0]).toContain('HTTP 503')
     })
   })
 })

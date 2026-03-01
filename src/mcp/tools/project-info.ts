@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 import { ApiClient } from '../../api-client'
+import { extractErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
 
 /** get_project_info ツールを MCP サーバーに登録する */
 export function registerProjectInfoTool(
@@ -47,18 +48,9 @@ export function registerProjectInfoTool(
 
         info.projectCode = projectCode
 
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify(info, null, 2),
-          }],
-        }
+        return mcpTextResponse(JSON.stringify(info, null, 2))
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${message}` }],
-          isError: true,
-        }
+        return mcpErrorResponse(extractErrorMessage(error))
       }
     },
   )

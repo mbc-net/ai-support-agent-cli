@@ -1,4 +1,4 @@
-import axios, { type AxiosInstance } from 'axios'
+import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios'
 
 import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT } from './constants'
 import { logger } from './logger'
@@ -45,21 +45,35 @@ export class ApiClient {
     })
   }
 
+  private async get<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
+    return this.retry.withRetry(async () => {
+      const { data } = await this.client.get<T>(url, config)
+      return data
+    })
+  }
+
+  private async post<T>(url: string, body?: unknown, config?: AxiosRequestConfig): Promise<T> {
+    return this.retry.withRetry(async () => {
+      const { data } = await this.client.post<T>(url, body, config)
+      return data
+    })
+  }
+
+  private async postVoid(url: string, body?: unknown, config?: AxiosRequestConfig): Promise<void> {
+    await this.retry.withRetry(async () => {
+      await this.client.post(url, body, config)
+    })
+  }
+
   async register(request: RegisterRequest): Promise<RegisterResponse> {
     logger.debug(`Registering agent: ${request.agentId}`)
-    return this.retry.withRetry(async () => {
-      const { ipAddress, availableChatModes, activeChatMode, ...rest } = request
-      const { data } = await this.client.post<RegisterResponse>(
-        API_ENDPOINTS.REGISTER,
-        {
-          ...rest,
-          version: AGENT_VERSION,
-          ...(ipAddress && { ipAddress }),
-          ...(availableChatModes !== undefined && { availableChatModes }),
-          ...(activeChatMode !== undefined && { activeChatMode }),
-        },
-      )
-      return data
+    const { ipAddress, availableChatModes, activeChatMode, ...rest } = request
+    return this.post<RegisterResponse>(API_ENDPOINTS.REGISTER, {
+      ...rest,
+      version: AGENT_VERSION,
+      ...(ipAddress && { ipAddress }),
+      ...(availableChatModes !== undefined && { availableChatModes }),
+      ...(activeChatMode !== undefined && { activeChatMode }),
     })
   }
 
@@ -72,39 +86,25 @@ export class ApiClient {
     ipAddress?: string,
   ): Promise<HeartbeatResponse | void> {
     logger.debug('Sending heartbeat')
-    return this.retry.withRetry(async () => {
-      const { data } = await this.client.post<HeartbeatResponse>(API_ENDPOINTS.HEARTBEAT, {
-        agentId,
-        timestamp: Date.now(),
-        version: AGENT_VERSION,
-        systemInfo,
-        ...(updateError && { updateError }),
-        ...(availableChatModes !== undefined && { availableChatModes }),
-        ...(activeChatMode !== undefined && { activeChatMode }),
-        ...(ipAddress && { ipAddress }),
-      })
-      return data
+    return this.post<HeartbeatResponse>(API_ENDPOINTS.HEARTBEAT, {
+      agentId,
+      timestamp: Date.now(),
+      version: AGENT_VERSION,
+      systemInfo,
+      ...(updateError && { updateError }),
+      ...(availableChatModes !== undefined && { availableChatModes }),
+      ...(activeChatMode !== undefined && { activeChatMode }),
+      ...(ipAddress && { ipAddress }),
     })
   }
 
   async getVersionInfo(channel: ReleaseChannel = 'latest'): Promise<VersionInfo> {
-    return this.retry.withRetry(async () => {
-      const { data } = await this.client.get<VersionInfo>(
-        `${API_ENDPOINTS.VERSION}?channel=${channel}`,
-      )
-      return data
-    })
+    return this.get<VersionInfo>(`${API_ENDPOINTS.VERSION}?channel=${channel}`)
   }
 
   async getPendingCommands(agentId: string): Promise<PendingCommand[]> {
     logger.debug('Polling for pending commands')
-    return this.retry.withRetry(async () => {
-      const { data } = await this.client.get<PendingCommand[]>(
-        API_ENDPOINTS.COMMANDS_PENDING,
-        { params: { agentId } },
-      )
-      return data
-    })
+    return this.get<PendingCommand[]>(API_ENDPOINTS.COMMANDS_PENDING, { params: { agentId } })
   }
 
   private validateCommandId(commandId: string): void {
@@ -116,13 +116,7 @@ export class ApiClient {
   async getCommand(commandId: string, agentId: string): Promise<AgentCommand> {
     this.validateCommandId(commandId)
     logger.debug(`Fetching command: ${commandId}`)
-    return this.retry.withRetry(async () => {
-      const { data } = await this.client.get<AgentCommand>(
-        API_ENDPOINTS.COMMAND(commandId),
-        { params: { agentId } },
-      )
-      return data
-    })
+    return this.get<AgentCommand>(API_ENDPOINTS.COMMAND(commandId), { params: { agentId } })
   }
 
   async submitResult(
@@ -132,66 +126,38 @@ export class ApiClient {
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting result for command: ${commandId}`)
-    await this.retry.withRetry(async () => {
-      await this.client.post(API_ENDPOINTS.COMMAND_RESULT(commandId), result, {
-        params: { agentId },
-      })
-    })
+    await this.postVoid(API_ENDPOINTS.COMMAND_RESULT(commandId), result, { params: { agentId } })
   }
 
   async reportConnectionStatus(
     agentId: string,
     status: 'connected' | 'disconnected',
   ): Promise<void> {
-    await this.retry.withRetry(async () => {
-      await this.client.post(API_ENDPOINTS.CONNECTION_STATUS, {
-        agentId,
-        status,
-        timestamp: Date.now(),
-      })
+    await this.postVoid(API_ENDPOINTS.CONNECTION_STATUS, {
+      agentId,
+      status,
+      timestamp: Date.now(),
     })
   }
 
   async getConfig(): Promise<AgentServerConfig> {
     logger.debug('Fetching agent config from server')
-    return this.retry.withRetry(async () => {
-      const { data } = await this.client.get<AgentServerConfig>(
-        API_ENDPOINTS.CONFIG,
-      )
-      return data
-    })
+    return this.get<AgentServerConfig>(API_ENDPOINTS.CONFIG)
   }
 
   async getProjectConfig(): Promise<ProjectConfigResponse> {
     logger.debug('Fetching project config from server')
-    return this.retry.withRetry(async () => {
-      const { data } = await this.client.get<ProjectConfigResponse>(
-        API_ENDPOINTS.PROJECT_CONFIG,
-      )
-      return data
-    })
+    return this.get<ProjectConfigResponse>(API_ENDPOINTS.PROJECT_CONFIG)
   }
 
   async getAwsCredentials(awsAccountId: string): Promise<AwsCredentials> {
     logger.debug(`Fetching AWS credentials for account: ${awsAccountId}`)
-    return this.retry.withRetry(async () => {
-      const { data } = await this.client.get<AwsCredentials>(
-        API_ENDPOINTS.AWS_CREDENTIALS,
-        { params: { awsAccountId } },
-      )
-      return data
-    })
+    return this.get<AwsCredentials>(API_ENDPOINTS.AWS_CREDENTIALS, { params: { awsAccountId } })
   }
 
   async getDbCredentials(name: string): Promise<DbCredentials> {
     logger.debug(`Fetching DB credentials for: ${name}`)
-    return this.retry.withRetry(async () => {
-      const { data } = await this.client.get<DbCredentials>(
-        API_ENDPOINTS.DB_CREDENTIALS,
-        { params: { name } },
-      )
-      return data
-    })
+    return this.get<DbCredentials>(API_ENDPOINTS.DB_CREDENTIALS, { params: { name } })
   }
 
   async submitChatChunk(
@@ -201,10 +167,6 @@ export class ApiClient {
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting chat chunk ${chunk.index} (${chunk.type}) for command: ${commandId}`)
-    await this.retry.withRetry(async () => {
-      await this.client.post(API_ENDPOINTS.COMMAND_CHUNKS(commandId), chunk, {
-        params: { agentId },
-      })
-    })
+    await this.postVoid(API_ENDPOINTS.COMMAND_CHUNKS(commandId), chunk, { params: { agentId } })
   }
 }

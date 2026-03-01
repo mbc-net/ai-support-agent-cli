@@ -5,6 +5,7 @@ import * as path from 'path'
 import { executeShellCommand } from '../../src/commands/shell-executor'
 import { ERR_NO_COMMAND_SPECIFIED, MAX_OUTPUT_SIZE } from '../../src/constants'
 import type { CommandResult } from '../../src/types'
+import { createFakeChildProcess, waitForSpawn } from '../helpers/mock-factory'
 
 function expectFailure(result: CommandResult): asserts result is { success: false; error: string; data?: unknown } {
   expect(result.success).toBe(false)
@@ -83,40 +84,11 @@ describe('shell-executor', () => {
   describe('spawn error handling', () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child_process = require('child_process') as typeof import('child_process')
-    const EventEmitter = require('events').EventEmitter as typeof import('events').EventEmitter
 
     type ChildProcess = import('child_process').ChildProcess
 
-    interface FakeProcess extends InstanceType<typeof EventEmitter> {
-      stdout: InstanceType<typeof EventEmitter>
-      stderr: InstanceType<typeof EventEmitter>
-      kill: jest.Mock
-    }
-
-    function createFakeProc(): FakeProcess {
-      const proc = Object.assign(new EventEmitter(), {
-        stdout: new EventEmitter(),
-        stderr: new EventEmitter(),
-        kill: jest.fn(),
-      })
-      return proc as FakeProcess
-    }
-
-    function waitForSpawn(spy: jest.SpiedFunction<typeof child_process.spawn>): Promise<void> {
-      return new Promise((resolve) => {
-        const check = (): void => {
-          if (spy.mock.calls.length > 0) {
-            resolve()
-          } else {
-            setTimeout(check, 5)
-          }
-        }
-        check()
-      })
-    }
-
     it('should return "Command not found" for ENOENT spawn error', async () => {
-      const fakeProc = createFakeProc()
+      const fakeProc = createFakeChildProcess()
       const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
 
       const resultPromise = executeShellCommand({ command: 'echo test' })
@@ -134,7 +106,7 @@ describe('shell-executor', () => {
     })
 
     it('should return "Permission denied" for EACCES spawn error', async () => {
-      const fakeProc = createFakeProc()
+      const fakeProc = createFakeChildProcess()
       const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
 
       const resultPromise = executeShellCommand({ command: 'echo test' })
@@ -152,7 +124,7 @@ describe('shell-executor', () => {
     })
 
     it('should not resolve twice when error fires after close', async () => {
-      const fakeProc = createFakeProc()
+      const fakeProc = createFakeChildProcess()
       const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
 
       const resultPromise = executeShellCommand({ command: 'echo test' })
@@ -169,7 +141,7 @@ describe('shell-executor', () => {
     })
 
     it('should truncate output exceeding MAX_OUTPUT_SIZE', async () => {
-      const fakeProc = createFakeProc()
+      const fakeProc = createFakeChildProcess()
       const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
 
       const resultPromise = executeShellCommand({ command: 'echo test' })
@@ -190,7 +162,7 @@ describe('shell-executor', () => {
     })
 
     it('should include stderr in error on non-zero exit', async () => {
-      const fakeProc = createFakeProc()
+      const fakeProc = createFakeChildProcess()
       const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
 
       const resultPromise = executeShellCommand({ command: 'echo test' })
@@ -207,7 +179,7 @@ describe('shell-executor', () => {
     })
 
     it('should show exit code when no stderr on non-zero exit', async () => {
-      const fakeProc = createFakeProc()
+      const fakeProc = createFakeChildProcess()
       const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
 
       const resultPromise = executeShellCommand({ command: 'echo test' })

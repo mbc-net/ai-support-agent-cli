@@ -3,6 +3,7 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import type { DbCredentials } from '../../types'
+import { extractErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
 
 /** SQL文が SELECT のみかどうか検証する */
 export function validateSelectOnly(sql: string): { valid: boolean; error?: string } {
@@ -89,10 +90,7 @@ export function registerDbQueryTool(server: McpServer, apiClient: ApiClient): vo
       // Validate SQL
       const validation = validateSelectOnly(sql)
       if (!validation.valid) {
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${validation.error}` }],
-          isError: true,
-        }
+        return mcpErrorResponse(validation.error!)
       }
 
       try {
@@ -103,16 +101,9 @@ export function registerDbQueryTool(server: McpServer, apiClient: ApiClient): vo
         const rows = await executeQuery(credentials, sql)
 
         // Format result
-        const resultText = JSON.stringify(rows, null, 2)
-        return {
-          content: [{ type: 'text' as const, text: resultText }],
-        }
+        return mcpTextResponse(JSON.stringify(rows, null, 2))
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${message}` }],
-          isError: true,
-        }
+        return mcpErrorResponse(extractErrorMessage(error))
       }
     },
   )

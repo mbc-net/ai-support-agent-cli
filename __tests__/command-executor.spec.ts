@@ -5,6 +5,7 @@ import * as path from 'path'
 import { executeCommand } from '../src/commands'
 import { ERR_NO_COMMAND_SPECIFIED, ERR_NO_CONTENT_SPECIFIED, ERR_NO_FILE_PATH_SPECIFIED } from '../src/constants'
 import type { CommandResult } from '../src/types'
+import { createFakeChildProcess, waitForSpawn } from './helpers/mock-factory'
 
 jest.mock('../src/logger')
 
@@ -402,40 +403,11 @@ describe('command-executor', () => {
   describe('spawn error handling', () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child_process = require('child_process') as typeof import('child_process')
-    const EventEmitter = require('events').EventEmitter as typeof import('events').EventEmitter
 
     type ChildProcess = import('child_process').ChildProcess
 
-    interface FakeProcess extends InstanceType<typeof EventEmitter> {
-      stdout: InstanceType<typeof EventEmitter>
-      stderr: InstanceType<typeof EventEmitter>
-      kill: jest.Mock
-    }
-
-    function createFakeProc(): FakeProcess {
-      const proc = Object.assign(new EventEmitter(), {
-        stdout: new EventEmitter(),
-        stderr: new EventEmitter(),
-        kill: jest.fn(),
-      })
-      return proc as FakeProcess
-    }
-
-    function waitForSpawn(spy: jest.SpiedFunction<typeof child_process.spawn>): Promise<void> {
-      return new Promise((resolve) => {
-        const check = (): void => {
-          if (spy.mock.calls.length > 0) {
-            resolve()
-          } else {
-            setTimeout(check, 5)
-          }
-        }
-        check()
-      })
-    }
-
     it('should return "Command not found" for ENOENT spawn error', async () => {
-      const fakeProc = createFakeProc()
+      const fakeProc = createFakeChildProcess()
       const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
 
       const resultPromise = executeCommand('execute_command', { command: 'echo test' })
@@ -455,7 +427,7 @@ describe('command-executor', () => {
     })
 
     it('should return "Permission denied" for EACCES spawn error', async () => {
-      const fakeProc = createFakeProc()
+      const fakeProc = createFakeChildProcess()
       const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
 
       const resultPromise = executeCommand('execute_command', { command: 'echo test' })
@@ -474,7 +446,7 @@ describe('command-executor', () => {
     })
 
     it('should return raw error message for unknown error codes', async () => {
-      const fakeProc = createFakeProc()
+      const fakeProc = createFakeChildProcess()
       const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
 
       const resultPromise = executeCommand('execute_command', { command: 'echo test' })

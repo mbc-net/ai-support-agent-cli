@@ -14,11 +14,23 @@ export interface AwsCredentialResult {
  * HTTPエラーレスポンスからAWS認証エラーメッセージを抽出する
  */
 function extractAwsCredentialError(error: unknown, accountName: string): string {
-  if (axios.isAxiosError(error) && error.response?.data) {
-    const data = error.response.data as Record<string, unknown>
-    if (data.error === 'SSO_AUTH_REQUIRED') {
-      return `AWS SSO認証の有効期限が切れています（${accountName}）。管理画面からSSO再認証を実行してください。`
+  if (axios.isAxiosError(error) && error.response) {
+    const status = error.response.status
+    const data = error.response.data as Record<string, unknown> | undefined
+
+    if (data) {
+      // SSO認証切れの場合は専用メッセージ
+      if (data.error === 'SSO_AUTH_REQUIRED') {
+        return `AWS SSO認証の有効期限が切れています（${accountName}）。管理画面からSSO再認証を実行してください。`
+      }
+
+      // その他のAPIエラー（422含む）はレスポンス詳細を含める
+      const serverMessage = data.message ?? data.error ?? 'Unknown error'
+      logger.debug(`[aws-cred] API error response (status=${status}): ${JSON.stringify(data)}`)
+      return `AWS認証情報の取得に失敗しました（${accountName}）: [${status}] ${serverMessage}`
     }
+
+    return `AWS認証情報の取得に失敗しました（${accountName}）: HTTP ${status}`
   }
   return `AWS認証情報の取得に失敗しました（${accountName}）: ${getErrorMessage(error)}`
 }

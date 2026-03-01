@@ -3,6 +3,7 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import { executeQuery } from './db-query'
+import { extractErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
 
 const MYSQL_SCHEMA_QUERY = `
 SELECT
@@ -60,16 +61,9 @@ export function registerDbSchemasTool(server: McpServer, apiClient: ApiClient): 
 
         const rows = await executeQuery(credentials, query)
 
-        const resultText = JSON.stringify(rows, null, 2)
-        return {
-          content: [{ type: 'text' as const, text: resultText }],
-        }
+        return mcpTextResponse(JSON.stringify(rows, null, 2))
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${message}` }],
-          isError: true,
-        }
+        return mcpErrorResponse(extractErrorMessage(error))
       }
     },
   )

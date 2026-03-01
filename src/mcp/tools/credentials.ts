@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
+import { extractErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
 
 /** get_credentials ツールを MCP サーバーに登録する */
 export function registerCredentialsTool(server: McpServer, apiClient: ApiClient): void {
@@ -16,39 +17,22 @@ export function registerCredentialsTool(server: McpServer, apiClient: ApiClient)
       try {
         if (type === 'aws') {
           const credentials = await apiClient.getAwsCredentials(name)
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                accessKeyId: credentials.accessKeyId,
-                secretAccessKey: credentials.secretAccessKey,
-                sessionToken: credentials.sessionToken,
-                region: credentials.region,
-              }, null, 2),
-            }],
-          }
+          return mcpTextResponse(JSON.stringify({
+            accessKeyId: credentials.accessKeyId,
+            secretAccessKey: credentials.secretAccessKey,
+            sessionToken: credentials.sessionToken,
+            region: credentials.region,
+          }, null, 2))
         }
 
         if (type === 'db') {
           const credentials = await apiClient.getDbCredentials(name)
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify(credentials, null, 2),
-            }],
-          }
+          return mcpTextResponse(JSON.stringify(credentials, null, 2))
         }
 
-        return {
-          content: [{ type: 'text' as const, text: `Error: Unknown credential type: ${type}` }],
-          isError: true,
-        }
+        return mcpErrorResponse(`Unknown credential type: ${type}`)
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        return {
-          content: [{ type: 'text' as const, text: `Error: ${message}` }],
-          isError: true,
-        }
+        return mcpErrorResponse(extractErrorMessage(error))
       }
     },
   )

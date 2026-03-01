@@ -2,18 +2,12 @@ import axios from 'axios'
 
 import { ApiClient } from '../src/api-client'
 import { logger } from '../src/logger'
+import { createAxiosError } from './helpers/mock-factory'
 
 jest.mock('axios')
 jest.mock('../src/logger')
 const mockedAxios = axios as jest.Mocked<typeof axios>
 const mockedLogger = logger as jest.Mocked<typeof logger>
-
-function createAxiosError(message: string, status: number): Error & { isAxiosError: boolean; response: { status: number } } {
-  const error = new Error(message) as Error & { isAxiosError: boolean; response: { status: number } }
-  error.isAxiosError = true
-  error.response = { status }
-  return error
-}
 
 describe('ApiClient', () => {
   let client: ApiClient
@@ -49,6 +43,7 @@ describe('ApiClient', () => {
       expect(mockInstance.post).toHaveBeenCalledWith(
         '/api/agent/register',
         expect.objectContaining({ agentId: 'test-id', hostname: 'hostname' }),
+        undefined,
       )
     })
 
@@ -107,6 +102,7 @@ describe('ApiClient', () => {
       expect(mockInstance.post).toHaveBeenCalledWith(
         '/api/agent/heartbeat',
         expect.objectContaining({ agentId: 'test-id' }),
+        undefined,
       )
     })
   })
@@ -125,7 +121,7 @@ describe('ApiClient', () => {
       const result = await client.getVersionInfo()
       expect(result.latestVersion).toBe('1.2.0')
       expect(result.channel).toBe('latest')
-      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version?channel=latest')
+      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version?channel=latest', undefined)
     })
 
     it('should pass channel parameter', async () => {
@@ -140,7 +136,7 @@ describe('ApiClient', () => {
 
       const result = await client.getVersionInfo('beta')
       expect(result.latestVersion).toBe('1.3.0-beta.1')
-      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version?channel=beta')
+      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version?channel=beta', undefined)
     })
   })
 
@@ -162,6 +158,7 @@ describe('ApiClient', () => {
           agentId: 'test-id',
           updateError: 'EACCES: permission denied',
         }),
+        undefined,
       )
     })
 
@@ -379,6 +376,7 @@ describe('ApiClient', () => {
           status: 'connected',
           timestamp: expect.any(Number),
         }),
+        undefined,
       )
     })
 
@@ -392,6 +390,7 @@ describe('ApiClient', () => {
         expect.objectContaining({
           status: 'disconnected',
         }),
+        undefined,
       )
     })
   })
@@ -410,7 +409,7 @@ describe('ApiClient', () => {
       const result = await client.getConfig()
 
       expect(result).toEqual(config)
-      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/config')
+      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/config', undefined)
     })
   })
 
