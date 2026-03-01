@@ -2,11 +2,14 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { getConfigDir } from './config-manager'
 import { logger } from './logger'
 import { t } from './i18n'
 import type { ProjectRegistration } from './types'
 
-const DEFAULT_PROJECT_DIR_TEMPLATE = '~/.ai-support-agent/projects/{projectCode}'
+function getDefaultProjectDirTemplate(): string {
+  return path.join(getConfigDir(), 'projects', '{projectCode}')
+}
 
 const PROJECT_SUBDIRS = ['repos', 'docs', 'artifacts', 'uploads'] as const
 const METADATA_DIR = '.ai-support-agent'
@@ -33,7 +36,7 @@ export function resolveProjectDir(
   if (project.projectDir) {
     return expandPath(project.projectDir, project.projectCode)
   }
-  const template = defaultProjectDir ?? DEFAULT_PROJECT_DIR_TEMPLATE
+  const template = defaultProjectDir ?? getDefaultProjectDirTemplate()
   return expandPath(template, project.projectCode)
 }
 

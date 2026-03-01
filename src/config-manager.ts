@@ -8,7 +8,7 @@ import { t } from './i18n'
 import { logger } from './logger'
 import type { AgentConfig, LegacyAgentConfig, ProjectRegistration } from './types'
 
-function getConfigDir(): string {
+export function getConfigDir(): string {
   if (path.isAbsolute(CONFIG_DIR)) {
     return CONFIG_DIR
   }

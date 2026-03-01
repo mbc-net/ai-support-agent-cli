@@ -14,6 +14,9 @@ jest.mock('../src/logger')
 jest.mock('../src/i18n', () => ({
   t: jest.fn((key: string, params?: Record<string, string>) => `${key}:${JSON.stringify(params)}`),
 }))
+jest.mock('../src/config-manager', () => ({
+  getConfigDir: jest.fn(() => '/home/testuser/.ai-support-agent'),
+}))
 
 import {
   expandPath,
@@ -25,15 +28,18 @@ import {
   getAwsDir,
   getMetadataDir,
 } from '../src/project-dir'
+import { getConfigDir } from '../src/config-manager'
 import { logger } from '../src/logger'
 
 const mockedFs = fs as jest.Mocked<typeof fs>
 const mockedHomedir = os.homedir as jest.MockedFunction<typeof os.homedir>
+const mockedGetConfigDir = getConfigDir as jest.MockedFunction<typeof getConfigDir>
 
 describe('project-dir', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockedHomedir.mockReturnValue('/home/testuser')
+    mockedGetConfigDir.mockReturnValue('/home/testuser/.ai-support-agent')
   })
 
   describe('expandPath', () => {
@@ -104,7 +110,23 @@ describe('project-dir', () => {
     it('should use default template when neither projectDir nor defaultProjectDir is set', () => {
       const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
       expect(resolveProjectDir(project)).toBe(
-        '/home/testuser/.ai-support-agent/projects/MBC_01',
+        path.join('/home/testuser/.ai-support-agent', 'projects', 'MBC_01'),
+      )
+    })
+
+    it('should use custom CONFIG_DIR for default template', () => {
+      mockedGetConfigDir.mockReturnValue('/custom/config/dir')
+      const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
+      expect(resolveProjectDir(project)).toBe(
+        path.join('/custom/config/dir', 'projects', 'MBC_01'),
+      )
+    })
+
+    it('should use absolute CONFIG_DIR path for default template', () => {
+      mockedGetConfigDir.mockReturnValue('/tmp/beta')
+      const project = { projectCode: 'PROJ_A', token: 'tok', apiUrl: 'http://api' }
+      expect(resolveProjectDir(project)).toBe(
+        path.join('/tmp/beta', 'projects', 'PROJ_A'),
       )
     })
 
@@ -245,7 +267,7 @@ describe('project-dir', () => {
       const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
       const result = initProjectDir(project)
 
-      expect(result).toBe('/home/testuser/.ai-support-agent/projects/MBC_01')
+      expect(result).toBe(path.join('/home/testuser/.ai-support-agent', 'projects', 'MBC_01'))
       // Verify directories were created (mkdirSync was called)
       expect(mockedFs.mkdirSync).toHaveBeenCalled()
     })
