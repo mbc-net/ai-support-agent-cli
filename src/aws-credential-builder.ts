@@ -22,8 +22,8 @@ export async function buildAwsProfileCredentials(
 
   for (const account of accounts) {
     try {
-      logger.info(`[chat] Fetching AWS credentials for profile: ${account.name} (${account.accountId})`)
-      const creds = await client.getAwsCredentials(account.accountId)
+      logger.info(`[chat] Fetching AWS credentials for profile: ${account.name} (${account.id})`)
+      const creds = await client.getAwsCredentials(account.id)
       credentialMap.set(account.name, creds)
     } catch (error) {
       logger.warn(`[chat] Failed to get AWS credentials for ${account.name}: ${getErrorMessage(error)}`)

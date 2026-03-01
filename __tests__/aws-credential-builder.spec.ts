@@ -97,8 +97,8 @@ describe('aws-credential-builder', () => {
       const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
 
       expect(client.getAwsCredentials).toHaveBeenCalledTimes(2)
-      expect(client.getAwsCredentials).toHaveBeenCalledWith('123456789012')
-      expect(client.getAwsCredentials).toHaveBeenCalledWith('987654321098')
+      expect(client.getAwsCredentials).toHaveBeenCalledWith('1')
+      expect(client.getAwsCredentials).toHaveBeenCalledWith('2')
 
       expect(writeAwsCredentials).toHaveBeenCalledWith(
         '/tmp/project',
