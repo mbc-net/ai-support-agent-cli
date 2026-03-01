@@ -104,5 +104,13 @@
   "projectDir.noProject": "Project \"{{projectCode}}\" is not registered.",
   "projectDir.initialized": "Project directory initialized: {{projectDir}} ({{projectCode}})",
   "projectDir.usageHint": "Usage: set-project-dir --project <code> --path <path> OR --default <template>",
-  "projectDir.cleaned": "Cleaned up metadata directory: {{metadataDir}}"
+  "projectDir.cleaned": "Cleaned up metadata directory: {{metadataDir}}",
+
+  "cmd.start.docker": "Run inside a Docker container",
+  "docker.notAvailable": "Docker is not available. Make sure Docker Desktop is running.",
+  "docker.building": "Building Docker image...",
+  "docker.buildComplete": "Docker image build complete",
+  "docker.imageFound": "Using existing Docker image ({{version}})",
+  "docker.starting": "Starting Docker container...",
+  "docker.runFailed": "Failed to run Docker container: {{message}}"
 }
