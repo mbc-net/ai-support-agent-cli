@@ -16,11 +16,12 @@ export interface ClaudeCodeResult {
   }
 }
 
-/** CLAUDECODE / CLAUDE_CODE_* 環境変数を除外した env を構築 */
+/** CLAUDECODE / CLAUDE_CODE_* 環境変数を除外した env を構築
+ *  ただし CLAUDE_CODE_OAUTH_TOKEN は認証に必要なため保持する */
 export function buildCleanEnv(): Record<string, string> {
   const cleanEnv: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {
-    if (key === 'CLAUDECODE' || key.startsWith('CLAUDE_CODE_')) continue
+    if (key === 'CLAUDECODE' || (key.startsWith('CLAUDE_CODE_') && key !== 'CLAUDE_CODE_OAUTH_TOKEN')) continue
     if (value !== undefined) cleanEnv[key] = value
   }
   return cleanEnv
