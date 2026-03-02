@@ -108,6 +108,16 @@
   "projectDir.usageHint": "使い方: set-project-dir --project <code> --path <path> または --default <template>",
   "projectDir.cleaned": "メタデータディレクトリを削除しました: {{metadataDir}}",
 
+  "cmd.setAutoUpdate": "自動更新を設定",
+  "cmd.setAutoUpdate.enable": "自動更新を有効化",
+  "cmd.setAutoUpdate.disable": "自動更新を無効化",
+  "cmd.setAutoUpdate.channel": "更新チャネルを設定（latest, beta, alpha）",
+  "autoUpdate.usageHint": "使い方: set-auto-update --enable | --disable | --channel <channel>",
+  "autoUpdate.conflictFlags": "--enable と --disable は同時に使用できません。",
+  "autoUpdate.disabled": "自動更新を無効にしました。",
+  "autoUpdate.enabled": "自動更新を有効にしました（チャネル: {{channel}}）。",
+  "autoUpdate.channelSet": "更新チャネルを \"{{channel}}\" に設定しました。",
+
   "cmd.start.docker": "Dockerコンテナ内で実行",
   "cmd.dockerLogin": "Dockerコンテナ内でClaude Codeにログイン",
   "docker.notAvailable": "Dockerが利用できません。Docker Desktopが起動していることを確認してください。",
