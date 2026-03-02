@@ -245,6 +245,7 @@ export interface DbCredentials {
   database: string
   user: string
   password: string
+  ssl?: boolean
   writePermissions?: { insert: boolean; update: boolean; delete: boolean }
 }
 

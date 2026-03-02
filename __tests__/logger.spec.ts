@@ -1,4 +1,4 @@
-import { logger } from '../src/logger'
+import { logger, maskSecrets } from '../src/logger'
 
 describe('logger', () => {
   let logSpy: jest.Spied<typeof console.log>
@@ -77,6 +77,92 @@ describe('logger', () => {
       logger.setVerbose(false)
       logger.debug('hidden')
       expect(logSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('secret masking', () => {
+    it('should mask log messages containing secrets', () => {
+      logger.info('password: my-secret-pass')
+      expect(logSpy).toHaveBeenCalledTimes(1)
+      const output = logSpy.mock.calls[0][0] as string
+      expect(output).not.toContain('my-secret-pass')
+      expect(output).toContain('****')
+    })
+
+    it('should mask Bearer tokens in log output', () => {
+      logger.info('Header: Bearer eyJhbGciOiJIUzI1NiJ9.token')
+      expect(logSpy).toHaveBeenCalledTimes(1)
+      const output = logSpy.mock.calls[0][0] as string
+      expect(output).not.toContain('eyJhbGciOiJIUzI1NiJ9.token')
+      expect(output).toContain('Bearer ****')
+    })
+
+    it('should mask AWS access key IDs in log output', () => {
+      logger.info('Found key: AKIAIOSFODNN7EXAMPLE')
+      expect(logSpy).toHaveBeenCalledTimes(1)
+      const output = logSpy.mock.calls[0][0] as string
+      expect(output).not.toContain('AKIAIOSFODNN7EXAMPLE')
+      expect(output).toContain('AKIA****')
+    })
+  })
+
+  describe('maskSecrets', () => {
+    it('should mask password values', () => {
+      expect(maskSecrets('password: my-secret')).toBe('password: ****')
+      expect(maskSecrets('password=my-secret')).toBe('password=****')
+      expect(maskSecrets('password: "my-secret"')).toBe('password: "****"')
+    })
+
+    it('should mask token values', () => {
+      expect(maskSecrets('token: abc123')).toBe('token: ****')
+      expect(maskSecrets('token=abc123')).toBe('token=****')
+    })
+
+    it('should mask secret values', () => {
+      expect(maskSecrets('secret: supersecret')).toBe('secret: ****')
+    })
+
+    it('should mask api_key values', () => {
+      expect(maskSecrets('api_key: da2-abcdef')).toBe('api_key: ****')
+      expect(maskSecrets('apikey=some-key')).toBe('apikey=****')
+    })
+
+    it('should mask access_key values', () => {
+      expect(maskSecrets('access_key: AKIAIOSFODNN7EXAMPLE')).toBe('access_key: ****')
+    })
+
+    it('should mask secret_key values', () => {
+      expect(maskSecrets('secret_key: wJalrXUtnFEMI/K7MDENG')).toBe('secret_key: ****')
+    })
+
+    it('should mask session_token values', () => {
+      expect(maskSecrets('session_token: FwoGZX...')).toBe('session_token: ****')
+    })
+
+    it('should mask Bearer tokens', () => {
+      expect(maskSecrets('Bearer eyJhbGciOiJIUzI1NiJ9')).toBe('Bearer ****')
+    })
+
+    it('should mask AWS access key IDs', () => {
+      expect(maskSecrets('key is AKIAIOSFODNN7EXAMPLE')).toBe('key is AKIA****')
+    })
+
+    it('should not modify messages without secrets', () => {
+      const message = 'This is a normal log message'
+      expect(maskSecrets(message)).toBe(message)
+    })
+
+    it('should handle multiple secrets in one message', () => {
+      const result = maskSecrets('password: abc token: def')
+      expect(result).not.toContain('abc')
+      expect(result).not.toContain('def')
+      expect(result).toContain('****')
+    })
+
+    it('should be case insensitive for key names', () => {
+      expect(maskSecrets('PASSWORD: secret')).toBe('PASSWORD: ****')
+      expect(maskSecrets('Token: secret')).toBe('Token: ****')
+      expect(maskSecrets('API_KEY: secret')).toBe('API_KEY: ****')
     })
   })
 })

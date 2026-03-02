@@ -4,7 +4,16 @@ import { z } from 'zod'
 import { ApiClient } from '../../api-client'
 import { extractErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
 
-/** get_credentials ツールを MCP サーバーに登録する */
+/**
+ * get_credentials ツールを MCP サーバーに登録する
+ *
+ * セキュリティ設計:
+ * - 認証情報はサーバーサイドで管理され、APIを通じてオンデマンドで取得する
+ * - クライアント側にはシークレットを永続化しない（メモリ内のみ）
+ * - API呼び出しにはBearerトークン認証が必要
+ * - AWS認証情報は一時的なSTS資格情報（有効期限あり）
+ * - DB認証情報はサーバー管理のSecureStringから取得
+ */
 export function registerCredentialsTool(server: McpServer, apiClient: ApiClient): void {
   server.tool(
     'get_credentials',
