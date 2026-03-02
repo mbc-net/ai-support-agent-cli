@@ -6,6 +6,7 @@ import { getProjectList, loadConfig, saveConfig } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
 import { ProjectAgent } from './project-agent'
+import { captureException, flushSentry, initSentry } from './sentry'
 import { getSystemInfo } from './system-info'
 import type { AgentChatMode, AutoUpdateConfig, ProjectRegistration, ReleaseChannel } from './types'
 import { detectChannelFromVersion } from './update-checker'
@@ -53,15 +54,19 @@ export function setupShutdownHandlers(
   agents: { stop: () => void }[],
   updater?: AutoUpdaterHandle,
 ): void {
-  const shutdown = (): void => {
+  let shuttingDown = false
+  const shutdown = async (): Promise<void> => {
+    if (shuttingDown) return
+    shuttingDown = true
     logger.info(t('runner.shuttingDown'))
     updater?.stop()
     agents.forEach((a) => a.stop())
+    await flushSentry()
     logger.success(t('runner.stopped'))
     process.exit(0)
   }
-  process.on('SIGINT', shutdown)
-  process.on('SIGTERM', shutdown)
+  process.on('SIGINT', () => void shutdown())
+  process.on('SIGTERM', () => void shutdown())
 }
 
 export function resolveAutoUpdateConfig(options: RunnerOptions, config?: { autoUpdate?: AutoUpdateConfig } | null): AutoUpdateConfig {
@@ -108,12 +113,16 @@ function runSingleProject(
 }
 
 export async function startAgent(options: RunnerOptions): Promise<void> {
+  await initSentry()
+
   // グローバルエラーハンドラ（非同期エラーでの静かなクラッシュを防止）
   process.on('uncaughtException', (error) => {
+    captureException(error, { handler: 'uncaughtException' })
     logger.error(`Uncaught exception: ${error.message}${error.stack ? `\n${error.stack}` : ''}`)
-    process.exit(1)
+    void flushSentry().finally(() => process.exit(1))
   })
   process.on('unhandledRejection', (reason) => {
+    captureException(reason, { handler: 'unhandledRejection' })
     logger.error(`Unhandled rejection: ${reason}`)
   })
 

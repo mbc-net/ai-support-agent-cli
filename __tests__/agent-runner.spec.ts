@@ -16,6 +16,11 @@ jest.mock('../src/api-client')
 jest.mock('../src/commands')
 jest.mock('../src/config-manager')
 jest.mock('../src/logger')
+jest.mock('../src/sentry', () => ({
+  initSentry: jest.fn().mockResolvedValue(undefined),
+  captureException: jest.fn(),
+  flushSentry: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('../src/auto-updater', () => ({
   startAutoUpdater: jest.fn().mockReturnValue({ stop: jest.fn() }),
 }))
@@ -549,7 +554,38 @@ describe('setupShutdownHandlers', () => {
     processOnSpy.mockRestore()
   })
 
-  it('should call stop on all agents and exit(0) when signal fires', () => {
+  it('should only execute shutdown once when both SIGINT and SIGTERM fire', async () => {
+    let sigintHandler: (() => void) | undefined
+    let sigtermHandler: (() => void) | undefined
+    const processOnSpy = jest.spyOn(process, 'on').mockImplementation((event, handler) => {
+      if (event === 'SIGINT') {
+        sigintHandler = handler as () => void
+      } else if (event === 'SIGTERM') {
+        sigtermHandler = handler as () => void
+      }
+      return process
+    })
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+    const agents = [{ stop: jest.fn() }]
+    setupShutdownHandlers(agents)
+
+    // Fire both signals simultaneously
+    sigintHandler!()
+    sigtermHandler!()
+
+    // Wait for async shutdown
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    // stop should be called only once
+    expect(agents[0].stop).toHaveBeenCalledTimes(1)
+    expect(exitSpy).toHaveBeenCalledTimes(1)
+
+    processOnSpy.mockRestore()
+    exitSpy.mockRestore()
+  })
+
+  it('should call stop on all agents and exit(0) when signal fires', async () => {
     let sigintHandler: (() => void) | undefined
     const processOnSpy = jest.spyOn(process, 'on').mockImplementation((event, handler) => {
       if (event === 'SIGINT') {
@@ -562,9 +598,12 @@ describe('setupShutdownHandlers', () => {
     const agents = [{ stop: jest.fn() }, { stop: jest.fn() }]
     setupShutdownHandlers(agents)
 
-    // Invoke the SIGINT handler
+    // Invoke the SIGINT handler (now wraps an async function)
     expect(sigintHandler).toBeDefined()
     sigintHandler!()
+
+    // Wait for the async shutdown to complete
+    await new Promise((resolve) => setTimeout(resolve, 10))
 
     expect(agents[0].stop).toHaveBeenCalled()
     expect(agents[1].stop).toHaveBeenCalled()
