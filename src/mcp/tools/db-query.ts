@@ -56,6 +56,8 @@ export async function executeQuery(
 
   if (credentials.engine === 'postgresql') {
     const { Client } = await import('pg')
+    const isLocalHost = credentials.host === 'localhost' || credentials.host === '127.0.0.1'
+    const useSsl = credentials.ssl !== undefined ? credentials.ssl : !isLocalHost
     const client = new Client({
       host: credentials.host,
       port: credentials.port,
@@ -63,7 +65,7 @@ export async function executeQuery(
       password: credentials.password,
       database: credentials.database,
       connectionTimeoutMillis: 10000,
-      ssl: false,
+      ssl: useSsl ? { rejectUnauthorized: true } : false,
     })
     try {
       await client.connect()

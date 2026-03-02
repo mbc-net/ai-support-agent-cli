@@ -77,6 +77,11 @@ describe('AppSyncSubscriber', () => {
       subscriber.disconnect()
     })
 
+    it('should reject non-HTTPS URLs', () => {
+      expect(() => new AppSyncSubscriber('http://example.appsync-api.amazonaws.com/graphql', apiKey))
+        .toThrow('AppSync URL must use HTTPS protocol')
+    })
+
     it('should include base64-encoded header and payload in URL', async () => {
       const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
       const connectPromise = subscriber.connect()

@@ -176,6 +176,101 @@ describe('db-query tool', () => {
       expect(mockClient.end).toHaveBeenCalled()
     })
 
+    it('should enable SSL by default for non-localhost PostgreSQL', async () => {
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        query: jest.fn().mockResolvedValue({ rows: [] }),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const pg = require('pg')
+      pg.Client.mockImplementation(() => mockClient)
+
+      await executeQuery(
+        { name: 'MAIN', engine: 'postgresql', host: 'db.example.com', port: 5432, database: 'testdb', user: 'postgres', password: 'pass' },
+        'SELECT 1',
+      )
+
+      expect(pg.Client).toHaveBeenCalledWith(
+        expect.objectContaining({ ssl: { rejectUnauthorized: true } }),
+      )
+    })
+
+    it('should disable SSL for localhost PostgreSQL', async () => {
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        query: jest.fn().mockResolvedValue({ rows: [] }),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const pg = require('pg')
+      pg.Client.mockImplementation(() => mockClient)
+
+      await executeQuery(
+        { name: 'MAIN', engine: 'postgresql', host: 'localhost', port: 5432, database: 'testdb', user: 'postgres', password: 'pass' },
+        'SELECT 1',
+      )
+
+      expect(pg.Client).toHaveBeenCalledWith(
+        expect.objectContaining({ ssl: false }),
+      )
+    })
+
+    it('should disable SSL for 127.0.0.1 PostgreSQL', async () => {
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        query: jest.fn().mockResolvedValue({ rows: [] }),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const pg = require('pg')
+      pg.Client.mockImplementation(() => mockClient)
+
+      await executeQuery(
+        { name: 'MAIN', engine: 'postgresql', host: '127.0.0.1', port: 5432, database: 'testdb', user: 'postgres', password: 'pass' },
+        'SELECT 1',
+      )
+
+      expect(pg.Client).toHaveBeenCalledWith(
+        expect.objectContaining({ ssl: false }),
+      )
+    })
+
+    it('should respect explicit ssl=false override for remote PostgreSQL', async () => {
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        query: jest.fn().mockResolvedValue({ rows: [] }),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const pg = require('pg')
+      pg.Client.mockImplementation(() => mockClient)
+
+      await executeQuery(
+        { name: 'MAIN', engine: 'postgresql', host: 'db.example.com', port: 5432, database: 'testdb', user: 'postgres', password: 'pass', ssl: false },
+        'SELECT 1',
+      )
+
+      expect(pg.Client).toHaveBeenCalledWith(
+        expect.objectContaining({ ssl: false }),
+      )
+    })
+
+    it('should respect explicit ssl=true override for localhost PostgreSQL', async () => {
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        query: jest.fn().mockResolvedValue({ rows: [] }),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const pg = require('pg')
+      pg.Client.mockImplementation(() => mockClient)
+
+      await executeQuery(
+        { name: 'MAIN', engine: 'postgresql', host: 'localhost', port: 5432, database: 'testdb', user: 'postgres', password: 'pass', ssl: true },
+        'SELECT 1',
+      )
+
+      expect(pg.Client).toHaveBeenCalledWith(
+        expect.objectContaining({ ssl: { rejectUnauthorized: true } }),
+      )
+    })
+
     it('should throw for unsupported engine', async () => {
       await expect(executeQuery(
         { name: 'MAIN', engine: 'sqlite', host: 'localhost', port: 0, database: 'test', user: 'u', password: 'p' },

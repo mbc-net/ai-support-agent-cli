@@ -20,8 +20,28 @@ function timestamp(): string {
   return `${y}-${mo}-${d} ${h}:${mi}:${s}`
 }
 
+const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
+  // AWS Access Key IDs
+  { pattern: /(AKIA[A-Z0-9]{16})/g, replacement: 'AKIA****' },
+  // Key-value pairs with secret-like keys
+  { pattern: /((?:password|secret|token|api_key|apikey|access_key|secret_key|session_token|authorization)\s*[:=]\s*["']?)([^\s"',}{]+)/gi, replacement: '$1****' },
+  // Bearer tokens
+  { pattern: /(Bearer\s+)[^\s]+/gi, replacement: '$1****' },
+]
+
+/** Mask secrets in log messages */
+export function maskSecrets(message: string): string {
+  let masked = message
+  for (const { pattern, replacement } of SECRET_PATTERNS) {
+    // Reset lastIndex for global regexps
+    pattern.lastIndex = 0
+    masked = masked.replace(pattern, replacement)
+  }
+  return masked
+}
+
 function formatLog(level: string, color: string, message: string): string {
-  return `${COLORS.gray}[${timestamp()}]${COLORS.reset} ${color}${level}${COLORS.reset} ${message}`
+  return `${COLORS.gray}[${timestamp()}]${COLORS.reset} ${color}${level}${COLORS.reset} ${maskSecrets(message)}`
 }
 
 export const logger = {

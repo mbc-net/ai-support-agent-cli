@@ -332,8 +332,27 @@ describe('ApiClient', () => {
     })
   })
 
-  describe('HTTP URL warning', () => {
-    it('should warn when API URL uses HTTP with a remote host', () => {
+  describe('HTTP URL restriction', () => {
+    const originalEnv = process.env
+
+    beforeEach(() => {
+      process.env = { ...originalEnv }
+      delete process.env.AI_SUPPORT_AGENT_ALLOW_HTTP
+    })
+
+    afterEach(() => {
+      process.env = originalEnv
+    })
+
+    it('should throw error when API URL uses HTTP with a remote host', () => {
+      mockedAxios.create.mockReturnValue(mockInstance as any)
+      expect(() => new ApiClient('http://remote-server:3000', 'test-token')).toThrow(
+        'API URL uses HTTP (not HTTPS). Set AI_SUPPORT_AGENT_ALLOW_HTTP=true to allow insecure connections.',
+      )
+    })
+
+    it('should warn instead of throwing when AI_SUPPORT_AGENT_ALLOW_HTTP=true', () => {
+      process.env.AI_SUPPORT_AGENT_ALLOW_HTTP = 'true'
       mockedAxios.create.mockReturnValue(mockInstance as any)
       new ApiClient('http://remote-server:3000', 'test-token')
       expect(mockedLogger.warn).toHaveBeenCalledWith(
@@ -341,21 +360,21 @@ describe('ApiClient', () => {
       )
     })
 
-    it('should not warn when API URL uses HTTPS', () => {
+    it('should not warn or throw when API URL uses HTTPS', () => {
       mockedAxios.create.mockReturnValue(mockInstance as any)
       mockedLogger.warn.mockClear()
       new ApiClient('https://remote-server:3000', 'test-token')
       expect(mockedLogger.warn).not.toHaveBeenCalled()
     })
 
-    it('should not warn when API URL uses HTTP with 127.0.0.1', () => {
+    it('should not warn or throw when API URL uses HTTP with 127.0.0.1', () => {
       mockedAxios.create.mockReturnValue(mockInstance as any)
       mockedLogger.warn.mockClear()
       new ApiClient('http://127.0.0.1:3030', 'test-token')
       expect(mockedLogger.warn).not.toHaveBeenCalled()
     })
 
-    it('should not warn when API URL uses HTTP with localhost', () => {
+    it('should not warn or throw when API URL uses HTTP with localhost', () => {
       mockedAxios.create.mockReturnValue(mockInstance as any)
       mockedLogger.warn.mockClear()
       new ApiClient('http://localhost:3030', 'test-token')
