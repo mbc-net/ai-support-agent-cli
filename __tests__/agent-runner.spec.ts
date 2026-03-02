@@ -6,11 +6,13 @@ import {
   setupShutdownHandlers,
   resolveAutoUpdateConfig,
 } from '../src/agent-runner'
+import { AGENT_VERSION } from '../src/constants'
 import { getSystemInfo, getLocalIpAddress } from '../src/system-info'
 import { ApiClient } from '../src/api-client'
 import { executeCommand } from '../src/commands'
 import { loadConfig, getProjectList, saveConfig } from '../src/config-manager'
 import { logger } from '../src/logger'
+import { detectChannelFromVersion } from '../src/update-checker'
 
 jest.mock('../src/api-client')
 jest.mock('../src/commands')
@@ -616,9 +618,9 @@ describe('setupShutdownHandlers', () => {
 
 describe('resolveAutoUpdateConfig', () => {
   it('should use detected channel from AGENT_VERSION when no explicit channel', () => {
-    // AGENT_VERSION is 0.0.1 (no pre-release) → detected channel = 'latest'
+    const expectedChannel = detectChannelFromVersion(AGENT_VERSION)
     const result = resolveAutoUpdateConfig({})
-    expect(result.channel).toBe('latest')
+    expect(result.channel).toBe(expectedChannel)
     expect(result.enabled).toBe(true)
     expect(result.autoRestart).toBe(true)
   })
