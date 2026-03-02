@@ -5,6 +5,8 @@ export interface HistoryMessage {
 
 export type ReleaseChannel = 'latest' | 'beta' | 'alpha'
 
+export type InstallMethod = 'global' | 'npx' | 'local' | 'dev'
+
 export interface VersionInfo {
   latestVersion: string
   minimumVersion: string

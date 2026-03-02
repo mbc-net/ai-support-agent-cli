@@ -1,13 +1,14 @@
 import * as os from 'os'
 
 import { type AutoUpdaterHandle, startAutoUpdater } from './auto-updater'
-import { DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJECT_CODE_CLI_DIRECT, PROJECT_CODE_ENV_DEFAULT } from './constants'
+import { AGENT_VERSION, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJECT_CODE_CLI_DIRECT, PROJECT_CODE_ENV_DEFAULT } from './constants'
 import { getProjectList, loadConfig, saveConfig } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
 import { ProjectAgent } from './project-agent'
 import { getSystemInfo } from './system-info'
 import type { AgentChatMode, AutoUpdateConfig, ProjectRegistration, ReleaseChannel } from './types'
+import { detectChannelFromVersion } from './update-checker'
 import { validateApiUrl } from './utils'
 
 export interface RunnerOptions {
@@ -63,11 +64,12 @@ export function setupShutdownHandlers(
   process.on('SIGTERM', shutdown)
 }
 
-function resolveAutoUpdateConfig(options: RunnerOptions, config?: { autoUpdate?: AutoUpdateConfig } | null): AutoUpdateConfig {
+export function resolveAutoUpdateConfig(options: RunnerOptions, config?: { autoUpdate?: AutoUpdateConfig } | null): AutoUpdateConfig {
+  const detectedChannel = detectChannelFromVersion(AGENT_VERSION)
   return {
     enabled: options.autoUpdate !== false,
     autoRestart: true,
-    channel: options.updateChannel ?? config?.autoUpdate?.channel ?? 'latest',
+    channel: options.updateChannel ?? config?.autoUpdate?.channel ?? detectedChannel,
     ...config?.autoUpdate,
     // CLI flags override config
     ...(options.autoUpdate === false && { enabled: false }),
