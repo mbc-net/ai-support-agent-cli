@@ -31,7 +31,7 @@ function extractAwsCredentialError(error: unknown, accountName: string): Credent
 
     if (data) {
       // SSO認証切れの場合は専用メッセージ + SSO情報
-      if (data.error === 'SSO_AUTH_REQUIRED') {
+      if (data.error === 'SSO_AUTH_REQUIRED' || data.errorCode === 'SSO_AUTH_REQUIRED') {
         const accountId = typeof data.accountId === 'string' ? data.accountId : ''
         return {
           errorMessage: `AWS SSO認証の有効期限が切れています（${accountName}）。管理画面からSSO再認証を実行してください。`,
