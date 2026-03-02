@@ -4,6 +4,7 @@ import {
   startAgent,
   startProjectAgent,
   setupShutdownHandlers,
+  resolveAutoUpdateConfig,
 } from '../src/agent-runner'
 import { getSystemInfo, getLocalIpAddress } from '../src/system-info'
 import { ApiClient } from '../src/api-client'
@@ -571,5 +572,38 @@ describe('setupShutdownHandlers', () => {
 
     processOnSpy.mockRestore()
     exitSpy.mockRestore()
+  })
+})
+
+describe('resolveAutoUpdateConfig', () => {
+  it('should use detected channel from AGENT_VERSION when no explicit channel', () => {
+    // AGENT_VERSION is 0.0.1 (no pre-release) → detected channel = 'latest'
+    const result = resolveAutoUpdateConfig({})
+    expect(result.channel).toBe('latest')
+    expect(result.enabled).toBe(true)
+    expect(result.autoRestart).toBe(true)
+  })
+
+  it('should prefer CLI updateChannel over detected channel', () => {
+    const result = resolveAutoUpdateConfig({ updateChannel: 'beta' })
+    expect(result.channel).toBe('beta')
+  })
+
+  it('should prefer config channel over detected channel', () => {
+    const result = resolveAutoUpdateConfig({}, { autoUpdate: { enabled: true, autoRestart: true, channel: 'alpha' } })
+    expect(result.channel).toBe('alpha')
+  })
+
+  it('should prefer CLI updateChannel over config channel', () => {
+    const result = resolveAutoUpdateConfig(
+      { updateChannel: 'beta' },
+      { autoUpdate: { enabled: true, autoRestart: true, channel: 'alpha' } },
+    )
+    expect(result.channel).toBe('beta')
+  })
+
+  it('should disable auto-update when autoUpdate is false', () => {
+    const result = resolveAutoUpdateConfig({ autoUpdate: false })
+    expect(result.enabled).toBe(false)
   })
 })

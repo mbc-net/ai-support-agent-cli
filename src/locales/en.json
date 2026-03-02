@@ -93,6 +93,8 @@
   "update.disabled": "disabled",
   "update.enabled": "enabled (auto-restart: {{autoRestart}})",
   "update.checkFailed": "Version check failed: {{message}}",
+  "update.skipDev": "Development mode detected. Automatic update is not supported.",
+  "update.skipLocal": "Local installation detected. Run \"npm update @ai-support-agent/cli\" in your project to update.",
 
   "cmd.setProjectDir": "Set project directory",
   "cmd.setProjectDir.project": "Project code",

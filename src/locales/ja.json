@@ -93,6 +93,8 @@
   "update.disabled": "無効",
   "update.enabled": "有効 (自動再起動: {{autoRestart}})",
   "update.checkFailed": "バージョンチェックに失敗しました: {{message}}",
+  "update.skipDev": "開発モードを検出しました。自動更新はサポートされていません。",
+  "update.skipLocal": "ローカルインストールを検出しました。更新するにはプロジェクト内で \"npm update @ai-support-agent/cli\" を実行してください。",
 
   "cmd.setProjectDir": "プロジェクトディレクトリを設定",
   "cmd.setProjectDir.project": "プロジェクトコード",

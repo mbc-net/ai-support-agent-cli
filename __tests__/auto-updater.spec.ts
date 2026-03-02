@@ -6,6 +6,7 @@ jest.mock('../src/api-client')
 jest.mock('../src/logger')
 jest.mock('../src/update-checker')
 
+const mockedDetectInstallMethod = updateChecker.detectInstallMethod as jest.MockedFunction<typeof updateChecker.detectInstallMethod>
 const mockedIsNewerVersion = updateChecker.isNewerVersion as jest.MockedFunction<typeof updateChecker.isNewerVersion>
 const mockedIsValidVersion = updateChecker.isValidVersion as jest.MockedFunction<typeof updateChecker.isValidVersion>
 const mockedPerformUpdate = updateChecker.performUpdate as jest.MockedFunction<typeof updateChecker.performUpdate>
@@ -33,6 +34,7 @@ describe('startAutoUpdater', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     jest.useFakeTimers()
+    mockedDetectInstallMethod.mockReturnValue('global')
     mockedIsValidVersion.mockReturnValue(true)
     mockedIsNewerVersion.mockReturnValue(false)
     mockedPerformUpdate.mockResolvedValue({ success: true })
@@ -82,9 +84,9 @@ describe('startAutoUpdater', () => {
 
     await jest.advanceTimersByTimeAsync(30_000)
 
-    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0')
+    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'global')
     expect(stopAll).toHaveBeenCalled()
-    expect(mockedReExecProcess).toHaveBeenCalled()
+    expect(mockedReExecProcess).toHaveBeenCalledWith('global')
 
     updater.stop()
   })
@@ -128,9 +130,9 @@ describe('startAutoUpdater', () => {
 
     await jest.advanceTimersByTimeAsync(30_000)
 
-    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0')
+    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'global')
     expect(stopAll).toHaveBeenCalled()
-    expect(mockedReExecProcess).toHaveBeenCalled()
+    expect(mockedReExecProcess).toHaveBeenCalledWith('global')
 
     updater.stop()
   })
@@ -229,7 +231,7 @@ describe('startAutoUpdater', () => {
     await jest.advanceTimersByTimeAsync(30_000)
 
     // performUpdate was called and failed with permission error
-    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0')
+    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'global')
 
     updater.stop()
   })
@@ -254,6 +256,51 @@ describe('startAutoUpdater', () => {
     await jest.advanceTimersByTimeAsync(30_000)
 
     // Should not throw
+    updater.stop()
+  })
+
+  it('should skip auto-update when install method is dev', async () => {
+    mockedDetectInstallMethod.mockReturnValue('dev')
+    const client = createMockClient()
+
+    const updater = startAutoUpdater([client], defaultConfig, jest.fn())
+
+    await jest.advanceTimersByTimeAsync(30_000)
+
+    expect(client.getVersionInfo).not.toHaveBeenCalled()
+    expect(mockedPerformUpdate).not.toHaveBeenCalled()
+
+    updater.stop()
+  })
+
+  it('should skip auto-update when install method is local', async () => {
+    mockedDetectInstallMethod.mockReturnValue('local')
+    const client = createMockClient()
+
+    const updater = startAutoUpdater([client], defaultConfig, jest.fn())
+
+    await jest.advanceTimersByTimeAsync(30_000)
+
+    expect(client.getVersionInfo).not.toHaveBeenCalled()
+    expect(mockedPerformUpdate).not.toHaveBeenCalled()
+
+    updater.stop()
+  })
+
+  it('should proceed with auto-update when install method is npx', async () => {
+    mockedDetectInstallMethod.mockReturnValue('npx')
+    const client = createMockClient()
+    const stopAll = jest.fn()
+    mockedIsNewerVersion.mockReturnValue(true)
+
+    const updater = startAutoUpdater([client], defaultConfig, stopAll)
+
+    await jest.advanceTimersByTimeAsync(30_000)
+
+    expect(client.getVersionInfo).toHaveBeenCalled()
+    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'npx')
+    expect(mockedReExecProcess).toHaveBeenCalledWith('npx')
+
     updater.stop()
   })
 })
