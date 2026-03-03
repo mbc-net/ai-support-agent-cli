@@ -101,6 +101,8 @@ export const API_ENDPOINTS = {
   AWS_CREDENTIALS: '/api/agent/aws-credentials',
   DB_CREDENTIALS: '/api/agent/db-credentials',
   PROJECT_CONFIG: '/api/agent/project-config',
+  FILES_UPLOAD_URL: '/api/agent/files/upload-url',
+  FILES_DOWNLOAD_URL: '/api/agent/files/download-url',
 } as const
 
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000
