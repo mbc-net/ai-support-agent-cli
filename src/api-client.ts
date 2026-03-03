@@ -175,4 +175,30 @@ export class ApiClient {
     logger.debug(`Submitting chat chunk ${chunk.index} (${chunk.type}) for command: ${commandId}`)
     await this.postVoid(API_ENDPOINTS.COMMAND_CHUNKS(commandId), chunk, { params: { agentId } })
   }
+
+  async getUploadUrl(data: {
+    conversationId: string
+    messageId: string
+    filename: string
+    contentType: string
+    fileSize: number
+    projectCode: string
+  }): Promise<{ uploadUrl: string; fileId: string; s3Key: string }> {
+    logger.debug(`Requesting upload URL for file: ${data.filename}`)
+    return this.post<{ uploadUrl: string; fileId: string; s3Key: string }>(
+      API_ENDPOINTS.FILES_UPLOAD_URL,
+      data,
+    )
+  }
+
+  async getDownloadUrl(data: {
+    fileId: string
+    s3Key: string
+  }): Promise<{ downloadUrl: string }> {
+    logger.debug(`Requesting download URL for file: ${data.fileId}`)
+    return this.post<{ downloadUrl: string }>(
+      API_ENDPOINTS.FILES_DOWNLOAD_URL,
+      data,
+    )
+  }
 }

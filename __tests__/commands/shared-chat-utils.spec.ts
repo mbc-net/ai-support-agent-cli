@@ -1,5 +1,6 @@
 import type { ApiClient } from '../../src/api-client'
-import { createChunkSender, formatHistoryForClaudeCode, parseHistory } from '../../src/commands/shared-chat-utils'
+import { createChunkSender, formatHistoryForClaudeCode, parseHistory, sendFileAttachmentChunk } from '../../src/commands/shared-chat-utils'
+import type { ChatFileInfo } from '../../src/types'
 
 jest.mock('../../src/logger')
 
@@ -169,6 +170,29 @@ describe('shared-chat-utils', () => {
       expect(result).toContain('[user]: Previous')
       expect(result).toContain('</conversation_history>')
       expect(result).toContain('Current')
+    })
+  })
+
+  describe('sendFileAttachmentChunk', () => {
+    it('should send a file_attachment chunk with file info', async () => {
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const file: ChatFileInfo = {
+        fileId: 'f1',
+        s3Key: 'uploads/f1.txt',
+        filename: 'test.txt',
+        contentType: 'text/plain',
+        fileSize: 1024,
+      }
+
+      await sendFileAttachmentChunk(sendChunk, file)
+
+      expect(sendChunk).toHaveBeenCalledWith('file_attachment', JSON.stringify({
+        fileId: 'f1',
+        s3Key: 'uploads/f1.txt',
+        filename: 'test.txt',
+        contentType: 'text/plain',
+        fileSize: 1024,
+      }))
     })
   })
 })

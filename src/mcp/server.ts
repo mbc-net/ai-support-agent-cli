@@ -5,6 +5,7 @@ import { ApiClient } from '../api-client'
 import { registerCredentialsTool } from './tools/credentials'
 import { registerDbQueryTool } from './tools/db-query'
 import { registerDbSchemasTool } from './tools/db-schemas'
+import { registerFileUploadTool } from './tools/file-upload'
 import { registerProjectInfoTool } from './tools/project-info'
 
 /**
@@ -19,6 +20,7 @@ export function createMcpServer(apiClient: ApiClient, projectCode: string): McpS
   registerDbQueryTool(server, apiClient)
   registerDbSchemasTool(server, apiClient)
   registerCredentialsTool(server, apiClient)
+  registerFileUploadTool(server, apiClient)
   registerProjectInfoTool(server, apiClient, projectCode)
 
   return server

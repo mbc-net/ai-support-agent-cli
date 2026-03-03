@@ -8,6 +8,7 @@ import { getErrorMessage, parseString, truncateString } from '../utils'
 import { getAutoAddDirs } from '../project-dir'
 import { executeApiChatCommand } from './api-chat-executor'
 import { runClaudeCode } from './claude-code-runner'
+import { downloadChatFiles, parseChatFiles } from './file-transfer'
 import { createChunkSender, formatHistoryForClaudeCode, parseHistory } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
@@ -99,9 +100,26 @@ async function executeClaudeCodeChat(
       await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
     }
 
+    // 添付ファイルのダウンロード
+    const chatFiles = parseChatFiles(payload.files)
+    const conversationId = parseString(payload.conversationId)
+    let filePathsNotice = ''
+    let cleanupDownloads: (() => void) | undefined
+    if (chatFiles.length > 0 && projectDir && conversationId) {
+      const downloadResult = await downloadChatFiles(client, agentId, chatFiles, projectDir, conversationId)
+      cleanupDownloads = downloadResult.cleanup
+      if (downloadResult.downloadedPaths.length > 0) {
+        filePathsNotice = `\n\n<attached_files>\n${downloadResult.downloadedPaths.map((p) => `- ${p}`).join('\n')}\n</attached_files>`
+        logger.info(`[chat] Downloaded ${downloadResult.downloadedPaths.length} files for command [${commandId}]`)
+      }
+      if (downloadResult.failedCount > 0) {
+        await sendChunk('delta', `⚠️ ${downloadResult.failedCount}件のファイルのダウンロードに失敗しました\n\n`)
+      }
+    }
+
     // 会話履歴をメッセージに埋め込む（Claude Code CLI用）
     const history = parseHistory(payload.history)
-    const messageWithHistory = formatHistoryForClaudeCode(history, message)
+    const messageWithHistory = formatHistoryForClaudeCode(history, message + filePathsNotice)
 
     const logDetails = [
       allowedTools?.length ? `allowedTools: ${allowedTools.join(', ')}` : '(no allowedTools)',
@@ -110,6 +128,7 @@ async function executeClaudeCodeChat(
       awsEnv ? 'AWS credentials' : null,
       mcpConfigPath ? 'MCP config' : null,
       history.length > 0 ? `${history.length} history messages` : null,
+      chatFiles.length > 0 ? `${chatFiles.length} attached files` : null,
     ].filter(Boolean).join(', ')
     logger.debug(`[chat] Spawning claude CLI for command [${commandId}]: ${logDetails}`)
     logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
@@ -121,6 +140,10 @@ async function executeClaudeCodeChat(
       metadata: result.metadata,
     })
     await sendChunk('done', doneContent)
+
+    // ダウンロードした一時ファイルをクリーンアップ
+    cleanupDownloads?.()
+
     return { success: true, data: result.text }
   } catch (error) {
     const errorMessage = getErrorMessage(error)
