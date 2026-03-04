@@ -15,6 +15,7 @@ import { writeMcpConfig } from './mcp/config-writer'
 import { syncProjectConfig } from './project-config-sync'
 import { initProjectDir } from './project-dir'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
+import { TerminalWebSocket } from './terminal'
 import type { AgentChatMode, AgentServerConfig, ProjectConfigResponse, ProjectRegistration, RegisterResponse } from './types'
 import { getErrorMessage } from './utils'
 
@@ -27,6 +28,7 @@ export class ProjectAgent {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private subscriber: AppSyncSubscriber | null = null
+  private terminalWs: TerminalWebSocket | null = null
   private processing = false
   private readonly client: ApiClient
   private readonly prefix: string
@@ -74,6 +76,7 @@ export class ProjectAgent {
     if (this.pollTimer) clearInterval(this.pollTimer)
     if (this.configSyncDebounceTimer) clearTimeout(this.configSyncDebounceTimer)
     if (this.subscriber) this.subscriber.disconnect()
+    if (this.terminalWs) this.terminalWs.disconnect()
   }
 
   getClient(): ApiClient {
@@ -91,7 +94,7 @@ export class ProjectAgent {
         os: os.platform(),
         arch: os.arch(),
         ipAddress: getLocalIpAddress(),
-        capabilities: ['shell', 'file_read', 'file_write', 'process_manage', 'chat'],
+        capabilities: ['shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal'],
         availableChatModes: this.availableChatModes,
         activeChatMode: this.activeChatMode,
       })
@@ -124,6 +127,22 @@ export class ProjectAgent {
     }
 
     this.startHeartbeat()
+
+    // Start terminal WebSocket connection
+    this.startTerminalWebSocket()
+  }
+
+  private startTerminalWebSocket(): void {
+    this.terminalWs = new TerminalWebSocket(
+      this.apiUrl,
+      this.token,
+      this.agentId,
+      this.projectDir,
+    )
+
+    this.terminalWs.connect().catch((error) => {
+      logger.warn(`${this.prefix} Terminal WebSocket connection failed: ${getErrorMessage(error)}`)
+    })
   }
 
   private async startSubscriptionMode(registerResult: RegisterResponse): Promise<void> {

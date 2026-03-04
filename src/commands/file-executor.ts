@@ -1,9 +1,10 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
-import { ERR_NO_CONTENT_SPECIFIED, MAX_DIR_ENTRIES, MAX_FILE_READ_SIZE, MAX_FILE_WRITE_SIZE } from '../constants'
+import { ERR_NO_CONTENT_SPECIFIED, ERR_NO_FILE_PATH_SPECIFIED, MAX_DIR_ENTRIES, MAX_FILE_READ_SIZE, MAX_FILE_WRITE_SIZE } from '../constants'
 import { resolveAndValidatePath } from '../security'
-import type { CommandResult, FileListPayload, FileReadPayload, FileWritePayload } from '../types'
+import type { CommandResult, FileDeletePayload, FileListPayload, FileMkdirPayload, FileReadPayload, FileRenamePayload, FileWritePayload } from '../types'
+import { parseString } from '../utils'
 
 export async function fileRead(
   payload: FileReadPayload,
@@ -72,4 +73,53 @@ export async function fileList(
   )
 
   return { success: true, data: { items, truncated, total: allEntries.length } }
+}
+
+export async function fileRename(
+  payload: FileRenamePayload,
+): Promise<CommandResult> {
+  const oldPath = parseString(payload.oldPath)
+  const newPath = parseString(payload.newPath)
+  if (!oldPath || !newPath) {
+    return { success: false, error: ERR_NO_FILE_PATH_SPECIFIED }
+  }
+
+  const oldPathOrError = await resolveAndValidatePath({ path: oldPath })
+  if (typeof oldPathOrError !== 'string') return oldPathOrError
+  const newPathOrError = await resolveAndValidatePath({ path: newPath })
+  if (typeof newPathOrError !== 'string') return newPathOrError
+
+  await fs.promises.rename(oldPathOrError, newPathOrError)
+  return { success: true, data: `Renamed ${oldPathOrError} to ${newPathOrError}` }
+}
+
+export async function fileDelete(
+  payload: FileDeletePayload,
+): Promise<CommandResult> {
+  const pathOrError = await resolveAndValidatePath(payload)
+  if (typeof pathOrError !== 'string') return pathOrError
+  const resolvedPath = pathOrError
+
+  if (payload.recursive) {
+    await fs.promises.rm(resolvedPath, { recursive: true, force: true })
+  } else {
+    const stat = await fs.promises.lstat(resolvedPath)
+    if (stat.isDirectory()) {
+      await fs.promises.rmdir(resolvedPath)
+    } else {
+      await fs.promises.unlink(resolvedPath)
+    }
+  }
+  return { success: true, data: `Deleted ${resolvedPath}` }
+}
+
+export async function fileMkdir(
+  payload: FileMkdirPayload,
+): Promise<CommandResult> {
+  const pathOrError = await resolveAndValidatePath(payload)
+  if (typeof pathOrError !== 'string') return pathOrError
+  const resolvedPath = pathOrError
+
+  await fs.promises.mkdir(resolvedPath, { recursive: true })
+  return { success: true, data: `Created directory ${resolvedPath}` }
 }
