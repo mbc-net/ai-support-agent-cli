@@ -5,7 +5,7 @@ import type { AgentChatMode, AgentCommandType, AgentServerConfig, CommandDispatc
 import { getErrorMessage } from '../utils'
 
 import { executeChatCommand } from './chat-executor'
-import { fileList, fileRead, fileWrite } from './file-executor'
+import { fileDelete, fileList, fileMkdir, fileRead, fileRename, fileWrite } from './file-executor'
 import { processKill, processList } from './process-executor'
 import { executeShellCommand } from './shell-executor'
 
@@ -69,6 +69,22 @@ export async function executeCommand(
         logger.debug(`[file_list] path="${String(path ?? '')}"`)
         return await fileList(p)
       }
+      case 'file_rename': {
+        const oldPath = (p as Record<string, unknown>).oldPath
+        const newPath = (p as Record<string, unknown>).newPath
+        logger.debug(`[file_rename] oldPath="${String(oldPath ?? '')}" newPath="${String(newPath ?? '')}"`)
+        return await fileRename(p)
+      }
+      case 'file_delete': {
+        const deletePath = (p as Record<string, unknown>).path
+        logger.debug(`[file_delete] path="${String(deletePath ?? '')}"`)
+        return await fileDelete(p)
+      }
+      case 'file_mkdir': {
+        const mkdirPath = (p as Record<string, unknown>).path
+        logger.debug(`[file_mkdir] path="${String(mkdirPath ?? '')}"`)
+        return await fileMkdir(p)
+      }
       case 'process_list':
         return await processList()
       case 'process_kill': {
@@ -105,5 +121,5 @@ export async function executeCommand(
 }
 
 export { executeShellCommand } from './shell-executor'
-export { fileList, fileRead, fileWrite } from './file-executor'
+export { fileDelete, fileList, fileMkdir, fileRead, fileRename, fileWrite } from './file-executor'
 export { processKill, processList } from './process-executor'
