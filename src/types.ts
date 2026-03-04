@@ -52,6 +52,9 @@ export type AgentCommandType =
   | 'file_read'
   | 'file_write'
   | 'file_list'
+  | 'file_rename'
+  | 'file_delete'
+  | 'file_mkdir'
   | 'process_list'
   | 'process_kill'
   | 'chat'
@@ -132,6 +135,20 @@ export interface FileWritePayload {
 }
 
 export interface FileListPayload {
+  path?: unknown
+}
+
+export interface FileRenamePayload {
+  oldPath?: unknown
+  newPath?: unknown
+}
+
+export interface FileDeletePayload {
+  path?: unknown
+  recursive?: unknown
+}
+
+export interface FileMkdirPayload {
   path?: unknown
 }
 
@@ -290,6 +307,9 @@ export type CommandDispatch =
   | { type: 'file_read'; payload: FileReadPayload }
   | { type: 'file_write'; payload: FileWritePayload }
   | { type: 'file_list'; payload: FileListPayload }
+  | { type: 'file_rename'; payload: FileRenamePayload }
+  | { type: 'file_delete'; payload: FileDeletePayload }
+  | { type: 'file_mkdir'; payload: FileMkdirPayload }
   | { type: 'process_list'; payload: Record<string, never> }
   | { type: 'process_kill'; payload: ProcessKillPayload }
   | { type: 'chat'; payload: ChatPayload }
