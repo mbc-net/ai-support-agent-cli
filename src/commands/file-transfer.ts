@@ -127,7 +127,7 @@ export async function uploadFile(
   conversationId: string,
   messageId: string,
   projectCode: string,
-): Promise<{ fileId: string; s3Key: string }> {
+): Promise<{ fileId: string; s3Key: string; fileSize: number }> {
   const ext = extname(filename).toLowerCase()
   if (!ALLOWED_EXTENSIONS.has(ext)) {
     throw new Error(`File extension not allowed: ${ext}`)
@@ -156,7 +156,7 @@ export async function uploadFile(
 
   logger.info(`[file-transfer] Uploaded file: ${filename} (fileId: ${fileId})`)
 
-  return { fileId, s3Key }
+  return { fileId, s3Key, fileSize }
 }
 
 /**

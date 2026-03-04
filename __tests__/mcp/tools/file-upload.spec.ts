@@ -54,6 +54,7 @@ describe('file-upload tool', () => {
       ;(uploadFile as jest.Mock).mockResolvedValue({
         fileId: 'file-123',
         s3Key: 'uploads/file-123.txt',
+        fileSize: 1024,
       })
 
       setupTool({})
@@ -72,6 +73,7 @@ describe('file-upload tool', () => {
       expect(parsed.s3Key).toBe('uploads/file-123.txt')
       expect(parsed.filename).toBe('test.txt')
       expect(parsed.contentType).toBe('text/plain')
+      expect(parsed.fileSize).toBe(1024)
     })
   })
 

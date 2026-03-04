@@ -73,6 +73,7 @@ async function executeClaudeCodeChat(
 
   try {
     const allowedTools = serverConfig?.claudeCodeConfig?.allowedTools
+    const systemPrompt = serverConfig?.claudeCodeConfig?.systemPrompt
     const serverAddDirs = serverConfig?.claudeCodeConfig?.addDirs ?? []
     // Merge project directory auto-add dirs with server-configured dirs
     let addDirs: string[] | undefined
@@ -119,7 +120,14 @@ async function executeClaudeCodeChat(
 
     // 会話履歴をメッセージに埋め込む（Claude Code CLI用）
     const history = parseHistory(payload.history)
-    const messageWithHistory = formatHistoryForClaudeCode(history, message + filePathsNotice)
+
+    // file_upload ツールに必要なメタデータをメッセージに付加
+    let metadataNotice = ''
+    if (conversationId && mcpConfigPath) {
+      metadataNotice = `\n\n<message_metadata>\nconversationId: ${conversationId}\nmessageId: ${commandId}\nprojectCode: ${projectCode ?? ''}\n</message_metadata>`
+    }
+
+    const messageWithHistory = formatHistoryForClaudeCode(history, message + filePathsNotice + metadataNotice)
 
     const logDetails = [
       allowedTools?.length ? `allowedTools: ${allowedTools.join(', ')}` : '(no allowedTools)',
@@ -132,7 +140,7 @@ async function executeClaudeCodeChat(
     ].filter(Boolean).join(', ')
     logger.debug(`[chat] Spawning claude CLI for command [${commandId}]: ${logDetails}`)
     logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
-    const result = await runClaudeCode(messageWithHistory, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath)
+    const result = await runClaudeCode(messageWithHistory, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, projectDir, systemPrompt)
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, duration=${result.metadata.durationMs}ms`)
     // 完了チャンクを送信（metadata を含める）
     const doneContent = JSON.stringify({
