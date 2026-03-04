@@ -69,7 +69,7 @@ describe('constants', () => {
     expect(constants.DEFAULT_MAX_TOKENS).toBe(4096)
 
     // Chat executor
-    expect(constants.CHAT_TIMEOUT).toBe(120_000)
+    expect(constants.CHAT_TIMEOUT).toBe(300_000)
     expect(constants.CHAT_SIGKILL_DELAY).toBe(5_000)
     expect(constants.CLAUDE_DETECT_TIMEOUT_MS).toBe(5_000)
     expect(constants.DEFAULT_APPSYNC_TIMEOUT_MS).toBe(300_000)

@@ -456,6 +456,62 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getUploadUrl', () => {
+    it('should request upload URL with correct parameters', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { uploadUrl: 'https://s3.example.com/upload', fileId: 'file-123', s3Key: 'uploads/file-123.txt' },
+      })
+
+      const result = await client.getUploadUrl({
+        conversationId: 'conv-1',
+        messageId: 'msg-1',
+        filename: 'test.txt',
+        contentType: 'text/plain',
+        fileSize: 1024,
+        projectCode: 'TEST_01',
+      })
+
+      expect(result.uploadUrl).toBe('https://s3.example.com/upload')
+      expect(result.fileId).toBe('file-123')
+      expect(result.s3Key).toBe('uploads/file-123.txt')
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/agent/files/upload-url',
+        {
+          conversationId: 'conv-1',
+          messageId: 'msg-1',
+          filename: 'test.txt',
+          contentType: 'text/plain',
+          fileSize: 1024,
+          projectCode: 'TEST_01',
+        },
+        undefined,
+      )
+    })
+  })
+
+  describe('getDownloadUrl', () => {
+    it('should request download URL with correct parameters', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { downloadUrl: 'https://s3.example.com/download' },
+      })
+
+      const result = await client.getDownloadUrl({
+        fileId: 'file-123',
+        s3Key: 'uploads/file-123.txt',
+      })
+
+      expect(result.downloadUrl).toBe('https://s3.example.com/download')
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/agent/files/download-url',
+        {
+          fileId: 'file-123',
+          s3Key: 'uploads/file-123.txt',
+        },
+        undefined,
+      )
+    })
+  })
+
   describe('retry logic', () => {
     beforeEach(() => {
       jest.useFakeTimers()

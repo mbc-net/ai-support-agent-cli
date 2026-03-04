@@ -1,7 +1,7 @@
 import { ApiClient } from '../api-client'
 import { CHUNK_LOG_LIMIT } from '../constants'
 import { logger } from '../logger'
-import type { ChatChunkType, HistoryMessage } from '../types'
+import type { ChatChunkType, ChatFileInfo, HistoryMessage } from '../types'
 import { getErrorMessage, truncateString } from '../utils'
 
 /**
@@ -77,4 +77,20 @@ export function createChunkSender(
   }
 
   return { sendChunk, getChunkIndex: () => chunkIndex }
+}
+
+/**
+ * ファイル添付チャンクを送信する
+ */
+export async function sendFileAttachmentChunk(
+  sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
+  file: ChatFileInfo,
+): Promise<void> {
+  await sendChunk('file_attachment', JSON.stringify({
+    fileId: file.fileId,
+    s3Key: file.s3Key,
+    filename: file.filename,
+    contentType: file.contentType,
+    fileSize: file.fileSize,
+  }))
 }

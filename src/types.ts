@@ -147,6 +147,7 @@ export interface ChatPayload {
   history?: unknown
   locale?: unknown
   awsAccountId?: unknown
+  files?: unknown
 }
 
 /**
@@ -260,6 +261,14 @@ export interface HeartbeatResponse {
   configHash?: string
 }
 
+export interface ChatFileInfo {
+  fileId: string
+  s3Key: string
+  filename: string
+  contentType: string
+  fileSize: number
+}
+
 export type ChatChunkType =
   | 'delta'
   | 'tool_call'
@@ -267,6 +276,7 @@ export type ChatChunkType =
   | 'done'
   | 'error'
   | 'system'
+  | 'file_attachment'
 
 export interface ChatChunk {
   index: number
