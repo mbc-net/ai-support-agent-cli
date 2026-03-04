@@ -23,7 +23,7 @@ export function registerFileUploadTool(server: McpServer, apiClient: ApiClient):
     },
     async ({ filePath, filename, conversationId, messageId, projectCode }) => {
       try {
-        const { fileId, s3Key } = await uploadFile(
+        const { fileId, s3Key, fileSize } = await uploadFile(
           apiClient,
           filePath,
           filename,
@@ -39,6 +39,7 @@ export function registerFileUploadTool(server: McpServer, apiClient: ApiClient):
           s3Key,
           filename,
           contentType,
+          fileSize,
         }, null, 2))
       } catch (error) {
         return mcpErrorResponse(extractErrorMessage(error))

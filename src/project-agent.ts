@@ -1,6 +1,7 @@
+import { existsSync } from 'fs'
 import * as os from 'os'
 
-import { join } from 'path'
+import { join, resolve } from 'path'
 
 import { ApiClient } from './api-client'
 import { AppSyncSubscriber, type AppSyncNotification } from './appsync-subscriber'
@@ -314,10 +315,11 @@ export class ProjectAgent {
       logger.info(`${this.prefix} Databases configured: ${config.databases.map(db => `${db.name}(${db.engine})`).join(', ')}`)
     }
 
-    // Write MCP config file if project directory and databases are configured
-    if (this.projectDir && config.databases?.length) {
+    // Write MCP config file if project directory is available
+    // MCP tools include file_upload, project_info etc. that are useful regardless of database config
+    if (this.projectDir) {
       try {
-        const mcpServerPath = join(__dirname, 'mcp', 'server.js')
+        const mcpServerPath = resolveMcpServerPath()
         this.mcpConfigPath = writeMcpConfig(
           this.projectDir,
           this.apiUrl,
@@ -422,4 +424,23 @@ export class ProjectAgent {
       logger.warn(`${this.prefix} Failed to check pending commands: ${getErrorMessage(error)}`)
     }
   }
+}
+
+/**
+ * MCP サーバースクリプトのパスを解決する
+ *
+ * ts-node/tsx で実行時は __dirname が src/ を指すため server.js が存在しない。
+ * その場合は dist/mcp/server.js にフォールバックする。
+ */
+function resolveMcpServerPath(): string {
+  const candidate = join(__dirname, 'mcp', 'server.js')
+  if (existsSync(candidate)) return candidate
+
+  // ts-node 実行時: src/ → dist/ に置換
+  const distCandidate = resolve(__dirname, '..', 'dist', 'mcp', 'server.js')
+  if (existsSync(distCandidate)) return distCandidate
+
+  // どちらも見つからない場合は元のパスを返す（エラーは呼び出し元でハンドリング）
+  logger.warn(`[mcp] MCP server script not found at ${candidate} or ${distCandidate}`)
+  return candidate
 }

@@ -212,7 +212,7 @@ describe('file-transfer', () => {
         mockClient, '/tmp/test.txt', 'test.txt', 'conv-1', 'msg-1', 'TEST_01',
       )
 
-      expect(result).toEqual({ fileId: 'file-123', s3Key: 'uploads/file-123.txt' })
+      expect(result).toEqual({ fileId: 'file-123', s3Key: 'uploads/file-123.txt', fileSize: 12 })
       expect(mockClient.getUploadUrl).toHaveBeenCalledWith({
         conversationId: 'conv-1',
         messageId: 'msg-1',
