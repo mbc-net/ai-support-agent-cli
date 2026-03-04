@@ -4,6 +4,9 @@ import {
   fileRead,
   fileWrite,
   fileList,
+  fileRename,
+  fileDelete,
+  fileMkdir,
   processList,
   processKill,
 } from '../../src/commands'
@@ -101,6 +104,62 @@ describe('commands/dispatch', () => {
       expect(result.success).toBe(true)
       expect(onConfigSync).toHaveBeenCalled()
     })
+
+    it('should dispatch file_rename command', async () => {
+      // file_rename requires valid paths; missing path returns error
+      const result = await executeCommand('file_rename', { oldPath: '', newPath: '' })
+      expect(result.success).toBe(false)
+    })
+
+    it('should dispatch file_delete command', async () => {
+      const result = await executeCommand('file_delete', { path: '/nonexistent/path/to/delete' })
+      expect(result.success).toBe(false)
+    })
+
+    it('should dispatch file_mkdir command', async () => {
+      const os = await import('os')
+      const fs = await import('fs')
+      const path = await import('path')
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-test-'))
+      const newDir = path.join(tmpDir, 'subdir')
+      const result = await executeCommand('file_mkdir', { path: newDir })
+      expect(result.success).toBe(true)
+      expect(fs.existsSync(newDir)).toBe(true)
+      fs.rmSync(tmpDir, { recursive: true })
+    })
+
+    it('should dispatch file_rename via CommandDispatch', async () => {
+      const dispatch: CommandDispatch = {
+        type: 'file_rename',
+        payload: { oldPath: '', newPath: '' },
+      }
+      const result = await executeCommand(dispatch)
+      expect(result.success).toBe(false)
+    })
+
+    it('should dispatch file_delete via CommandDispatch', async () => {
+      const dispatch: CommandDispatch = {
+        type: 'file_delete',
+        payload: { path: '/nonexistent' },
+      }
+      const result = await executeCommand(dispatch)
+      expect(result.success).toBe(false)
+    })
+
+    it('should dispatch file_mkdir via CommandDispatch', async () => {
+      const os = await import('os')
+      const fs = await import('fs')
+      const path = await import('path')
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-test2-'))
+      const newDir = path.join(tmpDir, 'sub')
+      const dispatch: CommandDispatch = {
+        type: 'file_mkdir',
+        payload: { path: newDir },
+      }
+      const result = await executeCommand(dispatch)
+      expect(result.success).toBe(true)
+      fs.rmSync(tmpDir, { recursive: true })
+    })
   })
 
   describe('re-exports', () => {
@@ -118,6 +177,18 @@ describe('commands/dispatch', () => {
 
     it('should export fileList', () => {
       expect(typeof fileList).toBe('function')
+    })
+
+    it('should export fileRename', () => {
+      expect(typeof fileRename).toBe('function')
+    })
+
+    it('should export fileDelete', () => {
+      expect(typeof fileDelete).toBe('function')
+    })
+
+    it('should export fileMkdir', () => {
+      expect(typeof fileMkdir).toBe('function')
     })
 
     it('should export processList', () => {
