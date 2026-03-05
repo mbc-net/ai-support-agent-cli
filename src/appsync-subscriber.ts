@@ -53,12 +53,13 @@ export class AppSyncSubscriber {
   constructor(appsyncUrl: string, apiKey: string) {
     this.apiKey = apiKey
     const url = new URL(appsyncUrl)
-    if (url.protocol !== 'https:') {
-      throw new Error('AppSync URL must use HTTPS protocol')
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      throw new Error('AppSync URL must use HTTP or HTTPS protocol')
     }
     this.host = url.host
     this.realtimeUrl = appsyncUrl
       .replace('https://', 'wss://')
+      .replace('http://', 'ws://')
       + '/realtime'
   }
 

@@ -128,8 +128,12 @@ export class ProjectAgent {
 
     this.startHeartbeat()
 
-    // Start terminal WebSocket connection
-    this.startTerminalWebSocket()
+    // Start terminal WebSocket connection (only if server has WS gateway enabled)
+    if (result.wsEnabled) {
+      this.startTerminalWebSocket()
+    } else {
+      logger.debug(`${this.prefix} Terminal WebSocket skipped (wsEnabled=false)`)
+    }
   }
 
   private startTerminalWebSocket(): void {

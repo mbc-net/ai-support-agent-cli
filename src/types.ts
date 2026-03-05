@@ -104,6 +104,7 @@ export interface RegisterResponse {
   appsyncUrl: string
   appsyncApiKey: string
   transportMode: TransportMode
+  wsEnabled?: boolean
 }
 
 export interface SystemInfo {
