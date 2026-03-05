@@ -8,6 +8,7 @@ import { AGENT_VERSION } from '../constants'
 import { getConfigDir, loadConfig } from '../config-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
+import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 
 const IMAGE_NAME = 'ai-support-agent'
 const PASSTHROUGH_ENV_VARS = [
@@ -191,6 +192,8 @@ export function runInDocker(opts: DockerRunOptions): void {
     `${IMAGE_NAME}:${version}`,
     ...containerArgs,
   ]
+
+  ensureClaudeJsonIntegrity()
 
   const child = spawn('docker', dockerArgs, {
     stdio: 'inherit',

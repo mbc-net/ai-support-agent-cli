@@ -4,6 +4,7 @@ import os from 'os'
 import { CHAT_SIGKILL_DELAY, CHAT_TIMEOUT, ERR_CLAUDE_CLI_NOT_FOUND, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import type { ChatChunkType } from '../types'
+import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 
 /** Claude Code CLI の実行結果 */
 export interface ClaudeCodeResult {
@@ -139,6 +140,8 @@ export async function runClaudeCode(
     const cleanEnv = buildCleanEnv()
     const env = awsEnv ? { ...cleanEnv, ...awsEnv } : cleanEnv
     const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt })
+
+    ensureClaudeJsonIntegrity()
 
     const child = spawn('claude', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
