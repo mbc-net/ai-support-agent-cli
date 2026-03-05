@@ -1,7 +1,7 @@
 import os from 'os'
 
 import { ERR_CLAUDE_CLI_NOT_FOUND } from '../../src/constants'
-import { buildClaudeArgs, buildCleanEnv, parseFileUploadResult, processStreamJsonLine, runClaudeCode } from '../../src/commands/claude-code-runner'
+import { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache, parseFileUploadResult, processStreamJsonLine, runClaudeCode } from '../../src/commands/claude-code-runner'
 import { createMockChildProcess } from '../helpers/mock-factory'
 
 jest.mock('../../src/logger')
@@ -48,10 +48,12 @@ describe('claude-code-runner', () => {
 
     beforeEach(() => {
       originalEnv = process.env
+      _resetCleanEnvCache()
     })
 
     afterEach(() => {
       process.env = originalEnv
+      _resetCleanEnvCache()
     })
 
     it('should exclude CLAUDECODE', () => {
@@ -90,6 +92,33 @@ describe('claude-code-runner', () => {
       for (const value of Object.values(result)) {
         expect(value).toBeDefined()
       }
+    })
+
+    it('should return cached result on subsequent calls', () => {
+      process.env = { HOME: '/home/user' }
+      const first = buildCleanEnv()
+      // Modify process.env — cached result should still be returned
+      process.env = { HOME: '/home/other', NEW_VAR: 'new' }
+      const second = buildCleanEnv()
+      expect(second).toEqual(first)
+      expect(second).not.toHaveProperty('NEW_VAR')
+    })
+
+    it('should return a copy, not the cached object itself', () => {
+      process.env = { HOME: '/home/user' }
+      const first = buildCleanEnv()
+      first.INJECTED = 'value'
+      const second = buildCleanEnv()
+      expect(second).not.toHaveProperty('INJECTED')
+    })
+
+    it('should refresh after _resetCleanEnvCache', () => {
+      process.env = { HOME: '/home/user' }
+      buildCleanEnv()
+      _resetCleanEnvCache()
+      process.env = { HOME: '/home/other' }
+      const result = buildCleanEnv()
+      expect(result).toHaveProperty('HOME', '/home/other')
     })
   })
 
@@ -548,7 +577,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode('hello', sendChunk)
+      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
 
       // Send NDJSON lines
       mockProcess.emitStdout('data', Buffer.from(makeAssistantLine('response text') + '\n'))
@@ -569,7 +598,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode('hello', sendChunk)
+      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
 
       mockProcess.emitStdout('data', Buffer.from(makeAssistantLine('chunk1') + '\n'))
       mockProcess.emitStdout('data', Buffer.from(makeResultLine('chunk1') + '\n'))
@@ -586,7 +615,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode('hello', sendChunk)
+      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
 
       mockProcess.emit('close', 1)
 
@@ -600,7 +629,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode('hello', sendChunk)
+      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
 
       const enoentError = new Error('spawn claude ENOENT') as NodeJS.ErrnoException
       enoentError.code = 'ENOENT'
@@ -616,7 +645,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode('hello', sendChunk)
+      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
 
       mockProcess.emit('error', new Error('Permission denied'))
 
@@ -631,7 +660,7 @@ describe('claude-code-runner', () => {
       const sendChunk = jest.fn().mockResolvedValue(undefined)
       const awsEnv = { AWS_ACCESS_KEY_ID: 'AKIA', AWS_SECRET_ACCESS_KEY: 'secret' }
 
-      const resultPromise = runClaudeCode('hello', sendChunk, undefined, undefined, undefined, awsEnv)
+      const resultPromise = runClaudeCode({ message: 'hello', sendChunk, awsEnv })
 
       mockProcess.emit('close', 0)
 
@@ -650,7 +679,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode('hello', sendChunk, undefined, undefined, undefined, undefined, undefined, '/tmp/project')
+      const resultPromise = runClaudeCode({ message: 'hello', sendChunk, cwd: '/tmp/project' })
 
       mockProcess.emit('close', 0)
 
@@ -667,7 +696,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode('hello', sendChunk)
+      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
 
       mockProcess.emit('close', 0)
 
@@ -684,7 +713,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode('hello', sendChunk)
+      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
 
       // Advance past CHAT_TIMEOUT to trigger SIGTERM
       jest.advanceTimersByTime(300_000)
@@ -707,7 +736,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode('hello', sendChunk)
+      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
 
       mockProcess.emit('close', 0)
 
@@ -727,7 +756,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode('hello', sendChunk)
+      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
 
       // Split a NDJSON line across two data events
       const fullLine = makeResultLine('split result')

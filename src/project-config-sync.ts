@@ -5,6 +5,7 @@ import type { ApiClient } from './api-client'
 import { getCacheDir } from './project-dir'
 import { logger } from './logger'
 import type { CachedProjectConfig, ProjectConfigResponse } from './types'
+import { atomicWriteFile } from './utils'
 
 const CACHE_FILE_NAME = 'project-config.json'
 
@@ -80,9 +81,7 @@ export function saveCachedConfig(
     }
 
     const cachePath = path.join(cacheDir, CACHE_FILE_NAME)
-    const tmpPath = cachePath + '.tmp'
-    fs.writeFileSync(tmpPath, JSON.stringify(cacheData, null, 2), { mode: 0o600 })
-    fs.renameSync(tmpPath, cachePath)
+    atomicWriteFile(cachePath, JSON.stringify(cacheData, null, 2))
 
     logger.debug(`Config cached to ${cachePath}`)
   } catch (error) {

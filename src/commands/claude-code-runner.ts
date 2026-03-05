@@ -51,14 +51,24 @@ interface StreamJsonLine {
 }
 
 /** CLAUDECODE / CLAUDE_CODE_* 環境変数を除外した env を構築
- *  ただし CLAUDE_CODE_OAUTH_TOKEN は認証に必要なため保持する */
+ *  ただし CLAUDE_CODE_OAUTH_TOKEN は認証に必要なため保持する
+ *  プロセス生存中は結果不変のためキャッシュする */
+let cachedCleanEnv: Record<string, string> | null = null
+
 export function buildCleanEnv(): Record<string, string> {
+  if (cachedCleanEnv) return { ...cachedCleanEnv }
   const cleanEnv: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {
     if (key === 'CLAUDECODE' || (key.startsWith('CLAUDE_CODE_') && key !== 'CLAUDE_CODE_OAUTH_TOKEN')) continue
     if (value !== undefined) cleanEnv[key] = value
   }
-  return cleanEnv
+  cachedCleanEnv = cleanEnv
+  return { ...cleanEnv }
+}
+
+/** テスト用のキャッシュリセット */
+export function _resetCleanEnvCache(): void {
+  cachedCleanEnv = null
 }
 
 /** Claude CLI の引数配列を構築 */
@@ -118,20 +128,24 @@ export function buildClaudeArgs(
   return args
 }
 
+/** runClaudeCode のオプション */
+export interface RunClaudeCodeOptions {
+  message: string
+  sendChunk: (type: ChatChunkType, content: string) => Promise<void>
+  allowedTools?: string[]
+  addDirs?: string[]
+  locale?: string
+  awsEnv?: Record<string, string>
+  mcpConfigPath?: string
+  cwd?: string
+  systemPrompt?: string
+}
+
 /**
  * Claude Code CLI をサブプロセスとして実行し、出力をストリーミングで返す
  */
-export async function runClaudeCode(
-  message: string,
-  sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
-  allowedTools?: string[],
-  addDirs?: string[],
-  locale?: string,
-  awsEnv?: Record<string, string>,
-  mcpConfigPath?: string,
-  cwd?: string,
-  systemPrompt?: string,
-): Promise<ClaudeCodeResult> {
+export async function runClaudeCode(options: RunClaudeCodeOptions): Promise<ClaudeCodeResult> {
+  const { message, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt } = options
   return new Promise<ClaudeCodeResult>((resolve, reject) => {
     const startTime = Date.now()
     // claude CLI が利用可能か確認し、print モードで実行

@@ -12,7 +12,7 @@ import { downloadChatFiles, parseChatFiles } from './file-transfer'
 import { createChunkSender, formatHistoryForClaudeCode, parseHistory } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
-export { buildClaudeArgs, buildCleanEnv } from './claude-code-runner'
+export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
 
 /**
  * エージェントチャットモードに応じてチャットメッセージを処理する
@@ -140,7 +140,17 @@ async function executeClaudeCodeChat(
     ].filter(Boolean).join(', ')
     logger.debug(`[chat] Spawning claude CLI for command [${commandId}]: ${logDetails}`)
     logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
-    const result = await runClaudeCode(messageWithHistory, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, projectDir, systemPrompt)
+    const result = await runClaudeCode({
+      message: messageWithHistory,
+      sendChunk,
+      allowedTools,
+      addDirs,
+      locale,
+      awsEnv,
+      mcpConfigPath,
+      cwd: projectDir,
+      systemPrompt,
+    })
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, duration=${result.metadata.durationMs}ms`)
     // 完了チャンクを送信（metadata を含める）
     const doneContent = JSON.stringify({

@@ -4,6 +4,7 @@ import * as path from 'path'
 import { getAwsDir } from './project-dir'
 import { logger } from './logger'
 import type { AwsCredentials, ProjectConfigResponse } from './types'
+import { atomicWriteFile } from './utils'
 
 type AwsAccount = NonNullable<ProjectConfigResponse['aws']>['accounts'][number]
 
@@ -63,9 +64,7 @@ export function writeAwsConfig(
 
     const content = generateAwsConfig(projectCode, accounts)
     const configPath = path.join(awsDir, 'config')
-    const tmpPath = configPath + '.tmp'
-    fs.writeFileSync(tmpPath, content, { mode: 0o600 })
-    fs.renameSync(tmpPath, configPath)
+    atomicWriteFile(configPath, content)
 
     logger.debug(`AWS config written to ${configPath} (${accounts.length} profiles)`)
   } catch (error) {
@@ -118,9 +117,7 @@ export function writeAwsCredentials(
 
     const content = generateAwsCredentials(projectCode, credentialMap)
     const credentialsPath = path.join(awsDir, 'credentials')
-    const tmpPath = credentialsPath + '.tmp'
-    fs.writeFileSync(tmpPath, content, { mode: 0o600 })
-    fs.renameSync(tmpPath, credentialsPath)
+    atomicWriteFile(credentialsPath, content)
 
     logger.debug(`AWS credentials written to ${credentialsPath} (${credentialMap.size} profiles)`)
   } catch (error) {

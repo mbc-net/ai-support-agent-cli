@@ -1,8 +1,8 @@
 import WebSocket from 'ws'
 
 import { logger } from '../logger'
-import { calculateBackoff } from '../retry-strategy'
 import { getErrorMessage } from '../utils'
+import { attemptReconnect } from '../ws-reconnect'
 
 import {
   TERMINAL_WS_MAX_RECONNECT_RETRIES,
@@ -39,7 +39,7 @@ export interface TerminalAgentMessage {
 export class TerminalWebSocket {
   private ws: WebSocket | null = null
   private readonly manager: TerminalSessionManager
-  private reconnectAttempts = 0
+  private readonly reconnectAttemptsRef = { current: 0 }
   private closed = false
   private readonly wsUrl: string
 
@@ -59,7 +59,7 @@ export class TerminalWebSocket {
 
   connect(): Promise<void> {
     this.closed = false
-    this.reconnectAttempts = 0
+    this.reconnectAttemptsRef.current = 0
     return this.doConnect()
   }
 
@@ -91,7 +91,7 @@ export class TerminalWebSocket {
 
       ws.on('open', () => {
         logger.info('[terminal-ws] Connected to terminal WebSocket')
-        this.reconnectAttempts = 0
+        this.reconnectAttemptsRef.current = 0
         resolve()
       })
 
@@ -108,7 +108,7 @@ export class TerminalWebSocket {
 
       ws.on('error', (error: Error) => {
         logger.debug(`[terminal-ws] WebSocket error: ${getErrorMessage(error)}`)
-        if (this.reconnectAttempts === 0 && !this.ws) {
+        if (this.reconnectAttemptsRef.current === 0 && !this.ws) {
           reject(error)
         }
       })
@@ -116,7 +116,7 @@ export class TerminalWebSocket {
       ws.on('close', () => {
         if (!this.closed) {
           logger.info('[terminal-ws] Connection closed, attempting reconnect...')
-          void this.attemptReconnect()
+          void this.doReconnect()
         }
       })
 
@@ -225,32 +225,13 @@ export class TerminalWebSocket {
     }
   }
 
-  private async attemptReconnect(): Promise<void> {
-    if (this.closed || this.reconnectAttempts >= TERMINAL_WS_MAX_RECONNECT_RETRIES) {
-      if (this.reconnectAttempts >= TERMINAL_WS_MAX_RECONNECT_RETRIES) {
-        logger.error('[terminal-ws] Max reconnect attempts reached')
-      }
-      return
-    }
-
-    this.reconnectAttempts++
-    const delay = calculateBackoff({
+  private async doReconnect(): Promise<void> {
+    await attemptReconnect(this.reconnectAttemptsRef, {
+      maxRetries: TERMINAL_WS_MAX_RECONNECT_RETRIES,
       baseDelayMs: TERMINAL_WS_RECONNECT_BASE_DELAY_MS,
-      attempt: this.reconnectAttempts - 1,
-      jitter: false,
+      logPrefix: '[terminal-ws]',
+      connectFn: () => this.doConnect(),
+      isClosedFn: () => this.closed,
     })
-    logger.info(`[terminal-ws] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${TERMINAL_WS_MAX_RECONNECT_RETRIES})`)
-
-    await new Promise<void>((resolve) => setTimeout(resolve, delay))
-
-    if (this.closed) return
-
-    try {
-      await this.doConnect()
-      logger.info('[terminal-ws] Reconnected successfully')
-    } catch (error) {
-      logger.warn(`[terminal-ws] Reconnect failed: ${getErrorMessage(error)}`)
-      void this.attemptReconnect()
-    }
   }
 }

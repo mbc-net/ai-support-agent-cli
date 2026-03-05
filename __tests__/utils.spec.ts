@@ -1,4 +1,7 @@
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl } from '../src/utils'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
+import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -121,5 +124,53 @@ describe('validateApiUrl', () => {
   it('should reject empty string', () => {
     const result = validateApiUrl('')
     expect(result).toContain('Invalid URL')
+  })
+})
+
+describe('atomicWriteFile', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atomic-write-test-'))
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true })
+  })
+
+  it('should write file with content', () => {
+    const filePath = path.join(tmpDir, 'test.txt')
+    atomicWriteFile(filePath, 'hello world')
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe('hello world')
+  })
+
+  it('should atomically replace existing file', () => {
+    const filePath = path.join(tmpDir, 'test.txt')
+    atomicWriteFile(filePath, 'original')
+    atomicWriteFile(filePath, 'updated')
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe('updated')
+    expect(fs.existsSync(filePath + '.tmp')).toBe(false)
+  })
+
+  it('should use default mode 0o600', () => {
+    const filePath = path.join(tmpDir, 'test.txt')
+    atomicWriteFile(filePath, 'secure content')
+
+    const stat = fs.statSync(filePath)
+    expect(stat.mode & 0o777).toBe(0o600)
+  })
+
+  it('should accept custom mode', () => {
+    const filePath = path.join(tmpDir, 'test.txt')
+    atomicWriteFile(filePath, 'content', 0o644)
+
+    const stat = fs.statSync(filePath)
+    expect(stat.mode & 0o777).toBe(0o644)
+  })
+
+  it('should not leave tmp file after successful write', () => {
+    const filePath = path.join(tmpDir, 'test.txt')
+    atomicWriteFile(filePath, 'content')
+    expect(fs.existsSync(filePath + '.tmp')).toBe(false)
   })
 })
