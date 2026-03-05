@@ -5,12 +5,14 @@ import { AGENT_VERSION, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJE
 import { getProjectList, loadConfig, saveConfig } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
+import { ProcessManager } from './process-manager'
 import { ProjectAgent } from './project-agent'
 import { captureException, flushSentry, initSentry } from './sentry'
 import { getSystemInfo } from './system-info'
 import type { AgentChatMode, AutoUpdateConfig, ProjectRegistration, ReleaseChannel } from './types'
 import { detectChannelFromVersion } from './update-checker'
 import { validateApiUrl } from './utils'
+import { ApiClient } from './api-client'
 
 export interface RunnerOptions {
   token?: string
@@ -50,8 +52,12 @@ function resolveIntervals(options: RunnerOptions): {
   }
 }
 
+export type ShutdownTarget =
+  | { kind: 'agents'; agents: { stop: () => void }[] }
+  | { kind: 'processManager'; processManager: ProcessManager }
+
 export function setupShutdownHandlers(
-  agents: { stop: () => void }[],
+  target: ShutdownTarget,
   updater?: AutoUpdaterHandle,
 ): void {
   let shuttingDown = false
@@ -60,13 +66,48 @@ export function setupShutdownHandlers(
     shuttingDown = true
     logger.info(t('runner.shuttingDown'))
     updater?.stop()
-    agents.forEach((a) => a.stop())
+    if (target.kind === 'processManager') {
+      await target.processManager.stopAll()
+    } else {
+      target.agents.forEach((a) => a.stop())
+    }
     await flushSentry()
     logger.success(t('runner.stopped'))
     process.exit(0)
   }
   process.on('SIGINT', () => void shutdown())
   process.on('SIGTERM', () => void shutdown())
+}
+
+function logMultiProjectStartup(
+  projects: ProjectRegistration[],
+  pollInterval: number,
+  heartbeatInterval: number,
+): void {
+  logger.info(t('runner.startedMulti', { count: projects.length, pollInterval, heartbeatInterval }))
+  for (const p of projects) {
+    logger.info(`  - ${p.projectCode} (${p.apiUrl})`)
+  }
+  logger.info(t('runner.stopHint'))
+}
+
+function initAutoUpdater(
+  options: RunnerOptions,
+  config: { autoUpdate?: AutoUpdateConfig } | null | undefined,
+  client: ApiClient,
+  agentId: string,
+  stopAllAgents: () => void,
+): AutoUpdaterHandle | undefined {
+  const autoUpdateConfig = resolveAutoUpdateConfig(options, config)
+  if (!autoUpdateConfig.enabled) return undefined
+  return startAutoUpdater(
+    [client],
+    autoUpdateConfig,
+    stopAllAgents,
+    (error) => {
+      void client.heartbeat(agentId, getSystemInfo(), error).catch(() => {})
+    },
+  )
 }
 
 export function resolveAutoUpdateConfig(options: RunnerOptions, config?: { autoUpdate?: AutoUpdateConfig } | null): AutoUpdateConfig {
@@ -94,22 +135,11 @@ function runSingleProject(
   logger.info(t('runner.starting'))
   const agent = startProjectAgent(project, agentId, { pollInterval, heartbeatInterval, agentChatMode, defaultProjectDir })
 
-  const autoUpdateConfig = resolveAutoUpdateConfig(options)
-  let updater: AutoUpdaterHandle | undefined
-  if (autoUpdateConfig.enabled) {
-    updater = startAutoUpdater(
-      [agent.client],
-      autoUpdateConfig,
-      () => agent.stop(),
-      (error) => {
-        void agent.client.heartbeat(agentId, getSystemInfo(), error).catch(() => {})
-      },
-    )
-  }
+  const updater = initAutoUpdater(options, undefined, agent.client, agentId, () => agent.stop())
 
   logger.info(t('runner.startedSingle', { pollInterval, heartbeatInterval }))
   logger.info(t('runner.stopHint'))
-  setupShutdownHandlers([agent], updater)
+  setupShutdownHandlers({ kind: 'agents', agents: [agent] }, updater)
 }
 
 export async function startAgent(options: RunnerOptions): Promise<void> {
@@ -191,32 +221,34 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
 
   logger.info(t('runner.startingMulti', { count: projects.length }))
 
-  const agents = projects.map((project) =>
-    startProjectAgent(project, agentId, { pollInterval, heartbeatInterval, agentChatMode: config.agentChatMode, defaultProjectDir: config.defaultProjectDir }),
-  )
+  if (projects.length === 1) {
+    // Single project: run in-process (no fork overhead)
+    const agent = startProjectAgent(projects[0], agentId, { pollInterval, heartbeatInterval, agentChatMode: config.agentChatMode, defaultProjectDir: config.defaultProjectDir })
+    saveConfig({ lastConnected: new Date().toISOString() })
+
+    const updater = initAutoUpdater(options, config, agent.client, agentId, () => agent.stop())
+
+    logMultiProjectStartup(projects, pollInterval, heartbeatInterval)
+    setupShutdownHandlers({ kind: 'agents', agents: [agent] }, updater)
+    return
+  }
+
+  // Multiple projects: fork child processes for isolation
+  const processManager = new ProcessManager()
+  for (const project of projects) {
+    processManager.forkProject(project, agentId, {
+      pollInterval,
+      heartbeatInterval,
+      agentChatMode: config.agentChatMode,
+      defaultProjectDir: config.defaultProjectDir,
+    })
+  }
 
   saveConfig({ lastConnected: new Date().toISOString() })
 
-  const autoUpdateConfig = resolveAutoUpdateConfig(options, config)
-  let updater: AutoUpdaterHandle | undefined
-  if (autoUpdateConfig.enabled) {
-    const clients = agents.map((a) => a.client)
-    updater = startAutoUpdater(
-      clients,
-      autoUpdateConfig,
-      () => agents.forEach((a) => a.stop()),
-      (error) => {
-        void agents[0]?.client.heartbeat(agentId, getSystemInfo(), error).catch(() => {})
-      },
-    )
-  }
+  const client = new ApiClient(projects[0].apiUrl, projects[0].token)
+  const updater = initAutoUpdater(options, config, client, agentId, () => processManager.sendUpdateToAll())
 
-  logger.info(
-    t('runner.startedMulti', { count: projects.length, pollInterval, heartbeatInterval }),
-  )
-  for (const p of projects) {
-    logger.info(`  - ${p.projectCode} (${p.apiUrl})`)
-  }
-  logger.info(t('runner.stopHint'))
-  setupShutdownHandlers(agents, updater)
+  logMultiProjectStartup(projects, pollInterval, heartbeatInterval)
+  setupShutdownHandlers({ kind: 'processManager', processManager }, updater)
 }

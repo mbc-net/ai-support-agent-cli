@@ -108,3 +108,8 @@ export const API_ENDPOINTS = {
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000
 export const INITIAL_CONFIG_SYNC_MAX_RETRIES = 3
 export const INITIAL_CONFIG_SYNC_RETRY_DELAY_MS = 2000
+
+// Child process management
+export const CHILD_PROCESS_MAX_RESTARTS = 5
+export const CHILD_PROCESS_RESTART_DELAY_MS = 5000
+export const CHILD_PROCESS_STOP_TIMEOUT_MS = 10000
