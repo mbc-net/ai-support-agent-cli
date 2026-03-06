@@ -2,7 +2,7 @@ import * as os from 'os'
 
 import { ERR_INVALID_PID, PROCESS_LIST_TIMEOUT } from '../constants'
 import { ALLOWED_SIGNALS } from '../security'
-import type { CommandResult, ProcessKillPayload } from '../types'
+import { type CommandResult, errorResult, type ProcessKillPayload, successResult } from '../types'
 import { getErrorMessage, parseNumber, parseString } from '../utils'
 
 import { executeShellCommand } from './shell-executor'
@@ -20,19 +20,19 @@ export async function processKill(
 ): Promise<CommandResult> {
   const pid = parseNumber(payload.pid)
   if (!pid || pid < 1 || !Number.isInteger(pid)) {
-    return { success: false, error: ERR_INVALID_PID }
+    return errorResult(ERR_INVALID_PID)
   }
 
   const signal = parseString(payload.signal) ?? 'SIGTERM'
 
   if (!ALLOWED_SIGNALS.has(signal)) {
-    return { success: false, error: `Signal not allowed: ${signal}. Allowed: ${[...ALLOWED_SIGNALS].join(', ')}` }
+    return errorResult(`Signal not allowed: ${signal}. Allowed: ${[...ALLOWED_SIGNALS].join(', ')}`)
   }
 
   try {
     process.kill(pid, signal)
-    return { success: true, data: `Sent ${signal} to PID ${pid}` }
+    return successResult(`Sent ${signal} to PID ${pid}`)
   } catch (error) {
-    return { success: false, error: getErrorMessage(error) }
+    return errorResult(getErrorMessage(error))
   }
 }

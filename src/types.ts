@@ -86,6 +86,14 @@ export type CommandResult =
   | { success: true; data: unknown }
   | { success: false; error: string; data?: unknown }
 
+export function successResult(data: unknown): CommandResult {
+  return { success: true, data }
+}
+
+export function errorResult(error: string, data?: unknown): CommandResult {
+  return { success: false, error, ...(data !== undefined && { data }) }
+}
+
 export interface RegisterRequest {
   agentId: string
   hostname: string

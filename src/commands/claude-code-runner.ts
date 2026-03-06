@@ -18,7 +18,7 @@ export interface ClaudeCodeResult {
 }
 
 /** stream-json の assistant/user メッセージ内のコンテンツブロック */
-interface StreamJsonContentBlock {
+export interface StreamJsonContentBlock {
   type: 'text' | 'tool_use' | 'tool_result' | 'tool_reference'
   text?: string
   name?: string
@@ -31,14 +31,14 @@ interface StreamJsonContentBlock {
 }
 
 /** stream-json の MCP サーバー接続情報 */
-interface StreamJsonMcpServer {
+export interface StreamJsonMcpServer {
   name: string
   status: string
   error?: string
 }
 
 /** stream-json の1行（NDJSON）の型定義 */
-interface StreamJsonLine {
+export interface StreamJsonLine {
   type: string
   subtype?: string
   message?: {

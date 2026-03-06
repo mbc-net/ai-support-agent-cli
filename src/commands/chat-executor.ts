@@ -2,7 +2,7 @@ import { ApiClient } from '../api-client'
 import { type AwsCredentialResult, buildAwsProfileCredentials, buildSingleAccountAwsEnv } from '../aws-credential-builder'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, LOG_MESSAGE_LIMIT } from '../constants'
 import { logger } from '../logger'
-import type { AgentChatMode, AgentServerConfig, ChatChunkType, ChatPayload, CommandResult, ProjectConfigResponse } from '../types'
+import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
 import { parseString, truncateString } from '../utils'
 
 import { getAutoAddDirs } from '../project-dir'
@@ -33,7 +33,7 @@ export async function executeChatCommand(
   mcpConfigPath?: string,
 ): Promise<CommandResult> {
   if (!agentId) {
-    return { success: false, error: ERR_AGENT_ID_REQUIRED }
+    return errorResult(ERR_AGENT_ID_REQUIRED)
   }
 
   const mode = activeChatMode ?? 'claude_code'
@@ -64,7 +64,7 @@ async function executeClaudeCodeChat(
 ): Promise<CommandResult> {
   const message = parseString(payload.message)
   if (!message) {
-    return { success: false, error: ERR_MESSAGE_REQUIRED }
+    return errorResult(ERR_MESSAGE_REQUIRED)
   }
 
   logger.info(`[chat] Starting chat command [${commandId}]: message="${truncateString(message, LOG_MESSAGE_LIMIT)}"`)
@@ -162,7 +162,7 @@ async function executeClaudeCodeChat(
     // ダウンロードした一時ファイルをクリーンアップ
     cleanupDownloads?.()
 
-    return { success: true, data: result.text }
+    return successResult(result.text)
   } catch (error) {
     return handleChatError(error, commandId, 'chat', sendChunk)
   }

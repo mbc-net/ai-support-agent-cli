@@ -4,6 +4,7 @@ import { ApiClient } from '../api-client'
 import {
   ANTHROPIC_API_URL,
   ANTHROPIC_API_VERSION,
+  ANTHROPIC_CONTENT_TYPE,
   CHAT_TIMEOUT,
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_MAX_TOKENS,
@@ -11,9 +12,12 @@ import {
   ERR_ANTHROPIC_API_KEY_NOT_SET,
   ERR_MESSAGE_REQUIRED,
   LOG_MESSAGE_LIMIT,
+  SSE_DONE,
+  SSE_EVENT,
+  SSE_PREFIX,
 } from '../constants'
 import { logger } from '../logger'
-import type { AgentServerConfig, ChatChunkType, ChatPayload, CommandResult, HistoryMessage } from '../types'
+import { type AgentServerConfig, type ChatChunkType, type ChatPayload, type CommandResult, errorResult, type HistoryMessage, successResult } from '../types'
 import { parseString, truncateString } from '../utils'
 
 import { createChunkSender, handleChatError, parseHistory } from './shared-chat-utils'
@@ -42,20 +46,17 @@ export async function executeApiChatCommand(
   agentId?: string,
 ): Promise<CommandResult> {
   if (!agentId) {
-    return { success: false, error: ERR_AGENT_ID_REQUIRED }
+    return errorResult(ERR_AGENT_ID_REQUIRED)
   }
 
   const message = parseString(payload.message)
   if (!message) {
-    return { success: false, error: ERR_MESSAGE_REQUIRED }
+    return errorResult(ERR_MESSAGE_REQUIRED)
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) {
-    return {
-      success: false,
-      error: ERR_ANTHROPIC_API_KEY_NOT_SET,
-    }
+    return errorResult(ERR_ANTHROPIC_API_KEY_NOT_SET)
   }
 
   logger.info(
@@ -95,7 +96,7 @@ export async function executeApiChatCommand(
       },
     })
     await sendChunk('done', doneContent)
-    return { success: true, data: result.text }
+    return successResult(result.text)
   } catch (error) {
     return handleChatError(error, commandId, 'api-chat', sendChunk)
   }
@@ -159,34 +160,34 @@ async function callAnthropicApi(
       buffer = lines.pop() ?? ''
 
       for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        const data = line.slice(6).trim()
-        if (data === '[DONE]') continue
+        if (!line.startsWith(SSE_PREFIX)) continue
+        const data = line.slice(SSE_PREFIX.length).trim()
+        if (data === SSE_DONE) continue
 
         try {
           const event = JSON.parse(data) as Record<string, unknown>
-          if (event.type === 'message_start') {
+          if (event.type === SSE_EVENT.MESSAGE_START) {
             // message_start イベントから input_tokens を取得
             const msg = event.message as Record<string, unknown> | undefined
             const msgUsage = msg?.usage as Record<string, unknown> | undefined
             if (typeof msgUsage?.input_tokens === 'number') {
               usage.inputTokens = msgUsage.input_tokens
             }
-          } else if (event.type === 'message_delta') {
+          } else if (event.type === SSE_EVENT.MESSAGE_DELTA) {
             // message_delta イベントから output_tokens を取得
             const deltaUsage = event.usage as Record<string, unknown> | undefined
             if (typeof deltaUsage?.output_tokens === 'number') {
               usage.outputTokens = deltaUsage.output_tokens
             }
-          } else if (event.type === 'content_block_delta') {
+          } else if (event.type === SSE_EVENT.CONTENT_BLOCK_DELTA) {
             const delta = event.delta as Record<string, unknown> | undefined
-            if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+            if (delta?.type === ANTHROPIC_CONTENT_TYPE.TEXT_DELTA && typeof delta.text === 'string') {
               fullOutput += delta.text
               void sendChunk('delta', delta.text)
             }
-          } else if (event.type === 'content_block_start') {
+          } else if (event.type === SSE_EVENT.CONTENT_BLOCK_START) {
             const contentBlock = event.content_block as Record<string, unknown> | undefined
-            if (contentBlock?.type === 'tool_use') {
+            if (contentBlock?.type === ANTHROPIC_CONTENT_TYPE.TOOL_USE) {
               const toolName = contentBlock.name as string ?? 'unknown'
               logger.info(`[api-chat] Tool use requested: ${toolName} (not supported in API mode)`)
               void sendChunk('delta', `\n[Tool call: ${toolName} — tool use is not supported in API chat mode]\n`)

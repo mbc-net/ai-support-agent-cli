@@ -3,7 +3,7 @@ import * as path from 'path'
 
 import { ERR_NO_CONTENT_SPECIFIED, ERR_NO_FILE_PATH_SPECIFIED, MAX_DIR_ENTRIES, MAX_FILE_READ_SIZE, MAX_FILE_WRITE_SIZE } from '../constants'
 import { resolveAndValidatePath } from '../security'
-import type { CommandResult, FileDeletePayload, FileListPayload, FileMkdirPayload, FileReadPayload, FileRenamePayload, FileWritePayload } from '../types'
+import { type CommandResult, errorResult, type FileDeletePayload, type FileListPayload, type FileMkdirPayload, type FileReadPayload, type FileRenamePayload, type FileWritePayload, successResult } from '../types'
 import { parseString } from '../utils'
 
 import { withValidatedPath } from './file-path-guard'
@@ -14,14 +14,11 @@ export async function fileRead(
   return withValidatedPath(payload, async (filePath) => {
     const stat = await fs.promises.stat(filePath)
     if (stat.size > MAX_FILE_READ_SIZE) {
-      return {
-        success: false,
-        error: `File too large: ${stat.size} bytes (limit: ${MAX_FILE_READ_SIZE} bytes)`,
-      }
+      return errorResult(`File too large: ${stat.size} bytes (limit: ${MAX_FILE_READ_SIZE} bytes)`)
     }
 
     const content = await fs.promises.readFile(filePath, 'utf-8')
-    return { success: true, data: content }
+    return successResult(content)
   })
 }
 
@@ -31,10 +28,10 @@ export async function fileWrite(
   return withValidatedPath(payload, async (filePath) => {
     const content = typeof payload.content === 'string' ? payload.content : null
     if (content === null) {
-      return { success: false, error: ERR_NO_CONTENT_SPECIFIED }
+      return errorResult(ERR_NO_CONTENT_SPECIFIED)
     }
     if (content.length > MAX_FILE_WRITE_SIZE) {
-      return { success: false, error: `Content too large: ${content.length} bytes (limit: ${MAX_FILE_WRITE_SIZE} bytes)` }
+      return errorResult(`Content too large: ${content.length} bytes (limit: ${MAX_FILE_WRITE_SIZE} bytes)`)
     }
 
     if (payload.createDirectories) {
@@ -42,7 +39,7 @@ export async function fileWrite(
     }
 
     await fs.promises.writeFile(filePath, content, 'utf-8')
-    return { success: true, data: `Written to ${filePath}` }
+    return successResult(`Written to ${filePath}`)
   })
 }
 
@@ -67,7 +64,7 @@ export async function fileList(
       }),
     )
 
-    return { success: true, data: { items, truncated, total: allEntries.length } }
+    return successResult({ items, truncated, total: allEntries.length })
   }, '.')
 }
 
@@ -77,7 +74,7 @@ export async function fileRename(
   const oldPath = parseString(payload.oldPath)
   const newPath = parseString(payload.newPath)
   if (!oldPath || !newPath) {
-    return { success: false, error: ERR_NO_FILE_PATH_SPECIFIED }
+    return errorResult(ERR_NO_FILE_PATH_SPECIFIED)
   }
 
   const oldPathOrError = await resolveAndValidatePath({ path: oldPath })
@@ -86,7 +83,7 @@ export async function fileRename(
   if (typeof newPathOrError !== 'string') return newPathOrError
 
   await fs.promises.rename(oldPathOrError, newPathOrError)
-  return { success: true, data: `Renamed ${oldPathOrError} to ${newPathOrError}` }
+  return successResult(`Renamed ${oldPathOrError} to ${newPathOrError}`)
 }
 
 export async function fileDelete(
@@ -103,7 +100,7 @@ export async function fileDelete(
         await fs.promises.unlink(resolvedPath)
       }
     }
-    return { success: true, data: `Deleted ${resolvedPath}` }
+    return successResult(`Deleted ${resolvedPath}`)
   })
 }
 
@@ -112,6 +109,6 @@ export async function fileMkdir(
 ): Promise<CommandResult> {
   return withValidatedPath(payload, async (resolvedPath) => {
     await fs.promises.mkdir(resolvedPath, { recursive: true })
-    return { success: true, data: `Created directory ${resolvedPath}` }
+    return successResult(`Created directory ${resolvedPath}`)
   })
 }
