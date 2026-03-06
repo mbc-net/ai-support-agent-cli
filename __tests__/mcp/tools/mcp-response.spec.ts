@@ -1,4 +1,4 @@
-import { getErrorMessage, mcpErrorResponse, mcpTextResponse } from '../../../src/mcp/tools/mcp-response'
+import { getErrorMessage, mcpErrorResponse, mcpTextResponse, withMcpErrorHandling } from '../../../src/mcp/tools/mcp-response'
 
 describe('mcp-response helpers', () => {
   describe('mcpTextResponse', () => {
@@ -57,6 +57,34 @@ describe('mcp-response helpers', () => {
 
     it('should convert undefined to string', () => {
       expect(getErrorMessage(undefined)).toBe('undefined')
+    })
+  })
+
+  describe('withMcpErrorHandling', () => {
+    it('should return result on success', async () => {
+      const expected = mcpTextResponse('ok')
+      const result = await withMcpErrorHandling(async () => expected)
+      expect(result).toEqual(expected)
+    })
+
+    it('should catch Error and return mcpErrorResponse', async () => {
+      const result = await withMcpErrorHandling(async () => {
+        throw new Error('something broke')
+      })
+      expect(result).toEqual({
+        content: [{ type: 'text', text: 'Error: something broke' }],
+        isError: true,
+      })
+    })
+
+    it('should catch non-Error (string) and return mcpErrorResponse', async () => {
+      const result = await withMcpErrorHandling(async () => {
+        throw 'string error'
+      })
+      expect(result).toEqual({
+        content: [{ type: 'text', text: 'Error: string error' }],
+        isError: true,
+      })
     })
   })
 })

@@ -3,7 +3,7 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import type { DbCredentials } from '../../types'
-import { getErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
+import { mcpErrorResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
 
 /** SQL文を検証する。writePermissions で INSERT/UPDATE/DELETE の許可を制御 */
 export function validateSql(
@@ -111,25 +111,21 @@ export function registerDbQueryTool(server: McpServer, apiClient: ApiClient): vo
       name: z.string().describe('Database connection name (e.g. "MAIN", "READONLY")'),
       sql: z.string().describe('SQL query to execute (SELECT, INSERT, UPDATE, DELETE)'),
     },
-    async ({ name, sql }) => {
-      try {
-        // Get credentials from API (includes writePermissions)
-        const credentials = await apiClient.getDbCredentials(name)
+    async ({ name, sql }) => withMcpErrorHandling(async () => {
+      // Get credentials from API (includes writePermissions)
+      const credentials = await apiClient.getDbCredentials(name)
 
-        // Validate SQL with write permissions
-        const validation = validateSql(sql, credentials.writePermissions)
-        if (!validation.valid) {
-          return mcpErrorResponse(validation.error!)
-        }
-
-        // Execute query
-        const rows = await executeQuery(credentials, sql)
-
-        // Format result
-        return mcpTextResponse(JSON.stringify(rows, null, 2))
-      } catch (error) {
-        return mcpErrorResponse(getErrorMessage(error))
+      // Validate SQL with write permissions
+      const validation = validateSql(sql, credentials.writePermissions)
+      if (!validation.valid) {
+        return mcpErrorResponse(validation.error!)
       }
-    },
+
+      // Execute query
+      const rows = await executeQuery(credentials, sql)
+
+      // Format result
+      return mcpTextResponse(JSON.stringify(rows, null, 2))
+    }),
   )
 }
