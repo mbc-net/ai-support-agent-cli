@@ -3,13 +3,13 @@ import { type AwsCredentialResult, buildAwsProfileCredentials, buildSingleAccoun
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, LOG_MESSAGE_LIMIT } from '../constants'
 import { logger } from '../logger'
 import type { AgentChatMode, AgentServerConfig, ChatChunkType, ChatPayload, CommandResult, ProjectConfigResponse } from '../types'
-import { getErrorMessage, parseString, truncateString } from '../utils'
+import { parseString, truncateString } from '../utils'
 
 import { getAutoAddDirs } from '../project-dir'
 import { executeApiChatCommand } from './api-chat-executor'
 import { runClaudeCode } from './claude-code-runner'
 import { downloadChatFiles, parseChatFiles } from './file-transfer'
-import { createChunkSender, formatHistoryForClaudeCode, parseHistory } from './shared-chat-utils'
+import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
@@ -164,10 +164,7 @@ async function executeClaudeCodeChat(
 
     return { success: true, data: result.text }
   } catch (error) {
-    const errorMessage = getErrorMessage(error)
-    logger.error(`[chat] Chat command failed [${commandId}]: ${errorMessage}`)
-    await sendChunk('error', errorMessage)
-    return { success: false, error: errorMessage }
+    return handleChatError(error, commandId, 'chat', sendChunk)
   }
 }
 

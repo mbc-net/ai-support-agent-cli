@@ -14,9 +14,9 @@ import {
 } from '../constants'
 import { logger } from '../logger'
 import type { AgentServerConfig, ChatChunkType, ChatPayload, CommandResult, HistoryMessage } from '../types'
-import { getErrorMessage, parseString, truncateString } from '../utils'
+import { parseString, truncateString } from '../utils'
 
-import { createChunkSender, parseHistory } from './shared-chat-utils'
+import { createChunkSender, handleChatError, parseHistory } from './shared-chat-utils'
 
 /** Anthropic API のトークン使用量 */
 interface ApiUsage {
@@ -97,10 +97,7 @@ export async function executeApiChatCommand(
     await sendChunk('done', doneContent)
     return { success: true, data: result.text }
   } catch (error) {
-    const errorMessage = getErrorMessage(error)
-    logger.error(`[api-chat] API chat command failed [${commandId}]: ${errorMessage}`)
-    await sendChunk('error', errorMessage)
-    return { success: false, error: errorMessage }
+    return handleChatError(error, commandId, 'api-chat', sendChunk)
   }
 }
 
