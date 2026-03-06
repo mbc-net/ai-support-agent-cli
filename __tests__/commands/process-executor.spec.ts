@@ -1,4 +1,5 @@
 import { processKill, processList } from '../../src/commands/process-executor'
+import * as shellExecutor from '../../src/commands/shell-executor'
 import type { CommandResult } from '../../src/types'
 
 function expectFailure(result: CommandResult): asserts result is { success: false; error: string; data?: unknown } {
@@ -11,6 +12,43 @@ describe('process-executor', () => {
       const result = await processList()
       expect(result.success).toBe(true)
       expect(result.data).toBeDefined()
+    })
+
+    it('should truncate output exceeding 50KB', async () => {
+      const header = 'USER PID %CPU %MEM COMMAND'
+      const line = 'user 12345 0.0 0.1 some-process'
+      // 50KB超のデータを生成
+      const lines = [header, ...Array(3000).fill(line)]
+      const largeOutput = lines.join('\n')
+      expect(largeOutput.length).toBeGreaterThan(50000)
+
+      jest.spyOn(shellExecutor, 'executeShellCommand').mockResolvedValue({
+        success: true,
+        data: largeOutput,
+      })
+
+      const result = await processList()
+      expect(result.success).toBe(true)
+      expect(typeof result.data).toBe('string')
+      expect((result.data as string).length).toBeLessThanOrEqual(51000) // header + truncation message
+      expect(result.data).toContain(header)
+      expect(result.data).toContain('more processes truncated')
+
+      jest.restoreAllMocks()
+    })
+
+    it('should not truncate output under 50KB', async () => {
+      const smallOutput = 'USER PID COMMAND\nuser 1 init\nuser 2 bash'
+      jest.spyOn(shellExecutor, 'executeShellCommand').mockResolvedValue({
+        success: true,
+        data: smallOutput,
+      })
+
+      const result = await processList()
+      expect(result.success).toBe(true)
+      expect(result.data).toBe(smallOutput)
+
+      jest.restoreAllMocks()
     })
   })
 

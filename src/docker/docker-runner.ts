@@ -1,4 +1,4 @@
-import { execSync, spawn } from 'child_process'
+import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
 import * as path from 'path'
 import * as fs from 'fs'
@@ -31,7 +31,7 @@ export interface DockerRunOptions {
 
 export function checkDockerAvailable(): boolean {
   try {
-    execSync('docker info', { stdio: 'ignore' })
+    execFileSync('docker', ['info'], { stdio: 'ignore' })
     return true
   } catch {
     return false
@@ -40,7 +40,7 @@ export function checkDockerAvailable(): boolean {
 
 export function imageExists(version: string): boolean {
   try {
-    execSync(`docker image inspect ${IMAGE_NAME}:${version}`, { stdio: 'ignore' })
+    execFileSync('docker', ['image', 'inspect', `${IMAGE_NAME}:${version}`], { stdio: 'ignore' })
     return true
   } catch {
     return false
@@ -51,8 +51,9 @@ export function buildImage(version: string): void {
   const dockerfilePath = getDockerfilePath()
   const contextDir = getDockerContextDir()
   logger.info(t('docker.building'))
-  execSync(
-    `docker build -t ${IMAGE_NAME}:${version} --build-arg AGENT_VERSION=${version} -f ${dockerfilePath} ${contextDir}`,
+  execFileSync(
+    'docker',
+    ['build', '-t', `${IMAGE_NAME}:${version}`, '--build-arg', `AGENT_VERSION=${version}`, '-f', dockerfilePath, contextDir],
     { stdio: 'inherit' },
   )
   logger.success(t('docker.buildComplete'))

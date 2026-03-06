@@ -18,7 +18,7 @@ export function validateSql(
   const upper = trimmed.toUpperCase()
 
   // DDLは常に禁止
-  const ddlKeywords = ['DROP', 'TRUNCATE', 'ALTER', 'CREATE', 'GRANT', 'REVOKE']
+  const ddlKeywords = ['DROP', 'TRUNCATE', 'ALTER', 'CREATE', 'GRANT', 'REVOKE', 'UNION']
   for (const keyword of ddlKeywords) {
     const regex = new RegExp(`(?<![A-Z_])${keyword}(?![A-Z_])`)
     if (regex.test(upper)) {
