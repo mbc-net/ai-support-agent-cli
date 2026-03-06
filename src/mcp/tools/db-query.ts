@@ -3,7 +3,7 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import type { DbCredentials } from '../../types'
-import { extractErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
+import { getErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
 
 /** SQL文を検証する。writePermissions で INSERT/UPDATE/DELETE の許可を制御 */
 export function validateSql(
@@ -128,7 +128,7 @@ export function registerDbQueryTool(server: McpServer, apiClient: ApiClient): vo
         // Format result
         return mcpTextResponse(JSON.stringify(rows, null, 2))
       } catch (error) {
-        return mcpErrorResponse(extractErrorMessage(error))
+        return mcpErrorResponse(getErrorMessage(error))
       }
     },
   )

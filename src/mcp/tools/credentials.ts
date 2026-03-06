@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
-import { extractErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
+import { getErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
 
 /**
  * get_credentials ツールを MCP サーバーに登録する
@@ -41,7 +41,7 @@ export function registerCredentialsTool(server: McpServer, apiClient: ApiClient)
 
         return mcpErrorResponse(`Unknown credential type: ${type}`)
       } catch (error) {
-        return mcpErrorResponse(extractErrorMessage(error))
+        return mcpErrorResponse(getErrorMessage(error))
       }
     },
   )

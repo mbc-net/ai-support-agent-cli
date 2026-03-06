@@ -1,4 +1,4 @@
-import { extractErrorMessage, mcpErrorResponse, mcpTextResponse } from '../../../src/mcp/tools/mcp-response'
+import { getErrorMessage, mcpErrorResponse, mcpTextResponse } from '../../../src/mcp/tools/mcp-response'
 
 describe('mcp-response helpers', () => {
   describe('mcpTextResponse', () => {
@@ -37,26 +37,26 @@ describe('mcp-response helpers', () => {
     })
   })
 
-  describe('extractErrorMessage', () => {
+  describe('getErrorMessage (re-exported from utils)', () => {
     it('should extract message from Error instance', () => {
       const error = new Error('test error')
-      expect(extractErrorMessage(error)).toBe('test error')
+      expect(getErrorMessage(error)).toBe('test error')
     })
 
     it('should convert non-Error to string', () => {
-      expect(extractErrorMessage('string error')).toBe('string error')
+      expect(getErrorMessage('string error')).toBe('string error')
     })
 
     it('should convert number to string', () => {
-      expect(extractErrorMessage(42)).toBe('42')
+      expect(getErrorMessage(42)).toBe('42')
     })
 
     it('should convert null to string', () => {
-      expect(extractErrorMessage(null)).toBe('null')
+      expect(getErrorMessage(null)).toBe('null')
     })
 
     it('should convert undefined to string', () => {
-      expect(extractErrorMessage(undefined)).toBe('undefined')
+      expect(getErrorMessage(undefined)).toBe('undefined')
     })
   })
 })
