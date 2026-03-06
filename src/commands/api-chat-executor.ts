@@ -34,6 +34,33 @@ interface ApiChatResult {
   usage: ApiUsage
 }
 
+/** Anthropic SSE ストリーミングイベント型 */
+interface AnthropicMessageStartEvent {
+  type: 'message_start'
+  message?: { usage?: { input_tokens?: number } }
+}
+
+interface AnthropicMessageDeltaEvent {
+  type: 'message_delta'
+  usage?: { output_tokens?: number }
+}
+
+interface AnthropicContentBlockDeltaEvent {
+  type: 'content_block_delta'
+  delta?: { type: string; text?: string }
+}
+
+interface AnthropicContentBlockStartEvent {
+  type: 'content_block_start'
+  content_block?: { type: string; name?: string }
+}
+
+type AnthropicStreamEvent =
+  | AnthropicMessageStartEvent
+  | AnthropicMessageDeltaEvent
+  | AnthropicContentBlockDeltaEvent
+  | AnthropicContentBlockStartEvent
+
 /**
  * Anthropic API を直接呼び出してチャットメッセージを処理する
  * エージェントが持つ ANTHROPIC_API_KEY で Claude を呼び出す
@@ -165,30 +192,29 @@ async function callAnthropicApi(
         if (data === SSE_DONE) continue
 
         try {
-          const event = JSON.parse(data) as Record<string, unknown>
+          const event = JSON.parse(data) as AnthropicStreamEvent
           if (event.type === SSE_EVENT.MESSAGE_START) {
             // message_start イベントから input_tokens を取得
-            const msg = event.message as Record<string, unknown> | undefined
-            const msgUsage = msg?.usage as Record<string, unknown> | undefined
-            if (typeof msgUsage?.input_tokens === 'number') {
-              usage.inputTokens = msgUsage.input_tokens
+            const inputTokens = event.message?.usage?.input_tokens
+            if (typeof inputTokens === 'number') {
+              usage.inputTokens = inputTokens
             }
           } else if (event.type === SSE_EVENT.MESSAGE_DELTA) {
             // message_delta イベントから output_tokens を取得
-            const deltaUsage = event.usage as Record<string, unknown> | undefined
-            if (typeof deltaUsage?.output_tokens === 'number') {
-              usage.outputTokens = deltaUsage.output_tokens
+            const outputTokens = event.usage?.output_tokens
+            if (typeof outputTokens === 'number') {
+              usage.outputTokens = outputTokens
             }
           } else if (event.type === SSE_EVENT.CONTENT_BLOCK_DELTA) {
-            const delta = event.delta as Record<string, unknown> | undefined
+            const delta = event.delta
             if (delta?.type === ANTHROPIC_CONTENT_TYPE.TEXT_DELTA && typeof delta.text === 'string') {
               fullOutput += delta.text
               void sendChunk('delta', delta.text)
             }
           } else if (event.type === SSE_EVENT.CONTENT_BLOCK_START) {
-            const contentBlock = event.content_block as Record<string, unknown> | undefined
+            const contentBlock = event.content_block
             if (contentBlock?.type === ANTHROPIC_CONTENT_TYPE.TOOL_USE) {
-              const toolName = contentBlock.name as string ?? 'unknown'
+              const toolName = contentBlock.name ?? 'unknown'
               logger.info(`[api-chat] Tool use requested: ${toolName} (not supported in API mode)`)
               void sendChunk('delta', `\n[Tool call: ${toolName} — tool use is not supported in API chat mode]\n`)
             }
