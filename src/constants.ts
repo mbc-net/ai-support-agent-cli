@@ -100,6 +100,7 @@ export const API_ENDPOINTS = {
   CONFIG: '/api/agent/config',
   AWS_CREDENTIALS: '/api/agent/aws-credentials',
   DB_CREDENTIALS: '/api/agent/db-credentials',
+  REPO_CREDENTIALS: (repositoryId: string) => `/api/agent/repo-credentials/${repositoryId}`,
   PROJECT_CONFIG: '/api/agent/project-config',
   FILES_UPLOAD_URL: '/api/agent/files/upload-url',
   FILES_DOWNLOAD_URL: '/api/agent/files/download-url',
@@ -123,6 +124,11 @@ export const ANTHROPIC_CONTENT_TYPE = {
   TEXT_DELTA: 'text_delta',
   TOOL_USE: 'tool_use',
 } as const
+
+// Git clone/pull
+export const GIT_CLONE_TIMEOUT = 120_000
+export const GIT_FETCH_TIMEOUT = 60_000
+export const GIT_CHECKOUT_TIMEOUT = 30_000
 
 // Child process management
 export const CHILD_PROCESS_MAX_RESTARTS = 5

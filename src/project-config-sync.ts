@@ -75,8 +75,17 @@ export function saveCachedConfig(
         configHash: config.configHash,
         project: config.project,
         agent: config.agent,
+        repositories: config.repositories,
         documentation: config.documentation,
         // aws is intentionally excluded from cache
+        // backlog: APIキーを除外してキャッシュ
+        backlog: config.backlog
+          ? {
+              items: config.backlog.items.map(
+                ({ apiKey: _apiKey, ...rest }) => rest,
+              ),
+            }
+          : undefined,
       },
     }
 

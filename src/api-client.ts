@@ -16,6 +16,7 @@ import type {
   ReleaseChannel,
   RegisterRequest,
   RegisterResponse,
+  RepoCredentials,
   SystemInfo,
   VersionInfo,
 } from './types'
@@ -164,6 +165,11 @@ export class ApiClient {
   async getDbCredentials(name: string): Promise<DbCredentials> {
     logger.debug(`Fetching DB credentials for: ${name}`)
     return this.get<DbCredentials>(API_ENDPOINTS.DB_CREDENTIALS, { params: { name } })
+  }
+
+  async getRepoCredentials(repositoryId: string): Promise<RepoCredentials> {
+    logger.debug(`Fetching repo credentials for: ${repositoryId}`)
+    return this.get<RepoCredentials>(API_ENDPOINTS.REPO_CREDENTIALS(repositoryId))
   }
 
   async submitChatChunk(

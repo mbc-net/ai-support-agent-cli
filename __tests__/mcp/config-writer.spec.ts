@@ -92,5 +92,68 @@ describe('config-writer', () => {
 
       expect(configPath).toBe(getMcpConfigPath(testDir))
     })
+
+    it('should include backlog MCP server when backlogConfigs provided', () => {
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+        [{ domain: 'myspace.backlog.jp', apiKey: 'backlog-api-key-123' }],
+      )
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+      expect(content.mcpServers.backlog).toBeDefined()
+      expect(content.mcpServers.backlog.command).toBe('npx')
+      expect(content.mcpServers.backlog.args).toEqual(['backlog-mcp-server'])
+      expect(content.mcpServers.backlog.env.BACKLOG_DOMAIN).toBe('myspace.backlog.jp')
+      expect(content.mcpServers.backlog.env.BACKLOG_API_KEY).toBe('backlog-api-key-123')
+    })
+
+    it('should not include backlog MCP server when backlogConfigs is undefined', () => {
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+      expect(content.mcpServers.backlog).toBeUndefined()
+    })
+
+    it('should not include backlog MCP server when backlogConfigs is empty', () => {
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+        [],
+      )
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+      expect(content.mcpServers.backlog).toBeUndefined()
+    })
+
+    it('should use first backlog config when multiple provided', () => {
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+        [
+          { domain: 'first.backlog.jp', apiKey: 'key-1' },
+          { domain: 'second.backlog.jp', apiKey: 'key-2' },
+        ],
+      )
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+      expect(content.mcpServers.backlog.env.BACKLOG_DOMAIN).toBe('first.backlog.jp')
+      expect(content.mcpServers.backlog.env.BACKLOG_API_KEY).toBe('key-1')
+    })
   })
 })

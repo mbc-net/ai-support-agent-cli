@@ -14,6 +14,7 @@ import { writeAwsConfig } from './aws-profile'
 import { writeMcpConfig } from './mcp/config-writer'
 import { syncProjectConfig } from './project-config-sync'
 import { initProjectDir } from './project-dir'
+import { syncRepositories } from './repo-sync'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
 import { TerminalWebSocket } from './terminal'
 import type { AgentChatMode, AgentServerConfig, ProjectConfigResponse, ProjectRegistration, RegisterResponse } from './types'
@@ -297,7 +298,26 @@ export class ProjectAgent {
     // 1. Config sync
     await this.performConfigSync()
 
-    // 2. Download documentation (future: repos clone)
+    // 2. Clone/update repositories
+    if (this.projectDir && this.projectConfig?.repositories?.length) {
+      try {
+        const reposDir = join(this.projectDir, 'repos')
+        const results = await syncRepositories(
+          this.client,
+          this.projectConfig.repositories,
+          reposDir,
+          this.prefix,
+        )
+        const cloned = results.filter(r => r.status === 'cloned').length
+        const updated = results.filter(r => r.status === 'updated').length
+        const skipped = results.filter(r => r.status === 'skipped').length
+        logger.info(`${this.prefix} Repository sync: ${cloned} cloned, ${updated} updated, ${skipped} skipped`)
+      } catch (error) {
+        logger.warn(`${this.prefix} Repository sync failed: ${getErrorMessage(error)}`)
+      }
+    }
+
+    // 3. Download documentation
     if (this.projectConfig?.documentation?.sources) {
       logger.info(`${this.prefix} Documentation sources found: ${this.projectConfig.documentation.sources.length}`)
       // Documentation download will be implemented in a future phase
@@ -338,17 +358,27 @@ export class ProjectAgent {
       logger.info(`${this.prefix} Databases configured: ${config.databases.map(db => `${db.name}(${db.engine})`).join(', ')}`)
     }
 
+    // Log repository configuration
+    if (config.repositories?.length) {
+      logger.info(`${this.prefix} Repositories configured: ${config.repositories.map(r => `${r.repositoryName}(${r.provider})`).join(', ')}`)
+    }
+
     // Write MCP config file if project directory is available
     // MCP tools include file_upload, project_info etc. that are useful regardless of database config
     if (this.projectDir) {
       try {
         const mcpServerPath = resolveMcpServerPath()
+        const backlogConfigs = config.backlog?.items?.map((item) => ({
+          domain: item.domain,
+          apiKey: item.apiKey,
+        }))
         this.mcpConfigPath = writeMcpConfig(
           this.projectDir,
           this.apiUrl,
           this.token,
           this.projectCode,
           mcpServerPath,
+          backlogConfigs,
         )
         logger.info(`${this.prefix} MCP config written: ${this.mcpConfigPath}`)
       } catch (error) {

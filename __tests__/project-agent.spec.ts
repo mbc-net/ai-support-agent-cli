@@ -5,6 +5,7 @@ import { executeCommand } from '../src/commands'
 import { logger } from '../src/logger'
 import { syncProjectConfig } from '../src/project-config-sync'
 import { ProjectAgent } from '../src/project-agent'
+import { syncRepositories } from '../src/repo-sync'
 
 jest.mock('../src/api-client')
 jest.mock('../src/appsync-subscriber')
@@ -27,12 +28,16 @@ jest.mock('../src/project-dir', () => ({
 jest.mock('../src/aws-profile', () => ({
   writeAwsConfig: jest.fn(),
 }))
+jest.mock('../src/repo-sync', () => ({
+  syncRepositories: jest.fn().mockResolvedValue([]),
+}))
 
 const MockApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
 const MockAppSyncSubscriber = AppSyncSubscriber as jest.MockedClass<typeof AppSyncSubscriber>
 const mockedExecuteCommand = executeCommand as jest.MockedFunction<typeof executeCommand>
 const mockedSyncProjectConfig = syncProjectConfig as jest.MockedFunction<typeof syncProjectConfig>
 const mockedWriteAwsConfig = writeAwsConfig as jest.MockedFunction<typeof writeAwsConfig>
+const mockedSyncRepositories = syncRepositories as jest.MockedFunction<typeof syncRepositories>
 
 describe('ProjectAgent', () => {
   let mockClient: {
@@ -831,6 +836,64 @@ describe('ProjectAgent', () => {
       // performConfigSync is called once during registration and once during setup
       expect(mockedSyncProjectConfig).toHaveBeenCalledTimes(2)
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Starting setup'))
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Setup completed'))
+
+      agent.stop()
+    })
+
+    it('should sync repositories when project config has repositories', async () => {
+      const mockConfig = {
+        configHash: 'repo-hash',
+        project: { projectCode: 'test-proj', projectName: 'Test' },
+        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+        repositories: [
+          { repositoryId: 'repo-1', repositoryName: 'my-repo', repositoryUrl: 'https://github.com/org/repo.git', provider: 'github', branch: 'main', authMethod: 'token' },
+        ],
+      }
+      mockedSyncProjectConfig.mockResolvedValue(mockConfig)
+      mockedSyncRepositories.mockResolvedValue([
+        { repositoryId: 'repo-1', repositoryName: 'my-repo', status: 'cloned' },
+      ])
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      await agent.performSetup()
+
+      expect(mockedSyncRepositories).toHaveBeenCalledWith(
+        expect.anything(), // client
+        mockConfig.repositories,
+        expect.stringContaining('repos'),
+        expect.stringContaining('test-proj'),
+      )
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Repository sync: 1 cloned, 0 updated, 0 skipped'))
+
+      agent.stop()
+    })
+
+    it('should handle repository sync failure gracefully', async () => {
+      const mockConfig = {
+        configHash: 'repo-fail-hash',
+        project: { projectCode: 'test-proj', projectName: 'Test' },
+        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+        repositories: [
+          { repositoryId: 'repo-1', repositoryName: 'my-repo', repositoryUrl: 'https://github.com/org/repo.git', provider: 'github', branch: 'main', authMethod: 'token' },
+        ],
+      }
+      mockedSyncProjectConfig.mockResolvedValue(mockConfig)
+      mockedSyncRepositories.mockRejectedValue(new Error('Sync failed'))
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      await agent.performSetup()
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Repository sync failed'))
+      // Setup should still complete
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Setup completed'))
 
       agent.stop()

@@ -254,12 +254,28 @@ export interface ProjectConfigResponse {
     engine: string
     writePermissions?: { insert: boolean; update: boolean; delete: boolean }
   }>
+  repositories?: Array<{
+    repositoryId: string
+    repositoryName: string
+    repositoryUrl: string
+    provider: string
+    branch: string
+    authMethod: string
+  }>
   documentation?: {
     sources: Array<{
       type: 'url' | 's3'
       url?: string
       bucket?: string
       prefix?: string
+    }>
+  }
+  backlog?: {
+    items: Array<{
+      id: string
+      domain: string
+      apiKey: string
+      projectKey: string
     }>
   }
 }
@@ -276,10 +292,25 @@ export interface DbCredentials {
   writePermissions?: { insert: boolean; update: boolean; delete: boolean }
 }
 
+export interface RepoCredentials {
+  repositoryId: string
+  repositoryUrl: string
+  authMethod: string
+  authSecret: string
+}
+
 export interface CachedProjectConfig {
   cachedAt: string
   configHash: string
-  config: Omit<ProjectConfigResponse, 'aws'>
+  config: Omit<ProjectConfigResponse, 'aws' | 'backlog'> & {
+    backlog?: {
+      items: Array<{
+        id: string
+        domain: string
+        projectKey: string
+      }>
+    }
+  }
 }
 
 export interface HeartbeatResponse {
