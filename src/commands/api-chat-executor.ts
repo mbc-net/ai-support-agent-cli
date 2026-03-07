@@ -1,3 +1,5 @@
+import { Readable } from 'stream'
+
 import axios from 'axios'
 
 import { ApiClient } from '../api-client'
@@ -177,9 +179,21 @@ async function callAnthropicApi(
     let buffer = ''
     const usage: ApiUsage = { inputTokens: 0, outputTokens: 0 }
 
-    const stream = response.data as NodeJS.ReadableStream
+    const stream = response.data as Readable
+
+    // アクティビティベースタイムアウト: ストリームデータ受信が途絶えたら中止
+    let activityTimer: NodeJS.Timeout | undefined
+    const resetActivityTimer = () => {
+      if (activityTimer) clearTimeout(activityTimer)
+      activityTimer = setTimeout(() => {
+        logger.warn(`[api-chat] Stream timed out after ${CHAT_TIMEOUT / 1000}s of inactivity`)
+        stream.destroy(new Error(`Stream timed out after ${CHAT_TIMEOUT / 1000}s of inactivity`))
+      }, CHAT_TIMEOUT)
+    }
+    resetActivityTimer()
 
     stream.on('data', (chunk: Buffer) => {
+      resetActivityTimer()
       buffer += chunk.toString()
 
       const lines = buffer.split('\n')
@@ -226,10 +240,12 @@ async function callAnthropicApi(
     })
 
     stream.on('end', () => {
+      if (activityTimer) clearTimeout(activityTimer)
       resolve({ text: fullOutput, usage })
     })
 
     stream.on('error', (error: Error) => {
+      if (activityTimer) clearTimeout(activityTimer)
       reject(error)
     })
   })

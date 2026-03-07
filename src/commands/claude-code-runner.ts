@@ -174,21 +174,27 @@ export async function runClaudeCode(options: RunClaudeCodeOptions): Promise<Clau
     // tool_use_id → ツール名のマッピング（tool_result で toolName を復元するため）
     const pendingToolNames = new Map<string, string>()
 
-    // タイムアウト: 120秒で応答がなければ強制終了
+    // アクティビティベースタイムアウト: 最後の stdout 出力から CHAT_TIMEOUT 経過で強制終了
     let sigkillTimer: NodeJS.Timeout | undefined
-    const timeout = setTimeout(() => {
-      logger.warn(`[chat] claude CLI timed out after ${CHAT_TIMEOUT / 1000}s (pid=${child.pid}), sending SIGTERM`)
+    const killOnTimeout = () => {
+      logger.warn(`[chat] claude CLI timed out after ${CHAT_TIMEOUT / 1000}s of inactivity (pid=${child.pid}), sending SIGTERM`)
       child.kill('SIGTERM')
-      // SIGTERM後5秒で応答なければSIGKILL
       sigkillTimer = setTimeout(() => {
         if (!child.killed) {
           logger.warn(`[chat] claude CLI still running after SIGTERM, sending SIGKILL (pid=${child.pid})`)
           child.kill('SIGKILL')
         }
       }, CHAT_SIGKILL_DELAY)
-    }, CHAT_TIMEOUT)
+    }
+    let timeout = setTimeout(killOnTimeout, CHAT_TIMEOUT)
+    /** stdout 受信時にタイムアウトをリセット */
+    const resetTimeout = () => {
+      clearTimeout(timeout)
+      timeout = setTimeout(killOnTimeout, CHAT_TIMEOUT)
+    }
 
     child.stdout.on('data', (data: Buffer) => {
+      resetTimeout()
       stdoutBuffer += data.toString()
       // NDJSON: 改行で分割して各行をパース
       const lines = stdoutBuffer.split('\n')
