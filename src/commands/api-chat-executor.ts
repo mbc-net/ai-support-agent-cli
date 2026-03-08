@@ -22,28 +22,23 @@ import { logger } from '../logger'
 import { type AgentServerConfig, type ChatChunkType, type ChatPayload, type CommandResult, errorResult, type HistoryMessage, successResult } from '../types'
 import { parseString, truncateString } from '../utils'
 
+import { ProcessManager } from './process-manager'
 import { createChunkSender, handleChatError, parseHistory } from './shared-chat-utils'
 
 /** 実行中の API チャットを commandId で管理 */
-const runningApiChats = new Map<string, { cancel: () => void }>()
+const processManager = new ProcessManager()
 
 /**
  * 実行中の API チャットプロセスをキャンセルする
  * @returns true: プロセスが見つかりキャンセルした, false: プロセスが見つからなかった
  */
 export function cancelApiChatProcess(commandId: string): boolean {
-  const handle = runningApiChats.get(commandId)
-  if (handle) {
-    handle.cancel()
-    runningApiChats.delete(commandId)
-    return true
-  }
-  return false
+  return processManager.cancel(commandId)
 }
 
 /** テスト用: runningApiChats の内容を取得 */
 export function _getRunningApiChats(): Map<string, { cancel: () => void }> {
-  return runningApiChats
+  return processManager._getRunning()
 }
 
 /** Anthropic API のトークン使用量 */
@@ -124,7 +119,7 @@ export async function executeApiChatCommand(
     const historyMessages = parseHistory(payload.history)
 
     const abortController = new AbortController()
-    runningApiChats.set(commandId, { cancel: () => abortController.abort() })
+    processManager.register(commandId, { cancel: () => abortController.abort() })
 
     let result: ApiChatResult
     try {
@@ -139,7 +134,7 @@ export async function executeApiChatCommand(
         abortController.signal,
       )
     } finally {
-      runningApiChats.delete(commandId)
+      processManager.remove(commandId)
     }
 
     logger.info(

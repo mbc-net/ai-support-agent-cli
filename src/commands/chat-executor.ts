@@ -9,31 +9,26 @@ import { getAutoAddDirs } from '../project-dir'
 import { executeApiChatCommand } from './api-chat-executor'
 import { runClaudeCode } from './claude-code-runner'
 import { downloadChatFiles, parseChatFiles } from './file-transfer'
+import { ProcessManager } from './process-manager'
 import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
 
 /** 実行中のチャットプロセスを commandId で管理 */
-const runningProcesses = new Map<string, { cancel: () => void }>()
+const processManager = new ProcessManager()
 
 /**
  * 実行中のチャットプロセスをキャンセルする
  * @returns true: プロセスが見つかりキルした, false: プロセスが見つからなかった
  */
 export function cancelChatProcess(commandId: string): boolean {
-  const handle = runningProcesses.get(commandId)
-  if (handle) {
-    handle.cancel()
-    runningProcesses.delete(commandId)
-    return true
-  }
-  return false
+  return processManager.cancel(commandId)
 }
 
 /** テスト用: runningProcesses の内容を取得 */
 export function _getRunningProcesses(): Map<string, { cancel: () => void }> {
-  return runningProcesses
+  return processManager._getRunning()
 }
 
 /**
@@ -174,12 +169,12 @@ async function executeClaudeCodeChat(
       systemPrompt,
     })
     // プロセスを管理 Map に登録
-    runningProcesses.set(commandId, handle)
+    processManager.register(commandId, handle)
     let result
     try {
       result = await handle.result
     } finally {
-      runningProcesses.delete(commandId)
+      processManager.remove(commandId)
     }
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, duration=${result.metadata.durationMs}ms`)
     // 完了チャンクを送信（metadata を含める）
