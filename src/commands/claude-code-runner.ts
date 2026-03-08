@@ -128,6 +128,12 @@ export function buildClaudeArgs(
   return args
 }
 
+/** Claude Code CLI の実行ハンドル（プロセス管理用） */
+export interface ClaudeCodeHandle {
+  result: Promise<ClaudeCodeResult>
+  cancel: () => void
+}
+
 /** runClaudeCode のオプション */
 export interface RunClaudeCodeOptions {
   message: string
@@ -143,10 +149,14 @@ export interface RunClaudeCodeOptions {
 
 /**
  * Claude Code CLI をサブプロセスとして実行し、出力をストリーミングで返す
+ * ClaudeCodeHandle を返す: result Promise と kill 関数
  */
-export async function runClaudeCode(options: RunClaudeCodeOptions): Promise<ClaudeCodeResult> {
+export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
   const { message, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt } = options
-  return new Promise<ClaudeCodeResult>((resolve, reject) => {
+
+  let killFn: () => void = () => { /* noop until child is spawned */ }
+
+  const result = new Promise<ClaudeCodeResult>((resolve, reject) => {
     const startTime = Date.now()
     // claude CLI が利用可能か確認し、print モードで実行
     // Claude Code セッション内からの起動時にネスト検出やSSEポート干渉を回避するため、
@@ -164,6 +174,19 @@ export async function runClaudeCode(options: RunClaudeCodeOptions): Promise<Clau
     })
 
     logger.debug(`[chat] claude CLI spawned (pid=${child.pid}, cmd=claude ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')})`)
+
+    // kill 関数を設定: SIGTERM → SIGKILL パターン
+    killFn = () => {
+      if (child.killed) return
+      logger.info(`[chat] Killing claude CLI process (pid=${child.pid})`)
+      child.kill('SIGTERM')
+      setTimeout(() => {
+        if (!child.killed) {
+          logger.warn(`[chat] claude CLI still running after SIGTERM, sending SIGKILL (pid=${child.pid})`)
+          child.kill('SIGKILL')
+        }
+      }, CHAT_SIGKILL_DELAY)
+    }
 
     let resultText = ''
     let stdoutBuffer = ''
@@ -252,6 +275,8 @@ export async function runClaudeCode(options: RunClaudeCodeOptions): Promise<Clau
       }
     })
   })
+
+  return { result, cancel: () => killFn() }
 }
 
 /** file_upload ツール結果を file_attachment チャンクに変換する */

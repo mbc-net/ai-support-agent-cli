@@ -1,5 +1,12 @@
 import type { ApiClient } from '../../src/api-client'
-import { executeChatCommand } from '../../src/commands/chat-executor'
+import {
+  cancelChatProcess,
+  executeChatCommand,
+  _getRunningProcesses,
+  buildClaudeArgs as reExportedBuildClaudeArgs,
+  buildCleanEnv as reExportedBuildCleanEnv,
+  _resetCleanEnvCache as reExportedResetCleanEnvCache,
+} from '../../src/commands/chat-executor'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED } from '../../src/constants'
 import type { AgentServerConfig, ChatPayload, ProjectConfigResponse } from '../../src/types'
 import { createMockChildProcess } from '../helpers/mock-factory'
@@ -932,6 +939,57 @@ describe('chat-executor', () => {
       const args = spawnCall[1] as string[]
       const messageArg = args[args.length - 1]
       expect(messageArg).toBe('Hello, world!')
+    })
+  })
+
+  describe('cancelChatProcess', () => {
+    it('should return false when commandId is not found', () => {
+      const result = cancelChatProcess('nonexistent-cmd')
+      expect(result).toBe(false)
+    })
+
+    it('should call cancel() and remove from map when commandId is found', () => {
+      const cancelFn = jest.fn()
+      const processes = _getRunningProcesses()
+      processes.set('cmd-to-cancel', { cancel: cancelFn })
+
+      const result = cancelChatProcess('cmd-to-cancel')
+
+      expect(result).toBe(true)
+      expect(cancelFn).toHaveBeenCalledTimes(1)
+      expect(processes.has('cmd-to-cancel')).toBe(false)
+    })
+
+    it('should not affect other processes when cancelling a specific one', () => {
+      const cancelFn1 = jest.fn()
+      const cancelFn2 = jest.fn()
+      const processes = _getRunningProcesses()
+      processes.set('cmd-1', { cancel: cancelFn1 })
+      processes.set('cmd-2', { cancel: cancelFn2 })
+
+      cancelChatProcess('cmd-1')
+
+      expect(cancelFn1).toHaveBeenCalledTimes(1)
+      expect(cancelFn2).not.toHaveBeenCalled()
+      expect(processes.has('cmd-1')).toBe(false)
+      expect(processes.has('cmd-2')).toBe(true)
+
+      // Cleanup
+      processes.delete('cmd-2')
+    })
+  })
+
+  describe('re-exports from claude-code-runner', () => {
+    it('should re-export buildClaudeArgs', () => {
+      expect(typeof reExportedBuildClaudeArgs).toBe('function')
+    })
+
+    it('should re-export buildCleanEnv', () => {
+      expect(typeof reExportedBuildCleanEnv).toBe('function')
+    })
+
+    it('should re-export _resetCleanEnvCache', () => {
+      expect(typeof reExportedResetCleanEnvCache).toBe('function')
     })
   })
 

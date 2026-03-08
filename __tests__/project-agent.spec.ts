@@ -512,6 +512,95 @@ describe('ProjectAgent', () => {
     })
   })
 
+  describe('chat_cancel priority in polling', () => {
+    it('should process chat_cancel commands before normal commands', async () => {
+      const executionOrder: string[] = []
+      mockedExecuteCommand.mockImplementation(async (type: any) => {
+        executionOrder.push(typeof type === 'string' ? type : type.type)
+        return { success: true, data: 'ok' }
+      })
+
+      // Return a mix of normal and cancel commands
+      mockClient.getPendingCommands.mockResolvedValue([
+        { commandId: 'cmd-chat', type: 'chat' },
+        { commandId: 'cmd-cancel', type: 'chat_cancel' },
+        { commandId: 'cmd-exec', type: 'execute_command' },
+      ])
+      mockClient.getCommand
+        .mockResolvedValueOnce({ commandId: 'cmd-cancel', type: 'chat_cancel', payload: { targetCommandId: 'some-cmd' } })
+        .mockResolvedValueOnce({ commandId: 'cmd-chat', type: 'chat', payload: { message: 'hello' } })
+        .mockResolvedValueOnce({ commandId: 'cmd-exec', type: 'execute_command', payload: { command: 'echo hi' } })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+      await jest.advanceTimersByTimeAsync(options.pollInterval)
+
+      // chat_cancel should be processed first
+      expect(executionOrder[0]).toBe('chat_cancel')
+
+      agent.stop()
+    })
+
+    it('should process chat_cancel even when processing flag is true', async () => {
+      // Simulate a long-running command that keeps processing=true
+      let longRunningResolve: (() => void) | undefined
+      const longRunningPromise = new Promise<void>((resolve) => { longRunningResolve = resolve })
+
+      let callCount = 0
+      mockedExecuteCommand.mockImplementation(async (type: any) => {
+        callCount++
+        const cmdType = typeof type === 'string' ? type : type.type
+        if (cmdType === 'chat') {
+          // Simulate long-running chat command
+          await longRunningPromise
+        }
+        return { success: true, data: 'ok' }
+      })
+
+      // First poll: return a long-running chat command
+      mockClient.getPendingCommands.mockResolvedValueOnce([
+        { commandId: 'cmd-long', type: 'chat' },
+      ])
+      mockClient.getCommand.mockResolvedValueOnce({
+        commandId: 'cmd-long',
+        type: 'chat',
+        payload: { message: 'long task' },
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+      await jest.advanceTimersByTimeAsync(options.pollInterval)
+
+      // Second poll: return a chat_cancel while chat is still processing
+      mockClient.getPendingCommands.mockResolvedValueOnce([
+        { commandId: 'cmd-cancel-2', type: 'chat_cancel' },
+      ])
+      mockClient.getCommand.mockResolvedValueOnce({
+        commandId: 'cmd-cancel-2',
+        type: 'chat_cancel',
+        payload: { targetCommandId: 'cmd-long' },
+      })
+
+      await jest.advanceTimersByTimeAsync(options.pollInterval)
+
+      // chat_cancel should have been executed even though processing=true
+      expect(mockedExecuteCommand).toHaveBeenCalledWith(
+        'chat_cancel',
+        { targetCommandId: 'cmd-long' },
+        expect.any(Object),
+      )
+
+      // Clean up
+      longRunningResolve?.()
+      await jest.advanceTimersByTimeAsync(100)
+      agent.stop()
+    })
+  })
+
   describe('config loading', () => {
     it('should continue when getConfig fails', async () => {
       mockClient.getConfig.mockRejectedValue(new Error('Config fetch failed'))

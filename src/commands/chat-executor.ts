@@ -14,6 +14,28 @@ import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHi
 // Re-export for backward compatibility with existing consumers
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
 
+/** 実行中のチャットプロセスを commandId で管理 */
+const runningProcesses = new Map<string, { cancel: () => void }>()
+
+/**
+ * 実行中のチャットプロセスをキャンセルする
+ * @returns true: プロセスが見つかりキルした, false: プロセスが見つからなかった
+ */
+export function cancelChatProcess(commandId: string): boolean {
+  const handle = runningProcesses.get(commandId)
+  if (handle) {
+    handle.cancel()
+    runningProcesses.delete(commandId)
+    return true
+  }
+  return false
+}
+
+/** テスト用: runningProcesses の内容を取得 */
+export function _getRunningProcesses(): Map<string, { cancel: () => void }> {
+  return runningProcesses
+}
+
 /**
  * エージェントチャットモードに応じてチャットメッセージを処理する
  * - claude_code: Claude Code CLI を使用（デフォルト）
@@ -140,7 +162,7 @@ async function executeClaudeCodeChat(
     ].filter(Boolean).join(', ')
     logger.debug(`[chat] Spawning claude CLI for command [${commandId}]: ${logDetails}`)
     logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
-    const result = await runClaudeCode({
+    const handle = runClaudeCode({
       message: messageWithHistory,
       sendChunk,
       allowedTools,
@@ -151,6 +173,14 @@ async function executeClaudeCodeChat(
       cwd: projectDir,
       systemPrompt,
     })
+    // プロセスを管理 Map に登録
+    runningProcesses.set(commandId, handle)
+    let result
+    try {
+      result = await handle.result
+    } finally {
+      runningProcesses.delete(commandId)
+    }
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, duration=${result.metadata.durationMs}ms`)
     // 完了チャンクを送信（metadata を含める）
     const doneContent = JSON.stringify({

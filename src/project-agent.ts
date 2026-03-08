@@ -175,23 +175,36 @@ export class ProjectAgent {
 
   private startPollingMode(): void {
     const pollCommands = async (): Promise<void> => {
-      if (this.processing) return
-      this.processing = true
-
       try {
         const pending = await this.client.getPendingCommands(this.agentId)
-        if (pending.length > 0) {
-          logger.debug(`${this.prefix} Polling found ${pending.length} pending command(s)`)
-        }
 
-        for (const cmd of pending) {
+        // chat_cancel コマンドは processing フラグに関係なく即時処理
+        const cancelCommands = pending.filter(cmd => cmd.type === 'chat_cancel')
+        const normalCommands = pending.filter(cmd => cmd.type !== 'chat_cancel')
+
+        for (const cmd of cancelCommands) {
           logger.info(t('runner.commandReceived', { prefix: this.prefix, type: cmd.type, commandId: cmd.commandId }))
           await this.processCommand(cmd.commandId)
         }
+
+        // 通常コマンドは processing フラグで制御
+        if (this.processing) return
+        this.processing = true
+
+        try {
+          if (normalCommands.length > 0) {
+            logger.debug(`${this.prefix} Polling found ${normalCommands.length} pending command(s)`)
+          }
+
+          for (const cmd of normalCommands) {
+            logger.info(t('runner.commandReceived', { prefix: this.prefix, type: cmd.type, commandId: cmd.commandId }))
+            await this.processCommand(cmd.commandId)
+          }
+        } finally {
+          this.processing = false
+        }
       } catch (error) {
         logger.debug(`${this.prefix} Polling error: ${getErrorMessage(error)}`)
-      } finally {
-        this.processing = false
       }
     }
 
@@ -246,11 +259,14 @@ export class ProjectAgent {
           logger.warn(`${this.prefix} Notification missing commandId: ${JSON.stringify(notification.content ?? {})}`)
           return
         }
+        const commandType = (notification.content?.type as string) ?? 'unknown'
         logger.info(t('runner.commandReceived', {
           prefix: this.prefix,
-          type: (notification.content?.type as string) ?? 'unknown',
+          type: commandType,
           commandId,
         }))
+        // chat_cancel は processing フラグに関係なく即時処理
+        // （通常の processCommand も非同期だが、chat_cancel は割り込みで実行する必要がある）
         await this.processCommand(commandId)
         break
       }

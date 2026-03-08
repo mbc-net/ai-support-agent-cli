@@ -4,7 +4,8 @@ import { logger } from '../logger'
 import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
 import { getErrorMessage } from '../utils'
 
-import { executeChatCommand } from './chat-executor'
+import { cancelChatProcess, executeChatCommand } from './chat-executor'
+import { cancelApiChatProcess } from './api-chat-executor'
 import { fileDelete, fileList, fileMkdir, fileRead, fileRename, fileWrite } from './file-executor'
 import { processKill, processList } from './process-executor'
 import { executeShellCommand } from './shell-executor'
@@ -97,6 +98,15 @@ export async function executeCommand(
           return errorResult(ERR_CHAT_REQUIRES_CLIENT)
         }
         return await executeChatCommand(p, opts.commandId, opts.client, opts.serverConfig, opts.activeChatMode, opts.agentId, opts.projectDir, opts.projectConfig, opts.mcpConfigPath)
+      case 'chat_cancel': {
+        const targetCommandId = (p as Record<string, unknown>).targetCommandId
+        if (typeof targetCommandId !== 'string') {
+          return errorResult('targetCommandId is required for chat_cancel')
+        }
+        logger.info(`[chat_cancel] Cancelling chat process: targetCommandId=${targetCommandId}`)
+        const cancelled = cancelChatProcess(targetCommandId) || cancelApiChatProcess(targetCommandId)
+        return successResult({ cancelled, targetCommandId })
+      }
       case 'setup':
         if (!opts?.onSetup) {
           return errorResult(ERR_SETUP_REQUIRES_CALLBACK)

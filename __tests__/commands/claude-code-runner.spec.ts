@@ -833,14 +833,15 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
 
       // Send NDJSON lines
       mockProcess.emitStdout('data', Buffer.from(makeAssistantLine('response text') + '\n'))
       mockProcess.emitStdout('data', Buffer.from(makeResultLine('response text') + '\n'))
       mockProcess.emit('close', 0)
 
-      const result = await resultPromise
+      const result = await handle.result
+
       expect(result.text).toBe('response text')
       expect(result.metadata.exitCode).toBe(0)
       expect(result.metadata.hasStderr).toBe(false)
@@ -854,13 +855,13 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
 
       mockProcess.emitStdout('data', Buffer.from(makeAssistantLine('chunk1') + '\n'))
       mockProcess.emitStdout('data', Buffer.from(makeResultLine('chunk1') + '\n'))
       mockProcess.emit('close', 0)
 
-      await resultPromise
+      await handle.result
       expect(sendChunk).toHaveBeenCalledWith('delta', 'chunk1')
     })
 
@@ -871,11 +872,11 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
 
       mockProcess.emit('close', 1)
 
-      await expect(resultPromise).rejects.toThrow('コード 1')
+      await expect(handle.result).rejects.toThrow('コード 1')
     })
 
     it('should reject with ENOENT error when claude CLI is not found', async () => {
@@ -885,13 +886,13 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
 
       const enoentError = new Error('spawn claude ENOENT') as NodeJS.ErrnoException
       enoentError.code = 'ENOENT'
       mockProcess.emit('error', enoentError)
 
-      await expect(resultPromise).rejects.toThrow(ERR_CLAUDE_CLI_NOT_FOUND)
+      await expect(handle.result).rejects.toThrow(ERR_CLAUDE_CLI_NOT_FOUND)
     })
 
     it('should reject with original error for non-ENOENT errors', async () => {
@@ -901,11 +902,11 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
 
       mockProcess.emit('error', new Error('Permission denied'))
 
-      await expect(resultPromise).rejects.toThrow('Permission denied')
+      await expect(handle.result).rejects.toThrow('Permission denied')
     })
 
     it('should pass awsEnv to spawn environment', async () => {
@@ -916,11 +917,11 @@ describe('claude-code-runner', () => {
       const sendChunk = jest.fn().mockResolvedValue(undefined)
       const awsEnv = { AWS_ACCESS_KEY_ID: 'AKIA', AWS_SECRET_ACCESS_KEY: 'secret' }
 
-      const resultPromise = runClaudeCode({ message: 'hello', sendChunk, awsEnv })
+      const handle = runClaudeCode({ message: 'hello', sendChunk, awsEnv })
 
       mockProcess.emit('close', 0)
 
-      await resultPromise
+      await handle.result
 
       const spawnCall = spawn.mock.calls[0]
       const env = spawnCall[2].env
@@ -935,11 +936,11 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode({ message: 'hello', sendChunk, cwd: '/tmp/project' })
+      const handle = runClaudeCode({ message: 'hello', sendChunk, cwd: '/tmp/project' })
 
       mockProcess.emit('close', 0)
 
-      await resultPromise
+      await handle.result
 
       const spawnCall = spawn.mock.calls[0]
       expect(spawnCall[2].cwd).toBe('/tmp/project')
@@ -952,11 +953,11 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
 
       mockProcess.emit('close', 0)
 
-      await resultPromise
+      await handle.result
 
       const spawnCall = spawn.mock.calls[0]
       expect(spawnCall[2].cwd).toBeUndefined()
@@ -969,7 +970,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
 
       // Advance past CHAT_TIMEOUT to trigger SIGTERM
       jest.advanceTimersByTime(300_000)
@@ -982,7 +983,7 @@ describe('claude-code-runner', () => {
 
       // Complete the process to resolve the promise
       mockProcess.emit('close', 1)
-      await expect(resultPromise).rejects.toThrow()
+      await expect(handle.result).rejects.toThrow()
     })
 
     it('should include --output-format stream-json --verbose in args', async () => {
@@ -992,11 +993,11 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
 
       mockProcess.emit('close', 0)
 
-      await resultPromise
+      await handle.result
 
       const spawnCall = spawn.mock.calls[0]
       const args = spawnCall[1] as string[]
@@ -1012,7 +1013,7 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const resultPromise = runClaudeCode({ message: 'hello', sendChunk })
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
 
       // Split a NDJSON line across two data events
       const fullLine = makeResultLine('split result')
@@ -1023,7 +1024,8 @@ describe('claude-code-runner', () => {
       mockProcess.emitStdout('data', Buffer.from(half2))
       mockProcess.emit('close', 0)
 
-      const result = await resultPromise
+      const result = await handle.result
+
       expect(result.text).toBe('split result')
     })
   })

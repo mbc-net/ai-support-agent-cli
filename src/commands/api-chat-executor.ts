@@ -24,6 +24,28 @@ import { parseString, truncateString } from '../utils'
 
 import { createChunkSender, handleChatError, parseHistory } from './shared-chat-utils'
 
+/** 実行中の API チャットを commandId で管理 */
+const runningApiChats = new Map<string, { cancel: () => void }>()
+
+/**
+ * 実行中の API チャットプロセスをキャンセルする
+ * @returns true: プロセスが見つかりキャンセルした, false: プロセスが見つからなかった
+ */
+export function cancelApiChatProcess(commandId: string): boolean {
+  const handle = runningApiChats.get(commandId)
+  if (handle) {
+    handle.cancel()
+    runningApiChats.delete(commandId)
+    return true
+  }
+  return false
+}
+
+/** テスト用: runningApiChats の内容を取得 */
+export function _getRunningApiChats(): Map<string, { cancel: () => void }> {
+  return runningApiChats
+}
+
 /** Anthropic API のトークン使用量 */
 interface ApiUsage {
   inputTokens: number
@@ -101,15 +123,24 @@ export async function executeApiChatCommand(
 
     const historyMessages = parseHistory(payload.history)
 
-    const result = await callAnthropicApi(
-      apiKey,
-      message,
-      model,
-      maxTokens,
-      systemPrompt,
-      sendChunk,
-      historyMessages,
-    )
+    const abortController = new AbortController()
+    runningApiChats.set(commandId, { cancel: () => abortController.abort() })
+
+    let result: ApiChatResult
+    try {
+      result = await callAnthropicApi(
+        apiKey,
+        message,
+        model,
+        maxTokens,
+        systemPrompt,
+        sendChunk,
+        historyMessages,
+        abortController.signal,
+      )
+    } finally {
+      runningApiChats.delete(commandId)
+    }
 
     logger.info(
       `[api-chat] API chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, tokens: in=${result.usage.inputTokens} out=${result.usage.outputTokens}`,
@@ -142,6 +173,7 @@ async function callAnthropicApi(
   systemPrompt: string | undefined,
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
   history?: HistoryMessage[],
+  abortSignal?: AbortSignal,
 ): Promise<ApiChatResult> {
   const messages = [
     ...(history ?? []).map((msg) => ({
@@ -171,6 +203,7 @@ async function callAnthropicApi(
       },
       responseType: 'stream',
       timeout: CHAT_TIMEOUT,
+      ...(abortSignal ? { signal: abortSignal } : {}),
     },
   )
 

@@ -58,6 +58,7 @@ export type AgentCommandType =
   | 'process_list'
   | 'process_kill'
   | 'chat'
+  | 'chat_cancel'
   | 'setup'
   | 'config_sync'
 
@@ -174,6 +175,10 @@ export interface ChatPayload {
   locale?: unknown
   awsAccountId?: unknown
   files?: unknown
+}
+
+export interface ChatCancelPayload {
+  targetCommandId?: unknown
 }
 
 /**
@@ -353,5 +358,6 @@ export type CommandDispatch =
   | { type: 'process_list'; payload: Record<string, never> }
   | { type: 'process_kill'; payload: ProcessKillPayload }
   | { type: 'chat'; payload: ChatPayload }
+  | { type: 'chat_cancel'; payload: ChatCancelPayload }
   | { type: 'setup'; payload: Record<string, never> }
   | { type: 'config_sync'; payload: Record<string, never> }
