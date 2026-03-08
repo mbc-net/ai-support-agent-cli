@@ -11,6 +11,7 @@ export interface ChatPayload {
   locale?: unknown
   awsAccountId?: unknown
   files?: unknown
+  conversationFiles?: unknown
 }
 
 export interface ChatFileInfo {

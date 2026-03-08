@@ -2,13 +2,13 @@ import { ApiClient } from '../api-client'
 import { type AwsCredentialResult, buildAwsProfileCredentials, buildSingleAccountAwsEnv } from '../aws-credential-builder'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, LOG_MESSAGE_LIMIT } from '../constants'
 import { logger } from '../logger'
-import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
+import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatFileInfo, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
 import { parseString, truncateString } from '../utils'
 
 import { getAutoAddDirs } from '../project-dir'
 import { executeApiChatCommand } from './api-chat-executor'
 import { runClaudeCode } from './claude-code-runner'
-import { downloadChatFiles, parseChatFiles } from './file-transfer'
+import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { ProcessManager } from './process-manager'
 import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory } from './shared-chat-utils'
 
@@ -135,16 +135,20 @@ async function executeClaudeCodeChat(
       }
     }
 
+    // 会話全体のファイルリファレンスを埋め込み（MCPツール経由で読み取り可能）
+    const conversationFiles = parseConversationFiles(payload.conversationFiles)
+    const conversationFileNotice = buildConversationFileNotice(conversationFiles)
+    if (conversationFiles.length > 0) {
+      logger.info(`[chat] ${conversationFiles.length} conversation file references embedded for command [${commandId}]`)
+    }
+
     // 会話履歴をメッセージに埋め込む（Claude Code CLI用）
     const history = parseHistory(payload.history)
 
     // file_upload ツールに必要なメタデータをメッセージに付加
-    let metadataNotice = ''
-    if (conversationId && mcpConfigPath) {
-      metadataNotice = `\n\n<message_metadata>\nconversationId: ${conversationId}\nmessageId: ${commandId}\nprojectCode: ${projectCode ?? ''}\n</message_metadata>`
-    }
+    const metadataNotice = buildMetadataNotice(conversationId, commandId, projectCode, mcpConfigPath)
 
-    const messageWithHistory = formatHistoryForClaudeCode(history, message + filePathsNotice + metadataNotice)
+    const messageWithHistory = formatHistoryForClaudeCode(history, message + filePathsNotice + conversationFileNotice + metadataNotice)
 
     const logDetails = [
       allowedTools?.length ? `allowedTools: ${allowedTools.join(', ')}` : '(no allowedTools)',
@@ -154,6 +158,7 @@ async function executeClaudeCodeChat(
       mcpConfigPath ? 'MCP config' : null,
       history.length > 0 ? `${history.length} history messages` : null,
       chatFiles.length > 0 ? `${chatFiles.length} attached files` : null,
+      conversationFiles.length > 0 ? `${conversationFiles.length} conversation files` : null,
     ].filter(Boolean).join(', ')
     logger.debug(`[chat] Spawning claude CLI for command [${commandId}]: ${logDetails}`)
     logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
@@ -191,6 +196,24 @@ async function executeClaudeCodeChat(
   } catch (error) {
     return handleChatError(error, commandId, 'chat', sendChunk)
   }
+}
+
+export function buildConversationFileNotice(conversationFiles: ChatFileInfo[]): string {
+  if (conversationFiles.length === 0) return ''
+  const fileList = conversationFiles.map((f) =>
+    `- fileId: ${f.fileId}, s3Key: ${f.s3Key}, filename: ${f.filename} (${f.contentType}, ${f.fileSize} bytes)`,
+  ).join('\n')
+  return `\n\n<conversation_files>\nFiles shared in this conversation. Use read_conversation_file tool to read their contents.\n${fileList}\n</conversation_files>`
+}
+
+export function buildMetadataNotice(
+  conversationId: string | null,
+  commandId: string,
+  projectCode: string | undefined,
+  mcpConfigPath?: string,
+): string {
+  if (!conversationId || !mcpConfigPath) return ''
+  return `\n\n<message_metadata>\nconversationId: ${conversationId}\nmessageId: ${commandId}\nprojectCode: ${projectCode ?? ''}\n</message_metadata>`
 }
 
 async function sendAwsCredentialNotices(

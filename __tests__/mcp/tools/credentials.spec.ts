@@ -1,3 +1,4 @@
+import { AxiosError, AxiosHeaders } from 'axios'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 import { ApiClient } from '../../../src/api-client'
@@ -100,6 +101,99 @@ describe('credentials tool', () => {
         content: [{ type: 'text', text: 'Error: string error' }],
         isError: true,
       })
+    })
+
+    it('should return user-friendly message for SSO_AUTH_REQUIRED error (error field)', async () => {
+      const axiosError = new AxiosError('Request failed with status code 422', 'ERR_BAD_REQUEST', undefined, undefined, {
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        data: { error: 'SSO_AUTH_REQUIRED', accountId: '123456789012' },
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      })
+
+      setupTool({
+        getAwsCredentials: jest.fn().mockRejectedValue(axiosError),
+      })
+
+      const result = await toolCallback({ type: 'aws', name: 'my-account' }) as { content: Array<{ text: string }>; isError: boolean }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('AWS SSO authentication has expired')
+      expect(result.content[0].text).toContain('my-account')
+    })
+
+    it('should return user-friendly message for SSO_AUTH_REQUIRED error (errorCode field)', async () => {
+      const axiosError = new AxiosError('Request failed with status code 422', 'ERR_BAD_REQUEST', undefined, undefined, {
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        data: { errorCode: 'SSO_AUTH_REQUIRED', message: 'SSO token expired' },
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      })
+
+      setupTool({
+        getAwsCredentials: jest.fn().mockRejectedValue(axiosError),
+      })
+
+      const result = await toolCallback({ type: 'aws', name: 'prod-account' }) as { content: Array<{ text: string }>; isError: boolean }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('AWS SSO authentication has expired')
+      expect(result.content[0].text).toContain('prod-account')
+      expect(result.content[0].text).toContain('re-authenticate via the admin console')
+    })
+
+    it('should include detailed Axios error for non-SSO AWS errors', async () => {
+      const axiosError = new AxiosError('Request failed with status code 404', 'ERR_BAD_REQUEST', undefined, undefined, {
+        status: 404,
+        statusText: 'Not Found',
+        data: { message: 'AWS account not configured' },
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      })
+
+      setupTool({
+        getAwsCredentials: jest.fn().mockRejectedValue(axiosError),
+      })
+
+      const result = await toolCallback({ type: 'aws', name: 'unknown-account' }) as { content: Array<{ text: string }>; isError: boolean }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toBe('Error: [404] AWS account not configured')
+    })
+
+    it('should include detailed Axios error for DB credential failures', async () => {
+      const axiosError = new AxiosError('Request failed with status code 500', 'ERR_BAD_RESPONSE', undefined, undefined, {
+        status: 500,
+        statusText: 'Internal Server Error',
+        data: { message: 'Database connection pool exhausted' },
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      })
+
+      setupTool({
+        getDbCredentials: jest.fn().mockRejectedValue(axiosError),
+      })
+
+      const result = await toolCallback({ type: 'db', name: 'MAIN' }) as { content: Array<{ text: string }>; isError: boolean }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toBe('Error: [500] Database connection pool exhausted')
+    })
+
+    it('should include HTTP status for Axios error without message in data', async () => {
+      const axiosError = new AxiosError('Request failed with status code 502', 'ERR_BAD_RESPONSE', undefined, undefined, {
+        status: 502,
+        statusText: 'Bad Gateway',
+        data: {},
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      })
+
+      setupTool({
+        getDbCredentials: jest.fn().mockRejectedValue(axiosError),
+      })
+
+      const result = await toolCallback({ type: 'db', name: 'MAIN' }) as { content: Array<{ text: string }>; isError: boolean }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toBe('Error: HTTP 502: Request failed with status code 502')
     })
   })
 })

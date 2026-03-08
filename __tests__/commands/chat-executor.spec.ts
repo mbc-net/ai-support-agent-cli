@@ -942,6 +942,84 @@ describe('chat-executor', () => {
     })
   })
 
+  describe('conversation files embedding', () => {
+    it('should embed conversation file references in the message', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const payload: ChatPayload = {
+        message: 'What was in the file?',
+        conversationFiles: [
+          { fileId: 'cf-1', s3Key: 'uploads/cf-1.txt', filename: 'readme.txt', contentType: 'text/plain', fileSize: 1024 },
+          { fileId: 'cf-2', s3Key: 'uploads/cf-2.png', filename: 'screenshot.png', contentType: 'image/png', fileSize: 2048 },
+        ],
+      }
+
+      const resultPromise = executeChatCommand(payload, 'cmd-conv-files', mockClient, undefined, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const args = spawnCall[1] as string[]
+      const messageArg = args[args.length - 1]
+      expect(messageArg).toContain('<conversation_files>')
+      expect(messageArg).toContain('read_conversation_file')
+      expect(messageArg).toContain('readme.txt')
+      expect(messageArg).toContain('screenshot.png')
+      expect(messageArg).toContain('cf-1')
+      expect(messageArg).toContain('cf-2')
+    })
+
+    it('should not embed conversation files when empty', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const payload: ChatPayload = {
+        message: 'No files here',
+        conversationFiles: [],
+      }
+
+      const resultPromise = executeChatCommand(payload, 'cmd-no-conv-files', mockClient, undefined, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const args = spawnCall[1] as string[]
+      const messageArg = args[args.length - 1]
+      expect(messageArg).not.toContain('<conversation_files>')
+    })
+
+    it('should not embed conversation files when undefined', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const resultPromise = executeChatCommand(basePayload, 'cmd-undef-conv-files', mockClient, undefined, 'claude_code', 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const args = spawnCall[1] as string[]
+      const messageArg = args[args.length - 1]
+      expect(messageArg).not.toContain('<conversation_files>')
+    })
+  })
+
   describe('cancelChatProcess', () => {
     it('should return false when commandId is not found', () => {
       const result = cancelChatProcess('nonexistent-cmd')

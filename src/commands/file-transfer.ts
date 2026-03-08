@@ -7,6 +7,7 @@ import { pipeline } from 'stream/promises'
 import { ApiClient } from '../api-client'
 import { logger } from '../logger'
 import type { ChatFileInfo } from '../types'
+import { guessContentType } from '../utils/content-type'
 
 export const ALLOWED_EXTENSIONS = new Set([
   '.txt', '.md', '.csv', '.json', '.xml', '.yaml', '.yml',
@@ -17,47 +18,8 @@ export const ALLOWED_EXTENSIONS = new Set([
   '.zip', '.tar', '.gz',
 ])
 
-const CONTENT_TYPE_MAP: Record<string, string> = {
-  '.txt': 'text/plain',
-  '.md': 'text/markdown',
-  '.csv': 'text/csv',
-  '.json': 'application/json',
-  '.xml': 'application/xml',
-  '.yaml': 'application/yaml',
-  '.yml': 'application/yaml',
-  '.log': 'text/plain',
-  '.html': 'text/html',
-  '.css': 'text/css',
-  '.js': 'application/javascript',
-  '.ts': 'application/typescript',
-  '.py': 'text/x-python',
-  '.sh': 'text/x-shellscript',
-  '.sql': 'application/sql',
-  '.env': 'text/plain',
-  '.conf': 'text/plain',
-  '.cfg': 'text/plain',
-  '.ini': 'text/plain',
-  '.toml': 'application/toml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.svg': 'image/svg+xml',
-  '.webp': 'image/webp',
-  '.pdf': 'application/pdf',
-  '.doc': 'application/msword',
-  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  '.xls': 'application/vnd.ms-excel',
-  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  '.zip': 'application/zip',
-  '.tar': 'application/x-tar',
-  '.gz': 'application/gzip',
-}
-
 export function getContentType(filename: string): string {
-  const ext = extname(filename).toLowerCase()
-  return CONTENT_TYPE_MAP[ext] ?? 'application/octet-stream'
+  return guessContentType(filename)
 }
 
 export interface DownloadResult {
@@ -173,5 +135,21 @@ export function parseChatFiles(files: unknown): ChatFileInfo[] {
       typeof item.filename === 'string' &&
       typeof item.contentType === 'string' &&
       typeof item.fileSize === 'number',
+  )
+}
+
+/**
+ * ChatPayload の conversationFiles フィールドをパースして ChatFileInfo[] を返す
+ * files と異なり contentType と fileSize は任意（デフォルト値で補完）
+ */
+export function parseConversationFiles(files: unknown): ChatFileInfo[] {
+  if (!Array.isArray(files)) return []
+  return files.filter(
+    (f): f is ChatFileInfo =>
+      f != null &&
+      typeof f === 'object' &&
+      typeof (f as Record<string, unknown>).fileId === 'string' &&
+      typeof (f as Record<string, unknown>).s3Key === 'string' &&
+      typeof (f as Record<string, unknown>).filename === 'string',
   )
 }
