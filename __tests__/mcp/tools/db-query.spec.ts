@@ -94,6 +94,18 @@ describe('db-query tool', () => {
       expect(result.error).toBe('Forbidden SQL operation: REVOKE')
     })
 
+    it('should reject UNION-based injection', () => {
+      const result = validateSql('SELECT * FROM users UNION SELECT * FROM passwords')
+      expect(result.valid).toBe(false)
+      expect(result.error).toBe('Forbidden SQL operation: UNION')
+    })
+
+    it('should reject UNION ALL injection', () => {
+      const result = validateSql('SELECT id FROM users UNION ALL SELECT password FROM credentials')
+      expect(result.valid).toBe(false)
+      expect(result.error).toBe('Forbidden SQL operation: UNION')
+    })
+
     it('should allow column names containing forbidden keywords as substrings', () => {
       expect(validateSql('SELECT UPDATED_AT FROM users').valid).toBe(true)
       expect(validateSql('SELECT CREATED_AT FROM users').valid).toBe(true)
@@ -151,6 +163,7 @@ describe('db-query tool', () => {
         expect(validateSql('CREATE TABLE users (id INT)', perms).valid).toBe(false)
         expect(validateSql('GRANT ALL ON users TO admin', perms).valid).toBe(false)
         expect(validateSql('REVOKE ALL ON users FROM admin', perms).valid).toBe(false)
+        expect(validateSql('SELECT * FROM users UNION SELECT * FROM passwords', perms).valid).toBe(false)
       })
 
       it('should still allow SELECT when writePermissions are granted', () => {

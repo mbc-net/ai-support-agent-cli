@@ -3,7 +3,7 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import { ALLOWED_EXTENSIONS, getContentType, uploadFile } from '../../commands/file-transfer'
-import { extractErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
+import { mcpTextResponse, withMcpErrorHandling } from './mcp-response'
 
 /**
  * file_upload ツールを MCP サーバーに登録する
@@ -21,8 +21,8 @@ export function registerFileUploadTool(server: McpServer, apiClient: ApiClient):
       messageId: z.string().describe('Message ID'),
       projectCode: z.string().describe('Project code'),
     },
-    async ({ filePath, filename, conversationId, messageId, projectCode }) => {
-      try {
+    async ({ filePath, filename, conversationId, messageId, projectCode }) =>
+      withMcpErrorHandling(async () => {
         const { fileId, s3Key, fileSize } = await uploadFile(
           apiClient,
           filePath,
@@ -41,9 +41,6 @@ export function registerFileUploadTool(server: McpServer, apiClient: ApiClient):
           contentType,
           fileSize,
         }, null, 2))
-      } catch (error) {
-        return mcpErrorResponse(extractErrorMessage(error))
-      }
-    },
+      }),
   )
 }

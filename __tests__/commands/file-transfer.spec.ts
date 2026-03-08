@@ -9,6 +9,7 @@ import {
   downloadChatFiles,
   getContentType,
   parseChatFiles,
+  parseConversationFiles,
   uploadFile,
 } from '../../src/commands/file-transfer'
 import type { ChatFileInfo } from '../../src/types'
@@ -111,6 +112,49 @@ describe('file-transfer', () => {
       const result = parseChatFiles(files)
       expect(result).toHaveLength(1)
       expect(result[0].fileId).toBe('f1')
+    })
+  })
+
+  describe('parseConversationFiles', () => {
+    it('should parse valid conversation file array', () => {
+      const files = [
+        { fileId: 'f1', s3Key: 'key1', filename: 'test.txt', contentType: 'text/plain', fileSize: 100 },
+        { fileId: 'f2', s3Key: 'key2', filename: 'img.png', contentType: 'image/png', fileSize: 200 },
+      ]
+      const result = parseConversationFiles(files)
+      expect(result).toHaveLength(2)
+      expect(result[0].fileId).toBe('f1')
+      expect(result[1].fileId).toBe('f2')
+    })
+
+    it('should return empty array for non-array input', () => {
+      expect(parseConversationFiles(null)).toEqual([])
+      expect(parseConversationFiles(undefined)).toEqual([])
+      expect(parseConversationFiles('string')).toEqual([])
+      expect(parseConversationFiles(42)).toEqual([])
+    })
+
+    it('should filter out items missing required fields', () => {
+      const files = [
+        { fileId: 'f1', s3Key: 'key1', filename: 'test.txt' }, // valid (contentType/fileSize optional)
+        { fileId: 'f2' }, // missing s3Key and filename
+        null,
+        'string',
+        { s3Key: 'key3', filename: 'test.txt' }, // missing fileId
+      ]
+      const result = parseConversationFiles(files)
+      expect(result).toHaveLength(1)
+      expect(result[0].fileId).toBe('f1')
+    })
+
+    it('should accept items without contentType and fileSize', () => {
+      const files = [
+        { fileId: 'f1', s3Key: 'key1', filename: 'test.txt' },
+      ]
+      const result = parseConversationFiles(files)
+      expect(result).toHaveLength(1)
+      expect(result[0].fileId).toBe('f1')
+      expect(result[0].filename).toBe('test.txt')
     })
   })
 

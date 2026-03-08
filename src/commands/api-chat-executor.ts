@@ -1,9 +1,12 @@
+import { Readable } from 'stream'
+
 import axios from 'axios'
 
 import { ApiClient } from '../api-client'
 import {
   ANTHROPIC_API_URL,
   ANTHROPIC_API_VERSION,
+  ANTHROPIC_CONTENT_TYPE,
   CHAT_TIMEOUT,
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_MAX_TOKENS,
@@ -11,12 +14,32 @@ import {
   ERR_ANTHROPIC_API_KEY_NOT_SET,
   ERR_MESSAGE_REQUIRED,
   LOG_MESSAGE_LIMIT,
+  SSE_DONE,
+  SSE_EVENT,
+  SSE_PREFIX,
 } from '../constants'
 import { logger } from '../logger'
-import type { AgentServerConfig, ChatChunkType, ChatPayload, CommandResult, HistoryMessage } from '../types'
-import { getErrorMessage, parseString, truncateString } from '../utils'
+import { type AgentServerConfig, type ChatChunkType, type ChatPayload, type CommandResult, errorResult, type HistoryMessage, successResult } from '../types'
+import { parseString, truncateString } from '../utils'
 
-import { createChunkSender, parseHistory } from './shared-chat-utils'
+import { ProcessManager } from './process-manager'
+import { createChunkSender, handleChatError, parseHistory } from './shared-chat-utils'
+
+/** 実行中の API チャットを commandId で管理 */
+const processManager = new ProcessManager()
+
+/**
+ * 実行中の API チャットプロセスをキャンセルする
+ * @returns true: プロセスが見つかりキャンセルした, false: プロセスが見つからなかった
+ */
+export function cancelApiChatProcess(commandId: string): boolean {
+  return processManager.cancel(commandId)
+}
+
+/** テスト用: runningApiChats の内容を取得 */
+export function _getRunningApiChats(): Map<string, { cancel: () => void }> {
+  return processManager._getRunning()
+}
 
 /** Anthropic API のトークン使用量 */
 interface ApiUsage {
@@ -30,6 +53,33 @@ interface ApiChatResult {
   usage: ApiUsage
 }
 
+/** Anthropic SSE ストリーミングイベント型 */
+interface AnthropicMessageStartEvent {
+  type: 'message_start'
+  message?: { usage?: { input_tokens?: number } }
+}
+
+interface AnthropicMessageDeltaEvent {
+  type: 'message_delta'
+  usage?: { output_tokens?: number }
+}
+
+interface AnthropicContentBlockDeltaEvent {
+  type: 'content_block_delta'
+  delta?: { type: string; text?: string }
+}
+
+interface AnthropicContentBlockStartEvent {
+  type: 'content_block_start'
+  content_block?: { type: string; name?: string }
+}
+
+type AnthropicStreamEvent =
+  | AnthropicMessageStartEvent
+  | AnthropicMessageDeltaEvent
+  | AnthropicContentBlockDeltaEvent
+  | AnthropicContentBlockStartEvent
+
 /**
  * Anthropic API を直接呼び出してチャットメッセージを処理する
  * エージェントが持つ ANTHROPIC_API_KEY で Claude を呼び出す
@@ -42,20 +92,17 @@ export async function executeApiChatCommand(
   agentId?: string,
 ): Promise<CommandResult> {
   if (!agentId) {
-    return { success: false, error: ERR_AGENT_ID_REQUIRED }
+    return errorResult(ERR_AGENT_ID_REQUIRED)
   }
 
   const message = parseString(payload.message)
   if (!message) {
-    return { success: false, error: ERR_MESSAGE_REQUIRED }
+    return errorResult(ERR_MESSAGE_REQUIRED)
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) {
-    return {
-      success: false,
-      error: ERR_ANTHROPIC_API_KEY_NOT_SET,
-    }
+    return errorResult(ERR_ANTHROPIC_API_KEY_NOT_SET)
   }
 
   logger.info(
@@ -71,15 +118,24 @@ export async function executeApiChatCommand(
 
     const historyMessages = parseHistory(payload.history)
 
-    const result = await callAnthropicApi(
-      apiKey,
-      message,
-      model,
-      maxTokens,
-      systemPrompt,
-      sendChunk,
-      historyMessages,
-    )
+    const abortController = new AbortController()
+    processManager.register(commandId, { cancel: () => abortController.abort() })
+
+    let result: ApiChatResult
+    try {
+      result = await callAnthropicApi(
+        apiKey,
+        message,
+        model,
+        maxTokens,
+        systemPrompt,
+        sendChunk,
+        historyMessages,
+        abortController.signal,
+      )
+    } finally {
+      processManager.remove(commandId)
+    }
 
     logger.info(
       `[api-chat] API chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, tokens: in=${result.usage.inputTokens} out=${result.usage.outputTokens}`,
@@ -95,12 +151,9 @@ export async function executeApiChatCommand(
       },
     })
     await sendChunk('done', doneContent)
-    return { success: true, data: result.text }
+    return successResult(result.text)
   } catch (error) {
-    const errorMessage = getErrorMessage(error)
-    logger.error(`[api-chat] API chat command failed [${commandId}]: ${errorMessage}`)
-    await sendChunk('error', errorMessage)
-    return { success: false, error: errorMessage }
+    return handleChatError(error, commandId, 'api-chat', sendChunk)
   }
 }
 
@@ -115,6 +168,7 @@ async function callAnthropicApi(
   systemPrompt: string | undefined,
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
   history?: HistoryMessage[],
+  abortSignal?: AbortSignal,
 ): Promise<ApiChatResult> {
   const messages = [
     ...(history ?? []).map((msg) => ({
@@ -144,6 +198,7 @@ async function callAnthropicApi(
       },
       responseType: 'stream',
       timeout: CHAT_TIMEOUT,
+      ...(abortSignal ? { signal: abortSignal } : {}),
     },
   )
 
@@ -152,9 +207,21 @@ async function callAnthropicApi(
     let buffer = ''
     const usage: ApiUsage = { inputTokens: 0, outputTokens: 0 }
 
-    const stream = response.data as NodeJS.ReadableStream
+    const stream = response.data as Readable
+
+    // アクティビティベースタイムアウト: ストリームデータ受信が途絶えたら中止
+    let activityTimer: NodeJS.Timeout | undefined
+    const resetActivityTimer = () => {
+      if (activityTimer) clearTimeout(activityTimer)
+      activityTimer = setTimeout(() => {
+        logger.warn(`[api-chat] Stream timed out after ${CHAT_TIMEOUT / 1000}s of inactivity`)
+        stream.destroy(new Error(`Stream timed out after ${CHAT_TIMEOUT / 1000}s of inactivity`))
+      }, CHAT_TIMEOUT)
+    }
+    resetActivityTimer()
 
     stream.on('data', (chunk: Buffer) => {
+      resetActivityTimer()
       buffer += chunk.toString()
 
       const lines = buffer.split('\n')
@@ -162,35 +229,34 @@ async function callAnthropicApi(
       buffer = lines.pop() ?? ''
 
       for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        const data = line.slice(6).trim()
-        if (data === '[DONE]') continue
+        if (!line.startsWith(SSE_PREFIX)) continue
+        const data = line.slice(SSE_PREFIX.length).trim()
+        if (data === SSE_DONE) continue
 
         try {
-          const event = JSON.parse(data) as Record<string, unknown>
-          if (event.type === 'message_start') {
+          const event = JSON.parse(data) as AnthropicStreamEvent
+          if (event.type === SSE_EVENT.MESSAGE_START) {
             // message_start イベントから input_tokens を取得
-            const msg = event.message as Record<string, unknown> | undefined
-            const msgUsage = msg?.usage as Record<string, unknown> | undefined
-            if (typeof msgUsage?.input_tokens === 'number') {
-              usage.inputTokens = msgUsage.input_tokens
+            const inputTokens = event.message?.usage?.input_tokens
+            if (typeof inputTokens === 'number') {
+              usage.inputTokens = inputTokens
             }
-          } else if (event.type === 'message_delta') {
+          } else if (event.type === SSE_EVENT.MESSAGE_DELTA) {
             // message_delta イベントから output_tokens を取得
-            const deltaUsage = event.usage as Record<string, unknown> | undefined
-            if (typeof deltaUsage?.output_tokens === 'number') {
-              usage.outputTokens = deltaUsage.output_tokens
+            const outputTokens = event.usage?.output_tokens
+            if (typeof outputTokens === 'number') {
+              usage.outputTokens = outputTokens
             }
-          } else if (event.type === 'content_block_delta') {
-            const delta = event.delta as Record<string, unknown> | undefined
-            if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+          } else if (event.type === SSE_EVENT.CONTENT_BLOCK_DELTA) {
+            const delta = event.delta
+            if (delta?.type === ANTHROPIC_CONTENT_TYPE.TEXT_DELTA && typeof delta.text === 'string') {
               fullOutput += delta.text
               void sendChunk('delta', delta.text)
             }
-          } else if (event.type === 'content_block_start') {
-            const contentBlock = event.content_block as Record<string, unknown> | undefined
-            if (contentBlock?.type === 'tool_use') {
-              const toolName = contentBlock.name as string ?? 'unknown'
+          } else if (event.type === SSE_EVENT.CONTENT_BLOCK_START) {
+            const contentBlock = event.content_block
+            if (contentBlock?.type === ANTHROPIC_CONTENT_TYPE.TOOL_USE) {
+              const toolName = contentBlock.name ?? 'unknown'
               logger.info(`[api-chat] Tool use requested: ${toolName} (not supported in API mode)`)
               void sendChunk('delta', `\n[Tool call: ${toolName} — tool use is not supported in API chat mode]\n`)
             }
@@ -202,10 +268,12 @@ async function callAnthropicApi(
     })
 
     stream.on('end', () => {
+      if (activityTimer) clearTimeout(activityTimer)
       resolve({ text: fullOutput, usage })
     })
 
     stream.on('error', (error: Error) => {
+      if (activityTimer) clearTimeout(activityTimer)
       reject(error)
     })
   })

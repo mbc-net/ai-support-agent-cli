@@ -7,6 +7,7 @@ import { CONFIG_DIR, CONFIG_FILE, PROJECT_CODE_DEFAULT } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AgentConfig, LegacyAgentConfig, ProjectRegistration } from './types'
+import { atomicWriteFile } from './utils'
 
 export function getConfigDir(): string {
   if (path.isAbsolute(CONFIG_DIR)) {
@@ -20,9 +21,7 @@ function getConfigPath(): string {
 }
 
 function writeConfigFile(configPath: string, data: AgentConfig): void {
-  const tmpPath = configPath + '.tmp'
-  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 })
-  fs.renameSync(tmpPath, configPath)
+  atomicWriteFile(configPath, JSON.stringify(data, null, 2))
 }
 
 function generateAgentId(): string {

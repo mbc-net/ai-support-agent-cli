@@ -1,0 +1,308 @@
+import type { ApiClient } from './api-client'
+import { type AppSyncSubscriber, type AppSyncNotification } from './appsync-subscriber'
+import { LOG_PAYLOAD_LIMIT, LOG_RESULT_LIMIT } from './constants'
+import { t } from './i18n'
+import { logger } from './logger'
+import { getSystemInfo, getLocalIpAddress } from './system-info'
+import { TerminalWebSocket } from './terminal'
+import { getErrorMessage } from './utils'
+import { executeCommand } from './commands'
+import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
+import { refreshChatMode, scheduleConfigSync } from './agent-config-sync'
+
+export interface TransportState {
+  heartbeatTimer: ReturnType<typeof setInterval> | null
+  pollTimer: ReturnType<typeof setInterval> | null
+  subscriber: AppSyncSubscriber | null
+  terminalWs: TerminalWebSocket | null
+  processing: boolean
+  configSyncDebounceTimer: ReturnType<typeof setTimeout> | null
+}
+
+export interface TransportDeps {
+  client: ApiClient
+  agentId: string
+  prefix: string
+  apiUrl: string
+  token: string
+  projectDir: string | undefined
+  tenantCode: string
+  pollInterval: number
+  heartbeatInterval: number
+}
+
+export interface CommandContext {
+  configSyncState: ConfigSyncState
+  configSyncDeps: ConfigSyncDeps
+  transportState: TransportState
+  onSetup: () => Promise<void>
+  onConfigSync: () => Promise<void>
+}
+
+/**
+ * Start polling mode for pending commands.
+ */
+export function startPollingMode(
+  deps: TransportDeps,
+  state: TransportState,
+  ctx: CommandContext,
+): void {
+  const pollCommands = async (): Promise<void> => {
+    try {
+      const pending = await deps.client.getPendingCommands(deps.agentId)
+
+      // chat_cancel commands are processed immediately regardless of processing flag
+      const cancelCommands = pending.filter(cmd => cmd.type === 'chat_cancel')
+      const normalCommands = pending.filter(cmd => cmd.type !== 'chat_cancel')
+
+      for (const cmd of cancelCommands) {
+        logger.info(t('runner.commandReceived', { prefix: deps.prefix, type: cmd.type, commandId: cmd.commandId }))
+        await processCommand(deps, ctx, cmd.commandId)
+      }
+
+      // Normal commands are gated by processing flag
+      if (state.processing) return
+      state.processing = true
+
+      try {
+        if (normalCommands.length > 0) {
+          logger.debug(`${deps.prefix} Polling found ${normalCommands.length} pending command(s)`)
+        }
+
+        for (const cmd of normalCommands) {
+          logger.info(t('runner.commandReceived', { prefix: deps.prefix, type: cmd.type, commandId: cmd.commandId }))
+          await processCommand(deps, ctx, cmd.commandId)
+        }
+      } finally {
+        state.processing = false
+      }
+    } catch (error) {
+      logger.debug(`${deps.prefix} Polling error: ${getErrorMessage(error)}`)
+    }
+  }
+
+  state.pollTimer = setInterval(() => {
+    void pollCommands()
+  }, deps.pollInterval)
+}
+
+/**
+ * Start subscription mode via AppSync WebSocket.
+ */
+export async function startSubscriptionMode(
+  deps: TransportDeps,
+  state: TransportState,
+  ctx: CommandContext,
+  AppSyncSubscriberClass: new (url: string, apiKey: string) => AppSyncSubscriber,
+  appsyncUrl: string,
+  appsyncApiKey: string,
+): Promise<void> {
+  state.subscriber = new AppSyncSubscriberClass(appsyncUrl, appsyncApiKey)
+
+  try {
+    await state.subscriber.connect()
+    logger.success(`${deps.prefix} Connected via AppSync WebSocket`)
+  } catch (error) {
+    logger.warn(`${deps.prefix} WebSocket connection failed, falling back to polling: ${getErrorMessage(error)}`)
+    startPollingMode(deps, state, ctx)
+    return
+  }
+
+  state.subscriber.subscribe(
+    deps.tenantCode,
+    (notification) => { void handleNotification(deps, state, ctx, notification) },
+  )
+
+  state.subscriber.onReconnect(() => {
+    logger.info(`${deps.prefix} Reconnected, checking for pending commands...`)
+    void checkPendingCommands(deps, state, ctx)
+  })
+}
+
+/**
+ * Start heartbeat interval.
+ */
+export function startHeartbeat(
+  deps: TransportDeps,
+  state: TransportState,
+  configSyncState: ConfigSyncState,
+  configSyncDeps: ConfigSyncDeps,
+): void {
+  const sendHeartbeat = async (): Promise<void> => {
+    try {
+      await refreshChatMode(configSyncDeps, configSyncState, false)
+
+      const response = await deps.client.heartbeat(
+        deps.agentId,
+        getSystemInfo(),
+        undefined,
+        configSyncState.availableChatModes,
+        configSyncState.activeChatMode,
+        getLocalIpAddress(),
+      )
+
+      // Check configHash from heartbeat response (polling fallback)
+      if (response && typeof response === 'object' && 'configHash' in response) {
+        const heartbeatResponse = response as { configHash?: string }
+        if (heartbeatResponse.configHash && heartbeatResponse.configHash !== configSyncState.currentConfigHash) {
+          logger.info(`${deps.prefix} Config hash changed in heartbeat response, syncing...`)
+          state.configSyncDebounceTimer = scheduleConfigSync(configSyncDeps, configSyncState, state.configSyncDebounceTimer)
+        }
+      }
+
+      logger.debug(`${deps.prefix} Heartbeat sent (activeChatMode=${configSyncState.activeChatMode ?? 'none'})`)
+    } catch (error) {
+      logger.warn(t('runner.heartbeatFailed', { prefix: deps.prefix, message: getErrorMessage(error) }))
+    }
+  }
+
+  state.heartbeatTimer = setInterval(() => {
+    void sendHeartbeat()
+  }, deps.heartbeatInterval)
+
+  void sendHeartbeat()
+}
+
+/**
+ * Start terminal WebSocket connection.
+ */
+export function startTerminalWebSocket(
+  deps: TransportDeps,
+  state: TransportState,
+): void {
+  state.terminalWs = new TerminalWebSocket(
+    deps.apiUrl,
+    deps.token,
+    deps.agentId,
+    deps.projectDir,
+  )
+
+  state.terminalWs.connect().catch((error) => {
+    logger.warn(`${deps.prefix} Terminal WebSocket connection failed: ${getErrorMessage(error)}`)
+  })
+}
+
+/**
+ * Handle an incoming AppSync notification.
+ */
+export async function handleNotification(
+  deps: TransportDeps,
+  state: TransportState,
+  ctx: CommandContext,
+  notification: AppSyncNotification,
+): Promise<void> {
+  logger.debug(`${deps.prefix} Notification received: action=${notification.action}, content=${JSON.stringify(notification.content ?? {}).substring(0, LOG_RESULT_LIMIT)}`)
+
+  switch (notification.action) {
+    case 'agent-command': {
+      const commandId = notification.content?.commandId as string
+      if (!commandId) {
+        logger.warn(`${deps.prefix} Notification missing commandId: ${JSON.stringify(notification.content ?? {})}`)
+        return
+      }
+      const commandType = (notification.content?.type as string) ?? 'unknown'
+      logger.info(t('runner.commandReceived', {
+        prefix: deps.prefix,
+        type: commandType,
+        commandId,
+      }))
+      // chat_cancel is processed immediately regardless of processing flag
+      await processCommand(deps, ctx, commandId)
+      break
+    }
+    case 'config-update': {
+      const newHash = notification.content?.configHash as string
+      if (newHash && newHash !== ctx.configSyncState.currentConfigHash) {
+        logger.info(`${deps.prefix} Config update detected (hash: ${newHash})`)
+        state.configSyncDebounceTimer = scheduleConfigSync(ctx.configSyncDeps, ctx.configSyncState, state.configSyncDebounceTimer)
+      }
+      break
+    }
+    default:
+      logger.debug(`${deps.prefix} Ignoring notification with action: ${notification.action}`)
+  }
+}
+
+/**
+ * Check for pending commands (used after reconnection).
+ */
+export async function checkPendingCommands(
+  deps: TransportDeps,
+  state: TransportState,
+  ctx: CommandContext,
+): Promise<void> {
+  try {
+    const pending = await deps.client.getPendingCommands(deps.agentId)
+    for (const cmd of pending) {
+      await handleNotification(deps, state, ctx, {
+        id: cmd.commandId,
+        table: '',
+        pk: '',
+        sk: '',
+        tenantCode: '',
+        action: 'agent-command',
+        content: { commandId: cmd.commandId, type: cmd.type },
+      })
+    }
+  } catch (error) {
+    logger.warn(`${deps.prefix} Failed to check pending commands: ${getErrorMessage(error)}`)
+  }
+}
+
+/**
+ * Process a single command: fetch, execute, and submit result.
+ */
+async function processCommand(
+  deps: TransportDeps,
+  ctx: CommandContext,
+  commandId: string,
+): Promise<void> {
+  try {
+    const detail = await deps.client.getCommand(commandId, deps.agentId)
+    logger.debug(`${deps.prefix} Command detail [${commandId}]: type=${detail.type}, payload=${JSON.stringify(detail.payload).substring(0, LOG_PAYLOAD_LIMIT)}`)
+    const result = await executeCommand(detail.type, detail.payload, {
+      commandId,
+      client: deps.client,
+      serverConfig: ctx.configSyncState.serverConfig ?? undefined,
+      activeChatMode: ctx.configSyncState.activeChatMode,
+      agentId: deps.agentId,
+      projectDir: deps.projectDir,
+      projectConfig: ctx.configSyncState.projectConfig,
+      mcpConfigPath: ctx.configSyncState.mcpConfigPath,
+      onSetup: ctx.onSetup,
+      onConfigSync: ctx.onConfigSync,
+    })
+    logger.debug(`${deps.prefix} Command result [${commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, LOG_RESULT_LIMIT)}`)
+    await deps.client.submitResult(commandId, result, deps.agentId)
+    logger.info(t('runner.commandDone', {
+      prefix: deps.prefix,
+      commandId,
+      result: result.success ? 'success' : 'failed',
+    }))
+  } catch (error) {
+    const message = getErrorMessage(error)
+    logger.error(
+      t('runner.commandError', { prefix: deps.prefix, commandId, message }),
+    )
+
+    try {
+      await deps.client.submitResult(commandId, {
+        success: false,
+        error: message,
+      }, deps.agentId)
+    } catch {
+      logger.error(t('runner.resultSendFailed', { prefix: deps.prefix }))
+    }
+  }
+}
+
+/**
+ * Stop all transport resources.
+ */
+export function stopTransport(state: TransportState): void {
+  if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
+  if (state.pollTimer) clearInterval(state.pollTimer)
+  if (state.configSyncDebounceTimer) clearTimeout(state.configSyncDebounceTimer)
+  if (state.subscriber) state.subscriber.disconnect()
+  if (state.terminalWs) state.terminalWs.disconnect()
+}

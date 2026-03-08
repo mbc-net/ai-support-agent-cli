@@ -19,8 +19,8 @@ describe('MCP Server', () => {
       const mockClient = {} as ApiClient
       const server = createMcpServer(mockClient, 'TEST_01')
       expect(server).toBeDefined()
-      // 5 tools: db_query, get_db_schemas, get_credentials, file_upload, get_project_info
-      expect(server.tool).toHaveBeenCalledTimes(5)
+      // 6 tools: db_query, get_db_schemas, get_credentials, file_upload, get_project_info, read_conversation_file
+      expect(server.tool).toHaveBeenCalledTimes(6)
     })
   })
 

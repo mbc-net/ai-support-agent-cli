@@ -2,17 +2,34 @@ import { ApiClient } from '../api-client'
 import { type AwsCredentialResult, buildAwsProfileCredentials, buildSingleAccountAwsEnv } from '../aws-credential-builder'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, LOG_MESSAGE_LIMIT } from '../constants'
 import { logger } from '../logger'
-import type { AgentChatMode, AgentServerConfig, ChatChunkType, ChatPayload, CommandResult, ProjectConfigResponse } from '../types'
-import { getErrorMessage, parseString, truncateString } from '../utils'
+import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatFileInfo, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
+import { parseString, truncateString } from '../utils'
 
 import { getAutoAddDirs } from '../project-dir'
 import { executeApiChatCommand } from './api-chat-executor'
 import { runClaudeCode } from './claude-code-runner'
-import { downloadChatFiles, parseChatFiles } from './file-transfer'
-import { createChunkSender, formatHistoryForClaudeCode, parseHistory } from './shared-chat-utils'
+import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
+import { ProcessManager } from './process-manager'
+import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
-export { buildClaudeArgs, buildCleanEnv } from './claude-code-runner'
+export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
+
+/** 実行中のチャットプロセスを commandId で管理 */
+const processManager = new ProcessManager()
+
+/**
+ * 実行中のチャットプロセスをキャンセルする
+ * @returns true: プロセスが見つかりキルした, false: プロセスが見つからなかった
+ */
+export function cancelChatProcess(commandId: string): boolean {
+  return processManager.cancel(commandId)
+}
+
+/** テスト用: runningProcesses の内容を取得 */
+export function _getRunningProcesses(): Map<string, { cancel: () => void }> {
+  return processManager._getRunning()
+}
 
 /**
  * エージェントチャットモードに応じてチャットメッセージを処理する
@@ -33,7 +50,7 @@ export async function executeChatCommand(
   mcpConfigPath?: string,
 ): Promise<CommandResult> {
   if (!agentId) {
-    return { success: false, error: ERR_AGENT_ID_REQUIRED }
+    return errorResult(ERR_AGENT_ID_REQUIRED)
   }
 
   const mode = activeChatMode ?? 'claude_code'
@@ -64,7 +81,7 @@ async function executeClaudeCodeChat(
 ): Promise<CommandResult> {
   const message = parseString(payload.message)
   if (!message) {
-    return { success: false, error: ERR_MESSAGE_REQUIRED }
+    return errorResult(ERR_MESSAGE_REQUIRED)
   }
 
   logger.info(`[chat] Starting chat command [${commandId}]: message="${truncateString(message, LOG_MESSAGE_LIMIT)}"`)
@@ -118,16 +135,20 @@ async function executeClaudeCodeChat(
       }
     }
 
+    // 会話全体のファイルリファレンスを埋め込み（MCPツール経由で読み取り可能）
+    const conversationFiles = parseConversationFiles(payload.conversationFiles)
+    const conversationFileNotice = buildConversationFileNotice(conversationFiles)
+    if (conversationFiles.length > 0) {
+      logger.info(`[chat] ${conversationFiles.length} conversation file references embedded for command [${commandId}]`)
+    }
+
     // 会話履歴をメッセージに埋め込む（Claude Code CLI用）
     const history = parseHistory(payload.history)
 
     // file_upload ツールに必要なメタデータをメッセージに付加
-    let metadataNotice = ''
-    if (conversationId && mcpConfigPath) {
-      metadataNotice = `\n\n<message_metadata>\nconversationId: ${conversationId}\nmessageId: ${commandId}\nprojectCode: ${projectCode ?? ''}\n</message_metadata>`
-    }
+    const metadataNotice = buildMetadataNotice(conversationId, commandId, projectCode, mcpConfigPath)
 
-    const messageWithHistory = formatHistoryForClaudeCode(history, message + filePathsNotice + metadataNotice)
+    const messageWithHistory = formatHistoryForClaudeCode(history, message + filePathsNotice + conversationFileNotice + metadataNotice)
 
     const logDetails = [
       allowedTools?.length ? `allowedTools: ${allowedTools.join(', ')}` : '(no allowedTools)',
@@ -137,10 +158,29 @@ async function executeClaudeCodeChat(
       mcpConfigPath ? 'MCP config' : null,
       history.length > 0 ? `${history.length} history messages` : null,
       chatFiles.length > 0 ? `${chatFiles.length} attached files` : null,
+      conversationFiles.length > 0 ? `${conversationFiles.length} conversation files` : null,
     ].filter(Boolean).join(', ')
     logger.debug(`[chat] Spawning claude CLI for command [${commandId}]: ${logDetails}`)
     logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
-    const result = await runClaudeCode(messageWithHistory, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, projectDir, systemPrompt)
+    const handle = runClaudeCode({
+      message: messageWithHistory,
+      sendChunk,
+      allowedTools,
+      addDirs,
+      locale,
+      awsEnv,
+      mcpConfigPath,
+      cwd: projectDir,
+      systemPrompt,
+    })
+    // プロセスを管理 Map に登録
+    processManager.register(commandId, handle)
+    let result
+    try {
+      result = await handle.result
+    } finally {
+      processManager.remove(commandId)
+    }
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, duration=${result.metadata.durationMs}ms`)
     // 完了チャンクを送信（metadata を含める）
     const doneContent = JSON.stringify({
@@ -152,13 +192,28 @@ async function executeClaudeCodeChat(
     // ダウンロードした一時ファイルをクリーンアップ
     cleanupDownloads?.()
 
-    return { success: true, data: result.text }
+    return successResult(result.text)
   } catch (error) {
-    const errorMessage = getErrorMessage(error)
-    logger.error(`[chat] Chat command failed [${commandId}]: ${errorMessage}`)
-    await sendChunk('error', errorMessage)
-    return { success: false, error: errorMessage }
+    return handleChatError(error, commandId, 'chat', sendChunk)
   }
+}
+
+export function buildConversationFileNotice(conversationFiles: ChatFileInfo[]): string {
+  if (conversationFiles.length === 0) return ''
+  const fileList = conversationFiles.map((f) =>
+    `- fileId: ${f.fileId}, s3Key: ${f.s3Key}, filename: ${f.filename} (${f.contentType}, ${f.fileSize} bytes)`,
+  ).join('\n')
+  return `\n\n<conversation_files>\nFiles shared in this conversation. Use read_conversation_file tool to read their contents.\n${fileList}\n</conversation_files>`
+}
+
+export function buildMetadataNotice(
+  conversationId: string | null,
+  commandId: string,
+  projectCode: string | undefined,
+  mcpConfigPath?: string,
+): string {
+  if (!conversationId || !mcpConfigPath) return ''
+  return `\n\n<message_metadata>\nconversationId: ${conversationId}\nmessageId: ${commandId}\nprojectCode: ${projectCode ?? ''}\n</message_metadata>`
 }
 
 async function sendAwsCredentialNotices(

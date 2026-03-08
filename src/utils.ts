@@ -1,3 +1,11 @@
+import * as fs from 'fs'
+
+export function atomicWriteFile(filePath: string, content: string, mode = 0o600): void {
+  const tmpPath = filePath + '.tmp'
+  fs.writeFileSync(tmpPath, content, { mode })
+  fs.renameSync(tmpPath, filePath)
+}
+
 export function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
