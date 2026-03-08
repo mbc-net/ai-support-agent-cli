@@ -274,6 +274,29 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getRepoCredentials', () => {
+    it('should fetch repo credentials', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          repositoryId: 'REPO_01',
+          repositoryUrl: 'https://github.com/org/repo.git',
+          authMethod: 'api_key',
+          authSecret: 'ghp_token123',
+        },
+      })
+
+      const result = await client.getRepoCredentials('REPO_01')
+      expect(result.repositoryId).toBe('REPO_01')
+      expect(result.repositoryUrl).toBe('https://github.com/org/repo.git')
+      expect(result.authMethod).toBe('api_key')
+      expect(result.authSecret).toBe('ghp_token123')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/agent/repo-credentials/REPO_01',
+        undefined,
+      )
+    })
+  })
+
   describe('submitResult', () => {
     it('should submit command result', async () => {
       mockInstance.post.mockResolvedValue({ data: { success: true } })

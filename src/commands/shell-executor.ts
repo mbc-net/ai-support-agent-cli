@@ -3,7 +3,7 @@ import * as os from 'os'
 
 import { CMD_DEFAULT_TIMEOUT, ERR_NO_COMMAND_SPECIFIED, MAX_CMD_TIMEOUT, MAX_OUTPUT_SIZE } from '../constants'
 import { buildSafeEnv, validateCommand, validateFilePath } from '../security'
-import type { CommandResult, ShellCommandPayload } from '../types'
+import { type CommandResult, errorResult, type ShellCommandPayload, successResult } from '../types'
 import { parseNumber, parseString } from '../utils'
 
 export async function executeShellCommand(
@@ -11,24 +11,24 @@ export async function executeShellCommand(
 ): Promise<CommandResult> {
   const command = parseString(payload.command)
   if (!command) {
-    return { success: false, error: ERR_NO_COMMAND_SPECIFIED }
+    return errorResult(ERR_NO_COMMAND_SPECIFIED)
   }
 
   const validationError = validateCommand(command)
   if (validationError) {
-    return { success: false, error: validationError }
+    return errorResult(validationError)
   }
 
   const rawTimeout = parseNumber(payload.timeout) ?? CMD_DEFAULT_TIMEOUT
   if (rawTimeout < 1 || rawTimeout > MAX_CMD_TIMEOUT) {
-    return { success: false, error: `Timeout must be between 1 and ${MAX_CMD_TIMEOUT}ms` }
+    return errorResult(`Timeout must be between 1 and ${MAX_CMD_TIMEOUT}ms`)
   }
   const timeout = rawTimeout
   const cwd = parseString(payload.cwd) ?? os.homedir()
 
   const cwdError = await validateFilePath(cwd)
   if (cwdError) {
-    return { success: false, error: cwdError }
+    return errorResult(cwdError)
   }
 
   return new Promise((resolve) => {
@@ -49,7 +49,7 @@ export async function executeShellCommand(
       if (!resolved) {
         resolved = true
         proc.kill('SIGKILL')
-        resolve({ success: false, error: `Command timed out after ${timeout}ms` })
+        resolve(errorResult(`Command timed out after ${timeout}ms`))
       }
     }, timeout)
 
@@ -76,13 +76,9 @@ export async function executeShellCommand(
       const suffix = truncated ? '\n... [output truncated]' : ''
 
       if (code === 0) {
-        resolve({ success: true, data: stdout + suffix })
+        resolve(successResult(stdout + suffix))
       } else {
-        resolve({
-          success: false,
-          data: stdout + suffix,
-          error: stderr || `Process exited with code ${code}`,
-        })
+        resolve(errorResult(stderr || `Process exited with code ${code}`, stdout + suffix))
       }
     })
 
@@ -96,7 +92,7 @@ export async function executeShellCommand(
       } else if (err.code === 'EACCES') {
         errorMessage = `Permission denied: ${shellCmd}`
       }
-      resolve({ success: false, error: errorMessage })
+      resolve(errorResult(errorMessage))
     })
   })
 }

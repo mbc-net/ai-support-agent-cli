@@ -3,7 +3,7 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import { executeQuery } from './db-query'
-import { extractErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
+import { mcpTextResponse, withMcpErrorHandling } from './mcp-response'
 
 const MYSQL_SCHEMA_QUERY = `
 SELECT
@@ -51,20 +51,16 @@ export function registerDbSchemasTool(server: McpServer, apiClient: ApiClient): 
     {
       name: z.string().describe('Database connection name (e.g. "MAIN", "READONLY")'),
     },
-    async ({ name }) => {
-      try {
-        const credentials = await apiClient.getDbCredentials(name)
+    async ({ name }) => withMcpErrorHandling(async () => {
+      const credentials = await apiClient.getDbCredentials(name)
 
-        const query = credentials.engine === 'mysql'
-          ? MYSQL_SCHEMA_QUERY
-          : PG_SCHEMA_QUERY
+      const query = credentials.engine === 'mysql'
+        ? MYSQL_SCHEMA_QUERY
+        : PG_SCHEMA_QUERY
 
-        const rows = await executeQuery(credentials, query)
+      const rows = await executeQuery(credentials, query)
 
-        return mcpTextResponse(JSON.stringify(rows, null, 2))
-      } catch (error) {
-        return mcpErrorResponse(extractErrorMessage(error))
-      }
-    },
+      return mcpTextResponse(JSON.stringify(rows, null, 2))
+    }),
   )
 }

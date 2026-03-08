@@ -1,6 +1,11 @@
 import { mkdirSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 
+export interface BacklogMcpConfig {
+  domain: string
+  apiKey: string
+}
+
 /**
  * MCP 設定ファイルのパスを返す
  */
@@ -44,6 +49,7 @@ export function writeMcpConfig(
   token: string,
   projectCode: string,
   mcpServerPath: string,
+  backlogConfigs?: BacklogMcpConfig[],
 ): string {
   const configPath = getMcpConfigPath(projectDir)
   const dir = dirname(configPath)
@@ -51,7 +57,7 @@ export function writeMcpConfig(
   mkdirSync(dir, { recursive: true, mode: 0o700 })
 
   // 実際の設定: token を直接埋め込む（ファイルは 0o600 で保護）
-  const config = {
+  const config: Record<string, unknown> = {
     mcpServers: {
       'ai-support-agent': {
         command: 'node',
@@ -62,6 +68,19 @@ export function writeMcpConfig(
           AI_SUPPORT_AGENT_PROJECT_CODE: projectCode,
         },
       },
+      // Backlog MCPサーバー（設定がある場合のみ）
+      ...(backlogConfigs?.length
+        ? {
+            backlog: {
+              command: 'npx',
+              args: ['backlog-mcp-server'],
+              env: {
+                BACKLOG_DOMAIN: backlogConfigs[0].domain,
+                BACKLOG_API_KEY: backlogConfigs[0].apiKey,
+              },
+            },
+          }
+        : {}),
     },
   }
 

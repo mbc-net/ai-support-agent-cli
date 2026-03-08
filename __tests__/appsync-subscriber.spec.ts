@@ -77,9 +77,23 @@ describe('AppSyncSubscriber', () => {
       subscriber.disconnect()
     })
 
-    it('should reject non-HTTPS URLs', () => {
-      expect(() => new AppSyncSubscriber('http://example.appsync-api.amazonaws.com/graphql', apiKey))
-        .toThrow('AppSync URL must use HTTPS protocol')
+    it('should accept HTTP URLs for local development', () => {
+      const subscriber = new AppSyncSubscriber('http://localhost:4001/graphql', apiKey)
+      const connectPromise = subscriber.connect()
+
+      expect(mockWsInstance).not.toBeNull()
+      expect(mockWsInstance!.url).toMatch(/^ws:\/\//)
+      expect(mockWsInstance!.url).toContain('/graphql/realtime')
+
+      mockWsInstance!.simulateOpen()
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })
+
+      void connectPromise.then(() => subscriber.disconnect())
+    })
+
+    it('should reject non-HTTP/HTTPS URLs', () => {
+      expect(() => new AppSyncSubscriber('ftp://example.com/graphql', apiKey))
+        .toThrow('AppSync URL must use HTTP or HTTPS protocol')
     })
 
     it('should include base64-encoded header and payload in URL', async () => {
