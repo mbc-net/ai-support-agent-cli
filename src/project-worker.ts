@@ -22,7 +22,6 @@ async function handleStart(msg: IpcStartMessage): Promise<void> {
     project,
     agentId,
     options,
-    undefined,
     options.agentChatMode,
     options.defaultProjectDir,
   )

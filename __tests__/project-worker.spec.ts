@@ -129,7 +129,6 @@ describe('project-worker', () => {
         startMessage.options,
         undefined,
         undefined,
-        undefined,
       )
       expect(mockStart).toHaveBeenCalled()
       expect(processSendSpy).toHaveBeenCalledWith({

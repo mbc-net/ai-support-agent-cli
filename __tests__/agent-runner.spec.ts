@@ -139,7 +139,7 @@ describe('agent-runner', () => {
 
     // Default: ApiClient mock setup
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
       heartbeat: jest.fn().mockResolvedValue({ success: true }),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -355,7 +355,7 @@ describe('agent-runner', () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     // Make heartbeat reject to cover .catch(() => {}) branch
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
       heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -393,7 +393,7 @@ describe('agent-runner', () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     // Make heartbeat reject to cover .catch(() => {}) branch
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
       heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -435,7 +435,7 @@ describe('agent-runner', () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     // Make heartbeat reject to cover .catch(() => {}) branch
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
       heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -686,7 +686,7 @@ describe('startProjectAgent', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockClient = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
       heartbeat: jest.fn().mockResolvedValue({ success: true }),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),

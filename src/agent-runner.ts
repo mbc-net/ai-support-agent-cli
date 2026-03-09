@@ -35,7 +35,7 @@ export function startProjectAgent(
     defaultProjectDir?: string
   },
 ): { stop: () => void; client: import('./api-client').ApiClient; agent: ProjectAgent } {
-  const agent = new ProjectAgent(project, agentId, options, undefined, options.agentChatMode, options.defaultProjectDir)
+  const agent = new ProjectAgent(project, agentId, options, options.agentChatMode, options.defaultProjectDir)
   agent.start()
   return {
     stop: () => agent.stop(),
