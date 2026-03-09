@@ -20,7 +20,7 @@ export interface ProjectAgentOptions {
 export class ProjectAgent {
   private readonly client: ApiClient
   private readonly prefix: string
-  private readonly tenantCode: string
+  private tenantCode: string
   private readonly projectDir: string | undefined
   private readonly apiUrl: string
   private token: string
@@ -52,13 +52,12 @@ export class ProjectAgent {
     project: ProjectRegistration,
     private readonly agentId: string,
     private readonly options: ProjectAgentOptions,
-    tenantCode?: string,
     localAgentChatMode?: AgentChatMode,
     defaultProjectDir?: string,
   ) {
     this.client = new ApiClient(project.apiUrl, project.token)
     this.prefix = `[${project.projectCode}]`
-    this.tenantCode = tenantCode ?? project.projectCode
+    this.tenantCode = ''
     this.apiUrl = project.apiUrl
     this.token = project.token
     this.projectCode = project.projectCode
@@ -132,6 +131,8 @@ export class ProjectAgent {
         availableChatModes: this.configSyncState.availableChatModes,
         activeChatMode: this.configSyncState.activeChatMode,
       })
+      this.tenantCode = result.tenantCode
+      this.transportDeps = { ...this.transportDeps, tenantCode: this.tenantCode }
       logger.success(t('runner.registered', { prefix: this.prefix, agentId: result.agentId }))
       logger.debug(`${this.prefix} Register response: transportMode=${result.transportMode ?? 'none'}, appsyncUrl=${result.appsyncUrl ? 'present' : 'absent'}`)
     } catch (error) {
