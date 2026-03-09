@@ -200,16 +200,22 @@ export async function handleNotification(
   ctx: CommandContext,
   notification: AppSyncNotification,
 ): Promise<void> {
-  logger.debug(`${deps.prefix} Notification received: action=${notification.action}, content=${JSON.stringify(notification.content ?? {}).substring(0, LOG_RESULT_LIMIT)}`)
+  // AppSync AWSJSON fields arrive as strings; parse if needed
+  const content: Record<string, unknown> =
+    typeof notification.content === 'string'
+      ? JSON.parse(notification.content)
+      : (notification.content ?? {})
+
+  logger.debug(`${deps.prefix} Notification received: action=${notification.action}, content=${JSON.stringify(content).substring(0, LOG_RESULT_LIMIT)}`)
 
   switch (notification.action) {
     case 'agent-command': {
-      const commandId = notification.content?.commandId as string
+      const commandId = content.commandId as string
       if (!commandId) {
-        logger.warn(`${deps.prefix} Notification missing commandId: ${JSON.stringify(notification.content ?? {})}`)
+        logger.warn(`${deps.prefix} Notification missing commandId: ${JSON.stringify(content)}`)
         return
       }
-      const commandType = (notification.content?.type as string) ?? 'unknown'
+      const commandType = (content.type as string) ?? 'unknown'
       logger.info(t('runner.commandReceived', {
         prefix: deps.prefix,
         type: commandType,
@@ -220,7 +226,7 @@ export async function handleNotification(
       break
     }
     case 'config-update': {
-      const newHash = notification.content?.configHash as string
+      const newHash = content.configHash as string
       if (newHash && newHash !== ctx.configSyncState.currentConfigHash) {
         logger.info(`${deps.prefix} Config update detected (hash: ${newHash})`)
         state.configSyncDebounceTimer = scheduleConfigSync(ctx.configSyncDeps, ctx.configSyncState, state.configSyncDebounceTimer)
