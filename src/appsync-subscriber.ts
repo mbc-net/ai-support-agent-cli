@@ -1,9 +1,8 @@
 import WebSocket from 'ws'
 
-import { DEFAULT_APPSYNC_TIMEOUT_MS } from './constants'
+import { BaseWebSocketConnection } from './base-websocket'
+import { APPSYNC_MAX_RECONNECT_RETRIES, APPSYNC_RECONNECT_BASE_DELAY_MS, DEFAULT_APPSYNC_TIMEOUT_MS } from './constants'
 import { logger } from './logger'
-import { getErrorMessage } from './utils'
-import { attemptReconnect } from './ws-reconnect'
 
 export interface AppSyncNotification {
   id: string
@@ -33,11 +32,7 @@ const SUBSCRIPTION_QUERY = `subscription OnMessage($tenantCode: String!) {
   }
 }`
 
-const MAX_RECONNECT_RETRIES = 5
-const RECONNECT_BASE_DELAY_MS = 1000
-
-export class AppSyncSubscriber {
-  private ws: WebSocket | null = null
+export class AppSyncSubscriber extends BaseWebSocketConnection<AppSyncMessage> {
   private readonly realtimeUrl: string
   private readonly host: string
   private readonly apiKey: string
@@ -45,12 +40,15 @@ export class AppSyncSubscriber {
   private tenantCode: string | null = null
   private messageHandler: ((notification: AppSyncNotification) => void) | null = null
   private reconnectCallback: (() => void) | null = null
-  private readonly reconnectAttemptsRef = { current: 0 }
-  private closed = false
   private keepAliveTimer: ReturnType<typeof setTimeout> | null = null
   private keepAliveTimeoutMs = 0
 
   constructor(appsyncUrl: string, apiKey: string) {
+    super({
+      maxReconnectRetries: APPSYNC_MAX_RECONNECT_RETRIES,
+      reconnectBaseDelayMs: APPSYNC_RECONNECT_BASE_DELAY_MS,
+      logPrefix: 'AppSync:',
+    })
     this.apiKey = apiKey
     const url = new URL(appsyncUrl)
     if (url.protocol !== 'https:' && url.protocol !== 'http:') {
@@ -60,13 +58,7 @@ export class AppSyncSubscriber {
     this.realtimeUrl = appsyncUrl
       .replace('https://', 'wss://')
       .replace('http://', 'ws://')
-      + '/realtime'
-  }
-
-  connect(): Promise<void> {
-    this.closed = false
-    this.reconnectAttemptsRef.current = 0
-    return this.doConnect()
+      .replace('.appsync-api.', '.appsync-realtime-api.')
   }
 
   subscribe(
@@ -84,80 +76,17 @@ export class AppSyncSubscriber {
     this.reconnectCallback = callback
   }
 
-  disconnect(): void {
-    this.closed = true
-    this.clearKeepAliveTimer()
-    if (this.ws) {
-      if (this.subscriptionId) {
-        const stopMessage: AppSyncMessage = {
-          id: this.subscriptionId,
-          type: 'stop',
-        }
-        try {
-          this.ws.send(JSON.stringify(stopMessage))
-        } catch {
-          // ignore send errors during disconnect
-        }
-      }
-      this.ws.close()
-      this.ws = null
-    }
-    this.subscriptionId = null
+  protected createWebSocket(): WebSocket {
+    const url = this.buildConnectionUrl()
+    return new WebSocket(url, ['graphql-ws'])
   }
 
-  private buildConnectionUrl(): string {
-    const header = {
-      host: this.host,
-      'x-api-key': this.apiKey,
-      'content-type': 'application/json',
-    }
-    const encodedHeader = Buffer.from(JSON.stringify(header)).toString('base64')
-    const encodedPayload = Buffer.from(JSON.stringify({})).toString('base64')
-    return `${this.realtimeUrl}?header=${encodedHeader}&payload=${encodedPayload}`
+  protected onOpen(ws: WebSocket): void {
+    const initMessage: AppSyncMessage = { type: 'connection_init' }
+    ws.send(JSON.stringify(initMessage))
   }
 
-  private doConnect(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const url = this.buildConnectionUrl()
-      const ws = new WebSocket(url, ['graphql-ws'])
-
-      ws.on('open', () => {
-        const initMessage: AppSyncMessage = { type: 'connection_init' }
-        ws.send(JSON.stringify(initMessage))
-      })
-
-      ws.on('message', (data: WebSocket.Data) => {
-        let msg: AppSyncMessage
-        try {
-          msg = JSON.parse(data.toString()) as AppSyncMessage
-        } catch {
-          logger.debug('AppSync: Failed to parse message')
-          return
-        }
-
-        this.handleMessage(msg, resolve)
-      })
-
-      ws.on('error', (error: Error) => {
-        logger.debug(`AppSync WebSocket error: ${getErrorMessage(error)}`)
-        if (this.reconnectAttemptsRef.current === 0 && !this.ws) {
-          reject(error)
-        }
-      })
-
-      ws.on('close', () => {
-        this.clearKeepAliveTimer()
-        if (!this.closed) {
-          logger.debug('AppSync WebSocket closed unexpectedly')
-          void this.doReconnect()
-        }
-      })
-
-      this.ws = ws
-    })
-  }
-
-  private handleMessage(msg: AppSyncMessage, resolveConnect?: (value: void) => void): void {
+  protected onParsedMessage(msg: AppSyncMessage, resolveConnect?: (value: void) => void): void {
     switch (msg.type) {
       case 'connection_ack': {
         const timeoutMs = (msg.payload?.connectionTimeoutMs as number) ?? DEFAULT_APPSYNC_TIMEOUT_MS
@@ -203,6 +132,41 @@ export class AppSyncSubscriber {
     }
   }
 
+  protected onDisconnect(): void {
+    this.clearKeepAliveTimer()
+    if (this.ws && this.subscriptionId) {
+      const stopMessage: AppSyncMessage = {
+        id: this.subscriptionId,
+        type: 'stop',
+      }
+      try {
+        this.ws.send(JSON.stringify(stopMessage))
+      } catch {
+        // ignore send errors during disconnect
+      }
+    }
+    this.subscriptionId = null
+  }
+
+  protected onWebSocketClose(): void {
+    this.clearKeepAliveTimer()
+  }
+
+  protected onReconnected(): void {
+    this.reconnectCallback?.()
+  }
+
+  private buildConnectionUrl(): string {
+    const header = {
+      host: this.host,
+      'x-api-key': this.apiKey,
+      'content-type': 'application/json',
+    }
+    const encodedHeader = Buffer.from(JSON.stringify(header)).toString('base64')
+    const encodedPayload = Buffer.from(JSON.stringify({})).toString('base64')
+    return `${this.realtimeUrl}?header=${encodedHeader}&payload=${encodedPayload}`
+  }
+
   private sendSubscription(tenantCode: string): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
 
@@ -230,17 +194,6 @@ export class AppSyncSubscriber {
     }
 
     this.ws.send(JSON.stringify(startMessage))
-  }
-
-  private async doReconnect(): Promise<void> {
-    await attemptReconnect(this.reconnectAttemptsRef, {
-      maxRetries: MAX_RECONNECT_RETRIES,
-      baseDelayMs: RECONNECT_BASE_DELAY_MS,
-      logPrefix: 'AppSync:',
-      connectFn: () => this.doConnect(),
-      onReconnectedFn: this.reconnectCallback ?? undefined,
-      isClosedFn: () => this.closed,
-    })
   }
 
   private resetKeepAliveTimer(): void {

@@ -60,14 +60,15 @@ describe('AppSyncSubscriber', () => {
   })
 
   describe('connection URL derivation', () => {
-    it('should convert https to wss and append /realtime', async () => {
+    it('should convert https to wss and replace appsync-api with appsync-realtime-api', async () => {
       const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
       const connectPromise = subscriber.connect()
 
       // Wait for WebSocket creation
       expect(mockWsInstance).not.toBeNull()
       expect(mockWsInstance!.url).toMatch(/^wss:\/\//)
-      expect(mockWsInstance!.url).toContain('/graphql/realtime')
+      expect(mockWsInstance!.url).toContain('.appsync-realtime-api.')
+      expect(mockWsInstance!.url).not.toContain('/graphql/realtime')
 
       // Complete connection
       mockWsInstance!.simulateOpen()
@@ -83,7 +84,7 @@ describe('AppSyncSubscriber', () => {
 
       expect(mockWsInstance).not.toBeNull()
       expect(mockWsInstance!.url).toMatch(/^ws:\/\//)
-      expect(mockWsInstance!.url).toContain('/graphql/realtime')
+      expect(mockWsInstance!.url).toContain('/graphql')
 
       mockWsInstance!.simulateOpen()
       mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })

@@ -1,8 +1,8 @@
 import WebSocket from 'ws'
 
+import { BaseWebSocketConnection } from '../base-websocket'
 import { logger } from '../logger'
 import { getErrorMessage } from '../utils'
-import { attemptReconnect } from '../ws-reconnect'
 
 import {
   TERMINAL_WS_MAX_RECONNECT_RETRIES,
@@ -36,11 +36,8 @@ export interface TerminalAgentMessage {
   rows?: number
 }
 
-export class TerminalWebSocket {
-  private ws: WebSocket | null = null
+export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMessage> {
   private readonly manager: TerminalSessionManager
-  private readonly reconnectAttemptsRef = { current: 0 }
-  private closed = false
   private readonly wsUrl: string
 
   constructor(
@@ -49,6 +46,11 @@ export class TerminalWebSocket {
     private readonly agentId: string,
     private readonly projectDir?: string,
   ) {
+    super({
+      maxReconnectRetries: TERMINAL_WS_MAX_RECONNECT_RETRIES,
+      reconnectBaseDelayMs: TERMINAL_WS_RECONNECT_BASE_DELAY_MS,
+      logPrefix: '[terminal-ws]',
+    })
     this.manager = new TerminalSessionManager()
     // Convert http(s) URL to ws(s) URL
     this.wsUrl = apiUrl
@@ -57,74 +59,26 @@ export class TerminalWebSocket {
       .replace(/\/$/, '') + '/ws/agent-terminal'
   }
 
-  connect(): Promise<void> {
-    this.closed = false
-    this.reconnectAttemptsRef.current = 0
-    return this.doConnect()
-  }
-
-  disconnect(): void {
-    this.closed = true
-    this.manager.closeAll()
-    if (this.ws) {
-      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CLOSING) {
-        this.ws.close()
-      } else {
-        this.ws.terminate()
-      }
-      this.ws = null
-    }
-  }
-
   getSessionManager(): TerminalSessionManager {
     return this.manager
   }
 
-  private doConnect(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(this.wsUrl, {
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          'X-Agent-Id': this.agentId,
-        },
-      })
-
-      ws.on('open', () => {
-        logger.info('[terminal-ws] Connected to terminal WebSocket')
-        this.reconnectAttemptsRef.current = 0
-        resolve()
-      })
-
-      ws.on('message', (data: WebSocket.Data) => {
-        let msg: TerminalServerMessage
-        try {
-          msg = JSON.parse(data.toString()) as TerminalServerMessage
-        } catch {
-          logger.debug('[terminal-ws] Failed to parse message')
-          return
-        }
-        this.handleMessage(msg)
-      })
-
-      ws.on('error', (error: Error) => {
-        logger.debug(`[terminal-ws] WebSocket error: ${getErrorMessage(error)}`)
-        if (this.reconnectAttemptsRef.current === 0 && !this.ws) {
-          reject(error)
-        }
-      })
-
-      ws.on('close', () => {
-        if (!this.closed) {
-          logger.info('[terminal-ws] Connection closed, attempting reconnect...')
-          void this.doReconnect()
-        }
-      })
-
-      this.ws = ws
+  protected createWebSocket(): WebSocket {
+    return new WebSocket(this.wsUrl, {
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        'X-Agent-Id': this.agentId,
+      },
     })
   }
 
-  private handleMessage(msg: TerminalServerMessage): void {
+  protected onOpen(_ws: WebSocket, resolve: (value: void) => void): void {
+    logger.info('[terminal-ws] Connected to terminal WebSocket')
+    this.reconnectAttemptsRef.current = 0
+    resolve()
+  }
+
+  protected onParsedMessage(msg: TerminalServerMessage): void {
     switch (msg.type) {
       case 'open':
         this.handleOpen(msg)
@@ -140,6 +94,18 @@ export class TerminalWebSocket {
         break
       default:
         logger.debug(`[terminal-ws] Unknown message type: ${(msg as { type: string }).type}`)
+    }
+  }
+
+  protected onDisconnect(): void {
+    this.manager.closeAll()
+  }
+
+  protected closeWebSocket(ws: WebSocket): void {
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CLOSING) {
+      ws.close()
+    } else {
+      ws.terminate()
     }
   }
 
@@ -223,15 +189,5 @@ export class TerminalWebSocket {
     } catch (error) {
       logger.debug(`[terminal-ws] Send error: ${getErrorMessage(error)}`)
     }
-  }
-
-  private async doReconnect(): Promise<void> {
-    await attemptReconnect(this.reconnectAttemptsRef, {
-      maxRetries: TERMINAL_WS_MAX_RECONNECT_RETRIES,
-      baseDelayMs: TERMINAL_WS_RECONNECT_BASE_DELAY_MS,
-      logPrefix: '[terminal-ws]',
-      connectFn: () => this.doConnect(),
-      isClosedFn: () => this.closed,
-    })
   }
 }

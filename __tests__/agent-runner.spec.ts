@@ -23,8 +23,8 @@ const mockForkProject = jest.fn()
 const mockStopAll = jest.fn().mockResolvedValue(undefined)
 const mockSendUpdateToAll = jest.fn()
 const mockGetRunningCount = jest.fn().mockReturnValue(0)
-jest.mock('../src/process-manager', () => ({
-  ProcessManager: jest.fn().mockImplementation(() => ({
+jest.mock('../src/child-process-manager', () => ({
+  ChildProcessManager: jest.fn().mockImplementation(() => ({
     forkProject: mockForkProject,
     stopAll: mockStopAll,
     sendUpdateToAll: mockSendUpdateToAll,
@@ -178,8 +178,8 @@ describe('agent-runner', () => {
     },
   ))
 
-  it('should use ProcessManager for multi-project config (2+ projects)', async () => {
-    const { ProcessManager } = require('../src/process-manager')
+  it('should use ChildProcessManager for multi-project config (2+ projects)', async () => {
+    const { ChildProcessManager } = require('../src/child-process-manager')
     const mockConfig = {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
@@ -195,7 +195,7 @@ describe('agent-runner', () => {
     await jest.advanceTimersByTimeAsync(100)
     await promise
 
-    expect(ProcessManager).toHaveBeenCalled()
+    expect(ChildProcessManager).toHaveBeenCalled()
     expect(mockForkProject).toHaveBeenCalledTimes(2)
     expect(mockForkProject).toHaveBeenCalledWith(
       mockConfig.projects[0],
@@ -304,7 +304,7 @@ describe('agent-runner', () => {
     )
   })
 
-  it('should start auto-updater with ProcessManager for multi-project config', async () => {
+  it('should start auto-updater with ChildProcessManager for multi-project config', async () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     const mockConfig = {
       agentId: 'multi-agent',
@@ -409,7 +409,7 @@ describe('agent-runner', () => {
     startAutoUpdater.mockReturnValue({ stop: jest.fn() })
   })
 
-  it('should invoke auto-updater callbacks with ProcessManager (multi project)', async () => {
+  it('should invoke auto-updater callbacks with ChildProcessManager (multi project)', async () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     // Make heartbeat reject to cover .catch(() => {}) branch
     const mockInstance = {
@@ -759,8 +759,8 @@ describe('setupShutdownHandlers', () => {
   })
 
   it('should call processManager.stopAll when processManager is provided', async () => {
-    const { ProcessManager } = require('../src/process-manager')
-    const pm = new ProcessManager()
+    const { ChildProcessManager } = require('../src/child-process-manager')
+    const pm = new ChildProcessManager()
 
     let sigintHandler: (() => void) | undefined
     const processOnSpy = jest.spyOn(process, 'on').mockImplementation((event, handler) => {
