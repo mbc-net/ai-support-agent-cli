@@ -284,14 +284,14 @@ describe('docker-runner', () => {
       expect(args).toContain('beta')
     })
 
-    it('should not include --docker flag', () => {
+    it('should include --no-docker flag to prevent recursive Docker launch', () => {
       const args = buildContainerArgs({ verbose: true })
-      expect(args).not.toContain('--docker')
+      expect(args).toContain('--no-docker')
     })
 
     it('should omit undefined options', () => {
       const args = buildContainerArgs({})
-      expect(args).toEqual(['start'])
+      expect(args).toEqual(['start', '--no-docker'])
     })
 
     it('should not include --no-auto-update when autoUpdate is true', () => {
@@ -357,7 +357,7 @@ describe('docker-runner', () => {
 
       const output = consoleSpy.mock.calls.map(c => c[0]).join('\n')
       expect(output).toContain('CLAUDE_CODE_OAUTH_TOKEN')
-      expect(output).toContain('ai-support-agent start --docker')
+      expect(output).toContain('ai-support-agent start')
     })
 
     it('should show step messages', () => {

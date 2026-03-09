@@ -121,7 +121,7 @@ export function buildEnvArgs(): string[] {
 }
 
 export function buildContainerArgs(opts: DockerRunOptions): string[] {
-  const args: string[] = ['start']
+  const args: string[] = ['start', '--no-docker']
 
   if (opts.token) {
     args.push('--token', opts.token)
@@ -166,7 +166,7 @@ export function dockerLogin(): void {
   logger.info(t('docker.loginStep2'))
   console.log('')
   console.log('  export CLAUDE_CODE_OAUTH_TOKEN=<token>')
-  console.log('  ai-support-agent start --docker')
+  console.log('  ai-support-agent start')
   console.log('')
   logger.info(t('docker.loginStep3'))
 }
