@@ -22,7 +22,6 @@ async function handleStart(msg: IpcStartMessage): Promise<void> {
     project,
     agentId,
     options,
-    undefined,
     options.agentChatMode,
     options.defaultProjectDir,
   )
@@ -61,6 +60,11 @@ function setupMessageHandler(): void {
         break
       case 'update':
         void handleGracefulExit(currentProjectCode, 'update')
+        break
+      case 'token_update':
+        if (agent) {
+          agent.updateToken(msg.token)
+        }
         break
     }
   })

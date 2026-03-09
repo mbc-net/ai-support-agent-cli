@@ -65,6 +65,8 @@
   "runner.resultSendFailed": "{{prefix}} 結果送信にも失敗しました",
   "runner.cliTokenWarning": "警告: --token でトークンを渡すとプロセス一覧（ps aux）にトークンが表示されます。代わりに環境変数 AI_SUPPORT_AGENT_TOKEN の使用を推奨します。",
   "runner.envTokenWarning": "環境変数からトークンを使用しています",
+  "runner.authError": "{{prefix}} 認証に失敗しました。トークンが無効または期限切れの可能性があります。\"ai-support-agent login\" で再認証してください。詳細: {{detail}}",
+  "runner.tokenUpdated": "{{prefix}} 設定ファイルからトークンを更新しました。再認証中...",
   "runner.unexpectedError": "プロジェクトエージェントで予期しないエラー: {{message}}",
 
   "status.noConfig": "設定が見つかりません。\"ai-support-agent login --url <url>\" で設定してください。",
@@ -118,7 +120,7 @@
   "autoUpdate.enabled": "自動更新を有効にしました（チャネル: {{channel}}）。",
   "autoUpdate.channelSet": "更新チャネルを \"{{channel}}\" に設定しました。",
 
-  "cmd.start.docker": "Dockerコンテナ内で実行",
+  "cmd.start.noDocker": "Dockerコンテナを使わずホスト上で直接実行",
   "cmd.dockerLogin": "Dockerコンテナ内でClaude Codeにログイン",
   "docker.notAvailable": "Dockerが利用できません。Docker Desktopが起動していることを確認してください。",
   "docker.building": "Dockerイメージをビルド中...",

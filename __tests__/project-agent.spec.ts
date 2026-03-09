@@ -50,6 +50,7 @@ describe('ProjectAgent', () => {
     reportConnectionStatus: jest.Mock
     getConfig: jest.Mock
     getProjectConfig: jest.Mock
+    updateToken: jest.Mock
   }
 
   let mockSubscriber: {
@@ -65,7 +66,7 @@ describe('ProjectAgent', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockClient = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '', transportMode: 'polling' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '', transportMode: 'polling' }),
       heartbeat: jest.fn().mockResolvedValue({ success: true }),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -74,6 +75,7 @@ describe('ProjectAgent', () => {
       reportConnectionStatus: jest.fn().mockResolvedValue(undefined),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       getProjectConfig: jest.fn().mockResolvedValue({ configHash: 'abc123', project: { projectCode: 'test-proj' }, agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] } }),
+      updateToken: jest.fn(),
     }
     MockApiClient.mockImplementation(() => mockClient as unknown as ApiClient)
 
@@ -229,6 +231,7 @@ describe('ProjectAgent', () => {
     beforeEach(() => {
       mockClient.register.mockResolvedValue({
         agentId: 'test-id',
+        tenantCode: 'test-tenant',
         appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
         appsyncApiKey: 'da2-testkey123',
         transportMode: 'realtime',
@@ -246,7 +249,7 @@ describe('ProjectAgent', () => {
         'da2-testkey123',
       )
       expect(mockSubscriber.connect).toHaveBeenCalled()
-      expect(mockSubscriber.subscribe).toHaveBeenCalled()
+      expect(mockSubscriber.subscribe).toHaveBeenCalledWith('test-tenant', expect.any(Function))
       expect(mockSubscriber.onReconnect).toHaveBeenCalled()
       expect(logger.success).toHaveBeenCalledWith(expect.stringContaining('AppSync WebSocket'))
 
@@ -415,6 +418,7 @@ describe('ProjectAgent', () => {
     it('should use polling when transportMode is polling', async () => {
       mockClient.register.mockResolvedValue({
         agentId: 'test-id',
+        tenantCode: 'test-tenant',
         appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
         appsyncApiKey: 'da2-testkey123',
         transportMode: 'polling',
@@ -675,7 +679,7 @@ describe('ProjectAgent', () => {
       }
       mockedSyncProjectConfig.mockResolvedValueOnce(mockConfig)
 
-      const agent = new ProjectAgent(projectWithDir, 'agent-1', options, undefined, undefined, undefined)
+      const agent = new ProjectAgent(projectWithDir, 'agent-1', options, undefined, undefined)
       agent.start()
 
       await jest.advanceTimersByTimeAsync(100)
@@ -711,6 +715,7 @@ describe('ProjectAgent', () => {
     it('should handle config-update notification', async () => {
       mockClient.register.mockResolvedValue({
         agentId: 'test-id',
+        tenantCode: 'test-tenant',
         appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
         appsyncApiKey: 'da2-testkey123',
         transportMode: 'realtime',
@@ -749,6 +754,7 @@ describe('ProjectAgent', () => {
     it('should debounce multiple config-update notifications', async () => {
       mockClient.register.mockResolvedValue({
         agentId: 'test-id',
+        tenantCode: 'test-tenant',
         appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
         appsyncApiKey: 'da2-testkey123',
         transportMode: 'realtime',
@@ -888,6 +894,7 @@ describe('ProjectAgent', () => {
     it('should clear configSyncDebounceTimer on stop()', async () => {
       mockClient.register.mockResolvedValue({
         agentId: 'test-id',
+        tenantCode: 'test-tenant',
         appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
         appsyncApiKey: 'da2-testkey123',
         transportMode: 'realtime',
@@ -1089,6 +1096,39 @@ describe('ProjectAgent', () => {
     })
   })
 
+  describe('updateToken', () => {
+    it('should update token on ApiClient and log message', () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.updateToken('new-token-123')
+
+      expect(mockClient.updateToken).toBeDefined()
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('runner.tokenUpdated'))
+    })
+  })
+
+  describe('register 401 error', () => {
+    it('should log authError when registration returns 401', async () => {
+      const { AxiosError, AxiosHeaders } = require('axios')
+      const error401 = new AxiosError('Unauthorized', 'ERR_BAD_REQUEST', undefined, undefined, {
+        status: 401,
+        statusText: 'Unauthorized',
+        data: { message: 'Invalid token' },
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      })
+      mockClient.register.mockRejectedValue(error401)
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(logger.error).toHaveBeenCalledWith('runner.authError')
+
+      agent.stop()
+    })
+  })
+
   describe('project directory', () => {
     it('should initialize project directory when projectDir is set', () => {
       const projectWithDir = { projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api', projectDir: '/tmp/proj' }
@@ -1097,7 +1137,7 @@ describe('ProjectAgent', () => {
     })
 
     it('should initialize project directory when defaultProjectDir is set', () => {
-      const agent = new ProjectAgent(project, 'agent-1', options, undefined, undefined, '~/projects/{projectCode}')
+      const agent = new ProjectAgent(project, 'agent-1', options, undefined, '~/projects/{projectCode}')
       expect(agent).toBeDefined()
     })
 

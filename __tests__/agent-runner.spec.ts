@@ -22,12 +22,14 @@ jest.mock('../src/logger')
 const mockForkProject = jest.fn()
 const mockStopAll = jest.fn().mockResolvedValue(undefined)
 const mockSendUpdateToAll = jest.fn()
+const mockSendTokenUpdate = jest.fn()
 const mockGetRunningCount = jest.fn().mockReturnValue(0)
-jest.mock('../src/process-manager', () => ({
-  ProcessManager: jest.fn().mockImplementation(() => ({
+jest.mock('../src/child-process-manager', () => ({
+  ChildProcessManager: jest.fn().mockImplementation(() => ({
     forkProject: mockForkProject,
     stopAll: mockStopAll,
     sendUpdateToAll: mockSendUpdateToAll,
+    sendTokenUpdate: mockSendTokenUpdate,
     getRunningCount: mockGetRunningCount,
   })),
 }))
@@ -58,6 +60,17 @@ jest.mock('../src/project-config-sync', () => ({
 }))
 jest.mock('../src/aws-profile', () => ({
   writeAwsConfig: jest.fn(),
+}))
+
+const mockTokenWatcherStop = jest.fn()
+let capturedTokenCallback: ((projectCode: string, newToken: string) => void) | undefined
+jest.mock('../src/token-watcher', () => ({
+  startTokenWatcher: jest.fn().mockImplementation(
+    (_projects: unknown, callback: (projectCode: string, newToken: string) => void) => {
+      capturedTokenCallback = callback
+      return { stop: mockTokenWatcherStop }
+    },
+  ),
 }))
 jest.mock('os', () => {
   const actual = jest.requireActual<typeof os>('os')
@@ -107,24 +120,33 @@ function withEnvVars(
 
 describe('agent-runner', () => {
   let exitSpy: jest.Spied<typeof process.exit>
+  const processHandlers = new Map<string, Function[]>()
 
   beforeEach(() => {
     jest.clearAllMocks()
+    capturedTokenCallback = undefined
+    processHandlers.clear()
 
     exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called')
     })
-    jest.spyOn(process, 'on').mockImplementation(() => process)
+    jest.spyOn(process, 'on').mockImplementation(((event: string, handler: (...args: unknown[]) => void) => {
+      const handlers = processHandlers.get(event) ?? []
+      handlers.push(handler)
+      processHandlers.set(event, handlers)
+      return process
+    }) as typeof process.on)
 
     // Default: ApiClient mock setup
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
       heartbeat: jest.fn().mockResolvedValue({ success: true }),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
+      updateToken: jest.fn(),
     }
     MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
 
@@ -178,8 +200,8 @@ describe('agent-runner', () => {
     },
   ))
 
-  it('should use ProcessManager for multi-project config (2+ projects)', async () => {
-    const { ProcessManager } = require('../src/process-manager')
+  it('should use ChildProcessManager for multi-project config (2+ projects)', async () => {
+    const { ChildProcessManager } = require('../src/child-process-manager')
     const mockConfig = {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
@@ -195,7 +217,7 @@ describe('agent-runner', () => {
     await jest.advanceTimersByTimeAsync(100)
     await promise
 
-    expect(ProcessManager).toHaveBeenCalled()
+    expect(ChildProcessManager).toHaveBeenCalled()
     expect(mockForkProject).toHaveBeenCalledTimes(2)
     expect(mockForkProject).toHaveBeenCalledWith(
       mockConfig.projects[0],
@@ -304,7 +326,7 @@ describe('agent-runner', () => {
     )
   })
 
-  it('should start auto-updater with ProcessManager for multi-project config', async () => {
+  it('should start auto-updater with ChildProcessManager for multi-project config', async () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     const mockConfig = {
       agentId: 'multi-agent',
@@ -333,7 +355,7 @@ describe('agent-runner', () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     // Make heartbeat reject to cover .catch(() => {}) branch
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
       heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -371,7 +393,7 @@ describe('agent-runner', () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     // Make heartbeat reject to cover .catch(() => {}) branch
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
       heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -409,11 +431,11 @@ describe('agent-runner', () => {
     startAutoUpdater.mockReturnValue({ stop: jest.fn() })
   })
 
-  it('should invoke auto-updater callbacks with ProcessManager (multi project)', async () => {
+  it('should invoke auto-updater callbacks with ChildProcessManager (multi project)', async () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     // Make heartbeat reject to cover .catch(() => {}) branch
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
       heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -454,6 +476,74 @@ describe('agent-runner', () => {
     startAutoUpdater.mockReturnValue({ stop: jest.fn() })
   })
 
+  it('should start token watcher for single project from config and invoke callback', async () => {
+    const { startTokenWatcher } = require('../src/token-watcher')
+    const mockConfig = {
+      agentId: 'single-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startTokenWatcher).toHaveBeenCalledWith(
+      mockConfig.projects,
+      expect.any(Function),
+    )
+
+    // Invoke the captured callback to cover the callback code path
+    expect(capturedTokenCallback).toBeDefined()
+    capturedTokenCallback!('proj-a', 'new-token')
+  })
+
+  it('should start token watcher for multi-project config and invoke callback', async () => {
+    const { startTokenWatcher } = require('../src/token-watcher')
+    const mockConfig = {
+      agentId: 'multi-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startTokenWatcher).toHaveBeenCalledWith(
+      mockConfig.projects,
+      expect.any(Function),
+    )
+
+    // Invoke the callback to cover the sendTokenUpdate code path
+    expect(capturedTokenCallback).toBeDefined()
+    capturedTokenCallback!('proj-a', 'new-token')
+    expect(mockSendTokenUpdate).toHaveBeenCalledWith('proj-a', 'new-token')
+  })
+
+  it('should not start token watcher for CLI direct token', async () => {
+    const { startTokenWatcher } = require('../src/token-watcher')
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startTokenWatcher).not.toHaveBeenCalled()
+  })
+
   it('should call process.exit(1) when config exists but has no projects', async () => {
     const mockConfig = {
       agentId: 'empty-agent',
@@ -464,6 +554,56 @@ describe('agent-runner', () => {
 
     await expect(startAgent({})).rejects.toThrow('process.exit called')
     expect(exitSpy).toHaveBeenCalledWith(1)
+  })
+
+  it('should register uncaughtException handler that calls captureException and exits', async () => {
+    const { captureException } = require('../src/sentry')
+    mockedLoadConfig.mockReturnValue(null)
+
+    // Use a non-throwing exit mock for this test
+    exitSpy.mockRestore()
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    const handlers = processHandlers.get('uncaughtException') ?? []
+    expect(handlers.length).toBeGreaterThan(0)
+
+    const error = new Error('test uncaught')
+    handlers[0](error)
+    await jest.advanceTimersByTimeAsync(100)
+
+    expect(captureException).toHaveBeenCalledWith(error, { handler: 'uncaughtException' })
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('test uncaught'))
+  })
+
+  it('should register unhandledRejection handler that calls captureException', async () => {
+    const { captureException } = require('../src/sentry')
+    mockedLoadConfig.mockReturnValue(null)
+
+    // Use a non-throwing exit mock for this test
+    exitSpy.mockRestore()
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    const handlers = processHandlers.get('unhandledRejection') ?? []
+    expect(handlers.length).toBeGreaterThan(0)
+
+    handlers[0]('rejected reason')
+
+    expect(captureException).toHaveBeenCalledWith('rejected reason', { handler: 'unhandledRejection' })
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('rejected reason'))
   })
 })
 
@@ -540,18 +680,20 @@ describe('startProjectAgent', () => {
     submitResult: jest.Mock
     getVersionInfo: jest.Mock
     getConfig: jest.Mock
+    updateToken: jest.Mock
   }
 
   beforeEach(() => {
     jest.clearAllMocks()
     mockClient = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
       heartbeat: jest.fn().mockResolvedValue({ success: true }),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn().mockResolvedValue(undefined),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
+      updateToken: jest.fn(),
     }
     ;(ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(
       () => mockClient as unknown as ApiClient,
@@ -759,8 +901,8 @@ describe('setupShutdownHandlers', () => {
   })
 
   it('should call processManager.stopAll when processManager is provided', async () => {
-    const { ProcessManager } = require('../src/process-manager')
-    const pm = new ProcessManager()
+    const { ChildProcessManager } = require('../src/child-process-manager')
+    const pm = new ChildProcessManager()
 
     let sigintHandler: (() => void) | undefined
     const processOnSpy = jest.spyOn(process, 'on').mockImplementation((event, handler) => {

@@ -96,6 +96,16 @@ export async function handleChatError(
 }
 
 /**
+ * done チャンクを送信する（結果テキストとメタデータを含む）
+ */
+export async function sendDoneChunk(
+  sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
+  content: Record<string, unknown>,
+): Promise<void> {
+  await sendChunk('done', JSON.stringify(content))
+}
+
+/**
  * ファイル添付チャンクを送信する
  */
 export async function sendFileAttachmentChunk(

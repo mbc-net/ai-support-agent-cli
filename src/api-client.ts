@@ -52,6 +52,10 @@ export class ApiClient {
     })
   }
 
+  updateToken(newToken: string): void {
+    this.client.defaults.headers['Authorization'] = `Bearer ${newToken}`
+  }
+
   private async get<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
     return this.retry.withRetry(async () => {
       const { data } = await this.client.get<T>(url, config)

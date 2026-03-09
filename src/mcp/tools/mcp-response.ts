@@ -1,8 +1,6 @@
-import axios from 'axios'
+import { getErrorMessage, getDetailedErrorMessage } from '../../utils'
 
-import { getErrorMessage } from '../../utils'
-
-export { getErrorMessage }
+export { getErrorMessage, getDetailedErrorMessage }
 
 export type McpToolResult =
   | ReturnType<typeof mcpTextResponse>
@@ -19,28 +17,6 @@ export function mcpErrorResponse(message: string) {
 
 export function mcpImageResponse(base64Data: string, mimeType: string) {
   return { content: [{ type: 'image' as const, data: base64Data, mimeType }] }
-}
-
-/**
- * エラーから詳細なメッセージを抽出する。
- * AxiosError の場合はレスポンスボディの message/error フィールドとHTTPステータスコードを含める。
- */
-export function getDetailedErrorMessage(error: unknown): string {
-  if (axios.isAxiosError(error) && error.response) {
-    const status = error.response.status
-    const data = error.response.data as Record<string, unknown> | undefined
-
-    if (data) {
-      const serverMessage = data.message ?? data.error
-      if (serverMessage) {
-        return `[${status}] ${serverMessage}`
-      }
-    }
-
-    return `HTTP ${status}: ${error.message}`
-  }
-
-  return getErrorMessage(error)
 }
 
 /**

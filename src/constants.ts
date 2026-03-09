@@ -134,3 +134,10 @@ export const GIT_CHECKOUT_TIMEOUT = 30_000
 export const CHILD_PROCESS_MAX_RESTARTS = 5
 export const CHILD_PROCESS_RESTART_DELAY_MS = 5000
 export const CHILD_PROCESS_STOP_TIMEOUT_MS = 10000
+
+// Token watcher
+export const TOKEN_WATCH_INTERVAL_MS = 5000
+
+// WebSocket reconnect
+export const APPSYNC_MAX_RECONNECT_RETRIES = 5
+export const APPSYNC_RECONNECT_BASE_DELAY_MS = 1000

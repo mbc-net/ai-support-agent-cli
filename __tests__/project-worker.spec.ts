@@ -11,11 +11,13 @@ jest.mock('../src/sentry', () => ({
 const mockStart = jest.fn()
 const mockStop = jest.fn()
 const mockGetClient = jest.fn()
+const mockUpdateToken = jest.fn()
 jest.mock('../src/project-agent', () => ({
   ProjectAgent: jest.fn().mockImplementation(() => ({
     start: mockStart,
     stop: mockStop,
     getClient: mockGetClient,
+    updateToken: mockUpdateToken,
     project: { projectCode: 'test-proj' },
   })),
 }))
@@ -127,7 +129,6 @@ describe('project-worker', () => {
         startMessage.options,
         undefined,
         undefined,
-        undefined,
       )
       expect(mockStart).toHaveBeenCalled()
       expect(processSendSpy).toHaveBeenCalledWith({
@@ -189,6 +190,32 @@ describe('project-worker', () => {
         projectCode: 'test-proj',
         message: 'init failed',
       })
+    })
+
+    it('should handle token_update message', async () => {
+      const worker = loadWorker()
+      worker.startWorker()
+
+      // First start an agent
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      // Then send token_update
+      emitProcessEvent('message', { type: 'token_update', token: 'new-token-123' })
+      await flushAsync()
+
+      expect(mockUpdateToken).toHaveBeenCalledWith('new-token-123')
+    })
+
+    it('should ignore token_update when agent is not started', () => {
+      const worker = loadWorker()
+      worker.startWorker()
+
+      // Send token_update without starting agent first
+      emitProcessEvent('message', { type: 'token_update', token: 'new-token' })
+
+      // Should not throw
+      expect(mockUpdateToken).not.toHaveBeenCalled()
     })
 
     it('should ignore non-IPC messages', () => {
