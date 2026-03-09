@@ -65,6 +65,8 @@
   "runner.resultSendFailed": "{{prefix}} Failed to send result",
   "runner.cliTokenWarning": "Warning: Passing tokens via --token exposes them in process listings (ps aux). Consider using the AI_SUPPORT_AGENT_TOKEN environment variable instead.",
   "runner.envTokenWarning": "Using token from environment variable",
+  "runner.authError": "{{prefix}} Authentication failed. Token may be invalid or expired. Run \"ai-support-agent login\" to re-authenticate. Detail: {{detail}}",
+  "runner.tokenUpdated": "{{prefix}} Token updated from config file. Re-authenticating...",
   "runner.unexpectedError": "Unexpected error in project agent: {{message}}",
 
   "status.noConfig": "No configuration found. Run \"ai-support-agent login --url <url>\" to set up.",

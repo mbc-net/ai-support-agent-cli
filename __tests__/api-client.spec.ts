@@ -27,6 +27,20 @@ describe('ApiClient', () => {
     jest.restoreAllMocks()
   })
 
+  describe('updateToken', () => {
+    it('should update the Authorization header on the axios instance', () => {
+      const defaults = { headers: { Authorization: 'Bearer test-token' } }
+      Object.defineProperty(mockInstance, 'defaults', {
+        value: defaults,
+        writable: true,
+        configurable: true,
+      })
+
+      client.updateToken('new-token')
+      expect(defaults.headers['Authorization']).toBe('Bearer new-token')
+    })
+  })
+
   describe('register', () => {
     it('should send registration request', async () => {
       mockInstance.post.mockResolvedValue({

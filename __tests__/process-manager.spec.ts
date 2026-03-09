@@ -248,6 +248,57 @@ describe('ChildProcessManager', () => {
     })
   })
 
+  describe('sendTokenUpdate', () => {
+    it('should send token_update message to the correct child process', () => {
+      const mockChild = createMockChild()
+      mockFork.mockReturnValue(mockChild)
+
+      manager.forkProject(project, 'agent-1', options)
+      manager.sendTokenUpdate('proj-a', 'new-token')
+
+      expect(mockChild.send).toHaveBeenCalledWith({
+        type: 'token_update',
+        token: 'new-token',
+      })
+    })
+
+    it('should update stored token for restarts', () => {
+      const child1 = createMockChild()
+      const child2 = createMockChild()
+      mockFork.mockReturnValueOnce(child1).mockReturnValueOnce(child2)
+
+      manager.forkProject(project, 'agent-1', options)
+      manager.sendTokenUpdate('proj-a', 'new-token')
+
+      // Simulate crash and restart
+      child1.emit('exit', 1, null)
+      jest.advanceTimersByTime(CHILD_PROCESS_RESTART_DELAY_MS)
+
+      // The restarted child should receive start message with the new token
+      expect(child2.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'start',
+          project: expect.objectContaining({ token: 'new-token' }),
+        }),
+      )
+    })
+
+    it('should not throw for unknown project code', () => {
+      expect(() => manager.sendTokenUpdate('unknown-proj', 'new-token')).not.toThrow()
+    })
+
+    it('should skip disconnected child process', () => {
+      const mockChild = createMockChild(false)
+      mockFork.mockReturnValue(mockChild)
+
+      manager.forkProject(project, 'agent-1', options)
+      manager.sendTokenUpdate('proj-a', 'new-token')
+
+      // send was called once for start only, not for token_update
+      expect(mockChild.send).toHaveBeenCalledTimes(1)
+    })
+  })
+
   describe('sendUpdateToAll', () => {
     it('should send update message to all connected children', () => {
       const child1 = createMockChild()

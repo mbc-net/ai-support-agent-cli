@@ -1,4 +1,5 @@
 import * as fs from 'fs'
+import axios from 'axios'
 
 export function atomicWriteFile(filePath: string, content: string, mode = 0o600): void {
   const tmpPath = filePath + '.tmp'
@@ -35,4 +36,30 @@ export function validateApiUrl(url: string): string | null {
   } catch {
     return `Invalid URL: ${url}`
   }
+}
+
+/**
+ * エラーから詳細なメッセージを抽出する。
+ * AxiosError の場合はレスポンスボディの message/error フィールドとHTTPステータスコードを含める。
+ */
+export function getDetailedErrorMessage(error: unknown): string {
+  if (axios.isAxiosError(error) && error.response) {
+    const status = error.response.status
+    const data = error.response.data as Record<string, unknown> | undefined
+
+    if (data) {
+      const serverMessage = data.message ?? data.error
+      if (serverMessage) {
+        return `[${status}] ${serverMessage}`
+      }
+    }
+
+    return `HTTP ${status}: ${error.message}`
+  }
+
+  return getErrorMessage(error)
+}
+
+export function isAuthenticationError(error: unknown): boolean {
+  return axios.isAxiosError(error) && error.response?.status === 401
 }

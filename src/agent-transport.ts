@@ -5,7 +5,7 @@ import { t } from './i18n'
 import { logger } from './logger'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
 import { TerminalWebSocket } from './terminal'
-import { getErrorMessage } from './utils'
+import { getDetailedErrorMessage, isAuthenticationError } from './utils'
 import { executeCommand } from './commands'
 import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
 import { refreshChatMode, scheduleConfigSync } from './agent-config-sync'
@@ -77,7 +77,11 @@ export function startPollingMode(
         state.processing = false
       }
     } catch (error) {
-      logger.debug(`${deps.prefix} Polling error: ${getErrorMessage(error)}`)
+      if (isAuthenticationError(error)) {
+        logger.error(t('runner.authError', { prefix: deps.prefix, detail: getDetailedErrorMessage(error) }))
+      } else {
+        logger.debug(`${deps.prefix} Polling error: ${getDetailedErrorMessage(error)}`)
+      }
     }
   }
 
@@ -103,7 +107,7 @@ export async function startSubscriptionMode(
     await state.subscriber.connect()
     logger.success(`${deps.prefix} Connected via AppSync WebSocket`)
   } catch (error) {
-    logger.warn(`${deps.prefix} WebSocket connection failed, falling back to polling: ${getErrorMessage(error)}`)
+    logger.warn(`${deps.prefix} WebSocket connection failed, falling back to polling: ${getDetailedErrorMessage(error)}`)
     startPollingMode(deps, state, ctx)
     return
   }
@@ -152,7 +156,11 @@ export function startHeartbeat(
 
       logger.debug(`${deps.prefix} Heartbeat sent (activeChatMode=${configSyncState.activeChatMode ?? 'none'})`)
     } catch (error) {
-      logger.warn(t('runner.heartbeatFailed', { prefix: deps.prefix, message: getErrorMessage(error) }))
+      if (isAuthenticationError(error)) {
+        logger.error(t('runner.authError', { prefix: deps.prefix, detail: getDetailedErrorMessage(error) }))
+      } else {
+        logger.warn(t('runner.heartbeatFailed', { prefix: deps.prefix, message: getDetailedErrorMessage(error) }))
+      }
     }
   }
 
@@ -178,7 +186,7 @@ export function startTerminalWebSocket(
   )
 
   state.terminalWs.connect().catch((error) => {
-    logger.warn(`${deps.prefix} Terminal WebSocket connection failed: ${getErrorMessage(error)}`)
+    logger.warn(`${deps.prefix} Terminal WebSocket connection failed: ${getDetailedErrorMessage(error)}`)
   })
 }
 
@@ -245,7 +253,7 @@ export async function checkPendingCommands(
       })
     }
   } catch (error) {
-    logger.warn(`${deps.prefix} Failed to check pending commands: ${getErrorMessage(error)}`)
+    logger.warn(`${deps.prefix} Failed to check pending commands: ${getDetailedErrorMessage(error)}`)
   }
 }
 
@@ -280,7 +288,7 @@ async function processCommand(
       result: result.success ? 'success' : 'failed',
     }))
   } catch (error) {
-    const message = getErrorMessage(error)
+    const message = getDetailedErrorMessage(error)
     logger.error(
       t('runner.commandError', { prefix: deps.prefix, commandId, message }),
     )

@@ -62,6 +62,11 @@ function setupMessageHandler(): void {
       case 'update':
         void handleGracefulExit(currentProjectCode, 'update')
         break
+      case 'token_update':
+        if (agent) {
+          agent.updateToken(msg.token)
+        }
+        break
     }
   })
 }

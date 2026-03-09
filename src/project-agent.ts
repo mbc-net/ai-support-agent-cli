@@ -10,7 +10,7 @@ import { logger } from './logger'
 import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
-import { getErrorMessage } from './utils'
+import { getErrorMessage, getDetailedErrorMessage, isAuthenticationError } from './utils'
 
 export interface ProjectAgentOptions {
   pollInterval: number
@@ -23,7 +23,7 @@ export class ProjectAgent {
   private readonly tenantCode: string
   private readonly projectDir: string | undefined
   private readonly apiUrl: string
-  private readonly token: string
+  private token: string
   private readonly projectCode: string
 
   private readonly configSyncState: ConfigSyncState = {
@@ -35,7 +35,7 @@ export class ProjectAgent {
     mcpConfigPath: undefined,
   }
 
-  private readonly configSyncDeps: ConfigSyncDeps
+  private configSyncDeps: ConfigSyncDeps
 
   private readonly transportState: TransportState = {
     heartbeatTimer: null,
@@ -46,7 +46,7 @@ export class ProjectAgent {
     configSyncDebounceTimer: null,
   }
 
-  private readonly transportDeps: TransportDeps
+  private transportDeps: TransportDeps
 
   constructor(
     project: ProjectRegistration,
@@ -101,6 +101,14 @@ export class ProjectAgent {
     return this.client
   }
 
+  updateToken(newToken: string): void {
+    this.token = newToken
+    this.client.updateToken(newToken)
+    this.configSyncDeps = { ...this.configSyncDeps, token: newToken }
+    this.transportDeps = { ...this.transportDeps, token: newToken }
+    logger.info(t('runner.tokenUpdated', { prefix: this.prefix }))
+  }
+
   async performConfigSync(): Promise<void> {
     await performConfigSync(this.configSyncDeps, this.configSyncState)
   }
@@ -127,7 +135,11 @@ export class ProjectAgent {
       logger.success(t('runner.registered', { prefix: this.prefix, agentId: result.agentId }))
       logger.debug(`${this.prefix} Register response: transportMode=${result.transportMode ?? 'none'}, appsyncUrl=${result.appsyncUrl ? 'present' : 'absent'}`)
     } catch (error) {
-      logger.error(t('runner.registerFailed', { prefix: this.prefix, message: getErrorMessage(error) }))
+      if (isAuthenticationError(error)) {
+        logger.error(t('runner.authError', { prefix: this.prefix, detail: getDetailedErrorMessage(error) }))
+      } else {
+        logger.error(t('runner.registerFailed', { prefix: this.prefix, message: getErrorMessage(error) }))
+      }
       return
     }
 
