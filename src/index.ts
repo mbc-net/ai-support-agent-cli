@@ -120,6 +120,50 @@ program
   })
 
 program
+  .command('set-auto-update')
+  .description(t('cmd.setAutoUpdate'))
+  .option('--enable', t('cmd.setAutoUpdate.enable'))
+  .option('--disable', t('cmd.setAutoUpdate.disable'))
+  .option('--channel <channel>', t('cmd.setAutoUpdate.channel'))
+  .action((opts: { enable?: boolean; disable?: boolean; channel?: string }) => {
+    if (!opts.enable && !opts.disable && !opts.channel) {
+      logger.warn(t('autoUpdate.usageHint'))
+      return
+    }
+
+    const config = loadConfig()
+    const current = config?.autoUpdate ?? { enabled: true, autoRestart: true, channel: 'latest' as ReleaseChannel }
+
+    if (opts.enable && opts.disable) {
+      logger.warn(t('autoUpdate.conflictFlags'))
+      return
+    }
+
+    const channel = opts.channel ? validateUpdateChannel(opts.channel) as ReleaseChannel | undefined : undefined
+    if (opts.channel && !channel) {
+      return
+    }
+
+    const updated = {
+      ...current,
+      ...(opts.enable && { enabled: true }),
+      ...(opts.disable && { enabled: false }),
+      ...(channel && { channel }),
+    }
+
+    saveConfig({ autoUpdate: updated })
+
+    if (opts.disable) {
+      logger.success(t('autoUpdate.disabled'))
+    } else if (opts.enable) {
+      logger.success(t('autoUpdate.enabled', { channel: updated.channel }))
+    }
+    if (channel) {
+      logger.success(t('autoUpdate.channelSet', { channel }))
+    }
+  })
+
+program
   .command('docker-login')
   .description(t('cmd.dockerLogin'))
   .action(async () => {

@@ -5,6 +5,7 @@ import type { ApiClient } from './api-client'
 import { getCacheDir } from './project-dir'
 import { logger } from './logger'
 import type { CachedProjectConfig, ProjectConfigResponse } from './types'
+import { atomicWriteFile } from './utils'
 
 const CACHE_FILE_NAME = 'project-config.json'
 
@@ -74,15 +75,22 @@ export function saveCachedConfig(
         configHash: config.configHash,
         project: config.project,
         agent: config.agent,
+        repositories: config.repositories,
         documentation: config.documentation,
         // aws is intentionally excluded from cache
+        // backlog: APIキーを除外してキャッシュ
+        backlog: config.backlog
+          ? {
+              items: config.backlog.items.map(
+                ({ apiKey: _apiKey, ...rest }) => rest,
+              ),
+            }
+          : undefined,
       },
     }
 
     const cachePath = path.join(cacheDir, CACHE_FILE_NAME)
-    const tmpPath = cachePath + '.tmp'
-    fs.writeFileSync(tmpPath, JSON.stringify(cacheData, null, 2), { mode: 0o600 })
-    fs.renameSync(tmpPath, cachePath)
+    atomicWriteFile(cachePath, JSON.stringify(cacheData, null, 2))
 
     logger.debug(`Config cached to ${cachePath}`)
   } catch (error) {

@@ -4,17 +4,38 @@ import {
   startAgent,
   startProjectAgent,
   setupShutdownHandlers,
+  resolveAutoUpdateConfig,
 } from '../src/agent-runner'
+import { AGENT_VERSION } from '../src/constants'
 import { getSystemInfo, getLocalIpAddress } from '../src/system-info'
 import { ApiClient } from '../src/api-client'
 import { executeCommand } from '../src/commands'
 import { loadConfig, getProjectList, saveConfig } from '../src/config-manager'
 import { logger } from '../src/logger'
+import { detectChannelFromVersion } from '../src/update-checker'
 
 jest.mock('../src/api-client')
 jest.mock('../src/commands')
 jest.mock('../src/config-manager')
 jest.mock('../src/logger')
+
+const mockForkProject = jest.fn()
+const mockStopAll = jest.fn().mockResolvedValue(undefined)
+const mockSendUpdateToAll = jest.fn()
+const mockGetRunningCount = jest.fn().mockReturnValue(0)
+jest.mock('../src/process-manager', () => ({
+  ProcessManager: jest.fn().mockImplementation(() => ({
+    forkProject: mockForkProject,
+    stopAll: mockStopAll,
+    sendUpdateToAll: mockSendUpdateToAll,
+    getRunningCount: mockGetRunningCount,
+  })),
+}))
+jest.mock('../src/sentry', () => ({
+  initSentry: jest.fn().mockResolvedValue(undefined),
+  captureException: jest.fn(),
+  flushSentry: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('../src/auto-updater', () => ({
   startAutoUpdater: jest.fn().mockReturnValue({ stop: jest.fn() }),
 }))
@@ -157,7 +178,8 @@ describe('agent-runner', () => {
     },
   ))
 
-  it('should start all projects from multi-project config', async () => {
+  it('should use ProcessManager for multi-project config (2+ projects)', async () => {
+    const { ProcessManager } = require('../src/process-manager')
     const mockConfig = {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
@@ -173,9 +195,40 @@ describe('agent-runner', () => {
     await jest.advanceTimersByTimeAsync(100)
     await promise
 
-    expect(MockApiClient).toHaveBeenCalledTimes(2)
+    expect(ProcessManager).toHaveBeenCalled()
+    expect(mockForkProject).toHaveBeenCalledTimes(2)
+    expect(mockForkProject).toHaveBeenCalledWith(
+      mockConfig.projects[0],
+      'multi-agent',
+      expect.objectContaining({ pollInterval: expect.any(Number), heartbeatInterval: expect.any(Number) }),
+    )
+    expect(mockForkProject).toHaveBeenCalledWith(
+      mockConfig.projects[1],
+      'multi-agent',
+      expect.objectContaining({ pollInterval: expect.any(Number), heartbeatInterval: expect.any(Number) }),
+    )
+    // ApiClient is created for auto-updater with first project's credentials
     expect(MockApiClient).toHaveBeenCalledWith('http://api-a', 'token-a')
-    expect(MockApiClient).toHaveBeenCalledWith('http://api-b', 'token-b')
+    expect(mockedSaveConfig).toHaveBeenCalled()
+  })
+
+  it('should use startProjectAgent for single project from config', async () => {
+    const mockConfig = {
+      agentId: 'single-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(MockApiClient).toHaveBeenCalledWith('http://api-a', 'token-a')
+    expect(mockForkProject).not.toHaveBeenCalled()
     expect(mockedSaveConfig).toHaveBeenCalled()
   })
 
@@ -227,7 +280,7 @@ describe('agent-runner', () => {
     expect(startAutoUpdater).not.toHaveBeenCalled()
   })
 
-  it('should start auto-updater with custom channel for multi-project config', async () => {
+  it('should start auto-updater with custom channel for single project from config', async () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     const mockConfig = {
       agentId: 'multi-agent',
@@ -251,8 +304,45 @@ describe('agent-runner', () => {
     )
   })
 
+  it('should start auto-updater with ProcessManager for multi-project config', async () => {
+    const { startAutoUpdater } = require('../src/auto-updater')
+    const mockConfig = {
+      agentId: 'multi-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({ updateChannel: 'beta' })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startAutoUpdater).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ channel: 'beta' }),
+      expect.any(Function),
+      expect.any(Function),
+    )
+  })
+
   it('should invoke auto-updater stopAllAgents and sendUpdateError callbacks (single project)', async () => {
     const { startAutoUpdater } = require('../src/auto-updater')
+    // Make heartbeat reject to cover .catch(() => {}) branch
+    const mockInstance = {
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
+      getPendingCommands: jest.fn().mockResolvedValue([]),
+      getCommand: jest.fn(),
+      submitResult: jest.fn(),
+      getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
+      getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
+    }
+    MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
+
     // Make startAutoUpdater call the callbacks to verify they work
     startAutoUpdater.mockImplementation(
       (_clients: unknown[], _config: unknown, stopAll: () => void, sendError?: (err: string) => void) => {
@@ -277,8 +367,20 @@ describe('agent-runner', () => {
     startAutoUpdater.mockReturnValue({ stop: jest.fn() })
   })
 
-  it('should invoke auto-updater stopAllAgents and sendUpdateError callbacks (multi project)', async () => {
+  it('should invoke auto-updater stopAllAgents and sendUpdateError callbacks (single project from config)', async () => {
     const { startAutoUpdater } = require('../src/auto-updater')
+    // Make heartbeat reject to cover .catch(() => {}) branch
+    const mockInstance = {
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
+      getPendingCommands: jest.fn().mockResolvedValue([]),
+      getCommand: jest.fn(),
+      submitResult: jest.fn(),
+      getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
+      getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
+    }
+    MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
+
     startAutoUpdater.mockImplementation(
       (_clients: unknown[], _config: unknown, stopAll: () => void, sendError?: (err: string) => void) => {
         stopAll()
@@ -302,6 +404,51 @@ describe('agent-runner', () => {
     await promise
 
     expect(startAutoUpdater).toHaveBeenCalled()
+
+    // Reset mock to default behavior
+    startAutoUpdater.mockReturnValue({ stop: jest.fn() })
+  })
+
+  it('should invoke auto-updater callbacks with ProcessManager (multi project)', async () => {
+    const { startAutoUpdater } = require('../src/auto-updater')
+    // Make heartbeat reject to cover .catch(() => {}) branch
+    const mockInstance = {
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' }),
+      heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
+      getPendingCommands: jest.fn().mockResolvedValue([]),
+      getCommand: jest.fn(),
+      submitResult: jest.fn(),
+      getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
+      getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
+    }
+    MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
+
+    startAutoUpdater.mockImplementation(
+      (_clients: unknown[], _config: unknown, stopAll: () => void, sendError?: (err: string) => void) => {
+        stopAll()
+        sendError?.('test error')
+        return { stop: jest.fn() }
+      },
+    )
+
+    const mockConfig = {
+      agentId: 'multi-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startAutoUpdater).toHaveBeenCalled()
+    // stopAll callback should call processManager.sendUpdateToAll()
+    expect(mockSendUpdateToAll).toHaveBeenCalled()
 
     // Reset mock to default behavior
     startAutoUpdater.mockReturnValue({ stop: jest.fn() })
@@ -536,11 +683,15 @@ describe('startProjectAgent', () => {
 })
 
 describe('setupShutdownHandlers', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
   it('should register SIGINT and SIGTERM handlers', () => {
     const processOnSpy = jest.spyOn(process, 'on')
     const agents = [{ stop: jest.fn() }]
 
-    setupShutdownHandlers(agents)
+    setupShutdownHandlers({ kind: 'agents', agents })
 
     expect(processOnSpy).toHaveBeenCalledWith('SIGINT', expect.any(Function))
     expect(processOnSpy).toHaveBeenCalledWith('SIGTERM', expect.any(Function))
@@ -548,7 +699,38 @@ describe('setupShutdownHandlers', () => {
     processOnSpy.mockRestore()
   })
 
-  it('should call stop on all agents and exit(0) when signal fires', () => {
+  it('should only execute shutdown once when both SIGINT and SIGTERM fire', async () => {
+    let sigintHandler: (() => void) | undefined
+    let sigtermHandler: (() => void) | undefined
+    const processOnSpy = jest.spyOn(process, 'on').mockImplementation((event, handler) => {
+      if (event === 'SIGINT') {
+        sigintHandler = handler as () => void
+      } else if (event === 'SIGTERM') {
+        sigtermHandler = handler as () => void
+      }
+      return process
+    })
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+    const agents = [{ stop: jest.fn() }]
+    setupShutdownHandlers({ kind: 'agents', agents })
+
+    // Fire both signals simultaneously
+    sigintHandler!()
+    sigtermHandler!()
+
+    // Wait for async shutdown
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    // stop should be called only once
+    expect(agents[0].stop).toHaveBeenCalledTimes(1)
+    expect(exitSpy).toHaveBeenCalledTimes(1)
+
+    processOnSpy.mockRestore()
+    exitSpy.mockRestore()
+  })
+
+  it('should call stop on all agents and exit(0) when signal fires', async () => {
     let sigintHandler: (() => void) | undefined
     const processOnSpy = jest.spyOn(process, 'on').mockImplementation((event, handler) => {
       if (event === 'SIGINT') {
@@ -559,11 +741,14 @@ describe('setupShutdownHandlers', () => {
     const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
 
     const agents = [{ stop: jest.fn() }, { stop: jest.fn() }]
-    setupShutdownHandlers(agents)
+    setupShutdownHandlers({ kind: 'agents', agents })
 
-    // Invoke the SIGINT handler
+    // Invoke the SIGINT handler (now wraps an async function)
     expect(sigintHandler).toBeDefined()
     sigintHandler!()
+
+    // Wait for the async shutdown to complete
+    await new Promise((resolve) => setTimeout(resolve, 10))
 
     expect(agents[0].stop).toHaveBeenCalled()
     expect(agents[1].stop).toHaveBeenCalled()
@@ -571,5 +756,64 @@ describe('setupShutdownHandlers', () => {
 
     processOnSpy.mockRestore()
     exitSpy.mockRestore()
+  })
+
+  it('should call processManager.stopAll when processManager is provided', async () => {
+    const { ProcessManager } = require('../src/process-manager')
+    const pm = new ProcessManager()
+
+    let sigintHandler: (() => void) | undefined
+    const processOnSpy = jest.spyOn(process, 'on').mockImplementation((event, handler) => {
+      if (event === 'SIGINT') {
+        sigintHandler = handler as () => void
+      }
+      return process
+    })
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+    setupShutdownHandlers({ kind: 'processManager', processManager: pm })
+
+    sigintHandler!()
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    expect(mockStopAll).toHaveBeenCalled()
+    expect(exitSpy).toHaveBeenCalledWith(0)
+
+    processOnSpy.mockRestore()
+    exitSpy.mockRestore()
+  })
+})
+
+describe('resolveAutoUpdateConfig', () => {
+  it('should use detected channel from AGENT_VERSION when no explicit channel', () => {
+    const expectedChannel = detectChannelFromVersion(AGENT_VERSION)
+    const result = resolveAutoUpdateConfig({})
+    expect(result.channel).toBe(expectedChannel)
+    expect(result.enabled).toBe(true)
+    expect(result.autoRestart).toBe(true)
+  })
+
+  it('should prefer CLI updateChannel over detected channel', () => {
+    const result = resolveAutoUpdateConfig({ updateChannel: 'beta' })
+    expect(result.channel).toBe('beta')
+  })
+
+  it('should prefer config channel over detected channel', () => {
+    const result = resolveAutoUpdateConfig({}, { autoUpdate: { enabled: true, autoRestart: true, channel: 'alpha' } })
+    expect(result.channel).toBe('alpha')
+  })
+
+  it('should prefer CLI updateChannel over config channel', () => {
+    const result = resolveAutoUpdateConfig(
+      { updateChannel: 'beta' },
+      { autoUpdate: { enabled: true, autoRestart: true, channel: 'alpha' } },
+    )
+    expect(result.channel).toBe('beta')
+  })
+
+  it('should disable auto-update when autoUpdate is false', () => {
+    const result = resolveAutoUpdateConfig({ autoUpdate: false })
+    expect(result.enabled).toBe(false)
   })
 })

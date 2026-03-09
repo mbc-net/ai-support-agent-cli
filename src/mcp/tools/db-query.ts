@@ -3,29 +3,52 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import type { DbCredentials } from '../../types'
-import { extractErrorMessage, mcpErrorResponse, mcpTextResponse } from './mcp-response'
+import { mcpErrorResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
 
-/** SQL文が SELECT のみかどうか検証する */
-export function validateSelectOnly(sql: string): { valid: boolean; error?: string } {
+/** SQL文を検証する。writePermissions で INSERT/UPDATE/DELETE の許可を制御 */
+export function validateSql(
+  sql: string,
+  writePermissions?: { insert: boolean; update: boolean; delete: boolean },
+): { valid: boolean; error?: string } {
   const trimmed = sql.trim()
   if (!trimmed) {
     return { valid: false, error: 'SQL query is empty' }
   }
 
-  // 禁止キーワードをチェック（大文字小文字無視）
-  const forbidden = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'TRUNCATE', 'ALTER', 'CREATE', 'GRANT', 'REVOKE']
   const upper = trimmed.toUpperCase()
-  for (const keyword of forbidden) {
-    // 単語境界でマッチ（前後が非単語文字 or 文字列の先頭/末尾）
+
+  // DDLは常に禁止
+  const ddlKeywords = ['DROP', 'TRUNCATE', 'ALTER', 'CREATE', 'GRANT', 'REVOKE', 'UNION']
+  for (const keyword of ddlKeywords) {
     const regex = new RegExp(`(?<![A-Z_])${keyword}(?![A-Z_])`)
     if (regex.test(upper)) {
       return { valid: false, error: `Forbidden SQL operation: ${keyword}` }
     }
   }
 
-  // SELECT で始まることを確認（WITH ... SELECT も許可）
-  if (!upper.startsWith('SELECT') && !upper.startsWith('WITH') && !upper.startsWith('EXPLAIN')) {
-    return { valid: false, error: 'Only SELECT, WITH, and EXPLAIN statements are allowed' }
+  // DML書き込み操作は writePermissions に基づいて許可/拒否
+  const dmlChecks: Array<{ keyword: string; permission: boolean }> = [
+    { keyword: 'INSERT', permission: writePermissions?.insert === true },
+    { keyword: 'UPDATE', permission: writePermissions?.update === true },
+    { keyword: 'DELETE', permission: writePermissions?.delete === true },
+  ]
+  for (const { keyword, permission } of dmlChecks) {
+    const regex = new RegExp(`(?<![A-Z_])${keyword}(?![A-Z_])`)
+    if (regex.test(upper) && !permission) {
+      return { valid: false, error: `Forbidden SQL operation: ${keyword}` }
+    }
+  }
+
+  // 許可される先頭キーワード
+  const allowedStarts = ['SELECT', 'WITH', 'EXPLAIN']
+  if (writePermissions?.insert) allowedStarts.push('INSERT')
+  if (writePermissions?.update) allowedStarts.push('UPDATE')
+  if (writePermissions?.delete) allowedStarts.push('DELETE')
+
+  const startsWithAllowed = allowedStarts.some((kw) => upper.startsWith(kw))
+  if (!startsWithAllowed) {
+    const allowed = allowedStarts.join(', ')
+    return { valid: false, error: `Only ${allowed} statements are allowed` }
   }
 
   return { valid: true }
@@ -56,6 +79,8 @@ export async function executeQuery(
 
   if (credentials.engine === 'postgresql') {
     const { Client } = await import('pg')
+    const isLocalHost = credentials.host === 'localhost' || credentials.host === '127.0.0.1'
+    const useSsl = credentials.ssl !== undefined ? credentials.ssl : !isLocalHost
     const client = new Client({
       host: credentials.host,
       port: credentials.port,
@@ -63,7 +88,7 @@ export async function executeQuery(
       password: credentials.password,
       database: credentials.database,
       connectionTimeoutMillis: 10000,
-      ssl: false,
+      ssl: useSsl ? { rejectUnauthorized: true } : false,
     })
     try {
       await client.connect()
@@ -81,30 +106,26 @@ export async function executeQuery(
 export function registerDbQueryTool(server: McpServer, apiClient: ApiClient): void {
   server.tool(
     'db_query',
-    'Execute a SELECT query on a project database. Only SELECT/WITH/EXPLAIN statements are allowed.',
+    'Execute a SQL query on a project database. Supports SELECT, INSERT, UPDATE, and DELETE. Write operations (INSERT/UPDATE/DELETE) are allowed when the database connection has the corresponding write permissions configured. DDL operations are always forbidden. Submit the SQL directly — permission checks are handled server-side.',
     {
       name: z.string().describe('Database connection name (e.g. "MAIN", "READONLY")'),
-      sql: z.string().describe('SQL query to execute (SELECT only)'),
+      sql: z.string().describe('SQL query to execute (SELECT, INSERT, UPDATE, DELETE)'),
     },
-    async ({ name, sql }) => {
-      // Validate SQL
-      const validation = validateSelectOnly(sql)
+    async ({ name, sql }) => withMcpErrorHandling(async () => {
+      // Get credentials from API (includes writePermissions)
+      const credentials = await apiClient.getDbCredentials(name)
+
+      // Validate SQL with write permissions
+      const validation = validateSql(sql, credentials.writePermissions)
       if (!validation.valid) {
         return mcpErrorResponse(validation.error!)
       }
 
-      try {
-        // Get credentials from API
-        const credentials = await apiClient.getDbCredentials(name)
+      // Execute query
+      const rows = await executeQuery(credentials, sql)
 
-        // Execute query
-        const rows = await executeQuery(credentials, sql)
-
-        // Format result
-        return mcpTextResponse(JSON.stringify(rows, null, 2))
-      } catch (error) {
-        return mcpErrorResponse(extractErrorMessage(error))
-      }
-    },
+      // Format result
+      return mcpTextResponse(JSON.stringify(rows, null, 2))
+    }),
   )
 }

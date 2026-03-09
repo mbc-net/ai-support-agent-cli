@@ -9,7 +9,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mbc-net/ai-support-agent-client.git"
+    "url": "https://github.com/mbc-net/ai-support-agent-cli.git"
   },
   "keywords": [
     "ai",
@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "@sentry/node": "^10.40.0",
     "axios": "^1.13.0",
     "commander": "^14.0.0",
     "mysql2": "^3.18.2",

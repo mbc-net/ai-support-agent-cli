@@ -4,7 +4,7 @@ import { t } from './i18n'
 import { logger } from './logger'
 import type { AutoUpdateConfig } from './types'
 import { getErrorMessage } from './utils'
-import { isNewerVersion, isValidVersion, performUpdate, reExecProcess } from './update-checker'
+import { detectInstallMethod, isNewerVersion, isValidVersion, performUpdate, reExecProcess } from './update-checker'
 
 export interface AutoUpdaterHandle {
   stop: () => void
@@ -34,6 +34,12 @@ export function startAutoUpdater(
     checking = true
 
     try {
+      const installMethod = detectInstallMethod()
+      if (installMethod === 'dev' || installMethod === 'local') {
+        logger.debug(`Auto-update skipped (install method: ${installMethod})`)
+        return
+      }
+
       // Use the first available client
       const client = clients[0]
       if (!client) return
@@ -76,7 +82,7 @@ export function startAutoUpdater(
 
       // Perform the update
       logger.info(t('update.installing', { version: targetVersion }))
-      const result = await performUpdate(targetVersion)
+      const result = await performUpdate(targetVersion, installMethod)
 
       if (!result.success) {
         lastFailedVersion = targetVersion
@@ -100,7 +106,7 @@ export function startAutoUpdater(
       stop()
 
       logger.info(t('update.restarting'))
-      reExecProcess()
+      reExecProcess(installMethod)
     } catch (error) {
       logger.debug(`Update check failed: ${getErrorMessage(error)}`)
     } finally {

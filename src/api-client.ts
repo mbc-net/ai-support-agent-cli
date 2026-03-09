@@ -16,6 +16,7 @@ import type {
   ReleaseChannel,
   RegisterRequest,
   RegisterResponse,
+  RepoCredentials,
   SystemInfo,
   VersionInfo,
 } from './types'
@@ -27,7 +28,13 @@ export class ApiClient {
   constructor(apiUrl: string, token: string) {
     const parsed = new URL(apiUrl)
     if (parsed.protocol === 'http:' && parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost') {
-      logger.warn('API URL uses HTTP (not HTTPS). Token may be transmitted in plain text.')
+      if (process.env.AI_SUPPORT_AGENT_ALLOW_HTTP === 'true') {
+        logger.warn('API URL uses HTTP (not HTTPS). Token may be transmitted in plain text.')
+      } else {
+        throw new Error(
+          'API URL uses HTTP (not HTTPS). Set AI_SUPPORT_AGENT_ALLOW_HTTP=true to allow insecure connections.',
+        )
+      }
     }
 
     this.client = axios.create({
@@ -160,6 +167,11 @@ export class ApiClient {
     return this.get<DbCredentials>(API_ENDPOINTS.DB_CREDENTIALS, { params: { name } })
   }
 
+  async getRepoCredentials(repositoryId: string): Promise<RepoCredentials> {
+    logger.debug(`Fetching repo credentials for: ${repositoryId}`)
+    return this.get<RepoCredentials>(API_ENDPOINTS.REPO_CREDENTIALS(repositoryId))
+  }
+
   async submitChatChunk(
     commandId: string,
     chunk: ChatChunk,
@@ -168,5 +180,31 @@ export class ApiClient {
     this.validateCommandId(commandId)
     logger.debug(`Submitting chat chunk ${chunk.index} (${chunk.type}) for command: ${commandId}`)
     await this.postVoid(API_ENDPOINTS.COMMAND_CHUNKS(commandId), chunk, { params: { agentId } })
+  }
+
+  async getUploadUrl(data: {
+    conversationId: string
+    messageId: string
+    filename: string
+    contentType: string
+    fileSize: number
+    projectCode: string
+  }): Promise<{ uploadUrl: string; fileId: string; s3Key: string }> {
+    logger.debug(`Requesting upload URL for file: ${data.filename}`)
+    return this.post<{ uploadUrl: string; fileId: string; s3Key: string }>(
+      API_ENDPOINTS.FILES_UPLOAD_URL,
+      data,
+    )
+  }
+
+  async getDownloadUrl(data: {
+    fileId: string
+    s3Key: string
+  }): Promise<{ downloadUrl: string }> {
+    logger.debug(`Requesting download URL for file: ${data.fileId}`)
+    return this.post<{ downloadUrl: string }>(
+      API_ENDPOINTS.FILES_DOWNLOAD_URL,
+      data,
+    )
   }
 }

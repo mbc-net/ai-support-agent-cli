@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 
 jest.mock('child_process', () => ({
-  execSync: jest.fn(),
+  execFileSync: jest.fn(),
   spawn: jest.fn(),
 }))
 
@@ -43,7 +43,7 @@ jest.mock('../../src/logger', () => ({
   },
 }))
 
-import { execSync, spawn } from 'child_process'
+import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
 import { existsSync } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
@@ -60,7 +60,7 @@ import {
   runInDocker,
 } from '../../src/docker/docker-runner'
 
-const mockExecSync = execSync as jest.MockedFunction<typeof execSync>
+const mockExecFileSync = execFileSync as jest.MockedFunction<typeof execFileSync>
 const mockSpawn = spawn as jest.MockedFunction<typeof spawn>
 const mockGetConfigDir = getConfigDir as jest.MockedFunction<typeof getConfigDir>
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>
@@ -84,36 +84,37 @@ describe('docker-runner', () => {
 
   describe('checkDockerAvailable', () => {
     it('should return true when docker info succeeds', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
       expect(checkDockerAvailable()).toBe(true)
-      expect(mockExecSync).toHaveBeenCalledWith('docker info', { stdio: 'ignore' })
+      expect(mockExecFileSync).toHaveBeenCalledWith('docker', ['info'], { stdio: 'ignore' })
     })
 
     it('should return false when docker info fails', () => {
-      mockExecSync.mockImplementation(() => { throw new Error('Docker not running') })
+      mockExecFileSync.mockImplementation(() => { throw new Error('Docker not running') })
       expect(checkDockerAvailable()).toBe(false)
     })
   })
 
   describe('imageExists', () => {
     it('should return true when image exists', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
       expect(imageExists('1.0.0')).toBe(true)
-      expect(mockExecSync).toHaveBeenCalledWith('docker image inspect ai-support-agent:1.0.0', { stdio: 'ignore' })
+      expect(mockExecFileSync).toHaveBeenCalledWith('docker', ['image', 'inspect', 'ai-support-agent:1.0.0'], { stdio: 'ignore' })
     })
 
     it('should return false when image does not exist', () => {
-      mockExecSync.mockImplementation(() => { throw new Error('No such image') })
+      mockExecFileSync.mockImplementation(() => { throw new Error('No such image') })
       expect(imageExists('1.0.0')).toBe(false)
     })
   })
 
   describe('buildImage', () => {
     it('should build docker image with correct arguments', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
       buildImage('1.0.0')
-      expect(mockExecSync).toHaveBeenCalledWith(
-        'docker build -t ai-support-agent:1.0.0 --build-arg AGENT_VERSION=1.0.0 -f /mock/docker/Dockerfile /mock',
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'docker',
+        ['build', '-t', 'ai-support-agent:1.0.0', '--build-arg', 'AGENT_VERSION=1.0.0', '-f', '/mock/docker/Dockerfile', '/mock'],
         { stdio: 'inherit' },
       )
       expect(logger.info).toHaveBeenCalled()
@@ -306,27 +307,27 @@ describe('docker-runner', () => {
 
   describe('ensureImage', () => {
     it('should build image when it does not exist', () => {
-      mockExecSync.mockImplementation((cmd: unknown) => {
-        const cmdStr = String(cmd)
-        if (cmdStr.startsWith('docker image inspect')) throw new Error('No such image')
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') throw new Error('No such image')
         return Buffer.from('')
       })
 
       ensureImage()
 
-      const buildCall = mockExecSync.mock.calls.find(
-        call => String(call[0]).startsWith('docker build'),
+      const buildCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'build',
       )
       expect(buildCall).toBeDefined()
     })
 
     it('should skip build when image exists', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
 
       ensureImage()
 
-      const buildCall = mockExecSync.mock.calls.find(
-        call => String(call[0]).startsWith('docker build'),
+      const buildCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'build',
       )
       expect(buildCall).toBeUndefined()
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.imageFound'))
@@ -370,7 +371,7 @@ describe('docker-runner', () => {
 
   describe('runInDocker', () => {
     it('should exit with error when Docker is not available', () => {
-      mockExecSync.mockImplementation(() => { throw new Error('not found') })
+      mockExecFileSync.mockImplementation(() => { throw new Error('not found') })
 
       runInDocker({})
 
@@ -379,13 +380,13 @@ describe('docker-runner', () => {
     })
 
     it('should build image when it does not exist', () => {
-      mockExecSync.mockImplementation((cmd: unknown) => {
-        const cmdStr = String(cmd)
-        if (cmdStr === 'docker info') return Buffer.from('')
-        if (cmdStr.startsWith('docker image inspect')) {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'info') return Buffer.from('')
+        if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') {
           throw new Error('No such image')
         }
-        if (cmdStr.startsWith('docker build')) return Buffer.from('')
+        if (argsArr && argsArr[0] === 'build') return Buffer.from('')
         return Buffer.from('')
       })
 
@@ -398,8 +399,8 @@ describe('docker-runner', () => {
       runInDocker({})
 
       // Should have called docker build
-      const buildCall = mockExecSync.mock.calls.find(
-        call => String(call[0]).startsWith('docker build'),
+      const buildCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'build',
       )
       expect(buildCall).toBeDefined()
       expect(mockSpawn).toHaveBeenCalledWith(
@@ -410,7 +411,7 @@ describe('docker-runner', () => {
     })
 
     it('should use existing image when available', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
 
       const fakeChild = Object.assign(new EventEmitter(), {
         kill: jest.fn(),
@@ -422,14 +423,14 @@ describe('docker-runner', () => {
 
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.imageFound'))
       // Should NOT have called docker build
-      const buildCall = mockExecSync.mock.calls.find(
-        call => String(call[0]).startsWith('docker build'),
+      const buildCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'build',
       )
       expect(buildCall).toBeUndefined()
     })
 
     it('should exit with container exit code on close', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
 
       const fakeChild = Object.assign(new EventEmitter(), {
         kill: jest.fn(),
@@ -444,7 +445,7 @@ describe('docker-runner', () => {
     })
 
     it('should exit with 0 when close code is null', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
 
       const fakeChild = Object.assign(new EventEmitter(), {
         kill: jest.fn(),
@@ -459,7 +460,7 @@ describe('docker-runner', () => {
     })
 
     it('should handle spawn error', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
 
       const fakeChild = Object.assign(new EventEmitter(), {
         kill: jest.fn(),
@@ -475,7 +476,7 @@ describe('docker-runner', () => {
     })
 
     it('should forward SIGINT to child process', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
 
       const fakeChild = Object.assign(new EventEmitter(), {
         kill: jest.fn(),
@@ -500,7 +501,7 @@ describe('docker-runner', () => {
     })
 
     it('should forward SIGTERM to child process', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
 
       const fakeChild = Object.assign(new EventEmitter(), {
         kill: jest.fn(),
@@ -525,7 +526,7 @@ describe('docker-runner', () => {
     })
 
     it('should pass container args to docker run', () => {
-      mockExecSync.mockReturnValue(Buffer.from(''))
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
 
       const fakeChild = Object.assign(new EventEmitter(), {
         kill: jest.fn(),

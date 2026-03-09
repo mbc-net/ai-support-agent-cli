@@ -5,6 +5,7 @@ import { executeCommand } from '../src/commands'
 import { logger } from '../src/logger'
 import { syncProjectConfig } from '../src/project-config-sync'
 import { ProjectAgent } from '../src/project-agent'
+import { syncRepositories } from '../src/repo-sync'
 
 jest.mock('../src/api-client')
 jest.mock('../src/appsync-subscriber')
@@ -27,12 +28,16 @@ jest.mock('../src/project-dir', () => ({
 jest.mock('../src/aws-profile', () => ({
   writeAwsConfig: jest.fn(),
 }))
+jest.mock('../src/repo-sync', () => ({
+  syncRepositories: jest.fn().mockResolvedValue([]),
+}))
 
 const MockApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
 const MockAppSyncSubscriber = AppSyncSubscriber as jest.MockedClass<typeof AppSyncSubscriber>
 const mockedExecuteCommand = executeCommand as jest.MockedFunction<typeof executeCommand>
 const mockedSyncProjectConfig = syncProjectConfig as jest.MockedFunction<typeof syncProjectConfig>
 const mockedWriteAwsConfig = writeAwsConfig as jest.MockedFunction<typeof writeAwsConfig>
+const mockedSyncRepositories = syncRepositories as jest.MockedFunction<typeof syncRepositories>
 
 describe('ProjectAgent', () => {
   let mockClient: {
@@ -507,6 +512,95 @@ describe('ProjectAgent', () => {
     })
   })
 
+  describe('chat_cancel priority in polling', () => {
+    it('should process chat_cancel commands before normal commands', async () => {
+      const executionOrder: string[] = []
+      mockedExecuteCommand.mockImplementation(async (type: any) => {
+        executionOrder.push(typeof type === 'string' ? type : type.type)
+        return { success: true, data: 'ok' }
+      })
+
+      // Return a mix of normal and cancel commands
+      mockClient.getPendingCommands.mockResolvedValue([
+        { commandId: 'cmd-chat', type: 'chat' },
+        { commandId: 'cmd-cancel', type: 'chat_cancel' },
+        { commandId: 'cmd-exec', type: 'execute_command' },
+      ])
+      mockClient.getCommand
+        .mockResolvedValueOnce({ commandId: 'cmd-cancel', type: 'chat_cancel', payload: { targetCommandId: 'some-cmd' } })
+        .mockResolvedValueOnce({ commandId: 'cmd-chat', type: 'chat', payload: { message: 'hello' } })
+        .mockResolvedValueOnce({ commandId: 'cmd-exec', type: 'execute_command', payload: { command: 'echo hi' } })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+      await jest.advanceTimersByTimeAsync(options.pollInterval)
+
+      // chat_cancel should be processed first
+      expect(executionOrder[0]).toBe('chat_cancel')
+
+      agent.stop()
+    })
+
+    it('should process chat_cancel even when processing flag is true', async () => {
+      // Simulate a long-running command that keeps processing=true
+      let longRunningResolve: (() => void) | undefined
+      const longRunningPromise = new Promise<void>((resolve) => { longRunningResolve = resolve })
+
+      let callCount = 0
+      mockedExecuteCommand.mockImplementation(async (type: any) => {
+        callCount++
+        const cmdType = typeof type === 'string' ? type : type.type
+        if (cmdType === 'chat') {
+          // Simulate long-running chat command
+          await longRunningPromise
+        }
+        return { success: true, data: 'ok' }
+      })
+
+      // First poll: return a long-running chat command
+      mockClient.getPendingCommands.mockResolvedValueOnce([
+        { commandId: 'cmd-long', type: 'chat' },
+      ])
+      mockClient.getCommand.mockResolvedValueOnce({
+        commandId: 'cmd-long',
+        type: 'chat',
+        payload: { message: 'long task' },
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+      await jest.advanceTimersByTimeAsync(options.pollInterval)
+
+      // Second poll: return a chat_cancel while chat is still processing
+      mockClient.getPendingCommands.mockResolvedValueOnce([
+        { commandId: 'cmd-cancel-2', type: 'chat_cancel' },
+      ])
+      mockClient.getCommand.mockResolvedValueOnce({
+        commandId: 'cmd-cancel-2',
+        type: 'chat_cancel',
+        payload: { targetCommandId: 'cmd-long' },
+      })
+
+      await jest.advanceTimersByTimeAsync(options.pollInterval)
+
+      // chat_cancel should have been executed even though processing=true
+      expect(mockedExecuteCommand).toHaveBeenCalledWith(
+        'chat_cancel',
+        { targetCommandId: 'cmd-long' },
+        expect.any(Object),
+      )
+
+      // Clean up
+      longRunningResolve?.()
+      await jest.advanceTimersByTimeAsync(100)
+      agent.stop()
+    })
+  })
+
   describe('config loading', () => {
     it('should continue when getConfig fails', async () => {
       mockClient.getConfig.mockRejectedValue(new Error('Config fetch failed'))
@@ -831,6 +925,64 @@ describe('ProjectAgent', () => {
       // performConfigSync is called once during registration and once during setup
       expect(mockedSyncProjectConfig).toHaveBeenCalledTimes(2)
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Starting setup'))
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Setup completed'))
+
+      agent.stop()
+    })
+
+    it('should sync repositories when project config has repositories', async () => {
+      const mockConfig = {
+        configHash: 'repo-hash',
+        project: { projectCode: 'test-proj', projectName: 'Test' },
+        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+        repositories: [
+          { repositoryId: 'repo-1', repositoryName: 'my-repo', repositoryUrl: 'https://github.com/org/repo.git', provider: 'github', branch: 'main', authMethod: 'token' },
+        ],
+      }
+      mockedSyncProjectConfig.mockResolvedValue(mockConfig)
+      mockedSyncRepositories.mockResolvedValue([
+        { repositoryId: 'repo-1', repositoryName: 'my-repo', status: 'cloned' },
+      ])
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      await agent.performSetup()
+
+      expect(mockedSyncRepositories).toHaveBeenCalledWith(
+        expect.anything(), // client
+        mockConfig.repositories,
+        expect.stringContaining('repos'),
+        expect.stringContaining('test-proj'),
+      )
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Repository sync: 1 cloned, 0 updated, 0 skipped'))
+
+      agent.stop()
+    })
+
+    it('should handle repository sync failure gracefully', async () => {
+      const mockConfig = {
+        configHash: 'repo-fail-hash',
+        project: { projectCode: 'test-proj', projectName: 'Test' },
+        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+        repositories: [
+          { repositoryId: 'repo-1', repositoryName: 'my-repo', repositoryUrl: 'https://github.com/org/repo.git', provider: 'github', branch: 'main', authMethod: 'token' },
+        ],
+      }
+      mockedSyncProjectConfig.mockResolvedValue(mockConfig)
+      mockedSyncRepositories.mockRejectedValue(new Error('Sync failed'))
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      await agent.performSetup()
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Repository sync failed'))
+      // Setup should still complete
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Setup completed'))
 
       agent.stop()

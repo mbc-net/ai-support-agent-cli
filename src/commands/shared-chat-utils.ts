@@ -1,7 +1,7 @@
 import { ApiClient } from '../api-client'
 import { CHUNK_LOG_LIMIT } from '../constants'
 import { logger } from '../logger'
-import type { ChatChunkType, HistoryMessage } from '../types'
+import type { ChatChunkType, ChatFileInfo, CommandResult, HistoryMessage } from '../types'
 import { getErrorMessage, truncateString } from '../utils'
 
 /**
@@ -77,4 +77,36 @@ export function createChunkSender(
   }
 
   return { sendChunk, getChunkIndex: () => chunkIndex }
+}
+
+/**
+ * チャットコマンドのエラーを共通的に処理する
+ * catch ブロックで使用し、ログ出力 + エラーチャンク送信 + 失敗結果を返す
+ */
+export async function handleChatError(
+  error: unknown,
+  commandId: string,
+  logTag: string,
+  sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
+): Promise<CommandResult> {
+  const errorMessage = getErrorMessage(error)
+  logger.error(`[${logTag}] Chat command failed [${commandId}]: ${errorMessage}`)
+  await sendChunk('error', errorMessage)
+  return { success: false, error: errorMessage }
+}
+
+/**
+ * ファイル添付チャンクを送信する
+ */
+export async function sendFileAttachmentChunk(
+  sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
+  file: ChatFileInfo,
+): Promise<void> {
+  await sendChunk('file_attachment', JSON.stringify({
+    fileId: file.fileId,
+    s3Key: file.s3Key,
+    filename: file.filename,
+    contentType: file.contentType,
+    fileSize: file.fileSize,
+  }))
 }

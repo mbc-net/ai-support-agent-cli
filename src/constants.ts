@@ -61,7 +61,7 @@ export const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
 export const DEFAULT_MAX_TOKENS = 4096
 
 // Chat executor
-export const CHAT_TIMEOUT = 120_000
+export const CHAT_TIMEOUT = 300_000
 export const CHAT_SIGKILL_DELAY = 5_000
 export const CLAUDE_DETECT_TIMEOUT_MS = 5_000
 export const DEFAULT_APPSYNC_TIMEOUT_MS = 300_000
@@ -100,9 +100,37 @@ export const API_ENDPOINTS = {
   CONFIG: '/api/agent/config',
   AWS_CREDENTIALS: '/api/agent/aws-credentials',
   DB_CREDENTIALS: '/api/agent/db-credentials',
+  REPO_CREDENTIALS: (repositoryId: string) => `/api/agent/repo-credentials/${repositoryId}`,
   PROJECT_CONFIG: '/api/agent/project-config',
+  FILES_UPLOAD_URL: '/api/agent/files/upload-url',
+  FILES_DOWNLOAD_URL: '/api/agent/files/download-url',
 } as const
 
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000
 export const INITIAL_CONFIG_SYNC_MAX_RETRIES = 3
 export const INITIAL_CONFIG_SYNC_RETRY_DELAY_MS = 2000
+
+// SSE/Streaming constants
+export const SSE_PREFIX = 'data: '
+export const SSE_DONE = '[DONE]'
+export const SSE_EVENT = {
+  MESSAGE_START: 'message_start',
+  MESSAGE_DELTA: 'message_delta',
+  CONTENT_BLOCK_DELTA: 'content_block_delta',
+  CONTENT_BLOCK_START: 'content_block_start',
+} as const
+
+export const ANTHROPIC_CONTENT_TYPE = {
+  TEXT_DELTA: 'text_delta',
+  TOOL_USE: 'tool_use',
+} as const
+
+// Git clone/pull
+export const GIT_CLONE_TIMEOUT = 120_000
+export const GIT_FETCH_TIMEOUT = 60_000
+export const GIT_CHECKOUT_TIMEOUT = 30_000
+
+// Child process management
+export const CHILD_PROCESS_MAX_RESTARTS = 5
+export const CHILD_PROCESS_RESTART_DELAY_MS = 5000
+export const CHILD_PROCESS_STOP_TIMEOUT_MS = 10000

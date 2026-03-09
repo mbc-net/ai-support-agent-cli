@@ -1,5 +1,6 @@
 import type { ApiClient } from '../../src/api-client'
-import { createChunkSender, formatHistoryForClaudeCode, parseHistory } from '../../src/commands/shared-chat-utils'
+import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, sendFileAttachmentChunk } from '../../src/commands/shared-chat-utils'
+import type { ChatFileInfo } from '../../src/types'
 
 jest.mock('../../src/logger')
 
@@ -169,6 +170,71 @@ describe('shared-chat-utils', () => {
       expect(result).toContain('[user]: Previous')
       expect(result).toContain('</conversation_history>')
       expect(result).toContain('Current')
+    })
+  })
+
+  describe('handleChatError', () => {
+    it('should log error, send error chunk, and return failure result', async () => {
+      const { logger } = require('../../src/logger')
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const result = await handleChatError(
+        new Error('Something went wrong'),
+        'cmd-err',
+        'test-tag',
+        sendChunk,
+      )
+
+      expect(logger.error).toHaveBeenCalledWith(
+        '[test-tag] Chat command failed [cmd-err]: Something went wrong',
+      )
+      expect(sendChunk).toHaveBeenCalledWith('error', 'Something went wrong')
+      expect(result).toEqual({ success: false, error: 'Something went wrong' })
+    })
+
+    it('should handle non-Error objects', async () => {
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const result = await handleChatError(
+        'string error',
+        'cmd-str',
+        'tag',
+        sendChunk,
+      )
+
+      expect(result).toEqual({ success: false, error: 'string error' })
+      expect(sendChunk).toHaveBeenCalledWith('error', 'string error')
+    })
+
+    it('should still return failure even if sendChunk throws', async () => {
+      const sendChunk = jest.fn().mockRejectedValue(new Error('Network error'))
+
+      await expect(
+        handleChatError(new Error('original'), 'cmd-net', 'tag', sendChunk),
+      ).rejects.toThrow('Network error')
+    })
+  })
+
+  describe('sendFileAttachmentChunk', () => {
+    it('should send a file_attachment chunk with file info', async () => {
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const file: ChatFileInfo = {
+        fileId: 'f1',
+        s3Key: 'uploads/f1.txt',
+        filename: 'test.txt',
+        contentType: 'text/plain',
+        fileSize: 1024,
+      }
+
+      await sendFileAttachmentChunk(sendChunk, file)
+
+      expect(sendChunk).toHaveBeenCalledWith('file_attachment', JSON.stringify({
+        fileId: 'f1',
+        s3Key: 'uploads/f1.txt',
+        filename: 'test.txt',
+        contentType: 'text/plain',
+        fileSize: 1024,
+      }))
     })
   })
 })

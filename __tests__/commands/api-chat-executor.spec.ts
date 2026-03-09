@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 
 import type { ApiClient } from '../../src/api-client'
-import { executeApiChatCommand } from '../../src/commands/api-chat-executor'
+import { cancelApiChatProcess, executeApiChatCommand, _getRunningApiChats } from '../../src/commands/api-chat-executor'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED } from '../../src/constants'
 import type { AgentServerConfig, ChatPayload } from '../../src/types'
 
@@ -523,6 +523,98 @@ describe('api-chat-executor', () => {
       }),
       expect.any(Object),
     )
+  })
+
+  describe('cancelApiChatProcess', () => {
+    it('should return false when commandId is not found', () => {
+      const result = cancelApiChatProcess('nonexistent-cmd')
+      expect(result).toBe(false)
+    })
+
+    it('should call cancel() and remove from map when commandId is found', () => {
+      const cancelFn = jest.fn()
+      const chats = _getRunningApiChats()
+      chats.set('cmd-to-cancel', { cancel: cancelFn })
+
+      const result = cancelApiChatProcess('cmd-to-cancel')
+
+      expect(result).toBe(true)
+      expect(cancelFn).toHaveBeenCalledTimes(1)
+      expect(chats.has('cmd-to-cancel')).toBe(false)
+    })
+
+    it('should abort the stream when cancelling a running API chat', async () => {
+      const stream = new EventEmitter()
+      mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+      const resultPromise = executeApiChatCommand(
+        basePayload, 'cmd-cancel-live', mockClient, baseConfig, 'agent-1',
+      )
+
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // The chat should be registered in runningApiChats
+      const chats = _getRunningApiChats()
+      expect(chats.has('cmd-cancel-live')).toBe(true)
+
+      // Cancel it using the actual cancel function (exercises the AbortController lambda)
+      const cancelled = cancelApiChatProcess('cmd-cancel-live')
+      expect(cancelled).toBe(true)
+
+      // The AbortController.abort() should cause the stream to emit an error
+      stream.emit('error', new Error('canceled'))
+
+      const result = await resultPromise
+      expect(result.success).toBe(false)
+    })
+
+    it('should not affect other chats when cancelling a specific one', () => {
+      const cancelFn1 = jest.fn()
+      const cancelFn2 = jest.fn()
+      const chats = _getRunningApiChats()
+      chats.set('cmd-a', { cancel: cancelFn1 })
+      chats.set('cmd-b', { cancel: cancelFn2 })
+
+      cancelApiChatProcess('cmd-a')
+
+      expect(cancelFn1).toHaveBeenCalledTimes(1)
+      expect(cancelFn2).not.toHaveBeenCalled()
+      expect(chats.has('cmd-a')).toBe(false)
+      expect(chats.has('cmd-b')).toBe(true)
+
+      // Cleanup
+      chats.delete('cmd-b')
+    })
+  })
+
+  it('should timeout when stream is inactive for too long', async () => {
+    jest.useFakeTimers()
+    try {
+      const stream = new EventEmitter()
+      // Add destroy method that streams would normally have
+      ;(stream as any).destroy = jest.fn((error: Error) => {
+        stream.emit('error', error)
+      })
+      mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+      const resultPromise = executeApiChatCommand(
+        basePayload, 'cmd-timeout', mockClient, baseConfig, 'agent-1',
+      )
+
+      // Wait for axios call to complete
+      await jest.advanceTimersByTimeAsync(50)
+
+      // Advance past CHAT_TIMEOUT (300_000ms) to trigger timeout
+      jest.advanceTimersByTime(300_000)
+
+      const result = await resultPromise
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toContain('timed out')
+      }
+    } finally {
+      jest.useRealTimers()
+    }
   })
 
   it('should handle incomplete SSE lines across chunks', async () => {

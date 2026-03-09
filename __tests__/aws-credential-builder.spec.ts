@@ -261,6 +261,50 @@ describe('aws-credential-builder', () => {
       ])
     })
 
+    it('should detect SSO_AUTH_REQUIRED via errorCode when error field is overwritten', async () => {
+      // HttpExceptionFilter が error を 'Unprocessable Entity' に上書きした場合のレスポンス形式
+      const ssoError = new axios.AxiosError(
+        'Request failed',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        {
+          status: 422,
+          statusText: 'Unprocessable Entity',
+          data: {
+            statusCode: 422,
+            error: 'Unprocessable Entity',
+            errorCode: 'SSO_AUTH_REQUIRED',
+            message: 'SSO token expired',
+            accountId: '123456789012',
+            accountName: 'dev',
+          },
+          headers: {},
+          config: {} as never,
+        },
+      )
+
+      const client = {
+        getAwsCredentials: jest.fn()
+          .mockRejectedValueOnce(ssoError)
+          .mockResolvedValueOnce({
+            accessKeyId: 'AKIA_STG',
+            secretAccessKey: 'secret_stg',
+            region: 'us-east-1',
+          }),
+      } as unknown as ApiClient
+
+      const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+
+      expect(result.env).toBeDefined()
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toContain('SSO認証の有効期限が切れています')
+      expect(result.errors[0]).toContain('dev')
+      expect(result.ssoAuthRequired).toEqual([
+        { accountId: '123456789012', accountName: 'dev' },
+      ])
+    })
+
     it('should include response details for non-SSO 422 errors', async () => {
       const apiError = new axios.AxiosError(
         'Request failed',
@@ -412,6 +456,45 @@ describe('aws-credential-builder', () => {
           data: {
             statusCode: 422,
             error: 'SSO_AUTH_REQUIRED',
+            message: 'SSO token expired',
+            accountId: '123456789012',
+            accountName: 'prod',
+          },
+          headers: {},
+          config: {} as never,
+        },
+      )
+
+      const client = {
+        getAwsCredentials: jest.fn().mockRejectedValue(ssoError),
+      } as unknown as ApiClient
+
+      const result = await buildSingleAccountAwsEnv(client, 'prod-account')
+
+      expect(result.env).toBeUndefined()
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toContain('SSO認証の有効期限が切れています')
+      expect(result.errors[0]).toContain('prod-account')
+      expect(result.errors[0]).toContain('管理画面からSSO再認証')
+      expect(result.ssoAuthRequired).toEqual([
+        { accountId: '123456789012', accountName: 'prod-account' },
+      ])
+    })
+
+    it('should detect SSO_AUTH_REQUIRED via errorCode when error field is overwritten', async () => {
+      // HttpExceptionFilter が error を 'Unprocessable Entity' に上書きした場合のレスポンス形式
+      const ssoError = new axios.AxiosError(
+        'Request failed',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        {
+          status: 422,
+          statusText: 'Unprocessable Entity',
+          data: {
+            statusCode: 422,
+            error: 'Unprocessable Entity',
+            errorCode: 'SSO_AUTH_REQUIRED',
             message: 'SSO token expired',
             accountId: '123456789012',
             accountName: 'prod',

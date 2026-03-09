@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 import { ApiClient } from '../../../src/api-client'
-import { validateSelectOnly, executeQuery, registerDbQueryTool } from '../../../src/mcp/tools/db-query'
+import { validateSql, executeQuery, registerDbQueryTool } from '../../../src/mcp/tools/db-query'
 
 jest.mock('../../../src/api-client')
 jest.mock('../../../src/logger')
@@ -13,97 +13,186 @@ jest.mock('pg', () => ({
 }))
 
 describe('db-query tool', () => {
-  describe('validateSelectOnly', () => {
+  describe('validateSql', () => {
     it('should allow valid SELECT queries', () => {
-      expect(validateSelectOnly('SELECT * FROM users').valid).toBe(true)
-      expect(validateSelectOnly('SELECT id, name FROM users WHERE id = 1').valid).toBe(true)
-      expect(validateSelectOnly('select * from users').valid).toBe(true)
+      expect(validateSql('SELECT * FROM users').valid).toBe(true)
+      expect(validateSql('SELECT id, name FROM users WHERE id = 1').valid).toBe(true)
+      expect(validateSql('select * from users').valid).toBe(true)
     })
 
     it('should allow WITH (CTE) queries', () => {
-      expect(validateSelectOnly('WITH cte AS (SELECT * FROM users) SELECT * FROM cte').valid).toBe(true)
+      expect(validateSql('WITH cte AS (SELECT * FROM users) SELECT * FROM cte').valid).toBe(true)
     })
 
     it('should allow EXPLAIN queries', () => {
-      expect(validateSelectOnly('EXPLAIN SELECT * FROM users').valid).toBe(true)
+      expect(validateSql('EXPLAIN SELECT * FROM users').valid).toBe(true)
     })
 
     it('should reject empty queries', () => {
-      const result = validateSelectOnly('')
+      const result = validateSql('')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('SQL query is empty')
     })
 
     it('should reject whitespace-only queries', () => {
-      const result = validateSelectOnly('   ')
+      const result = validateSql('   ')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('SQL query is empty')
     })
 
     it('should reject DROP statements', () => {
-      const result = validateSelectOnly('DROP TABLE users')
+      const result = validateSql('DROP TABLE users')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('Forbidden SQL operation: DROP')
     })
 
     it('should reject DELETE statements', () => {
-      const result = validateSelectOnly('DELETE FROM users WHERE id = 1')
+      const result = validateSql('DELETE FROM users WHERE id = 1')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('Forbidden SQL operation: DELETE')
     })
 
     it('should reject UPDATE statements', () => {
-      const result = validateSelectOnly('UPDATE users SET name = "test" WHERE id = 1')
+      const result = validateSql('UPDATE users SET name = "test" WHERE id = 1')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('Forbidden SQL operation: UPDATE')
     })
 
     it('should reject INSERT statements', () => {
-      const result = validateSelectOnly('INSERT INTO users (name) VALUES ("test")')
+      const result = validateSql('INSERT INTO users (name) VALUES ("test")')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('Forbidden SQL operation: INSERT')
     })
 
     it('should reject TRUNCATE statements', () => {
-      const result = validateSelectOnly('TRUNCATE TABLE users')
+      const result = validateSql('TRUNCATE TABLE users')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('Forbidden SQL operation: TRUNCATE')
     })
 
     it('should reject ALTER statements', () => {
-      const result = validateSelectOnly('ALTER TABLE users ADD COLUMN age INT')
+      const result = validateSql('ALTER TABLE users ADD COLUMN age INT')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('Forbidden SQL operation: ALTER')
     })
 
     it('should reject CREATE statements', () => {
-      const result = validateSelectOnly('CREATE TABLE users (id INT)')
+      const result = validateSql('CREATE TABLE users (id INT)')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('Forbidden SQL operation: CREATE')
     })
 
     it('should reject GRANT statements', () => {
-      const result = validateSelectOnly('GRANT ALL ON users TO admin')
+      const result = validateSql('GRANT ALL ON users TO admin')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('Forbidden SQL operation: GRANT')
     })
 
     it('should reject REVOKE statements', () => {
-      const result = validateSelectOnly('REVOKE ALL ON users FROM admin')
+      const result = validateSql('REVOKE ALL ON users FROM admin')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('Forbidden SQL operation: REVOKE')
     })
 
+    it('should reject UNION-based injection', () => {
+      const result = validateSql('SELECT * FROM users UNION SELECT * FROM passwords')
+      expect(result.valid).toBe(false)
+      expect(result.error).toBe('Forbidden SQL operation: UNION')
+    })
+
+    it('should reject UNION ALL injection', () => {
+      const result = validateSql('SELECT id FROM users UNION ALL SELECT password FROM credentials')
+      expect(result.valid).toBe(false)
+      expect(result.error).toBe('Forbidden SQL operation: UNION')
+    })
+
     it('should allow column names containing forbidden keywords as substrings', () => {
-      expect(validateSelectOnly('SELECT UPDATED_AT FROM users').valid).toBe(true)
-      expect(validateSelectOnly('SELECT CREATED_AT FROM users').valid).toBe(true)
-      expect(validateSelectOnly('SELECT IS_DELETED FROM users').valid).toBe(true)
+      expect(validateSql('SELECT UPDATED_AT FROM users').valid).toBe(true)
+      expect(validateSql('SELECT CREATED_AT FROM users').valid).toBe(true)
+      expect(validateSql('SELECT IS_DELETED FROM users').valid).toBe(true)
     })
 
     it('should reject queries that do not start with SELECT/WITH/EXPLAIN', () => {
-      const result = validateSelectOnly('SHOW TABLES')
+      const result = validateSql('SHOW TABLES')
       expect(result.valid).toBe(false)
-      expect(result.error).toBe('Only SELECT, WITH, and EXPLAIN statements are allowed')
+      expect(result.error).toBe('Only SELECT, WITH, EXPLAIN statements are allowed')
+    })
+
+    describe('with writePermissions', () => {
+      it('should allow INSERT when insert permission is granted', () => {
+        const perms = { insert: true, update: false, delete: false }
+        expect(validateSql('INSERT INTO users (name) VALUES ("test")', perms).valid).toBe(true)
+      })
+
+      it('should block INSERT when insert permission is not granted', () => {
+        const perms = { insert: false, update: false, delete: false }
+        const result = validateSql('INSERT INTO users (name) VALUES ("test")', perms)
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Forbidden SQL operation: INSERT')
+      })
+
+      it('should allow UPDATE when update permission is granted', () => {
+        const perms = { insert: false, update: true, delete: false }
+        expect(validateSql('UPDATE users SET name = "test" WHERE id = 1', perms).valid).toBe(true)
+      })
+
+      it('should block UPDATE when update permission is not granted', () => {
+        const perms = { insert: false, update: false, delete: false }
+        const result = validateSql('UPDATE users SET name = "test" WHERE id = 1', perms)
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Forbidden SQL operation: UPDATE')
+      })
+
+      it('should allow DELETE when delete permission is granted', () => {
+        const perms = { insert: false, update: false, delete: true }
+        expect(validateSql('DELETE FROM users WHERE id = 1', perms).valid).toBe(true)
+      })
+
+      it('should block DELETE when delete permission is not granted', () => {
+        const perms = { insert: false, update: false, delete: false }
+        const result = validateSql('DELETE FROM users WHERE id = 1', perms)
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Forbidden SQL operation: DELETE')
+      })
+
+      it('should always block DDL regardless of writePermissions', () => {
+        const perms = { insert: true, update: true, delete: true }
+        expect(validateSql('DROP TABLE users', perms).valid).toBe(false)
+        expect(validateSql('TRUNCATE TABLE users', perms).valid).toBe(false)
+        expect(validateSql('ALTER TABLE users ADD COLUMN age INT', perms).valid).toBe(false)
+        expect(validateSql('CREATE TABLE users (id INT)', perms).valid).toBe(false)
+        expect(validateSql('GRANT ALL ON users TO admin', perms).valid).toBe(false)
+        expect(validateSql('REVOKE ALL ON users FROM admin', perms).valid).toBe(false)
+        expect(validateSql('SELECT * FROM users UNION SELECT * FROM passwords', perms).valid).toBe(false)
+      })
+
+      it('should still allow SELECT when writePermissions are granted', () => {
+        const perms = { insert: true, update: true, delete: true }
+        expect(validateSql('SELECT * FROM users', perms).valid).toBe(true)
+      })
+
+      it('should only allow SELECT when writePermissions is undefined (backward compat)', () => {
+        expect(validateSql('SELECT * FROM users').valid).toBe(true)
+        expect(validateSql('INSERT INTO users (name) VALUES ("test")').valid).toBe(false)
+        expect(validateSql('UPDATE users SET name = "test"').valid).toBe(false)
+        expect(validateSql('DELETE FROM users WHERE id = 1').valid).toBe(false)
+      })
+
+      it('should allow column names containing forbidden DML keywords as substrings', () => {
+        const perms = { insert: false, update: false, delete: false }
+        expect(validateSql('SELECT UPDATED_AT FROM users', perms).valid).toBe(true)
+        expect(validateSql('SELECT INSERTED_AT FROM users', perms).valid).toBe(true)
+        expect(validateSql('SELECT IS_DELETED FROM users', perms).valid).toBe(true)
+      })
+
+      it('should include write operations in allowed starts error message', () => {
+        const perms = { insert: true, update: true, delete: true }
+        const result = validateSql('SHOW TABLES', perms)
+        expect(result.valid).toBe(false)
+        expect(result.error).toContain('INSERT')
+        expect(result.error).toContain('UPDATE')
+        expect(result.error).toContain('DELETE')
+      })
     })
   })
 
@@ -176,6 +265,101 @@ describe('db-query tool', () => {
       expect(mockClient.end).toHaveBeenCalled()
     })
 
+    it('should enable SSL by default for non-localhost PostgreSQL', async () => {
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        query: jest.fn().mockResolvedValue({ rows: [] }),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const pg = require('pg')
+      pg.Client.mockImplementation(() => mockClient)
+
+      await executeQuery(
+        { name: 'MAIN', engine: 'postgresql', host: 'db.example.com', port: 5432, database: 'testdb', user: 'postgres', password: 'pass' },
+        'SELECT 1',
+      )
+
+      expect(pg.Client).toHaveBeenCalledWith(
+        expect.objectContaining({ ssl: { rejectUnauthorized: true } }),
+      )
+    })
+
+    it('should disable SSL for localhost PostgreSQL', async () => {
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        query: jest.fn().mockResolvedValue({ rows: [] }),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const pg = require('pg')
+      pg.Client.mockImplementation(() => mockClient)
+
+      await executeQuery(
+        { name: 'MAIN', engine: 'postgresql', host: 'localhost', port: 5432, database: 'testdb', user: 'postgres', password: 'pass' },
+        'SELECT 1',
+      )
+
+      expect(pg.Client).toHaveBeenCalledWith(
+        expect.objectContaining({ ssl: false }),
+      )
+    })
+
+    it('should disable SSL for 127.0.0.1 PostgreSQL', async () => {
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        query: jest.fn().mockResolvedValue({ rows: [] }),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const pg = require('pg')
+      pg.Client.mockImplementation(() => mockClient)
+
+      await executeQuery(
+        { name: 'MAIN', engine: 'postgresql', host: '127.0.0.1', port: 5432, database: 'testdb', user: 'postgres', password: 'pass' },
+        'SELECT 1',
+      )
+
+      expect(pg.Client).toHaveBeenCalledWith(
+        expect.objectContaining({ ssl: false }),
+      )
+    })
+
+    it('should respect explicit ssl=false override for remote PostgreSQL', async () => {
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        query: jest.fn().mockResolvedValue({ rows: [] }),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const pg = require('pg')
+      pg.Client.mockImplementation(() => mockClient)
+
+      await executeQuery(
+        { name: 'MAIN', engine: 'postgresql', host: 'db.example.com', port: 5432, database: 'testdb', user: 'postgres', password: 'pass', ssl: false },
+        'SELECT 1',
+      )
+
+      expect(pg.Client).toHaveBeenCalledWith(
+        expect.objectContaining({ ssl: false }),
+      )
+    })
+
+    it('should respect explicit ssl=true override for localhost PostgreSQL', async () => {
+      const mockClient = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        query: jest.fn().mockResolvedValue({ rows: [] }),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const pg = require('pg')
+      pg.Client.mockImplementation(() => mockClient)
+
+      await executeQuery(
+        { name: 'MAIN', engine: 'postgresql', host: 'localhost', port: 5432, database: 'testdb', user: 'postgres', password: 'pass', ssl: true },
+        'SELECT 1',
+      )
+
+      expect(pg.Client).toHaveBeenCalledWith(
+        expect.objectContaining({ ssl: { rejectUnauthorized: true } }),
+      )
+    })
+
     it('should throw for unsupported engine', async () => {
       await expect(executeQuery(
         { name: 'MAIN', engine: 'sqlite', host: 'localhost', port: 0, database: 'test', user: 'u', password: 'p' },
@@ -187,24 +371,35 @@ describe('db-query tool', () => {
   describe('registerDbQueryTool', () => {
     let toolCallback: (args: { name: string; sql: string }) => Promise<unknown>
 
-    beforeEach(() => {
+    const setupTool = (credentialsOrError?: unknown, shouldReject = false) => {
       const mockServer = {
         tool: jest.fn().mockImplementation((_name: string, _desc: string, _schema: unknown, cb: typeof toolCallback) => {
           toolCallback = cb
         }),
       } as unknown as McpServer
-      const mockClient = {
-        getDbCredentials: jest.fn(),
-      } as unknown as ApiClient
-
+      const getDbCredentials = jest.fn()
+      if (shouldReject) {
+        getDbCredentials.mockRejectedValue(credentialsOrError)
+      } else if (credentialsOrError) {
+        getDbCredentials.mockResolvedValue(credentialsOrError)
+      }
+      const mockClient = { getDbCredentials } as unknown as ApiClient
       registerDbQueryTool(mockServer, mockClient)
+      return { mockServer, mockClient }
+    }
+
+    beforeEach(() => {
+      setupTool({
+        name: 'MAIN', engine: 'mysql', host: 'localhost', port: 3306,
+        database: 'testdb', user: 'root', password: 'pass',
+      })
     })
 
     it('should register the tool on the server', () => {
       expect(toolCallback).toBeDefined()
     })
 
-    it('should return error for invalid SQL', async () => {
+    it('should return error for DDL SQL', async () => {
       const result = await toolCallback({ name: 'MAIN', sql: 'DROP TABLE users' })
       expect(result).toEqual({
         content: [{ type: 'text', text: 'Error: Forbidden SQL operation: DROP' }],
@@ -221,16 +416,7 @@ describe('db-query tool', () => {
     })
 
     it('should handle API errors', async () => {
-      const mockServer = {
-        tool: jest.fn().mockImplementation((_n: string, _d: string, _s: unknown, cb: typeof toolCallback) => {
-          toolCallback = cb
-        }),
-      } as unknown as McpServer
-      const mockClient = {
-        getDbCredentials: jest.fn().mockRejectedValue(new Error('Unauthorized')),
-      } as unknown as ApiClient
-
-      registerDbQueryTool(mockServer, mockClient)
+      setupTool(new Error('Unauthorized'), true)
 
       const result = await toolCallback({ name: 'MAIN', sql: 'SELECT 1' })
       expect(result).toEqual({
@@ -247,23 +433,59 @@ describe('db-query tool', () => {
       const mysql2 = require('mysql2/promise')
       mysql2.createConnection.mockResolvedValue(mockConnection)
 
-      const mockServer = {
-        tool: jest.fn().mockImplementation((_n: string, _d: string, _s: unknown, cb: typeof toolCallback) => {
-          toolCallback = cb
-        }),
-      } as unknown as McpServer
-      const mockClient = {
-        getDbCredentials: jest.fn().mockResolvedValue({
-          name: 'MAIN', engine: 'mysql', host: 'localhost', port: 3306,
-          database: 'testdb', user: 'root', password: 'pass',
-        }),
-      } as unknown as ApiClient
-
-      registerDbQueryTool(mockServer, mockClient)
+      setupTool({
+        name: 'MAIN', engine: 'mysql', host: 'localhost', port: 3306,
+        database: 'testdb', user: 'root', password: 'pass',
+      })
 
       const result = await toolCallback({ name: 'MAIN', sql: 'SELECT * FROM users' })
       expect(result).toEqual({
         content: [{ type: 'text', text: JSON.stringify([{ id: 1 }], null, 2) }],
+      })
+    })
+
+    it('should allow INSERT when credentials have insert permission', async () => {
+      const mockConnection = {
+        query: jest.fn().mockResolvedValue([{ affectedRows: 1 }]),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const mysql2 = require('mysql2/promise')
+      mysql2.createConnection.mockResolvedValue(mockConnection)
+
+      setupTool({
+        name: 'MAIN', engine: 'mysql', host: 'localhost', port: 3306,
+        database: 'testdb', user: 'root', password: 'pass',
+        writePermissions: { insert: true, update: false, delete: false },
+      })
+
+      const result = await toolCallback({ name: 'MAIN', sql: 'INSERT INTO users (name) VALUES ("test")' })
+      expect(result).not.toHaveProperty('isError')
+    })
+
+    it('should block INSERT when credentials lack insert permission', async () => {
+      setupTool({
+        name: 'MAIN', engine: 'mysql', host: 'localhost', port: 3306,
+        database: 'testdb', user: 'root', password: 'pass',
+        writePermissions: { insert: false, update: false, delete: false },
+      })
+
+      const result = await toolCallback({ name: 'MAIN', sql: 'INSERT INTO users (name) VALUES ("test")' })
+      expect(result).toEqual({
+        content: [{ type: 'text', text: 'Error: Forbidden SQL operation: INSERT' }],
+        isError: true,
+      })
+    })
+
+    it('should block write operations when credentials have no writePermissions', async () => {
+      setupTool({
+        name: 'MAIN', engine: 'mysql', host: 'localhost', port: 3306,
+        database: 'testdb', user: 'root', password: 'pass',
+      })
+
+      const result = await toolCallback({ name: 'MAIN', sql: 'DELETE FROM users WHERE id = 1' })
+      expect(result).toEqual({
+        content: [{ type: 'text', text: 'Error: Forbidden SQL operation: DELETE' }],
+        isError: true,
       })
     })
   })

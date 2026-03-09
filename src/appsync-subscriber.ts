@@ -2,8 +2,8 @@ import WebSocket from 'ws'
 
 import { DEFAULT_APPSYNC_TIMEOUT_MS } from './constants'
 import { logger } from './logger'
-import { calculateBackoff } from './retry-strategy'
 import { getErrorMessage } from './utils'
+import { attemptReconnect } from './ws-reconnect'
 
 export interface AppSyncNotification {
   id: string
@@ -45,7 +45,7 @@ export class AppSyncSubscriber {
   private tenantCode: string | null = null
   private messageHandler: ((notification: AppSyncNotification) => void) | null = null
   private reconnectCallback: (() => void) | null = null
-  private reconnectAttempts = 0
+  private readonly reconnectAttemptsRef = { current: 0 }
   private closed = false
   private keepAliveTimer: ReturnType<typeof setTimeout> | null = null
   private keepAliveTimeoutMs = 0
@@ -53,6 +53,9 @@ export class AppSyncSubscriber {
   constructor(appsyncUrl: string, apiKey: string) {
     this.apiKey = apiKey
     const url = new URL(appsyncUrl)
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      throw new Error('AppSync URL must use HTTP or HTTPS protocol')
+    }
     this.host = url.host
     this.realtimeUrl = appsyncUrl
       .replace('https://', 'wss://')
@@ -62,7 +65,7 @@ export class AppSyncSubscriber {
 
   connect(): Promise<void> {
     this.closed = false
-    this.reconnectAttempts = 0
+    this.reconnectAttemptsRef.current = 0
     return this.doConnect()
   }
 
@@ -137,7 +140,7 @@ export class AppSyncSubscriber {
 
       ws.on('error', (error: Error) => {
         logger.debug(`AppSync WebSocket error: ${getErrorMessage(error)}`)
-        if (this.reconnectAttempts === 0 && !this.ws) {
+        if (this.reconnectAttemptsRef.current === 0 && !this.ws) {
           reject(error)
         }
       })
@@ -146,7 +149,7 @@ export class AppSyncSubscriber {
         this.clearKeepAliveTimer()
         if (!this.closed) {
           logger.debug('AppSync WebSocket closed unexpectedly')
-          void this.attemptReconnect()
+          void this.doReconnect()
         }
       })
 
@@ -229,37 +232,15 @@ export class AppSyncSubscriber {
     this.ws.send(JSON.stringify(startMessage))
   }
 
-  private async attemptReconnect(): Promise<void> {
-    if (this.closed || this.reconnectAttempts >= MAX_RECONNECT_RETRIES) {
-      if (this.reconnectAttempts >= MAX_RECONNECT_RETRIES) {
-        logger.error('AppSync: Max reconnect attempts reached')
-      }
-      return
-    }
-
-    this.reconnectAttempts++
-    const delay = calculateBackoff({
+  private async doReconnect(): Promise<void> {
+    await attemptReconnect(this.reconnectAttemptsRef, {
+      maxRetries: MAX_RECONNECT_RETRIES,
       baseDelayMs: RECONNECT_BASE_DELAY_MS,
-      attempt: this.reconnectAttempts - 1,
-      jitter: false,
+      logPrefix: 'AppSync:',
+      connectFn: () => this.doConnect(),
+      onReconnectedFn: this.reconnectCallback ?? undefined,
+      isClosedFn: () => this.closed,
     })
-    logger.info(`AppSync: Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${MAX_RECONNECT_RETRIES})`)
-
-    await new Promise<void>((resolve) => setTimeout(resolve, delay))
-
-    if (this.closed) return
-
-    try {
-      await this.doConnect()
-      logger.info('AppSync: Reconnected successfully')
-      this.reconnectAttempts = 0
-      if (this.reconnectCallback) {
-        this.reconnectCallback()
-      }
-    } catch (error) {
-      logger.warn(`AppSync: Reconnect failed: ${getErrorMessage(error)}`)
-      void this.attemptReconnect()
-    }
   }
 
   private resetKeepAliveTimer(): void {

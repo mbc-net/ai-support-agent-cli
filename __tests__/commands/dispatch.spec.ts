@@ -4,9 +4,14 @@ import {
   fileRead,
   fileWrite,
   fileList,
+  fileRename,
+  fileDelete,
+  fileMkdir,
   processList,
   processKill,
 } from '../../src/commands'
+import { _getRunningProcesses } from '../../src/commands/chat-executor'
+import { _getRunningApiChats } from '../../src/commands/api-chat-executor'
 import type { CommandDispatch } from '../../src/types'
 
 jest.mock('../../src/logger')
@@ -101,6 +106,137 @@ describe('commands/dispatch', () => {
       expect(result.success).toBe(true)
       expect(onConfigSync).toHaveBeenCalled()
     })
+
+    it('should dispatch file_rename command', async () => {
+      // file_rename requires valid paths; missing path returns error
+      const result = await executeCommand('file_rename', { oldPath: '', newPath: '' })
+      expect(result.success).toBe(false)
+    })
+
+    it('should dispatch file_delete command', async () => {
+      const result = await executeCommand('file_delete', { path: '/nonexistent/path/to/delete' })
+      expect(result.success).toBe(false)
+    })
+
+    it('should dispatch file_mkdir command', async () => {
+      const os = await import('os')
+      const fs = await import('fs')
+      const path = await import('path')
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-test-'))
+      const newDir = path.join(tmpDir, 'subdir')
+      const result = await executeCommand('file_mkdir', { path: newDir })
+      expect(result.success).toBe(true)
+      expect(fs.existsSync(newDir)).toBe(true)
+      fs.rmSync(tmpDir, { recursive: true })
+    })
+
+    it('should dispatch file_rename via CommandDispatch', async () => {
+      const dispatch: CommandDispatch = {
+        type: 'file_rename',
+        payload: { oldPath: '', newPath: '' },
+      }
+      const result = await executeCommand(dispatch)
+      expect(result.success).toBe(false)
+    })
+
+    it('should dispatch file_delete via CommandDispatch', async () => {
+      const dispatch: CommandDispatch = {
+        type: 'file_delete',
+        payload: { path: '/nonexistent' },
+      }
+      const result = await executeCommand(dispatch)
+      expect(result.success).toBe(false)
+    })
+
+    it('should dispatch file_mkdir via CommandDispatch', async () => {
+      const os = await import('os')
+      const fs = await import('fs')
+      const path = await import('path')
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-test2-'))
+      const newDir = path.join(tmpDir, 'sub')
+      const dispatch: CommandDispatch = {
+        type: 'file_mkdir',
+        payload: { path: newDir },
+      }
+      const result = await executeCommand(dispatch)
+      expect(result.success).toBe(true)
+      fs.rmSync(tmpDir, { recursive: true })
+    })
+  })
+
+  describe('chat_cancel dispatch', () => {
+    afterEach(() => {
+      // Cleanup any leftover entries
+      _getRunningProcesses().clear()
+      _getRunningApiChats().clear()
+    })
+
+    it('should return error when targetCommandId is not a string', async () => {
+      const result = await executeCommand('chat_cancel' as any, { targetCommandId: 123 })
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toContain('targetCommandId is required')
+      }
+    })
+
+    it('should return error when targetCommandId is not provided', async () => {
+      const result = await executeCommand('chat_cancel' as any, {})
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toContain('targetCommandId is required')
+      }
+    })
+
+    it('should return cancelled=true when cancelChatProcess succeeds', async () => {
+      const cancelFn = jest.fn()
+      _getRunningProcesses().set('target-cmd', { cancel: cancelFn })
+
+      const result = await executeCommand('chat_cancel' as any, { targetCommandId: 'target-cmd' })
+      expect(result.success).toBe(true)
+      if (result.success) {
+        const data = result.data as { cancelled: boolean; targetCommandId: string }
+        expect(data.cancelled).toBe(true)
+        expect(data.targetCommandId).toBe('target-cmd')
+      }
+      expect(cancelFn).toHaveBeenCalled()
+    })
+
+    it('should return cancelled=true when cancelApiChatProcess succeeds (after cancelChatProcess fails)', async () => {
+      const cancelFn = jest.fn()
+      _getRunningApiChats().set('api-target-cmd', { cancel: cancelFn })
+
+      const result = await executeCommand('chat_cancel' as any, { targetCommandId: 'api-target-cmd' })
+      expect(result.success).toBe(true)
+      if (result.success) {
+        const data = result.data as { cancelled: boolean; targetCommandId: string }
+        expect(data.cancelled).toBe(true)
+        expect(data.targetCommandId).toBe('api-target-cmd')
+      }
+      expect(cancelFn).toHaveBeenCalled()
+    })
+
+    it('should return cancelled=false when both cancel methods fail', async () => {
+      const result = await executeCommand('chat_cancel' as any, { targetCommandId: 'unknown-cmd' })
+      expect(result.success).toBe(true)
+      if (result.success) {
+        const data = result.data as { cancelled: boolean; targetCommandId: string }
+        expect(data.cancelled).toBe(false)
+        expect(data.targetCommandId).toBe('unknown-cmd')
+      }
+    })
+
+    it('should dispatch chat_cancel via CommandDispatch', async () => {
+      const dispatch: CommandDispatch = {
+        type: 'chat_cancel',
+        payload: { targetCommandId: 'no-such-cmd' },
+      }
+      const result = await executeCommand(dispatch)
+      expect(result.success).toBe(true)
+      if (result.success) {
+        const data = result.data as { cancelled: boolean; targetCommandId: string }
+        expect(data.cancelled).toBe(false)
+      }
+    })
   })
 
   describe('re-exports', () => {
@@ -118,6 +254,18 @@ describe('commands/dispatch', () => {
 
     it('should export fileList', () => {
       expect(typeof fileList).toBe('function')
+    })
+
+    it('should export fileRename', () => {
+      expect(typeof fileRename).toBe('function')
+    })
+
+    it('should export fileDelete', () => {
+      expect(typeof fileDelete).toBe('function')
+    })
+
+    it('should export fileMkdir', () => {
+      expect(typeof fileMkdir).toBe('function')
     })
 
     it('should export processList', () => {

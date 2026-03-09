@@ -93,6 +93,8 @@
   "update.disabled": "disabled",
   "update.enabled": "enabled (auto-restart: {{autoRestart}})",
   "update.checkFailed": "Version check failed: {{message}}",
+  "update.skipDev": "Development mode detected. Automatic update is not supported.",
+  "update.skipLocal": "Local installation detected. Run \"npm update @ai-support-agent/cli\" in your project to update.",
 
   "cmd.setProjectDir": "Set project directory",
   "cmd.setProjectDir.project": "Project code",
@@ -105,6 +107,16 @@
   "projectDir.initialized": "Project directory initialized: {{projectDir}} ({{projectCode}})",
   "projectDir.usageHint": "Usage: set-project-dir --project <code> --path <path> OR --default <template>",
   "projectDir.cleaned": "Cleaned up metadata directory: {{metadataDir}}",
+
+  "cmd.setAutoUpdate": "Configure automatic updates",
+  "cmd.setAutoUpdate.enable": "Enable automatic updates",
+  "cmd.setAutoUpdate.disable": "Disable automatic updates",
+  "cmd.setAutoUpdate.channel": "Set update channel (latest, beta, alpha)",
+  "autoUpdate.usageHint": "Usage: set-auto-update --enable | --disable | --channel <channel>",
+  "autoUpdate.conflictFlags": "Cannot use --enable and --disable together.",
+  "autoUpdate.disabled": "Automatic updates disabled.",
+  "autoUpdate.enabled": "Automatic updates enabled (channel: {{channel}}).",
+  "autoUpdate.channelSet": "Update channel set to \"{{channel}}\".",
 
   "cmd.start.docker": "Run inside a Docker container",
   "cmd.dockerLogin": "Log in to Claude Code inside a Docker container",
