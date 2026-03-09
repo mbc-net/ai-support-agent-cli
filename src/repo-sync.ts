@@ -100,11 +100,18 @@ async function cloneRepository(
 
   try {
     const cloneUrl = buildCloneUrl(repositoryUrl, authMethod, authSecret)
+    // 全ブランチを取得（サポート対象の環境に応じてブランチ切り替えが必要なため）
     await execFileAsync(
       'git',
-      ['clone', '--depth', '1', '--branch', branch, '--single-branch', cloneUrl, repoDir],
+      ['clone', '--no-single-branch', cloneUrl, repoDir],
       { env: { ...process.env, ...env }, timeout: GIT_CLONE_TIMEOUT },
     )
+    // デフォルトブランチをチェックアウト
+    await execFileAsync('git', ['checkout', branch], {
+      cwd: repoDir,
+      env: { ...process.env, ...env },
+      timeout: GIT_CHECKOUT_TIMEOUT,
+    })
   } finally {
     cleanup()
   }
@@ -119,7 +126,8 @@ async function pullRepository(
   const { env, cleanup } = buildAuthEnv(authMethod, authSecret)
 
   try {
-    await execFileAsync('git', ['fetch', 'origin', branch], {
+    // 全リモートブランチを取得
+    await execFileAsync('git', ['fetch', '--all'], {
       cwd: repoDir,
       env: { ...process.env, ...env },
       timeout: GIT_FETCH_TIMEOUT,
