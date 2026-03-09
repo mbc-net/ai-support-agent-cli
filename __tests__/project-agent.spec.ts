@@ -389,6 +389,40 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
+    it('should process commands with undefined agentId (backward compatibility)', async () => {
+      mockClient.getCommand.mockResolvedValue({
+        commandId: 'cmd-no-agent',
+        type: 'execute_command',
+        payload: { command: 'echo compat' },
+      })
+      mockedExecuteCommand.mockResolvedValue({ success: true, data: 'compat output' })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      // agentIdが未指定の通知（後方互換性）
+      onMessage({
+        id: 'notif-compat',
+        table: 'commands',
+        pk: 'CMD#200',
+        sk: 'CMD#200',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-no-agent', type: 'execute_command' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-no-agent', 'agent-1')
+      expect(mockedExecuteCommand).toHaveBeenCalled()
+
+      agent.stop()
+    })
+
     it('should process commands for matching agentId', async () => {
       mockClient.getCommand.mockResolvedValue({
         commandId: 'cmd-match',

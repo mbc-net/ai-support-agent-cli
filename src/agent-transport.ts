@@ -120,7 +120,7 @@ export async function startSubscriptionMode(
 
   state.subscriber.onReconnect(() => {
     logger.info(`${deps.prefix} Reconnected, checking for pending commands...`)
-    void checkPendingCommands(deps, state, ctx)
+    void checkPendingCommands(deps, ctx)
   })
 }
 
@@ -215,7 +215,7 @@ export async function handleNotification(
 
       // 別agentId宛のコマンドはスキップ
       if (targetAgentId && targetAgentId !== deps.agentId) {
-        logger.debug(`${deps.prefix} Ignoring command for different agent: ${targetAgentId}`)
+        logger.debug(`${deps.prefix} Ignoring command for agent ${targetAgentId} (expected ${deps.agentId})`)
         return
       }
 
@@ -251,21 +251,17 @@ export async function handleNotification(
  */
 export async function checkPendingCommands(
   deps: TransportDeps,
-  state: TransportState,
   ctx: CommandContext,
 ): Promise<void> {
   try {
     const pending = await deps.client.getPendingCommands(deps.agentId)
     for (const cmd of pending) {
-      await handleNotification(deps, state, ctx, {
-        id: cmd.commandId,
-        table: '',
-        pk: '',
-        sk: '',
-        tenantCode: '',
-        action: 'agent-command',
-        content: { commandId: cmd.commandId, type: cmd.type },
-      })
+      logger.info(t('runner.commandReceived', {
+        prefix: deps.prefix,
+        type: cmd.type ?? 'unknown',
+        commandId: cmd.commandId,
+      }))
+      await processCommand(deps, ctx, cmd.commandId)
     }
   } catch (error) {
     logger.warn(`${deps.prefix} Failed to check pending commands: ${getDetailedErrorMessage(error)}`)
