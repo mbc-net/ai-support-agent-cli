@@ -10,7 +10,7 @@ import { executeApiChatCommand } from './api-chat-executor'
 import { runClaudeCode } from './claude-code-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { ProcessManager } from './process-manager'
-import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory } from './shared-chat-utils'
+import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
@@ -183,11 +183,10 @@ async function executeClaudeCodeChat(
     }
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, duration=${result.metadata.durationMs}ms`)
     // 完了チャンクを送信（metadata を含める）
-    const doneContent = JSON.stringify({
+    await sendDoneChunk(sendChunk, {
       text: result.text,
       metadata: result.metadata,
     })
-    await sendChunk('done', doneContent)
 
     // ダウンロードした一時ファイルをクリーンアップ
     cleanupDownloads?.()
