@@ -2,7 +2,7 @@ import { EventEmitter } from 'events'
 import type { ChildProcess } from 'child_process'
 
 import { CHILD_PROCESS_MAX_RESTARTS, CHILD_PROCESS_RESTART_DELAY_MS, CHILD_PROCESS_STOP_TIMEOUT_MS } from '../src/constants'
-import { ProcessManager } from '../src/process-manager'
+import { ChildProcessManager } from '../src/child-process-manager'
 import { logger } from '../src/logger'
 
 jest.mock('../src/logger')
@@ -23,13 +23,13 @@ function createMockChild(connected = true): ChildProcess & EventEmitter {
   return mock
 }
 
-describe('ProcessManager', () => {
-  let manager: ProcessManager
+describe('ChildProcessManager', () => {
+  let manager: ChildProcessManager
 
   beforeEach(() => {
     jest.clearAllMocks()
     jest.useFakeTimers()
-    manager = new ProcessManager()
+    manager = new ChildProcessManager()
   })
 
   afterEach(() => {

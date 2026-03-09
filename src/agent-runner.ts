@@ -5,7 +5,7 @@ import { AGENT_VERSION, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJE
 import { getProjectList, loadConfig, saveConfig } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
-import { ProcessManager } from './process-manager'
+import { ChildProcessManager } from './child-process-manager'
 import { ProjectAgent } from './project-agent'
 import { captureException, flushSentry, initSentry } from './sentry'
 import { getSystemInfo } from './system-info'
@@ -54,7 +54,7 @@ function resolveIntervals(options: RunnerOptions): {
 
 export type ShutdownTarget =
   | { kind: 'agents'; agents: { stop: () => void }[] }
-  | { kind: 'processManager'; processManager: ProcessManager }
+  | { kind: 'processManager'; processManager: ChildProcessManager }
 
 export function setupShutdownHandlers(
   target: ShutdownTarget,
@@ -234,7 +234,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   }
 
   // Multiple projects: fork child processes for isolation
-  const processManager = new ProcessManager()
+  const processManager = new ChildProcessManager()
   for (const project of projects) {
     processManager.forkProject(project, agentId, {
       pollInterval,

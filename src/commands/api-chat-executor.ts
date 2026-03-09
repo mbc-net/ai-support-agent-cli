@@ -21,9 +21,12 @@ import {
 import { logger } from '../logger'
 import { type AgentServerConfig, type ChatChunkType, type ChatPayload, type CommandResult, errorResult, type HistoryMessage, successResult } from '../types'
 import { parseString, truncateString } from '../utils'
+import { createActivityTimeout } from '../utils/activity-timeout'
+import { safeJsonParse } from '../utils/json-parse'
+import { StreamLineParser } from '../utils/stream-parser'
 
 import { ProcessManager } from './process-manager'
-import { createChunkSender, handleChatError, parseHistory } from './shared-chat-utils'
+import { createChunkSender, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
 
 /** 実行中の API チャットを commandId で管理 */
 const processManager = new ProcessManager()
@@ -142,7 +145,7 @@ export async function executeApiChatCommand(
     )
 
     // done チャンクに usage 情報を含める
-    const doneContent = JSON.stringify({
+    await sendDoneChunk(sendChunk, {
       text: result.text,
       usage: {
         totalInputTokens: result.usage.inputTokens,
@@ -150,7 +153,6 @@ export async function executeApiChatCommand(
         totalTokens: result.usage.inputTokens + result.usage.outputTokens,
       },
     })
-    await sendChunk('done', doneContent)
     return successResult(result.text)
   } catch (error) {
     return handleChatError(error, commandId, 'api-chat', sendChunk)
@@ -204,76 +206,66 @@ async function callAnthropicApi(
 
   return new Promise<ApiChatResult>((resolve, reject) => {
     let fullOutput = ''
-    let buffer = ''
     const usage: ApiUsage = { inputTokens: 0, outputTokens: 0 }
 
     const stream = response.data as Readable
+    const lineParser = new StreamLineParser()
 
     // アクティビティベースタイムアウト: ストリームデータ受信が途絶えたら中止
-    let activityTimer: NodeJS.Timeout | undefined
-    const resetActivityTimer = () => {
-      if (activityTimer) clearTimeout(activityTimer)
-      activityTimer = setTimeout(() => {
-        logger.warn(`[api-chat] Stream timed out after ${CHAT_TIMEOUT / 1000}s of inactivity`)
-        stream.destroy(new Error(`Stream timed out after ${CHAT_TIMEOUT / 1000}s of inactivity`))
-      }, CHAT_TIMEOUT)
-    }
-    resetActivityTimer()
+    const activityTimeout = createActivityTimeout(CHAT_TIMEOUT, () => {
+      logger.warn(`[api-chat] Stream timed out after ${CHAT_TIMEOUT / 1000}s of inactivity`)
+      stream.destroy(new Error(`Stream timed out after ${CHAT_TIMEOUT / 1000}s of inactivity`))
+    })
 
     stream.on('data', (chunk: Buffer) => {
-      resetActivityTimer()
-      buffer += chunk.toString()
-
-      const lines = buffer.split('\n')
-      // Keep the last incomplete line in the buffer
-      buffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        if (!line.startsWith(SSE_PREFIX)) continue
+      activityTimeout.reset()
+      // SSE lines use \n as line separator; StreamLineParser handles buffering
+      // but SSE format needs special handling: lines start with "data: "
+      // We parse manually since SSE lines may contain empty lines as delimiters
+      lineParser.push(chunk.toString(), (line) => {
+        if (!line.startsWith(SSE_PREFIX)) return
         const data = line.slice(SSE_PREFIX.length).trim()
-        if (data === SSE_DONE) continue
+        if (data === SSE_DONE) return
 
-        try {
-          const event = JSON.parse(data) as AnthropicStreamEvent
-          if (event.type === SSE_EVENT.MESSAGE_START) {
-            // message_start イベントから input_tokens を取得
-            const inputTokens = event.message?.usage?.input_tokens
-            if (typeof inputTokens === 'number') {
-              usage.inputTokens = inputTokens
-            }
-          } else if (event.type === SSE_EVENT.MESSAGE_DELTA) {
-            // message_delta イベントから output_tokens を取得
-            const outputTokens = event.usage?.output_tokens
-            if (typeof outputTokens === 'number') {
-              usage.outputTokens = outputTokens
-            }
-          } else if (event.type === SSE_EVENT.CONTENT_BLOCK_DELTA) {
-            const delta = event.delta
-            if (delta?.type === ANTHROPIC_CONTENT_TYPE.TEXT_DELTA && typeof delta.text === 'string') {
-              fullOutput += delta.text
-              void sendChunk('delta', delta.text)
-            }
-          } else if (event.type === SSE_EVENT.CONTENT_BLOCK_START) {
-            const contentBlock = event.content_block
-            if (contentBlock?.type === ANTHROPIC_CONTENT_TYPE.TOOL_USE) {
-              const toolName = contentBlock.name ?? 'unknown'
-              logger.info(`[api-chat] Tool use requested: ${toolName} (not supported in API mode)`)
-              void sendChunk('delta', `\n[Tool call: ${toolName} — tool use is not supported in API chat mode]\n`)
-            }
+        const event = safeJsonParse<AnthropicStreamEvent>(data)
+        if (!event) return
+
+        if (event.type === SSE_EVENT.MESSAGE_START) {
+          // message_start イベントから input_tokens を取得
+          const inputTokens = event.message?.usage?.input_tokens
+          if (typeof inputTokens === 'number') {
+            usage.inputTokens = inputTokens
           }
-        } catch {
-          // Skip non-JSON lines
+        } else if (event.type === SSE_EVENT.MESSAGE_DELTA) {
+          // message_delta イベントから output_tokens を取得
+          const outputTokens = event.usage?.output_tokens
+          if (typeof outputTokens === 'number') {
+            usage.outputTokens = outputTokens
+          }
+        } else if (event.type === SSE_EVENT.CONTENT_BLOCK_DELTA) {
+          const delta = event.delta
+          if (delta?.type === ANTHROPIC_CONTENT_TYPE.TEXT_DELTA && typeof delta.text === 'string') {
+            fullOutput += delta.text
+            void sendChunk('delta', delta.text)
+          }
+        } else if (event.type === SSE_EVENT.CONTENT_BLOCK_START) {
+          const contentBlock = event.content_block
+          if (contentBlock?.type === ANTHROPIC_CONTENT_TYPE.TOOL_USE) {
+            const toolName = contentBlock.name ?? 'unknown'
+            logger.info(`[api-chat] Tool use requested: ${toolName} (not supported in API mode)`)
+            void sendChunk('delta', `\n[Tool call: ${toolName} — tool use is not supported in API chat mode]\n`)
+          }
         }
-      }
+      })
     })
 
     stream.on('end', () => {
-      if (activityTimer) clearTimeout(activityTimer)
+      activityTimeout.clear()
       resolve({ text: fullOutput, usage })
     })
 
     stream.on('error', (error: Error) => {
-      if (activityTimer) clearTimeout(activityTimer)
+      activityTimeout.clear()
       reject(error)
     })
   })
