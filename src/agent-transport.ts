@@ -112,6 +112,7 @@ export async function startSubscriptionMode(
     return
   }
 
+  logger.debug(`${deps.prefix} Subscribing with tenantCode: ${deps.tenantCode}`)
   state.subscriber.subscribe(
     deps.tenantCode,
     (notification) => { void handleNotification(deps, state, ctx, notification) },
