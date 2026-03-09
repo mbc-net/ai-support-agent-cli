@@ -141,11 +141,11 @@ jobs:
 
       - name: Publish to npm (Pre-release)
         if: steps.release-type.outputs.prerelease == 'true'
-        run: npm publish --access public --tag ${{ steps.release-type.outputs.tag }}
+        run: npm publish --access public --provenance --tag ${{ steps.release-type.outputs.tag }}
 
       - name: Publish to npm (Production)
         if: steps.release-type.outputs.prerelease == 'false'
-        run: npm publish --access public
+        run: npm publish --access public --provenance
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
