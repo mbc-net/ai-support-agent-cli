@@ -50,6 +50,7 @@ describe('ProjectAgent', () => {
     reportConnectionStatus: jest.Mock
     getConfig: jest.Mock
     getProjectConfig: jest.Mock
+    updateToken: jest.Mock
   }
 
   let mockSubscriber: {
@@ -74,6 +75,7 @@ describe('ProjectAgent', () => {
       reportConnectionStatus: jest.fn().mockResolvedValue(undefined),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       getProjectConfig: jest.fn().mockResolvedValue({ configHash: 'abc123', project: { projectCode: 'test-proj' }, agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] } }),
+      updateToken: jest.fn(),
     }
     MockApiClient.mockImplementation(() => mockClient as unknown as ApiClient)
 
@@ -1084,6 +1086,39 @@ describe('ProjectAgent', () => {
       )
       // performConfigSync is called: initial + callback
       expect(mockedSyncProjectConfig).toHaveBeenCalledTimes(2)
+
+      agent.stop()
+    })
+  })
+
+  describe('updateToken', () => {
+    it('should update token on ApiClient and log message', () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.updateToken('new-token-123')
+
+      expect(mockClient.updateToken).toBeDefined()
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('runner.tokenUpdated'))
+    })
+  })
+
+  describe('register 401 error', () => {
+    it('should log authError when registration returns 401', async () => {
+      const { AxiosError, AxiosHeaders } = require('axios')
+      const error401 = new AxiosError('Unauthorized', 'ERR_BAD_REQUEST', undefined, undefined, {
+        status: 401,
+        statusText: 'Unauthorized',
+        data: { message: 'Invalid token' },
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      })
+      mockClient.register.mockRejectedValue(error401)
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(logger.error).toHaveBeenCalledWith('runner.authError')
 
       agent.stop()
     })

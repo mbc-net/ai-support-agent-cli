@@ -1,7 +1,8 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile } from '../src/utils'
+import { AxiosError, AxiosHeaders } from 'axios'
+import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, getDetailedErrorMessage, isAuthenticationError } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -172,5 +173,100 @@ describe('atomicWriteFile', () => {
     const filePath = path.join(tmpDir, 'test.txt')
     atomicWriteFile(filePath, 'content')
     expect(fs.existsSync(filePath + '.tmp')).toBe(false)
+  })
+})
+
+describe('getDetailedErrorMessage', () => {
+  it('should extract message from Axios error response with message field', () => {
+    const error = new AxiosError('Request failed with status code 401', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 401,
+      statusText: 'Unauthorized',
+      data: { message: 'Invalid or expired token' },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(getDetailedErrorMessage(error)).toBe('[401] Invalid or expired token')
+  })
+
+  it('should extract error field from Axios error response', () => {
+    const error = new AxiosError('Request failed with status code 403', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 403,
+      statusText: 'Forbidden',
+      data: { error: 'ACCESS_DENIED' },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(getDetailedErrorMessage(error)).toBe('[403] ACCESS_DENIED')
+  })
+
+  it('should fall back to HTTP status when no message or error in data', () => {
+    const error = new AxiosError('Request failed with status code 500', 'ERR_BAD_RESPONSE', undefined, undefined, {
+      status: 500,
+      statusText: 'Internal Server Error',
+      data: { some: 'other field' },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(getDetailedErrorMessage(error)).toBe('HTTP 500: Request failed with status code 500')
+  })
+
+  it('should fall back to HTTP status when response data is undefined', () => {
+    const error = new AxiosError('Request failed with status code 502', 'ERR_BAD_RESPONSE', undefined, undefined, {
+      status: 502,
+      statusText: 'Bad Gateway',
+      data: undefined,
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(getDetailedErrorMessage(error)).toBe('HTTP 502: Request failed with status code 502')
+  })
+
+  it('should fall back to getErrorMessage for AxiosError without response', () => {
+    const error = new AxiosError('Network Error', 'ERR_NETWORK')
+    expect(getDetailedErrorMessage(error)).toBe('Network Error')
+  })
+
+  it('should fall back to getErrorMessage for non-Axios Error', () => {
+    const error = new Error('generic error')
+    expect(getDetailedErrorMessage(error)).toBe('generic error')
+  })
+
+  it('should fall back to getErrorMessage for non-Error values', () => {
+    expect(getDetailedErrorMessage('string error')).toBe('string error')
+    expect(getDetailedErrorMessage(42)).toBe('42')
+    expect(getDetailedErrorMessage(null)).toBe('null')
+  })
+})
+
+describe('isAuthenticationError', () => {
+  it('should return true for 401 AxiosError', () => {
+    const error = new AxiosError('Unauthorized', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 401,
+      statusText: 'Unauthorized',
+      data: {},
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(isAuthenticationError(error)).toBe(true)
+  })
+
+  it('should return false for 403 AxiosError', () => {
+    const error = new AxiosError('Forbidden', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 403,
+      statusText: 'Forbidden',
+      data: {},
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(isAuthenticationError(error)).toBe(false)
+  })
+
+  it('should return false for non-Axios error', () => {
+    expect(isAuthenticationError(new Error('some error'))).toBe(false)
+  })
+
+  it('should return false for AxiosError without response', () => {
+    const error = new AxiosError('Network Error', 'ERR_NETWORK')
+    expect(isAuthenticationError(error)).toBe(false)
   })
 })

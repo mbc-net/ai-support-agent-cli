@@ -13,6 +13,7 @@ import type { AgentChatMode, AutoUpdateConfig, ProjectRegistration, ReleaseChann
 import { detectChannelFromVersion } from './update-checker'
 import { validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
+import { startTokenWatcher } from './token-watcher'
 
 export interface RunnerOptions {
   token?: string
@@ -33,12 +34,13 @@ export function startProjectAgent(
     agentChatMode?: AgentChatMode
     defaultProjectDir?: string
   },
-): { stop: () => void; client: import('./api-client').ApiClient } {
+): { stop: () => void; client: import('./api-client').ApiClient; agent: ProjectAgent } {
   const agent = new ProjectAgent(project, agentId, options, undefined, options.agentChatMode, options.defaultProjectDir)
   agent.start()
   return {
     stop: () => agent.stop(),
     client: agent.getClient(),
+    agent,
   }
 }
 
@@ -129,17 +131,31 @@ function runSingleProject(
   options: RunnerOptions,
   agentChatMode?: AgentChatMode,
   defaultProjectDir?: string,
+  enableTokenWatcher = false,
 ): void {
   const { pollInterval, heartbeatInterval } = resolveIntervals(options)
 
   logger.info(t('runner.starting'))
-  const agent = startProjectAgent(project, agentId, { pollInterval, heartbeatInterval, agentChatMode, defaultProjectDir })
+  const started = startProjectAgent(project, agentId, { pollInterval, heartbeatInterval, agentChatMode, defaultProjectDir })
 
-  const updater = initAutoUpdater(options, undefined, agent.client, agentId, () => agent.stop())
+  const updater = initAutoUpdater(options, undefined, started.client, agentId, () => started.stop())
+
+  let tokenWatcher: { stop: () => void } | undefined
+  if (enableTokenWatcher) {
+    tokenWatcher = startTokenWatcher([project], (_projectCode, newToken) => {
+      started.agent.updateToken(newToken)
+    })
+  }
 
   logger.info(t('runner.startedSingle', { pollInterval, heartbeatInterval }))
   logger.info(t('runner.stopHint'))
-  setupShutdownHandlers({ kind: 'agents', agents: [agent] }, updater)
+
+  const originalStop = started.stop
+  const stopWithWatcher = (): void => {
+    tokenWatcher?.stop()
+    originalStop()
+  }
+  setupShutdownHandlers({ kind: 'agents', agents: [{ stop: stopWithWatcher }] }, updater)
 }
 
 export async function startAgent(options: RunnerOptions): Promise<void> {
@@ -223,13 +239,22 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
 
   if (projects.length === 1) {
     // Single project: run in-process (no fork overhead)
-    const agent = startProjectAgent(projects[0], agentId, { pollInterval, heartbeatInterval, agentChatMode: config.agentChatMode, defaultProjectDir: config.defaultProjectDir })
+    const started = startProjectAgent(projects[0], agentId, { pollInterval, heartbeatInterval, agentChatMode: config.agentChatMode, defaultProjectDir: config.defaultProjectDir })
     saveConfig({ lastConnected: new Date().toISOString() })
 
-    const updater = initAutoUpdater(options, config, agent.client, agentId, () => agent.stop())
+    const updater = initAutoUpdater(options, config, started.client, agentId, () => started.stop())
+
+    const tokenWatcher = startTokenWatcher(projects, (_projectCode, newToken) => {
+      started.agent.updateToken(newToken)
+    })
 
     logMultiProjectStartup(projects, pollInterval, heartbeatInterval)
-    setupShutdownHandlers({ kind: 'agents', agents: [agent] }, updater)
+    const originalStop = started.stop
+    const stopWithWatcher = (): void => {
+      tokenWatcher.stop()
+      originalStop()
+    }
+    setupShutdownHandlers({ kind: 'agents', agents: [{ stop: stopWithWatcher }] }, updater)
     return
   }
 
@@ -249,6 +274,17 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   const client = new ApiClient(projects[0].apiUrl, projects[0].token)
   const updater = initAutoUpdater(options, config, client, agentId, () => processManager.sendUpdateToAll())
 
+  const tokenWatcher = startTokenWatcher(projects, (projectCode, newToken) => {
+    processManager.sendTokenUpdate(projectCode, newToken)
+  })
+
   logMultiProjectStartup(projects, pollInterval, heartbeatInterval)
   setupShutdownHandlers({ kind: 'processManager', processManager }, updater)
+
+  // Clean up token watcher on shutdown
+  const origStopAll = processManager.stopAll.bind(processManager)
+  processManager.stopAll = async (timeoutMs?: number): Promise<void> => {
+    tokenWatcher.stop()
+    await origStopAll(timeoutMs)
+  }
 }
