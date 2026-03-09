@@ -211,6 +211,14 @@ export async function handleNotification(
   switch (notification.action) {
     case 'agent-command': {
       const commandId = content.commandId as string
+      const targetAgentId = content.agentId as string
+
+      // 別agentId宛のコマンドはスキップ
+      if (targetAgentId && targetAgentId !== deps.agentId) {
+        logger.debug(`${deps.prefix} Ignoring command for different agent: ${targetAgentId}`)
+        return
+      }
+
       if (!commandId) {
         logger.warn(`${deps.prefix} Notification missing commandId: ${JSON.stringify(content)}`)
         return

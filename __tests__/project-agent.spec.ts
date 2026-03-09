@@ -364,6 +364,63 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
+    it('should ignore commands for different agentId', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-other',
+        table: 'commands',
+        pk: 'CMD#789',
+        sk: 'CMD#789',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-other', type: 'execute_command', agentId: 'agent-2' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.getCommand).not.toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('should process commands for matching agentId', async () => {
+      mockClient.getCommand.mockResolvedValue({
+        commandId: 'cmd-match',
+        type: 'execute_command',
+        payload: { command: 'echo match' },
+      })
+      mockedExecuteCommand.mockResolvedValue({ success: true, data: 'match output' })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-match',
+        table: 'commands',
+        pk: 'CMD#101',
+        sk: 'CMD#101',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-match', type: 'execute_command', agentId: 'agent-1' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-match', 'agent-1')
+
+      agent.stop()
+    })
+
     it('should check pending commands on reconnect', async () => {
       mockClient.getPendingCommands.mockResolvedValue([
         { commandId: 'cmd-pending', type: 'execute_command', createdAt: 123 },
