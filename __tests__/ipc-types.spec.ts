@@ -45,6 +45,22 @@ describe('isParentToChildMessage', () => {
     expect(isParentToChildMessage(42)).toBe(false)
   })
 
+  it('should accept a token_update message', () => {
+    expect(
+      isParentToChildMessage({ type: 'token_update', token: 'new-token' }),
+    ).toBe(true)
+  })
+
+  it('should reject token_update without token', () => {
+    expect(isParentToChildMessage({ type: 'token_update' })).toBe(false)
+  })
+
+  it('should reject token_update with non-string token', () => {
+    expect(
+      isParentToChildMessage({ type: 'token_update', token: 123 }),
+    ).toBe(false)
+  })
+
   it('should reject unknown type', () => {
     expect(isParentToChildMessage({ type: 'unknown' })).toBe(false)
   })

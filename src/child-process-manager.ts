@@ -120,6 +120,20 @@ export class ChildProcessManager {
     this.restartTimers.set(projectCode, timer)
   }
 
+  sendTokenUpdate(projectCode: string, newToken: string): void {
+    const managed = this.processes.get(projectCode)
+    if (!managed) return
+
+    if (managed.child.connected) {
+      managed.child.send({ type: 'token_update', token: newToken })
+      logger.debug(`Sent token update to ${projectCode}`)
+    }
+
+    // Update stored token so restarts use the new token
+    managed.startMessage.project = { ...managed.startMessage.project, token: newToken }
+    managed.project = { ...managed.project, token: newToken }
+  }
+
   sendUpdateToAll(): void {
     for (const [projectCode, managed] of this.processes) {
       if (managed.child.connected) {

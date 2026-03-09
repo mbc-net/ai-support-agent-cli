@@ -22,10 +22,16 @@ export interface IpcUpdateMessage {
   type: 'update'
 }
 
+export interface IpcTokenUpdateMessage {
+  type: 'token_update'
+  token: string
+}
+
 export type ParentToChildMessage =
   | IpcStartMessage
   | IpcShutdownMessage
   | IpcUpdateMessage
+  | IpcTokenUpdateMessage
 
 // ─── Child → Parent ─────────────────────────────────────────────
 
@@ -60,6 +66,9 @@ export function isParentToChildMessage(msg: unknown): msg is ParentToChildMessag
   if (!isObject(msg)) return false
   const { type } = msg
   if (type === 'shutdown' || type === 'update') return true
+  if (type === 'token_update') {
+    return typeof msg.token === 'string'
+  }
   if (type === 'start') {
     return (
       isObject(msg.project) &&
