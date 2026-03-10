@@ -74,5 +74,18 @@ describe('MCP Server', () => {
 
       await expect(startMcpServer()).resolves.toBeUndefined()
     })
+
+    it('should set tenantCode on ApiClient when AI_SUPPORT_AGENT_TENANT_CODE is provided', async () => {
+      process.env.AI_SUPPORT_AGENT_API_URL = 'http://localhost:3030'
+      process.env.AI_SUPPORT_AGENT_TOKEN = 'test-token'
+      process.env.AI_SUPPORT_AGENT_PROJECT_CODE = 'TEST_01'
+      process.env.AI_SUPPORT_AGENT_TENANT_CODE = 'test_tenant'
+
+      await startMcpServer()
+
+      const MockedApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
+      const instance = MockedApiClient.mock.instances[MockedApiClient.mock.instances.length - 1]
+      expect(instance.setTenantCode).toHaveBeenCalledWith('test_tenant')
+    })
   })
 })
