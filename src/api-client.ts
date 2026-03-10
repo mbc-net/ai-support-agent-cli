@@ -24,6 +24,8 @@ import type {
 export class ApiClient {
   private readonly client: AxiosInstance
   private readonly retry: RetryStrategy
+  private tenantCode = ''
+  private projectCode = ''
 
   constructor(apiUrl: string, token: string) {
     const parsed = new URL(apiUrl)
@@ -35,6 +37,12 @@ export class ApiClient {
           'API URL uses HTTP (not HTTPS). Set AI_SUPPORT_AGENT_ALLOW_HTTP=true to allow insecure connections.',
         )
       }
+    }
+
+    // Parse tenantCode from token format: {tenantCode}:{tokenId}:{rawToken}
+    const tokenParts = token.split(':')
+    if (tokenParts.length >= 3) {
+      this.tenantCode = tokenParts[0]
     }
 
     this.client = axios.create({
@@ -50,6 +58,14 @@ export class ApiClient {
       maxRetries: API_MAX_RETRIES,
       baseDelayMs: API_BASE_DELAY_MS,
     })
+  }
+
+  setTenantCode(code: string): void {
+    this.tenantCode = code
+  }
+
+  setProjectCode(code: string): void {
+    this.projectCode = code
   }
 
   updateToken(newToken: string): void {
@@ -79,7 +95,7 @@ export class ApiClient {
   async register(request: RegisterRequest): Promise<RegisterResponse> {
     logger.debug(`Registering agent: ${request.agentId}`)
     const { ipAddress, availableChatModes, activeChatMode, ...rest } = request
-    return this.post<RegisterResponse>(API_ENDPOINTS.REGISTER, {
+    return this.post<RegisterResponse>(API_ENDPOINTS.REGISTER(this.tenantCode), {
       ...rest,
       version: AGENT_VERSION,
       ...(ipAddress && { ipAddress }),
@@ -97,7 +113,7 @@ export class ApiClient {
     ipAddress?: string,
   ): Promise<HeartbeatResponse | void> {
     logger.debug('Sending heartbeat')
-    return this.post<HeartbeatResponse>(API_ENDPOINTS.HEARTBEAT, {
+    return this.post<HeartbeatResponse>(API_ENDPOINTS.HEARTBEAT(this.tenantCode), {
       agentId,
       timestamp: Date.now(),
       version: AGENT_VERSION,
@@ -115,7 +131,7 @@ export class ApiClient {
 
   async getPendingCommands(agentId: string): Promise<PendingCommand[]> {
     logger.debug('Polling for pending commands')
-    return this.get<PendingCommand[]>(API_ENDPOINTS.COMMANDS_PENDING, { params: { agentId } })
+    return this.get<PendingCommand[]>(API_ENDPOINTS.COMMANDS_PENDING(this.tenantCode), { params: { agentId } })
   }
 
   private validateCommandId(commandId: string): void {
@@ -127,7 +143,7 @@ export class ApiClient {
   async getCommand(commandId: string, agentId: string): Promise<AgentCommand> {
     this.validateCommandId(commandId)
     logger.debug(`Fetching command: ${commandId}`)
-    return this.get<AgentCommand>(API_ENDPOINTS.COMMAND(commandId), { params: { agentId } })
+    return this.get<AgentCommand>(API_ENDPOINTS.COMMAND(this.tenantCode, commandId), { params: { agentId } })
   }
 
   async submitResult(
@@ -137,14 +153,14 @@ export class ApiClient {
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting result for command: ${commandId}`)
-    await this.postVoid(API_ENDPOINTS.COMMAND_RESULT(commandId), result, { params: { agentId } })
+    await this.postVoid(API_ENDPOINTS.COMMAND_RESULT(this.tenantCode, commandId), result, { params: { agentId } })
   }
 
   async reportConnectionStatus(
     agentId: string,
     status: 'connected' | 'disconnected',
   ): Promise<void> {
-    await this.postVoid(API_ENDPOINTS.CONNECTION_STATUS, {
+    await this.postVoid(API_ENDPOINTS.CONNECTION_STATUS(this.tenantCode), {
       agentId,
       status,
       timestamp: Date.now(),
@@ -153,27 +169,27 @@ export class ApiClient {
 
   async getConfig(): Promise<AgentServerConfig> {
     logger.debug('Fetching agent config from server')
-    return this.get<AgentServerConfig>(API_ENDPOINTS.CONFIG)
+    return this.get<AgentServerConfig>(API_ENDPOINTS.CONFIG(this.tenantCode))
   }
 
   async getProjectConfig(): Promise<ProjectConfigResponse> {
     logger.debug('Fetching project config from server')
-    return this.get<ProjectConfigResponse>(API_ENDPOINTS.PROJECT_CONFIG)
+    return this.get<ProjectConfigResponse>(API_ENDPOINTS.PROJECT_CONFIG(this.tenantCode))
   }
 
   async getAwsCredentials(awsAccountId: string): Promise<AwsCredentials> {
     logger.debug(`Fetching AWS credentials for account: ${awsAccountId}`)
-    return this.get<AwsCredentials>(API_ENDPOINTS.AWS_CREDENTIALS, { params: { awsAccountId } })
+    return this.get<AwsCredentials>(API_ENDPOINTS.AWS_CREDENTIALS(this.tenantCode), { params: { awsAccountId } })
   }
 
   async getDbCredentials(name: string): Promise<DbCredentials> {
     logger.debug(`Fetching DB credentials for: ${name}`)
-    return this.get<DbCredentials>(API_ENDPOINTS.DB_CREDENTIALS, { params: { name } })
+    return this.get<DbCredentials>(API_ENDPOINTS.DB_CREDENTIALS(this.tenantCode), { params: { name } })
   }
 
   async getRepoCredentials(repositoryId: string): Promise<RepoCredentials> {
     logger.debug(`Fetching repo credentials for: ${repositoryId}`)
-    return this.get<RepoCredentials>(API_ENDPOINTS.REPO_CREDENTIALS(repositoryId))
+    return this.get<RepoCredentials>(API_ENDPOINTS.REPO_CREDENTIALS(this.tenantCode, repositoryId))
   }
 
   async submitChatChunk(
@@ -183,7 +199,7 @@ export class ApiClient {
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting chat chunk ${chunk.index} (${chunk.type}) for command: ${commandId}`)
-    await this.postVoid(API_ENDPOINTS.COMMAND_CHUNKS(commandId), chunk, { params: { agentId } })
+    await this.postVoid(API_ENDPOINTS.COMMAND_CHUNKS(this.tenantCode, commandId), chunk, { params: { agentId } })
   }
 
   async getUploadUrl(data: {
@@ -196,7 +212,7 @@ export class ApiClient {
   }): Promise<{ uploadUrl: string; fileId: string; s3Key: string }> {
     logger.debug(`Requesting upload URL for file: ${data.filename}`)
     return this.post<{ uploadUrl: string; fileId: string; s3Key: string }>(
-      API_ENDPOINTS.FILES_UPLOAD_URL,
+      API_ENDPOINTS.FILES_UPLOAD_URL(this.tenantCode, this.projectCode),
       data,
     )
   }
@@ -207,7 +223,7 @@ export class ApiClient {
   }): Promise<{ downloadUrl: string }> {
     logger.debug(`Requesting download URL for file: ${data.fileId}`)
     return this.post<{ downloadUrl: string }>(
-      API_ENDPOINTS.FILES_DOWNLOAD_URL,
+      API_ENDPOINTS.FILES_DOWNLOAD_URL(this.tenantCode, this.projectCode),
       data,
     )
   }

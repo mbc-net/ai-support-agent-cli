@@ -18,7 +18,7 @@ describe('ApiClient', () => {
 
   beforeEach(() => {
     mockedAxios.create.mockReturnValue(mockInstance as any)
-    client = new ApiClient('http://localhost:3030', 'test-token')
+    client = new ApiClient('http://localhost:3030', 'test_tenant:tokenId:rawToken')
   })
 
   afterEach(() => {
@@ -29,7 +29,7 @@ describe('ApiClient', () => {
 
   describe('updateToken', () => {
     it('should update the Authorization header on the axios instance', () => {
-      const defaults = { headers: { Authorization: 'Bearer test-token' } }
+      const defaults = { headers: { Authorization: 'Bearer test_tenant:tokenId:rawToken' } }
       Object.defineProperty(mockInstance, 'defaults', {
         value: defaults,
         writable: true,
@@ -55,7 +55,7 @@ describe('ApiClient', () => {
       })
       expect(result.agentId).toBe('test-id')
       expect(mockInstance.post).toHaveBeenCalledWith(
-        '/api/agent/register',
+        '/api/test_tenant/agent/register',
         expect.objectContaining({ agentId: 'test-id', hostname: 'hostname' }),
         undefined,
       )
@@ -114,7 +114,7 @@ describe('ApiClient', () => {
       })
 
       expect(mockInstance.post).toHaveBeenCalledWith(
-        '/api/agent/heartbeat',
+        '/api/test_tenant/agent/heartbeat',
         expect.objectContaining({ agentId: 'test-id' }),
         undefined,
       )
@@ -167,7 +167,7 @@ describe('ApiClient', () => {
       }, 'EACCES: permission denied')
 
       expect(mockInstance.post).toHaveBeenCalledWith(
-        '/api/agent/heartbeat',
+        '/api/test_tenant/agent/heartbeat',
         expect.objectContaining({
           agentId: 'test-id',
           updateError: 'EACCES: permission denied',
@@ -234,7 +234,7 @@ describe('ApiClient', () => {
       expect(result).toHaveLength(1)
       expect(result[0].commandId).toBe('cmd-1')
       expect(mockInstance.get).toHaveBeenCalledWith(
-        '/api/agent/commands/pending',
+        '/api/test_tenant/agent/commands/pending',
         { params: { agentId: 'agent-1' } },
       )
     })
@@ -257,7 +257,7 @@ describe('ApiClient', () => {
       expect(result.sessionToken).toBe('token...')
       expect(result.region).toBe('ap-northeast-1')
       expect(mockInstance.get).toHaveBeenCalledWith(
-        '/api/agent/aws-credentials',
+        '/api/test_tenant/agent/aws-credentials',
         { params: { awsAccountId: 'prod' } },
       )
     })
@@ -282,7 +282,7 @@ describe('ApiClient', () => {
       expect(result.engine).toBe('mysql')
       expect(result.password).toBe('secret')
       expect(mockInstance.get).toHaveBeenCalledWith(
-        '/api/agent/db-credentials',
+        '/api/test_tenant/agent/db-credentials',
         { params: { name: 'MAIN' } },
       )
     })
@@ -305,7 +305,7 @@ describe('ApiClient', () => {
       expect(result.authMethod).toBe('api_key')
       expect(result.authSecret).toBe('ghp_token123')
       expect(mockInstance.get).toHaveBeenCalledWith(
-        '/api/agent/repo-credentials/REPO_01',
+        '/api/test_tenant/agent/repo-credentials/REPO_01',
         undefined,
       )
     })
@@ -317,7 +317,7 @@ describe('ApiClient', () => {
 
       await client.submitResult('cmd-1', { success: true, data: 'output' }, 'agent-1')
       expect(mockInstance.post).toHaveBeenCalledWith(
-        '/api/agent/commands/cmd-1/result',
+        '/api/test_tenant/agent/commands/cmd-1/result',
         { success: true, data: 'output' },
         { params: { agentId: 'agent-1' } },
       )
@@ -340,7 +340,7 @@ describe('ApiClient', () => {
       expect(result.commandId).toBe('cmd-1')
       expect(result.type).toBe('execute_command')
       expect(mockInstance.get).toHaveBeenCalledWith(
-        '/api/agent/commands/cmd-1',
+        '/api/test_tenant/agent/commands/cmd-1',
         { params: { agentId: 'agent-1' } },
       )
     })
@@ -426,7 +426,7 @@ describe('ApiClient', () => {
       await client.reportConnectionStatus('agent-1', 'connected')
 
       expect(mockInstance.post).toHaveBeenCalledWith(
-        '/api/agent/connection-status',
+        '/api/test_tenant/agent/connection-status',
         expect.objectContaining({
           agentId: 'agent-1',
           status: 'connected',
@@ -442,7 +442,7 @@ describe('ApiClient', () => {
       await client.reportConnectionStatus('agent-1', 'disconnected')
 
       expect(mockInstance.post).toHaveBeenCalledWith(
-        '/api/agent/connection-status',
+        '/api/test_tenant/agent/connection-status',
         expect.objectContaining({
           status: 'disconnected',
         }),
@@ -465,7 +465,7 @@ describe('ApiClient', () => {
       const result = await client.getConfig()
 
       expect(result).toEqual(config)
-      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/config', undefined)
+      expect(mockInstance.get).toHaveBeenCalledWith('/api/test_tenant/agent/config', undefined)
     })
   })
 
@@ -480,7 +480,7 @@ describe('ApiClient', () => {
       }, 'agent-1')
 
       expect(mockInstance.post).toHaveBeenCalledWith(
-        '/api/agent/commands/cmd-1/chunks',
+        '/api/test_tenant/agent/commands/cmd-1/chunks',
         { index: 0, type: 'delta', content: 'Hello' },
         { params: { agentId: 'agent-1' } },
       )
@@ -512,7 +512,7 @@ describe('ApiClient', () => {
       expect(result.fileId).toBe('file-123')
       expect(result.s3Key).toBe('uploads/file-123.txt')
       expect(mockInstance.post).toHaveBeenCalledWith(
-        '/api/agent/files/upload-url',
+        '/api/test_tenant/projects//agent/files/upload-url',
         {
           conversationId: 'conv-1',
           messageId: 'msg-1',
@@ -539,7 +539,7 @@ describe('ApiClient', () => {
 
       expect(result.downloadUrl).toBe('https://s3.example.com/download')
       expect(mockInstance.post).toHaveBeenCalledWith(
-        '/api/agent/files/download-url',
+        '/api/test_tenant/projects//agent/files/download-url',
         {
           fileId: 'file-123',
           s3Key: 'uploads/file-123.txt',

@@ -51,6 +51,8 @@ describe('ProjectAgent', () => {
     getConfig: jest.Mock
     getProjectConfig: jest.Mock
     updateToken: jest.Mock
+    setTenantCode: jest.Mock
+    setProjectCode: jest.Mock
   }
 
   let mockSubscriber: {
@@ -76,6 +78,8 @@ describe('ProjectAgent', () => {
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       getProjectConfig: jest.fn().mockResolvedValue({ configHash: 'abc123', project: { projectCode: 'test-proj' }, agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] } }),
       updateToken: jest.fn(),
+      setTenantCode: jest.fn(),
+      setProjectCode: jest.fn(),
     }
     MockApiClient.mockImplementation(() => mockClient as unknown as ApiClient)
 

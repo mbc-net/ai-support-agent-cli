@@ -58,7 +58,7 @@ beforeEach(() => {
 })
 
 describe('ApiClient integration (real axios + real HTTP)', () => {
-  const TEST_TOKEN = 'test-token-abc'
+  const TEST_TOKEN = 'test_tenant:tokenId:rawToken'
 
   it('should send a real HTTP POST when register() is called', async () => {
     const registerResponse = { agentId: 'agent-1', appsyncUrl: 'wss://test', appsyncApiKey: 'key' }
@@ -73,7 +73,7 @@ describe('ApiClient integration (real axios + real HTTP)', () => {
     })
 
     expect(lastReq.method).toBe('POST')
-    expect(lastReq.url).toBe(API_ENDPOINTS.REGISTER)
+    expect(lastReq.url).toBe(API_ENDPOINTS.REGISTER('test_tenant'))
     expect(result).toEqual(registerResponse)
   })
 
@@ -114,7 +114,7 @@ describe('ApiClient integration (real axios + real HTTP)', () => {
     const commands = await client.getPendingCommands('agent-1')
 
     expect(lastReq.method).toBe('GET')
-    expect(lastReq.url).toContain(API_ENDPOINTS.COMMANDS_PENDING)
+    expect(lastReq.url).toContain(API_ENDPOINTS.COMMANDS_PENDING('test_tenant'))
     expect(commands).toHaveLength(1)
     expect(commands[0].commandId).toBe('c1')
   })
@@ -126,7 +126,7 @@ describe('ApiClient integration (real axios + real HTTP)', () => {
     await client.submitResult('cmd-123', { success: true, data: { output: 'hello' } }, 'agent-1')
 
     expect(lastReq.method).toBe('POST')
-    expect(lastReq.url).toContain(API_ENDPOINTS.COMMAND_RESULT('cmd-123'))
+    expect(lastReq.url).toContain(API_ENDPOINTS.COMMAND_RESULT('test_tenant', 'cmd-123'))
     const body = JSON.parse(lastReq.body)
     expect(body).toEqual({ success: true, data: { output: 'hello' } })
   })
@@ -195,7 +195,7 @@ describe('ApiClient integration (real axios + real HTTP)', () => {
     const result = await client.getCommand('cmd-456', 'agent-1')
 
     expect(lastReq.method).toBe('GET')
-    expect(lastReq.url).toContain(API_ENDPOINTS.COMMAND('cmd-456'))
+    expect(lastReq.url).toContain(API_ENDPOINTS.COMMAND('test_tenant', 'cmd-456'))
     expect(result).toEqual(command)
   })
 
@@ -212,7 +212,7 @@ describe('ApiClient integration (real axios + real HTTP)', () => {
     })
 
     expect(lastReq.method).toBe('POST')
-    expect(lastReq.url).toBe(API_ENDPOINTS.HEARTBEAT)
+    expect(lastReq.url).toBe(API_ENDPOINTS.HEARTBEAT('test_tenant'))
     const body = JSON.parse(lastReq.body)
     expect(body.agentId).toBe('agent-1')
     expect(body.systemInfo).toEqual({

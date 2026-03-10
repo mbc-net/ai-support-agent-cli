@@ -132,6 +132,8 @@ export class ProjectAgent {
         activeChatMode: this.configSyncState.activeChatMode,
       })
       this.tenantCode = result.tenantCode
+      this.client.setTenantCode(this.tenantCode)
+      this.client.setProjectCode(this.projectCode)
       this.transportDeps = { ...this.transportDeps, tenantCode: this.tenantCode }
       logger.success(t('runner.registered', { prefix: this.prefix, agentId: result.agentId }))
       logger.debug(`${this.prefix} Register response: transportMode=${result.transportMode ?? 'none'}, appsyncUrl=${result.appsyncUrl ? 'present' : 'absent'}`)
