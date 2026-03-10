@@ -86,7 +86,18 @@ async function executeClaudeCodeChat(
 
   logger.info(`[chat] Starting chat command [${commandId}]: message="${truncateString(message, LOG_MESSAGE_LIMIT)}"`)
 
-  const { sendChunk, getChunkIndex } = createChunkSender(commandId, client, agentId, 'chat', { debugLog: true })
+  const { sendChunk: rawSendChunk, getChunkIndex } = createChunkSender(commandId, client, agentId, 'chat', { debugLog: true })
+
+  // tool_call チャンクを蓄積して done チャンクに含める（RDS 永続化用）
+  const collectedToolCalls: Record<string, unknown>[] = []
+  const sendChunk = async (type: ChatChunkType, content: string): Promise<void> => {
+    if (type === 'tool_call') {
+      try {
+        collectedToolCalls.push(JSON.parse(content))
+      } catch { /* ignore parse errors */ }
+    }
+    return rawSendChunk(type, content)
+  }
 
   try {
     const allowedTools = serverConfig?.claudeCodeConfig?.allowedTools
@@ -182,10 +193,11 @@ async function executeClaudeCodeChat(
       processManager.remove(commandId)
     }
     logger.info(`[chat] Chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, duration=${result.metadata.durationMs}ms`)
-    // 完了チャンクを送信（metadata を含める）
+    // 完了チャンクを送信（metadata + toolCalls を含める）
     await sendDoneChunk(sendChunk, {
       text: result.text,
       metadata: result.metadata,
+      ...(collectedToolCalls.length > 0 ? { toolCalls: collectedToolCalls } : {}),
     })
 
     // ダウンロードした一時ファイルをクリーンアップ
