@@ -28,6 +28,7 @@ describe('config-writer', () => {
         'http://localhost:3030',
         'TEST_01',
         '/path/to/server.js',
+        'test_tenant',
       )
 
       expect(config).toEqual({
@@ -39,6 +40,7 @@ describe('config-writer', () => {
               AI_SUPPORT_AGENT_API_URL: 'http://localhost:3030',
               AI_SUPPORT_AGENT_TOKEN: '${AI_SUPPORT_AGENT_TOKEN}',
               AI_SUPPORT_AGENT_PROJECT_CODE: 'TEST_01',
+              AI_SUPPORT_AGENT_TENANT_CODE: 'test_tenant',
             },
           },
         },
@@ -51,7 +53,7 @@ describe('config-writer', () => {
       const configPath = writeMcpConfig(
         testDir,
         'http://localhost:3030',
-        'test-token-123',
+        'test_tenant:tokenId:rawToken',
         'TEST_01',
         '/path/to/server.js',
       )
@@ -62,8 +64,24 @@ describe('config-writer', () => {
       expect(content.mcpServers['ai-support-agent'].command).toBe('node')
       expect(content.mcpServers['ai-support-agent'].args).toEqual(['/path/to/server.js'])
       expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_API_URL).toBe('http://localhost:3030')
-      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_TOKEN).toBe('test-token-123')
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_TOKEN).toBe('test_tenant:tokenId:rawToken')
       expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_PROJECT_CODE).toBe('TEST_01')
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_TENANT_CODE).toBe('test_tenant')
+    })
+
+    it('should use explicit tenantCode when provided', () => {
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+        undefined,
+        'explicit_tenant',
+      )
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_TENANT_CODE).toBe('explicit_tenant')
     })
 
     it('should set file permission to 0600', () => {

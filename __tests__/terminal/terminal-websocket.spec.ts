@@ -310,14 +310,19 @@ describe('TerminalWebSocket', () => {
     void terminalWs.connect()
   })
 
-  it('should ignore unknown message types', (done) => {
-    server.on('connection', (ws) => {
-      ws.send(JSON.stringify({ type: 'unknown_type' }))
-      setTimeout(done, 50)
+  it('should ignore unknown message types', async () => {
+    const connected = new Promise<void>((resolve) => {
+      server.on('connection', (ws) => {
+        ws.send(JSON.stringify({ type: 'unknown_type' }))
+        resolve()
+      })
     })
 
     terminalWs = createTerminalWs()
-    void terminalWs.connect()
+    await terminalWs.connect()
+    await connected
+    // Wait briefly to confirm no crash or unexpected behavior
+    await new Promise((r) => setTimeout(r, 50))
   })
 
   it('should attempt reconnect when server closes connection', (done) => {

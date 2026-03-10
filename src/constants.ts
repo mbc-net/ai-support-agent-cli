@@ -89,21 +89,21 @@ export const ERR_CONFIG_SYNC_REQUIRES_CALLBACK = 'config_sync command requires o
 
 // API endpoint paths
 export const API_ENDPOINTS = {
-  REGISTER: '/api/agent/register',
-  HEARTBEAT: '/api/agent/heartbeat',
-  COMMANDS_PENDING: '/api/agent/commands/pending',
-  COMMAND: (commandId: string) => `/api/agent/commands/${commandId}`,
-  COMMAND_RESULT: (commandId: string) => `/api/agent/commands/${commandId}/result`,
-  COMMAND_CHUNKS: (commandId: string) => `/api/agent/commands/${commandId}/chunks`,
+  REGISTER: (tenantCode: string) => `/api/${tenantCode}/agent/register`,
+  HEARTBEAT: (tenantCode: string) => `/api/${tenantCode}/agent/heartbeat`,
+  COMMANDS_PENDING: (tenantCode: string) => `/api/${tenantCode}/agent/commands/pending`,
+  COMMAND: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}`,
+  COMMAND_RESULT: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}/result`,
+  COMMAND_CHUNKS: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}/chunks`,
   VERSION: '/api/agent/version',
-  CONNECTION_STATUS: '/api/agent/connection-status',
-  CONFIG: '/api/agent/config',
-  AWS_CREDENTIALS: '/api/agent/aws-credentials',
-  DB_CREDENTIALS: '/api/agent/db-credentials',
-  REPO_CREDENTIALS: (repositoryId: string) => `/api/agent/repo-credentials/${repositoryId}`,
-  PROJECT_CONFIG: '/api/agent/project-config',
-  FILES_UPLOAD_URL: '/api/agent/files/upload-url',
-  FILES_DOWNLOAD_URL: '/api/agent/files/download-url',
+  CONNECTION_STATUS: (tenantCode: string) => `/api/${tenantCode}/agent/connection-status`,
+  CONFIG: (tenantCode: string) => `/api/${tenantCode}/agent/config`,
+  AWS_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/aws-credentials`,
+  DB_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/db-credentials`,
+  REPO_CREDENTIALS: (tenantCode: string, repositoryId: string) => `/api/${tenantCode}/agent/repo-credentials/${repositoryId}`,
+  PROJECT_CONFIG: (tenantCode: string) => `/api/${tenantCode}/agent/project-config`,
+  FILES_UPLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/upload-url`,
+  FILES_DOWNLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/download-url`,
 } as const
 
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000

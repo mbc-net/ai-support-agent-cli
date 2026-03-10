@@ -35,6 +35,7 @@ export async function startMcpServer(): Promise<void> {
   const apiUrl = process.env.AI_SUPPORT_AGENT_API_URL
   const token = process.env.AI_SUPPORT_AGENT_TOKEN
   const projectCode = process.env.AI_SUPPORT_AGENT_PROJECT_CODE
+  const tenantCode = process.env.AI_SUPPORT_AGENT_TENANT_CODE
 
   if (!apiUrl || !token || !projectCode) {
     const missing = []
@@ -45,6 +46,10 @@ export async function startMcpServer(): Promise<void> {
   }
 
   const apiClient = new ApiClient(apiUrl, token)
+  if (tenantCode) {
+    apiClient.setTenantCode(tenantCode)
+  }
+  apiClient.setProjectCode(projectCode)
   const server = createMcpServer(apiClient, projectCode)
   const transport = new StdioServerTransport()
   await server.connect(transport)

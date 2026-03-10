@@ -147,6 +147,8 @@ describe('agent-runner', () => {
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       updateToken: jest.fn(),
+      setTenantCode: jest.fn(),
+      setProjectCode: jest.fn(),
     }
     MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
 
@@ -362,6 +364,8 @@ describe('agent-runner', () => {
       submitResult: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
+      setTenantCode: jest.fn(),
+      setProjectCode: jest.fn(),
     }
     MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
 
@@ -400,6 +404,8 @@ describe('agent-runner', () => {
       submitResult: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
+      setTenantCode: jest.fn(),
+      setProjectCode: jest.fn(),
     }
     MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
 
@@ -442,6 +448,8 @@ describe('agent-runner', () => {
       submitResult: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
+      setTenantCode: jest.fn(),
+      setProjectCode: jest.fn(),
     }
     MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
 
@@ -681,6 +689,8 @@ describe('startProjectAgent', () => {
     getVersionInfo: jest.Mock
     getConfig: jest.Mock
     updateToken: jest.Mock
+    setTenantCode: jest.Mock
+    setProjectCode: jest.Mock
   }
 
   beforeEach(() => {
@@ -694,6 +704,8 @@ describe('startProjectAgent', () => {
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       updateToken: jest.fn(),
+      setTenantCode: jest.fn(),
+      setProjectCode: jest.fn(),
     }
     ;(ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(
       () => mockClient as unknown as ApiClient,
