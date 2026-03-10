@@ -27,6 +27,49 @@ describe('ApiClient', () => {
     jest.restoreAllMocks()
   })
 
+  describe('setTenantCode', () => {
+    it('should update the tenant code used in API paths', async () => {
+      mockInstance.get.mockResolvedValue({ data: {} })
+      client.setTenantCode('new_tenant')
+      await client.getConfig()
+      expect(mockInstance.get).toHaveBeenCalledWith('/api/new_tenant/agent/config', undefined)
+    })
+  })
+
+  describe('setProjectCode', () => {
+    it('should update the project code used in file API paths', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { uploadUrl: 'https://s3.example.com/upload', fileId: 'file-1', s3Key: 'key' },
+      })
+      client.setProjectCode('PROJ_01')
+      await client.getUploadUrl({
+        conversationId: 'conv-1',
+        messageId: 'msg-1',
+        filename: 'test.txt',
+        contentType: 'text/plain',
+        fileSize: 1024,
+        projectCode: 'PROJ_01',
+      })
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/projects/PROJ_01/agent/files/upload-url',
+        expect.any(Object),
+        undefined,
+      )
+    })
+  })
+
+  describe('getProjectConfig', () => {
+    it('should fetch project config from server', async () => {
+      const config = { projectCode: 'TEST_01', projectName: 'Test' }
+      mockInstance.get.mockResolvedValue({ data: config })
+
+      const result = await client.getProjectConfig()
+
+      expect(result).toEqual(config)
+      expect(mockInstance.get).toHaveBeenCalledWith('/api/test_tenant/agent/project-config', undefined)
+    })
+  })
+
   describe('updateToken', () => {
     it('should update the Authorization header on the axios instance', () => {
       const defaults = { headers: { Authorization: 'Bearer test_tenant:tokenId:rawToken' } }
