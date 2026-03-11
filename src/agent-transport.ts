@@ -144,6 +144,7 @@ export function startHeartbeat(
         configSyncState.availableChatModes,
         configSyncState.activeChatMode,
         getLocalIpAddress(),
+        configSyncState.currentConfigHash,
       )
 
       // Check configHash from heartbeat response (polling fallback)
