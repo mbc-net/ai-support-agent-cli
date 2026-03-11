@@ -112,6 +112,7 @@ export async function startSubscriptionMode(
     return
   }
 
+  logger.debug(`${deps.prefix} Subscribing with tenantCode: ${deps.tenantCode}`)
   state.subscriber.subscribe(
     deps.tenantCode,
     (notification) => { void handleNotification(deps, state, ctx, notification) },
@@ -119,7 +120,7 @@ export async function startSubscriptionMode(
 
   state.subscriber.onReconnect(() => {
     logger.info(`${deps.prefix} Reconnected, checking for pending commands...`)
-    void checkPendingCommands(deps, state, ctx)
+    void checkPendingCommands(deps, ctx)
   })
 }
 
@@ -199,16 +200,30 @@ export async function handleNotification(
   ctx: CommandContext,
   notification: AppSyncNotification,
 ): Promise<void> {
-  logger.debug(`${deps.prefix} Notification received: action=${notification.action}, content=${JSON.stringify(notification.content ?? {}).substring(0, LOG_RESULT_LIMIT)}`)
+  // AppSync AWSJSON fields arrive as strings; parse if needed
+  const content: Record<string, unknown> =
+    typeof notification.content === 'string'
+      ? JSON.parse(notification.content)
+      : (notification.content ?? {})
+
+  logger.debug(`${deps.prefix} Notification received: action=${notification.action}, content=${JSON.stringify(content).substring(0, LOG_RESULT_LIMIT)}`)
 
   switch (notification.action) {
     case 'agent-command': {
-      const commandId = notification.content?.commandId as string
-      if (!commandId) {
-        logger.warn(`${deps.prefix} Notification missing commandId: ${JSON.stringify(notification.content ?? {})}`)
+      const commandId = content.commandId as string
+      const targetAgentId = content.agentId as string
+
+      // 別agentId宛のコマンドはスキップ
+      if (targetAgentId && targetAgentId !== deps.agentId) {
+        logger.debug(`${deps.prefix} Ignoring command for agent ${targetAgentId} (expected ${deps.agentId})`)
         return
       }
-      const commandType = (notification.content?.type as string) ?? 'unknown'
+
+      if (!commandId) {
+        logger.warn(`${deps.prefix} Notification missing commandId: ${JSON.stringify(content)}`)
+        return
+      }
+      const commandType = (content.type as string) ?? 'unknown'
       logger.info(t('runner.commandReceived', {
         prefix: deps.prefix,
         type: commandType,
@@ -219,7 +234,7 @@ export async function handleNotification(
       break
     }
     case 'config-update': {
-      const newHash = notification.content?.configHash as string
+      const newHash = content.configHash as string
       if (newHash && newHash !== ctx.configSyncState.currentConfigHash) {
         logger.info(`${deps.prefix} Config update detected (hash: ${newHash})`)
         state.configSyncDebounceTimer = scheduleConfigSync(ctx.configSyncDeps, ctx.configSyncState, state.configSyncDebounceTimer)
@@ -236,21 +251,17 @@ export async function handleNotification(
  */
 export async function checkPendingCommands(
   deps: TransportDeps,
-  state: TransportState,
   ctx: CommandContext,
 ): Promise<void> {
   try {
     const pending = await deps.client.getPendingCommands(deps.agentId)
     for (const cmd of pending) {
-      await handleNotification(deps, state, ctx, {
-        id: cmd.commandId,
-        table: '',
-        pk: '',
-        sk: '',
-        tenantCode: '',
-        action: 'agent-command',
-        content: { commandId: cmd.commandId, type: cmd.type },
-      })
+      logger.info(t('runner.commandReceived', {
+        prefix: deps.prefix,
+        type: cmd.type ?? 'unknown',
+        commandId: cmd.commandId,
+      }))
+      await processCommand(deps, ctx, cmd.commandId)
     }
   } catch (error) {
     logger.warn(`${deps.prefix} Failed to check pending commands: ${getDetailedErrorMessage(error)}`)

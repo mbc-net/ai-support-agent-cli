@@ -16,8 +16,15 @@ function ndjsonResult(text: string): string {
   return JSON.stringify({ type: 'result', subtype: 'success', result: text }) + '\n'
 }
 
-function ndjsonAssistant(text: string): string {
-  return JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }) + '\n'
+function ndjsonAssistant(text: string, toolUses?: Array<{ name: string; id: string; input: Record<string, unknown> }>): string {
+  const content: Array<Record<string, unknown>> = []
+  if (toolUses) {
+    for (const tu of toolUses) {
+      content.push({ type: 'tool_use', name: tu.name, id: tu.id, input: tu.input })
+    }
+  }
+  content.push({ type: 'text', text })
+  return JSON.stringify({ type: 'assistant', message: { content } }) + '\n'
 }
 
 jest.mock('../../src/logger')
@@ -288,6 +295,58 @@ describe('chat-executor', () => {
         hasStderr: false,
       }))
       expect(typeof doneContent.metadata.durationMs).toBe('number')
+    })
+
+    it('should include toolCalls in done chunk when tool_call chunks were sent', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const resultPromise = executeChatCommand(basePayload, 'cmd-done-tools', mockClient, undefined, undefined, 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      // Send assistant message with tool_use blocks
+      mockProcess.emitStdout('data', Buffer.from(ndjsonAssistant('output text', [
+        { name: 'WebSearch', id: 'tool-1', input: { query: 'test' } },
+        { name: 'Read', id: 'tool-2', input: { path: '/tmp/file.txt' } },
+      ])))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('output text')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+
+      const doneCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) => (call[1] as { type: string }).type === 'done',
+      )
+      expect(doneCall).toBeTruthy()
+      const doneContent = JSON.parse((doneCall[1] as { content: string }).content)
+      expect(doneContent.toolCalls).toHaveLength(2)
+      expect(doneContent.toolCalls[0].toolName).toBe('WebSearch')
+      expect(doneContent.toolCalls[1].toolName).toBe('Read')
+    })
+
+    it('should not include toolCalls in done chunk when no tool_call chunks were sent', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const resultPromise = executeChatCommand(basePayload, 'cmd-done-no-tools', mockClient, undefined, undefined, 'agent-1')
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonAssistant('output text')))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('output text')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+
+      const doneCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) => (call[1] as { type: string }).type === 'done',
+      )
+      expect(doneCall).toBeTruthy()
+      const doneContent = JSON.parse((doneCall[1] as { content: string }).content)
+      expect(doneContent.toolCalls).toBeUndefined()
     })
 
     it('should send delta chunks for text in assistant messages', async () => {

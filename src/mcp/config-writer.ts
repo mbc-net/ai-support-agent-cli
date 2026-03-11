@@ -22,6 +22,7 @@ export function buildMcpConfig(
   apiUrl: string,
   projectCode: string,
   mcpServerPath: string,
+  tenantCode: string,
 ): Record<string, unknown> {
   return {
     mcpServers: {
@@ -32,6 +33,7 @@ export function buildMcpConfig(
           AI_SUPPORT_AGENT_API_URL: apiUrl,
           AI_SUPPORT_AGENT_TOKEN: '${AI_SUPPORT_AGENT_TOKEN}',
           AI_SUPPORT_AGENT_PROJECT_CODE: projectCode,
+          AI_SUPPORT_AGENT_TENANT_CODE: tenantCode,
         },
       },
     },
@@ -50,11 +52,18 @@ export function writeMcpConfig(
   projectCode: string,
   mcpServerPath: string,
   backlogConfigs?: BacklogMcpConfig[],
+  tenantCode?: string,
 ): string {
   const configPath = getMcpConfigPath(projectDir)
   const dir = dirname(configPath)
 
   mkdirSync(dir, { recursive: true, mode: 0o700 })
+
+  // Parse tenantCode from token if not provided: {tenantCode}:{tokenId}:{rawToken}
+  const resolvedTenantCode = tenantCode ?? (() => {
+    const parts = token.split(':')
+    return parts.length >= 3 ? parts[0] : ''
+  })()
 
   // 実際の設定: token を直接埋め込む（ファイルは 0o600 で保護）
   const config: Record<string, unknown> = {
@@ -66,6 +75,7 @@ export function writeMcpConfig(
           AI_SUPPORT_AGENT_API_URL: apiUrl,
           AI_SUPPORT_AGENT_TOKEN: token,
           AI_SUPPORT_AGENT_PROJECT_CODE: projectCode,
+          AI_SUPPORT_AGENT_TENANT_CODE: resolvedTenantCode,
         },
       },
       // Backlog MCPサーバー（設定がある場合のみ）

@@ -44,8 +44,8 @@ jobs:
         run: |
           git diff origin/main...HEAD -- package-lock.json > /tmp/lockfile-diff.txt || true
 
-          CHANGED_COUNT=$(grep -c '"version":' /tmp/lockfile-diff.txt || echo "0")
-          echo "changed_packages=$CHANGED_COUNT" >> $GITHUB_OUTPUT
+          CHANGED_COUNT=$(grep -c '"version":' /tmp/lockfile-diff.txt 2>/dev/null || true)
+          echo "changed_packages=${CHANGED_COUNT:-0}" >> $GITHUB_OUTPUT
 
           if grep -E '^\+.*"version":\s*"[0-9]+\.' /tmp/lockfile-diff.txt | grep -E '"[0-9]+\.' > /dev/null 2>&1; then
             echo "has_major_updates=true" >> $GITHUB_OUTPUT

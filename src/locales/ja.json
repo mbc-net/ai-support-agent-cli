@@ -120,7 +120,7 @@
   "autoUpdate.enabled": "自動更新を有効にしました（チャネル: {{channel}}）。",
   "autoUpdate.channelSet": "更新チャネルを \"{{channel}}\" に設定しました。",
 
-  "cmd.start.docker": "Dockerコンテナ内で実行",
+  "cmd.start.noDocker": "Dockerコンテナを使わずホスト上で直接実行",
   "cmd.dockerLogin": "Dockerコンテナ内でClaude Codeにログイン",
   "docker.notAvailable": "Dockerが利用できません。Docker Desktopが起動していることを確認してください。",
   "docker.building": "Dockerイメージをビルド中...",

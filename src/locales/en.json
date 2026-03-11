@@ -120,7 +120,7 @@
   "autoUpdate.enabled": "Automatic updates enabled (channel: {{channel}}).",
   "autoUpdate.channelSet": "Update channel set to \"{{channel}}\".",
 
-  "cmd.start.docker": "Run inside a Docker container",
+  "cmd.start.noDocker": "Run directly on host instead of Docker container",
   "cmd.dockerLogin": "Log in to Claude Code inside a Docker container",
   "docker.notAvailable": "Docker is not available. Make sure Docker Desktop is running.",
   "docker.building": "Building Docker image...",

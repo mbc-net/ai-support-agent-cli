@@ -51,6 +51,8 @@ describe('ProjectAgent', () => {
     getConfig: jest.Mock
     getProjectConfig: jest.Mock
     updateToken: jest.Mock
+    setTenantCode: jest.Mock
+    setProjectCode: jest.Mock
   }
 
   let mockSubscriber: {
@@ -76,6 +78,8 @@ describe('ProjectAgent', () => {
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       getProjectConfig: jest.fn().mockResolvedValue({ configHash: 'abc123', project: { projectCode: 'test-proj' }, agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] } }),
       updateToken: jest.fn(),
+      setTenantCode: jest.fn(),
+      setProjectCode: jest.fn(),
     }
     MockApiClient.mockImplementation(() => mockClient as unknown as ApiClient)
 
@@ -360,6 +364,97 @@ describe('ProjectAgent', () => {
       await jest.advanceTimersByTimeAsync(100)
 
       expect(mockClient.getCommand).not.toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('should ignore commands for different agentId', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-other',
+        table: 'commands',
+        pk: 'CMD#789',
+        sk: 'CMD#789',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-other', type: 'execute_command', agentId: 'agent-2' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.getCommand).not.toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('should process commands with undefined agentId (backward compatibility)', async () => {
+      mockClient.getCommand.mockResolvedValue({
+        commandId: 'cmd-no-agent',
+        type: 'execute_command',
+        payload: { command: 'echo compat' },
+      })
+      mockedExecuteCommand.mockResolvedValue({ success: true, data: 'compat output' })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      // agentIdが未指定の通知（後方互換性）
+      onMessage({
+        id: 'notif-compat',
+        table: 'commands',
+        pk: 'CMD#200',
+        sk: 'CMD#200',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-no-agent', type: 'execute_command' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-no-agent', 'agent-1')
+      expect(mockedExecuteCommand).toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('should process commands for matching agentId', async () => {
+      mockClient.getCommand.mockResolvedValue({
+        commandId: 'cmd-match',
+        type: 'execute_command',
+        payload: { command: 'echo match' },
+      })
+      mockedExecuteCommand.mockResolvedValue({ success: true, data: 'match output' })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-match',
+        table: 'commands',
+        pk: 'CMD#101',
+        sk: 'CMD#101',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-match', type: 'execute_command', agentId: 'agent-1' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-match', 'agent-1')
 
       agent.stop()
     })
