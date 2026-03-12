@@ -94,7 +94,9 @@ async function executeClaudeCodeChat(
     if (type === 'tool_call') {
       try {
         collectedToolCalls.push(JSON.parse(content))
-      } catch { /* ignore parse errors */ }
+      } catch (err) {
+        logger.warn(`[chat] Failed to parse tool_call JSON: ${err instanceof Error ? err.message : String(err)}`)
+      }
     }
     // tool_result チャンクの success/output を対応する tool_call エントリにマージ
     if (type === 'tool_result') {
@@ -107,7 +109,9 @@ async function executeClaudeCodeChat(
           entry.success = result.success
           entry.result = result.output
         }
-      } catch { /* ignore parse errors */ }
+      } catch (err) {
+        logger.warn(`[chat] Failed to parse tool_result JSON: ${err instanceof Error ? err.message : String(err)}`)
+      }
     }
     return rawSendChunk(type, content)
   }

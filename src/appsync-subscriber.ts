@@ -55,10 +55,18 @@ export class AppSyncSubscriber extends BaseWebSocketConnection<AppSyncMessage> {
       throw new Error('AppSync URL must use HTTP or HTTPS protocol')
     }
     this.host = url.host
-    this.realtimeUrl = appsyncUrl
-      .replace('https://', 'wss://')
-      .replace('http://', 'ws://')
-      .replace('.appsync-api.', '.appsync-realtime-api.')
+    const isAwsAppSync = url.host.includes('.appsync-api.')
+    if (isAwsAppSync) {
+      this.realtimeUrl = appsyncUrl
+        .replace('https://', 'wss://')
+        .replace('.appsync-api.', '.appsync-realtime-api.')
+    } else {
+      // Local AppSync simulator uses /graphql/realtime path
+      this.realtimeUrl = appsyncUrl
+        .replace('https://', 'wss://')
+        .replace('http://', 'ws://')
+        .replace(/\/graphql$/, '/graphql/realtime')
+    }
   }
 
   subscribe(

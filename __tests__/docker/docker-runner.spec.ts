@@ -525,6 +525,60 @@ describe('docker-runner', () => {
       processOnSpy.mockRestore()
     })
 
+    it('should include --user flag with host UID/GID on Unix', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+
+      const fakeChild = Object.assign(new EventEmitter(), {
+        kill: jest.fn(),
+      })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+
+      // Ensure process.getuid/getgid are available (Unix)
+      const originalGetuid = process.getuid
+      const originalGetgid = process.getgid
+      process.getuid = () => 1000
+      process.getgid = () => 1000
+
+      try {
+        runInDocker({})
+
+        const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+        const userIdx = spawnArgs.indexOf('--user')
+        expect(userIdx).toBeGreaterThan(-1)
+        expect(spawnArgs[userIdx + 1]).toBe('1000:1000')
+      } finally {
+        process.getuid = originalGetuid
+        process.getgid = originalGetgid
+      }
+    })
+
+    it('should omit --user flag on Windows (no process.getuid)', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+
+      const fakeChild = Object.assign(new EventEmitter(), {
+        kill: jest.fn(),
+      })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+
+      // Simulate Windows: getuid is undefined
+      const originalGetuid = process.getuid
+      const originalGetgid = process.getgid
+      process.getuid = undefined as unknown as typeof process.getuid
+      process.getgid = undefined as unknown as typeof process.getgid
+
+      try {
+        runInDocker({})
+
+        const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+        expect(spawnArgs).not.toContain('--user')
+      } finally {
+        process.getuid = originalGetuid
+        process.getgid = originalGetgid
+      }
+    })
+
     it('should pass container args to docker run', () => {
       mockExecFileSync.mockReturnValue(Buffer.from(''))
 

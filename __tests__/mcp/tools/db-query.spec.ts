@@ -112,10 +112,175 @@ describe('db-query tool', () => {
       expect(validateSql('SELECT IS_DELETED FROM users').valid).toBe(true)
     })
 
-    it('should reject queries that do not start with SELECT/WITH/EXPLAIN', () => {
-      const result = validateSql('SHOW TABLES')
+    it('should allow SHOW statements', () => {
+      expect(validateSql('SHOW TABLES').valid).toBe(true)
+      expect(validateSql('SHOW COLUMNS FROM users').valid).toBe(true)
+    })
+
+    it('should allow DESCRIBE/DESC statements', () => {
+      expect(validateSql('DESCRIBE users').valid).toBe(true)
+      expect(validateSql('DESC users').valid).toBe(true)
+    })
+
+    it('should reject queries that do not start with allowed keywords', () => {
+      const result = validateSql('CALL my_procedure()')
       expect(result.valid).toBe(false)
-      expect(result.error).toBe('Only SELECT, WITH, EXPLAIN statements are allowed')
+      expect(result.error).toContain('Only')
+    })
+
+    describe('comment injection detection', () => {
+      it('should reject SQL dash comments', () => {
+        const result = validateSql('SELECT * FROM users -- WHERE id = 1')
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('SQL comments are not allowed')
+      })
+
+      it('should reject C-style block comments', () => {
+        expect(validateSql('SELECT * FROM users /* comment */').valid).toBe(false)
+        expect(validateSql('SELECT */ FROM users').valid).toBe(false)
+      })
+
+      it('should reject MySQL hash comments', () => {
+        const result = validateSql('SELECT * FROM users # comment')
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('SQL comments are not allowed')
+      })
+    })
+
+    describe('multiple statement detection', () => {
+      it('should reject multiple statements separated by semicolons', () => {
+        const result = validateSql('SELECT 1; DELETE FROM users')
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Multiple SQL statements are not allowed')
+      })
+
+      it('should allow trailing semicolon', () => {
+        expect(validateSql('SELECT * FROM users;').valid).toBe(true)
+        expect(validateSql('SELECT * FROM users;  ').valid).toBe(true)
+      })
+    })
+
+    describe('time-based blind injection detection', () => {
+      it('should reject SLEEP function', () => {
+        const result = validateSql("SELECT * FROM users WHERE id = 1 AND SLEEP(5)")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Dangerous function detected: SLEEP')
+      })
+
+      it('should reject BENCHMARK function', () => {
+        const result = validateSql("SELECT BENCHMARK(1000000, SHA1('test'))")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Dangerous function detected: BENCHMARK')
+      })
+
+      it('should reject PG_SLEEP function', () => {
+        const result = validateSql("SELECT * FROM users WHERE id = 1 AND PG_SLEEP(5)")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Dangerous function detected: PG_SLEEP')
+      })
+
+      it('should reject WAITFOR DELAY', () => {
+        const result = validateSql("SELECT * FROM users; WAITFOR DELAY '0:0:5'")
+        expect(result.valid).toBe(false)
+        // Could match multiple statement or WAITFOR DELAY
+        expect(result.valid).toBe(false)
+      })
+
+      it('should reject DBMS_LOCK.SLEEP', () => {
+        const result = validateSql("SELECT DBMS_LOCK.SLEEP(5) FROM dual")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Dangerous function detected: DBMS_LOCK.SLEEP')
+      })
+    })
+
+    describe('encoding bypass detection', () => {
+      it('should reject hex literals', () => {
+        const result = validateSql("SELECT * FROM users WHERE name = 0x61646D696E")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Encoding bypass detected: hex literal')
+      })
+
+      it('should reject CONVERT function', () => {
+        const result = validateSql("SELECT CONVERT('admin' USING utf8)")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Encoding bypass detected: CONVERT')
+      })
+
+      it('should reject UNHEX function', () => {
+        const result = validateSql("SELECT UNHEX('61646D696E')")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Encoding bypass detected: UNHEX')
+      })
+    })
+
+    describe('filesystem and system access detection', () => {
+      it('should reject LOAD DATA', () => {
+        const result = validateSql("SELECT * FROM users WHERE LOAD DATA INFILE '/etc/passwd'")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Dangerous operation detected: LOAD DATA')
+      })
+
+      it('should reject INTO OUTFILE', () => {
+        const result = validateSql("SELECT * FROM users INTO OUTFILE '/tmp/data.csv'")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Dangerous operation detected: INTO OUTFILE')
+      })
+
+      it('should reject INTO DUMPFILE', () => {
+        const result = validateSql("SELECT * FROM users INTO DUMPFILE '/tmp/data.bin'")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Dangerous operation detected: INTO DUMPFILE')
+      })
+
+      it('should reject xp_cmdshell', () => {
+        const result = validateSql("SELECT xp_cmdshell('dir')")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Dangerous operation detected: xp_cmdshell')
+      })
+
+      it('should reject xp_regread', () => {
+        const result = validateSql("SELECT xp_regread('HKLM', 'key')")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Dangerous operation detected: xp_regread')
+      })
+
+      it('should reject sp_executesql', () => {
+        const result = validateSql("SELECT sp_executesql('SELECT 1')")
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Dangerous operation detected: sp_executesql')
+      })
+    })
+
+    describe('subquery depth limiting', () => {
+      it('should allow queries within depth limit', () => {
+        const sql = 'SELECT * FROM a WHERE id IN (SELECT id FROM b WHERE id IN (SELECT id FROM c))'
+        expect(validateSql(sql).valid).toBe(true)
+      })
+
+      it('should reject queries exceeding depth limit', () => {
+        const sql = 'SELECT * FROM a WHERE id IN (SELECT id FROM b WHERE id IN (SELECT id FROM c WHERE id IN (SELECT id FROM d WHERE id IN (SELECT id FROM e))))'
+        const result = validateSql(sql)
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Subquery nesting too deep (max 3 levels)')
+      })
+    })
+
+    describe('EXEC/EXECUTE blocking', () => {
+      it('should reject EXEC', () => {
+        const result = validateSql('EXEC sp_who')
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Forbidden SQL operation: EXEC')
+      })
+
+      it('should reject EXECUTE', () => {
+        const result = validateSql('EXECUTE sp_who')
+        expect(result.valid).toBe(false)
+        expect(result.error).toBe('Forbidden SQL operation: EXECUTE')
+      })
+
+      it('should not false-positive on EXECUTED_AT column', () => {
+        expect(validateSql('SELECT EXECUTED_AT FROM jobs').valid).toBe(true)
+      })
     })
 
     describe('with writePermissions', () => {
@@ -185,9 +350,15 @@ describe('db-query tool', () => {
         expect(validateSql('SELECT IS_DELETED FROM users', perms).valid).toBe(true)
       })
 
-      it('should include write operations in allowed starts error message', () => {
+      it('should allow SHOW TABLES with writePermissions', () => {
         const perms = { insert: true, update: true, delete: true }
         const result = validateSql('SHOW TABLES', perms)
+        expect(result.valid).toBe(true)
+      })
+
+      it('should reject unknown starting keywords', () => {
+        const perms = { insert: true, update: true, delete: true }
+        const result = validateSql('CALL my_procedure()', perms)
         expect(result.valid).toBe(false)
         expect(result.error).toContain('INSERT')
         expect(result.error).toContain('UPDATE')
