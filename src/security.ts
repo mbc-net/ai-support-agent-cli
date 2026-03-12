@@ -55,18 +55,20 @@ export function validateCommand(command: string): string | null {
   return null
 }
 
-export async function validateFilePath(filePath: string): Promise<string | null> {
+export async function validateFilePath(filePath: string, baseDir?: string): Promise<string | null> {
+  // Resolve relative paths against baseDir (project directory) when provided
+  const toResolve = baseDir && !path.isAbsolute(filePath) ? path.resolve(baseDir, filePath) : filePath
   let resolved: string
   try {
-    resolved = await fs.promises.realpath(filePath)
+    resolved = await fs.promises.realpath(toResolve)
   } catch {
     // File does not exist yet (e.g. file_write new file) — resolve parent directory
-    const parentDir = path.dirname(path.resolve(filePath))
+    const parentDir = path.dirname(path.resolve(baseDir ?? '', toResolve))
     try {
       const realParent = await fs.promises.realpath(parentDir)
-      resolved = path.join(realParent, path.basename(filePath))
+      resolved = path.join(realParent, path.basename(toResolve))
     } catch {
-      resolved = path.resolve(filePath)
+      resolved = path.resolve(baseDir ?? '', toResolve)
     }
   }
   const allBlocked = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
@@ -82,14 +84,19 @@ export async function validateFilePath(filePath: string): Promise<string | null>
 export async function resolveAndValidatePath(
   payload: { path?: unknown },
   defaultPath?: string,
+  baseDir?: string,
 ): Promise<string | CommandResult> {
   const filePath = parseString(payload.path) ?? defaultPath ?? null
   if (!filePath) {
     return { success: false, error: ERR_NO_FILE_PATH_SPECIFIED }
   }
-  const pathError = await validateFilePath(filePath)
+  const pathError = await validateFilePath(filePath, baseDir)
   if (pathError) {
     return { success: false, error: pathError }
+  }
+  // Return the resolved absolute path when baseDir is used
+  if (baseDir && !path.isAbsolute(filePath)) {
+    return path.resolve(baseDir, filePath)
   }
   return filePath
 }

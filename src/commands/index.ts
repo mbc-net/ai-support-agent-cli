@@ -58,33 +58,33 @@ export async function executeCommand(
       case 'file_read': {
         const path = (p as Record<string, unknown>).path
         logger.debug(`[file_read] path="${String(path ?? '')}"`)
-        return await fileRead(p)
+        return await fileRead(p, opts?.projectDir)
       }
       case 'file_write': {
         const path = (p as Record<string, unknown>).path
         logger.debug(`[file_write] path="${String(path ?? '')}"`)
-        return await fileWrite(p)
+        return await fileWrite(p, opts?.projectDir)
       }
       case 'file_list': {
         const path = (p as Record<string, unknown>).path
         logger.debug(`[file_list] path="${String(path ?? '')}"`)
-        return await fileList(p)
+        return await fileList(p, opts?.projectDir)
       }
       case 'file_rename': {
         const oldPath = (p as Record<string, unknown>).oldPath
         const newPath = (p as Record<string, unknown>).newPath
         logger.debug(`[file_rename] oldPath="${String(oldPath ?? '')}" newPath="${String(newPath ?? '')}"`)
-        return await fileRename(p)
+        return await fileRename(p, opts?.projectDir)
       }
       case 'file_delete': {
         const deletePath = (p as Record<string, unknown>).path
         logger.debug(`[file_delete] path="${String(deletePath ?? '')}"`)
-        return await fileDelete(p)
+        return await fileDelete(p, opts?.projectDir)
       }
       case 'file_mkdir': {
         const mkdirPath = (p as Record<string, unknown>).path
         logger.debug(`[file_mkdir] path="${String(mkdirPath ?? '')}"`)
-        return await fileMkdir(p)
+        return await fileMkdir(p, opts?.projectDir)
       }
       case 'process_list':
         return await processList()

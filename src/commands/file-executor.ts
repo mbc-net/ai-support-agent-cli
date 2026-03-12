@@ -10,6 +10,7 @@ import { withValidatedPath } from './file-path-guard'
 
 export async function fileRead(
   payload: FileReadPayload,
+  baseDir?: string,
 ): Promise<CommandResult> {
   return withValidatedPath(payload, async (filePath) => {
     const stat = await fs.promises.stat(filePath)
@@ -19,11 +20,12 @@ export async function fileRead(
 
     const content = await fs.promises.readFile(filePath, 'utf-8')
     return successResult(content)
-  })
+  }, undefined, baseDir)
 }
 
 export async function fileWrite(
   payload: FileWritePayload,
+  baseDir?: string,
 ): Promise<CommandResult> {
   return withValidatedPath(payload, async (filePath) => {
     const content = typeof payload.content === 'string' ? payload.content : null
@@ -40,11 +42,12 @@ export async function fileWrite(
 
     await fs.promises.writeFile(filePath, content, 'utf-8')
     return successResult(`Written to ${filePath}`)
-  })
+  }, undefined, baseDir)
 }
 
 export async function fileList(
   payload: FileListPayload,
+  baseDir?: string,
 ): Promise<CommandResult> {
   return withValidatedPath(payload, async (dirPath) => {
     const allEntries = await fs.promises.readdir(dirPath, { withFileTypes: true })
@@ -65,11 +68,12 @@ export async function fileList(
     )
 
     return successResult({ items, truncated, total: allEntries.length })
-  }, '.')
+  }, '.', baseDir)
 }
 
 export async function fileRename(
   payload: FileRenamePayload,
+  baseDir?: string,
 ): Promise<CommandResult> {
   const oldPath = parseString(payload.oldPath)
   const newPath = parseString(payload.newPath)
@@ -77,9 +81,9 @@ export async function fileRename(
     return errorResult(ERR_NO_FILE_PATH_SPECIFIED)
   }
 
-  const oldPathOrError = await resolveAndValidatePath({ path: oldPath })
+  const oldPathOrError = await resolveAndValidatePath({ path: oldPath }, undefined, baseDir)
   if (typeof oldPathOrError !== 'string') return oldPathOrError
-  const newPathOrError = await resolveAndValidatePath({ path: newPath })
+  const newPathOrError = await resolveAndValidatePath({ path: newPath }, undefined, baseDir)
   if (typeof newPathOrError !== 'string') return newPathOrError
 
   await fs.promises.rename(oldPathOrError, newPathOrError)
@@ -88,6 +92,7 @@ export async function fileRename(
 
 export async function fileDelete(
   payload: FileDeletePayload,
+  baseDir?: string,
 ): Promise<CommandResult> {
   return withValidatedPath(payload, async (resolvedPath) => {
     if (payload.recursive) {
@@ -101,14 +106,15 @@ export async function fileDelete(
       }
     }
     return successResult(`Deleted ${resolvedPath}`)
-  })
+  }, undefined, baseDir)
 }
 
 export async function fileMkdir(
   payload: FileMkdirPayload,
+  baseDir?: string,
 ): Promise<CommandResult> {
   return withValidatedPath(payload, async (resolvedPath) => {
     await fs.promises.mkdir(resolvedPath, { recursive: true })
     return successResult(`Created directory ${resolvedPath}`)
-  })
+  }, undefined, baseDir)
 }
