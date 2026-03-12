@@ -68,7 +68,7 @@ describe('ProjectAgent', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockClient = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '', transportMode: 'polling' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql', appsyncApiKey: 'da2-testkey123', transportMode: 'realtime' }),
       heartbeat: jest.fn().mockResolvedValue({ success: true }),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -99,8 +99,8 @@ describe('ProjectAgent', () => {
     jest.restoreAllMocks()
   })
 
-  describe('polling mode', () => {
-    it('should register on start and begin heartbeat/polling', async () => {
+  describe('registration and lifecycle', () => {
+    it('should register on start and begin heartbeat/subscription', async () => {
       const agent = new ProjectAgent(project, 'agent-1', options)
       agent.start()
 
@@ -136,6 +136,25 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
+    it('should log error and not start when AppSync credentials are missing', async () => {
+      mockClient.register.mockResolvedValue({
+        agentId: 'test-id',
+        tenantCode: 'test-tenant',
+        appsyncUrl: '',
+        appsyncApiKey: '',
+        transportMode: 'realtime',
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('AppSync credentials missing'))
+
+      agent.stop()
+    })
+
     it('should log warning when heartbeat fails', async () => {
       mockClient.heartbeat.mockRejectedValue(new Error('Heartbeat timeout'))
 
@@ -145,52 +164,6 @@ describe('ProjectAgent', () => {
       await jest.advanceTimersByTimeAsync(100)
 
       expect(logger.warn).toHaveBeenCalledWith('runner.heartbeatFailed')
-
-      agent.stop()
-    })
-
-    it('should poll, execute commands, and submit results', async () => {
-      mockClient.getPendingCommands.mockResolvedValue([
-        { commandId: 'cmd-1', type: 'execute_command' },
-      ])
-      mockClient.getCommand.mockResolvedValue({
-        commandId: 'cmd-1',
-        type: 'execute_command',
-        payload: { command: 'echo hi' },
-      })
-      mockedExecuteCommand.mockResolvedValue({ success: true, data: 'hi' })
-
-      const agent = new ProjectAgent(project, 'agent-1', options)
-      agent.start()
-
-      await jest.advanceTimersByTimeAsync(100)
-
-      // Trigger poll interval
-      await jest.advanceTimersByTimeAsync(options.pollInterval)
-
-      expect(mockClient.getPendingCommands).toHaveBeenCalledWith('agent-1')
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'agent-1')
-      expect(mockedExecuteCommand).toHaveBeenCalledWith('execute_command', { command: 'echo hi' }, expect.objectContaining({ commandId: 'cmd-1', client: mockClient, agentId: 'agent-1' }))
-      expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'agent-1')
-
-      agent.stop()
-    })
-
-    it('should handle command execution error', async () => {
-      mockClient.getPendingCommands.mockResolvedValue([
-        { commandId: 'cmd-2', type: 'execute_command' },
-      ])
-      mockClient.getCommand.mockRejectedValue(new Error('Command fetch failed'))
-      mockClient.submitResult.mockRejectedValue(new Error('Submit failed'))
-
-      const agent = new ProjectAgent(project, 'agent-1', options)
-      agent.start()
-
-      await jest.advanceTimersByTimeAsync(100)
-      await jest.advanceTimersByTimeAsync(options.pollInterval)
-
-      expect(logger.error).toHaveBeenCalledWith('runner.commandError')
-      expect(logger.error).toHaveBeenCalledWith('runner.resultSendFailed')
 
       agent.stop()
     })
@@ -209,39 +182,15 @@ describe('ProjectAgent', () => {
       await jest.advanceTimersByTimeAsync(60000)
 
       expect(mockClient.heartbeat).not.toHaveBeenCalled()
-      expect(mockClient.getPendingCommands).not.toHaveBeenCalled()
     })
 
     it('should expose the ApiClient via getClient()', () => {
       const agent = new ProjectAgent(project, 'agent-1', options)
       expect(agent.getClient()).toBeDefined()
     })
-
-    it('should handle polling error gracefully', async () => {
-      mockClient.getPendingCommands.mockRejectedValue(new Error('Network failure'))
-
-      const agent = new ProjectAgent(project, 'agent-1', options)
-      agent.start()
-
-      await jest.advanceTimersByTimeAsync(100)
-      await jest.advanceTimersByTimeAsync(options.pollInterval)
-
-      // Should continue running despite polling error
-      agent.stop()
-    })
   })
 
   describe('subscription mode', () => {
-    beforeEach(() => {
-      mockClient.register.mockResolvedValue({
-        agentId: 'test-id',
-        tenantCode: 'test-tenant',
-        appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
-        appsyncApiKey: 'da2-testkey123',
-        transportMode: 'realtime',
-      })
-    })
-
     it('should activate subscription mode when transportMode is realtime', async () => {
       const agent = new ProjectAgent(project, 'agent-1', options)
       agent.start()
@@ -260,7 +209,7 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
-    it('should fall back to polling when WebSocket connection fails', async () => {
+    it('should handle WebSocket connection failure', async () => {
       mockSubscriber.connect.mockRejectedValue(new Error('WebSocket connection failed'))
 
       const agent = new ProjectAgent(project, 'agent-1', options)
@@ -268,14 +217,9 @@ describe('ProjectAgent', () => {
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(logger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('falling back to polling'),
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('WebSocket connection failed'),
       )
-
-      // Polling should be active
-      mockClient.getPendingCommands.mockResolvedValue([])
-      await jest.advanceTimersByTimeAsync(options.pollInterval)
-      expect(mockClient.getPendingCommands).toHaveBeenCalled()
 
       agent.stop()
     })
@@ -510,25 +454,6 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
-    it('should use polling when transportMode is polling', async () => {
-      mockClient.register.mockResolvedValue({
-        agentId: 'test-id',
-        tenantCode: 'test-tenant',
-        appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
-        appsyncApiKey: 'da2-testkey123',
-        transportMode: 'polling',
-      })
-
-      const agent = new ProjectAgent(project, 'agent-1', options)
-      agent.start()
-
-      await jest.advanceTimersByTimeAsync(100)
-
-      expect(MockAppSyncSubscriber).not.toHaveBeenCalled()
-
-      agent.stop()
-    })
-
     it('should handle command error in subscription mode and submit error result', async () => {
       mockClient.getCommand.mockRejectedValue(new Error('Command fetch failed'))
       mockClient.submitResult.mockResolvedValue(undefined)
@@ -611,91 +536,40 @@ describe('ProjectAgent', () => {
     })
   })
 
-  describe('chat_cancel priority in polling', () => {
-    it('should process chat_cancel commands before normal commands', async () => {
-      const executionOrder: string[] = []
-      mockedExecuteCommand.mockImplementation(async (type: any) => {
-        executionOrder.push(typeof type === 'string' ? type : type.type)
-        return { success: true, data: 'ok' }
-      })
-
-      // Return a mix of normal and cancel commands
-      mockClient.getPendingCommands.mockResolvedValue([
-        { commandId: 'cmd-chat', type: 'chat' },
-        { commandId: 'cmd-cancel', type: 'chat_cancel' },
-        { commandId: 'cmd-exec', type: 'execute_command' },
-      ])
-      mockClient.getCommand
-        .mockResolvedValueOnce({ commandId: 'cmd-cancel', type: 'chat_cancel', payload: { targetCommandId: 'some-cmd' } })
-        .mockResolvedValueOnce({ commandId: 'cmd-chat', type: 'chat', payload: { message: 'hello' } })
-        .mockResolvedValueOnce({ commandId: 'cmd-exec', type: 'execute_command', payload: { command: 'echo hi' } })
-
-      const agent = new ProjectAgent(project, 'agent-1', options)
-      agent.start()
-
-      await jest.advanceTimersByTimeAsync(100)
-      await jest.advanceTimersByTimeAsync(options.pollInterval)
-
-      // chat_cancel should be processed first
-      expect(executionOrder[0]).toBe('chat_cancel')
-
-      agent.stop()
-    })
-
-    it('should process chat_cancel even when processing flag is true', async () => {
-      // Simulate a long-running command that keeps processing=true
-      let longRunningResolve: (() => void) | undefined
-      const longRunningPromise = new Promise<void>((resolve) => { longRunningResolve = resolve })
-
-      let callCount = 0
-      mockedExecuteCommand.mockImplementation(async (type: any) => {
-        callCount++
-        const cmdType = typeof type === 'string' ? type : type.type
-        if (cmdType === 'chat') {
-          // Simulate long-running chat command
-          await longRunningPromise
-        }
-        return { success: true, data: 'ok' }
-      })
-
-      // First poll: return a long-running chat command
-      mockClient.getPendingCommands.mockResolvedValueOnce([
-        { commandId: 'cmd-long', type: 'chat' },
-      ])
-      mockClient.getCommand.mockResolvedValueOnce({
-        commandId: 'cmd-long',
-        type: 'chat',
-        payload: { message: 'long task' },
-      })
-
-      const agent = new ProjectAgent(project, 'agent-1', options)
-      agent.start()
-
-      await jest.advanceTimersByTimeAsync(100)
-      await jest.advanceTimersByTimeAsync(options.pollInterval)
-
-      // Second poll: return a chat_cancel while chat is still processing
-      mockClient.getPendingCommands.mockResolvedValueOnce([
-        { commandId: 'cmd-cancel-2', type: 'chat_cancel' },
-      ])
-      mockClient.getCommand.mockResolvedValueOnce({
-        commandId: 'cmd-cancel-2',
+  describe('chat_cancel via subscription', () => {
+    it('should process chat_cancel command via subscription notification', async () => {
+      mockClient.getCommand.mockResolvedValue({
+        commandId: 'cmd-cancel',
         type: 'chat_cancel',
-        payload: { targetCommandId: 'cmd-long' },
+        payload: { targetCommandId: 'some-cmd' },
+      })
+      mockedExecuteCommand.mockResolvedValue({ success: true, data: 'ok' })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-cancel',
+        table: 'commands',
+        pk: 'CMD#123',
+        sk: 'CMD#123',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-cancel', type: 'chat_cancel' },
       })
 
-      await jest.advanceTimersByTimeAsync(options.pollInterval)
+      await jest.advanceTimersByTimeAsync(100)
 
-      // chat_cancel should have been executed even though processing=true
       expect(mockedExecuteCommand).toHaveBeenCalledWith(
         'chat_cancel',
-        { targetCommandId: 'cmd-long' },
+        { targetCommandId: 'some-cmd' },
         expect.any(Object),
       )
 
-      // Clean up
-      longRunningResolve?.()
-      await jest.advanceTimersByTimeAsync(100)
       agent.stop()
     })
   })
@@ -961,9 +835,6 @@ describe('ProjectAgent', () => {
       }
       mockedSyncProjectConfig.mockResolvedValueOnce(mockConfig)
 
-      mockClient.getPendingCommands.mockResolvedValue([
-        { commandId: 'cmd-cfg', type: 'chat' },
-      ])
       mockClient.getCommand.mockResolvedValue({
         commandId: 'cmd-cfg',
         type: 'chat',
@@ -975,7 +846,20 @@ describe('ProjectAgent', () => {
       agent.start()
 
       await jest.advanceTimersByTimeAsync(100)
-      await jest.advanceTimersByTimeAsync(options.pollInterval)
+
+      // Send command via subscription notification
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+      onMessage({
+        id: 'notif-cfg',
+        table: 'commands',
+        pk: 'CMD#123',
+        sk: 'CMD#123',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-cfg', type: 'chat' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
 
       expect(mockedExecuteCommand).toHaveBeenCalledWith(
         'chat',
@@ -1125,9 +1009,6 @@ describe('ProjectAgent', () => {
         return { success: true, data: 'ok' }
       })
 
-      mockClient.getPendingCommands.mockResolvedValue([
-        { commandId: 'cmd-setup', type: 'setup' },
-      ])
       mockClient.getCommand.mockResolvedValue({
         commandId: 'cmd-setup',
         type: 'setup',
@@ -1138,7 +1019,19 @@ describe('ProjectAgent', () => {
       agent.start()
 
       await jest.advanceTimersByTimeAsync(100)
-      await jest.advanceTimersByTimeAsync(options.pollInterval)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+      onMessage({
+        id: 'notif-setup',
+        table: 'commands',
+        pk: 'CMD#123',
+        sk: 'CMD#123',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-setup', type: 'setup' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
 
       expect(mockedExecuteCommand).toHaveBeenCalledWith(
         'setup',
@@ -1162,9 +1055,6 @@ describe('ProjectAgent', () => {
         return { success: true, data: 'ok' }
       })
 
-      mockClient.getPendingCommands.mockResolvedValue([
-        { commandId: 'cmd-sync', type: 'config_sync' },
-      ])
       mockClient.getCommand.mockResolvedValue({
         commandId: 'cmd-sync',
         type: 'config_sync',
@@ -1175,7 +1065,19 @@ describe('ProjectAgent', () => {
       agent.start()
 
       await jest.advanceTimersByTimeAsync(100)
-      await jest.advanceTimersByTimeAsync(options.pollInterval)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+      onMessage({
+        id: 'notif-sync',
+        table: 'commands',
+        pk: 'CMD#123',
+        sk: 'CMD#123',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-sync', type: 'config_sync' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
 
       expect(mockedExecuteCommand).toHaveBeenCalledWith(
         'config_sync',

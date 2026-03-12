@@ -35,7 +35,7 @@ program
   .description(t('cmd.start'))
   .option('--token <token>', t('cmd.start.token'))
   .option('--api-url <url>', t('cmd.start.apiUrl'))
-  .option('--poll-interval <ms>', t('cmd.start.pollInterval'), '3000')
+  .option('--poll-interval <ms>', `${t('cmd.start.pollInterval')} (deprecated)`, '3000')
   .option('--heartbeat-interval <ms>', t('cmd.start.heartbeatInterval'), '30000')
   .option('--verbose', t('cmd.start.verbose'))
   .option('--no-auto-update', t('cmd.start.noAutoUpdate'))
