@@ -96,6 +96,19 @@ async function executeClaudeCodeChat(
         collectedToolCalls.push(JSON.parse(content))
       } catch { /* ignore parse errors */ }
     }
+    // tool_result チャンクの success/output を対応する tool_call エントリにマージ
+    if (type === 'tool_result') {
+      try {
+        const result = JSON.parse(content) as Record<string, unknown>
+        const entry = collectedToolCalls.find(
+          (tc) => tc.toolName === result.toolName,
+        )
+        if (entry) {
+          entry.success = result.success
+          entry.result = result.output
+        }
+      } catch { /* ignore parse errors */ }
+    }
     return rawSendChunk(type, content)
   }
 
