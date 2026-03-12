@@ -111,6 +111,7 @@ export class ApiClient {
     availableChatModes?: string[],
     activeChatMode?: string,
     ipAddress?: string,
+    configHash?: string,
   ): Promise<HeartbeatResponse | void> {
     logger.debug('Sending heartbeat')
     return this.post<HeartbeatResponse>(API_ENDPOINTS.HEARTBEAT(this.tenantCode), {
@@ -122,6 +123,7 @@ export class ApiClient {
       ...(availableChatModes !== undefined && { availableChatModes }),
       ...(activeChatMode !== undefined && { activeChatMode }),
       ...(ipAddress && { ipAddress }),
+      ...(configHash && { configHash }),
     })
   }
 

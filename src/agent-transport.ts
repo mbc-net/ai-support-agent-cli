@@ -12,7 +12,6 @@ import { refreshChatMode, scheduleConfigSync } from './agent-config-sync'
 
 export interface TransportState {
   heartbeatTimer: ReturnType<typeof setInterval> | null
-  pollTimer: ReturnType<typeof setInterval> | null
   subscriber: AppSyncSubscriber | null
   terminalWs: TerminalWebSocket | null
   processing: boolean
@@ -27,6 +26,7 @@ export interface TransportDeps {
   token: string
   projectDir: string | undefined
   tenantCode: string
+  /** @deprecated pollInterval is no longer used. Kept for backward compatibility with CLI options. */
   pollInterval: number
   heartbeatInterval: number
 }
@@ -37,57 +37,6 @@ export interface CommandContext {
   transportState: TransportState
   onSetup: () => Promise<void>
   onConfigSync: () => Promise<void>
-}
-
-/**
- * Start polling mode for pending commands.
- */
-export function startPollingMode(
-  deps: TransportDeps,
-  state: TransportState,
-  ctx: CommandContext,
-): void {
-  const pollCommands = async (): Promise<void> => {
-    try {
-      const pending = await deps.client.getPendingCommands(deps.agentId)
-
-      // chat_cancel commands are processed immediately regardless of processing flag
-      const cancelCommands = pending.filter(cmd => cmd.type === 'chat_cancel')
-      const normalCommands = pending.filter(cmd => cmd.type !== 'chat_cancel')
-
-      for (const cmd of cancelCommands) {
-        logger.info(t('runner.commandReceived', { prefix: deps.prefix, type: cmd.type, commandId: cmd.commandId }))
-        await processCommand(deps, ctx, cmd.commandId)
-      }
-
-      // Normal commands are gated by processing flag
-      if (state.processing) return
-      state.processing = true
-
-      try {
-        if (normalCommands.length > 0) {
-          logger.debug(`${deps.prefix} Polling found ${normalCommands.length} pending command(s)`)
-        }
-
-        for (const cmd of normalCommands) {
-          logger.info(t('runner.commandReceived', { prefix: deps.prefix, type: cmd.type, commandId: cmd.commandId }))
-          await processCommand(deps, ctx, cmd.commandId)
-        }
-      } finally {
-        state.processing = false
-      }
-    } catch (error) {
-      if (isAuthenticationError(error)) {
-        logger.error(t('runner.authError', { prefix: deps.prefix, detail: getDetailedErrorMessage(error) }))
-      } else {
-        logger.debug(`${deps.prefix} Polling error: ${getDetailedErrorMessage(error)}`)
-      }
-    }
-  }
-
-  state.pollTimer = setInterval(() => {
-    void pollCommands()
-  }, deps.pollInterval)
 }
 
 /**
@@ -107,9 +56,8 @@ export async function startSubscriptionMode(
     await state.subscriber.connect()
     logger.success(`${deps.prefix} Connected via AppSync WebSocket`)
   } catch (error) {
-    logger.warn(`${deps.prefix} WebSocket connection failed, falling back to polling: ${getDetailedErrorMessage(error)}`)
-    startPollingMode(deps, state, ctx)
-    return
+    logger.error(`${deps.prefix} WebSocket connection failed: ${getDetailedErrorMessage(error)}`)
+    throw error
   }
 
   logger.debug(`${deps.prefix} Subscribing with tenantCode: ${deps.tenantCode}`)
@@ -144,6 +92,7 @@ export function startHeartbeat(
         configSyncState.availableChatModes,
         configSyncState.activeChatMode,
         getLocalIpAddress(),
+        configSyncState.currentConfigHash,
       )
 
       // Check configHash from heartbeat response (polling fallback)
@@ -320,7 +269,6 @@ async function processCommand(
  */
 export function stopTransport(state: TransportState): void {
   if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
-  if (state.pollTimer) clearInterval(state.pollTimer)
   if (state.configSyncDebounceTimer) clearTimeout(state.configSyncDebounceTimer)
   if (state.subscriber) state.subscriber.disconnect()
   if (state.terminalWs) state.terminalWs.disconnect()

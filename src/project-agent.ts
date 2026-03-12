@@ -3,7 +3,7 @@ import * as os from 'os'
 import { ApiClient } from './api-client'
 import { AppSyncSubscriber } from './appsync-subscriber'
 import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, refreshChatMode } from './agent-config-sync'
-import { type TransportDeps, type TransportState, startPollingMode, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, stopTransport } from './agent-transport'
+import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, stopTransport } from './agent-transport'
 import { INITIAL_CONFIG_SYNC_MAX_RETRIES, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
@@ -39,7 +39,6 @@ export class ProjectAgent {
 
   private readonly transportState: TransportState = {
     heartbeatTimer: null,
-    pollTimer: null,
     subscriber: null,
     terminalWs: null,
     processing: false,
@@ -167,20 +166,19 @@ export class ProjectAgent {
       onConfigSync: () => this.performConfigSync(),
     }
 
-    if (result.transportMode === 'realtime' && result.appsyncUrl && result.appsyncApiKey) {
-      logger.info(`${this.prefix} Starting subscription mode (realtime)`)
-      await startSubscriptionMode(
-        this.transportDeps,
-        this.transportState,
-        commandContext,
-        AppSyncSubscriber,
-        result.appsyncUrl,
-        result.appsyncApiKey,
-      )
-    } else {
-      logger.info(`${this.prefix} Starting polling mode (interval: ${this.options.pollInterval}ms)`)
-      startPollingMode(this.transportDeps, this.transportState, commandContext)
+    if (!result.appsyncUrl || !result.appsyncApiKey) {
+      logger.error(`${this.prefix} AppSync credentials missing. Cannot start agent.`)
+      return
     }
+    logger.info(`${this.prefix} Starting subscription mode (realtime)`)
+    await startSubscriptionMode(
+      this.transportDeps,
+      this.transportState,
+      commandContext,
+      AppSyncSubscriber,
+      result.appsyncUrl,
+      result.appsyncApiKey,
+    )
 
     startHeartbeat(this.transportDeps, this.transportState, this.configSyncState, this.configSyncDeps)
 

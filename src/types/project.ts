@@ -46,6 +46,7 @@ export interface ProjectConfigResponse {
     provider: string
     branch: string
     authMethod: string
+    description?: string
   }>
   documentation?: {
     sources: Array<{
