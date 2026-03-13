@@ -1170,4 +1170,57 @@ describe('chat-executor', () => {
       expect(addDirIndices.length).toBe(3) // repos, docs, server/dir
     })
   })
+
+  describe('policyContext environment variables', () => {
+    it('should set policyContext env vars when tenantCode, projectCode, and conversationId are provided', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const payload: ChatPayload = {
+        message: 'Hello',
+        projectCode: 'MBC_01',
+        conversationId: 'conv-456',
+      }
+
+      const resultPromise = executeChatCommand(
+        payload, 'cmd-policy', mockClient, undefined, 'claude_code', 'agent-1',
+        undefined, undefined, undefined, 'mbc',
+      )
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const env = spawnCall[2].env
+      expect(env).toHaveProperty('AI_SUPPORT_TENANT_CODE', 'mbc')
+      expect(env).toHaveProperty('AI_SUPPORT_PROJECT_CODE', 'MBC_01')
+      expect(env).toHaveProperty('AI_SUPPORT_CONVERSATION_ID', 'conv-456')
+    })
+
+    it('should not set policyContext env vars when values are not provided', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const resultPromise = executeChatCommand(
+        basePayload, 'cmd-no-policy', mockClient, undefined, 'claude_code', 'agent-1',
+      )
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const env = spawnCall[2].env
+      expect(env).not.toHaveProperty('AI_SUPPORT_TENANT_CODE')
+      expect(env).not.toHaveProperty('AI_SUPPORT_PROJECT_CODE')
+      expect(env).not.toHaveProperty('AI_SUPPORT_CONVERSATION_ID')
+    })
+  })
 })

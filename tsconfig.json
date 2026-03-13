@@ -21,5 +21,9 @@
     "noImplicitReturns": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "__tests__", "src/__mocks__"]
+  "exclude": ["node_modules", "dist", "__tests__", "src/__mocks__"],
+  "ts-node": {
+    "transpileOnly": true,
+    "ignore": ["(?:^|/)node_modules/"]
+  }
 }

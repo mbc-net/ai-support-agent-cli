@@ -20,6 +20,7 @@ export interface ExecuteCommandOptions {
   projectDir?: string
   projectConfig?: ProjectConfigResponse
   mcpConfigPath?: string
+  tenantCode?: string
   onSetup?: () => Promise<void>
   onConfigSync?: () => Promise<void>
 }
@@ -97,7 +98,7 @@ export async function executeCommand(
         if (!opts?.commandId || !opts?.client) {
           return errorResult(ERR_CHAT_REQUIRES_CLIENT)
         }
-        return await executeChatCommand(p, opts.commandId, opts.client, opts.serverConfig, opts.activeChatMode, opts.agentId, opts.projectDir, opts.projectConfig, opts.mcpConfigPath)
+        return await executeChatCommand(p, opts.commandId, opts.client, opts.serverConfig, opts.activeChatMode, opts.agentId, opts.projectDir, opts.projectConfig, opts.mcpConfigPath, opts.tenantCode)
       case 'chat_cancel': {
         const targetCommandId = (p as Record<string, unknown>).targetCommandId
         if (typeof targetCommandId !== 'string') {

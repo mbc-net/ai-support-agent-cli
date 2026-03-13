@@ -48,6 +48,7 @@ export async function executeChatCommand(
   projectDir?: string,
   projectConfig?: ProjectConfigResponse,
   mcpConfigPath?: string,
+  tenantCode?: string,
 ): Promise<CommandResult> {
   if (!agentId) {
     return errorResult(ERR_AGENT_ID_REQUIRED)
@@ -60,7 +61,7 @@ export async function executeChatCommand(
       return executeApiChatCommand(payload, commandId, client, serverConfig, agentId)
     case 'claude_code':
     default:
-      return executeClaudeCodeChat(payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath)
+      return executeClaudeCodeChat(payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode)
   }
 }
 
@@ -78,6 +79,7 @@ async function executeClaudeCodeChat(
   projectDir?: string,
   projectConfig?: ProjectConfigResponse,
   mcpConfigPath?: string,
+  tenantCode?: string,
 ): Promise<CommandResult> {
   const message = parseString(payload.message)
   if (!message) {
@@ -190,6 +192,7 @@ async function executeClaudeCodeChat(
     ].filter(Boolean).join(', ')
     logger.debug(`[chat] Spawning claude CLI for command [${commandId}]: ${logDetails}`)
     logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
+    const conversationIdStr = conversationId ?? undefined
     const handle = runClaudeCode({
       message: messageWithHistory,
       sendChunk,
@@ -200,6 +203,11 @@ async function executeClaudeCodeChat(
       mcpConfigPath,
       cwd: projectDir,
       systemPrompt,
+      policyContext: {
+        tenantCode,
+        projectCode,
+        conversationId: conversationIdStr,
+      },
     })
     // プロセスを管理 Map に登録
     processManager.register(commandId, handle)

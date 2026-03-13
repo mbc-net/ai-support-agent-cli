@@ -123,13 +123,17 @@ export function startHeartbeat(
 
 /**
  * Start terminal WebSocket connection.
+ * @param wsUrl - サーバーから返されたWebSocket URL（指定時はapiUrlの代わりに使用）
  */
 export function startTerminalWebSocket(
   deps: TransportDeps,
   state: TransportState,
+  wsUrl?: string,
 ): void {
+  // wsUrl が指定された場合はそれを使う（Next.jsプロキシ経由ではWSが通らないため）
+  const baseUrl = wsUrl ?? deps.apiUrl
   state.terminalWs = new TerminalWebSocket(
-    deps.apiUrl,
+    baseUrl,
     deps.token,
     deps.agentId,
     deps.projectDir,
@@ -237,6 +241,7 @@ async function processCommand(
       projectDir: deps.projectDir,
       projectConfig: ctx.configSyncState.projectConfig,
       mcpConfigPath: ctx.configSyncState.mcpConfigPath,
+      tenantCode: deps.tenantCode,
       onSetup: ctx.onSetup,
       onConfigSync: ctx.onConfigSync,
     })
