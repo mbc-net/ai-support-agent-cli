@@ -1,3 +1,5 @@
+import * as path from 'path'
+
 import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../base-websocket'
@@ -110,16 +112,45 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
   }
 
   private handleOpen(msg: TerminalServerMessage): void {
-    const session = this.manager.createSession({
+    // API から受け取った sessionId を使用する
+    const serverSessionId = msg.sessionId
+    if (!serverSessionId) {
+      this.send({
+        type: 'error',
+        sessionId: 'unknown',
+        error: 'Missing sessionId in open message',
+      })
+      return
+    }
+
+    // Resolve cwd: if relative, resolve against projectDir
+    let cwd = this.projectDir
+    if (msg.cwd && this.projectDir) {
+      const resolved = path.resolve(this.projectDir, msg.cwd)
+      const resolvedProjectDir = path.resolve(this.projectDir)
+      if (resolved !== resolvedProjectDir && !resolved.startsWith(resolvedProjectDir + '/')) {
+        this.send({
+          type: 'error',
+          sessionId: serverSessionId,
+          error: 'Invalid cwd: outside project directory',
+        })
+        return
+      }
+      cwd = resolved
+    } else if (msg.cwd) {
+      cwd = msg.cwd
+    }
+
+    const session = this.manager.createSessionWithId(serverSessionId, {
       cols: msg.cols,
       rows: msg.rows,
-      cwd: msg.cwd ?? this.projectDir,
+      cwd,
     })
 
     if (!session) {
       this.send({
         type: 'error',
-        sessionId: msg.sessionId ?? 'unknown',
+        sessionId: serverSessionId,
         error: `Maximum concurrent sessions (${this.manager.size}) reached`,
       })
       return
@@ -128,7 +159,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     session.onData((data) => {
       this.send({
         type: 'stdout',
-        sessionId: session.sessionId,
+        sessionId: serverSessionId,
         data: Buffer.from(data).toString('base64'),
       })
     })
@@ -136,20 +167,20 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     session.onExit((code) => {
       this.send({
         type: 'exit',
-        sessionId: session.sessionId,
+        sessionId: serverSessionId,
         code,
       })
     })
 
     this.send({
       type: 'ready',
-      sessionId: session.sessionId,
+      sessionId: serverSessionId,
       pid: session.pid,
       cols: session.cols,
       rows: session.rows,
     })
 
-    logger.debug(`[terminal-ws] Session opened: ${session.sessionId} (pid=${session.pid})`)
+    logger.debug(`[terminal-ws] Session opened: ${serverSessionId} (pid=${session.pid})`)
   }
 
   private handleStdin(msg: TerminalServerMessage): void {

@@ -72,6 +72,7 @@ describe('TerminalWebSocket', () => {
 
       const openMsg: TerminalServerMessage = {
         type: 'open',
+        sessionId: 'test-session-1',
         cols: 80,
         rows: 24,
       }
@@ -111,7 +112,7 @@ describe('TerminalWebSocket', () => {
         }
       })
 
-      const openMsg: TerminalServerMessage = { type: 'open' }
+      const openMsg: TerminalServerMessage = { type: 'open', sessionId: 'test-stdin-session' }
       ws.send(JSON.stringify(openMsg))
     })
 
@@ -149,7 +150,7 @@ describe('TerminalWebSocket', () => {
         }
       })
 
-      ws.send(JSON.stringify({ type: 'open' }))
+      ws.send(JSON.stringify({ type: 'open', sessionId: 'test-resize-session' }))
     })
 
     terminalWs = createTerminalWs()
@@ -175,7 +176,7 @@ describe('TerminalWebSocket', () => {
         }
       })
 
-      ws.send(JSON.stringify({ type: 'open' }))
+      ws.send(JSON.stringify({ type: 'open', sessionId: 'test-close-session' }))
     })
 
     terminalWs = createTerminalWs()
@@ -202,7 +203,7 @@ describe('TerminalWebSocket', () => {
         }
       })
 
-      ws.send(JSON.stringify({ type: 'open' }))
+      ws.send(JSON.stringify({ type: 'open', sessionId: 'test-exit-session' }))
     })
 
     terminalWs = createTerminalWs()
@@ -232,14 +233,14 @@ describe('TerminalWebSocket', () => {
   })
 
   it('should send error when max sessions reached', (done) => {
-    let readyCount = 0
+    let openCount = 0
     server.on('connection', (ws) => {
       ws.on('message', (data) => {
         const msg = JSON.parse(data.toString()) as TerminalAgentMessage
         if (msg.type === 'ready') {
-          readyCount++
-          if (readyCount < 5) {
-            ws.send(JSON.stringify({ type: 'open' }))
+          openCount++
+          if (openCount < 5) {
+            ws.send(JSON.stringify({ type: 'open', sessionId: `max-session-${openCount + 1}` }))
           } else {
             // 6th open should fail
             ws.send(JSON.stringify({ type: 'open', sessionId: 'overflow' }))
@@ -250,7 +251,7 @@ describe('TerminalWebSocket', () => {
         }
       })
 
-      ws.send(JSON.stringify({ type: 'open' }))
+      ws.send(JSON.stringify({ type: 'open', sessionId: 'max-session-1' }))
     })
 
     terminalWs = createTerminalWs()
@@ -393,6 +394,23 @@ describe('TerminalWebSocket', () => {
       // Send resize for a nonexistent session - should not throw or send error
       ws.send(JSON.stringify({ type: 'resize', sessionId: 'nonexistent', cols: 100, rows: 50 }))
       setTimeout(done, 50)
+    })
+
+    terminalWs = createTerminalWs()
+    void terminalWs.connect()
+  })
+
+  it('should reject cwd outside project directory', (done) => {
+    server.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+        if (msg.type === 'error') {
+          expect(msg.error).toContain('Invalid cwd: outside project directory')
+          done()
+        }
+      })
+
+      ws.send(JSON.stringify({ type: 'open', sessionId: 'traversal-test', cwd: '../../etc' }))
     })
 
     terminalWs = createTerminalWs()

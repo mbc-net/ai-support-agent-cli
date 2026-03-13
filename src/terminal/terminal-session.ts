@@ -1,4 +1,8 @@
-import { ChildProcess, spawn } from 'child_process'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
+
+import * as pty from 'node-pty'
 
 import { buildSafeEnv } from '../security'
 
@@ -13,6 +17,69 @@ export interface TerminalSessionOptions {
   cols?: number
   rows?: number
   cwd?: string
+}
+
+/**
+ * プロジェクトディレクトリ外への移動を制限するシェル初期化スクリプトを生成する。
+ * cd をラップし、移動先がプロジェクトディレクトリ配下でなければ拒否する。
+ * PROMPT_COMMAND / precmd でも毎回チェックし、外部コマンド経由での移動も防止する。
+ */
+function buildSandboxInitScript(projectDir: string): string {
+  // シェル変数に埋め込む際にシングルクォートをエスケープ
+  const escaped = projectDir.replace(/'/g, "'\\''")
+  // __SANDBOX_REAL は realpath で解決した物理パス。
+  // pwd -P との比較に使い、シンボリックリンクの不一致を防ぐ。
+  return `
+__SANDBOX_DIR='${escaped}'
+__SANDBOX_REAL="$(cd "\${__SANDBOX_DIR}" && pwd -P)"
+__sandbox_is_inside() {
+  local cur
+  cur="$(pwd -P)"
+  case "\${cur}" in
+    "\${__SANDBOX_REAL}") return 0 ;;
+    "\${__SANDBOX_REAL}/"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+cd() {
+  builtin cd "\$@" || return
+  if ! __sandbox_is_inside; then
+    echo "restricted: cannot leave project directory (\${__SANDBOX_REAL})" >&2
+    builtin cd "\${__SANDBOX_DIR}"
+    return 1
+  fi
+}
+pushd() {
+  builtin pushd "\$@" || return
+  if ! __sandbox_is_inside; then
+    builtin popd >/dev/null 2>&1
+    echo "restricted: cannot leave project directory (\${__SANDBOX_REAL})" >&2
+    return 1
+  fi
+}
+popd() {
+  builtin popd "\$@" || return
+  if ! __sandbox_is_inside; then
+    builtin cd "\${__SANDBOX_DIR}"
+    echo "restricted: cannot leave project directory (\${__SANDBOX_REAL})" >&2
+    return 1
+  fi
+}
+__sandbox_check() {
+  if ! __sandbox_is_inside; then
+    builtin cd "\${__SANDBOX_DIR}" 2>/dev/null
+  fi
+}
+# bash
+if [ -n "\${BASH_VERSION}" ]; then
+  PROMPT_COMMAND="__sandbox_check;\${PROMPT_COMMAND}"
+fi
+# zsh
+if [ -n "\${ZSH_VERSION}" ]; then
+  autoload -Uz add-zsh-hook 2>/dev/null
+  add-zsh-hook precmd __sandbox_check 2>/dev/null
+fi
+`
 }
 
 export interface TerminalSessionInfo {
@@ -31,12 +98,13 @@ type ExitCallback = (code: number | null) => void
 export class TerminalSession {
   readonly sessionId: string
   readonly pid: number
-  readonly cols: number
-  readonly rows: number
+  cols: number
+  rows: number
   readonly cwd: string
   readonly createdAt: number
   private lastActivity: number
-  private readonly process: ChildProcess
+  private readonly ptyProcess: pty.IPty
+  private sandboxTmpDir: string | null = null
   private dataCallback: DataCallback | null = null
   private exitCallback: ExitCallback | null = null
   private exited = false
@@ -51,40 +119,62 @@ export class TerminalSession {
     this.createdAt = Date.now()
     this.lastActivity = this.createdAt
 
-    const env = {
-      ...buildSafeEnv(),
-      COLUMNS: String(this.cols),
-      LINES: String(this.rows),
+    const shell = process.env.SHELL ?? '/bin/bash'
+    const safeEnv = buildSafeEnv()
+    const env: Record<string, string> = {
+      ...safeEnv,
       TERM: 'xterm-256color',
     }
+    // node-pty requires PATH to locate spawn-helper
+    if (!env.PATH) {
+      env.PATH = '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+    }
 
-    this.process = spawn('/bin/bash', ['--login'], {
+    // サンドボックス初期化スクリプトを一時ファイルに書き出す
+    const sandboxScript = buildSandboxInitScript(path.resolve(this.cwd))
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'terminal-sandbox-'))
+    this.sandboxTmpDir = tmpDir
+
+    const shellArgs: string[] = []
+    const isZsh = shell.endsWith('/zsh') || shell.endsWith('/zsh5')
+    if (isZsh) {
+      // zsh: ZDOTDIR に .zshrc を配置し、元の .zshrc も読み込む
+      const origZdotdir = (process.env.ZDOTDIR ?? process.env.HOME ?? '').replace(/'/g, "'\\''")
+      const zshrc = `# Load original .zshrc\n[ -f '${origZdotdir}/.zshrc' ] && source '${origZdotdir}/.zshrc'\n${sandboxScript}`
+      fs.writeFileSync(path.join(tmpDir, '.zshrc'), zshrc)
+      env.ZDOTDIR = tmpDir
+      shellArgs.push('--login')
+    } else {
+      // bash: --rcfile でサンドボックススクリプトを読み込む
+      const bashrc = `# Load original .bashrc\n[ -f ~/.bashrc ] && source ~/.bashrc\n${sandboxScript}`
+      const rcFile = path.join(tmpDir, '.bashrc')
+      fs.writeFileSync(rcFile, bashrc)
+      shellArgs.push('--rcfile', rcFile)
+    }
+
+    this.ptyProcess = pty.spawn(shell, shellArgs, {
+      name: 'xterm-256color',
+      cols: this.cols,
+      rows: this.rows,
       cwd: this.cwd,
       env,
-      stdio: ['pipe', 'pipe', 'pipe'],
     })
 
-    this.pid = this.process.pid ?? 0
+    this.pid = this.ptyProcess.pid
 
-    this.process.stdout?.on('data', (chunk: Buffer) => {
+    this.ptyProcess.onData((data: string) => {
       this.touchActivity()
       if (this.dataCallback) {
-        this.dataCallback(chunk.toString('utf-8'))
+        this.dataCallback(data)
       }
     })
 
-    this.process.stderr?.on('data', (chunk: Buffer) => {
-      this.touchActivity()
-      if (this.dataCallback) {
-        this.dataCallback(chunk.toString('utf-8'))
-      }
-    })
-
-    this.process.on('exit', (code) => {
+    this.ptyProcess.onExit(({ exitCode }) => {
       this.exited = true
       this.clearIdleTimer()
+      this.cleanupTmpDir()
       if (this.exitCallback) {
-        this.exitCallback(code)
+        this.exitCallback(exitCode)
       }
     })
 
@@ -106,21 +196,33 @@ export class TerminalSession {
   write(data: string): void {
     if (this.exited) return
     this.touchActivity()
-    this.process.stdin?.write(data)
+    this.ptyProcess.write(data)
   }
 
   resize(cols: number, rows: number): void {
-    // child_process does not support resize natively;
-    // update stored dimensions for info purposes
-    (this as { cols: number }).cols = cols;
-    (this as { rows: number }).rows = rows
+    if (this.exited) return
+    this.cols = cols
+    this.rows = rows
+    this.ptyProcess.resize(cols, rows)
     this.touchActivity()
   }
 
   kill(): void {
     if (this.exited) return
     this.clearIdleTimer()
-    this.process.kill('SIGTERM')
+    this.ptyProcess.kill()
+    this.cleanupTmpDir()
+  }
+
+  private cleanupTmpDir(): void {
+    if (this.sandboxTmpDir) {
+      try {
+        fs.rmSync(this.sandboxTmpDir, { recursive: true, force: true })
+      } catch {
+        // ignore cleanup errors
+      }
+      this.sandboxTmpDir = null
+    }
   }
 
   isAlive(): boolean {
@@ -168,12 +270,16 @@ export class TerminalSessionManager {
   private sessionCounter = 0
 
   createSession(options: TerminalSessionOptions = {}): TerminalSession | null {
+    this.sessionCounter++
+    const sessionId = `term-${Date.now()}-${this.sessionCounter}`
+    return this.createSessionWithId(sessionId, options)
+  }
+
+  createSessionWithId(sessionId: string, options: TerminalSessionOptions = {}): TerminalSession | null {
     if (this.sessions.size >= MAX_CONCURRENT_SESSIONS) {
       return null
     }
 
-    this.sessionCounter++
-    const sessionId = `term-${Date.now()}-${this.sessionCounter}`
     const session = new TerminalSession(sessionId, options)
 
     session.onExit(() => {

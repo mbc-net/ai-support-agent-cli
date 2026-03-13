@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
-import { ERR_NO_CONTENT_SPECIFIED, ERR_NO_FILE_PATH_SPECIFIED, MAX_DIR_ENTRIES, MAX_FILE_READ_SIZE, MAX_FILE_WRITE_SIZE } from '../constants'
+import { ERR_NO_CONTENT_SPECIFIED, ERR_NO_FILE_PATH_SPECIFIED, HIDDEN_ENTRIES, MAX_DIR_ENTRIES, MAX_FILE_READ_SIZE, MAX_FILE_WRITE_SIZE } from '../constants'
 import { resolveAndValidatePath } from '../security'
 import { type CommandResult, errorResult, type FileDeletePayload, type FileListPayload, type FileMkdirPayload, type FileReadPayload, type FileRenamePayload, type FileWritePayload, successResult } from '../types'
 import { parseString } from '../utils'
@@ -50,7 +50,8 @@ export async function fileList(
   baseDir?: string,
 ): Promise<CommandResult> {
   return withValidatedPath(payload, async (dirPath) => {
-    const allEntries = await fs.promises.readdir(dirPath, { withFileTypes: true })
+    const rawEntries = await fs.promises.readdir(dirPath, { withFileTypes: true })
+    const allEntries = rawEntries.filter((e) => !HIDDEN_ENTRIES.includes(e.name))
     const truncated = allEntries.length > MAX_DIR_ENTRIES
     const entries = allEntries.slice(0, MAX_DIR_ENTRIES)
 
