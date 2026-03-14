@@ -41,17 +41,20 @@ describe('VsCodeWsProxy', () => {
       const onData = jest.fn()
       const onClose = jest.fn()
 
-      proxy.openConnection('sub-1', '/ws', onData, onClose)
+      proxy.openConnection('sub-1', '/ws', jest.fn(), onData, onClose)
 
       expect(WebSocket).toHaveBeenCalledWith('ws://127.0.0.1:8443/ws')
     })
 
-    it('should add connection to map on open', () => {
+    it('should add connection to map on open and call onOpen', () => {
+      const onOpen = jest.fn()
       const onData = jest.fn()
       const onClose = jest.fn()
 
-      proxy.openConnection('sub-1', '/ws', onData, onClose)
+      proxy.openConnection('sub-1', '/ws', onOpen, onData, onClose)
       mockWs.emit('open')
+
+      expect(onOpen).toHaveBeenCalled()
 
       // Verify connection is tracked by attempting to send
       proxy.sendFrame('sub-1', Buffer.from('hello').toString('base64'))
@@ -62,7 +65,7 @@ describe('VsCodeWsProxy', () => {
       const onData = jest.fn()
       const onClose = jest.fn()
 
-      proxy.openConnection('sub-1', '/ws', onData, onClose)
+      proxy.openConnection('sub-1', '/ws', jest.fn(), onData, onClose)
       mockWs.emit('open')
 
       // Send buffer data
@@ -74,7 +77,7 @@ describe('VsCodeWsProxy', () => {
       const onData = jest.fn()
       const onClose = jest.fn()
 
-      proxy.openConnection('sub-1', '/ws', onData, onClose)
+      proxy.openConnection('sub-1', '/ws', jest.fn(), onData, onClose)
       mockWs.emit('open')
 
       mockWs.emit('message', 'string data')
@@ -85,7 +88,7 @@ describe('VsCodeWsProxy', () => {
       const onData = jest.fn()
       const onClose = jest.fn()
 
-      proxy.openConnection('sub-1', '/ws', onData, onClose)
+      proxy.openConnection('sub-1', '/ws', jest.fn(), onData, onClose)
       mockWs.emit('open')
       mockWs.emit('close')
 
@@ -100,7 +103,7 @@ describe('VsCodeWsProxy', () => {
       const onData = jest.fn()
       const onClose = jest.fn()
 
-      proxy.openConnection('sub-1', '/ws', onData, onClose)
+      proxy.openConnection('sub-1', '/ws', jest.fn(), onData, onClose)
 
       expect(() => {
         mockWs.emit('error', new Error('connection refused'))
@@ -113,7 +116,7 @@ describe('VsCodeWsProxy', () => {
       const onData = jest.fn()
       const onClose = jest.fn()
 
-      proxy.openConnection('sub-1', '/ws', onData, onClose)
+      proxy.openConnection('sub-1', '/ws', jest.fn(), onData, onClose)
       mockWs.emit('open')
 
       const data = Buffer.from('test').toString('base64')
@@ -131,7 +134,7 @@ describe('VsCodeWsProxy', () => {
       const onData = jest.fn()
       const onClose = jest.fn()
 
-      proxy.openConnection('sub-1', '/ws', onData, onClose)
+      proxy.openConnection('sub-1', '/ws', jest.fn(), onData, onClose)
       mockWs.emit('open')
 
       mockWs.readyState = WebSocket.CLOSED
@@ -144,7 +147,7 @@ describe('VsCodeWsProxy', () => {
       const onData = jest.fn()
       const onClose = jest.fn()
 
-      proxy.openConnection('sub-1', '/ws', onData, onClose)
+      proxy.openConnection('sub-1', '/ws', jest.fn(), onData, onClose)
       mockWs.emit('open')
 
       mockWs.send.mockImplementation(() => { throw new Error('send failed') })
@@ -160,7 +163,7 @@ describe('VsCodeWsProxy', () => {
       const onData = jest.fn()
       const onClose = jest.fn()
 
-      proxy.openConnection('sub-1', '/ws', onData, onClose)
+      proxy.openConnection('sub-1', '/ws', jest.fn(), onData, onClose)
       mockWs.emit('open')
 
       proxy.closeConnection('sub-1')
@@ -190,10 +193,10 @@ describe('VsCodeWsProxy', () => {
         return callCount++ === 0 ? mockWs : mockWs2
       })
 
-      proxy.openConnection('sub-1', '/ws', jest.fn(), jest.fn())
+      proxy.openConnection('sub-1', '/ws', jest.fn(), jest.fn(), jest.fn())
       mockWs.emit('open')
 
-      proxy.openConnection('sub-2', '/ws', jest.fn(), jest.fn())
+      proxy.openConnection('sub-2', '/ws', jest.fn(), jest.fn(), jest.fn())
       mockWs2.emit('open')
 
       proxy.closeAll()
