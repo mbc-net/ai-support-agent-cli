@@ -178,7 +178,7 @@ export function buildEnvArgs(projectMappings: ProjectDirMapping[]): string[] {
 }
 
 export function buildContainerArgs(opts: DockerRunOptions): string[] {
-  const args: string[] = ['start', '--no-docker']
+  const args: string[] = ['ai-support-agent', 'start', '--no-docker']
 
   if (opts.token) {
     args.push('--token', opts.token)
