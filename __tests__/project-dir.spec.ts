@@ -130,6 +130,44 @@ describe('project-dir', () => {
       )
     })
 
+    it('should use container dir mapping from AI_SUPPORT_AGENT_PROJECT_DIR_MAP', () => {
+      process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP = 'MBC_01=/workspace/projects/MBC_01;PROJ_B=/workspace/projects/PROJ_B'
+      const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
+      expect(resolveProjectDir(project)).toBe('/workspace/projects/MBC_01')
+      delete process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP
+    })
+
+    it('should prioritize container dir mapping over project.projectDir', () => {
+      process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP = 'MBC_01=/container/path'
+      const project = {
+        projectCode: 'MBC_01',
+        token: 'tok',
+        apiUrl: 'http://api',
+        projectDir: '/explicit/path',
+      }
+      expect(resolveProjectDir(project)).toBe('/container/path')
+      delete process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP
+    })
+
+    it('should fall through when project code is not in container dir mapping', () => {
+      process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP = 'OTHER=/workspace/projects/OTHER'
+      const project = {
+        projectCode: 'MBC_01',
+        token: 'tok',
+        apiUrl: 'http://api',
+        projectDir: '/explicit/path',
+      }
+      expect(resolveProjectDir(project)).toBe('/explicit/path')
+      delete process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP
+    })
+
+    it('should handle malformed entries in AI_SUPPORT_AGENT_PROJECT_DIR_MAP', () => {
+      process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP = 'badentry;MBC_01=/good/path;=noprojectcode'
+      const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
+      expect(resolveProjectDir(project)).toBe('/good/path')
+      delete process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP
+    })
+
     it('should prioritize project.projectDir over defaultProjectDir', () => {
       const project = {
         projectCode: 'MBC_01',

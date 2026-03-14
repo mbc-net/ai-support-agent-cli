@@ -305,6 +305,16 @@ describe('docker-runner', () => {
       expect(configDirArg).not.toContain('./relative/path')
     })
 
+    it('should include project directory mappings when provided', () => {
+      const mappings = [
+        { hostDir: '/host/project-a', containerDir: '/workspace/projects/A', projectCode: 'A' },
+        { hostDir: '/host/project-b', containerDir: '/workspace/projects/B', projectCode: 'B' },
+      ]
+      const args = buildEnvArgs(mappings)
+      const mapArg = args.find((a: string) => a.startsWith('AI_SUPPORT_AGENT_PROJECT_DIR_MAP='))
+      expect(mapArg).toBe('AI_SUPPORT_AGENT_PROJECT_DIR_MAP=A=/workspace/projects/A;B=/workspace/projects/B')
+    })
+
     it('should skip unset environment variables', () => {
       delete process.env.AI_SUPPORT_AGENT_TOKEN
       delete process.env.AI_SUPPORT_AGENT_API_URL
