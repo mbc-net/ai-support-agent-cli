@@ -1,7 +1,6 @@
 import { AxiosError, AxiosHeaders } from 'axios'
 
 import {
-  getDetailedErrorMessage,
   getErrorMessage,
   mcpErrorResponse,
   mcpImageResponse,
@@ -83,7 +82,7 @@ describe('mcp-response helpers', () => {
     })
   })
 
-  describe('getDetailedErrorMessage', () => {
+  describe('getErrorMessage', () => {
     it('should extract message from Axios error response data', () => {
       const error = new AxiosError('Request failed with status code 404', 'ERR_BAD_REQUEST', undefined, undefined, {
         status: 404,
@@ -92,7 +91,7 @@ describe('mcp-response helpers', () => {
         headers: {},
         config: { headers: new AxiosHeaders() },
       })
-      expect(getDetailedErrorMessage(error)).toBe('[404] Credentials not found for account xyz')
+      expect(getErrorMessage(error)).toBe('[404] Credentials not found for account xyz')
     })
 
     it('should extract error field from Axios error response data', () => {
@@ -103,7 +102,7 @@ describe('mcp-response helpers', () => {
         headers: {},
         config: { headers: new AxiosHeaders() },
       })
-      expect(getDetailedErrorMessage(error)).toBe('[422] SSO_AUTH_REQUIRED')
+      expect(getErrorMessage(error)).toBe('[422] SSO_AUTH_REQUIRED')
     })
 
     it('should fall back to HTTP status when no message or error in data', () => {
@@ -114,7 +113,7 @@ describe('mcp-response helpers', () => {
         headers: {},
         config: { headers: new AxiosHeaders() },
       })
-      expect(getDetailedErrorMessage(error)).toBe('HTTP 500: Request failed with status code 500')
+      expect(getErrorMessage(error)).toBe('HTTP 500: Request failed with status code 500')
     })
 
     it('should fall back to HTTP status when response data is undefined', () => {
@@ -125,23 +124,23 @@ describe('mcp-response helpers', () => {
         headers: {},
         config: { headers: new AxiosHeaders() },
       })
-      expect(getDetailedErrorMessage(error)).toBe('HTTP 502: Request failed with status code 502')
+      expect(getErrorMessage(error)).toBe('HTTP 502: Request failed with status code 502')
     })
 
     it('should fall back to getErrorMessage for AxiosError without response', () => {
       const error = new AxiosError('Network Error', 'ERR_NETWORK')
-      expect(getDetailedErrorMessage(error)).toBe('Network Error')
+      expect(getErrorMessage(error)).toBe('Network Error')
     })
 
     it('should fall back to getErrorMessage for non-Axios Error', () => {
       const error = new Error('generic error')
-      expect(getDetailedErrorMessage(error)).toBe('generic error')
+      expect(getErrorMessage(error)).toBe('generic error')
     })
 
     it('should fall back to getErrorMessage for non-Error values', () => {
-      expect(getDetailedErrorMessage('string error')).toBe('string error')
-      expect(getDetailedErrorMessage(42)).toBe('42')
-      expect(getDetailedErrorMessage(null)).toBe('null')
+      expect(getErrorMessage('string error')).toBe('string error')
+      expect(getErrorMessage(42)).toBe('42')
+      expect(getErrorMessage(null)).toBe('null')
     })
 
     it('should prefer message over error field when both exist', () => {
@@ -152,7 +151,7 @@ describe('mcp-response helpers', () => {
         headers: {},
         config: { headers: new AxiosHeaders() },
       })
-      expect(getDetailedErrorMessage(error)).toBe('[400] Detailed message')
+      expect(getErrorMessage(error)).toBe('[400] Detailed message')
     })
   })
 
@@ -183,7 +182,7 @@ describe('mcp-response helpers', () => {
       })
     })
 
-    it('should use getDetailedErrorMessage for Axios errors', async () => {
+    it('should use getErrorMessage for Axios errors', async () => {
       const axiosError = new AxiosError('Request failed', 'ERR_BAD_REQUEST', undefined, undefined, {
         status: 403,
         statusText: 'Forbidden',

@@ -98,5 +98,9 @@ RUN npm install -g @anthropic-ai/claude-code @ai-support-agent/cli@${AGENT_VERSI
 
 WORKDIR /workspace
 RUN chmod 777 /workspace
-USER node
-ENTRYPOINT ["ai-support-agent"]
+
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh && chmod g+w /etc/passwd
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["ai-support-agent"]

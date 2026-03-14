@@ -1,6 +1,6 @@
-import { getErrorMessage, getDetailedErrorMessage } from '../../utils'
+import { getErrorMessage } from '../../utils'
 
-export { getErrorMessage, getDetailedErrorMessage }
+export { getErrorMessage }
 
 export type McpToolResult =
   | ReturnType<typeof mcpTextResponse>
@@ -38,6 +38,6 @@ export async function withMcpErrorHandling(
   try {
     return await fn()
   } catch (error) {
-    return mcpErrorResponse(getDetailedErrorMessage(error))
+    return mcpErrorResponse(getErrorMessage(error))
   }
 }

@@ -8,12 +8,16 @@ import type { AgentServerConfig, ChatPayload } from '../../src/types'
 jest.mock('../../src/logger')
 
 // Mock axios - the module uses `import axios from 'axios'` so we mock the default export
-jest.mock('axios', () => ({
-  __esModule: true,
-  default: {
-    post: jest.fn(),
-  },
-}))
+jest.mock('axios', () => {
+  const actual = jest.requireActual('axios')
+  return {
+    __esModule: true,
+    default: {
+      post: jest.fn(),
+      isAxiosError: actual.default?.isAxiosError ?? actual.isAxiosError,
+    },
+  }
+})
 
 import axios from 'axios'
 

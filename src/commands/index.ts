@@ -98,7 +98,18 @@ export async function executeCommand(
         if (!opts?.commandId || !opts?.client) {
           return errorResult(ERR_CHAT_REQUIRES_CLIENT)
         }
-        return await executeChatCommand(p, opts.commandId, opts.client, opts.serverConfig, opts.activeChatMode, opts.agentId, opts.projectDir, opts.projectConfig, opts.mcpConfigPath, opts.tenantCode)
+        return await executeChatCommand({
+          payload: p,
+          commandId: opts.commandId,
+          client: opts.client,
+          serverConfig: opts.serverConfig,
+          activeChatMode: opts.activeChatMode,
+          agentId: opts.agentId,
+          projectDir: opts.projectDir,
+          projectConfig: opts.projectConfig,
+          mcpConfigPath: opts.mcpConfigPath,
+          tenantCode: opts.tenantCode,
+        })
       case 'chat_cancel': {
         const targetCommandId = (p as Record<string, unknown>).targetCommandId
         if (typeof targetCommandId !== 'string') {

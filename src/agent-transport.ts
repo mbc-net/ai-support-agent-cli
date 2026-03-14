@@ -5,7 +5,7 @@ import { t } from './i18n'
 import { logger } from './logger'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
 import { TerminalWebSocket, isNodePtyAvailable } from './terminal'
-import { getDetailedErrorMessage, isAuthenticationError } from './utils'
+import { getErrorMessage, isAuthenticationError } from './utils'
 import { executeCommand } from './commands'
 import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
 import { refreshChatMode, scheduleConfigSync } from './agent-config-sync'
@@ -56,7 +56,7 @@ export async function startSubscriptionMode(
     await state.subscriber.connect()
     logger.success(`${deps.prefix} Connected via AppSync WebSocket`)
   } catch (error) {
-    logger.error(`${deps.prefix} WebSocket connection failed: ${getDetailedErrorMessage(error)}`)
+    logger.error(`${deps.prefix} WebSocket connection failed: ${getErrorMessage(error)}`)
     throw error
   }
 
@@ -107,9 +107,9 @@ export function startHeartbeat(
       logger.debug(`${deps.prefix} Heartbeat sent (activeChatMode=${configSyncState.activeChatMode ?? 'none'})`)
     } catch (error) {
       if (isAuthenticationError(error)) {
-        logger.error(t('runner.authError', { prefix: deps.prefix, detail: getDetailedErrorMessage(error) }))
+        logger.error(t('runner.authError', { prefix: deps.prefix, detail: getErrorMessage(error) }))
       } else {
-        logger.warn(t('runner.heartbeatFailed', { prefix: deps.prefix, message: getDetailedErrorMessage(error) }))
+        logger.warn(t('runner.heartbeatFailed', { prefix: deps.prefix, message: getErrorMessage(error) }))
       }
     }
   }
@@ -145,7 +145,7 @@ export function startTerminalWebSocket(
   )
 
   state.terminalWs.connect().catch((error) => {
-    logger.warn(`${deps.prefix} Terminal WebSocket connection failed: ${getDetailedErrorMessage(error)}`)
+    logger.warn(`${deps.prefix} Terminal WebSocket connection failed: ${getErrorMessage(error)}`)
   })
 }
 
@@ -222,7 +222,7 @@ export async function checkPendingCommands(
       await processCommand(deps, ctx, cmd.commandId)
     }
   } catch (error) {
-    logger.warn(`${deps.prefix} Failed to check pending commands: ${getDetailedErrorMessage(error)}`)
+    logger.warn(`${deps.prefix} Failed to check pending commands: ${getErrorMessage(error)}`)
   }
 }
 
@@ -258,7 +258,7 @@ async function processCommand(
       result: result.success ? 'success' : 'failed',
     }))
   } catch (error) {
-    const message = getDetailedErrorMessage(error)
+    const message = getErrorMessage(error)
     logger.error(
       t('runner.commandError', { prefix: deps.prefix, commandId, message }),
     )

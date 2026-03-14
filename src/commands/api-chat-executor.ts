@@ -19,17 +19,28 @@ import {
   SSE_PREFIX,
 } from '../constants'
 import { logger } from '../logger'
-import { type AgentServerConfig, type ChatChunkType, type ChatPayload, type CommandResult, errorResult, type HistoryMessage, successResult } from '../types'
+import {
+  type AgentServerConfig,
+  type AnthropicStreamEvent,
+  type ApiChatResult,
+  type ApiUsage,
+  type ChatChunkType,
+  type ChatPayload,
+  type CommandResult,
+  errorResult,
+  type HistoryMessage,
+  successResult,
+} from '../types'
 import { parseString, truncateString } from '../utils'
 import { createActivityTimeout } from '../utils/activity-timeout'
 import { safeJsonParse } from '../utils/json-parse'
 import { StreamLineParser } from '../utils/stream-parser'
 
-import { ProcessManager } from './process-manager'
+import { getProcessManager } from './process-manager'
 import { createChunkSender, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
 
-/** 実行中の API チャットを commandId で管理 */
-const processManager = new ProcessManager()
+/** 実行中の API チャットを commandId で管理（chat-executor と共有シングルトン） */
+const processManager = getProcessManager()
 
 /**
  * 実行中の API チャットプロセスをキャンセルする
@@ -43,45 +54,6 @@ export function cancelApiChatProcess(commandId: string): boolean {
 export function _getRunningApiChats(): Map<string, { cancel: () => void }> {
   return processManager._getRunning()
 }
-
-/** Anthropic API のトークン使用量 */
-interface ApiUsage {
-  inputTokens: number
-  outputTokens: number
-}
-
-/** callAnthropicApi の戻り値 */
-interface ApiChatResult {
-  text: string
-  usage: ApiUsage
-}
-
-/** Anthropic SSE ストリーミングイベント型 */
-interface AnthropicMessageStartEvent {
-  type: 'message_start'
-  message?: { usage?: { input_tokens?: number } }
-}
-
-interface AnthropicMessageDeltaEvent {
-  type: 'message_delta'
-  usage?: { output_tokens?: number }
-}
-
-interface AnthropicContentBlockDeltaEvent {
-  type: 'content_block_delta'
-  delta?: { type: string; text?: string }
-}
-
-interface AnthropicContentBlockStartEvent {
-  type: 'content_block_start'
-  content_block?: { type: string; name?: string }
-}
-
-type AnthropicStreamEvent =
-  | AnthropicMessageStartEvent
-  | AnthropicMessageDeltaEvent
-  | AnthropicContentBlockDeltaEvent
-  | AnthropicContentBlockStartEvent
 
 /**
  * Anthropic API を直接呼び出してチャットメッセージを処理する
