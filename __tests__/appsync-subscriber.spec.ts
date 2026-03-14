@@ -78,13 +78,13 @@ describe('AppSyncSubscriber', () => {
       subscriber.disconnect()
     })
 
-    it('should accept HTTP URLs for local development', () => {
+    it('should use /graphql/realtime path for local simulator', () => {
       const subscriber = new AppSyncSubscriber('http://localhost:4001/graphql', apiKey)
       const connectPromise = subscriber.connect()
 
       expect(mockWsInstance).not.toBeNull()
       expect(mockWsInstance!.url).toMatch(/^ws:\/\//)
-      expect(mockWsInstance!.url).toContain('/graphql')
+      expect(mockWsInstance!.url).toContain('/graphql/realtime')
 
       mockWsInstance!.simulateOpen()
       mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })

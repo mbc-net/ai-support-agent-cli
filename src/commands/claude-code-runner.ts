@@ -32,6 +32,13 @@ export interface ClaudeCodeHandle {
   cancel: () => void
 }
 
+/** Hook payload に含めるポリシー評価コンテキスト */
+export interface PolicyContext {
+  tenantCode?: string
+  projectCode?: string
+  conversationId?: string
+}
+
 /** runClaudeCode のオプション */
 export interface RunClaudeCodeOptions {
   message: string
@@ -43,6 +50,7 @@ export interface RunClaudeCodeOptions {
   mcpConfigPath?: string
   cwd?: string
   systemPrompt?: string
+  policyContext?: PolicyContext
 }
 
 /**
@@ -50,7 +58,7 @@ export interface RunClaudeCodeOptions {
  * ClaudeCodeHandle を返す: result Promise と kill 関数
  */
 export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
-  const { message, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt } = options
+  const { message, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt, policyContext } = options
 
   let killFn: () => void = () => { /* noop until child is spawned */ }
 
@@ -60,7 +68,14 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     // Claude Code セッション内からの起動時にネスト検出やSSEポート干渉を回避するため、
     // CLAUDECODE および CLAUDE_CODE_* 環境変数を除外
     const cleanEnv = buildCleanEnv()
-    const env = awsEnv ? { ...cleanEnv, ...awsEnv } : cleanEnv
+    const env: Record<string, string> = awsEnv ? { ...cleanEnv, ...awsEnv } : { ...cleanEnv }
+
+    // Hook payload 用のポリシーコンテキスト環境変数を設定
+    if (policyContext) {
+      if (policyContext.tenantCode) env.AI_SUPPORT_TENANT_CODE = policyContext.tenantCode
+      if (policyContext.projectCode) env.AI_SUPPORT_PROJECT_CODE = policyContext.projectCode
+      if (policyContext.conversationId) env.AI_SUPPORT_CONVERSATION_ID = policyContext.conversationId
+    }
     const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt })
 
     ensureClaudeJsonIntegrity()

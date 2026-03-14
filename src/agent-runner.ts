@@ -107,7 +107,9 @@ function initAutoUpdater(
     autoUpdateConfig,
     stopAllAgents,
     (error) => {
-      void client.heartbeat(agentId, getSystemInfo(), error).catch(() => {})
+      void client.heartbeat(agentId, getSystemInfo(), error).catch((err) => {
+        logger.warn(`[auto-update] Failed to send error heartbeat: ${err instanceof Error ? err.message : String(err)}`)
+      })
     },
   )
 }

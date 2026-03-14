@@ -5,6 +5,38 @@ import { ApiClient } from '../../api-client'
 import type { DbCredentials } from '../../types'
 import { mcpErrorResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
 
+/** コメントインジェクション検出パターン */
+const COMMENT_PATTERNS = ['--', '/*', '*/', '#']
+
+/** 時間ベース・ブラインドSQLインジェクション検出パターン */
+const TIME_BASED_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
+  { pattern: /\bDBMS_LOCK\.SLEEP\s*\(/i, name: 'DBMS_LOCK.SLEEP' },
+  { pattern: /\bPG_SLEEP\s*\(/i, name: 'PG_SLEEP' },
+  { pattern: /\bSLEEP\s*\(/i, name: 'SLEEP' },
+  { pattern: /\bBENCHMARK\s*\(/i, name: 'BENCHMARK' },
+  { pattern: /\bWAITFOR\s+DELAY\b/i, name: 'WAITFOR DELAY' },
+]
+
+/** エンコーディングバイパス検出パターン */
+const ENCODING_BYPASS_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
+  { pattern: /\b0x[0-9a-fA-F]+\b/, name: 'hex literal' },
+  { pattern: /\bCONVERT\s*\(/i, name: 'CONVERT' },
+  { pattern: /\bUNHEX\s*\(/i, name: 'UNHEX' },
+]
+
+/** ファイルシステム・システムアクセス検出パターン */
+const FILE_SYSTEM_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
+  { pattern: /\bLOAD\s+DATA\b/i, name: 'LOAD DATA' },
+  { pattern: /\bINTO\s+OUTFILE\b/i, name: 'INTO OUTFILE' },
+  { pattern: /\bINTO\s+DUMPFILE\b/i, name: 'INTO DUMPFILE' },
+  { pattern: /\bxp_cmdshell\b/i, name: 'xp_cmdshell' },
+  { pattern: /\bxp_regread\b/i, name: 'xp_regread' },
+  { pattern: /\bsp_executesql\b/i, name: 'sp_executesql' },
+]
+
+/** サブクエリ最大ネスト深度 */
+const MAX_SUBQUERY_DEPTH = 3
+
 /** SQL文を検証する。writePermissions で INSERT/UPDATE/DELETE の許可を制御 */
 export function validateSql(
   sql: string,
@@ -17,8 +49,21 @@ export function validateSql(
 
   const upper = trimmed.toUpperCase()
 
-  // DDLは常に禁止
-  const ddlKeywords = ['DROP', 'TRUNCATE', 'ALTER', 'CREATE', 'GRANT', 'REVOKE', 'UNION']
+  // コメントインジェクション検出（最優先）
+  for (const pattern of COMMENT_PATTERNS) {
+    if (trimmed.includes(pattern)) {
+      return { valid: false, error: 'SQL comments are not allowed' }
+    }
+  }
+
+  // 複数ステートメント検出（末尾セミコロンは許可）
+  const withoutTrailingSemicolon = trimmed.replace(/;\s*$/, '')
+  if (withoutTrailingSemicolon.includes(';')) {
+    return { valid: false, error: 'Multiple SQL statements are not allowed' }
+  }
+
+  // DDLは常に禁止（EXEC/EXECUTE追加）
+  const ddlKeywords = ['DROP', 'TRUNCATE', 'ALTER', 'CREATE', 'GRANT', 'REVOKE', 'UNION', 'EXEC', 'EXECUTE']
   for (const keyword of ddlKeywords) {
     const regex = new RegExp(`(?<![A-Z_])${keyword}(?![A-Z_])`)
     if (regex.test(upper)) {
@@ -39,8 +84,35 @@ export function validateSql(
     }
   }
 
-  // 許可される先頭キーワード
-  const allowedStarts = ['SELECT', 'WITH', 'EXPLAIN']
+  // 時間ベース・ブラインドSQLインジェクション検出
+  for (const { pattern, name } of TIME_BASED_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { valid: false, error: `Dangerous function detected: ${name}` }
+    }
+  }
+
+  // エンコーディングバイパス検出
+  for (const { pattern, name } of ENCODING_BYPASS_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { valid: false, error: `Encoding bypass detected: ${name}` }
+    }
+  }
+
+  // ファイルシステム・システムアクセス検出
+  for (const { pattern, name } of FILE_SYSTEM_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { valid: false, error: `Dangerous operation detected: ${name}` }
+    }
+  }
+
+  // サブクエリ深度制限
+  const selectCount = (upper.match(/\bSELECT\b/g) || []).length
+  if (selectCount > MAX_SUBQUERY_DEPTH + 1) {
+    return { valid: false, error: `Subquery nesting too deep (max ${MAX_SUBQUERY_DEPTH} levels)` }
+  }
+
+  // 許可される先頭キーワード（SHOW/DESCRIBE追加）
+  const allowedStarts = ['SELECT', 'WITH', 'EXPLAIN', 'SHOW', 'DESCRIBE', 'DESC']
   if (writePermissions?.insert) allowedStarts.push('INSERT')
   if (writePermissions?.update) allowedStarts.push('UPDATE')
   if (writePermissions?.delete) allowedStarts.push('DELETE')

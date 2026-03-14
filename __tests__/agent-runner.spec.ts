@@ -6,6 +6,7 @@ import {
   setupShutdownHandlers,
   resolveAutoUpdateConfig,
 } from '../src/agent-runner'
+import { AppSyncSubscriber } from '../src/appsync-subscriber'
 import { AGENT_VERSION } from '../src/constants'
 import { getSystemInfo, getLocalIpAddress } from '../src/system-info'
 import { ApiClient } from '../src/api-client'
@@ -46,7 +47,12 @@ jest.mock('../src/chat-mode-detector', () => ({
   resolveActiveChatMode: jest.fn().mockReturnValue(undefined),
 }))
 jest.mock('../src/appsync-subscriber', () => ({
-  AppSyncSubscriber: jest.fn(),
+  AppSyncSubscriber: jest.fn().mockImplementation(() => ({
+    connect: jest.fn().mockResolvedValue(undefined),
+    subscribe: jest.fn(),
+    onReconnect: jest.fn(),
+    disconnect: jest.fn(),
+  })),
 }))
 jest.mock('../src/project-dir', () => ({
   initProjectDir: jest.fn().mockReturnValue('/tmp/test-project'),
@@ -139,7 +145,7 @@ describe('agent-runner', () => {
 
     // Default: ApiClient mock setup
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql', appsyncApiKey: 'da2-testkey123', transportMode: 'realtime' }),
       heartbeat: jest.fn().mockResolvedValue({ success: true }),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -357,7 +363,7 @@ describe('agent-runner', () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     // Make heartbeat reject to cover .catch(() => {}) branch
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql', appsyncApiKey: 'da2-testkey123', transportMode: 'realtime' }),
       heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -397,7 +403,7 @@ describe('agent-runner', () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     // Make heartbeat reject to cover .catch(() => {}) branch
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql', appsyncApiKey: 'da2-testkey123', transportMode: 'realtime' }),
       heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -441,7 +447,7 @@ describe('agent-runner', () => {
     const { startAutoUpdater } = require('../src/auto-updater')
     // Make heartbeat reject to cover .catch(() => {}) branch
     const mockInstance = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql', appsyncApiKey: 'da2-testkey123', transportMode: 'realtime' }),
       heartbeat: jest.fn().mockRejectedValue(new Error('heartbeat failed')),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -696,7 +702,7 @@ describe('startProjectAgent', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockClient = {
-      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: '', appsyncApiKey: '' }),
+      register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql', appsyncApiKey: 'da2-testkey123', transportMode: 'realtime' }),
       heartbeat: jest.fn().mockResolvedValue({ success: true }),
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
@@ -756,10 +762,7 @@ describe('startProjectAgent', () => {
     agent.stop()
   })
 
-  it('should poll, execute commands, and submit results', async () => {
-    mockClient.getPendingCommands.mockResolvedValue([
-      { commandId: 'cmd-1', type: 'execute_command' },
-    ])
+  it('should execute commands via subscription and submit results', async () => {
     mockClient.getCommand.mockResolvedValue({
       commandId: 'cmd-1',
       type: 'execute_command',
@@ -772,10 +775,22 @@ describe('startProjectAgent', () => {
     // Let registerAndStart run
     await jest.advanceTimersByTimeAsync(100)
 
-    // Trigger poll interval
-    await jest.advanceTimersByTimeAsync(intervals.pollInterval)
+    // Get the subscriber mock instance and trigger a notification
+    const MockAppSyncSubscriber = AppSyncSubscriber as jest.MockedClass<typeof AppSyncSubscriber>
+    const subscriberInstance = MockAppSyncSubscriber.mock.results[0]?.value
+    const onMessage = subscriberInstance.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+    onMessage({
+      id: 'notif-1',
+      table: 'commands',
+      pk: 'CMD#123',
+      sk: 'CMD#123',
+      tenantCode: 'test-tenant',
+      action: 'agent-command',
+      content: { commandId: 'cmd-1', type: 'execute_command' },
+    })
 
-    expect(mockClient.getPendingCommands).toHaveBeenCalledWith('agent-1')
+    await jest.advanceTimersByTimeAsync(100)
+
     expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'agent-1')
     expect(mockedExecuteCommand).toHaveBeenCalledWith('execute_command', { command: 'echo hi' }, expect.objectContaining({ commandId: 'cmd-1', client: mockClient, serverConfig: expect.any(Object), agentId: 'agent-1' }))
     expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'agent-1')
@@ -784,9 +799,6 @@ describe('startProjectAgent', () => {
   })
 
   it('should handle command execution error and log resultSendFailed', async () => {
-    mockClient.getPendingCommands.mockResolvedValue([
-      { commandId: 'cmd-2', type: 'execute_command' },
-    ])
     mockClient.getCommand.mockRejectedValue(new Error('Command fetch failed'))
     mockClient.submitResult.mockRejectedValue(new Error('Submit failed'))
 
@@ -794,26 +806,25 @@ describe('startProjectAgent', () => {
 
     await jest.advanceTimersByTimeAsync(100)
 
-    // Trigger poll
-    await jest.advanceTimersByTimeAsync(intervals.pollInterval)
+    // Get the subscriber mock instance and trigger a notification
+    const MockAppSyncSubscriber = AppSyncSubscriber as jest.MockedClass<typeof AppSyncSubscriber>
+    const subscriberInstance = MockAppSyncSubscriber.mock.results[0]?.value
+    const onMessage = subscriberInstance.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+    onMessage({
+      id: 'notif-err',
+      table: 'commands',
+      pk: 'CMD#123',
+      sk: 'CMD#123',
+      tenantCode: 'test-tenant',
+      action: 'agent-command',
+      content: { commandId: 'cmd-2', type: 'execute_command' },
+    })
+
+    await jest.advanceTimersByTimeAsync(100)
 
     expect(logger.error).toHaveBeenCalledWith('runner.commandError')
     expect(logger.error).toHaveBeenCalledWith('runner.resultSendFailed')
 
-    agent.stop()
-  })
-
-  it('should handle polling error gracefully', async () => {
-    mockClient.getPendingCommands.mockRejectedValue(new Error('Network failure'))
-
-    const agent = startProjectAgent(project, 'agent-1', intervals)
-
-    await jest.advanceTimersByTimeAsync(100)
-
-    // Trigger poll interval — should not throw
-    await jest.advanceTimersByTimeAsync(intervals.pollInterval)
-
-    // Should continue running despite polling error
     agent.stop()
   })
 

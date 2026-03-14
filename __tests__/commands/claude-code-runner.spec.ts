@@ -929,6 +929,80 @@ describe('claude-code-runner', () => {
       expect(env).toHaveProperty('AWS_SECRET_ACCESS_KEY', 'secret')
     })
 
+    it('should set policyContext env vars when provided', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({
+        message: 'hello',
+        sendChunk,
+        policyContext: {
+          tenantCode: 'mbc',
+          projectCode: 'MBC_01',
+          conversationId: 'conv-123',
+        },
+      })
+
+      mockProcess.emit('close', 0)
+
+      await handle.result
+
+      const spawnCall = spawn.mock.calls[0]
+      const env = spawnCall[2].env
+      expect(env).toHaveProperty('AI_SUPPORT_TENANT_CODE', 'mbc')
+      expect(env).toHaveProperty('AI_SUPPORT_PROJECT_CODE', 'MBC_01')
+      expect(env).toHaveProperty('AI_SUPPORT_CONVERSATION_ID', 'conv-123')
+    })
+
+    it('should not set policyContext env vars when not provided', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      mockProcess.emit('close', 0)
+
+      await handle.result
+
+      const spawnCall = spawn.mock.calls[0]
+      const env = spawnCall[2].env
+      expect(env).not.toHaveProperty('AI_SUPPORT_TENANT_CODE')
+      expect(env).not.toHaveProperty('AI_SUPPORT_PROJECT_CODE')
+      expect(env).not.toHaveProperty('AI_SUPPORT_CONVERSATION_ID')
+    })
+
+    it('should only set non-empty policyContext fields', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({
+        message: 'hello',
+        sendChunk,
+        policyContext: {
+          tenantCode: 'mbc',
+        },
+      })
+
+      mockProcess.emit('close', 0)
+
+      await handle.result
+
+      const spawnCall = spawn.mock.calls[0]
+      const env = spawnCall[2].env
+      expect(env).toHaveProperty('AI_SUPPORT_TENANT_CODE', 'mbc')
+      expect(env).not.toHaveProperty('AI_SUPPORT_PROJECT_CODE')
+      expect(env).not.toHaveProperty('AI_SUPPORT_CONVERSATION_ID')
+    })
+
     it('should pass cwd to spawn when provided', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockChildProcess()

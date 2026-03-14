@@ -188,6 +188,7 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   const dockerArgs = [
     'run', '--rm', '-it',
+    ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
     ...volumeMounts,
     ...envArgs,
     `${IMAGE_NAME}:${version}`,

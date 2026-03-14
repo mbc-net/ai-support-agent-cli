@@ -9,8 +9,9 @@ export async function withValidatedPath(
   payload: { path?: unknown },
   handler: (filePath: string) => Promise<CommandResult>,
   defaultPath?: string,
+  baseDir?: string,
 ): Promise<CommandResult> {
-  const result = await resolveAndValidatePath(payload, defaultPath)
+  const result = await resolveAndValidatePath(payload, defaultPath, baseDir)
   if (typeof result !== 'string') return result
   return handler(result)
 }
