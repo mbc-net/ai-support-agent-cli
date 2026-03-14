@@ -12,7 +12,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pandoc \
     # PDF rendering support for Python PDF libraries
     libpoppler-cpp-dev poppler-utils \
+    # Locale support (for Japanese filenames etc.)
+    locales \
+    && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
+    && locale-gen \
     && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 # Python document processing tools (installed in system scope, no venv needed in container)
 RUN pip3 install --no-cache-dir --break-system-packages \
