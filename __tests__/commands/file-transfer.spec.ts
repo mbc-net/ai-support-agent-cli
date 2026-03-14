@@ -190,6 +190,28 @@ describe('file-transfer', () => {
       expect(typeof result.cleanup).toBe('function')
     })
 
+    it('should sanitize path traversal in filenames', async () => {
+      const maliciousFiles: ChatFileInfo[] = [
+        { fileId: 'f1', s3Key: 'key1', filename: '../../../etc/passwd', contentType: 'text/plain', fileSize: 100 },
+      ]
+
+      ;(mockClient.getDownloadUrl as jest.Mock).mockResolvedValue({
+        downloadUrl: 'https://s3.example.com/file',
+      })
+
+      const mockStream = new Readable({ read() { this.push(null) } })
+      mockedAxios.get.mockResolvedValue({ data: mockStream })
+      const mockWriter = {} as ReturnType<typeof createWriteStream>
+      mockedCreateWriteStream.mockReturnValue(mockWriter)
+      mockedPipeline.mockResolvedValue(undefined)
+
+      const result = await downloadChatFiles(mockClient, 'agent-1', maliciousFiles, '/tmp/project', 'conv-1')
+
+      // Should use basename only, not the full path traversal
+      expect(mockedCreateWriteStream).toHaveBeenCalledWith('/tmp/project/.chat-files/conv-1/passwd')
+      expect(result.downloadedPaths).toEqual(['/tmp/project/.chat-files/conv-1/passwd'])
+    })
+
     it('should continue downloading other files when one fails', async () => {
       const twoFiles: ChatFileInfo[] = [
         { fileId: 'f1', s3Key: 'key1', filename: 'fail.txt', contentType: 'text/plain', fileSize: 100 },
@@ -278,6 +300,15 @@ describe('file-transfer', () => {
       await expect(
         uploadFile(mockClient, '/tmp/test.exe', 'test.exe', 'conv-1', 'msg-1', 'TEST_01'),
       ).rejects.toThrow('File extension not allowed: .exe')
+    })
+
+    it('should reject files exceeding size limit', async () => {
+      const oversizedBytes = 100 * 1024 * 1024 + 1 // 100MB + 1
+      mockedStatSync.mockReturnValue({ size: oversizedBytes } as ReturnType<typeof statSync>)
+
+      await expect(
+        uploadFile(mockClient, '/tmp/huge.txt', 'huge.txt', 'conv-1', 'msg-1', 'TEST_01'),
+      ).rejects.toThrow(/File too large/)
     })
   })
 })

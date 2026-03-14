@@ -8,6 +8,7 @@ import { AGENT_VERSION } from '../constants'
 import { getConfigDir, loadConfig } from '../config-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
+import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 
 const IMAGE_NAME = 'ai-support-agent'
@@ -89,8 +90,24 @@ export function buildVolumeMounts(): string[] {
   const config = loadConfig()
   if (config?.projects) {
     const mounted = new Set<string>()
+    const blockedPrefixes = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
     for (const project of config.projects) {
       if (project.projectDir && !mounted.has(project.projectDir) && fs.existsSync(project.projectDir)) {
+        let resolved: string
+        try {
+          resolved = fs.realpathSync(project.projectDir)
+        } catch {
+          logger.warn(`[docker] Cannot resolve path, skipping: ${project.projectDir}`)
+          continue
+        }
+        const isBlocked = blockedPrefixes.some((prefix) => {
+          const prefixWithoutSlash = prefix.replace(/\/$/, '')
+          return resolved === prefixWithoutSlash || resolved.startsWith(prefix)
+        })
+        if (isBlocked) {
+          logger.warn(`[docker] Skipping blocked path for volume mount: ${project.projectDir}`)
+          continue
+        }
         mounts.push('-v', `${project.projectDir}:${project.projectDir}:rw`)
         mounted.add(project.projectDir)
       }

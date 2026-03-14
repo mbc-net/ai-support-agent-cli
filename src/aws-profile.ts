@@ -9,6 +9,14 @@ import { atomicWriteFile } from './utils'
 type AwsAccount = NonNullable<ProjectConfigResponse['aws']>['accounts'][number]
 
 /**
+ * Sanitize a value for use in an INI file by removing newline characters.
+ * Prevents INI injection where a malicious value could add new sections or keys.
+ */
+function sanitizeIniValue(value: string): string {
+  return value.replace(/[\n\r]/g, '')
+}
+
+/**
  * Generate profile name from project code and account.
  * Uses profileName if available, otherwise falls back to name.
  * Format: {projectCode}-{profileName|name}
@@ -32,13 +40,13 @@ export function generateAwsConfig(projectCode: string, accounts: AwsAccount[]): 
   for (const account of accounts) {
     const profileName = getProfileName(projectCode, account)
     lines.push(`[profile ${profileName}]`)
-    lines.push(`region = ${account.region}`)
+    lines.push(`region = ${sanitizeIniValue(account.region)}`)
 
     if (account.auth.method === 'sso') {
-      lines.push(`sso_start_url = ${account.auth.startUrl}`)
-      lines.push(`sso_region = ${account.auth.ssoRegion}`)
-      lines.push(`sso_account_id = ${account.accountId}`)
-      lines.push(`sso_role_name = ${account.auth.permissionSetName}`)
+      lines.push(`sso_start_url = ${sanitizeIniValue(account.auth.startUrl)}`)
+      lines.push(`sso_region = ${sanitizeIniValue(account.auth.ssoRegion)}`)
+      lines.push(`sso_account_id = ${sanitizeIniValue(account.accountId)}`)
+      lines.push(`sso_role_name = ${sanitizeIniValue(account.auth.permissionSetName)}`)
     }
 
     lines.push('')
@@ -88,12 +96,12 @@ export function generateAwsCredentials(
   for (const [accountName, creds] of credentialMap) {
     const profileName = getProfileName(projectCode, accountName)
     lines.push(`[${profileName}]`)
-    lines.push(`aws_access_key_id = ${creds.accessKeyId}`)
-    lines.push(`aws_secret_access_key = ${creds.secretAccessKey}`)
+    lines.push(`aws_access_key_id = ${sanitizeIniValue(creds.accessKeyId)}`)
+    lines.push(`aws_secret_access_key = ${sanitizeIniValue(creds.secretAccessKey)}`)
     if (creds.sessionToken) {
-      lines.push(`aws_session_token = ${creds.sessionToken}`)
+      lines.push(`aws_session_token = ${sanitizeIniValue(creds.sessionToken)}`)
     }
-    lines.push(`region = ${creds.region}`)
+    lines.push(`region = ${sanitizeIniValue(creds.region)}`)
     lines.push('')
   }
 
