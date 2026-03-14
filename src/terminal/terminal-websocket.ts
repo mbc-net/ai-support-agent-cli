@@ -16,12 +16,13 @@ import { TerminalSessionManager } from './terminal-session'
  * Messages sent from API server to agent
  */
 export interface TerminalServerMessage {
-  type: 'open' | 'stdin' | 'resize' | 'close'
+  type: 'open' | 'stdin' | 'resize' | 'close' | 'auth_success' | 'error'
   sessionId?: string
   data?: string // Base64 encoded for stdin
   cols?: number
   rows?: number
   cwd?: string
+  message?: string
 }
 
 /**
@@ -94,6 +95,14 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       case 'close':
         this.handleClose(msg)
         break
+      case 'auth_success':
+        // Authentication success acknowledgement from server — no action needed
+        break
+      case 'error': {
+        const errMsg = (msg as unknown as Record<string, unknown>).message ?? (msg as unknown as Record<string, unknown>).error ?? 'unknown'
+        logger.warn(`[terminal-ws] Server error (session=${msg.sessionId ?? 'none'}): ${errMsg}`)
+        break
+      }
       default:
         logger.debug(`[terminal-ws] Unknown message type: ${(msg as { type: string }).type}`)
     }
