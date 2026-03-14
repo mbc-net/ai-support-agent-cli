@@ -4,6 +4,12 @@ import * as path from 'path'
 
 import { logger } from '../logger'
 import { buildSafeEnv } from '../security'
+import {
+  MAX_CONCURRENT_SESSIONS,
+  SESSION_IDLE_TIMEOUT_MS,
+  TERMINAL_DEFAULT_COLS,
+  TERMINAL_DEFAULT_ROWS,
+} from './constants'
 
 /**
  * node-pty を遅延ロードする。
@@ -26,13 +32,6 @@ try {
 export function isNodePtyAvailable(): boolean {
   return pty !== null
 }
-
-import {
-  MAX_CONCURRENT_SESSIONS,
-  SESSION_IDLE_TIMEOUT_MS,
-  TERMINAL_DEFAULT_COLS,
-  TERMINAL_DEFAULT_ROWS,
-} from './constants'
 
 export interface TerminalSessionOptions {
   cols?: number
@@ -124,8 +123,7 @@ export class TerminalSession {
   readonly cwd: string
   readonly createdAt: number
   private lastActivity: number
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private readonly ptyProcess: any
+  private readonly ptyProcess: import('node-pty').IPty
   private sandboxTmpDir: string | null = null
   private dataCallback: DataCallback | null = null
   private exitCallback: ExitCallback | null = null
