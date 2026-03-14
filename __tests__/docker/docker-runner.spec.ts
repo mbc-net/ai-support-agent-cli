@@ -329,9 +329,10 @@ describe('docker-runner', () => {
   })
 
   describe('buildContainerArgs', () => {
-    it('should include start command', () => {
+    it('should include ai-support-agent start command', () => {
       const args = buildContainerArgs({})
-      expect(args[0]).toBe('start')
+      expect(args[0]).toBe('ai-support-agent')
+      expect(args[1]).toBe('start')
     })
 
     it('should pass all options', () => {
@@ -366,7 +367,7 @@ describe('docker-runner', () => {
 
     it('should omit undefined options', () => {
       const args = buildContainerArgs({})
-      expect(args).toEqual(['start', '--no-docker'])
+      expect(args).toEqual(['ai-support-agent', 'start', '--no-docker'])
     })
 
     it('should not include --no-auto-update when autoUpdate is true', () => {

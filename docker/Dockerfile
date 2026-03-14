@@ -100,7 +100,6 @@ WORKDIR /workspace
 RUN chmod 777 /workspace
 
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && chmod g+w /etc/passwd
+RUN chmod +x /entrypoint.sh && chmod a+w /etc/passwd
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["ai-support-agent"]
