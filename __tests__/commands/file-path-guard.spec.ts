@@ -56,5 +56,17 @@ describe('file-path-guard', () => {
         withValidatedPath({ path: '/tmp' }, handler),
       ).rejects.toThrow('handler error')
     })
+
+    it('should resolve relative path against baseDir', async () => {
+      const handler = jest.fn<Promise<CommandResult>, [string]>().mockResolvedValue({
+        success: true,
+        data: 'ok',
+      })
+
+      const result = await withValidatedPath({ path: 'subdir' }, handler, undefined, '/tmp')
+
+      expect(result).toEqual({ success: true, data: 'ok' })
+      expect(handler).toHaveBeenCalledWith('/tmp/subdir')
+    })
   })
 })

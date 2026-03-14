@@ -4,6 +4,7 @@ coverage/
 report/
 *.js.map
 .env
+.local/
 ### VisualStudioCode template
 .vscode/*
 !.vscode/settings.json

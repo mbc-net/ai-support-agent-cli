@@ -135,7 +135,8 @@ export class ProjectAgent {
       this.client.setProjectCode(this.projectCode)
       this.transportDeps = { ...this.transportDeps, tenantCode: this.tenantCode }
       logger.success(t('runner.registered', { prefix: this.prefix, agentId: result.agentId }))
-      logger.debug(`${this.prefix} Register response: transportMode=${result.transportMode ?? 'none'}, appsyncUrl=${result.appsyncUrl ? 'present' : 'absent'}`)
+      logger.debug(`${this.prefix} Register response: transportMode=${result.transportMode ?? 'none'}, appsyncUrl=${result.appsyncUrl ? 'present' : 'absent'}, wsEnabled=${result.wsEnabled}`)
+      logger.debug(`${this.prefix} Full register response keys: ${JSON.stringify(Object.keys(result))}`)
     } catch (error) {
       if (isAuthenticationError(error)) {
         logger.error(t('runner.authError', { prefix: this.prefix, detail: getDetailedErrorMessage(error) }))
@@ -184,7 +185,7 @@ export class ProjectAgent {
 
     // Start terminal WebSocket connection (only if server has WS gateway enabled)
     if (result.wsEnabled) {
-      startTerminalWebSocket(this.transportDeps, this.transportState)
+      startTerminalWebSocket(this.transportDeps, this.transportState, result.wsUrl)
     } else {
       logger.debug(`${this.prefix} Terminal WebSocket skipped (wsEnabled=false)`)
     }

@@ -4,7 +4,7 @@ import { LOG_PAYLOAD_LIMIT, LOG_RESULT_LIMIT } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
-import { TerminalWebSocket } from './terminal'
+import { TerminalWebSocket, isNodePtyAvailable } from './terminal'
 import { getDetailedErrorMessage, isAuthenticationError } from './utils'
 import { executeCommand } from './commands'
 import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
@@ -123,13 +123,22 @@ export function startHeartbeat(
 
 /**
  * Start terminal WebSocket connection.
+ * @param wsUrl - サーバーから返されたWebSocket URL（指定時はapiUrlの代わりに使用）
  */
 export function startTerminalWebSocket(
   deps: TransportDeps,
   state: TransportState,
+  wsUrl?: string,
 ): void {
+  if (!isNodePtyAvailable()) {
+    logger.warn(`${deps.prefix} Terminal WebSocket skipped: node-pty is not available (native build may have failed)`)
+    return
+  }
+
+  // wsUrl が指定された場合はそれを使う（Next.jsプロキシ経由ではWSが通らないため）
+  const baseUrl = wsUrl ?? deps.apiUrl
   state.terminalWs = new TerminalWebSocket(
-    deps.apiUrl,
+    baseUrl,
     deps.token,
     deps.agentId,
     deps.projectDir,
@@ -237,6 +246,7 @@ async function processCommand(
       projectDir: deps.projectDir,
       projectConfig: ctx.configSyncState.projectConfig,
       mcpConfigPath: ctx.configSyncState.mcpConfigPath,
+      tenantCode: deps.tenantCode,
       onSetup: ctx.onSetup,
       onConfigSync: ctx.onConfigSync,
     })

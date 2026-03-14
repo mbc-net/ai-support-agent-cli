@@ -72,6 +72,11 @@ describe('security', () => {
       const result = await validateFilePath(awsPath)
       expect(result).toContain('Access denied')
     })
+
+    it('should resolve relative paths against baseDir when provided', async () => {
+      const result = await validateFilePath('somefile.txt', os.tmpdir())
+      expect(result).toBeNull()
+    })
   })
 
   describe('resolveAndValidatePath', () => {
@@ -106,6 +111,24 @@ describe('security', () => {
     it('should use defaultPath when no path in payload', async () => {
       const result = await resolveAndValidatePath({}, os.tmpdir())
       expect(typeof result).toBe('string')
+    })
+
+    it('should resolve relative paths against baseDir when provided', async () => {
+      const result = await resolveAndValidatePath({ path: 'test.txt' }, undefined, os.tmpdir())
+      expect(typeof result).toBe('string')
+      if (typeof result === 'string') {
+        expect(path.isAbsolute(result)).toBe(true)
+        expect(result).toContain(os.tmpdir())
+      }
+    })
+
+    it('should not change absolute paths when baseDir is provided', async () => {
+      const absPath = path.join(os.tmpdir(), 'abs-test.txt')
+      const result = await resolveAndValidatePath({ path: absPath }, undefined, '/some/other/dir')
+      expect(typeof result).toBe('string')
+      if (typeof result === 'string') {
+        expect(result).toContain(os.tmpdir())
+      }
     })
   })
 

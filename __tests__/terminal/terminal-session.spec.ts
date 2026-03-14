@@ -1,9 +1,15 @@
 import * as os from 'os'
 
 import * as constants from '../../src/terminal/constants'
-import { TerminalSession, TerminalSessionManager } from '../../src/terminal/terminal-session'
+import { TerminalSession, TerminalSessionManager, isNodePtyAvailable } from '../../src/terminal/terminal-session'
 
 const { MAX_CONCURRENT_SESSIONS } = constants
+
+describe('isNodePtyAvailable', () => {
+  it('should return true when node-pty is installed', () => {
+    expect(isNodePtyAvailable()).toBe(true)
+  })
+})
 
 describe('TerminalSession', () => {
   let session: TerminalSession

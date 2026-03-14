@@ -34,6 +34,20 @@ describe('file-executor', () => {
       expectFailure(result)
       expect(result.error).toContain('Access denied')
     })
+
+    it('should resolve relative path against baseDir', async () => {
+      const tmpDir = path.join(os.tmpdir(), `test-basedir-${Date.now()}`)
+      fs.mkdirSync(tmpDir, { recursive: true })
+      const tmpFile = path.join(tmpDir, 'relative-test.txt')
+      fs.writeFileSync(tmpFile, 'baseDir content')
+
+      const result = await fileRead({ path: 'relative-test.txt' }, tmpDir)
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('baseDir content')
+
+      fs.unlinkSync(tmpFile)
+      fs.rmdirSync(tmpDir)
+    })
   })
 
   describe('fileWrite', () => {
