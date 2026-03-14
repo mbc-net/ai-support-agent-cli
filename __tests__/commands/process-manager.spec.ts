@@ -1,4 +1,4 @@
-import { ProcessManager } from '../../src/commands/process-manager'
+import { ProcessManager, getProcessManager } from '../../src/commands/process-manager'
 
 describe('ProcessManager', () => {
   let pm: ProcessManager
@@ -97,5 +97,20 @@ describe('ProcessManager', () => {
 
       expect(pm._getRunning().size).toBe(3)
     })
+  })
+})
+
+describe('getProcessManager (singleton)', () => {
+  it('should return the same instance on every call', () => {
+    const instance1 = getProcessManager()
+    const instance2 = getProcessManager()
+
+    expect(instance1).toBe(instance2)
+  })
+
+  it('should return an instance of ProcessManager', () => {
+    const instance = getProcessManager()
+
+    expect(instance).toBeInstanceOf(ProcessManager)
   })
 })

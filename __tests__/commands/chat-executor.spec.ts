@@ -98,7 +98,7 @@ describe('chat-executor', () => {
         }
       })
 
-      const result = await executeChatCommand(basePayload, 'cmd-1', mockClient, undefined, undefined, 'agent-1')
+      const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-1', client: mockClient, agentId: 'agent-1' })
       expect(result.success).toBe(true)
       expect(spawn).toHaveBeenCalledWith('claude', ['-p', '--output-format', 'stream-json', '--verbose', 'Hello, world!'], expect.any(Object))
     })
@@ -120,7 +120,7 @@ describe('chat-executor', () => {
         if (event === 'close') cb(0)
       })
 
-      const result = await executeChatCommand(basePayload, 'cmd-2', mockClient, undefined, 'claude_code', 'agent-1')
+      const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-2', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
       expect(result.success).toBe(true)
       expect(spawn).toHaveBeenCalled()
     })
@@ -136,7 +136,7 @@ describe('chat-executor', () => {
         chatMode: 'agent',
       }
 
-      const result = await executeChatCommand(basePayload, 'cmd-3', mockClient, serverConfig, 'api', 'agent-1')
+      const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-3', client: mockClient, serverConfig, activeChatMode: 'api', agentId: 'agent-1' })
       expect(result.success).toBe(true)
       expect(executeApiChatCommand).toHaveBeenCalledWith(
         basePayload, 'cmd-3', mockClient, serverConfig, 'agent-1',
@@ -146,7 +146,7 @@ describe('chat-executor', () => {
 
   describe('agentId validation', () => {
     it('should return error when agentId is missing', async () => {
-      const result = await executeChatCommand(basePayload, 'cmd-no-agent', mockClient)
+      const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-no-agent', client: mockClient })
       expect(result.success).toBe(false)
       if (!result.success) {
         expect(result.error).toBe(ERR_AGENT_ID_REQUIRED)
@@ -154,7 +154,7 @@ describe('chat-executor', () => {
     })
 
     it('should return error when agentId is empty string', async () => {
-      const result = await executeChatCommand(basePayload, 'cmd-empty-agent', mockClient, undefined, undefined, '')
+      const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-empty-agent', client: mockClient, agentId: '' })
       expect(result.success).toBe(false)
       if (!result.success) {
         expect(result.error).toBe(ERR_AGENT_ID_REQUIRED)
@@ -164,14 +164,12 @@ describe('chat-executor', () => {
 
   describe('message validation', () => {
     it('should return error when message is missing', async () => {
-      const result = await executeChatCommand(
-        { message: undefined } as ChatPayload,
-        'cmd-5',
-        mockClient,
-        undefined,
-        undefined,
-        'agent-1',
-      )
+      const result = await executeChatCommand({
+        payload: { message: undefined } as ChatPayload,
+        commandId: 'cmd-5',
+        client: mockClient,
+        agentId: 'agent-1',
+      })
       expect(result.success).toBe(false)
       if (!result.success) {
         expect(result.error).toBe(ERR_MESSAGE_REQUIRED)
@@ -185,7 +183,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-err-1', mockClient, undefined, undefined, 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-err-1', client: mockClient, agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emit('close', 1)
@@ -202,7 +200,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-err-2', mockClient, undefined, undefined, 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-err-2', client: mockClient, agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStderr('data', Buffer.from('some error output'))
@@ -220,7 +218,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-enoent', mockClient, undefined, undefined, 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-enoent', client: mockClient, agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       const enoentError = new Error('spawn claude ENOENT') as NodeJS.ErrnoException
@@ -239,7 +237,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-generic-err', mockClient, undefined, undefined, 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-generic-err', client: mockClient, agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emit('error', new Error('Permission denied'))
@@ -256,7 +254,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-err-chunk', mockClient, undefined, undefined, 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-err-chunk', client: mockClient, agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emit('close', 1)
@@ -273,7 +271,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-done', mockClient, undefined, undefined, 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-done', client: mockClient, agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonAssistant('output text')))
@@ -302,7 +300,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-done-tools', mockClient, undefined, undefined, 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-done-tools', client: mockClient, agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       // Send assistant message with tool_use blocks
@@ -331,7 +329,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-done-no-tools', mockClient, undefined, undefined, 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-done-no-tools', client: mockClient, agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonAssistant('output text')))
@@ -354,7 +352,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-delta', mockClient, undefined, undefined, 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-delta', client: mockClient, agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonAssistant('chunk1')))
@@ -385,7 +383,7 @@ describe('chat-executor', () => {
         },
       }
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-tools', mockClient, serverConfig, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-tools', client: mockClient, serverConfig, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -413,7 +411,7 @@ describe('chat-executor', () => {
         chatMode: 'agent',
       }
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-no-tools', mockClient, serverConfig, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-no-tools', client: mockClient, serverConfig, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -444,7 +442,7 @@ describe('chat-executor', () => {
         },
       }
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-empty-tools', mockClient, serverConfig, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-empty-tools', client: mockClient, serverConfig, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -475,7 +473,7 @@ describe('chat-executor', () => {
         },
       }
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-dirs', mockClient, serverConfig, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-dirs', client: mockClient, serverConfig, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -508,7 +506,7 @@ describe('chat-executor', () => {
         },
       }
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-no-dirs', mockClient, serverConfig, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-no-dirs', client: mockClient, serverConfig, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -530,7 +528,7 @@ describe('chat-executor', () => {
 
       const payload: ChatPayload = { message: 'Hello', locale: 'ja' }
 
-      const resultPromise = executeChatCommand(payload, 'cmd-locale-ja', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload, commandId: 'cmd-locale-ja', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -552,7 +550,7 @@ describe('chat-executor', () => {
 
       const payload: ChatPayload = { message: 'Hello', locale: 'en' }
 
-      const resultPromise = executeChatCommand(payload, 'cmd-locale-en', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload, commandId: 'cmd-locale-en', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -572,7 +570,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-no-locale', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-no-locale', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -606,7 +604,7 @@ describe('chat-executor', () => {
 
       const payload: ChatPayload = { message: 'List S3 buckets', awsAccountId: 'prod' }
 
-      const resultPromise = executeChatCommand(payload, 'cmd-aws', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload, commandId: 'cmd-aws', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -629,7 +627,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-no-aws', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-no-aws', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -653,7 +651,7 @@ describe('chat-executor', () => {
 
       const payload: ChatPayload = { message: 'Hello', awsAccountId: 'invalid' }
 
-      const resultPromise = executeChatCommand(payload, 'cmd-aws-fail', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload, commandId: 'cmd-aws-fail', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -675,7 +673,7 @@ describe('chat-executor', () => {
       const originalEnv = process.env
       process.env = { ...originalEnv, CLAUDECODE: '1', CLAUDE_CODE_SSE_PORT: '1234', PATH: '/usr/bin' }
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-env', mockClient, undefined, undefined, 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-env', client: mockClient, agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emit('close', 0)
@@ -734,10 +732,11 @@ describe('chat-executor', () => {
         ssoAuthRequired: [],
       })
 
-      const resultPromise = executeChatCommand(
-        basePayload, 'cmd-profile', mockClient, undefined, 'claude_code', 'agent-1',
-        '/tmp/project', projectConfig,
-      )
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-profile', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        projectDir: '/tmp/project', projectConfig,
+      })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -776,10 +775,11 @@ describe('chat-executor', () => {
 
       const payload: ChatPayload = { message: 'Hello', awsAccountId: 'legacy-account' }
 
-      const resultPromise = executeChatCommand(
-        payload, 'cmd-legacy', mockClient, undefined, 'claude_code', 'agent-1',
-        '/tmp/project', undefined, // no projectConfig
-      )
+      const resultPromise = executeChatCommand({
+        payload, commandId: 'cmd-legacy', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        projectDir: '/tmp/project', // no projectConfig
+      })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -804,10 +804,11 @@ describe('chat-executor', () => {
       const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
       ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce({ errors: ['Credential fetch failed'], ssoAuthRequired: [] })
 
-      const resultPromise = executeChatCommand(
-        basePayload, 'cmd-profile-fail', mockClient, undefined, 'claude_code', 'agent-1',
-        '/tmp/project', projectConfig,
-      )
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-profile-fail', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        projectDir: '/tmp/project', projectConfig,
+      })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -833,10 +834,11 @@ describe('chat-executor', () => {
         ssoAuthRequired: [{ accountId: '123456789012', accountName: 'dev' }],
       })
 
-      const resultPromise = executeChatCommand(
-        basePayload, 'cmd-sso-system', mockClient, undefined, 'claude_code', 'agent-1',
-        '/tmp/project', projectConfig,
-      )
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-sso-system', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        projectDir: '/tmp/project', projectConfig,
+      })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -870,9 +872,10 @@ describe('chat-executor', () => {
 
       const payload: ChatPayload = { message: 'Hello', awsAccountId: 'prod-account', projectCode: 'PROJ_01' }
 
-      const resultPromise = executeChatCommand(
-        payload, 'cmd-sso-legacy', mockClient, undefined, 'claude_code', 'agent-1',
-      )
+      const resultPromise = executeChatCommand({
+        payload, commandId: 'cmd-sso-legacy', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+      })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -905,10 +908,11 @@ describe('chat-executor', () => {
         ssoAuthRequired: [],
       })
 
-      const resultPromise = executeChatCommand(
-        basePayload, 'cmd-no-sso', mockClient, undefined, 'claude_code', 'agent-1',
-        '/tmp/project', projectConfig,
-      )
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-no-sso', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        projectDir: '/tmp/project', projectConfig,
+      })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -938,7 +942,7 @@ describe('chat-executor', () => {
         ],
       }
 
-      const resultPromise = executeChatCommand(payload, 'cmd-history', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload, commandId: 'cmd-history', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -966,7 +970,7 @@ describe('chat-executor', () => {
         history: [],
       }
 
-      const resultPromise = executeChatCommand(payload, 'cmd-no-history', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload, commandId: 'cmd-no-history', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -986,7 +990,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-no-history-field', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-no-history-field', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -1015,7 +1019,7 @@ describe('chat-executor', () => {
         ],
       }
 
-      const resultPromise = executeChatCommand(payload, 'cmd-conv-files', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload, commandId: 'cmd-conv-files', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -1045,7 +1049,7 @@ describe('chat-executor', () => {
         conversationFiles: [],
       }
 
-      const resultPromise = executeChatCommand(payload, 'cmd-no-conv-files', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload, commandId: 'cmd-no-conv-files', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -1064,7 +1068,7 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(basePayload, 'cmd-undef-conv-files', mockClient, undefined, 'claude_code', 'agent-1')
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-undef-conv-files', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -1147,10 +1151,11 @@ describe('chat-executor', () => {
         },
       }
 
-      const resultPromise = executeChatCommand(
-        basePayload, 'cmd-auto-add', mockClient, serverConfig, 'claude_code', 'agent-1',
-        '/tmp/project',
-      )
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-auto-add', client: mockClient, serverConfig,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        projectDir: '/tmp/project',
+      })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -1183,10 +1188,11 @@ describe('chat-executor', () => {
         conversationId: 'conv-456',
       }
 
-      const resultPromise = executeChatCommand(
-        payload, 'cmd-policy', mockClient, undefined, 'claude_code', 'agent-1',
-        undefined, undefined, undefined, 'mbc',
-      )
+      const resultPromise = executeChatCommand({
+        payload, commandId: 'cmd-policy', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        tenantCode: 'mbc',
+      })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
@@ -1206,9 +1212,10 @@ describe('chat-executor', () => {
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
-      const resultPromise = executeChatCommand(
-        basePayload, 'cmd-no-policy', mockClient, undefined, 'claude_code', 'agent-1',
-      )
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-no-policy', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+      })
 
       await new Promise((r) => setTimeout(r, 10))
       mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))

@@ -10,7 +10,7 @@ import { logger } from './logger'
 import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
-import { getErrorMessage, getDetailedErrorMessage, isAuthenticationError } from './utils'
+import { getErrorMessage, isAuthenticationError } from './utils'
 
 export interface ProjectAgentOptions {
   pollInterval: number
@@ -139,7 +139,7 @@ export class ProjectAgent {
       logger.debug(`${this.prefix} Full register response keys: ${JSON.stringify(Object.keys(result))}`)
     } catch (error) {
       if (isAuthenticationError(error)) {
-        logger.error(t('runner.authError', { prefix: this.prefix, detail: getDetailedErrorMessage(error) }))
+        logger.error(t('runner.authError', { prefix: this.prefix, detail: getErrorMessage(error) }))
       } else {
         logger.error(t('runner.registerFailed', { prefix: this.prefix, message: getErrorMessage(error) }))
       }
