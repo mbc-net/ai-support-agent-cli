@@ -8,10 +8,15 @@ import { parseString } from './utils'
 
 export const BLOCKED_COMMAND_PATTERNS = [
   /\brm\s+-rf\s+\/(?!\w)/,
+  /\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?\/(?!\w)/,  // rm -f /, rm / etc.
+  /\bsudo\b/,
   /\bmkfs\b/,
   /\bdd\s+.*of=\/dev\//,
+  /\bdd\s+.*if=\/dev\/sd/,                         // dd if=/dev/sda (data exfiltration)
   />\s*\/dev\/sd[a-z]/,
   /:\(\)\s*\{.*\};\s*:/,
+  /\bchmod\s+.*\s+\/(?!\w)/,                       // chmod on root
+  /\bchown\s+.*\s+\/(?!\w)/,                       // chown on root
 ]
 
 export const BLOCKED_PATH_PREFIXES = [

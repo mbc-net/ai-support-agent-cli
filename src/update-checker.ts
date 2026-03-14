@@ -111,7 +111,7 @@ export function isNewerVersion(current: string, latest: string): boolean {
  * Validate that a version string looks like semver.
  */
 export function isValidVersion(version: string): boolean {
-  return /^\d+\.\d+\.\d+/.test(version)
+  return /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?$/.test(version)
 }
 
 /**

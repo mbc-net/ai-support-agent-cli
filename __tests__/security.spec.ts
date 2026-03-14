@@ -26,6 +26,16 @@ describe('security', () => {
       expect(validateCommand('rm -rf /')).not.toBeNull()
     })
 
+    it('should block rm -f / and rm / patterns', () => {
+      expect(validateCommand('rm -f /')).not.toBeNull()
+      expect(validateCommand('rm /')).not.toBeNull()
+    })
+
+    it('should block sudo commands', () => {
+      expect(validateCommand('sudo rm -rf /tmp')).not.toBeNull()
+      expect(validateCommand('sudo cat /etc/shadow')).not.toBeNull()
+    })
+
     it('should block mkfs commands', () => {
       expect(validateCommand('mkfs.ext4 /dev/sda1')).not.toBeNull()
     })
@@ -34,14 +44,28 @@ describe('security', () => {
       expect(validateCommand('dd if=/dev/zero of=/dev/sda')).not.toBeNull()
     })
 
+    it('should block dd from device commands (data exfiltration)', () => {
+      expect(validateCommand('dd if=/dev/sda of=/tmp/disk.img')).not.toBeNull()
+    })
+
     it('should block fork bomb patterns', () => {
       expect(validateCommand(':(){ :|:& };:')).not.toBeNull()
       expect(validateCommand(':() { :|:& };:')).not.toBeNull()
     })
 
+    it('should block chmod/chown on root', () => {
+      expect(validateCommand('chmod 777 /')).not.toBeNull()
+      expect(validateCommand('chown root:root /')).not.toBeNull()
+    })
+
     it('should allow safe rm commands', () => {
       expect(validateCommand('rm /tmp/test.txt')).toBeNull()
       expect(validateCommand('rm -rf /tmp/mydir')).toBeNull()
+    })
+
+    it('should allow safe chmod/chown on non-root paths', () => {
+      expect(validateCommand('chmod 644 /tmp/myfile')).toBeNull()
+      expect(validateCommand('chown user:user /tmp/myfile')).toBeNull()
     })
   })
 

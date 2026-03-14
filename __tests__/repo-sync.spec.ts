@@ -1,5 +1,6 @@
 import * as child_process from 'child_process'
 import * as fs from 'fs'
+import * as path from 'path'
 
 import { buildAuthEnv, buildCloneUrl, normalizePemKey, syncRepositories } from '../src/repo-sync'
 import type { ApiClient } from '../src/api-client'
@@ -121,6 +122,10 @@ describe('repo-sync', () => {
         expect.any(String),
         { mode: 0o600 },
       )
+
+      // SSH key filename should use cryptographic hex pattern
+      const writtenPath = (mockedFs.writeFileSync as jest.Mock).mock.calls[0][0] as string
+      expect(path.basename(writtenPath)).toMatch(/^ssh-key-[0-9a-f]{32}$/)
 
       cleanup()
       expect(mockedFs.unlinkSync).toHaveBeenCalled()
@@ -273,6 +278,39 @@ describe('repo-sync', () => {
       expect(results).toHaveLength(1)
       expect(results[0].status).toBe('skipped')
       expect(results[0].error).toBe('Not found')
+    })
+
+    it('should reject branch names starting with -', async () => {
+      ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+        repositoryId: 'REPO_01',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        authMethod: 'api_key',
+        authSecret: 'ghp_token123',
+      })
+
+      mockedFs.existsSync.mockReturnValue(false)
+
+      const maliciousRepos: NonNullable<ProjectConfigResponse['repositories']> = [
+        {
+          repositoryId: 'REPO_01',
+          repositoryName: 'my-repo',
+          repositoryUrl: 'https://github.com/org/repo.git',
+          provider: 'github',
+          branch: '-u',
+          authMethod: 'api_key',
+        },
+      ]
+
+      const results = await syncRepositories(
+        mockClient,
+        maliciousRepos,
+        '/tmp/repos',
+        '[TEST]',
+      )
+
+      expect(results).toHaveLength(1)
+      expect(results[0].status).toBe('skipped')
+      expect(results[0].error).toContain('Invalid branch name')
     })
 
     it('should handle multiple repositories', async () => {

@@ -147,6 +147,14 @@ describe('logger', () => {
       expect(maskSecrets('key is AKIAIOSFODNN7EXAMPLE')).toBe('key is AKIA****')
     })
 
+    it('should mask database connection strings', () => {
+      expect(maskSecrets('postgres://admin:s3cret@db.example.com/mydb')).toBe('postgres://admin:****@db.example.com/mydb')
+      expect(maskSecrets('mysql://root:password123@localhost:3306/app')).toBe('mysql://root:****@localhost:3306/app')
+      expect(maskSecrets('mongodb+srv://user:pass@cluster.mongodb.net')).toBe('mongodb+srv://user:****@cluster.mongodb.net')
+      expect(maskSecrets('redis://default:mypass@redis.host:6379')).toBe('redis://default:****@redis.host:6379')
+      expect(maskSecrets('postgresql://user:pwd@host/db')).toBe('postgresql://user:****@host/db')
+    })
+
     it('should not modify messages without secrets', () => {
       const message = 'This is a normal log message'
       expect(maskSecrets(message)).toBe(message)

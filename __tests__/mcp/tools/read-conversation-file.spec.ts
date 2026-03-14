@@ -186,7 +186,7 @@ describe('read-conversation-file tool', () => {
     afterEach(() => {
       // Clean up temp files created during tests
       const tmpDir = path.join(os.tmpdir(), 'ai-support-agent-files')
-      for (const name of ['document.pdf', 'archive.zip', 'data.xlsx']) {
+      for (const name of ['document.pdf', 'archive.zip', 'data.xlsx', 'traversal.pdf']) {
         const tmpFile = path.join(tmpDir, name)
         if (fs.existsSync(tmpFile)) {
           fs.unlinkSync(tmpFile)
@@ -248,6 +248,36 @@ describe('read-conversation-file tool', () => {
         'https://s3.example.com/data.xlsx',
         { responseType: 'arraybuffer', timeout: 60000 },
       )
+    })
+
+    it('should sanitize path traversal in filename for binary files', async () => {
+      const mockClient = {
+        getDownloadUrl: jest.fn().mockResolvedValue({
+          downloadUrl: 'https://s3.example.com/traversal.pdf',
+        }),
+      } as unknown as ApiClient
+
+      setupTool(mockClient)
+
+      const pdfBuffer = Buffer.from('fake-traversal-data')
+      mockedAxios.get.mockResolvedValue({ data: pdfBuffer })
+
+      const result = await toolCallback({
+        fileId: 'file-traversal',
+        s3Key: 'uploads/file-traversal.pdf',
+        filename: '../../etc/traversal.pdf',
+      }) as { content: Array<{ text: string }>; isError?: boolean }
+
+      expect(result.isError).toBeUndefined()
+      // Should use basename only, not the traversal path
+      expect(result.content[0].text).toContain('traversal.pdf')
+      expect(result.content[0].text).toContain('downloaded to:')
+
+      // Verify file was written inside tmpDir, not outside
+      const tmpDir = path.join(os.tmpdir(), 'ai-support-agent-files')
+      const tmpFile = path.join(tmpDir, 'traversal.pdf')
+      expect(fs.existsSync(tmpFile)).toBe(true)
+      expect(fs.readFileSync(tmpFile)).toEqual(pdfBuffer)
     })
 
     it('should download other binary files to temp file', async () => {

@@ -7,6 +7,7 @@ jest.mock('child_process', () => ({
 
 jest.mock('fs', () => ({
   existsSync: jest.fn(),
+  realpathSync: jest.fn((p: string) => p),
 }))
 
 jest.mock('../../src/docker/dockerfile-path', () => ({
@@ -45,7 +46,7 @@ jest.mock('../../src/logger', () => ({
 
 import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
-import { existsSync } from 'fs'
+import { existsSync, realpathSync } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
 import {
@@ -65,6 +66,7 @@ const mockSpawn = spawn as jest.MockedFunction<typeof spawn>
 const mockGetConfigDir = getConfigDir as jest.MockedFunction<typeof getConfigDir>
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>
+const mockRealpathSync = realpathSync as jest.MockedFunction<typeof realpathSync>
 
 describe('docker-runner', () => {
   const originalEnv = process.env
@@ -199,6 +201,24 @@ describe('docker-runner', () => {
       expect(count).toBe(1)
     })
 
+    it('should skip blocked paths for project directories', () => {
+      mockExistsSync.mockImplementation((p: unknown) => {
+        return p === '/etc/secrets' || p === '/proc/data'
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'test-agent',
+        createdAt: '2024-01-01T00:00:00.000Z',
+        projects: [
+          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/etc/secrets' },
+          { projectCode: 'B', token: 't2', apiUrl: 'http://b', projectDir: '/proc/data' },
+        ],
+      })
+
+      const mounts = buildVolumeMounts()
+      expect(mounts).not.toContain('/etc/secrets:/etc/secrets:rw')
+      expect(mounts).not.toContain('/proc/data:/proc/data:rw')
+    })
+
     it('should skip project directories that do not exist', () => {
       mockExistsSync.mockReturnValue(false)
       mockLoadConfig.mockReturnValue({
@@ -211,6 +231,48 @@ describe('docker-runner', () => {
 
       const mounts = buildVolumeMounts()
       expect(mounts).toHaveLength(0)
+    })
+
+    it('should resolve symlinks to detect blocked paths', () => {
+      mockExistsSync.mockImplementation((p: unknown) => {
+        return p === '/workspace/symlink-to-etc'
+      })
+      mockRealpathSync.mockImplementation((p: unknown) => {
+        if (p === '/workspace/symlink-to-etc') return '/etc/secrets'
+        return p as string
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'test-agent',
+        createdAt: '2024-01-01T00:00:00.000Z',
+        projects: [
+          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/symlink-to-etc' },
+        ],
+      })
+
+      const mounts = buildVolumeMounts()
+      expect(mounts).not.toContain('/workspace/symlink-to-etc:/workspace/symlink-to-etc:rw')
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('blocked path'))
+    })
+
+    it('should skip project directories when realpathSync fails', () => {
+      mockExistsSync.mockImplementation((p: unknown) => {
+        return p === '/workspace/broken-link'
+      })
+      mockRealpathSync.mockImplementation((p: unknown) => {
+        if (p === '/workspace/broken-link') throw new Error('ENOENT')
+        return p as string
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'test-agent',
+        createdAt: '2024-01-01T00:00:00.000Z',
+        projects: [
+          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/broken-link' },
+        ],
+      })
+
+      const mounts = buildVolumeMounts()
+      expect(mounts).toHaveLength(0)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Cannot resolve path'))
     })
   })
 

@@ -88,6 +88,10 @@ ARG AGENT_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code @ai-support-agent/cli@${AGENT_VERSION} \
     && npm cache clean --force
 
+# Create non-root user for security
+RUN groupadd -g 1000 agent && useradd -m -u 1000 -g agent agent
+
 WORKDIR /workspace
 RUN chmod 777 /workspace
+USER agent
 ENTRYPOINT ["ai-support-agent"]

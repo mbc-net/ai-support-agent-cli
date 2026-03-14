@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { createWriteStream, readFileSync, mkdirSync, statSync, rmSync, existsSync } from 'fs'
-import { join, extname } from 'path'
+import { join, basename, extname } from 'path'
 import { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 
@@ -51,7 +51,9 @@ export async function downloadChatFiles(
         s3Key: file.s3Key,
       })
 
-      const filePath = join(downloadDir, file.filename)
+      // Sanitize filename to prevent path traversal (e.g. "../../../etc/passwd")
+      const safeName = basename(file.filename)
+      const filePath = join(downloadDir, safeName)
       const response = await axios.get(downloadUrl, { responseType: 'stream' })
       const stream = response.data as Readable
       const writer = createWriteStream(filePath)
@@ -95,9 +97,14 @@ export async function uploadFile(
     throw new Error(`File extension not allowed: ${ext}`)
   }
 
+  const MAX_UPLOAD_SIZE = 100 * 1024 * 1024 // 100MB
+  const fileSize = statSync(filePath).size
+  if (fileSize > MAX_UPLOAD_SIZE) {
+    throw new Error(`File too large: ${fileSize} bytes (max: ${MAX_UPLOAD_SIZE})`)
+  }
+
   const contentType = getContentType(filename)
   const fileBuffer = readFileSync(filePath)
-  const fileSize = statSync(filePath).size
 
   const { uploadUrl, fileId, s3Key } = await client.getUploadUrl({
     conversationId,

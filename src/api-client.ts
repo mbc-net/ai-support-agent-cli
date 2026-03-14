@@ -128,7 +128,7 @@ export class ApiClient {
   }
 
   async getVersionInfo(channel: ReleaseChannel = 'latest'): Promise<VersionInfo> {
-    return this.get<VersionInfo>(`${API_ENDPOINTS.VERSION}?channel=${channel}`)
+    return this.get<VersionInfo>(API_ENDPOINTS.VERSION, { params: { channel } })
   }
 
   async getPendingCommands(agentId: string): Promise<PendingCommand[]> {

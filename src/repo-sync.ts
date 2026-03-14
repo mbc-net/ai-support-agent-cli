@@ -1,5 +1,7 @@
 import { execFile } from 'child_process'
+import * as crypto from 'crypto'
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import { promisify } from 'util'
 
@@ -10,6 +12,12 @@ import type { ProjectConfigResponse } from './types'
 import { getErrorMessage } from './utils'
 
 const execFileAsync = promisify(execFile)
+
+function validateBranchName(branch: string): void {
+  if (branch.startsWith('-')) {
+    throw new Error(`Invalid branch name: "${branch}"`)
+  }
+}
 
 export interface RepoSyncResult {
   repositoryId: string
@@ -99,6 +107,7 @@ async function cloneRepository(
   const { env, cleanup } = buildAuthEnv(authMethod, authSecret)
 
   try {
+    validateBranchName(branch)
     const cloneUrl = buildCloneUrl(repositoryUrl, authMethod, authSecret)
     // 全ブランチを取得（サポート対象の環境に応じてブランチ切り替えが必要なため）
     await execFileAsync(
@@ -107,7 +116,7 @@ async function cloneRepository(
       { env: { ...process.env, ...env }, timeout: GIT_CLONE_TIMEOUT },
     )
     // デフォルトブランチをチェックアウト
-    await execFileAsync('git', ['checkout', branch], {
+    await execFileAsync('git', ['checkout', '--', branch], {
       cwd: repoDir,
       env: { ...process.env, ...env },
       timeout: GIT_CHECKOUT_TIMEOUT,
@@ -126,6 +135,7 @@ async function pullRepository(
   const { env, cleanup } = buildAuthEnv(authMethod, authSecret)
 
   try {
+    validateBranchName(branch)
     // 全リモートブランチを取得
     await execFileAsync('git', ['fetch', '--all'], {
       cwd: repoDir,
@@ -133,7 +143,7 @@ async function pullRepository(
       timeout: GIT_FETCH_TIMEOUT,
     })
 
-    await execFileAsync('git', ['checkout', branch], {
+    await execFileAsync('git', ['checkout', '--', branch], {
       cwd: repoDir,
       env: { ...process.env, ...env },
       timeout: GIT_CHECKOUT_TIMEOUT,
@@ -208,8 +218,8 @@ export function buildAuthEnv(
   }
 
   const tmpKeyPath = path.join(
-    require('os').tmpdir(),
-    `ssh-key-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    os.tmpdir(),
+    `ssh-key-${crypto.randomBytes(16).toString('hex')}`,
   )
 
   const normalizedKey = normalizePemKey(authSecret)

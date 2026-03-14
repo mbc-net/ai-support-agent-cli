@@ -85,6 +85,10 @@ popd() {
     return 1
   fi
 }
+exec() {
+  echo "restricted: exec is disabled in sandbox mode" >&2
+  return 1
+}
 __sandbox_check() {
   if ! __sandbox_is_inside; then
     builtin cd "\${__SANDBOX_DIR}" 2>/dev/null

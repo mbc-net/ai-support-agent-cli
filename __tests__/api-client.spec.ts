@@ -178,7 +178,7 @@ describe('ApiClient', () => {
       const result = await client.getVersionInfo()
       expect(result.latestVersion).toBe('1.2.0')
       expect(result.channel).toBe('latest')
-      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version?channel=latest', undefined)
+      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version', { params: { channel: 'latest' } })
     })
 
     it('should pass channel parameter', async () => {
@@ -193,7 +193,7 @@ describe('ApiClient', () => {
 
       const result = await client.getVersionInfo('beta')
       expect(result.latestVersion).toBe('1.3.0-beta.1')
-      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version?channel=beta', undefined)
+      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version', { params: { channel: 'beta' } })
     })
   })
 
