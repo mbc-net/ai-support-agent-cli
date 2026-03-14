@@ -139,11 +139,11 @@ describe('docker-runner', () => {
       })
       mockLoadConfig.mockReturnValue(null)
 
-      const mounts = buildVolumeMounts()
-      expect(mounts).toContain(`${home}/.claude:${home}/.claude:rw`)
-      expect(mounts).toContain(`${home}/.claude.json:${home}/.claude.json:rw`)
-      expect(mounts).toContain(`${home}/.ai-support-agent:${home}/.ai-support-agent:rw`)
-      expect(mounts).toContain(`${home}/.aws:${home}/.aws:ro`)
+      const { mounts } = buildVolumeMounts()
+      expect(mounts).toContain(`${home}/.claude:/home/node/.claude:rw`)
+      expect(mounts).toContain(`${home}/.claude.json:/home/node/.claude.json:rw`)
+      expect(mounts).toContain(`${home}/.ai-support-agent:/home/node/.ai-support-agent:rw`)
+      expect(mounts).toContain(`${home}/.aws:/home/node/.aws:ro`)
     })
 
     it('should mount custom config directory from AI_SUPPORT_AGENT_CONFIG_DIR', () => {
@@ -153,15 +153,15 @@ describe('docker-runner', () => {
       })
       mockLoadConfig.mockReturnValue(null)
 
-      const mounts = buildVolumeMounts()
-      expect(mounts).toContain('/custom/config/dir:/custom/config/dir:rw')
+      const { mounts } = buildVolumeMounts()
+      expect(mounts).toContain('/custom/config/dir:/workspace/.config/ai-support-agent:rw')
     })
 
     it('should skip non-existing directories', () => {
       mockExistsSync.mockReturnValue(false)
       mockLoadConfig.mockReturnValue(null)
 
-      const mounts = buildVolumeMounts()
+      const { mounts } = buildVolumeMounts()
       expect(mounts).toHaveLength(0)
     })
 
@@ -178,9 +178,9 @@ describe('docker-runner', () => {
         ],
       })
 
-      const mounts = buildVolumeMounts()
-      expect(mounts).toContain('/workspace/project-a:/workspace/project-a:rw')
-      expect(mounts).toContain('/workspace/project-b:/workspace/project-b:rw')
+      const { mounts } = buildVolumeMounts()
+      expect(mounts).toContain('/workspace/project-a:/workspace/projects/A:rw')
+      expect(mounts).toContain('/workspace/project-b:/workspace/projects/B:rw')
     })
 
     it('should not duplicate project directory mounts', () => {
@@ -196,8 +196,8 @@ describe('docker-runner', () => {
         ],
       })
 
-      const mounts = buildVolumeMounts()
-      const count = mounts.filter(m => m === '/workspace/shared:/workspace/shared:rw').length
+      const { mounts } = buildVolumeMounts()
+      const count = mounts.filter(m => m === '/workspace/shared:/workspace/projects/A:rw').length
       expect(count).toBe(1)
     })
 
@@ -214,9 +214,9 @@ describe('docker-runner', () => {
         ],
       })
 
-      const mounts = buildVolumeMounts()
-      expect(mounts).not.toContain('/etc/secrets:/etc/secrets:rw')
-      expect(mounts).not.toContain('/proc/data:/proc/data:rw')
+      const { mounts } = buildVolumeMounts()
+      expect(mounts).not.toContain('/etc/secrets:/workspace/projects/A:rw')
+      expect(mounts).not.toContain('/proc/data:/workspace/projects/B:rw')
     })
 
     it('should skip project directories that do not exist', () => {
@@ -229,7 +229,7 @@ describe('docker-runner', () => {
         ],
       })
 
-      const mounts = buildVolumeMounts()
+      const { mounts } = buildVolumeMounts()
       expect(mounts).toHaveLength(0)
     })
 
@@ -249,8 +249,8 @@ describe('docker-runner', () => {
         ],
       })
 
-      const mounts = buildVolumeMounts()
-      expect(mounts).not.toContain('/workspace/symlink-to-etc:/workspace/symlink-to-etc:rw')
+      const { mounts } = buildVolumeMounts()
+      expect(mounts).not.toContain('/workspace/symlink-to-etc:/workspace/projects/A:rw')
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('blocked path'))
     })
 
@@ -270,7 +270,7 @@ describe('docker-runner', () => {
         ],
       })
 
-      const mounts = buildVolumeMounts()
+      const { mounts } = buildVolumeMounts()
       expect(mounts).toHaveLength(0)
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Cannot resolve path'))
     })
@@ -278,9 +278,9 @@ describe('docker-runner', () => {
 
   describe('buildEnvArgs', () => {
     it('should always include HOME', () => {
-      const args = buildEnvArgs()
+      const args = buildEnvArgs([])
       expect(args).toContain('-e')
-      expect(args).toContain(`HOME=${os.homedir()}`)
+      expect(args).toContain(`HOME=/home/node`)
     })
 
     it('should pass through set environment variables', () => {
@@ -288,7 +288,7 @@ describe('docker-runner', () => {
       process.env.AI_SUPPORT_AGENT_API_URL = 'http://test.api'
       process.env.ANTHROPIC_API_KEY = 'sk-test'
 
-      const args = buildEnvArgs()
+      const args = buildEnvArgs([])
       expect(args).toContain('AI_SUPPORT_AGENT_TOKEN=test-token')
       expect(args).toContain('AI_SUPPORT_AGENT_API_URL=http://test.api')
       expect(args).toContain('ANTHROPIC_API_KEY=sk-test')
@@ -298,9 +298,11 @@ describe('docker-runner', () => {
       process.env.AI_SUPPORT_AGENT_CONFIG_DIR = './relative/path'
       mockGetConfigDir.mockReturnValue('/resolved/absolute/path')
 
-      const args = buildEnvArgs()
-      expect(args).toContain('AI_SUPPORT_AGENT_CONFIG_DIR=/resolved/absolute/path')
-      expect(args).not.toContain('AI_SUPPORT_AGENT_CONFIG_DIR=./relative/path')
+      const args = buildEnvArgs([])
+      // Config dir is mapped to container-internal path
+      const configDirArg = args.find((a: string) => a.startsWith('AI_SUPPORT_AGENT_CONFIG_DIR='))
+      expect(configDirArg).toBeDefined()
+      expect(configDirArg).not.toContain('./relative/path')
     })
 
     it('should skip unset environment variables', () => {
@@ -309,9 +311,10 @@ describe('docker-runner', () => {
       delete process.env.ANTHROPIC_API_KEY
       delete process.env.AI_SUPPORT_AGENT_CONFIG_DIR
 
-      const args = buildEnvArgs()
-      // Only HOME should be present
-      expect(args).toEqual(['-e', `HOME=${os.homedir()}`])
+      const args = buildEnvArgs([])
+      // Only HOME should be present (no passthrough vars set)
+      expect(args[0]).toBe('-e')
+      expect(args[1]).toBe('HOME=/home/node')
     })
   })
 
