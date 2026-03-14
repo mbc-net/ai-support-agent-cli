@@ -451,7 +451,7 @@ describe('db-query tool', () => {
       )
 
       expect(pg.Client).toHaveBeenCalledWith(
-        expect.objectContaining({ ssl: { rejectUnauthorized: true } }),
+        expect.objectContaining({ ssl: { rejectUnauthorized: false } }),
       )
     })
 

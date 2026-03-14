@@ -157,9 +157,9 @@ function buildPgSslConfig(
     if (mode === 'verify-ca' || mode === 'verify-full') return { rejectUnauthorized: true }
     return false
   }
-  // 後方互換: ssl未設定の場合、localhostならSSLなし、それ以外はSSL有効
+  // 後方互換: ssl未設定の場合、localhostならSSLなし、それ以外はSSL有効（証明書検証なし）
   const isLocalHost = credentials.host === 'localhost' || credentials.host === '127.0.0.1'
-  return isLocalHost ? false : { rejectUnauthorized: true }
+  return isLocalHost ? false : { rejectUnauthorized: false }
 }
 
 /** DB接続を作成してクエリを実行する */
