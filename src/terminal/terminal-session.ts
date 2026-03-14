@@ -2,9 +2,30 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import * as pty from 'node-pty'
-
+import { logger } from '../logger'
 import { buildSafeEnv } from '../security'
+
+/**
+ * node-pty を遅延ロードする。
+ * optionalDependency のため、ネイティブビルドが失敗した環境では利用不可。
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let pty: typeof import('node-pty') | null = null
+let ptyLoadError: string | null = null
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  pty = require('node-pty')
+} catch (e) /* istanbul ignore next -- only when native build fails */ {
+  ptyLoadError = e instanceof Error ? e.message : String(e)
+  logger.debug(`[terminal] node-pty is not available: ${ptyLoadError}`)
+}
+
+/**
+ * node-pty が利用可能か確認する
+ */
+export function isNodePtyAvailable(): boolean {
+  return pty !== null
+}
 
 import {
   MAX_CONCURRENT_SESSIONS,
@@ -103,7 +124,8 @@ export class TerminalSession {
   readonly cwd: string
   readonly createdAt: number
   private lastActivity: number
-  private readonly ptyProcess: pty.IPty
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly ptyProcess: any
   private sandboxTmpDir: string | null = null
   private dataCallback: DataCallback | null = null
   private exitCallback: ExitCallback | null = null
@@ -112,6 +134,13 @@ export class TerminalSession {
   private onIdleTimeout: (() => void) | null = null
 
   constructor(sessionId: string, options: TerminalSessionOptions = {}) {
+    /* istanbul ignore if -- only when native build fails */
+    if (!pty) {
+      throw new Error(
+        `Terminal functionality is not available: node-pty failed to load. ${ptyLoadError ?? 'Unknown error'}`,
+      )
+    }
+
     this.sessionId = sessionId
     this.cols = options.cols ?? TERMINAL_DEFAULT_COLS
     this.rows = options.rows ?? TERMINAL_DEFAULT_ROWS
@@ -169,7 +198,7 @@ export class TerminalSession {
       }
     })
 
-    this.ptyProcess.onExit(({ exitCode }) => {
+    this.ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
       this.exited = true
       this.clearIdleTimer()
       this.cleanupTmpDir()
