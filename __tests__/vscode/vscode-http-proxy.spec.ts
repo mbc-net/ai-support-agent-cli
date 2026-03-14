@@ -134,6 +134,30 @@ describe('proxyHttpRequest', () => {
     expect(result.headers['set-cookie']).toBe('a=1, b=2')
   })
 
+  it('should skip undefined header values', async () => {
+    const mockRes = Object.assign(new EventEmitter(), {
+      statusCode: 200,
+      headers: { 'content-type': 'text/html', 'x-empty': undefined },
+    })
+
+    ;(http.request as jest.Mock).mockImplementation((_opts: http.RequestOptions, cb: (res: typeof mockRes) => void) => {
+      process.nextTick(() => {
+        cb(mockRes)
+        mockRes.emit('end')
+      })
+      return mockReq
+    })
+
+    const result = await proxyHttpRequest(8443, {
+      method: 'GET',
+      path: '/',
+      headers: {},
+    })
+
+    expect(result.headers['content-type']).toBe('text/html')
+    expect(result.headers['x-empty']).toBeUndefined()
+  })
+
   it('should default to status 500 if statusCode is undefined', async () => {
     const mockRes = Object.assign(new EventEmitter(), {
       statusCode: undefined,
