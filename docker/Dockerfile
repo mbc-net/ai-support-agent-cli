@@ -91,6 +91,10 @@ RUN ARCH=$(dpkg --print-architecture) \
     && dpkg -i /tmp/glab.deb \
     && rm /tmp/glab.deb
 
+# code-server (VS Code Server)
+RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local \
+    && code-server --version
+
 # Claude Code CLI + AI Support Agent CLI
 ARG AGENT_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code @ai-support-agent/cli@${AGENT_VERSION} \
