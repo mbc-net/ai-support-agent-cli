@@ -1,7 +1,7 @@
 FROM node:24-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl unzip git openssh-client \
+    ca-certificates curl unzip git openssh-client vim \
     default-mysql-client postgresql-client \
     gnupg apt-transport-https \
     # Build tools for native addons (node-pty)
