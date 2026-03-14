@@ -4,7 +4,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip git openssh-client \
     default-mysql-client postgresql-client \
     gnupg apt-transport-https \
-    # Python 3 + pip (for document processing tools)
+    # Build tools for native addons (node-pty)
+    make g++ \
+    # Python 3 + pip (for document processing tools and node-gyp)
     python3 python3-pip python3-venv \
     # Pandoc (universal document converter: docx/pdf/html/markdown/etc.)
     pandoc \
