@@ -265,6 +265,38 @@ describe('startHeartbeat', () => {
     if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
   })
 
+  it('should call heartbeat periodically via setInterval', async () => {
+    const deps = createMockDeps({ heartbeatInterval: 5000 })
+    const state = createMockState()
+    const configSyncState = {
+      availableChatModes: ['api' as const],
+      activeChatMode: 'api' as const,
+      currentConfigHash: undefined,
+      serverConfig: null,
+      projectConfig: undefined,
+      mcpConfigPath: undefined,
+    }
+    const configSyncDeps = {
+      client: deps.client,
+      agentId: deps.agentId,
+      prefix: deps.prefix,
+      projectDir: deps.projectDir,
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    startHeartbeat(deps, state, configSyncState as any, configSyncDeps as any)
+
+    // Initial heartbeat call
+    await jest.advanceTimersByTimeAsync(100)
+    expect(deps.client.heartbeat).toHaveBeenCalledTimes(1)
+
+    // Advance past heartbeat interval to trigger setInterval callback
+    await jest.advanceTimersByTimeAsync(5000)
+    expect(deps.client.heartbeat).toHaveBeenCalledTimes(2)
+
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
+  })
+
   it('should call heartbeat on auth error', async () => {
     const { isAuthenticationError } = require('../src/utils')
     const { logger } = require('../src/logger')
