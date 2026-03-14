@@ -1,4 +1,5 @@
 import { execFile } from 'child_process'
+import { EventEmitter } from 'events'
 
 import { detectAvailableChatModes, resolveActiveChatMode } from '../src/chat-mode-detector'
 
@@ -72,6 +73,21 @@ describe('detectAvailableChatModes', () => {
     const modes = await detectAvailableChatModes()
 
     expect(modes).not.toContain('api')
+  })
+
+  it('should handle child process error event', async () => {
+    mockExecFile.mockImplementation(
+      (_cmd: string, _args: string[], _opts: unknown, _callback: (err: Error | null) => void) => {
+        const child = new EventEmitter()
+        // Emit error after a tick (before callback is called)
+        process.nextTick(() => child.emit('error', new Error('spawn ENOENT')))
+        return child
+      },
+    )
+
+    const modes = await detectAvailableChatModes()
+
+    expect(modes).not.toContain('claude_code')
   })
 
   it('should detect both modes when both are available', async () => {

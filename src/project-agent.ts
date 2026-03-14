@@ -3,7 +3,7 @@ import * as os from 'os'
 import { ApiClient } from './api-client'
 import { AppSyncSubscriber } from './appsync-subscriber'
 import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, refreshChatMode } from './agent-config-sync'
-import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, stopTransport } from './agent-transport'
+import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, startVsCodeTunnel, stopTransport } from './agent-transport'
 import { INITIAL_CONFIG_SYNC_MAX_RETRIES, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
@@ -41,6 +41,7 @@ export class ProjectAgent {
     heartbeatTimer: null,
     subscriber: null,
     terminalWs: null,
+    vsCodeWs: null,
     processing: false,
     configSyncDebounceTimer: null,
   }
@@ -126,7 +127,7 @@ export class ProjectAgent {
         os: os.platform(),
         arch: os.arch(),
         ipAddress: getLocalIpAddress(),
-        capabilities: ['shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal'],
+        capabilities: ['shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode'],
         availableChatModes: this.configSyncState.availableChatModes,
         activeChatMode: this.configSyncState.activeChatMode,
       })
@@ -186,8 +187,9 @@ export class ProjectAgent {
     // Start terminal WebSocket connection (only if server has WS gateway enabled)
     if (result.wsEnabled) {
       startTerminalWebSocket(this.transportDeps, this.transportState, result.wsUrl)
+      startVsCodeTunnel(this.transportDeps, this.transportState, result.wsUrl)
     } else {
-      logger.debug(`${this.prefix} Terminal WebSocket skipped (wsEnabled=false)`)
+      logger.debug(`${this.prefix} Terminal/VS Code WebSocket skipped (wsEnabled=false)`)
     }
   }
 }

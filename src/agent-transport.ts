@@ -6,6 +6,7 @@ import { logger } from './logger'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
 import { TerminalWebSocket, isNodePtyAvailable } from './terminal'
 import { getErrorMessage, isAuthenticationError } from './utils'
+import { VsCodeTunnelWebSocket } from './vscode'
 import { executeCommand } from './commands'
 import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
 import { refreshChatMode, scheduleConfigSync } from './agent-config-sync'
@@ -14,6 +15,7 @@ export interface TransportState {
   heartbeatTimer: ReturnType<typeof setInterval> | null
   subscriber: AppSyncSubscriber | null
   terminalWs: TerminalWebSocket | null
+  vsCodeWs: VsCodeTunnelWebSocket | null
   processing: boolean
   configSyncDebounceTimer: ReturnType<typeof setTimeout> | null
 }
@@ -150,6 +152,28 @@ export function startTerminalWebSocket(
 }
 
 /**
+ * Start VS Code tunnel WebSocket connection.
+ * @param wsUrl - サーバーから返されたWebSocket URL（指定時はapiUrlの代わりに使用）
+ */
+export function startVsCodeTunnel(
+  deps: TransportDeps,
+  state: TransportState,
+  wsUrl?: string,
+): void {
+  const baseUrl = wsUrl ?? deps.apiUrl
+  state.vsCodeWs = new VsCodeTunnelWebSocket(
+    baseUrl,
+    deps.token,
+    deps.agentId,
+    deps.projectDir,
+  )
+
+  state.vsCodeWs.connect().catch((error) => {
+    logger.warn(`${deps.prefix} VS Code tunnel WebSocket connection failed: ${getErrorMessage(error)}`)
+  })
+}
+
+/**
  * Handle an incoming AppSync notification.
  */
 export async function handleNotification(
@@ -282,4 +306,5 @@ export function stopTransport(state: TransportState): void {
   if (state.configSyncDebounceTimer) clearTimeout(state.configSyncDebounceTimer)
   if (state.subscriber) state.subscriber.disconnect()
   if (state.terminalWs) state.terminalWs.disconnect()
+  if (state.vsCodeWs) state.vsCodeWs.disconnect()
 }

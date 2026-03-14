@@ -493,7 +493,7 @@ describe('db-query tool', () => {
       )
     })
 
-    it('should respect explicit ssl=false override for remote PostgreSQL', async () => {
+    it('should respect explicit ssl disable mode for remote PostgreSQL', async () => {
       const mockClient = {
         connect: jest.fn().mockResolvedValue(undefined),
         query: jest.fn().mockResolvedValue({ rows: [] }),
@@ -503,7 +503,7 @@ describe('db-query tool', () => {
       pg.Client.mockImplementation(() => mockClient)
 
       await executeQuery(
-        { name: 'MAIN', engine: 'postgresql', host: 'db.example.com', port: 5432, database: 'testdb', user: 'postgres', password: 'pass', ssl: false },
+        { name: 'MAIN', engine: 'postgresql', host: 'db.example.com', port: 5432, database: 'testdb', user: 'postgres', password: 'pass', ssl: { mode: 'disable' } },
         'SELECT 1',
       )
 
@@ -512,7 +512,7 @@ describe('db-query tool', () => {
       )
     })
 
-    it('should respect explicit ssl=true override for localhost PostgreSQL', async () => {
+    it('should respect explicit ssl require mode for localhost PostgreSQL', async () => {
       const mockClient = {
         connect: jest.fn().mockResolvedValue(undefined),
         query: jest.fn().mockResolvedValue({ rows: [] }),
@@ -522,7 +522,7 @@ describe('db-query tool', () => {
       pg.Client.mockImplementation(() => mockClient)
 
       await executeQuery(
-        { name: 'MAIN', engine: 'postgresql', host: 'localhost', port: 5432, database: 'testdb', user: 'postgres', password: 'pass', ssl: true },
+        { name: 'MAIN', engine: 'postgresql', host: 'localhost', port: 5432, database: 'testdb', user: 'postgres', password: 'pass', ssl: { mode: 'verify-full' } },
         'SELECT 1',
       )
 
