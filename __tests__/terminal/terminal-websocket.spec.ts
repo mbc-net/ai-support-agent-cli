@@ -233,20 +233,25 @@ describe('TerminalWebSocket', () => {
   })
 
   it('should send error when max sessions reached', (done) => {
+    // Temporarily reduce MAX_CONCURRENT_SESSIONS for faster test
+    const origMax = wsConstants.MAX_CONCURRENT_SESSIONS
+    Object.defineProperty(wsConstants, 'MAX_CONCURRENT_SESSIONS', { value: 2, writable: true })
+
     let openCount = 0
     server.on('connection', (ws) => {
       ws.on('message', (data) => {
         const msg = JSON.parse(data.toString()) as TerminalAgentMessage
         if (msg.type === 'ready') {
           openCount++
-          if (openCount < 5) {
+          if (openCount < 2) {
             ws.send(JSON.stringify({ type: 'open', sessionId: `max-session-${openCount + 1}` }))
           } else {
-            // 6th open should fail
+            // 3rd open should fail (MAX_CONCURRENT_SESSIONS = 2)
             ws.send(JSON.stringify({ type: 'open', sessionId: 'overflow' }))
           }
         }
         if (msg.type === 'error' && msg.error?.includes('Maximum concurrent sessions')) {
+          Object.defineProperty(wsConstants, 'MAX_CONCURRENT_SESSIONS', { value: origMax, writable: true })
           done()
         }
       })

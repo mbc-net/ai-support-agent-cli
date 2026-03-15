@@ -41,3 +41,22 @@ const processManager = new ProcessManager()
 export function getProcessManager(): ProcessManager {
   return processManager
 }
+
+/**
+ * 実行中のプロセス/チャットをキャンセルする（統一インターフェース）
+ *
+ * chat-executor と api-chat-executor の両方が同じシングルトン ProcessManager を
+ * 共有しているため、この関数1つで全てのプロセスをキャンセルできる。
+ *
+ * @returns true: プロセスが見つかりキャンセルした, false: プロセスが見つからなかった
+ */
+export function cancelProcess(commandId: string): boolean {
+  return processManager.cancel(commandId)
+}
+
+/**
+ * テスト用: シングルトン ProcessManager の running Map の内容を取得
+ */
+export function _getRunningProcesses(): Map<string, { cancel: () => void }> {
+  return processManager._getRunning()
+}

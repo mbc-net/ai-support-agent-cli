@@ -5,8 +5,8 @@ import { getWorkspaceDir } from '../project-dir'
 import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
 import { getErrorMessage } from '../utils'
 
-import { cancelChatProcess, executeChatCommand } from './chat-executor'
-import { cancelApiChatProcess } from './api-chat-executor'
+import { executeChatCommand } from './chat-executor'
+import { cancelProcess } from './process-manager'
 import { fileDelete, fileList, fileMkdir, fileRead, fileRename, fileWrite } from './file-executor'
 import { processKill, processList } from './process-executor'
 import { executeShellCommand } from './shell-executor'
@@ -119,7 +119,7 @@ export async function executeCommand(
           return errorResult('targetCommandId is required for chat_cancel')
         }
         logger.info(`[chat_cancel] Cancelling chat process: targetCommandId=${targetCommandId}`)
-        const cancelled = cancelChatProcess(targetCommandId) || cancelApiChatProcess(targetCommandId)
+        const cancelled = cancelProcess(targetCommandId)
         return successResult({ cancelled, targetCommandId })
       }
       case 'setup':

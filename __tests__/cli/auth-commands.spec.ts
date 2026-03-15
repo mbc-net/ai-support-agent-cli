@@ -2,6 +2,7 @@ import { Command } from 'commander'
 
 import { startAuthServer } from '../../src/auth-server'
 import { addProject } from '../../src/config-manager'
+import { DEFAULT_LOGIN_URL } from '../../src/constants'
 import { logger } from '../../src/logger'
 import { registerAuthCommands } from '../../src/cli/auth-commands'
 
@@ -43,16 +44,31 @@ describe('cli/auth-commands', () => {
     expect(commandNames).toContain('configure')
   })
 
-  it('login should require --url option', () => {
+  it('login should default to production URL when --url is omitted', async () => {
+    mockedStartAuthServer.mockResolvedValue({
+      url: 'http://localhost:12345',
+      nonce: 'test-nonce',
+      waitForCallback: jest.fn().mockResolvedValue({
+        token: 'auth-token',
+        apiUrl: 'http://callback-api',
+        projectCode: 'my-proj',
+      }),
+      stop: jest.fn(),
+    })
+
     const program = new Command()
       .exitOverride()
       .configureOutput({ writeOut: () => {}, writeErr: () => {} })
 
     registerAuthCommands(program)
 
-    expect(() => {
-      program.parse(['node', 'test', 'login'])
-    }).toThrow()
+    const loginCmd = program.commands.find((cmd) => cmd.name() === 'login')!
+    await loginCmd.parseAsync(['node', 'test'])
+
+    expect(mockedStartAuthServer).toHaveBeenCalledWith(
+      undefined,
+      DEFAULT_LOGIN_URL,
+    )
   })
 
   it('configure should require --token and --api-url options', () => {
