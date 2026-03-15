@@ -47,6 +47,9 @@ export const MAX_DIR_ENTRIES = 1000
 // Hidden entries to exclude from file listings
 export const HIDDEN_ENTRIES = ['.claude']
 
+// Default login URL (production)
+export const DEFAULT_LOGIN_URL = 'https://ai-support-agent.com'
+
 // Default project codes
 export const PROJECT_CODE_DEFAULT = 'default'
 export const PROJECT_CODE_CLI_DIRECT = 'cli-direct'
