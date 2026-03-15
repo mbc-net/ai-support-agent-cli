@@ -269,6 +269,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       this.wsProxy.openConnection(
         subSocketId,
         msg.path,
+        () => {
+          this.send({
+            type: 'ws_frame',
+            sessionId: msg.sessionId,
+            subSocketId,
+            isOpen: true,
+          })
+        },
         (data) => {
           this.send({
             type: 'ws_frame',

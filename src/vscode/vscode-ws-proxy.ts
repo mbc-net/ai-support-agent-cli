@@ -22,6 +22,7 @@ export class VsCodeWsProxy {
   openConnection(
     subSocketId: string,
     path: string,
+    onOpen: () => void,
     onData: (data: string) => void,
     onClose: () => void,
   ): void {
@@ -33,6 +34,7 @@ export class VsCodeWsProxy {
     ws.on('open', () => {
       logger.debug(`[vscode-ws-proxy] Connection ${subSocketId} opened`)
       this.connections.set(subSocketId, ws)
+      onOpen()
     })
 
     ws.on('message', (data: WebSocket.Data) => {

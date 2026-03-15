@@ -407,6 +407,7 @@ describe('VsCodeTunnelWebSocket', () => {
         '/ws/path',
         expect.any(Function),
         expect.any(Function),
+        expect.any(Function),
       )
     })
 
@@ -463,14 +464,25 @@ describe('VsCodeTunnelWebSocket', () => {
         sessionId: 'sess-1',
       })
 
-      // Get the onData and onClose callbacks
-      const onData = mockProxy.openConnection.mock.calls[0][2]
-      const onClose = mockProxy.openConnection.mock.calls[0][3]
+      // Get the onOpen, onData and onClose callbacks
+      const onOpen = mockProxy.openConnection.mock.calls[0][2]
+      const onData = mockProxy.openConnection.mock.calls[0][3]
+      const onClose = mockProxy.openConnection.mock.calls[0][4]
+
+      // Invoke onOpen callback
+      onOpen()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({
+        type: 'ws_frame',
+        sessionId: 'sess-1',
+        subSocketId: 'sub-1',
+        isOpen: true,
+      })
 
       // Invoke onData callback
       onData('encoded-data')
-      expect(sentMessages).toHaveLength(1)
-      expect(sentMessages[0]).toMatchObject({
+      expect(sentMessages).toHaveLength(2)
+      expect(sentMessages[1]).toMatchObject({
         type: 'ws_frame',
         sessionId: 'sess-1',
         subSocketId: 'sub-1',
@@ -479,8 +491,8 @@ describe('VsCodeTunnelWebSocket', () => {
 
       // Invoke onClose callback
       onClose()
-      expect(sentMessages).toHaveLength(2)
-      expect(sentMessages[1]).toMatchObject({
+      expect(sentMessages).toHaveLength(3)
+      expect(sentMessages[2]).toMatchObject({
         type: 'ws_frame',
         sessionId: 'sess-1',
         subSocketId: 'sub-1',
