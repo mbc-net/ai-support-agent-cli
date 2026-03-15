@@ -36,7 +36,7 @@ import { createActivityTimeout } from '../utils/activity-timeout'
 import { safeJsonParse } from '../utils/json-parse'
 import { StreamLineParser } from '../utils/stream-parser'
 
-import { getProcessManager } from './process-manager'
+import { cancelProcess, getProcessManager, _getRunningProcesses } from './process-manager'
 import { createChunkSender, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
 
 /** 実行中の API チャットを commandId で管理（chat-executor と共有シングルトン） */
@@ -44,15 +44,20 @@ const processManager = getProcessManager()
 
 /**
  * 実行中の API チャットプロセスをキャンセルする
+ * @deprecated Use {@link cancelProcess} from './process-manager' instead.
+ * Both chat-executor and api-chat-executor share the same ProcessManager singleton.
  * @returns true: プロセスが見つかりキャンセルした, false: プロセスが見つからなかった
  */
 export function cancelApiChatProcess(commandId: string): boolean {
-  return processManager.cancel(commandId)
+  return cancelProcess(commandId)
 }
 
-/** テスト用: runningApiChats の内容を取得 */
+/**
+ * テスト用: runningApiChats の内容を取得
+ * @deprecated Use {@link _getRunningProcesses} from './process-manager' instead.
+ */
 export function _getRunningApiChats(): Map<string, { cancel: () => void }> {
-  return processManager._getRunning()
+  return _getRunningProcesses()
 }
 
 /**

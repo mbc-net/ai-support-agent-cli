@@ -1,7 +1,7 @@
 import type { Command } from 'commander'
 
 import { startAuthServer } from '../auth-server'
-import { PROJECT_CODE_DEFAULT } from '../constants'
+import { DEFAULT_LOGIN_URL, PROJECT_CODE_DEFAULT } from '../constants'
 import {
   addProject,
 } from '../config-manager'
@@ -73,7 +73,7 @@ export function registerAuthCommands(program: Command): void {
   program
     .command('login')
     .description(t('cmd.login'))
-    .requiredOption('--url <url>', t('cmd.login.url'))
+    .option('--url <url>', t('cmd.login.url'), DEFAULT_LOGIN_URL)
     .option('--api-url <url>', t('cmd.login.apiUrl'))
     .option('--port <port>', t('cmd.login.port'))
     .action((opts: { url: string; apiUrl?: string; port?: string }) =>
@@ -83,7 +83,7 @@ export function registerAuthCommands(program: Command): void {
   program
     .command('add-project')
     .description(t('cmd.addProject'))
-    .requiredOption('--url <url>', t('cmd.login.url'))
+    .option('--url <url>', t('cmd.login.url'), DEFAULT_LOGIN_URL)
     .option('--api-url <url>', t('cmd.login.apiUrl'))
     .option('--port <port>', t('cmd.login.port'))
     .action((opts: { url: string; apiUrl?: string; port?: string }) =>

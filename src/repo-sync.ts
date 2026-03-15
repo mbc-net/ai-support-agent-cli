@@ -21,6 +21,7 @@ function validateBranchName(branch: string): void {
 
 export interface RepoSyncResult {
   repositoryId: string
+  repositoryCode: string
   repositoryName: string
   status: 'cloned' | 'updated' | 'skipped'
   error?: string
@@ -46,6 +47,7 @@ export async function syncRepositories(
       logger.warn(`${prefix} Repository sync failed for ${repo.repositoryName}: ${errorMsg}`)
       results.push({
         repositoryId: repo.repositoryId,
+        repositoryCode: repo.repositoryCode,
         repositoryName: repo.repositoryName,
         status: 'skipped',
         error: errorMsg,
@@ -65,7 +67,15 @@ async function syncSingleRepository(
   // 認証情報をJIT取得
   const credentials = await client.getRepoCredentials(repo.repositoryId)
 
-  const repoDir = path.join(reposDir, repo.repositoryId)
+  const repoDir = path.join(reposDir, repo.repositoryCode)
+
+  // レガシーディレクトリ移行: repositoryId → repositoryCode
+  const legacyDir = path.join(reposDir, repo.repositoryId)
+  if (repo.repositoryId !== repo.repositoryCode && fs.existsSync(legacyDir) && !fs.existsSync(repoDir)) {
+    fs.renameSync(legacyDir, repoDir)
+    logger.info(`${prefix} Migrated repository directory: ${repo.repositoryId} -> ${repo.repositoryCode}`)
+  }
+
   const gitDir = path.join(repoDir, '.git')
 
   if (fs.existsSync(gitDir)) {
@@ -74,6 +84,7 @@ async function syncSingleRepository(
     logger.info(`${prefix} Repository updated: ${repo.repositoryName} (${repo.branch})`)
     return {
       repositoryId: repo.repositoryId,
+      repositoryCode: repo.repositoryCode,
       repositoryName: repo.repositoryName,
       status: 'updated',
     }
@@ -89,6 +100,7 @@ async function syncSingleRepository(
     logger.info(`${prefix} Repository cloned: ${repo.repositoryName} (${repo.branch})`)
     return {
       repositoryId: repo.repositoryId,
+      repositoryCode: repo.repositoryCode,
       repositoryName: repo.repositoryName,
       status: 'cloned',
     }

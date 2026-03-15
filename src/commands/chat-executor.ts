@@ -5,11 +5,11 @@ import { logger } from '../logger'
 import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatFileInfo, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
 import { parseString, truncateString } from '../utils'
 
-import { getAutoAddDirs } from '../project-dir'
+import { getAutoAddDirs, getWorkspaceDir } from '../project-dir'
 import { executeApiChatCommand } from './api-chat-executor'
 import { runClaudeCode } from './claude-code-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
-import { getProcessManager } from './process-manager'
+import { cancelProcess, getProcessManager, _getRunningProcesses as _getRunningFromManager } from './process-manager'
 import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
@@ -20,15 +20,20 @@ const processManager = getProcessManager()
 
 /**
  * 実行中のチャットプロセスをキャンセルする
+ * @deprecated Use {@link cancelProcess} from './process-manager' instead.
+ * Both chat-executor and api-chat-executor share the same ProcessManager singleton.
  * @returns true: プロセスが見つかりキルした, false: プロセスが見つからなかった
  */
 export function cancelChatProcess(commandId: string): boolean {
-  return processManager.cancel(commandId)
+  return cancelProcess(commandId)
 }
 
-/** テスト用: runningProcesses の内容を取得 */
+/**
+ * テスト用: runningProcesses の内容を取得
+ * @deprecated Use {@link _getRunningProcesses} from './process-manager' instead.
+ */
 export function _getRunningProcesses(): Map<string, { cancel: () => void }> {
-  return processManager._getRunning()
+  return _getRunningFromManager()
 }
 
 /** Options for executeChatCommand */
@@ -217,7 +222,7 @@ async function executeClaudeCodeChat(
       locale,
       awsEnv,
       mcpConfigPath,
-      cwd: projectDir,
+      cwd: projectDir ? getWorkspaceDir(projectDir) : undefined,
       systemPrompt,
       policyContext: {
         tenantCode,

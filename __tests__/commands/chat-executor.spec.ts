@@ -10,28 +10,14 @@ import {
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED } from '../../src/constants'
 import type { AgentServerConfig, ChatPayload, ProjectConfigResponse } from '../../src/types'
 import { createMockChildProcess } from '../helpers/mock-factory'
-
-/** NDJSON行を作るヘルパー */
-function ndjsonResult(text: string): string {
-  return JSON.stringify({ type: 'result', subtype: 'success', result: text }) + '\n'
-}
-
-function ndjsonAssistant(text: string, toolUses?: Array<{ name: string; id: string; input: Record<string, unknown> }>): string {
-  const content: Array<Record<string, unknown>> = []
-  if (toolUses) {
-    for (const tu of toolUses) {
-      content.push({ type: 'tool_use', name: tu.name, id: tu.id, input: tu.input })
-    }
-  }
-  content.push({ type: 'text', text })
-  return JSON.stringify({ type: 'assistant', message: { content } }) + '\n'
-}
+import { ndjsonAssistant, ndjsonResult } from '../helpers/ndjson-builders'
 
 jest.mock('../../src/logger')
 
 // Mock project-dir
 jest.mock('../../src/project-dir', () => ({
   getAutoAddDirs: jest.fn().mockReturnValue(['/mock/repos', '/mock/docs']),
+  getWorkspaceDir: jest.fn((dir: string) => `${dir}/workspace`),
 }))
 
 // Mock aws-credential-builder

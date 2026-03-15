@@ -3,6 +3,7 @@ import { type AppSyncSubscriber, type AppSyncNotification } from './appsync-subs
 import { LOG_PAYLOAD_LIMIT, LOG_RESULT_LIMIT } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
+import { getWorkspaceDir, getReposDir } from './project-dir'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
 import { TerminalWebSocket, isNodePtyAvailable } from './terminal'
 import { getErrorMessage, isAuthenticationError } from './utils'
@@ -139,11 +140,12 @@ export function startTerminalWebSocket(
 
   // wsUrl が指定された場合はそれを使う（Next.jsプロキシ経由ではWSが通らないため）
   const baseUrl = wsUrl ?? deps.apiUrl
+  const terminalDir = deps.projectDir ? getWorkspaceDir(deps.projectDir) : undefined
   state.terminalWs = new TerminalWebSocket(
     baseUrl,
     deps.token,
     deps.agentId,
-    deps.projectDir,
+    terminalDir,
   )
 
   state.terminalWs.connect().catch((error) => {
@@ -161,11 +163,12 @@ export function startVsCodeTunnel(
   wsUrl?: string,
 ): void {
   const baseUrl = wsUrl ?? deps.apiUrl
+  const reposDir = deps.projectDir ? getReposDir(deps.projectDir) : undefined
   state.vsCodeWs = new VsCodeTunnelWebSocket(
     baseUrl,
     deps.token,
     deps.agentId,
-    deps.projectDir,
+    reposDir,
   )
 
   state.vsCodeWs.connect().catch((error) => {
