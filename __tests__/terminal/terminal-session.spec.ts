@@ -1,7 +1,8 @@
 import * as os from 'os'
 
 import * as constants from '../../src/terminal/constants'
-import { TerminalSession, TerminalSessionManager, isNodePtyAvailable } from '../../src/terminal/terminal-session'
+import { TerminalSession, isNodePtyAvailable } from '../../src/terminal/terminal-session'
+import { TerminalSessionManager } from '../../src/terminal/terminal-session-manager'
 
 const { MAX_CONCURRENT_SESSIONS } = constants
 

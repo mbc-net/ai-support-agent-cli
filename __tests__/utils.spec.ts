@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError } from '../src/utils'
+import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -268,5 +268,19 @@ describe('isAuthenticationError', () => {
   it('should return false for AxiosError without response', () => {
     const error = new AxiosError('Network Error', 'ERR_NETWORK')
     expect(isAuthenticationError(error)).toBe(false)
+  })
+})
+
+describe('buildWsUrl', () => {
+  it('should convert https to wss', () => {
+    expect(buildWsUrl('https://api.example.com', '/ws/terminal')).toBe('wss://api.example.com/ws/terminal')
+  })
+
+  it('should convert http to ws', () => {
+    expect(buildWsUrl('http://localhost:3000', '/ws/terminal')).toBe('ws://localhost:3000/ws/terminal')
+  })
+
+  it('should strip trailing slash', () => {
+    expect(buildWsUrl('https://api.example.com/', '/ws/terminal')).toBe('wss://api.example.com/ws/terminal')
   })
 })
