@@ -20,7 +20,7 @@ export abstract class BaseWebSocketConnection<TMessage> {
   protected ws: WebSocket | null = null
   protected closed = false
   protected readonly reconnectAttemptsRef = { current: 0 }
-  private readonly options: BaseWebSocketOptions
+  protected readonly options: BaseWebSocketOptions
 
   constructor(options: BaseWebSocketOptions) {
     this.options = options
@@ -57,7 +57,20 @@ export abstract class BaseWebSocketConnection<TMessage> {
 
   /** WebSocket を閉じる（サブクラスでオーバーライド可能） */
   protected closeWebSocket(ws: WebSocket): void {
-    ws.close()
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CLOSING) {
+      ws.close()
+    } else {
+      ws.terminate()
+    }
+  }
+
+  protected sendMessage(msg: unknown): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    try {
+      this.ws.send(JSON.stringify(msg))
+    } catch (error) {
+      logger.debug(`${this.options.logPrefix} Send error: ${getErrorMessage(error)}`)
+    }
   }
 
   /** 再接続成功時のコールバック（サブクラスでオーバーライド可能） */

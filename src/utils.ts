@@ -60,3 +60,10 @@ export function validateApiUrl(url: string): string | null {
 export function isAuthenticationError(error: unknown): boolean {
   return axios.isAxiosError(error) && error.response?.status === 401
 }
+
+export function buildWsUrl(apiUrl: string, path: string): string {
+  return apiUrl
+    .replace(/^https:/, 'wss:')
+    .replace(/^http:/, 'ws:')
+    .replace(/\/$/, '') + path
+}

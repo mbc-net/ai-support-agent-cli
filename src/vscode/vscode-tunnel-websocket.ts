@@ -2,7 +2,7 @@ import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../base-websocket'
 import { logger } from '../logger'
-import { getErrorMessage } from '../utils'
+import { getErrorMessage, buildWsUrl } from '../utils'
 
 import {
   VSCODE_WS_MAX_RECONNECT_RETRIES,
@@ -85,10 +85,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       reconnectBaseDelayMs: VSCODE_WS_RECONNECT_BASE_DELAY_MS,
       logPrefix: '[vscode-ws]',
     })
-    this.wsUrl = apiUrl
-      .replace(/^https:/, 'wss:')
-      .replace(/^http:/, 'ws:')
-      .replace(/\/$/, '') + '/ws/agent-vscode'
+    this.wsUrl = buildWsUrl(apiUrl, '/ws/agent-vscode')
   }
 
   protected createWebSocket(): WebSocket {
@@ -134,14 +131,6 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
   protected onDisconnect(): void {
     this.cleanup()
-  }
-
-  protected closeWebSocket(ws: WebSocket): void {
-    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CLOSING) {
-      ws.close()
-    } else {
-      ws.terminate()
-    }
   }
 
   private async handleVsCodeOpen(msg: VsCodeServerMessage): Promise<void> {
@@ -313,11 +302,6 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private send(msg: VsCodeAgentMessage): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    try {
-      this.ws.send(JSON.stringify(msg))
-    } catch (error) {
-      logger.debug(`[vscode-ws] Send error: ${getErrorMessage(error)}`)
-    }
+    this.sendMessage(msg)
   }
 }

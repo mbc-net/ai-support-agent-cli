@@ -11,6 +11,7 @@ class MockWebSocket extends EventEmitter {
   readyState = MockWebSocket.OPEN
   send = jest.fn()
   close = jest.fn()
+  terminate = jest.fn()
 
   simulateOpen(): void {
     this.emit('open')
@@ -95,6 +96,18 @@ describe('BaseWebSocketConnection default methods', () => {
     expect(mockWsInstance!.close).toHaveBeenCalled()
   })
 
+  it('should terminate when readyState is not OPEN or CLOSING', async () => {
+    const conn = new TestWebSocketConnection()
+    const connectPromise = conn.connect()
+    mockWsInstance!.simulateOpen()
+    await connectPromise
+
+    mockWsInstance!.readyState = MockWebSocket.CLOSED
+    conn.disconnect()
+    expect(mockWsInstance!.terminate).toHaveBeenCalled()
+    expect(mockWsInstance!.close).not.toHaveBeenCalled()
+  })
+
   it('should call default onWebSocketClose on close event', async () => {
     const conn = new TestWebSocketConnection()
     const connectPromise = conn.connect()
@@ -130,5 +143,49 @@ describe('BaseWebSocketConnection default methods', () => {
     expect(conn.receivedMessages).toEqual([{ type: 'test', data: 'hello' }])
 
     conn.disconnect()
+  })
+
+  describe('sendMessage', () => {
+    it('should send JSON message when ws is OPEN', async () => {
+      const conn = new TestWebSocketConnection()
+      const connectPromise = conn.connect()
+      mockWsInstance!.simulateOpen()
+      await connectPromise
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(conn as any).sendMessage({ type: 'test', data: 'hello' })
+      expect(mockWsInstance!.send).toHaveBeenCalledWith('{"type":"test","data":"hello"}')
+    })
+
+    it('should not send when ws is null', () => {
+      const conn = new TestWebSocketConnection()
+      // ws is null before connect
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(conn as any).sendMessage({ type: 'test' })
+      // No error thrown
+    })
+
+    it('should not send when ws is not OPEN', async () => {
+      const conn = new TestWebSocketConnection()
+      const connectPromise = conn.connect()
+      mockWsInstance!.simulateOpen()
+      await connectPromise
+
+      mockWsInstance!.readyState = MockWebSocket.CLOSED
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(conn as any).sendMessage({ type: 'test' })
+      expect(mockWsInstance!.send).not.toHaveBeenCalled()
+    })
+
+    it('should catch send errors', async () => {
+      const conn = new TestWebSocketConnection()
+      const connectPromise = conn.connect()
+      mockWsInstance!.simulateOpen()
+      await connectPromise
+
+      mockWsInstance!.send.mockImplementation(() => { throw new Error('send failed') })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(() => (conn as any).sendMessage({ type: 'test' })).not.toThrow()
+    })
   })
 })
