@@ -41,6 +41,7 @@ export interface ProjectConfigResponse {
   }>
   repositories?: Array<{
     repositoryId: string
+    repositoryCode: string
     repositoryName: string
     repositoryUrl: string
     provider: string

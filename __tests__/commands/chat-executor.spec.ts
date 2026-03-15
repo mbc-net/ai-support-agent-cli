@@ -32,6 +32,7 @@ jest.mock('../../src/logger')
 // Mock project-dir
 jest.mock('../../src/project-dir', () => ({
   getAutoAddDirs: jest.fn().mockReturnValue(['/mock/repos', '/mock/docs']),
+  getWorkspaceDir: jest.fn((dir: string) => `${dir}/workspace`),
 }))
 
 // Mock aws-credential-builder

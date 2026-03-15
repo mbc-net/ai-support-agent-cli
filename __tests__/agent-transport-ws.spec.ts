@@ -39,6 +39,11 @@ jest.mock('../src/utils', () => ({
   isAuthenticationError: jest.fn(() => false),
 }))
 
+jest.mock('../src/project-dir', () => ({
+  getWorkspaceDir: jest.fn((dir: string) => `${dir}/workspace`),
+  getReposDir: jest.fn((dir: string) => `${dir}/workspace/repos`),
+}))
+
 function createMockDeps(overrides?: Partial<TransportDeps>): TransportDeps {
   return {
     client: {
@@ -107,7 +112,7 @@ describe('startTerminalWebSocket', () => {
       'https://api.example.com',
       'test-token',
       'agent-1',
-      '/test/project',
+      '/test/project/workspace',
     )
     expect(state.terminalWs).not.toBeNull()
     expect(mockConnect).toHaveBeenCalled()
@@ -131,7 +136,7 @@ describe('startTerminalWebSocket', () => {
       'wss://ws.example.com',
       'test-token',
       'agent-1',
-      '/test/project',
+      '/test/project/workspace',
     )
   })
 
@@ -180,7 +185,7 @@ describe('startVsCodeTunnel', () => {
       'https://api.example.com',
       'test-token',
       'agent-1',
-      '/test/project',
+      '/test/project/workspace/repos',
     )
     expect(state.vsCodeWs).not.toBeNull()
     expect(mockConnect).toHaveBeenCalled()
@@ -203,7 +208,7 @@ describe('startVsCodeTunnel', () => {
       'wss://ws.example.com',
       'test-token',
       'agent-1',
-      '/test/project',
+      '/test/project/workspace/repos',
     )
   })
 

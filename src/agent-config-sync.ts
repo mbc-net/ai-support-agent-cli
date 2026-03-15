@@ -7,6 +7,7 @@ import { CONFIG_SYNC_DEBOUNCE_MS } from './constants'
 import { logger } from './logger'
 import { writeAwsConfig } from './aws-profile'
 import { writeMcpConfig } from './mcp/config-writer'
+import { getReposDir } from './project-dir'
 import { syncProjectConfig } from './project-config-sync'
 import { syncRepositories } from './repo-sync'
 import type { AgentChatMode, AgentServerConfig, ProjectConfigResponse } from './types'
@@ -67,7 +68,7 @@ export async function performSetup(
   // 2. Clone/update repositories
   if (deps.projectDir && state.projectConfig?.repositories?.length) {
     try {
-      const reposDir = join(deps.projectDir, 'repos')
+      const reposDir = getReposDir(deps.projectDir)
       const results = await syncRepositories(
         deps.client,
         state.projectConfig.repositories,

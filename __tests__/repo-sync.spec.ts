@@ -155,6 +155,7 @@ describe('repo-sync', () => {
     const repositories: NonNullable<ProjectConfigResponse['repositories']> = [
       {
         repositoryId: 'REPO_01',
+        repositoryCode: 'my-repo',
         repositoryName: 'my-repo',
         repositoryUrl: 'https://github.com/org/repo.git',
         provider: 'github',
@@ -293,6 +294,7 @@ describe('repo-sync', () => {
       const maliciousRepos: NonNullable<ProjectConfigResponse['repositories']> = [
         {
           repositoryId: 'REPO_01',
+          repositoryCode: 'my-repo',
           repositoryName: 'my-repo',
           repositoryUrl: 'https://github.com/org/repo.git',
           provider: 'github',
@@ -317,6 +319,7 @@ describe('repo-sync', () => {
       const multiRepos: NonNullable<ProjectConfigResponse['repositories']> = [
         {
           repositoryId: 'REPO_01',
+          repositoryCode: 'repo-a',
           repositoryName: 'repo-a',
           repositoryUrl: 'https://github.com/org/repo-a.git',
           provider: 'github',
@@ -325,6 +328,7 @@ describe('repo-sync', () => {
         },
         {
           repositoryId: 'REPO_02',
+          repositoryCode: 'repo-b',
           repositoryName: 'repo-b',
           repositoryUrl: 'https://github.com/org/repo-b.git',
           provider: 'github',

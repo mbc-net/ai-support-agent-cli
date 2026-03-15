@@ -45,7 +45,7 @@ export const MAX_INTERVAL = 300_000 // 5 minutes
 export const MAX_DIR_ENTRIES = 1000
 
 // Hidden entries to exclude from file listings
-export const HIDDEN_ENTRIES = ['.ai-support-agent', '.claude']
+export const HIDDEN_ENTRIES = ['.claude']
 
 // Default project codes
 export const PROJECT_CODE_DEFAULT = 'default'

@@ -11,7 +11,7 @@ function getDefaultProjectDirTemplate(): string {
   return path.join(getConfigDir(), 'projects', '{projectCode}')
 }
 
-const PROJECT_SUBDIRS = ['repos', 'docs', 'artifacts', 'uploads'] as const
+const PROJECT_SUBDIRS = ['workspace/repos', 'workspace/docs', 'workspace/artifacts', 'uploads'] as const
 const METADATA_DIR = '.ai-support-agent'
 const CACHE_DIR = 'cache'
 const AWS_DIR = 'aws'
@@ -66,13 +66,19 @@ export function resolveProjectDir(
 
 /**
  * Create project directory structure with proper permissions.
- * Creates: repos/, docs/, artifacts/, uploads/, .ai-support-agent/cache/, .ai-support-agent/aws/
+ * Creates: workspace/repos/, workspace/docs/, workspace/artifacts/, uploads/, .ai-support-agent/cache/, .ai-support-agent/aws/
  */
 export function ensureProjectDirs(projectDir: string): void {
   // Create project root
   if (!fs.existsSync(projectDir)) {
     fs.mkdirSync(projectDir, { recursive: true, mode: 0o700 })
   }
+
+  // Legacy directory migration
+  migrateIfNeeded(projectDir, 'metadata', '.ai-support-agent')
+  migrateIfNeeded(projectDir, 'repos', path.join('workspace', 'repos'))
+  migrateIfNeeded(projectDir, 'docs', path.join('workspace', 'docs'))
+  migrateIfNeeded(projectDir, 'artifacts', path.join('workspace', 'artifacts'))
 
   // Create subdirectories
   for (const subdir of PROJECT_SUBDIRS) {
@@ -121,13 +127,27 @@ export function initProjectDir(
  */
 export function getAutoAddDirs(projectDir: string): string[] {
   const dirs: string[] = []
-  for (const subdir of ['repos', 'docs'] as const) {
+  for (const subdir of ['workspace/repos', 'workspace/docs'] as const) {
     const dirPath = path.join(projectDir, subdir)
     if (fs.existsSync(dirPath)) {
       dirs.push(dirPath)
     }
   }
   return dirs
+}
+
+/**
+ * Get workspace directory path
+ */
+export function getWorkspaceDir(projectDir: string): string {
+  return path.join(projectDir, 'workspace')
+}
+
+/**
+ * Get repos directory path
+ */
+export function getReposDir(projectDir: string): string {
+  return path.join(projectDir, 'workspace', 'repos')
 }
 
 /**
@@ -149,4 +169,14 @@ export function getAwsDir(projectDir: string): string {
  */
 export function getMetadataDir(projectDir: string): string {
   return path.join(projectDir, METADATA_DIR)
+}
+
+function migrateIfNeeded(projectDir: string, oldSub: string, newSub: string): void {
+  const oldPath = path.join(projectDir, oldSub)
+  const newPath = path.join(projectDir, newSub)
+  if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) {
+    fs.mkdirSync(path.dirname(newPath), { recursive: true })
+    fs.renameSync(oldPath, newPath)
+    logger.info(`Migrated ${oldPath} -> ${newPath}`)
+  }
 }
