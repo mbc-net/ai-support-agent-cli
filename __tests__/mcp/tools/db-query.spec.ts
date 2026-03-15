@@ -537,6 +537,134 @@ describe('db-query tool', () => {
         'SELECT 1',
       )).rejects.toThrow('Unsupported database engine: sqlite')
     })
+
+    it('should throw for mssql engine', async () => {
+      await expect(executeQuery(
+        { name: 'MAIN', engine: 'mssql', host: 'localhost', port: 1433, database: 'test', user: 'sa', password: 'pass' },
+        'SELECT 1',
+      )).rejects.toThrow('MSSQL is not yet supported')
+    })
+
+    describe('MySQL SSL configuration', () => {
+      const mysqlCreds = (ssl?: { mode: string }) => ({
+        name: 'MAIN' as const, engine: 'mysql' as const, host: 'db.example.com', port: 3306,
+        database: 'testdb', user: 'root', password: 'pass', ssl,
+      })
+
+      let mockConnection: { query: jest.Mock; end: jest.Mock }
+      let mysql2: { createConnection: jest.Mock }
+
+      beforeEach(() => {
+        mockConnection = {
+          query: jest.fn().mockResolvedValue([[{ id: 1 }]]),
+          end: jest.fn().mockResolvedValue(undefined),
+        }
+        mysql2 = require('mysql2/promise')
+        mysql2.createConnection.mockReset()
+        mysql2.createConnection.mockResolvedValue(mockConnection)
+      })
+
+      it('should disable SSL when mode is disabled', async () => {
+        await executeQuery(mysqlCreds({ mode: 'disabled' }), 'SELECT 1')
+        const opts = mysql2.createConnection.mock.calls[0][0]
+        expect(opts.ssl).toBeUndefined()
+      })
+
+      it('should set rejectUnauthorized=false for preferred mode', async () => {
+        await executeQuery(mysqlCreds({ mode: 'preferred' }), 'SELECT 1')
+        const opts = mysql2.createConnection.mock.calls[0][0]
+        expect(opts.ssl).toEqual({ rejectUnauthorized: false })
+      })
+
+      it('should set rejectUnauthorized=false for required mode', async () => {
+        await executeQuery(mysqlCreds({ mode: 'required' }), 'SELECT 1')
+        const opts = mysql2.createConnection.mock.calls[0][0]
+        expect(opts.ssl).toEqual({ rejectUnauthorized: false })
+      })
+
+      it('should set rejectUnauthorized=true for verify_ca mode', async () => {
+        await executeQuery(mysqlCreds({ mode: 'verify_ca' }), 'SELECT 1')
+        const opts = mysql2.createConnection.mock.calls[0][0]
+        expect(opts.ssl).toEqual({ rejectUnauthorized: true })
+      })
+
+      it('should set rejectUnauthorized=true for verify_identity mode', async () => {
+        await executeQuery(mysqlCreds({ mode: 'verify_identity' }), 'SELECT 1')
+        const opts = mysql2.createConnection.mock.calls[0][0]
+        expect(opts.ssl).toEqual({ rejectUnauthorized: true })
+      })
+
+      it('should disable SSL when no ssl config provided', async () => {
+        await executeQuery(mysqlCreds(), 'SELECT 1')
+        const opts = mysql2.createConnection.mock.calls[0][0]
+        expect(opts.ssl).toBeUndefined()
+      })
+
+      it('should disable SSL for unknown mode', async () => {
+        await executeQuery(mysqlCreds({ mode: 'unknown_mode' }), 'SELECT 1')
+        const opts = mysql2.createConnection.mock.calls[0][0]
+        expect(opts.ssl).toBeUndefined()
+      })
+    })
+
+    describe('PostgreSQL SSL configuration', () => {
+      const pgCreds = (host: string, ssl?: { mode: string }) => ({
+        name: 'MAIN' as const, engine: 'postgresql' as const, host, port: 5432,
+        database: 'testdb', user: 'postgres', password: 'pass', ssl,
+      })
+
+      let mockClient: { connect: jest.Mock; query: jest.Mock; end: jest.Mock }
+
+      beforeEach(() => {
+        mockClient = {
+          connect: jest.fn().mockResolvedValue(undefined),
+          query: jest.fn().mockResolvedValue({ rows: [] }),
+          end: jest.fn().mockResolvedValue(undefined),
+        }
+        const pg = require('pg')
+        pg.Client.mockImplementation(() => mockClient)
+      })
+
+      it('should set rejectUnauthorized=false for allow mode', async () => {
+        const pg = require('pg')
+        await executeQuery(pgCreds('db.example.com', { mode: 'allow' }), 'SELECT 1')
+        expect(pg.Client).toHaveBeenCalledWith(
+          expect.objectContaining({ ssl: { rejectUnauthorized: false } }),
+        )
+      })
+
+      it('should set rejectUnauthorized=false for prefer mode', async () => {
+        const pg = require('pg')
+        await executeQuery(pgCreds('db.example.com', { mode: 'prefer' }), 'SELECT 1')
+        expect(pg.Client).toHaveBeenCalledWith(
+          expect.objectContaining({ ssl: { rejectUnauthorized: false } }),
+        )
+      })
+
+      it('should set rejectUnauthorized=false for require mode', async () => {
+        const pg = require('pg')
+        await executeQuery(pgCreds('db.example.com', { mode: 'require' }), 'SELECT 1')
+        expect(pg.Client).toHaveBeenCalledWith(
+          expect.objectContaining({ ssl: { rejectUnauthorized: false } }),
+        )
+      })
+
+      it('should set rejectUnauthorized=true for verify-ca mode', async () => {
+        const pg = require('pg')
+        await executeQuery(pgCreds('db.example.com', { mode: 'verify-ca' }), 'SELECT 1')
+        expect(pg.Client).toHaveBeenCalledWith(
+          expect.objectContaining({ ssl: { rejectUnauthorized: true } }),
+        )
+      })
+
+      it('should disable SSL for unknown mode', async () => {
+        const pg = require('pg')
+        await executeQuery(pgCreds('db.example.com', { mode: 'unknown' }), 'SELECT 1')
+        expect(pg.Client).toHaveBeenCalledWith(
+          expect.objectContaining({ ssl: false }),
+        )
+      })
+    })
   })
 
   describe('registerDbQueryTool', () => {
