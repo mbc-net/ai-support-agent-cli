@@ -1,4 +1,4 @@
-import { ProcessManager, getProcessManager } from '../../src/commands/process-manager'
+import { ProcessManager, getProcessManager, cancelProcess, _getRunningProcesses } from '../../src/commands/process-manager'
 
 describe('ProcessManager', () => {
   let pm: ProcessManager
@@ -112,5 +112,54 @@ describe('getProcessManager (singleton)', () => {
     const instance = getProcessManager()
 
     expect(instance).toBeInstanceOf(ProcessManager)
+  })
+})
+
+describe('cancelProcess (unified)', () => {
+  afterEach(() => {
+    // Cleanup singleton state
+    const running = _getRunningProcesses()
+    for (const key of running.keys()) {
+      running.delete(key)
+    }
+  })
+
+  it('should cancel a process registered via the singleton', () => {
+    const cancelFn = jest.fn()
+    const pm = getProcessManager()
+    pm.register('cmd-unified', { cancel: cancelFn })
+
+    const result = cancelProcess('cmd-unified')
+
+    expect(result).toBe(true)
+    expect(cancelFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('should return false when commandId is not found', () => {
+    const result = cancelProcess('nonexistent')
+    expect(result).toBe(false)
+  })
+})
+
+describe('_getRunningProcesses (unified)', () => {
+  afterEach(() => {
+    const running = _getRunningProcesses()
+    for (const key of running.keys()) {
+      running.delete(key)
+    }
+  })
+
+  it('should return the singleton running map', () => {
+    const pm = getProcessManager()
+    const handle = { cancel: jest.fn() }
+    pm.register('cmd-check', handle)
+
+    const running = _getRunningProcesses()
+
+    expect(running.has('cmd-check')).toBe(true)
+    expect(running.get('cmd-check')).toBe(handle)
+
+    // Cleanup
+    pm.remove('cmd-check')
   })
 })
