@@ -26,13 +26,37 @@ export function expandPath(template: string, projectCode: string): string {
 }
 
 /**
+ * Parse AI_SUPPORT_AGENT_PROJECT_DIR_MAP env var.
+ * Format: "projectCode1=/path1;projectCode2=/path2"
+ */
+function getContainerProjectDirMap(): Map<string, string> {
+  const map = new Map<string, string>()
+  const envVal = process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP
+  if (!envVal) return map
+  for (const entry of envVal.split(';')) {
+    const eqIdx = entry.indexOf('=')
+    if (eqIdx > 0) {
+      map.set(entry.substring(0, eqIdx), entry.substring(eqIdx + 1))
+    }
+  }
+  return map
+}
+
+/**
  * Resolve the project directory path.
- * Priority: project.projectDir > defaultProjectDir template > default template
+ * Priority: container dir mapping > project.projectDir > defaultProjectDir template > default template
  */
 export function resolveProjectDir(
   project: ProjectRegistration,
   defaultProjectDir?: string,
 ): string {
+  // Docker container mapping takes highest priority
+  const containerMap = getContainerProjectDirMap()
+  const containerDir = containerMap.get(project.projectCode)
+  if (containerDir) {
+    return containerDir
+  }
+
   if (project.projectDir) {
     return expandPath(project.projectDir, project.projectCode)
   }

@@ -33,3 +33,11 @@ export class ProcessManager {
     return this.running
   }
 }
+
+// Shared singleton instance
+const processManager = new ProcessManager()
+
+/** シングルトンの ProcessManager インスタンスを取得 */
+export function getProcessManager(): ProcessManager {
+  return processManager
+}

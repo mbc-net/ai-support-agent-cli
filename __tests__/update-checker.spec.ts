@@ -101,6 +101,13 @@ describe('isValidVersion', () => {
     expect(isValidVersion('1.0')).toBe(false)
     expect(isValidVersion('')).toBe(false)
   })
+
+  it('should reject versions with trailing arbitrary content', () => {
+    expect(isValidVersion('1.0.0; rm -rf /')).toBe(false)
+    expect(isValidVersion('1.0.0<script>')).toBe(false)
+    expect(isValidVersion('1.0.0 malicious')).toBe(false)
+    expect(isValidVersion('1.0.0-')).toBe(false)
+  })
 })
 
 describe('getGlobalNpmPrefix', () => {

@@ -326,6 +326,62 @@ describe('TerminalWebSocket', () => {
     await new Promise((r) => setTimeout(r, 50))
   })
 
+  it('should handle auth_success message silently', async () => {
+    const connected = new Promise<void>((resolve) => {
+      server.on('connection', (ws) => {
+        ws.send(JSON.stringify({ type: 'auth_success' }))
+        resolve()
+      })
+    })
+
+    terminalWs = createTerminalWs()
+    await terminalWs.connect()
+    await connected
+    await new Promise((r) => setTimeout(r, 50))
+  })
+
+  it('should log server error message', async () => {
+    const connected = new Promise<void>((resolve) => {
+      server.on('connection', (ws) => {
+        ws.send(JSON.stringify({ type: 'error', sessionId: 'sess-1', message: 'Session not found' }))
+        resolve()
+      })
+    })
+
+    terminalWs = createTerminalWs()
+    await terminalWs.connect()
+    await connected
+    await new Promise((r) => setTimeout(r, 50))
+  })
+
+  it('should log server error with error field fallback', async () => {
+    const connected = new Promise<void>((resolve) => {
+      server.on('connection', (ws) => {
+        ws.send(JSON.stringify({ type: 'error', sessionId: 'sess-2', error: 'Access denied' }))
+        resolve()
+      })
+    })
+
+    terminalWs = createTerminalWs()
+    await terminalWs.connect()
+    await connected
+    await new Promise((r) => setTimeout(r, 50))
+  })
+
+  it('should log server error with unknown fallback', async () => {
+    const connected = new Promise<void>((resolve) => {
+      server.on('connection', (ws) => {
+        ws.send(JSON.stringify({ type: 'error' }))
+        resolve()
+      })
+    })
+
+    terminalWs = createTerminalWs()
+    await terminalWs.connect()
+    await connected
+    await new Promise((r) => setTimeout(r, 50))
+  })
+
   it('should attempt reconnect when server closes connection', (done) => {
     const origDelay = wsConstants.TERMINAL_WS_RECONNECT_BASE_DELAY_MS
     const origRetries = wsConstants.TERMINAL_WS_MAX_RECONNECT_RETRIES

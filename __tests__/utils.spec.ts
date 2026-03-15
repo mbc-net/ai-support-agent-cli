@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, getDetailedErrorMessage, isAuthenticationError } from '../src/utils'
+import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -176,7 +176,7 @@ describe('atomicWriteFile', () => {
   })
 })
 
-describe('getDetailedErrorMessage', () => {
+describe('getErrorMessage (Axios detailed)', () => {
   it('should extract message from Axios error response with message field', () => {
     const error = new AxiosError('Request failed with status code 401', 'ERR_BAD_REQUEST', undefined, undefined, {
       status: 401,
@@ -185,7 +185,7 @@ describe('getDetailedErrorMessage', () => {
       headers: {},
       config: { headers: new AxiosHeaders() },
     })
-    expect(getDetailedErrorMessage(error)).toBe('[401] Invalid or expired token')
+    expect(getErrorMessage(error)).toBe('[401] Invalid or expired token')
   })
 
   it('should extract error field from Axios error response', () => {
@@ -196,7 +196,7 @@ describe('getDetailedErrorMessage', () => {
       headers: {},
       config: { headers: new AxiosHeaders() },
     })
-    expect(getDetailedErrorMessage(error)).toBe('[403] ACCESS_DENIED')
+    expect(getErrorMessage(error)).toBe('[403] ACCESS_DENIED')
   })
 
   it('should fall back to HTTP status when no message or error in data', () => {
@@ -207,7 +207,7 @@ describe('getDetailedErrorMessage', () => {
       headers: {},
       config: { headers: new AxiosHeaders() },
     })
-    expect(getDetailedErrorMessage(error)).toBe('HTTP 500: Request failed with status code 500')
+    expect(getErrorMessage(error)).toBe('HTTP 500: Request failed with status code 500')
   })
 
   it('should fall back to HTTP status when response data is undefined', () => {
@@ -218,23 +218,23 @@ describe('getDetailedErrorMessage', () => {
       headers: {},
       config: { headers: new AxiosHeaders() },
     })
-    expect(getDetailedErrorMessage(error)).toBe('HTTP 502: Request failed with status code 502')
+    expect(getErrorMessage(error)).toBe('HTTP 502: Request failed with status code 502')
   })
 
-  it('should fall back to getErrorMessage for AxiosError without response', () => {
+  it('should fall back to basic message for AxiosError without response', () => {
     const error = new AxiosError('Network Error', 'ERR_NETWORK')
-    expect(getDetailedErrorMessage(error)).toBe('Network Error')
+    expect(getErrorMessage(error)).toBe('Network Error')
   })
 
-  it('should fall back to getErrorMessage for non-Axios Error', () => {
+  it('should return message for non-Axios Error', () => {
     const error = new Error('generic error')
-    expect(getDetailedErrorMessage(error)).toBe('generic error')
+    expect(getErrorMessage(error)).toBe('generic error')
   })
 
-  it('should fall back to getErrorMessage for non-Error values', () => {
-    expect(getDetailedErrorMessage('string error')).toBe('string error')
-    expect(getDetailedErrorMessage(42)).toBe('42')
-    expect(getDetailedErrorMessage(null)).toBe('null')
+  it('should convert non-Error values to string', () => {
+    expect(getErrorMessage('string error')).toBe('string error')
+    expect(getErrorMessage(42)).toBe('42')
+    expect(getErrorMessage(null)).toBe('null')
   })
 })
 
@@ -268,5 +268,19 @@ describe('isAuthenticationError', () => {
   it('should return false for AxiosError without response', () => {
     const error = new AxiosError('Network Error', 'ERR_NETWORK')
     expect(isAuthenticationError(error)).toBe(false)
+  })
+})
+
+describe('buildWsUrl', () => {
+  it('should convert https to wss', () => {
+    expect(buildWsUrl('https://api.example.com', '/ws/terminal')).toBe('wss://api.example.com/ws/terminal')
+  })
+
+  it('should convert http to ws', () => {
+    expect(buildWsUrl('http://localhost:3000', '/ws/terminal')).toBe('ws://localhost:3000/ws/terminal')
+  })
+
+  it('should strip trailing slash', () => {
+    expect(buildWsUrl('https://api.example.com/', '/ws/terminal')).toBe('wss://api.example.com/ws/terminal')
   })
 })

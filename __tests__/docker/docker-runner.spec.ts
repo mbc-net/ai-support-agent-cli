@@ -7,6 +7,7 @@ jest.mock('child_process', () => ({
 
 jest.mock('fs', () => ({
   existsSync: jest.fn(),
+  realpathSync: jest.fn((p: string) => p),
 }))
 
 jest.mock('../../src/docker/dockerfile-path', () => ({
@@ -45,7 +46,7 @@ jest.mock('../../src/logger', () => ({
 
 import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
-import { existsSync } from 'fs'
+import { existsSync, realpathSync } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
 import {
@@ -65,6 +66,7 @@ const mockSpawn = spawn as jest.MockedFunction<typeof spawn>
 const mockGetConfigDir = getConfigDir as jest.MockedFunction<typeof getConfigDir>
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>
+const mockRealpathSync = realpathSync as jest.MockedFunction<typeof realpathSync>
 
 describe('docker-runner', () => {
   const originalEnv = process.env
@@ -137,11 +139,11 @@ describe('docker-runner', () => {
       })
       mockLoadConfig.mockReturnValue(null)
 
-      const mounts = buildVolumeMounts()
-      expect(mounts).toContain(`${home}/.claude:${home}/.claude:rw`)
-      expect(mounts).toContain(`${home}/.claude.json:${home}/.claude.json:rw`)
-      expect(mounts).toContain(`${home}/.ai-support-agent:${home}/.ai-support-agent:rw`)
-      expect(mounts).toContain(`${home}/.aws:${home}/.aws:ro`)
+      const { mounts } = buildVolumeMounts()
+      expect(mounts).toContain(`${home}/.claude:/home/node/.claude:rw`)
+      expect(mounts).toContain(`${home}/.claude.json:/home/node/.claude.json:rw`)
+      expect(mounts).toContain(`${home}/.ai-support-agent:/home/node/.ai-support-agent:rw`)
+      expect(mounts).toContain(`${home}/.aws:/home/node/.aws:ro`)
     })
 
     it('should mount custom config directory from AI_SUPPORT_AGENT_CONFIG_DIR', () => {
@@ -151,15 +153,15 @@ describe('docker-runner', () => {
       })
       mockLoadConfig.mockReturnValue(null)
 
-      const mounts = buildVolumeMounts()
-      expect(mounts).toContain('/custom/config/dir:/custom/config/dir:rw')
+      const { mounts } = buildVolumeMounts()
+      expect(mounts).toContain('/custom/config/dir:/workspace/.config/ai-support-agent:rw')
     })
 
     it('should skip non-existing directories', () => {
       mockExistsSync.mockReturnValue(false)
       mockLoadConfig.mockReturnValue(null)
 
-      const mounts = buildVolumeMounts()
+      const { mounts } = buildVolumeMounts()
       expect(mounts).toHaveLength(0)
     })
 
@@ -176,9 +178,9 @@ describe('docker-runner', () => {
         ],
       })
 
-      const mounts = buildVolumeMounts()
-      expect(mounts).toContain('/workspace/project-a:/workspace/project-a:rw')
-      expect(mounts).toContain('/workspace/project-b:/workspace/project-b:rw')
+      const { mounts } = buildVolumeMounts()
+      expect(mounts).toContain('/workspace/project-a:/workspace/projects/A:rw')
+      expect(mounts).toContain('/workspace/project-b:/workspace/projects/B:rw')
     })
 
     it('should not duplicate project directory mounts', () => {
@@ -194,9 +196,27 @@ describe('docker-runner', () => {
         ],
       })
 
-      const mounts = buildVolumeMounts()
-      const count = mounts.filter(m => m === '/workspace/shared:/workspace/shared:rw').length
+      const { mounts } = buildVolumeMounts()
+      const count = mounts.filter(m => m === '/workspace/shared:/workspace/projects/A:rw').length
       expect(count).toBe(1)
+    })
+
+    it('should skip blocked paths for project directories', () => {
+      mockExistsSync.mockImplementation((p: unknown) => {
+        return p === '/etc/secrets' || p === '/proc/data'
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'test-agent',
+        createdAt: '2024-01-01T00:00:00.000Z',
+        projects: [
+          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/etc/secrets' },
+          { projectCode: 'B', token: 't2', apiUrl: 'http://b', projectDir: '/proc/data' },
+        ],
+      })
+
+      const { mounts } = buildVolumeMounts()
+      expect(mounts).not.toContain('/etc/secrets:/workspace/projects/A:rw')
+      expect(mounts).not.toContain('/proc/data:/workspace/projects/B:rw')
     })
 
     it('should skip project directories that do not exist', () => {
@@ -209,16 +229,58 @@ describe('docker-runner', () => {
         ],
       })
 
-      const mounts = buildVolumeMounts()
+      const { mounts } = buildVolumeMounts()
       expect(mounts).toHaveLength(0)
+    })
+
+    it('should resolve symlinks to detect blocked paths', () => {
+      mockExistsSync.mockImplementation((p: unknown) => {
+        return p === '/workspace/symlink-to-etc'
+      })
+      mockRealpathSync.mockImplementation((p: unknown) => {
+        if (p === '/workspace/symlink-to-etc') return '/etc/secrets'
+        return p as string
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'test-agent',
+        createdAt: '2024-01-01T00:00:00.000Z',
+        projects: [
+          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/symlink-to-etc' },
+        ],
+      })
+
+      const { mounts } = buildVolumeMounts()
+      expect(mounts).not.toContain('/workspace/symlink-to-etc:/workspace/projects/A:rw')
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('blocked path'))
+    })
+
+    it('should skip project directories when realpathSync fails', () => {
+      mockExistsSync.mockImplementation((p: unknown) => {
+        return p === '/workspace/broken-link'
+      })
+      mockRealpathSync.mockImplementation((p: unknown) => {
+        if (p === '/workspace/broken-link') throw new Error('ENOENT')
+        return p as string
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'test-agent',
+        createdAt: '2024-01-01T00:00:00.000Z',
+        projects: [
+          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/broken-link' },
+        ],
+      })
+
+      const { mounts } = buildVolumeMounts()
+      expect(mounts).toHaveLength(0)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Cannot resolve path'))
     })
   })
 
   describe('buildEnvArgs', () => {
     it('should always include HOME', () => {
-      const args = buildEnvArgs()
+      const args = buildEnvArgs([])
       expect(args).toContain('-e')
-      expect(args).toContain(`HOME=${os.homedir()}`)
+      expect(args).toContain(`HOME=/home/node`)
     })
 
     it('should pass through set environment variables', () => {
@@ -226,7 +288,7 @@ describe('docker-runner', () => {
       process.env.AI_SUPPORT_AGENT_API_URL = 'http://test.api'
       process.env.ANTHROPIC_API_KEY = 'sk-test'
 
-      const args = buildEnvArgs()
+      const args = buildEnvArgs([])
       expect(args).toContain('AI_SUPPORT_AGENT_TOKEN=test-token')
       expect(args).toContain('AI_SUPPORT_AGENT_API_URL=http://test.api')
       expect(args).toContain('ANTHROPIC_API_KEY=sk-test')
@@ -236,9 +298,21 @@ describe('docker-runner', () => {
       process.env.AI_SUPPORT_AGENT_CONFIG_DIR = './relative/path'
       mockGetConfigDir.mockReturnValue('/resolved/absolute/path')
 
-      const args = buildEnvArgs()
-      expect(args).toContain('AI_SUPPORT_AGENT_CONFIG_DIR=/resolved/absolute/path')
-      expect(args).not.toContain('AI_SUPPORT_AGENT_CONFIG_DIR=./relative/path')
+      const args = buildEnvArgs([])
+      // Config dir is mapped to container-internal path
+      const configDirArg = args.find((a: string) => a.startsWith('AI_SUPPORT_AGENT_CONFIG_DIR='))
+      expect(configDirArg).toBeDefined()
+      expect(configDirArg).not.toContain('./relative/path')
+    })
+
+    it('should include project directory mappings when provided', () => {
+      const mappings = [
+        { hostDir: '/host/project-a', containerDir: '/workspace/projects/A', projectCode: 'A' },
+        { hostDir: '/host/project-b', containerDir: '/workspace/projects/B', projectCode: 'B' },
+      ]
+      const args = buildEnvArgs(mappings)
+      const mapArg = args.find((a: string) => a.startsWith('AI_SUPPORT_AGENT_PROJECT_DIR_MAP='))
+      expect(mapArg).toBe('AI_SUPPORT_AGENT_PROJECT_DIR_MAP=A=/workspace/projects/A;B=/workspace/projects/B')
     })
 
     it('should skip unset environment variables', () => {
@@ -247,16 +321,18 @@ describe('docker-runner', () => {
       delete process.env.ANTHROPIC_API_KEY
       delete process.env.AI_SUPPORT_AGENT_CONFIG_DIR
 
-      const args = buildEnvArgs()
-      // Only HOME should be present
-      expect(args).toEqual(['-e', `HOME=${os.homedir()}`])
+      const args = buildEnvArgs([])
+      // Only HOME should be present (no passthrough vars set)
+      expect(args[0]).toBe('-e')
+      expect(args[1]).toBe('HOME=/home/node')
     })
   })
 
   describe('buildContainerArgs', () => {
-    it('should include start command', () => {
+    it('should include ai-support-agent start command', () => {
       const args = buildContainerArgs({})
-      expect(args[0]).toBe('start')
+      expect(args[0]).toBe('ai-support-agent')
+      expect(args[1]).toBe('start')
     })
 
     it('should pass all options', () => {
@@ -291,7 +367,7 @@ describe('docker-runner', () => {
 
     it('should omit undefined options', () => {
       const args = buildContainerArgs({})
-      expect(args).toEqual(['start', '--no-docker'])
+      expect(args).toEqual(['ai-support-agent', 'start', '--no-docker'])
     })
 
     it('should not include --no-auto-update when autoUpdate is true', () => {

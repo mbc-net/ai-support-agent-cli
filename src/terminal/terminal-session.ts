@@ -4,6 +4,11 @@ import * as path from 'path'
 
 import { logger } from '../logger'
 import { buildSafeEnv } from '../security'
+import {
+  SESSION_IDLE_TIMEOUT_MS,
+  TERMINAL_DEFAULT_COLS,
+  TERMINAL_DEFAULT_ROWS,
+} from './constants'
 
 /**
  * node-pty を遅延ロードする。
@@ -26,13 +31,6 @@ try {
 export function isNodePtyAvailable(): boolean {
   return pty !== null
 }
-
-import {
-  MAX_CONCURRENT_SESSIONS,
-  SESSION_IDLE_TIMEOUT_MS,
-  TERMINAL_DEFAULT_COLS,
-  TERMINAL_DEFAULT_ROWS,
-} from './constants'
 
 export interface TerminalSessionOptions {
   cols?: number
@@ -86,6 +84,10 @@ popd() {
     return 1
   fi
 }
+exec() {
+  echo "restricted: exec is disabled in sandbox mode" >&2
+  return 1
+}
 __sandbox_check() {
   if ! __sandbox_is_inside; then
     builtin cd "\${__SANDBOX_DIR}" 2>/dev/null
@@ -124,8 +126,7 @@ export class TerminalSession {
   readonly cwd: string
   readonly createdAt: number
   private lastActivity: number
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private readonly ptyProcess: any
+  private readonly ptyProcess: import('node-pty').IPty
   private sandboxTmpDir: string | null = null
   private dataCallback: DataCallback | null = null
   private exitCallback: ExitCallback | null = null
@@ -291,63 +292,5 @@ export class TerminalSession {
       clearTimeout(this.idleTimer)
       this.idleTimer = null
     }
-  }
-}
-
-export class TerminalSessionManager {
-  private readonly sessions = new Map<string, TerminalSession>()
-  private sessionCounter = 0
-
-  createSession(options: TerminalSessionOptions = {}): TerminalSession | null {
-    this.sessionCounter++
-    const sessionId = `term-${Date.now()}-${this.sessionCounter}`
-    return this.createSessionWithId(sessionId, options)
-  }
-
-  createSessionWithId(sessionId: string, options: TerminalSessionOptions = {}): TerminalSession | null {
-    if (this.sessions.size >= MAX_CONCURRENT_SESSIONS) {
-      return null
-    }
-
-    const session = new TerminalSession(sessionId, options)
-
-    session.onExit(() => {
-      this.sessions.delete(sessionId)
-    })
-
-    session.setOnIdleTimeout(() => {
-      session.kill()
-      this.sessions.delete(sessionId)
-    })
-
-    this.sessions.set(sessionId, session)
-    return session
-  }
-
-  getSession(sessionId: string): TerminalSession | undefined {
-    return this.sessions.get(sessionId)
-  }
-
-  closeSession(sessionId: string): boolean {
-    const session = this.sessions.get(sessionId)
-    if (!session) return false
-    session.kill()
-    this.sessions.delete(sessionId)
-    return true
-  }
-
-  listSessions(): TerminalSessionInfo[] {
-    return Array.from(this.sessions.values()).map((s) => s.getInfo())
-  }
-
-  closeAll(): void {
-    for (const session of this.sessions.values()) {
-      session.kill()
-    }
-    this.sessions.clear()
-  }
-
-  get size(): number {
-    return this.sessions.size
   }
 }

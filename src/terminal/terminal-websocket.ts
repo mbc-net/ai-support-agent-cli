@@ -4,24 +4,25 @@ import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../base-websocket'
 import { logger } from '../logger'
-import { getErrorMessage } from '../utils'
+import { buildWsUrl } from '../utils'
 
 import {
   TERMINAL_WS_MAX_RECONNECT_RETRIES,
   TERMINAL_WS_RECONNECT_BASE_DELAY_MS,
 } from './constants'
-import { TerminalSessionManager } from './terminal-session'
+import { TerminalSessionManager } from './terminal-session-manager'
 
 /**
  * Messages sent from API server to agent
  */
 export interface TerminalServerMessage {
-  type: 'open' | 'stdin' | 'resize' | 'close'
+  type: 'open' | 'stdin' | 'resize' | 'close' | 'auth_success' | 'error'
   sessionId?: string
   data?: string // Base64 encoded for stdin
   cols?: number
   rows?: number
   cwd?: string
+  message?: string
 }
 
 /**
@@ -54,11 +55,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       logPrefix: '[terminal-ws]',
     })
     this.manager = new TerminalSessionManager()
-    // Convert http(s) URL to ws(s) URL
-    this.wsUrl = apiUrl
-      .replace(/^https:/, 'wss:')
-      .replace(/^http:/, 'ws:')
-      .replace(/\/$/, '') + '/ws/agent-terminal'
+    this.wsUrl = buildWsUrl(apiUrl, '/ws/agent-terminal')
   }
 
   getSessionManager(): TerminalSessionManager {
@@ -94,6 +91,14 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       case 'close':
         this.handleClose(msg)
         break
+      case 'auth_success':
+        // Authentication success acknowledgement from server — no action needed
+        break
+      case 'error': {
+        const errMsg = (msg as unknown as Record<string, unknown>).message ?? (msg as unknown as Record<string, unknown>).error ?? 'unknown'
+        logger.warn(`[terminal-ws] Server error (session=${msg.sessionId ?? 'none'}): ${errMsg}`)
+        break
+      }
       default:
         logger.debug(`[terminal-ws] Unknown message type: ${(msg as { type: string }).type}`)
     }
@@ -101,14 +106,6 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
 
   protected onDisconnect(): void {
     this.manager.closeAll()
-  }
-
-  protected closeWebSocket(ws: WebSocket): void {
-    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CLOSING) {
-      ws.close()
-    } else {
-      ws.terminate()
-    }
   }
 
   private handleOpen(msg: TerminalServerMessage): void {
@@ -214,11 +211,6 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
   }
 
   private send(msg: TerminalAgentMessage): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    try {
-      this.ws.send(JSON.stringify(msg))
-    } catch (error) {
-      logger.debug(`[terminal-ws] Send error: ${getErrorMessage(error)}`)
-    }
+    this.sendMessage(msg)
   }
 }

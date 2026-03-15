@@ -1,16 +1,24 @@
 FROM node:24-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl unzip git openssh-client \
+    ca-certificates curl unzip git openssh-client vim \
     default-mysql-client postgresql-client \
     gnupg apt-transport-https \
-    # Python 3 + pip (for document processing tools)
+    # Build tools for native addons (node-pty)
+    make g++ \
+    # Python 3 + pip (for document processing tools and node-gyp)
     python3 python3-pip python3-venv \
     # Pandoc (universal document converter: docx/pdf/html/markdown/etc.)
     pandoc \
     # PDF rendering support for Python PDF libraries
     libpoppler-cpp-dev poppler-utils \
+    # Locale support (for Japanese filenames etc.)
+    locales \
+    && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
+    && locale-gen \
     && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 # Python document processing tools (installed in system scope, no venv needed in container)
 RUN pip3 install --no-cache-dir --break-system-packages \
@@ -77,10 +85,15 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 
 # GitLab CLI
 RUN ARCH=$(dpkg --print-architecture) \
-    && curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/permalink/latest/downloads/glab_$(uname -s)_${ARCH}.deb" \
+    && GLAB_VERSION=$(curl -sL "https://gitlab.com/api/v4/projects/34675721/releases/permalink/latest" | sed -n 's/.*"tag_name":"v\([^"]*\)".*/\1/p') \
+    && curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${ARCH}.deb" \
         -o /tmp/glab.deb \
     && dpkg -i /tmp/glab.deb \
     && rm /tmp/glab.deb
+
+# code-server (VS Code Server)
+RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local \
+    && code-server --version
 
 # Claude Code CLI + AI Support Agent CLI
 ARG AGENT_VERSION=latest
@@ -89,4 +102,8 @@ RUN npm install -g @anthropic-ai/claude-code @ai-support-agent/cli@${AGENT_VERSI
 
 WORKDIR /workspace
 RUN chmod 777 /workspace
-ENTRYPOINT ["ai-support-agent"]
+
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh && chmod a+w /etc/passwd
+
+ENTRYPOINT ["/entrypoint.sh"]

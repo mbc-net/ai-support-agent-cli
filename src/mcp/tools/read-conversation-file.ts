@@ -62,7 +62,8 @@ export function registerReadConversationFileTool(
         const os = await import('os')
         const tmpDir = path.join(os.tmpdir(), 'ai-support-agent-files')
         fs.mkdirSync(tmpDir, { recursive: true })
-        const tmpFilePath = path.join(tmpDir, filename)
+        const safeFilename = path.basename(filename)
+        const tmpFilePath = path.join(tmpDir, safeFilename)
         fs.writeFileSync(tmpFilePath, Buffer.from(response.data as ArrayBuffer))
 
         return mcpTextResponse(

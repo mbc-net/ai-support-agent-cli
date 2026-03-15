@@ -8,6 +8,7 @@ import { AGENT_VERSION } from '../constants'
 import { getConfigDir, loadConfig } from '../config-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
+import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 
 const IMAGE_NAME = 'ai-support-agent'
@@ -59,69 +60,125 @@ export function buildImage(version: string): void {
   logger.success(t('docker.buildComplete'))
 }
 
-export function buildVolumeMounts(): string[] {
+/** Container-internal base path for project directories */
+const CONTAINER_PROJECTS_BASE = '/workspace/projects'
+/** Container-internal home directory */
+const CONTAINER_HOME = '/home/node'
+
+export interface ProjectDirMapping {
+  hostDir: string
+  containerDir: string
+  projectCode: string
+}
+
+export function buildVolumeMounts(): { mounts: string[]; projectMappings: ProjectDirMapping[] } {
   const home = os.homedir()
   const mounts: string[] = []
+  const projectMappings: ProjectDirMapping[] = []
 
-  // Claude Code OAuth tokens and config
+  // Claude Code OAuth tokens and config — mount to container home
   const claudeDir = path.join(home, '.claude')
   if (fs.existsSync(claudeDir)) {
-    mounts.push('-v', `${claudeDir}:${claudeDir}:rw`)
+    mounts.push('-v', `${claudeDir}:${path.join(CONTAINER_HOME, '.claude')}:rw`)
   }
   const claudeJson = path.join(home, '.claude.json')
   if (fs.existsSync(claudeJson)) {
-    mounts.push('-v', `${claudeJson}:${claudeJson}:rw`)
+    mounts.push('-v', `${claudeJson}:${path.join(CONTAINER_HOME, '.claude.json')}:rw`)
   }
 
-  // Agent config (resolves custom AI_SUPPORT_AGENT_CONFIG_DIR)
+  // Agent config — mount to container home
   const agentConfigDir = getConfigDir()
   if (fs.existsSync(agentConfigDir)) {
-    mounts.push('-v', `${agentConfigDir}:${agentConfigDir}:rw`)
+    const relativeToHome = path.relative(home, agentConfigDir)
+    const isUnderHome = !relativeToHome.startsWith('..')
+    const containerConfigDir = isUnderHome
+      ? path.join(CONTAINER_HOME, relativeToHome)
+      : `/workspace/.config/ai-support-agent`
+    mounts.push('-v', `${agentConfigDir}:${containerConfigDir}:rw`)
   }
 
-  // AWS credentials
+  // AWS credentials — mount to container home
   const awsDir = path.join(home, '.aws')
   if (fs.existsSync(awsDir)) {
-    mounts.push('-v', `${awsDir}:${awsDir}:ro`)
+    mounts.push('-v', `${awsDir}:${path.join(CONTAINER_HOME, '.aws')}:ro`)
   }
 
-  // Custom project directories from config
+  // Custom project directories — mount to /workspace/projects/{projectCode}
   const config = loadConfig()
   if (config?.projects) {
     const mounted = new Set<string>()
+    const blockedPrefixes = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
     for (const project of config.projects) {
       if (project.projectDir && !mounted.has(project.projectDir) && fs.existsSync(project.projectDir)) {
-        mounts.push('-v', `${project.projectDir}:${project.projectDir}:rw`)
+        let resolved: string
+        try {
+          resolved = fs.realpathSync(project.projectDir)
+        } catch {
+          logger.warn(`[docker] Cannot resolve path, skipping: ${project.projectDir}`)
+          continue
+        }
+        const isBlocked = blockedPrefixes.some((prefix) => {
+          const prefixWithoutSlash = prefix.replace(/\/$/, '')
+          return resolved === prefixWithoutSlash || resolved.startsWith(prefix)
+        })
+        if (isBlocked) {
+          logger.warn(`[docker] Skipping blocked path for volume mount: ${project.projectDir}`)
+          continue
+        }
+        const containerDir = `${CONTAINER_PROJECTS_BASE}/${project.projectCode}`
+        mounts.push('-v', `${project.projectDir}:${containerDir}:rw`)
+        projectMappings.push({
+          hostDir: project.projectDir,
+          containerDir,
+          projectCode: project.projectCode,
+        })
         mounted.add(project.projectDir)
       }
     }
   }
 
-  return mounts
+  return { mounts, projectMappings }
 }
 
-export function buildEnvArgs(): string[] {
+export function buildEnvArgs(projectMappings: ProjectDirMapping[]): string[] {
   const args: string[] = []
 
-  // HOME must be passed so volume mounts resolve to the same paths
-  args.push('-e', `HOME=${os.homedir()}`)
+  // Set HOME to container-internal path (not host path)
+  args.push('-e', `HOME=${CONTAINER_HOME}`)
+
+  // Map config dir to container-internal path
+  const hostConfigDir = getConfigDir()
+  const home = os.homedir()
+  const relativeToHome = path.relative(home, hostConfigDir)
+  const isUnderHome = !relativeToHome.startsWith('..')
+  const containerConfigDir = isUnderHome
+    ? path.join(CONTAINER_HOME, relativeToHome)
+    : `/workspace/.config/ai-support-agent`
 
   for (const key of PASSTHROUGH_ENV_VARS) {
     if (process.env[key]) {
-      // Resolve CONFIG_DIR to absolute path so it matches the volume mount inside the container
       if (key === 'AI_SUPPORT_AGENT_CONFIG_DIR') {
-        args.push('-e', `${key}=${getConfigDir()}`)
+        args.push('-e', `${key}=${containerConfigDir}`)
       } else {
         args.push('-e', `${key}=${process.env[key]}`)
       }
     }
   }
 
+  // Pass project directory mappings so agent uses container-internal paths
+  if (projectMappings.length > 0) {
+    // Format: projectCode=containerDir;projectCode2=containerDir2
+    const mapping = projectMappings
+      .map((m) => `${m.projectCode}=${m.containerDir}`)
+      .join(';')
+    args.push('-e', `AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${mapping}`)
+  }
+
   return args
 }
 
 export function buildContainerArgs(opts: DockerRunOptions): string[] {
-  const args: string[] = ['start', '--no-docker']
+  const args: string[] = ['ai-support-agent', 'start', '--no-docker']
 
   if (opts.token) {
     args.push('--token', opts.token)
@@ -182,14 +239,14 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   logger.info(t('docker.starting'))
 
-  const volumeMounts = buildVolumeMounts()
-  const envArgs = buildEnvArgs()
+  const { mounts, projectMappings } = buildVolumeMounts()
+  const envArgs = buildEnvArgs(projectMappings)
   const containerArgs = buildContainerArgs(opts)
 
   const dockerArgs = [
     'run', '--rm', '-it',
     ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
-    ...volumeMounts,
+    ...mounts,
     ...envArgs,
     `${IMAGE_NAME}:${version}`,
     ...containerArgs,

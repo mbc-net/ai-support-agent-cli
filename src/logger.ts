@@ -27,6 +27,8 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   { pattern: /((?:password|secret|token|api_key|apikey|access_key|secret_key|session_token|authorization)\s*[:=]\s*["']?)([^\s"',}{]+)/gi, replacement: '$1****' },
   // Bearer tokens
   { pattern: /(Bearer\s+)[^\s]+/gi, replacement: '$1****' },
+  // Database connection strings (postgres://user:pass@host, mysql://user:pass@host, etc.)
+  { pattern: /((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|rediss):\/\/[^:]+:)[^@]+(@)/gi, replacement: '$1****$2' },
 ]
 
 /** Mask secrets in log messages */

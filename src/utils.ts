@@ -7,7 +7,26 @@ export function atomicWriteFile(filePath: string, content: string, mode = 0o600)
   fs.renameSync(tmpPath, filePath)
 }
 
+/**
+ * エラーから詳細なメッセージを抽出する。
+ * AxiosError の場合はレスポンスボディの message/error フィールドとHTTPステータスコードを含める。
+ * それ以外の Error はメッセージを、非 Error は String() を返す。
+ */
 export function getErrorMessage(error: unknown): string {
+  if (axios.isAxiosError(error) && error.response) {
+    const status = error.response.status
+    const data = error.response.data as Record<string, unknown> | undefined
+
+    if (data) {
+      const serverMessage = data.message ?? data.error
+      if (serverMessage) {
+        return `[${status}] ${serverMessage}`
+      }
+    }
+
+    return `HTTP ${status}: ${error.message}`
+  }
+
   return error instanceof Error ? error.message : String(error)
 }
 
@@ -38,28 +57,13 @@ export function validateApiUrl(url: string): string | null {
   }
 }
 
-/**
- * エラーから詳細なメッセージを抽出する。
- * AxiosError の場合はレスポンスボディの message/error フィールドとHTTPステータスコードを含める。
- */
-export function getDetailedErrorMessage(error: unknown): string {
-  if (axios.isAxiosError(error) && error.response) {
-    const status = error.response.status
-    const data = error.response.data as Record<string, unknown> | undefined
-
-    if (data) {
-      const serverMessage = data.message ?? data.error
-      if (serverMessage) {
-        return `[${status}] ${serverMessage}`
-      }
-    }
-
-    return `HTTP ${status}: ${error.message}`
-  }
-
-  return getErrorMessage(error)
-}
-
 export function isAuthenticationError(error: unknown): boolean {
   return axios.isAxiosError(error) && error.response?.status === 401
+}
+
+export function buildWsUrl(apiUrl: string, path: string): string {
+  return apiUrl
+    .replace(/^https:/, 'wss:')
+    .replace(/^http:/, 'ws:')
+    .replace(/\/$/, '') + path
 }

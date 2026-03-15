@@ -9,14 +9,14 @@ import { getAutoAddDirs } from '../project-dir'
 import { executeApiChatCommand } from './api-chat-executor'
 import { runClaudeCode } from './claude-code-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
-import { ProcessManager } from './process-manager'
+import { getProcessManager } from './process-manager'
 import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
 
 /** 実行中のチャットプロセスを commandId で管理 */
-const processManager = new ProcessManager()
+const processManager = getProcessManager()
 
 /**
  * 実行中のチャットプロセスをキャンセルする
@@ -31,6 +31,20 @@ export function _getRunningProcesses(): Map<string, { cancel: () => void }> {
   return processManager._getRunning()
 }
 
+/** Options for executeChatCommand */
+export interface ExecuteChatCommandOptions {
+  payload: ChatPayload
+  commandId: string
+  client: ApiClient
+  serverConfig?: AgentServerConfig
+  activeChatMode?: AgentChatMode
+  agentId?: string
+  projectDir?: string
+  projectConfig?: ProjectConfigResponse
+  mcpConfigPath?: string
+  tenantCode?: string
+}
+
 /**
  * エージェントチャットモードに応じてチャットメッセージを処理する
  * - claude_code: Claude Code CLI を使用（デフォルト）
@@ -38,18 +52,20 @@ export function _getRunningProcesses(): Map<string, { cancel: () => void }> {
  *
  * activeChatMode はサーバーの chatMode ではなく、エージェント内部の実行方式を指す
  */
-export async function executeChatCommand(
-  payload: ChatPayload,
-  commandId: string,
-  client: ApiClient,
-  serverConfig?: AgentServerConfig,
-  activeChatMode?: AgentChatMode,
-  agentId?: string,
-  projectDir?: string,
-  projectConfig?: ProjectConfigResponse,
-  mcpConfigPath?: string,
-  tenantCode?: string,
-): Promise<CommandResult> {
+export async function executeChatCommand(options: ExecuteChatCommandOptions): Promise<CommandResult> {
+  const {
+    payload,
+    commandId,
+    client,
+    serverConfig,
+    activeChatMode,
+    agentId,
+    projectDir,
+    projectConfig,
+    mcpConfigPath,
+    tenantCode,
+  } = options
+
   if (!agentId) {
     return errorResult(ERR_AGENT_ID_REQUIRED)
   }

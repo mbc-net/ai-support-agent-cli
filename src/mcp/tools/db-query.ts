@@ -126,6 +126,42 @@ export function validateSql(
   return { valid: true }
 }
 
+/**
+ * MySQL SSL設定を構築する
+ * @see https://dev.mysql.com/doc/refman/8.0/en/using-encrypted-connections.html
+ */
+function buildMysqlSslConfig(
+  credentials: DbCredentials,
+): boolean | Record<string, unknown> {
+  const mode = credentials.ssl?.mode
+  if (!mode || mode === 'disabled') return false
+  if (mode === 'preferred') return { rejectUnauthorized: false }
+  if (mode === 'required') return { rejectUnauthorized: false }
+  if (mode === 'verify_ca') return { rejectUnauthorized: true }
+  if (mode === 'verify_identity') return { rejectUnauthorized: true }
+  return false
+}
+
+/**
+ * PostgreSQL SSL設定を構築する
+ * @see https://www.postgresql.org/docs/current/libpq-ssl.html
+ */
+function buildPgSslConfig(
+  credentials: DbCredentials,
+): boolean | Record<string, unknown> {
+  const mode = credentials.ssl?.mode
+  if (mode) {
+    if (mode === 'disable') return false
+    if (mode === 'allow' || mode === 'prefer') return { rejectUnauthorized: false }
+    if (mode === 'require') return { rejectUnauthorized: false }
+    if (mode === 'verify-ca' || mode === 'verify-full') return { rejectUnauthorized: true }
+    return false
+  }
+  // 後方互換: ssl未設定の場合、localhostならSSLなし、それ以外はSSL有効（証明書検証なし）
+  const isLocalHost = credentials.host === 'localhost' || credentials.host === '127.0.0.1'
+  return isLocalHost ? false : { rejectUnauthorized: false }
+}
+
 /** DB接続を作成してクエリを実行する */
 export async function executeQuery(
   credentials: DbCredentials,
@@ -133,14 +169,19 @@ export async function executeQuery(
 ): Promise<unknown[]> {
   if (credentials.engine === 'mysql') {
     const mysql2 = await import('mysql2/promise')
-    const connection = await mysql2.createConnection({
+    const sslConfig = buildMysqlSslConfig(credentials)
+    const connectionOptions: Record<string, unknown> = {
       host: credentials.host,
       port: credentials.port,
       user: credentials.user,
       password: credentials.password,
       database: credentials.database,
       connectTimeout: 10000,
-    })
+    }
+    if (sslConfig) {
+      connectionOptions.ssl = sslConfig
+    }
+    const connection = await mysql2.createConnection(connectionOptions)
     try {
       const [rows] = await connection.query(sql)
       return rows as unknown[]
@@ -151,8 +192,7 @@ export async function executeQuery(
 
   if (credentials.engine === 'postgresql') {
     const { Client } = await import('pg')
-    const isLocalHost = credentials.host === 'localhost' || credentials.host === '127.0.0.1'
-    const useSsl = credentials.ssl !== undefined ? credentials.ssl : !isLocalHost
+    const sslConfig = buildPgSslConfig(credentials)
     const client = new Client({
       host: credentials.host,
       port: credentials.port,
@@ -160,7 +200,7 @@ export async function executeQuery(
       password: credentials.password,
       database: credentials.database,
       connectionTimeoutMillis: 10000,
-      ssl: useSsl ? { rejectUnauthorized: true } : false,
+      ssl: sslConfig,
     })
     try {
       await client.connect()
@@ -169,6 +209,10 @@ export async function executeQuery(
     } finally {
       await client.end()
     }
+  }
+
+  if (credentials.engine === 'mssql') {
+    throw new Error('MSSQL is not yet supported for direct queries. Configure a supported database engine.')
   }
 
   throw new Error(`Unsupported database engine: ${credentials.engine}`)
