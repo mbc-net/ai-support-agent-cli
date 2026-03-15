@@ -5,7 +5,7 @@ on:
     tags:
       - 'v*'
   pull_request:
-    branches: [develop, main]
+    branches: [develop, main, beta]
 
 permissions:
   contents: write

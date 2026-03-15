@@ -24,6 +24,7 @@ jest.mock('../src/project-config-sync', () => ({
 }))
 jest.mock('../src/project-dir', () => ({
   initProjectDir: jest.fn().mockReturnValue('/tmp/test-project'),
+  getReposDir: jest.fn((dir: string) => `${dir}/workspace/repos`),
 }))
 jest.mock('../src/aws-profile', () => ({
   writeAwsConfig: jest.fn(),
@@ -922,12 +923,12 @@ describe('ProjectAgent', () => {
         project: { projectCode: 'test-proj', projectName: 'Test' },
         agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
         repositories: [
-          { repositoryId: 'repo-1', repositoryName: 'my-repo', repositoryUrl: 'https://github.com/org/repo.git', provider: 'github', branch: 'main', authMethod: 'token' },
+          { repositoryId: 'repo-1', repositoryCode: 'my-repo', repositoryName: 'my-repo', repositoryUrl: 'https://github.com/org/repo.git', provider: 'github', branch: 'main', authMethod: 'token' },
         ],
       }
       mockedSyncProjectConfig.mockResolvedValue(mockConfig)
       mockedSyncRepositories.mockResolvedValue([
-        { repositoryId: 'repo-1', repositoryName: 'my-repo', status: 'cloned' },
+        { repositoryId: 'repo-1', repositoryCode: 'my-repo', repositoryName: 'my-repo', status: 'cloned' },
       ])
 
       const agent = new ProjectAgent(project, 'agent-1', options)
@@ -954,7 +955,7 @@ describe('ProjectAgent', () => {
         project: { projectCode: 'test-proj', projectName: 'Test' },
         agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
         repositories: [
-          { repositoryId: 'repo-1', repositoryName: 'my-repo', repositoryUrl: 'https://github.com/org/repo.git', provider: 'github', branch: 'main', authMethod: 'token' },
+          { repositoryId: 'repo-1', repositoryCode: 'my-repo', repositoryName: 'my-repo', repositoryUrl: 'https://github.com/org/repo.git', provider: 'github', branch: 'main', authMethod: 'token' },
         ],
       }
       mockedSyncProjectConfig.mockResolvedValue(mockConfig)

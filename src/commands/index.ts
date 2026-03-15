@@ -1,6 +1,7 @@
 import type { ApiClient } from '../api-client'
 import { ERR_CHAT_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
+import { getWorkspaceDir } from '../project-dir'
 import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
 import { getErrorMessage } from '../utils'
 
@@ -48,6 +49,8 @@ export async function executeCommand(
     opts = payloadOrOptions as ExecuteCommandOptions | undefined
   }
 
+  const fileBaseDir = opts?.projectDir ? getWorkspaceDir(opts.projectDir) : undefined
+
   logger.debug(`Executing command: type=${type}`)
   try {
     switch (type) {
@@ -59,33 +62,33 @@ export async function executeCommand(
       case 'file_read': {
         const path = (p as Record<string, unknown>).path
         logger.debug(`[file_read] path="${String(path ?? '')}"`)
-        return await fileRead(p, opts?.projectDir)
+        return await fileRead(p, fileBaseDir)
       }
       case 'file_write': {
         const path = (p as Record<string, unknown>).path
         logger.debug(`[file_write] path="${String(path ?? '')}"`)
-        return await fileWrite(p, opts?.projectDir)
+        return await fileWrite(p, fileBaseDir)
       }
       case 'file_list': {
         const path = (p as Record<string, unknown>).path
         logger.debug(`[file_list] path="${String(path ?? '')}"`)
-        return await fileList(p, opts?.projectDir)
+        return await fileList(p, fileBaseDir)
       }
       case 'file_rename': {
         const oldPath = (p as Record<string, unknown>).oldPath
         const newPath = (p as Record<string, unknown>).newPath
         logger.debug(`[file_rename] oldPath="${String(oldPath ?? '')}" newPath="${String(newPath ?? '')}"`)
-        return await fileRename(p, opts?.projectDir)
+        return await fileRename(p, fileBaseDir)
       }
       case 'file_delete': {
         const deletePath = (p as Record<string, unknown>).path
         logger.debug(`[file_delete] path="${String(deletePath ?? '')}"`)
-        return await fileDelete(p, opts?.projectDir)
+        return await fileDelete(p, fileBaseDir)
       }
       case 'file_mkdir': {
         const mkdirPath = (p as Record<string, unknown>).path
         logger.debug(`[file_mkdir] path="${String(mkdirPath ?? '')}"`)
-        return await fileMkdir(p, opts?.projectDir)
+        return await fileMkdir(p, fileBaseDir)
       }
       case 'process_list':
         return await processList()

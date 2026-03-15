@@ -5,7 +5,7 @@ import { logger } from '../logger'
 import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatFileInfo, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
 import { parseString, truncateString } from '../utils'
 
-import { getAutoAddDirs } from '../project-dir'
+import { getAutoAddDirs, getWorkspaceDir } from '../project-dir'
 import { executeApiChatCommand } from './api-chat-executor'
 import { runClaudeCode } from './claude-code-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
@@ -217,7 +217,7 @@ async function executeClaudeCodeChat(
       locale,
       awsEnv,
       mcpConfigPath,
-      cwd: projectDir,
+      cwd: projectDir ? getWorkspaceDir(projectDir) : undefined,
       systemPrompt,
       policyContext: {
         tenantCode,

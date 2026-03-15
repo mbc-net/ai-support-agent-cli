@@ -27,6 +27,8 @@ import {
   getCacheDir,
   getAwsDir,
   getMetadataDir,
+  getWorkspaceDir,
+  getReposDir,
 } from '../src/project-dir'
 import { getConfigDir } from '../src/config-manager'
 import { logger } from '../src/logger'
@@ -204,7 +206,7 @@ describe('project-dir', () => {
       mockedFs.existsSync.mockReturnValue(false)
       ensureProjectDirs('/projects/MBC_01')
 
-      const expectedSubdirs = ['repos', 'docs', 'artifacts', 'uploads']
+      const expectedSubdirs = ['workspace/repos', 'workspace/docs', 'workspace/artifacts', 'uploads']
       for (const subdir of expectedSubdirs) {
         expect(mockedFs.mkdirSync).toHaveBeenCalledWith(
           path.join('/projects/MBC_01', subdir),
@@ -253,8 +255,8 @@ describe('project-dir', () => {
     it('should create only missing directories', () => {
       const existingPaths = new Set([
         '/projects/MBC_01',
-        path.join('/projects/MBC_01', 'repos'),
-        path.join('/projects/MBC_01', 'docs'),
+        path.join('/projects/MBC_01', 'workspace', 'repos'),
+        path.join('/projects/MBC_01', 'workspace', 'docs'),
         path.join('/projects/MBC_01', '.ai-support-agent'),
       ])
       mockedFs.existsSync.mockImplementation((p) => existingPaths.has(p as string))
@@ -267,11 +269,11 @@ describe('project-dir', () => {
         expect.anything(),
       )
       expect(mockedFs.mkdirSync).not.toHaveBeenCalledWith(
-        path.join('/projects/MBC_01', 'repos'),
+        path.join('/projects/MBC_01', 'workspace', 'repos'),
         expect.anything(),
       )
       expect(mockedFs.mkdirSync).not.toHaveBeenCalledWith(
-        path.join('/projects/MBC_01', 'docs'),
+        path.join('/projects/MBC_01', 'workspace', 'docs'),
         expect.anything(),
       )
       expect(mockedFs.mkdirSync).not.toHaveBeenCalledWith(
@@ -281,7 +283,7 @@ describe('project-dir', () => {
 
       // Should create dirs that don't exist
       expect(mockedFs.mkdirSync).toHaveBeenCalledWith(
-        path.join('/projects/MBC_01', 'artifacts'),
+        path.join('/projects/MBC_01', 'workspace', 'artifacts'),
         { recursive: true },
       )
       expect(mockedFs.mkdirSync).toHaveBeenCalledWith(
@@ -295,6 +297,53 @@ describe('project-dir', () => {
       expect(mockedFs.mkdirSync).toHaveBeenCalledWith(
         path.join('/projects/MBC_01', '.ai-support-agent', 'aws'),
         { recursive: true, mode: 0o700 },
+      )
+    })
+
+    it('should migrate legacy metadata directory to .ai-support-agent', () => {
+      // metadata exists, .ai-support-agent does not
+      mockedFs.existsSync.mockImplementation((p) => {
+        const s = p as string
+        if (s === path.join('/projects/MBC_01', 'metadata')) return true
+        if (s === path.join('/projects/MBC_01', 'repos')) return true
+        if (s === path.join('/projects/MBC_01', 'docs')) return true
+        if (s === path.join('/projects/MBC_01', 'artifacts')) return true
+        return false
+      })
+
+      ensureProjectDirs('/projects/MBC_01')
+
+      expect(mockedFs.renameSync).toHaveBeenCalledWith(
+        path.join('/projects/MBC_01', 'metadata'),
+        path.join('/projects/MBC_01', '.ai-support-agent'),
+      )
+      expect(mockedFs.renameSync).toHaveBeenCalledWith(
+        path.join('/projects/MBC_01', 'repos'),
+        path.join('/projects/MBC_01', 'workspace', 'repos'),
+      )
+      expect(mockedFs.renameSync).toHaveBeenCalledWith(
+        path.join('/projects/MBC_01', 'docs'),
+        path.join('/projects/MBC_01', 'workspace', 'docs'),
+      )
+      expect(mockedFs.renameSync).toHaveBeenCalledWith(
+        path.join('/projects/MBC_01', 'artifacts'),
+        path.join('/projects/MBC_01', 'workspace', 'artifacts'),
+      )
+    })
+
+    it('should not migrate when .ai-support-agent already exists', () => {
+      mockedFs.existsSync.mockImplementation((p) => {
+        const s = p as string
+        if (s === path.join('/projects/MBC_01', 'metadata')) return true
+        if (s === path.join('/projects/MBC_01', '.ai-support-agent')) return true
+        return s === '/projects/MBC_01'
+      })
+
+      ensureProjectDirs('/projects/MBC_01')
+
+      expect(mockedFs.renameSync).not.toHaveBeenCalledWith(
+        path.join('/projects/MBC_01', 'metadata'),
+        path.join('/projects/MBC_01', '.ai-support-agent'),
       )
     })
   })
@@ -358,27 +407,27 @@ describe('project-dir', () => {
       const dirs = getAutoAddDirs('/projects/MBC_01')
 
       expect(dirs).toEqual([
-        path.join('/projects/MBC_01', 'repos'),
-        path.join('/projects/MBC_01', 'docs'),
+        path.join('/projects/MBC_01', 'workspace', 'repos'),
+        path.join('/projects/MBC_01', 'workspace', 'docs'),
       ])
     })
 
     it('should return only repos when docs does not exist', () => {
       mockedFs.existsSync.mockImplementation((p) => {
-        return p === path.join('/projects/MBC_01', 'repos')
+        return p === path.join('/projects/MBC_01', 'workspace', 'repos')
       })
       const dirs = getAutoAddDirs('/projects/MBC_01')
 
-      expect(dirs).toEqual([path.join('/projects/MBC_01', 'repos')])
+      expect(dirs).toEqual([path.join('/projects/MBC_01', 'workspace', 'repos')])
     })
 
     it('should return only docs when repos does not exist', () => {
       mockedFs.existsSync.mockImplementation((p) => {
-        return p === path.join('/projects/MBC_01', 'docs')
+        return p === path.join('/projects/MBC_01', 'workspace', 'docs')
       })
       const dirs = getAutoAddDirs('/projects/MBC_01')
 
-      expect(dirs).toEqual([path.join('/projects/MBC_01', 'docs')])
+      expect(dirs).toEqual([path.join('/projects/MBC_01', 'workspace', 'docs')])
     })
 
     it('should return empty array when neither exists', () => {
@@ -409,6 +458,22 @@ describe('project-dir', () => {
     it('should return correct metadata directory path', () => {
       expect(getMetadataDir('/projects/MBC_01')).toBe(
         path.join('/projects/MBC_01', '.ai-support-agent'),
+      )
+    })
+  })
+
+  describe('getWorkspaceDir', () => {
+    it('should return correct workspace directory path', () => {
+      expect(getWorkspaceDir('/projects/MBC_01')).toBe(
+        path.join('/projects/MBC_01', 'workspace'),
+      )
+    })
+  })
+
+  describe('getReposDir', () => {
+    it('should return correct repos directory path', () => {
+      expect(getReposDir('/projects/MBC_01')).toBe(
+        path.join('/projects/MBC_01', 'workspace', 'repos'),
       )
     })
   })
