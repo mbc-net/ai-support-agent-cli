@@ -1,13 +1,22 @@
 import { ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import * as child_process from 'child_process'
+import * as fs from 'fs'
 import * as http from 'http'
+import * as path from 'path'
 
 import { VsCodeServer } from '../../src/vscode/vscode-server'
 
 // Mock child_process.spawn
 jest.mock('child_process', () => ({
   spawn: jest.fn(),
+}))
+
+// Mock fs
+jest.mock('fs', () => ({
+  mkdirSync: jest.fn(),
+  writeFileSync: jest.fn(),
+  readFileSync: jest.fn(() => { throw new Error('ENOENT') }),
 }))
 
 // Mock http.get for health checks
@@ -354,6 +363,194 @@ describe('VsCodeServer', () => {
 
       mockProcess.emit('exit', 0, null)
       expect(server.isRunning).toBe(false)
+    })
+  })
+
+  describe('setupTerminalSandbox (private)', () => {
+    const resolvedProject = path.resolve('/test/project')
+
+    it('should create sandbox directory', async () => {
+      mockHealthCheckSuccess()
+
+      await server.start()
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith(
+        path.join(resolvedProject, '.vscode-server', 'terminal-sandbox'),
+        { recursive: true },
+      )
+    })
+
+    it('should create settings directory', async () => {
+      mockHealthCheckSuccess()
+
+      await server.start()
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith(
+        path.join(resolvedProject, '.vscode-server', 'config', 'Code', 'User'),
+        { recursive: true },
+      )
+    })
+
+    it('should write .bashrc with sandbox script', async () => {
+      mockHealthCheckSuccess()
+
+      await server.start()
+
+      const bashrcPath = path.join(resolvedProject, '.vscode-server', 'terminal-sandbox', '.bashrc')
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        bashrcPath,
+        expect.stringContaining('__SANDBOX_DIR='),
+      )
+      // Should also load original .bashrc
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        bashrcPath,
+        expect.stringContaining('source ~/.bashrc'),
+      )
+    })
+
+    it('should write .zshrc with sandbox script', async () => {
+      mockHealthCheckSuccess()
+
+      await server.start()
+
+      const zshrcPath = path.join(resolvedProject, '.vscode-server', 'terminal-sandbox', '.zshrc')
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        zshrcPath,
+        expect.stringContaining('__SANDBOX_DIR='),
+      )
+    })
+
+    it('should write settings.json with terminal profiles', async () => {
+      mockHealthCheckSuccess()
+
+      await server.start()
+
+      const settingsPath = path.join(
+        resolvedProject, '.vscode-server', 'config', 'Code', 'User', 'settings.json',
+      )
+      const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === settingsPath,
+      )
+      expect(writeCall).toBeDefined()
+
+      const settings = JSON.parse(writeCall[1])
+      expect(settings['terminal.integrated.profiles.osx']).toHaveProperty('sandbox-bash')
+      expect(settings['terminal.integrated.profiles.osx']).toHaveProperty('sandbox-zsh')
+      expect(settings['terminal.integrated.profiles.linux']).toHaveProperty('sandbox-bash')
+      expect(settings['terminal.integrated.profiles.linux']).toHaveProperty('sandbox-zsh')
+      expect(settings['terminal.integrated.cwd']).toBe(resolvedProject)
+      expect(settings['security.workspace.trust.enabled']).toBe(true)
+      expect(settings['security.workspace.trust.startupPrompt']).toBe('never')
+    })
+
+    it('should set default profile based on SHELL env', async () => {
+      mockHealthCheckSuccess()
+      const origShell = process.env.SHELL
+
+      try {
+        process.env.SHELL = '/bin/zsh'
+        server = new VsCodeServer({ projectDir: '/test/project' })
+        ;(child_process.spawn as jest.Mock).mockReturnValue(mockProcess)
+
+        await server.start()
+
+        const settingsPath = path.join(
+          resolvedProject, '.vscode-server', 'config', 'Code', 'User', 'settings.json',
+        )
+        const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
+          (call: unknown[]) => call[0] === settingsPath,
+        )
+        const settings = JSON.parse(writeCall[1])
+        expect(settings['terminal.integrated.defaultProfile.osx']).toBe('sandbox-zsh')
+        expect(settings['terminal.integrated.defaultProfile.linux']).toBe('sandbox-zsh')
+      } finally {
+        process.env.SHELL = origShell
+      }
+    })
+
+    it('should merge with existing settings.json', async () => {
+      mockHealthCheckSuccess()
+
+      const existingSettings = { 'editor.fontSize': 14, 'some.other.setting': true }
+      ;(fs.readFileSync as jest.Mock).mockReturnValueOnce(JSON.stringify(existingSettings))
+
+      await server.start()
+
+      const settingsPath = path.join(
+        resolvedProject, '.vscode-server', 'config', 'Code', 'User', 'settings.json',
+      )
+      const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === settingsPath,
+      )
+      const settings = JSON.parse(writeCall[1])
+      expect(settings['editor.fontSize']).toBe(14)
+      expect(settings['some.other.setting']).toBe(true)
+      expect(settings['terminal.integrated.profiles.osx']).toBeDefined()
+    })
+
+    it('should deep merge existing terminal profiles', async () => {
+      mockHealthCheckSuccess()
+
+      const existingSettings = {
+        'terminal.integrated.profiles.osx': {
+          'my-custom-profile': { path: '/bin/fish' },
+        },
+      }
+      ;(fs.readFileSync as jest.Mock).mockReturnValueOnce(JSON.stringify(existingSettings))
+
+      await server.start()
+
+      const settingsPath = path.join(
+        resolvedProject, '.vscode-server', 'config', 'Code', 'User', 'settings.json',
+      )
+      const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === settingsPath,
+      )
+      const settings = JSON.parse(writeCall[1])
+      // User's custom profile should be preserved
+      expect(settings['terminal.integrated.profiles.osx']['my-custom-profile']).toEqual({ path: '/bin/fish' })
+      // Sandbox profiles should also exist
+      expect(settings['terminal.integrated.profiles.osx']['sandbox-bash']).toBeDefined()
+      expect(settings['terminal.integrated.profiles.osx']['sandbox-zsh']).toBeDefined()
+    })
+
+    it('should set sandbox-bash as default when SHELL is bash', async () => {
+      mockHealthCheckSuccess()
+      const origShell = process.env.SHELL
+
+      try {
+        process.env.SHELL = '/bin/bash'
+        server = new VsCodeServer({ projectDir: '/test/project' })
+        ;(child_process.spawn as jest.Mock).mockReturnValue(mockProcess)
+
+        await server.start()
+
+        const settingsPath = path.join(
+          resolvedProject, '.vscode-server', 'config', 'Code', 'User', 'settings.json',
+        )
+        const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
+          (call: unknown[]) => call[0] === settingsPath,
+        )
+        const settings = JSON.parse(writeCall[1])
+        expect(settings['terminal.integrated.defaultProfile.osx']).toBe('sandbox-bash')
+      } finally {
+        process.env.SHELL = origShell
+      }
+    })
+
+    it('should still start code-server when sandbox setup fails', async () => {
+      mockHealthCheckSuccess()
+
+      // Make mkdirSync throw on first call (sandbox dir creation)
+      ;(fs.mkdirSync as jest.Mock).mockImplementationOnce(() => {
+        throw new Error('Permission denied')
+      })
+
+      await server.start()
+
+      // code-server should still be running despite sandbox failure
+      expect(server.isRunning).toBe(true)
+      expect(child_process.spawn).toHaveBeenCalledWith('code-server', expect.any(Array), expect.any(Object))
     })
   })
 })

@@ -1,3 +1,4 @@
+export { buildSandboxInitScript } from './sandbox-init-script'
 export { TerminalSession, isNodePtyAvailable } from './terminal-session'
 export type { TerminalSessionInfo, TerminalSessionOptions } from './terminal-session'
 export { TerminalSessionManager } from './terminal-session-manager'

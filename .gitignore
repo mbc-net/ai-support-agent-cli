@@ -2,6 +2,7 @@ node_modules/
 dist/
 coverage/
 report/
+.vscode-server/
 *.js.map
 .env
 .local/
