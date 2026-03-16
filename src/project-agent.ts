@@ -10,6 +10,7 @@ import { logger } from './logger'
 import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
+import { detectInstallMethod, performUpdate, reExecProcess } from './update-checker'
 import { getErrorMessage, isAuthenticationError } from './utils'
 
 export interface ProjectAgentOptions {
@@ -116,6 +117,31 @@ export class ProjectAgent {
     await performSetup(this.configSyncDeps, this.configSyncState)
   }
 
+  async performReboot(): Promise<void> {
+    logger.info(`${this.prefix} Reboot requested, scheduling restart...`)
+    this.stop()
+    setTimeout(() => {
+      reExecProcess()
+    }, 1000)
+  }
+
+  async performUpdate(): Promise<void> {
+    logger.info(`${this.prefix} Update requested, checking for latest version...`)
+    const versionInfo = await this.client.getVersionInfo()
+    const targetVersion = versionInfo.latestVersion
+    logger.info(`${this.prefix} Updating to version ${targetVersion}...`)
+    const installMethod = detectInstallMethod()
+    const result = await performUpdate(targetVersion, installMethod)
+    if (!result.success) {
+      throw new Error(`Update failed: ${result.error ?? 'Unknown error'}`)
+    }
+    logger.success(`${this.prefix} Update to ${targetVersion} successful, restarting...`)
+    this.stop()
+    setTimeout(() => {
+      reExecProcess(installMethod)
+    }, 1000)
+  }
+
   private async registerAndStart(): Promise<void> {
     await refreshChatMode(this.configSyncDeps, this.configSyncState, true)
 
@@ -166,6 +192,8 @@ export class ProjectAgent {
       transportState: this.transportState,
       onSetup: () => this.performSetup(),
       onConfigSync: () => this.performConfigSync(),
+      onReboot: () => this.performReboot(),
+      onUpdate: () => this.performUpdate(),
     }
 
     if (!result.appsyncUrl || !result.appsyncApiKey) {

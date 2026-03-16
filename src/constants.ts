@@ -92,6 +92,8 @@ export const ERR_CLAUDE_CLI_NOT_FOUND = 'claude CLI が見つかりません。C
 export const ERR_CHAT_REQUIRES_CLIENT = 'chat command requires commandId and client'
 export const ERR_SETUP_REQUIRES_CALLBACK = 'setup command requires onSetup callback'
 export const ERR_CONFIG_SYNC_REQUIRES_CALLBACK = 'config_sync command requires onConfigSync callback'
+export const ERR_REBOOT_REQUIRES_CALLBACK = 'reboot command requires onReboot callback'
+export const ERR_UPDATE_REQUIRES_CALLBACK = 'update command requires onUpdate callback'
 
 // API endpoint paths
 export const API_ENDPOINTS = {

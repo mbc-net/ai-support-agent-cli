@@ -6,6 +6,7 @@ import { logger } from '../src/logger'
 import { syncProjectConfig } from '../src/project-config-sync'
 import { ProjectAgent } from '../src/project-agent'
 import { syncRepositories } from '../src/repo-sync'
+import { detectInstallMethod, performUpdate, reExecProcess } from '../src/update-checker'
 
 jest.mock('../src/api-client')
 jest.mock('../src/appsync-subscriber')
@@ -32,6 +33,11 @@ jest.mock('../src/aws-profile', () => ({
 jest.mock('../src/repo-sync', () => ({
   syncRepositories: jest.fn().mockResolvedValue([]),
 }))
+jest.mock('../src/update-checker', () => ({
+  detectInstallMethod: jest.fn().mockReturnValue('global'),
+  performUpdate: jest.fn().mockResolvedValue({ success: true }),
+  reExecProcess: jest.fn(),
+}))
 
 const MockApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
 const MockAppSyncSubscriber = AppSyncSubscriber as jest.MockedClass<typeof AppSyncSubscriber>
@@ -39,6 +45,9 @@ const mockedExecuteCommand = executeCommand as jest.MockedFunction<typeof execut
 const mockedSyncProjectConfig = syncProjectConfig as jest.MockedFunction<typeof syncProjectConfig>
 const mockedWriteAwsConfig = writeAwsConfig as jest.MockedFunction<typeof writeAwsConfig>
 const mockedSyncRepositories = syncRepositories as jest.MockedFunction<typeof syncRepositories>
+const mockedDetectInstallMethod = detectInstallMethod as jest.MockedFunction<typeof detectInstallMethod>
+const mockedPerformUpdate = performUpdate as jest.MockedFunction<typeof performUpdate>
+const mockedReExecProcess = reExecProcess as jest.MockedFunction<typeof reExecProcess>
 
 describe('ProjectAgent', () => {
   let mockClient: {
@@ -1089,6 +1098,61 @@ describe('ProjectAgent', () => {
       )
       // performConfigSync is called: initial + callback
       expect(mockedSyncProjectConfig).toHaveBeenCalledTimes(2)
+
+      agent.stop()
+    })
+  })
+
+  describe('performReboot', () => {
+    it('should stop transport and schedule reExecProcess', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      await agent.performReboot()
+
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Reboot requested'))
+      expect(mockSubscriber.disconnect).toHaveBeenCalled()
+
+      // Advance past setTimeout(1000)
+      await jest.advanceTimersByTimeAsync(1000)
+
+      expect(mockedReExecProcess).toHaveBeenCalledWith()
+    })
+  })
+
+  describe('performUpdate', () => {
+    it('should update to latest version and schedule reExecProcess', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      await agent.performUpdate()
+
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Update requested'))
+      expect(mockClient.getVersionInfo).toHaveBeenCalled()
+      expect(mockedDetectInstallMethod).toHaveBeenCalled()
+      expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.1', 'global')
+      expect(logger.success).toHaveBeenCalledWith(expect.stringContaining('Update to 0.0.1 successful'))
+      expect(mockSubscriber.disconnect).toHaveBeenCalled()
+
+      // Advance past setTimeout(1000)
+      await jest.advanceTimersByTimeAsync(1000)
+
+      expect(mockedReExecProcess).toHaveBeenCalledWith('global')
+    })
+
+    it('should throw error when update fails', async () => {
+      mockedPerformUpdate.mockResolvedValueOnce({ success: false, error: 'Permission denied' })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      await expect(agent.performUpdate()).rejects.toThrow('Update failed: Permission denied')
 
       agent.stop()
     })
