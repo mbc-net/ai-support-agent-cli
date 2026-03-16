@@ -259,7 +259,9 @@ export class VsCodeServer {
       'security.workspace.trust.startupPrompt': 'never',
     }
 
-    const settingsDir = path.join(resolvedDir, '.vscode-server', 'config', 'Code', 'User')
+    // code-server は user-data-dir/User/settings.json を読む。
+    // XDG_DATA_HOME={projectDir}/.vscode-server/data → user-data-dir = .vscode-server/data/code-server
+    const settingsDir = path.join(resolvedDir, '.vscode-server', 'data', 'code-server', 'User')
     fs.mkdirSync(settingsDir, { recursive: true })
     const settingsPath = path.join(settingsDir, 'settings.json')
 

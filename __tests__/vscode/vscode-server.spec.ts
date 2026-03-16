@@ -386,7 +386,7 @@ describe('VsCodeServer', () => {
       await server.start()
 
       expect(fs.mkdirSync).toHaveBeenCalledWith(
-        path.join(resolvedProject, '.vscode-server', 'config', 'Code', 'User'),
+        path.join(resolvedProject, '.vscode-server', 'data', 'code-server', 'User'),
         { recursive: true },
       )
     })
@@ -426,7 +426,7 @@ describe('VsCodeServer', () => {
       await server.start()
 
       const settingsPath = path.join(
-        resolvedProject, '.vscode-server', 'config', 'Code', 'User', 'settings.json',
+        resolvedProject, '.vscode-server', 'data', 'code-server', 'User', 'settings.json',
       )
       const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
         (call: unknown[]) => call[0] === settingsPath,
@@ -455,7 +455,7 @@ describe('VsCodeServer', () => {
         await server.start()
 
         const settingsPath = path.join(
-          resolvedProject, '.vscode-server', 'config', 'Code', 'User', 'settings.json',
+          resolvedProject, '.vscode-server', 'data', 'code-server', 'User', 'settings.json',
         )
         const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
           (call: unknown[]) => call[0] === settingsPath,
@@ -477,7 +477,7 @@ describe('VsCodeServer', () => {
       await server.start()
 
       const settingsPath = path.join(
-        resolvedProject, '.vscode-server', 'config', 'Code', 'User', 'settings.json',
+        resolvedProject, '.vscode-server', 'data', 'code-server', 'User', 'settings.json',
       )
       const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
         (call: unknown[]) => call[0] === settingsPath,
@@ -501,7 +501,7 @@ describe('VsCodeServer', () => {
       await server.start()
 
       const settingsPath = path.join(
-        resolvedProject, '.vscode-server', 'config', 'Code', 'User', 'settings.json',
+        resolvedProject, '.vscode-server', 'data', 'code-server', 'User', 'settings.json',
       )
       const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
         (call: unknown[]) => call[0] === settingsPath,
@@ -526,7 +526,7 @@ describe('VsCodeServer', () => {
         await server.start()
 
         const settingsPath = path.join(
-          resolvedProject, '.vscode-server', 'config', 'Code', 'User', 'settings.json',
+          resolvedProject, '.vscode-server', 'data', 'code-server', 'User', 'settings.json',
         )
         const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
           (call: unknown[]) => call[0] === settingsPath,
