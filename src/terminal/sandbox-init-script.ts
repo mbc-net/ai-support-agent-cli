@@ -5,6 +5,46 @@
  *
  * terminal-session.ts と vscode-server.ts の両方から利用される共有モジュール。
  */
+
+/**
+ * シェルパスが zsh かどうかを判定する。
+ * 引数なしの場合は process.env.SHELL を参照する。
+ */
+export function isZshShell(shell?: string): boolean {
+  const s = shell ?? process.env.SHELL ?? ''
+  return s.endsWith('/zsh') || s.endsWith('/zsh5')
+}
+
+/**
+ * bash 用 rc ファイルの内容を生成する。
+ * 元の ~/.bashrc をロードした後にサンドボックススクリプトを注入する。
+ */
+export function buildBashRcContent(sandboxScript: string): string {
+  return `# Load original .bashrc\n[ -f ~/.bashrc ] && source ~/.bashrc\n${sandboxScript}`
+}
+
+/**
+ * zsh 用 rc ファイルの内容を生成する。
+ * ZDOTDIR または HOME の .zshrc をロードした後にサンドボックススクリプトを注入する。
+ */
+export function buildZshRcContent(sandboxScript: string): string {
+  const origZdotdir = (process.env.ZDOTDIR ?? process.env.HOME ?? '').replace(/'/g, "'\\''")
+  return `# Load original .zshrc\n[ -f '${origZdotdir}/.zshrc' ] && source '${origZdotdir}/.zshrc'\n${sandboxScript}`
+}
+
+/**
+ * Open Folder / Open File / Open Workspace 系コマンドのキーバインド無効化エントリを生成する。
+ * code-server の keybindings.json に書き出すことで、ショートカットによるフォルダ移動を防止する。
+ */
+export function buildOpenFolderDisableKeybindings(): Array<{ key: string; command: string }> {
+  return [
+    { key: 'ctrl+o', command: '-workbench.action.files.openFile' },
+    { key: 'ctrl+k ctrl+o', command: '-workbench.action.files.openFolder' },
+    { key: 'cmd+o', command: '-workbench.action.files.openFile' },
+    { key: 'cmd+k cmd+o', command: '-workbench.action.files.openFolder' },
+  ]
+}
+
 export function buildSandboxInitScript(projectDir: string): string {
   // シェル変数に埋め込む際にシングルクォートをエスケープ
   const escaped = projectDir.replace(/'/g, "'\\''")

@@ -4,7 +4,13 @@ import * as http from 'http'
 import * as path from 'path'
 
 import { logger } from '../logger'
-import { buildSandboxInitScript } from '../terminal/sandbox-init-script'
+import {
+  buildSandboxInitScript,
+  buildBashRcContent,
+  buildZshRcContent,
+  buildOpenFolderDisableKeybindings,
+  isZshShell,
+} from '../terminal/sandbox-init-script'
 import { getErrorMessage } from '../utils'
 
 import {
@@ -211,27 +217,36 @@ export class VsCodeServer {
    * - bash/zsh 用の rc ファイルを生成し、サンドボックススクリプトを注入
    * - settings.json でサンドボックス付きターミナルプロファイルをデフォルトに設定
    * - Workspace Trust を有効化して別フォルダを開いた場合に restricted mode にする
+   * - File メニュー非表示 + Open Folder 系キーバインド無効化
    */
   private setupTerminalSandbox(): void {
     const resolvedDir = path.resolve(this.projectDir)
     const sandboxDir = path.join(resolvedDir, '.vscode-server', 'terminal-sandbox')
     fs.mkdirSync(sandboxDir, { recursive: true })
 
+    this.writeSandboxRcFiles(sandboxDir, resolvedDir)
+    const settings = this.buildSandboxSettings(sandboxDir, resolvedDir)
+
+    const settingsDir = path.join(resolvedDir, '.vscode-server', 'data', 'code-server', 'User')
+    this.writeUserConfig(settingsDir, settings)
+
+    logger.debug(`[vscode-server] Terminal sandbox configured at ${sandboxDir}`)
+  }
+
+  /**
+   * bash/zsh 用の rc ファイルを生成する
+   */
+  private writeSandboxRcFiles(sandboxDir: string, resolvedDir: string): void {
     const sandboxScript = buildSandboxInitScript(resolvedDir)
+    fs.writeFileSync(path.join(sandboxDir, '.bashrc'), buildBashRcContent(sandboxScript))
+    fs.writeFileSync(path.join(sandboxDir, '.zshrc'), buildZshRcContent(sandboxScript))
+  }
 
-    // bash: --rcfile で注入
-    const bashrc = `[ -f ~/.bashrc ] && source ~/.bashrc\n${sandboxScript}`
-    fs.writeFileSync(path.join(sandboxDir, '.bashrc'), bashrc)
-
-    // zsh: ZDOTDIR で注入
-    const origZdotdir = (process.env.ZDOTDIR ?? process.env.HOME ?? '').replace(/'/g, "'\\''")
-    const zshrc = `[ -f '${origZdotdir}/.zshrc' ] && source '${origZdotdir}/.zshrc'\n${sandboxScript}`
-    fs.writeFileSync(path.join(sandboxDir, '.zshrc'), zshrc)
-
-    // settings.json を生成
-    const shell = process.env.SHELL ?? '/bin/bash'
-    const isZsh = shell.endsWith('/zsh') || shell.endsWith('/zsh5')
-    const defaultProfile = isZsh ? 'sandbox-zsh' : 'sandbox-bash'
+  /**
+   * settings.json のオブジェクトを構築する
+   */
+  private buildSandboxSettings(sandboxDir: string, resolvedDir: string): Record<string, unknown> {
+    const defaultProfile = isZshShell() ? 'sandbox-zsh' : 'sandbox-bash'
 
     const sandboxBashProfile = {
       path: '/bin/bash',
@@ -243,7 +258,7 @@ export class VsCodeServer {
       env: { ZDOTDIR: sandboxDir },
     }
 
-    const settings: Record<string, unknown> = {
+    return {
       'terminal.integrated.profiles.osx': {
         'sandbox-bash': sandboxBashProfile,
         'sandbox-zsh': sandboxZshProfile,
@@ -257,11 +272,14 @@ export class VsCodeServer {
       'terminal.integrated.cwd': resolvedDir,
       'security.workspace.trust.enabled': true,
       'security.workspace.trust.startupPrompt': 'never',
+      'window.menuBarVisibility': 'hidden',
     }
+  }
 
-    // code-server は user-data-dir/User/settings.json を読む。
-    // XDG_DATA_HOME={projectDir}/.vscode-server/data → user-data-dir = .vscode-server/data/code-server
-    const settingsDir = path.join(resolvedDir, '.vscode-server', 'data', 'code-server', 'User')
+  /**
+   * settings.json マージ書き出し + keybindings.json 生成
+   */
+  private writeUserConfig(settingsDir: string, settings: Record<string, unknown>): void {
     fs.mkdirSync(settingsDir, { recursive: true })
     const settingsPath = path.join(settingsDir, 'settings.json')
 
@@ -284,6 +302,10 @@ export class VsCodeServer {
     }
     fs.writeFileSync(settingsPath, JSON.stringify(merged, null, 2))
 
-    logger.debug(`[vscode-server] Terminal sandbox configured at ${sandboxDir}`)
+    // keybindings.json — Open Folder 系キーバインドを無効化
+    // サンドボックス管理下のため、ユーザーカスタムキーバインドは想定せず毎回上書きする
+    const keybindingsPath = path.join(settingsDir, 'keybindings.json')
+    const keybindings = buildOpenFolderDisableKeybindings()
+    fs.writeFileSync(keybindingsPath, JSON.stringify(keybindings, null, 2))
   }
 }

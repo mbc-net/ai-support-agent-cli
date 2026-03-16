@@ -1,4 +1,134 @@
-import { buildSandboxInitScript } from '../../src/terminal/sandbox-init-script'
+import {
+  buildSandboxInitScript,
+  isZshShell,
+  buildBashRcContent,
+  buildZshRcContent,
+  buildOpenFolderDisableKeybindings,
+} from '../../src/terminal/sandbox-init-script'
+
+describe('isZshShell', () => {
+  it('should return true for /bin/zsh', () => {
+    expect(isZshShell('/bin/zsh')).toBe(true)
+  })
+
+  it('should return true for /usr/bin/zsh5', () => {
+    expect(isZshShell('/usr/bin/zsh5')).toBe(true)
+  })
+
+  it('should return false for /bin/bash', () => {
+    expect(isZshShell('/bin/bash')).toBe(false)
+  })
+
+  it('should return false for empty string', () => {
+    expect(isZshShell('')).toBe(false)
+  })
+
+  it('should use process.env.SHELL when no argument', () => {
+    const origShell = process.env.SHELL
+    try {
+      process.env.SHELL = '/bin/zsh'
+      expect(isZshShell()).toBe(true)
+      process.env.SHELL = '/bin/bash'
+      expect(isZshShell()).toBe(false)
+    } finally {
+      process.env.SHELL = origShell
+    }
+  })
+
+  it('should return false when no argument and SHELL is undefined', () => {
+    const origShell = process.env.SHELL
+    try {
+      delete process.env.SHELL
+      expect(isZshShell()).toBe(false)
+    } finally {
+      process.env.SHELL = origShell
+    }
+  })
+})
+
+describe('buildBashRcContent', () => {
+  it('should include original .bashrc source', () => {
+    const content = buildBashRcContent('# sandbox')
+    expect(content).toContain('source ~/.bashrc')
+  })
+
+  it('should include the sandbox script', () => {
+    const content = buildBashRcContent('__SANDBOX_DIR=test')
+    expect(content).toContain('__SANDBOX_DIR=test')
+  })
+})
+
+describe('buildZshRcContent', () => {
+  it('should include original .zshrc source', () => {
+    const content = buildZshRcContent('# sandbox')
+    expect(content).toContain('.zshrc')
+    expect(content).toContain('source')
+  })
+
+  it('should include the sandbox script', () => {
+    const content = buildZshRcContent('__SANDBOX_DIR=test')
+    expect(content).toContain('__SANDBOX_DIR=test')
+  })
+
+  it('should use ZDOTDIR if set', () => {
+    const origZdotdir = process.env.ZDOTDIR
+    try {
+      process.env.ZDOTDIR = '/custom/zdotdir'
+      const content = buildZshRcContent('# sandbox')
+      expect(content).toContain('/custom/zdotdir/.zshrc')
+    } finally {
+      process.env.ZDOTDIR = origZdotdir
+    }
+  })
+
+  it('should escape single quotes in ZDOTDIR', () => {
+    const origZdotdir = process.env.ZDOTDIR
+    try {
+      process.env.ZDOTDIR = "/path/with'quote"
+      const content = buildZshRcContent('# sandbox')
+      expect(content).toContain("'\\''")
+    } finally {
+      process.env.ZDOTDIR = origZdotdir
+    }
+  })
+})
+
+describe('buildOpenFolderDisableKeybindings', () => {
+  it('should return an array of keybinding entries', () => {
+    const keybindings = buildOpenFolderDisableKeybindings()
+    expect(Array.isArray(keybindings)).toBe(true)
+    expect(keybindings.length).toBeGreaterThan(0)
+  })
+
+  it('should have entries with key and command properties', () => {
+    const keybindings = buildOpenFolderDisableKeybindings()
+    for (const entry of keybindings) {
+      expect(entry).toHaveProperty('key')
+      expect(entry).toHaveProperty('command')
+    }
+  })
+
+  it('should use "-" prefix in command to unbind', () => {
+    const keybindings = buildOpenFolderDisableKeybindings()
+    for (const entry of keybindings) {
+      expect(entry.command).toMatch(/^-/)
+    }
+  })
+
+  it('should include ctrl+o and cmd+o bindings', () => {
+    const keybindings = buildOpenFolderDisableKeybindings()
+    const keys = keybindings.map(k => k.key)
+    expect(keys).toContain('ctrl+o')
+    expect(keys).toContain('cmd+o')
+  })
+
+  it('should include Open Folder chord bindings', () => {
+    const keybindings = buildOpenFolderDisableKeybindings()
+    const keys = keybindings.map(k => k.key)
+    expect(keys).toContain('ctrl+k ctrl+o')
+    expect(keys).toContain('cmd+k cmd+o')
+  })
+})
 
 describe('buildSandboxInitScript', () => {
   it('should return a non-empty script string', () => {
