@@ -95,9 +95,9 @@ RUN ARCH=$(dpkg --print-architecture) \
 RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local \
     && code-server --version
 
-# Claude Code CLI + AI Support Agent CLI
+# Claude Code CLI + AI Support Agent CLI + Backlog MCP Server
 ARG AGENT_VERSION=latest
-RUN npm install -g @anthropic-ai/claude-code @ai-support-agent/cli@${AGENT_VERSION} \
+RUN npm install -g @anthropic-ai/claude-code @ai-support-agent/cli@${AGENT_VERSION} backlog-mcp-server \
     && npm cache clean --force
 
 WORKDIR /workspace
