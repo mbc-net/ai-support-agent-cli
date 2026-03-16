@@ -1,7 +1,16 @@
 import { ChildProcess, spawn } from 'child_process'
+import * as fs from 'fs'
 import * as http from 'http'
+import * as path from 'path'
 
 import { logger } from '../logger'
+import {
+  buildSandboxInitScript,
+  buildBashRcContent,
+  buildZshRcContent,
+  buildOpenFolderDisableKeybindings,
+  isZshShell,
+} from '../terminal/sandbox-init-script'
 import { getErrorMessage } from '../utils'
 
 import {
@@ -55,6 +64,12 @@ export class VsCodeServer {
     }
 
     logger.info(`[vscode-server] Starting code-server on ${VSCODE_BIND_HOST}:${this.port}`)
+
+    try {
+      this.setupTerminalSandbox()
+    } catch (error) {
+      logger.warn(`[vscode-server] Failed to setup terminal sandbox: ${getErrorMessage(error)}`)
+    }
 
     this.process = spawn('code-server', [
       '--bind-addr', `${VSCODE_BIND_HOST}:${this.port}`,
@@ -195,5 +210,102 @@ export class VsCodeServer {
       }
     }
     throw new Error(`code-server failed to start within ${STARTUP_TIMEOUT_MS}ms`)
+  }
+
+  /**
+   * code-server のターミナルにサンドボックスを適用する。
+   * - bash/zsh 用の rc ファイルを生成し、サンドボックススクリプトを注入
+   * - settings.json でサンドボックス付きターミナルプロファイルをデフォルトに設定
+   * - Workspace Trust を有効化して別フォルダを開いた場合に restricted mode にする
+   * - File メニュー非表示 + Open Folder 系キーバインド無効化
+   */
+  private setupTerminalSandbox(): void {
+    const resolvedDir = path.resolve(this.projectDir)
+    const sandboxDir = path.join(resolvedDir, '.vscode-server', 'terminal-sandbox')
+    fs.mkdirSync(sandboxDir, { recursive: true })
+
+    this.writeSandboxRcFiles(sandboxDir, resolvedDir)
+    const settings = this.buildSandboxSettings(sandboxDir, resolvedDir)
+
+    const settingsDir = path.join(resolvedDir, '.vscode-server', 'data', 'code-server', 'User')
+    this.writeUserConfig(settingsDir, settings)
+
+    logger.debug(`[vscode-server] Terminal sandbox configured at ${sandboxDir}`)
+  }
+
+  /**
+   * bash/zsh 用の rc ファイルを生成する
+   */
+  private writeSandboxRcFiles(sandboxDir: string, resolvedDir: string): void {
+    const sandboxScript = buildSandboxInitScript(resolvedDir)
+    fs.writeFileSync(path.join(sandboxDir, '.bashrc'), buildBashRcContent(sandboxScript))
+    fs.writeFileSync(path.join(sandboxDir, '.zshrc'), buildZshRcContent(sandboxScript))
+  }
+
+  /**
+   * settings.json のオブジェクトを構築する
+   */
+  private buildSandboxSettings(sandboxDir: string, resolvedDir: string): Record<string, unknown> {
+    const defaultProfile = isZshShell() ? 'sandbox-zsh' : 'sandbox-bash'
+
+    const sandboxBashProfile = {
+      path: '/bin/bash',
+      args: ['--rcfile', path.join(sandboxDir, '.bashrc')],
+    }
+    const sandboxZshProfile = {
+      path: '/bin/zsh',
+      args: ['--login'],
+      env: { ZDOTDIR: sandboxDir },
+    }
+
+    return {
+      'terminal.integrated.profiles.osx': {
+        'sandbox-bash': sandboxBashProfile,
+        'sandbox-zsh': sandboxZshProfile,
+      },
+      'terminal.integrated.profiles.linux': {
+        'sandbox-bash': sandboxBashProfile,
+        'sandbox-zsh': sandboxZshProfile,
+      },
+      'terminal.integrated.defaultProfile.osx': defaultProfile,
+      'terminal.integrated.defaultProfile.linux': defaultProfile,
+      'terminal.integrated.cwd': resolvedDir,
+      'security.workspace.trust.enabled': true,
+      'security.workspace.trust.startupPrompt': 'never',
+      'window.menuBarVisibility': 'hidden',
+    }
+  }
+
+  /**
+   * settings.json マージ書き出し + keybindings.json 生成
+   */
+  private writeUserConfig(settingsDir: string, settings: Record<string, unknown>): void {
+    fs.mkdirSync(settingsDir, { recursive: true })
+    const settingsPath = path.join(settingsDir, 'settings.json')
+
+    // 既存 settings.json があればマージ（profiles キーは deep merge）
+    let existing: Record<string, unknown> = {}
+    try {
+      existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+    } catch {
+      // ignore — file doesn't exist or is malformed
+    }
+    const merged: Record<string, unknown> = { ...existing, ...settings }
+    const profileKeys = [
+      'terminal.integrated.profiles.osx',
+      'terminal.integrated.profiles.linux',
+    ]
+    for (const key of profileKeys) {
+      if (existing[key] && typeof existing[key] === 'object' && settings[key]) {
+        merged[key] = { ...(existing[key] as Record<string, unknown>), ...(settings[key] as Record<string, unknown>) }
+      }
+    }
+    fs.writeFileSync(settingsPath, JSON.stringify(merged, null, 2))
+
+    // keybindings.json — Open Folder 系キーバインドを無効化
+    // サンドボックス管理下のため、ユーザーカスタムキーバインドは想定せず毎回上書きする
+    const keybindingsPath = path.join(settingsDir, 'keybindings.json')
+    const keybindings = buildOpenFolderDisableKeybindings()
+    fs.writeFileSync(keybindingsPath, JSON.stringify(keybindings, null, 2))
   }
 }
