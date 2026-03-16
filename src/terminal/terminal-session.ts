@@ -9,7 +9,12 @@ import {
   TERMINAL_DEFAULT_COLS,
   TERMINAL_DEFAULT_ROWS,
 } from './constants'
-import { buildSandboxInitScript } from './sandbox-init-script'
+import {
+  buildSandboxInitScript,
+  buildBashRcContent,
+  buildZshRcContent,
+  isZshShell,
+} from './sandbox-init-script'
 
 /**
  * node-pty を遅延ロードする。
@@ -100,20 +105,13 @@ export class TerminalSession {
     this.sandboxTmpDir = tmpDir
 
     const shellArgs: string[] = []
-    const isZsh = shell.endsWith('/zsh') || shell.endsWith('/zsh5')
-    if (isZsh) {
-      // zsh: ZDOTDIR に .zshrc を配置し、元の .zshrc も読み込む
-      const origZdotdir = (process.env.ZDOTDIR ?? process.env.HOME ?? '').replace(/'/g, "'\\''")
-      const zshrc = `# Load original .zshrc\n[ -f '${origZdotdir}/.zshrc' ] && source '${origZdotdir}/.zshrc'\n${sandboxScript}`
-      fs.writeFileSync(path.join(tmpDir, '.zshrc'), zshrc)
+    if (isZshShell(shell)) {
+      fs.writeFileSync(path.join(tmpDir, '.zshrc'), buildZshRcContent(sandboxScript))
       env.ZDOTDIR = tmpDir
       shellArgs.push('--login')
     } else {
-      // bash: --rcfile でサンドボックススクリプトを読み込む
-      const bashrc = `# Load original .bashrc\n[ -f ~/.bashrc ] && source ~/.bashrc\n${sandboxScript}`
-      const rcFile = path.join(tmpDir, '.bashrc')
-      fs.writeFileSync(rcFile, bashrc)
-      shellArgs.push('--rcfile', rcFile)
+      fs.writeFileSync(path.join(tmpDir, '.bashrc'), buildBashRcContent(sandboxScript))
+      shellArgs.push('--rcfile', path.join(tmpDir, '.bashrc'))
     }
 
     this.ptyProcess = pty.spawn(shell, shellArgs, {

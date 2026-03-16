@@ -315,6 +315,20 @@ describe('VsCodeServer', () => {
       ;(server as any).stopTimers()
       jest.useRealTimers()
     })
+
+    it('should call stop when idle timeout fires', () => {
+      jest.useFakeTimers()
+
+      const stopSpy = jest.spyOn(server, 'stop')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(server as any).resetIdleTimer()
+
+      jest.advanceTimersByTime(30 * 60 * 1000 + 1)
+
+      expect(stopSpy).toHaveBeenCalled()
+      stopSpy.mockRestore()
+      jest.useRealTimers()
+    })
   })
 
   describe('startHealthCheck (private)', () => {
@@ -328,6 +342,27 @@ describe('VsCodeServer', () => {
       expect((server as any).healthTimer).not.toBeNull()
 
       // Clean up
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(server as any).stopTimers()
+      jest.useRealTimers()
+    })
+
+    it('should call checkHealth in interval callback', async () => {
+      jest.useFakeTimers()
+
+      // Mock checkHealth to resolve immediately
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const checkHealthSpy = jest.spyOn(server as any, 'checkHealth').mockResolvedValue(undefined)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(server as any).startHealthCheck()
+
+      // Advance past one interval (HEALTH_CHECK_INTERVAL_MS = 30000)
+      jest.advanceTimersByTime(30001)
+
+      expect(checkHealthSpy).toHaveBeenCalled()
+
+      checkHealthSpy.mockRestore()
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(server as any).stopTimers()
       jest.useRealTimers()
@@ -536,6 +571,46 @@ describe('VsCodeServer', () => {
       } finally {
         process.env.SHELL = origShell
       }
+    })
+
+    it('should write keybindings.json with Open Folder disable entries', async () => {
+      mockHealthCheckSuccess()
+
+      await server.start()
+
+      const keybindingsPath = path.join(
+        resolvedProject, '.vscode-server', 'data', 'code-server', 'User', 'keybindings.json',
+      )
+      const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === keybindingsPath,
+      )
+      expect(writeCall).toBeDefined()
+
+      const keybindings = JSON.parse(writeCall[1])
+      expect(Array.isArray(keybindings)).toBe(true)
+      expect(keybindings.length).toBeGreaterThan(0)
+      // All entries should be unbind commands (prefixed with "-")
+      for (const entry of keybindings) {
+        expect(entry.command).toMatch(/^-/)
+      }
+      // Should include ctrl+o unbind
+      const keys = keybindings.map((k: { key: string }) => k.key)
+      expect(keys).toContain('ctrl+o')
+    })
+
+    it('should set window.menuBarVisibility to hidden', async () => {
+      mockHealthCheckSuccess()
+
+      await server.start()
+
+      const settingsPath = path.join(
+        resolvedProject, '.vscode-server', 'data', 'code-server', 'User', 'settings.json',
+      )
+      const writeCall = (fs.writeFileSync as jest.Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === settingsPath,
+      )
+      const settings = JSON.parse(writeCall[1])
+      expect(settings['window.menuBarVisibility']).toBe('hidden')
     })
 
     it('should still start code-server when sandbox setup fails', async () => {
