@@ -32,7 +32,7 @@ async function performBrowserAuth(opts: {
   const { url: serverUrl, nonce, waitForCallback, stop } = await startAuthServer(port, origin)
 
   const callbackUrl = `${serverUrl}/callback`
-  const webUrl = `${opts.url}/admin/agent-callback?callbackUrl=${encodeURIComponent(callbackUrl)}&nonce=${nonce}`
+  const webUrl = `${opts.url}/agent-callback?callbackUrl=${encodeURIComponent(callbackUrl)}&nonce=${nonce}`
 
   logger.info(t('auth.openingBrowser'))
   logger.info(t('auth.url', { url: webUrl }))
