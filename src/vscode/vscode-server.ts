@@ -1,7 +1,10 @@
 import { ChildProcess, spawn } from 'child_process'
+import * as fs from 'fs'
 import * as http from 'http'
+import * as path from 'path'
 
 import { logger } from '../logger'
+import { buildSandboxInitScript } from '../terminal/sandbox-init-script'
 import { getErrorMessage } from '../utils'
 
 import {
@@ -55,6 +58,12 @@ export class VsCodeServer {
     }
 
     logger.info(`[vscode-server] Starting code-server on ${VSCODE_BIND_HOST}:${this.port}`)
+
+    try {
+      this.setupTerminalSandbox()
+    } catch (error) {
+      logger.warn(`[vscode-server] Failed to setup terminal sandbox: ${getErrorMessage(error)}`)
+    }
 
     this.process = spawn('code-server', [
       '--bind-addr', `${VSCODE_BIND_HOST}:${this.port}`,
@@ -195,5 +204,84 @@ export class VsCodeServer {
       }
     }
     throw new Error(`code-server failed to start within ${STARTUP_TIMEOUT_MS}ms`)
+  }
+
+  /**
+   * code-server のターミナルにサンドボックスを適用する。
+   * - bash/zsh 用の rc ファイルを生成し、サンドボックススクリプトを注入
+   * - settings.json でサンドボックス付きターミナルプロファイルをデフォルトに設定
+   * - Workspace Trust を有効化して別フォルダを開いた場合に restricted mode にする
+   */
+  private setupTerminalSandbox(): void {
+    const resolvedDir = path.resolve(this.projectDir)
+    const sandboxDir = path.join(resolvedDir, '.vscode-server', 'terminal-sandbox')
+    fs.mkdirSync(sandboxDir, { recursive: true })
+
+    const sandboxScript = buildSandboxInitScript(resolvedDir)
+
+    // bash: --rcfile で注入
+    const bashrc = `[ -f ~/.bashrc ] && source ~/.bashrc\n${sandboxScript}`
+    fs.writeFileSync(path.join(sandboxDir, '.bashrc'), bashrc)
+
+    // zsh: ZDOTDIR で注入
+    const origZdotdir = (process.env.ZDOTDIR ?? process.env.HOME ?? '').replace(/'/g, "'\\''")
+    const zshrc = `[ -f '${origZdotdir}/.zshrc' ] && source '${origZdotdir}/.zshrc'\n${sandboxScript}`
+    fs.writeFileSync(path.join(sandboxDir, '.zshrc'), zshrc)
+
+    // settings.json を生成
+    const shell = process.env.SHELL ?? '/bin/bash'
+    const isZsh = shell.endsWith('/zsh') || shell.endsWith('/zsh5')
+    const defaultProfile = isZsh ? 'sandbox-zsh' : 'sandbox-bash'
+
+    const sandboxBashProfile = {
+      path: '/bin/bash',
+      args: ['--rcfile', path.join(sandboxDir, '.bashrc')],
+    }
+    const sandboxZshProfile = {
+      path: '/bin/zsh',
+      args: ['--login'],
+      env: { ZDOTDIR: sandboxDir },
+    }
+
+    const settings: Record<string, unknown> = {
+      'terminal.integrated.profiles.osx': {
+        'sandbox-bash': sandboxBashProfile,
+        'sandbox-zsh': sandboxZshProfile,
+      },
+      'terminal.integrated.profiles.linux': {
+        'sandbox-bash': sandboxBashProfile,
+        'sandbox-zsh': sandboxZshProfile,
+      },
+      'terminal.integrated.defaultProfile.osx': defaultProfile,
+      'terminal.integrated.defaultProfile.linux': defaultProfile,
+      'terminal.integrated.cwd': resolvedDir,
+      'security.workspace.trust.enabled': true,
+      'security.workspace.trust.startupPrompt': 'never',
+    }
+
+    const settingsDir = path.join(resolvedDir, '.vscode-server', 'config', 'Code', 'User')
+    fs.mkdirSync(settingsDir, { recursive: true })
+    const settingsPath = path.join(settingsDir, 'settings.json')
+
+    // 既存 settings.json があればマージ（profiles キーは deep merge）
+    let existing: Record<string, unknown> = {}
+    try {
+      existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+    } catch {
+      // ignore — file doesn't exist or is malformed
+    }
+    const merged: Record<string, unknown> = { ...existing, ...settings }
+    const profileKeys = [
+      'terminal.integrated.profiles.osx',
+      'terminal.integrated.profiles.linux',
+    ]
+    for (const key of profileKeys) {
+      if (existing[key] && typeof existing[key] === 'object' && settings[key]) {
+        merged[key] = { ...(existing[key] as Record<string, unknown>), ...(settings[key] as Record<string, unknown>) }
+      }
+    }
+    fs.writeFileSync(settingsPath, JSON.stringify(merged, null, 2))
+
+    logger.debug(`[vscode-server] Terminal sandbox configured at ${sandboxDir}`)
   }
 }
