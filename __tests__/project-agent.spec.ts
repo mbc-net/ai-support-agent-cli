@@ -455,6 +455,31 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
+    it('should ignore commands with matching tenantCode but missing projectCode', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-no-proj',
+        table: 'commands',
+        pk: 'CMD#201',
+        sk: 'CMD#201',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-no-proj', type: 'execute_command', tenantCode: 'test-tenant' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.getCommand).not.toHaveBeenCalled()
+
+      agent.stop()
+    })
+
     it('should process commands for matching agentId', async () => {
       mockClient.getCommand.mockResolvedValue({
         commandId: 'cmd-match',
