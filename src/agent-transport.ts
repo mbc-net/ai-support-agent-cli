@@ -207,15 +207,15 @@ export async function handleNotification(
         return
       }
 
-      // tenantCode/projectCodeが含まれている場合、自分宛でないコマンドをスキップ
+      // tenantCode/projectCodeが含まれていない通知、または自分宛でない通知をスキップ
       const contentTenantCode = content.tenantCode as string | undefined
       const contentProjectCode = content.projectCode as string | undefined
-      if (contentTenantCode && contentTenantCode !== deps.tenantCode) {
-        logger.debug(`${deps.prefix} Ignoring command for tenant ${contentTenantCode} (expected ${deps.tenantCode})`)
+      if (!contentTenantCode || contentTenantCode !== deps.tenantCode) {
+        logger.debug(`${deps.prefix} Ignoring command for tenant ${contentTenantCode ?? '(none)'} (expected ${deps.tenantCode})`)
         return
       }
-      if (contentProjectCode && contentProjectCode !== deps.projectCode) {
-        logger.debug(`${deps.prefix} Ignoring command for project ${contentProjectCode} (expected ${deps.projectCode})`)
+      if (!contentProjectCode || contentProjectCode !== deps.projectCode) {
+        logger.debug(`${deps.prefix} Ignoring command for project ${contentProjectCode ?? '(none)'} (expected ${deps.projectCode})`)
         return
       }
 

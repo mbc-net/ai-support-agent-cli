@@ -259,7 +259,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#123',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-1', type: 'execute_command' },
+        content: { commandId: 'cmd-1', type: 'execute_command', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -286,7 +286,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#123',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { type: 'execute_command' }, // no commandId
+        content: { type: 'execute_command', tenantCode: 'test-tenant', projectCode: 'test-proj' }, // no commandId
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -337,7 +337,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#789',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-other', type: 'execute_command', agentId: 'agent-2' },
+        content: { commandId: 'cmd-other', type: 'execute_command', agentId: 'agent-2', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -429,14 +429,7 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
-    it('should process commands with undefined agentId (backward compatibility)', async () => {
-      mockClient.getCommand.mockResolvedValue({
-        commandId: 'cmd-no-agent',
-        type: 'execute_command',
-        payload: { command: 'echo compat' },
-      })
-      mockedExecuteCommand.mockResolvedValue({ success: true, data: 'compat output' })
-
+    it('should ignore commands with missing tenantCode/projectCode', async () => {
       const agent = new ProjectAgent(project, 'agent-1', options)
       agent.start()
 
@@ -444,21 +437,20 @@ describe('ProjectAgent', () => {
 
       const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
 
-      // agentIdが未指定の通知（後方互換性）
+      // tenantCode/projectCodeが未指定の通知は無視される
       onMessage({
-        id: 'notif-compat',
+        id: 'notif-no-tenant',
         table: 'commands',
         pk: 'CMD#200',
         sk: 'CMD#200',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-no-agent', type: 'execute_command' },
+        content: { commandId: 'cmd-no-tenant', type: 'execute_command' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-no-agent', 'agent-1')
-      expect(mockedExecuteCommand).toHaveBeenCalled()
+      expect(mockClient.getCommand).not.toHaveBeenCalled()
 
       agent.stop()
     })
@@ -485,7 +477,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#101',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-match', type: 'execute_command', agentId: 'agent-1' },
+        content: { commandId: 'cmd-match', type: 'execute_command', agentId: 'agent-1', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -564,7 +556,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#123',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-err', type: 'execute_command' },
+        content: { commandId: 'cmd-err', type: 'execute_command', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -597,7 +589,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#456',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-err2', type: 'execute_command' },
+        content: { commandId: 'cmd-err2', type: 'execute_command', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -651,7 +643,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#123',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-cancel', type: 'chat_cancel' },
+        content: { commandId: 'cmd-cancel', type: 'chat_cancel', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -948,7 +940,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#123',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-cfg', type: 'chat' },
+        content: { commandId: 'cmd-cfg', type: 'chat', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -1120,7 +1112,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#123',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-setup', type: 'setup' },
+        content: { commandId: 'cmd-setup', type: 'setup', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -1166,7 +1158,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#123',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-sync', type: 'config_sync' },
+        content: { commandId: 'cmd-sync', type: 'config_sync', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)

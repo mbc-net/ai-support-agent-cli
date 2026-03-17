@@ -802,7 +802,7 @@ describe('startProjectAgent', () => {
       sk: 'CMD#123',
       tenantCode: 'test-tenant',
       action: 'agent-command',
-      content: { commandId: 'cmd-1', type: 'execute_command' },
+      content: { commandId: 'cmd-1', type: 'execute_command', tenantCode: 'test-tenant', projectCode: 'test-proj' },
     })
 
     await jest.advanceTimersByTimeAsync(100)
@@ -833,7 +833,7 @@ describe('startProjectAgent', () => {
       sk: 'CMD#123',
       tenantCode: 'test-tenant',
       action: 'agent-command',
-      content: { commandId: 'cmd-2', type: 'execute_command' },
+      content: { commandId: 'cmd-2', type: 'execute_command', tenantCode: 'test-tenant', projectCode: 'test-proj' },
     })
 
     await jest.advanceTimersByTimeAsync(100)

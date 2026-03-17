@@ -237,7 +237,7 @@ describe('VsCodeTunnelWebSocket', () => {
 
       expect(mockServer.touch).toHaveBeenCalled()
       expect(sentMessages).toHaveLength(1)
-      expect(sentMessages[0]).toEqual({ type: 'vscode_ready', sessionId: 'sess-1', port: 8443 })
+      expect(sentMessages[0]).toEqual({ type: 'vscode_ready', sessionId: 'sess-1', port: 8443, projectDir: '/test/project' })
     })
 
     it('should start new server and send vscode_ready', async () => {
@@ -253,7 +253,7 @@ describe('VsCodeTunnelWebSocket', () => {
 
       expect(mockServerInstance.start).toHaveBeenCalled()
       expect(sentMessages).toHaveLength(1)
-      expect(sentMessages[0]).toEqual({ type: 'vscode_ready', sessionId: 'sess-1', port: 8443 })
+      expect(sentMessages[0]).toEqual({ type: 'vscode_ready', sessionId: 'sess-1', port: 8443, projectDir: '/test/project' })
     })
 
     it('should use projectDir from message if provided', async () => {
