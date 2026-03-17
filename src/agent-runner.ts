@@ -244,6 +244,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     heartbeatInterval,
     agentChatMode: config.agentChatMode,
     defaultProjectDir: config.defaultProjectDir,
+    verbose: options.verbose,
   }
 
   // Always use ChildProcessManager for dynamic project management

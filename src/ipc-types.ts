@@ -11,6 +11,7 @@ export interface IpcStartMessage {
     heartbeatInterval: number
     agentChatMode?: AgentChatMode
     defaultProjectDir?: string
+    verbose?: boolean
   }
 }
 
