@@ -347,6 +347,88 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
+    it('should ignore commands for different projectCode', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-other-proj',
+        table: 'commands',
+        pk: 'CMD#789',
+        sk: 'CMD#789',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-other-proj', type: 'execute_command', agentId: 'agent-1', tenantCode: 'test-tenant', projectCode: 'OTHER_PROJ' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.getCommand).not.toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('should ignore commands for different tenantCode', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-other-tenant',
+        table: 'commands',
+        pk: 'CMD#789',
+        sk: 'CMD#789',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-other-tenant', type: 'execute_command', agentId: 'agent-1', tenantCode: 'other-tenant', projectCode: 'test-proj' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.getCommand).not.toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('should process commands with matching tenantCode and projectCode', async () => {
+      mockClient.getCommand.mockResolvedValue({
+        commandId: 'cmd-match-proj',
+        type: 'execute_command',
+        payload: { command: 'echo match' },
+      })
+      mockedExecuteCommand.mockResolvedValue({ success: true, data: 'match' })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+
+      onMessage({
+        id: 'notif-match-proj',
+        table: 'commands',
+        pk: 'CMD#101',
+        sk: 'CMD#101',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-match-proj', type: 'execute_command', agentId: 'agent-1', tenantCode: 'test-tenant', projectCode: 'test-proj' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-match-proj', 'agent-1')
+
+      agent.stop()
+    })
+
     it('should process commands with undefined agentId (backward compatibility)', async () => {
       mockClient.getCommand.mockResolvedValue({
         commandId: 'cmd-no-agent',
