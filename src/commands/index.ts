@@ -1,5 +1,5 @@
 import type { ApiClient } from '../api-client'
-import { ERR_CHAT_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
+import { ERR_CHAT_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_REBOOT_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, ERR_UPDATE_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import { getWorkspaceDir } from '../project-dir'
 import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
@@ -24,6 +24,8 @@ export interface ExecuteCommandOptions {
   tenantCode?: string
   onSetup?: () => Promise<void>
   onConfigSync?: () => Promise<void>
+  onReboot?: () => Promise<void>
+  onUpdate?: () => Promise<void>
 }
 
 // Overload: type-safe discriminated union
@@ -134,6 +136,18 @@ export async function executeCommand(
         }
         await opts.onConfigSync()
         return successResult('config sync completed')
+      case 'reboot':
+        if (!opts?.onReboot) {
+          return errorResult(ERR_REBOOT_REQUIRES_CALLBACK)
+        }
+        await opts.onReboot()
+        return successResult('reboot initiated')
+      case 'update':
+        if (!opts?.onUpdate) {
+          return errorResult(ERR_UPDATE_REQUIRES_CALLBACK)
+        }
+        await opts.onUpdate()
+        return successResult('update initiated')
       default:
         logger.warn(`Unknown command type: ${type}`)
         return errorResult(`Unknown command type: ${type}`)

@@ -14,6 +14,8 @@ export type AgentCommandType =
   | 'chat_cancel'
   | 'setup'
   | 'config_sync'
+  | 'reboot'
+  | 'update'
 
 export type AgentCommandStatus =
   | 'PENDING'
@@ -110,3 +112,5 @@ export type CommandDispatch =
   | { type: 'chat_cancel'; payload: ChatCancelPayload }
   | { type: 'setup'; payload: Record<string, never> }
   | { type: 'config_sync'; payload: Record<string, never> }
+  | { type: 'reboot'; payload: Record<string, never> }
+  | { type: 'update'; payload: Record<string, never> }

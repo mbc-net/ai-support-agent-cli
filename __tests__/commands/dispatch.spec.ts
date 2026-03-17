@@ -107,6 +107,56 @@ describe('commands/dispatch', () => {
       expect(onConfigSync).toHaveBeenCalled()
     })
 
+    it('should dispatch reboot command with onReboot callback', async () => {
+      const onReboot = jest.fn().mockResolvedValue(undefined)
+      const result = await executeCommand('reboot', {}, { onReboot })
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('reboot initiated')
+      expect(onReboot).toHaveBeenCalled()
+    })
+
+    it('should return error for reboot command without onReboot callback', async () => {
+      const result = await executeCommand('reboot', {})
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toBe('reboot command requires onReboot callback')
+      }
+    })
+
+    it('should dispatch reboot via CommandDispatch', async () => {
+      const onReboot = jest.fn().mockResolvedValue(undefined)
+      const dispatch: CommandDispatch = { type: 'reboot', payload: {} as Record<string, never> }
+      const result = await executeCommand(dispatch, { onReboot })
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('reboot initiated')
+      expect(onReboot).toHaveBeenCalled()
+    })
+
+    it('should dispatch update command with onUpdate callback', async () => {
+      const onUpdate = jest.fn().mockResolvedValue(undefined)
+      const result = await executeCommand('update', {}, { onUpdate })
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('update initiated')
+      expect(onUpdate).toHaveBeenCalled()
+    })
+
+    it('should return error for update command without onUpdate callback', async () => {
+      const result = await executeCommand('update', {})
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toBe('update command requires onUpdate callback')
+      }
+    })
+
+    it('should dispatch update via CommandDispatch', async () => {
+      const onUpdate = jest.fn().mockResolvedValue(undefined)
+      const dispatch: CommandDispatch = { type: 'update', payload: {} as Record<string, never> }
+      const result = await executeCommand(dispatch, { onUpdate })
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('update initiated')
+      expect(onUpdate).toHaveBeenCalled()
+    })
+
     it('should dispatch file_rename command', async () => {
       // file_rename requires valid paths; missing path returns error
       const result = await executeCommand('file_rename', { oldPath: '', newPath: '' })

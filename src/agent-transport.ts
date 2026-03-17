@@ -40,6 +40,8 @@ export interface CommandContext {
   transportState: TransportState
   onSetup: () => Promise<void>
   onConfigSync: () => Promise<void>
+  onReboot: () => Promise<void>
+  onUpdate: () => Promise<void>
 }
 
 /**
@@ -276,6 +278,8 @@ async function processCommand(
       tenantCode: deps.tenantCode,
       onSetup: ctx.onSetup,
       onConfigSync: ctx.onConfigSync,
+      onReboot: ctx.onReboot,
+      onUpdate: ctx.onUpdate,
     })
     logger.debug(`${deps.prefix} Command result [${commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, LOG_RESULT_LIMIT)}`)
     await deps.client.submitResult(commandId, result, deps.agentId)

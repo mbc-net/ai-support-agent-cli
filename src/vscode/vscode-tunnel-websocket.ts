@@ -20,6 +20,8 @@ export interface VsCodeServerMessage {
   type:
     | 'vscode_open'
     | 'vscode_close'
+    | 'port_forward_open'
+    | 'port_forward_close'
     | 'http_request'
     | 'ws_frame'
     | 'auth_success'
@@ -28,6 +30,7 @@ export interface VsCodeServerMessage {
   requestId?: string
   subSocketId?: string
   projectDir?: string
+  targetPort?: number
   method?: string
   path?: string
   headers?: Record<string, string>
@@ -45,10 +48,13 @@ export interface VsCodeAgentMessage {
   type:
     | 'vscode_ready'
     | 'vscode_stopped'
+    | 'port_forward_ready'
+    | 'port_forward_stopped'
     | 'http_response'
     | 'ws_frame'
     | 'error'
   sessionId?: string
+  targetPort?: number
   requestId?: string
   subSocketId?: string
   port?: number
@@ -73,6 +79,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private readonly wsUrl: string
   private vsCodeServer: VsCodeServer | null = null
   private wsProxy: VsCodeWsProxy | null = null
+  private readonly portForwardSessions = new Map<string, { targetPort: number; wsProxy: VsCodeWsProxy }>()
 
   constructor(
     apiUrl: string,
@@ -110,6 +117,12 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         break
       case 'vscode_close':
         this.handleVsCodeClose(msg)
+        break
+      case 'port_forward_open':
+        this.handlePortForwardOpen(msg)
+        break
+      case 'port_forward_close':
+        this.handlePortForwardClose(msg)
         break
       case 'http_request':
         this.handleHttpRequest(msg)
@@ -185,7 +198,11 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleHttpRequest(msg: VsCodeServerMessage): Promise<void> {
-    if (!this.vsCodeServer?.isRunning) {
+    // ポートフォワードセッションの場合はそちらのポートを使用
+    const pfSession = msg.sessionId ? this.portForwardSessions.get(msg.sessionId) : undefined
+    const targetPort = pfSession?.targetPort
+
+    if (!targetPort && !this.vsCodeServer?.isRunning) {
       this.send({
         type: 'error',
         requestId: msg.requestId,
@@ -194,10 +211,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       return
     }
 
-    this.vsCodeServer.touch()
+    if (!targetPort) {
+      this.vsCodeServer!.touch()
+    }
+
+    const port = targetPort ?? this.vsCodeServer!.getPort()
 
     try {
-      const response = await proxyHttpRequest(this.vsCodeServer.getPort(), {
+      const response = await proxyHttpRequest(port, {
         method: msg.method ?? 'GET',
         path: msg.path ?? '/',
         headers: msg.headers ?? {},
@@ -245,17 +266,24 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private handleWsFrame(msg: VsCodeServerMessage): void {
-    if (!this.vsCodeServer?.isRunning || !this.wsProxy) {
+    // ポートフォワードセッションの場合は専用wsProxyを使用
+    const pfSession = msg.sessionId ? this.portForwardSessions.get(msg.sessionId) : undefined
+    const proxy = pfSession?.wsProxy ?? this.wsProxy
+
+    if (!pfSession && (!this.vsCodeServer?.isRunning || !this.wsProxy)) {
       return
     }
+    if (!proxy) return
 
-    this.vsCodeServer.touch()
+    if (!pfSession) {
+      this.vsCodeServer!.touch()
+    }
     const subSocketId = msg.subSocketId
     if (!subSocketId) return
 
     if (msg.isOpen && msg.path) {
       // 新しい WebSocket 接続を開く
-      this.wsProxy.openConnection(
+      proxy.openConnection(
         subSocketId,
         msg.path,
         () => {
@@ -284,13 +312,58 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         },
       )
     } else if (msg.isClosed) {
-      this.wsProxy.closeConnection(subSocketId)
+      proxy.closeConnection(subSocketId)
     } else if (msg.data) {
-      this.wsProxy.sendFrame(subSocketId, msg.data)
+      proxy.sendFrame(subSocketId, msg.data)
+    }
+  }
+
+  private handlePortForwardOpen(msg: VsCodeServerMessage): void {
+    const sessionId = msg.sessionId
+    if (!sessionId) {
+      this.send({ type: 'error', message: 'Missing sessionId' })
+      return
+    }
+
+    const targetPort = msg.targetPort
+    if (!targetPort) {
+      this.send({ type: 'error', sessionId, message: 'Missing targetPort' })
+      return
+    }
+
+    const wsProxy = new VsCodeWsProxy(targetPort)
+    this.portForwardSessions.set(sessionId, { targetPort, wsProxy })
+
+    logger.info(`[vscode-ws] Port forward session opened: ${sessionId} → port ${targetPort}`)
+
+    this.send({
+      type: 'port_forward_ready',
+      sessionId,
+      targetPort,
+    })
+  }
+
+  private handlePortForwardClose(msg: VsCodeServerMessage): void {
+    const sessionId = msg.sessionId
+    logger.info(`[vscode-ws] Port forward close requested (session=${sessionId})`)
+
+    if (sessionId) {
+      const pfSession = this.portForwardSessions.get(sessionId)
+      if (pfSession) {
+        pfSession.wsProxy.closeAll()
+        this.portForwardSessions.delete(sessionId)
+      }
+      this.send({ type: 'port_forward_stopped', sessionId })
     }
   }
 
   private cleanup(): void {
+    // ポートフォワードセッションのクリーンアップ
+    for (const [, pfSession] of this.portForwardSessions) {
+      pfSession.wsProxy.closeAll()
+    }
+    this.portForwardSessions.clear()
+
     if (this.wsProxy) {
       this.wsProxy.closeAll()
       this.wsProxy = null
