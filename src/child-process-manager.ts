@@ -1,4 +1,5 @@
 import { fork, type ChildProcess } from 'child_process'
+import { existsSync } from 'fs'
 import { join } from 'path'
 
 import {
@@ -44,9 +45,14 @@ export class ChildProcessManager {
   }
 
   private spawnChild(projectCode: string, startMessage: IpcStartMessage): void {
-    const workerPath = join(__dirname, 'project-worker.js')
+    // ts-node 環境では .ts ファイルを使用、ビルド後は .js ファイルを使用
+    const jsPath = join(__dirname, 'project-worker.js')
+    const tsPath = join(__dirname, 'project-worker.ts')
+    const workerPath = existsSync(jsPath) ? jsPath : tsPath
+    const execArgv = workerPath.endsWith('.ts') ? ['--require', 'ts-node/register'] : []
     const child = fork(workerPath, [], {
       stdio: ['pipe', 'inherit', 'inherit', 'ipc'],
+      execArgv,
     })
 
     const managed: ManagedProcess = {
