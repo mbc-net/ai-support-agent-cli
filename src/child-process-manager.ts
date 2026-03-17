@@ -120,6 +120,46 @@ export class ChildProcessManager {
     this.restartTimers.set(projectCode, timer)
   }
 
+  /**
+   * 特定プロジェクトの子プロセスを graceful shutdown する
+   */
+  async stopProject(projectCode: string, timeoutMs: number = CHILD_PROCESS_STOP_TIMEOUT_MS): Promise<void> {
+    // pending restart timer があればキャンセル
+    const restartTimer = this.restartTimers.get(projectCode)
+    if (restartTimer) {
+      clearTimeout(restartTimer)
+      this.restartTimers.delete(projectCode)
+    }
+
+    const managed = this.processes.get(projectCode)
+    if (!managed) return
+
+    if (managed.child.connected) {
+      managed.child.send({ type: 'shutdown' })
+      logger.debug(`Sent shutdown to ${projectCode}`)
+    }
+
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        logger.warn(`Force killing ${projectCode} (timeout)`)
+        managed.child.kill('SIGKILL')
+        resolve()
+      }, timeoutMs)
+
+      managed.child.once('exit', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+
+    this.processes.delete(projectCode)
+    logger.info(`Project ${projectCode} stopped and removed`)
+  }
+
+  hasProject(projectCode: string): boolean {
+    return this.processes.has(projectCode)
+  }
+
   sendTokenUpdate(projectCode: string, newToken: string): void {
     const managed = this.processes.get(projectCode)
     if (!managed) return

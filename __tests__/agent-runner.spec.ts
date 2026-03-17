@@ -68,13 +68,23 @@ jest.mock('../src/aws-profile', () => ({
   writeAwsConfig: jest.fn(),
 }))
 
-const mockTokenWatcherStop = jest.fn()
-let capturedTokenCallback: ((projectCode: string, newToken: string) => void) | undefined
-jest.mock('../src/token-watcher', () => ({
+const mockConfigWatcherStop = jest.fn()
+let capturedConfigCallbacks: {
+  onTokenUpdate?: (projectCode: string, newToken: string) => void
+  onProjectAdded?: (project: unknown) => void
+  onProjectRemoved?: (projectCode: string) => void
+} = {}
+jest.mock('../src/config-watcher', () => ({
+  startConfigWatcher: jest.fn().mockImplementation(
+    (_projects: unknown, callbacks: typeof capturedConfigCallbacks) => {
+      capturedConfigCallbacks = callbacks
+      return { stop: mockConfigWatcherStop }
+    },
+  ),
   startTokenWatcher: jest.fn().mockImplementation(
     (_projects: unknown, callback: (projectCode: string, newToken: string) => void) => {
-      capturedTokenCallback = callback
-      return { stop: mockTokenWatcherStop }
+      capturedConfigCallbacks = { onTokenUpdate: callback }
+      return { stop: mockConfigWatcherStop }
     },
   ),
 }))
@@ -130,7 +140,7 @@ describe('agent-runner', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
-    capturedTokenCallback = undefined
+    capturedConfigCallbacks = {}
     processHandlers.clear()
 
     exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => {
@@ -242,7 +252,8 @@ describe('agent-runner', () => {
     expect(mockedSaveConfig).toHaveBeenCalled()
   })
 
-  it('should use startProjectAgent for single project from config', async () => {
+  it('should use ChildProcessManager even for single project from config (hot-add support)', async () => {
+    const { ChildProcessManager } = require('../src/child-process-manager')
     const mockConfig = {
       agentId: 'single-agent',
       createdAt: '2024-01-01',
@@ -257,8 +268,9 @@ describe('agent-runner', () => {
     await jest.advanceTimersByTimeAsync(100)
     await promise
 
+    expect(ChildProcessManager).toHaveBeenCalled()
+    expect(mockForkProject).toHaveBeenCalledTimes(1)
     expect(MockApiClient).toHaveBeenCalledWith('http://api-a', 'token-a')
-    expect(mockForkProject).not.toHaveBeenCalled()
     expect(mockedSaveConfig).toHaveBeenCalled()
   })
 
@@ -490,34 +502,8 @@ describe('agent-runner', () => {
     startAutoUpdater.mockReturnValue({ stop: jest.fn() })
   })
 
-  it('should start token watcher for single project from config and invoke callback', async () => {
-    const { startTokenWatcher } = require('../src/token-watcher')
-    const mockConfig = {
-      agentId: 'single-agent',
-      createdAt: '2024-01-01',
-      projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-      ],
-    }
-    mockedLoadConfig.mockReturnValue(mockConfig)
-    mockedGetProjectList.mockReturnValue(mockConfig.projects)
-
-    const promise = startAgent({})
-    await jest.advanceTimersByTimeAsync(100)
-    await promise
-
-    expect(startTokenWatcher).toHaveBeenCalledWith(
-      mockConfig.projects,
-      expect.any(Function),
-    )
-
-    // Invoke the captured callback to cover the callback code path
-    expect(capturedTokenCallback).toBeDefined()
-    capturedTokenCallback!('proj-a', 'new-token')
-  })
-
-  it('should start token watcher for multi-project config and invoke callback', async () => {
-    const { startTokenWatcher } = require('../src/token-watcher')
+  it('should start config watcher and handle token update callback', async () => {
+    const { startConfigWatcher } = require('../src/config-watcher')
     const mockConfig = {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
@@ -533,19 +519,49 @@ describe('agent-runner', () => {
     await jest.advanceTimersByTimeAsync(100)
     await promise
 
-    expect(startTokenWatcher).toHaveBeenCalledWith(
+    expect(startConfigWatcher).toHaveBeenCalledWith(
       mockConfig.projects,
-      expect.any(Function),
+      expect.objectContaining({
+        onTokenUpdate: expect.any(Function),
+        onProjectAdded: expect.any(Function),
+        onProjectRemoved: expect.any(Function),
+      }),
     )
 
-    // Invoke the callback to cover the sendTokenUpdate code path
-    expect(capturedTokenCallback).toBeDefined()
-    capturedTokenCallback!('proj-a', 'new-token')
+    // Invoke the token update callback
+    expect(capturedConfigCallbacks.onTokenUpdate).toBeDefined()
+    capturedConfigCallbacks.onTokenUpdate!('proj-a', 'new-token')
     expect(mockSendTokenUpdate).toHaveBeenCalledWith('proj-a', 'new-token')
   })
 
-  it('should not start token watcher for CLI direct token', async () => {
-    const { startTokenWatcher } = require('../src/token-watcher')
+  it('should hot-add project when config watcher detects new project', async () => {
+    const mockConfig = {
+      agentId: 'multi-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    // Simulate new project added via config watcher
+    const newProject = { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' }
+    capturedConfigCallbacks.onProjectAdded!(newProject)
+
+    expect(mockForkProject).toHaveBeenCalledWith(
+      newProject,
+      'multi-agent',
+      expect.objectContaining({ pollInterval: expect.any(Number), heartbeatInterval: expect.any(Number) }),
+    )
+  })
+
+  it('should not start config watcher for CLI direct token', async () => {
+    const { startConfigWatcher } = require('../src/config-watcher')
     mockedLoadConfig.mockReturnValue(null)
 
     const promise = startAgent({
@@ -555,7 +571,7 @@ describe('agent-runner', () => {
     await jest.advanceTimersByTimeAsync(100)
     await promise
 
-    expect(startTokenWatcher).not.toHaveBeenCalled()
+    expect(startConfigWatcher).not.toHaveBeenCalled()
   })
 
   it('should call process.exit(1) when config exists but has no projects', async () => {
