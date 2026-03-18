@@ -5,9 +5,10 @@ import * as path from 'path'
 
 import type { ApiClient } from './api-client'
 import { logger } from './logger'
-import { normalizePemKey } from './repo-sync'
 import type { ProjectConfigResponse } from './types'
 import { getErrorMessage } from './utils'
+import { normalizePemKey } from './utils/pem-key'
+import { createSecureTempFile } from './utils/temp-file'
 
 export interface GitCredentialResult {
   env: Record<string, string>
@@ -205,12 +206,8 @@ async function addSshEntry(
   sshEntries: { host: string; keyPath: string }[],
   tempFiles: string[],
 ): Promise<void> {
-  const tmpKeyPath = path.join(
-    os.tmpdir(),
-    `ssh-key-${crypto.randomBytes(16).toString('hex')}`,
-  )
   const normalizedKey = normalizePemKey(authSecret)
-  fs.writeFileSync(tmpKeyPath, normalizedKey, { mode: 0o600 })
+  const tmpKeyPath = createSecureTempFile(normalizedKey, 'ssh-key')
   tempFiles.push(tmpKeyPath)
   sshEntries.push({ host, keyPath: tmpKeyPath })
 }
