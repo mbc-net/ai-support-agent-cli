@@ -1,9 +1,10 @@
 import { ApiClient } from '../api-client'
 import { type AwsCredentialResult, buildAwsProfileCredentials, buildSingleAccountAwsEnv } from '../aws-credential-builder'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, LOG_MESSAGE_LIMIT } from '../constants'
+import { buildGitCredentialEnv } from '../git-credential-setup'
 import { logger } from '../logger'
 import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatFileInfo, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
-import { parseString, truncateString } from '../utils'
+import { getErrorMessage, parseString, truncateString } from '../utils'
 
 import { getAutoAddDirs, getWorkspaceDir } from '../project-dir'
 import { executeApiChatCommand } from './api-chat-executor'
@@ -139,6 +140,9 @@ async function executeClaudeCodeChat(
     return rawSendChunk(type, content)
   }
 
+  let cleanupDownloads: (() => void) | undefined
+  let cleanupGitCredentials: (() => void) | undefined
+
   try {
     const allowedTools = serverConfig?.claudeCodeConfig?.allowedTools
     const systemPrompt = serverConfig?.claudeCodeConfig?.systemPrompt
@@ -169,11 +173,22 @@ async function executeClaudeCodeChat(
       await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
     }
 
+    // Git 認証情報を取得（SSH ラッパー + credential helper）
+    let gitEnv: Record<string, string> | undefined
+    if (projectConfig?.repositories?.length) {
+      try {
+        const gitCredResult = await buildGitCredentialEnv(client, projectConfig.repositories)
+        gitEnv = gitCredResult.env
+        cleanupGitCredentials = gitCredResult.cleanup
+      } catch (error) {
+        logger.warn(`[chat] Git credential setup failed: ${getErrorMessage(error)}`)
+      }
+    }
+
     // 添付ファイルのダウンロード
     const chatFiles = parseChatFiles(payload.files)
     const conversationId = parseString(payload.conversationId)
     let filePathsNotice = ''
-    let cleanupDownloads: (() => void) | undefined
     if (chatFiles.length > 0 && projectDir && conversationId) {
       const downloadResult = await downloadChatFiles(client, agentId, chatFiles, projectDir, conversationId)
       cleanupDownloads = downloadResult.cleanup
@@ -206,6 +221,7 @@ async function executeClaudeCodeChat(
       addDirs?.length ? `addDirs: ${addDirs.join(', ')}` : null,
       locale ? `locale=${locale}` : null,
       awsEnv ? 'AWS credentials' : null,
+      gitEnv && Object.keys(gitEnv).length > 0 ? 'Git credentials' : null,
       mcpConfigPath ? 'MCP config' : null,
       history.length > 0 ? `${history.length} history messages` : null,
       chatFiles.length > 0 ? `${chatFiles.length} attached files` : null,
@@ -220,7 +236,7 @@ async function executeClaudeCodeChat(
       allowedTools,
       addDirs,
       locale,
-      awsEnv,
+      awsEnv: { ...awsEnv, ...gitEnv },
       mcpConfigPath,
       cwd: projectDir ? getWorkspaceDir(projectDir) : undefined,
       systemPrompt,
@@ -246,11 +262,14 @@ async function executeClaudeCodeChat(
       ...(collectedToolCalls.length > 0 ? { toolCalls: collectedToolCalls } : {}),
     })
 
-    // ダウンロードした一時ファイルをクリーンアップ
+    // 一時ファイルをクリーンアップ
     cleanupDownloads?.()
+    cleanupGitCredentials?.()
 
     return successResult(result.text)
   } catch (error) {
+    cleanupDownloads?.()
+    cleanupGitCredentials?.()
     return handleChatError(error, commandId, 'chat', sendChunk)
   }
 }
