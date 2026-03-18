@@ -1,4 +1,5 @@
 import { fork, type ChildProcess } from 'child_process'
+import { existsSync } from 'fs'
 import { join } from 'path'
 
 import {
@@ -44,9 +45,14 @@ export class ChildProcessManager {
   }
 
   private spawnChild(projectCode: string, startMessage: IpcStartMessage): void {
-    const workerPath = join(__dirname, 'project-worker.js')
+    // ts-node 環境では .ts ファイルを使用、ビルド後は .js ファイルを使用
+    const jsPath = join(__dirname, 'project-worker.js')
+    const tsPath = join(__dirname, 'project-worker.ts')
+    const workerPath = existsSync(jsPath) ? jsPath : tsPath
+    const execArgv = workerPath.endsWith('.ts') ? ['--require', 'ts-node/register'] : []
     const child = fork(workerPath, [], {
       stdio: ['pipe', 'inherit', 'inherit', 'ipc'],
+      execArgv,
     })
 
     const managed: ManagedProcess = {
@@ -118,6 +124,46 @@ export class ChildProcessManager {
       this.spawnChild(projectCode, managed.startMessage)
     }, CHILD_PROCESS_RESTART_DELAY_MS)
     this.restartTimers.set(projectCode, timer)
+  }
+
+  /**
+   * 特定プロジェクトの子プロセスを graceful shutdown する
+   */
+  async stopProject(projectCode: string, timeoutMs: number = CHILD_PROCESS_STOP_TIMEOUT_MS): Promise<void> {
+    // pending restart timer があればキャンセル
+    const restartTimer = this.restartTimers.get(projectCode)
+    if (restartTimer) {
+      clearTimeout(restartTimer)
+      this.restartTimers.delete(projectCode)
+    }
+
+    const managed = this.processes.get(projectCode)
+    if (!managed) return
+
+    if (managed.child.connected) {
+      managed.child.send({ type: 'shutdown' })
+      logger.debug(`Sent shutdown to ${projectCode}`)
+    }
+
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        logger.warn(`Force killing ${projectCode} (timeout)`)
+        managed.child.kill('SIGKILL')
+        resolve()
+      }, timeoutMs)
+
+      managed.child.once('exit', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+
+    this.processes.delete(projectCode)
+    logger.info(`Project ${projectCode} stopped and removed`)
+  }
+
+  hasProject(projectCode: string): boolean {
+    return this.processes.has(projectCode)
   }
 
   sendTokenUpdate(projectCode: string, newToken: string): void {

@@ -82,6 +82,7 @@ export class ProjectAgent {
       token: this.token,
       projectDir: this.projectDir,
       tenantCode: this.tenantCode,
+      projectCode: this.projectCode,
       pollInterval: this.options.pollInterval,
       heartbeatInterval: this.options.heartbeatInterval,
     }
@@ -160,7 +161,7 @@ export class ProjectAgent {
       this.tenantCode = result.tenantCode
       this.client.setTenantCode(this.tenantCode)
       this.client.setProjectCode(this.projectCode)
-      this.transportDeps = { ...this.transportDeps, tenantCode: this.tenantCode }
+      this.transportDeps = { ...this.transportDeps, tenantCode: this.tenantCode, projectCode: this.projectCode }
       logger.success(t('runner.registered', { prefix: this.prefix, agentId: result.agentId }))
       logger.debug(`${this.prefix} Register response: transportMode=${result.transportMode ?? 'none'}, appsyncUrl=${result.appsyncUrl ? 'present' : 'absent'}, wsEnabled=${result.wsEnabled}`)
       logger.debug(`${this.prefix} Full register response keys: ${JSON.stringify(Object.keys(result))}`)

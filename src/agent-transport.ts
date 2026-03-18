@@ -29,6 +29,7 @@ export interface TransportDeps {
   token: string
   projectDir: string | undefined
   tenantCode: string
+  projectCode: string
   /** @deprecated pollInterval is no longer used. Kept for backward compatibility with CLI options. */
   pollInterval: number
   heartbeatInterval: number
@@ -203,6 +204,18 @@ export async function handleNotification(
       // 別agentId宛のコマンドはスキップ
       if (targetAgentId && targetAgentId !== deps.agentId) {
         logger.debug(`${deps.prefix} Ignoring command for agent ${targetAgentId} (expected ${deps.agentId})`)
+        return
+      }
+
+      // tenantCode/projectCodeが含まれていない通知、または自分宛でない通知をスキップ
+      const contentTenantCode = content.tenantCode as string | undefined
+      const contentProjectCode = content.projectCode as string | undefined
+      if (!contentTenantCode || contentTenantCode !== deps.tenantCode) {
+        logger.debug(`${deps.prefix} Ignoring command for tenant ${contentTenantCode ?? '(none)'} (expected ${deps.tenantCode})`)
+        return
+      }
+      if (!contentProjectCode || contentProjectCode !== deps.projectCode) {
+        logger.debug(`${deps.prefix} Ignoring command for project ${contentProjectCode ?? '(none)'} (expected ${deps.projectCode})`)
         return
       }
 

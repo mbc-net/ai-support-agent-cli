@@ -1,6 +1,7 @@
 import { ChildProcess, spawn } from 'child_process'
 import * as fs from 'fs'
 import * as http from 'http'
+import * as net from 'net'
 import * as path from 'path'
 
 import { logger } from '../logger'
@@ -35,14 +36,16 @@ export interface VsCodeServerOptions {
  */
 export class VsCodeServer {
   private process: ChildProcess | null = null
-  private readonly port: number
+  private port: number
+  private readonly requestedPort: number
   private readonly projectDir: string
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private healthTimer: ReturnType<typeof setInterval> | null = null
   private running = false
 
   constructor(options: VsCodeServerOptions) {
-    this.port = options.port ?? VSCODE_DEFAULT_PORT
+    this.requestedPort = options.port ?? VSCODE_DEFAULT_PORT
+    this.port = this.requestedPort
     this.projectDir = options.projectDir
   }
 
@@ -62,6 +65,9 @@ export class VsCodeServer {
       logger.debug('[vscode-server] Already running')
       return
     }
+
+    // 要求ポートが使用中なら空きポートを自動取得
+    this.port = await this.resolveAvailablePort(this.requestedPort)
 
     logger.info(`[vscode-server] Starting code-server on ${VSCODE_BIND_HOST}:${this.port}`)
 
@@ -210,6 +216,40 @@ export class VsCodeServer {
       }
     }
     throw new Error(`code-server failed to start within ${STARTUP_TIMEOUT_MS}ms`)
+  }
+
+  /**
+   * ポートが使用可能かチェックし、使用中なら空きポートを自動取得する
+   */
+  private async resolveAvailablePort(preferredPort: number): Promise<number> {
+    const isAvailable = await this.checkPortAvailable(preferredPort)
+    if (isAvailable) return preferredPort
+
+    // ポート 0 で OS に空きポートを割り当てさせる
+    logger.info(`[vscode-server] Port ${preferredPort} is in use, finding available port...`)
+    return new Promise<number>((resolve, reject) => {
+      const server = net.createServer()
+      server.listen(0, VSCODE_BIND_HOST, () => {
+        const addr = server.address()
+        if (addr && typeof addr === 'object') {
+          const port = addr.port
+          server.close(() => resolve(port))
+        } else {
+          server.close(() => reject(new Error('Failed to get assigned port')))
+        }
+      })
+      server.on('error', reject)
+    })
+  }
+
+  private checkPortAvailable(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const server = net.createServer()
+      server.once('error', () => resolve(false))
+      server.listen(port, VSCODE_BIND_HOST, () => {
+        server.close(() => resolve(true))
+      })
+    })
   }
 
   /**

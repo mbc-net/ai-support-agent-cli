@@ -58,6 +58,7 @@ export interface VsCodeAgentMessage {
   requestId?: string
   subSocketId?: string
   port?: number
+  projectDir?: string
   statusCode?: number
   headers?: Record<string, string>
   body?: string
@@ -166,6 +167,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         type: 'vscode_ready',
         sessionId,
         port: this.vsCodeServer.getPort(),
+        projectDir,
       })
       return
     }
@@ -179,6 +181,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         type: 'vscode_ready',
         sessionId,
         port: this.vsCodeServer.getPort(),
+        projectDir,
       })
     } catch (error) {
       this.send({

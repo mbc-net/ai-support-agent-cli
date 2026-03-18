@@ -1,158 +1,222 @@
 # AI Support Agent CLI
 
 [![npm version](https://img.shields.io/npm/v/@ai-support-agent/cli.svg)](https://www.npmjs.com/package/@ai-support-agent/cli)
-[![license](https://img.shields.io/npm/l/@ai-support-agent/cli.svg)](https://github.com/mbc-net/ai-support-agent-client/blob/main/LICENSE)
+[![license](https://img.shields.io/npm/l/@ai-support-agent/cli.svg)](https://github.com/mbc-net/ai-support-agent-cli/blob/main/LICENSE)
 
-Multi-tenant AI support agent CLI that connects to your AI Support Agent server. It runs as a background agent on your machine, receiving and executing commands from the server while reporting results back in real time.
+A daemon that turns your machine into an AI-powered remote agent. Install it, authenticate via browser, and your team can send shell commands, AI chat prompts, file operations, and more — all from a Web UI, with results streamed back in real time.
 
-## Features
+```
+┌──────────────┐  AppSync     ┌─────────────────┐  WebSocket/HTTP  ┌──────────────────┐
+│   Web UI     │ ──────────── │   API Server    │ ─────────────── │  Agent CLI       │
+│  (browser)   │  subscription│   (NestJS)      │  commands/result │  (your machine)  │
+└──────────────┘              └─────────────────┘                  └──────────────────┘
+                                                                     ├─ Claude Code
+                                                                     ├─ Shell / PTY
+                                                                     ├─ File I/O
+                                                                     ├─ Git repos
+                                                                     ├─ MCP server
+                                                                     └─ VS Code tunnel
+```
 
-- **Multi-project support** - Manage multiple projects under different tenants from a single CLI
-- **Browser-based OAuth authentication** - Secure login via Cognito with automatic browser redirect
-- **Remote command execution** - Execute shell commands, read/write files, and manage processes
-- **Heartbeat monitoring** - Automatic health reporting to the server
-- **i18n support** - English (default) and Japanese locales with OS locale auto-detection
+## Why?
+
+- **Remote AI pair-programming** — Ask questions about your codebase from the Web UI; Claude Code runs on the agent machine with full repository access.
+- **Multi-tenant, multi-project** — A single agent manages multiple projects across different tenants. Add/remove projects on the fly; the agent hot-reloads.
+- **Zero-config realtime** — AppSync WebSocket subscriptions deliver commands instantly. No polling delay, no port forwarding.
+- **Secure by default** — OAuth login, 0600 config permissions, nonce-protected callbacks, SQL injection detection, path traversal guards, and environment sanitization.
 
 ## Quick Start
 
 ```bash
-# Install globally
 npm install -g @ai-support-agent/cli
 
-# Login via browser OAuth
-ai-support-agent login --url https://your-web-ui.example.com
+# Opens your browser → select tenant & project → done
+ai-support-agent login
 
-# Start the agent
+# Start the daemon (Ctrl-C to stop)
 ai-support-agent start
 ```
 
-## Commands
+That's it. The agent registers with the server, syncs project config, clones repositories, and starts listening for commands.
 
-| Command | Description |
-|---------|-------------|
-| `start` | Start the agent and begin polling for commands |
-| `login` | Authenticate with the server via browser-based OAuth |
-| `add-project` | Add a project to the agent configuration |
-| `remove-project` | Remove a project from the agent configuration |
-| `configure` | Update agent configuration interactively |
-| `set-language` | Set the display language (`en` or `ja`) |
-| `status` | Show current agent status and configuration |
-
-### Start
+### Add more projects
 
 ```bash
-# Start with default settings
-ai-support-agent start
-
-# Start with verbose logging
-ai-support-agent start --verbose
-
-# Start with a specific project
-ai-support-agent start --project my_project
+ai-support-agent add-project          # browser OAuth flow
+ai-support-agent status               # verify registered projects
 ```
 
-### Login
+### Run in Docker
 
 ```bash
-# Login via browser OAuth
-ai-support-agent login --url https://your-web-ui.example.com
-
-# Login with explicit API URL
-ai-support-agent login --url https://your-web-ui.example.com --api-url https://api.example.com
+ai-support-agent start --docker
 ```
 
-### Project Management
+Project dirs, `~/.claude/`, and `~/.aws/` are auto-mounted. The container runs with your host UID/GID.
 
-```bash
-# Add another project via browser OAuth
-ai-support-agent add-project --url https://your-web-ui.example.com
+## How It Works
 
-# Remove a project by code
-ai-support-agent remove-project my_project
+1. **Register** — Agent sends its capabilities (shell, file I/O, chat, terminal, vscode) to the API.
+2. **Subscribe** — Connects to AppSync for real-time command delivery.
+3. **Config sync** — Pulls project settings, MCP config, and repo list from the server.
+4. **Execute** — Receives commands, runs them locally, streams results back chunk-by-chunk.
 
-# Manual token setup (backward compatible)
-ai-support-agent configure --token <token> --api-url <url> --project-code my_project
+Each project runs in its own forked child process. The main process watches `config.json` and hot-adds/removes projects without restart.
+
+### Supported Commands
+
+| Command Type | What It Does |
+|-------------|-------------|
+| `chat` | Runs Claude Code (or Anthropic API) with your codebase context |
+| `execute_command` | Executes a shell command with timeout and output capture |
+| `file_read` / `file_write` / `file_list` / `file_rename` / `file_delete` / `file_mkdir` | File system operations |
+| `process_list` / `process_kill` | Process management |
+| `chat_cancel` | Cancels a running chat process |
+| `setup` / `config_sync` / `reboot` / `update` | Lifecycle management |
+
+### Chat Modes
+
+| Mode | How it works |
+|------|-------------|
+| `claude_code` (default) | Spawns Claude Code CLI as a subprocess with MCP tools, system prompts, and tool allowlists |
+| `api` | Direct Anthropic API streaming. Requires `ANTHROPIC_API_KEY` |
+
+The mode is resolved as: agent config → server default → auto-detection (whether `claude` CLI is installed).
+
+### Built-in MCP Server
+
+The agent ships a [Model Context Protocol](https://modelcontextprotocol.io/) server that Claude Code can call:
+
+| Tool | Description |
+|------|-------------|
+| `get_credentials` | Fetch AWS STS or database credentials from the API |
+| `query_database` | Run SELECT queries (injection-protected) |
+| `get_db_schemas` | Retrieve table/column metadata |
+| `upload_file` | Upload files to S3 via presigned URLs |
+| `get_project_info` | Fetch project configuration |
+| `read_conversation_file` | Read conversation history |
+
+## CLI Reference
+
+```
+ai-support-agent <command> [options]
+
+Commands:
+  start              Start the agent daemon
+  login              Authenticate via browser OAuth
+  add-project        Add a project (browser OAuth)
+  remove-project     Remove a project by code
+  configure          Register with --token and --api-url
+  status             Show agent status and registered projects
+  set-language       Set display language (en | ja)
+  set-auto-update    Configure auto-update (--enable | --disable | --channel)
+  set-project-dir    Set project working directory
+  docker-login       Login and start in Docker
+
+Global options:
+  --lang <lang>      Override display language for this invocation
+  --version          Show version
 ```
 
-## Configuration File
+### `start` Options
 
-The agent stores its configuration at `~/.ai-support-agent/config.json`:
+```
+--verbose                  Enable debug logging
+--heartbeat-interval <ms>  Heartbeat interval (default: 60000)
+--no-auto-update           Disable auto-update for this session
+--update-channel <channel> Release channel: latest | beta | alpha
+--no-docker                Force native mode (skip Docker)
+--docker                   Run inside a Docker container
+```
 
-```json
+### `set-project-dir` Options
+
+```
+--default <template>       Set default dir template (e.g. ~/projects/{projectCode})
+--project <code> --path <path>  Set dir for a specific project
+```
+
+## Configuration
+
+Stored at `~/.ai-support-agent/config.json` (mode `0600`):
+
+```jsonc
 {
-  "agentId": "hostname-a1b2",
-  "createdAt": "2025-01-01T00:00:00.000Z",
-  "lastConnected": "2025-01-01T12:00:00.000Z",
-  "language": "en",
+  "agentId": "macbook-a1b2c3d4",       // auto-generated
+  "createdAt": "2025-01-01T00:00:00Z",
+  "lastConnected": "2025-06-15T09:00:00Z",
+  "language": "en",                     // en | ja
+  "agentChatMode": "claude_code",       // claude_code | api
+  "defaultProjectDir": "~/.ai-support-agent/projects/{projectCode}",
+  "autoUpdate": {
+    "enabled": true,
+    "autoRestart": true,
+    "channel": "latest"                 // latest | beta | alpha
+  },
   "projects": [
     {
-      "projectCode": "my_project",
-      "token": "agt_...",
-      "apiUrl": "https://api.example.com"
+      "projectCode": "MY_PROJECT",
+      "token": "agt_xxxx",
+      "apiUrl": "https://api.example.com",
+      "projectDir": "~/custom-path"     // optional override
     }
   ]
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `agentId` | Auto-generated unique agent identifier (hostname + random hex) |
-| `createdAt` | Timestamp when the config was first created |
-| `lastConnected` | Timestamp of last successful connection |
-| `language` | Display language (`en` or `ja`) |
-| `projects` | Array of registered projects with `projectCode`, `token`, and `apiUrl` |
-
-## Environment Variables
+### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `AI_SUPPORT_AGENT_API_URL` | Override the server URL from config |
-| `AI_SUPPORT_AGENT_TOKEN` | Override the auth token from config |
+| `AI_SUPPORT_AGENT_TOKEN` | Override auth token (lowest priority) |
+| `AI_SUPPORT_AGENT_API_URL` | Override API URL (lowest priority) |
+| `AI_SUPPORT_AGENT_CONFIG_DIR` | Override config directory path |
+| `ANTHROPIC_API_KEY` | Required for `api` chat mode |
 
-Environment variables have the lowest priority (CLI args > config file > env vars).
+Priority: CLI flags > config file > environment variables.
 
-## Language / i18n
+## Project Directory Structure
 
-The CLI supports English and Japanese. Language is determined in the following order:
+Each project gets an isolated workspace:
 
-1. `--lang` flag on any command (e.g., `ai-support-agent start --lang ja`)
-2. Value set via `ai-support-agent set-language <lang>`
-3. Auto-detection from OS locale (`LANG`, `LC_ALL`, or `LC_MESSAGES`)
-4. Default: `en`
-
-```bash
-# Set language to Japanese
-ai-support-agent set-language ja
-
-# Run a single command in Japanese
-ai-support-agent status --lang ja
+```
+{projectDir}/
+├── workspace/
+│   ├── repos/          # Git-cloned repositories
+│   ├── docs/           # Documentation from server
+│   └── artifacts/      # Generated outputs
+├── uploads/            # File uploads staging
+└── .ai-support-agent/
+    ├── cache/          # Temporary cache
+    └── aws/            # AWS credential cache
 ```
 
 ## Security
 
-- **Config file permissions**: The configuration file is created with mode `0o600` (owner read/write only)
-- **Localhost-only auth server**: The OAuth callback server binds to `127.0.0.1` and shuts down immediately after receiving the callback
-- **CSRF nonce protection**: Each login flow generates a unique nonce to prevent cross-site request forgery
+| Layer | Detail |
+|-------|--------|
+| Authentication | Browser-based OAuth with localhost callback, CSRF nonce |
+| Config file | Mode `0600`, directory `0700` |
+| Path traversal | Blocked paths: `/root`, `/etc`, `/sys`, `/proc`, `/dev`, `~/.ssh`, `~/.aws`, etc. |
+| SQL injection | Pattern-based detection: comments, time-based blind, encoding bypass, file system access |
+| Subprocess env | Sensitive variables stripped before spawning child processes |
+| File transfer | Extension allowlist (53 types), `basename()` sanitization |
+| Git operations | Branch name validation to prevent CLI injection |
 
 ## Development
 
 ```bash
-# Clone the repository
-git clone https://github.com/mbc-net/ai-support-agent-client.git
-cd ai-support-agent-client
+git clone https://github.com/mbc-net/ai-support-agent-cli.git
+cd ai-support-agent-cli
 
-# Install dependencies
 npm install
-
-# Run in development mode
-npm run dev -- start --verbose
-
-# Run tests
-npm test
-
-# Run tests with coverage
-npm run test:cov
+npm run dev -- start --verbose    # development mode
+npm test                          # run tests
+npm run test:cov                  # coverage (95%+ thresholds enforced)
+npm run build                     # compile to dist/
 ```
+
+Requires Node.js >= 20. `node-pty` is an optional dependency for terminal/PTY sessions.
 
 ## License
 

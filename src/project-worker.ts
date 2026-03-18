@@ -18,6 +18,10 @@ async function handleStart(msg: IpcStartMessage): Promise<void> {
 
   const { project, agentId, options } = msg
 
+  if (options.verbose) {
+    logger.setVerbose(true)
+  }
+
   agent = new ProjectAgent(
     project,
     agentId,
