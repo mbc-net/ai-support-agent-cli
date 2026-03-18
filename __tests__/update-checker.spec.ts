@@ -346,6 +346,21 @@ describe('performUpdate', () => {
     )
   })
 
+  it('should auto-detect install method when not provided', async () => {
+    // argv pattern for global install
+    process.argv = ['node', '/usr/local/lib/node_modules/@ai-support-agent/cli/dist/index.js']
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
+      callback(null)
+    })
+
+    // Call without method argument to test ?? branch
+    const result = await performUpdate('1.2.3')
+
+    expect(result).toEqual({ success: true })
+  })
+
   it('should return error for dev method', async () => {
     const result = await performUpdate('1.2.3', 'dev')
 
@@ -480,6 +495,24 @@ describe('reExecProcess', () => {
     expect(mockedSpawn).toHaveBeenCalledWith(
       process.execPath,
       expect.arrayContaining([expectedScript, 'start', '--verbose']),
+      expect.objectContaining({ detached: true, stdio: 'inherit' }),
+    )
+  })
+
+  it('should resolve Windows global binary script for npx method', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    process.execArgv = []
+    process.argv = ['node', 'C:\\Users\\test\\.npm\\_npx\\abc123\\node_modules\\.bin\\ai-support-agent', 'start']
+    mockedExecFileSync.mockReturnValue('C:\\Users\\test\\AppData\\Roaming\\npm\n')
+
+    reExecProcess('npx')
+
+    expect(mockedSpawn).toHaveBeenCalledWith(
+      process.execPath,
+      expect.arrayContaining([
+        expect.stringContaining('node_modules'),
+        'start',
+      ]),
       expect.objectContaining({ detached: true, stdio: 'inherit' }),
     )
   })
