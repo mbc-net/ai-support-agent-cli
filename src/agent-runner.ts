@@ -13,7 +13,7 @@ import type { AgentChatMode, AutoUpdateConfig, ProjectRegistration, ReleaseChann
 import { detectChannelFromVersion } from './update-checker'
 import { validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
-import { startTokenWatcher } from './token-watcher'
+import { startConfigWatcher, startTokenWatcher } from './config-watcher'
 
 export interface RunnerOptions {
   token?: string
@@ -239,36 +239,18 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
 
   logger.info(t('runner.startingMulti', { count: projects.length }))
 
-  if (projects.length === 1) {
-    // Single project: run in-process (no fork overhead)
-    const started = startProjectAgent(projects[0], agentId, { pollInterval, heartbeatInterval, agentChatMode: config.agentChatMode, defaultProjectDir: config.defaultProjectDir })
-    saveConfig({ lastConnected: new Date().toISOString() })
-
-    const updater = initAutoUpdater(options, config, started.client, agentId, () => started.stop())
-
-    const tokenWatcher = startTokenWatcher(projects, (_projectCode, newToken) => {
-      started.agent.updateToken(newToken)
-    })
-
-    logMultiProjectStartup(projects, pollInterval, heartbeatInterval)
-    const originalStop = started.stop
-    const stopWithWatcher = (): void => {
-      tokenWatcher.stop()
-      originalStop()
-    }
-    setupShutdownHandlers({ kind: 'agents', agents: [{ stop: stopWithWatcher }] }, updater)
-    return
+  const forkOptions = {
+    pollInterval,
+    heartbeatInterval,
+    agentChatMode: config.agentChatMode,
+    defaultProjectDir: config.defaultProjectDir,
+    verbose: options.verbose,
   }
 
-  // Multiple projects: fork child processes for isolation
+  // Always use ChildProcessManager for dynamic project management
   const processManager = new ChildProcessManager()
   for (const project of projects) {
-    processManager.forkProject(project, agentId, {
-      pollInterval,
-      heartbeatInterval,
-      agentChatMode: config.agentChatMode,
-      defaultProjectDir: config.defaultProjectDir,
-    })
+    processManager.forkProject(project, agentId, forkOptions)
   }
 
   saveConfig({ lastConnected: new Date().toISOString() })
@@ -276,17 +258,27 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   const client = new ApiClient(projects[0].apiUrl, projects[0].token)
   const updater = initAutoUpdater(options, config, client, agentId, () => processManager.sendUpdateToAll())
 
-  const tokenWatcher = startTokenWatcher(projects, (projectCode, newToken) => {
-    processManager.sendTokenUpdate(projectCode, newToken)
+  const configWatcher = startConfigWatcher(projects, {
+    onTokenUpdate: (projectCode, newToken) => {
+      processManager.sendTokenUpdate(projectCode, newToken)
+    },
+    onProjectAdded: (project) => {
+      logger.info(`Hot-adding project: ${project.projectCode}`)
+      processManager.forkProject(project, agentId, forkOptions)
+    },
+    onProjectRemoved: (projectCode) => {
+      logger.info(`Hot-removing project: ${projectCode}`)
+      void processManager.stopProject(projectCode)
+    },
   })
 
   logMultiProjectStartup(projects, pollInterval, heartbeatInterval)
   setupShutdownHandlers({ kind: 'processManager', processManager }, updater)
 
-  // Clean up token watcher on shutdown
+  // Clean up config watcher on shutdown
   const origStopAll = processManager.stopAll.bind(processManager)
   processManager.stopAll = async (timeoutMs?: number): Promise<void> => {
-    tokenWatcher.stop()
+    configWatcher.stop()
     await origStopAll(timeoutMs)
   }
 }

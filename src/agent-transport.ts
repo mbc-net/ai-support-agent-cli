@@ -29,6 +29,7 @@ export interface TransportDeps {
   token: string
   projectDir: string | undefined
   tenantCode: string
+  projectCode: string
   /** @deprecated pollInterval is no longer used. Kept for backward compatibility with CLI options. */
   pollInterval: number
   heartbeatInterval: number
@@ -40,6 +41,8 @@ export interface CommandContext {
   transportState: TransportState
   onSetup: () => Promise<void>
   onConfigSync: () => Promise<void>
+  onReboot: () => Promise<void>
+  onUpdate: () => Promise<void>
 }
 
 /**
@@ -204,6 +207,18 @@ export async function handleNotification(
         return
       }
 
+      // tenantCode/projectCodeが含まれていない通知、または自分宛でない通知をスキップ
+      const contentTenantCode = content.tenantCode as string | undefined
+      const contentProjectCode = content.projectCode as string | undefined
+      if (!contentTenantCode || contentTenantCode !== deps.tenantCode) {
+        logger.debug(`${deps.prefix} Ignoring command for tenant ${contentTenantCode ?? '(none)'} (expected ${deps.tenantCode})`)
+        return
+      }
+      if (!contentProjectCode || contentProjectCode !== deps.projectCode) {
+        logger.debug(`${deps.prefix} Ignoring command for project ${contentProjectCode ?? '(none)'} (expected ${deps.projectCode})`)
+        return
+      }
+
       if (!commandId) {
         logger.warn(`${deps.prefix} Notification missing commandId: ${JSON.stringify(content)}`)
         return
@@ -276,6 +291,8 @@ async function processCommand(
       tenantCode: deps.tenantCode,
       onSetup: ctx.onSetup,
       onConfigSync: ctx.onConfigSync,
+      onReboot: ctx.onReboot,
+      onUpdate: ctx.onUpdate,
     })
     logger.debug(`${deps.prefix} Command result [${commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, LOG_RESULT_LIMIT)}`)
     await deps.client.submitResult(commandId, result, deps.agentId)

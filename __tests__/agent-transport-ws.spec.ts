@@ -58,6 +58,7 @@ function createMockDeps(overrides?: Partial<TransportDeps>): TransportDeps {
     token: 'test-token',
     projectDir: '/test/project',
     tenantCode: 'test',
+    projectCode: 'TEST_PROJ',
     pollInterval: 5000,
     heartbeatInterval: 30000,
     ...overrides,

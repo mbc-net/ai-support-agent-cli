@@ -47,9 +47,9 @@ describe('ChildProcessManager', () => {
       manager.forkProject(project, 'agent-1', options)
 
       expect(mockFork).toHaveBeenCalledWith(
-        expect.stringContaining('project-worker.js'),
+        expect.stringMatching(/project-worker\.(js|ts)$/),
         [],
-        { stdio: ['pipe', 'inherit', 'inherit', 'ipc'] },
+        expect.objectContaining({ stdio: ['pipe', 'inherit', 'inherit', 'ipc'] }),
       )
       expect(mockChild.send).toHaveBeenCalledWith({
         type: 'start',

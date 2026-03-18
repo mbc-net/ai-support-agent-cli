@@ -12,6 +12,22 @@ jest.mock('child_process', () => ({
   spawn: jest.fn(),
 }))
 
+// Mock net for port availability check
+jest.mock('net', () => {
+  const EventEmitter = require('events').EventEmitter
+  return {
+    createServer: jest.fn().mockImplementation(() => {
+      const server = new EventEmitter()
+      server.listen = jest.fn().mockImplementation((_port: number, _host: string, cb: () => void) => {
+        cb()
+      })
+      server.close = jest.fn().mockImplementation((cb?: () => void) => { cb?.() })
+      server.address = jest.fn().mockReturnValue({ port: 8443 })
+      return server
+    }),
+  }
+})
+
 // Mock fs
 jest.mock('fs', () => ({
   mkdirSync: jest.fn(),
@@ -131,6 +147,8 @@ describe('VsCodeServer', () => {
 
       const startPromise = server.start()
 
+      // Wait for resolveAvailablePort to complete before emitting spawn error
+      await new Promise(resolve => setTimeout(resolve, 0))
       errorProcess.emit('error', new Error('spawn code-server ENOENT'))
 
       await expect(startPromise).rejects.toThrow('code-server is not installed or not in PATH')
@@ -626,6 +644,40 @@ describe('VsCodeServer', () => {
       // code-server should still be running despite sandbox failure
       expect(server.isRunning).toBe(true)
       expect(child_process.spawn).toHaveBeenCalledWith('code-server', expect.any(Array), expect.any(Object))
+    })
+  })
+
+  describe('port conflict resolution', () => {
+    it('should use alternate port when default port is in use', async () => {
+      const net = require('net')
+      const EventEmitter = require('events').EventEmitter
+
+      // First call (checkPortAvailable): simulate port in use by emitting 'error'
+      const busyServer = new EventEmitter()
+      busyServer.listen = jest.fn().mockImplementation(() => {
+        process.nextTick(() => busyServer.emit('error', new Error('EADDRINUSE')))
+      })
+      busyServer.close = jest.fn()
+
+      // Second call (resolveAvailablePort fallback): return random port
+      const freeServer = new EventEmitter()
+      freeServer.listen = jest.fn().mockImplementation((_port: number, _host: string, cb: () => void) => { cb() })
+      freeServer.close = jest.fn().mockImplementation((cb?: () => void) => { cb?.() })
+      freeServer.address = jest.fn().mockReturnValue({ port: 9999 })
+
+      net.createServer
+        .mockReturnValueOnce(busyServer)
+        .mockReturnValueOnce(freeServer)
+
+      mockHealthCheckSuccess()
+
+      server = new VsCodeServer({ projectDir: '/test/project' })
+      ;(child_process.spawn as jest.Mock).mockReturnValue(mockProcess)
+
+      await server.start()
+
+      expect(server.getPort()).toBe(9999)
+      expect(server.isRunning).toBe(true)
     })
   })
 })
