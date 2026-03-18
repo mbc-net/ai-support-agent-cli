@@ -128,7 +128,7 @@ async function cloneRepository(
       { env: { ...process.env, ...env }, timeout: GIT_CLONE_TIMEOUT },
     )
     // デフォルトブランチをチェックアウト
-    await execFileAsync('git', ['checkout', '--', branch], {
+    await execFileAsync('git', ['checkout', branch], {
       cwd: repoDir,
       env: { ...process.env, ...env },
       timeout: GIT_CHECKOUT_TIMEOUT,
@@ -155,7 +155,7 @@ async function pullRepository(
       timeout: GIT_FETCH_TIMEOUT,
     })
 
-    await execFileAsync('git', ['checkout', '--', branch], {
+    await execFileAsync('git', ['checkout', branch], {
       cwd: repoDir,
       env: { ...process.env, ...env },
       timeout: GIT_CHECKOUT_TIMEOUT,
