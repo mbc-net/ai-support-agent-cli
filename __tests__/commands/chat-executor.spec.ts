@@ -43,6 +43,20 @@ jest.mock('../../src/commands/api-chat-executor', () => ({
   }),
 }))
 
+// Mock git-credential-setup
+const mockGitCleanup = jest.fn()
+jest.mock('../../src/git-credential-setup', () => {
+  // Use a reference that's resolved at call time, not at factory time
+  return {
+    buildGitCredentialEnv: jest.fn().mockImplementation(() =>
+      Promise.resolve({
+        env: {},
+        cleanup: mockGitCleanup,
+      }),
+    ),
+  }
+})
+
 // Mock child_process for Claude Code CLI
 jest.mock('child_process', () => ({
   spawn: jest.fn(),
@@ -1214,6 +1228,219 @@ describe('chat-executor', () => {
       expect(env).not.toHaveProperty('AI_SUPPORT_TENANT_CODE')
       expect(env).not.toHaveProperty('AI_SUPPORT_PROJECT_CODE')
       expect(env).not.toHaveProperty('AI_SUPPORT_CONVERSATION_ID')
+    })
+  })
+
+  describe('Git credential integration', () => {
+    const projectConfigWithRepos: ProjectConfigResponse = {
+      configHash: 'test-hash',
+      project: { projectCode: 'TEST', projectName: 'Test Project' },
+      agent: {
+        agentEnabled: true,
+        builtinAgentEnabled: true,
+        builtinFallbackEnabled: true,
+        externalAgentEnabled: true,
+        allowedTools: [],
+      },
+      repositories: [
+        {
+          repositoryId: 'repo-1',
+          repositoryCode: 'my-repo',
+          repositoryName: 'My Repo',
+          repositoryUrl: 'git@gitlab.com:org/my-repo.git',
+          provider: 'gitlab',
+          branch: 'main',
+          authMethod: 'ssh',
+        },
+      ],
+    }
+
+    it('should call buildGitCredentialEnv when repositories are present', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { buildGitCredentialEnv } = require('../../src/git-credential-setup')
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-git-cred',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectConfig: projectConfigWithRepos,
+        projectDir: '/mock/project',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      expect(buildGitCredentialEnv).toHaveBeenCalledWith(
+        mockClient,
+        projectConfigWithRepos.repositories,
+      )
+    })
+
+    it('should merge git env into spawn env', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { buildGitCredentialEnv } = require('../../src/git-credential-setup')
+      ;(buildGitCredentialEnv as jest.Mock).mockResolvedValueOnce({
+        env: {
+          GIT_SSH_COMMAND: '/tmp/git-ssh-wrapper-abc.sh',
+        },
+        cleanup: mockGitCleanup,
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-git-env',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectConfig: projectConfigWithRepos,
+        projectDir: '/mock/project',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const env = spawnCall[2].env
+      expect(env).toHaveProperty('GIT_SSH_COMMAND', '/tmp/git-ssh-wrapper-abc.sh')
+    })
+
+    it('should call git cleanup on success', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { buildGitCredentialEnv } = require('../../src/git-credential-setup')
+      ;(buildGitCredentialEnv as jest.Mock).mockResolvedValueOnce({
+        env: { GIT_SSH_COMMAND: '/tmp/wrapper.sh' },
+        cleanup: mockGitCleanup,
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-git-cleanup',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectConfig: projectConfigWithRepos,
+        projectDir: '/mock/project',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      expect(mockGitCleanup).toHaveBeenCalled()
+    })
+
+    it('should not call buildGitCredentialEnv when no repositories', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { buildGitCredentialEnv } = require('../../src/git-credential-setup')
+
+      const projectConfigNoRepos: ProjectConfigResponse = {
+        configHash: 'test-hash',
+        project: { projectCode: 'TEST', projectName: 'Test Project' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+      }
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-no-repo',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectConfig: projectConfigNoRepos,
+        projectDir: '/mock/project',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      expect(buildGitCredentialEnv).not.toHaveBeenCalled()
+    })
+
+    it('should call git cleanup on error', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { buildGitCredentialEnv } = require('../../src/git-credential-setup')
+      ;(buildGitCredentialEnv as jest.Mock).mockResolvedValueOnce({
+        env: { GIT_SSH_COMMAND: '/tmp/wrapper.sh' },
+        cleanup: mockGitCleanup,
+      })
+
+      mockGitCleanup.mockClear()
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-git-cleanup-error',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectConfig: projectConfigWithRepos,
+        projectDir: '/mock/project',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emit('close', 1)
+
+      await resultPromise
+
+      expect(mockGitCleanup).toHaveBeenCalled()
+    })
+
+    it('should continue chat when git credential setup fails', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { buildGitCredentialEnv } = require('../../src/git-credential-setup')
+      ;(buildGitCredentialEnv as jest.Mock).mockRejectedValueOnce(new Error('Git credential error'))
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-git-fail',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectConfig: projectConfigWithRepos,
+        projectDir: '/mock/project',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
     })
   })
 })
