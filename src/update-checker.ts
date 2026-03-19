@@ -1,4 +1,5 @@
 import { execFile, execFileSync, spawn } from 'child_process'
+import { accessSync, constants as fsConstants } from 'fs'
 import * as path from 'path'
 
 import { NPM_INSTALL_TIMEOUT } from './constants'
@@ -115,6 +116,23 @@ export function isValidVersion(version: string): boolean {
 }
 
 /**
+ * Check if the current user has write permission to the npm global directory.
+ * Returns true if writable, false otherwise.
+ * On Windows, always returns true (sudo is not available).
+ */
+export function hasGlobalWritePermission(): boolean {
+  if (process.platform === 'win32') return true
+  try {
+    const globalPrefix = getGlobalNpmPrefix()
+    const globalDir = path.join(globalPrefix, 'lib', 'node_modules')
+    accessSync(globalDir, fsConstants.W_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * Resolve the global binary script path for @ai-support-agent/cli.
  */
 function resolveGlobalBinaryScript(): string {
@@ -132,22 +150,16 @@ function resolveGlobalBinaryScript(): string {
 function execNpmCommand(
   npmCmd: string,
   args: string[],
-  version: string,
+  _version: string,
+  useSudo: boolean = false,
 ): Promise<{ success: boolean; error?: string }> {
+  const cmd = useSudo ? 'sudo' : npmCmd
+  const cmdArgs = useSudo ? [npmCmd, ...args] : args
   return new Promise((resolve) => {
-    execFile(npmCmd, args, { timeout: NPM_INSTALL_TIMEOUT }, (error, _stdout, stderr) => {
+    execFile(cmd, cmdArgs, { timeout: NPM_INSTALL_TIMEOUT }, (error, _stdout, stderr) => {
       if (error) {
         const message = error.message || stderr || 'Unknown error'
-        const isPermissionError = message.includes('EACCES') || message.includes('permission denied')
-
-        if (isPermissionError) {
-          resolve({
-            success: false,
-            error: `Permission denied. Try: sudo npm install -g @ai-support-agent/cli@${version}`,
-          })
-        } else {
-          resolve({ success: false, error: message })
-        }
+        resolve({ success: false, error: message })
         return
       }
       resolve({ success: true })
@@ -176,7 +188,11 @@ export async function performUpdate(
   // global & npx: npm install -g
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
   const args = ['install', '-g', `@ai-support-agent/cli@${version}`]
-  return execNpmCommand(npmCmd, args, version)
+  const needsSudo = !hasGlobalWritePermission()
+  if (needsSudo) {
+    logger.info('[update] No write permission to global npm directory, using sudo')
+  }
+  return execNpmCommand(npmCmd, args, version, needsSudo)
 }
 
 /**

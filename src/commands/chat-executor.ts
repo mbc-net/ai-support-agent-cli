@@ -158,48 +158,18 @@ async function executeClaudeCodeChat(
     const locale = parseString(payload.locale) ?? undefined
 
     // AWS認証情報を取得（プロファイル方式 or 環境変数直接注入）
-    let awsEnv: Record<string, string> | undefined
     const projectCode = parseString(payload.projectCode) ?? projectConfig?.project.projectCode
-    if (projectDir && projectConfig?.aws?.accounts?.length) {
-      // プロファイル方式: 全アカウントの認証情報を取得してプロファイルファイルに書き込み
-      const awsResult = await buildAwsProfileCredentials(client, projectDir, projectConfig)
-      awsEnv = awsResult.env
-      await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
-    } else {
-      // フォールバック: 単一アカウントの環境変数直接注入（従来方式）
-      const awsAccountId = parseString(payload.awsAccountId) ?? undefined
-      const awsResult = await buildSingleAccountAwsEnv(client, awsAccountId)
-      awsEnv = awsResult.env
-      await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
-    }
-
-    // Git 認証情報を取得（SSH ラッパー + credential helper）
-    let gitEnv: Record<string, string> | undefined
-    if (projectConfig?.repositories?.length) {
-      try {
-        const gitCredResult = await buildGitCredentialEnv(client, projectConfig.repositories)
-        gitEnv = gitCredResult.env
-        cleanupGitCredentials = gitCredResult.cleanup
-      } catch (error) {
-        logger.warn(`[chat] Git credential setup failed: ${getErrorMessage(error)}`)
-      }
-    }
+    const { awsEnv, gitEnv, cleanupGitCredentials: gitCleanup } = await buildEnvironmentCredentials(
+      payload, client, projectDir, projectConfig, projectCode, sendChunk,
+    )
+    cleanupGitCredentials = gitCleanup
 
     // 添付ファイルのダウンロード
-    const chatFiles = parseChatFiles(payload.files)
     const conversationId = parseString(payload.conversationId)
-    let filePathsNotice = ''
-    if (chatFiles.length > 0 && projectDir && conversationId) {
-      const downloadResult = await downloadChatFiles(client, agentId, chatFiles, projectDir, conversationId)
-      cleanupDownloads = downloadResult.cleanup
-      if (downloadResult.downloadedPaths.length > 0) {
-        filePathsNotice = `\n\n<attached_files>\n${downloadResult.downloadedPaths.map((p) => `- ${p}`).join('\n')}\n</attached_files>`
-        logger.info(`[chat] Downloaded ${downloadResult.downloadedPaths.length} files for command [${commandId}]`)
-      }
-      if (downloadResult.failedCount > 0) {
-        await sendChunk('delta', `⚠️ ${downloadResult.failedCount}件のファイルのダウンロードに失敗しました\n\n`)
-      }
-    }
+    const { filePathsNotice, cleanup: dlCleanup } = await downloadAttachments(
+      payload, client, agentId, projectDir, conversationId, commandId, sendChunk,
+    )
+    cleanupDownloads = dlCleanup
 
     // 会話全体のファイルリファレンスを埋め込み（MCPツール経由で読み取り可能）
     const conversationFiles = parseConversationFiles(payload.conversationFiles)
@@ -224,7 +194,7 @@ async function executeClaudeCodeChat(
       gitEnv && Object.keys(gitEnv).length > 0 ? 'Git credentials' : null,
       mcpConfigPath ? 'MCP config' : null,
       history.length > 0 ? `${history.length} history messages` : null,
-      chatFiles.length > 0 ? `${chatFiles.length} attached files` : null,
+      payload.files ? `${Array.isArray(payload.files) ? payload.files.length : 0} attached files` : null,
       conversationFiles.length > 0 ? `${conversationFiles.length} conversation files` : null,
     ].filter(Boolean).join(', ')
     logger.debug(`[chat] Spawning claude CLI for command [${commandId}]: ${logDetails}`)
@@ -272,6 +242,82 @@ async function executeClaudeCodeChat(
     cleanupGitCredentials?.()
     return handleChatError(error, commandId, 'chat', sendChunk)
   }
+}
+
+/**
+ * AWS認証情報とGit認証情報を構築する
+ */
+async function buildEnvironmentCredentials(
+  payload: ChatPayload,
+  client: ApiClient,
+  projectDir?: string,
+  projectConfig?: ProjectConfigResponse,
+  projectCode?: string,
+  sendChunk?: (type: ChatChunkType, content: string) => Promise<void>,
+): Promise<{
+  awsEnv: Record<string, string> | undefined
+  gitEnv: Record<string, string> | undefined
+  cleanupGitCredentials: (() => void) | undefined
+}> {
+  let awsEnv: Record<string, string> | undefined
+  if (projectDir && projectConfig?.aws?.accounts?.length) {
+    const awsResult = await buildAwsProfileCredentials(client, projectDir, projectConfig)
+    awsEnv = awsResult.env
+    if (sendChunk) await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
+  } else {
+    const awsAccountId = parseString(payload.awsAccountId) ?? undefined
+    const awsResult = await buildSingleAccountAwsEnv(client, awsAccountId)
+    awsEnv = awsResult.env
+    if (sendChunk) await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
+  }
+
+  let gitEnv: Record<string, string> | undefined
+  let cleanupGitCredentials: (() => void) | undefined
+  if (projectConfig?.repositories?.length) {
+    try {
+      const gitCredResult = await buildGitCredentialEnv(client, projectConfig.repositories)
+      gitEnv = gitCredResult.env
+      cleanupGitCredentials = gitCredResult.cleanup
+    } catch (error) {
+      logger.warn(`[chat] Git credential setup failed: ${getErrorMessage(error)}`)
+    }
+  }
+
+  return { awsEnv, gitEnv, cleanupGitCredentials }
+}
+
+/**
+ * 添付ファイルをダウンロードし、通知を送信する
+ */
+async function downloadAttachments(
+  payload: ChatPayload,
+  client: ApiClient,
+  agentId: string,
+  projectDir?: string,
+  conversationId?: string | null,
+  commandId?: string,
+  sendChunk?: (type: ChatChunkType, content: string) => Promise<void>,
+): Promise<{
+  filePathsNotice: string
+  cleanup: (() => void) | undefined
+}> {
+  const chatFiles = parseChatFiles(payload.files)
+  let filePathsNotice = ''
+  let cleanup: (() => void) | undefined
+
+  if (chatFiles.length > 0 && projectDir && conversationId) {
+    const downloadResult = await downloadChatFiles(client, agentId, chatFiles, projectDir, conversationId)
+    cleanup = downloadResult.cleanup
+    if (downloadResult.downloadedPaths.length > 0) {
+      filePathsNotice = `\n\n<attached_files>\n${downloadResult.downloadedPaths.map((p) => `- ${p}`).join('\n')}\n</attached_files>`
+      logger.info(`[chat] Downloaded ${downloadResult.downloadedPaths.length} files for command [${commandId}]`)
+    }
+    if (downloadResult.failedCount > 0 && sendChunk) {
+      await sendChunk('delta', `⚠️ ${downloadResult.failedCount}件のファイルのダウンロードに失敗しました\n\n`)
+    }
+  }
+
+  return { filePathsNotice, cleanup }
 }
 
 export function buildConversationFileNotice(conversationFiles: ChatFileInfo[]): string {

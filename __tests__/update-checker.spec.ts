@@ -1,9 +1,11 @@
 import { execFile, execFileSync, spawn } from 'child_process'
+import { accessSync } from 'fs'
 
 import {
   detectChannelFromVersion,
   detectInstallMethod,
   getGlobalNpmPrefix,
+  hasGlobalWritePermission,
   isNewerVersion,
   isValidVersion,
   performUpdate,
@@ -13,10 +15,12 @@ import {
 
 jest.mock('child_process')
 jest.mock('../src/logger')
+jest.mock('fs')
 
 const mockedExecFile = execFile as unknown as jest.Mock
 const mockedExecFileSync = execFileSync as jest.Mock
 const mockedSpawn = spawn as jest.Mock
+const mockedAccessSync = accessSync as jest.Mock
 
 describe('detectChannelFromVersion', () => {
   it('should detect beta channel', () => {
@@ -148,6 +152,50 @@ describe('getGlobalNpmPrefix', () => {
   })
 })
 
+describe('hasGlobalWritePermission', () => {
+  const originalPlatform = process.platform
+
+  beforeEach(() => {
+    resetGlobalPrefixCache()
+    jest.clearAllMocks()
+  })
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform })
+  })
+
+  it('should return true when directory is writable', () => {
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
+
+    expect(hasGlobalWritePermission()).toBe(true)
+  })
+
+  it('should return false when directory is not writable', () => {
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => {
+      throw new Error('EACCES: permission denied')
+    })
+
+    expect(hasGlobalWritePermission()).toBe(false)
+  })
+
+  it('should return false when npm prefix fails', () => {
+    mockedExecFileSync.mockImplementation(() => {
+      throw new Error('npm not found')
+    })
+
+    expect(hasGlobalWritePermission()).toBe(false)
+  })
+
+  it('should always return true on Windows', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+
+    expect(hasGlobalWritePermission()).toBe(true)
+    expect(mockedAccessSync).not.toHaveBeenCalled()
+  })
+})
+
 describe('detectInstallMethod', () => {
   const originalArgv = process.argv
   const originalExecArgv = process.execArgv
@@ -234,10 +282,13 @@ describe('detectInstallMethod', () => {
 
 describe('performUpdate', () => {
   beforeEach(() => {
+    resetGlobalPrefixCache()
     jest.clearAllMocks()
   })
 
-  it('should call npm install with correct arguments for global method', async () => {
+  it('should call npm install without sudo when directory is writable', async () => {
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
     mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
       callback(null)
     })
@@ -254,7 +305,32 @@ describe('performUpdate', () => {
     )
   })
 
+  it('should use sudo when global directory is not writable', async () => {
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => {
+      throw new Error('EACCES: permission denied')
+    })
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
+      callback(null)
+    })
+
+    const result = await performUpdate('1.2.3', 'global')
+
+    expect(result).toEqual({ success: true })
+    if (process.platform !== 'win32') {
+      const expectedNpmCmd = 'npm'
+      expect(mockedExecFile).toHaveBeenCalledWith(
+        'sudo',
+        [expectedNpmCmd, 'install', '-g', '@ai-support-agent/cli@1.2.3'],
+        expect.objectContaining({ timeout: 120000 }),
+        expect.any(Function),
+      )
+    }
+  })
+
   it('should call npm install for npx method', async () => {
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
     mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
       callback(null)
     })
@@ -264,10 +340,25 @@ describe('performUpdate', () => {
     expect(result).toEqual({ success: true })
     expect(mockedExecFile).toHaveBeenCalledWith(
       expect.any(String),
-      ['install', '-g', '@ai-support-agent/cli@1.2.3'],
+      expect.arrayContaining(['install', '-g', '@ai-support-agent/cli@1.2.3']),
       expect.objectContaining({ timeout: 120000 }),
       expect.any(Function),
     )
+  })
+
+  it('should auto-detect install method when not provided', async () => {
+    // argv pattern for global install
+    process.argv = ['node', '/usr/local/lib/node_modules/@ai-support-agent/cli/dist/index.js']
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
+      callback(null)
+    })
+
+    // Call without method argument to test ?? branch
+    const result = await performUpdate('1.2.3')
+
+    expect(result).toEqual({ success: true })
   })
 
   it('should return error for dev method', async () => {
@@ -287,6 +378,8 @@ describe('performUpdate', () => {
   })
 
   it('should return failure with error message on general error', async () => {
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
     mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: Error) => void) => {
       callback(new Error('npm ERR! 404 Not Found'))
     })
@@ -299,6 +392,8 @@ describe('performUpdate', () => {
 
   it('should fallback to stderr when error.message is empty', async () => {
     const error = new Error('')
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
     mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: Error, stdout: string, stderr: string) => void) => {
       callback(error, '', 'stderr output here')
     })
@@ -309,16 +404,36 @@ describe('performUpdate', () => {
     expect(result.error).toBe('stderr output here')
   })
 
-  it('should detect EACCES permission errors', async () => {
-    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: Error) => void) => {
-      callback(new Error('EACCES: permission denied'))
+  it('should use npm.cmd on Windows', async () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    mockedExecFileSync.mockReturnValue('C:\\Users\\test\\AppData\\Roaming\\npm\n')
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
+      callback(null)
+    })
+
+    const result = await performUpdate('1.2.3', 'global')
+
+    expect(result).toEqual({ success: true })
+    expect(mockedExecFile).toHaveBeenCalledWith(
+      'npm.cmd',
+      ['install', '-g', '@ai-support-agent/cli@1.2.3'],
+      expect.objectContaining({ timeout: 120000 }),
+      expect.any(Function),
+    )
+  })
+
+  it('should fallback to Unknown error when both message and stderr are empty', async () => {
+    const error = new Error('')
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: Error, stdout: string, stderr: string) => void) => {
+      callback(error, '', '')
     })
 
     const result = await performUpdate('1.2.3', 'global')
 
     expect(result.success).toBe(false)
-    expect(result.error).toContain('Permission denied')
-    expect(result.error).toContain('sudo')
+    expect(result.error).toBe('Unknown error')
   })
 })
 
@@ -380,6 +495,24 @@ describe('reExecProcess', () => {
     expect(mockedSpawn).toHaveBeenCalledWith(
       process.execPath,
       expect.arrayContaining([expectedScript, 'start', '--verbose']),
+      expect.objectContaining({ detached: true, stdio: 'inherit' }),
+    )
+  })
+
+  it('should resolve Windows global binary script for npx method', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    process.execArgv = []
+    process.argv = ['node', 'C:\\Users\\test\\.npm\\_npx\\abc123\\node_modules\\.bin\\ai-support-agent', 'start']
+    mockedExecFileSync.mockReturnValue('C:\\Users\\test\\AppData\\Roaming\\npm\n')
+
+    reExecProcess('npx')
+
+    expect(mockedSpawn).toHaveBeenCalledWith(
+      process.execPath,
+      expect.arrayContaining([
+        expect.stringContaining('node_modules'),
+        'start',
+      ]),
       expect.objectContaining({ detached: true, stdio: 'inherit' }),
     )
   })
