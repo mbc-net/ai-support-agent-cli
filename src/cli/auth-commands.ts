@@ -1,7 +1,7 @@
 import type { Command } from 'commander'
 
 import { startAuthServer } from '../auth-server'
-import { DEFAULT_LOGIN_URL, PROJECT_CODE_DEFAULT } from '../constants'
+import { DEFAULT_API_URL, DEFAULT_LOGIN_URL, PROJECT_CODE_DEFAULT } from '../constants'
 import {
   addProject,
 } from '../config-manager'
@@ -94,7 +94,7 @@ export function registerAuthCommands(program: Command): void {
     .command('configure')
     .description(t('cmd.configure'))
     .requiredOption('--token <token>', t('cmd.configure.token'))
-    .requiredOption('--api-url <url>', t('cmd.configure.apiUrl'))
+    .option('--api-url <url>', t('cmd.configure.apiUrl'), DEFAULT_API_URL)
     .option('--project-code <code>', t('cmd.configure.projectCode'))
     .action((opts: { token: string; apiUrl: string; projectCode?: string }) => {
       const apiUrlError = validateApiUrl(opts.apiUrl)
