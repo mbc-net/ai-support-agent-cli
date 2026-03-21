@@ -50,14 +50,14 @@ RUN npm install -g \
     && npm cache clean --force
 
 # AWS CLI v2
-RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip \
+RUN curl -fSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip \
     && unzip /tmp/awscliv2.zip -d /tmp \
     && /tmp/aws/install \
     && rm -rf /tmp/aws /tmp/awscliv2.zip
 
 # AWS Session Manager Plugin
 RUN ARCH=$(dpkg --print-architecture) \
-    && curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_${ARCH}/session-manager-plugin.deb" \
+    && curl -fSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_${ARCH}/session-manager-plugin.deb" \
         -o /tmp/session-manager-plugin.deb \
     && dpkg -i /tmp/session-manager-plugin.deb \
     && rm /tmp/session-manager-plugin.deb
