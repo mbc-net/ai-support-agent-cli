@@ -16,6 +16,7 @@ export type TransportMode = 'polling' | 'realtime'
 export interface RegisterResponse {
   agentId: string
   tenantCode: string
+  projectCode?: string
   appsyncUrl: string
   appsyncApiKey: string
   transportMode: TransportMode

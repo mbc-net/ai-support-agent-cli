@@ -91,6 +91,47 @@ describe('project-info tool', () => {
       expect(parsed.documentation.sources).toHaveLength(1)
     })
 
+    it('should return project info with SSH hosts', async () => {
+      setupTool({
+        getProjectConfig: jest.fn().mockResolvedValue({
+          configHash: 'abc',
+          project: { projectCode: 'TEST_01', projectName: 'Test' },
+          agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+          ssh: {
+            enabled: true,
+            hosts: [
+              { hostId: 'PROD_SERVER', name: 'Production', hostname: '192.168.1.100', port: 22, username: 'deploy', authType: 'privateKey', description: 'Main server' },
+              { hostId: 'STAGING', name: 'Staging', hostname: '192.168.1.200', username: 'admin', authType: 'password', environment: 'staging' },
+            ],
+          },
+        }),
+      })
+
+      const result = await toolCallback({} as Record<string, never>) as { content: Array<{ text: string }> }
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.ssh.enabled).toBe(true)
+      expect(parsed.ssh.hosts).toHaveLength(2)
+      expect(parsed.ssh.hosts[0].hostId).toBe('PROD_SERVER')
+      expect(parsed.ssh.hosts[0].port).toBe(22)
+      expect(parsed.ssh.hosts[1].port).toBe(22) // default port
+      expect(parsed.ssh.hosts[1].environment).toBe('staging')
+    })
+
+    it('should not include SSH when disabled', async () => {
+      setupTool({
+        getProjectConfig: jest.fn().mockResolvedValue({
+          configHash: 'abc',
+          project: { projectCode: 'TEST_01', projectName: 'Test' },
+          agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+          ssh: { enabled: false, hosts: [] },
+        }),
+      })
+
+      const result = await toolCallback({} as Record<string, never>) as { content: Array<{ text: string }> }
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.ssh).toBeUndefined()
+    })
+
     it('should return minimal project info when no optional data', async () => {
       setupTool({
         getProjectConfig: jest.fn().mockResolvedValue({

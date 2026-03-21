@@ -20,12 +20,12 @@ export interface ProjectAgentOptions {
 
 export class ProjectAgent {
   private readonly client: ApiClient
-  private readonly prefix: string
+  private prefix: string
   private tenantCode: string
-  private readonly projectDir: string | undefined
+  private projectDir: string | undefined
   private readonly apiUrl: string
   private token: string
-  private readonly projectCode: string
+  private projectCode: string
 
   private readonly configSyncState: ConfigSyncState = {
     currentConfigHash: undefined,
@@ -159,9 +159,17 @@ export class ProjectAgent {
         activeChatMode: this.configSyncState.activeChatMode,
       })
       this.tenantCode = result.tenantCode
+      if (result.projectCode && result.projectCode !== this.projectCode) {
+        logger.info(`${this.prefix} Server assigned projectCode: ${result.projectCode} (was: ${this.projectCode})`)
+        this.projectCode = result.projectCode
+        this.prefix = `[${this.projectCode}]`
+        // Re-initialize projectDir with the server-assigned projectCode
+        this.projectDir = initProjectDir({ projectCode: this.projectCode, token: this.token, apiUrl: this.apiUrl })
+        this.configSyncDeps = { ...this.configSyncDeps, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }
+      }
       this.client.setTenantCode(this.tenantCode)
       this.client.setProjectCode(this.projectCode)
-      this.transportDeps = { ...this.transportDeps, tenantCode: this.tenantCode, projectCode: this.projectCode }
+      this.transportDeps = { ...this.transportDeps, tenantCode: this.tenantCode, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }
       logger.success(t('runner.registered', { prefix: this.prefix, agentId: result.agentId }))
       logger.debug(`${this.prefix} Register response: transportMode=${result.transportMode ?? 'none'}, appsyncUrl=${result.appsyncUrl ? 'present' : 'absent'}, wsEnabled=${result.wsEnabled}`)
       logger.debug(`${this.prefix} Full register response keys: ${JSON.stringify(Object.keys(result))}`)

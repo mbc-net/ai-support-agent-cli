@@ -125,6 +125,53 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
+    it('should update projectCode when server returns a different one', async () => {
+      mockClient.register.mockResolvedValue({
+        agentId: 'test-id',
+        tenantCode: 'test-tenant',
+        projectCode: 'SERVER_PROJ',
+        appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+        appsyncApiKey: 'da2-testkey123',
+        transportMode: 'realtime',
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.setProjectCode).toHaveBeenCalledWith('SERVER_PROJ')
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.stringContaining('Server assigned projectCode: SERVER_PROJ'),
+      )
+
+      agent.stop()
+    })
+
+    it('should not update projectCode when server returns the same one', async () => {
+      mockClient.register.mockResolvedValue({
+        agentId: 'test-id',
+        tenantCode: 'test-tenant',
+        projectCode: 'test-proj',
+        appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+        appsyncApiKey: 'da2-testkey123',
+        transportMode: 'realtime',
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockClient.setProjectCode).toHaveBeenCalledWith('test-proj')
+      // Should NOT log the "Server assigned" message
+      expect(logger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('Server assigned projectCode'),
+      )
+
+      agent.stop()
+    })
+
     it('should log error and not start timers when registration fails', async () => {
       mockClient.register.mockRejectedValue(new Error('Network error'))
 
