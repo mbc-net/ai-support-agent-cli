@@ -56,8 +56,10 @@ RUN curl -fSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o
     && rm -rf /tmp/aws /tmp/awscliv2.zip
 
 # AWS Session Manager Plugin
+# Note: AWS uses "ubuntu_64bit" for x86_64/amd64 and "ubuntu_arm64" for arm64
 RUN ARCH=$(dpkg --print-architecture) \
-    && curl -fSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_${ARCH}/session-manager-plugin.deb" \
+    && if [ "$ARCH" = "amd64" ]; then SSM_ARCH="64bit"; else SSM_ARCH="$ARCH"; fi \
+    && curl -fSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_${SSM_ARCH}/session-manager-plugin.deb" \
         -o /tmp/session-manager-plugin.deb \
     && dpkg -i /tmp/session-manager-plugin.deb \
     && rm /tmp/session-manager-plugin.deb
