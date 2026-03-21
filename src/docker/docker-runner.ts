@@ -11,6 +11,11 @@ import { logger } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 
+/** Convert a path.relative() result to POSIX format for container use */
+function toPosixRelative(relativePath: string): string {
+  return relativePath.split(path.sep).join('/')
+}
+
 const IMAGE_NAME = 'ai-support-agent'
 const PASSTHROUGH_ENV_VARS = [
   'AI_SUPPORT_AGENT_TOKEN',
@@ -79,11 +84,11 @@ export function buildVolumeMounts(): { mounts: string[]; projectMappings: Projec
   // Claude Code OAuth tokens and config — mount to container home
   const claudeDir = path.join(home, '.claude')
   if (fs.existsSync(claudeDir)) {
-    mounts.push('-v', `${claudeDir}:${path.join(CONTAINER_HOME, '.claude')}:rw`)
+    mounts.push('-v', `${claudeDir}:${path.posix.join(CONTAINER_HOME, '.claude')}:rw`)
   }
   const claudeJson = path.join(home, '.claude.json')
   if (fs.existsSync(claudeJson)) {
-    mounts.push('-v', `${claudeJson}:${path.join(CONTAINER_HOME, '.claude.json')}:rw`)
+    mounts.push('-v', `${claudeJson}:${path.posix.join(CONTAINER_HOME, '.claude.json')}:rw`)
   }
 
   // Agent config — mount to container home
@@ -92,7 +97,7 @@ export function buildVolumeMounts(): { mounts: string[]; projectMappings: Projec
     const relativeToHome = path.relative(home, agentConfigDir)
     const isUnderHome = !relativeToHome.startsWith('..')
     const containerConfigDir = isUnderHome
-      ? path.join(CONTAINER_HOME, relativeToHome)
+      ? path.posix.join(CONTAINER_HOME, toPosixRelative(relativeToHome))
       : `/workspace/.config/ai-support-agent`
     mounts.push('-v', `${agentConfigDir}:${containerConfigDir}:rw`)
   }
@@ -100,7 +105,7 @@ export function buildVolumeMounts(): { mounts: string[]; projectMappings: Projec
   // AWS credentials — mount to container home
   const awsDir = path.join(home, '.aws')
   if (fs.existsSync(awsDir)) {
-    mounts.push('-v', `${awsDir}:${path.join(CONTAINER_HOME, '.aws')}:ro`)
+    mounts.push('-v', `${awsDir}:${path.posix.join(CONTAINER_HOME, '.aws')}:ro`)
   }
 
   // Custom project directories — mount to /workspace/projects/{projectCode}
@@ -152,7 +157,7 @@ export function buildEnvArgs(projectMappings: ProjectDirMapping[]): string[] {
   const relativeToHome = path.relative(home, hostConfigDir)
   const isUnderHome = !relativeToHome.startsWith('..')
   const containerConfigDir = isUnderHome
-    ? path.join(CONTAINER_HOME, relativeToHome)
+    ? path.posix.join(CONTAINER_HOME, toPosixRelative(relativeToHome))
     : `/workspace/.config/ai-support-agent`
 
   for (const key of PASSTHROUGH_ENV_VARS) {

@@ -21,7 +21,7 @@ const AWS_DIR = 'aws'
  */
 export function expandPath(template: string, projectCode: string): string {
   return template
-    .replace(/^~(?=$|\/)/, os.homedir())
+    .replace(/^~(?=$|[/\\])/, os.homedir())
     .replace(/\{projectCode\}/g, projectCode)
 }
 
