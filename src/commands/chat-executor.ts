@@ -7,6 +7,7 @@ import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type Ch
 import { getErrorMessage, parseString, truncateString } from '../utils'
 
 import { getAutoAddDirs, getWorkspaceDir } from '../project-dir'
+import { ensureAllowedToolsInSettings } from '../utils/claude-settings'
 import { executeApiChatCommand } from './api-chat-executor'
 import { runClaudeCode } from './claude-code-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
@@ -185,6 +186,11 @@ async function executeClaudeCodeChat(
     const metadataNotice = buildMetadataNotice(conversationId, commandId, projectCode, mcpConfigPath)
 
     const messageWithHistory = formatHistoryForClaudeCode(history, message + filePathsNotice + conversationFileNotice + metadataNotice)
+
+    // Ensure allowedTools are registered in Claude Code settings.json
+    if (allowedTools?.length) {
+      ensureAllowedToolsInSettings(allowedTools)
+    }
 
     const logDetails = [
       allowedTools?.length ? `allowedTools: ${allowedTools.join(', ')}` : '(no allowedTools)',
