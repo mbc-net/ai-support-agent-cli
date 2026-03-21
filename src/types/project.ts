@@ -65,6 +65,19 @@ export interface ProjectConfigResponse {
       projectKey: string
     }>
   }
+  ssh?: {
+    enabled: boolean
+    hosts: Array<{
+      hostId: string
+      name: string
+      hostname: string
+      port?: number
+      username: string
+      authType: string
+      description?: string
+      environment?: string
+    }>
+  }
 }
 
 export interface DbCredentials {

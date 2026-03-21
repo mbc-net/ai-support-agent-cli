@@ -45,6 +45,22 @@ export function registerProjectInfoTool(
         info.documentation = config.documentation
       }
 
+      if (config.ssh?.enabled && config.ssh.hosts?.length) {
+        info.ssh = {
+          enabled: true,
+          hosts: config.ssh.hosts.map((h) => ({
+            hostId: h.hostId,
+            name: h.name,
+            hostname: h.hostname,
+            port: h.port ?? 22,
+            username: h.username,
+            authType: h.authType,
+            description: h.description,
+            environment: h.environment,
+          })),
+        }
+      }
+
       info.projectCode = projectCode
 
       return mcpTextResponse(JSON.stringify(info, null, 2))
