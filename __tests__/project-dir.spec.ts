@@ -79,6 +79,12 @@ describe('project-dir', () => {
     it('should not replace ~user style paths', () => {
       expect(expandPath('~other/dir', 'PROJ_01')).toBe('~other/dir')
     })
+
+    it('should replace ~ followed by backslash (Windows-style)', () => {
+      expect(expandPath('~\\projects\\{projectCode}', 'MBC_01')).toBe(
+        '/home/testuser\\projects\\MBC_01',
+      )
+    })
   })
 
   describe('resolveProjectDir', () => {

@@ -254,6 +254,32 @@ describe('docker-runner', () => {
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('blocked path'))
     })
 
+    it('should always use forward slashes for container-side paths', () => {
+      const home = os.homedir()
+      mockGetConfigDir.mockReturnValue(`${home}/.ai-support-agent`)
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const existing = [
+          `${home}/.claude`,
+          `${home}/.claude.json`,
+          `${home}/.ai-support-agent`,
+          `${home}/.aws`,
+        ]
+        return existing.includes(p as string)
+      })
+      mockLoadConfig.mockReturnValue(null)
+
+      const { mounts } = buildVolumeMounts()
+      // All container-side paths (right side of ':') must use forward slashes
+      for (let i = 0; i < mounts.length; i++) {
+        if (mounts[i] === '-v') continue
+        const containerPath = mounts[i + 0].split(':')[1]
+        if (containerPath) {
+          expect(containerPath).not.toContain('\\')
+          expect(containerPath).toMatch(/^\//)
+        }
+      }
+    })
+
     it('should skip project directories when realpathSync fails', () => {
       mockExistsSync.mockImplementation((p: unknown) => {
         return p === '/workspace/broken-link'
@@ -313,6 +339,19 @@ describe('docker-runner', () => {
       const args = buildEnvArgs(mappings)
       const mapArg = args.find((a: string) => a.startsWith('AI_SUPPORT_AGENT_PROJECT_DIR_MAP='))
       expect(mapArg).toBe('AI_SUPPORT_AGENT_PROJECT_DIR_MAP=A=/workspace/projects/A;B=/workspace/projects/B')
+    })
+
+    it('should always use forward slashes for container config dir path', () => {
+      const home = os.homedir()
+      mockGetConfigDir.mockReturnValue(`${home}/.ai-support-agent`)
+      process.env.AI_SUPPORT_AGENT_CONFIG_DIR = `${home}/.ai-support-agent`
+
+      const args = buildEnvArgs([])
+      const configDirArg = args.find((a: string) => a.startsWith('AI_SUPPORT_AGENT_CONFIG_DIR='))
+      expect(configDirArg).toBeDefined()
+      const configDirValue = configDirArg!.split('=')[1]
+      expect(configDirValue).not.toContain('\\')
+      expect(configDirValue).toMatch(/^\//)
     })
 
     it('should skip unset environment variables', () => {
