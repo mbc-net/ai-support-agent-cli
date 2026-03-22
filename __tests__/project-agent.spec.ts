@@ -33,6 +33,9 @@ jest.mock('../src/aws-profile', () => ({
 jest.mock('../src/repo-sync', () => ({
   syncRepositories: jest.fn().mockResolvedValue([]),
 }))
+jest.mock('../src/ssh-config-setup', () => ({
+  setupSshConfig: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('../src/update-checker', () => ({
   detectInstallMethod: jest.fn().mockReturnValue('global'),
   performUpdate: jest.fn().mockResolvedValue({ success: true }),

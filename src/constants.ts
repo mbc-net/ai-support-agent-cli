@@ -113,6 +113,7 @@ export const API_ENDPOINTS = {
   DB_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/db-credentials`,
   REPO_CREDENTIALS: (tenantCode: string, repositoryId: string) => `/api/${tenantCode}/agent/repo-credentials/${repositoryId}`,
   PROJECT_CONFIG: (tenantCode: string) => `/api/${tenantCode}/agent/project-config`,
+  SSH_CREDENTIALS: (tenantCode: string, hostId: string) => `/api/${tenantCode}/agent/ssh-credentials/${hostId}`,
   FILES_UPLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/upload-url`,
   FILES_DOWNLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/download-url`,
 } as const
