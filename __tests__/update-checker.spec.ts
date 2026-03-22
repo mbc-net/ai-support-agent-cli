@@ -8,6 +8,7 @@ import {
   hasGlobalWritePermission,
   isNewerVersion,
   isValidVersion,
+  isSudoAvailable,
   performUpdate,
   reExecProcess,
   resetGlobalPrefixCache,
@@ -196,6 +197,44 @@ describe('hasGlobalWritePermission', () => {
   })
 })
 
+describe('isSudoAvailable', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform })
+  })
+
+  const originalPlatform = process.platform
+
+  it('should return true when sudo is found', () => {
+    mockedExecFileSync.mockReturnValue('/usr/bin/sudo\n')
+
+    expect(isSudoAvailable()).toBe(true)
+    expect(mockedExecFileSync).toHaveBeenCalledWith(
+      'which',
+      ['sudo'],
+      { encoding: 'utf-8', timeout: 5_000 },
+    )
+  })
+
+  it('should return false when sudo is not found', () => {
+    mockedExecFileSync.mockImplementation(() => {
+      throw new Error('not found')
+    })
+
+    expect(isSudoAvailable()).toBe(false)
+  })
+
+  it('should return false on Windows', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+
+    expect(isSudoAvailable()).toBe(false)
+    expect(mockedExecFileSync).not.toHaveBeenCalled()
+  })
+})
+
 describe('detectInstallMethod', () => {
   const originalArgv = process.argv
   const originalExecArgv = process.execArgv
@@ -305,8 +344,11 @@ describe('performUpdate', () => {
     )
   })
 
-  it('should use sudo when global directory is not writable', async () => {
-    mockedExecFileSync.mockReturnValue('/usr/local\n')
+  it('should use sudo when global directory is not writable and sudo is available', async () => {
+    mockedExecFileSync.mockImplementation((cmd: string) => {
+      if (cmd === 'which') return '/usr/bin/sudo\n'
+      return '/usr/local\n'
+    })
     mockedAccessSync.mockImplementation(() => {
       throw new Error('EACCES: permission denied')
     })
@@ -326,6 +368,30 @@ describe('performUpdate', () => {
         expect.any(Function),
       )
     }
+  })
+
+  it('should not use sudo when global directory is not writable but sudo is unavailable', async () => {
+    mockedExecFileSync.mockImplementation((cmd: string) => {
+      if (cmd === 'which') throw new Error('not found')
+      return '/usr/local\n'
+    })
+    mockedAccessSync.mockImplementation(() => {
+      throw new Error('EACCES: permission denied')
+    })
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
+      callback(null)
+    })
+
+    const result = await performUpdate('1.2.3', 'global')
+
+    expect(result).toEqual({ success: true })
+    const expectedCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+    expect(mockedExecFile).toHaveBeenCalledWith(
+      expectedCmd,
+      ['install', '-g', '@ai-support-agent/cli@1.2.3'],
+      expect.objectContaining({ timeout: 120000 }),
+      expect.any(Function),
+    )
   })
 
   it('should call npm install for npx method', async () => {
