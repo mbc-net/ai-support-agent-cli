@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg apt-transport-https \
     # Build tools for native addons (node-pty)
     make g++ \
+    # Network diagnostic tools (for server troubleshooting)
+    iputils-ping net-tools dnsutils whois traceroute netcat-openbsd iproute2 \
     # Python 3 + pip (for document processing tools and node-gyp)
     python3 python3-pip python3-venv \
     # Pandoc (universal document converter: docx/pdf/html/markdown/etc.)
