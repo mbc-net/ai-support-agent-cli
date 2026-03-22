@@ -133,6 +133,20 @@ export function hasGlobalWritePermission(): boolean {
 }
 
 /**
+ * Check if sudo is available on the system.
+ * Returns false on Windows or when the sudo binary is not found.
+ */
+export function isSudoAvailable(): boolean {
+  if (process.platform === 'win32') return false
+  try {
+    execFileSync('which', ['sudo'], { encoding: 'utf-8', timeout: 5_000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * Resolve the global binary script path for @ai-support-agent/cli.
  */
 function resolveGlobalBinaryScript(): string {
@@ -188,8 +202,10 @@ export async function performUpdate(
   // global & npx: npm install -g
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
   const args = ['install', '-g', `@ai-support-agent/cli@${version}`]
-  const needsSudo = !hasGlobalWritePermission()
-  if (needsSudo) {
+  const needsSudo = !hasGlobalWritePermission() && isSudoAvailable()
+  if (!hasGlobalWritePermission() && !isSudoAvailable()) {
+    logger.warn('[update] No write permission to global npm directory and sudo is not available, attempting without sudo')
+  } else if (needsSudo) {
     logger.info('[update] No write permission to global npm directory, using sudo')
   }
   return execNpmCommand(npmCmd, args, version, needsSudo)

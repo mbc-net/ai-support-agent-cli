@@ -17,6 +17,7 @@ import type {
   RegisterRequest,
   RegisterResponse,
   RepoCredentials,
+  SshCredentials,
   SystemInfo,
   VersionInfo,
 } from './types'
@@ -192,6 +193,11 @@ export class ApiClient {
   async getDbCredentials(name: string): Promise<DbCredentials> {
     logger.debug(`Fetching DB credentials for: ${name}`)
     return this.get<DbCredentials>(API_ENDPOINTS.DB_CREDENTIALS(this.tenantCode), { params: { name } })
+  }
+
+  async getSshCredentials(hostId: string): Promise<SshCredentials> {
+    logger.debug(`Fetching SSH credentials for host: ${hostId}`)
+    return this.get<SshCredentials>(API_ENDPOINTS.SSH_CREDENTIALS(this.tenantCode, hostId))
   }
 
   async getRepoCredentials(repositoryId: string): Promise<RepoCredentials> {
