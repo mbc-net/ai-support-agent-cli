@@ -40,6 +40,9 @@
 
   "config.saved": "設定を保存しました。\"ai-support-agent start\" で接続してください。",
   "config.projectSaved": "プロジェクト \"{{projectCode}}\" を設定しました。\"ai-support-agent start\" で接続してください。",
+  "config.resolvingProject": "サーバーからプロジェクトコードを取得中...",
+  "config.resolvedProject": "プロジェクトコード取得: {{projectCode}}",
+  "config.resolveProjectFailed": "サーバーからプロジェクトコードを取得できませんでした ({{message}})。--project-code で手動指定してください。",
   "config.readError": "設定ファイルの読み込みに失敗しました: {{error}}",
   "config.savedDebug": "設定を保存しました: {{path}}",
   "config.languageSet": "言語を \"{{lang}}\" に設定しました。",
