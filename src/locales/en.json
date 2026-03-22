@@ -40,6 +40,9 @@
 
   "config.saved": "Configuration saved. Run \"ai-support-agent start\" to connect.",
   "config.projectSaved": "Project \"{{projectCode}}\" configured. Run \"ai-support-agent start\" to connect.",
+  "config.resolvingProject": "Resolving project code from server...",
+  "config.resolvedProject": "Project code resolved: {{projectCode}}",
+  "config.resolveProjectFailed": "Could not resolve project code from server ({{message}}). Specify --project-code to set manually.",
   "config.readError": "Failed to read config file: {{error}}",
   "config.savedDebug": "Configuration saved: {{path}}",
   "config.languageSet": "Language set to \"{{lang}}\".",
