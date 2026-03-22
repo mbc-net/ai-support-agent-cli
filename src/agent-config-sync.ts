@@ -10,6 +10,7 @@ import { writeMcpConfig } from './mcp/config-writer'
 import { getReposDir } from './project-dir'
 import { syncProjectConfig } from './project-config-sync'
 import { syncRepositories } from './repo-sync'
+import { setupSshConfig } from './ssh-config-setup'
 import type { AgentChatMode, AgentServerConfig, ProjectConfigResponse } from './types'
 import { getErrorMessage } from './utils'
 
@@ -47,7 +48,7 @@ export async function performConfigSync(
     deps.prefix,
   )
   if (config) {
-    applyProjectConfig(deps, state, config)
+    await applyProjectConfig(deps, state, config)
     return true
   }
   return false
@@ -96,11 +97,11 @@ export async function performSetup(
 /**
  * Apply project config to state (update serverConfig, write AWS/MCP config files).
  */
-export function applyProjectConfig(
+export async function applyProjectConfig(
   deps: ConfigSyncDeps,
   state: ConfigSyncState,
   config: ProjectConfigResponse,
-): void {
+): Promise<void> {
   state.currentConfigHash = config.configHash
   state.projectConfig = config
 
@@ -156,6 +157,15 @@ export function applyProjectConfig(
       logger.info(`${deps.prefix} MCP config written: ${state.mcpConfigPath}`)
     } catch (error) {
       logger.warn(`${deps.prefix} Failed to write MCP config: ${getErrorMessage(error)}`)
+    }
+  }
+
+  // Set up SSH config if SSH hosts are configured
+  if (config.ssh?.enabled && config.ssh.hosts?.length) {
+    try {
+      await setupSshConfig(deps.client, config.ssh)
+    } catch (error) {
+      logger.warn(`${deps.prefix} Failed to set up SSH config: ${getErrorMessage(error)}`)
     }
   }
 

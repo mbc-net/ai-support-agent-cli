@@ -99,6 +99,15 @@ export interface RepoCredentials {
   authSecret: string
 }
 
+export interface SshCredentials {
+  hostId: string
+  hostname: string
+  port: number
+  username: string
+  authType: string
+  privateKey: string
+}
+
 export interface CachedProjectConfig {
   cachedAt: string
   configHash: string
