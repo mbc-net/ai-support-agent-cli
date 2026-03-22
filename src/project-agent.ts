@@ -9,6 +9,7 @@ import { t } from './i18n'
 import { logger } from './logger'
 import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
+import { submitPendingResults } from './pending-result-store'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { detectInstallMethod, performUpdate, reExecProcess } from './update-checker'
 import { getErrorMessage, isAuthenticationError } from './utils'
@@ -98,6 +99,10 @@ export class ProjectAgent {
     stopTransport(this.transportState)
   }
 
+  isBusy(): boolean {
+    return this.transportState.processing
+  }
+
   getClient(): ApiClient {
     return this.client
   }
@@ -181,6 +186,9 @@ export class ProjectAgent {
       }
       return
     }
+
+    // Submit any pending results from previous sessions
+    await submitPendingResults()
 
     // Perform initial config sync with retries
     for (let attempt = 1; attempt <= INITIAL_CONFIG_SYNC_MAX_RETRIES; attempt++) {

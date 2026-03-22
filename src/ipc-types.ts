@@ -28,11 +28,16 @@ export interface IpcTokenUpdateMessage {
   token: string
 }
 
+export interface IpcBusyQueryMessage {
+  type: 'busy_query'
+}
+
 export type ParentToChildMessage =
   | IpcStartMessage
   | IpcShutdownMessage
   | IpcUpdateMessage
   | IpcTokenUpdateMessage
+  | IpcBusyQueryMessage
 
 // ─── Child → Parent ─────────────────────────────────────────────
 
@@ -52,10 +57,17 @@ export interface IpcStoppedMessage {
   projectCode: string
 }
 
+export interface IpcBusyResponseMessage {
+  type: 'busy_response'
+  projectCode: string
+  busy: boolean
+}
+
 export type ChildToParentMessage =
   | IpcStartedMessage
   | IpcErrorMessage
   | IpcStoppedMessage
+  | IpcBusyResponseMessage
 
 // ─── Type Guards ─────────────────────────────────────────────────
 
@@ -66,7 +78,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 export function isParentToChildMessage(msg: unknown): msg is ParentToChildMessage {
   if (!isObject(msg)) return false
   const { type } = msg
-  if (type === 'shutdown' || type === 'update') return true
+  if (type === 'shutdown' || type === 'update' || type === 'busy_query') return true
   if (type === 'token_update') {
     return typeof msg.token === 'string'
   }
@@ -88,6 +100,9 @@ export function isChildToParentMessage(msg: unknown): msg is ChildToParentMessag
   }
   if (type === 'error') {
     return typeof msg.projectCode === 'string' && typeof msg.message === 'string'
+  }
+  if (type === 'busy_response') {
+    return typeof msg.projectCode === 'string' && typeof msg.busy === 'boolean'
   }
   return false
 }

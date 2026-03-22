@@ -153,3 +153,9 @@ export const TOKEN_WATCH_INTERVAL_MS = 5000
 // WebSocket reconnect
 export const APPSYNC_MAX_RECONNECT_RETRIES = 5
 export const APPSYNC_RECONNECT_BASE_DELAY_MS = 1000
+
+// Graceful update deferral
+export const UPDATE_BUSY_WAIT_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes max wait for busy agents
+export const UPDATE_BUSY_POLL_INTERVAL_MS = 3_000          // poll every 3 seconds
+export const UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS = 30_000   // 30 seconds for forced updates
+export const BUSY_QUERY_TIMEOUT_MS = 5_000                  // 5 seconds for IPC busy query

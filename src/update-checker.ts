@@ -202,6 +202,11 @@ export async function performUpdate(
   // global & npx: npm install -g
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
   const args = ['install', '-g', `@ai-support-agent/cli@${version}`]
+
+  // Use a user-writable cache directory to avoid root-owned cache issues in Docker containers
+  const tmpCacheDir = path.join(require('os').tmpdir(), '.npm-update-cache')
+  args.push('--cache', tmpCacheDir)
+
   const needsSudo = !hasGlobalWritePermission() && isSudoAvailable()
   if (!hasGlobalWritePermission() && !isSudoAvailable()) {
     logger.warn('[update] No write permission to global npm directory and sudo is not available, attempting without sudo')

@@ -6,8 +6,9 @@ import {
   CHILD_PROCESS_MAX_RESTARTS,
   CHILD_PROCESS_RESTART_DELAY_MS,
   CHILD_PROCESS_STOP_TIMEOUT_MS,
+  BUSY_QUERY_TIMEOUT_MS,
 } from './constants'
-import type { ChildToParentMessage, IpcStartMessage } from './ipc-types'
+import type { ChildToParentMessage, IpcStartMessage, IpcBusyResponseMessage } from './ipc-types'
 import { isChildToParentMessage } from './ipc-types'
 import { logger } from './logger'
 import type { AgentChatMode, ProjectRegistration } from './types'
@@ -22,6 +23,7 @@ interface ManagedProcess {
 export class ChildProcessManager {
   private readonly processes = new Map<string, ManagedProcess>()
   private readonly restartTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly busyResponseHandlers: Array<(msg: IpcBusyResponseMessage) => void> = []
   private stopping = false
 
   forkProject(
@@ -97,6 +99,11 @@ export class ChildProcessManager {
         break
       case 'stopped':
         logger.info(`Project ${msg.projectCode} stopped`)
+        break
+      case 'busy_response':
+        for (const handler of this.busyResponseHandlers) {
+          handler(msg)
+        }
         break
     }
   }
@@ -221,6 +228,45 @@ export class ChildProcessManager {
 
     await Promise.all(shutdownPromises)
     this.processes.clear()
+  }
+
+  async isAnyBusy(timeoutMs: number = BUSY_QUERY_TIMEOUT_MS): Promise<boolean> {
+    const connectedProcesses = Array.from(this.processes.entries())
+      .filter(([, m]) => m.child.connected)
+
+    if (connectedProcesses.length === 0) return false
+
+    return new Promise<boolean>((resolve) => {
+      const pending = new Set(connectedProcesses.map(([code]) => code))
+      let anyBusy = false
+
+      const timer = setTimeout(() => {
+        cleanup()
+        // Timed-out children are treated as not busy (they may be dead/stuck)
+        resolve(anyBusy)
+      }, timeoutMs)
+
+      const handler = (msg: IpcBusyResponseMessage): void => {
+        if (msg.busy) anyBusy = true
+        pending.delete(msg.projectCode)
+        if (pending.size === 0) {
+          cleanup()
+          resolve(anyBusy)
+        }
+      }
+
+      const cleanup = (): void => {
+        clearTimeout(timer)
+        const idx = this.busyResponseHandlers.indexOf(handler)
+        if (idx !== -1) this.busyResponseHandlers.splice(idx, 1)
+      }
+
+      this.busyResponseHandlers.push(handler)
+
+      for (const [, managed] of connectedProcesses) {
+        managed.child.send({ type: 'busy_query' })
+      }
+    })
   }
 
   getRunningCount(): number {

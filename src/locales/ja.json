@@ -92,6 +92,7 @@
   "update.installFailed": "更新に失敗しました: {{message}}",
   "update.permissionHint": "次のコマンドを実行してください: sudo npm install -g @ai-support-agent/cli@{{version}}",
   "update.manualHint": "次のコマンドを実行してください: npm install -g @ai-support-agent/cli@{{version}}",
+  "update.waitingForBusy": "実行中のコマンドの完了を待っています...",
   "update.stoppingAgents": "再起動のためエージェントを停止中...",
   "update.restarting": "新しいバージョンで再起動中...",
   "update.forced": "強制更新が必要です: 現在のバージョンが最低バージョン ({{minimumVersion}}) を下回っています。{{version}} に更新します...",
