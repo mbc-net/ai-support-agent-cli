@@ -1,5 +1,6 @@
 import type { Command } from 'commander'
 
+import { ApiClient } from '../api-client'
 import { startAuthServer } from '../auth-server'
 import { DEFAULT_API_URL, DEFAULT_LOGIN_URL, PROJECT_CODE_DEFAULT } from '../constants'
 import {
@@ -96,13 +97,28 @@ export function registerAuthCommands(program: Command): void {
     .requiredOption('--token <token>', t('cmd.configure.token'))
     .option('--api-url <url>', t('cmd.configure.apiUrl'), DEFAULT_API_URL)
     .option('--project-code <code>', t('cmd.configure.projectCode'))
-    .action((opts: { token: string; apiUrl: string; projectCode?: string }) => {
+    .action(async (opts: { token: string; apiUrl: string; projectCode?: string }) => {
       const apiUrlError = validateApiUrl(opts.apiUrl)
       if (apiUrlError) {
         logger.error(apiUrlError)
         process.exit(1)
       }
-      const projectCode = opts.projectCode ?? PROJECT_CODE_DEFAULT
+
+      let projectCode = opts.projectCode
+      if (!projectCode) {
+        // Auto-resolve projectCode from API
+        try {
+          logger.info(t('config.resolvingProject'))
+          const client = new ApiClient(opts.apiUrl, opts.token)
+          const config = await client.getProjectConfig()
+          projectCode = config.project.projectCode
+          logger.info(t('config.resolvedProject', { projectCode }))
+        } catch (error) {
+          logger.error(t('config.resolveProjectFailed', { message: getErrorMessage(error) }))
+          process.exit(1)
+        }
+      }
+
       addProject({
         projectCode,
         token: opts.token,
