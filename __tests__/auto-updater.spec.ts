@@ -287,6 +287,102 @@ describe('startAutoUpdater', () => {
     updater.stop()
   })
 
+  it('should wait for busy agents before restarting', async () => {
+    const client = createMockClient()
+    const stopAll = jest.fn()
+    mockedIsNewerVersion.mockReturnValue(true)
+
+    let busyCount = 0
+    const isAnyAgentBusy = jest.fn(async () => {
+      busyCount++
+      return busyCount <= 2 // busy for first 2 polls, then not busy
+    })
+
+    const updater = startAutoUpdater([client], defaultConfig, stopAll, undefined, isAnyAgentBusy)
+
+    // Initial delay triggers check()
+    await jest.advanceTimersByTimeAsync(30_000)
+    // Advance through busy wait poll intervals (3s each × 2 busy + 1 not busy)
+    for (let i = 0; i < 5; i++) {
+      await jest.advanceTimersByTimeAsync(3_000)
+    }
+
+    // Should have polled until not busy, then proceed
+    expect(isAnyAgentBusy).toHaveBeenCalled()
+    expect(stopAll).toHaveBeenCalled()
+    expect(mockedReExecProcess).toHaveBeenCalled()
+
+    updater.stop()
+  })
+
+  it('should proceed after busy wait timeout even if still busy', async () => {
+    const client = createMockClient()
+    const stopAll = jest.fn()
+    mockedIsNewerVersion.mockReturnValue(true)
+
+    const isAnyAgentBusy = jest.fn(async () => true) // always busy
+
+    const updater = startAutoUpdater([client], defaultConfig, stopAll, undefined, isAnyAgentBusy)
+
+    // Initial delay
+    await jest.advanceTimersByTimeAsync(30_000)
+    // Advance through busy wait timeout (5 min) in increments
+    for (let elapsed = 0; elapsed < 5 * 60 * 1000 + 10_000; elapsed += 3_000) {
+      await jest.advanceTimersByTimeAsync(3_000)
+    }
+
+    // Should eventually proceed despite being busy
+    expect(stopAll).toHaveBeenCalled()
+    expect(mockedReExecProcess).toHaveBeenCalled()
+
+    updater.stop()
+  })
+
+  it('should not wait for busy agents when isAnyAgentBusy is not provided', async () => {
+    const client = createMockClient()
+    const stopAll = jest.fn()
+    mockedIsNewerVersion.mockReturnValue(true)
+
+    const updater = startAutoUpdater([client], defaultConfig, stopAll)
+
+    await jest.advanceTimersByTimeAsync(30_000)
+
+    // Should proceed immediately without waiting
+    expect(stopAll).toHaveBeenCalled()
+    expect(mockedReExecProcess).toHaveBeenCalled()
+
+    updater.stop()
+  })
+
+  it('should use shorter timeout for forced updates', async () => {
+    const client = createMockClient()
+    ;(client.getVersionInfo as jest.Mock).mockResolvedValue({
+      latestVersion: '2.0.0',
+      minimumVersion: '1.5.0',
+      channel: 'latest',
+      channels: { latest: '2.0.0' },
+    })
+    const stopAll = jest.fn()
+    mockedIsNewerVersion.mockReturnValue(true) // both minimum and latest checks return true
+
+    const isAnyAgentBusy = jest.fn(async () => true) // always busy
+
+    const updater = startAutoUpdater([client], defaultConfig, stopAll, undefined, isAnyAgentBusy)
+
+    // Initial delay
+    await jest.advanceTimersByTimeAsync(30_000)
+    // Advance through forced busy wait timeout (30s) in increments
+    for (let elapsed = 0; elapsed < 30_000 + 10_000; elapsed += 3_000) {
+      await jest.advanceTimersByTimeAsync(3_000)
+    }
+
+    // Forced update should proceed after shorter timeout
+    expect(stopAll).toHaveBeenCalled()
+    expect(mockedReExecProcess).toHaveBeenCalled()
+
+    updater.stop()
+  })
+
   it('should proceed with auto-update when install method is npx', async () => {
     mockedDetectInstallMethod.mockReturnValue('npx')
     const client = createMockClient()

@@ -36,6 +36,11 @@ jest.mock('../src/repo-sync', () => ({
 jest.mock('../src/ssh-config-setup', () => ({
   setupSshConfig: jest.fn().mockResolvedValue(undefined),
 }))
+jest.mock('../src/pending-result-store', () => ({
+  savePendingResult: jest.fn(),
+  removePendingResult: jest.fn(),
+  submitPendingResults: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('../src/update-checker', () => ({
   detectInstallMethod: jest.fn().mockReturnValue('global'),
   performUpdate: jest.fn().mockResolvedValue({ success: true }),
@@ -1314,6 +1319,13 @@ describe('ProjectAgent', () => {
 
       expect(mockClient.updateToken).toBeDefined()
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('runner.tokenUpdated'))
+    })
+  })
+
+  describe('isBusy', () => {
+    it('should return false when not processing a command', () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      expect(agent.isBusy()).toBe(false)
     })
   })
 

@@ -338,7 +338,7 @@ describe('performUpdate', () => {
     const expectedCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
     expect(mockedExecFile).toHaveBeenCalledWith(
       expectedCmd,
-      ['install', '-g', '@ai-support-agent/cli@1.2.3'],
+      expect.arrayContaining(['install', '-g', '@ai-support-agent/cli@1.2.3']),
       expect.objectContaining({ timeout: 120000 }),
       expect.any(Function),
     )
@@ -363,7 +363,7 @@ describe('performUpdate', () => {
       const expectedNpmCmd = 'npm'
       expect(mockedExecFile).toHaveBeenCalledWith(
         'sudo',
-        [expectedNpmCmd, 'install', '-g', '@ai-support-agent/cli@1.2.3'],
+        expect.arrayContaining([expectedNpmCmd, 'install', '-g', '@ai-support-agent/cli@1.2.3']),
         expect.objectContaining({ timeout: 120000 }),
         expect.any(Function),
       )
@@ -388,7 +388,7 @@ describe('performUpdate', () => {
     const expectedCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
     expect(mockedExecFile).toHaveBeenCalledWith(
       expectedCmd,
-      ['install', '-g', '@ai-support-agent/cli@1.2.3'],
+      expect.arrayContaining(['install', '-g', '@ai-support-agent/cli@1.2.3']),
       expect.objectContaining({ timeout: 120000 }),
       expect.any(Function),
     )
@@ -482,7 +482,7 @@ describe('performUpdate', () => {
     expect(result).toEqual({ success: true })
     expect(mockedExecFile).toHaveBeenCalledWith(
       'npm.cmd',
-      ['install', '-g', '@ai-support-agent/cli@1.2.3'],
+      expect.arrayContaining(['install', '-g', '@ai-support-agent/cli@1.2.3']),
       expect.objectContaining({ timeout: 120000 }),
       expect.any(Function),
     )

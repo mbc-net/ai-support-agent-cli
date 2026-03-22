@@ -92,6 +92,7 @@
   "update.installFailed": "Update failed: {{message}}",
   "update.permissionHint": "Try: sudo npm install -g @ai-support-agent/cli@{{version}}",
   "update.manualHint": "Run: npm install -g @ai-support-agent/cli@{{version}}",
+  "update.waitingForBusy": "Waiting for in-progress commands to finish before restarting...",
   "update.stoppingAgents": "Stopping agents for restart...",
   "update.restarting": "Restarting with new version...",
   "update.forced": "Forced update required: current version is below minimum ({{minimumVersion}}). Updating to {{version}}...",

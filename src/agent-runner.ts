@@ -99,6 +99,7 @@ function initAutoUpdater(
   client: ApiClient,
   agentId: string,
   stopAllAgents: () => void,
+  isAnyAgentBusy?: () => Promise<boolean>,
 ): AutoUpdaterHandle | undefined {
   const autoUpdateConfig = resolveAutoUpdateConfig(options, config)
   if (!autoUpdateConfig.enabled) return undefined
@@ -111,6 +112,7 @@ function initAutoUpdater(
         logger.warn(`[auto-update] Failed to send error heartbeat: ${err instanceof Error ? err.message : String(err)}`)
       })
     },
+    isAnyAgentBusy,
   )
 }
 
@@ -140,7 +142,7 @@ function runSingleProject(
   logger.info(t('runner.starting'))
   const started = startProjectAgent(project, agentId, { pollInterval, heartbeatInterval, agentChatMode, defaultProjectDir })
 
-  const updater = initAutoUpdater(options, undefined, started.client, agentId, () => started.stop())
+  const updater = initAutoUpdater(options, undefined, started.client, agentId, () => started.stop(), async () => started.agent.isBusy())
 
   let tokenWatcher: { stop: () => void } | undefined
   if (enableTokenWatcher) {
@@ -256,7 +258,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   saveConfig({ lastConnected: new Date().toISOString() })
 
   const client = new ApiClient(projects[0].apiUrl, projects[0].token)
-  const updater = initAutoUpdater(options, config, client, agentId, () => processManager.sendUpdateToAll())
+  const updater = initAutoUpdater(options, config, client, agentId, () => processManager.sendUpdateToAll(), () => processManager.isAnyBusy())
 
   const configWatcher = startConfigWatcher(projects, {
     onTokenUpdate: (projectCode, newToken) => {
