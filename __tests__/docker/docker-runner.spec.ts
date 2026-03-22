@@ -520,9 +520,29 @@ describe('docker-runner', () => {
       expect(buildCall).toBeDefined()
       expect(mockSpawn).toHaveBeenCalledWith(
         'docker',
+        expect.arrayContaining(['run', '--rm', '-i']),
+        { stdio: 'inherit' },
+      )
+    })
+
+    it('should use -it flag when TTY is available', () => {
+      const originalIsTTY = process.stdin.isTTY
+      Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true })
+
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+
+      runInDocker({})
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'docker',
         expect.arrayContaining(['run', '--rm', '-it']),
         { stdio: 'inherit' },
       )
+
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true })
     })
 
     it('should use existing image when available', () => {

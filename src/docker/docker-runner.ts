@@ -248,8 +248,10 @@ export function runInDocker(opts: DockerRunOptions): void {
   const envArgs = buildEnvArgs(projectMappings)
   const containerArgs = buildContainerArgs(opts)
 
+  const interactive = process.stdin.isTTY ? ['-it'] : ['-i']
+
   const dockerArgs = [
-    'run', '--rm', '-it',
+    'run', '--rm', ...interactive,
     ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
     ...mounts,
     ...envArgs,
