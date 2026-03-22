@@ -165,8 +165,8 @@ describe('ApiClient', () => {
   })
 
   describe('getVersionInfo', () => {
-    it('should fetch version info with default channel', async () => {
-      mockInstance.get.mockResolvedValue({
+    it('should fetch version info from production API with default channel', async () => {
+      mockedAxios.get.mockResolvedValue({
         data: {
           latestVersion: '1.2.0',
           minimumVersion: '1.0.0',
@@ -178,11 +178,14 @@ describe('ApiClient', () => {
       const result = await client.getVersionInfo()
       expect(result.latestVersion).toBe('1.2.0')
       expect(result.channel).toBe('latest')
-      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version', { params: { channel: 'latest' } })
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        'https://api.ai-support-agent.com/api/agent/version',
+        expect.objectContaining({ params: { channel: 'latest' } }),
+      )
     })
 
-    it('should pass channel parameter', async () => {
-      mockInstance.get.mockResolvedValue({
+    it('should pass channel parameter to production API', async () => {
+      mockedAxios.get.mockResolvedValue({
         data: {
           latestVersion: '1.3.0-beta.1',
           minimumVersion: '1.0.0',
@@ -193,7 +196,29 @@ describe('ApiClient', () => {
 
       const result = await client.getVersionInfo('beta')
       expect(result.latestVersion).toBe('1.3.0-beta.1')
-      expect(mockInstance.get).toHaveBeenCalledWith('/api/agent/version', { params: { channel: 'beta' } })
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        'https://api.ai-support-agent.com/api/agent/version',
+        expect.objectContaining({ params: { channel: 'beta' } }),
+      )
+    })
+
+    it('should always use production API regardless of client baseURL', async () => {
+      // Client is configured with dev URL
+      const devClient = new ApiClient('https://dev-api.ai-support-agent.com', 'test_tenant:tokenId:rawToken')
+      mockedAxios.get.mockResolvedValue({
+        data: {
+          latestVersion: '1.2.0',
+          minimumVersion: '1.0.0',
+          channel: 'latest',
+          channels: { latest: '1.2.0' },
+        },
+      })
+
+      await devClient.getVersionInfo()
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        'https://api.ai-support-agent.com/api/agent/version',
+        expect.objectContaining({ params: { channel: 'latest' } }),
+      )
     })
   })
 

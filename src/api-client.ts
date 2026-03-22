@@ -1,6 +1,6 @@
 import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios'
 
-import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT } from './constants'
+import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL } from './constants'
 import { logger } from './logger'
 import { RetryStrategy } from './retry-strategy'
 import type {
@@ -128,7 +128,12 @@ export class ApiClient {
   }
 
   async getVersionInfo(channel: ReleaseChannel = 'latest'): Promise<VersionInfo> {
-    return this.get<VersionInfo>(API_ENDPOINTS.VERSION, { params: { channel } })
+    // Version info is global (not per-environment), always fetch from production API
+    const { data } = await axios.get<VersionInfo>(`${DEFAULT_API_URL}${API_ENDPOINTS.VERSION}`, {
+      params: { channel },
+      timeout: API_REQUEST_TIMEOUT,
+    })
+    return data
   }
 
   async getPendingCommands(agentId: string): Promise<PendingCommand[]> {
