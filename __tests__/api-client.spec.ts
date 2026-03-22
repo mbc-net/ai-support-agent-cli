@@ -356,6 +356,32 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getSshCredentials', () => {
+    it('should fetch SSH credentials for a host', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          hostId: 'host-1',
+          hostname: 'server.example.com',
+          port: 22,
+          username: 'deploy',
+          authType: 'private_key',
+          privateKey: '-----BEGIN RSA PRIVATE KEY-----\nkey\n-----END RSA PRIVATE KEY-----\n',
+        },
+      })
+
+      const result = await client.getSshCredentials('host-1')
+      expect(result.hostId).toBe('host-1')
+      expect(result.hostname).toBe('server.example.com')
+      expect(result.port).toBe(22)
+      expect(result.username).toBe('deploy')
+      expect(result.privateKey).toContain('BEGIN RSA PRIVATE KEY')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/ssh-credentials/host-1',
+        undefined,
+      )
+    })
+  })
+
   describe('getRepoCredentials', () => {
     it('should fetch repo credentials', async () => {
       mockInstance.get.mockResolvedValue({
