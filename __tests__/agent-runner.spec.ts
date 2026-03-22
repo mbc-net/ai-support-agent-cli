@@ -25,6 +25,7 @@ const mockStopAll = jest.fn().mockResolvedValue(undefined)
 const mockSendUpdateToAll = jest.fn()
 const mockSendTokenUpdate = jest.fn()
 const mockGetRunningCount = jest.fn().mockReturnValue(0)
+const mockIsAnyBusy = jest.fn().mockResolvedValue(false)
 jest.mock('../src/child-process-manager', () => ({
   ChildProcessManager: jest.fn().mockImplementation(() => ({
     forkProject: mockForkProject,
@@ -32,6 +33,7 @@ jest.mock('../src/child-process-manager', () => ({
     sendUpdateToAll: mockSendUpdateToAll,
     sendTokenUpdate: mockSendTokenUpdate,
     getRunningCount: mockGetRunningCount,
+    isAnyBusy: mockIsAnyBusy,
   })),
 }))
 jest.mock('../src/sentry', () => ({
@@ -66,6 +68,11 @@ jest.mock('../src/project-config-sync', () => ({
 }))
 jest.mock('../src/aws-profile', () => ({
   writeAwsConfig: jest.fn(),
+}))
+jest.mock('../src/pending-result-store', () => ({
+  savePendingResult: jest.fn(),
+  removePendingResult: jest.fn(),
+  submitPendingResults: jest.fn().mockResolvedValue(undefined),
 }))
 
 const mockConfigWatcherStop = jest.fn()
@@ -343,6 +350,7 @@ describe('agent-runner', () => {
       expect.objectContaining({ channel: 'beta' }),
       expect.any(Function),
       expect.any(Function),
+      expect.any(Function),
     )
   })
 
@@ -366,6 +374,7 @@ describe('agent-runner', () => {
     expect(startAutoUpdater).toHaveBeenCalledWith(
       expect.any(Array),
       expect.objectContaining({ channel: 'beta' }),
+      expect.any(Function),
       expect.any(Function),
       expect.any(Function),
     )

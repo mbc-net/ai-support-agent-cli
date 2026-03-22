@@ -11,6 +11,7 @@ import { VsCodeTunnelWebSocket } from './vscode'
 import { executeCommand } from './commands'
 import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
 import { refreshChatMode, scheduleConfigSync } from './agent-config-sync'
+import { savePendingResult, removePendingResult } from './pending-result-store'
 
 export interface TransportState {
   heartbeatTimer: ReturnType<typeof setInterval> | null
@@ -276,6 +277,7 @@ async function processCommand(
   ctx: CommandContext,
   commandId: string,
 ): Promise<void> {
+  ctx.transportState.processing = true
   try {
     const detail = await deps.client.getCommand(commandId, deps.agentId)
     logger.debug(`${deps.prefix} Command detail [${commandId}]: type=${detail.type}, payload=${JSON.stringify(detail.payload).substring(0, LOG_PAYLOAD_LIMIT)}`)
@@ -295,7 +297,9 @@ async function processCommand(
       onUpdate: ctx.onUpdate,
     })
     logger.debug(`${deps.prefix} Command result [${commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, LOG_RESULT_LIMIT)}`)
+    savePendingResult(commandId, deps.agentId, result, deps.apiUrl, deps.token, deps.tenantCode)
     await deps.client.submitResult(commandId, result, deps.agentId)
+    removePendingResult(commandId)
     logger.info(t('runner.commandDone', {
       prefix: deps.prefix,
       commandId,
@@ -315,6 +319,8 @@ async function processCommand(
     } catch {
       logger.error(t('runner.resultSendFailed', { prefix: deps.prefix }))
     }
+  } finally {
+    ctx.transportState.processing = false
   }
 }
 
