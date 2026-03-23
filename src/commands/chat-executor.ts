@@ -50,6 +50,7 @@ export interface ExecuteChatCommandOptions {
   projectConfig?: ProjectConfigResponse
   mcpConfigPath?: string
   tenantCode?: string
+  browserLocalPort?: number
 }
 
 /**
@@ -71,6 +72,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
     projectConfig,
     mcpConfigPath,
     tenantCode,
+    browserLocalPort,
   } = options
 
   if (!agentId) {
@@ -84,7 +86,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
       return executeApiChatCommand(payload, commandId, client, serverConfig, agentId)
     case 'claude_code':
     default:
-      return executeClaudeCodeChat(payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode)
+      return executeClaudeCodeChat(payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort)
   }
 }
 
@@ -103,6 +105,7 @@ async function executeClaudeCodeChat(
   projectConfig?: ProjectConfigResponse,
   mcpConfigPath?: string,
   tenantCode?: string,
+  browserLocalPort?: number,
 ): Promise<CommandResult> {
   const message = parseString(payload.message)
   if (!message) {
@@ -220,6 +223,8 @@ async function executeClaudeCodeChat(
         tenantCode,
         projectCode,
         conversationId: conversationIdStr,
+        browserSessionId: parseString(payload.browserSessionId) ?? undefined,
+        browserLocalPort,
       },
     })
     // プロセスを管理 Map に登録

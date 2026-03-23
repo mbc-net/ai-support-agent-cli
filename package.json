@@ -46,7 +46,8 @@
     "ws": "^8.19.0"
   },
   "optionalDependencies": {
-    "node-pty": "^1.1.0"
+    "node-pty": "^1.1.0",
+    "playwright": "^1.58.2"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",

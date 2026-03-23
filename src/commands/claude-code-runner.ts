@@ -37,6 +37,8 @@ export interface PolicyContext {
   tenantCode?: string
   projectCode?: string
   conversationId?: string
+  browserSessionId?: string
+  browserLocalPort?: number
 }
 
 /** runClaudeCode のオプション */
@@ -75,6 +77,8 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
       if (policyContext.tenantCode) env.AI_SUPPORT_TENANT_CODE = policyContext.tenantCode
       if (policyContext.projectCode) env.AI_SUPPORT_PROJECT_CODE = policyContext.projectCode
       if (policyContext.conversationId) env.AI_SUPPORT_CONVERSATION_ID = policyContext.conversationId
+      if (policyContext.browserSessionId) env.AI_SUPPORT_BROWSER_SESSION_ID = policyContext.browserSessionId
+      if (policyContext.browserLocalPort) env.AI_SUPPORT_BROWSER_LOCAL_PORT = String(policyContext.browserLocalPort)
     }
     const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt })
 
