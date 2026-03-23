@@ -71,6 +71,12 @@ export class ApiClient {
 
   updateToken(newToken: string): void {
     this.client.defaults.headers['Authorization'] = `Bearer ${newToken}`
+
+    // Re-extract tenantCode from new token format: {tenantCode}:{tokenId}:{rawToken}
+    const tokenParts = newToken.split(':')
+    if (tokenParts.length >= 3) {
+      this.tenantCode = tokenParts[0]
+    }
   }
 
   private async get<T>(url: string, config?: AxiosRequestConfig): Promise<T> {

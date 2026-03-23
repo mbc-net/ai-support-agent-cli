@@ -113,6 +113,12 @@ export class ProjectAgent {
     this.configSyncDeps = { ...this.configSyncDeps, token: newToken }
     this.transportDeps = { ...this.transportDeps, token: newToken }
     logger.info(t('runner.tokenUpdated', { prefix: this.prefix }))
+
+    // Token change may alter tenantCode/projectCode (embedded in token format).
+    // Re-register to ensure the agent record matches the new token's identity.
+    logger.info(`${this.prefix} Re-registering after token update...`)
+    stopTransport(this.transportState)
+    this.start()
   }
 
   async performConfigSync(): Promise<void> {

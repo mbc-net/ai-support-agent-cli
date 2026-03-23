@@ -4,6 +4,7 @@ import { Command } from 'commander'
 
 import { startAgent } from './agent-runner'
 import { registerAuthCommands } from './cli/auth-commands'
+import { registerServiceCommands } from './cli/service-command'
 import { registerStatusCommand } from './cli/status-command'
 import { registerSetProjectDirCommand } from './commands/set-project-dir'
 import { resolveProjectDir, getMetadataDir } from './project-dir'
@@ -172,6 +173,7 @@ program
   })
 
 registerStatusCommand(program)
+registerServiceCommands(program)
 registerSetProjectDirCommand(program)
 
 program.parse()
