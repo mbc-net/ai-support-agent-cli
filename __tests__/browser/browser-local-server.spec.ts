@@ -166,6 +166,26 @@ describe('BrowserLocalServer', () => {
     })
   })
 
+  describe('extract', () => {
+    it('should extract text and set variable', async () => {
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/extract', JSON.stringify({ selector: '.item', variableName: 'myVar' }))
+      expect(res.status).toBe(200)
+      expect(res.body.text).toBe('Hello World')
+      expect(mockSession.variables.get('myVar')).toBe('Hello World')
+      expect(mockSession.actionLog.add).toHaveBeenCalledWith('chat', 'extract', expect.stringContaining('myVar'))
+    })
+
+    it('should return 400 for missing selector', async () => {
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/extract', JSON.stringify({ variableName: 'myVar' }))
+      expect(res.status).toBe(400)
+    })
+
+    it('should return 400 for missing variableName', async () => {
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/extract', JSON.stringify({ selector: '.item' }))
+      expect(res.status).toBe(400)
+    })
+  })
+
   describe('screenshot', () => {
     it('should return screenshot', async () => {
       const res = await httpRequest(port, 'POST', '/browser/sess-1/screenshot', JSON.stringify({}))
@@ -216,6 +236,31 @@ describe('BrowserLocalServer', () => {
       const res = await httpRequest(port, 'GET', '/browser/sess-1/variables')
       expect(res.status).toBe(200)
       expect(res.body.variables).toEqual({ a: '1', b: '2' })
+    })
+  })
+
+  describe('execute-script', () => {
+    it('should execute a simple script', async () => {
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/execute-script', JSON.stringify({
+        script: "await page.goto('https://example.com', { waitUntil: 'domcontentloaded' });\nawait page.click('#btn');",
+      }))
+      expect(res.status).toBe(200)
+      expect(res.body.success).toBe(true)
+      expect(res.body.completedSteps).toBe(2)
+    })
+
+    it('should return 400 for missing script', async () => {
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/execute-script', JSON.stringify({}))
+      expect(res.status).toBe(400)
+    })
+
+    it('should return fallbackToChat for unparseable script', async () => {
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/execute-script', JSON.stringify({
+        script: 'some unknown command',
+      }))
+      expect(res.status).toBe(200)
+      expect(res.body.success).toBe(false)
+      expect(res.body.fallbackToChat).toBe(true)
     })
   })
 

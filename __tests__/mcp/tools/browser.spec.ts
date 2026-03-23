@@ -58,11 +58,20 @@ jest.mock('../../../src/mcp/tools/browser/browser-proxy-session', () => {
       screenshot: Buffer.from('proxy-screenshot'),
     })
     fill = jest.fn().mockResolvedValue(undefined)
+    extract = jest.fn().mockImplementation(async (_selector: string, variableName: string) => {
+      const text = 'Extracted text'
+      this.variables.set(variableName, text)
+      return text
+    })
     getText = jest.fn().mockResolvedValue('Proxy text')
     screenshot = jest.fn().mockResolvedValue(Buffer.from('proxy-screenshot'))
     getUrl = jest.fn().mockResolvedValue('https://proxy.example.com')
     getTitle = jest.fn().mockResolvedValue('Proxy Page')
     isActive = jest.fn().mockReturnValue(true)
+    setVariable = jest.fn().mockImplementation(async (name: string, value: string) => {
+      this.variables.set(name, value)
+    })
+    getVariable = jest.fn().mockResolvedValue(undefined)
     variables = new Map()
     actionLog = { add: jest.fn() }
   }
@@ -107,10 +116,10 @@ describe('browser tools', () => {
   })
 
   describe('registerBrowserTools', () => {
-    it('should register all 9 browser tools', () => {
+    it('should register all 10 browser tools', () => {
       const mockServer = setup()
 
-      expect((mockServer.tool as jest.Mock)).toHaveBeenCalledTimes(9)
+      expect((mockServer.tool as jest.Mock)).toHaveBeenCalledTimes(10)
       const registeredNames = (mockServer.tool as jest.Mock).mock.calls.map(
         (call: unknown[]) => call[0],
       )
@@ -120,6 +129,7 @@ describe('browser tools', () => {
       expect(registeredNames).toContain('browser_fill')
       expect(registeredNames).toContain('browser_get_text')
       expect(registeredNames).toContain('browser_login')
+      expect(registeredNames).toContain('browser_extract')
       expect(registeredNames).toContain('browser_set_variable')
       expect(registeredNames).toContain('browser_get_variable')
       expect(registeredNames).toContain('browser_list_variables')
@@ -252,6 +262,20 @@ describe('browser tools', () => {
 
       await toolCallbacks.browser_get_text({ selector: '.content' })
       expect(mockPage.locator).toHaveBeenCalledWith('.content')
+    })
+  })
+
+  describe('browser_extract', () => {
+    it('should extract text and store in variable', async () => {
+      setup()
+
+      const result = await toolCallbacks.browser_extract({
+        selector: '.partner-list li:nth-child(2)',
+        variableName: 'companyName',
+      }) as { content: Array<{ text: string }> }
+
+      expect(result.content[0].text).toBe('Hello World')
+      expect(mockPage.locator).toHaveBeenCalledWith('.partner-list li:nth-child(2)')
     })
   })
 
@@ -404,7 +428,20 @@ describe('browser tools', () => {
       // fill returns undefined by default, so no screenshot
       expect(result.content).toHaveLength(1)
       expect(result.content[0].text).toBe('Filled: #email')
-      expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'fill', '#email')
+      expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'fill', '#email "test@test.com"')
+    })
+
+    it('should use proxy session for extract', async () => {
+      setup()
+
+      const result = await toolCallbacks.browser_extract({
+        selector: '.item',
+        variableName: 'myVar',
+      }) as { content: Array<{ text: string }> }
+
+      expect(result.content[0].text).toBe('Extracted text')
+      expect(getProxy().extract).toHaveBeenCalledWith('.item', 'myVar')
+      expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'extract', expect.stringContaining('myVar'))
     })
 
     it('should use proxy session for get_text', async () => {
@@ -452,6 +489,8 @@ describe('browser tools', () => {
       expect(setResult.content[0].text).toBe('Variable set: test')
       // Variable was set on the proxy's variables map
       expect(getProxy().variables.get('test')).toBe('value')
+      // Action log was recorded
+      expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'set_variable', 'test "value"')
     })
 
     it('should get variable error for missing variable via proxy session', async () => {
