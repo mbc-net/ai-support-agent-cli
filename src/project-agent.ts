@@ -4,14 +4,14 @@ import { ApiClient } from './api-client'
 import { AppSyncSubscriber } from './appsync-subscriber'
 import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, refreshChatMode } from './agent-config-sync'
 import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, startVsCodeTunnel, stopTransport } from './agent-transport'
-import { INITIAL_CONFIG_SYNC_MAX_RETRIES, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS } from './constants'
+import { AGENT_VERSION, INITIAL_CONFIG_SYNC_MAX_RETRIES, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
 import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import { submitPendingResults } from './pending-result-store'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
-import { detectInstallMethod, performUpdate, reExecProcess } from './update-checker'
+import { detectChannelFromVersion, detectInstallMethod, performUpdate, reExecProcess } from './update-checker'
 import { getErrorMessage, isAuthenticationError } from './utils'
 
 export interface ProjectAgentOptions {
@@ -138,8 +138,9 @@ export class ProjectAgent {
   }
 
   async performUpdate(): Promise<void> {
-    logger.info(`${this.prefix} Update requested, checking for latest version...`)
-    const versionInfo = await this.client.getVersionInfo()
+    const channel = detectChannelFromVersion(AGENT_VERSION)
+    logger.info(`${this.prefix} Update requested, checking for latest version (channel: ${channel})...`)
+    const versionInfo = await this.client.getVersionInfo(channel)
     const targetVersion = versionInfo.latestVersion
     logger.info(`${this.prefix} Updating to version ${targetVersion}...`)
     const installMethod = detectInstallMethod()
