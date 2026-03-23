@@ -22,6 +22,7 @@ export interface ExecuteCommandOptions {
   projectConfig?: ProjectConfigResponse
   mcpConfigPath?: string
   tenantCode?: string
+  browserLocalPort?: number
   onSetup?: () => Promise<void>
   onConfigSync?: () => Promise<void>
   onReboot?: () => Promise<void>
@@ -114,6 +115,7 @@ export async function executeCommand(
           projectConfig: opts.projectConfig,
           mcpConfigPath: opts.mcpConfigPath,
           tenantCode: opts.tenantCode,
+          browserLocalPort: opts.browserLocalPort,
         })
       case 'chat_cancel': {
         const targetCommandId = (p as Record<string, unknown>).targetCommandId

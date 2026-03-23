@@ -291,6 +291,7 @@ async function processCommand(
       projectConfig: ctx.configSyncState.projectConfig,
       mcpConfigPath: ctx.configSyncState.mcpConfigPath,
       tenantCode: deps.tenantCode,
+      browserLocalPort: ctx.transportState.vsCodeWs?.getBrowserLocalPort(),
       onSetup: ctx.onSetup,
       onConfigSync: ctx.onConfigSync,
       onReboot: ctx.onReboot,

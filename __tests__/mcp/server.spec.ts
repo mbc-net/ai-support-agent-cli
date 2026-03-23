@@ -3,6 +3,10 @@ import { createMcpServer, startMcpServer } from '../../src/mcp/server'
 
 jest.mock('../../src/api-client')
 jest.mock('../../src/logger')
+jest.mock('../../src/mcp/tools/browser/playwright-loader', () => ({
+  loadPlaywright: jest.fn(),
+  isPlaywrightAvailable: jest.fn().mockReturnValue(true),
+}))
 jest.mock('@modelcontextprotocol/sdk/server/mcp.js', () => ({
   McpServer: jest.fn().mockImplementation(() => ({
     tool: jest.fn(),
@@ -19,8 +23,10 @@ describe('MCP Server', () => {
       const mockClient = {} as ApiClient
       const server = createMcpServer(mockClient, 'TEST_01')
       expect(server).toBeDefined()
-      // 6 tools: db_query, get_db_schemas, get_credentials, file_upload, get_project_info, read_conversation_file
-      expect(server.tool).toHaveBeenCalledTimes(6)
+      // 15 tools: db_query, get_db_schemas, get_credentials, file_upload, get_project_info, read_conversation_file,
+      // browser_navigate, browser_close, browser_click, browser_fill, browser_get_text, browser_login,
+      // browser_set_variable, browser_get_variable, browser_list_variables
+      expect(server.tool).toHaveBeenCalledTimes(15)
     })
   })
 

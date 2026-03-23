@@ -1,5 +1,6 @@
 import { execFile, execFileSync, spawn } from 'child_process'
 import { accessSync, constants as fsConstants } from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 
 import { NPM_INSTALL_TIMEOUT } from './constants'
@@ -204,7 +205,7 @@ export async function performUpdate(
   const args = ['install', '-g', `@ai-support-agent/cli@${version}`]
 
   // Use a user-writable cache directory to avoid root-owned cache issues in Docker containers
-  const tmpCacheDir = path.join(require('os').tmpdir(), '.npm-update-cache')
+  const tmpCacheDir = path.join(os.tmpdir(), '.npm-update-cache')
   args.push('--cache', tmpCacheDir)
 
   const needsSudo = !hasGlobalWritePermission() && isSudoAvailable()
