@@ -203,57 +203,46 @@ function registerBrowserLoginTool(
 ): void {
   server.tool(
     'browser_login',
-    'Log in to a website using saved browser credentials. Navigates to the login page, fills credentials, and submits.',
+    'Navigate to a website and retrieve saved login credentials. Returns a screenshot of the page along with username/password. Use browser_fill and browser_click to complete the login.',
     {
       credentialName: z.string().describe('Name of the browser credential (BROWSER_AUTH# prefix is added automatically)'),
-      screenshot: z.boolean().optional().default(true).describe('Take screenshot after login (default: true)'),
     },
-    async ({ credentialName, screenshot }) => withMcpErrorHandling(async () => {
+    async ({ credentialName }) => withMcpErrorHandling(async () => {
       logger.debug(`[browser] Logging in with credential: ${credentialName}`)
 
       // Fetch credentials from API
       const credentials = await apiClient.getBrowserCredentials(credentialName)
 
-      const validation = validateUrl(credentials.url)
+      const validation = validateUrl(credentials.baseUrl)
       if (!validation.valid) {
         return mcpErrorResponse(validation.reason!)
       }
 
-      // Navigate to login page
+      // Navigate to base URL
       const page = await session.getPage()
-      await page.goto(credentials.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
-
-      // Fill credentials
-      await page.fill(credentials.usernameSelector, credentials.username, { timeout: 10000 })
-      await page.fill(credentials.passwordSelector, credentials.password, { timeout: 10000 })
-
-      // Submit
-      await Promise.all([
-        page.waitForNavigation({ timeout: 30000 }).catch(() => { /* navigation may not happen */ }),
-        page.click(credentials.submitSelector, { timeout: 10000 }),
-      ])
-
-      // Wait for success indicator if specified
-      if (credentials.successIndicator) {
-        try {
-          await page.waitForSelector(credentials.successIndicator, { timeout: 15000 })
-        } catch {
-          // Don't fail — the login may have succeeded even without the indicator
-          logger.debug(`[browser] Success indicator not found: ${credentials.successIndicator}`)
-        }
-      }
+      await page.goto(credentials.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
       const title: string = await page.title()
       const currentUrl: string = page.url()
-      const statusText = `Login completed.\nPage: ${title}\nURL: ${currentUrl}`
+      const screenshotBuffer = await session.screenshot(true)
+      const base64 = screenshotBuffer.toString('base64')
 
-      if (screenshot) {
-        const screenshotBuffer = await session.screenshot(true)
-        const base64 = screenshotBuffer.toString('base64')
-        return mcpTextImageResponse(statusText, base64, 'image/png')
+      let statusText = `Login page loaded.\nPage: ${title}\nURL: ${currentUrl}\n\nCredentials:\n- Username: ${credentials.username}\n- Password: [provided, use browser_fill to enter]\n\nUse browser_fill to enter the username and password into the appropriate fields, then browser_click to submit the form.`
+
+      if (credentials.promptText) {
+        statusText += `\n\nAdditional instructions: ${credentials.promptText}`
+      }
+      if (credentials.customFields && Object.keys(credentials.customFields).length > 0) {
+        statusText += `\n\nCustom fields: ${JSON.stringify(credentials.customFields)}`
       }
 
-      return mcpTextResponse(statusText)
+      return {
+        content: [
+          { type: 'text' as const, text: statusText },
+          { type: 'image' as const, data: base64, mimeType: 'image/png' },
+          { type: 'text' as const, text: `__CREDENTIALS__\nusername: ${credentials.username}\npassword: ${credentials.password}` },
+        ],
+      }
     }),
   )
 }

@@ -215,16 +215,13 @@ describe('browser tools', () => {
   })
 
   describe('browser_login', () => {
-    it('should fetch credentials and perform login', async () => {
+    it('should fetch credentials and return page with credentials info', async () => {
       const mockClient = {
         getBrowserCredentials: jest.fn().mockResolvedValue({
           credentialId: 'STAGING',
-          url: 'https://app.example.com/login',
+          baseUrl: 'https://app.example.com',
           username: 'admin@example.com',
           password: 'secret',
-          usernameSelector: '#email',
-          passwordSelector: '#password',
-          submitSelector: 'button[type=submit]',
           environment: 'staging',
           description: 'Staging login',
           promptText: 'Check dashboard after login',
@@ -236,37 +233,16 @@ describe('browser tools', () => {
 
       const result = await toolCallbacks.browser_login({
         credentialName: 'STAGING',
-        screenshot: true,
       }) as { content: Array<{ type: string; text?: string }> }
 
       expect(mockClient.getBrowserCredentials).toHaveBeenCalledWith('STAGING')
-      expect(result.content[0].text).toContain('Login completed')
-      expect(result.content).toHaveLength(2)
-    })
-
-    it('should return text only when screenshot is false', async () => {
-      const mockClient = {
-        getBrowserCredentials: jest.fn().mockResolvedValue({
-          credentialId: 'STAGING',
-          url: 'https://app.example.com/login',
-          username: 'admin@example.com',
-          password: 'secret',
-          usernameSelector: '#email',
-          passwordSelector: '#password',
-          submitSelector: 'button[type=submit]',
-          environment: 'staging',
-        }),
-      }
-
-      setup(mockClient)
-
-      const result = await toolCallbacks.browser_login({
-        credentialName: 'STAGING',
-        screenshot: false,
-      }) as { content: Array<{ type: string; text?: string }> }
-
-      expect(result.content).toHaveLength(1)
-      expect(result.content[0].text).toContain('Login completed')
+      expect(result.content[0].text).toContain('Login page loaded')
+      expect(result.content[0].text).toContain('Additional instructions: Check dashboard after login')
+      expect(result.content[0].text).toContain('orgId')
+      expect(result.content[1].type).toBe('image')
+      expect(result.content[2].text).toContain('username: admin@example.com')
+      expect(result.content[2].text).toContain('password: secret')
+      expect(result.content).toHaveLength(3)
     })
 
     it('should handle API errors', async () => {
@@ -287,12 +263,9 @@ describe('browser tools', () => {
     it('should reject blocked URLs in credentials', async () => {
       const mockClient = {
         getBrowserCredentials: jest.fn().mockResolvedValue({
-          url: 'file:///etc/passwd',
+          baseUrl: 'file:///etc/passwd',
           username: 'admin',
           password: 'pass',
-          usernameSelector: '#user',
-          passwordSelector: '#pass',
-          submitSelector: '#submit',
         }),
       }
 

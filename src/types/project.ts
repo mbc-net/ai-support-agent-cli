@@ -83,7 +83,7 @@ export interface ProjectConfigResponse {
     credentials: Array<{
       credentialId: string
       name: string
-      url: string
+      baseUrl: string
       environment?: string
       description?: string
     }>
@@ -120,13 +120,9 @@ export interface SshCredentials {
 
 export interface BrowserCredentials {
   credentialId: string
-  url: string
+  baseUrl: string
   username: string
   password: string
-  usernameSelector: string
-  passwordSelector: string
-  submitSelector: string
-  successIndicator?: string
   environment?: string
   description?: string
   promptText?: string
