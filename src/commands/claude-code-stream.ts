@@ -43,14 +43,15 @@ const FILE_UPLOAD_TOOL_NAME = 'mcp__ai-support-agent__file_upload'
  * stream-json の NDJSON 1行をパースし、テキストやツール呼び出し情報を処理する
  * sendChunk は fire-and-forget で呼び出される（同期的に状態を返すため）
  *
- * @returns newSentTextLength: 送信済みテキスト長, text: resultイベントのテキスト(undefinedなら未取得)
+ * @returns newSentTextLength: 送信済みテキスト長, text: resultイベントのテキスト(undefinedなら未取得),
+ *          toolExecutionChange: ツール実行状態の変化 ('started' | 'finished' | undefined)
  */
 export function processStreamJsonLine(
   line: string,
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
   pid: number,
   state: { sentTextLength: number; pendingFileUploadIds?: Set<string>; pendingToolNames?: Map<string, string> },
-): { newSentTextLength: number; text?: string } {
+): { newSentTextLength: number; text?: string; toolExecutionChange?: 'started' | 'finished' } {
   const parsed = safeJsonParse<StreamJsonLine>(line)
   if (!parsed) {
     logger.debug(`[chat] stream-json parse error (pid=${pid}): ${line.substring(0, LOG_DEBUG_LIMIT)}`)
@@ -61,10 +62,12 @@ export function processStreamJsonLine(
     let newSentTextLength = state.sentTextLength
     // assistant メッセージからテキストとツール呼び出しを抽出
     let fullText = ''
+    let hasToolUse = false
     for (const block of parsed.message.content) {
       if (block.type === 'text' && block.text) {
         fullText += block.text
       } else if (block.type === 'tool_use' && block.name) {
+        hasToolUse = true
         // ツール呼び出し情報をログ出力
         logger.info(`[chat] tool_use: ${block.name} (pid=${pid})`)
         // tool_call チャンクとして送信（input は大きすぎる場合があるため省略可）
@@ -92,7 +95,7 @@ export function processStreamJsonLine(
       void sendChunk('delta', newText)
       newSentTextLength = fullText.length
     }
-    return { newSentTextLength }
+    return { newSentTextLength, toolExecutionChange: hasToolUse ? 'started' : undefined }
   }
 
   // user メッセージ内の tool_result を処理
@@ -105,6 +108,7 @@ export function processStreamJsonLine(
   // リセットしないと、新メッセージのテキストが前メッセージより短い場合に
   // delta チャンクが送信されず、テキストが欠落する。
   if (parsed.type === 'user' && parsed.message?.content) {
+    let hasActualToolResult = false
     for (const block of parsed.message.content) {
       if (block.type !== 'tool_result' || !block.tool_use_id) continue
 
@@ -112,6 +116,8 @@ export function processStreamJsonLine(
       if (Array.isArray(block.content) && block.content.length > 0 && block.content[0].type === 'tool_reference') {
         continue
       }
+
+      hasActualToolResult = true
 
       // ツール名を復元
       const toolName = state.pendingToolNames?.get(block.tool_use_id) ?? 'unknown'
@@ -152,7 +158,8 @@ export function processStreamJsonLine(
     }
     // sentTextLength をリセット: 次の assistant メッセージは新しいメッセージなので
     // 前メッセージのテキスト長に基づく重複防止は不要
-    return { newSentTextLength: 0 }
+    // tool_reference のみの場合はツール実行中のまま（タイマー再開しない）
+    return { newSentTextLength: 0, toolExecutionChange: hasActualToolResult ? 'finished' : undefined }
   }
 
   if (parsed.type === 'result' && parsed.result !== undefined) {
