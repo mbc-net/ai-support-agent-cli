@@ -41,6 +41,11 @@ export function buildMcpConfig(
 }
 
 /**
+ * ブラウザローカルポートの環境変数名
+ */
+export const BROWSER_LOCAL_PORT_ENV = 'AI_SUPPORT_BROWSER_LOCAL_PORT'
+
+/**
  * MCP 設定ファイルを書き出す
  *
  * 0o600 権限で作成し、token は環境変数参照にする。

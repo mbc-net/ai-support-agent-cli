@@ -3,6 +3,7 @@
  *
  * Phase 1: browser_navigate, browser_close
  * Phase 2: browser_click, browser_fill, browser_get_text, browser_login
+ * Phase 3: browser_open_session, browser_close_session, browser_set_variable, browser_get_variable, browser_list_variables
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -10,32 +11,61 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import { logger } from '../../logger'
+import { BrowserProxySession } from './browser/browser-proxy-session'
 import { validateUrl } from './browser/browser-security'
 import { BrowserSession } from './browser/browser-session'
+import { BrowserSessionManager } from './browser/browser-session-manager'
 import { isPlaywrightAvailable } from './browser/playwright-loader'
 import { mcpErrorResponse, mcpTextImageResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
 
 /**
+ * Get the current browser session, using the environment variable or the manager's first session.
+ * When running in a child process (MCP server), uses the local HTTP proxy if available.
+ */
+function getActiveSession(sessionManager: BrowserSessionManager, fallbackSession: BrowserSession): BrowserSession | BrowserProxySession {
+  const browserSessionId = process.env.AI_SUPPORT_BROWSER_SESSION_ID
+  const localPort = process.env.AI_SUPPORT_BROWSER_LOCAL_PORT
+
+  if (browserSessionId) {
+    // First try in-process session (main process context)
+    const session = sessionManager.get(browserSessionId)
+    if (session) return session
+
+    // If local port is set, use proxy session (child process context)
+    if (localPort) {
+      logger.debug(`[browser] Using proxy session: sessionId=${browserSessionId}, port=${localPort}`)
+      return new BrowserProxySession(`http://127.0.0.1:${localPort}`, browserSessionId)
+    }
+  }
+  // Fall back to the default singleton session
+  return fallbackSession
+}
+
+/**
  * Register all browser tools on the MCP server.
  */
-export function registerBrowserTools(server: McpServer, apiClient: ApiClient): void {
+export function registerBrowserTools(server: McpServer, apiClient: ApiClient, sessionManager?: BrowserSessionManager): void {
   // Skip registration entirely if Playwright is not installed
   if (!isPlaywrightAvailable()) {
     logger.debug('[browser] Playwright not installed, skipping browser tool registration')
     return
   }
 
-  const session = new BrowserSession()
+  const defaultSession = new BrowserSession()
+  const manager = sessionManager ?? new BrowserSessionManager()
 
-  registerBrowserNavigateTool(server, session)
-  registerBrowserCloseTool(server, session)
-  registerBrowserClickTool(server, session)
-  registerBrowserFillTool(server, session)
-  registerBrowserGetTextTool(server, session)
-  registerBrowserLoginTool(server, session, apiClient)
+  registerBrowserNavigateTool(server, defaultSession, manager)
+  registerBrowserCloseTool(server, defaultSession, manager)
+  registerBrowserClickTool(server, defaultSession, manager)
+  registerBrowserFillTool(server, defaultSession, manager)
+  registerBrowserGetTextTool(server, defaultSession, manager)
+  registerBrowserLoginTool(server, defaultSession, manager, apiClient)
+  registerBrowserSetVariableTool(server, defaultSession, manager)
+  registerBrowserGetVariableTool(server, defaultSession, manager)
+  registerBrowserListVariablesTool(server, defaultSession, manager)
 }
 
-function registerBrowserNavigateTool(server: McpServer, session: BrowserSession): void {
+function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {
   server.tool(
     'browser_navigate',
     'Navigate to a URL and take a screenshot. Returns the page screenshot, title, and URL.',
@@ -55,13 +85,23 @@ function registerBrowserNavigateTool(server: McpServer, session: BrowserSession)
         return mcpErrorResponse(validation.reason!)
       }
 
+      const session = getActiveSession(manager, defaultSession)
+
+      logger.debug(`[browser] Navigating to: ${url}`)
+
+      if (session instanceof BrowserProxySession) {
+        const result = await session.navigate(url, { waitForSelector, waitForTimeout, fullPage: fullPage ?? true })
+        const base64 = result.screenshot.toString('base64')
+        session.actionLog.add('chat', 'navigate', url)
+        return mcpTextImageResponse(`Page: ${result.title}\nURL: ${result.url}`, base64, 'image/png')
+      }
+
       if (viewport) {
         await session.setViewport(viewport.width, viewport.height)
       }
 
       const page = await session.getPage()
 
-      logger.debug(`[browser] Navigating to: ${url}`)
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
       if (waitForSelector) {
@@ -78,19 +118,26 @@ function registerBrowserNavigateTool(server: McpServer, session: BrowserSession)
       const screenshotBuffer = await session.screenshot(fullPage ?? true)
       const base64 = screenshotBuffer.toString('base64')
 
+      session.actionLog.add('chat', 'navigate', url)
+
       return mcpTextImageResponse(`Page: ${title}\nURL: ${currentUrl}`, base64, 'image/png')
     }),
   )
 }
 
-function registerBrowserCloseTool(server: McpServer, session: BrowserSession): void {
+function registerBrowserCloseTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {
   server.tool(
     'browser_close',
     'Close the browser session and free resources.',
     {},
     async () => withMcpErrorHandling(async () => {
+      const session = getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
         return mcpTextResponse('No active browser session.')
+      }
+      // Proxy sessions cannot be closed from MCP child process
+      if (session instanceof BrowserProxySession) {
+        return mcpTextResponse('Browser session is managed by the main process.')
       }
       await session.close()
       return mcpTextResponse('Browser session closed.')
@@ -98,7 +145,7 @@ function registerBrowserCloseTool(server: McpServer, session: BrowserSession): v
   )
 }
 
-function registerBrowserClickTool(server: McpServer, session: BrowserSession): void {
+function registerBrowserClickTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {
   server.tool(
     'browser_click',
     'Click an element on the page. Optionally wait for navigation and take a screenshot.',
@@ -108,13 +155,25 @@ function registerBrowserClickTool(server: McpServer, session: BrowserSession): v
       screenshot: z.boolean().optional().default(true).describe('Take screenshot after click (default: true)'),
     },
     async ({ selector, waitForNavigation, screenshot }) => withMcpErrorHandling(async () => {
+      const session = getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
         return mcpErrorResponse('No active browser session. Use browser_navigate first.')
       }
 
+      logger.debug(`[browser] Clicking: ${selector}`)
+
+      if (session instanceof BrowserProxySession) {
+        const result = await session.click(selector, { waitForNavigation: waitForNavigation ?? false, screenshot: screenshot ?? true })
+        const statusText = `Clicked: ${selector}\nPage: ${result.title}\nURL: ${result.url}`
+        session.actionLog.add('chat', 'click', selector)
+        if (result.screenshot) {
+          return mcpTextImageResponse(statusText, result.screenshot.toString('base64'), 'image/png')
+        }
+        return mcpTextResponse(statusText)
+      }
+
       const page = await session.getPage()
 
-      logger.debug(`[browser] Clicking: ${selector}`)
       if (waitForNavigation) {
         await Promise.all([
           page.waitForNavigation({ timeout: 30000 }).catch(() => { /* navigation may not happen */ }),
@@ -128,6 +187,8 @@ function registerBrowserClickTool(server: McpServer, session: BrowserSession): v
       const currentUrl: string = page.url()
       const statusText = `Clicked: ${selector}\nPage: ${title}\nURL: ${currentUrl}`
 
+      session.actionLog.add('chat', 'click', selector)
+
       if (screenshot) {
         const screenshotBuffer = await session.screenshot(true)
         const base64 = screenshotBuffer.toString('base64')
@@ -139,7 +200,7 @@ function registerBrowserClickTool(server: McpServer, session: BrowserSession): v
   )
 }
 
-function registerBrowserFillTool(server: McpServer, session: BrowserSession): void {
+function registerBrowserFillTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {
   server.tool(
     'browser_fill',
     'Fill a form field with a value.',
@@ -149,14 +210,26 @@ function registerBrowserFillTool(server: McpServer, session: BrowserSession): vo
       screenshot: z.boolean().optional().default(false).describe('Take screenshot after fill'),
     },
     async ({ selector, value, screenshot }) => withMcpErrorHandling(async () => {
+      const session = getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
         return mcpErrorResponse('No active browser session. Use browser_navigate first.')
       }
 
-      const page = await session.getPage()
-
       logger.debug(`[browser] Filling: ${selector}`)
+
+      if (session instanceof BrowserProxySession) {
+        const screenshotBuf = await session.fill(selector, value, screenshot ?? false)
+        session.actionLog.add('chat', 'fill', selector)
+        if (screenshotBuf) {
+          return mcpTextImageResponse(`Filled: ${selector}`, screenshotBuf.toString('base64'), 'image/png')
+        }
+        return mcpTextResponse(`Filled: ${selector}`)
+      }
+
+      const page = await session.getPage()
       await page.fill(selector, value, { timeout: 10000 })
+
+      session.actionLog.add('chat', 'fill', selector)
 
       if (screenshot) {
         const screenshotBuffer = await session.screenshot(true)
@@ -169,7 +242,7 @@ function registerBrowserFillTool(server: McpServer, session: BrowserSession): vo
   )
 }
 
-function registerBrowserGetTextTool(server: McpServer, session: BrowserSession): void {
+function registerBrowserGetTextTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {
   server.tool(
     'browser_get_text',
     'Get text content from the page or a specific element.',
@@ -177,14 +250,20 @@ function registerBrowserGetTextTool(server: McpServer, session: BrowserSession):
       selector: z.string().optional().describe('CSS selector (default: body)'),
     },
     async ({ selector }) => withMcpErrorHandling(async () => {
+      const session = getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
         return mcpErrorResponse('No active browser session. Use browser_navigate first.')
       }
 
-      const page = await session.getPage()
       const target = selector ?? 'body'
-
       logger.debug(`[browser] Getting text: ${target}`)
+
+      if (session instanceof BrowserProxySession) {
+        const text = await session.getText(target)
+        return mcpTextResponse(text)
+      }
+
+      const page = await session.getPage()
       const text: string = await page.locator(target).innerText({ timeout: 10000 })
 
       // Truncate to 50KB to avoid overwhelming the context
@@ -198,7 +277,8 @@ function registerBrowserGetTextTool(server: McpServer, session: BrowserSession):
 
 function registerBrowserLoginTool(
   server: McpServer,
-  session: BrowserSession,
+  defaultSession: BrowserSession,
+  manager: BrowserSessionManager,
   apiClient: ApiClient,
 ): void {
   server.tool(
@@ -210,6 +290,8 @@ function registerBrowserLoginTool(
     async ({ credentialName }) => withMcpErrorHandling(async () => {
       logger.debug(`[browser] Logging in with credential: ${credentialName}`)
 
+      const session = getActiveSession(manager, defaultSession)
+
       // Fetch credentials from API
       const credentials = await apiClient.getBrowserCredentials(credentialName)
 
@@ -218,14 +300,27 @@ function registerBrowserLoginTool(
         return mcpErrorResponse(validation.reason!)
       }
 
-      // Navigate to base URL
-      const page = await session.getPage()
-      await page.goto(credentials.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      let title: string
+      let currentUrl: string
+      let base64: string
 
-      const title: string = await page.title()
-      const currentUrl: string = page.url()
-      const screenshotBuffer = await session.screenshot(true)
-      const base64 = screenshotBuffer.toString('base64')
+      if (session instanceof BrowserProxySession) {
+        const result = await session.navigate(credentials.baseUrl)
+        title = result.title
+        currentUrl = result.url
+        base64 = result.screenshot.toString('base64')
+        session.actionLog.add('chat', 'login', credentialName)
+      } else {
+        // Navigate to base URL
+        const page = await session.getPage()
+        await page.goto(credentials.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+
+        title = await page.title()
+        currentUrl = page.url()
+        const screenshotBuffer = await session.screenshot(true)
+        base64 = screenshotBuffer.toString('base64')
+        session.actionLog.add('chat', 'login', credentialName)
+      }
 
       let statusText = `Login page loaded.\nPage: ${title}\nURL: ${currentUrl}\n\nCredentials:\n- Username: ${credentials.username}\n- Password: [provided, use browser_fill to enter]\n\nUse browser_fill to enter the username and password into the appropriate fields, then browser_click to submit the form.`
 
@@ -243,6 +338,59 @@ function registerBrowserLoginTool(
           { type: 'text' as const, text: `__CREDENTIALS__\nusername: ${credentials.username}\npassword: ${credentials.password}` },
         ],
       }
+    }),
+  )
+}
+
+// --- Session variable tools ---
+
+function registerBrowserSetVariableTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {
+  server.tool(
+    'browser_set_variable',
+    'Set a temporary variable in the current browser session. Variables are session-scoped and lost when the session closes.',
+    {
+      name: z.string().describe('Variable name'),
+      value: z.string().describe('Variable value'),
+    },
+    async ({ name, value }) => withMcpErrorHandling(async () => {
+      const session = getActiveSession(manager, defaultSession)
+      session.variables.set(name, value)
+      return mcpTextResponse(`Variable set: ${name}`)
+    }),
+  )
+}
+
+function registerBrowserGetVariableTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {
+  server.tool(
+    'browser_get_variable',
+    'Get the value of a temporary variable from the current browser session.',
+    {
+      name: z.string().describe('Variable name'),
+    },
+    async ({ name }) => withMcpErrorHandling(async () => {
+      const session = getActiveSession(manager, defaultSession)
+      const value = session.variables.get(name)
+      if (value === undefined) {
+        return mcpErrorResponse(`Variable not found: ${name}`)
+      }
+      return mcpTextResponse(value)
+    }),
+  )
+}
+
+function registerBrowserListVariablesTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {
+  server.tool(
+    'browser_list_variables',
+    'List all temporary variables in the current browser session.',
+    {},
+    async () => withMcpErrorHandling(async () => {
+      const session = getActiveSession(manager, defaultSession)
+      const entries = Array.from(session.variables.entries())
+      if (entries.length === 0) {
+        return mcpTextResponse('No variables set.')
+      }
+      const text = entries.map(([k, v]) => `${k}=${v}`).join('\n')
+      return mcpTextResponse(text)
     }),
   )
 }

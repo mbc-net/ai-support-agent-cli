@@ -15,6 +15,9 @@ jest.mock('../../src/logger', () => ({
 jest.mock('../../src/vscode/vscode-server')
 jest.mock('../../src/vscode/vscode-http-proxy')
 jest.mock('../../src/vscode/vscode-ws-proxy')
+jest.mock('../../src/mcp/tools/browser/browser-security', () => ({
+  validateUrl: jest.fn().mockReturnValue({ valid: true }),
+}))
 
 describe('VsCodeTunnelWebSocket', () => {
   let tunnel: VsCodeTunnelWebSocket
@@ -589,6 +592,521 @@ describe('VsCodeTunnelWebSocket', () => {
       expect((tunnel as any).vsCodeServer).toBeNull()
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((tunnel as any).wsProxy).toBeNull()
+    })
+  })
+
+  // --- Browser handler tests ---
+
+  describe('handleBrowserOpen', () => {
+    it('should send error if sessionId is missing', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({ type: 'browser_open' })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({ type: 'error', message: 'Missing sessionId' })
+    })
+
+    it('should create session, start live view and send browser_ready', async () => {
+      const mockPage = {
+        goto: jest.fn().mockResolvedValue(undefined),
+        url: jest.fn().mockReturnValue('about:blank'),
+        title: jest.fn().mockResolvedValue(''),
+        screenshot: jest.fn().mockResolvedValue(Buffer.from('fake')),
+      }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
+        getPageTitle: jest.fn().mockResolvedValue(''),
+      }
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({ type: 'browser_open', sessionId: 'sess-b1' })
+
+      expect(tunnel.browserSessionManager.getOrCreate).toHaveBeenCalledWith('sess-b1')
+      expect(mockSession.startLiveView).toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({
+        type: 'browser_ready',
+        sessionId: 'sess-b1',
+        currentUrl: 'about:blank',
+      })
+    })
+
+    it('should navigate to URL if provided', async () => {
+      const mockPage = {
+        goto: jest.fn().mockResolvedValue(undefined),
+        url: jest.fn().mockReturnValue('https://example.com'),
+        title: jest.fn().mockResolvedValue('Example'),
+        screenshot: jest.fn().mockResolvedValue(Buffer.from('fake')),
+      }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('https://example.com'),
+        getPageTitle: jest.fn().mockResolvedValue('Example'),
+      }
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-b2',
+        url: 'https://example.com',
+      })
+
+      expect(mockPage.goto).toHaveBeenCalledWith('https://example.com', expect.any(Object))
+    })
+
+    it('should link conversation if conversationId provided', async () => {
+      const mockPage = {
+        url: jest.fn().mockReturnValue('about:blank'),
+        title: jest.fn().mockResolvedValue(''),
+        screenshot: jest.fn().mockResolvedValue(Buffer.from('fake')),
+      }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
+        getPageTitle: jest.fn().mockResolvedValue(''),
+      }
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+      tunnel.browserSessionManager.linkConversation = jest.fn()
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-b3',
+        conversationId: 'conv-1',
+      })
+
+      expect(tunnel.browserSessionManager.linkConversation).toHaveBeenCalledWith('conv-1', 'sess-b3')
+    })
+
+    it('should send browser_stopped on error', async () => {
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockRejectedValue(new Error('max reached'))
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({ type: 'browser_open', sessionId: 'sess-b4' })
+
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('browser_stopped')
+      expect(sentMessages[0].sessionId).toBe('sess-b4')
+      expect(sentMessages[0].reason).toContain('max reached')
+    })
+  })
+
+  describe('handleBrowserClose', () => {
+    it('should return early if no sessionId', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserClose({ type: 'browser_close' })
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should close session and send browser_stopped', async () => {
+      const mockSession = { stopLiveView: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      tunnel.browserSessionManager.close = jest.fn().mockResolvedValue(undefined)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserClose({ type: 'browser_close', sessionId: 'sess-b5' })
+
+      expect(mockSession.stopLiveView).toHaveBeenCalled()
+      expect(tunnel.browserSessionManager.close).toHaveBeenCalledWith('sess-b5')
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({ type: 'browser_stopped', sessionId: 'sess-b5', reason: 'closed' })
+    })
+  })
+
+  describe('handleBrowserNavigate', () => {
+    it('should do nothing if no sessionId or url', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserNavigate({ type: 'browser_navigate' })
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should send error if session not found', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserNavigate({
+        type: 'browser_navigate',
+        sessionId: 'sess-b6',
+        url: 'https://example.com',
+      })
+
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({ type: 'error', sessionId: 'sess-b6', message: 'Browser session not found' })
+    })
+
+    it('should send error for invalid URL', async () => {
+      const mockSession = { getPage: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+
+      const { validateUrl } = require('../../src/mcp/tools/browser/browser-security')
+      validateUrl.mockReturnValueOnce({ valid: false, reason: 'Blocked protocol' })
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserNavigate({
+        type: 'browser_navigate',
+        sessionId: 'sess-b7',
+        url: 'file:///etc/passwd',
+      })
+
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({ type: 'error', sessionId: 'sess-b7' })
+    })
+
+    it('should navigate to URL', async () => {
+      const mockPage = { goto: jest.fn().mockResolvedValue(undefined) }
+      const mockSession = { getPage: jest.fn().mockResolvedValue(mockPage) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserNavigate({
+        type: 'browser_navigate',
+        sessionId: 'sess-b8',
+        url: 'https://example.com',
+      })
+
+      expect(mockPage.goto).toHaveBeenCalledWith('https://example.com', expect.any(Object))
+    })
+
+    it('should send error on navigation failure', async () => {
+      const mockPage = { goto: jest.fn().mockRejectedValue(new Error('timeout')) }
+      const mockSession = { getPage: jest.fn().mockResolvedValue(mockPage) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserNavigate({
+        type: 'browser_navigate',
+        sessionId: 'sess-b9',
+        url: 'https://example.com',
+      })
+
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+      expect(sentMessages[0].message).toContain('Navigation failed')
+    })
+  })
+
+  describe('handleBrowserGoBack', () => {
+    it('should do nothing if session not found', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserGoBack({ type: 'browser_go_back', sessionId: 'no-sess' })
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should call goBack on session', async () => {
+      const mockSession = { goBack: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserGoBack({ type: 'browser_go_back', sessionId: 'sess-b10' })
+      expect(mockSession.goBack).toHaveBeenCalled()
+    })
+  })
+
+  describe('handleBrowserGoForward', () => {
+    it('should call goForward on session', async () => {
+      const mockSession = { goForward: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserGoForward({ type: 'browser_go_forward', sessionId: 'sess-b11' })
+      expect(mockSession.goForward).toHaveBeenCalled()
+    })
+  })
+
+  describe('handleBrowserReload', () => {
+    it('should call reload on session', async () => {
+      const mockSession = { reload: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserReload({ type: 'browser_reload', sessionId: 'sess-b12' })
+      expect(mockSession.reload).toHaveBeenCalled()
+    })
+  })
+
+  describe('handleBrowserMouseClick', () => {
+    it('should do nothing if missing coordinates', async () => {
+      const mockSession = { executeMouseClick: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseClick({ type: 'browser_mouse_click', sessionId: 'sess-b13' })
+      expect(mockSession.executeMouseClick).not.toHaveBeenCalled()
+    })
+
+    it('should call executeMouseClick with coordinates', async () => {
+      const mockSession = { executeMouseClick: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseClick({
+        type: 'browser_mouse_click',
+        sessionId: 'sess-b14',
+        x: 100,
+        y: 200,
+        button: 'left',
+        clickCount: 2,
+      })
+      expect(mockSession.executeMouseClick).toHaveBeenCalledWith(100, 200, 'left', 2)
+    })
+  })
+
+  describe('handleBrowserMouseWheel', () => {
+    it('should do nothing if missing delta', async () => {
+      const mockSession = { executeMouseWheel: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseWheel({ type: 'browser_mouse_wheel', sessionId: 'sess-b15' })
+      expect(mockSession.executeMouseWheel).not.toHaveBeenCalled()
+    })
+
+    it('should call executeMouseWheel', async () => {
+      const mockSession = { executeMouseWheel: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseWheel({
+        type: 'browser_mouse_wheel',
+        sessionId: 'sess-b16',
+        deltaX: 0,
+        deltaY: 100,
+      })
+      expect(mockSession.executeMouseWheel).toHaveBeenCalledWith(0, 100)
+    })
+  })
+
+  describe('handleBrowserKeyboardType', () => {
+    it('should do nothing if no text', async () => {
+      const mockSession = { executeKeyboardType: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserKeyboardType({ type: 'browser_keyboard_type', sessionId: 'sess-b17' })
+      expect(mockSession.executeKeyboardType).not.toHaveBeenCalled()
+    })
+
+    it('should call executeKeyboardType', async () => {
+      const mockSession = { executeKeyboardType: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserKeyboardType({
+        type: 'browser_keyboard_type',
+        sessionId: 'sess-b18',
+        text: 'hello',
+      })
+      expect(mockSession.executeKeyboardType).toHaveBeenCalledWith('hello')
+    })
+  })
+
+  describe('handleBrowserKeyboardPress', () => {
+    it('should do nothing if no key', async () => {
+      const mockSession = { executeKeyboardPress: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserKeyboardPress({ type: 'browser_keyboard_press', sessionId: 'sess-b19' })
+      expect(mockSession.executeKeyboardPress).not.toHaveBeenCalled()
+    })
+
+    it('should call executeKeyboardPress with modifiers', async () => {
+      const mockSession = { executeKeyboardPress: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserKeyboardPress({
+        type: 'browser_keyboard_press',
+        sessionId: 'sess-b20',
+        key: 'Enter',
+        modifiers: ['Control'],
+      })
+      expect(mockSession.executeKeyboardPress).toHaveBeenCalledWith('Enter', ['Control'])
+    })
+  })
+
+  describe('handleBrowserScreenshot', () => {
+    it('should do nothing if no sessionId', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserScreenshot({ type: 'browser_screenshot' })
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should send error if session not found', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserScreenshot({ type: 'browser_screenshot', sessionId: 'sess-b21' })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({ type: 'error', sessionId: 'sess-b21' })
+    })
+
+    it('should take screenshot and send result', async () => {
+      const mockSession = {
+        screenshot: jest.fn().mockResolvedValue(Buffer.from('screenshot-data')),
+        getCurrentUrl: jest.fn().mockReturnValue('https://example.com'),
+        getPageTitle: jest.fn().mockResolvedValue('Example'),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserScreenshot({ type: 'browser_screenshot', sessionId: 'sess-b22' })
+
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({
+        type: 'browser_screenshot_result',
+        sessionId: 'sess-b22',
+        body: Buffer.from('screenshot-data').toString('base64'),
+        currentUrl: 'https://example.com',
+        pageTitle: 'Example',
+      })
+    })
+
+    it('should send error on screenshot failure', async () => {
+      const mockSession = {
+        screenshot: jest.fn().mockRejectedValue(new Error('no page')),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserScreenshot({ type: 'browser_screenshot', sessionId: 'sess-b23' })
+
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+      expect(sentMessages[0].message).toContain('Screenshot failed')
+    })
+  })
+
+  describe('handleBrowserViewport', () => {
+    it('should do nothing if missing dimensions', async () => {
+      const mockSession = { setViewport: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserViewport({ type: 'browser_viewport', sessionId: 'sess-b24' })
+      expect(mockSession.setViewport).not.toHaveBeenCalled()
+    })
+
+    it('should call setViewport', async () => {
+      const mockSession = { setViewport: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserViewport({
+        type: 'browser_viewport',
+        sessionId: 'sess-b25',
+        width: 1920,
+        height: 1080,
+      })
+      expect(mockSession.setViewport).toHaveBeenCalledWith(1920, 1080)
+    })
+  })
+
+  describe('onParsedMessage - browser routing', () => {
+    it('should dispatch browser_open to handleBrowserOpen', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_open' })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1)
+      expect(sentMessages[0].type).toBe('error')
+      expect(sentMessages[0].message).toBe('Missing sessionId')
+    })
+
+    it('should dispatch browser_close to handleBrowserClose', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_close', sessionId: 'sess-x' })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({ type: 'browser_stopped', sessionId: 'sess-x' })
+    })
+
+    it('should dispatch browser_navigate', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_navigate', sessionId: 'sess-y', url: 'https://test.com' })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1)
+    })
+
+    it('should dispatch browser_go_back', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_go_back', sessionId: 'sess-z' })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0) // no session, early return
+    })
+
+    it('should dispatch browser_go_forward', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_go_forward', sessionId: 'sess-z' })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should dispatch browser_reload', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_reload', sessionId: 'sess-z' })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should dispatch browser_mouse_click', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_mouse_click', sessionId: 'sess-z', x: 10, y: 20 })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should dispatch browser_mouse_wheel', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_mouse_wheel', sessionId: 'sess-z', deltaX: 0, deltaY: 10 })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should dispatch browser_keyboard_type', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_keyboard_type', sessionId: 'sess-z', text: 'hi' })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should dispatch browser_keyboard_press', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_keyboard_press', sessionId: 'sess-z', key: 'Enter' })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should dispatch browser_screenshot', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_screenshot', sessionId: 'sess-z' })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1) // error: session not found
+    })
+
+    it('should dispatch browser_viewport', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_viewport', sessionId: 'sess-z', width: 1024, height: 768 })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0) // no session, early return
+    })
+  })
+
+  describe('onParsedMessage - port forward routing', () => {
+    it('should dispatch port_forward_open', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'port_forward_open', sessionId: 'pf-1', targetPort: 8080 })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({ type: 'port_forward_ready', sessionId: 'pf-1', targetPort: 8080 })
+    })
+
+    it('should dispatch port_forward_close', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'port_forward_close', sessionId: 'pf-2' })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({ type: 'port_forward_stopped', sessionId: 'pf-2' })
     })
   })
 })

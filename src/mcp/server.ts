@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 import { ApiClient } from '../api-client'
 import { registerBrowserTools } from './tools/browser'
+import { BrowserSessionManager } from './tools/browser/browser-session-manager'
 import { registerCredentialsTool } from './tools/credentials'
 import { registerDbQueryTool } from './tools/db-query'
 import { registerDbSchemasTool } from './tools/db-schemas'
@@ -13,7 +14,7 @@ import { registerReadConversationFileTool } from './tools/read-conversation-file
 /**
  * MCP サーバーを作成する
  */
-export function createMcpServer(apiClient: ApiClient, projectCode: string): McpServer {
+export function createMcpServer(apiClient: ApiClient, projectCode: string, browserSessionManager?: BrowserSessionManager): McpServer {
   const server = new McpServer({
     name: 'ai-support-agent',
     version: '1.0.0',
@@ -25,7 +26,7 @@ export function createMcpServer(apiClient: ApiClient, projectCode: string): McpS
   registerFileUploadTool(server, apiClient)
   registerProjectInfoTool(server, apiClient, projectCode)
   registerReadConversationFileTool(server, apiClient)
-  registerBrowserTools(server, apiClient)
+  registerBrowserTools(server, apiClient, browserSessionManager)
 
   return server
 }
