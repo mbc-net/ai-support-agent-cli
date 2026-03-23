@@ -71,6 +71,7 @@ export const DEFAULT_MAX_TOKENS = 4096
 
 // Chat executor
 export const CHAT_TIMEOUT = 300_000
+export const CHAT_TOOL_EXECUTION_TIMEOUT = 1_800_000
 export const CHAT_SIGKILL_DELAY = 5_000
 export const CLAUDE_DETECT_TIMEOUT_MS = 5_000
 export const DEFAULT_APPSYNC_TIMEOUT_MS = 300_000
