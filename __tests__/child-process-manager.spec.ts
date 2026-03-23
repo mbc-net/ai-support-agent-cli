@@ -142,6 +142,90 @@ describe('ChildProcessManager', () => {
     })
   })
 
+  describe('isAnyBusy', () => {
+    it('should return false when no processes are running', async () => {
+      const result = await manager.isAnyBusy()
+      expect(result).toBe(false)
+    })
+
+    it('should return false when all children report not busy', async () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value
+
+      // Simulate child responding to busy_query
+      child.send.mockImplementation((msg: { type: string }) => {
+        if (msg.type === 'busy_query') {
+          // Trigger the message handler with busy_response
+          child._emit('message', { type: 'busy_response', projectCode: 'proj-a', busy: false })
+        }
+      })
+
+      const result = await manager.isAnyBusy()
+      expect(result).toBe(false)
+    })
+
+    it('should return true when any child reports busy', async () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value
+
+      child.send.mockImplementation((msg: { type: string }) => {
+        if (msg.type === 'busy_query') {
+          child._emit('message', { type: 'busy_response', projectCode: 'proj-a', busy: true })
+        }
+      })
+
+      const result = await manager.isAnyBusy()
+      expect(result).toBe(true)
+    })
+
+    it('should return false on timeout when child does not respond', async () => {
+      manager.forkProject(project, 'agent-1', options)
+      // Don't respond to busy_query — let it timeout
+
+      jest.useFakeTimers()
+      const busyPromise = manager.isAnyBusy(100)
+      jest.advanceTimersByTime(200)
+      const result = await busyPromise
+      expect(result).toBe(false)
+      jest.useRealTimers()
+    })
+
+    it('should handle multiple children with mixed busy states', async () => {
+      manager.forkProject(project, 'agent-1', options)
+      manager.forkProject(
+        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        'agent-1',
+        options,
+      )
+
+      const children = fork.mock.results.map((r: { value: unknown }) => r.value) as any[]
+
+      // proj-a is not busy, proj-b is busy
+      children[0].send.mockImplementation((msg: { type: string }) => {
+        if (msg.type === 'busy_query') {
+          children[0]._emit('message', { type: 'busy_response', projectCode: 'proj-a', busy: false })
+        }
+      })
+      children[1].send.mockImplementation((msg: { type: string }) => {
+        if (msg.type === 'busy_query') {
+          children[1]._emit('message', { type: 'busy_response', projectCode: 'proj-b', busy: true })
+        }
+      })
+
+      const result = await manager.isAnyBusy()
+      expect(result).toBe(true)
+    })
+
+    it('should skip disconnected children', async () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value
+      child.connected = false
+
+      const result = await manager.isAnyBusy()
+      expect(result).toBe(false)
+    })
+  })
+
   describe('stopAll', () => {
     it('should send shutdown to all children and wait for exit', async () => {
       manager.forkProject(project, 'agent-1', options)

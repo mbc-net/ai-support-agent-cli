@@ -12,12 +12,14 @@ const mockStart = jest.fn()
 const mockStop = jest.fn()
 const mockGetClient = jest.fn()
 const mockUpdateToken = jest.fn()
+const mockIsBusy = jest.fn().mockReturnValue(false)
 jest.mock('../src/project-agent', () => ({
   ProjectAgent: jest.fn().mockImplementation(() => ({
     start: mockStart,
     stop: mockStop,
     getClient: mockGetClient,
     updateToken: mockUpdateToken,
+    isBusy: mockIsBusy,
     project: { projectCode: 'test-proj' },
   })),
 }))
@@ -216,6 +218,60 @@ describe('project-worker', () => {
 
       // Should not throw
       expect(mockUpdateToken).not.toHaveBeenCalled()
+    })
+
+    it('should handle busy_query message and respond with busy_response', async () => {
+      const worker = loadWorker()
+      worker.startWorker()
+
+      // Start agent first
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      processSendSpy.mockClear()
+
+      // Agent is not busy
+      mockIsBusy.mockReturnValue(false)
+      emitProcessEvent('message', { type: 'busy_query' })
+
+      expect(processSendSpy).toHaveBeenCalledWith({
+        type: 'busy_response',
+        projectCode: 'test-proj',
+        busy: false,
+      })
+    })
+
+    it('should respond busy=true when agent is processing', async () => {
+      const worker = loadWorker()
+      worker.startWorker()
+
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      processSendSpy.mockClear()
+
+      mockIsBusy.mockReturnValue(true)
+      emitProcessEvent('message', { type: 'busy_query' })
+
+      expect(processSendSpy).toHaveBeenCalledWith({
+        type: 'busy_response',
+        projectCode: 'test-proj',
+        busy: true,
+      })
+    })
+
+    it('should respond busy=false when agent is not started', () => {
+      const worker = loadWorker()
+      worker.startWorker()
+
+      // No agent started, send busy_query
+      emitProcessEvent('message', { type: 'busy_query' })
+
+      expect(processSendSpy).toHaveBeenCalledWith({
+        type: 'busy_response',
+        projectCode: 'unknown',
+        busy: false,
+      })
     })
 
     it('should ignore non-IPC messages', () => {

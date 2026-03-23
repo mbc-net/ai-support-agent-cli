@@ -6,7 +6,7 @@ import { logger } from '../src/logger'
 import { syncProjectConfig } from '../src/project-config-sync'
 import { ProjectAgent } from '../src/project-agent'
 import { syncRepositories } from '../src/repo-sync'
-import { detectInstallMethod, performUpdate, reExecProcess } from '../src/update-checker'
+import { detectChannelFromVersion, detectInstallMethod, performUpdate, reExecProcess } from '../src/update-checker'
 
 jest.mock('../src/api-client')
 jest.mock('../src/appsync-subscriber')
@@ -36,7 +36,13 @@ jest.mock('../src/repo-sync', () => ({
 jest.mock('../src/ssh-config-setup', () => ({
   setupSshConfig: jest.fn().mockResolvedValue(undefined),
 }))
+jest.mock('../src/pending-result-store', () => ({
+  savePendingResult: jest.fn(),
+  removePendingResult: jest.fn(),
+  submitPendingResults: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('../src/update-checker', () => ({
+  detectChannelFromVersion: jest.fn().mockReturnValue('latest'),
   detectInstallMethod: jest.fn().mockReturnValue('global'),
   performUpdate: jest.fn().mockResolvedValue({ success: true }),
   reExecProcess: jest.fn(),
@@ -1281,7 +1287,7 @@ describe('ProjectAgent', () => {
       await agent.performUpdate()
 
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Update requested'))
-      expect(mockClient.getVersionInfo).toHaveBeenCalled()
+      expect(mockClient.getVersionInfo).toHaveBeenCalledWith('latest')
       expect(mockedDetectInstallMethod).toHaveBeenCalled()
       expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.1', 'global')
       expect(logger.success).toHaveBeenCalledWith(expect.stringContaining('Update to 0.0.1 successful'))
@@ -1291,6 +1297,29 @@ describe('ProjectAgent', () => {
       await jest.advanceTimersByTimeAsync(1000)
 
       expect(mockedReExecProcess).toHaveBeenCalledWith('global')
+    })
+
+    it('should use beta channel when running a beta version', async () => {
+      const mockedDetectChannel = detectChannelFromVersion as jest.MockedFunction<typeof detectChannelFromVersion>
+      mockedDetectChannel.mockReturnValueOnce('beta')
+
+      mockClient.getVersionInfo.mockResolvedValueOnce({
+        latestVersion: '0.0.22-beta.3',
+        minimumVersion: '0.0.0',
+        channel: 'beta',
+        channels: {},
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      await agent.performUpdate()
+
+      expect(mockClient.getVersionInfo).toHaveBeenCalledWith('beta')
+      expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.22-beta.3', 'global')
+
+      agent.stop()
     })
 
     it('should throw error when update fails', async () => {
@@ -1314,6 +1343,13 @@ describe('ProjectAgent', () => {
 
       expect(mockClient.updateToken).toBeDefined()
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('runner.tokenUpdated'))
+    })
+  })
+
+  describe('isBusy', () => {
+    it('should return false when not processing a command', () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      expect(agent.isBusy()).toBe(false)
     })
   })
 

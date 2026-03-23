@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 
-import { CHAT_SIGKILL_DELAY, CHAT_TIMEOUT, ERR_CLAUDE_CLI_NOT_FOUND, LOG_DEBUG_LIMIT } from '../constants'
+import { CHAT_SIGKILL_DELAY, CHAT_TIMEOUT, CHAT_TOOL_EXECUTION_TIMEOUT, ERR_CLAUDE_CLI_NOT_FOUND, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import type { ChatChunkType } from '../types'
 import { createActivityTimeout } from '../utils/activity-timeout'
@@ -111,9 +111,11 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     const pendingToolNames = new Map<string, string>()
 
     // アクティビティベースタイムアウト: 最後の stdout 出力から CHAT_TIMEOUT 経過で強制終了
+    // ツール実行中は pause() で通常タイムアウトを停止するが、
+    // フォールバックとして CHAT_TOOL_EXECUTION_TIMEOUT 後に強制終了する（ハング防止）
     let sigkillTimer: NodeJS.Timeout | undefined
     const activityTimeout = createActivityTimeout(CHAT_TIMEOUT, () => {
-      logger.warn(`[chat] claude CLI timed out after ${CHAT_TIMEOUT / 1000}s of inactivity (pid=${child.pid}), sending SIGTERM`)
+      logger.warn(`[chat] claude CLI timed out (pid=${child.pid}), sending SIGTERM`)
       child.kill('SIGTERM')
       sigkillTimer = setTimeout(() => {
         if (!child.killed) {
@@ -121,14 +123,21 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
           child.kill('SIGKILL')
         }
       }, CHAT_SIGKILL_DELAY)
-    })
+    }, CHAT_TOOL_EXECUTION_TIMEOUT)
 
     child.stdout.on('data', (data: Buffer) => {
       activityTimeout.reset()
       streamParser.push(data.toString(), (line) => {
-        const { newSentTextLength, text } = processStreamJsonLine(line, sendChunk, child.pid ?? 0, { sentTextLength, pendingFileUploadIds, pendingToolNames })
+        const { newSentTextLength, text, toolExecutionChange } = processStreamJsonLine(line, sendChunk, child.pid ?? 0, { sentTextLength, pendingFileUploadIds, pendingToolNames })
         sentTextLength = newSentTextLength
         if (text !== undefined) resultText = text
+        // ツール実行開始時はタイマーを一時停止（ツール実行中はstdout出力がないため）
+        // ツール実行完了時はタイマーを再開
+        if (toolExecutionChange === 'started') {
+          activityTimeout.pause()
+        } else if (toolExecutionChange === 'finished') {
+          activityTimeout.reset()
+        }
       })
     })
 

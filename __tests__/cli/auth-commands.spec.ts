@@ -1,11 +1,13 @@
 import { Command } from 'commander'
 
+import { ApiClient } from '../../src/api-client'
 import { startAuthServer } from '../../src/auth-server'
 import { addProject } from '../../src/config-manager'
 import { DEFAULT_LOGIN_URL } from '../../src/constants'
 import { logger } from '../../src/logger'
 import { registerAuthCommands } from '../../src/cli/auth-commands'
 
+jest.mock('../../src/api-client')
 jest.mock('../../src/auth-server')
 jest.mock('../../src/config-manager')
 jest.mock('../../src/logger')
@@ -16,6 +18,7 @@ jest.mock('open', () => ({
 
 const mockedStartAuthServer = startAuthServer as jest.MockedFunction<typeof startAuthServer>
 const mockedAddProject = addProject as jest.MockedFunction<typeof addProject>
+const MockedApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
 
 describe('cli/auth-commands', () => {
   let exitSpy: jest.Spied<typeof process.exit>
@@ -84,32 +87,66 @@ describe('cli/auth-commands', () => {
   })
 
   describe('configure action', () => {
-    it('should save project with valid options', async () => {
+    it('should auto-resolve projectCode from API when --project-code is not specified', async () => {
+      const mockGetProjectConfig = jest.fn().mockResolvedValue({
+        project: { projectCode: 'RESOLVED_01', projectName: 'Resolved Project' },
+        configHash: 'hash',
+        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true },
+      })
+      MockedApiClient.mockImplementation(() => ({
+        getProjectConfig: mockGetProjectConfig,
+      }) as unknown as ApiClient)
+
       const program = new Command()
         .exitOverride()
         .configureOutput({ writeOut: () => {}, writeErr: () => {} })
 
       registerAuthCommands(program)
 
-      program.parse(['node', 'test', 'configure', '--token', 'my-token', '--api-url', 'http://my-api'])
+      const configureCmd = program.commands.find((cmd) => cmd.name() === 'configure')!
+      await configureCmd.parseAsync(['node', 'test', '--token', 'my-token', '--api-url', 'http://my-api'])
 
+      expect(MockedApiClient).toHaveBeenCalledWith('http://my-api', 'my-token')
+      expect(mockGetProjectConfig).toHaveBeenCalled()
       expect(mockedAddProject).toHaveBeenCalledWith({
-        projectCode: 'default',
+        projectCode: 'RESOLVED_01',
         token: 'my-token',
         apiUrl: 'http://my-api',
       })
       expect(logger.success).toHaveBeenCalled()
     })
 
-    it('should save project with custom project code', async () => {
+    it('should exit with error when API resolution fails', async () => {
+      MockedApiClient.mockImplementation(() => ({
+        getProjectConfig: jest.fn().mockRejectedValue(new Error('Network error')),
+      }) as unknown as ApiClient)
+
       const program = new Command()
         .exitOverride()
         .configureOutput({ writeOut: () => {}, writeErr: () => {} })
 
       registerAuthCommands(program)
 
-      program.parse(['node', 'test', 'configure', '--token', 'my-token', '--api-url', 'http://my-api', '--project-code', 'my-proj'])
+      const configureCmd = program.commands.find((cmd) => cmd.name() === 'configure')!
+      await expect(
+        configureCmd.parseAsync(['node', 'test', '--token', 'my-token', '--api-url', 'http://my-api']),
+      ).rejects.toThrow('process.exit called')
+      expect(exitSpy).toHaveBeenCalledWith(1)
+      expect(logger.error).toHaveBeenCalled()
+      expect(mockedAddProject).not.toHaveBeenCalled()
+    })
 
+    it('should save project with custom project code (skip API resolution)', async () => {
+      const program = new Command()
+        .exitOverride()
+        .configureOutput({ writeOut: () => {}, writeErr: () => {} })
+
+      registerAuthCommands(program)
+
+      const configureCmd = program.commands.find((cmd) => cmd.name() === 'configure')!
+      await configureCmd.parseAsync(['node', 'test', '--token', 'my-token', '--api-url', 'http://my-api', '--project-code', 'my-proj'])
+
+      expect(MockedApiClient).not.toHaveBeenCalled()
       expect(mockedAddProject).toHaveBeenCalledWith({
         projectCode: 'my-proj',
         token: 'my-token',
@@ -124,9 +161,10 @@ describe('cli/auth-commands', () => {
 
       registerAuthCommands(program)
 
-      expect(() => {
-        program.parse(['node', 'test', 'configure', '--token', 'my-token', '--api-url', 'not-a-url'])
-      }).toThrow('process.exit called')
+      const configureCmd = program.commands.find((cmd) => cmd.name() === 'configure')!
+      await expect(
+        configureCmd.parseAsync(['node', 'test', '--token', 'my-token', '--api-url', 'not-a-url']),
+      ).rejects.toThrow('process.exit called')
       expect(exitSpy).toHaveBeenCalledWith(1)
     })
   })

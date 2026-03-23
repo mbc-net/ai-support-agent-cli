@@ -61,6 +61,10 @@ describe('isParentToChildMessage', () => {
     ).toBe(false)
   })
 
+  it('should accept a busy_query message', () => {
+    expect(isParentToChildMessage({ type: 'busy_query' })).toBe(true)
+  })
+
   it('should reject unknown type', () => {
     expect(isParentToChildMessage({ type: 'unknown' })).toBe(false)
   })
@@ -110,6 +114,33 @@ describe('isChildToParentMessage', () => {
     expect(isChildToParentMessage(undefined)).toBe(false)
     expect(isChildToParentMessage('string')).toBe(false)
     expect(isChildToParentMessage(42)).toBe(false)
+  })
+
+  it('should accept a busy_response message', () => {
+    expect(
+      isChildToParentMessage({ type: 'busy_response', projectCode: 'p1', busy: true }),
+    ).toBe(true)
+    expect(
+      isChildToParentMessage({ type: 'busy_response', projectCode: 'p1', busy: false }),
+    ).toBe(true)
+  })
+
+  it('should reject busy_response without projectCode', () => {
+    expect(
+      isChildToParentMessage({ type: 'busy_response', busy: true }),
+    ).toBe(false)
+  })
+
+  it('should reject busy_response without busy', () => {
+    expect(
+      isChildToParentMessage({ type: 'busy_response', projectCode: 'p1' }),
+    ).toBe(false)
+  })
+
+  it('should reject busy_response with non-boolean busy', () => {
+    expect(
+      isChildToParentMessage({ type: 'busy_response', projectCode: 'p1', busy: 'yes' }),
+    ).toBe(false)
   })
 
   it('should reject unknown type', () => {

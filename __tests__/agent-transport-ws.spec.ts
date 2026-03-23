@@ -1,4 +1,4 @@
-import { startTerminalWebSocket, startVsCodeTunnel, startHeartbeat, TransportDeps, TransportState } from '../src/agent-transport'
+import { startTerminalWebSocket, startVsCodeTunnel, startHeartbeat, handleNotification, TransportDeps, TransportState, CommandContext } from '../src/agent-transport'
 
 // Mock all dependencies
 jest.mock('../src/terminal', () => ({
@@ -27,6 +27,10 @@ jest.mock('../src/i18n', () => ({
 jest.mock('../src/system-info', () => ({
   getSystemInfo: jest.fn(() => ({})),
   getLocalIpAddress: jest.fn(() => '127.0.0.1'),
+}))
+
+jest.mock('../src/commands', () => ({
+  executeCommand: jest.fn().mockResolvedValue({ success: true, data: 'ok' }),
 }))
 
 jest.mock('../src/agent-config-sync', () => ({
@@ -341,5 +345,97 @@ describe('startHeartbeat', () => {
     expect(logger.error).toHaveBeenCalled()
 
     if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
+  })
+})
+
+describe('processCommand processing flag', () => {
+  function createMockCtx(state: TransportState): CommandContext {
+    return {
+      configSyncState: {
+        currentConfigHash: undefined,
+        projectConfig: undefined,
+        serverConfig: null,
+        availableChatModes: [],
+        activeChatMode: undefined,
+        mcpConfigPath: undefined,
+      },
+      configSyncDeps: {} as any,
+      transportState: state,
+      onSetup: jest.fn(),
+      onConfigSync: jest.fn(),
+      onReboot: jest.fn(),
+      onUpdate: jest.fn(),
+    }
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('should set processing=true during command execution and reset after', async () => {
+    const { executeCommand } = require('../src/commands')
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands: jest.fn().mockResolvedValue([]),
+        getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: { command: 'echo hello' } }),
+        submitResult: jest.fn().mockResolvedValue(undefined),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    const ctx = createMockCtx(state)
+
+    let processingDuringExecution = false
+    executeCommand.mockImplementation(async () => {
+      processingDuringExecution = state.processing
+      return { success: true, data: 'ok' }
+    })
+
+    expect(state.processing).toBe(false)
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n1', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: 'agent-command',
+      content: {
+        commandId: 'cmd-1',
+        agentId: 'agent-1',
+        tenantCode: 'test',
+        projectCode: 'TEST_PROJ',
+        type: 'shell',
+      },
+    })
+
+    expect(processingDuringExecution).toBe(true)
+    expect(state.processing).toBe(false)
+  })
+
+  it('should reset processing=false even when command execution throws', async () => {
+    const { executeCommand } = require('../src/commands')
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands: jest.fn().mockResolvedValue([]),
+        getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
+        submitResult: jest.fn().mockResolvedValue(undefined),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    const ctx = createMockCtx(state)
+
+    executeCommand.mockRejectedValue(new Error('command failed'))
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n2', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: 'agent-command',
+      content: {
+        commandId: 'cmd-2',
+        agentId: 'agent-1',
+        tenantCode: 'test',
+        projectCode: 'TEST_PROJ',
+        type: 'shell',
+      },
+    })
+
+    expect(state.processing).toBe(false)
   })
 })

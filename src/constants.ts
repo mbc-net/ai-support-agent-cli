@@ -71,6 +71,7 @@ export const DEFAULT_MAX_TOKENS = 4096
 
 // Chat executor
 export const CHAT_TIMEOUT = 300_000
+export const CHAT_TOOL_EXECUTION_TIMEOUT = 1_800_000
 export const CHAT_SIGKILL_DELAY = 5_000
 export const CLAUDE_DETECT_TIMEOUT_MS = 5_000
 export const DEFAULT_APPSYNC_TIMEOUT_MS = 300_000
@@ -153,3 +154,9 @@ export const TOKEN_WATCH_INTERVAL_MS = 5000
 // WebSocket reconnect
 export const APPSYNC_MAX_RECONNECT_RETRIES = 5
 export const APPSYNC_RECONNECT_BASE_DELAY_MS = 1000
+
+// Graceful update deferral
+export const UPDATE_BUSY_WAIT_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes max wait for busy agents
+export const UPDATE_BUSY_POLL_INTERVAL_MS = 3_000          // poll every 3 seconds
+export const UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS = 30_000   // 30 seconds for forced updates
+export const BUSY_QUERY_TIMEOUT_MS = 5_000                  // 5 seconds for IPC busy query

@@ -104,6 +104,14 @@ ARG AGENT_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code @ai-support-agent/cli@${AGENT_VERSION} backlog-mcp-server \
     && npm cache clean --force
 
+# Fix npm cache/global directory permissions for runtime user (may run as non-root)
+# The npm cache and global lib are created as root during build; runtime updates need write access.
+RUN chmod -R 777 /usr/local/lib/node_modules \
+    && chmod -R 777 /usr/local/bin \
+    && rm -rf /home/node/.npm \
+    && mkdir -p /home/node/.npm \
+    && chmod 777 /home/node/.npm
+
 WORKDIR /workspace
 RUN chmod 777 /workspace
 

@@ -65,6 +65,13 @@ function setupMessageHandler(): void {
       case 'update':
         void handleGracefulExit(currentProjectCode, 'update')
         break
+      case 'busy_query':
+        sendToParent({
+          type: 'busy_response',
+          projectCode: currentProjectCode,
+          busy: agent?.isBusy() ?? false,
+        })
+        break
       case 'token_update':
         if (agent) {
           agent.updateToken(msg.token)

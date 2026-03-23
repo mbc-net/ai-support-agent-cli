@@ -1,5 +1,5 @@
 import { ApiClient } from './api-client'
-import { AGENT_VERSION, UPDATE_CHECK_INITIAL_DELAY, UPDATE_CHECK_INTERVAL } from './constants'
+import { AGENT_VERSION, UPDATE_CHECK_INITIAL_DELAY, UPDATE_CHECK_INTERVAL, UPDATE_BUSY_WAIT_TIMEOUT_MS, UPDATE_BUSY_POLL_INTERVAL_MS, UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AutoUpdateConfig } from './types'
@@ -17,12 +17,14 @@ export interface AutoUpdaterHandle {
  * @param config - Auto-update configuration
  * @param stopAllAgents - Function to gracefully stop all running agents
  * @param sendUpdateError - Function to report update errors via heartbeat
+ * @param isAnyAgentBusy - Optional callback to check if any agent is processing a command
  */
 export function startAutoUpdater(
   clients: ApiClient[],
   config: AutoUpdateConfig,
   stopAllAgents: () => void,
   sendUpdateError?: (error: string) => void,
+  isAnyAgentBusy?: () => Promise<boolean>,
 ): AutoUpdaterHandle {
   let initialTimer: ReturnType<typeof setTimeout> | null = null
   let intervalTimer: ReturnType<typeof setInterval> | null = null
@@ -99,6 +101,18 @@ export function startAutoUpdater(
       }
 
       logger.success(t('update.installSuccess', { version: targetVersion }))
+
+      // Wait for busy agents to finish before restarting
+      if (isAnyAgentBusy) {
+        const busyTimeout = forcedUpdate ? UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS : UPDATE_BUSY_WAIT_TIMEOUT_MS
+        const deadline = Date.now() + busyTimeout
+        while (Date.now() < deadline) {
+          const busy = await isAnyAgentBusy()
+          if (!busy) break
+          logger.info(t('update.waitingForBusy'))
+          await new Promise<void>(r => setTimeout(r, UPDATE_BUSY_POLL_INTERVAL_MS))
+        }
+      }
 
       // Graceful restart
       logger.info(t('update.stoppingAgents'))
