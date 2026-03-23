@@ -231,6 +231,7 @@ describe('claude-code-runner', () => {
       expect(sendChunk).toHaveBeenCalledWith('delta', 'Hello world')
       expect(result.newSentTextLength).toBe(11)
       expect(result.text).toBeUndefined()
+      expect(result.toolExecutionChange).toBeUndefined()
     })
 
     it('should only send new text portion (avoid duplicates)', () => {
@@ -257,7 +258,7 @@ describe('claude-code-runner', () => {
       const sendChunk = jest.fn().mockResolvedValue(undefined)
       const line = makeToolUseLine('Write', 'tool-123', { file_path: '/tmp/test.ts', content: 'hello' })
 
-      processStreamJsonLine(line, sendChunk, 123, { sentTextLength: 0 })
+      const result = processStreamJsonLine(line, sendChunk, 123, { sentTextLength: 0 })
 
       expect(sendChunk).toHaveBeenCalledWith('tool_call', JSON.stringify({
         toolName: 'Write',
@@ -265,6 +266,7 @@ describe('claude-code-runner', () => {
         id: 'tool-123',
         input: { file_path: '/tmp/test.ts', content: 'hello' },
       }))
+      expect(result.toolExecutionChange).toBe('started')
     })
 
     it('should send tool_call chunk with empty input when input is undefined', () => {
@@ -411,7 +413,7 @@ describe('claude-code-runner', () => {
           ],
         },
       })
-      processStreamJsonLine(toolResultLine, sendChunk, 123, state)
+      const result = processStreamJsonLine(toolResultLine, sendChunk, 123, state)
 
       expect(sendChunk).toHaveBeenCalledWith('tool_result', JSON.stringify({
         toolName: 'Bash',
@@ -420,6 +422,7 @@ describe('claude-code-runner', () => {
       }))
       // pendingToolNames should be cleaned up
       expect(state.pendingToolNames!.has('tool-1')).toBe(false)
+      expect(result.toolExecutionChange).toBe('finished')
     })
 
     it('should reset sentTextLength after user message so next assistant text is not skipped', () => {
@@ -583,11 +586,13 @@ describe('claude-code-runner', () => {
           ],
         },
       })
-      processStreamJsonLine(toolRefLine, sendChunk, 123, state)
+      const result = processStreamJsonLine(toolRefLine, sendChunk, 123, state)
 
       expect(sendChunk).not.toHaveBeenCalledWith('tool_result', expect.anything())
       // pendingToolNames should still have the entry (waiting for actual result)
       expect(state.pendingToolNames!.has('tool-5')).toBe(true)
+      // tool_reference only — tool is still executing, should not signal 'finished'
+      expect(result.toolExecutionChange).toBeUndefined()
     })
 
     it('should track file_upload tool_use and send both tool_result and file_attachment on tool_result', () => {
@@ -1057,6 +1062,65 @@ describe('claude-code-runner', () => {
 
       // Complete the process to resolve the promise
       mockProcess.emit('close', 1)
+      await expect(handle.result).rejects.toThrow()
+    })
+
+    it('should pause timeout during tool execution and resume on tool_result', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      // Emit tool_use — should pause the normal timeout
+      mockProcess.emitStdout('data', Buffer.from(makeToolUseLine('mcp__ai-support-agent__db_query', 'tool-1') + '\n'))
+
+      // Advance past CHAT_TIMEOUT but within CHAT_TOOL_EXECUTION_TIMEOUT — should NOT trigger SIGTERM
+      jest.advanceTimersByTime(600_000)
+      expect(mockProcess.kill).not.toHaveBeenCalled()
+
+      // Emit tool_result — should resume normal timeout
+      const toolResultLine = JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 'tool-1', content: 'query result' },
+          ],
+        },
+      })
+      mockProcess.emitStdout('data', Buffer.from(toolResultLine + '\n'))
+
+      // Now advance past CHAT_TIMEOUT again — should trigger SIGTERM
+      jest.advanceTimersByTime(300_000)
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGTERM')
+
+      mockProcess.emit('close', 143)
+      await expect(handle.result).rejects.toThrow()
+    })
+
+    it('should trigger fallback SIGTERM if tool execution exceeds CHAT_TOOL_EXECUTION_TIMEOUT', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      // Emit tool_use — pauses normal timeout, starts fallback
+      mockProcess.emitStdout('data', Buffer.from(makeToolUseLine('mcp__ai-support-agent__db_query', 'tool-1') + '\n'))
+
+      // Advance to just before fallback timeout (1800s)
+      jest.advanceTimersByTime(1_799_999)
+      expect(mockProcess.kill).not.toHaveBeenCalled()
+
+      // Advance past fallback timeout
+      jest.advanceTimersByTime(1)
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGTERM')
+
+      mockProcess.emit('close', 143)
       await expect(handle.result).rejects.toThrow()
     })
 
