@@ -4,6 +4,7 @@ import {
   getErrorMessage,
   mcpErrorResponse,
   mcpImageResponse,
+  mcpTextImageResponse,
   mcpTextResponse,
   withMcpErrorHandling,
 } from '../../../src/mcp/tools/mcp-response'
@@ -55,6 +56,23 @@ describe('mcp-response helpers', () => {
 
     it('should not include isError', () => {
       const result = mcpImageResponse('data', 'image/jpeg')
+      expect(result).not.toHaveProperty('isError')
+    })
+  })
+
+  describe('mcpTextImageResponse', () => {
+    it('should return a text+image content response', () => {
+      const result = mcpTextImageResponse('Page info', 'base64data', 'image/png')
+      expect(result).toEqual({
+        content: [
+          { type: 'text', text: 'Page info' },
+          { type: 'image', data: 'base64data', mimeType: 'image/png' },
+        ],
+      })
+    })
+
+    it('should not include isError', () => {
+      const result = mcpTextImageResponse('info', 'data', 'image/jpeg')
       expect(result).not.toHaveProperty('isError')
     })
   })

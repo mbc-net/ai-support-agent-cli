@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 import { ApiClient } from '../api-client'
+import { registerBrowserTools } from './tools/browser'
 import { registerCredentialsTool } from './tools/credentials'
 import { registerDbQueryTool } from './tools/db-query'
 import { registerDbSchemasTool } from './tools/db-schemas'
@@ -24,6 +25,7 @@ export function createMcpServer(apiClient: ApiClient, projectCode: string): McpS
   registerFileUploadTool(server, apiClient)
   registerProjectInfoTool(server, apiClient, projectCode)
   registerReadConversationFileTool(server, apiClient)
+  registerBrowserTools(server, apiClient)
 
   return server
 }

@@ -78,6 +78,16 @@ export interface ProjectConfigResponse {
       environment?: string
     }>
   }
+  browser?: {
+    enabled: boolean
+    credentials: Array<{
+      credentialId: string
+      name: string
+      url: string
+      environment?: string
+      description?: string
+    }>
+  }
 }
 
 export interface DbCredentials {
@@ -106,6 +116,21 @@ export interface SshCredentials {
   username: string
   authType: string
   privateKey: string
+}
+
+export interface BrowserCredentials {
+  credentialId: string
+  url: string
+  username: string
+  password: string
+  usernameSelector: string
+  passwordSelector: string
+  submitSelector: string
+  successIndicator?: string
+  environment?: string
+  description?: string
+  promptText?: string
+  customFields?: Record<string, string>
 }
 
 export interface CachedProjectConfig {
