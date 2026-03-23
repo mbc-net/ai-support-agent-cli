@@ -104,6 +104,13 @@ ARG AGENT_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code @ai-support-agent/cli@${AGENT_VERSION} backlog-mcp-server \
     && npm cache clean --force
 
+# Playwright (Chromium only) — install as peer of @ai-support-agent/cli so require('playwright') resolves
+# 1. Install playwright package next to the CLI's node_modules
+# 2. Install Chromium browser binary + OS dependencies (fonts, libX11, etc.)
+RUN cd /usr/local/lib/node_modules/@ai-support-agent/cli \
+    && npm install playwright \
+    && npx playwright install --with-deps chromium
+
 # Fix npm cache/global directory permissions for runtime user (may run as non-root)
 # The npm cache and global lib are created as root during build; runtime updates need write access.
 RUN chmod -R 777 /usr/local/lib/node_modules \

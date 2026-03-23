@@ -948,6 +948,7 @@ describe('claude-code-runner', () => {
           tenantCode: 'mbc',
           projectCode: 'MBC_01',
           conversationId: 'conv-123',
+          browserLocalPort: 12345,
         },
       })
 
@@ -960,6 +961,7 @@ describe('claude-code-runner', () => {
       expect(env).toHaveProperty('AI_SUPPORT_TENANT_CODE', 'mbc')
       expect(env).toHaveProperty('AI_SUPPORT_PROJECT_CODE', 'MBC_01')
       expect(env).toHaveProperty('AI_SUPPORT_CONVERSATION_ID', 'conv-123')
+      expect(env).toHaveProperty('AI_SUPPORT_BROWSER_LOCAL_PORT', '12345')
     })
 
     it('should not set policyContext env vars when not provided', async () => {

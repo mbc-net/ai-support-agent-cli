@@ -2,10 +2,15 @@ import { getErrorMessage } from '../../utils'
 
 export { getErrorMessage }
 
+type McpContentItem =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string }
+
 export type McpToolResult =
   | ReturnType<typeof mcpTextResponse>
   | ReturnType<typeof mcpErrorResponse>
   | ReturnType<typeof mcpImageResponse>
+  | ReturnType<typeof mcpTextImageResponse>
 
 export function mcpTextResponse(text: string) {
   return { content: [{ type: 'text' as const, text }] }
@@ -17,6 +22,15 @@ export function mcpErrorResponse(message: string) {
 
 export function mcpImageResponse(base64Data: string, mimeType: string) {
   return { content: [{ type: 'image' as const, data: base64Data, mimeType }] }
+}
+
+export function mcpTextImageResponse(text: string, base64Data: string, mimeType: string) {
+  return {
+    content: [
+      { type: 'text' as const, text },
+      { type: 'image' as const, data: base64Data, mimeType },
+    ] as McpContentItem[],
+  }
 }
 
 /**

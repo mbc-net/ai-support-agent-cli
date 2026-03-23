@@ -7,6 +7,7 @@ import type {
   AgentCommand,
   AgentServerConfig,
   AwsCredentials,
+  BrowserCredentials,
   ChatChunk,
   CommandResult,
   DbCredentials,
@@ -204,6 +205,11 @@ export class ApiClient {
   async getSshCredentials(hostId: string): Promise<SshCredentials> {
     logger.debug(`Fetching SSH credentials for host: ${hostId}`)
     return this.get<SshCredentials>(API_ENDPOINTS.SSH_CREDENTIALS(this.tenantCode, hostId))
+  }
+
+  async getBrowserCredentials(name: string): Promise<BrowserCredentials> {
+    logger.debug(`Fetching browser credentials for: ${name}`)
+    return this.get<BrowserCredentials>(API_ENDPOINTS.BROWSER_CREDENTIALS(this.tenantCode), { params: { name } })
   }
 
   async getRepoCredentials(repositoryId: string): Promise<RepoCredentials> {
