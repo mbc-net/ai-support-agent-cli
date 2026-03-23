@@ -404,7 +404,7 @@ describe('browser tools', () => {
       // fill returns undefined by default, so no screenshot
       expect(result.content).toHaveLength(1)
       expect(result.content[0].text).toBe('Filled: #email')
-      expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'fill', '#email')
+      expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'fill', '#email "test@test.com"')
     })
 
     it('should use proxy session for get_text', async () => {
