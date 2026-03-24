@@ -47,6 +47,38 @@ describe('BrowserActionLog', () => {
     })
   })
 
+  describe('addEntry', () => {
+    it('should add a pre-built entry', () => {
+      const entry = { timestamp: 1700000000000, source: 'chat' as const, action: 'navigate', details: 'https://example.com' }
+      log.addEntry(entry)
+
+      const entries = log.getEntries()
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toEqual(entry)
+    })
+
+    it('should not trigger onChange', () => {
+      const onChange = jest.fn()
+      log.onChange = onChange
+
+      log.addEntry({ timestamp: 1700000000000, source: 'chat', action: 'click', details: '#btn' })
+
+      expect(onChange).not.toHaveBeenCalled()
+    })
+
+    it('should trim oldest entries when exceeding maxEntries', () => {
+      const smallLog = new BrowserActionLog(3)
+      for (let i = 0; i < 5; i++) {
+        smallLog.addEntry({ timestamp: 1700000000000 + i, source: 'chat', action: 'click', details: `entry-${i}` })
+      }
+
+      const entries = smallLog.getEntries()
+      expect(entries).toHaveLength(3)
+      expect(entries[0].details).toBe('entry-2')
+      expect(entries[2].details).toBe('entry-4')
+    })
+  })
+
   describe('getEntries', () => {
     it('should return empty array when no entries', () => {
       expect(log.getEntries()).toEqual([])

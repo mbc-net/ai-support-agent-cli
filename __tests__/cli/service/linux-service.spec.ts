@@ -2,6 +2,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 jest.mock('fs')
+jest.mock('child_process')
 jest.mock('../../../src/logger')
 jest.mock('../../../src/i18n', () => ({
   initI18n: jest.fn(),
@@ -17,6 +18,7 @@ jest.mock('../../../src/i18n', () => ({
   },
 }))
 
+import { execSync } from 'child_process'
 import * as fs from 'fs'
 import {
   LinuxServiceStrategy,
@@ -25,6 +27,7 @@ import {
 import { logger } from '../../../src/logger'
 
 const mockedFs = jest.mocked(fs)
+const mockedExecSync = jest.mocked(execSync)
 
 describe('generateServiceUnit', () => {
   it('should generate valid systemd unit file', () => {
@@ -59,6 +62,17 @@ describe('generateServiceUnit', () => {
     })
 
     expect(result).toContain('--verbose')
+  })
+
+  it('should not include --no-docker when docker is true', () => {
+    const result = generateServiceUnit({
+      nodePath: '/usr/bin/node',
+      entryPoint: '/path/to/index.js',
+      logDir: '/tmp/logs',
+      docker: true,
+    })
+
+    expect(result).not.toContain('--no-docker')
   })
 
   it('should quote paths containing spaces in ExecStart', () => {
@@ -201,6 +215,45 @@ describe('LinuxServiceStrategy', () => {
       const infoCallOrder = (logger.info as jest.Mock).mock.invocationCallOrder[0]
       const unlinkCallOrder = (mockedFs.unlinkSync as jest.Mock).mock.invocationCallOrder[0]
       expect(infoCallOrder).toBeLessThan(unlinkCallOrder!)
+    })
+  })
+
+  describe('restart', () => {
+    it('should error if service file does not exist', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+
+      strategy.restart()
+
+      expect(logger.error).toHaveBeenCalledWith('service.notInstalled.linux')
+      expect(mockedExecSync).not.toHaveBeenCalled()
+    })
+
+    it('should daemon-reload and restart the service', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      strategy.restart()
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'systemctl --user daemon-reload',
+        { stdio: 'pipe' },
+      )
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'systemctl --user restart ai-support-agent',
+        { stdio: 'pipe' },
+      )
+      expect(logger.success).toHaveBeenCalledWith('service.restarted')
+    })
+
+    it('should log error if restart fails', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw new Error('systemctl failed') })
+
+      strategy.restart()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.restartFailed'),
+      )
     })
   })
 })

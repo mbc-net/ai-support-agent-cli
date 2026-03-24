@@ -8,7 +8,7 @@ import { logger } from '../../../logger'
 import { BrowserActionLog } from './browser-action-log'
 import { BROWSER_IDLE_TIMEOUT_MS } from './browser-types'
 import { DeviceEmulation, DEVICE_PRESETS } from './device-presets'
-import { getElementAtPoint, getFocusedElementInfo, formatElementInfo } from './element-info'
+import { getElementAtPoint, getFocusedElementInfo } from './element-info'
 import { loadPlaywright } from './playwright-loader'
 
 // Playwright types (used loosely to avoid hard dependency)
@@ -244,8 +244,11 @@ export class BrowserSession {
       clickCount: clickCount || 1,
     })
 
-    const elementDesc = elementInfo ? formatElementInfo(elementInfo) : '(no element)'
-    this.actionLog.add('direct', 'click', `(${x}, ${y}) ${elementDesc}`)
+    // Use selector as primary detail for Playwright reproducibility
+    const details = elementInfo
+      ? elementInfo.selector
+      : `page.mouse.click(${x}, ${y})`
+    this.actionLog.add('direct', 'click', details)
   }
 
   /**
@@ -270,8 +273,12 @@ export class BrowserSession {
 
     await this.page.keyboard.type(text)
 
-    const target = focusedInfo ? `target=${formatElementInfo(focusedInfo)}` : '(no focused element)'
-    this.actionLog.add('direct', 'type', `"${text}" ${target}`)
+    // Use selector for fill action if focused element is fillable, otherwise type
+    if (focusedInfo && (focusedInfo.tagName === 'input' || focusedInfo.tagName === 'textarea' || focusedInfo.tagName === 'select')) {
+      this.actionLog.add('direct', 'fill', `${focusedInfo.selector} "${text}"`)
+    } else {
+      this.actionLog.add('direct', 'type', text)
+    }
   }
 
   /**
@@ -281,8 +288,6 @@ export class BrowserSession {
     if (!this.page) throw new Error('No active browser page')
     this.resetIdleTimer()
 
-    const focusedInfo = await getFocusedElementInfo(this.page)
-
     if (modifiers && modifiers.length > 0) {
       const combo = [...modifiers, key].join('+')
       await this.page.keyboard.press(combo)
@@ -291,8 +296,7 @@ export class BrowserSession {
     }
 
     const keyStr = modifiers?.length ? `${modifiers.join('+')}+${key}` : key
-    const target = focusedInfo ? `target=${formatElementInfo(focusedInfo)}` : ''
-    this.actionLog.add('direct', 'press', target ? `${keyStr} ${target}` : keyStr)
+    this.actionLog.add('direct', 'press', keyStr)
   }
 
   /**

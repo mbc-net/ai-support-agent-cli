@@ -138,7 +138,9 @@
 
   "cmd.installService": "バックグラウンドサービスとしてインストール",
   "cmd.installService.verbose": "サービスの詳細ログを有効化",
+  "cmd.installService.docker": "Dockerモードでサービスを起動（Claude CLI、Playwright等を含むDockerコンテナを使用）",
   "cmd.uninstallService": "バックグラウンドサービスをアンインストール",
+  "cmd.restartService": "バックグラウンドサービスを再起動",
   "service.unsupportedPlatform": "このコマンドは {{platform}} ではサポートされていません。",
   "service.entryPointNotFound": "CLIエントリポイントが見つかりません: {{path}}",
   "service.installed": "LaunchAgent plist を作成しました: {{path}}",
@@ -159,5 +161,7 @@
   "service.notInstalled.win32": "スケジュールタスクが見つかりません。サービスはインストールされていません。",
   "service.uninstalled.win32": "スケジュールタスクを削除しました。",
   "service.unloadHint.win32": "タスクが実行中の場合は停止して削除されます。",
-  "service.schtasksFailed": "schtasks コマンドが失敗しました: {{message}}"
+  "service.schtasksFailed": "schtasks コマンドが失敗しました: {{message}}",
+  "service.restarted": "サービスを再起動しました。",
+  "service.restartFailed": "サービスの再起動に失敗しました: {{message}}"
 }

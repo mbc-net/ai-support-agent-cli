@@ -6,6 +6,8 @@
  * Phase 3: browser_open_session, browser_close_session, browser_set_variable, browser_get_variable, browser_list_variables
  */
 
+import http from 'http'
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
@@ -19,11 +21,14 @@ import { isPlaywrightAvailable } from './browser/playwright-loader'
 import { tryClickSelectors, tryFillSelectors } from './browser/selector-utils'
 import { mcpErrorResponse, mcpTextImageResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
 
+/** Cache the resolved session ID from BrowserLocalServer */
+let resolvedProxySessionId: string | null = null
+
 /**
  * Get the current browser session, using the environment variable or the manager's first session.
  * When running in a child process (MCP server), uses the local HTTP proxy if available.
  */
-function getActiveSession(sessionManager: BrowserSessionManager, fallbackSession: BrowserSession): BrowserSession | BrowserProxySession {
+async function getActiveSession(sessionManager: BrowserSessionManager, fallbackSession: BrowserSession): Promise<BrowserSession | BrowserProxySession> {
   const browserSessionId = process.env.AI_SUPPORT_BROWSER_SESSION_ID
   const localPort = process.env.AI_SUPPORT_BROWSER_LOCAL_PORT
 
@@ -38,8 +43,61 @@ function getActiveSession(sessionManager: BrowserSessionManager, fallbackSession
       return new BrowserProxySession(`http://127.0.0.1:${localPort}`, browserSessionId)
     }
   }
+
+  // No browserSessionId but local port available — try to resolve from BrowserLocalServer
+  if (!browserSessionId && localPort) {
+    const sessionId = resolvedProxySessionId ?? await resolveFirstSessionId(localPort)
+    if (sessionId) {
+      logger.debug(`[browser] Using resolved proxy session: sessionId=${sessionId}, port=${localPort}`)
+      return new BrowserProxySession(`http://127.0.0.1:${localPort}`, sessionId)
+    }
+  }
+
   // Fall back to the default singleton session
   return fallbackSession
+}
+
+/**
+ * Resolve the first active session ID from BrowserLocalServer.
+ * Retries a few times since the Web browser panel may still be connecting.
+ */
+async function resolveFirstSessionId(localPort: string): Promise<string | null> {
+  const maxRetries = 5
+  const retryDelay = 500
+
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const data = await httpGet(`http://127.0.0.1:${localPort}/sessions/first`)
+      const parsed = JSON.parse(data) as { sessionId?: string }
+      if (parsed.sessionId) {
+        resolvedProxySessionId = parsed.sessionId
+        logger.debug(`[browser] Resolved first session ID: ${parsed.sessionId}`)
+        return parsed.sessionId
+      }
+    } catch (error) {
+      logger.debug(`[browser] Failed to resolve first session (attempt ${i + 1}/${maxRetries}): ${String(error)}`)
+    }
+    if (i < maxRetries - 1) {
+      await new Promise(resolve => setTimeout(resolve, retryDelay))
+    }
+  }
+  // Clear cache on failure so next call retries fresh
+  resolvedProxySessionId = null
+  return null
+}
+
+/**
+ * Simple HTTP GET for localhost requests.
+ */
+function httpGet(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    http.get(url, { timeout: 3000 }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => resolve(Buffer.concat(chunks).toString()))
+      res.on('error', reject)
+    }).on('error', reject)
+  })
 }
 
 /**
@@ -87,14 +145,13 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
         return mcpErrorResponse(validation.reason!)
       }
 
-      const session = getActiveSession(manager, defaultSession)
+      const session = await getActiveSession(manager, defaultSession)
 
       logger.debug(`[browser] Navigating to: ${url}`)
 
       if (session instanceof BrowserProxySession) {
         const result = await session.navigate(url, { waitForSelector, waitForTimeout, fullPage: fullPage ?? true })
         const base64 = result.screenshot.toString('base64')
-        session.actionLog.add('chat', 'navigate', url)
         return mcpTextImageResponse(`Page: ${result.title}\nURL: ${result.url}`, base64, 'image/png')
       }
 
@@ -133,7 +190,7 @@ function registerBrowserCloseTool(server: McpServer, defaultSession: BrowserSess
     'Close the browser session and free resources.',
     {},
     async () => withMcpErrorHandling(async () => {
-      const session = getActiveSession(manager, defaultSession)
+      const session = await getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
         return mcpTextResponse('No active browser session.')
       }
@@ -157,7 +214,7 @@ function registerBrowserClickTool(server: McpServer, defaultSession: BrowserSess
       screenshot: z.boolean().optional().default(true).describe('Take screenshot after click (default: true)'),
     },
     async ({ selector, waitForNavigation, screenshot }) => withMcpErrorHandling(async () => {
-      const session = getActiveSession(manager, defaultSession)
+      const session = await getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
         return mcpErrorResponse('No active browser session. Use browser_navigate first.')
       }
@@ -167,7 +224,6 @@ function registerBrowserClickTool(server: McpServer, defaultSession: BrowserSess
       if (session instanceof BrowserProxySession) {
         const result = await session.click(selector, { waitForNavigation: waitForNavigation ?? false, screenshot: screenshot ?? true })
         const statusText = `Clicked: ${selector}\nPage: ${result.title}\nURL: ${result.url}`
-        session.actionLog.add('chat', 'click', selector)
         if (result.screenshot) {
           return mcpTextImageResponse(statusText, result.screenshot.toString('base64'), 'image/png')
         }
@@ -205,7 +261,7 @@ function registerBrowserFillTool(server: McpServer, defaultSession: BrowserSessi
       screenshot: z.boolean().optional().default(false).describe('Take screenshot after fill'),
     },
     async ({ selector, value, screenshot }) => withMcpErrorHandling(async () => {
-      const session = getActiveSession(manager, defaultSession)
+      const session = await getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
         return mcpErrorResponse('No active browser session. Use browser_navigate first.')
       }
@@ -214,7 +270,6 @@ function registerBrowserFillTool(server: McpServer, defaultSession: BrowserSessi
 
       if (session instanceof BrowserProxySession) {
         const screenshotBuf = await session.fill(selector, value, screenshot ?? false)
-        session.actionLog.add('chat', 'fill', `${selector} "${value}"`)
         if (screenshotBuf) {
           return mcpTextImageResponse(`Filled: ${selector}`, screenshotBuf.toString('base64'), 'image/png')
         }
@@ -245,7 +300,7 @@ function registerBrowserGetTextTool(server: McpServer, defaultSession: BrowserSe
       selector: z.string().optional().describe('CSS selector targeting the specific element to extract text from. Prefer precise selectors over "body".'),
     },
     async ({ selector }) => withMcpErrorHandling(async () => {
-      const session = getActiveSession(manager, defaultSession)
+      const session = await getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
         return mcpErrorResponse('No active browser session. Use browser_navigate first.')
       }
@@ -255,7 +310,6 @@ function registerBrowserGetTextTool(server: McpServer, defaultSession: BrowserSe
 
       if (session instanceof BrowserProxySession) {
         const text = await session.getText(target)
-        session.actionLog.add('chat', 'get_text', `${target} → "${textPreview(text)}"`)
         return mcpTextResponse(text)
       }
 
@@ -287,7 +341,7 @@ function registerBrowserLoginTool(
     async ({ credentialName }) => withMcpErrorHandling(async () => {
       logger.debug(`[browser] Logging in with credential: ${credentialName}`)
 
-      const session = getActiveSession(manager, defaultSession)
+      const session = await getActiveSession(manager, defaultSession)
 
       // Fetch credentials from API
       const credentials = await apiClient.getBrowserCredentials(credentialName)
@@ -306,7 +360,6 @@ function registerBrowserLoginTool(
         title = result.title
         currentUrl = result.url
         base64 = result.screenshot.toString('base64')
-        session.actionLog.add('chat', 'login', credentialName)
       } else {
         // Navigate to base URL
         const page = await session.getPage()
@@ -350,7 +403,7 @@ function registerBrowserExtractTool(server: McpServer, defaultSession: BrowserSe
       variableName: z.string().describe('Variable name to store the extracted text'),
     },
     async ({ selector, variableName }) => withMcpErrorHandling(async () => {
-      const session = getActiveSession(manager, defaultSession)
+      const session = await getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
         return mcpErrorResponse('No active browser session. Use browser_navigate first.')
       }
@@ -359,7 +412,6 @@ function registerBrowserExtractTool(server: McpServer, defaultSession: BrowserSe
 
       if (session instanceof BrowserProxySession) {
         const text = await session.extract(selector, variableName)
-        session.actionLog.add('chat', 'extract', `${variableName} "${selector}" → "${textPreview(text)}"`)
         return mcpTextResponse(text)
       }
 
@@ -388,15 +440,15 @@ function registerBrowserSetVariableTool(server: McpServer, defaultSession: Brows
       value: z.string().describe('Variable value'),
     },
     async ({ name, value }) => withMcpErrorHandling(async () => {
-      const session = getActiveSession(manager, defaultSession)
+      const session = await getActiveSession(manager, defaultSession)
 
       if (session instanceof BrowserProxySession) {
         // Use HTTP endpoint so the server emits action log via WebSocket
         await session.setVariable(name, value)
       } else {
         session.variables.set(name, value)
+        session.actionLog.add('chat', 'set_variable', `${name} "${value}"`)
       }
-      session.actionLog.add('chat', 'set_variable', `${name} "${value}"`)
       return mcpTextResponse(`Variable set: ${name}`)
     }),
   )
@@ -410,7 +462,7 @@ function registerBrowserGetVariableTool(server: McpServer, defaultSession: Brows
       name: z.string().describe('Variable name'),
     },
     async ({ name }) => withMcpErrorHandling(async () => {
-      const session = getActiveSession(manager, defaultSession)
+      const session = await getActiveSession(manager, defaultSession)
 
       let value: string | undefined
       if (session instanceof BrowserProxySession) {
@@ -423,7 +475,12 @@ function registerBrowserGetVariableTool(server: McpServer, defaultSession: Brows
       if (value === undefined) {
         return mcpErrorResponse(`Variable not found: ${name}`)
       }
-      session.actionLog.add('chat', 'get_variable', `${name} → "${value}"`)
+
+      // Only add to local action log for non-proxy sessions
+      // (proxy sessions get their log entry via BrowserLocalServer.emitActionLog)
+      if (!(session instanceof BrowserProxySession)) {
+        session.actionLog.add('chat', 'get_variable', `${name} → "${value}"`)
+      }
       return mcpTextResponse(value)
     }),
   )
@@ -435,7 +492,7 @@ function registerBrowserListVariablesTool(server: McpServer, defaultSession: Bro
     'List all temporary variables in the current browser session.',
     {},
     async () => withMcpErrorHandling(async () => {
-      const session = getActiveSession(manager, defaultSession)
+      const session = await getActiveSession(manager, defaultSession)
       const entries = Array.from(session.variables.entries())
       if (entries.length === 0) {
         return mcpTextResponse('No variables set.')

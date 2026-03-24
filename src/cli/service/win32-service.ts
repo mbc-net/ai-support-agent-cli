@@ -17,8 +17,11 @@ function getLogDir(): string {
 }
 
 export function generateTaskXml(options: ServiceConfig): string {
-  const { nodePath, entryPoint, verbose } = options
-  const args = [entryPoint, 'start', '--no-docker']
+  const { nodePath, entryPoint, verbose, docker } = options
+  const args = [entryPoint, 'start']
+  if (!docker) {
+    args.push('--no-docker')
+  }
   if (verbose) {
     args.push('--verbose')
   }
@@ -69,6 +72,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
       entryPoint,
       logDir,
       verbose: options.verbose,
+      docker: options.docker,
     })
 
     const tmpXmlPath = path.join(os.tmpdir(), `${TASK_NAME}-task.xml`)
@@ -112,5 +116,28 @@ export class Win32ServiceStrategy implements ServiceStrategy {
     }
 
     logger.success(t('service.uninstalled.win32'))
+  }
+
+  restart(): void {
+    try {
+      execSync(`schtasks /Query /TN "${TASK_NAME}"`, { stdio: 'pipe' })
+    } catch {
+      logger.error(t('service.notInstalled.win32'))
+      return
+    }
+
+    try {
+      execSync(`schtasks /End /TN "${TASK_NAME}"`, { stdio: 'pipe' })
+    } catch {
+      // Task may not be running — ignore
+    }
+
+    try {
+      execSync(`schtasks /Run /TN "${TASK_NAME}"`, { stdio: 'pipe' })
+      logger.success(t('service.restarted'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error(t('service.restartFailed', { message }))
+    }
   }
 }

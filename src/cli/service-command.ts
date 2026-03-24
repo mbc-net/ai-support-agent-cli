@@ -20,7 +20,7 @@ function getStrategy(): ServiceStrategy | null {
   }
 }
 
-export function installService(options: { verbose?: boolean }): void {
+export function installService(options: { verbose?: boolean; docker?: boolean }): void {
   const strategy = getStrategy()
   if (!strategy) {
     logger.error(t('service.unsupportedPlatform', { platform: process.platform }))
@@ -38,12 +38,22 @@ export function uninstallService(): void {
   strategy.uninstall()
 }
 
+export function restartService(): void {
+  const strategy = getStrategy()
+  if (!strategy) {
+    logger.error(t('service.unsupportedPlatform', { platform: process.platform }))
+    return
+  }
+  strategy.restart()
+}
+
 export function registerServiceCommands(program: Command): void {
   program
     .command('install-service')
     .description(t('cmd.installService'))
     .option('--verbose', t('cmd.installService.verbose'))
-    .action((opts: { verbose?: boolean }) => {
+    .option('--docker', t('cmd.installService.docker'))
+    .action((opts: { verbose?: boolean; docker?: boolean }) => {
       installService(opts)
     })
 
@@ -52,6 +62,13 @@ export function registerServiceCommands(program: Command): void {
     .description(t('cmd.uninstallService'))
     .action(() => {
       uninstallService()
+    })
+
+  program
+    .command('restart-service')
+    .description(t('cmd.restartService'))
+    .action(() => {
+      restartService()
     })
 }
 

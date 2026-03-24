@@ -78,6 +78,22 @@ describe('credentials tool', () => {
     })
   })
 
+  describe('unknown credential type', () => {
+    it('should return error for unknown credential type', async () => {
+      setupTool({
+        getAwsCredentials: jest.fn(),
+        getDbCredentials: jest.fn(),
+      })
+
+      const result = await toolCallback({ type: 'unknown' as 'aws', name: 'test' }) as {
+        content: Array<{ text: string }>
+        isError: boolean
+      }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('Unknown credential type')
+    })
+  })
+
   describe('error handling', () => {
     it('should handle API errors', async () => {
       setupTool({
