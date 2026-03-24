@@ -184,6 +184,59 @@ describe('browser tools', () => {
       expect(result.isError).toBe(true)
       expect(result.content[0].text).toContain('Invalid URL')
     })
+
+    it('should set viewport when provided', async () => {
+      setup()
+      const { BrowserSession } = require('../../../src/mcp/tools/browser/browser-session')
+      const mockSession = new BrowserSession()
+
+      await toolCallbacks.browser_navigate({
+        url: 'https://example.com',
+        viewport: { width: 1024, height: 768 },
+      })
+
+      expect(mockSession.setViewport).toHaveBeenCalledWith(1024, 768)
+    })
+
+    it('should wait for selector when provided', async () => {
+      setup()
+
+      await toolCallbacks.browser_navigate({
+        url: 'https://example.com',
+        waitForSelector: '#main',
+      })
+
+      expect(mockPage.waitForSelector).toHaveBeenCalledWith('#main', { timeout: 10000 })
+    })
+
+    it('should wait for timeout when provided (clamped to 10s)', async () => {
+      setup()
+
+      await toolCallbacks.browser_navigate({
+        url: 'https://example.com',
+        waitForTimeout: 30000,
+      })
+
+      expect(mockPage.waitForTimeout).toHaveBeenCalledWith(10000)
+    })
+
+    it('should use proxy session navigate when proxy session is active', async () => {
+      setup({ getConfig: jest.fn().mockResolvedValue({ browser: { proxySessionId: 'session-1' } }) } as unknown as Partial<ApiClient>)
+
+      // Trigger navigate which creates a proxy session via manager
+      const { BrowserSessionManager } = require('../../../src/mcp/tools/browser/browser-session-manager')
+      const mockManagerInstance = new BrowserSessionManager()
+      mockManagerInstance.getSession = jest.fn().mockReturnValue(lastProxyInstance)
+
+      // Use the proxy path by setting up a proxy session
+      if (lastProxyInstance) {
+        const result = await toolCallbacks.browser_navigate({
+          url: 'https://proxy.example.com',
+        }) as { content: Array<{ type: string; text?: string }> }
+
+        expect(result.content[0].type).toBe('text')
+      }
+    })
   })
 
   describe('browser_close', () => {
@@ -206,6 +259,19 @@ describe('browser tools', () => {
 
       expect(result.content).toHaveLength(2)
       expect(result.content[0].text).toContain('Clicked: #submit-btn')
+    })
+
+    it('should wait for navigation when waitForNavigation is true', async () => {
+      setup()
+
+      await toolCallbacks.browser_click({
+        selector: '#link',
+        waitForNavigation: true,
+        screenshot: false,
+      })
+
+      expect(mockPage.waitForNavigation).toHaveBeenCalled()
+      expect(mockPage.click).toHaveBeenCalledWith('#link', { timeout: 10000 })
     })
 
     it('should return text only when screenshot is false', async () => {
