@@ -303,6 +303,29 @@ describe('read-conversation-file tool', () => {
     })
   })
 
+  describe('filename without extension', () => {
+    it('should handle filename with no extension', async () => {
+      const mockClient = {
+        getDownloadUrl: jest.fn().mockResolvedValue({
+          downloadUrl: 'https://s3.example.com/readme',
+        }),
+      } as unknown as ApiClient
+
+      setupTool(mockClient)
+
+      mockedAxios.get.mockResolvedValue({ data: 'Content of README' })
+
+      const result = await toolCallback({
+        fileId: 'file-noext',
+        s3Key: 'uploads/file-noext',
+        filename: 'README',
+      }) as { content: Array<{ type: string; text: string }> }
+
+      expect(result.content[0].type).toBe('text')
+      expect(result.content[0].text).toContain('README')
+    })
+  })
+
   describe('error handling', () => {
     it('should handle API errors', async () => {
       const mockClient = {

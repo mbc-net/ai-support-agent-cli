@@ -157,6 +157,36 @@ describe('Win32ServiceStrategy', () => {
       expect(logger.success).not.toHaveBeenCalled()
     })
 
+    it('should handle non-Error throw from schtasks', () => {
+      mockedFs.existsSync
+        .mockReturnValueOnce(true) // entry point
+        .mockReturnValueOnce(true) // log dir
+        .mockReturnValueOnce(false) // tmp xml cleanup (does not exist)
+
+      mockedExecSync.mockImplementation(() => {
+        throw 'string error'
+      })
+
+      strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.schtasksFailed'),
+      )
+    })
+
+    it('should skip tmp XML cleanup if file does not exist', () => {
+      mockedFs.existsSync
+        .mockReturnValueOnce(true) // entry point
+        .mockReturnValueOnce(true) // log dir
+        .mockReturnValueOnce(false) // tmp xml cleanup check
+
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      strategy.install({})
+
+      expect(mockedFs.unlinkSync).not.toHaveBeenCalled()
+    })
+
     it('should clean up temporary XML file after install', () => {
       mockedFs.existsSync
         .mockReturnValueOnce(true) // entry point
@@ -235,6 +265,20 @@ describe('Win32ServiceStrategy', () => {
       )
       expect(logger.success).not.toHaveBeenCalled()
     })
+
+    it('should handle non-Error throw from schtasks delete', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from('')) // Query succeeds
+        .mockImplementationOnce(() => {
+          throw 'string delete error'
+        })
+
+      strategy.uninstall()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.schtasksFailed'),
+      )
+    })
   })
 
   describe('restart', () => {
@@ -284,6 +328,19 @@ describe('Win32ServiceStrategy', () => {
         .mockReturnValueOnce(Buffer.from(''))  // Query
         .mockReturnValueOnce(Buffer.from(''))  // End
         .mockImplementationOnce(() => { throw new Error('run failed') })  // Run
+
+      strategy.restart()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.restartFailed'),
+      )
+    })
+
+    it('should handle non-Error throw from Run', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from(''))  // Query
+        .mockReturnValueOnce(Buffer.from(''))  // End
+        .mockImplementationOnce(() => { throw 'string run error' })  // Run
 
       strategy.restart()
 
