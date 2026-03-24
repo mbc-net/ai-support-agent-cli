@@ -372,6 +372,17 @@ describe('DarwinServiceStrategy', () => {
         expect.stringContaining('service.startFailed'),
       )
     })
+
+    it('should handle non-Error throw from start', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw 'string start error' })
+
+      strategy.start()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.startFailed'),
+      )
+    })
   })
 
   describe('stop', () => {
@@ -400,6 +411,17 @@ describe('DarwinServiceStrategy', () => {
     it('should log error if remove fails', () => {
       mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockImplementation(() => { throw new Error('remove failed') })
+
+      strategy.stop()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.stopFailed'),
+      )
+    })
+
+    it('should handle non-Error throw from stop', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw 'string stop error' })
 
       strategy.stop()
 

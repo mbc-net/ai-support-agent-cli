@@ -313,6 +313,18 @@ describe('Win32ServiceStrategy', () => {
         expect.stringContaining('service.startFailed'),
       )
     })
+
+    it('should handle non-Error throw from start', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from(''))  // Query
+        .mockImplementationOnce(() => { throw 'string start error' })  // Run
+
+      strategy.start()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.startFailed'),
+      )
+    })
   })
 
   describe('stop', () => {
@@ -340,6 +352,18 @@ describe('Win32ServiceStrategy', () => {
       mockedExecSync
         .mockReturnValueOnce(Buffer.from(''))  // Query
         .mockImplementationOnce(() => { throw new Error('end failed') })  // End
+
+      strategy.stop()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.stopFailed'),
+      )
+    })
+
+    it('should handle non-Error throw from stop', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from(''))  // Query
+        .mockImplementationOnce(() => { throw 'string stop error' })  // End
 
       strategy.stop()
 

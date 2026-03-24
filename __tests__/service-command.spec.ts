@@ -125,6 +125,21 @@ describe('service-command orchestrator', () => {
     })
   })
 
+  describe('installService on win32', () => {
+    it('should delegate to Win32ServiceStrategy on Windows', () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' })
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      installService({})
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        expect.stringContaining('schtasks /Create'),
+        expect.any(Object),
+      )
+    })
+  })
+
   describe('startService', () => {
     it('should delegate to DarwinServiceStrategy on macOS', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })

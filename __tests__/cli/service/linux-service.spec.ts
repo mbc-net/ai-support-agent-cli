@@ -255,6 +255,17 @@ describe('LinuxServiceStrategy', () => {
         expect.stringContaining('service.startFailed'),
       )
     })
+
+    it('should handle non-Error throw from start', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw 'string start error' })
+
+      strategy.start()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.startFailed'),
+      )
+    })
   })
 
   describe('stop', () => {
@@ -283,6 +294,17 @@ describe('LinuxServiceStrategy', () => {
     it('should log error if stop fails', () => {
       mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockImplementation(() => { throw new Error('stop failed') })
+
+      strategy.stop()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.stopFailed'),
+      )
+    })
+
+    it('should handle non-Error throw from stop', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw 'string stop error' })
 
       strategy.stop()
 
@@ -329,6 +351,17 @@ describe('LinuxServiceStrategy', () => {
         expect.stringContaining('service.restartFailed'),
       )
     })
+
+    it('should handle non-Error throw from restart', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw 'string restart error' })
+
+      strategy.restart()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.restartFailed'),
+      )
+    })
   })
 
   describe('status', () => {
@@ -360,6 +393,17 @@ describe('LinuxServiceStrategy', () => {
 
       expect(result.installed).toBe(true)
       expect(result.running).toBe(false)
+    })
+
+    it('should return active without PID when MainPID is missing', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from('ActiveState=active\n'))
+
+      const result = strategy.status()
+
+      expect(result.installed).toBe(true)
+      expect(result.running).toBe(true)
+      expect(result.pid).toBeUndefined()
     })
 
     it('should return installed but not running when systemctl fails', () => {
