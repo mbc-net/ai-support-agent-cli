@@ -6,7 +6,7 @@ import * as path from 'path'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { getCliEntryPoint, getNodePath } from './node-paths'
-import type { ServiceConfig, ServiceOptions, ServiceStrategy } from './types'
+import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
 
 const SERVICE_NAME = 'ai-support-agent.service'
 
@@ -102,6 +102,43 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     logger.success(t('service.uninstalled.linux'))
   }
 
+  start(): void {
+    const serviceFilePath = getServiceFilePath()
+
+    if (!fs.existsSync(serviceFilePath)) {
+      logger.error(t('service.notInstalled.linux'))
+      return
+    }
+
+    try {
+      const serviceName = SERVICE_NAME.replace('.service', '')
+      execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
+      execSync(`systemctl --user start ${serviceName}`, { stdio: 'pipe' })
+      logger.success(t('service.started'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error(t('service.startFailed', { message }))
+    }
+  }
+
+  stop(): void {
+    const serviceFilePath = getServiceFilePath()
+
+    if (!fs.existsSync(serviceFilePath)) {
+      logger.error(t('service.notInstalled.linux'))
+      return
+    }
+
+    try {
+      const serviceName = SERVICE_NAME.replace('.service', '')
+      execSync(`systemctl --user stop ${serviceName}`, { stdio: 'pipe' })
+      logger.success(t('service.stopped'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error(t('service.stopFailed', { message }))
+    }
+  }
+
   restart(): void {
     const serviceFilePath = getServiceFilePath()
 
@@ -118,6 +155,26 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       logger.error(t('service.restartFailed', { message }))
+    }
+  }
+
+  status(): ServiceStatus {
+    const serviceFilePath = getServiceFilePath()
+    const logDir = getLogDir()
+    if (!fs.existsSync(serviceFilePath)) {
+      return { installed: false, running: false }
+    }
+
+    try {
+      const serviceName = SERVICE_NAME.replace('.service', '')
+      const output = execSync(`systemctl --user show ${serviceName} --property=ActiveState,MainPID --no-pager`, { stdio: 'pipe' }).toString()
+      const activeMatch = output.match(/ActiveState=(\w+)/)
+      const pidMatch = output.match(/MainPID=(\d+)/)
+      const active = activeMatch?.[1] === 'active'
+      const pid = pidMatch ? parseInt(pidMatch[1], 10) : undefined
+      return { installed: true, running: active, pid: active ? pid : undefined, logDir }
+    } catch {
+      return { installed: true, running: false, logDir }
     }
   }
 }

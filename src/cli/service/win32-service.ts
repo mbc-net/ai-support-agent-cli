@@ -7,7 +7,7 @@ import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
-import type { ServiceConfig, ServiceOptions, ServiceStrategy } from './types'
+import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
 
 const TASK_NAME = 'AISupportAgent'
 
@@ -118,6 +118,40 @@ export class Win32ServiceStrategy implements ServiceStrategy {
     logger.success(t('service.uninstalled.win32'))
   }
 
+  start(): void {
+    try {
+      execSync(`schtasks /Query /TN "${TASK_NAME}"`, { stdio: 'pipe' })
+    } catch {
+      logger.error(t('service.notInstalled.win32'))
+      return
+    }
+
+    try {
+      execSync(`schtasks /Run /TN "${TASK_NAME}"`, { stdio: 'pipe' })
+      logger.success(t('service.started'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error(t('service.startFailed', { message }))
+    }
+  }
+
+  stop(): void {
+    try {
+      execSync(`schtasks /Query /TN "${TASK_NAME}"`, { stdio: 'pipe' })
+    } catch {
+      logger.error(t('service.notInstalled.win32'))
+      return
+    }
+
+    try {
+      execSync(`schtasks /End /TN "${TASK_NAME}"`, { stdio: 'pipe' })
+      logger.success(t('service.stopped'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error(t('service.stopFailed', { message }))
+    }
+  }
+
   restart(): void {
     try {
       execSync(`schtasks /Query /TN "${TASK_NAME}"`, { stdio: 'pipe' })
@@ -138,6 +172,17 @@ export class Win32ServiceStrategy implements ServiceStrategy {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       logger.error(t('service.restartFailed', { message }))
+    }
+  }
+
+  status(): ServiceStatus {
+    const logDir = getLogDir()
+    try {
+      const output = execSync(`schtasks /Query /TN "${TASK_NAME}" /FO CSV /NH`, { stdio: 'pipe' }).toString()
+      const running = output.includes('Running')
+      return { installed: true, running, logDir }
+    } catch {
+      return { installed: false, running: false }
     }
   }
 }

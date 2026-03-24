@@ -339,6 +339,98 @@ describe('DarwinServiceStrategy', () => {
     })
   })
 
+  describe('start', () => {
+    it('should error if plist does not exist', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+
+      strategy.start()
+
+      expect(logger.error).toHaveBeenCalledWith('service.notInstalled')
+      expect(mockedExecSync).not.toHaveBeenCalled()
+    })
+
+    it('should load the service', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      strategy.start()
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        expect.stringContaining('launchctl load'),
+        { stdio: 'pipe' },
+      )
+      expect(logger.success).toHaveBeenCalledWith('service.started')
+    })
+
+    it('should log error if load fails', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw new Error('load failed') })
+
+      strategy.start()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.startFailed'),
+      )
+    })
+
+    it('should handle non-Error throw from start', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw 'string start error' })
+
+      strategy.start()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.startFailed'),
+      )
+    })
+  })
+
+  describe('stop', () => {
+    it('should error if plist does not exist', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+
+      strategy.stop()
+
+      expect(logger.error).toHaveBeenCalledWith('service.notInstalled')
+      expect(mockedExecSync).not.toHaveBeenCalled()
+    })
+
+    it('should remove the service', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      strategy.stop()
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'launchctl remove com.ai-support-agent.cli',
+        { stdio: 'pipe' },
+      )
+      expect(logger.success).toHaveBeenCalledWith('service.stopped')
+    })
+
+    it('should log error if remove fails', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw new Error('remove failed') })
+
+      strategy.stop()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.stopFailed'),
+      )
+    })
+
+    it('should handle non-Error throw from stop', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw 'string stop error' })
+
+      strategy.stop()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.stopFailed'),
+      )
+    })
+  })
+
   describe('restart', () => {
     it('should error if plist does not exist', () => {
       mockedFs.existsSync.mockReturnValue(false)
@@ -388,6 +480,49 @@ describe('DarwinServiceStrategy', () => {
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('service.restartFailed'),
       )
+    })
+  })
+
+  describe('status', () => {
+    it('should return not installed when plist does not exist', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+
+      const result = strategy.status()
+
+      expect(result).toEqual({ installed: false, running: false })
+    })
+
+    it('should return running with PID when service is loaded', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from('"PID" = 12345;'))
+
+      const result = strategy.status()
+
+      expect(result.installed).toBe(true)
+      expect(result.running).toBe(true)
+      expect(result.pid).toBe(12345)
+      expect(result.logDir).toBeTruthy()
+    })
+
+    it('should return installed but not running when launchctl list fails', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw new Error('not loaded') })
+
+      const result = strategy.status()
+
+      expect(result.installed).toBe(true)
+      expect(result.running).toBe(false)
+      expect(result.logDir).toBeTruthy()
+    })
+
+    it('should return installed but not running when PID is not in output', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from('"Label" = "com.ai-support-agent.cli";'))
+
+      const result = strategy.status()
+
+      expect(result.installed).toBe(true)
+      expect(result.running).toBe(false)
     })
   })
 })
