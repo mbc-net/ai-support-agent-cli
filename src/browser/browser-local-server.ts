@@ -11,6 +11,7 @@ import http from 'http'
 import { logger } from '../logger'
 import { BrowserSessionManager } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
+import { executePlaywrightScript } from './browser-script-executor'
 
 /** Action log entry emitted to the caller */
 export interface ActionLogNotification {
@@ -113,7 +114,10 @@ export class BrowserLocalServer {
           await this.handleFill(res, sessionId, session, params)
           break
         case 'get-text':
-          await this.handleGetText(res, session, params)
+          await this.handleGetText(res, sessionId, session, params)
+          break
+        case 'extract':
+          await this.handleExtract(res, sessionId, session, params)
           break
         case 'screenshot':
           await this.handleScreenshot(res, session, params)
@@ -128,17 +132,20 @@ export class BrowserLocalServer {
           if (req.method === 'GET') {
             const varName = segments[3]
             if (varName) {
-              this.handleGetVariable(res, session, varName)
+              this.handleGetVariable(res, sessionId, session, varName)
             } else {
               sendJson(res, 400, { error: 'Missing variable name' })
             }
           } else {
-            await this.handleSetVariable(res, session, params)
+            await this.handleSetVariable(res, sessionId, session, params)
           }
           break
         }
         case 'variables':
           this.handleListVariables(res, session)
+          break
+        case 'execute-script':
+          await this.handleExecuteScript(res, sessionId, session, params)
           break
         default:
           sendJson(res, 404, { error: `Unknown action: ${action}` })
@@ -243,7 +250,7 @@ export class BrowserLocalServer {
     const page = await session.getPage()
     await page.fill(selector, value, { timeout: 10000 })
 
-    this.emitActionLog(sessionId, session, 'fill', selector)
+    this.emitActionLog(sessionId, session, 'fill', `${selector} "${value}"`)
 
     if (params.screenshot) {
       const screenshotBuffer = await session.screenshot(true)
@@ -255,12 +262,38 @@ export class BrowserLocalServer {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async handleGetText(res: http.ServerResponse, session: any, params: Record<string, unknown>): Promise<void> {
+  private async handleGetText(res: http.ServerResponse, sessionId: string, session: any, params: Record<string, unknown>): Promise<void> {
     const page = await session.getPage()
     const target = (params.selector as string) ?? 'body'
     const text: string = await page.locator(target).innerText({ timeout: 10000 })
     const maxLength = 50 * 1024
     const truncated = text.length > maxLength ? text.substring(0, maxLength) + '\n... (truncated)' : text
+    const preview = text.replace(/\s+/g, ' ').trim()
+    const previewText = preview.length > 100 ? preview.substring(0, 100) + '…' : preview
+    this.emitActionLog(sessionId, session, 'get_text', `${target} → "${previewText}"`)
+    sendJson(res, 200, { text: truncated })
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async handleExtract(res: http.ServerResponse, sessionId: string, session: any, params: Record<string, unknown>): Promise<void> {
+    const selector = params.selector as string
+    const variableName = params.variableName as string
+    if (!selector || !variableName) {
+      sendJson(res, 400, { error: 'Missing selector or variableName' })
+      return
+    }
+
+    const page = await session.getPage()
+    const text: string = await page.locator(selector).innerText({ timeout: 10000 })
+    const maxLength = 50 * 1024
+    const truncated = text.length > maxLength ? text.substring(0, maxLength) + '\n... (truncated)' : text
+
+    session.variables.set(variableName, truncated)
+
+    const preview = text.replace(/\s+/g, ' ').trim()
+    const previewText = preview.length > 100 ? preview.substring(0, 100) + '…' : preview
+    this.emitActionLog(sessionId, session, 'extract', `${variableName} "${selector}" → "${previewText}"`)
+
     sendJson(res, 200, { text: truncated })
   }
 
@@ -283,17 +316,18 @@ export class BrowserLocalServer {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private handleGetVariable(res: http.ServerResponse, session: any, name: string): void {
+  private handleGetVariable(res: http.ServerResponse, sessionId: string, session: any, name: string): void {
     const value = session.variables.get(name)
     if (value === undefined) {
       sendJson(res, 404, { error: `Variable not found: ${name}` })
       return
     }
+    this.emitActionLog(sessionId, session, 'get_variable', `${name} → "${value}"`)
     sendJson(res, 200, { name, value })
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async handleSetVariable(res: http.ServerResponse, session: any, params: Record<string, unknown>): Promise<void> {
+  private async handleSetVariable(res: http.ServerResponse, sessionId: string, session: any, params: Record<string, unknown>): Promise<void> {
     const name = params.name as string
     const value = params.value as string
     if (!name || value === undefined) {
@@ -301,7 +335,29 @@ export class BrowserLocalServer {
       return
     }
     session.variables.set(name, value)
+    this.emitActionLog(sessionId, session, 'set_variable', `${name} "${value}"`)
     sendJson(res, 200, { ok: true })
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async handleExecuteScript(res: http.ServerResponse, sessionId: string, session: any, params: Record<string, unknown>): Promise<void> {
+    const script = params.script as string
+    if (!script) {
+      sendJson(res, 400, { error: 'Missing script' })
+      return
+    }
+
+    const result = await executePlaywrightScript(session, script, (step, total, line) => {
+      // Emit progress via action log callback
+      if (this.onActionLog) {
+        this.onActionLog({
+          sessionId,
+          entry: { timestamp: Date.now(), source: 'chat', action: 'script_progress', details: `${step}/${total}: ${line}` },
+        })
+      }
+    })
+
+    sendJson(res, 200, result)
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

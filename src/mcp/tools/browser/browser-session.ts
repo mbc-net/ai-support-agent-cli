@@ -7,6 +7,7 @@
 import { logger } from '../../../logger'
 import { BrowserActionLog } from './browser-action-log'
 import { BROWSER_IDLE_TIMEOUT_MS } from './browser-types'
+import { DeviceEmulation, DEVICE_PRESETS } from './device-presets'
 import { getElementAtPoint, getFocusedElementInfo, formatElementInfo } from './element-info'
 import { loadPlaywright } from './playwright-loader'
 
@@ -18,10 +19,20 @@ type Page = any
 
 export class BrowserSession {
   private browser: Browser | null = null
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private context: any = null
   private page: Page | null = null
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private readonly idleTimeoutMs: number
   private liveViewInterval: ReturnType<typeof setInterval> | null = null
+  private _currentDeviceId: string | null = null
+
+  /**
+   * Get the currently active device emulation ID, or null if none.
+   */
+  get currentDeviceId(): string | null {
+    return this._currentDeviceId
+  }
 
   /** Session-scoped temporary variables */
   readonly variables = new Map<string, string>()
@@ -49,7 +60,8 @@ export class BrowserSession {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     })
-    this.page = await this.browser.newPage()
+    this.context = await this.browser.newContext()
+    this.page = await this.context.newPage()
     return this.page
   }
 
@@ -74,16 +86,85 @@ export class BrowserSession {
         logger.debug(`[browser] Error closing browser: ${String(error)}`)
       }
       this.browser = null
+      this.context = null
       this.page = null
     }
   }
 
   /**
-   * Set the viewport size for the current page.
+   * Set device emulation by recreating the browser context with the new userAgent.
+   * This ensures the server receives the correct User-Agent on every request.
+   * Pass null to clear emulation (reset to default UA).
    */
-  async setViewport(width: number, height: number): Promise<void> {
-    const page = await this.getPage()
-    await page.setViewportSize({ width, height })
+  async setDeviceEmulation(emulation: DeviceEmulation | null): Promise<void> {
+    if (!this.browser) return
+
+    // Save current state
+    const currentUrl = this.page ? this.page.url() : 'about:blank'
+    const currentViewport = this.page ? this.page.viewportSize() : null
+
+    // Close old context (which also closes its pages)
+    if (this.context) {
+      try {
+        await this.context.close()
+      } catch {
+        // ignore close errors
+      }
+    }
+
+    // Create new context with the desired userAgent
+    const contextOptions: Record<string, unknown> = {}
+    if (emulation) {
+      contextOptions.userAgent = emulation.userAgent
+      contextOptions.isMobile = emulation.isMobile
+      contextOptions.hasTouch = emulation.hasTouch
+      contextOptions.deviceScaleFactor = emulation.deviceScaleFactor
+    }
+    if (currentViewport) {
+      contextOptions.viewport = currentViewport
+    }
+
+    this.context = await this.browser.newContext(contextOptions)
+    this.page = await this.context.newPage()
+
+    // Navigate back to the previous URL
+    if (currentUrl && currentUrl !== 'about:blank') {
+      try {
+        await this.page.goto(currentUrl, { waitUntil: 'domcontentloaded' })
+      } catch (error) {
+        logger.debug(`[browser] Navigate after device change failed: ${String(error)}`)
+      }
+    }
+  }
+
+  /**
+   * Set the viewport size for the current page.
+   * If deviceId is a non-empty string, apply corresponding device emulation.
+   * If deviceId is empty string, clear device emulation.
+   * If deviceId is undefined, don't change emulation (backward compat).
+   */
+  async setViewport(width: number, height: number, deviceId?: string): Promise<void> {
+    if (deviceId !== undefined && deviceId !== (this._currentDeviceId ?? '')) {
+      // デバイスが変更された場合、コンテキスト再作成（UA + viewport を反映）
+      // setDeviceEmulation 内で viewport も引き継がれるが、明示的に指定サイズを使う
+      const page = await this.getPage()
+      await page.setViewportSize({ width, height })
+
+      if (deviceId === '') {
+        await this.setDeviceEmulation(null)
+        this._currentDeviceId = null
+      } else {
+        const preset = DEVICE_PRESETS[deviceId]
+        if (preset) {
+          await this.setDeviceEmulation(preset)
+          this._currentDeviceId = deviceId
+        }
+      }
+    } else {
+      // デバイス変更なし: ビューポートサイズのみ変更
+      const page = await this.getPage()
+      await page.setViewportSize({ width, height })
+    }
   }
 
   /**
