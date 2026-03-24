@@ -133,6 +133,7 @@ export class BrowserSession {
     await page.setViewportSize({ width, height })
 
     if (deviceId !== undefined) {
+      const prevDeviceId = this._currentDeviceId
       if (deviceId === '') {
         await this.setDeviceEmulation(null)
         this._currentDeviceId = null
@@ -141,6 +142,18 @@ export class BrowserSession {
         if (preset) {
           await this.setDeviceEmulation(preset)
           this._currentDeviceId = deviceId
+        }
+      }
+
+      // デバイスが変更された場合、UA反映のためページをリロード
+      if (this._currentDeviceId !== prevDeviceId) {
+        const currentUrl = page.url()
+        if (currentUrl && currentUrl !== 'about:blank') {
+          try {
+            await page.reload({ waitUntil: 'domcontentloaded' })
+          } catch (error) {
+            logger.debug(`[browser] Reload after device change failed: ${String(error)}`)
+          }
         }
       }
     }

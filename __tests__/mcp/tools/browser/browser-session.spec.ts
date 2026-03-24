@@ -27,6 +27,7 @@ describe('BrowserSession', () => {
       setViewportSize: jest.fn().mockResolvedValue(undefined),
       setExtraHTTPHeaders: jest.fn().mockResolvedValue(undefined),
       addInitScript: jest.fn().mockResolvedValue(undefined),
+      reload: jest.fn().mockResolvedValue(undefined),
     }
 
     mockBrowser = {
@@ -232,7 +233,7 @@ describe('BrowserSession', () => {
   })
 
   describe('setViewport with deviceId', () => {
-    it('should apply device emulation when deviceId is provided', async () => {
+    it('should apply device emulation and reload when deviceId is provided', async () => {
       const session = new BrowserSession()
       await session.setViewport(375, 667, 'iphone-se')
 
@@ -241,14 +242,17 @@ describe('BrowserSession', () => {
         expect.objectContaining({ 'User-Agent': expect.stringContaining('iPhone') }),
       )
       expect(mockPage.addInitScript).toHaveBeenCalled()
+      // Should reload the page to apply new UA
+      expect(mockPage.reload).toHaveBeenCalledWith({ waitUntil: 'domcontentloaded' })
     })
 
-    it('should clear device emulation when deviceId is empty string', async () => {
+    it('should clear device emulation and reload when deviceId is empty string', async () => {
       const session = new BrowserSession()
       // First set a device
       await session.setViewport(375, 667, 'iphone-se')
       mockPage.setExtraHTTPHeaders.mockClear()
       mockPage.addInitScript.mockClear()
+      mockPage.reload.mockClear()
 
       // Then clear it
       await session.setViewport(1280, 720, '')
@@ -258,6 +262,26 @@ describe('BrowserSession', () => {
       expect(mockPage.addInitScript).toHaveBeenCalledWith(
         expect.stringContaining('device emulation cleared'),
       )
+      // Should reload to apply cleared UA
+      expect(mockPage.reload).toHaveBeenCalledWith({ waitUntil: 'domcontentloaded' })
+    })
+
+    it('should not reload when switching to same device', async () => {
+      const session = new BrowserSession()
+      await session.setViewport(375, 667, 'iphone-se')
+      mockPage.reload.mockClear()
+
+      // Same device again
+      await session.setViewport(375, 667, 'iphone-se')
+      expect(mockPage.reload).not.toHaveBeenCalled()
+    })
+
+    it('should not reload when page is about:blank', async () => {
+      mockPage.url.mockReturnValue('about:blank')
+      const session = new BrowserSession()
+      await session.setViewport(375, 667, 'iphone-se')
+
+      expect(mockPage.reload).not.toHaveBeenCalled()
     })
 
     it('should not change emulation when deviceId is undefined (backward compat)', async () => {
@@ -267,6 +291,7 @@ describe('BrowserSession', () => {
       expect(mockPage.setViewportSize).toHaveBeenCalledWith({ width: 1920, height: 1080 })
       expect(mockPage.setExtraHTTPHeaders).not.toHaveBeenCalled()
       expect(mockPage.addInitScript).not.toHaveBeenCalled()
+      expect(mockPage.reload).not.toHaveBeenCalled()
     })
 
     it('should ignore unknown deviceId', async () => {
@@ -276,6 +301,7 @@ describe('BrowserSession', () => {
       expect(mockPage.setViewportSize).toHaveBeenCalledWith({ width: 1024, height: 768 })
       // No emulation should be applied for unknown device
       expect(mockPage.setExtraHTTPHeaders).not.toHaveBeenCalled()
+      expect(mockPage.reload).not.toHaveBeenCalled()
     })
   })
 
