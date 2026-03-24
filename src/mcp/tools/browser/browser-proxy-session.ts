@@ -72,6 +72,16 @@ export class BrowserProxySession {
   }
 
   /**
+   * Extract text from an element and store in a variable (atomic operation).
+   */
+  async extract(selector: string, variableName: string): Promise<string> {
+    const result = await this.post('extract', { selector, variableName })
+    const text = result.text as string
+    this.variables.setLocal(variableName, text)
+    return text
+  }
+
+  /**
    * Get text content from the page.
    */
   async getText(selector?: string): Promise<string> {
@@ -108,6 +118,8 @@ export class BrowserProxySession {
    */
   async setVariable(name: string, value: string): Promise<void> {
     await this.post('variable', { name, value })
+    // Update local cache so subsequent get() calls reflect the new value
+    this.variables.setLocal(name, value)
   }
 
   /**
@@ -169,6 +181,11 @@ class ProxyVariableMap {
     httpRequest(this.baseUrl, 'POST', `/browser/${this.sessionId}/variable`, JSON.stringify({ name, value }))
       .catch((err) => { logger.warn(`[proxy-variable] Failed to sync variable "${name}" to server: ${String(err)}`) })
     return this
+  }
+
+  /** Update local cache only (no HTTP request). Used when setVariable() already sent the request. */
+  setLocal(name: string, value: string): void {
+    this.cache.set(name, value)
   }
 
   entries(): IterableIterator<[string, string]> {

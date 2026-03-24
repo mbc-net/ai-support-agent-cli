@@ -61,6 +61,7 @@ export function registerBrowserTools(server: McpServer, apiClient: ApiClient, se
   registerBrowserFillTool(server, defaultSession, manager)
   registerBrowserGetTextTool(server, defaultSession, manager)
   registerBrowserLoginTool(server, defaultSession, manager, apiClient)
+  registerBrowserExtractTool(server, defaultSession, manager)
   registerBrowserSetVariableTool(server, defaultSession, manager)
   registerBrowserGetVariableTool(server, defaultSession, manager)
   registerBrowserListVariablesTool(server, defaultSession, manager)
@@ -239,9 +240,9 @@ function registerBrowserFillTool(server: McpServer, defaultSession: BrowserSessi
 function registerBrowserGetTextTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {
   server.tool(
     'browser_get_text',
-    'Get text content from the page or a specific element.',
+    'Get text content from a specific element. IMPORTANT: Always use a specific CSS selector that targets the exact element (e.g., "table tr:nth-child(2) td:first-child", ".partner-list li:nth-child(3)") instead of "body". This ensures operations are reproducible when replayed as a script. Only use "body" as a last resort when no suitable selector exists.',
     {
-      selector: z.string().optional().describe('CSS selector (default: body)'),
+      selector: z.string().optional().describe('CSS selector targeting the specific element to extract text from. Prefer precise selectors over "body".'),
     },
     async ({ selector }) => withMcpErrorHandling(async () => {
       const session = getActiveSession(manager, defaultSession)
@@ -254,6 +255,7 @@ function registerBrowserGetTextTool(server: McpServer, defaultSession: BrowserSe
 
       if (session instanceof BrowserProxySession) {
         const text = await session.getText(target)
+        session.actionLog.add('chat', 'get_text', `${target} → "${textPreview(text)}"`)
         return mcpTextResponse(text)
       }
 
@@ -264,6 +266,7 @@ function registerBrowserGetTextTool(server: McpServer, defaultSession: BrowserSe
       const maxLength = 50 * 1024
       const truncated = text.length > maxLength ? text.substring(0, maxLength) + '\n... (truncated)' : text
 
+      session.actionLog.add('chat', 'get_text', `${target} → "${textPreview(text)}"`)
       return mcpTextResponse(truncated)
     }),
   )
@@ -336,19 +339,64 @@ function registerBrowserLoginTool(
   )
 }
 
+// --- Extract tool (atomic get_text + set_variable) ---
+
+function registerBrowserExtractTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {
+  server.tool(
+    'browser_extract',
+    'Extract text from a specific element using a CSS selector and store it in a session variable. This is an atomic operation that combines get_text + set_variable, producing a reproducible script line. Always use a precise CSS selector (e.g., ".partner-list li:nth-child(2)", "table tr:nth-child(3) td:first-child").',
+    {
+      selector: z.string().describe('CSS selector targeting the specific element to extract text from'),
+      variableName: z.string().describe('Variable name to store the extracted text'),
+    },
+    async ({ selector, variableName }) => withMcpErrorHandling(async () => {
+      const session = getActiveSession(manager, defaultSession)
+      if (!session.isActive()) {
+        return mcpErrorResponse('No active browser session. Use browser_navigate first.')
+      }
+
+      logger.debug(`[browser] Extracting: ${selector} → ${variableName}`)
+
+      if (session instanceof BrowserProxySession) {
+        const text = await session.extract(selector, variableName)
+        session.actionLog.add('chat', 'extract', `${variableName} "${selector}" → "${textPreview(text)}"`)
+        return mcpTextResponse(text)
+      }
+
+      const page = await session.getPage()
+      const text: string = await page.locator(selector).innerText({ timeout: 10000 })
+
+      // Truncate to 50KB to avoid overwhelming the context
+      const maxLength = 50 * 1024
+      const truncated = text.length > maxLength ? text.substring(0, maxLength) + '\n... (truncated)' : text
+
+      session.variables.set(variableName, truncated)
+      session.actionLog.add('chat', 'extract', `${variableName} "${selector}" → "${textPreview(text)}"`)
+      return mcpTextResponse(truncated)
+    }),
+  )
+}
+
 // --- Session variable tools ---
 
 function registerBrowserSetVariableTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {
   server.tool(
     'browser_set_variable',
-    'Set a temporary variable in the current browser session. Variables are session-scoped and lost when the session closes.',
+    'Set a temporary variable in the current browser session. Variables are session-scoped and lost when the session closes. When storing a value extracted from the page, prefer using browser_get_text with a precise CSS selector first, then store the result — this makes the operation reproducible as a script.',
     {
       name: z.string().describe('Variable name'),
       value: z.string().describe('Variable value'),
     },
     async ({ name, value }) => withMcpErrorHandling(async () => {
       const session = getActiveSession(manager, defaultSession)
-      session.variables.set(name, value)
+
+      if (session instanceof BrowserProxySession) {
+        // Use HTTP endpoint so the server emits action log via WebSocket
+        await session.setVariable(name, value)
+      } else {
+        session.variables.set(name, value)
+      }
+      session.actionLog.add('chat', 'set_variable', `${name} "${value}"`)
       return mcpTextResponse(`Variable set: ${name}`)
     }),
   )
@@ -363,10 +411,19 @@ function registerBrowserGetVariableTool(server: McpServer, defaultSession: Brows
     },
     async ({ name }) => withMcpErrorHandling(async () => {
       const session = getActiveSession(manager, defaultSession)
-      const value = session.variables.get(name)
+
+      let value: string | undefined
+      if (session instanceof BrowserProxySession) {
+        // Use HTTP endpoint so the server can emit action log
+        value = await session.getVariable(name)
+      } else {
+        value = session.variables.get(name)
+      }
+
       if (value === undefined) {
         return mcpErrorResponse(`Variable not found: ${name}`)
       }
+      session.actionLog.add('chat', 'get_variable', `${name} → "${value}"`)
       return mcpTextResponse(value)
     }),
   )
@@ -387,4 +444,10 @@ function registerBrowserListVariablesTool(server: McpServer, defaultSession: Bro
       return mcpTextResponse(text)
     }),
   )
+}
+
+/** Truncate text for action log display (max 100 chars, single line). */
+function textPreview(text: string): string {
+  const single = text.replace(/\s+/g, ' ').trim()
+  return single.length > 100 ? single.substring(0, 100) + '…' : single
 }
