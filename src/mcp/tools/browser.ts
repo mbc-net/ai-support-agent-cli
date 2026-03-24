@@ -16,6 +16,7 @@ import { validateUrl } from './browser/browser-security'
 import { BrowserSession } from './browser/browser-session'
 import { BrowserSessionManager } from './browser/browser-session-manager'
 import { isPlaywrightAvailable } from './browser/playwright-loader'
+import { tryClickSelectors, tryFillSelectors } from './browser/selector-utils'
 import { mcpErrorResponse, mcpTextImageResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
 
 /**
@@ -175,20 +176,13 @@ function registerBrowserClickTool(server: McpServer, defaultSession: BrowserSess
 
       const page = await session.getPage()
 
-      if (waitForNavigation) {
-        await Promise.all([
-          page.waitForNavigation({ timeout: 30000 }).catch(() => { /* navigation may not happen */ }),
-          page.click(selector, { timeout: 10000 }),
-        ])
-      } else {
-        await page.click(selector, { timeout: 10000 })
-      }
+      const matchedSelector = await tryClickSelectors(page, selector, { waitForNavigation: waitForNavigation ?? false })
 
       const title: string = await page.title()
       const currentUrl: string = page.url()
-      const statusText = `Clicked: ${selector}\nPage: ${title}\nURL: ${currentUrl}`
+      const statusText = `Clicked: ${matchedSelector}\nPage: ${title}\nURL: ${currentUrl}`
 
-      session.actionLog.add('chat', 'click', selector)
+      session.actionLog.add('chat', 'click', matchedSelector)
 
       if (screenshot) {
         const screenshotBuffer = await session.screenshot(true)
@@ -228,17 +222,17 @@ function registerBrowserFillTool(server: McpServer, defaultSession: BrowserSessi
       }
 
       const page = await session.getPage()
-      await page.fill(selector, value, { timeout: 10000 })
+      const matchedSelector = await tryFillSelectors(page, selector, value)
 
-      session.actionLog.add('chat', 'fill', `${selector} "${value}"`)
+      session.actionLog.add('chat', 'fill', `${matchedSelector} "${value}"`)
 
       if (screenshot) {
         const screenshotBuffer = await session.screenshot(true)
         const base64 = screenshotBuffer.toString('base64')
-        return mcpTextImageResponse(`Filled: ${selector}`, base64, 'image/png')
+        return mcpTextImageResponse(`Filled: ${matchedSelector}`, base64, 'image/png')
       }
 
-      return mcpTextResponse(`Filled: ${selector}`)
+      return mcpTextResponse(`Filled: ${matchedSelector}`)
     }),
   )
 }
