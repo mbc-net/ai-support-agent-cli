@@ -39,9 +39,6 @@ export interface StreamJsonLine {
 /** file_upload ツール結果を file_attachment チャンクに変換する */
 const FILE_UPLOAD_TOOL_NAME = 'mcp__ai-support-agent__file_upload'
 
-/** Screenshot base64 の最大サイズ（バイト） */
-const SCREENSHOT_MAX_BASE64_BYTES = 512 * 1024
-
 /**
  * stream-json の NDJSON 1行をパースし、テキストやツール呼び出し情報を処理する
  * sendChunk は fire-and-forget で呼び出される（同期的に状態を返すため）
@@ -125,33 +122,15 @@ export function processStreamJsonLine(
       // ツール名を復元
       const toolName = state.pendingToolNames?.get(block.tool_use_id) ?? 'unknown'
 
-      // tool_result の内容をテキストとして抽出（image ブロックがあればスクリーンショットも含める）
+      // tool_result の内容をテキストとして抽出
       let resultText: string
-      let screenshotBase64: string | undefined
       if (typeof block.content === 'string') {
         resultText = block.content
       } else if (Array.isArray(block.content)) {
         const textBlock = block.content.find(b => b.type === 'text' && b.text)
         resultText = textBlock?.text ?? ''
-        // Extract screenshot from image blocks
-        const imageBlock = block.content.find(b => b.type === 'image')
-        if (imageBlock) {
-          // image block can have data directly or in source.data
-          const base64Data = imageBlock.data ?? imageBlock.source?.data
-          // Size guard: skip if base64 > 512KB
-          if (base64Data && base64Data.length <= SCREENSHOT_MAX_BASE64_BYTES) {
-            screenshotBase64 = base64Data
-          } else if (base64Data) {
-            logger.warn(`[stream] Screenshot base64 too large (${base64Data.length} bytes), skipped`)
-          }
-        }
       } else {
         resultText = ''
-      }
-
-      // Append screenshot marker if present
-      if (screenshotBase64) {
-        resultText += `\n[screenshot:base64:${screenshotBase64}]`
       }
 
       // tool_result チャンクを送信

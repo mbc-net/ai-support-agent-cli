@@ -523,6 +523,15 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     try {
       const session = await this.browserSessionManager.getOrCreate(sessionId)
 
+      // Wire up action log notifications so in-process operations are relayed to Web UI
+      session.actionLog.onChange = (entry) => {
+        this.send({
+          type: 'browser_action_log',
+          sessionId,
+          entries: [entry],
+        })
+      }
+
       if (msg.conversationId) {
         this.browserSessionManager.linkConversation(msg.conversationId, sessionId)
       }

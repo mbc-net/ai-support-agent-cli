@@ -87,6 +87,17 @@ export class BrowserLocalServer {
       const url = new URL(req.url ?? '/', `http://localhost:${this.port}`)
       const segments = url.pathname.split('/').filter(Boolean)
 
+      // Route: /sessions/first — returns the first active session ID
+      if (segments.length === 2 && segments[0] === 'sessions' && segments[1] === 'first') {
+        const sessions = this.sessionManager.listSessions()
+        if (sessions.length === 0) {
+          sendJson(res, 404, { error: 'No active sessions' })
+        } else {
+          sendJson(res, 200, { sessionId: sessions[0].sessionId })
+        }
+        return
+      }
+
       // Route: /browser/:sessionId/:action
       if (segments.length < 3 || segments[0] !== 'browser') {
         sendJson(res, 404, { error: 'Not found' })
@@ -158,16 +169,18 @@ export class BrowserLocalServer {
   }
 
   /**
-   * Emit an action log notification to the WebSocket callback.
+   * Record an action log entry and notify via callback.
+   * BrowserActionLog.onChange may also fire for direct operations, but
+   * for chat operations via BrowserLocalServer we use onActionLog to
+   * ensure delivery even before the Web browser panel is connected.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private emitActionLog(sessionId: string, session: any, action: string, details: string): void {
-    session.actionLog.add('chat', action, details)
+    const entry = { timestamp: Date.now(), source: 'chat' as const, action, details }
+    // Add to log without triggering onChange (to avoid double notification)
+    session.actionLog.addEntry(entry)
     if (this.onActionLog) {
-      this.onActionLog({
-        sessionId,
-        entry: { timestamp: Date.now(), source: 'chat', action, details },
-      })
+      this.onActionLog({ sessionId, entry })
     }
   }
 

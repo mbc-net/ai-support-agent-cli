@@ -13,18 +13,31 @@ export class BrowserActionLog {
   private entries: ActionLogEntry[] = []
   private readonly maxEntries: number
 
+  /** Optional callback invoked whenever a new entry is added. */
+  onChange: ((entry: ActionLogEntry) => void) | null = null
+
   constructor(maxEntries: number = 1000) {
     this.maxEntries = maxEntries
   }
 
   add(source: 'direct' | 'chat', action: string, details: string): void {
-    this.entries.push({
+    const entry: ActionLogEntry = {
       timestamp: Date.now(),
       source,
       action,
       details,
-    })
+    }
+    this.entries.push(entry)
     // Remove oldest entries when exceeding max
+    if (this.entries.length > this.maxEntries) {
+      this.entries = this.entries.slice(-this.maxEntries)
+    }
+    this.onChange?.(entry)
+  }
+
+  /** Add a pre-built entry without triggering onChange. */
+  addEntry(entry: ActionLogEntry): void {
+    this.entries.push(entry)
     if (this.entries.length > this.maxEntries) {
       this.entries = this.entries.slice(-this.maxEntries)
     }
