@@ -13,6 +13,7 @@ const mockLoadPlaywright = loadPlaywright as jest.MockedFunction<typeof loadPlay
 
 describe('BrowserSession - Live View & Interaction', () => {
   let mockPage: Record<string, jest.Mock | Record<string, jest.Mock>>
+  let mockContext: Record<string, jest.Mock>
   let mockBrowser: Record<string, jest.Mock>
   let mockPlaywright: { chromium: { launch: jest.Mock } }
 
@@ -28,6 +29,7 @@ describe('BrowserSession - Live View & Interaction', () => {
       goBack: jest.fn().mockResolvedValue(undefined),
       goForward: jest.fn().mockResolvedValue(undefined),
       reload: jest.fn().mockResolvedValue(undefined),
+      viewportSize: jest.fn().mockReturnValue({ width: 1280, height: 720 }),
       mouse: {
         click: jest.fn().mockResolvedValue(undefined),
         wheel: jest.fn().mockResolvedValue(undefined),
@@ -38,8 +40,13 @@ describe('BrowserSession - Live View & Interaction', () => {
       },
     }
 
-    mockBrowser = {
+    mockContext = {
       newPage: jest.fn().mockResolvedValue(mockPage),
+      close: jest.fn().mockResolvedValue(undefined),
+    }
+
+    mockBrowser = {
+      newContext: jest.fn().mockResolvedValue(mockContext),
       close: jest.fn().mockResolvedValue(undefined),
     }
 

@@ -19,6 +19,8 @@ type Page = any
 
 export class BrowserSession {
   private browser: Browser | null = null
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private context: any = null
   private page: Page | null = null
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private readonly idleTimeoutMs: number
@@ -58,7 +60,8 @@ export class BrowserSession {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     })
-    this.page = await this.browser.newPage()
+    this.context = await this.browser.newContext()
+    this.page = await this.context.newPage()
     return this.page
   }
 
@@ -83,42 +86,54 @@ export class BrowserSession {
         logger.debug(`[browser] Error closing browser: ${String(error)}`)
       }
       this.browser = null
+      this.context = null
       this.page = null
     }
   }
 
   /**
-   * Set device emulation (User-Agent, touch, platform overrides).
-   * Pass null to clear emulation.
+   * Set device emulation by recreating the browser context with the new userAgent.
+   * This ensures the server receives the correct User-Agent on every request.
+   * Pass null to clear emulation (reset to default UA).
    */
   async setDeviceEmulation(emulation: DeviceEmulation | null): Promise<void> {
-    const page = await this.getPage()
+    if (!this.browser) return
 
-    if (emulation) {
-      await page.setExtraHTTPHeaders({ 'User-Agent': emulation.userAgent })
+    // Save current state
+    const currentUrl = this.page ? this.page.url() : 'about:blank'
+    const currentViewport = this.page ? this.page.viewportSize() : null
 
-      const ua = emulation.userAgent
-      const maxTouchPoints = emulation.hasTouch ? 5 : 0
-      let platform = 'Win32'
-      if (ua.includes('iPhone')) {
-        platform = 'iPhone'
-      } else if (ua.includes('iPad')) {
-        platform = 'iPad'
-      } else if (ua.includes('Linux') || ua.includes('Android')) {
-        platform = 'Linux armv8l'
+    // Close old context (which also closes its pages)
+    if (this.context) {
+      try {
+        await this.context.close()
+      } catch {
+        // ignore close errors
       }
+    }
 
-      await page.addInitScript(`
-        Object.defineProperty(navigator, 'userAgent', { get: () => ${JSON.stringify(ua)} });
-        Object.defineProperty(navigator, 'maxTouchPoints', { get: () => ${maxTouchPoints} });
-        Object.defineProperty(navigator, 'platform', { get: () => ${JSON.stringify(platform)} });
-      `)
-    } else {
-      await page.setExtraHTTPHeaders({})
-      // addInitScript は蓄積される（Playwright仕様）。
-      // 最後の defineProperty が有効になるため機能的には問題なし。
-      // コンテキスト再作成（V2）で解消予定。
-      await page.addInitScript('// device emulation cleared')
+    // Create new context with the desired userAgent
+    const contextOptions: Record<string, unknown> = {}
+    if (emulation) {
+      contextOptions.userAgent = emulation.userAgent
+      contextOptions.isMobile = emulation.isMobile
+      contextOptions.hasTouch = emulation.hasTouch
+      contextOptions.deviceScaleFactor = emulation.deviceScaleFactor
+    }
+    if (currentViewport) {
+      contextOptions.viewport = currentViewport
+    }
+
+    this.context = await this.browser.newContext(contextOptions)
+    this.page = await this.context.newPage()
+
+    // Navigate back to the previous URL
+    if (currentUrl && currentUrl !== 'about:blank') {
+      try {
+        await this.page.goto(currentUrl, { waitUntil: 'domcontentloaded' })
+      } catch (error) {
+        logger.debug(`[browser] Navigate after device change failed: ${String(error)}`)
+      }
     }
   }
 
@@ -129,11 +144,12 @@ export class BrowserSession {
    * If deviceId is undefined, don't change emulation (backward compat).
    */
   async setViewport(width: number, height: number, deviceId?: string): Promise<void> {
-    const page = await this.getPage()
-    await page.setViewportSize({ width, height })
+    if (deviceId !== undefined && deviceId !== (this._currentDeviceId ?? '')) {
+      // デバイスが変更された場合、コンテキスト再作成（UA + viewport を反映）
+      // setDeviceEmulation 内で viewport も引き継がれるが、明示的に指定サイズを使う
+      const page = await this.getPage()
+      await page.setViewportSize({ width, height })
 
-    if (deviceId !== undefined) {
-      const prevDeviceId = this._currentDeviceId
       if (deviceId === '') {
         await this.setDeviceEmulation(null)
         this._currentDeviceId = null
@@ -144,18 +160,10 @@ export class BrowserSession {
           this._currentDeviceId = deviceId
         }
       }
-
-      // デバイスが変更された場合、UA反映のためページをリロード
-      if (this._currentDeviceId !== prevDeviceId) {
-        const currentUrl = page.url()
-        if (currentUrl && currentUrl !== 'about:blank') {
-          try {
-            await page.reload({ waitUntil: 'domcontentloaded' })
-          } catch (error) {
-            logger.debug(`[browser] Reload after device change failed: ${String(error)}`)
-          }
-        }
-      }
+    } else {
+      // デバイス変更なし: ビューポートサイズのみ変更
+      const page = await this.getPage()
+      await page.setViewportSize({ width, height })
     }
   }
 
