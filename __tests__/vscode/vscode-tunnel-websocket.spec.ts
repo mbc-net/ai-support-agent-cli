@@ -617,6 +617,7 @@ describe('VsCodeTunnelWebSocket', () => {
         startLiveView: jest.fn(),
         getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
         getPageTitle: jest.fn().mockResolvedValue(''),
+        actionLog: { onChange: null },
       }
       tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
 
@@ -645,6 +646,7 @@ describe('VsCodeTunnelWebSocket', () => {
         startLiveView: jest.fn(),
         getCurrentUrl: jest.fn().mockReturnValue('https://example.com'),
         getPageTitle: jest.fn().mockResolvedValue('Example'),
+        actionLog: { onChange: null },
       }
       tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
 
@@ -669,6 +671,7 @@ describe('VsCodeTunnelWebSocket', () => {
         startLiveView: jest.fn(),
         getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
         getPageTitle: jest.fn().mockResolvedValue(''),
+        actionLog: { onChange: null },
       }
       tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
       tunnel.browserSessionManager.linkConversation = jest.fn()

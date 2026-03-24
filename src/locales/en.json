@@ -138,7 +138,9 @@
 
   "cmd.installService": "Install as a background service",
   "cmd.installService.verbose": "Enable verbose logging for the service",
+  "cmd.installService.docker": "Run the service in Docker mode (uses Docker container with Claude CLI, Playwright, etc.)",
   "cmd.uninstallService": "Uninstall background service",
+  "cmd.restartService": "Restart background service",
   "service.unsupportedPlatform": "This command is not supported on {{platform}}.",
   "service.entryPointNotFound": "CLI entry point not found: {{path}}",
   "service.installed": "LaunchAgent plist created: {{path}}",
@@ -159,5 +161,7 @@
   "service.notInstalled.win32": "Scheduled task not found. Service is not installed.",
   "service.uninstalled.win32": "Scheduled task removed.",
   "service.unloadHint.win32": "If the task is running, it will be stopped and removed.",
-  "service.schtasksFailed": "schtasks command failed: {{message}}"
+  "service.schtasksFailed": "schtasks command failed: {{message}}",
+  "service.restarted": "Service restarted successfully.",
+  "service.restartFailed": "Failed to restart service: {{message}}"
 }

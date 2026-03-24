@@ -567,14 +567,13 @@ describe('claude-code-runner', () => {
       }))
     })
 
-    it('should extract screenshot from image block with data field', () => {
+    it('should extract only text from image+text content blocks (screenshot ignored)', () => {
       const sendChunk = jest.fn().mockResolvedValue(undefined)
       const state: { sentTextLength: number; pendingToolNames?: Map<string, string> } = {
         sentTextLength: 0,
         pendingToolNames: new Map([['tool-img1', 'mcp__browser__screenshot']]),
       }
 
-      const base64Data = 'iVBORw0KGgoAAAANS'
       const toolResultLine = JSON.stringify({
         type: 'user',
         message: {
@@ -584,7 +583,7 @@ describe('claude-code-runner', () => {
               tool_use_id: 'tool-img1',
               content: [
                 { type: 'text', text: 'Screenshot taken' },
-                { type: 'image', data: base64Data },
+                { type: 'image', data: 'iVBORw0KGgoAAAANS' },
               ],
             },
           ],
@@ -595,71 +594,7 @@ describe('claude-code-runner', () => {
       expect(sendChunk).toHaveBeenCalledWith('tool_result', JSON.stringify({
         toolName: 'mcp__browser__screenshot',
         success: true,
-        output: { text: `Screenshot taken\n[screenshot:base64:${base64Data}]` },
-      }))
-    })
-
-    it('should extract screenshot from image block with source.data field', () => {
-      const sendChunk = jest.fn().mockResolvedValue(undefined)
-      const state: { sentTextLength: number; pendingToolNames?: Map<string, string> } = {
-        sentTextLength: 0,
-        pendingToolNames: new Map([['tool-img2', 'mcp__browser__screenshot']]),
-      }
-
-      const base64Data = 'iVBORw0KGgoAAAANS'
-      const toolResultLine = JSON.stringify({
-        type: 'user',
-        message: {
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: 'tool-img2',
-              content: [
-                { type: 'text', text: 'Page captured' },
-                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64Data } },
-              ],
-            },
-          ],
-        },
-      })
-      processStreamJsonLine(toolResultLine, sendChunk, 123, state)
-
-      expect(sendChunk).toHaveBeenCalledWith('tool_result', JSON.stringify({
-        toolName: 'mcp__browser__screenshot',
-        success: true,
-        output: { text: `Page captured\n[screenshot:base64:${base64Data}]` },
-      }))
-    })
-
-    it('should skip screenshot when base64 data exceeds 512KB', () => {
-      const sendChunk = jest.fn().mockResolvedValue(undefined)
-      const state: { sentTextLength: number; pendingToolNames?: Map<string, string> } = {
-        sentTextLength: 0,
-        pendingToolNames: new Map([['tool-img3', 'mcp__browser__screenshot']]),
-      }
-
-      const largeBase64 = 'x'.repeat(512 * 1024 + 1)
-      const toolResultLine = JSON.stringify({
-        type: 'user',
-        message: {
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: 'tool-img3',
-              content: [
-                { type: 'text', text: 'Large screenshot' },
-                { type: 'image', data: largeBase64 },
-              ],
-            },
-          ],
-        },
-      })
-      processStreamJsonLine(toolResultLine, sendChunk, 123, state)
-
-      expect(sendChunk).toHaveBeenCalledWith('tool_result', JSON.stringify({
-        toolName: 'mcp__browser__screenshot',
-        success: true,
-        output: { text: 'Large screenshot' },
+        output: { text: 'Screenshot taken' },
       }))
     })
 

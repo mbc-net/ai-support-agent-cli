@@ -52,7 +52,7 @@ describe('BrowserLocalServer', () => {
     getCurrentUrl: jest.fn().mockReturnValue('https://example.com'),
     getPageTitle: jest.fn().mockResolvedValue('Test Page'),
     variables: new Map<string, string>(),
-    actionLog: { add: jest.fn() },
+    actionLog: { add: jest.fn(), addEntry: jest.fn() },
     isActive: jest.fn().mockReturnValue(true),
   }
 
@@ -91,6 +91,24 @@ describe('BrowserLocalServer', () => {
     expect(res.body.error).toContain('Session not found')
   })
 
+  describe('/sessions/first', () => {
+    it('should return first session ID when session exists', async () => {
+      jest.spyOn(manager, 'listSessions').mockReturnValue([
+        { sessionId: 'sess-abc', createdAt: Date.now() },
+      ] as never)
+      const res = await httpRequest(port, 'GET', '/sessions/first')
+      expect(res.status).toBe(200)
+      expect(res.body.sessionId).toBe('sess-abc')
+    })
+
+    it('should return 404 when no active sessions', async () => {
+      jest.spyOn(manager, 'listSessions').mockReturnValue([])
+      const res = await httpRequest(port, 'GET', '/sessions/first')
+      expect(res.status).toBe(404)
+      expect(res.body.error).toBe('No active sessions')
+    })
+  })
+
   describe('navigate', () => {
     it('should navigate and return screenshot', async () => {
       const res = await httpRequest(port, 'POST', '/browser/sess-1/navigate', JSON.stringify({ url: 'https://example.com' }))
@@ -116,7 +134,7 @@ describe('BrowserLocalServer', () => {
 
     it('should add action log entry', async () => {
       await httpRequest(port, 'POST', '/browser/sess-1/navigate', JSON.stringify({ url: 'https://example.com' }))
-      expect(mockSession.actionLog.add).toHaveBeenCalledWith('chat', 'navigate', 'https://example.com')
+      expect(mockSession.actionLog.addEntry).toHaveBeenCalledWith(expect.objectContaining({ source: 'chat', action: 'navigate', details: 'https://example.com' }))
     })
   })
 
@@ -135,7 +153,7 @@ describe('BrowserLocalServer', () => {
 
     it('should add action log entry', async () => {
       await httpRequest(port, 'POST', '/browser/sess-1/click', JSON.stringify({ selector: '#btn' }))
-      expect(mockSession.actionLog.add).toHaveBeenCalledWith('chat', 'click', '#btn')
+      expect(mockSession.actionLog.addEntry).toHaveBeenCalledWith(expect.objectContaining({ source: 'chat', action: 'click', details: '#btn' }))
     })
   })
 
@@ -172,7 +190,7 @@ describe('BrowserLocalServer', () => {
       expect(res.status).toBe(200)
       expect(res.body.text).toBe('Hello World')
       expect(mockSession.variables.get('myVar')).toBe('Hello World')
-      expect(mockSession.actionLog.add).toHaveBeenCalledWith('chat', 'extract', expect.stringContaining('myVar'))
+      expect(mockSession.actionLog.addEntry).toHaveBeenCalledWith(expect.objectContaining({ source: 'chat', action: 'extract', details: expect.stringContaining('myVar') }))
     })
 
     it('should return 400 for missing selector', async () => {

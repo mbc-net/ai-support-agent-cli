@@ -19,7 +19,10 @@ jest.mock('os', () => {
 
 jest.mock('../../src/logger')
 
+import { logger } from '../../src/logger'
+
 const mockFs = jest.mocked(fs)
+const mockLogger = jest.mocked(logger)
 
 describe('ensureClaudeJsonIntegrity', () => {
   const MOCK_HOME = '/mock/home'
@@ -113,16 +116,19 @@ describe('ensureClaudeJsonIntegrity', () => {
     expect(mockFs.writeFileSync).toHaveBeenCalledWith(CLAUDE_JSON_PATH, '{}', { mode: 0o600 })
   })
 
-  it('should not throw when readFileSync throws IO error', () => {
+  it('should log warning when readFileSync throws IO error', () => {
     mockFs.existsSync.mockReturnValue(true)
     mockFs.readFileSync.mockImplementation(() => {
       throw new Error('EACCES: permission denied')
     })
 
     expect(() => ensureClaudeJsonIntegrity()).not.toThrow()
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('EACCES: permission denied'),
+    )
   })
 
-  it('should not throw when writeFileSync throws IO error', () => {
+  it('should log warning when writeFileSync throws IO error during backup', () => {
     const validJson = '{"key":"value"}'
     mockFs.existsSync.mockReturnValue(true)
     mockFs.readFileSync.mockReturnValue(validJson)
@@ -131,5 +137,8 @@ describe('ensureClaudeJsonIntegrity', () => {
     })
 
     expect(() => ensureClaudeJsonIntegrity()).not.toThrow()
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('ENOSPC: no space left on device'),
+    )
   })
 })

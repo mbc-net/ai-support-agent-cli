@@ -1,4 +1,5 @@
 jest.mock('fs')
+jest.mock('child_process')
 jest.mock('../src/logger')
 jest.mock('../src/i18n', () => ({
   initI18n: jest.fn(),
@@ -14,17 +15,20 @@ jest.mock('../src/i18n', () => ({
   },
 }))
 
+import { execSync } from 'child_process'
 import { Command } from 'commander'
 import * as fs from 'fs'
 import {
   generatePlist,
   installService,
   registerServiceCommands,
+  restartService,
   uninstallService,
 } from '../src/cli/service-command'
 import { logger } from '../src/logger'
 
 const mockedFs = jest.mocked(fs)
+const mockedExecSync = jest.mocked(execSync)
 
 describe('service-command orchestrator', () => {
   const originalPlatform = process.platform
@@ -106,14 +110,53 @@ describe('service-command orchestrator', () => {
     })
   })
 
+  describe('restartService', () => {
+    it('should delegate to DarwinServiceStrategy on macOS', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' })
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      restartService()
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        expect.stringContaining('launchctl'),
+        expect.any(Object),
+      )
+    })
+
+    it('should delegate to LinuxServiceStrategy on Linux', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' })
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      restartService()
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        expect.stringContaining('systemctl'),
+        expect.any(Object),
+      )
+    })
+
+    it('should reject unsupported platforms', () => {
+      Object.defineProperty(process, 'platform', { value: 'freebsd' })
+
+      restartService()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.unsupportedPlatform'),
+      )
+    })
+  })
+
   describe('registerServiceCommands', () => {
-    it('should register install-service and uninstall-service commands', () => {
+    it('should register install-service, uninstall-service, and restart-service commands', () => {
       const program = new Command()
       registerServiceCommands(program)
 
       const commands = program.commands.map((cmd) => cmd.name())
       expect(commands).toContain('install-service')
       expect(commands).toContain('uninstall-service')
+      expect(commands).toContain('restart-service')
     })
 
     it('should invoke installService via install-service command', () => {
@@ -131,6 +174,21 @@ describe('service-command orchestrator', () => {
       expect(content).toContain('--verbose')
     })
 
+    it('should pass --docker option to installService', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' })
+      mockedFs.existsSync.mockReturnValue(true)
+
+      const program = new Command()
+      program.exitOverride()
+      registerServiceCommands(program)
+
+      program.parse(['install-service', '--docker'], { from: 'user' })
+
+      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1)
+      const content = mockedFs.writeFileSync.mock.calls[0]?.[1] as string
+      expect(content).not.toContain('--no-docker')
+    })
+
     it('should invoke uninstallService via uninstall-service command', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
       mockedFs.existsSync.mockReturnValue(true)
@@ -142,6 +200,23 @@ describe('service-command orchestrator', () => {
       program.parse(['uninstall-service'], { from: 'user' })
 
       expect(mockedFs.unlinkSync).toHaveBeenCalled()
+    })
+
+    it('should invoke restartService via restart-service command', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' })
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      const program = new Command()
+      program.exitOverride()
+      registerServiceCommands(program)
+
+      program.parse(['restart-service'], { from: 'user' })
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        expect.stringContaining('launchctl'),
+        expect.any(Object),
+      )
     })
   })
 

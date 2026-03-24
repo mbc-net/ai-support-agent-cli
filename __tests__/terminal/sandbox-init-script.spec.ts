@@ -70,6 +70,22 @@ describe('buildZshRcContent', () => {
     expect(content).toContain('__SANDBOX_DIR=test')
   })
 
+  it('should fall back to empty string when both ZDOTDIR and HOME are undefined', () => {
+    const origZdotdir = process.env.ZDOTDIR
+    const origHome = process.env.HOME
+    try {
+      delete process.env.ZDOTDIR
+      delete process.env.HOME
+      const content = buildZshRcContent('# sandbox')
+      expect(content).toContain("'/.zshrc'")
+    } finally {
+      if (origZdotdir !== undefined) process.env.ZDOTDIR = origZdotdir
+      else delete process.env.ZDOTDIR
+      if (origHome !== undefined) process.env.HOME = origHome
+      else delete process.env.HOME
+    }
+  })
+
   it('should use ZDOTDIR if set', () => {
     const origZdotdir = process.env.ZDOTDIR
     try {
