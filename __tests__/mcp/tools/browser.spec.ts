@@ -436,7 +436,8 @@ describe('browser tools', () => {
       expect(result.content).toHaveLength(2)
       expect(result.content[0].text).toContain('Proxy Page')
       expect(getProxy().navigate).toHaveBeenCalledWith('https://example.com', expect.any(Object))
-      expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'navigate', 'https://example.com')
+      // actionLog.add is NOT called on proxy — BrowserLocalServer.emitActionLog handles it
+      expect(getProxy().actionLog.add).not.toHaveBeenCalled()
     })
 
     it('should use proxy session for click', async () => {
@@ -462,7 +463,7 @@ describe('browser tools', () => {
       }) as { content: Array<{ type: string; text?: string }> }
 
       expect(result.content[0].text).toContain('Clicked: #btn')
-      expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'click', '#btn')
+      expect(getProxy().actionLog.add).not.toHaveBeenCalled()
     })
 
     it('should use proxy session for fill', async () => {
@@ -490,7 +491,7 @@ describe('browser tools', () => {
       // fill returns undefined by default, so no screenshot
       expect(result.content).toHaveLength(1)
       expect(result.content[0].text).toBe('Filled: #email')
-      expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'fill', '#email "test@test.com"')
+      expect(getProxy().actionLog.add).not.toHaveBeenCalled()
     })
 
     it('should use proxy session for extract', async () => {
@@ -503,7 +504,7 @@ describe('browser tools', () => {
 
       expect(result.content[0].text).toBe('Extracted text')
       expect(getProxy().extract).toHaveBeenCalledWith('.item', 'myVar')
-      expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'extract', expect.stringContaining('myVar'))
+      expect(getProxy().actionLog.add).not.toHaveBeenCalled()
       expect(getProxy().variables.get('myVar')).toBe('Extracted text')
     })
 
@@ -552,8 +553,8 @@ describe('browser tools', () => {
       expect(setResult.content[0].text).toBe('Variable set: test')
       // Variable was set on the proxy's variables map
       expect(getProxy().variables.get('test')).toBe('value')
-      // Action log was recorded
-      expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'set_variable', 'test "value"')
+      // actionLog.add is NOT called on proxy — BrowserLocalServer.emitActionLog handles it
+      expect(getProxy().actionLog.add).not.toHaveBeenCalled()
     })
 
     it('should get variable error for missing variable via proxy session', async () => {
