@@ -218,6 +218,80 @@ describe('LinuxServiceStrategy', () => {
     })
   })
 
+  describe('start', () => {
+    it('should error if service file does not exist', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+
+      strategy.start()
+
+      expect(logger.error).toHaveBeenCalledWith('service.notInstalled.linux')
+      expect(mockedExecSync).not.toHaveBeenCalled()
+    })
+
+    it('should daemon-reload and start the service', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      strategy.start()
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'systemctl --user daemon-reload',
+        { stdio: 'pipe' },
+      )
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'systemctl --user start ai-support-agent',
+        { stdio: 'pipe' },
+      )
+      expect(logger.success).toHaveBeenCalledWith('service.started')
+    })
+
+    it('should log error if start fails', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw new Error('start failed') })
+
+      strategy.start()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.startFailed'),
+      )
+    })
+  })
+
+  describe('stop', () => {
+    it('should error if service file does not exist', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+
+      strategy.stop()
+
+      expect(logger.error).toHaveBeenCalledWith('service.notInstalled.linux')
+      expect(mockedExecSync).not.toHaveBeenCalled()
+    })
+
+    it('should stop the service', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      strategy.stop()
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'systemctl --user stop ai-support-agent',
+        { stdio: 'pipe' },
+      )
+      expect(logger.success).toHaveBeenCalledWith('service.stopped')
+    })
+
+    it('should log error if stop fails', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw new Error('stop failed') })
+
+      strategy.stop()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.stopFailed'),
+      )
+    })
+  })
+
   describe('restart', () => {
     it('should error if service file does not exist', () => {
       mockedFs.existsSync.mockReturnValue(false)
@@ -254,6 +328,49 @@ describe('LinuxServiceStrategy', () => {
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('service.restartFailed'),
       )
+    })
+  })
+
+  describe('status', () => {
+    it('should return not installed when service file does not exist', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+
+      const result = strategy.status()
+
+      expect(result).toEqual({ installed: false, running: false })
+    })
+
+    it('should return running with PID when service is active', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from('ActiveState=active\nMainPID=5678\n'))
+
+      const result = strategy.status()
+
+      expect(result.installed).toBe(true)
+      expect(result.running).toBe(true)
+      expect(result.pid).toBe(5678)
+      expect(result.logDir).toBeTruthy()
+    })
+
+    it('should return stopped when service is inactive', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from('ActiveState=inactive\nMainPID=0\n'))
+
+      const result = strategy.status()
+
+      expect(result.installed).toBe(true)
+      expect(result.running).toBe(false)
+    })
+
+    it('should return installed but not running when systemctl fails', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw new Error('systemctl failed') })
+
+      const result = strategy.status()
+
+      expect(result.installed).toBe(true)
+      expect(result.running).toBe(false)
+      expect(result.logDir).toBeTruthy()
     })
   })
 })

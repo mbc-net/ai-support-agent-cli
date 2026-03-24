@@ -281,6 +281,74 @@ describe('Win32ServiceStrategy', () => {
     })
   })
 
+  describe('start', () => {
+    it('should error if task does not exist', () => {
+      mockedExecSync.mockImplementation(() => { throw new Error('not found') })
+
+      strategy.start()
+
+      expect(logger.error).toHaveBeenCalledWith('service.notInstalled.win32')
+    })
+
+    it('should run the task', () => {
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      strategy.start()
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'schtasks /Run /TN "AISupportAgent"',
+        { stdio: 'pipe' },
+      )
+      expect(logger.success).toHaveBeenCalledWith('service.started')
+    })
+
+    it('should log error if Run fails', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from(''))  // Query
+        .mockImplementationOnce(() => { throw new Error('run failed') })  // Run
+
+      strategy.start()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.startFailed'),
+      )
+    })
+  })
+
+  describe('stop', () => {
+    it('should error if task does not exist', () => {
+      mockedExecSync.mockImplementation(() => { throw new Error('not found') })
+
+      strategy.stop()
+
+      expect(logger.error).toHaveBeenCalledWith('service.notInstalled.win32')
+    })
+
+    it('should end the task', () => {
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      strategy.stop()
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'schtasks /End /TN "AISupportAgent"',
+        { stdio: 'pipe' },
+      )
+      expect(logger.success).toHaveBeenCalledWith('service.stopped')
+    })
+
+    it('should log error if End fails', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from(''))  // Query
+        .mockImplementationOnce(() => { throw new Error('end failed') })  // End
+
+      strategy.stop()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.stopFailed'),
+      )
+    })
+  })
+
   describe('restart', () => {
     it('should error if task does not exist', () => {
       mockedExecSync.mockImplementation(() => {
@@ -347,6 +415,35 @@ describe('Win32ServiceStrategy', () => {
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('service.restartFailed'),
       )
+    })
+  })
+
+  describe('status', () => {
+    it('should return not installed when task does not exist', () => {
+      mockedExecSync.mockImplementation(() => { throw new Error('not found') })
+
+      const result = strategy.status()
+
+      expect(result).toEqual({ installed: false, running: false })
+    })
+
+    it('should return running when task is Running', () => {
+      mockedExecSync.mockReturnValue(Buffer.from('"AISupportAgent","Running"'))
+
+      const result = strategy.status()
+
+      expect(result.installed).toBe(true)
+      expect(result.running).toBe(true)
+      expect(result.logDir).toBeTruthy()
+    })
+
+    it('should return not running when task is Ready', () => {
+      mockedExecSync.mockReturnValue(Buffer.from('"AISupportAgent","Ready"'))
+
+      const result = strategy.status()
+
+      expect(result.installed).toBe(true)
+      expect(result.running).toBe(false)
     })
   })
 })
