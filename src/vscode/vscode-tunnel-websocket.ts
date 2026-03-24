@@ -71,6 +71,7 @@ export interface VsCodeServerMessage {
   modifiers?: string[]
   width?: number
   height?: number
+  deviceId?: string
   script?: string
 }
 
@@ -758,7 +759,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
     if (!session || !msg.width || !msg.height) return
     try {
-      await session.setViewport(msg.width, msg.height)
+      await session.setViewport(msg.width, msg.height, msg.deviceId)
     } catch (error) {
       logger.warn(`[vscode-ws] setViewport failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
     }

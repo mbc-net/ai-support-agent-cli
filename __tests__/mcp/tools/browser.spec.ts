@@ -442,6 +442,7 @@ describe('browser tools', () => {
       expect(result.content[0].text).toBe('Extracted text')
       expect(getProxy().extract).toHaveBeenCalledWith('.item', 'myVar')
       expect(getProxy().actionLog.add).toHaveBeenCalledWith('chat', 'extract', expect.stringContaining('myVar'))
+      expect(getProxy().variables.get('myVar')).toBe('Extracted text')
     })
 
     it('should use proxy session for get_text', async () => {

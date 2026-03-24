@@ -7,6 +7,7 @@
 import { logger } from '../../../logger'
 import { BrowserActionLog } from './browser-action-log'
 import { BROWSER_IDLE_TIMEOUT_MS } from './browser-types'
+import { DeviceEmulation, DEVICE_PRESETS } from './device-presets'
 import { getElementAtPoint, getFocusedElementInfo, formatElementInfo } from './element-info'
 import { loadPlaywright } from './playwright-loader'
 
@@ -22,6 +23,14 @@ export class BrowserSession {
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private readonly idleTimeoutMs: number
   private liveViewInterval: ReturnType<typeof setInterval> | null = null
+  private _currentDeviceId: string | null = null
+
+  /**
+   * Get the currently active device emulation ID, or null if none.
+   */
+  get currentDeviceId(): string | null {
+    return this._currentDeviceId
+  }
 
   /** Session-scoped temporary variables */
   readonly variables = new Map<string, string>()
@@ -79,11 +88,62 @@ export class BrowserSession {
   }
 
   /**
-   * Set the viewport size for the current page.
+   * Set device emulation (User-Agent, touch, platform overrides).
+   * Pass null to clear emulation.
    */
-  async setViewport(width: number, height: number): Promise<void> {
+  async setDeviceEmulation(emulation: DeviceEmulation | null): Promise<void> {
+    const page = await this.getPage()
+
+    if (emulation) {
+      await page.setExtraHTTPHeaders({ 'User-Agent': emulation.userAgent })
+
+      const ua = emulation.userAgent
+      const maxTouchPoints = emulation.hasTouch ? 5 : 0
+      let platform = 'Win32'
+      if (ua.includes('iPhone')) {
+        platform = 'iPhone'
+      } else if (ua.includes('iPad')) {
+        platform = 'iPad'
+      } else if (ua.includes('Linux') || ua.includes('Android')) {
+        platform = 'Linux armv8l'
+      }
+
+      await page.addInitScript(`
+        Object.defineProperty(navigator, 'userAgent', { get: () => ${JSON.stringify(ua)} });
+        Object.defineProperty(navigator, 'maxTouchPoints', { get: () => ${maxTouchPoints} });
+        Object.defineProperty(navigator, 'platform', { get: () => ${JSON.stringify(platform)} });
+      `)
+    } else {
+      await page.setExtraHTTPHeaders({})
+      // addInitScript は蓄積される（Playwright仕様）。
+      // 最後の defineProperty が有効になるため機能的には問題なし。
+      // コンテキスト再作成（V2）で解消予定。
+      await page.addInitScript('// device emulation cleared')
+    }
+  }
+
+  /**
+   * Set the viewport size for the current page.
+   * If deviceId is a non-empty string, apply corresponding device emulation.
+   * If deviceId is empty string, clear device emulation.
+   * If deviceId is undefined, don't change emulation (backward compat).
+   */
+  async setViewport(width: number, height: number, deviceId?: string): Promise<void> {
     const page = await this.getPage()
     await page.setViewportSize({ width, height })
+
+    if (deviceId !== undefined) {
+      if (deviceId === '') {
+        await this.setDeviceEmulation(null)
+        this._currentDeviceId = null
+      } else {
+        const preset = DEVICE_PRESETS[deviceId]
+        if (preset) {
+          await this.setDeviceEmulation(preset)
+          this._currentDeviceId = deviceId
+        }
+      }
+    }
   }
 
   /**

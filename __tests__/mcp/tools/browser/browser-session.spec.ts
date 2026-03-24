@@ -25,6 +25,8 @@ describe('BrowserSession', () => {
       url: jest.fn().mockReturnValue('https://example.com'),
       screenshot: jest.fn().mockResolvedValue(Buffer.from('fake-screenshot')),
       setViewportSize: jest.fn().mockResolvedValue(undefined),
+      setExtraHTTPHeaders: jest.fn().mockResolvedValue(undefined),
+      addInitScript: jest.fn().mockResolvedValue(undefined),
     }
 
     mockBrowser = {
@@ -139,6 +141,141 @@ describe('BrowserSession', () => {
       await session.screenshot(false)
 
       expect(mockPage.screenshot).toHaveBeenCalledWith({ fullPage: false, type: 'png' })
+    })
+  })
+
+  describe('setDeviceEmulation', () => {
+    it('should set User-Agent header and init script for iPhone preset', async () => {
+      const session = new BrowserSession()
+      const emulation = {
+        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+        isMobile: true,
+        hasTouch: true,
+        deviceScaleFactor: 3,
+      }
+      await session.setDeviceEmulation(emulation)
+
+      expect(mockPage.setExtraHTTPHeaders).toHaveBeenCalledWith({
+        'User-Agent': emulation.userAgent,
+      })
+      expect(mockPage.addInitScript).toHaveBeenCalledWith(
+        expect.stringContaining('navigator'),
+      )
+      // Check platform is iPhone
+      expect(mockPage.addInitScript).toHaveBeenCalledWith(
+        expect.stringContaining('iPhone'),
+      )
+      // Check maxTouchPoints is 5
+      expect(mockPage.addInitScript).toHaveBeenCalledWith(
+        expect.stringContaining('5'),
+      )
+    })
+
+    it('should set Linux platform for Android UA', async () => {
+      const session = new BrowserSession()
+      const emulation = {
+        userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 7)',
+        isMobile: true,
+        hasTouch: true,
+        deviceScaleFactor: 2.625,
+      }
+      await session.setDeviceEmulation(emulation)
+
+      expect(mockPage.addInitScript).toHaveBeenCalledWith(
+        expect.stringContaining('Linux armv8l'),
+      )
+    })
+
+    it('should set iPad platform for iPad UA', async () => {
+      const session = new BrowserSession()
+      const emulation = {
+        userAgent: 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)',
+        isMobile: true,
+        hasTouch: true,
+        deviceScaleFactor: 2,
+      }
+      await session.setDeviceEmulation(emulation)
+
+      expect(mockPage.addInitScript).toHaveBeenCalledWith(
+        expect.stringContaining('iPad'),
+      )
+    })
+
+    it('should set maxTouchPoints to 0 when hasTouch is false', async () => {
+      const session = new BrowserSession()
+      const emulation = {
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        isMobile: false,
+        hasTouch: false,
+        deviceScaleFactor: 1,
+      }
+      await session.setDeviceEmulation(emulation)
+
+      expect(mockPage.addInitScript).toHaveBeenCalledWith(
+        expect.stringContaining('0'),
+      )
+      // Should default to Win32 platform
+      expect(mockPage.addInitScript).toHaveBeenCalledWith(
+        expect.stringContaining('Win32'),
+      )
+    })
+
+    it('should clear emulation when called with null', async () => {
+      const session = new BrowserSession()
+      await session.setDeviceEmulation(null)
+
+      expect(mockPage.setExtraHTTPHeaders).toHaveBeenCalledWith({})
+      expect(mockPage.addInitScript).toHaveBeenCalledWith(
+        expect.stringContaining('device emulation cleared'),
+      )
+    })
+  })
+
+  describe('setViewport with deviceId', () => {
+    it('should apply device emulation when deviceId is provided', async () => {
+      const session = new BrowserSession()
+      await session.setViewport(375, 667, 'iphone-se')
+
+      expect(mockPage.setViewportSize).toHaveBeenCalledWith({ width: 375, height: 667 })
+      expect(mockPage.setExtraHTTPHeaders).toHaveBeenCalledWith(
+        expect.objectContaining({ 'User-Agent': expect.stringContaining('iPhone') }),
+      )
+      expect(mockPage.addInitScript).toHaveBeenCalled()
+    })
+
+    it('should clear device emulation when deviceId is empty string', async () => {
+      const session = new BrowserSession()
+      // First set a device
+      await session.setViewport(375, 667, 'iphone-se')
+      mockPage.setExtraHTTPHeaders.mockClear()
+      mockPage.addInitScript.mockClear()
+
+      // Then clear it
+      await session.setViewport(1280, 720, '')
+
+      expect(mockPage.setViewportSize).toHaveBeenCalledWith({ width: 1280, height: 720 })
+      expect(mockPage.setExtraHTTPHeaders).toHaveBeenCalledWith({})
+      expect(mockPage.addInitScript).toHaveBeenCalledWith(
+        expect.stringContaining('device emulation cleared'),
+      )
+    })
+
+    it('should not change emulation when deviceId is undefined (backward compat)', async () => {
+      const session = new BrowserSession()
+      await session.setViewport(1920, 1080)
+
+      expect(mockPage.setViewportSize).toHaveBeenCalledWith({ width: 1920, height: 1080 })
+      expect(mockPage.setExtraHTTPHeaders).not.toHaveBeenCalled()
+      expect(mockPage.addInitScript).not.toHaveBeenCalled()
+    })
+
+    it('should ignore unknown deviceId', async () => {
+      const session = new BrowserSession()
+      await session.setViewport(1024, 768, 'unknown-device')
+
+      expect(mockPage.setViewportSize).toHaveBeenCalledWith({ width: 1024, height: 768 })
+      // No emulation should be applied for unknown device
+      expect(mockPage.setExtraHTTPHeaders).not.toHaveBeenCalled()
     })
   })
 
