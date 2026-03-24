@@ -11,6 +11,7 @@ import http from 'http'
 import { logger } from '../logger'
 import { BrowserSessionManager } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
+import { tryClickSelectors, tryFillSelectors } from '../mcp/tools/browser/selector-utils'
 import { executePlaywrightScript } from './browser-script-executor'
 
 /** Action log entry emitted to the caller */
@@ -215,19 +216,12 @@ export class BrowserLocalServer {
 
     const page = await session.getPage()
 
-    if (params.waitForNavigation) {
-      await Promise.all([
-        page.waitForNavigation({ timeout: 30000 }).catch(() => { /* navigation may not happen */ }),
-        page.click(selector, { timeout: 10000 }),
-      ])
-    } else {
-      await page.click(selector, { timeout: 10000 })
-    }
+    const matchedSelector = await tryClickSelectors(page, selector, { waitForNavigation: !!params.waitForNavigation })
 
     const title: string = await page.title()
     const currentUrl: string = page.url()
 
-    this.emitActionLog(sessionId, session, 'click', selector)
+    this.emitActionLog(sessionId, session, 'click', matchedSelector)
 
     if (params.screenshot !== false) {
       const screenshotBuffer = await session.screenshot(true)
@@ -248,9 +242,9 @@ export class BrowserLocalServer {
     }
 
     const page = await session.getPage()
-    await page.fill(selector, value, { timeout: 10000 })
+    const matchedSelector = await tryFillSelectors(page, selector, value)
 
-    this.emitActionLog(sessionId, session, 'fill', `${selector} "${value}"`)
+    this.emitActionLog(sessionId, session, 'fill', `${matchedSelector} "${value}"`)
 
     if (params.screenshot) {
       const screenshotBuffer = await session.screenshot(true)
