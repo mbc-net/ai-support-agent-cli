@@ -990,7 +990,106 @@ describe('VsCodeTunnelWebSocket', () => {
         width: 1920,
         height: 1080,
       })
-      expect(mockSession.setViewport).toHaveBeenCalledWith(1920, 1080)
+      expect(mockSession.setViewport).toHaveBeenCalledWith(1920, 1080, undefined)
+    })
+
+    it('should pass deviceId to setViewport', async () => {
+      const mockSession = { setViewport: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserViewport({
+        type: 'browser_viewport',
+        sessionId: 'sess-b26',
+        width: 375,
+        height: 667,
+        deviceId: 'iphone-se',
+      })
+      expect(mockSession.setViewport).toHaveBeenCalledWith(375, 667, 'iphone-se')
+    })
+
+    it('should pass empty string deviceId to clear emulation', async () => {
+      const mockSession = { setViewport: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserViewport({
+        type: 'browser_viewport',
+        sessionId: 'sess-b27',
+        width: 1280,
+        height: 720,
+        deviceId: '',
+      })
+      expect(mockSession.setViewport).toHaveBeenCalledWith(1280, 720, '')
+    })
+  })
+
+  describe('handleBrowserExecuteScript', () => {
+    it('should send error if no sessionId', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserExecuteScript({ type: 'browser_execute_script' })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+    })
+
+    it('should send error if no script', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserExecuteScript({ type: 'browser_execute_script', sessionId: 'sess-es1' })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+    })
+
+    it('should send error if session not found', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserExecuteScript({
+        type: 'browser_execute_script',
+        sessionId: 'sess-es2',
+        script: "await page.click('#btn');",
+      })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+      expect(sentMessages[0].message).toContain('Browser session not found')
+    })
+
+    it('should execute script and return result', async () => {
+      const mockPage = {
+        click: jest.fn().mockResolvedValue(undefined),
+      }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        variables: new Map(),
+        actionLog: { add: jest.fn() },
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserExecuteScript({
+        type: 'browser_execute_script',
+        sessionId: 'sess-es3',
+        script: "await page.click('#btn');",
+      })
+
+      // Should have progress + result messages
+      const resultMsg = sentMessages.find(m => m.type === 'browser_script_result')
+      expect(resultMsg).toBeDefined()
+      expect(resultMsg!.success).toBe(true)
+    })
+
+    it('should return fallbackToChat for unparseable script', async () => {
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue({}),
+        variables: new Map(),
+        actionLog: { add: jest.fn() },
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserExecuteScript({
+        type: 'browser_execute_script',
+        sessionId: 'sess-es4',
+        script: 'some unknown command',
+      })
+
+      const resultMsg = sentMessages.find(m => m.type === 'browser_script_result')
+      expect(resultMsg).toBeDefined()
+      expect(resultMsg!.fallbackToChat).toBe(true)
     })
   })
 
@@ -1091,6 +1190,15 @@ describe('VsCodeTunnelWebSocket', () => {
       ;(tunnel as any).onParsedMessage({ type: 'browser_viewport', sessionId: 'sess-z', width: 1024, height: 768 })
       await new Promise(resolve => setTimeout(resolve, 10))
       expect(sentMessages).toHaveLength(0) // no session, early return
+    })
+
+    it('should dispatch browser_execute_script', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_execute_script', sessionId: 'sess-z', script: "await page.click('#btn');" })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages.length).toBeGreaterThanOrEqual(1)
+      expect(sentMessages[0].type).toBe('error')
     })
   })
 

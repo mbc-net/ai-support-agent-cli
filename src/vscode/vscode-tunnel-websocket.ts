@@ -6,6 +6,7 @@ import { logger } from '../logger'
 import { getErrorMessage, buildWsUrl } from '../utils'
 import { BrowserSessionManager } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
+import { executePlaywrightScript } from '../browser/browser-script-executor'
 
 import {
   VSCODE_WS_MAX_RECONNECT_RETRIES,
@@ -42,6 +43,7 @@ export interface VsCodeServerMessage {
     | 'browser_keyboard_press'
     | 'browser_screenshot'
     | 'browser_viewport'
+    | 'browser_execute_script'
   sessionId?: string
   requestId?: string
   subSocketId?: string
@@ -69,6 +71,8 @@ export interface VsCodeServerMessage {
   modifiers?: string[]
   width?: number
   height?: number
+  deviceId?: string
+  script?: string
 }
 
 /**
@@ -89,6 +93,8 @@ export interface VsCodeAgentMessage {
     | 'browser_screenshot_result'
     | 'browser_action_log'
     | 'browser_stopped'
+    | 'browser_script_result'
+    | 'browser_script_progress'
   sessionId?: string
   targetPort?: number
   requestId?: string
@@ -111,6 +117,16 @@ export interface VsCodeAgentMessage {
   timestamp?: number
   reason?: string
   entries?: Array<{ timestamp: number; source: string; action: string; details: string }>
+  // Script execution fields
+  success?: boolean
+  completedSteps?: number
+  totalSteps?: number
+  results?: Array<{ line: string; success: boolean; error?: string }>
+  failedLine?: string
+  fallbackToChat?: boolean
+  step?: number
+  line?: string
+  script?: string
 }
 
 /** Live view frame interval in milliseconds (5 FPS) */
@@ -267,6 +283,9 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         break
       case 'browser_viewport':
         this.handleBrowserViewport(msg)
+        break
+      case 'browser_execute_script':
+        this.handleBrowserExecuteScript(msg)
         break
       default:
         logger.debug(`[vscode-ws] Unknown message type: ${(msg as { type: string }).type}`)
@@ -697,11 +716,50 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
   }
 
+  private async handleBrowserExecuteScript(msg: VsCodeServerMessage): Promise<void> {
+    const sessionId = msg.sessionId
+    if (!sessionId || !msg.script) {
+      this.send({ type: 'error', sessionId, message: 'Missing sessionId or script' })
+      return
+    }
+
+    const session = this.browserSessionManager.get(sessionId)
+    if (!session) {
+      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      return
+    }
+
+    try {
+      const result = await executePlaywrightScript(session, msg.script, (step, total, line) => {
+        this.send({
+          type: 'browser_script_progress',
+          sessionId,
+          step,
+          totalSteps: total,
+          line,
+        })
+      })
+
+      this.send({
+        type: 'browser_script_result',
+        sessionId,
+        success: result.success,
+        completedSteps: result.completedSteps,
+        totalSteps: result.totalSteps,
+        results: result.results,
+        failedLine: result.failedLine,
+        fallbackToChat: result.fallbackToChat,
+      })
+    } catch (error) {
+      this.send({ type: 'error', sessionId, message: `Script execution failed: ${getErrorMessage(error)}` })
+    }
+  }
+
   private async handleBrowserViewport(msg: VsCodeServerMessage): Promise<void> {
     const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
     if (!session || !msg.width || !msg.height) return
     try {
-      await session.setViewport(msg.width, msg.height)
+      await session.setViewport(msg.width, msg.height, msg.deviceId)
     } catch (error) {
       logger.warn(`[vscode-ws] setViewport failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
     }
