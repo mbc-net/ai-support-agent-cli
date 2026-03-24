@@ -140,6 +140,19 @@ describe('TerminalSessionManager', () => {
     expect(manager.size).toBe(1)
   })
 
+  it('should create a session with default options (no args)', () => {
+    const session = manager.createSession()
+    expect(session).not.toBeNull()
+    expect(manager.size).toBe(1)
+  })
+
+  it('should create a session with explicit id and default options', () => {
+    const session = manager.createSessionWithId('custom-id')
+    expect(session).not.toBeNull()
+    expect(session!.sessionId).toBe('custom-id')
+    expect(manager.size).toBe(1)
+  })
+
   it('should list sessions', () => {
     manager.createSession({ cwd: os.tmpdir() })
     manager.createSession({ cwd: os.tmpdir() })
