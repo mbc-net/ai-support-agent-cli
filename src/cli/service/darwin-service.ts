@@ -1,3 +1,4 @@
+import { execSync } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -20,9 +21,32 @@ function getLogDir(): string {
   return path.join(os.homedir(), 'Library', 'Logs', 'ai-support-agent')
 }
 
+const PASSTHROUGH_ENV_VARS = [
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'AI_SUPPORT_AGENT_TOKEN',
+  'AI_SUPPORT_AGENT_API_URL',
+]
+
+function generateEnvVarEntries(): string {
+  const entries: string[] = []
+  for (const key of PASSTHROUGH_ENV_VARS) {
+    const value = process.env[key]
+    if (value) {
+      entries.push(
+        `\n        <key>${escapeXml(key)}</key>\n        <string>${escapeXml(value)}</string>`,
+      )
+    }
+  }
+  return entries.join('')
+}
+
 export function generatePlist(options: ServiceConfig): string {
-  const { nodePath, entryPoint, logDir, verbose } = options
-  const args = [nodePath, entryPoint, 'start', '--no-docker']
+  const { nodePath, entryPoint, logDir, verbose, docker } = options
+  const args = [nodePath, entryPoint, 'start']
+  if (!docker) {
+    args.push('--no-docker')
+  }
   if (verbose) {
     args.push('--verbose')
   }
@@ -61,7 +85,7 @@ ${programArgs}
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
         <key>HOME</key>
-        <string>${escapeXml(os.homedir())}</string>
+        <string>${escapeXml(os.homedir())}</string>${generateEnvVarEntries()}
     </dict>
 </dict>
 </plist>`
@@ -97,6 +121,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       entryPoint,
       logDir,
       verbose: options.verbose,
+      docker: options.docker,
     })
     fs.writeFileSync(plistPath, plist, 'utf-8')
 
@@ -118,5 +143,27 @@ export class DarwinServiceStrategy implements ServiceStrategy {
 
     fs.unlinkSync(plistPath)
     logger.success(t('service.uninstalled'))
+  }
+
+  restart(): void {
+    const plistPath = getPlistPath()
+
+    if (!fs.existsSync(plistPath)) {
+      logger.error(t('service.notInstalled'))
+      return
+    }
+
+    try {
+      try {
+        execSync(`launchctl remove ${SERVICE_LABEL}`, { stdio: 'pipe' })
+      } catch {
+        // Service may not be loaded — ignore
+      }
+      execSync(`launchctl load ${plistPath}`, { stdio: 'pipe' })
+      logger.success(t('service.restarted'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error(t('service.restartFailed', { message }))
+    }
   }
 }

@@ -59,6 +59,17 @@ describe('generateTaskXml', () => {
     expect(result).toContain('--verbose')
   })
 
+  it('should not include --no-docker when docker is true', () => {
+    const result = generateTaskXml({
+      nodePath: 'C:\\node.exe',
+      entryPoint: 'C:\\index.js',
+      logDir: 'C:\\logs',
+      docker: true,
+    })
+
+    expect(result).not.toContain('--no-docker')
+  })
+
   it('should escape XML special characters', () => {
     const result = generateTaskXml({
       nodePath: 'C:\\path with <special> & "chars"\\node.exe',
@@ -223,6 +234,62 @@ describe('Win32ServiceStrategy', () => {
         expect.stringContaining('service.schtasksFailed'),
       )
       expect(logger.success).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('restart', () => {
+    it('should error if task does not exist', () => {
+      mockedExecSync.mockImplementation(() => {
+        throw new Error('not found')
+      })
+
+      strategy.restart()
+
+      expect(logger.error).toHaveBeenCalledWith('service.notInstalled.win32')
+    })
+
+    it('should end and run the task', () => {
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      strategy.restart()
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'schtasks /Query /TN "AISupportAgent"',
+        { stdio: 'pipe' },
+      )
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'schtasks /End /TN "AISupportAgent"',
+        { stdio: 'pipe' },
+      )
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'schtasks /Run /TN "AISupportAgent"',
+        { stdio: 'pipe' },
+      )
+      expect(logger.success).toHaveBeenCalledWith('service.restarted')
+    })
+
+    it('should succeed even if End fails (task not running)', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from(''))  // Query
+        .mockImplementationOnce(() => { throw new Error('not running') })  // End
+        .mockReturnValueOnce(Buffer.from(''))  // Run
+
+      strategy.restart()
+
+      expect(logger.success).toHaveBeenCalledWith('service.restarted')
+    })
+
+    it('should log error if Run fails', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from(''))  // Query
+        .mockReturnValueOnce(Buffer.from(''))  // End
+        .mockImplementationOnce(() => { throw new Error('run failed') })  // Run
+
+      strategy.restart()
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.restartFailed'),
+      )
     })
   })
 })

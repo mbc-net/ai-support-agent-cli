@@ -1,3 +1,4 @@
+import { execSync } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -18,8 +19,11 @@ function getLogDir(): string {
 }
 
 export function generateServiceUnit(options: ServiceConfig): string {
-  const { nodePath, entryPoint, logDir, verbose } = options
-  const execArgs = [nodePath, entryPoint, 'start', '--no-docker']
+  const { nodePath, entryPoint, logDir, verbose, docker } = options
+  const execArgs = [nodePath, entryPoint, 'start']
+  if (!docker) {
+    execArgs.push('--no-docker')
+  }
   if (verbose) {
     execArgs.push('--verbose')
   }
@@ -74,6 +78,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       entryPoint,
       logDir,
       verbose: options.verbose,
+      docker: options.docker,
     })
     fs.writeFileSync(serviceFilePath, unit, 'utf-8')
 
@@ -95,5 +100,24 @@ export class LinuxServiceStrategy implements ServiceStrategy {
 
     fs.unlinkSync(serviceFilePath)
     logger.success(t('service.uninstalled.linux'))
+  }
+
+  restart(): void {
+    const serviceFilePath = getServiceFilePath()
+
+    if (!fs.existsSync(serviceFilePath)) {
+      logger.error(t('service.notInstalled.linux'))
+      return
+    }
+
+    try {
+      execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
+      const serviceName = SERVICE_NAME.replace('.service', '')
+      execSync(`systemctl --user restart ${serviceName}`, { stdio: 'pipe' })
+      logger.success(t('service.restarted'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error(t('service.restartFailed', { message }))
+    }
   }
 }
