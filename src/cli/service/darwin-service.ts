@@ -7,7 +7,7 @@ import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
-import type { ServiceConfig, ServiceOptions, ServiceStrategy } from './types'
+import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
 
 export { getCliEntryPoint, getNodePath }
 
@@ -145,6 +145,40 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     logger.success(t('service.uninstalled'))
   }
 
+  start(): void {
+    const plistPath = getPlistPath()
+
+    if (!fs.existsSync(plistPath)) {
+      logger.error(t('service.notInstalled'))
+      return
+    }
+
+    try {
+      execSync(`launchctl load ${plistPath}`, { stdio: 'pipe' })
+      logger.success(t('service.started'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error(t('service.startFailed', { message }))
+    }
+  }
+
+  stop(): void {
+    const plistPath = getPlistPath()
+
+    if (!fs.existsSync(plistPath)) {
+      logger.error(t('service.notInstalled'))
+      return
+    }
+
+    try {
+      execSync(`launchctl remove ${SERVICE_LABEL}`, { stdio: 'pipe' })
+      logger.success(t('service.stopped'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error(t('service.stopFailed', { message }))
+    }
+  }
+
   restart(): void {
     const plistPath = getPlistPath()
 
@@ -164,6 +198,23 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       logger.error(t('service.restartFailed', { message }))
+    }
+  }
+
+  status(): ServiceStatus {
+    const plistPath = getPlistPath()
+    const logDir = getLogDir()
+    if (!fs.existsSync(plistPath)) {
+      return { installed: false, running: false }
+    }
+
+    try {
+      const output = execSync(`launchctl list ${SERVICE_LABEL}`, { stdio: 'pipe' }).toString()
+      const pidMatch = output.match(/"PID"\s*=\s*(\d+)/)
+      const pid = pidMatch ? parseInt(pidMatch[1], 10) : undefined
+      return { installed: true, running: pid !== undefined, pid, logDir }
+    } catch {
+      return { installed: true, running: false, logDir }
     }
   }
 }
