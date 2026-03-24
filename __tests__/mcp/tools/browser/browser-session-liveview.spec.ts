@@ -90,6 +90,29 @@ describe('BrowserSession - Live View & Interaction', () => {
       session.stopLiveView()
     })
 
+    it('should handle screenshot error gracefully during live view', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      ;(mockPage.screenshot as jest.Mock).mockRejectedValueOnce(new Error('Page crashed'))
+
+      const onFrame = jest.fn()
+      session.startLiveView(100, onFrame)
+
+      jest.advanceTimersByTime(100)
+      // Allow the async screenshot rejection to complete
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // onFrame should not be called when screenshot fails
+      expect(onFrame).not.toHaveBeenCalled()
+
+      // Live view should still be active (not stopped by error)
+      expect(session.isLiveViewActive()).toBe(true)
+
+      session.stopLiveView()
+    })
+
     it('should disable idle timeout during live view', async () => {
       const session = new BrowserSession(500)
       await session.getPage()

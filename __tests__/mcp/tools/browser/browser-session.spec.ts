@@ -243,6 +243,60 @@ describe('BrowserSession', () => {
       })
       expect(mockBrowser.newContext).not.toHaveBeenCalled()
     })
+
+    it('should handle goto error gracefully after device change', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      mockBrowser.newContext.mockClear()
+      // Make goto fail on the new page
+      mockPage.goto.mockRejectedValueOnce(new Error('Navigation timeout'))
+
+      await session.setDeviceEmulation({
+        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+        isMobile: true,
+        hasTouch: true,
+        deviceScaleFactor: 3,
+      })
+
+      // Should not throw — error is caught internally
+      expect(mockBrowser.newContext).toHaveBeenCalled()
+    })
+
+    it('should handle context close error gracefully', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      mockContext.close.mockRejectedValueOnce(new Error('Already closed'))
+      mockBrowser.newContext.mockClear()
+
+      await session.setDeviceEmulation({
+        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+        isMobile: true,
+        hasTouch: true,
+        deviceScaleFactor: 3,
+      })
+
+      expect(mockBrowser.newContext).toHaveBeenCalled()
+    })
+  })
+
+  describe('currentDeviceId', () => {
+    it('should return null when no device is set', () => {
+      const session = new BrowserSession()
+      expect(session.currentDeviceId).toBeNull()
+    })
+
+    it('should return deviceId after setViewport with device', async () => {
+      const session = new BrowserSession()
+      await session.setViewport(375, 667, 'iphone-se')
+      expect(session.currentDeviceId).toBe('iphone-se')
+    })
+
+    it('should return null after clearing device', async () => {
+      const session = new BrowserSession()
+      await session.setViewport(375, 667, 'iphone-se')
+      await session.setViewport(1280, 720, '')
+      expect(session.currentDeviceId).toBeNull()
+    })
   })
 
   describe('setViewport with deviceId', () => {
