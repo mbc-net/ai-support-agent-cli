@@ -101,7 +101,7 @@ export class BrowserSession {
 
     // Save current state
     const currentUrl = this.page ? this.page.url() : 'about:blank'
-    const currentViewport = this.page ? this.page.viewportSize() : null
+    const currentViewport = this.page?.viewportSize() ?? { width: 1280, height: 720 }
 
     // Close old context (which also closes its pages)
     if (this.context) {
@@ -120,9 +120,7 @@ export class BrowserSession {
       contextOptions.hasTouch = emulation.hasTouch
       contextOptions.deviceScaleFactor = emulation.deviceScaleFactor
     }
-    if (currentViewport) {
-      contextOptions.viewport = currentViewport
-    }
+    contextOptions.viewport = currentViewport
 
     this.context = await this.browser.newContext(contextOptions)
     this.page = await this.context.newPage()
@@ -145,11 +143,10 @@ export class BrowserSession {
    */
   async setViewport(width: number, height: number, deviceId?: string): Promise<void> {
     if (deviceId !== undefined && deviceId !== (this._currentDeviceId ?? '')) {
-      // デバイスが変更された場合、コンテキスト再作成（UA + viewport を反映）
-      // setDeviceEmulation 内で viewport も引き継がれるが、明示的に指定サイズを使う
-      const page = await this.getPage()
-      await page.setViewportSize({ width, height })
-
+      // ブラウザ未起動の場合は先に起動（setDeviceEmulation は this.browser が必要）
+      await this.getPage()
+      // デバイスが変更された場合、先にエミュレーション変更（コンテキスト再作成）
+      // → その後に新ページで viewport を設定
       if (deviceId === '') {
         await this.setDeviceEmulation(null)
         this._currentDeviceId = null
@@ -160,6 +157,9 @@ export class BrowserSession {
           this._currentDeviceId = deviceId
         }
       }
+      // コンテキスト再作成後の新ページに対して viewport を設定
+      const page = await this.getPage()
+      await page.setViewportSize({ width, height })
     } else {
       // デバイス変更なし: ビューポートサイズのみ変更
       const page = await this.getPage()
