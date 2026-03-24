@@ -39,6 +39,9 @@ export interface StreamJsonLine {
 /** file_upload ツール結果を file_attachment チャンクに変換する */
 const FILE_UPLOAD_TOOL_NAME = 'mcp__ai-support-agent__file_upload'
 
+/** Screenshot base64 の最大サイズ（バイト） */
+const SCREENSHOT_MAX_BASE64_BYTES = 512 * 1024
+
 /**
  * stream-json の NDJSON 1行をパースし、テキストやツール呼び出し情報を処理する
  * sendChunk は fire-and-forget で呼び出される（同期的に状態を返すため）
@@ -136,8 +139,10 @@ export function processStreamJsonLine(
           // image block can have data directly or in source.data
           const base64Data = imageBlock.data ?? imageBlock.source?.data
           // Size guard: skip if base64 > 512KB
-          if (base64Data && base64Data.length <= 512 * 1024) {
+          if (base64Data && base64Data.length <= SCREENSHOT_MAX_BASE64_BYTES) {
             screenshotBase64 = base64Data
+          } else if (base64Data) {
+            logger.warn(`[stream] Screenshot base64 too large (${base64Data.length} bytes), skipped`)
           }
         }
       } else {

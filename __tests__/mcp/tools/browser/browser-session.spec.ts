@@ -304,8 +304,9 @@ describe('BrowserSession', () => {
       const session = new BrowserSession()
       await session.setViewport(375, 667, 'iphone-se')
 
+      // setDeviceEmulation が先に呼ばれ、その後に新ページで setViewportSize が呼ばれる
       expect(mockPage.setViewportSize).toHaveBeenCalledWith({ width: 375, height: 667 })
-      // Should recreate context for iPhone SE
+      // newContext は2回呼ばれる: 1回目は getPage() 内（引数なし）、2回目は setDeviceEmulation 内（デバイス設定付き）
       expect(mockBrowser.newContext).toHaveBeenCalledWith(
         expect.objectContaining({
           userAgent: expect.stringContaining('iPhone'),
