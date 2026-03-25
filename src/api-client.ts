@@ -284,4 +284,16 @@ export class ApiClient {
       body,
     )
   }
+
+  async updateE2eTestScript(
+    tenantCode: string,
+    projectCode: string,
+    executionId: string,
+    body: Record<string, unknown>,
+  ): Promise<void> {
+    await this.putVoid(
+      API_ENDPOINTS.E2E_EXECUTION_SCRIPT(tenantCode, projectCode, executionId),
+      body,
+    )
+  }
 }

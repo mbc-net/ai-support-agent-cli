@@ -14,6 +14,8 @@ describe('ApiClient', () => {
   const mockInstance = {
     post: jest.fn(),
     get: jest.fn(),
+    put: jest.fn(),
+    defaults: { headers: {} as Record<string, string> },
   }
 
   beforeEach(() => {
@@ -760,6 +762,61 @@ describe('ApiClient', () => {
       const result = await promise
       expect(result).toHaveLength(1)
       expect(mockInstance.get).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  describe('updateToken', () => {
+    it('should update Authorization header and extract tenantCode', () => {
+      client.updateToken('new_tenant:tid:rawToken')
+      expect(mockInstance.defaults.headers['Authorization']).toBe('Bearer new_tenant:tid:rawToken')
+    })
+
+    it('should not update tenantCode when token has fewer than 3 parts', () => {
+      client.setTenantCode('original')
+      client.updateToken('short-token')
+      expect(mockInstance.defaults.headers['Authorization']).toBe('Bearer short-token')
+    })
+  })
+
+  describe('updateE2eExecutionStatus', () => {
+    it('should PUT to execution status endpoint', async () => {
+      mockInstance.put.mockResolvedValue({})
+
+      await client.updateE2eExecutionStatus('mbc', 'MBC_01', 'exec-1', { status: 'running' })
+
+      expect(mockInstance.put).toHaveBeenCalledWith(
+        expect.stringContaining('exec-1'),
+        { status: 'running' },
+        undefined,
+      )
+    })
+  })
+
+  describe('reportE2eTestStep', () => {
+    it('should POST to execution steps endpoint', async () => {
+      mockInstance.post.mockResolvedValue({})
+
+      await client.reportE2eTestStep('mbc', 'MBC_01', 'exec-1', { stepNumber: 1, action: 'click' })
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        expect.stringContaining('exec-1'),
+        { stepNumber: 1, action: 'click' },
+        undefined,
+      )
+    })
+  })
+
+  describe('updateE2eTestScript', () => {
+    it('should PUT to execution script endpoint', async () => {
+      mockInstance.put.mockResolvedValue({})
+
+      await client.updateE2eTestScript('mbc', 'MBC_01', 'exec-1', { playwrightScript: 'code' })
+
+      expect(mockInstance.put).toHaveBeenCalledWith(
+        expect.stringContaining('exec-1'),
+        { playwrightScript: 'code' },
+        undefined,
+      )
     })
   })
 })

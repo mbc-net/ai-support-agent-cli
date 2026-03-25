@@ -123,6 +123,8 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/e2e-test-executions/${executionId}/status`,
   E2E_EXECUTION_STEPS: (tenantCode: string, _projectCode: string, executionId: string) =>
     `/api/${tenantCode}/agent/e2e-test-executions/${executionId}/steps`,
+  E2E_EXECUTION_SCRIPT: (tenantCode: string, _projectCode: string, executionId: string) =>
+    `/api/${tenantCode}/agent/e2e-test-executions/${executionId}/script`,
 } as const
 
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000

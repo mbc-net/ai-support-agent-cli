@@ -106,6 +106,9 @@ export interface E2eTestPayload {
   browserSettings?: unknown
   credentialId?: unknown
   executionMethod?: unknown
+  playwrightScript?: unknown
+  steps?: unknown
+  recoveryMode?: unknown
 }
 
 // Discriminated union for type-safe command dispatch
