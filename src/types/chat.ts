@@ -13,6 +13,11 @@ export interface ChatPayload {
   files?: unknown
   conversationFiles?: unknown
   browserSessionId?: unknown
+  policyContext?: {
+    e2eExecutionId?: string
+    e2eTestCaseId?: string
+    [key: string]: unknown
+  }
 }
 
 export interface ChatFileInfo {

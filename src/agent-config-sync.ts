@@ -31,6 +31,7 @@ export interface ConfigSyncDeps {
   token: string
   projectCode: string
   localAgentChatMode: AgentChatMode | undefined
+  browserLocalPort?: number
 }
 
 /**
@@ -153,6 +154,8 @@ export async function applyProjectConfig(
         deps.projectCode,
         mcpServerPath,
         backlogConfigs,
+        undefined,
+        deps.browserLocalPort,
       )
       logger.info(`${deps.prefix} MCP config written: ${state.mcpConfigPath}`)
     } catch (error) {

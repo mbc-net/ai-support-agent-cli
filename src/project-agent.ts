@@ -122,6 +122,8 @@ export class ProjectAgent {
   }
 
   async performConfigSync(): Promise<void> {
+    // ブラウザローカルポートを動的に更新（VSCode tunnel接続後に判明）
+    this.configSyncDeps.browserLocalPort = this.transportState.vsCodeWs?.getBrowserLocalPort()
     await performConfigSync(this.configSyncDeps, this.configSyncState)
   }
 

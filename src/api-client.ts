@@ -100,6 +100,12 @@ export class ApiClient {
     })
   }
 
+  private async putVoid(url: string, body?: unknown, config?: AxiosRequestConfig): Promise<void> {
+    await this.retry.withRetry(async () => {
+      await this.client.put(url, body, config)
+    })
+  }
+
   async register(request: RegisterRequest): Promise<RegisterResponse> {
     logger.debug(`Registering agent: ${request.agentId}`)
     const { ipAddress, availableChatModes, activeChatMode, ...rest } = request
@@ -250,6 +256,32 @@ export class ApiClient {
     return this.post<{ downloadUrl: string }>(
       API_ENDPOINTS.FILES_DOWNLOAD_URL(this.tenantCode, this.projectCode),
       data,
+    )
+  }
+
+  // === E2E Test ===
+
+  async updateE2eExecutionStatus(
+    tenantCode: string,
+    projectCode: string,
+    executionId: string,
+    body: Record<string, unknown>,
+  ): Promise<void> {
+    await this.putVoid(
+      API_ENDPOINTS.E2E_EXECUTION_STATUS(tenantCode, projectCode, executionId),
+      body,
+    )
+  }
+
+  async reportE2eTestStep(
+    tenantCode: string,
+    projectCode: string,
+    executionId: string,
+    body: Record<string, unknown>,
+  ): Promise<void> {
+    await this.postVoid(
+      API_ENDPOINTS.E2E_EXECUTION_STEPS(tenantCode, projectCode, executionId),
+      body,
     )
   }
 }

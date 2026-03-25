@@ -225,6 +225,12 @@ async function executeClaudeCodeChat(
         conversationId: conversationIdStr,
         browserSessionId: parseString(payload.browserSessionId) ?? undefined,
         browserLocalPort,
+        ...(payload.policyContext?.e2eExecutionId && {
+          e2eExecutionId: payload.policyContext.e2eExecutionId,
+        }),
+        ...(payload.policyContext?.e2eTestCaseId && {
+          e2eTestCaseId: payload.policyContext.e2eTestCaseId,
+        }),
       },
     })
     // プロセスを管理 Map に登録
