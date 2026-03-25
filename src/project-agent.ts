@@ -174,11 +174,12 @@ export class ProjectAgent {
       if (result.projectCode && result.projectCode !== this.projectCode) {
         logger.info(`${this.prefix} Server assigned projectCode: ${result.projectCode} (was: ${this.projectCode})`)
         this.projectCode = result.projectCode
-        this.prefix = `[${this.projectCode}]`
         // Re-initialize projectDir with the server-assigned projectCode
         this.projectDir = initProjectDir({ projectCode: this.projectCode, token: this.token, apiUrl: this.apiUrl })
         this.configSyncDeps = { ...this.configSyncDeps, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }
       }
+      this.prefix = `[${this.tenantCode}#${this.projectCode}]`
+      this.configSyncDeps = { ...this.configSyncDeps, prefix: this.prefix }
       this.client.setTenantCode(this.tenantCode)
       this.client.setProjectCode(this.projectCode)
       this.transportDeps = { ...this.transportDeps, tenantCode: this.tenantCode, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }

@@ -32,7 +32,7 @@ async function handleStart(msg: IpcStartMessage): Promise<void> {
 
   agent.start()
   sendToParent({ type: 'started', projectCode: project.projectCode })
-  logger.info(`Worker started for ${project.projectCode} (pid=${process.pid})`)
+  logger.info(`Worker started for [${project.projectCode}] agentId=${agentId} (pid=${process.pid})`)
 }
 
 async function handleGracefulExit(projectCode: string, reason: 'shutdown' | 'update'): Promise<void> {
