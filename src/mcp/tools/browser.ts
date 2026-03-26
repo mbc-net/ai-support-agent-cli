@@ -103,11 +103,11 @@ function httpGet(url: string): Promise<string> {
 /**
  * Register all browser tools on the MCP server.
  */
-export function registerBrowserTools(server: McpServer, apiClient: ApiClient, sessionManager?: BrowserSessionManager): void {
+export function registerBrowserTools(server: McpServer, apiClient: ApiClient, sessionManager?: BrowserSessionManager): BrowserSession | undefined {
   // Skip registration entirely if Playwright is not installed
   if (!isPlaywrightAvailable()) {
     logger.debug('[browser] Playwright not installed, skipping browser tool registration')
-    return
+    return undefined
   }
 
   const defaultSession = new BrowserSession()
@@ -123,6 +123,8 @@ export function registerBrowserTools(server: McpServer, apiClient: ApiClient, se
   registerBrowserSetVariableTool(server, defaultSession, manager)
   registerBrowserGetVariableTool(server, defaultSession, manager)
   registerBrowserListVariablesTool(server, defaultSession, manager)
+
+  return defaultSession
 }
 
 function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserSession, manager: BrowserSessionManager): void {

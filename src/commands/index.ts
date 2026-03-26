@@ -1,11 +1,12 @@
 import type { ApiClient } from '../api-client'
-import { ERR_CHAT_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_REBOOT_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, ERR_UPDATE_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
+import { ERR_CHAT_REQUIRES_CLIENT, ERR_E2E_TEST_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_REBOOT_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, ERR_UPDATE_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import { getWorkspaceDir } from '../project-dir'
 import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
 import { getErrorMessage } from '../utils'
 
 import { executeChatCommand } from './chat-executor'
+import { executeE2eTest } from './e2e-test-executor'
 import { cancelProcess } from './process-manager'
 import { fileDelete, fileList, fileMkdir, fileRead, fileRename, fileWrite } from './file-executor'
 import { processKill, processList } from './process-executor'
@@ -150,6 +151,23 @@ export async function executeCommand(
         }
         await opts.onUpdate()
         return successResult('update initiated')
+      case 'e2e_test':
+        if (!opts?.commandId || !opts?.client) {
+          return errorResult(ERR_E2E_TEST_REQUIRES_CLIENT)
+        }
+        return await executeE2eTest({
+          payload: p,
+          commandId: opts.commandId,
+          client: opts.client,
+          serverConfig: opts.serverConfig,
+          activeChatMode: opts.activeChatMode,
+          agentId: opts.agentId,
+          projectDir: opts.projectDir,
+          projectConfig: opts.projectConfig,
+          mcpConfigPath: opts.mcpConfigPath,
+          tenantCode: opts.tenantCode,
+          browserLocalPort: opts.browserLocalPort,
+        })
       default:
         logger.warn(`Unknown command type: ${type}`)
         return errorResult(`Unknown command type: ${type}`)
