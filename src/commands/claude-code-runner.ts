@@ -39,6 +39,8 @@ export interface PolicyContext {
   conversationId?: string
   browserSessionId?: string
   browserLocalPort?: number
+  e2eExecutionId?: string
+  e2eTestCaseId?: string
 }
 
 /** runClaudeCode のオプション */
@@ -79,6 +81,8 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
       if (policyContext.conversationId) env.AI_SUPPORT_CONVERSATION_ID = policyContext.conversationId
       if (policyContext.browserSessionId) env.AI_SUPPORT_BROWSER_SESSION_ID = policyContext.browserSessionId
       if (policyContext.browserLocalPort) env.AI_SUPPORT_BROWSER_LOCAL_PORT = String(policyContext.browserLocalPort)
+      if (policyContext.e2eExecutionId) env.AI_SUPPORT_E2E_EXECUTION_ID = policyContext.e2eExecutionId
+      if (policyContext.e2eTestCaseId) env.AI_SUPPORT_E2E_TEST_CASE_ID = policyContext.e2eTestCaseId
     }
     const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt })
 

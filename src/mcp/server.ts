@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 import { ApiClient } from '../api-client'
 import { registerBrowserTools } from './tools/browser'
+import { registerE2eTestStepTool } from './tools/e2e-test-step'
 import { BrowserSessionManager } from './tools/browser/browser-session-manager'
 import { registerCredentialsTool } from './tools/credentials'
 import { registerDbQueryTool } from './tools/db-query'
@@ -26,7 +27,8 @@ export function createMcpServer(apiClient: ApiClient, projectCode: string, brows
   registerFileUploadTool(server, apiClient)
   registerProjectInfoTool(server, apiClient, projectCode)
   registerReadConversationFileTool(server, apiClient)
-  registerBrowserTools(server, apiClient, browserSessionManager)
+  const browserSession = registerBrowserTools(server, apiClient, browserSessionManager)
+  registerE2eTestStepTool(server, apiClient, browserSession)
 
   return server
 }

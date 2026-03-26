@@ -16,6 +16,7 @@ export type AgentCommandType =
   | 'config_sync'
   | 'reboot'
   | 'update'
+  | 'e2e_test'
 
 export type AgentCommandStatus =
   | 'PENDING'
@@ -97,6 +98,19 @@ export interface ChatCancelPayload {
   targetCommandId?: unknown
 }
 
+export interface E2eTestPayload {
+  executionId?: unknown
+  testCaseId?: unknown
+  scenario?: unknown
+  targetUrl?: unknown
+  browserSettings?: unknown
+  credentialId?: unknown
+  executionMethod?: unknown
+  playwrightScript?: unknown
+  steps?: unknown
+  recoveryMode?: unknown
+}
+
 // Discriminated union for type-safe command dispatch
 export type CommandDispatch =
   | { type: 'execute_command'; payload: ShellCommandPayload }
@@ -114,3 +128,4 @@ export type CommandDispatch =
   | { type: 'config_sync'; payload: Record<string, never> }
   | { type: 'reboot'; payload: Record<string, never> }
   | { type: 'update'; payload: Record<string, never> }
+  | { type: 'e2e_test'; payload: E2eTestPayload }

@@ -58,6 +58,7 @@ export function writeMcpConfig(
   mcpServerPath: string,
   backlogConfigs?: BacklogMcpConfig[],
   tenantCode?: string,
+  browserLocalPort?: number,
 ): string {
   const configPath = getMcpConfigPath(projectDir)
   const dir = dirname(configPath)
@@ -81,6 +82,9 @@ export function writeMcpConfig(
           AI_SUPPORT_AGENT_TOKEN: token,
           AI_SUPPORT_AGENT_PROJECT_CODE: projectCode,
           AI_SUPPORT_AGENT_TENANT_CODE: resolvedTenantCode,
+          ...(browserLocalPort && {
+            [BROWSER_LOCAL_PORT_ENV]: String(browserLocalPort),
+          }),
         },
       },
       // Backlog MCPサーバー（設定がある場合のみ）
@@ -106,3 +110,4 @@ export function writeMcpConfig(
 
   return configPath
 }
+

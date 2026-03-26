@@ -94,6 +94,7 @@ export const ERR_ANTHROPIC_API_KEY_NOT_SET = 'ANTHROPIC_API_KEY is not set. API 
 export const ERR_AUTH_SERVER_START_FAILED = 'Failed to start auth server'
 export const ERR_CLAUDE_CLI_NOT_FOUND = 'claude CLI が見つかりません。Claude Code がインストールされていることを確認してください。'
 export const ERR_CHAT_REQUIRES_CLIENT = 'chat command requires commandId and client'
+export const ERR_E2E_TEST_REQUIRES_CLIENT = 'e2e_test command requires commandId and client'
 export const ERR_SETUP_REQUIRES_CALLBACK = 'setup command requires onSetup callback'
 export const ERR_CONFIG_SYNC_REQUIRES_CALLBACK = 'config_sync command requires onConfigSync callback'
 export const ERR_REBOOT_REQUIRES_CALLBACK = 'reboot command requires onReboot callback'
@@ -118,6 +119,12 @@ export const API_ENDPOINTS = {
   BROWSER_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/browser-credentials`,
   FILES_UPLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/upload-url`,
   FILES_DOWNLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/download-url`,
+  E2E_EXECUTION_STATUS: (tenantCode: string, _projectCode: string, executionId: string) =>
+    `/api/${tenantCode}/agent/e2e-test-executions/${executionId}/status`,
+  E2E_EXECUTION_STEPS: (tenantCode: string, _projectCode: string, executionId: string) =>
+    `/api/${tenantCode}/agent/e2e-test-executions/${executionId}/steps`,
+  E2E_EXECUTION_SCRIPT: (tenantCode: string, _projectCode: string, executionId: string) =>
+    `/api/${tenantCode}/agent/e2e-test-executions/${executionId}/script`,
 } as const
 
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000
