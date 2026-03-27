@@ -130,6 +130,7 @@
   "docker.building": "Dockerイメージをビルド中...",
   "docker.buildComplete": "Dockerイメージのビルドが完了しました",
   "docker.imageFound": "既存のDockerイメージを使用します ({{version}})",
+  "docker.buildingForVersion": "更新されたバージョン {{version}} のDockerイメージをビルド中...",
   "docker.starting": "Dockerコンテナを起動中...",
   "docker.runFailed": "Dockerコンテナの実行に失敗しました: {{message}}",
   "docker.loginStep1": "Step 1: ホスト側のターミナルで以下を実行し、OAuthトークンを取得してください:",
