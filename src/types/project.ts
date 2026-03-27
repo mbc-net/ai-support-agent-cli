@@ -15,6 +15,7 @@ export interface ProjectConfigResponse {
       additionalDirs?: string[]
       appendSystemPrompt?: string
     }
+    gitPullStrategy?: 'merge' | 'rebase'
   }
   aws?: {
     accounts: Array<{

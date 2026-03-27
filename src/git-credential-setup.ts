@@ -70,9 +70,16 @@ export function buildSshWrapperScript(entries: { host: string; keyPath: string }
 # Extract hostname from ssh arguments
 # Git calls: ssh [options...] user@host command
 # Find the first non-option argument and extract host from user@host
+# Note: options like -o, -i, -p take a value as the next argument, so we skip those too
 HOST=""
+SKIP_NEXT=""
 for arg in "$@"; do
+  if [ -n "$SKIP_NEXT" ]; then
+    SKIP_NEXT=""
+    continue
+  fi
   case "$arg" in
+    -o|-i|-p|-l|-E|-F|-c|-D|-b|-e|-I|-J|-L|-m|-O|-Q|-R|-S|-W|-w) SKIP_NEXT=1 ;;
     -*) ;;
     *)
       HOST=$(echo "$arg" | sed 's/.*@//')
