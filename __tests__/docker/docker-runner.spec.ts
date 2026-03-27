@@ -57,6 +57,8 @@ import {
   buildEnvArgs,
   buildContainerArgs,
   ensureImage,
+  getInstalledVersion,
+  resetInstalledVersionCache,
   dockerLogin,
   runInDocker,
 } from '../../src/docker/docker-runner'
@@ -420,10 +422,125 @@ describe('docker-runner', () => {
     })
   })
 
+  describe('getInstalledVersion', () => {
+    beforeEach(() => {
+      resetInstalledVersionCache()
+    })
+
+    it('should return version from npm list output', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') {
+          return Buffer.from(JSON.stringify({
+            dependencies: { '@ai-support-agent/cli': { version: '1.2.3' } },
+          }))
+        }
+        return Buffer.from('')
+      })
+
+      expect(getInstalledVersion()).toBe('1.2.3')
+    })
+
+    it('should cache the result after first call', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') {
+          return Buffer.from(JSON.stringify({
+            dependencies: { '@ai-support-agent/cli': { version: '1.2.3' } },
+          }))
+        }
+        return Buffer.from('')
+      })
+
+      getInstalledVersion()
+      getInstalledVersion()
+
+      const listCalls = mockExecFileSync.mock.calls.filter(
+        call => (call[1] as string[] | undefined)?.[0] === 'list',
+      )
+      expect(listCalls).toHaveLength(1)
+    })
+
+    it('should return fresh value after resetInstalledVersionCache', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') {
+          return Buffer.from(JSON.stringify({
+            dependencies: { '@ai-support-agent/cli': { version: '1.2.3' } },
+          }))
+        }
+        return Buffer.from('')
+      })
+
+      expect(getInstalledVersion()).toBe('1.2.3')
+
+      resetInstalledVersionCache()
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') {
+          return Buffer.from(JSON.stringify({
+            dependencies: { '@ai-support-agent/cli': { version: '2.0.0' } },
+          }))
+        }
+        return Buffer.from('')
+      })
+
+      expect(getInstalledVersion()).toBe('2.0.0')
+    })
+
+    it('should fall back to AGENT_VERSION when npm list fails', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') throw new Error('npm error')
+        return Buffer.from('')
+      })
+
+      // Should return AGENT_VERSION (compile-time constant) as fallback
+      const result = getInstalledVersion()
+      expect(typeof result).toBe('string')
+      expect(result).toMatch(/^\d+\.\d+\.\d+/)
+    })
+
+    it('should fall back to AGENT_VERSION when version is missing from output', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') {
+          return Buffer.from(JSON.stringify({ dependencies: {} }))
+        }
+        return Buffer.from('')
+      })
+
+      const result = getInstalledVersion()
+      expect(typeof result).toBe('string')
+      expect(result).toMatch(/^\d+\.\d+\.\d+/)
+    })
+
+    it('should fall back to AGENT_VERSION when version string is invalid', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') {
+          return Buffer.from(JSON.stringify({
+            dependencies: { '@ai-support-agent/cli': { version: 'invalid' } },
+          }))
+        }
+        return Buffer.from('')
+      })
+
+      const result = getInstalledVersion()
+      expect(typeof result).toBe('string')
+      expect(result).toMatch(/^\d+\.\d+\.\d+/)
+    })
+  })
+
   describe('ensureImage', () => {
+    beforeEach(() => {
+      resetInstalledVersionCache()
+    })
+
     it('should build image when it does not exist', () => {
       mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
         const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') return Buffer.from(JSON.stringify({ dependencies: {} }))
         if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') throw new Error('No such image')
         return Buffer.from('')
       })
@@ -441,6 +558,52 @@ describe('docker-runner', () => {
 
       ensureImage()
 
+      const buildCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'build',
+      )
+      expect(buildCall).toBeUndefined()
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.imageFound'))
+    })
+
+    it('should build image with newer installed version when installed version is newer', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') {
+          return Buffer.from(JSON.stringify({
+            dependencies: { '@ai-support-agent/cli': { version: '99.0.0' } },
+          }))
+        }
+        // docker image inspect for newer version: not found
+        if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') throw new Error('No such image')
+        return Buffer.from('')
+      })
+
+      const version = ensureImage()
+
+      expect(version).toBe('99.0.0')
+      const buildCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'build',
+      )
+      expect(buildCall).toBeDefined()
+      // Should build with the newer version tag
+      expect((buildCall![1] as string[])).toContain('ai-support-agent:99.0.0')
+    })
+
+    it('should use existing image of newer installed version without rebuilding', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') {
+          return Buffer.from(JSON.stringify({
+            dependencies: { '@ai-support-agent/cli': { version: '99.0.0' } },
+          }))
+        }
+        // docker image inspect succeeds (image exists)
+        return Buffer.from('')
+      })
+
+      const version = ensureImage()
+
+      expect(version).toBe('99.0.0')
       const buildCall = mockExecFileSync.mock.calls.find(
         call => (call[1] as string[])?.[0] === 'build',
       )
