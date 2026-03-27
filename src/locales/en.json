@@ -130,7 +130,6 @@
   "docker.building": "Building Docker image...",
   "docker.buildComplete": "Docker image build complete",
   "docker.imageFound": "Using existing Docker image ({{version}})",
-  "docker.buildingForVersion": "Building Docker image for updated version {{version}}...",
   "docker.starting": "Starting Docker container...",
   "docker.runFailed": "Failed to run Docker container: {{message}}",
   "docker.loginStep1": "Step 1: Run the following in your host terminal to get an OAuth token:",

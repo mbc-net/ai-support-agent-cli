@@ -10,7 +10,7 @@ import { t } from '../i18n'
 import { logger } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
-import { isNewerVersion, isValidVersion } from '../update-checker'
+import { isNewerVersion, isValidVersion } from '../utils/version'
 
 /** Convert a path.relative() result to POSIX format for container use */
 function toPosixRelative(relativePath: string): string {
@@ -211,11 +211,19 @@ export function buildContainerArgs(opts: DockerRunOptions): string[] {
   return args
 }
 
+let cachedInstalledVersion: string | null = null
+
 /**
  * Get the currently installed version of @ai-support-agent/cli from npm global.
  * Falls back to AGENT_VERSION if npm query fails.
+ * Result is cached after the first call.
+ *
+ * NOTE: Must only be called from host-side code (i.e. runInDocker).
+ * Inside a Docker container the process runs with --no-docker, so
+ * ensureImage() / getInstalledVersion() are never reached.
  */
 export function getInstalledVersion(): string {
+  if (cachedInstalledVersion !== null) return cachedInstalledVersion
   try {
     const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
     const output = execFileSync(npmCmd, ['list', '-g', '--json', '--depth=0'], {
@@ -227,12 +235,21 @@ export function getInstalledVersion(): string {
     }
     const version = parsed.dependencies?.['@ai-support-agent/cli']?.version
     if (version && isValidVersion(version)) {
+      cachedInstalledVersion = version
       return version
     }
   } catch {
     // npm list failed — fall back to compile-time version
   }
+  cachedInstalledVersion = AGENT_VERSION
   return AGENT_VERSION
+}
+
+/**
+ * Reset the cached installed version (for testing).
+ */
+export function resetInstalledVersionCache(): void {
+  cachedInstalledVersion = null
 }
 
 export function ensureImage(): string {
@@ -240,7 +257,6 @@ export function ensureImage(): string {
   // Use the installed version if it is newer than the compile-time version
   const version = isNewerVersion(AGENT_VERSION, installedVersion) ? installedVersion : AGENT_VERSION
   if (!imageExists(version)) {
-    logger.info(t('docker.buildingForVersion', { version }))
     buildImage(version)
   } else {
     logger.info(t('docker.imageFound', { version }))
