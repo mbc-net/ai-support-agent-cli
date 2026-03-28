@@ -24,6 +24,7 @@ export function getContentType(filename: string): string {
 
 export interface DownloadResult {
   downloadedPaths: string[]
+  imagePaths: string[]
   failedCount: number
   cleanup: () => void
 }
@@ -42,6 +43,7 @@ export async function downloadChatFiles(
   mkdirSync(downloadDir, { recursive: true })
 
   const downloadedPaths: string[] = []
+  const imagePaths: string[] = []
   let failedCount = 0
 
   for (const file of files) {
@@ -59,7 +61,11 @@ export async function downloadChatFiles(
       const writer = createWriteStream(filePath)
       await pipeline(stream, writer)
 
-      downloadedPaths.push(filePath)
+      if (file.contentType.startsWith('image/')) {
+        imagePaths.push(filePath)
+      } else {
+        downloadedPaths.push(filePath)
+      }
       logger.info(`[file-transfer] Downloaded file: ${file.filename} -> ${filePath}`)
     } catch (error) {
       failedCount++
@@ -78,7 +84,7 @@ export async function downloadChatFiles(
     }
   }
 
-  return { downloadedPaths, failedCount, cleanup }
+  return { downloadedPaths, imagePaths, failedCount, cleanup }
 }
 
 /**
