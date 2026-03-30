@@ -25,6 +25,7 @@ export class ChildProcessManager {
   private readonly restartTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly busyResponseHandlers: Array<(msg: IpcBusyResponseMessage) => void> = []
   private stopping = false
+  onUpdateComplete?: () => void
 
   forkProject(
     project: ProjectRegistration,
@@ -104,6 +105,10 @@ export class ChildProcessManager {
         for (const handler of this.busyResponseHandlers) {
           handler(msg)
         }
+        break
+      case 'update_complete':
+        logger.info(`Project ${msg.projectCode} update complete, notifying runner`)
+        this.onUpdateComplete?.()
         break
     }
   }
