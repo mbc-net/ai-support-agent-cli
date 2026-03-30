@@ -114,14 +114,15 @@ export function buildManagedBlock(
   sshDir: string,
   entries: Array<{ hostId: string; hostname: string; port: number; username: string }>,
 ): string {
+  const knownHostsPath = path.join(sshDir, 'known_hosts')
   const hostBlocks = entries.map((entry) =>
     `Host ai-agent-${entry.hostId}\n` +
     `    HostName ${entry.hostname}\n` +
     `    Port ${entry.port}\n` +
     `    User ${entry.username}\n` +
     `    IdentityFile ${path.join(sshDir, KEY_FILE_PREFIX + entry.hostId)}\n` +
-    `    StrictHostKeyChecking no\n` +
-    `    UserKnownHostsFile /dev/null`,
+    `    StrictHostKeyChecking accept-new\n` +
+    `    UserKnownHostsFile ${knownHostsPath}`,
   )
 
   return [

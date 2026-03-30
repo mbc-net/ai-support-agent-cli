@@ -166,8 +166,8 @@ describe('ssh-config-setup', () => {
       // IdentityFile must use absolute path (not ~/.ssh/)
       expect(configContent).toContain(`IdentityFile ${path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1')}`)
       expect(configContent).not.toContain('~/.ssh/')
-      expect(configContent).toContain('StrictHostKeyChecking no')
-      expect(configContent).toContain('UserKnownHostsFile /dev/null')
+      expect(configContent).toContain('StrictHostKeyChecking accept-new')
+      expect(configContent).toContain(`UserKnownHostsFile ${path.join(FAKE_SSH_DIR, 'known_hosts')}`)
     })
 
     it('should handle multiple hosts', async () => {
@@ -442,8 +442,8 @@ describe('ssh-config-setup', () => {
         '    Port 22',
         '    User deploy',
         `    IdentityFile ${path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1')}`,
-        '    StrictHostKeyChecking no',
-        '    UserKnownHostsFile /dev/null',
+        '    StrictHostKeyChecking accept-new',
+        `    UserKnownHostsFile ${path.join(FAKE_SSH_DIR, 'known_hosts')}`,
         '# END ai-support-agent managed',
       ].join('\n'))
     })
