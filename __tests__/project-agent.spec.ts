@@ -1273,20 +1273,89 @@ describe('ProjectAgent', () => {
 
   describe('performReboot', () => {
     it('should stop transport and schedule reExecProcess', async () => {
-      const agent = new ProjectAgent(project, 'agent-1', options)
-      agent.start()
+      const originalSend = process.send
+      // Jest runs tests in a forked child process, so process.send is defined.
+      // Simulate a standalone (non-child) process for this test.
+      Object.defineProperty(process, 'send', { value: undefined, writable: true, configurable: true })
 
-      await jest.advanceTimersByTimeAsync(100)
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
 
-      await agent.performReboot()
+        await jest.advanceTimersByTimeAsync(100)
 
-      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Reboot requested'))
-      expect(mockSubscriber.disconnect).toHaveBeenCalled()
+        await agent.performReboot()
 
-      // Advance past setTimeout(1000)
-      await jest.advanceTimersByTimeAsync(1000)
+        expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Reboot requested'))
+        expect(mockSubscriber.disconnect).toHaveBeenCalled()
 
-      expect(mockedReExecProcess).toHaveBeenCalledWith()
+        // Advance past setTimeout(1000)
+        await jest.advanceTimersByTimeAsync(1000)
+
+        expect(mockedReExecProcess).toHaveBeenCalledWith()
+      } finally {
+        Object.defineProperty(process, 'send', { value: originalSend, writable: true, configurable: true })
+      }
+    })
+
+    it('should call process.exit(0) instead of reExecProcess when running in Docker', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        await agent.performReboot()
+
+        expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Reboot requested'))
+        expect(mockSubscriber.disconnect).toHaveBeenCalled()
+
+        // Advance past setTimeout(1000)
+        await jest.advanceTimersByTimeAsync(1000)
+
+        // In Docker mode, exits cleanly without spawning a new process
+        expect(mockExit).toHaveBeenCalledWith(0)
+        expect(mockedReExecProcess).not.toHaveBeenCalled()
+      } finally {
+        mockExit.mockRestore()
+        if (originalDockerEnv === undefined) {
+          delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        } else {
+          process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+        }
+      }
+    })
+
+    it('should call process.exit(0) instead of reExecProcess when running as child process', async () => {
+      const originalSend = process.send
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      Object.defineProperty(process, 'send', { value: jest.fn(), writable: true, configurable: true })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        await agent.performReboot()
+
+        expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Reboot requested'))
+        expect(mockSubscriber.disconnect).toHaveBeenCalled()
+
+        // Advance past setTimeout(1000)
+        await jest.advanceTimersByTimeAsync(1000)
+
+        // Child process exits cleanly, does NOT call reExecProcess
+        expect(mockExit).toHaveBeenCalledWith(0)
+        expect(mockedReExecProcess).not.toHaveBeenCalled()
+      } finally {
+        mockExit.mockRestore()
+        Object.defineProperty(process, 'send', { value: originalSend, writable: true, configurable: true })
+      }
     })
   })
 
