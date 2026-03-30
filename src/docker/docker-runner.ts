@@ -65,7 +65,7 @@ export function buildImage(version: string, customDockerfile?: string): void {
   }
   execFileSync(
     'docker',
-    ['build', '-t', `${IMAGE_NAME}:${version}`, '--pull=missing', '--build-arg', `AGENT_VERSION=${version}`, '-f', dockerfilePath, contextDir],
+    ['build', '-t', `${IMAGE_NAME}:${version}`, '--pull=false', '--build-arg', `AGENT_VERSION=${version}`, '-f', dockerfilePath, contextDir],
     { stdio: 'inherit' },
   )
   logger.success(t('docker.buildComplete'))

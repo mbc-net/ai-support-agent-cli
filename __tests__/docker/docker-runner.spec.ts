@@ -142,7 +142,7 @@ describe('docker-runner', () => {
       buildImage('1.0.0')
       expect(mockExecFileSync).toHaveBeenCalledWith(
         'docker',
-        ['build', '-t', 'ai-support-agent:1.0.0', '--pull=missing', '--build-arg', 'AGENT_VERSION=1.0.0', '-f', '/mock/docker/Dockerfile', '/mock'],
+        ['build', '-t', 'ai-support-agent:1.0.0', '--pull=false', '--build-arg', 'AGENT_VERSION=1.0.0', '-f', '/mock/docker/Dockerfile', '/mock'],
         { stdio: 'inherit' },
       )
       expect(logger.info).toHaveBeenCalled()
@@ -154,7 +154,7 @@ describe('docker-runner', () => {
       buildImage('1.0.0', '/custom/Dockerfile')
       expect(mockExecFileSync).toHaveBeenCalledWith(
         'docker',
-        ['build', '-t', 'ai-support-agent:1.0.0', '--pull=missing', '--build-arg', 'AGENT_VERSION=1.0.0', '-f', '/custom/Dockerfile', '/custom'],
+        ['build', '-t', 'ai-support-agent:1.0.0', '--pull=false', '--build-arg', 'AGENT_VERSION=1.0.0', '-f', '/custom/Dockerfile', '/custom'],
         { stdio: 'inherit' },
       )
       // Should log usingCustomDockerfile message
