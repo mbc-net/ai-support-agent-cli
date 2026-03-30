@@ -1,5 +1,5 @@
 import { ApiClient } from './api-client'
-import { AGENT_VERSION, UPDATE_CHECK_INITIAL_DELAY, UPDATE_CHECK_INTERVAL, UPDATE_BUSY_WAIT_TIMEOUT_MS, UPDATE_BUSY_POLL_INTERVAL_MS, UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS } from './constants'
+import { AGENT_VERSION, UPDATE_CHECK_INITIAL_DELAY, UPDATE_CHECK_INTERVAL, UPDATE_BUSY_WAIT_TIMEOUT_MS, UPDATE_BUSY_POLL_INTERVAL_MS, UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS, DOCKER_UPDATE_EXIT_CODE } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AutoUpdateConfig } from './types'
@@ -120,11 +120,11 @@ export function startAutoUpdater(
       stop()
 
       logger.info(t('update.restarting'))
-      // Inside a Docker container, exit cleanly so the host-side runInDocker()
-      // detects the exit and calls reExecProcess(), which runs ensureImage() to
-      // rebuild the Docker image for the new agent version before restarting.
+      // Inside a Docker container, exit with a dedicated code so the host-side
+      // runInDocker() can distinguish an update restart from a clean stop (SIGINT)
+      // and calls reExecProcess() to rebuild the Docker image for the new version.
       if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
-        process.exit(0)
+        process.exit(DOCKER_UPDATE_EXIT_CODE)
         return
       }
       reExecProcess(installMethod)

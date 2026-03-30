@@ -746,11 +746,11 @@ describe('docker-runner', () => {
 
       runInDocker({})
 
-      fakeChild.emit('close', 42)
-      expect(mockExit).toHaveBeenCalledWith(42)
+      fakeChild.emit('close', 1)
+      expect(mockExit).toHaveBeenCalledWith(1)
     })
 
-    it('should call reExecProcess when container exits with code 0 (update)', () => {
+    it('should call reExecProcess when container exits with DOCKER_UPDATE_EXIT_CODE (42)', () => {
       mockExecFileSync.mockReturnValue(Buffer.from(''))
 
       const fakeChild = Object.assign(new EventEmitter(), {
@@ -761,12 +761,12 @@ describe('docker-runner', () => {
 
       runInDocker({})
 
-      fakeChild.emit('close', 0)
+      fakeChild.emit('close', 42)
       expect(mockReExecProcess).toHaveBeenCalled()
       expect(mockExit).not.toHaveBeenCalled()
     })
 
-    it('should exit with 1 when close code is null', () => {
+    it('should exit with 0 when close code is null', () => {
       mockExecFileSync.mockReturnValue(Buffer.from(''))
 
       const fakeChild = Object.assign(new EventEmitter(), {
@@ -778,7 +778,7 @@ describe('docker-runner', () => {
       runInDocker({})
 
       fakeChild.emit('close', null)
-      expect(mockExit).toHaveBeenCalledWith(1)
+      expect(mockExit).toHaveBeenCalledWith(0)
     })
 
     it('should handle spawn error', () => {

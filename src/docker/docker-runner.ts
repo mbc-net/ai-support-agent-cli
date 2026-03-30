@@ -11,6 +11,7 @@ import { logger } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { isNewerVersion, isValidVersion } from '../utils/version'
+import { DOCKER_UPDATE_EXIT_CODE } from '../constants'
 import { reExecProcess } from '../update-checker'
 
 /** Convert a path.relative() result to POSIX format for container use */
@@ -326,14 +327,13 @@ export function runInDocker(opts: DockerRunOptions): void {
   })
 
   child.on('close', (code) => {
-    // Exit code 0 means the container shut down cleanly (e.g. after an update).
-    // Re-exec the host process so ensureImage() runs again and rebuilds the
-    // Docker image for the newly installed agent version before restarting.
-    if (code === 0) {
-      logger.info('[docker] Container exited cleanly. Restarting to apply updates...')
+    // DOCKER_UPDATE_EXIT_CODE signals "update installed, rebuild image and restart".
+    // Any other exit (including 0 from SIGINT) exits the host process as-is.
+    if (code === DOCKER_UPDATE_EXIT_CODE) {
+      logger.info('[docker] Container exited for update. Rebuilding image and restarting...')
       reExecProcess()
       return
     }
-    process.exit(code ?? 1)
+    process.exit(code ?? 0)
   })
 }
