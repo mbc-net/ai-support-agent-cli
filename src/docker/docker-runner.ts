@@ -11,6 +11,7 @@ import { logger } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { isNewerVersion, isValidVersion } from '../utils/version'
+import { reExecProcess } from '../update-checker'
 
 /** Convert a path.relative() result to POSIX format for container use */
 function toPosixRelative(relativePath: string): string {
@@ -148,6 +149,9 @@ export function buildVolumeMounts(): { mounts: string[]; projectMappings: Projec
 
 export function buildEnvArgs(projectMappings: ProjectDirMapping[]): string[] {
   const args: string[] = []
+
+  // Mark process as running inside a Docker container
+  args.push('-e', 'AI_SUPPORT_AGENT_IN_DOCKER=1')
 
   // Set HOME to container-internal path (not host path)
   args.push('-e', `HOME=${CONTAINER_HOME}`)
@@ -322,6 +326,14 @@ export function runInDocker(opts: DockerRunOptions): void {
   })
 
   child.on('close', (code) => {
-    process.exit(code ?? 0)
+    // Exit code 0 means the container shut down cleanly (e.g. after an update).
+    // Re-exec the host process so ensureImage() runs again and rebuilds the
+    // Docker image for the newly installed agent version before restarting.
+    if (code === 0) {
+      logger.info('[docker] Container exited cleanly. Restarting to apply updates...')
+      reExecProcess()
+      return
+    }
+    process.exit(code ?? 1)
   })
 }

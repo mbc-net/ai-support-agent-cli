@@ -188,3 +188,30 @@ jobs:
         env:
           VERSION_API_URL: ${{ secrets.AGENT_VERSION_API_URL }}
           VERSION_API_KEY: ${{ secrets.AGENT_VERSION_API_KEY }}
+
+  docker_build:
+    name: Docker Build
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG_NAME=${{ github.ref_name }}
+          VERSION=${TAG_NAME#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: false
+          build-args: |
+            AGENT_VERSION=${{ steps.version.outputs.version }}

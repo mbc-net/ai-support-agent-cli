@@ -22,7 +22,7 @@ export interface AutoUpdaterHandle {
 export function startAutoUpdater(
   clients: ApiClient[],
   config: AutoUpdateConfig,
-  stopAllAgents: () => void,
+  stopAllAgents: () => void | Promise<void>,
   sendUpdateError?: (error: string) => void,
   isAnyAgentBusy?: () => Promise<boolean>,
 ): AutoUpdaterHandle {
@@ -116,10 +116,17 @@ export function startAutoUpdater(
 
       // Graceful restart
       logger.info(t('update.stoppingAgents'))
-      stopAllAgents()
+      await stopAllAgents()
       stop()
 
       logger.info(t('update.restarting'))
+      // Inside a Docker container, exit cleanly so the host-side runInDocker()
+      // detects the exit and calls reExecProcess(), which runs ensureImage() to
+      // rebuild the Docker image for the new agent version before restarting.
+      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+        process.exit(0)
+        return
+      }
       reExecProcess(installMethod)
     } catch (error) {
       logger.debug(`Update check failed: ${getErrorMessage(error)}`)
