@@ -98,7 +98,7 @@ function initAutoUpdater(
   config: { autoUpdate?: AutoUpdateConfig } | null | undefined,
   client: ApiClient,
   agentId: string,
-  stopAllAgents: () => void,
+  stopAllAgents: () => void | Promise<void>,
   isAnyAgentBusy?: () => Promise<boolean>,
 ): AutoUpdaterHandle | undefined {
   const autoUpdateConfig = resolveAutoUpdateConfig(options, config)
@@ -258,7 +258,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   saveConfig({ lastConnected: new Date().toISOString() })
 
   const client = new ApiClient(projects[0].apiUrl, projects[0].token)
-  const updater = initAutoUpdater(options, config, client, agentId, () => processManager.sendUpdateToAll(), () => processManager.isAnyBusy())
+  const updater = initAutoUpdater(options, config, client, agentId, () => processManager.stopAll(), () => processManager.isAnyBusy())
 
   const configWatcher = startConfigWatcher(projects, {
     onTokenUpdate: (projectCode, newToken) => {
