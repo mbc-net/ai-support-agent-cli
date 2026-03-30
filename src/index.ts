@@ -7,6 +7,7 @@ import { registerAuthCommands } from './cli/auth-commands'
 import { registerServiceCommands } from './cli/service-command'
 import { registerStatusCommand } from './cli/status-command'
 import { registerSetProjectDirCommand } from './commands/set-project-dir'
+import { registerDockerCommands } from './commands/docker-commands'
 import { resolveProjectDir, getMetadataDir } from './project-dir'
 import { parseIntervalOrExit, validateUpdateChannel } from './cli/validators'
 import { AGENT_VERSION } from './constants'
@@ -42,6 +43,8 @@ program
   .option('--no-auto-update', t('cmd.start.noAutoUpdate'))
   .option('--update-channel <channel>', t('cmd.start.updateChannel'))
   .option('--no-docker', t('cmd.start.noDocker'))
+  .option('--dockerfile <path>', t('cmd.start.dockerfile'))
+  .option('--no-dockerfile-sync', t('cmd.start.noDockerfileSync'))
   .action(async (opts: {
     token?: string
     apiUrl?: string
@@ -51,6 +54,8 @@ program
     autoUpdate?: boolean
     updateChannel?: string
     docker: boolean
+    dockerfile?: string
+    dockerfileSync: boolean
   }) => {
     if (opts.docker) {
       const { runInDocker } = await import('./docker/docker-runner')
@@ -62,6 +67,8 @@ program
         verbose: opts.verbose,
         autoUpdate: opts.autoUpdate,
         updateChannel: opts.updateChannel,
+        dockerfile: opts.dockerfile,
+        dockerfileSync: opts.dockerfileSync,
       })
       return
     }
@@ -171,6 +178,8 @@ program
     const { dockerLogin } = await import('./docker/docker-runner')
     dockerLogin()
   })
+
+registerDockerCommands(program)
 
 registerStatusCommand(program)
 registerServiceCommands(program)

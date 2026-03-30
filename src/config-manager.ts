@@ -89,6 +89,8 @@ export function saveConfig(config: Partial<AgentConfig>): void {
     autoUpdate: config.autoUpdate ?? existing?.autoUpdate,
     agentChatMode: config.agentChatMode ?? existing?.agentChatMode,
     defaultProjectDir: config.defaultProjectDir ?? existing?.defaultProjectDir,
+    dockerfilePath: config.dockerfilePath ?? existing?.dockerfilePath,
+    dockerfileSync: config.dockerfileSync ?? existing?.dockerfileSync,
   }
 
   const configPath = getConfigPath()
