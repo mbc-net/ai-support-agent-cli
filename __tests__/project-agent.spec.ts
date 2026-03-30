@@ -6,7 +6,7 @@ import { logger } from '../src/logger'
 import { syncProjectConfig } from '../src/project-config-sync'
 import { ProjectAgent } from '../src/project-agent'
 import { syncRepositories } from '../src/repo-sync'
-import { detectChannelFromVersion, detectInstallMethod, performUpdate, reExecProcess } from '../src/update-checker'
+import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from '../src/update-checker'
 
 jest.mock('../src/api-client')
 jest.mock('../src/appsync-subscriber')
@@ -44,7 +44,7 @@ jest.mock('../src/pending-result-store', () => ({
 jest.mock('../src/update-checker', () => ({
   detectChannelFromVersion: jest.fn().mockReturnValue('latest'),
   detectInstallMethod: jest.fn().mockReturnValue('global'),
-  isNewerVersion: jest.fn().mockImplementation((current: string, latest: string) => current !== latest && latest > current),
+  isNewerVersion: jest.fn().mockReturnValue(true),
   performUpdate: jest.fn().mockResolvedValue({ success: true }),
   reExecProcess: jest.fn(),
 }))
@@ -69,6 +69,7 @@ const mockedSyncProjectConfig = syncProjectConfig as jest.MockedFunction<typeof 
 const mockedWriteAwsConfig = writeAwsConfig as jest.MockedFunction<typeof writeAwsConfig>
 const mockedSyncRepositories = syncRepositories as jest.MockedFunction<typeof syncRepositories>
 const mockedDetectInstallMethod = detectInstallMethod as jest.MockedFunction<typeof detectInstallMethod>
+const mockedIsNewerVersion = isNewerVersion as jest.MockedFunction<typeof isNewerVersion>
 const mockedPerformUpdate = performUpdate as jest.MockedFunction<typeof performUpdate>
 const mockedReExecProcess = reExecProcess as jest.MockedFunction<typeof reExecProcess>
 
@@ -1485,12 +1486,7 @@ describe('ProjectAgent', () => {
     })
 
     it('should skip update when already on latest version', async () => {
-      mockClient.getVersionInfo.mockResolvedValueOnce({
-        latestVersion: '0.0.1',
-        minimumVersion: '0.0.0',
-        channel: 'latest',
-        channels: {},
-      })
+      mockedIsNewerVersion.mockReturnValueOnce(false)
 
       const agent = new ProjectAgent(project, 'agent-1', options)
       agent.start()
