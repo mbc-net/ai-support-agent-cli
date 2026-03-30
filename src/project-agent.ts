@@ -138,7 +138,16 @@ export class ProjectAgent {
     logger.info(`${this.prefix} Reboot requested, scheduling restart...`)
     this.stop()
     setTimeout(() => {
-      reExecProcess()
+      // When running inside a Docker container or as a child process (forked by
+      // ChildProcessManager), just exit cleanly. The host-side runner (launchd /
+      // docker-runner) will restart the process automatically via KeepAlive or
+      // the container restart loop.
+      // reExecProcess() from a worker would spawn a duplicate runner process.
+      if (process.send || process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+        process.exit(0)
+      } else {
+        reExecProcess()
+      }
     }, 1000)
   }
 
