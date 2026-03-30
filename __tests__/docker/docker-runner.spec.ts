@@ -11,11 +11,18 @@ jest.mock('fs', () => ({
   readFileSync: jest.fn(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }),
   unlinkSync: jest.fn(),
   writeFileSync: jest.fn(),
+  copyFileSync: jest.fn(),
+  mkdirSync: jest.fn(),
 }))
 
 jest.mock('../../src/docker/dockerfile-path', () => ({
   getDockerfilePath: jest.fn(() => '/mock/docker/Dockerfile'),
   getDockerContextDir: jest.fn(() => '/mock'),
+  getConfigDockerfilePath: jest.fn(() => '/mock/config-dir/Dockerfile'),
+  resolveDockerfile: jest.fn((customPath?: string) => {
+    if (customPath) return { dockerfilePath: customPath, contextDir: require('path').dirname(customPath) }
+    return { dockerfilePath: '/mock/docker/Dockerfile', contextDir: '/mock' }
+  }),
 }))
 
 jest.mock('../../src/config-manager', () => ({
@@ -54,7 +61,7 @@ jest.mock('../../src/update-checker', () => ({
 
 import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
-import { existsSync, realpathSync, readFileSync, unlinkSync } from 'fs'
+import { existsSync, realpathSync, readFileSync, unlinkSync, copyFileSync, mkdirSync } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
 import { reExecProcess, performUpdate } from '../../src/update-checker'
@@ -69,6 +76,7 @@ import {
   getInstalledVersion,
   resetInstalledVersionCache,
   resetIsDockerRunning,
+  syncDockerfileToConfigDir,
   dockerLogin,
   runInDocker,
 } from '../../src/docker/docker-runner'
@@ -83,6 +91,8 @@ const mockReExecProcess = reExecProcess as jest.MockedFunction<typeof reExecProc
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>
 const mockUnlinkSync = unlinkSync as jest.MockedFunction<typeof unlinkSync>
 const mockPerformUpdate = performUpdate as jest.MockedFunction<typeof performUpdate>
+const mockCopyFileSync = copyFileSync as jest.MockedFunction<typeof copyFileSync>
+const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>
 
 describe('docker-runner', () => {
   const originalEnv = process.env
@@ -127,16 +137,28 @@ describe('docker-runner', () => {
   })
 
   describe('buildImage', () => {
-    it('should build docker image with correct arguments', () => {
+    it('should build docker image with correct arguments (bundled Dockerfile)', () => {
       mockExecFileSync.mockReturnValue(Buffer.from(''))
       buildImage('1.0.0')
       expect(mockExecFileSync).toHaveBeenCalledWith(
         'docker',
-        ['build', '-t', 'ai-support-agent:1.0.0', '--build-arg', 'AGENT_VERSION=1.0.0', '-f', '/mock/docker/Dockerfile', '/mock'],
+        ['build', '-t', 'ai-support-agent:1.0.0', '--pull=missing', '--build-arg', 'AGENT_VERSION=1.0.0', '-f', '/mock/docker/Dockerfile', '/mock'],
         { stdio: 'inherit' },
       )
       expect(logger.info).toHaveBeenCalled()
       expect(logger.success).toHaveBeenCalled()
+    })
+
+    it('should use custom Dockerfile path when provided', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      buildImage('1.0.0', '/custom/Dockerfile')
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'docker',
+        ['build', '-t', 'ai-support-agent:1.0.0', '--pull=missing', '--build-arg', 'AGENT_VERSION=1.0.0', '-f', '/custom/Dockerfile', '/custom'],
+        { stdio: 'inherit' },
+      )
+      // Should log usingCustomDockerfile message
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.usingCustomDockerfile'))
     })
   })
 
@@ -626,6 +648,67 @@ describe('docker-runner', () => {
       expect(buildCall).toBeUndefined()
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.imageFound'))
     })
+
+    it('should pass customDockerfile to buildImage when provided', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') return Buffer.from(JSON.stringify({ dependencies: {} }))
+        if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') throw new Error('No such image')
+        return Buffer.from('')
+      })
+
+      ensureImage('/custom/Dockerfile')
+
+      const buildCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'build',
+      )
+      expect(buildCall).toBeDefined()
+      expect((buildCall![1] as string[])).toContain('/custom/Dockerfile')
+    })
+  })
+
+  describe('syncDockerfileToConfigDir', () => {
+    beforeEach(() => {
+      mockGetConfigDir.mockReturnValue('/mock/config-dir')
+    })
+
+    it('should copy bundled Dockerfile to config dir on first run', () => {
+      mockExistsSync.mockReturnValue(false) // destDockerfile does not exist
+
+      syncDockerfileToConfigDir()
+
+      expect(mockMkdirSync).toHaveBeenCalledWith('/mock/config-dir', expect.objectContaining({ recursive: true }))
+      expect(mockCopyFileSync).toHaveBeenCalledWith('/mock/docker/Dockerfile', '/mock/config-dir/Dockerfile')
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.dockerfileSynced'))
+    })
+
+    it('should skip when Dockerfile already exists in config dir', () => {
+      mockExistsSync.mockImplementation((p) => p === '/mock/config-dir/Dockerfile')
+
+      syncDockerfileToConfigDir()
+
+      expect(mockCopyFileSync).not.toHaveBeenCalled()
+      expect(logger.info).not.toHaveBeenCalled()
+    })
+
+    it('should also copy entrypoint.sh when it exists', () => {
+      mockExistsSync.mockImplementation((p) => p === '/mock/docker/entrypoint.sh')
+
+      syncDockerfileToConfigDir()
+
+      expect(mockCopyFileSync).toHaveBeenCalledWith(
+        '/mock/docker/entrypoint.sh',
+        '/mock/config-dir/docker/entrypoint.sh',
+      )
+    })
+
+    it('should warn and not throw when copy fails', () => {
+      mockExistsSync.mockReturnValue(false)
+      mockCopyFileSync.mockImplementation(() => { throw new Error('permission denied') })
+
+      expect(() => syncDockerfileToConfigDir()).not.toThrow()
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('docker.dockerfileSyncFailed'))
+    })
   })
 
   describe('dockerLogin', () => {
@@ -666,6 +749,7 @@ describe('docker-runner', () => {
   describe('runInDocker', () => {
     beforeEach(() => {
       resetIsDockerRunning()
+      mockGetConfigDir.mockReturnValue('/mock/config-dir')
     })
 
     it('should exit with error when Docker is not available', () => {
@@ -970,6 +1054,85 @@ describe('docker-runner', () => {
       expect(spawnArgs).toContain('--verbose')
       expect(spawnArgs).toContain('--poll-interval')
       expect(spawnArgs).toContain('5000')
+    })
+
+    it('should call syncDockerfileToConfigDir by default', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+      mockExistsSync.mockReturnValue(false) // Dockerfile not yet in config dir
+
+      runInDocker({})
+
+      // syncDockerfileToConfigDir was called: mkdirSync and copyFileSync should have been called
+      expect(mockCopyFileSync).toHaveBeenCalledWith('/mock/docker/Dockerfile', '/mock/config-dir/Dockerfile')
+    })
+
+    it('should skip syncDockerfileToConfigDir when --no-dockerfile-sync flag is set', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+
+      runInDocker({ dockerfileSync: false })
+
+      expect(mockCopyFileSync).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('Dockerfile'),
+      )
+    })
+
+    it('should skip syncDockerfileToConfigDir when config.dockerfileSync is false', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({ agentId: 'a', createdAt: '2024', dockerfileSync: false })
+
+      runInDocker({})
+
+      expect(mockCopyFileSync).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('Dockerfile'),
+      )
+    })
+
+    it('should use opts.dockerfile when provided', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') throw new Error('No such image')
+        return Buffer.from('')
+      })
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+
+      runInDocker({ dockerfileSync: false, dockerfile: '/custom/Dockerfile' })
+
+      const buildCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'build',
+      )
+      expect(buildCall).toBeDefined()
+      expect((buildCall![1] as string[])).toContain('/custom/Dockerfile')
+    })
+
+    it('should use config.dockerfilePath when opts.dockerfile is not set', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') throw new Error('No such image')
+        return Buffer.from('')
+      })
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({ agentId: 'a', createdAt: '2024', dockerfilePath: '/from-config/Dockerfile', dockerfileSync: false })
+
+      runInDocker({})
+
+      const buildCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'build',
+      )
+      expect(buildCall).toBeDefined()
+      expect((buildCall![1] as string[])).toContain('/from-config/Dockerfile')
     })
   })
 })
