@@ -68,6 +68,7 @@ import {
   ensureImage,
   getInstalledVersion,
   resetInstalledVersionCache,
+  resetIsDockerRunning,
   dockerLogin,
   runInDocker,
 } from '../../src/docker/docker-runner'
@@ -663,6 +664,10 @@ describe('docker-runner', () => {
   })
 
   describe('runInDocker', () => {
+    beforeEach(() => {
+      resetIsDockerRunning()
+    })
+
     it('should exit with error when Docker is not available', () => {
       mockExecFileSync.mockImplementation(() => { throw new Error('not found') })
 
@@ -791,7 +796,7 @@ describe('docker-runner', () => {
       await Promise.resolve()
       await Promise.resolve()
 
-      expect(mockPerformUpdate).toHaveBeenCalledWith('0.0.30-beta.4')
+      expect(mockPerformUpdate).toHaveBeenCalledWith('0.0.30-beta.4', 'global')
       expect(mockUnlinkSync).toHaveBeenCalled()
       expect(mockReExecProcess).toHaveBeenCalled()
     })
@@ -811,7 +816,7 @@ describe('docker-runner', () => {
       await Promise.resolve()
       await Promise.resolve()
 
-      expect(mockPerformUpdate).toHaveBeenCalledWith('0.0.30-beta.4')
+      expect(mockPerformUpdate).toHaveBeenCalledWith('0.0.30-beta.4', 'global')
       expect(mockReExecProcess).toHaveBeenCalled()
     })
 
