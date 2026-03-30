@@ -63,11 +63,17 @@ export interface IpcBusyResponseMessage {
   busy: boolean
 }
 
+export interface IpcUpdateCompleteMessage {
+  type: 'update_complete'
+  projectCode: string
+}
+
 export type ChildToParentMessage =
   | IpcStartedMessage
   | IpcErrorMessage
   | IpcStoppedMessage
   | IpcBusyResponseMessage
+  | IpcUpdateCompleteMessage
 
 // ─── Type Guards ─────────────────────────────────────────────────
 
@@ -95,7 +101,7 @@ export function isParentToChildMessage(msg: unknown): msg is ParentToChildMessag
 export function isChildToParentMessage(msg: unknown): msg is ChildToParentMessage {
   if (!isObject(msg)) return false
   const { type } = msg
-  if (type === 'started' || type === 'stopped') {
+  if (type === 'started' || type === 'stopped' || type === 'update_complete') {
     return typeof msg.projectCode === 'string'
   }
   if (type === 'error') {

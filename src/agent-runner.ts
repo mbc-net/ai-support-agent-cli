@@ -1,7 +1,7 @@
 import * as os from 'os'
 
 import { type AutoUpdaterHandle, startAutoUpdater } from './auto-updater'
-import { AGENT_VERSION, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJECT_CODE_CLI_DIRECT, PROJECT_CODE_ENV_DEFAULT } from './constants'
+import { AGENT_VERSION, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJECT_CODE_CLI_DIRECT, PROJECT_CODE_ENV_DEFAULT, DOCKER_UPDATE_EXIT_CODE } from './constants'
 import { getProjectList, loadConfig, saveConfig } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
@@ -98,7 +98,7 @@ function initAutoUpdater(
   config: { autoUpdate?: AutoUpdateConfig } | null | undefined,
   client: ApiClient,
   agentId: string,
-  stopAllAgents: () => void,
+  stopAllAgents: () => void | Promise<void>,
   isAnyAgentBusy?: () => Promise<boolean>,
 ): AutoUpdaterHandle | undefined {
   const autoUpdateConfig = resolveAutoUpdateConfig(options, config)
@@ -251,6 +251,16 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
 
   // Always use ChildProcessManager for dynamic project management
   const processManager = new ChildProcessManager()
+
+  // In Docker mode, when a worker completes an update, exit the runner with
+  // DOCKER_UPDATE_EXIT_CODE so the host-side runInDocker() rebuilds the image.
+  if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+    processManager.onUpdateComplete = () => {
+      logger.info('[docker] Worker update complete. Exiting container to rebuild image...')
+      void processManager.stopAll().then(() => process.exit(DOCKER_UPDATE_EXIT_CODE))
+    }
+  }
+
   for (const project of projects) {
     processManager.forkProject(project, agentId, forkOptions)
   }
@@ -258,7 +268,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   saveConfig({ lastConnected: new Date().toISOString() })
 
   const client = new ApiClient(projects[0].apiUrl, projects[0].token)
-  const updater = initAutoUpdater(options, config, client, agentId, () => processManager.sendUpdateToAll(), () => processManager.isAnyBusy())
+  const updater = initAutoUpdater(options, config, client, agentId, () => processManager.stopAll(), () => processManager.isAnyBusy())
 
   const configWatcher = startConfigWatcher(projects, {
     onTokenUpdate: (projectCode, newToken) => {

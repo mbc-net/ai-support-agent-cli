@@ -1,18 +1,17 @@
 import * as fs from 'fs'
-import * as os from 'os'
 import * as path from 'path'
 
 import type { ApiClient } from '../src/api-client'
 import type { SshCredentials } from '../src/types'
 
 jest.mock('fs')
-jest.mock('os')
 jest.mock('../src/logger')
 
 const mockedFs = fs as jest.Mocked<typeof fs>
-const mockedOs = os as jest.Mocked<typeof os>
 
 import { setupSshConfig, cleanupSshConfig, buildManagedBlock, removeManagedBlock } from '../src/ssh-config-setup'
+
+const FAKE_SSH_DIR = '/home/testuser/.ai-support-agent/projects/MY_PROJECT/.ai-support-agent/ssh'
 
 function createMockCredentials(hostId: string, overrides?: Partial<SshCredentials>): SshCredentials {
   return {
@@ -37,11 +36,8 @@ function createMockClient(credentialsMap: Record<string, SshCredentials>): ApiCl
 }
 
 describe('ssh-config-setup', () => {
-  const fakeHome = '/home/testuser'
-
   beforeEach(() => {
     jest.clearAllMocks()
-    mockedOs.homedir.mockReturnValue(fakeHome)
     mockedFs.existsSync.mockReturnValue(false)
     mockedFs.writeFileSync.mockImplementation(() => {})
     mockedFs.mkdirSync.mockImplementation(() => '' as unknown as string)
@@ -51,7 +47,7 @@ describe('ssh-config-setup', () => {
   })
 
   describe('setupSshConfig', () => {
-    it('should create ~/.ssh directory if it does not exist', async () => {
+    it('should create project-scoped SSH directory if it does not exist', async () => {
       const client = createMockClient({
         'host-1': createMockCredentials('host-1'),
       })
@@ -60,48 +56,59 @@ describe('ssh-config-setup', () => {
 
       await setupSshConfig(client, {
         hosts: [{ hostId: 'host-1', name: 'Host 1', hostname: 'host-1.example.com', port: 22, username: 'deploy', authType: 'private_key' }],
-      })
+      }, FAKE_SSH_DIR)
 
       expect(mockedFs.mkdirSync).toHaveBeenCalledWith(
-        path.join(fakeHome, '.ssh'),
+        FAKE_SSH_DIR,
         { recursive: true, mode: 0o700 },
       )
     })
 
-    it('should not create ~/.ssh directory if it already exists', async () => {
+    it('should not create SSH directory if it already exists', async () => {
       const client = createMockClient({
         'host-1': createMockCredentials('host-1'),
       })
 
-      // First call: check ~/.ssh dir exists -> true
-      // Second call: check ~/.ssh/config exists -> false
       mockedFs.existsSync.mockImplementation((p) => {
-        if (p === path.join(fakeHome, '.ssh')) return true
+        if (p === FAKE_SSH_DIR) return true
         return false
       })
 
       await setupSshConfig(client, {
         hosts: [{ hostId: 'host-1', name: 'Host 1', hostname: 'host-1.example.com', port: 22, username: 'deploy', authType: 'private_key' }],
-      })
+      }, FAKE_SSH_DIR)
 
       expect(mockedFs.mkdirSync).not.toHaveBeenCalled()
     })
 
-    it('should write private key file with mode 0o600', async () => {
+    it('should throw when SSH directory cannot be created', async () => {
+      const client = createMockClient({
+        'host-1': createMockCredentials('host-1'),
+      })
+
+      mockedFs.existsSync.mockReturnValue(false)
+      mockedFs.mkdirSync.mockImplementation(() => { throw new Error('EACCES: permission denied') })
+
+      await expect(setupSshConfig(client, {
+        hosts: [{ hostId: 'host-1', name: 'Host 1', hostname: 'host-1.example.com', port: 22, username: 'deploy', authType: 'private_key' }],
+      }, FAKE_SSH_DIR)).rejects.toThrow('Cannot create SSH directory')
+    })
+
+    it('should write private key file with mode 0o600 in project-scoped SSH directory', async () => {
       const creds = createMockCredentials('host-1')
       const client = createMockClient({ 'host-1': creds })
 
       mockedFs.existsSync.mockImplementation((p) => {
-        if (p === path.join(fakeHome, '.ssh')) return true
+        if (p === FAKE_SSH_DIR) return true
         return false
       })
 
       await setupSshConfig(client, {
         hosts: [{ hostId: 'host-1', name: 'Host 1', hostname: 'host-1.example.com', port: 22, username: 'deploy', authType: 'private_key' }],
-      })
+      }, FAKE_SSH_DIR)
 
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
-        path.join(fakeHome, '.ssh', 'ai-support-agent-host-1'),
+        path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1'),
         creds.privateKey,
         { mode: 0o600 },
       )
@@ -113,15 +120,14 @@ describe('ssh-config-setup', () => {
       const client = createMockClient({ 'host-1': creds })
 
       mockedFs.existsSync.mockImplementation((p) => {
-        if (p === path.join(fakeHome, '.ssh')) return true
+        if (p === FAKE_SSH_DIR) return true
         return false
       })
 
       await setupSshConfig(client, {
         hosts: [{ hostId: 'host-1', name: 'Host 1', hostname: 'host-1.example.com', port: 22, username: 'deploy', authType: 'private_key' }],
-      })
+      }, FAKE_SSH_DIR)
 
-      // The key file should contain normalized PEM (with newlines)
       const writeCall = mockedFs.writeFileSync.mock.calls.find(
         (call) => (call[0] as string).includes('ai-support-agent-host-1'),
       )
@@ -132,22 +138,22 @@ describe('ssh-config-setup', () => {
       expect(writtenKey).toMatch(/\n-----END RSA PRIVATE KEY-----\n$/)
     })
 
-    it('should write SSH config with managed block', async () => {
+    it('should write SSH config with absolute IdentityFile paths', async () => {
       const client = createMockClient({
         'host-1': createMockCredentials('host-1'),
       })
 
       mockedFs.existsSync.mockImplementation((p) => {
-        if (p === path.join(fakeHome, '.ssh')) return true
+        if (p === FAKE_SSH_DIR) return true
         return false
       })
 
       await setupSshConfig(client, {
         hosts: [{ hostId: 'host-1', name: 'Host 1', hostname: 'host-1.example.com', port: 22, username: 'deploy', authType: 'private_key' }],
-      })
+      }, FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(fakeHome, '.ssh', 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
@@ -157,9 +163,11 @@ describe('ssh-config-setup', () => {
       expect(configContent).toContain('HostName host-1.example.com')
       expect(configContent).toContain('Port 22')
       expect(configContent).toContain('User deploy')
-      expect(configContent).toContain('IdentityFile ~/.ssh/ai-support-agent-host-1')
-      expect(configContent).toContain('StrictHostKeyChecking no')
-      expect(configContent).toContain('UserKnownHostsFile /dev/null')
+      // IdentityFile must use absolute path (not ~/.ssh/)
+      expect(configContent).toContain(`IdentityFile ${path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1')}`)
+      expect(configContent).not.toContain('~/.ssh/')
+      expect(configContent).toContain('StrictHostKeyChecking accept-new')
+      expect(configContent).toContain(`UserKnownHostsFile ${path.join(FAKE_SSH_DIR, 'known_hosts')}`)
     })
 
     it('should handle multiple hosts', async () => {
@@ -169,7 +177,7 @@ describe('ssh-config-setup', () => {
       })
 
       mockedFs.existsSync.mockImplementation((p) => {
-        if (p === path.join(fakeHome, '.ssh')) return true
+        if (p === FAKE_SSH_DIR) return true
         return false
       })
 
@@ -178,10 +186,10 @@ describe('ssh-config-setup', () => {
           { hostId: 'host-1', name: 'Host 1', hostname: 'host-1.example.com', port: 22, username: 'deploy', authType: 'private_key' },
           { hostId: 'host-2', name: 'Host 2', hostname: 'host-2.example.com', port: 2222, username: 'admin', authType: 'private_key' },
         ],
-      })
+      }, FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(fakeHome, '.ssh', 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
@@ -202,10 +210,10 @@ describe('ssh-config-setup', () => {
 
       await setupSshConfig(client, {
         hosts: [{ hostId: 'host-1', name: 'Host 1', hostname: 'host-1.example.com', port: 22, username: 'deploy', authType: 'private_key' }],
-      })
+      }, FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(fakeHome, '.ssh', 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
@@ -235,16 +243,15 @@ describe('ssh-config-setup', () => {
 
       await setupSshConfig(client, {
         hosts: [{ hostId: 'host-new', name: 'Host New', hostname: 'host-new.example.com', port: 22, username: 'deploy', authType: 'private_key' }],
-      })
+      }, FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(fakeHome, '.ssh', 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
       expect(configContent).not.toContain('old-host')
       expect(configContent).toContain('Host ai-agent-host-new')
-      // Should contain exactly one managed block
       expect(configContent.match(/# BEGIN ai-support-agent managed/g)).toHaveLength(1)
       expect(configContent.match(/# END ai-support-agent managed/g)).toHaveLength(1)
     })
@@ -253,10 +260,9 @@ describe('ssh-config-setup', () => {
       const client = createMockClient({
         'host-2': createMockCredentials('host-2'),
       })
-      // host-1 will fail (not in credentialsMap)
 
       mockedFs.existsSync.mockImplementation((p) => {
-        if (p === path.join(fakeHome, '.ssh')) return true
+        if (p === FAKE_SSH_DIR) return true
         return false
       })
 
@@ -265,11 +271,10 @@ describe('ssh-config-setup', () => {
           { hostId: 'host-1', name: 'Host 1', hostname: 'host-1.example.com', port: 22, username: 'deploy', authType: 'private_key' },
           { hostId: 'host-2', name: 'Host 2', hostname: 'host-2.example.com', port: 22, username: 'deploy', authType: 'private_key' },
         ],
-      })
+      }, FAKE_SSH_DIR)
 
-      // host-2 should still be configured
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(fakeHome, '.ssh', 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
@@ -283,11 +288,10 @@ describe('ssh-config-setup', () => {
       })
 
       mockedFs.existsSync.mockImplementation((p) => {
-        if (p === path.join(fakeHome, '.ssh')) return true
+        if (p === FAKE_SSH_DIR) return true
         return false
       })
 
-      // Make writeFileSync throw only for the config file (not the key file)
       let keyWritten = false
       mockedFs.writeFileSync.mockImplementation(((filePath: string) => {
         if ((filePath as string).endsWith('config')) {
@@ -296,12 +300,10 @@ describe('ssh-config-setup', () => {
         keyWritten = true
       }) as any)
 
-      // Should not throw
       await expect(setupSshConfig(client, {
         hosts: [{ hostId: 'host-1', name: 'Host 1', hostname: 'host-1.example.com', port: 22, username: 'deploy', authType: 'private_key' }],
-      })).resolves.toBeUndefined()
+      }, FAKE_SSH_DIR)).resolves.toBeUndefined()
 
-      // Key file was written before config failed
       expect(keyWritten).toBe(true)
     })
 
@@ -309,7 +311,7 @@ describe('ssh-config-setup', () => {
       const client = createMockClient({})
 
       mockedFs.existsSync.mockImplementation((p) => {
-        if (p === path.join(fakeHome, '.ssh')) return true
+        if (p === FAKE_SSH_DIR) return true
         return false
       })
 
@@ -317,10 +319,10 @@ describe('ssh-config-setup', () => {
         hosts: [
           { hostId: 'host-1', name: 'Host 1', hostname: 'host-1.example.com', port: 22, username: 'deploy', authType: 'private_key' },
         ],
-      })
+      }, FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(fakeHome, '.ssh', 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
       )
       expect(configWriteCall).toBeUndefined()
     })
@@ -342,10 +344,10 @@ describe('ssh-config-setup', () => {
       mockedFs.readFileSync.mockReturnValue(existingConfig)
       mockedFs.readdirSync.mockReturnValue([])
 
-      cleanupSshConfig()
+      cleanupSshConfig(FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(fakeHome, '.ssh', 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
@@ -364,13 +366,13 @@ describe('ssh-config-setup', () => {
         'config',
       ] as any)
 
-      cleanupSshConfig()
+      cleanupSshConfig(FAKE_SSH_DIR)
 
       expect(mockedFs.unlinkSync).toHaveBeenCalledWith(
-        path.join(fakeHome, '.ssh', 'ai-support-agent-host-1'),
+        path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1'),
       )
       expect(mockedFs.unlinkSync).toHaveBeenCalledWith(
-        path.join(fakeHome, '.ssh', 'ai-support-agent-host-2'),
+        path.join(FAKE_SSH_DIR, 'ai-support-agent-host-2'),
       )
       expect(mockedFs.unlinkSync).toHaveBeenCalledTimes(2)
     })
@@ -382,13 +384,13 @@ describe('ssh-config-setup', () => {
       })
       mockedFs.readdirSync.mockReturnValue([])
 
-      expect(() => cleanupSshConfig()).not.toThrow()
+      expect(() => cleanupSshConfig(FAKE_SSH_DIR)).not.toThrow()
     })
 
-    it('should handle missing .ssh directory gracefully', () => {
+    it('should handle missing SSH directory gracefully', () => {
       mockedFs.existsSync.mockReturnValue(false)
 
-      expect(() => cleanupSshConfig()).not.toThrow()
+      expect(() => cleanupSshConfig(FAKE_SSH_DIR)).not.toThrow()
       expect(mockedFs.readdirSync).not.toHaveBeenCalled()
     })
 
@@ -402,7 +404,7 @@ describe('ssh-config-setup', () => {
         throw new Error('EACCES: permission denied')
       })
 
-      expect(() => cleanupSshConfig()).not.toThrow()
+      expect(() => cleanupSshConfig(FAKE_SSH_DIR)).not.toThrow()
     })
 
     it('should write empty string when config only had managed block', () => {
@@ -417,10 +419,10 @@ describe('ssh-config-setup', () => {
       mockedFs.readFileSync.mockReturnValue(configContent)
       mockedFs.readdirSync.mockReturnValue([])
 
-      cleanupSshConfig()
+      cleanupSshConfig(FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(fakeHome, '.ssh', 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
       )
       expect(configWriteCall).toBeDefined()
       expect(configWriteCall![1]).toBe('')
@@ -428,8 +430,8 @@ describe('ssh-config-setup', () => {
   })
 
   describe('buildManagedBlock', () => {
-    it('should build correct managed block for single entry', () => {
-      const block = buildManagedBlock([
+    it('should build correct managed block with absolute IdentityFile paths', () => {
+      const block = buildManagedBlock(FAKE_SSH_DIR, [
         { hostId: 'host-1', hostname: 'server.example.com', port: 22, username: 'deploy' },
       ])
 
@@ -439,15 +441,24 @@ describe('ssh-config-setup', () => {
         '    HostName server.example.com',
         '    Port 22',
         '    User deploy',
-        '    IdentityFile ~/.ssh/ai-support-agent-host-1',
-        '    StrictHostKeyChecking no',
-        '    UserKnownHostsFile /dev/null',
+        `    IdentityFile ${path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1')}`,
+        '    StrictHostKeyChecking accept-new',
+        `    UserKnownHostsFile ${path.join(FAKE_SSH_DIR, 'known_hosts')}`,
         '# END ai-support-agent managed',
       ].join('\n'))
     })
 
+    it('should not use ~ or relative paths in IdentityFile', () => {
+      const block = buildManagedBlock(FAKE_SSH_DIR, [
+        { hostId: 'host-1', hostname: 'server.example.com', port: 22, username: 'deploy' },
+      ])
+
+      expect(block).not.toContain('~/')
+      expect(block).toMatch(/IdentityFile \//)
+    })
+
     it('should build correct managed block for multiple entries', () => {
-      const block = buildManagedBlock([
+      const block = buildManagedBlock(FAKE_SSH_DIR, [
         { hostId: 'host-1', hostname: 'server1.example.com', port: 22, username: 'deploy' },
         { hostId: 'host-2', hostname: 'server2.example.com', port: 2222, username: 'admin' },
       ])

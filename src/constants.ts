@@ -163,6 +163,10 @@ export const TOKEN_WATCH_INTERVAL_MS = 5000
 export const APPSYNC_MAX_RECONNECT_RETRIES = 5
 export const APPSYNC_RECONNECT_BASE_DELAY_MS = 1000
 
+// Exit code used by the in-container agent to signal "update complete, rebuild image"
+// Must be distinct from 0 (clean stop) and 1 (error) to avoid false restarts on SIGINT.
+export const DOCKER_UPDATE_EXIT_CODE = 42
+
 // Graceful update deferral
 export const UPDATE_BUSY_WAIT_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes max wait for busy agents
 export const UPDATE_BUSY_POLL_INTERVAL_MS = 3_000          // poll every 3 seconds

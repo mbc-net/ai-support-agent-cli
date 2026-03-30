@@ -1,10 +1,13 @@
+import * as fs from 'fs'
 import * as os from 'os'
+import * as path from 'path'
 
 import { ApiClient } from './api-client'
 import { AppSyncSubscriber } from './appsync-subscriber'
 import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, refreshChatMode } from './agent-config-sync'
 import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, startVsCodeTunnel, stopTransport } from './agent-transport'
 import { AGENT_VERSION, INITIAL_CONFIG_SYNC_MAX_RETRIES, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS } from './constants'
+import { getConfigDir } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
 import { initProjectDir } from './project-dir'
@@ -153,7 +156,30 @@ export class ProjectAgent {
     logger.success(`${this.prefix} Update to ${targetVersion} successful, restarting...`)
     this.stop()
     setTimeout(() => {
-      reExecProcess(installMethod)
+      // When running as a child process (forked by ChildProcessManager),
+      // notify the parent runner and exit cleanly.
+      // In Docker mode the runner exits with DOCKER_UPDATE_EXIT_CODE so the
+      // host-side runInDocker() rebuilds the image for the new version.
+      // reExecProcess() from a worker would spawn a new runner process
+      // in addition to the existing parent, causing duplicate auto-update.
+      if (process.send) {
+        // Write the new version to a file in the config directory so the host-side
+        // runInDocker() can read it and install the correct version before rebuilding
+        // the Docker image. The config directory is volume-mounted and accessible
+        // from both inside the container and the host.
+        if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+          try {
+            const versionFile = path.join(getConfigDir(), 'update-version.json')
+            fs.writeFileSync(versionFile, JSON.stringify({ version: targetVersion }), 'utf-8')
+          } catch (err) {
+            logger.warn(`[update] Failed to write update-version.json: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+        process.send({ type: 'update_complete', projectCode: this.projectCode })
+        process.exit(0)
+      } else {
+        reExecProcess(installMethod)
+      }
     }, 1000)
   }
 

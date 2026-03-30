@@ -8,6 +8,9 @@ jest.mock('child_process', () => ({
 jest.mock('fs', () => ({
   existsSync: jest.fn(),
   realpathSync: jest.fn((p: string) => p),
+  readFileSync: jest.fn(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }),
+  unlinkSync: jest.fn(),
+  writeFileSync: jest.fn(),
 }))
 
 jest.mock('../../src/docker/dockerfile-path', () => ({
@@ -44,11 +47,17 @@ jest.mock('../../src/logger', () => ({
   },
 }))
 
+jest.mock('../../src/update-checker', () => ({
+  reExecProcess: jest.fn(),
+  performUpdate: jest.fn().mockResolvedValue({ success: true }),
+}))
+
 import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
-import { existsSync, realpathSync } from 'fs'
+import { existsSync, realpathSync, readFileSync, unlinkSync } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
+import { reExecProcess, performUpdate } from '../../src/update-checker'
 import {
   checkDockerAvailable,
   imageExists,
@@ -69,6 +78,10 @@ const mockGetConfigDir = getConfigDir as jest.MockedFunction<typeof getConfigDir
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>
 const mockRealpathSync = realpathSync as jest.MockedFunction<typeof realpathSync>
+const mockReExecProcess = reExecProcess as jest.MockedFunction<typeof reExecProcess>
+const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>
+const mockUnlinkSync = unlinkSync as jest.MockedFunction<typeof unlinkSync>
+const mockPerformUpdate = performUpdate as jest.MockedFunction<typeof performUpdate>
 
 describe('docker-runner', () => {
   const originalEnv = process.env
@@ -363,9 +376,11 @@ describe('docker-runner', () => {
       delete process.env.AI_SUPPORT_AGENT_CONFIG_DIR
 
       const args = buildEnvArgs([])
-      // Only HOME should be present (no passthrough vars set)
+      // AI_SUPPORT_AGENT_IN_DOCKER and HOME should be present (no passthrough vars set)
       expect(args[0]).toBe('-e')
-      expect(args[1]).toBe('HOME=/home/node')
+      expect(args[1]).toBe('AI_SUPPORT_AGENT_IN_DOCKER=1')
+      expect(args[2]).toBe('-e')
+      expect(args[3]).toBe('HOME=/home/node')
     })
   })
 
@@ -738,8 +753,66 @@ describe('docker-runner', () => {
 
       runInDocker({})
 
+      fakeChild.emit('close', 1)
+      expect(mockExit).toHaveBeenCalledWith(1)
+    })
+
+    it('should call reExecProcess when container exits with DOCKER_UPDATE_EXIT_CODE (42)', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+
+      const fakeChild = Object.assign(new EventEmitter(), {
+        kill: jest.fn(),
+      })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+
+      runInDocker({})
+
       fakeChild.emit('close', 42)
-      expect(mockExit).toHaveBeenCalledWith(42)
+      // installUpdateAndRestart() is async — flush microtasks
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(mockReExecProcess).toHaveBeenCalled()
+      expect(mockExit).not.toHaveBeenCalled()
+    })
+
+    it('should install new version from update-version.json on code=42', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+      mockGetConfigDir.mockReturnValue('/mock/config')
+      mockReadFileSync.mockReturnValue(JSON.stringify({ version: '0.0.30-beta.4' }) as any)
+      mockPerformUpdate.mockResolvedValue({ success: true })
+
+      runInDocker({})
+      fakeChild.emit('close', 42)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(mockPerformUpdate).toHaveBeenCalledWith('0.0.30-beta.4')
+      expect(mockUnlinkSync).toHaveBeenCalled()
+      expect(mockReExecProcess).toHaveBeenCalled()
+    })
+
+    it('should warn but still restart when npm install fails on code=42', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+      mockGetConfigDir.mockReturnValue('/mock/config')
+      mockReadFileSync.mockReturnValue(JSON.stringify({ version: '0.0.30-beta.4' }) as any)
+      mockPerformUpdate.mockResolvedValue({ success: false, error: 'permission denied' })
+
+      runInDocker({})
+      fakeChild.emit('close', 42)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(mockPerformUpdate).toHaveBeenCalledWith('0.0.30-beta.4')
+      expect(mockReExecProcess).toHaveBeenCalled()
     })
 
     it('should exit with 0 when close code is null', () => {

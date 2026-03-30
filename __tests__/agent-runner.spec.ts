@@ -504,11 +504,70 @@ describe('agent-runner', () => {
     await promise
 
     expect(startAutoUpdater).toHaveBeenCalled()
-    // stopAll callback should call processManager.sendUpdateToAll()
-    expect(mockSendUpdateToAll).toHaveBeenCalled()
+    // stopAll callback should call processManager.stopAll()
+    expect(mockStopAll).toHaveBeenCalled()
 
     // Reset mock to default behavior
     startAutoUpdater.mockReturnValue({ stop: jest.fn() })
+  })
+
+  it('should set onUpdateComplete on processManager and exit with DOCKER_UPDATE_EXIT_CODE in Docker mode', async () => {
+    const originalEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+    process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+    const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+    const mockConfig = {
+      agentId: 'multi-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+      ],
+    }
+
+    // Capture the processManager instance to access onUpdateComplete
+    let capturedManager: any = null
+    const { ChildProcessManager } = require('../src/child-process-manager')
+    ChildProcessManager.mockImplementationOnce(() => {
+      capturedManager = {
+        forkProject: mockForkProject,
+        stopAll: mockStopAll,
+        sendUpdateToAll: mockSendUpdateToAll,
+        sendTokenUpdate: mockSendTokenUpdate,
+        getRunningCount: mockGetRunningCount,
+        isAnyBusy: mockIsAnyBusy,
+        stopProject: jest.fn(),
+        onUpdateComplete: undefined as (() => void) | undefined,
+      }
+      return capturedManager
+    })
+
+    try {
+      mockedLoadConfig.mockReturnValue(mockConfig)
+      mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+      const promise = startAgent({})
+      await jest.advanceTimersByTimeAsync(100)
+      await promise
+
+      expect(capturedManager).not.toBeNull()
+      expect(typeof capturedManager.onUpdateComplete).toBe('function')
+
+      // Trigger onUpdateComplete
+      capturedManager.onUpdateComplete()
+      await jest.advanceTimersByTimeAsync(100)
+      await Promise.resolve()
+
+      expect(mockStopAll).toHaveBeenCalled()
+      expect(mockExit).toHaveBeenCalledWith(42)
+    } finally {
+      mockExit.mockRestore()
+      if (originalEnv === undefined) {
+        delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      } else {
+        process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalEnv
+      }
+    }
   })
 
   it('should start config watcher and handle token update callback', async () => {

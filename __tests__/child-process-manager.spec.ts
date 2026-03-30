@@ -226,6 +226,29 @@ describe('ChildProcessManager', () => {
     })
   })
 
+  describe('update_complete message', () => {
+    it('should call onUpdateComplete when worker sends update_complete', () => {
+      const onUpdateComplete = jest.fn()
+      manager.onUpdateComplete = onUpdateComplete
+
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+
+      child._emit('message', { type: 'update_complete', projectCode: 'proj-a' })
+
+      expect(onUpdateComplete).toHaveBeenCalled()
+    })
+
+    it('should not throw when onUpdateComplete is not set', () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+
+      expect(() => {
+        child._emit('message', { type: 'update_complete', projectCode: 'proj-a' })
+      }).not.toThrow()
+    })
+  })
+
   describe('stopAll', () => {
     it('should send shutdown to all children and wait for exit', async () => {
       manager.forkProject(project, 'agent-1', options)

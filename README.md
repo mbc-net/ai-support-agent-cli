@@ -54,6 +54,17 @@ ai-support-agent start --docker
 
 Project dirs, `~/.claude/`, and `~/.aws/` are auto-mounted. The container runs with your host UID/GID.
 
+### Run as a background service
+
+```bash
+ai-support-agent service install      # install as a system service
+ai-support-agent service start        # start the service
+ai-support-agent service status       # check service status
+ai-support-agent service stop         # stop the service
+ai-support-agent service restart      # restart the service
+ai-support-agent service uninstall    # remove the service
+```
+
 ## How It Works
 
 1. **Register** — Agent sends its capabilities (shell, file I/O, chat, terminal, vscode) to the API.
@@ -72,6 +83,7 @@ Each project runs in its own forked child process. The main process watches `con
 | `file_read` / `file_write` / `file_list` / `file_rename` / `file_delete` / `file_mkdir` | File system operations |
 | `process_list` / `process_kill` | Process management |
 | `chat_cancel` | Cancels a running chat process |
+| `e2e_test` | End-to-end test execution with Playwright browser automation and step reporting |
 | `setup` / `config_sync` / `reboot` / `update` | Lifecycle management |
 
 ### Chat Modes
@@ -87,14 +99,35 @@ The mode is resolved as: agent config → server default → auto-detection (whe
 
 The agent ships a [Model Context Protocol](https://modelcontextprotocol.io/) server that Claude Code can call:
 
+**General tools:**
+
 | Tool | Description |
 |------|-------------|
 | `get_credentials` | Fetch AWS STS or database credentials from the API |
-| `query_database` | Run SELECT queries (injection-protected) |
+| `db_query` | Run SELECT queries (injection-protected) |
 | `get_db_schemas` | Retrieve table/column metadata |
-| `upload_file` | Upload files to S3 via presigned URLs |
+| `file_upload` | Upload files to S3 via presigned URLs |
 | `get_project_info` | Fetch project configuration |
 | `read_conversation_file` | Read conversation history |
+
+**Browser automation tools (Playwright-based):**
+
+| Tool | Description |
+|------|-------------|
+| `browser_navigate` | Navigate to a URL and take a screenshot |
+| `browser_click` | Click an element by CSS selector |
+| `browser_fill` | Fill a form field with a value |
+| `browser_get_text` | Extract text from a specific element |
+| `browser_login` | Log in using saved credentials |
+| `browser_extract` | Extract text and save to a session variable atomically |
+| `browser_set_variable` / `browser_get_variable` / `browser_list_variables` | Manage session variables |
+| `browser_close` | Close the browser session |
+
+**E2E test tools:**
+
+| Tool | Description |
+|------|-------------|
+| `report_test_step` | Report an E2E test step result (status, screenshot, duration) to the API |
 
 ## CLI Reference
 
@@ -112,10 +145,26 @@ Commands:
   set-auto-update    Configure auto-update (--enable | --disable | --channel)
   set-project-dir    Set project working directory
   docker-login       Login and start in Docker
+  service            Manage agent background service
 
 Global options:
   --lang <lang>      Override display language for this invocation
   --version          Show version
+```
+
+### `service` Subcommands
+
+```
+service install     Install the agent as a system background service
+service uninstall   Uninstall the agent service
+service start       Start the agent service
+service stop        Stop the agent service
+service restart     Restart the agent service
+service status      Show service status
+
+Options (install):
+  --verbose          Show detailed installation info
+  --no-docker        Install in native mode (skip Docker)
 ```
 
 ### `start` Options
@@ -172,6 +221,8 @@ Stored at `~/.ai-support-agent/config.json` (mode `0600`):
 | `AI_SUPPORT_AGENT_API_URL` | Override API URL (lowest priority) |
 | `AI_SUPPORT_AGENT_CONFIG_DIR` | Override config directory path |
 | `ANTHROPIC_API_KEY` | Required for `api` chat mode |
+| `AI_SUPPORT_E2E_EXECUTION_ID` | E2E test execution ID (set automatically during `e2e_test` runs) |
+| `AI_SUPPORT_E2E_TEST_CASE_ID` | E2E test case ID (set automatically during `e2e_test` runs) |
 
 Priority: CLI flags > config file > environment variables.
 

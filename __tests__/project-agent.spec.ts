@@ -48,6 +48,19 @@ jest.mock('../src/update-checker', () => ({
   reExecProcess: jest.fn(),
 }))
 
+jest.mock('../src/config-manager', () => ({
+  getConfigDir: jest.fn().mockReturnValue('/mock/config'),
+  loadConfig: jest.fn().mockReturnValue(null),
+  getConfigFilePath: jest.fn().mockReturnValue('/mock/config/config.json'),
+  saveConfig: jest.fn(),
+  getProjectList: jest.fn().mockReturnValue([]),
+}))
+
+jest.mock('fs', () => ({
+  ...jest.requireActual('fs'),
+  writeFileSync: jest.fn(),
+}))
+
 const MockApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
 const MockAppSyncSubscriber = AppSyncSubscriber as jest.MockedClass<typeof AppSyncSubscriber>
 const mockedExecuteCommand = executeCommand as jest.MockedFunction<typeof executeCommand>
@@ -1278,48 +1291,127 @@ describe('ProjectAgent', () => {
   })
 
   describe('performUpdate', () => {
-    it('should update to latest version and schedule reExecProcess', async () => {
-      const agent = new ProjectAgent(project, 'agent-1', options)
-      agent.start()
+    it('should update and call reExecProcess when running as standalone (no process.send)', async () => {
+      const originalSend = process.send
+      // Simulate standalone process (not a child process)
+      Object.defineProperty(process, 'send', { value: undefined, writable: true, configurable: true })
 
-      await jest.advanceTimersByTimeAsync(100)
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
 
-      await agent.performUpdate()
+        await jest.advanceTimersByTimeAsync(100)
 
-      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Update requested'))
-      expect(mockClient.getVersionInfo).toHaveBeenCalledWith('latest')
-      expect(mockedDetectInstallMethod).toHaveBeenCalled()
-      expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.1', 'global')
-      expect(logger.success).toHaveBeenCalledWith(expect.stringContaining('Update to 0.0.1 successful'))
-      expect(mockSubscriber.disconnect).toHaveBeenCalled()
+        await agent.performUpdate()
 
-      // Advance past setTimeout(1000)
-      await jest.advanceTimersByTimeAsync(1000)
+        expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Update requested'))
+        expect(mockClient.getVersionInfo).toHaveBeenCalledWith('latest')
+        expect(mockedDetectInstallMethod).toHaveBeenCalled()
+        expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.1', 'global')
+        expect(logger.success).toHaveBeenCalledWith(expect.stringContaining('Update to 0.0.1 successful'))
+        expect(mockSubscriber.disconnect).toHaveBeenCalled()
 
-      expect(mockedReExecProcess).toHaveBeenCalledWith('global')
+        // Advance past setTimeout(1000)
+        await jest.advanceTimersByTimeAsync(1000)
+
+        expect(mockedReExecProcess).toHaveBeenCalledWith('global')
+      } finally {
+        Object.defineProperty(process, 'send', { value: originalSend, writable: true, configurable: true })
+      }
+    })
+
+    it('should update and exit cleanly when running as child process (process.send defined)', async () => {
+      const originalSend = process.send
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      // Simulate child process
+      Object.defineProperty(process, 'send', { value: jest.fn(), writable: true, configurable: true })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        await agent.performUpdate()
+
+        expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.1', 'global')
+        expect(logger.success).toHaveBeenCalledWith(expect.stringContaining('Update to 0.0.1 successful'))
+
+        // Advance past setTimeout(1000)
+        await jest.advanceTimersByTimeAsync(1000)
+
+        // Child process exits cleanly, does NOT call reExecProcess
+        expect(mockExit).toHaveBeenCalledWith(0)
+        expect(mockedReExecProcess).not.toHaveBeenCalled()
+      } finally {
+        mockExit.mockRestore()
+        Object.defineProperty(process, 'send', { value: originalSend, writable: true, configurable: true })
+      }
+    })
+
+    it('should write update-version.json when running as child process in Docker mode', async () => {
+      const originalSend = process.send
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      Object.defineProperty(process, 'send', { value: jest.fn(), writable: true, configurable: true })
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const { writeFileSync } = require('fs') as { writeFileSync: jest.Mock }
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        await agent.performUpdate()
+        await jest.advanceTimersByTimeAsync(1000)
+
+        expect(writeFileSync).toHaveBeenCalledWith(
+          expect.stringContaining('update-version.json'),
+          expect.stringContaining('0.0.1'),
+          'utf-8',
+        )
+        expect(mockExit).toHaveBeenCalledWith(0)
+      } finally {
+        mockExit.mockRestore()
+        Object.defineProperty(process, 'send', { value: originalSend, writable: true, configurable: true })
+        if (originalDockerEnv === undefined) {
+          delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        } else {
+          process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+        }
+      }
     })
 
     it('should use beta channel when running a beta version', async () => {
-      const mockedDetectChannel = detectChannelFromVersion as jest.MockedFunction<typeof detectChannelFromVersion>
-      mockedDetectChannel.mockReturnValueOnce('beta')
+      const originalSend = process.send
+      Object.defineProperty(process, 'send', { value: undefined, writable: true, configurable: true })
 
-      mockClient.getVersionInfo.mockResolvedValueOnce({
-        latestVersion: '0.0.22-beta.3',
-        minimumVersion: '0.0.0',
-        channel: 'beta',
-        channels: {},
-      })
+      try {
+        const mockedDetectChannel = detectChannelFromVersion as jest.MockedFunction<typeof detectChannelFromVersion>
+        mockedDetectChannel.mockReturnValueOnce('beta')
 
-      const agent = new ProjectAgent(project, 'agent-1', options)
-      agent.start()
-      await jest.advanceTimersByTimeAsync(100)
+        mockClient.getVersionInfo.mockResolvedValueOnce({
+          latestVersion: '0.0.22-beta.3',
+          minimumVersion: '0.0.0',
+          channel: 'beta',
+          channels: {},
+        })
 
-      await agent.performUpdate()
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getVersionInfo).toHaveBeenCalledWith('beta')
-      expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.22-beta.3', 'global')
+        await agent.performUpdate()
 
-      agent.stop()
+        expect(mockClient.getVersionInfo).toHaveBeenCalledWith('beta')
+        expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.22-beta.3', 'global')
+
+        agent.stop()
+      } finally {
+        Object.defineProperty(process, 'send', { value: originalSend, writable: true, configurable: true })
+      }
     })
 
     it('should throw error when update fails', async () => {
