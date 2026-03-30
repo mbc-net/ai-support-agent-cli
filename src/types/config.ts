@@ -38,6 +38,8 @@ export interface AgentConfig {
   autoUpdate?: AutoUpdateConfig
   agentChatMode?: AgentChatMode
   defaultProjectDir?: string
+  dockerfilePath?: string
+  dockerfileSync?: boolean
 }
 
 /**
