@@ -504,8 +504,8 @@ describe('agent-runner', () => {
     await promise
 
     expect(startAutoUpdater).toHaveBeenCalled()
-    // stopAll callback should call processManager.sendUpdateToAll()
-    expect(mockSendUpdateToAll).toHaveBeenCalled()
+    // stopAll callback should call processManager.stopAll()
+    expect(mockStopAll).toHaveBeenCalled()
 
     // Reset mock to default behavior
     startAutoUpdater.mockReturnValue({ stop: jest.fn() })

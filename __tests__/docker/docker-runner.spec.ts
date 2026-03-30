@@ -44,11 +44,16 @@ jest.mock('../../src/logger', () => ({
   },
 }))
 
+jest.mock('../../src/update-checker', () => ({
+  reExecProcess: jest.fn(),
+}))
+
 import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
 import { existsSync, realpathSync } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
+import { reExecProcess } from '../../src/update-checker'
 import {
   checkDockerAvailable,
   imageExists,
@@ -69,6 +74,7 @@ const mockGetConfigDir = getConfigDir as jest.MockedFunction<typeof getConfigDir
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>
 const mockRealpathSync = realpathSync as jest.MockedFunction<typeof realpathSync>
+const mockReExecProcess = reExecProcess as jest.MockedFunction<typeof reExecProcess>
 
 describe('docker-runner', () => {
   const originalEnv = process.env
@@ -363,9 +369,11 @@ describe('docker-runner', () => {
       delete process.env.AI_SUPPORT_AGENT_CONFIG_DIR
 
       const args = buildEnvArgs([])
-      // Only HOME should be present (no passthrough vars set)
+      // AI_SUPPORT_AGENT_IN_DOCKER and HOME should be present (no passthrough vars set)
       expect(args[0]).toBe('-e')
-      expect(args[1]).toBe('HOME=/home/node')
+      expect(args[1]).toBe('AI_SUPPORT_AGENT_IN_DOCKER=1')
+      expect(args[2]).toBe('-e')
+      expect(args[3]).toBe('HOME=/home/node')
     })
   })
 
@@ -738,8 +746,24 @@ describe('docker-runner', () => {
 
       runInDocker({})
 
+      fakeChild.emit('close', 1)
+      expect(mockExit).toHaveBeenCalledWith(1)
+    })
+
+    it('should call reExecProcess when container exits with DOCKER_UPDATE_EXIT_CODE (42)', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+
+      const fakeChild = Object.assign(new EventEmitter(), {
+        kill: jest.fn(),
+      })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+
+      runInDocker({})
+
       fakeChild.emit('close', 42)
-      expect(mockExit).toHaveBeenCalledWith(42)
+      expect(mockReExecProcess).toHaveBeenCalled()
+      expect(mockExit).not.toHaveBeenCalled()
     })
 
     it('should exit with 0 when close code is null', () => {

@@ -15,6 +15,7 @@ const PROJECT_SUBDIRS = ['workspace/repos', 'workspace/docs', 'workspace/artifac
 const METADATA_DIR = '.ai-support-agent'
 const CACHE_DIR = 'cache'
 const AWS_DIR = 'aws'
+const SSH_DIR = 'ssh'
 
 /**
  * Expand ~ and {projectCode} in a path template
@@ -162,6 +163,13 @@ export function getCacheDir(projectDir: string): string {
  */
 export function getAwsDir(projectDir: string): string {
   return path.join(projectDir, METADATA_DIR, AWS_DIR)
+}
+
+/**
+ * Get SSH directory path
+ */
+export function getSshDir(projectDir: string): string {
+  return path.join(projectDir, METADATA_DIR, SSH_DIR)
 }
 
 /**

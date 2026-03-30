@@ -1,5 +1,4 @@
 import * as fs from 'fs'
-import * as os from 'os'
 import * as path from 'path'
 
 import type { ApiClient } from './api-client'
@@ -16,18 +15,22 @@ type SshHost = NonNullable<ProjectConfigResponse['ssh']>['hosts'][number]
 
 /**
  * Set up SSH config and private key files for the given SSH hosts.
- * Fetches credentials from the API, writes key files, and updates ~/.ssh/config.
+ * Files are written to sshDir (project-scoped directory, not ~/.ssh).
+ * Fetches credentials from the API, writes key files, and updates sshDir/config.
  */
 export async function setupSshConfig(
   client: ApiClient,
   sshConfig: { hosts: SshHost[] },
+  sshDir: string,
 ): Promise<void> {
-  const sshDir = path.join(os.homedir(), '.ssh')
-
-  // Ensure ~/.ssh directory exists
+  // Ensure SSH directory exists (project-scoped, not ~/.ssh)
   if (!fs.existsSync(sshDir)) {
-    fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 })
-    logger.info('[ssh] Created ~/.ssh directory')
+    try {
+      fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 })
+      logger.info(`[ssh] Created SSH directory: ${sshDir}`)
+    } catch (error) {
+      throw new Error(`Cannot create SSH directory ${sshDir}: ${getErrorMessage(error)}`)
+    }
   }
 
   const configEntries: Array<{
@@ -56,7 +59,7 @@ export async function setupSshConfig(
   if (configEntries.length > 0) {
     try {
       writeSshConfig(sshDir, configEntries)
-      logger.info(`[ssh] SSH config updated with ${configEntries.length} host(s)`)
+      logger.info(`[ssh] SSH config updated with ${configEntries.length} host(s) at ${sshDir}`)
     } catch (error) {
       logger.warn(`[ssh] Failed to write SSH config: ${getErrorMessage(error)}`)
     }
@@ -64,7 +67,7 @@ export async function setupSshConfig(
 }
 
 /**
- * Write a private key file to ~/.ssh/ai-support-agent-{hostId}
+ * Write a private key file to {sshDir}/ai-support-agent-{hostId}
  */
 function writeKeyFile(sshDir: string, credentials: SshCredentials): void {
   const keyPath = path.join(sshDir, `${KEY_FILE_PREFIX}${credentials.hostId}`)
@@ -73,7 +76,7 @@ function writeKeyFile(sshDir: string, credentials: SshCredentials): void {
 }
 
 /**
- * Write/update the managed block in ~/.ssh/config.
+ * Write/update the managed block in {sshDir}/config.
  * Preserves any existing content outside the managed block.
  */
 function writeSshConfig(
@@ -91,8 +94,8 @@ function writeSshConfig(
   // Remove old managed block
   const contentOutside = removeManagedBlock(existingContent)
 
-  // Build new managed block
-  const managedBlock = buildManagedBlock(entries)
+  // Build new managed block (use absolute paths for IdentityFile)
+  const managedBlock = buildManagedBlock(sshDir, entries)
 
   // Combine: existing content + managed block
   const trimmed = contentOutside.trimEnd()
@@ -105,18 +108,21 @@ function writeSshConfig(
 
 /**
  * Build the managed block content for SSH config.
+ * Uses absolute paths for IdentityFile to work regardless of CWD.
  */
 export function buildManagedBlock(
+  sshDir: string,
   entries: Array<{ hostId: string; hostname: string; port: number; username: string }>,
 ): string {
+  const knownHostsPath = path.join(sshDir, 'known_hosts')
   const hostBlocks = entries.map((entry) =>
     `Host ai-agent-${entry.hostId}\n` +
     `    HostName ${entry.hostname}\n` +
     `    Port ${entry.port}\n` +
     `    User ${entry.username}\n` +
-    `    IdentityFile ~/.ssh/${KEY_FILE_PREFIX}${entry.hostId}\n` +
-    `    StrictHostKeyChecking no\n` +
-    `    UserKnownHostsFile /dev/null`,
+    `    IdentityFile ${path.join(sshDir, KEY_FILE_PREFIX + entry.hostId)}\n` +
+    `    StrictHostKeyChecking accept-new\n` +
+    `    UserKnownHostsFile ${knownHostsPath}`,
   )
 
   return [
@@ -145,10 +151,9 @@ export function removeManagedBlock(content: string): string {
 
 /**
  * Clean up all SSH config and key files managed by ai-support-agent.
- * Removes the managed block from ~/.ssh/config and deletes key files.
+ * Removes the managed block from {sshDir}/config and deletes key files.
  */
-export function cleanupSshConfig(): void {
-  const sshDir = path.join(os.homedir(), '.ssh')
+export function cleanupSshConfig(sshDir: string): void {
   const configPath = path.join(sshDir, 'config')
 
   // Remove managed block from config
@@ -157,7 +162,7 @@ export function cleanupSshConfig(): void {
       const content = fs.readFileSync(configPath, 'utf-8')
       const cleaned = removeManagedBlock(content).trimEnd()
       fs.writeFileSync(configPath, cleaned.length > 0 ? cleaned + '\n' : '', { mode: 0o600 })
-      logger.info('[ssh] Removed managed block from ~/.ssh/config')
+      logger.info(`[ssh] Removed managed block from ${configPath}`)
     } catch (error) {
       logger.warn(`[ssh] Failed to clean up SSH config: ${getErrorMessage(error)}`)
     }

@@ -11,6 +11,8 @@ import { logger } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { isNewerVersion, isValidVersion } from '../utils/version'
+import { DOCKER_UPDATE_EXIT_CODE } from '../constants'
+import { reExecProcess } from '../update-checker'
 
 /** Convert a path.relative() result to POSIX format for container use */
 function toPosixRelative(relativePath: string): string {
@@ -148,6 +150,9 @@ export function buildVolumeMounts(): { mounts: string[]; projectMappings: Projec
 
 export function buildEnvArgs(projectMappings: ProjectDirMapping[]): string[] {
   const args: string[] = []
+
+  // Mark process as running inside a Docker container
+  args.push('-e', 'AI_SUPPORT_AGENT_IN_DOCKER=1')
 
   // Set HOME to container-internal path (not host path)
   args.push('-e', `HOME=${CONTAINER_HOME}`)
@@ -322,6 +327,13 @@ export function runInDocker(opts: DockerRunOptions): void {
   })
 
   child.on('close', (code) => {
+    // DOCKER_UPDATE_EXIT_CODE signals "update installed, rebuild image and restart".
+    // Any other exit (including 0 from SIGINT) exits the host process as-is.
+    if (code === DOCKER_UPDATE_EXIT_CODE) {
+      logger.info('[docker] Container exited for update. Rebuilding image and restarting...')
+      reExecProcess()
+      return
+    }
     process.exit(code ?? 0)
   })
 }

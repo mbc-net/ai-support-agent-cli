@@ -399,4 +399,33 @@ describe('startAutoUpdater', () => {
 
     updater.stop()
   })
+
+  it('should exit with DOCKER_UPDATE_EXIT_CODE instead of reExecProcess when in Docker container', async () => {
+    const originalEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+    process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+    const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+    try {
+      const client = createMockClient()
+      const stopAll = jest.fn()
+      mockedIsNewerVersion.mockReturnValue(true)
+
+      const updater = startAutoUpdater([client], defaultConfig, stopAll)
+
+      await jest.advanceTimersByTimeAsync(30_000)
+
+      expect(stopAll).toHaveBeenCalled()
+      expect(mockExit).toHaveBeenCalledWith(42)
+      expect(mockedReExecProcess).not.toHaveBeenCalled()
+
+      updater.stop()
+    } finally {
+      mockExit.mockRestore()
+      if (originalEnv === undefined) {
+        delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      } else {
+        process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalEnv
+      }
+    }
+  })
 })
