@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { getDockerfilePath, getDockerContextDir } from './dockerfile-path'
+import { getDockerfilePath, getDockerContextDir, resolveDockerfile } from './dockerfile-path'
 import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE } from '../constants'
 import { getConfigDir, loadConfig } from '../config-manager'
 import { t } from '../i18n'
@@ -35,6 +35,8 @@ export interface DockerRunOptions {
   verbose?: boolean
   autoUpdate?: boolean
   updateChannel?: string
+  dockerfile?: string
+  dockerfileSync?: boolean
 }
 
 export function checkDockerAvailable(): boolean {
@@ -55,13 +57,15 @@ export function imageExists(version: string): boolean {
   }
 }
 
-export function buildImage(version: string): void {
-  const dockerfilePath = getDockerfilePath()
-  const contextDir = getDockerContextDir()
+export function buildImage(version: string, customDockerfile?: string): void {
+  const { dockerfilePath, contextDir } = resolveDockerfile(customDockerfile)
   logger.info(t('docker.building'))
+  if (customDockerfile) {
+    logger.info(t('docker.usingCustomDockerfile', { path: dockerfilePath }))
+  }
   execFileSync(
     'docker',
-    ['build', '-t', `${IMAGE_NAME}:${version}`, '--build-arg', `AGENT_VERSION=${version}`, '-f', dockerfilePath, contextDir],
+    ['build', '-t', `${IMAGE_NAME}:${version}`, '--pull=missing', '--build-arg', `AGENT_VERSION=${version}`, '-f', dockerfilePath, contextDir],
     { stdio: 'inherit' },
   )
   logger.success(t('docker.buildComplete'))
@@ -256,12 +260,12 @@ export function resetInstalledVersionCache(): void {
   cachedInstalledVersion = null
 }
 
-export function ensureImage(): string {
+export function ensureImage(customDockerfile?: string): string {
   const installedVersion = getInstalledVersion()
   // Use the installed version if it is newer than the compile-time version
   const version = isNewerVersion(AGENT_VERSION, installedVersion) ? installedVersion : AGENT_VERSION
   if (!imageExists(version)) {
-    buildImage(version)
+    buildImage(version, customDockerfile)
   } else {
     logger.info(t('docker.imageFound', { version }))
   }
@@ -303,7 +307,10 @@ async function installUpdateAndRestart(): Promise<void> {
 
   if (newVersion) {
     logger.info(`[docker] Installing @ai-support-agent/cli@${newVersion} on host...`)
-    const result = await performUpdate(newVersion)
+    // Always use 'global' install method on the host side regardless of how the
+    // host process was originally launched (it may be detected as 'local' in
+    // service/systemd environments where the script path is under node_modules).
+    const result = await performUpdate(newVersion, 'global')
     if (!result.success) {
       logger.warn(`[docker] Host npm install failed: ${result.error ?? 'unknown'}. Proceeding with existing version.`)
     } else {
@@ -315,14 +322,71 @@ async function installUpdateAndRestart(): Promise<void> {
   reExecProcess()
 }
 
+/**
+ * Copy the bundled Dockerfile (and entrypoint.sh) to the config directory
+ * on first run so users can customise it.
+ * Does NOT overwrite an existing file — user edits are preserved.
+ * Exported for testing.
+ */
+export function syncDockerfileToConfigDir(): void {
+  const configDir = getConfigDir()
+  const destDockerfile = path.join(configDir, 'Dockerfile')
+
+  if (fs.existsSync(destDockerfile)) return // preserve existing file
+
+  try {
+    const srcDockerfile = getDockerfilePath()
+    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 })
+    fs.copyFileSync(srcDockerfile, destDockerfile)
+
+    // Also copy entrypoint.sh which the bundled Dockerfile references via COPY
+    const srcEntrypoint = path.join(getDockerContextDir(), 'docker', 'entrypoint.sh')
+    const destEntrypoint = path.join(configDir, 'docker', 'entrypoint.sh')
+    if (fs.existsSync(srcEntrypoint)) {
+      fs.mkdirSync(path.dirname(destEntrypoint), { recursive: true })
+      fs.copyFileSync(srcEntrypoint, destEntrypoint)
+    }
+
+    logger.info(t('docker.dockerfileSynced', { path: destDockerfile }))
+  } catch (err) {
+    logger.warn(t('docker.dockerfileSyncFailed', { message: err instanceof Error ? err.message : String(err) }))
+  }
+}
+
+let isDockerRunning = false
+
+/** Reset the running flag (for testing). */
+export function resetIsDockerRunning(): void {
+  isDockerRunning = false
+}
+
 export function runInDocker(opts: DockerRunOptions): void {
+  // Guard against multiple concurrent invocations (e.g. auto-updater and
+  // server-triggered update firing at the same time).
+  if (isDockerRunning) {
+    logger.warn('[docker] runInDocker called while already running — ignoring duplicate call')
+    return
+  }
+  isDockerRunning = true
+
   if (!checkDockerAvailable()) {
     logger.error(t('docker.notAvailable'))
     process.exit(1)
     return
   }
 
-  const version = ensureImage()
+  const config = loadConfig()
+
+  // Sync bundled Dockerfile to config dir on first run (unless disabled)
+  const shouldSync = opts.dockerfileSync !== false && config?.dockerfileSync !== false
+  if (shouldSync) {
+    syncDockerfileToConfigDir()
+  }
+
+  // Resolve Dockerfile: CLI flag > config.dockerfilePath > configDir/Dockerfile > bundled default
+  const customDockerfile = opts.dockerfile ?? config?.dockerfilePath
+
+  const version = ensureImage(customDockerfile)
 
   logger.info(t('docker.starting'))
 
@@ -359,7 +423,13 @@ export function runInDocker(opts: DockerRunOptions): void {
     process.exit(1)
   })
 
+  let closeHandled = false
   child.on('close', (code) => {
+    // Guard against duplicate close events
+    if (closeHandled) return
+    closeHandled = true
+    isDockerRunning = false
+
     // DOCKER_UPDATE_EXIT_CODE signals "update installed, rebuild image and restart".
     // Any other exit (including 0 from SIGINT) exits the host process as-is.
     if (code === DOCKER_UPDATE_EXIT_CODE) {
