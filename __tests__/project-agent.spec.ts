@@ -48,6 +48,19 @@ jest.mock('../src/update-checker', () => ({
   reExecProcess: jest.fn(),
 }))
 
+jest.mock('../src/config-manager', () => ({
+  getConfigDir: jest.fn().mockReturnValue('/mock/config'),
+  loadConfig: jest.fn().mockReturnValue(null),
+  getConfigFilePath: jest.fn().mockReturnValue('/mock/config/config.json'),
+  saveConfig: jest.fn(),
+  getProjectList: jest.fn().mockReturnValue([]),
+}))
+
+jest.mock('fs', () => ({
+  ...jest.requireActual('fs'),
+  writeFileSync: jest.fn(),
+}))
+
 const MockApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
 const MockAppSyncSubscriber = AppSyncSubscriber as jest.MockedClass<typeof AppSyncSubscriber>
 const mockedExecuteCommand = executeCommand as jest.MockedFunction<typeof executeCommand>
@@ -1333,6 +1346,41 @@ describe('ProjectAgent', () => {
       } finally {
         mockExit.mockRestore()
         Object.defineProperty(process, 'send', { value: originalSend, writable: true, configurable: true })
+      }
+    })
+
+    it('should write update-version.json when running as child process in Docker mode', async () => {
+      const originalSend = process.send
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      Object.defineProperty(process, 'send', { value: jest.fn(), writable: true, configurable: true })
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const { writeFileSync } = require('fs') as { writeFileSync: jest.Mock }
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        await agent.performUpdate()
+        await jest.advanceTimersByTimeAsync(1000)
+
+        expect(writeFileSync).toHaveBeenCalledWith(
+          expect.stringContaining('update-version.json'),
+          expect.stringContaining('0.0.1'),
+          'utf-8',
+        )
+        expect(mockExit).toHaveBeenCalledWith(0)
+      } finally {
+        mockExit.mockRestore()
+        Object.defineProperty(process, 'send', { value: originalSend, writable: true, configurable: true })
+        if (originalDockerEnv === undefined) {
+          delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        } else {
+          process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+        }
       }
     })
 

@@ -1,18 +1,17 @@
 import { execFileSync, spawn } from 'child_process'
+import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import * as fs from 'fs'
 
 import { getDockerfilePath, getDockerContextDir } from './dockerfile-path'
-import { AGENT_VERSION } from '../constants'
+import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE } from '../constants'
 import { getConfigDir, loadConfig } from '../config-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { isNewerVersion, isValidVersion } from '../utils/version'
-import { DOCKER_UPDATE_EXIT_CODE } from '../constants'
-import { reExecProcess } from '../update-checker'
+import { performUpdate, reExecProcess } from '../update-checker'
 
 /** Convert a path.relative() result to POSIX format for container use */
 function toPosixRelative(relativePath: string): string {
@@ -282,6 +281,40 @@ export function dockerLogin(): void {
   logger.info(t('docker.loginStep3'))
 }
 
+/**
+ * Called on the host after the container exits with DOCKER_UPDATE_EXIT_CODE.
+ * Reads the new version from the config-dir volume (written by the container),
+ * installs it on the host with npm, then re-execs the process so ensureImage()
+ * picks up the newly installed version and rebuilds the Docker image.
+ */
+async function installUpdateAndRestart(): Promise<void> {
+  let newVersion: string | undefined
+  try {
+    const versionFile = path.join(getConfigDir(), 'update-version.json')
+    const raw = fs.readFileSync(versionFile, 'utf-8')
+    const parsed = JSON.parse(raw) as { version?: string }
+    if (parsed.version && isValidVersion(parsed.version)) {
+      newVersion = parsed.version
+    }
+    fs.unlinkSync(versionFile)
+  } catch {
+    // File may not exist (e.g. auto-updater path) — proceed without it
+  }
+
+  if (newVersion) {
+    logger.info(`[docker] Installing @ai-support-agent/cli@${newVersion} on host...`)
+    const result = await performUpdate(newVersion)
+    if (!result.success) {
+      logger.warn(`[docker] Host npm install failed: ${result.error ?? 'unknown'}. Proceeding with existing version.`)
+    } else {
+      // Invalidate the cached installed version so ensureImage() re-reads it
+      resetInstalledVersionCache()  // defined in this file
+    }
+  }
+
+  reExecProcess()
+}
+
 export function runInDocker(opts: DockerRunOptions): void {
   if (!checkDockerAvailable()) {
     logger.error(t('docker.notAvailable'))
@@ -331,7 +364,7 @@ export function runInDocker(opts: DockerRunOptions): void {
     // Any other exit (including 0 from SIGINT) exits the host process as-is.
     if (code === DOCKER_UPDATE_EXIT_CODE) {
       logger.info('[docker] Container exited for update. Rebuilding image and restarting...')
-      reExecProcess()
+      void installUpdateAndRestart()
       return
     }
     process.exit(code ?? 0)
