@@ -7,7 +7,7 @@ import { CONFIG_SYNC_DEBOUNCE_MS } from './constants'
 import { logger } from './logger'
 import { writeAwsConfig } from './aws-profile'
 import { writeMcpConfig } from './mcp/config-writer'
-import { getReposDir } from './project-dir'
+import { getReposDir, getSshDir } from './project-dir'
 import { syncProjectConfig } from './project-config-sync'
 import { syncRepositories } from './repo-sync'
 import { setupSshConfig } from './ssh-config-setup'
@@ -163,10 +163,11 @@ export async function applyProjectConfig(
     }
   }
 
-  // Set up SSH config if SSH hosts are configured
-  if (config.ssh?.enabled && config.ssh.hosts?.length) {
+  // Set up SSH config if SSH hosts are configured and project directory is available
+  if (config.ssh?.enabled && config.ssh.hosts?.length && deps.projectDir) {
     try {
-      await setupSshConfig(deps.client, config.ssh)
+      const sshDir = getSshDir(deps.projectDir)
+      await setupSshConfig(deps.client, config.ssh, sshDir)
     } catch (error) {
       logger.warn(`${deps.prefix} Failed to set up SSH config: ${getErrorMessage(error)}`)
     }
