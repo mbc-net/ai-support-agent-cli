@@ -303,7 +303,10 @@ async function installUpdateAndRestart(): Promise<void> {
 
   if (newVersion) {
     logger.info(`[docker] Installing @ai-support-agent/cli@${newVersion} on host...`)
-    const result = await performUpdate(newVersion)
+    // Always use 'global' install method on the host side regardless of how the
+    // host process was originally launched (it may be detected as 'local' in
+    // service/systemd environments where the script path is under node_modules).
+    const result = await performUpdate(newVersion, 'global')
     if (!result.success) {
       logger.warn(`[docker] Host npm install failed: ${result.error ?? 'unknown'}. Proceeding with existing version.`)
     } else {
@@ -315,7 +318,22 @@ async function installUpdateAndRestart(): Promise<void> {
   reExecProcess()
 }
 
+let isDockerRunning = false
+
+/** Reset the running flag (for testing). */
+export function resetIsDockerRunning(): void {
+  isDockerRunning = false
+}
+
 export function runInDocker(opts: DockerRunOptions): void {
+  // Guard against multiple concurrent invocations (e.g. auto-updater and
+  // server-triggered update firing at the same time).
+  if (isDockerRunning) {
+    logger.warn('[docker] runInDocker called while already running — ignoring duplicate call')
+    return
+  }
+  isDockerRunning = true
+
   if (!checkDockerAvailable()) {
     logger.error(t('docker.notAvailable'))
     process.exit(1)
@@ -359,7 +377,13 @@ export function runInDocker(opts: DockerRunOptions): void {
     process.exit(1)
   })
 
+  let closeHandled = false
   child.on('close', (code) => {
+    // Guard against duplicate close events
+    if (closeHandled) return
+    closeHandled = true
+    isDockerRunning = false
+
     // DOCKER_UPDATE_EXIT_CODE signals "update installed, rebuild image and restart".
     // Any other exit (including 0 from SIGINT) exits the host process as-is.
     if (code === DOCKER_UPDATE_EXIT_CODE) {
