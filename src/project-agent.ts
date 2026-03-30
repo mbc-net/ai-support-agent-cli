@@ -14,7 +14,7 @@ import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import { submitPendingResults } from './pending-result-store'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
-import { detectChannelFromVersion, detectInstallMethod, performUpdate, reExecProcess } from './update-checker'
+import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
 import { getErrorMessage, isAuthenticationError } from './utils'
 
 export interface ProjectAgentOptions {
@@ -156,6 +156,10 @@ export class ProjectAgent {
     logger.info(`${this.prefix} Update requested, checking for latest version (channel: ${channel})...`)
     const versionInfo = await this.client.getVersionInfo(channel)
     const targetVersion = versionInfo.latestVersion
+    if (!isNewerVersion(AGENT_VERSION, targetVersion)) {
+      logger.info(`${this.prefix} Already up to date (${AGENT_VERSION})`)
+      return
+    }
     logger.info(`${this.prefix} Updating to version ${targetVersion}...`)
     const installMethod = detectInstallMethod()
     const result = await performUpdate(targetVersion, installMethod)
