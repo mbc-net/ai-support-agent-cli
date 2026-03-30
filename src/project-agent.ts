@@ -153,7 +153,15 @@ export class ProjectAgent {
     logger.success(`${this.prefix} Update to ${targetVersion} successful, restarting...`)
     this.stop()
     setTimeout(() => {
-      reExecProcess(installMethod)
+      // When running as a child process (forked by ChildProcessManager),
+      // exit cleanly and let the parent runner restart the worker.
+      // reExecProcess() from a worker would spawn a new runner process
+      // in addition to the existing parent, causing duplicate auto-update.
+      if (process.send) {
+        process.exit(0)
+      } else {
+        reExecProcess(installMethod)
+      }
     }, 1000)
   }
 
