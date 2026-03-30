@@ -154,10 +154,13 @@ export class ProjectAgent {
     this.stop()
     setTimeout(() => {
       // When running as a child process (forked by ChildProcessManager),
-      // exit cleanly and let the parent runner restart the worker.
+      // notify the parent runner and exit cleanly.
+      // In Docker mode the runner exits with DOCKER_UPDATE_EXIT_CODE so the
+      // host-side runInDocker() rebuilds the image for the new version.
       // reExecProcess() from a worker would spawn a new runner process
       // in addition to the existing parent, causing duplicate auto-update.
       if (process.send) {
+        process.send({ type: 'update_complete', projectCode: this.projectCode })
         process.exit(0)
       } else {
         reExecProcess(installMethod)
