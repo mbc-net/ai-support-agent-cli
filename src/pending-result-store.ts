@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
+import axios from 'axios'
 import { getConfigDir } from './config-manager'
 import { logger } from './logger'
 import { ApiClient } from './api-client'
@@ -119,6 +120,17 @@ export async function submitPendingResults(): Promise<void> {
       removePendingResult(pending.commandId)
       logger.info(`Submitted pending result: ${pending.commandId}`)
     } catch (error) {
+      // If the server returns 4xx other than 401/403, the command no longer exists or
+      // is invalid — discard the pending result instead of retrying forever.
+      // 401/403 are auth issues that may be resolved after re-login, so keep the file.
+      if (axios.isAxiosError(error) && error.response) {
+        const status = error.response.status
+        if (status !== 401 && status !== 403 && status >= 400 && status < 500) {
+          removePendingResult(pending.commandId)
+          logger.warn(`Discarded pending result ${pending.commandId}: server returned ${status}`)
+          continue
+        }
+      }
       logger.warn(`Failed to submit pending result ${pending.commandId}: ${getErrorMessage(error)}`)
       // Leave the file for next restart attempt (unless stale cleanup removes it)
     }
