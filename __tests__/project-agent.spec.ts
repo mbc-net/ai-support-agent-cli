@@ -1271,6 +1271,49 @@ describe('ProjectAgent', () => {
 
       agent.stop()
     })
+
+    it('should pass onSyncRepository callback', async () => {
+      mockedExecuteCommand.mockImplementation(async (_type, _payload, opts) => {
+        if (opts?.onSyncRepository) {
+          await opts.onSyncRepository('my-repo', 'feature/test')
+        }
+        return { success: true, data: 'ok' }
+      })
+
+      mockClient.getCommand.mockResolvedValue({
+        commandId: 'cmd-sync-repo',
+        type: 'sync_repository',
+        payload: { repositoryCode: 'my-repo', branch: 'feature/test' },
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+      onMessage({
+        id: 'notif-sync-repo',
+        table: 'commands',
+        pk: 'CMD#456',
+        sk: 'CMD#456',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-sync-repo', type: 'sync_repository', tenantCode: 'test-tenant', projectCode: 'test-proj' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(mockedExecuteCommand).toHaveBeenCalledWith(
+        'sync_repository',
+        { repositoryCode: 'my-repo', branch: 'feature/test' },
+        expect.objectContaining({
+          onSyncRepository: expect.any(Function),
+        }),
+      )
+
+      agent.stop()
+    })
   })
 
   describe('performReboot', () => {

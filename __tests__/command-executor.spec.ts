@@ -660,4 +660,77 @@ describe('command-executor', () => {
       readdirSpy.mockRestore()
     })
   })
+
+  describe('sync_repository', () => {
+    it('should return error when onSyncRepository callback is not provided', async () => {
+      const result = await executeCommand('sync_repository', { repositoryCode: 'my-repo' })
+      expectFailure(result)
+      expect(result.error).toBe('sync_repository command requires onSyncRepository callback')
+    })
+
+    it('should return error when repositoryCode is missing', async () => {
+      const onSyncRepository = jest.fn()
+      const result = await executeCommand(
+        'sync_repository',
+        {},
+        { onSyncRepository },
+      )
+      expectFailure(result)
+      expect(result.error).toBe('repositoryCode is required for sync_repository')
+    })
+
+    it('should return error when repositoryCode is not a string', async () => {
+      const onSyncRepository = jest.fn()
+      const result = await executeCommand(
+        'sync_repository',
+        { repositoryCode: 123 },
+        { onSyncRepository },
+      )
+      expectFailure(result)
+      expect(result.error).toBe('repositoryCode is required for sync_repository')
+    })
+
+    it('should call onSyncRepository with repositoryCode and no branch override', async () => {
+      const syncResult = { repositoryId: 'REPO_01', repositoryCode: 'my-repo', repositoryName: 'my-repo', status: 'updated' as const }
+      const onSyncRepository = jest.fn().mockResolvedValue(syncResult)
+
+      const result = await executeCommand(
+        'sync_repository',
+        { repositoryCode: 'my-repo' },
+        { onSyncRepository },
+      )
+
+      expect(result.success).toBe(true)
+      expect(onSyncRepository).toHaveBeenCalledWith('my-repo', undefined)
+      expect(result.data).toEqual(syncResult)
+    })
+
+    it('should call onSyncRepository with repositoryCode and branch override', async () => {
+      const syncResult = { repositoryId: 'REPO_01', repositoryCode: 'my-repo', repositoryName: 'my-repo', status: 'updated' as const }
+      const onSyncRepository = jest.fn().mockResolvedValue(syncResult)
+
+      const result = await executeCommand(
+        'sync_repository',
+        { repositoryCode: 'my-repo', branch: 'feature/new' },
+        { onSyncRepository },
+      )
+
+      expect(result.success).toBe(true)
+      expect(onSyncRepository).toHaveBeenCalledWith('my-repo', 'feature/new')
+    })
+
+    it('should ignore empty string branch and pass undefined', async () => {
+      const syncResult = { repositoryId: 'REPO_01', repositoryCode: 'my-repo', repositoryName: 'my-repo', status: 'updated' as const }
+      const onSyncRepository = jest.fn().mockResolvedValue(syncResult)
+
+      const result = await executeCommand(
+        'sync_repository',
+        { repositoryCode: 'my-repo', branch: '' },
+        { onSyncRepository },
+      )
+
+      expect(result.success).toBe(true)
+      expect(onSyncRepository).toHaveBeenCalledWith('my-repo', undefined)
+    })
+  })
 })

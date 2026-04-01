@@ -2,7 +2,7 @@ import * as child_process from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 
-import { buildAuthEnv, buildCloneUrl, normalizePemKey, syncRepositories } from '../src/repo-sync'
+import { buildAuthEnv, buildCloneUrl, normalizePemKey, syncRepositories, syncRepositoryByCode } from '../src/repo-sync'
 import type { ApiClient } from '../src/api-client'
 import type { ProjectConfigResponse } from '../src/types'
 
@@ -14,6 +14,7 @@ jest.mock('fs', () => {
     existsSync: jest.fn(),
     writeFileSync: jest.fn(),
     unlinkSync: jest.fn(),
+    renameSync: jest.fn(),
     promises: {
       mkdir: jest.fn().mockResolvedValue(undefined),
     },
@@ -315,6 +316,45 @@ describe('repo-sync', () => {
       expect(results[0].error).toContain('Invalid branch name')
     })
 
+    it('should migrate legacy directory and update repository', async () => {
+      ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+        repositoryId: 'REPO_01',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        authMethod: 'api_key',
+        authSecret: 'ghp_token123',
+      })
+
+      // Legacy dir (repositoryId) exists but new dir (repositoryCode) does not,
+      // then after migration the .git dir exists
+      const mockedRenameSync = fs.renameSync as jest.Mock
+      mockedRenameSync.mockClear()
+
+      let renameCallCount = 0
+      mockedFs.existsSync.mockImplementation((p: unknown) => {
+        if (typeof p !== 'string') return false
+        // legacyDir (/tmp/repos/REPO_01): exists
+        if (p === '/tmp/repos/REPO_01') return true
+        // repoDir (/tmp/repos/my-repo): doesn't exist yet (triggers rename)
+        if (p === '/tmp/repos/my-repo') return false
+        // gitDir (/tmp/repos/my-repo/.git): exists after rename
+        if (p === '/tmp/repos/my-repo/.git') return renameCallCount > 0
+        return false
+      })
+      mockedRenameSync.mockImplementation(() => {
+        renameCallCount++
+      })
+
+      const results = await syncRepositories(
+        mockClient,
+        repositories,
+        '/tmp/repos',
+        '[TEST]',
+      )
+
+      expect(mockedRenameSync).toHaveBeenCalled()
+      expect(results[0].status).toBe('updated')
+    })
+
     it('should handle multiple repositories', async () => {
       const multiRepos: NonNullable<ProjectConfigResponse['repositories']> = [
         {
@@ -358,6 +398,116 @@ describe('repo-sync', () => {
       expect(results).toHaveLength(2)
       expect(results[0].status).toBe('cloned')
       expect(results[1].status).toBe('skipped')
+    })
+  })
+
+  describe('syncRepositoryByCode', () => {
+    const mockClient = {
+      getRepoCredentials: jest.fn(),
+    } as unknown as ApiClient
+
+    const repositories: NonNullable<ProjectConfigResponse['repositories']> = [
+      {
+        repositoryId: 'REPO_01',
+        repositoryCode: 'my-repo',
+        repositoryName: 'my-repo',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        provider: 'github',
+        branch: 'main',
+        authMethod: 'api_key',
+      },
+    ]
+
+    beforeEach(() => {
+      jest.clearAllMocks()
+      ;(fs.promises.mkdir as jest.Mock).mockResolvedValue(undefined)
+      ;(child_process.execFile as unknown as jest.Mock).mockImplementation(
+        (...args: unknown[]) => {
+          const callback = args[args.length - 1]
+          if (typeof callback === 'function') {
+            callback(null, { stdout: '', stderr: '' })
+          }
+          return { on: jest.fn(), kill: jest.fn() }
+        },
+      )
+      ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+        repositoryId: 'REPO_01',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        authMethod: 'api_key',
+        authSecret: 'ghp_token123',
+      })
+    })
+
+    it('should sync repository by code (clone)', async () => {
+      mockedFs.existsSync.mockReturnValue(false)
+
+      const result = await syncRepositoryByCode(
+        mockClient,
+        repositories,
+        'my-repo',
+        undefined,
+        '/tmp/repos',
+        '[TEST]',
+      )
+
+      expect(result.status).toBe('cloned')
+      expect(result.repositoryCode).toBe('my-repo')
+    })
+
+    it('should override branch when specified', async () => {
+      mockedFs.existsSync.mockReturnValue(true)
+
+      const result = await syncRepositoryByCode(
+        mockClient,
+        repositories,
+        'my-repo',
+        'feature/new-branch',
+        '/tmp/repos',
+        '[TEST]',
+      )
+
+      expect(result.status).toBe('updated')
+      // Verify git checkout was called with the override branch
+      const execFileCalls = (child_process.execFile as unknown as jest.Mock).mock.calls
+      const checkoutCall = execFileCalls.find(
+        (args: unknown[]) => Array.isArray(args[1]) && (args[1] as string[])[0] === 'checkout',
+      )
+      expect(checkoutCall).toBeDefined()
+      expect((checkoutCall[1] as string[])).toContain('feature/new-branch')
+    })
+
+    it('should use config branch when override is not specified', async () => {
+      mockedFs.existsSync.mockReturnValue(true)
+
+      const result = await syncRepositoryByCode(
+        mockClient,
+        repositories,
+        'my-repo',
+        undefined,
+        '/tmp/repos',
+        '[TEST]',
+      )
+
+      expect(result.status).toBe('updated')
+      const execFileCalls = (child_process.execFile as unknown as jest.Mock).mock.calls
+      const checkoutCall = execFileCalls.find(
+        (args: unknown[]) => Array.isArray(args[1]) && (args[1] as string[])[0] === 'checkout',
+      )
+      expect(checkoutCall).toBeDefined()
+      expect((checkoutCall[1] as string[])).toContain('main')
+    })
+
+    it('should throw when repositoryCode is not found', async () => {
+      await expect(
+        syncRepositoryByCode(
+          mockClient,
+          repositories,
+          'non-existent-repo',
+          undefined,
+          '/tmp/repos',
+          '[TEST]',
+        ),
+      ).rejects.toThrow('Repository not found: non-existent-repo')
     })
   })
 })

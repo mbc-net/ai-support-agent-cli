@@ -365,6 +365,7 @@ describe('processCommand processing flag', () => {
       onConfigSync: jest.fn(),
       onReboot: jest.fn(),
       onUpdate: jest.fn(),
+      onSyncRepository: jest.fn(),
     }
   }
 

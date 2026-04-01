@@ -44,6 +44,7 @@ export interface CommandContext {
   onConfigSync: () => Promise<void>
   onReboot: () => Promise<void>
   onUpdate: () => Promise<void>
+  onSyncRepository: (repositoryCode: string, branch?: string) => Promise<import('./repo-sync').RepoSyncResult>
 }
 
 /**
@@ -296,6 +297,7 @@ async function processCommand(
       onConfigSync: ctx.onConfigSync,
       onReboot: ctx.onReboot,
       onUpdate: ctx.onUpdate,
+      onSyncRepository: ctx.onSyncRepository,
     })
     logger.debug(`${deps.prefix} Command result [${commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, LOG_RESULT_LIMIT)}`)
     savePendingResult(commandId, deps.agentId, result, deps.apiUrl, deps.token, deps.tenantCode)

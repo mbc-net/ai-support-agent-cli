@@ -17,6 +17,7 @@ export type AgentCommandType =
   | 'reboot'
   | 'update'
   | 'e2e_test'
+  | 'sync_repository'
 
 export type AgentCommandStatus =
   | 'PENDING'
@@ -111,6 +112,11 @@ export interface E2eTestPayload {
   recoveryMode?: unknown
 }
 
+export interface SyncRepositoryPayload {
+  repositoryCode?: unknown
+  branch?: unknown
+}
+
 // Discriminated union for type-safe command dispatch
 export type CommandDispatch =
   | { type: 'execute_command'; payload: ShellCommandPayload }
@@ -129,3 +135,4 @@ export type CommandDispatch =
   | { type: 'reboot'; payload: Record<string, never> }
   | { type: 'update'; payload: Record<string, never> }
   | { type: 'e2e_test'; payload: E2eTestPayload }
+  | { type: 'sync_repository'; payload: SyncRepositoryPayload }

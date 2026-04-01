@@ -196,6 +196,26 @@ export function buildCloneUrl(
   }
 }
 
+/**
+ * リポジトリコードを指定して単体同期する。
+ * overrideBranch を指定した場合は ProjectConfig のブランチを上書きする。
+ */
+export async function syncRepositoryByCode(
+  client: ApiClient,
+  repositories: NonNullable<ProjectConfigResponse['repositories']>,
+  repositoryCode: string,
+  overrideBranch: string | undefined,
+  reposDir: string,
+  prefix: string,
+): Promise<RepoSyncResult> {
+  const repo = repositories.find(r => r.repositoryCode === repositoryCode)
+  if (!repo) {
+    throw new Error(`Repository not found: ${repositoryCode}`)
+  }
+  const effectiveRepo = overrideBranch ? { ...repo, branch: overrideBranch } : repo
+  return syncSingleRepository(client, effectiveRepo, reposDir, prefix)
+}
+
 export { normalizePemKey } from './utils/pem-key'
 
 export function buildAuthEnv(
