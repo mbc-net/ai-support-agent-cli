@@ -1,5 +1,9 @@
+import fs from 'fs'
+import path from 'path'
+
 import { ApiClient } from './api-client'
 import { AGENT_VERSION, UPDATE_CHECK_INITIAL_DELAY, UPDATE_CHECK_INTERVAL, UPDATE_BUSY_WAIT_TIMEOUT_MS, UPDATE_BUSY_POLL_INTERVAL_MS, UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS, DOCKER_UPDATE_EXIT_CODE } from './constants'
+import { getConfigDir } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AutoUpdateConfig } from './types'
@@ -124,6 +128,15 @@ export function startAutoUpdater(
       // runInDocker() can distinguish an update restart from a clean stop (SIGINT)
       // and calls reExecProcess() to rebuild the Docker image for the new version.
       if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+        // Write the new version to a file so the host-side installUpdateAndRestart()
+        // can read it and run npm install before rebuilding the Docker image.
+        // The config directory is volume-mounted and accessible from both sides.
+        try {
+          const versionFile = path.join(getConfigDir(), 'update-version.json')
+          fs.writeFileSync(versionFile, JSON.stringify({ version: targetVersion }), 'utf-8')
+        } catch (err) {
+          logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
+        }
         process.exit(DOCKER_UPDATE_EXIT_CODE)
         return
       }
