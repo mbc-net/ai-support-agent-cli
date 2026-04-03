@@ -1,8 +1,9 @@
 import type { ApiClient } from '../api-client'
-import { ERR_CHAT_REQUIRES_CLIENT, ERR_E2E_TEST_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_REBOOT_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, ERR_UPDATE_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
+import { ERR_CHAT_REQUIRES_CLIENT, ERR_E2E_TEST_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_REBOOT_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, ERR_UPDATE_REQUIRES_CALLBACK, ERR_SYNC_REPOSITORY_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import { getWorkspaceDir } from '../project-dir'
-import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
+import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, type SyncRepositoryPayload, successResult } from '../types'
+import type { RepoSyncResult } from '../repo-sync'
 import { getErrorMessage } from '../utils'
 
 import { executeChatCommand } from './chat-executor'
@@ -28,6 +29,7 @@ export interface ExecuteCommandOptions {
   onConfigSync?: () => Promise<void>
   onReboot?: () => Promise<void>
   onUpdate?: () => Promise<void>
+  onSyncRepository?: (repositoryCode: string, branch?: string) => Promise<RepoSyncResult>
 }
 
 // Overload: type-safe discriminated union
@@ -151,6 +153,19 @@ export async function executeCommand(
         }
         await opts.onUpdate()
         return successResult('update initiated')
+      case 'sync_repository': {
+        if (!opts?.onSyncRepository) {
+          return errorResult(ERR_SYNC_REPOSITORY_REQUIRES_CALLBACK)
+        }
+        const repositoryCode = (p as SyncRepositoryPayload).repositoryCode
+        if (typeof repositoryCode !== 'string' || !repositoryCode) {
+          return errorResult('repositoryCode is required for sync_repository')
+        }
+        const branch = (p as SyncRepositoryPayload).branch
+        const overrideBranch = typeof branch === 'string' && branch ? branch : undefined
+        const result = await opts.onSyncRepository(repositoryCode, overrideBranch)
+        return successResult(result)
+      }
       case 'e2e_test':
         if (!opts?.commandId || !opts?.client) {
           return errorResult(ERR_E2E_TEST_REQUIRES_CLIENT)

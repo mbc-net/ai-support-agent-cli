@@ -9,7 +9,8 @@ import { writeAwsConfig } from './aws-profile'
 import { writeMcpConfig } from './mcp/config-writer'
 import { getReposDir, getSshDir } from './project-dir'
 import { syncProjectConfig } from './project-config-sync'
-import { syncRepositories } from './repo-sync'
+import { syncRepositories, syncRepositoryByCode } from './repo-sync'
+import type { RepoSyncResult } from './repo-sync'
 import { setupSshConfig } from './ssh-config-setup'
 import type { AgentChatMode, AgentServerConfig, ProjectConfigResponse } from './types'
 import { getErrorMessage } from './utils'
@@ -174,6 +175,41 @@ export async function applyProjectConfig(
   }
 
   logger.info(`${deps.prefix} Config applied (hash: ${config.configHash})`)
+}
+
+export interface SyncRepositoryOptions {
+  repositoryCode: string
+  branch?: string
+}
+
+/**
+ * 特定リポジトリをコードとブランチ指定で同期する。
+ */
+export async function performSyncRepository(
+  deps: ConfigSyncDeps,
+  state: ConfigSyncState,
+  options: SyncRepositoryOptions,
+): Promise<RepoSyncResult> {
+  if (!deps.projectDir) {
+    throw new Error('Project directory is required for sync_repository')
+  }
+  if (!state.projectConfig) {
+    throw new Error('Project config not loaded')
+  }
+  if (!state.projectConfig.repositories?.length) {
+    throw new Error('No repositories configured')
+  }
+  const reposDir = getReposDir(deps.projectDir)
+  const result = await syncRepositoryByCode(
+    deps.client,
+    state.projectConfig.repositories,
+    options.repositoryCode,
+    options.branch,
+    reposDir,
+    deps.prefix,
+  )
+  logger.info(`${deps.prefix} Repository synced: ${result.repositoryName} (${result.status})`)
+  return result
 }
 
 /**
