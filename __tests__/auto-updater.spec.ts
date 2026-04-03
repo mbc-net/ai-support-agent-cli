@@ -1,3 +1,6 @@
+import fs from 'fs'
+import path from 'path'
+
 import { startAutoUpdater } from '../src/auto-updater'
 import { ApiClient } from '../src/api-client'
 import * as updateChecker from '../src/update-checker'
@@ -5,6 +8,12 @@ import * as updateChecker from '../src/update-checker'
 jest.mock('../src/api-client')
 jest.mock('../src/logger')
 jest.mock('../src/update-checker')
+jest.mock('../src/config-manager', () => ({
+  getConfigDir: jest.fn().mockReturnValue('/tmp/test-config'),
+}))
+jest.mock('fs')
+
+const mockedFs = fs as jest.Mocked<typeof fs>
 
 const mockedDetectInstallMethod = updateChecker.detectInstallMethod as jest.MockedFunction<typeof updateChecker.detectInstallMethod>
 const mockedIsNewerVersion = updateChecker.isNewerVersion as jest.MockedFunction<typeof updateChecker.isNewerVersion>
@@ -404,6 +413,7 @@ describe('startAutoUpdater', () => {
     const originalEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
     process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
     const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    mockedFs.writeFileSync.mockImplementation(() => {})
 
     try {
       const client = createMockClient()
@@ -415,6 +425,13 @@ describe('startAutoUpdater', () => {
       await jest.advanceTimersByTimeAsync(30_000)
 
       expect(stopAll).toHaveBeenCalled()
+      // update-version.json must be written before exiting so the host-side
+      // installUpdateAndRestart() can read the new version and run npm install
+      expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
+        path.join('/tmp/test-config', 'update-version.json'),
+        JSON.stringify({ version: '2.0.0' }),
+        'utf-8',
+      )
       expect(mockExit).toHaveBeenCalledWith(42)
       expect(mockedReExecProcess).not.toHaveBeenCalled()
 
