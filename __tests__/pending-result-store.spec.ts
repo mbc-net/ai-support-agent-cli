@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 
+import axios from 'axios'
 import {
   savePendingResult,
   removePendingResult,
@@ -155,7 +156,7 @@ describe('pending-result-store', () => {
       expect(fs.existsSync(filePath)).toBe(false)
     })
 
-    it('should keep file when submission fails', async () => {
+    it('should keep file when submission fails with network error', async () => {
       MockApiClient.mockImplementation(() => ({
         submitResult: jest.fn().mockRejectedValue(new Error('network error')),
         setTenantCode: jest.fn(),
@@ -167,6 +168,62 @@ describe('pending-result-store', () => {
 
       // File should still exist
       const filePath = path.join(tempDir, 'pending-results', 'cmd-1.json')
+      expect(fs.existsSync(filePath)).toBe(true)
+    })
+
+    it('should discard file when server returns 4xx (command not found)', async () => {
+      const axiosError = new axios.AxiosError('Not Found', 'ERR_BAD_REQUEST', undefined, undefined, {
+        status: 404,
+        data: { message: 'Command not found' },
+      } as never)
+      MockApiClient.mockImplementation(() => ({
+        submitResult: jest.fn().mockRejectedValue(axiosError),
+        setTenantCode: jest.fn(),
+      }) as unknown as ApiClient)
+
+      savePendingResult('cmd-1', 'agent-1', mockResult, 'http://api', 'tok', 'tenant-1')
+
+      await submitPendingResults()
+
+      // File should be removed — no point retrying a non-existent command
+      const filePath = path.join(tempDir, 'pending-results', 'cmd-1.json')
+      expect(fs.existsSync(filePath)).toBe(false)
+    })
+
+    it('should discard file when server returns 410 Gone', async () => {
+      const axiosError = new axios.AxiosError('Gone', 'ERR_BAD_REQUEST', undefined, undefined, {
+        status: 410,
+        data: {},
+      } as never)
+      MockApiClient.mockImplementation(() => ({
+        submitResult: jest.fn().mockRejectedValue(axiosError),
+        setTenantCode: jest.fn(),
+      }) as unknown as ApiClient)
+
+      savePendingResult('cmd-2', 'agent-1', mockResult, 'http://api', 'tok', 'tenant-1')
+
+      await submitPendingResults()
+
+      const filePath = path.join(tempDir, 'pending-results', 'cmd-2.json')
+      expect(fs.existsSync(filePath)).toBe(false)
+    })
+
+    it.each([401, 403])('should keep file when server returns %d (auth issue)', async (status) => {
+      const axiosError = new axios.AxiosError('Unauthorized', 'ERR_BAD_REQUEST', undefined, undefined, {
+        status,
+        data: {},
+      } as never)
+      MockApiClient.mockImplementation(() => ({
+        submitResult: jest.fn().mockRejectedValue(axiosError),
+        setTenantCode: jest.fn(),
+      }) as unknown as ApiClient)
+
+      savePendingResult('cmd-auth', 'agent-1', mockResult, 'http://api', 'tok', 'tenant-1')
+
+      await submitPendingResults()
+
+      // File should be kept — auth issues may be resolved after re-login
+      const filePath = path.join(tempDir, 'pending-results', 'cmd-auth.json')
       expect(fs.existsSync(filePath)).toBe(true)
     })
   })

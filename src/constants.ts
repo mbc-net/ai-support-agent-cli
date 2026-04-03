@@ -99,6 +99,7 @@ export const ERR_SETUP_REQUIRES_CALLBACK = 'setup command requires onSetup callb
 export const ERR_CONFIG_SYNC_REQUIRES_CALLBACK = 'config_sync command requires onConfigSync callback'
 export const ERR_REBOOT_REQUIRES_CALLBACK = 'reboot command requires onReboot callback'
 export const ERR_UPDATE_REQUIRES_CALLBACK = 'update command requires onUpdate callback'
+export const ERR_SYNC_REPOSITORY_REQUIRES_CALLBACK = 'sync_repository command requires onSyncRepository callback'
 
 // API endpoint paths
 export const API_ENDPOINTS = {

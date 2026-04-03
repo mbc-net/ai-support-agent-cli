@@ -4,7 +4,8 @@ import * as path from 'path'
 
 import { ApiClient } from './api-client'
 import { AppSyncSubscriber } from './appsync-subscriber'
-import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, refreshChatMode } from './agent-config-sync'
+import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, performSyncRepository, refreshChatMode } from './agent-config-sync'
+import type { RepoSyncResult } from './repo-sync'
 import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, startVsCodeTunnel, stopTransport } from './agent-transport'
 import { AGENT_VERSION, INITIAL_CONFIG_SYNC_MAX_RETRIES, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS } from './constants'
 import { getConfigDir } from './config-manager'
@@ -134,6 +135,10 @@ export class ProjectAgent {
     await performSetup(this.configSyncDeps, this.configSyncState)
   }
 
+  async performSyncRepository(repositoryCode: string, branch?: string): Promise<RepoSyncResult> {
+    return performSyncRepository(this.configSyncDeps, this.configSyncState, { repositoryCode, branch })
+  }
+
   async performReboot(): Promise<void> {
     logger.info(`${this.prefix} Reboot requested, scheduling restart...`)
     this.stop()
@@ -260,6 +265,7 @@ export class ProjectAgent {
       onConfigSync: () => this.performConfigSync(),
       onReboot: () => this.performReboot(),
       onUpdate: () => this.performUpdate(),
+      onSyncRepository: (repositoryCode: string, branch?: string) => this.performSyncRepository(repositoryCode, branch),
     }
 
     if (!result.appsyncUrl || !result.appsyncApiKey) {
