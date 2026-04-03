@@ -60,10 +60,12 @@ export function registerReadConversationFileTool(
         const fs = await import('fs')
         const path = await import('path')
         const os = await import('os')
+        const crypto = await import('crypto')
         const tmpDir = path.join(os.tmpdir(), 'ai-support-agent-files')
         fs.mkdirSync(tmpDir, { recursive: true })
         const safeFilename = path.basename(filename)
-        const tmpFilePath = path.join(tmpDir, safeFilename)
+        const uniqueId = crypto.randomUUID().slice(0, 8)
+        const tmpFilePath = path.join(tmpDir, `${uniqueId}_${safeFilename}`)
         fs.writeFileSync(tmpFilePath, Buffer.from(response.data as ArrayBuffer))
 
         return mcpTextResponse(
