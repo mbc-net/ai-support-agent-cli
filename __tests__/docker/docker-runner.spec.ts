@@ -30,6 +30,9 @@ jest.mock('../../src/docker/dockerfile-path', () => ({
 jest.mock('../../src/config-manager', () => ({
   getConfigDir: jest.fn(() => '/mock/config-dir'),
   loadConfig: jest.fn(),
+  getProjectList: jest.fn((config: { projects?: Array<{ tenantCode?: string }> }) =>
+    (config?.projects ?? []).filter((p) => !!p.tenantCode)
+  ),
 }))
 
 jest.mock('../../src/i18n', () => ({

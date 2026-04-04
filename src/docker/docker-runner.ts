@@ -6,7 +6,7 @@ import * as path from 'path'
 
 import { getDockerfilePath, getDockerContextDir, resolveDockerfile, getProjectDockerfilePath, getProjectImageTag } from './dockerfile-path'
 import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE, DOCKER_RESTART_EXIT_CODE } from '../constants'
-import { getConfigDir, loadConfig } from '../config-manager'
+import { getConfigDir, getProjectList, loadConfig } from '../config-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
@@ -726,8 +726,8 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   const version = ensureImage(customDockerfile)
 
-  // Determine projects to run
-  const allProjects = config?.projects ?? []
+  // Determine projects to run (skip entries without tenantCode)
+  const allProjects = config ? getProjectList(config) : []
   let projects: ProjectRegistration[]
 
   if (opts.project) {
