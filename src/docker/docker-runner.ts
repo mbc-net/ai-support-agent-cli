@@ -331,6 +331,15 @@ export function resetInstalledVersionCache(): void {
 }
 
 export function ensureImage(customDockerfile?: string): string {
+  // When running via ts-node (npm run dev), always rebuild the image from local source
+  const sym = Symbol.for('ts-node.register.instance')
+  const isDevMode = !!(process as unknown as { [key: symbol]: unknown })[sym]
+  if (isDevMode) {
+    logger.info(t('docker.building'))
+    buildImage(AGENT_VERSION, customDockerfile)
+    return AGENT_VERSION
+  }
+
   const installedVersion = getInstalledVersion()
   // Use the installed version if it is newer than the compile-time version
   const version = isNewerVersion(AGENT_VERSION, installedVersion) ? installedVersion : AGENT_VERSION
