@@ -20,6 +20,34 @@ function toPosixRelative(relativePath: string): string {
   return relativePath.split(path.sep).join('/')
 }
 
+/**
+ * Returns true when running via ts-node (i.e. `npm run dev`).
+ * In this case, local dist/ should be mounted into containers instead of
+ * relying on the npm-installed package inside the image.
+ */
+function isRunningViaTsNode(): boolean {
+  const sym = Symbol.for('ts-node.register.instance')
+  return !!(process as unknown as { [key: symbol]: unknown })[sym]
+}
+
+/**
+ * Returns extra volume mount args to overlay the local dist/ into the container
+ * when running in dev mode (ts-node), so the container uses local source code.
+ * Returns an empty array when not in dev mode.
+ */
+function buildDevMounts(): string[] {
+  if (!isRunningViaTsNode()) return []
+  // __dirname is agent/src/docker — walk up two levels to get agent/
+  const agentRoot = path.resolve(__dirname, '..', '..')
+  const distDir = path.join(agentRoot, 'dist')
+  const localesDir = path.join(agentRoot, 'src', 'locales')
+  const containerBase = '/usr/local/lib/node_modules/@ai-support-agent/cli'
+  return [
+    '-v', `${distDir}:${containerBase}/dist:ro`,
+    '-v', `${localesDir}:${containerBase}/dist/locales:ro`,
+  ]
+}
+
 const IMAGE_NAME = 'ai-support-agent'
 const PASSTHROUGH_ENV_VARS = [
   'AI_SUPPORT_AGENT_TOKEN',
@@ -331,15 +359,6 @@ export function resetInstalledVersionCache(): void {
 }
 
 export function ensureImage(customDockerfile?: string): string {
-  // When running via ts-node (npm run dev), always rebuild the image from local source
-  const sym = Symbol.for('ts-node.register.instance')
-  const isDevMode = !!(process as unknown as { [key: symbol]: unknown })[sym]
-  if (isDevMode) {
-    logger.info(t('docker.building'))
-    buildImage(AGENT_VERSION, customDockerfile)
-    return AGENT_VERSION
-  }
-
   const installedVersion = getInstalledVersion()
   // Use the installed version if it is newer than the compile-time version
   const version = isNewerVersion(AGENT_VERSION, installedVersion) ? installedVersion : AGENT_VERSION
@@ -638,6 +657,7 @@ class DockerSupervisor {
       'run', '--rm', ...interactive,
       ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
       ...mounts,
+      ...buildDevMounts(),
       ...envArgs,
       imageTag,
       ...containerArgs,
