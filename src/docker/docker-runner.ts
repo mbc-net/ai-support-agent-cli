@@ -500,7 +500,12 @@ function buildProjectVolumeMounts(
     envArgs.push('-e', `AI_SUPPORT_AGENT_TOKEN=${project.token}`)
   }
   if (project.apiUrl) {
-    envArgs.push('-e', `AI_SUPPORT_AGENT_API_URL=${project.apiUrl}`)
+    // Replace localhost/127.0.0.1 with host.docker.internal so the container can reach the host
+    const containerApiUrl = project.apiUrl.replace(
+      /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
+      (_, scheme, _host, port) => `${scheme}host.docker.internal${port ?? ''}`,
+    )
+    envArgs.push('-e', `AI_SUPPORT_AGENT_API_URL=${containerApiUrl}`)
   }
 
   // Pass ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN if set

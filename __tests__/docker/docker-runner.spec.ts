@@ -1214,6 +1214,44 @@ describe('docker-runner', () => {
       expect(eIdx).toBeGreaterThan(-1)
     })
 
+    it('should replace localhost with host.docker.internal in apiUrl', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'my-token', apiUrl: 'http://localhost:4030' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      expect(spawnArgs).toContain('AI_SUPPORT_AGENT_API_URL=http://host.docker.internal:4030')
+    })
+
+    it('should replace 127.0.0.1 with host.docker.internal in apiUrl', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'my-token', apiUrl: 'http://127.0.0.1:4030' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      expect(spawnArgs).toContain('AI_SUPPORT_AGENT_API_URL=http://host.docker.internal:4030')
+    })
+
     it('should stop all containers when one exits with update code 42', async () => {
       mockExecFileSync.mockReturnValue(Buffer.from(''))
       const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })

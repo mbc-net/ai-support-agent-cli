@@ -215,6 +215,20 @@ describe('agent-runner', () => {
     },
   ))
 
+  it('should use tenantCode/projectCode from --project flag when falling back to env vars', withEnvVars(
+    { AI_SUPPORT_AGENT_TOKEN: 'env-token', AI_SUPPORT_AGENT_API_URL: 'http://env-api' },
+    async () => {
+      mockedLoadConfig.mockReturnValue(null)
+
+      const promise = startAgent({ project: 'mytenant/MYPROJECT' })
+      await jest.advanceTimersByTimeAsync(100)
+      await promise
+
+      // ApiClient is called with the env API URL and token
+      expect(MockApiClient).toHaveBeenCalledWith('http://env-api', 'env-token')
+    },
+  ))
+
   it('should call process.exit(1) when no config and no env vars', withEnvVars(
     {},
     async () => {
