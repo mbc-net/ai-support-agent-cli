@@ -64,9 +64,7 @@ export function saveCachedConfig(
 ): void {
   try {
     const cacheDir = getCacheDir(projectDir)
-    if (!fs.existsSync(cacheDir)) {
-      fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 })
-    }
+    fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 })
 
     const cacheData: CachedProjectConfig = {
       cachedAt: new Date().toISOString(),

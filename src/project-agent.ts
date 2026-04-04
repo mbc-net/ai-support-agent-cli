@@ -7,7 +7,7 @@ import { AppSyncSubscriber } from './appsync-subscriber'
 import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, performSyncRepository, refreshChatMode } from './agent-config-sync'
 import type { RepoSyncResult } from './repo-sync'
 import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, startVsCodeTunnel, stopTransport } from './agent-transport'
-import { AGENT_VERSION, INITIAL_CONFIG_SYNC_MAX_RETRIES, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS } from './constants'
+import { AGENT_VERSION, DOCKER_RESTART_EXIT_CODE, INITIAL_CONFIG_SYNC_MAX_RETRIES, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS } from './constants'
 import { getConfigDir } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
@@ -39,6 +39,7 @@ export class ProjectAgent {
     availableChatModes: [],
     activeChatMode: undefined,
     mcpConfigPath: undefined,
+    dockerCustomizationHash: undefined,
   }
 
   private configSyncDeps: ConfigSyncDeps
@@ -77,6 +78,9 @@ export class ProjectAgent {
       token: this.token,
       projectCode: this.projectCode,
       localAgentChatMode,
+      onDockerRebuild: process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1'
+        ? () => { void this.performDockerRebuild() }
+        : undefined,
     }
 
     this.transportDeps = {
@@ -143,16 +147,33 @@ export class ProjectAgent {
     logger.info(`${this.prefix} Reboot requested, scheduling restart...`)
     this.stop()
     setTimeout(() => {
-      // When running inside a Docker container or as a child process (forked by
-      // ChildProcessManager), just exit cleanly. The host-side runner (launchd /
-      // docker-runner) will restart the process automatically via KeepAlive or
-      // the container restart loop.
-      // reExecProcess() from a worker would spawn a duplicate runner process.
-      if (process.send || process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+      // In Docker mode, exit with DOCKER_RESTART_EXIT_CODE so DockerSupervisor
+      // restarts only this project's container.
+      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+        process.exit(DOCKER_RESTART_EXIT_CODE)
+      } else if (process.send) {
+        // Running as a child process (forked by ChildProcessManager) — exit cleanly.
+        // The parent runner will restart the process automatically.
         process.exit(0)
       } else {
         reExecProcess()
       }
+    }, 1000)
+  }
+
+  async performDockerRebuild(): Promise<void> {
+    logger.info(`${this.prefix} Docker rebuild requested, scheduling restart...`)
+    this.stop()
+    setTimeout(() => {
+      // Write marker file so DockerSupervisor knows to rebuild the image before restart
+      const markerPath = path.join(getConfigDir(), 'projects', this.tenantCode, this.projectCode, '.ai-support-agent', 'docker-rebuild-needed')
+      try {
+        fs.mkdirSync(path.dirname(markerPath), { recursive: true })
+        fs.writeFileSync(markerPath, '')
+      } catch (err) {
+        logger.warn(`${this.prefix} Failed to write docker-rebuild-needed marker: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      process.exit(DOCKER_RESTART_EXIT_CODE)
     }, 1000)
   }
 
@@ -221,7 +242,7 @@ export class ProjectAgent {
         logger.info(`${this.prefix} Server assigned projectCode: ${result.projectCode} (was: ${this.projectCode})`)
         this.projectCode = result.projectCode
         // Re-initialize projectDir with the server-assigned projectCode
-        this.projectDir = initProjectDir({ projectCode: this.projectCode, token: this.token, apiUrl: this.apiUrl })
+        this.projectDir = initProjectDir({ tenantCode: this.tenantCode || 'unknown', projectCode: this.projectCode, token: this.token, apiUrl: this.apiUrl })
         this.configSyncDeps = { ...this.configSyncDeps, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }
       }
       this.prefix = `[${this.tenantCode}#${this.projectCode}]`

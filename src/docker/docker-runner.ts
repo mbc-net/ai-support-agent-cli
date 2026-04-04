@@ -1,10 +1,11 @@
 import { execFileSync, spawn } from 'child_process'
+import type { ChildProcess } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { getDockerfilePath, getDockerContextDir, resolveDockerfile } from './dockerfile-path'
-import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE } from '../constants'
+import { getDockerfilePath, getDockerContextDir, resolveDockerfile, getProjectDockerfilePath, getProjectImageTag } from './dockerfile-path'
+import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE, DOCKER_RESTART_EXIT_CODE } from '../constants'
 import { getConfigDir, loadConfig } from '../config-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
@@ -12,6 +13,7 @@ import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { isNewerVersion, isValidVersion } from '../utils/version'
 import { performUpdate, reExecProcess } from '../update-checker'
+import type { ProjectRegistration } from '../types'
 
 /** Convert a path.relative() result to POSIX format for container use */
 function toPosixRelative(relativePath: string): string {
@@ -37,6 +39,11 @@ export interface DockerRunOptions {
   updateChannel?: string
   dockerfile?: string
   dockerfileSync?: boolean
+  /**
+   * Filter to a single project. Format: "tenantCode/projectCode"
+   * When set, only the matching project is started.
+   */
+  project?: string
 }
 
 export function checkDockerAvailable(): boolean {
@@ -69,6 +76,66 @@ export function buildImage(version: string, customDockerfile?: string): void {
     { stdio: 'inherit' },
   )
   logger.success(t('docker.buildComplete'))
+}
+
+/** Allowlist for apt package names: letters, digits, hyphens, dots, plus signs, colons */
+const APT_PACKAGE_RE = /^[a-zA-Z0-9][a-zA-Z0-9+\-.:]*$/
+/** Allowlist for npm package names: scoped (@scope/name) or plain, with version (@x.y.z) */
+const NPM_PACKAGE_RE = /^(@[a-zA-Z0-9_\-.]+\/)?[a-zA-Z0-9_\-.]+(@[a-zA-Z0-9._\-^~*]+)?$/
+
+/**
+ * Validate a list of package names against an allowlist regex.
+ * Throws if any name is invalid to prevent Dockerfile injection.
+ */
+export function validatePackageNames(packages: string[], type: 'apt' | 'npm'): void {
+  const re = type === 'apt' ? APT_PACKAGE_RE : NPM_PACKAGE_RE
+  for (const pkg of packages) {
+    if (!re.test(pkg)) {
+      throw new Error(`Invalid ${type} package name: "${pkg}"`)
+    }
+  }
+}
+
+/**
+ * Generate a per-project Dockerfile that extends the base agent image.
+ */
+export function generateProjectDockerfile(
+  baseVersion: string,
+  aptPackages: string[],
+  npmPackages: string[],
+): string {
+  validatePackageNames(aptPackages, 'apt')
+  validatePackageNames(npmPackages, 'npm')
+
+  const lines = [`FROM ${IMAGE_NAME}:${baseVersion}`]
+  if (aptPackages.length > 0) {
+    lines.push(
+      `RUN apt-get update && apt-get install -y --no-install-recommends \\`,
+      `    ${aptPackages.join(' \\\n    ')} \\`,
+      `    && rm -rf /var/lib/apt/lists/*`,
+    )
+  }
+  if (npmPackages.length > 0) {
+    lines.push(
+      `RUN npm install -g ${npmPackages.join(' ')} && npm cache clean --force`,
+    )
+  }
+  return lines.join('\n') + '\n'
+}
+
+/**
+ * Build a per-project Docker image using the given Dockerfile.
+ */
+export function buildProjectImage(tenantCode: string, projectCode: string, baseVersion: string, dockerfilePath: string): void {
+  const imageTag = getProjectImageTag(tenantCode, projectCode, baseVersion)
+  const contextDir = getDockerContextDir()
+  logger.info(`[docker] Building project image: ${imageTag}`)
+  execFileSync(
+    'docker',
+    ['build', '-t', imageTag, '--pull=false', '--build-arg', `AGENT_VERSION=${baseVersion}`, '-f', dockerfilePath, contextDir],
+    { stdio: 'inherit' },
+  )
+  logger.success(`[docker] Project image built: ${imageTag}`)
 }
 
 /** Container-internal base path for project directories */
@@ -215,6 +282,9 @@ export function buildContainerArgs(opts: DockerRunOptions): string[] {
   if (opts.updateChannel) {
     args.push('--update-channel', opts.updateChannel)
   }
+  if (opts.project) {
+    args.push('--project', opts.project)
+  }
 
   return args
 }
@@ -286,23 +356,31 @@ export function dockerLogin(): void {
 }
 
 /**
- * Called on the host after the container exits with DOCKER_UPDATE_EXIT_CODE.
- * Reads the new version from the config-dir volume (written by the container),
+ * Called on the host after a container exits with DOCKER_UPDATE_EXIT_CODE.
+ * Reads the new version from a project-specific config dir (written by the container),
  * installs it on the host with npm, then re-execs the process so ensureImage()
  * picks up the newly installed version and rebuilds the Docker image.
  */
-async function installUpdateAndRestart(): Promise<void> {
+async function installUpdateAndRestart(projectConfigDir?: string): Promise<void> {
   let newVersion: string | undefined
-  try {
-    const versionFile = path.join(getConfigDir(), 'update-version.json')
-    const raw = fs.readFileSync(versionFile, 'utf-8')
-    const parsed = JSON.parse(raw) as { version?: string }
-    if (parsed.version && isValidVersion(parsed.version)) {
-      newVersion = parsed.version
+  // First try project-specific config dir, fall back to global config dir
+  const searchDirs = projectConfigDir
+    ? [projectConfigDir, getConfigDir()]
+    : [getConfigDir()]
+
+  for (const dir of searchDirs) {
+    try {
+      const versionFile = path.join(dir, 'update-version.json')
+      const raw = fs.readFileSync(versionFile, 'utf-8')
+      const parsed = JSON.parse(raw) as { version?: string }
+      if (parsed.version && isValidVersion(parsed.version)) {
+        newVersion = parsed.version
+      }
+      fs.unlinkSync(versionFile)
+      break
+    } catch {
+      // File does not exist in this dir — try next
     }
-    fs.unlinkSync(versionFile)
-  } catch {
-    // File may not exist (e.g. auto-updater path) — proceed without it
   }
 
   if (newVersion) {
@@ -353,6 +431,266 @@ export function syncDockerfileToConfigDir(): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Per-project volume mount helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build volume mounts and env args for a single project container.
+ * Each project gets its own isolated config dir under ~/.ai-support-agent/projects/{tenantCode}/{projectCode}/.ai-support-agent/
+ */
+function buildProjectVolumeMounts(
+  project: ProjectRegistration,
+  projectConfigHostDir: string,
+): { mounts: string[]; envArgs: string[] } {
+  const home = os.homedir()
+  const mounts: string[] = []
+  const envArgs: string[] = []
+
+  // Claude Code OAuth tokens and config — mount to container home
+  const claudeDir = path.join(home, '.claude')
+  if (fs.existsSync(claudeDir)) {
+    mounts.push('-v', `${claudeDir}:${path.posix.join(CONTAINER_HOME, '.claude')}:rw`)
+  }
+  const claudeJson = path.join(home, '.claude.json')
+  if (fs.existsSync(claudeJson)) {
+    mounts.push('-v', `${claudeJson}:${path.posix.join(CONTAINER_HOME, '.claude.json')}:rw`)
+  }
+
+  // Per-project isolated config dir — mounts to /home/node/.ai-support-agent inside container
+  const containerConfigDir = path.posix.join(CONTAINER_HOME, '.ai-support-agent')
+  fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
+  mounts.push('-v', `${projectConfigHostDir}:${containerConfigDir}:rw`)
+
+  // Standard env vars for per-project container
+  envArgs.push('-e', 'AI_SUPPORT_AGENT_IN_DOCKER=1')
+  envArgs.push('-e', `HOME=${CONTAINER_HOME}`)
+  envArgs.push('-e', `AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir}`)
+
+  // Pass token and apiUrl per-project
+  if (project.token) {
+    envArgs.push('-e', `AI_SUPPORT_AGENT_TOKEN=${project.token}`)
+  }
+  if (project.apiUrl) {
+    envArgs.push('-e', `AI_SUPPORT_AGENT_API_URL=${project.apiUrl}`)
+  }
+
+  // Pass ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN if set
+  for (const key of ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'] as const) {
+    if (process.env[key]) {
+      envArgs.push('-e', `${key}=${process.env[key]}`)
+    }
+  }
+
+  // Project dir mapping: single project only
+  const containerProjectDir = `${CONTAINER_PROJECTS_BASE}/${project.projectCode}`
+  const blockedPrefixes = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
+  if (project.projectDir && fs.existsSync(project.projectDir)) {
+    let resolved: string
+    try {
+      resolved = fs.realpathSync(project.projectDir)
+      const isBlocked = blockedPrefixes.some((prefix) => {
+        const prefixWithoutSlash = prefix.replace(/\/$/, '')
+        return resolved === prefixWithoutSlash || resolved.startsWith(prefix)
+      })
+      if (!isBlocked) {
+        mounts.push('-v', `${project.projectDir}:${containerProjectDir}:rw`)
+        envArgs.push('-e', `AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${project.projectCode}=${containerProjectDir}`)
+      } else {
+        logger.warn(`[docker] Skipping blocked path for volume mount: ${project.projectDir}`)
+      }
+    } catch {
+      logger.warn(`[docker] Cannot resolve path, skipping: ${project.projectDir}`)
+    }
+  }
+
+  return { mounts, envArgs }
+}
+
+/**
+ * Get the host-side per-project config directory.
+ * Located at: ~/.ai-support-agent/projects/{tenantCode}/{projectCode}/.ai-support-agent/
+ */
+function getProjectConfigHostDir(project: ProjectRegistration): string {
+  return path.join(getConfigDir(), 'projects', project.tenantCode, project.projectCode, '.ai-support-agent')
+}
+
+// ---------------------------------------------------------------------------
+// DockerSupervisor: one container per project
+// ---------------------------------------------------------------------------
+
+interface DockerContainerHandle {
+  project: ProjectRegistration
+  child: ChildProcess
+  version: string
+  closeHandled: boolean
+}
+
+/**
+ * Manages one Docker container per project.
+ * Spawned from runInDocker() when multiple projects are configured.
+ */
+class DockerSupervisor {
+  private handles = new Map<string, DockerContainerHandle>()
+  private updating = false
+  private opts: DockerRunOptions
+  private version: string
+  private onAllStopped: (() => void) | undefined
+
+  constructor(version: string, opts: DockerRunOptions) {
+    this.version = version
+    this.opts = opts
+  }
+
+  private projectKey(project: ProjectRegistration): string {
+    return `${project.tenantCode}/${project.projectCode}`
+  }
+
+  start(projects: ProjectRegistration[], onStop?: () => void): void {
+    this.onAllStopped = onStop
+
+    for (const project of projects) {
+      this.spawnProject(project)
+    }
+
+    // Setup shutdown handlers
+    let shuttingDown = false
+    const shutdown = (): void => {
+      if (shuttingDown) return
+      shuttingDown = true
+      // Set updating flag so the close handler does not call process.exit again
+      this.updating = true
+      logger.info(t('runner.shuttingDown'))
+      this.stopAll()
+      onStop?.()
+      process.exit(0)
+    }
+    process.on('SIGINT', () => shutdown())
+    process.on('SIGTERM', () => shutdown())
+  }
+
+  private getImageTag(project: ProjectRegistration): string {
+    const projectTag = getProjectImageTag(project.tenantCode, project.projectCode, this.version)
+    try {
+      execFileSync('docker', ['image', 'inspect', projectTag], { stdio: 'ignore' })
+      return projectTag
+    } catch {
+      return `${IMAGE_NAME}:${this.version}`
+    }
+  }
+
+  private async rebuildAndRestart(project: ProjectRegistration, projectConfigHostDir: string): Promise<void> {
+    const rebuildMarker = path.join(projectConfigHostDir, 'docker-rebuild-needed')
+    if (fs.existsSync(rebuildMarker)) {
+      fs.unlinkSync(rebuildMarker)
+      const projectDockerfile = getProjectDockerfilePath(project.tenantCode, project.projectCode)
+      if (fs.existsSync(projectDockerfile)) {
+        try {
+          buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile)
+        } catch (err) {
+          logger.error(`[docker] Image build failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.error(`[docker] Container ${this.projectKey(project)} will not be restarted due to build failure.`)
+          return
+        }
+      }
+    }
+    this.spawnProject(project)
+  }
+
+  private spawnProject(project: ProjectRegistration): void {
+    const key = this.projectKey(project)
+    const projectConfigHostDir = getProjectConfigHostDir(project)
+
+    const { mounts, envArgs } = buildProjectVolumeMounts(project, projectConfigHostDir)
+
+    const containerArgs = [
+      'ai-support-agent', 'start', '--no-docker',
+      '--project', key,
+    ]
+    if (this.opts.pollInterval !== undefined) {
+      containerArgs.push('--poll-interval', String(this.opts.pollInterval))
+    }
+    if (this.opts.heartbeatInterval !== undefined) {
+      containerArgs.push('--heartbeat-interval', String(this.opts.heartbeatInterval))
+    }
+    if (this.opts.verbose) {
+      containerArgs.push('--verbose')
+    }
+    if (this.opts.autoUpdate === false) {
+      containerArgs.push('--no-auto-update')
+    }
+    if (this.opts.updateChannel) {
+      containerArgs.push('--update-channel', this.opts.updateChannel)
+    }
+
+    const interactive = process.stdin.isTTY ? ['-it'] : ['-i']
+    const imageTag = this.getImageTag(project)
+    const dockerArgs = [
+      'run', '--rm', ...interactive,
+      ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
+      ...mounts,
+      ...envArgs,
+      imageTag,
+      ...containerArgs,
+    ]
+
+    logger.info(`[docker] Starting container for project: ${key}`)
+    const child = spawn('docker', dockerArgs, { stdio: 'inherit' })
+
+    const handle: DockerContainerHandle = {
+      project,
+      child,
+      version: this.version,
+      closeHandled: false,
+    }
+    this.handles.set(key, handle)
+
+    child.on('error', (err) => {
+      logger.error(`[docker] Container error for ${key}: ${err.message}`)
+    })
+
+    child.on('close', (code) => {
+      if (handle.closeHandled) return
+      handle.closeHandled = true
+      this.handles.delete(key)
+
+      if (code === DOCKER_UPDATE_EXIT_CODE && !this.updating) {
+        this.updating = true
+        logger.info(`[docker] Container ${key} exited for update. Stopping all containers and rebuilding...`)
+        this.stopAll()
+        void installUpdateAndRestart(projectConfigHostDir).catch((err) => {
+          logger.error(`[docker] Update failed: ${err instanceof Error ? err.message : String(err)}`)
+          process.exit(1)
+        })
+        return
+      }
+
+      if (code === DOCKER_RESTART_EXIT_CODE && !this.updating) {
+        logger.info(`[docker] Container ${key} requested restart. Rebuilding image if needed...`)
+        void this.rebuildAndRestart(project, projectConfigHostDir).catch((err) => {
+          logger.error(`[docker] Restart failed: ${err instanceof Error ? err.message : String(err)}`)
+        })
+        return
+      }
+
+      if (this.handles.size === 0 && !this.updating) {
+        // All containers have exited cleanly
+        this.onAllStopped?.()
+        process.exit(code ?? 0)
+      }
+    })
+  }
+
+  stopAll(): void {
+    for (const [key, handle] of this.handles) {
+      if (!handle.closeHandled) {
+        logger.info(`[docker] Stopping container for project: ${key}`)
+        handle.child.kill('SIGTERM')
+      }
+    }
+  }
+}
+
 let isDockerRunning = false
 
 /** Reset the running flag (for testing). */
@@ -388,6 +726,58 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   const version = ensureImage(customDockerfile)
 
+  // Determine projects to run
+  const allProjects = config?.projects ?? []
+  let projects: ProjectRegistration[]
+
+  if (opts.project) {
+    // Single-project mode (e.g. for testing or external invocation)
+    const slashIdx = opts.project.indexOf('/')
+    if (slashIdx < 0) {
+      logger.error(`[docker] --project must be in "tenantCode/projectCode" format: ${opts.project}`)
+      process.exit(1)
+      return
+    }
+    const tenantCode = opts.project.substring(0, slashIdx)
+    const projectCode = opts.project.substring(slashIdx + 1)
+    projects = allProjects.filter(
+      (p) => p.tenantCode === tenantCode && p.projectCode === projectCode,
+    )
+    if (projects.length === 0) {
+      if (opts.token || process.env.AI_SUPPORT_AGENT_TOKEN) {
+        // Fallback: create a temporary project from env/CLI args
+        projects = [{
+          tenantCode,
+          projectCode,
+          token: opts.token ?? process.env.AI_SUPPORT_AGENT_TOKEN ?? '',
+          apiUrl: opts.apiUrl ?? process.env.AI_SUPPORT_AGENT_API_URL ?? '',
+        }]
+      } else {
+        logger.error(`[docker] Project not found: ${opts.project}`)
+        process.exit(1)
+        return
+      }
+    }
+  } else if (allProjects.length > 0) {
+    // Multi-project supervisor mode: one container per project
+    projects = allProjects
+  } else {
+    // No config: run single container with legacy volume mount approach
+    projects = []
+  }
+
+  ensureClaudeJsonIntegrity()
+
+  if (projects.length > 0) {
+    // Per-project container mode (new architecture)
+    logger.info(`[docker] Starting ${projects.length} project container(s)...`)
+    const supervisor = new DockerSupervisor(version, opts)
+    supervisor.start(projects, () => { isDockerRunning = false })
+    return
+  }
+
+  // Legacy fallback: single container handling all projects via shared volume mount
+  // (used when no projects are registered in config — e.g. token/apiUrl passed via CLI)
   logger.info(t('docker.starting'))
 
   const { mounts, projectMappings } = buildVolumeMounts()
@@ -404,8 +794,6 @@ export function runInDocker(opts: DockerRunOptions): void {
     `${IMAGE_NAME}:${version}`,
     ...containerArgs,
   ]
-
-  ensureClaudeJsonIntegrity()
 
   const child = spawn('docker', dockerArgs, {
     stdio: 'inherit',

@@ -36,7 +36,7 @@ describe('ChildProcessManager', () => {
     jest.useRealTimers()
   })
 
-  const project = { projectCode: 'proj-a', token: 'tok-a', apiUrl: 'http://api-a' }
+  const project = { tenantCode: 'mbc', projectCode: 'proj-a', token: 'tok-a', apiUrl: 'http://api-a' }
   const options = { pollInterval: 3000, heartbeatInterval: 60000 }
 
   describe('forkProject', () => {
@@ -305,7 +305,7 @@ describe('ChildProcessManager', () => {
       const child2 = createMockChild()
       mockFork.mockReturnValueOnce(child1).mockReturnValueOnce(child2)
 
-      const project2 = { projectCode: 'proj-b', token: 'tok-b', apiUrl: 'http://api-b' }
+      const project2 = { tenantCode: 'mbc', projectCode: 'proj-b', token: 'tok-b', apiUrl: 'http://api-b' }
 
       manager.forkProject(project, 'agent-1', options)
       manager.forkProject(project2, 'agent-1', options)
@@ -413,7 +413,7 @@ describe('ChildProcessManager', () => {
 
       manager.forkProject(project, 'agent-1', options)
       manager.forkProject(
-        { projectCode: 'proj-b', token: 'tok-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'tok-b', apiUrl: 'http://api-b' },
         'agent-1',
         options,
       )

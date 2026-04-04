@@ -28,6 +28,7 @@
   "auth.url": "URL: {{url}}",
   "auth.selectProject": "ブラウザでプロジェクトを選択してトークンを発行してください...",
   "auth.noApiUrl": "API URLが取得できませんでした",
+  "auth.noTenantCode": "認証レスポンスからtenantCodeが取得できませんでした",
   "auth.failed": "認証に失敗しました: {{message}}",
   "auth.timeout": "認証がタイムアウトしました（5分）",
   "auth.invalidProtocol": "無効なURL: http および https プロトコルのみ使用できます。",

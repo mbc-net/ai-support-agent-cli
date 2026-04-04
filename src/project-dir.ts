@@ -8,7 +8,7 @@ import { t } from './i18n'
 import type { ProjectRegistration } from './types'
 
 function getDefaultProjectDirTemplate(): string {
-  return path.join(getConfigDir(), 'projects', '{projectCode}')
+  return path.join(getConfigDir(), 'projects', '{tenantCode}', '{projectCode}')
 }
 
 const PROJECT_SUBDIRS = ['workspace/repos', 'workspace/docs', 'workspace/artifacts', 'uploads'] as const
@@ -18,11 +18,12 @@ const AWS_DIR = 'aws'
 const SSH_DIR = 'ssh'
 
 /**
- * Expand ~ and {projectCode} in a path template
+ * Expand ~, {tenantCode}, and {projectCode} in a path template
  */
-export function expandPath(template: string, projectCode: string): string {
+export function expandPath(template: string, projectCode: string, tenantCode?: string): string {
   return template
     .replace(/^~(?=$|[/\\])/, os.homedir())
+    .replace(/\{tenantCode\}/g, tenantCode ?? 'unknown')
     .replace(/\{projectCode\}/g, projectCode)
 }
 
@@ -59,10 +60,10 @@ export function resolveProjectDir(
   }
 
   if (project.projectDir) {
-    return expandPath(project.projectDir, project.projectCode)
+    return expandPath(project.projectDir, project.projectCode, project.tenantCode)
   }
   const template = defaultProjectDir ?? getDefaultProjectDirTemplate()
-  return expandPath(template, project.projectCode)
+  return expandPath(template, project.projectCode, project.tenantCode)
 }
 
 /**

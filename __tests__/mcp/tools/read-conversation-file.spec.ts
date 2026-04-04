@@ -217,11 +217,13 @@ describe('read-conversation-file tool', () => {
       expect(result.content[0].text).toContain('downloaded to:')
       expect(result.content[0].text).toContain('Bash or Read tools')
 
-      // Verify file was actually written
-      const tmpDir = path.join(os.tmpdir(), 'ai-support-agent-files')
-      const tmpFile = path.join(tmpDir, 'document.pdf')
-      expect(fs.existsSync(tmpFile)).toBe(true)
-      expect(fs.readFileSync(tmpFile)).toEqual(pdfBuffer)
+      // Verify file was actually written — extract path from response text
+      // (implementation uses a uniqueId prefix: "{uuid8}_{filename}")
+      const text = result.content[0].text
+      const match = text.match(/downloaded to: (.+)/)
+      const tmpFilePath = match![1].trim()
+      expect(fs.existsSync(tmpFilePath)).toBe(true)
+      expect(fs.readFileSync(tmpFilePath)).toEqual(pdfBuffer)
     })
 
     it('should download xlsx to temp file and return path', async () => {
@@ -274,10 +276,14 @@ describe('read-conversation-file tool', () => {
       expect(result.content[0].text).toContain('downloaded to:')
 
       // Verify file was written inside tmpDir, not outside
+      // extract path from response text (implementation uses a uniqueId prefix)
+      const text = result.content[0].text
+      const match = text.match(/downloaded to: (.+)/)
+      const tmpFilePath = match![1].trim()
       const tmpDir = path.join(os.tmpdir(), 'ai-support-agent-files')
-      const tmpFile = path.join(tmpDir, 'traversal.pdf')
-      expect(fs.existsSync(tmpFile)).toBe(true)
-      expect(fs.readFileSync(tmpFile)).toEqual(pdfBuffer)
+      expect(tmpFilePath.startsWith(tmpDir)).toBe(true)
+      expect(fs.existsSync(tmpFilePath)).toBe(true)
+      expect(fs.readFileSync(tmpFilePath)).toEqual(pdfBuffer)
     })
 
     it('should download other binary files to temp file', async () => {

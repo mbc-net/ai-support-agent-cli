@@ -9,7 +9,7 @@ jest.mock('../../src/config-manager', () => ({
 }))
 
 import { existsSync } from 'fs'
-import { getDockerfilePath, getDockerContextDir, getConfigDockerfilePath, resolveDockerfile } from '../../src/docker/dockerfile-path'
+import { getDockerfilePath, getDockerContextDir, getConfigDockerfilePath, getProjectDockerfilePath, getProjectImageTag, resolveDockerfile } from '../../src/docker/dockerfile-path'
 
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>
 
@@ -46,6 +46,20 @@ describe('dockerfile-path', () => {
     it('should return Dockerfile path inside config directory', () => {
       const result = getConfigDockerfilePath()
       expect(result).toBe('/mock/config/Dockerfile')
+    })
+  })
+
+  describe('getProjectDockerfilePath', () => {
+    it('should return path under projects/{tenantCode}/{projectCode}/Dockerfile', () => {
+      const result = getProjectDockerfilePath('mbc', 'PROJ_01')
+      expect(result).toBe('/mock/config/projects/mbc/PROJ_01/Dockerfile')
+    })
+  })
+
+  describe('getProjectImageTag', () => {
+    it('should return image tag with lowercased projectCode', () => {
+      const result = getProjectImageTag('mbc', 'PROJ_01', '1.2.3')
+      expect(result).toBe('ai-support-agent-mbc-proj_01:1.2.3')
     })
   })
 

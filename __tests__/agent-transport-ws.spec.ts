@@ -358,6 +358,7 @@ describe('processCommand processing flag', () => {
         availableChatModes: [],
         activeChatMode: undefined,
         mcpConfigPath: undefined,
+        dockerCustomizationHash: undefined,
       },
       configSyncDeps: {} as any,
       transportState: state,

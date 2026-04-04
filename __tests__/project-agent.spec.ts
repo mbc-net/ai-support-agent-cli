@@ -96,7 +96,7 @@ describe('ProjectAgent', () => {
     disconnect: jest.Mock
   }
 
-  const project = { projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api' }
+  const project = { tenantCode: 'mbc', projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api' }
   const options = { pollInterval: 5000, heartbeatInterval: 30000 }
 
   beforeEach(() => {
@@ -809,7 +809,7 @@ describe('ProjectAgent', () => {
     })
 
     it('should write AWS config when project config has AWS accounts and projectDir', async () => {
-      const projectWithDir = { projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api', projectDir: '/tmp/proj' }
+      const projectWithDir = { tenantCode: 'mbc', projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api', projectDir: '/tmp/proj' }
       const mockConfig = {
         configHash: 'aws-hash',
         project: { projectCode: 'test-proj', projectName: 'Test' },
@@ -1343,7 +1343,7 @@ describe('ProjectAgent', () => {
       }
     })
 
-    it('should call process.exit(0) instead of reExecProcess when running in Docker', async () => {
+    it('should call process.exit(43) instead of reExecProcess when running in Docker', async () => {
       const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
       const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
       process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
@@ -1362,8 +1362,8 @@ describe('ProjectAgent', () => {
         // Advance past setTimeout(1000)
         await jest.advanceTimersByTimeAsync(1000)
 
-        // In Docker mode, exits cleanly without spawning a new process
-        expect(mockExit).toHaveBeenCalledWith(0)
+        // In Docker mode, exits with DOCKER_RESTART_EXIT_CODE (43) so DockerSupervisor can restart
+        expect(mockExit).toHaveBeenCalledWith(43)
         expect(mockedReExecProcess).not.toHaveBeenCalled()
       } finally {
         mockExit.mockRestore()
@@ -1597,9 +1597,47 @@ describe('ProjectAgent', () => {
     })
   })
 
+  describe('performDockerRebuild', () => {
+    it('should write docker-rebuild-needed marker and exit with 43', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockMkdirSync = jest.spyOn(mockFs, 'mkdirSync').mockImplementation(() => undefined)
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation(() => undefined)
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        await agent.performDockerRebuild()
+
+        expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Docker rebuild requested'))
+
+        // Advance past setTimeout(1000)
+        await jest.advanceTimersByTimeAsync(1000)
+
+        expect(mockWriteFileSync).toHaveBeenCalled()
+        expect(mockExit).toHaveBeenCalledWith(43)
+      } finally {
+        mockExit.mockRestore()
+        mockMkdirSync.mockRestore()
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) {
+          delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        } else {
+          process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+        }
+      }
+    })
+  })
+
   describe('project directory', () => {
     it('should initialize project directory when projectDir is set', () => {
-      const projectWithDir = { projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api', projectDir: '/tmp/proj' }
+      const projectWithDir = { tenantCode: 'mbc', projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api', projectDir: '/tmp/proj' }
       const agent = new ProjectAgent(projectWithDir, 'agent-1', options)
       expect(agent).toBeDefined()
     })

@@ -55,6 +55,7 @@ describe('cli/auth-commands', () => {
         token: 'auth-token',
         apiUrl: 'http://callback-api',
         projectCode: 'my-proj',
+        tenantCode: 'mbc',
       }),
       stop: jest.fn(),
     })
@@ -89,7 +90,7 @@ describe('cli/auth-commands', () => {
   describe('configure action', () => {
     it('should auto-resolve projectCode from API when --project-code is not specified', async () => {
       const mockGetProjectConfig = jest.fn().mockResolvedValue({
-        project: { projectCode: 'RESOLVED_01', projectName: 'Resolved Project' },
+        project: { tenantCode: 'mbc', projectCode: 'RESOLVED_01', projectName: 'Resolved Project' },
         configHash: 'hash',
         agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true },
       })
@@ -109,6 +110,7 @@ describe('cli/auth-commands', () => {
       expect(MockedApiClient).toHaveBeenCalledWith('http://my-api', 'my-token')
       expect(mockGetProjectConfig).toHaveBeenCalled()
       expect(mockedAddProject).toHaveBeenCalledWith({
+        tenantCode: expect.any(String),
         projectCode: 'RESOLVED_01',
         token: 'my-token',
         apiUrl: 'http://my-api',
@@ -136,7 +138,16 @@ describe('cli/auth-commands', () => {
       expect(mockedAddProject).not.toHaveBeenCalled()
     })
 
-    it('should save project with custom project code (skip API resolution)', async () => {
+    it('should save project with custom project code (always resolves tenantCode from API)', async () => {
+      const mockGetProjectConfig = jest.fn().mockResolvedValue({
+        project: { tenantCode: 'mbc', projectCode: 'OTHER_CODE', projectName: 'Other Project' },
+        configHash: 'hash',
+        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true },
+      })
+      MockedApiClient.mockImplementation(() => ({
+        getProjectConfig: mockGetProjectConfig,
+      }) as unknown as ApiClient)
+
       const program = new Command()
         .exitOverride()
         .configureOutput({ writeOut: () => {}, writeErr: () => {} })
@@ -146,8 +157,11 @@ describe('cli/auth-commands', () => {
       const configureCmd = program.commands.find((cmd) => cmd.name() === 'configure')!
       await configureCmd.parseAsync(['node', 'test', '--token', 'my-token', '--api-url', 'http://my-api', '--project-code', 'my-proj'])
 
-      expect(MockedApiClient).not.toHaveBeenCalled()
+      // Always calls API to resolve tenantCode, but uses the provided projectCode
+      expect(MockedApiClient).toHaveBeenCalled()
+      expect(mockGetProjectConfig).toHaveBeenCalled()
       expect(mockedAddProject).toHaveBeenCalledWith({
+        tenantCode: 'mbc',
         projectCode: 'my-proj',
         token: 'my-token',
         apiUrl: 'http://my-api',
@@ -178,6 +192,7 @@ describe('cli/auth-commands', () => {
           token: 'auth-token',
           apiUrl: 'http://callback-api',
           projectCode: 'my-proj',
+          tenantCode: 'mbc',
         }),
         stop: jest.fn(),
       })
@@ -194,6 +209,7 @@ describe('cli/auth-commands', () => {
 
       expect(mockedStartAuthServer).toHaveBeenCalled()
       expect(mockedAddProject).toHaveBeenCalledWith({
+        tenantCode: expect.any(String),
         projectCode: 'my-proj',
         token: 'auth-token',
         apiUrl: 'http://callback-api',
@@ -238,6 +254,7 @@ describe('cli/auth-commands', () => {
         waitForCallback: jest.fn().mockResolvedValue({
           token: 'auth-token',
           apiUrl: 'http://callback-api',
+          tenantCode: 'mbc',
         }),
         stop: jest.fn(),
       })
@@ -285,6 +302,7 @@ describe('cli/auth-commands', () => {
         waitForCallback: jest.fn().mockResolvedValue({
           token: 'auth-token',
           projectCode: 'my-proj',
+          tenantCode: 'mbc',
         }),
         stop: jest.fn(),
       })
@@ -325,6 +343,7 @@ describe('cli/auth-commands', () => {
           token: 'auth-token',
           apiUrl: 'http://callback-api',
           projectCode: 'my-proj',
+          tenantCode: 'mbc',
         }),
         stop: jest.fn(),
       })
@@ -339,6 +358,33 @@ describe('cli/auth-commands', () => {
       await loginCmd.parseAsync(['node', 'test', '--url', 'http://my-web', '--port', '8888'])
 
       expect(mockedStartAuthServer).toHaveBeenCalledWith(8888, 'http://my-web')
+    })
+
+    it('should exit with error when callback has no tenantCode', async () => {
+      mockedStartAuthServer.mockResolvedValue({
+        url: 'http://localhost:12345',
+        nonce: 'test-nonce',
+        waitForCallback: jest.fn().mockResolvedValue({
+          token: 'auth-token',
+          apiUrl: 'http://callback-api',
+          projectCode: 'my-proj',
+          // no tenantCode
+        }),
+        stop: jest.fn(),
+      })
+
+      const program = new Command()
+        .exitOverride()
+        .configureOutput({ writeOut: () => {}, writeErr: () => {} })
+
+      registerAuthCommands(program)
+
+      const loginCmd = program.commands.find((cmd) => cmd.name() === 'login')!
+      await expect(
+        loginCmd.parseAsync(['node', 'test', '--url', 'http://my-web']),
+      ).rejects.toThrow('process.exit called')
+      expect(exitSpy).toHaveBeenCalledWith(1)
+      expect(logger.error).toHaveBeenCalled()
     })
   })
 })

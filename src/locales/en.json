@@ -28,6 +28,7 @@
   "auth.url": "URL: {{url}}",
   "auth.selectProject": "Select a project in the browser and issue a token...",
   "auth.noApiUrl": "Could not obtain API URL",
+  "auth.noTenantCode": "Could not obtain tenantCode from authentication response",
   "auth.failed": "Authentication failed: {{message}}",
   "auth.timeout": "Authentication timed out (5 minutes)",
   "auth.invalidProtocol": "Invalid URL: only http and https protocols are allowed.",
