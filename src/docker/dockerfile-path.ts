@@ -31,6 +31,21 @@ export function getConfigDockerfilePath(): string {
   return join(getConfigDir(), 'Dockerfile')
 }
 
+/**
+ * Get the path to the per-project Dockerfile in the config directory.
+ * (~/.ai-support-agent/projects/{tenantCode}/{projectCode}/Dockerfile)
+ */
+export function getProjectDockerfilePath(tenantCode: string, projectCode: string): string {
+  return join(getConfigDir(), 'projects', tenantCode, projectCode, 'Dockerfile')
+}
+
+/**
+ * Get the Docker image tag for a per-project image.
+ */
+export function getProjectImageTag(tenantCode: string, projectCode: string, version: string): string {
+  return `ai-support-agent-${tenantCode}-${projectCode.toLowerCase()}:${version}`
+}
+
 export interface DockerfileResolution {
   dockerfilePath: string
   contextDir: string

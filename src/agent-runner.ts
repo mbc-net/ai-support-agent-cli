@@ -23,6 +23,12 @@ export interface RunnerOptions {
   verbose?: boolean
   autoUpdate?: boolean
   updateChannel?: ReleaseChannel
+  /**
+   * Filter to a single project. Format: "tenantCode/projectCode"
+   * When set, only the matching project is started.
+   * Used by DockerSupervisor to spawn one container per project.
+   */
+  project?: string
 }
 
 export function startProjectAgent(
@@ -196,6 +202,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     logger.warn(t('runner.cliTokenWarning'))
     const agentId = config?.agentId ?? os.hostname()
     const project: ProjectRegistration = {
+      tenantCode: 'unknown',
       projectCode: PROJECT_CODE_CLI_DIRECT,
       token: options.token,
       apiUrl: options.apiUrl,
@@ -217,6 +224,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
       }
       logger.info(t('runner.envTokenWarning'))
       const project: ProjectRegistration = {
+        tenantCode: 'unknown',
         projectCode: PROJECT_CODE_ENV_DEFAULT,
         token: envToken,
         apiUrl: envApiUrl,
@@ -230,10 +238,28 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     process.exit(1)
   }
 
-  const projects = getProjectList(config)
+  let projects = getProjectList(config)
   if (projects.length === 0) {
     logger.error(t('runner.noProjects'))
     process.exit(1)
+  }
+
+  // Filter to a single project when --project flag is specified (e.g. "mbc/PROJ_A")
+  if (options.project) {
+    const slashIdx = options.project.indexOf('/')
+    if (slashIdx < 0) {
+      logger.error(`[runner] --project must be in "tenantCode/projectCode" format: ${options.project}`)
+      process.exit(1)
+    }
+    const tenantCode = options.project.substring(0, slashIdx)
+    const projectCode = options.project.substring(slashIdx + 1)
+    projects = projects.filter(
+      (p) => p.tenantCode === tenantCode && p.projectCode === projectCode,
+    )
+    if (projects.length === 0) {
+      logger.error(`[runner] Project not found: ${options.project}`)
+      process.exit(1)
+    }
   }
 
   const agentId = config.agentId ?? os.hostname()

@@ -16,6 +16,7 @@ export interface AutoUpdateConfig {
 }
 
 export interface ProjectRegistration {
+  tenantCode: string
   projectCode: string
   token: string
   apiUrl: string

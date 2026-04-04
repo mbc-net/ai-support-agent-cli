@@ -18,8 +18,8 @@ describe('startTokenWatcher', () => {
   })
 
   const projects = [
-    { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-    { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+    { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+    { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
   ]
 
   it('should call onTokenUpdate when token changes for a project', () => {
@@ -27,13 +27,13 @@ describe('startTokenWatcher', () => {
       agentId: 'test',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     })
     mockedGetProjectList.mockReturnValue([
-      { projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
-      { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
+      { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
     ])
 
     const callback = jest.fn()
@@ -70,13 +70,13 @@ describe('startTokenWatcher', () => {
       agentId: 'test',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     })
     mockedGetProjectList.mockReturnValue([
-      { projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
-      { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
+      { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
     ])
 
     const callback = jest.fn()
@@ -124,13 +124,13 @@ describe('startTokenWatcher', () => {
       agentId: 'test',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a-v2', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a-v2', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     })
     mockedGetProjectList.mockReturnValueOnce([
-      { projectCode: 'proj-a', token: 'token-a-v2', apiUrl: 'http://api-a' },
-      { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a-v2', apiUrl: 'http://api-a' },
+      { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
     ])
 
     // Second poll: token-a unchanged (same as v2)
@@ -138,13 +138,13 @@ describe('startTokenWatcher', () => {
       agentId: 'test',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a-v2', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a-v2', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     })
     mockedGetProjectList.mockReturnValueOnce([
-      { projectCode: 'proj-a', token: 'token-a-v2', apiUrl: 'http://api-a' },
-      { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a-v2', apiUrl: 'http://api-a' },
+      { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
     ])
 
     const callback = jest.fn()
@@ -166,13 +166,13 @@ describe('startTokenWatcher', () => {
       agentId: 'test',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-c', token: 'token-c-new', apiUrl: 'http://api-c' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-c', token: 'token-c-new', apiUrl: 'http://api-c' },
       ],
     })
     mockedGetProjectList.mockReturnValue([
-      { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-      { projectCode: 'proj-c', token: 'token-c-new', apiUrl: 'http://api-c' },
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+      { tenantCode: 'mbc', projectCode: 'proj-c', token: 'token-c-new', apiUrl: 'http://api-c' },
     ])
 
     const callback = jest.fn()

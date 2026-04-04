@@ -168,6 +168,10 @@ export const APPSYNC_RECONNECT_BASE_DELAY_MS = 1000
 // Must be distinct from 0 (clean stop) and 1 (error) to avoid false restarts on SIGINT.
 export const DOCKER_UPDATE_EXIT_CODE = 42
 
+// Exit code used by the in-container agent to signal "restart this project's container only"
+// Used when Docker customization changes or a reboot is requested for a single project.
+export const DOCKER_RESTART_EXIT_CODE = 43
+
 // Graceful update deferral
 export const UPDATE_BUSY_WAIT_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes max wait for busy agents
 export const UPDATE_BUSY_POLL_INTERVAL_MS = 3_000          // poll every 3 seconds

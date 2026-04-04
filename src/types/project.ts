@@ -1,6 +1,7 @@
 export interface ProjectConfigResponse {
   configHash: string
   project: {
+    tenantCode?: string
     projectCode: string
     projectName: string
     description?: string
@@ -16,6 +17,10 @@ export interface ProjectConfigResponse {
       appendSystemPrompt?: string
     }
     gitPullStrategy?: 'merge' | 'rebase'
+    dockerCustomization?: {
+      aptPackages?: string[]
+      npmPackages?: string[]
+    }
   }
   aws?: {
     accounts: Array<{

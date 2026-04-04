@@ -19,6 +19,8 @@ jest.mock('../../src/docker/dockerfile-path', () => ({
   getDockerfilePath: jest.fn(() => '/mock/docker/Dockerfile'),
   getDockerContextDir: jest.fn(() => '/mock'),
   getConfigDockerfilePath: jest.fn(() => '/mock/config-dir/Dockerfile'),
+  getProjectDockerfilePath: jest.fn((tenantCode: string, projectCode: string) => `/mock/config-dir/projects/${tenantCode}/${projectCode}/Dockerfile`),
+  getProjectImageTag: jest.fn((tenantCode: string, projectCode: string, version: string) => `ai-support-agent-${tenantCode}-${projectCode}:${version}`),
   resolveDockerfile: jest.fn((customPath?: string) => {
     if (customPath) return { dockerfilePath: customPath, contextDir: require('path').dirname(customPath) }
     return { dockerfilePath: '/mock/docker/Dockerfile', contextDir: '/mock' }
@@ -79,6 +81,9 @@ import {
   syncDockerfileToConfigDir,
   dockerLogin,
   runInDocker,
+  generateProjectDockerfile,
+  buildProjectImage,
+  validatePackageNames,
 } from '../../src/docker/docker-runner'
 
 const mockExecFileSync = execFileSync as jest.MockedFunction<typeof execFileSync>
@@ -211,8 +216,8 @@ describe('docker-runner', () => {
         agentId: 'test-agent',
         createdAt: '2024-01-01T00:00:00.000Z',
         projects: [
-          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/project-a' },
-          { projectCode: 'B', token: 't2', apiUrl: 'http://b', projectDir: '/workspace/project-b' },
+          { tenantCode: 'mbc', projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/project-a' },
+          { tenantCode: 'mbc', projectCode: 'B', token: 't2', apiUrl: 'http://b', projectDir: '/workspace/project-b' },
         ],
       })
 
@@ -229,8 +234,8 @@ describe('docker-runner', () => {
         agentId: 'test-agent',
         createdAt: '2024-01-01T00:00:00.000Z',
         projects: [
-          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/shared' },
-          { projectCode: 'B', token: 't2', apiUrl: 'http://b', projectDir: '/workspace/shared' },
+          { tenantCode: 'mbc', projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/shared' },
+          { tenantCode: 'mbc', projectCode: 'B', token: 't2', apiUrl: 'http://b', projectDir: '/workspace/shared' },
         ],
       })
 
@@ -247,8 +252,8 @@ describe('docker-runner', () => {
         agentId: 'test-agent',
         createdAt: '2024-01-01T00:00:00.000Z',
         projects: [
-          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/etc/secrets' },
-          { projectCode: 'B', token: 't2', apiUrl: 'http://b', projectDir: '/proc/data' },
+          { tenantCode: 'mbc', projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/etc/secrets' },
+          { tenantCode: 'mbc', projectCode: 'B', token: 't2', apiUrl: 'http://b', projectDir: '/proc/data' },
         ],
       })
 
@@ -263,7 +268,7 @@ describe('docker-runner', () => {
         agentId: 'test-agent',
         createdAt: '2024-01-01T00:00:00.000Z',
         projects: [
-          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/nonexistent' },
+          { tenantCode: 'mbc', projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/nonexistent' },
         ],
       })
 
@@ -283,7 +288,7 @@ describe('docker-runner', () => {
         agentId: 'test-agent',
         createdAt: '2024-01-01T00:00:00.000Z',
         projects: [
-          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/symlink-to-etc' },
+          { tenantCode: 'mbc', projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/symlink-to-etc' },
         ],
       })
 
@@ -330,7 +335,7 @@ describe('docker-runner', () => {
         agentId: 'test-agent',
         createdAt: '2024-01-01T00:00:00.000Z',
         projects: [
-          { projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/broken-link' },
+          { tenantCode: 'mbc', projectCode: 'A', token: 't1', apiUrl: 'http://a', projectDir: '/workspace/broken-link' },
         ],
       })
 
@@ -457,6 +462,12 @@ describe('docker-runner', () => {
     it('should not include --no-auto-update when autoUpdate is undefined', () => {
       const args = buildContainerArgs({})
       expect(args).not.toContain('--no-auto-update')
+    })
+
+    it('should include --project flag when opts.project is set', () => {
+      const args = buildContainerArgs({ project: 'mbc/PROJ_A' })
+      expect(args).toContain('--project')
+      expect(args).toContain('mbc/PROJ_A')
     })
   })
 
@@ -1134,5 +1145,750 @@ describe('docker-runner', () => {
       expect(buildCall).toBeDefined()
       expect((buildCall![1] as string[])).toContain('/from-config/Dockerfile')
     })
+
+    it('should spawn one container per project when projects are configured', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      let spawnCount = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCount++
+        return (spawnCount === 1 ? fakeChild1 : fakeChild2) as never
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+          { tenantCode: 'mbc', projectCode: 'PROJ_B', token: 'token-b', apiUrl: 'http://api-b' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      // Two containers should have been spawned
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('should pass --project flag to each project container', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      expect(spawnArgs).toContain('--project')
+      expect(spawnArgs).toContain('mbc/PROJ_A')
+    })
+
+    it('should pass per-project token and apiUrl as env vars', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'my-token', apiUrl: 'http://my-api' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      const eIdx = spawnArgs.indexOf('AI_SUPPORT_AGENT_TOKEN=my-token')
+      expect(eIdx).toBeGreaterThan(-1)
+    })
+
+    it('should stop all containers when one exits with update code 42', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      let spawnCount = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCount++
+        return (spawnCount === 1 ? fakeChild1 : fakeChild2) as never
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+          { tenantCode: 'mbc', projectCode: 'PROJ_B', token: 'token-b', apiUrl: 'http://api-b' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+      mockReadFileSync.mockReturnValue(JSON.stringify({ version: '1.0.1' }))
+
+      runInDocker({})
+
+      // Container for PROJ_A exits with code 42
+      fakeChild1.emit('close', 42)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // Other container (PROJ_B) should have been killed
+      expect(fakeChild2.kill).toHaveBeenCalledWith('SIGTERM')
+      // And npm install should have been triggered
+      expect(mockPerformUpdate).toHaveBeenCalledWith('1.0.1', 'global')
+    })
+
+    it('should exit when all project containers exit cleanly', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+      fakeChild.emit('close', 0)
+
+      expect(mockExit).toHaveBeenCalledWith(0)
+    })
+
+    it('should mount per-project config dir for each container', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      // Should contain a volume mount for the per-project config dir
+      const vIdx = spawnArgs.indexOf('-v')
+      expect(vIdx).toBeGreaterThan(-1)
+      // One of the -v args should include the project config path
+      const vArgs: string[] = []
+      for (let i = 0; i < spawnArgs.length; i++) {
+        if (spawnArgs[i] === '-v' && i + 1 < spawnArgs.length) {
+          vArgs.push(spawnArgs[i + 1])
+        }
+      }
+      const hasProjectConfigMount = vArgs.some((v) => v.includes('mbc') && v.includes('PROJ_A'))
+      expect(hasProjectConfigMount).toBe(true)
+    })
+
+    it('should use tenantCode in project config dir path', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'acme', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      const vArgs: string[] = []
+      for (let i = 0; i < spawnArgs.length; i++) {
+        if (spawnArgs[i] === '-v' && i + 1 < spawnArgs.length) {
+          vArgs.push(spawnArgs[i + 1])
+        }
+      }
+      // Should include tenantCode in the config dir path
+      const hasTenantMount = vArgs.some((v) => v.includes('acme') && v.includes('PROJ_A'))
+      expect(hasTenantMount).toBe(true)
+    })
+
+    it('should mount .claude and .claude.json when they exist in per-project mode', () => {
+      const home = os.homedir()
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return s === `${home}/.claude` || s === `${home}/.claude.json`
+      })
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      const vArgs: string[] = []
+      for (let i = 0; i < spawnArgs.length; i++) {
+        if (spawnArgs[i] === '-v' && i + 1 < spawnArgs.length) {
+          vArgs.push(spawnArgs[i + 1])
+        }
+      }
+      expect(vArgs.some((v) => v.includes('.claude:'))).toBe(true)
+      expect(vArgs.some((v) => v.includes('.claude.json:'))).toBe(true)
+    })
+
+    it('should mount projectDir and set PROJECT_DIR_MAP when project.projectDir exists', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          {
+            tenantCode: 'mbc',
+            projectCode: 'PROJ_A',
+            token: 'token-a',
+            apiUrl: 'http://api-a',
+            projectDir: '/projects/proj-a',
+          },
+        ],
+      })
+      mockExistsSync.mockImplementation((p: unknown) => p === '/projects/proj-a')
+      mockRealpathSync.mockImplementation((p: unknown) => p as string)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      const vArgs: string[] = []
+      for (let i = 0; i < spawnArgs.length; i++) {
+        if (spawnArgs[i] === '-v' && i + 1 < spawnArgs.length) {
+          vArgs.push(spawnArgs[i + 1])
+        }
+      }
+      expect(vArgs.some((v) => v.includes('/projects/proj-a:'))).toBe(true)
+      const eArgs: string[] = []
+      for (let i = 0; i < spawnArgs.length; i++) {
+        if (spawnArgs[i] === '-e' && i + 1 < spawnArgs.length) {
+          eArgs.push(spawnArgs[i + 1])
+        }
+      }
+      expect(eArgs.some((e) => e.startsWith('AI_SUPPORT_AGENT_PROJECT_DIR_MAP='))).toBe(true)
+    })
+
+    it('should pass ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN when set', () => {
+      process.env.ANTHROPIC_API_KEY = 'test-anthropic-key'
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'test-oauth-token'
+
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      const eArgs: string[] = []
+      for (let i = 0; i < spawnArgs.length; i++) {
+        if (spawnArgs[i] === '-e' && i + 1 < spawnArgs.length) {
+          eArgs.push(spawnArgs[i + 1])
+        }
+      }
+      expect(eArgs).toContain('ANTHROPIC_API_KEY=test-anthropic-key')
+      expect(eArgs).toContain('CLAUDE_CODE_OAUTH_TOKEN=test-oauth-token')
+
+      delete process.env.ANTHROPIC_API_KEY
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+    })
+
+    it('should handle error from project container spawn', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      fakeChild.emit('error', new Error('spawn failed'))
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('spawn failed'))
+    })
+
+    it('should not exit when one of multiple containers exits cleanly (others still running)', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      let spawnCount = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCount++
+        return (spawnCount === 1 ? fakeChild1 : fakeChild2) as never
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+          { tenantCode: 'mbc', projectCode: 'PROJ_B', token: 'token-b', apiUrl: 'http://api-b' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      // Only first container exits (second still running)
+      fakeChild1.emit('close', 0)
+
+      // Should not exit yet (second container still running)
+      expect(mockExit).not.toHaveBeenCalled()
+    })
+
+    it('should call process.exit(1) when installUpdateAndRestart rejects in supervisor mode', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+      // Make reExecProcess throw synchronously to simulate a critical failure
+      mockReExecProcess.mockImplementation(() => { throw new Error('reExecProcess failed') })
+
+      runInDocker({})
+
+      fakeChild.emit('close', 42)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(mockExit).toHaveBeenCalledWith(1)
+    })
+
+    it('should skip blocked projectDir mount in per-project mode', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          {
+            tenantCode: 'mbc',
+            projectCode: 'PROJ_A',
+            token: 'token-a',
+            apiUrl: 'http://api-a',
+            projectDir: '/etc/passwd',
+          },
+        ],
+      })
+      mockExistsSync.mockImplementation((p: unknown) => p === '/etc/passwd')
+      mockRealpathSync.mockImplementation((p: unknown) => p as string)
+
+      runInDocker({})
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Skipping blocked path'))
+    })
+
+    it('should ignore second update exit (updating flag) when two containers exit with 42', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      let spawnCount = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCount++
+        return (spawnCount === 1 ? fakeChild1 : fakeChild2) as never
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+          { tenantCode: 'mbc', projectCode: 'PROJ_B', token: 'token-b', apiUrl: 'http://api-b' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+      mockReadFileSync.mockReturnValue(JSON.stringify({ version: '1.0.1' }))
+
+      runInDocker({})
+
+      // Both containers exit with 42
+      fakeChild1.emit('close', 42)
+      fakeChild2.emit('close', 42)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // performUpdate should only have been called once (not twice)
+      // due to the `this.updating` guard
+      expect(mockPerformUpdate).toHaveBeenCalledTimes(1)
+    })
+
+    it('should guard against duplicate runInDocker calls', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+
+      runInDocker({})
+      runInDocker({}) // second call should be ignored
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('already running'))
+      // spawn only called once
+      expect(mockSpawn).toHaveBeenCalledTimes(1)
+
+      // Clean up: reset so subsequent tests work
+      resetIsDockerRunning()
+      fakeChild.emit('close', 0)
+    })
+
+    it('should handle SIGINT and SIGTERM in multi-project mode', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      const processOnSpy = jest.spyOn(process, 'on')
+      runInDocker({})
+
+      const sigintCall = processOnSpy.mock.calls.find(call => call[0] === 'SIGINT')
+      expect(sigintCall).toBeDefined()
+      const handler = sigintCall![1] as () => void
+      handler()
+
+      expect(fakeChild.kill).toHaveBeenCalledWith('SIGTERM')
+      processOnSpy.mockRestore()
+    })
+
+    it('should handle realpathSync failure for project.projectDir (skip mount)', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          {
+            tenantCode: 'mbc',
+            projectCode: 'PROJ_A',
+            token: 'token-a',
+            apiUrl: 'http://api-a',
+            projectDir: '/bad/path',
+          },
+        ],
+      })
+      mockExistsSync.mockImplementation((p: unknown) => p === '/bad/path')
+      mockRealpathSync.mockImplementation(() => { throw new Error('lstat failed') })
+
+      runInDocker({})
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Cannot resolve path'))
+    })
+
+    it('should use fallback project from token when --project does not match config', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({ project: 'mbc/PROJ_A', token: 'cli-token', apiUrl: 'http://cli-api' })
+
+      // Should still spawn a container using the CLI token
+      expect(mockSpawn).toHaveBeenCalledTimes(1)
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      expect(spawnArgs).toContain('mbc/PROJ_A')
+    })
+
+    it('should call process.exit(1) when --project has no slash', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({ project: 'PROJ_A_WITHOUT_SLASH' })
+      expect(mockExit).toHaveBeenCalledWith(1)
+    })
+
+    it('should call process.exit(1) when --project not found and no token', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_B', token: 'token-b', apiUrl: 'http://api-b' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({ project: 'mbc/PROJ_A' })
+      expect(mockExit).toHaveBeenCalledWith(1)
+    })
+
+    it('should pass verbose, pollInterval, heartbeatInterval, updateChannel to project containers', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({
+        verbose: true,
+        pollInterval: 5000,
+        heartbeatInterval: 30000,
+        autoUpdate: false,
+        updateChannel: 'beta',
+      })
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      expect(spawnArgs).toContain('--verbose')
+      expect(spawnArgs).toContain('--poll-interval')
+      expect(spawnArgs).toContain('5000')
+      expect(spawnArgs).toContain('--heartbeat-interval')
+      expect(spawnArgs).toContain('30000')
+      expect(spawnArgs).toContain('--no-auto-update')
+      expect(spawnArgs).toContain('--update-channel')
+      expect(spawnArgs).toContain('beta')
+    })
+
+    it('should restart only the project container when exit code is 43 (no rebuild marker)', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      let spawnCount = 0
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockImplementation(() => {
+        spawnCount++
+        return (spawnCount === 1 ? fakeChild1 : fakeChild2) as never
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false) // no rebuild marker, no project-specific image
+
+      runInDocker({})
+      resetIsDockerRunning()
+
+      // Container exits with code 43 (restart signal)
+      fakeChild1.emit('close', 43)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // Should have spawned a second container (restart)
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+      // Should NOT call process.exit
+      expect(mockExit).not.toHaveBeenCalled()
+    })
+
+    it('should rebuild image and restart when exit code is 43 with docker-rebuild-needed marker', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      let spawnCount = 0
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockImplementation(() => {
+        spawnCount++
+        return (spawnCount === 1 ? fakeChild1 : fakeChild2) as never
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      // rebuild marker exists, project Dockerfile exists
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        return ps.includes('docker-rebuild-needed') || ps.includes('PROJ_A/Dockerfile')
+      })
+
+      runInDocker({})
+      resetIsDockerRunning()
+
+      fakeChild1.emit('close', 43)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // unlinkSync should have been called for the marker
+      expect(unlinkSync).toHaveBeenCalled()
+      // docker build should have been called for the project image
+      const dockerBuildCall = mockExecFileSync.mock.calls.find(
+        (c) => Array.isArray(c[1]) && (c[1] as string[]).includes('build'),
+      )
+      expect(dockerBuildCall).toBeDefined()
+      // Should have restarted the container
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('should NOT restart container when image build fails', async () => {
+      let spawnCount = 0
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockImplementation(() => {
+        spawnCount++
+        return fakeChild1 as never
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      // rebuild marker and project Dockerfile exist
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        return ps.includes('docker-rebuild-needed') || ps.includes('PROJ_A/Dockerfile')
+      })
+      // docker build throws
+      mockExecFileSync.mockImplementation((...args: unknown[]) => {
+        const cmdArgs = args[1] as string[]
+        if (Array.isArray(cmdArgs) && cmdArgs.includes('build')) {
+          throw new Error('Build failed')
+        }
+        return Buffer.from('')
+      })
+
+      runInDocker({})
+      resetIsDockerRunning()
+
+      fakeChild1.emit('close', 43)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // Container should NOT have been restarted (spawn called only once for initial start)
+      expect(mockSpawn).toHaveBeenCalledTimes(1)
+      expect(mockExit).not.toHaveBeenCalled()
+    })
+  })
+})
+
+describe('validatePackageNames', () => {
+  it('should accept valid apt package names', () => {
+    expect(() => validatePackageNames(['curl', 'git', 'libssl-dev', 'python3.11', 'g++'], 'apt')).not.toThrow()
+  })
+
+  it('should accept valid npm package names including scoped and versioned', () => {
+    expect(() => validatePackageNames(['typescript', '@playwright/test', 'jest@29.0.0', 'ts-node'], 'npm')).not.toThrow()
+  })
+
+  it('should throw for apt package name with shell metacharacters', () => {
+    expect(() => validatePackageNames(['curl; rm -rf /'], 'apt')).toThrow('Invalid apt package name')
+    expect(() => validatePackageNames(['$(evil)'], 'apt')).toThrow('Invalid apt package name')
+    expect(() => validatePackageNames(['curl && evil'], 'apt')).toThrow('Invalid apt package name')
+  })
+
+  it('should throw for npm package name with shell metacharacters', () => {
+    expect(() => validatePackageNames(['typescript; rm -rf /'], 'npm')).toThrow('Invalid npm package name')
+  })
+
+  it('should throw for empty string package name', () => {
+    expect(() => validatePackageNames([''], 'apt')).toThrow('Invalid apt package name')
+  })
+})
+
+describe('generateProjectDockerfile', () => {
+  it('should generate FROM line only when no packages', () => {
+    const result = generateProjectDockerfile('1.0.0', [], [])
+    expect(result).toBe('FROM ai-support-agent:1.0.0\n')
+  })
+
+  it('should include apt-get install when aptPackages are given', () => {
+    const result = generateProjectDockerfile('1.0.0', ['curl', 'git'], [])
+    expect(result).toContain('apt-get install')
+    expect(result).toContain('curl')
+    expect(result).toContain('git')
+  })
+
+  it('should include npm install -g when npmPackages are given', () => {
+    const result = generateProjectDockerfile('1.0.0', [], ['@playwright/test'])
+    expect(result).toContain('npm install -g @playwright/test')
+  })
+
+  it('should include both apt and npm when both are given', () => {
+    const result = generateProjectDockerfile('1.0.0', ['curl'], ['typescript'])
+    expect(result).toContain('apt-get install')
+    expect(result).toContain('npm install -g typescript')
+  })
+
+  it('should throw when apt package name is invalid', () => {
+    expect(() => generateProjectDockerfile('1.0.0', ['curl; evil'], [])).toThrow('Invalid apt package name')
+  })
+
+  it('should throw when npm package name is invalid', () => {
+    expect(() => generateProjectDockerfile('1.0.0', [], ['ts; evil'])).toThrow('Invalid npm package name')
+  })
+})
+
+describe('buildProjectImage', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('should call execFileSync with correct docker build arguments', () => {
+    const mockExec = execFileSync as jest.MockedFunction<typeof execFileSync>
+    mockExec.mockReturnValue(Buffer.from(''))
+
+    buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile')
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'docker',
+      expect.arrayContaining(['build', '-t', expect.stringContaining('mbc'), '-f', '/path/to/Dockerfile']),
+      expect.any(Object),
+    )
   })
 })

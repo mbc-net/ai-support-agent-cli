@@ -231,8 +231,8 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -265,7 +265,7 @@ describe('agent-runner', () => {
       agentId: 'single-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -335,7 +335,7 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -360,8 +360,8 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -448,7 +448,7 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -492,8 +492,8 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -520,8 +520,8 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     }
 
@@ -576,8 +576,8 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -607,7 +607,7 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -618,7 +618,7 @@ describe('agent-runner', () => {
     await promise
 
     // Simulate new project added via config watcher
-    const newProject = { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' }
+    const newProject = { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' }
     capturedConfigCallbacks.onProjectAdded!(newProject)
 
     expect(mockForkProject).toHaveBeenCalledWith(
@@ -702,6 +702,64 @@ describe('agent-runner', () => {
 
     expect(captureException).toHaveBeenCalledWith('rejected reason', { handler: 'unhandledRejection' })
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('rejected reason'))
+  })
+
+  describe('--project flag filtering', () => {
+    it('should filter to matching tenantCode/projectCode when --project is set', async () => {
+      const mockConfig = {
+        agentId: 'multi-agent',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+          { tenantCode: 'mbc', projectCode: 'PROJ_B', token: 'token-b', apiUrl: 'http://api-b' },
+        ],
+      }
+      mockedLoadConfig.mockReturnValue(mockConfig)
+      mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+      const promise = startAgent({ project: 'mbc/PROJ_A' })
+      await jest.advanceTimersByTimeAsync(100)
+      await promise
+
+      // Only PROJ_A should be forked
+      expect(mockForkProject).toHaveBeenCalledTimes(1)
+      expect(mockForkProject).toHaveBeenCalledWith(
+        expect.objectContaining({ projectCode: 'PROJ_A', tenantCode: 'mbc' }),
+        expect.any(String),
+        expect.any(Object),
+      )
+    })
+
+    it('should call process.exit(1) when --project has no slash (tenantCode is required)', async () => {
+      const mockConfig = {
+        agentId: 'multi-agent',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+          { tenantCode: 'mbc', projectCode: 'PROJ_B', token: 'token-b', apiUrl: 'http://api-b' },
+        ],
+      }
+      mockedLoadConfig.mockReturnValue(mockConfig)
+      mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+      await expect(startAgent({ project: 'PROJ_A' })).rejects.toThrow('process.exit called')
+      expect(exitSpy).toHaveBeenCalledWith(1)
+    })
+
+    it('should call process.exit(1) when --project has no matching project', async () => {
+      const mockConfig = {
+        agentId: 'multi-agent',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      }
+      mockedLoadConfig.mockReturnValue(mockConfig)
+      mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+      await expect(startAgent({ project: 'mbc/NONEXISTENT' })).rejects.toThrow('process.exit called')
+      expect(exitSpy).toHaveBeenCalledWith(1)
+    })
   })
 })
 
@@ -808,7 +866,7 @@ describe('startProjectAgent', () => {
     jest.restoreAllMocks()
   })
 
-  const project = { projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api' }
+  const project = { tenantCode: 'mbc', projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api' }
   const intervals = { pollInterval: 5000, heartbeatInterval: 30000 }
 
   it('should log error and not start timers when registration fails', async () => {

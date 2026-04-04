@@ -52,8 +52,12 @@ async function performBrowserAuth(opts: {
     process.exit(1)
   }
 
+  if (!result.tenantCode) {
+    logger.error(t('auth.noTenantCode'))
+    process.exit(1)
+  }
   const projectCode = result.projectCode ?? PROJECT_CODE_DEFAULT
-  addProject({ projectCode, token: result.token, apiUrl })
+  addProject({ tenantCode: result.tenantCode, projectCode, token: result.token, apiUrl })
   return { projectCode }
 }
 
@@ -105,21 +109,29 @@ export function registerAuthCommands(program: Command): void {
       }
 
       let projectCode = opts.projectCode
-      if (!projectCode) {
-        // Auto-resolve projectCode from API
-        try {
-          logger.info(t('config.resolvingProject'))
-          const client = new ApiClient(opts.apiUrl, opts.token)
-          const config = await client.getProjectConfig()
+      let tenantCode: string | undefined
+      // Always resolve tenantCode and optionally projectCode from API
+      try {
+        logger.info(t('config.resolvingProject'))
+        const client = new ApiClient(opts.apiUrl, opts.token)
+        const config = await client.getProjectConfig()
+        if (!projectCode) {
           projectCode = config.project.projectCode
-          logger.info(t('config.resolvedProject', { projectCode }))
-        } catch (error) {
-          logger.error(t('config.resolveProjectFailed', { message: getErrorMessage(error) }))
-          process.exit(1)
         }
+        tenantCode = config.project.tenantCode
+        logger.info(t('config.resolvedProject', { projectCode }))
+      } catch (error) {
+        logger.error(t('config.resolveProjectFailed', { message: getErrorMessage(error) }))
+        process.exit(1)
+      }
+
+      if (!tenantCode) {
+        logger.error(t('config.resolveProjectFailed', { message: 'tenantCode not returned from API' }))
+        process.exit(1)
       }
 
       addProject({
+        tenantCode,
         projectCode,
         token: opts.token,
         apiUrl: opts.apiUrl,

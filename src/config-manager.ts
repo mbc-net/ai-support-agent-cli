@@ -43,6 +43,7 @@ function migrateConfigIfNeeded(raw: LegacyAgentConfig): AgentConfig {
       lastConnected: raw.lastConnected,
       language: raw.language,
       projects: [{
+        tenantCode: 'unknown',
         projectCode: PROJECT_CODE_DEFAULT,
         token: raw.token,
         apiUrl: raw.apiUrl,
@@ -122,7 +123,7 @@ export function addProject(registration: ProjectRegistration): void {
   const config = loadConfig()
   const projects = config?.projects ?? []
   const existing = projects.findIndex(
-    (p) => p.projectCode === registration.projectCode,
+    (p) => p.tenantCode === registration.tenantCode && p.projectCode === registration.projectCode,
   )
   if (existing >= 0) {
     projects[existing] = registration
@@ -147,12 +148,20 @@ export function removeProject(projectCode: string): boolean {
 }
 
 /**
- * Get registered project list
+ * Get registered project list.
+ * Projects without tenantCode are skipped with a warning (legacy entries).
  */
 export function getProjectList(
   config: AgentConfig,
 ): ProjectRegistration[] {
-  return config.projects ?? []
+  const projects = config.projects ?? []
+  return projects.filter((p) => {
+    if (!p.tenantCode) {
+      logger.warn(`[config] Project "${p.projectCode}" has no tenantCode and will be skipped. Re-run "agent login" to fix.`)
+      return false
+    }
+    return true
+  })
 }
 
 /**
