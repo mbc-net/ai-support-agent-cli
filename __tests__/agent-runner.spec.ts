@@ -5,6 +5,7 @@ import {
   startProjectAgent,
   setupShutdownHandlers,
   resolveAutoUpdateConfig,
+  extractTokenId,
 } from '../src/agent-runner'
 import { AppSyncSubscriber } from '../src/appsync-subscriber'
 import { AGENT_VERSION } from '../src/constants'
@@ -1136,5 +1137,136 @@ describe('resolveAutoUpdateConfig', () => {
   it('should disable auto-update when autoUpdate is false', () => {
     const result = resolveAutoUpdateConfig({ autoUpdate: false })
     expect(result.enabled).toBe(false)
+  })
+})
+
+describe('extractTokenId', () => {
+  it('should extract tokenId from valid token format', () => {
+    expect(extractTokenId('mbc:abc-123-uuid:raw-secret-token')).toBe('abc-123-uuid')
+  })
+
+  it('should return undefined when token has more than 3 parts (invalid format)', () => {
+    expect(extractTokenId('tenant:token-id:raw:token:with:colons')).toBeUndefined()
+  })
+
+  it('should return undefined when token has fewer than 3 parts', () => {
+    expect(extractTokenId('tenant:tokenId')).toBeUndefined()
+  })
+
+  it('should return undefined when token has no colons', () => {
+    expect(extractTokenId('invalidtoken')).toBeUndefined()
+  })
+
+  it('should return empty string when tokenId part is empty', () => {
+    expect(extractTokenId('tenant::rawtoken')).toBe('')
+  })
+})
+
+describe('startAgent tokenId-based agentId', () => {
+  let mockRegister: jest.Mock
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    jest.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called')
+    })
+    jest.spyOn(process, 'on').mockImplementation((() => process) as typeof process.on)
+    jest.useFakeTimers()
+
+    mockRegister = jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql', appsyncApiKey: 'da2-testkey123', transportMode: 'realtime' })
+    const mockInstance = {
+      register: mockRegister,
+      heartbeat: jest.fn().mockResolvedValue({ success: true }),
+      getPendingCommands: jest.fn().mockResolvedValue([]),
+      getCommand: jest.fn(),
+      submitResult: jest.fn(),
+      getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
+      getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
+      updateToken: jest.fn(),
+      setTenantCode: jest.fn(),
+      setProjectCode: jest.fn(),
+    }
+    ;(ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(() => mockInstance as unknown as ApiClient)
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
+    jest.restoreAllMocks()
+  })
+
+  it('should use tokenId from CLI token as agentId in register call', async () => {
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'mbc:cli-token-id:raw-secret',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    // register is called with tokenId as agentId
+    expect(mockRegister).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'cli-token-id' }),
+    )
+  })
+
+  it('should use tokenId from env token as agentId in register call', async () => {
+    const saved = process.env.AI_SUPPORT_AGENT_TOKEN
+    const savedUrl = process.env.AI_SUPPORT_AGENT_API_URL
+    process.env.AI_SUPPORT_AGENT_TOKEN = 'tenant:env-token-id:raw-secret'
+    process.env.AI_SUPPORT_AGENT_API_URL = 'http://env-api'
+    try {
+      mockedLoadConfig.mockReturnValue(null)
+
+      const promise = startAgent({})
+      await jest.advanceTimersByTimeAsync(100)
+      await promise
+
+      expect(mockRegister).toHaveBeenCalledWith(
+        expect.objectContaining({ agentId: 'env-token-id' }),
+      )
+    } finally {
+      if (saved === undefined) delete process.env.AI_SUPPORT_AGENT_TOKEN
+      else process.env.AI_SUPPORT_AGENT_TOKEN = saved
+      if (savedUrl === undefined) delete process.env.AI_SUPPORT_AGENT_API_URL
+      else process.env.AI_SUPPORT_AGENT_API_URL = savedUrl
+    }
+  })
+
+  it('should use tokenId from config project token as agentId in forkProject', async () => {
+    const mockConfig = {
+      agentId: 'ignored-agent-id',
+      createdAt: '2024-01-01',
+      projects: [
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'mbc:config-token-id:raw-secret', apiUrl: 'http://api-a' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(mockForkProject).toHaveBeenCalledWith(
+      expect.any(Object),
+      'config-token-id',
+      expect.any(Object),
+    )
+  })
+
+  it('should fall back to hostname when CLI token has no colons', async () => {
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'legacy-token-without-colons',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(mockRegister).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: os.hostname() }),
+    )
   })
 })

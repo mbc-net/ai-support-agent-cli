@@ -294,6 +294,40 @@ export class ProjectAgent {
       logger.success(t('runner.registered', { prefix: this.prefix, agentId: result.agentId }))
       logger.debug(`${this.prefix} Register response: transportMode=${result.transportMode ?? 'none'}, appsyncUrl=${result.appsyncUrl ? 'present' : 'absent'}, wsEnabled=${result.wsEnabled}`)
       logger.debug(`${this.prefix} Full register response keys: ${JSON.stringify(Object.keys(result))}`)
+
+      // Report docker build error (if any) via heartbeat
+      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+        const buildErrorPath = path.join(getConfigDir(), 'docker-build-error')
+        let dockerBuildError: string | undefined
+        try {
+          dockerBuildError = fs.readFileSync(buildErrorPath, 'utf-8').trim() || undefined
+        } catch {
+          // File does not exist — no build error
+        }
+        if (dockerBuildError !== undefined) {
+          try {
+            await this.client.heartbeat(
+              result.agentId,
+              { platform: os.platform(), arch: os.arch(), cpuUsage: 0, memoryUsage: 0, uptime: os.uptime() },
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              dockerBuildError,
+            )
+            // Delete the error file after successful report to avoid re-reporting on next startup
+            try {
+              fs.unlinkSync(buildErrorPath)
+            } catch {
+              // Ignore deletion failure — will be re-reported next time
+            }
+          } catch (err: unknown) {
+            logger.warn(`${this.prefix} Failed to report docker build error: ${getErrorMessage(err)}`)
+            // Keep the file so it can be reported on next startup
+          }
+        }
+      }
     } catch (error) {
       if (isAuthenticationError(error)) {
         logger.error(t('runner.authError', { prefix: this.prefix, detail: getErrorMessage(error) }))

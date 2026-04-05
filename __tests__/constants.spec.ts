@@ -97,5 +97,7 @@ describe('constants', () => {
     expect(constants.API_ENDPOINTS.DB_CREDENTIALS('tenant1')).toBe('/api/tenant1/agent/db-credentials')
     expect(constants.API_ENDPOINTS.REPO_CREDENTIALS('tenant1', 'REPO_01')).toBe('/api/tenant1/agent/repo-credentials/REPO_01')
     expect(constants.API_ENDPOINTS.COMMAND_CHUNKS('tenant1', 'cmd-1')).toBe('/api/tenant1/agent/commands/cmd-1/chunks')
+    expect(constants.API_ENDPOINTS.LOG_CHUNK('tenant1')).toBe('/api/tenant1/agent/logs/chunk')
+    expect(constants.API_ENDPOINTS.LOG_SESSION('tenant1')).toBe('/api/tenant1/agent/logs/session')
   })
 })

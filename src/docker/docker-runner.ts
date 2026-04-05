@@ -13,7 +13,21 @@ import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { isNewerVersion, isValidVersion } from '../utils/version'
 import { performUpdate, reExecProcess } from '../update-checker'
+import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
+
+function makeSessionId(): string {
+  const d = new Date()
+  const pad = (n: number, len = 2): string => String(n).padStart(len, '0')
+  return (
+    String(d.getFullYear()) +
+    pad(d.getMonth() + 1) +
+    pad(d.getDate()) +
+    pad(d.getHours()) +
+    pad(d.getMinutes()) +
+    pad(d.getSeconds())
+  )
+}
 
 /** Convert a path.relative() result to POSIX format for container use */
 function toPosixRelative(relativePath: string): string {
@@ -72,6 +86,10 @@ export interface DockerRunOptions {
    * When set, only the matching project is started.
    */
   project?: string
+  /** API client for log streaming (injected from agent-runner.ts) */
+  apiClient?: ApiClient
+  /** Agent ID for log streaming */
+  agentId?: string
 }
 
 export function checkDockerAvailable(): boolean {
@@ -160,16 +178,81 @@ export function generateProjectDockerfile(
 
 /**
  * Build a per-project Docker image using the given Dockerfile.
+ * Streams stdout/stderr to both the host terminal and the API (for real-time log viewing).
  */
-export function buildProjectImage(tenantCode: string, projectCode: string, baseVersion: string, dockerfilePath: string): void {
+/** Maximum total log size kept in memory per session (2 MB). Older content is discarded. */
+const MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024
+
+export async function buildProjectImage(
+  tenantCode: string,
+  projectCode: string,
+  baseVersion: string,
+  dockerfilePath: string,
+  apiClient?: ApiClient,
+  agentId?: string,
+): Promise<void> {
   const imageTag = getProjectImageTag(tenantCode, projectCode, baseVersion)
   const contextDir = getDockerContextDir()
   logger.info(`[docker] Building project image: ${imageTag}`)
-  execFileSync(
-    'docker',
-    ['build', '-t', imageTag, '--pull=false', '--build-arg', `AGENT_VERSION=${baseVersion}`, '-f', dockerfilePath, contextDir],
-    { stdio: 'inherit' },
-  )
+
+  const sessionId = makeSessionId()
+  let seq = 0
+  let fullLog = ''
+  let logTruncated = false
+  let buf = ''
+
+  const flush = async (): Promise<void> => {
+    if (!buf) return
+    const text = buf
+    buf = ''
+    if (!logTruncated) {
+      if (fullLog.length + text.length <= MAX_SESSION_LOG_BYTES) {
+        fullLog += text
+      } else {
+        const remaining = MAX_SESSION_LOG_BYTES - fullLog.length
+        fullLog += remaining > 0 ? text.slice(0, remaining) : ''
+        logTruncated = true
+        logger.warn('[docker] Build log exceeded 2 MB limit; remaining output will not be saved to S3')
+      }
+    }
+    if (apiClient && agentId) {
+      await apiClient.submitLogChunk({ agentId, projectCode, logType: 'docker-build', sessionId, seq: ++seq, text })
+        .catch((e: unknown) => logger.warn(`[docker] Failed to send log chunk: ${e}`))
+    }
+  }
+
+  let buildError: Error | undefined
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn('docker', [
+      'build', '-t', imageTag, '--pull=false',
+      '--build-arg', `AGENT_VERSION=${baseVersion}`,
+      '-f', dockerfilePath, contextDir,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+
+    const onData = (d: Buffer): void => {
+      process.stdout.write(d)
+      buf += d.toString()
+      if (buf.length > 4096) {
+        void flush()
+      }
+    }
+    proc.stdout?.on('data', onData)
+    proc.stderr?.on('data', onData)
+    proc.on('error', (err) => reject(err))
+    proc.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`docker build exited with code ${code}`))
+    })
+  }).catch((e: unknown) => { buildError = e instanceof Error ? e : new Error(String(e)) })
+
+  await flush()
+
+  if (apiClient && agentId && fullLog) {
+    await apiClient.saveSessionLog({ agentId, projectCode, logType: 'docker-build', sessionId, content: fullLog })
+      .catch((e: unknown) => logger.warn(`[docker] Failed to upload build log to S3: ${e}`))
+  }
+
+  if (buildError) throw buildError
   logger.success(`[docker] Project image built: ${imageTag}`)
 }
 
@@ -576,10 +659,14 @@ class DockerSupervisor {
   private opts: DockerRunOptions
   private version: string
   private onAllStopped: (() => void) | undefined
+  private apiClient: ApiClient | undefined
+  private agentId: string | undefined
 
   constructor(version: string, opts: DockerRunOptions) {
     this.version = version
     this.opts = opts
+    this.apiClient = opts.apiClient
+    this.agentId = opts.agentId
   }
 
   private projectKey(project: ProjectRegistration): string {
@@ -627,7 +714,7 @@ class DockerSupervisor {
       const projectDockerfile = path.join(projectConfigHostDir, 'Dockerfile')
       if (fs.existsSync(projectDockerfile)) {
         try {
-          buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile)
+          await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, this.apiClient, this.agentId)
           // Copy the docker-customization-hash file written by the container so the
           // next container startup knows the current customization was already built.
           const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
@@ -635,9 +722,24 @@ class DockerSupervisor {
           if (fs.existsSync(srcHash)) {
             fs.copyFileSync(srcHash, dstHash)
           }
+          // Clear any previous build error so the container can report success
+          const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
+          if (fs.existsSync(buildErrorPath)) {
+            fs.unlinkSync(buildErrorPath)
+          }
         } catch (err) {
-          logger.error(`[docker] Image build failed: ${err instanceof Error ? err.message : String(err)}`)
+          const errorMsg = err instanceof Error ? err.message : String(err)
+          logger.error(`[docker] Image build failed: ${errorMsg}`)
           logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
+          // Write the error message so the container can report it via heartbeat
+          // Truncate to 3000 chars to avoid DynamoDB item size limits
+          const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
+          const truncatedError = errorMsg.length > 3000 ? errorMsg.substring(0, 3000) + '...(truncated)' : errorMsg
+          try {
+            fs.writeFileSync(buildErrorPath, truncatedError, 'utf-8')
+          } catch (writeErr) {
+            logger.warn(`[docker] Failed to write build error file: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`)
+          }
           // Write docker-built-hash even on failure so the next startup does not
           // attempt the same failed build again. The container starts with the
           // previous (base) image until the configuration is fixed and changed.
@@ -691,7 +793,7 @@ class DockerSupervisor {
     ]
 
     logger.info(`[docker] Starting container for project: ${key}`)
-    const child = spawn('docker', dockerArgs, { stdio: 'inherit' })
+    const child = spawn('docker', dockerArgs, { stdio: ['inherit', 'pipe', 'pipe'] })
 
     const handle: DockerContainerHandle = {
       project,
@@ -700,6 +802,54 @@ class DockerSupervisor {
       closeHandled: false,
     }
     this.handles.set(key, handle)
+
+    // Stream container stdout/stderr to host terminal and API for real-time log viewing
+    if (this.apiClient && this.agentId) {
+      const sessionId = makeSessionId()
+      let seq = 0
+      let fullLog = ''
+      let logTruncated = false
+      let buf = ''
+      const apiClient = this.apiClient
+      const agentId = this.agentId
+
+      const flush = async (): Promise<void> => {
+        if (!buf) return
+        const text = buf
+        buf = ''
+        if (!logTruncated) {
+          if (fullLog.length + text.length <= MAX_SESSION_LOG_BYTES) {
+            fullLog += text
+          } else {
+            const remaining = MAX_SESSION_LOG_BYTES - fullLog.length
+            fullLog += remaining > 0 ? text.slice(0, remaining) : ''
+            logTruncated = true
+            logger.warn(`[docker] Container log for ${key} exceeded 2 MB limit; remaining output will not be saved to S3`)
+          }
+        }
+        await apiClient.submitLogChunk({ agentId, projectCode: project.projectCode, logType: 'container', sessionId, seq: ++seq, text })
+          .catch((e: unknown) => logger.warn(`[docker] log chunk failed: ${e}`))
+      }
+
+      const flushTimer = setInterval(() => { void flush() }, 1_000)
+
+      child.stdout?.on('data', (d: Buffer) => { process.stdout.write(d); buf += d.toString() })
+      child.stderr?.on('data', (d: Buffer) => { process.stderr.write(d); buf += d.toString() })
+
+      child.on('close', () => {
+        clearInterval(flushTimer)
+        void flush().then(() => {
+          if (fullLog) {
+            void apiClient.saveSessionLog({ agentId, projectCode: project.projectCode, logType: 'container', sessionId, content: fullLog })
+              .catch((e: unknown) => logger.warn(`[docker] S3 upload failed: ${e}`))
+          }
+        })
+      })
+    } else {
+      // No log streaming: forward to host terminal directly
+      child.stdout?.on('data', (d: Buffer) => process.stdout.write(d))
+      child.stderr?.on('data', (d: Buffer) => process.stderr.write(d))
+    }
 
     child.on('error', (err) => {
       logger.error(`[docker] Container error for ${key}: ${err.message}`)
@@ -827,7 +977,17 @@ export function runInDocker(opts: DockerRunOptions): void {
   if (projects.length > 0) {
     // Per-project container mode (new architecture)
     logger.info(`[docker] Starting ${projects.length} project container(s)...`)
-    const supervisor = new DockerSupervisor(version, opts)
+
+    // ログストリーミング用の ApiClient を生成して opts に注入する
+    // （opts から未渡しの場合のみ。テスト等で外部から渡された場合はそちらを優先）
+    const agentId = config?.agentId ?? os.hostname()
+    const enrichedOpts: DockerRunOptions = {
+      ...opts,
+      agentId: opts.agentId ?? agentId,
+      apiClient: opts.apiClient ?? new ApiClient(projects[0].apiUrl, projects[0].token),
+    }
+
+    const supervisor = new DockerSupervisor(version, enrichedOpts)
     supervisor.start(projects, () => { isDockerRunning = false })
     return
   }

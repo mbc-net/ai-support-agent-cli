@@ -5,6 +5,13 @@ jest.mock('child_process', () => ({
   spawn: jest.fn(),
 }))
 
+jest.mock('../../src/api-client', () => ({
+  ApiClient: jest.fn().mockImplementation(() => ({
+    submitLogChunk: jest.fn().mockResolvedValue(undefined),
+    saveSessionLog: jest.fn().mockResolvedValue(undefined),
+  })),
+}))
+
 jest.mock('fs', () => ({
   existsSync: jest.fn(),
   realpathSync: jest.fn((p: string) => p),
@@ -1777,11 +1784,14 @@ describe('docker-runner', () => {
     it('should rebuild image and restart when exit code is 43 with docker-rebuild-needed marker', async () => {
       mockExecFileSync.mockReturnValue(Buffer.from(''))
       let spawnCount = 0
-      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
-      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const fakeBuildChild = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
       mockSpawn.mockImplementation(() => {
         spawnCount++
-        return (spawnCount === 1 ? fakeChild1 : fakeChild2) as never
+        if (spawnCount === 1) return fakeChild1 as never
+        if (spawnCount === 2) return fakeBuildChild as never
+        return fakeChild2 as never
       })
       mockLoadConfig.mockReturnValue({
         agentId: 'agent-1',
@@ -1801,26 +1811,34 @@ describe('docker-runner', () => {
 
       fakeChild1.emit('close', 43)
       await Promise.resolve()
+      // buildProjectImage is now async (spawn-based), emit close to resolve the build
+      fakeBuildChild.emit('close', 0)
+      await Promise.resolve()
+      await Promise.resolve()
       await Promise.resolve()
       await Promise.resolve()
 
       // unlinkSync should have been called for the marker
       expect(unlinkSync).toHaveBeenCalled()
-      // docker build should have been called for the project image
-      const dockerBuildCall = mockExecFileSync.mock.calls.find(
+      // docker build should have been called via spawn (not execFileSync)
+      const dockerBuildCall = mockSpawn.mock.calls.find(
         (c) => Array.isArray(c[1]) && (c[1] as string[]).includes('build'),
       )
       expect(dockerBuildCall).toBeDefined()
-      // Should have restarted the container
-      expect(mockSpawn).toHaveBeenCalledTimes(2)
+      // Should have restarted the container (3 total: container1 + build + container2)
+      expect(mockSpawn).toHaveBeenCalledTimes(3)
     })
 
     it('should NOT restart container when image build fails', async () => {
       let spawnCount = 0
-      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const fakeBuildChild = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
       mockSpawn.mockImplementation(() => {
         spawnCount++
-        return fakeChild1 as never
+        if (spawnCount === 1) return fakeChild1 as never
+        if (spawnCount === 2) return fakeBuildChild as never
+        return fakeChild2 as never
       })
       mockLoadConfig.mockReturnValue({
         agentId: 'agent-1',
@@ -1834,36 +1852,37 @@ describe('docker-runner', () => {
         const ps = String(p)
         return ps.endsWith('docker-rebuild-needed') || ps.endsWith('Dockerfile')
       })
-      // docker build throws
-      mockExecFileSync.mockImplementation((...args: unknown[]) => {
-        const cmdArgs = args[1] as string[]
-        if (Array.isArray(cmdArgs) && cmdArgs.includes('build')) {
-          throw new Error('Build failed')
-        }
-        return Buffer.from('')
-      })
 
       runInDocker({})
       resetIsDockerRunning()
 
       fakeChild1.emit('close', 43)
       await Promise.resolve()
+      // buildProjectImage spawn emits non-zero exit code to simulate build failure
+      fakeBuildChild.emit('close', 1)
+      await Promise.resolve()
+      await Promise.resolve()
       await Promise.resolve()
       await Promise.resolve()
 
-      // Container should have been restarted with previous image (spawn called twice)
-      expect(mockSpawn).toHaveBeenCalledTimes(2)
+      // Container should have been restarted with previous image (3 total: container1 + build + container2)
+      expect(mockSpawn).toHaveBeenCalledTimes(3)
       // Supervisor should NOT exit
       expect(mockExit).not.toHaveBeenCalled()
     })
 
     it('should NOT exit when build fails but other containers are still running', async () => {
       let spawnCount = 0
-      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
-      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const fakeBuildChild = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const fakeChild3 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
       mockSpawn.mockImplementation(() => {
         spawnCount++
-        return (spawnCount === 1 ? fakeChild1 : fakeChild2) as never
+        if (spawnCount === 1) return fakeChild1 as never  // PROJ_A initial
+        if (spawnCount === 2) return fakeChild2 as never  // PROJ_B initial
+        if (spawnCount === 3) return fakeBuildChild as never  // docker build
+        return fakeChild3 as never  // PROJ_A restart
       })
       mockLoadConfig.mockReturnValue({
         agentId: 'agent-1',
@@ -1877,26 +1896,21 @@ describe('docker-runner', () => {
         const ps = String(p)
         return ps.includes('PROJ_A') && (ps.endsWith('docker-rebuild-needed') || ps.endsWith('Dockerfile'))
       })
-      // docker build throws for PROJ_A
-      mockExecFileSync.mockImplementation((...args: unknown[]) => {
-        const cmdArgs = args[1] as string[]
-        if (Array.isArray(cmdArgs) && cmdArgs.includes('build')) {
-          throw new Error('Build failed')
-        }
-        return Buffer.from('')
-      })
 
       runInDocker({})
       resetIsDockerRunning()
 
-      // PROJ_A requests rebuild (fails)
+      // PROJ_A requests rebuild (build fails with non-zero exit)
       fakeChild1.emit('close', 43)
+      await Promise.resolve()
+      fakeBuildChild.emit('close', 1)
+      await Promise.resolve()
       await Promise.resolve()
       await Promise.resolve()
       await Promise.resolve()
 
-      // Spawn called 3 times: PROJ_A initial + PROJ_B initial + PROJ_A restart with previous image
-      expect(mockSpawn).toHaveBeenCalledTimes(3)
+      // Spawn called 4 times: PROJ_A initial + PROJ_B initial + build + PROJ_A restart with previous image
+      expect(mockSpawn).toHaveBeenCalledTimes(4)
       // PROJ_B is still running, so supervisor should NOT exit
       expect(mockExit).not.toHaveBeenCalled()
     })
@@ -1904,11 +1918,14 @@ describe('docker-runner', () => {
     it('should copy docker-customization-hash to docker-built-hash after successful build', async () => {
       mockExecFileSync.mockReturnValue(Buffer.from(''))
       let spawnCount = 0
-      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
-      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const fakeBuildChild = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
       mockSpawn.mockImplementation(() => {
         spawnCount++
-        return (spawnCount === 1 ? fakeChild1 : fakeChild2) as never
+        if (spawnCount === 1) return fakeChild1 as never
+        if (spawnCount === 2) return fakeBuildChild as never
+        return fakeChild2 as never
       })
       mockLoadConfig.mockReturnValue({
         agentId: 'agent-1',
@@ -1927,6 +1944,10 @@ describe('docker-runner', () => {
       resetIsDockerRunning()
 
       fakeChild1.emit('close', 43)
+      await Promise.resolve()
+      // buildProjectImage is now async (spawn-based), emit close to resolve the build
+      fakeBuildChild.emit('close', 0)
+      await Promise.resolve()
       await Promise.resolve()
       await Promise.resolve()
       await Promise.resolve()
@@ -2002,16 +2023,286 @@ describe('buildProjectImage', () => {
     jest.clearAllMocks()
   })
 
-  it('should call execFileSync with correct docker build arguments', () => {
-    const mockExec = execFileSync as jest.MockedFunction<typeof execFileSync>
-    mockExec.mockReturnValue(Buffer.from(''))
+  it('should spawn docker build with correct arguments', async () => {
+    const fakeProc = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    const mockSpawnFn = spawn as jest.MockedFunction<typeof spawn>
+    mockSpawnFn.mockReturnValue(fakeProc as never)
 
-    buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile')
+    const promise = buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile')
+    fakeProc.emit('close', 0)
+    await promise
 
-    expect(mockExec).toHaveBeenCalledWith(
+    expect(mockSpawnFn).toHaveBeenCalledWith(
       'docker',
       expect.arrayContaining(['build', '-t', expect.stringContaining('mbc'), '-f', '/path/to/Dockerfile']),
       expect.any(Object),
     )
+  })
+
+  it('should throw when docker build exits with non-zero code', async () => {
+    const fakeProc = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    const mockSpawnFn = spawn as jest.MockedFunction<typeof spawn>
+    mockSpawnFn.mockReturnValue(fakeProc as never)
+
+    const promise = buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile')
+    fakeProc.emit('close', 1)
+
+    await expect(promise).rejects.toThrow('docker build exited with code 1')
+  })
+
+  it('should stream log chunks to apiClient when provided', async () => {
+    const fakeProc = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    const mockSpawnFn = spawn as jest.MockedFunction<typeof spawn>
+    mockSpawnFn.mockReturnValue(fakeProc as never)
+
+    const mockApiClient = {
+      submitLogChunk: jest.fn().mockResolvedValue(undefined),
+      saveSessionLog: jest.fn().mockResolvedValue(undefined),
+    }
+
+    const promise = buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile', mockApiClient as never, 'agent-1')
+    // Emit data to trigger chunk buffering
+    fakeProc.stdout.emit('data', Buffer.from('Step 1/3 : FROM node'))
+    fakeProc.emit('close', 0)
+    await promise
+
+    // saveSessionLog should have been called with the full log
+    expect(mockApiClient.saveSessionLog).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: 'agent-1',
+      projectCode: 'PROJ_A',
+      logType: 'docker-build',
+      content: expect.stringContaining('Step 1/3'),
+    }))
+  })
+
+  it('should not call apiClient when not provided', async () => {
+    const fakeProc = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    const mockSpawnFn = spawn as jest.MockedFunction<typeof spawn>
+    mockSpawnFn.mockReturnValue(fakeProc as never)
+
+    // Should complete without error even without apiClient
+    const promise = buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile')
+    fakeProc.stdout.emit('data', Buffer.from('some log'))
+    fakeProc.emit('close', 0)
+    await promise
+    // No assertion needed — just verify it doesn't throw
+  })
+
+  it('should handle submitLogChunk errors gracefully', async () => {
+    const fakeProc = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    const mockSpawnFn = spawn as jest.MockedFunction<typeof spawn>
+    mockSpawnFn.mockReturnValue(fakeProc as never)
+
+    const mockApiClient = {
+      submitLogChunk: jest.fn().mockRejectedValue(new Error('chunk failed')),
+      saveSessionLog: jest.fn().mockResolvedValue(undefined),
+    }
+
+    // Should not throw even when submitLogChunk fails
+    const promise = buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile', mockApiClient as never, 'agent-1')
+    // Large data to trigger flush during build
+    fakeProc.stdout.emit('data', Buffer.from('x'.repeat(5000)))
+    fakeProc.emit('close', 0)
+    await promise
+    // No assertion needed — just verify it doesn't throw
+  })
+
+  it('should handle saveSessionLog errors gracefully', async () => {
+    const fakeProc = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    const mockSpawnFn = spawn as jest.MockedFunction<typeof spawn>
+    mockSpawnFn.mockReturnValue(fakeProc as never)
+
+    const mockApiClient = {
+      submitLogChunk: jest.fn().mockResolvedValue(undefined),
+      saveSessionLog: jest.fn().mockRejectedValue(new Error('upload failed')),
+    }
+
+    // Should not throw even when saveSessionLog fails
+    const promise = buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile', mockApiClient as never, 'agent-1')
+    fakeProc.stdout.emit('data', Buffer.from('some log'))
+    fakeProc.emit('close', 0)
+    await promise
+    // No assertion needed — just verify it doesn't throw
+  })
+
+  it('should truncate fullLog when it exceeds 2 MB limit', async () => {
+    const fakeProc = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    const mockSpawnFn = spawn as jest.MockedFunction<typeof spawn>
+    mockSpawnFn.mockReturnValue(fakeProc as never)
+
+    const mockApiClient = {
+      submitLogChunk: jest.fn().mockResolvedValue(undefined),
+      saveSessionLog: jest.fn().mockResolvedValue(undefined),
+    }
+
+    const promise = buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile', mockApiClient as never, 'agent-1')
+    // Send data exceeding 4KB threshold in multiple chunks to trigger flush+truncation
+    // First chunk fills fullLog past 2MB
+    fakeProc.stdout.emit('data', Buffer.from('A'.repeat(5000))) // triggers flush (>4096)
+    await Promise.resolve()
+    fakeProc.stdout.emit('data', Buffer.from('B'.repeat(2 * 1024 * 1024))) // exceeds 2MB
+    await Promise.resolve()
+    fakeProc.emit('close', 0)
+    await promise
+
+    // saveSessionLog content should be at most 2MB
+    const savedContent: string = mockApiClient.saveSessionLog.mock.calls[0]?.[0]?.content ?? ''
+    expect(savedContent.length).toBeLessThanOrEqual(2 * 1024 * 1024)
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('2 MB limit'))
+  })
+
+  it('should handle remaining=0 case when fullLog is exactly at limit before flush', async () => {
+    const fakeProc = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    const mockSpawnFn = spawn as jest.MockedFunction<typeof spawn>
+    mockSpawnFn.mockReturnValue(fakeProc as never)
+
+    const mockApiClient = {
+      submitLogChunk: jest.fn().mockResolvedValue(undefined),
+      saveSessionLog: jest.fn().mockResolvedValue(undefined),
+    }
+
+    const promise = buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile', mockApiClient as never, 'agent-1')
+    // First chunk fills fullLog to exactly 2MB
+    fakeProc.stdout.emit('data', Buffer.from('X'.repeat(2 * 1024 * 1024 + 100)))
+    await Promise.resolve()
+    // Second chunk after fullLog is already at limit (remaining = 0)
+    fakeProc.stdout.emit('data', Buffer.from('Y'.repeat(5000)))
+    await Promise.resolve()
+    fakeProc.emit('close', 0)
+    await promise
+
+    const savedContent: string = mockApiClient.saveSessionLog.mock.calls[0]?.[0]?.content ?? ''
+    expect(savedContent.length).toBeLessThanOrEqual(2 * 1024 * 1024)
+  })
+})
+
+describe('DockerSupervisor log streaming', () => {
+  let mockExitInner: jest.SpyInstance
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockExecFileSync.mockReturnValue(Buffer.from(''))
+    mockExitInner = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+  })
+
+  afterEach(() => {
+    mockExitInner.mockRestore()
+  })
+
+  it('should stream container logs to apiClient when provided', async () => {
+    const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
+    const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
+    const mockApiClient = { submitLogChunk: mockSubmitLogChunk, saveSessionLog: mockSaveSessionLog }
+
+    const fakeChild = Object.assign(new EventEmitter(), {
+      kill: jest.fn(),
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    mockSpawn.mockReturnValue(fakeChild as never)
+    mockLoadConfig.mockReturnValue({
+      agentId: 'agent-1',
+      createdAt: '2024-01-01',
+      projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
+    })
+
+    runInDocker({ apiClient: mockApiClient as never, agentId: 'agent-1' })
+    resetIsDockerRunning()
+
+    // Emit log data
+    fakeChild.stdout.emit('data', Buffer.from('container output'))
+    // Trigger close to flush and upload
+    fakeChild.emit('close', 0)
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mockSaveSessionLog).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: 'agent-1',
+      projectCode: 'PROJ_A',
+      logType: 'container',
+      content: expect.stringContaining('container output'),
+    }))
+  })
+
+  it('should fall back to forwarding stdout/stderr without apiClient', () => {
+    const fakeChild = Object.assign(new EventEmitter(), {
+      kill: jest.fn(),
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    mockSpawn.mockReturnValue(fakeChild as never)
+    mockLoadConfig.mockReturnValue({
+      agentId: 'agent-1',
+      createdAt: '2024-01-01',
+      projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
+    })
+
+    runInDocker({})
+    resetIsDockerRunning()
+
+    const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    fakeChild.stdout.emit('data', Buffer.from('hello'))
+    writeSpy.mockRestore()
+
+    // No error thrown — test passes if no exception
+  })
+
+  it('should truncate container fullLog when it exceeds 2 MB limit', async () => {
+    const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
+    const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
+    const mockApiClient = { submitLogChunk: mockSubmitLogChunk, saveSessionLog: mockSaveSessionLog }
+
+    const fakeChild = Object.assign(new EventEmitter(), {
+      kill: jest.fn(),
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    mockSpawn.mockReturnValue(fakeChild as never)
+    mockLoadConfig.mockReturnValue({
+      agentId: 'agent-1',
+      createdAt: '2024-01-01',
+      projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
+    })
+
+    runInDocker({ apiClient: mockApiClient as never, agentId: 'agent-1' })
+    resetIsDockerRunning()
+
+    // Emit data exceeding 2MB limit
+    fakeChild.stdout.emit('data', Buffer.from('A'.repeat(2 * 1024 * 1024 + 100)))
+    await Promise.resolve()
+    fakeChild.stdout.emit('data', Buffer.from('B'.repeat(5000)))
+    await Promise.resolve()
+
+    fakeChild.emit('close', 0)
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('2 MB limit'))
   })
 })
