@@ -15,6 +15,7 @@ import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import { submitPendingResults } from './pending-result-store'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
+import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
 import { getErrorMessage, isAuthenticationError } from './utils'
 
@@ -39,7 +40,7 @@ export class ProjectAgent {
     availableChatModes: [],
     activeChatMode: undefined,
     mcpConfigPath: undefined,
-    dockerCustomizationHash: undefined,
+    dockerCustomizationHash: undefined, // will be initialized in constructor from docker-built-hash
   }
 
   private configSyncDeps: ConfigSyncDeps
@@ -95,6 +96,22 @@ export class ProjectAgent {
       pollInterval: this.options.pollInterval,
       heartbeatInterval: this.options.heartbeatInterval,
     }
+
+    // When running inside Docker, initialize dockerCustomizationHash from the
+    // docker-built-hash file so we don't trigger a rebuild for already-built customizations.
+    // AI_SUPPORT_AGENT_CONFIG_DIR is mounted to the per-project config dir directly,
+    // so docker-built-hash lives at the root of getConfigDir().
+    if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+      const builtHashPath = path.join(getConfigDir(), 'docker-built-hash')
+      try {
+        const builtHash = fs.readFileSync(builtHashPath, 'utf-8').trim()
+        if (builtHash) {
+          this.configSyncState.dockerCustomizationHash = builtHash
+        }
+      } catch {
+        // File does not exist yet — first startup, leave dockerCustomizationHash as undefined
+      }
+    }
   }
 
   start(): void {
@@ -132,6 +149,9 @@ export class ProjectAgent {
   async performConfigSync(): Promise<void> {
     // ブラウザローカルポートを動的に更新（VSCode tunnel接続後に判明）
     this.configSyncDeps.browserLocalPort = this.transportState.vsCodeWs?.getBrowserLocalPort()
+    // API通知の configHash はRDS同期前の古い値の可能性があるため、
+    // config_update を受け取ったときは currentConfigHash をリセットして強制再同期する
+    this.configSyncState.currentConfigHash = undefined
     await performConfigSync(this.configSyncDeps, this.configSyncState)
   }
 
@@ -165,10 +185,30 @@ export class ProjectAgent {
     logger.info(`${this.prefix} Docker rebuild requested, scheduling restart...`)
     this.stop()
     setTimeout(() => {
-      // Write marker file so DockerSupervisor knows to rebuild the image before restart
-      const markerPath = path.join(getConfigDir(), 'projects', this.tenantCode, this.projectCode, '.ai-support-agent', 'docker-rebuild-needed')
+      // Inside Docker, AI_SUPPORT_AGENT_CONFIG_DIR is mounted to the per-project config dir directly.
+      // All docker-related files live at the root of getConfigDir() (not in a projects sub-path).
+      const configDir = getConfigDir()
+      const markerPath = path.join(configDir, 'docker-rebuild-needed')
       try {
-        fs.mkdirSync(path.dirname(markerPath), { recursive: true })
+        fs.mkdirSync(configDir, { recursive: true })
+
+        // Generate and write project-specific Dockerfile from dockerCustomization.
+        // Place it at configDir/Dockerfile so DockerSupervisor can find it via getProjectDockerfilePath()
+        // on the host (which maps to the same mounted directory).
+        const dockerCustomization = this.configSyncState.projectConfig?.agent?.dockerCustomization
+        const aptPackages = dockerCustomization?.aptPackages ?? []
+        const npmPackages = dockerCustomization?.npmPackages ?? []
+        const dockerfileContent = generateProjectDockerfile(AGENT_VERSION, aptPackages, npmPackages)
+        const dockerfilePath = path.join(configDir, 'Dockerfile')
+        fs.writeFileSync(dockerfilePath, dockerfileContent)
+        logger.info(`${this.prefix} Project Dockerfile written: ${dockerfilePath}`)
+
+        // Save the dockerCustomization hash so DockerSupervisor can copy it to docker-built-hash after build
+        fs.writeFileSync(
+          path.join(configDir, 'docker-customization-hash'),
+          this.configSyncState.dockerCustomizationHash ?? '',
+        )
+
         fs.writeFileSync(markerPath, '')
       } catch (err) {
         logger.warn(`${this.prefix} Failed to write docker-rebuild-needed marker: ${err instanceof Error ? err.message : String(err)}`)
@@ -294,12 +334,20 @@ export class ProjectAgent {
       return
     }
     logger.info(`${this.prefix} Starting subscription mode (realtime)`)
+    // When running inside a Docker container, localhost refers to the container itself.
+    // Convert localhost/127.0.0.1 to host.docker.internal so the container can reach the host.
+    const resolvedAppsyncUrl = process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1'
+      ? result.appsyncUrl.replace(
+          /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
+          (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
+        )
+      : result.appsyncUrl
     await startSubscriptionMode(
       this.transportDeps,
       this.transportState,
       commandContext,
       AppSyncSubscriber,
-      result.appsyncUrl,
+      resolvedAppsyncUrl,
       result.appsyncApiKey,
     )
 
@@ -307,8 +355,14 @@ export class ProjectAgent {
 
     // Start terminal WebSocket connection (only if server has WS gateway enabled)
     if (result.wsEnabled) {
-      startTerminalWebSocket(this.transportDeps, this.transportState, result.wsUrl)
-      startVsCodeTunnel(this.transportDeps, this.transportState, result.wsUrl)
+      const resolvedWsUrl = (result.wsUrl && process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1')
+        ? result.wsUrl.replace(
+            /^(wss?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
+            (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
+          )
+        : result.wsUrl
+      startTerminalWebSocket(this.transportDeps, this.transportState, resolvedWsUrl)
+      startVsCodeTunnel(this.transportDeps, this.transportState, resolvedWsUrl)
     } else {
       logger.debug(`${this.prefix} Terminal/VS Code WebSocket skipped (wsEnabled=false)`)
     }

@@ -9,13 +9,26 @@ jest.mock('../../src/config-manager')
 jest.mock('../../src/logger')
 jest.mock('../../src/utils/unified-diff')
 
+// Mock docker-runner for docker-build command
+jest.mock('../../src/docker/docker-runner', () => ({
+  buildImage: jest.fn(),
+}))
+
+// Mock constants
+jest.mock('../../src/constants', () => ({
+  AGENT_VERSION: '1.0.0',
+}))
+
 import * as fs from 'fs'
 import { getDockerfilePath, getConfigDockerfilePath } from '../../src/docker/dockerfile-path'
 import { loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
 import { computeUnifiedDiff } from '../../src/utils/unified-diff'
 import { registerDockerCommands } from '../../src/commands/docker-commands'
+import { buildImage } from '../../src/docker/docker-runner'
 import type { AgentConfig } from '../../src/types'
+
+const mockBuildImage = buildImage as jest.MockedFunction<typeof buildImage>
 
 const mockExistsSync = fs.existsSync as jest.MockedFunction<typeof fs.existsSync>
 const mockReadFileSync = fs.readFileSync as jest.MockedFunction<typeof fs.readFileSync>
@@ -42,6 +55,27 @@ describe('commands/docker-commands', () => {
     it('should register docker-diff-dockerfile command on program', () => {
       const commandNames = program.commands.map((cmd) => cmd.name())
       expect(commandNames).toContain('docker-diff-dockerfile')
+    })
+
+    it('should register docker-build command on program', () => {
+      const commandNames = program.commands.map((cmd) => cmd.name())
+      expect(commandNames).toContain('docker-build')
+    })
+  })
+
+  describe('docker-build', () => {
+    it('should call buildImage with AGENT_VERSION and no dockerfile', async () => {
+      await program.parseAsync(['node', 'test', 'docker-build'])
+
+      expect(mockBuildImage).toHaveBeenCalledWith('1.0.0', undefined)
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.building'))
+      expect(logger.success).toHaveBeenCalledWith(expect.stringContaining('docker.buildComplete'))
+    })
+
+    it('should resolve custom dockerfile path and pass to buildImage', async () => {
+      await program.parseAsync(['node', 'test', 'docker-build', '--dockerfile', '/custom/Dockerfile'])
+
+      expect(mockBuildImage).toHaveBeenCalledWith('1.0.0', '/custom/Dockerfile')
     })
   })
 

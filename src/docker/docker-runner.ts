@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { getDockerfilePath, getDockerContextDir, resolveDockerfile, getProjectDockerfilePath, getProjectImageTag } from './dockerfile-path'
+import { getDockerfilePath, getDockerContextDir, resolveDockerfile, getProjectImageTag } from './dockerfile-path'
 import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE, DOCKER_RESTART_EXIT_CODE } from '../constants'
 import { getConfigDir, getProjectList, loadConfig } from '../config-manager'
 import { t } from '../i18n'
@@ -616,14 +616,29 @@ class DockerSupervisor {
     const rebuildMarker = path.join(projectConfigHostDir, 'docker-rebuild-needed')
     if (fs.existsSync(rebuildMarker)) {
       fs.unlinkSync(rebuildMarker)
-      const projectDockerfile = getProjectDockerfilePath(project.tenantCode, project.projectCode)
+      // The container writes Dockerfile into its configDir root, which maps to projectConfigHostDir on host.
+      const projectDockerfile = path.join(projectConfigHostDir, 'Dockerfile')
       if (fs.existsSync(projectDockerfile)) {
         try {
           buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile)
+          // Copy the docker-customization-hash file written by the container so the
+          // next container startup knows the current customization was already built.
+          const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
+          const dstHash = path.join(projectConfigHostDir, 'docker-built-hash')
+          if (fs.existsSync(srcHash)) {
+            fs.copyFileSync(srcHash, dstHash)
+          }
         } catch (err) {
           logger.error(`[docker] Image build failed: ${err instanceof Error ? err.message : String(err)}`)
-          logger.error(`[docker] Container ${this.projectKey(project)} will not be restarted due to build failure.`)
-          return
+          logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
+          // Write docker-built-hash even on failure so the next startup does not
+          // attempt the same failed build again. The container starts with the
+          // previous (base) image until the configuration is fixed and changed.
+          const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
+          const dstHash = path.join(projectConfigHostDir, 'docker-built-hash')
+          if (fs.existsSync(srcHash)) {
+            fs.copyFileSync(srcHash, dstHash)
+          }
         }
       }
     }

@@ -20,13 +20,13 @@ function getStrategy(): ServiceStrategy | null {
   }
 }
 
-export function installService(options: { verbose?: boolean; docker?: boolean }): void {
+export async function installService(options: { verbose?: boolean; docker?: boolean }): Promise<void> {
   const strategy = getStrategy()
   if (!strategy) {
     logger.error(t('service.unsupportedPlatform', { platform: process.platform }))
     return
   }
-  strategy.install(options)
+  await strategy.install(options)
 }
 
 export function uninstallService(): void {
@@ -106,8 +106,8 @@ export function registerServiceCommands(program: Command): void {
     .description(t('cmd.service.install'))
     .option('--verbose', t('cmd.service.install.verbose'))
     .option('--no-docker', t('cmd.service.install.noDocker'))
-    .action((opts: { verbose?: boolean; docker?: boolean }) => {
-      installService(opts)
+    .action(async (opts: { verbose?: boolean; docker?: boolean }) => {
+      await installService(opts)
     })
 
   service
@@ -152,8 +152,8 @@ export function registerServiceCommands(program: Command): void {
     .description(t('cmd.service.install'))
     .option('--verbose', t('cmd.service.install.verbose'))
     .option('--no-docker', t('cmd.service.install.noDocker'))
-    .action((opts: { verbose?: boolean; docker?: boolean }) => {
-      installService(opts)
+    .action(async (opts: { verbose?: boolean; docker?: boolean }) => {
+      await installService(opts)
     })
 
   program
