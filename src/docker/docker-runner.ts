@@ -131,6 +131,7 @@ export function generateProjectDockerfile(
   baseVersion: string,
   aptPackages: string[],
   npmPackages: string[],
+  commands: string[] = [],
 ): string {
   validatePackageNames(aptPackages, 'apt')
   validatePackageNames(npmPackages, 'npm')
@@ -147,6 +148,12 @@ export function generateProjectDockerfile(
     lines.push(
       `RUN npm install -g ${npmPackages.join(' ')} && npm cache clean --force`,
     )
+  }
+  for (const cmd of commands) {
+    if (/[\n\r|`;$()]/.test(cmd)) {
+      throw new Error(`Invalid command (contains forbidden character): "${cmd.substring(0, 50)}"`)
+    }
+    lines.push(`RUN ${cmd}`)
   }
   return lines.join('\n') + '\n'
 }
