@@ -6,6 +6,8 @@ import {
   buildClaudeArgs as reExportedBuildClaudeArgs,
   buildCleanEnv as reExportedBuildCleanEnv,
   _resetCleanEnvCache as reExportedResetCleanEnvCache,
+  buildConversationFileNotice,
+  buildMetadataNotice,
 } from '../../src/commands/chat-executor'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED } from '../../src/constants'
 import type { AgentServerConfig, ChatPayload, ProjectConfigResponse } from '../../src/types'
@@ -1443,4 +1445,47 @@ describe('chat-executor', () => {
       expect(result.success).toBe(true)
     })
   })
+
+  describe('buildConversationFileNotice', () => {
+    it('should return empty string when no files', () => {
+      expect(buildConversationFileNotice([])).toBe('')
+    })
+
+    it('should return notice with file list when files exist', () => {
+      const files = [
+        { fileId: 'f1', s3Key: 'key1', filename: 'test.txt', contentType: 'text/plain', fileSize: 100 },
+        { fileId: 'f2', s3Key: 'key2', filename: 'image.png', contentType: 'image/png', fileSize: 2048 },
+      ]
+      const result = buildConversationFileNotice(files)
+      expect(result).toContain('<conversation_files>')
+      expect(result).toContain('test.txt')
+      expect(result).toContain('image.png')
+      expect(result).toContain('f1')
+      expect(result).toContain('key2')
+    })
+  })
+
+  describe('buildMetadataNotice', () => {
+    it('should return empty string when conversationId is null', () => {
+      expect(buildMetadataNotice(null, 'cmd-1', 'PROJ', '/path/to/mcp')).toBe('')
+    })
+
+    it('should return empty string when mcpConfigPath is undefined', () => {
+      expect(buildMetadataNotice('conv-1', 'cmd-1', 'PROJ', undefined)).toBe('')
+    })
+
+    it('should return metadata notice when both conversationId and mcpConfigPath are provided', () => {
+      const result = buildMetadataNotice('conv-1', 'cmd-1', 'PROJ_01', '/path/to/mcp')
+      expect(result).toContain('<message_metadata>')
+      expect(result).toContain('conv-1')
+      expect(result).toContain('cmd-1')
+      expect(result).toContain('PROJ_01')
+    })
+
+    it('should use empty string for projectCode when undefined', () => {
+      const result = buildMetadataNotice('conv-1', 'cmd-1', undefined, '/path/to/mcp')
+      expect(result).toContain('projectCode: ')
+    })
+  })
+
 })
