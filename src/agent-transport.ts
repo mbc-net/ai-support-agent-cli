@@ -236,11 +236,12 @@ export async function handleNotification(
       break
     }
     case 'config-update': {
-      const newHash = content.configHash as string
-      if (newHash && newHash !== ctx.configSyncState.currentConfigHash) {
-        logger.info(`${deps.prefix} Config update detected (hash: ${newHash})`)
-        state.configSyncDebounceTimer = scheduleConfigSync(ctx.configSyncDeps, ctx.configSyncState, state.configSyncDebounceTimer)
-      }
+      // APIがconfig-update通知を送るタイミングはRDS同期前の可能性があるため、
+      // hashの比較は行わず常に再同期をスケジュールする。
+      // hash比較による変更なしスキップはsyncProjectConfig側で行う。
+      logger.info(`${deps.prefix} Config update notification received, scheduling sync`)
+      ctx.configSyncState.currentConfigHash = undefined
+      state.configSyncDebounceTimer = scheduleConfigSync(ctx.configSyncDeps, ctx.configSyncState, state.configSyncDebounceTimer)
       break
     }
     default:

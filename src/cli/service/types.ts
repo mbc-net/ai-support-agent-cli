@@ -11,7 +11,7 @@ export interface ServiceStatus {
 }
 
 export interface ServiceStrategy {
-  install(options: ServiceOptions): void
+  install(options: ServiceOptions): void | Promise<void>
   uninstall(): void
   start(): void
   stop(): void

@@ -223,9 +223,21 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
         process.exit(1)
       }
       logger.info(t('runner.envTokenWarning'))
+
+      // When --project is specified (e.g. from DockerSupervisor), use its tenantCode/projectCode
+      let tenantCode = 'unknown'
+      let projectCode = PROJECT_CODE_ENV_DEFAULT
+      if (options.project) {
+        const slashIdx = options.project.indexOf('/')
+        if (slashIdx >= 0) {
+          tenantCode = options.project.substring(0, slashIdx)
+          projectCode = options.project.substring(slashIdx + 1)
+        }
+      }
+
       const project: ProjectRegistration = {
-        tenantCode: 'unknown',
-        projectCode: PROJECT_CODE_ENV_DEFAULT,
+        tenantCode,
+        projectCode,
         token: envToken,
         apiUrl: envApiUrl,
       }

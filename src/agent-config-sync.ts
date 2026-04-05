@@ -181,8 +181,13 @@ export async function applyProjectConfig(
   // Detect Docker customization changes and trigger rebuild if needed
   if (deps.onDockerRebuild) {
     const newDockerHash = createHash('md5').update(JSON.stringify(config.agent.dockerCustomization ?? null)).digest('hex')
+    const noCustomizationHash = createHash('md5').update(JSON.stringify(null)).digest('hex')
     const prevDockerHash = state.dockerCustomizationHash
-    if (prevDockerHash !== undefined && prevDockerHash !== newDockerHash) {
+    // Trigger rebuild if:
+    // - Hash changed (includes first sync where prevDockerHash is undefined)
+    // - AND new config has actual packages (not null/empty)
+    // This ensures containers always rebuild on startup when packages are configured.
+    if (prevDockerHash !== newDockerHash && newDockerHash !== noCustomizationHash) {
       logger.info(`${deps.prefix} Docker customization changed, triggering rebuild...`)
       deps.onDockerRebuild()
     }

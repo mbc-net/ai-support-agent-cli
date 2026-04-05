@@ -305,6 +305,64 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
+    it('should convert localhost appsyncUrl to host.docker.internal when in Docker', async () => {
+      const originalEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      try {
+        process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+        mockClient.register.mockResolvedValue({
+          agentId: 'test-id',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'http://localhost:4001/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        expect(MockAppSyncSubscriber).toHaveBeenCalledWith(
+          'http://host.docker.internal:4001/graphql',
+          'da2-testkey123',
+        )
+
+        agent.stop()
+      } finally {
+        if (originalEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalEnv
+      }
+    })
+
+    it('should not convert appsyncUrl when not in Docker', async () => {
+      const originalEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      try {
+        delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        mockClient.register.mockResolvedValue({
+          agentId: 'test-id',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'http://localhost:4001/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        expect(MockAppSyncSubscriber).toHaveBeenCalledWith(
+          'http://localhost:4001/graphql',
+          'da2-testkey123',
+        )
+
+        agent.stop()
+      } finally {
+        if (originalEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalEnv
+      }
+    })
+
     it('should handle notification from subscription', async () => {
       mockClient.getCommand.mockResolvedValue({
         commandId: 'cmd-1',
@@ -889,7 +947,7 @@ describe('ProjectAgent', () => {
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Config update detected'))
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Config update notification received'))
 
       // Wait for debounce
       await jest.advanceTimersByTimeAsync(3000)
@@ -1597,6 +1655,25 @@ describe('ProjectAgent', () => {
     })
   })
 
+  describe('onDockerRebuild callback', () => {
+    it('should call performDockerRebuild when onDockerRebuild is invoked', () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        const performDockerRebuildSpy = jest.spyOn(agent as unknown as { performDockerRebuild: () => Promise<void> }, 'performDockerRebuild').mockResolvedValue(undefined)
+        const deps = (agent as unknown as { configSyncDeps: { onDockerRebuild?: () => void } }).configSyncDeps
+        expect(deps.onDockerRebuild).toBeDefined()
+        deps.onDockerRebuild?.()
+        expect(performDockerRebuildSpy).toHaveBeenCalledTimes(1)
+      } finally {
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+  })
+
   describe('performDockerRebuild', () => {
     it('should write docker-rebuild-needed marker and exit with 43', async () => {
       const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
@@ -1631,6 +1708,163 @@ describe('ProjectAgent', () => {
         } else {
           process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
         }
+      }
+    })
+
+    it('should write Dockerfile with apt/npm packages from dockerCustomization', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockMkdirSync = jest.spyOn(mockFs, 'mkdirSync').mockImplementation(() => undefined)
+      const writtenFiles: Record<string, string> = {}
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation((...args: unknown[]) => {
+        writtenFiles[String(args[0])] = String(args[1])
+      })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        // Set projectConfig with dockerCustomization
+        const state = (agent as unknown as { configSyncState: { projectConfig: unknown; dockerCustomizationHash: string } }).configSyncState
+        state.projectConfig = {
+          configHash: 'hash',
+          project: { projectCode: 'TEST_01', projectName: 'Test' },
+          agent: {
+            agentEnabled: true,
+            builtinAgentEnabled: true,
+            builtinFallbackEnabled: true,
+            externalAgentEnabled: true,
+            allowedTools: [],
+            dockerCustomization: { aptPackages: ['curl'], npmPackages: ['typescript'] },
+          },
+        }
+        state.dockerCustomizationHash = 'some-hash'
+
+        await agent.performDockerRebuild()
+        await jest.advanceTimersByTimeAsync(1000)
+
+        // Check that Dockerfile was written with package content
+        const dockerfileEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('Dockerfile'))
+        expect(dockerfileEntry).toBeDefined()
+        expect(dockerfileEntry?.[1]).toContain('curl')
+        expect(dockerfileEntry?.[1]).toContain('typescript')
+      } finally {
+        mockExit.mockRestore()
+        mockMkdirSync.mockRestore()
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should log warn when writing marker fails', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockMkdirSync = jest.spyOn(mockFs, 'mkdirSync').mockImplementation(() => { throw new Error('permission denied') })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        await agent.performDockerRebuild()
+        await jest.advanceTimersByTimeAsync(1000)
+
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to write docker-rebuild-needed marker'))
+        expect(mockExit).toHaveBeenCalledWith(43)
+      } finally {
+        mockExit.mockRestore()
+        mockMkdirSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+  })
+
+  describe('docker-built-hash initialization', () => {
+    it('should initialize dockerCustomizationHash from docker-built-hash file when in Docker', () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((...args: unknown[]) => {
+        if (String(args[0]).endsWith('docker-built-hash')) return 'abc123hash'
+        throw new Error('ENOENT')
+      })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        // Access internal state via type cast for testing
+        const state = (agent as unknown as { configSyncState: { dockerCustomizationHash: string | undefined } }).configSyncState
+        expect(state.dockerCustomizationHash).toBe('abc123hash')
+      } finally {
+        mockReadFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should leave dockerCustomizationHash undefined when docker-built-hash file does not exist', () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((..._args: unknown[]) => {
+        throw new Error('ENOENT')
+      })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        const state = (agent as unknown as { configSyncState: { dockerCustomizationHash: string | undefined } }).configSyncState
+        expect(state.dockerCustomizationHash).toBeUndefined()
+      } finally {
+        mockReadFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should not read docker-built-hash when not in Docker', () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+
+      const mockFs = require('fs')
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync')
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        const state = (agent as unknown as { configSyncState: { dockerCustomizationHash: string | undefined } }).configSyncState
+        expect(state.dockerCustomizationHash).toBeUndefined()
+        expect(mockReadFileSync).not.toHaveBeenCalledWith(expect.stringContaining('docker-built-hash'), expect.anything())
+      } finally {
+        mockReadFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should read docker-built-hash from getConfigDir() root when in Docker', () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((..._args: unknown[]) => {
+        throw new Error('ENOENT')
+      })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        expect(agent).toBeDefined()
+        // Should have tried to read from configDir root (not a sub-path with tenantCode)
+        expect(mockReadFileSync).toHaveBeenCalledWith(
+          expect.stringContaining('docker-built-hash'),
+          'utf-8',
+        )
+      } finally {
+        mockReadFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
       }
     })
   })

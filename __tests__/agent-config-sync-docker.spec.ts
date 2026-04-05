@@ -78,14 +78,26 @@ describe('applyProjectConfig - Docker customization detection', () => {
     expect(onDockerRebuild).not.toHaveBeenCalled()
   })
 
-  it('should set dockerCustomizationHash on first call but not trigger rebuild', async () => {
+  it('should trigger rebuild on first call when dockerCustomization is set', async () => {
     const onDockerRebuild = jest.fn()
     const state = makeState({ dockerCustomizationHash: undefined })
     const deps = makeDeps({ onDockerRebuild })
 
     await applyProjectConfig(deps, state, makeConfig({ aptPackages: ['curl'] }))
 
-    // On first call, prevDockerHash is undefined so rebuild is NOT triggered
+    // On first call with packages configured, rebuild MUST be triggered
+    expect(onDockerRebuild).toHaveBeenCalledTimes(1)
+    expect(state.dockerCustomizationHash).toBeDefined()
+  })
+
+  it('should NOT trigger rebuild on first call when dockerCustomization is null', async () => {
+    const onDockerRebuild = jest.fn()
+    const state = makeState({ dockerCustomizationHash: undefined })
+    const deps = makeDeps({ onDockerRebuild })
+
+    await applyProjectConfig(deps, state, makeConfig(undefined))
+
+    // On first call with no packages, rebuild should NOT be triggered
     expect(onDockerRebuild).not.toHaveBeenCalled()
     expect(state.dockerCustomizationHash).toBeDefined()
   })
@@ -100,31 +112,30 @@ describe('applyProjectConfig - Docker customization detection', () => {
     expect(onDockerRebuild).toHaveBeenCalledTimes(1)
   })
 
-  it('should NOT call onDockerRebuild when dockerCustomization is unchanged', async () => {
+  it('should NOT call onDockerRebuild when dockerCustomization is unchanged after first sync', async () => {
     const onDockerRebuild = jest.fn()
-    // First call to compute the initial hash
     const state = makeState()
     const deps = makeDeps({ onDockerRebuild })
     const config = makeConfig({ aptPackages: ['curl'] })
 
+    // First call — triggers rebuild because prevHash = undefined and packages are set
     await applyProjectConfig(deps, state, config)
-    const initialHash = state.dockerCustomizationHash
-    expect(onDockerRebuild).not.toHaveBeenCalled()
+    expect(onDockerRebuild).toHaveBeenCalledTimes(1)
 
-    // Second call with same config — should not trigger rebuild
+    // Second call with same config — should NOT trigger rebuild again
     await applyProjectConfig(deps, state, config)
-    expect(state.dockerCustomizationHash).toBe(initialHash)
-    expect(onDockerRebuild).not.toHaveBeenCalled()
+    expect(onDockerRebuild).toHaveBeenCalledTimes(1)
   })
 
-  it('should call onDockerRebuild when dockerCustomization goes from defined to undefined', async () => {
+  it('should NOT call onDockerRebuild when dockerCustomization goes from defined to undefined', async () => {
     const onDockerRebuild = jest.fn()
     const state = makeState({ dockerCustomizationHash: 'some-previous-hash' })
     const deps = makeDeps({ onDockerRebuild })
 
-    // Config with no dockerCustomization
+    // Config with no dockerCustomization — removing packages does not trigger rebuild
+    // (the next container start will simply not have those packages, which is correct)
     await applyProjectConfig(deps, state, makeConfig(undefined))
 
-    expect(onDockerRebuild).toHaveBeenCalledTimes(1)
+    expect(onDockerRebuild).not.toHaveBeenCalled()
   })
 })

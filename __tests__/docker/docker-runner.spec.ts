@@ -30,6 +30,9 @@ jest.mock('../../src/docker/dockerfile-path', () => ({
 jest.mock('../../src/config-manager', () => ({
   getConfigDir: jest.fn(() => '/mock/config-dir'),
   loadConfig: jest.fn(),
+  getProjectList: jest.fn((config: { projects?: Array<{ tenantCode?: string }> }) =>
+    (config?.projects ?? []).filter((p) => !!p.tenantCode)
+  ),
 }))
 
 jest.mock('../../src/i18n', () => ({
@@ -1211,6 +1214,44 @@ describe('docker-runner', () => {
       expect(eIdx).toBeGreaterThan(-1)
     })
 
+    it('should replace localhost with host.docker.internal in apiUrl', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'my-token', apiUrl: 'http://localhost:4030' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      expect(spawnArgs).toContain('AI_SUPPORT_AGENT_API_URL=http://host.docker.internal:4030')
+    })
+
+    it('should replace 127.0.0.1 with host.docker.internal in apiUrl', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'my-token', apiUrl: 'http://127.0.0.1:4030' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      expect(spawnArgs).toContain('AI_SUPPORT_AGENT_API_URL=http://host.docker.internal:4030')
+    })
+
     it('should stop all containers when one exits with update code 42', async () => {
       mockExecFileSync.mockReturnValue(Buffer.from(''))
       const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
@@ -1749,10 +1790,10 @@ describe('docker-runner', () => {
           { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
         ],
       })
-      // rebuild marker exists, project Dockerfile exists
+      // rebuild marker exists, project Dockerfile exists at projectConfigHostDir/Dockerfile
       mockExistsSync.mockImplementation((p: unknown) => {
         const ps = String(p)
-        return ps.includes('docker-rebuild-needed') || ps.includes('PROJ_A/Dockerfile')
+        return ps.endsWith('docker-rebuild-needed') || ps.endsWith('Dockerfile')
       })
 
       runInDocker({})
@@ -1788,10 +1829,10 @@ describe('docker-runner', () => {
           { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
         ],
       })
-      // rebuild marker and project Dockerfile exist
+      // rebuild marker and project Dockerfile exist at projectConfigHostDir/Dockerfile
       mockExistsSync.mockImplementation((p: unknown) => {
         const ps = String(p)
-        return ps.includes('docker-rebuild-needed') || ps.includes('PROJ_A/Dockerfile')
+        return ps.endsWith('docker-rebuild-needed') || ps.endsWith('Dockerfile')
       })
       // docker build throws
       mockExecFileSync.mockImplementation((...args: unknown[]) => {
@@ -1810,9 +1851,91 @@ describe('docker-runner', () => {
       await Promise.resolve()
       await Promise.resolve()
 
-      // Container should NOT have been restarted (spawn called only once for initial start)
-      expect(mockSpawn).toHaveBeenCalledTimes(1)
+      // Container should have been restarted with previous image (spawn called twice)
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+      // Supervisor should NOT exit
       expect(mockExit).not.toHaveBeenCalled()
+    })
+
+    it('should NOT exit when build fails but other containers are still running', async () => {
+      let spawnCount = 0
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockImplementation(() => {
+        spawnCount++
+        return (spawnCount === 1 ? fakeChild1 : fakeChild2) as never
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+          { tenantCode: 'mbc', projectCode: 'PROJ_B', token: 'token-b', apiUrl: 'http://api-b' },
+        ],
+      })
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        return ps.includes('PROJ_A') && (ps.endsWith('docker-rebuild-needed') || ps.endsWith('Dockerfile'))
+      })
+      // docker build throws for PROJ_A
+      mockExecFileSync.mockImplementation((...args: unknown[]) => {
+        const cmdArgs = args[1] as string[]
+        if (Array.isArray(cmdArgs) && cmdArgs.includes('build')) {
+          throw new Error('Build failed')
+        }
+        return Buffer.from('')
+      })
+
+      runInDocker({})
+      resetIsDockerRunning()
+
+      // PROJ_A requests rebuild (fails)
+      fakeChild1.emit('close', 43)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // Spawn called 3 times: PROJ_A initial + PROJ_B initial + PROJ_A restart with previous image
+      expect(mockSpawn).toHaveBeenCalledTimes(3)
+      // PROJ_B is still running, so supervisor should NOT exit
+      expect(mockExit).not.toHaveBeenCalled()
+    })
+
+    it('should copy docker-customization-hash to docker-built-hash after successful build', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      let spawnCount = 0
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockImplementation(() => {
+        spawnCount++
+        return (spawnCount === 1 ? fakeChild1 : fakeChild2) as never
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      // rebuild marker exists, project Dockerfile exists at projectConfigHostDir/Dockerfile, and docker-customization-hash exists
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        return ps.endsWith('docker-rebuild-needed') || ps.endsWith('Dockerfile') || ps.endsWith('docker-customization-hash')
+      })
+
+      runInDocker({})
+      resetIsDockerRunning()
+
+      fakeChild1.emit('close', 43)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // copyFileSync should have been called to copy docker-customization-hash to docker-built-hash
+      expect(mockCopyFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('docker-customization-hash'),
+        expect.stringContaining('docker-built-hash'),
+      )
     })
   })
 })

@@ -4,9 +4,9 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { getDockerfilePath, getDockerContextDir, resolveDockerfile, getProjectDockerfilePath, getProjectImageTag } from './dockerfile-path'
+import { getDockerfilePath, getDockerContextDir, resolveDockerfile, getProjectImageTag } from './dockerfile-path'
 import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE, DOCKER_RESTART_EXIT_CODE } from '../constants'
-import { getConfigDir, loadConfig } from '../config-manager'
+import { getConfigDir, getProjectList, loadConfig } from '../config-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
@@ -18,6 +18,34 @@ import type { ProjectRegistration } from '../types'
 /** Convert a path.relative() result to POSIX format for container use */
 function toPosixRelative(relativePath: string): string {
   return relativePath.split(path.sep).join('/')
+}
+
+/**
+ * Returns true when running via ts-node (i.e. `npm run dev`).
+ * In this case, local dist/ should be mounted into containers instead of
+ * relying on the npm-installed package inside the image.
+ */
+function isRunningViaTsNode(): boolean {
+  const sym = Symbol.for('ts-node.register.instance')
+  return !!(process as unknown as { [key: symbol]: unknown })[sym]
+}
+
+/**
+ * Returns extra volume mount args to overlay the local dist/ into the container
+ * when running in dev mode (ts-node), so the container uses local source code.
+ * Returns an empty array when not in dev mode.
+ */
+function buildDevMounts(): string[] {
+  if (!isRunningViaTsNode()) return []
+  // __dirname is agent/src/docker — walk up two levels to get agent/
+  const agentRoot = path.resolve(__dirname, '..', '..')
+  const distDir = path.join(agentRoot, 'dist')
+  const localesDir = path.join(agentRoot, 'src', 'locales')
+  const containerBase = '/usr/local/lib/node_modules/@ai-support-agent/cli'
+  return [
+    '-v', `${distDir}:${containerBase}/dist:ro`,
+    '-v', `${localesDir}:${containerBase}/dist/locales:ro`,
+  ]
 }
 
 const IMAGE_NAME = 'ai-support-agent'
@@ -472,7 +500,12 @@ function buildProjectVolumeMounts(
     envArgs.push('-e', `AI_SUPPORT_AGENT_TOKEN=${project.token}`)
   }
   if (project.apiUrl) {
-    envArgs.push('-e', `AI_SUPPORT_AGENT_API_URL=${project.apiUrl}`)
+    // Replace localhost/127.0.0.1 with host.docker.internal so the container can reach the host
+    const containerApiUrl = project.apiUrl.replace(
+      /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
+      (_, scheme, _host, port) => `${scheme}host.docker.internal${port ?? ''}`,
+    )
+    envArgs.push('-e', `AI_SUPPORT_AGENT_API_URL=${containerApiUrl}`)
   }
 
   // Pass ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN if set
@@ -583,14 +616,29 @@ class DockerSupervisor {
     const rebuildMarker = path.join(projectConfigHostDir, 'docker-rebuild-needed')
     if (fs.existsSync(rebuildMarker)) {
       fs.unlinkSync(rebuildMarker)
-      const projectDockerfile = getProjectDockerfilePath(project.tenantCode, project.projectCode)
+      // The container writes Dockerfile into its configDir root, which maps to projectConfigHostDir on host.
+      const projectDockerfile = path.join(projectConfigHostDir, 'Dockerfile')
       if (fs.existsSync(projectDockerfile)) {
         try {
           buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile)
+          // Copy the docker-customization-hash file written by the container so the
+          // next container startup knows the current customization was already built.
+          const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
+          const dstHash = path.join(projectConfigHostDir, 'docker-built-hash')
+          if (fs.existsSync(srcHash)) {
+            fs.copyFileSync(srcHash, dstHash)
+          }
         } catch (err) {
           logger.error(`[docker] Image build failed: ${err instanceof Error ? err.message : String(err)}`)
-          logger.error(`[docker] Container ${this.projectKey(project)} will not be restarted due to build failure.`)
-          return
+          logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
+          // Write docker-built-hash even on failure so the next startup does not
+          // attempt the same failed build again. The container starts with the
+          // previous (base) image until the configuration is fixed and changed.
+          const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
+          const dstHash = path.join(projectConfigHostDir, 'docker-built-hash')
+          if (fs.existsSync(srcHash)) {
+            fs.copyFileSync(srcHash, dstHash)
+          }
         }
       }
     }
@@ -629,6 +677,7 @@ class DockerSupervisor {
       'run', '--rm', ...interactive,
       ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
       ...mounts,
+      ...buildDevMounts(),
       ...envArgs,
       imageTag,
       ...containerArgs,
@@ -726,8 +775,8 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   const version = ensureImage(customDockerfile)
 
-  // Determine projects to run
-  const allProjects = config?.projects ?? []
+  // Determine projects to run (skip entries without tenantCode)
+  const allProjects = config ? getProjectList(config) : []
   let projects: ProjectRegistration[]
 
   if (opts.project) {
