@@ -131,6 +131,7 @@ export function generateProjectDockerfile(
   baseVersion: string,
   aptPackages: string[],
   npmPackages: string[],
+  commands: string[] = [],
 ): string {
   validatePackageNames(aptPackages, 'apt')
   validatePackageNames(npmPackages, 'npm')
@@ -147,6 +148,9 @@ export function generateProjectDockerfile(
     lines.push(
       `RUN npm install -g ${npmPackages.join(' ')} && npm cache clean --force`,
     )
+  }
+  for (const cmd of commands) {
+    lines.push(`RUN ${cmd}`)
   }
   return lines.join('\n') + '\n'
 }

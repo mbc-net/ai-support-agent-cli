@@ -20,6 +20,7 @@ export interface ProjectConfigResponse {
     dockerCustomization?: {
       aptPackages?: string[]
       npmPackages?: string[]
+      commands?: string[]
     }
   }
   aws?: {

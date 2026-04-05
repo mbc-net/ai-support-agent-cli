@@ -198,7 +198,8 @@ export class ProjectAgent {
         const dockerCustomization = this.configSyncState.projectConfig?.agent?.dockerCustomization
         const aptPackages = dockerCustomization?.aptPackages ?? []
         const npmPackages = dockerCustomization?.npmPackages ?? []
-        const dockerfileContent = generateProjectDockerfile(AGENT_VERSION, aptPackages, npmPackages)
+        const commands = dockerCustomization?.commands ?? []
+        const dockerfileContent = generateProjectDockerfile(AGENT_VERSION, aptPackages, npmPackages, commands)
         const dockerfilePath = path.join(configDir, 'Dockerfile')
         fs.writeFileSync(dockerfilePath, dockerfileContent)
         logger.info(`${this.prefix} Project Dockerfile written: ${dockerfilePath}`)
