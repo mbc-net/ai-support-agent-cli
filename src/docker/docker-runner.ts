@@ -150,6 +150,9 @@ export function generateProjectDockerfile(
     )
   }
   for (const cmd of commands) {
+    if (/[\n\r]/.test(cmd)) {
+      throw new Error(`Invalid command (contains newline): "${cmd.substring(0, 50)}"`)
+    }
     lines.push(`RUN ${cmd}`)
   }
   return lines.join('\n') + '\n'
