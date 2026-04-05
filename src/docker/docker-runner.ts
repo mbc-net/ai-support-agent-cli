@@ -831,7 +831,7 @@ class DockerSupervisor {
           .catch((e: unknown) => logger.warn(`[docker] log chunk failed: ${e}`))
       }
 
-      const flushTimer = setInterval(() => { void flush() }, 1_000)
+      const flushTimer = setInterval(() => { void flush() }, 1_000).unref()
 
       child.stdout?.on('data', (d: Buffer) => { process.stdout.write(d); buf += d.toString() })
       child.stderr?.on('data', (d: Buffer) => { process.stderr.write(d); buf += d.toString() })
