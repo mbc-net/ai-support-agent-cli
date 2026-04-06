@@ -53,21 +53,17 @@ jobs:
         run: npm audit --audit-level=high
         continue-on-error: true
 
-      - name: Diagnose Node/Jest environment
-        run: |
-          echo "Node: $(node --version)"
-          echo "npm: $(npm --version)"
-          echo "OS: $(uname -a)"
-          echo "--- jest --listTests ---"
-          timeout 30 npx jest --listTests 2>&1 | head -10 || echo "listTests failed"
-          echo "--- jest --version ---"
-          npx jest --version
-          echo "--- Running single test ---"
-          timeout 60 npx jest --forceExit --coverage __tests__/constants.spec.ts 2>&1
-          echo "--- Done ---"
-
       - name: Run Unit Tests
-        run: npm run test:cov
+        run: |
+          setsid npm run test:cov &
+          TEST_PID=$!
+          TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
+          ( sleep 180; echo "Killing stale test group $TEST_PGID"; kill -- -$TEST_PGID 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
         timeout-minutes: 5
 
       - name: Unit Test Report
