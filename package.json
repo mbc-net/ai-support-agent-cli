@@ -32,8 +32,8 @@
     "dev": "node --env-file-if-exists=.env --require ts-node/register src/index.ts",
     "build": "tsc && cp -r src/locales dist/locales",
     "prepublishOnly": "npm run build && npm test",
-    "test": "jest --forceExit",
-    "test:cov": "jest --coverage --forceExit"
+    "test": "jest",
+    "test:cov": "jest --coverage"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
