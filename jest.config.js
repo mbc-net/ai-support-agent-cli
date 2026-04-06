@@ -8,6 +8,7 @@ module.exports = {
       isolatedModules: true,
     },
   },
+  collectCoverageFrom: ['src/**/*.ts', '!src/index.ts', '!src/__mocks__/**'],
   coverageThreshold: {
     global: {
       statements: 95,
