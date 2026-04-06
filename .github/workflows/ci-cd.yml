@@ -55,7 +55,7 @@ jobs:
 
       - name: Run Unit Tests
         run: |
-          setsid npm test &
+          setsid npm run test:cov &
           TEST_PID=$!
           TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
           ( sleep 180; echo "Killing stale test group $TEST_PGID"; kill -- -$TEST_PGID 2>/dev/null || true ) &
