@@ -393,9 +393,9 @@ describe('ProjectAgent', () => {
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'agent-1')
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'test-id')
       expect(mockedExecuteCommand).toHaveBeenCalled()
-      expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'agent-1')
+      expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'test-id')
 
       agent.stop()
     })
@@ -491,7 +491,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#789',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-other-proj', type: 'execute_command', agentId: 'agent-1', tenantCode: 'test-tenant', projectCode: 'OTHER_PROJ' },
+        content: { commandId: 'cmd-other-proj', type: 'execute_command', agentId: 'test-id', tenantCode: 'test-tenant', projectCode: 'OTHER_PROJ' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -516,7 +516,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#789',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-other-tenant', type: 'execute_command', agentId: 'agent-1', tenantCode: 'other-tenant', projectCode: 'test-proj' },
+        content: { commandId: 'cmd-other-tenant', type: 'execute_command', agentId: 'test-id', tenantCode: 'other-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -548,12 +548,12 @@ describe('ProjectAgent', () => {
         sk: 'CMD#101',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-match-proj', type: 'execute_command', agentId: 'agent-1', tenantCode: 'test-tenant', projectCode: 'test-proj' },
+        content: { commandId: 'cmd-match-proj', type: 'execute_command', agentId: 'test-id', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-match-proj', 'agent-1')
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-match-proj', 'test-id')
 
       agent.stop()
     })
@@ -631,12 +631,12 @@ describe('ProjectAgent', () => {
         sk: 'CMD#101',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-match', type: 'execute_command', agentId: 'agent-1', tenantCode: 'test-tenant', projectCode: 'test-proj' },
+        content: { commandId: 'cmd-match', type: 'execute_command', agentId: 'test-id', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-match', 'agent-1')
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-match', 'test-id')
 
       agent.stop()
     })
@@ -663,8 +663,8 @@ describe('ProjectAgent', () => {
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getPendingCommands).toHaveBeenCalledWith('agent-1')
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-pending', 'agent-1')
+      expect(mockClient.getPendingCommands).toHaveBeenCalledWith('test-id')
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-pending', 'test-id')
       expect(mockedExecuteCommand).toHaveBeenCalled()
 
       agent.stop()
@@ -719,7 +719,7 @@ describe('ProjectAgent', () => {
       expect(mockClient.submitResult).toHaveBeenCalledWith(
         'cmd-err',
         expect.objectContaining({ success: false, error: expect.any(String) }),
-        'agent-1',
+        'test-id',
       )
 
       agent.stop()

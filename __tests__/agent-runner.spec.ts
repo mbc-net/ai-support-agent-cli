@@ -948,9 +948,9 @@ describe('startProjectAgent', () => {
 
     await jest.advanceTimersByTimeAsync(100)
 
-    expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'agent-1')
-    expect(mockedExecuteCommand).toHaveBeenCalledWith('execute_command', { command: 'echo hi' }, expect.objectContaining({ commandId: 'cmd-1', client: mockClient, serverConfig: expect.any(Object), agentId: 'agent-1' }))
-    expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'agent-1')
+    expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'test-id')
+    expect(mockedExecuteCommand).toHaveBeenCalledWith('execute_command', { command: 'echo hi' }, expect.objectContaining({ commandId: 'cmd-1', client: mockClient, serverConfig: expect.any(Object), agentId: 'test-id' }))
+    expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'test-id')
 
     agent.stop()
   })
