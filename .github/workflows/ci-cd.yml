@@ -54,7 +54,12 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: npm run test:cov
+        run: |
+          timeout 240 npx jest --coverage --forceExit --runInBand --verbose 2>&1 | tee /tmp/jest-output.txt
+          EXIT=${PIPESTATUS[0]}
+          echo "=== Last 30 lines of jest output ==="
+          tail -30 /tmp/jest-output.txt
+          exit $EXIT
         timeout-minutes: 5
 
       - name: Unit Test Report
