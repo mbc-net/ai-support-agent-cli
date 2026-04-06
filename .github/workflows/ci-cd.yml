@@ -54,7 +54,17 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: npm test
+        run: |
+          # Run npm test in a new process group, then kill the entire group after 240s
+          setsid npm test &
+          TEST_PID=$!
+          TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
+          ( sleep 240; echo "⚠ Killing test process group $TEST_PGID after timeout"; kill -- -$TEST_PGID 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
         timeout-minutes: 5
 
       - name: Unit Test Report
