@@ -58,6 +58,8 @@ jobs:
           severity: 'HIGH,CRITICAL'
           format: 'sarif'
           output: 'trivy-results.sarif'
+          skip-dirs: 'node_modules'
+          cache: true
         continue-on-error: true
 
       - name: Upload Trivy scan results
