@@ -86,8 +86,6 @@ export interface DockerRunOptions {
    * When set, only the matching project is started.
    */
   project?: string
-  /** API client for log streaming (injected from agent-runner.ts) */
-  apiClient?: ApiClient
   /** Agent ID for log streaming */
   agentId?: string
 }
@@ -671,6 +669,10 @@ class DockerSupervisor {
     return `${project.tenantCode}/${project.projectCode}`
   }
 
+  private createProjectApiClient(project: ProjectRegistration): ApiClient | undefined {
+    return this.agentId ? new ApiClient(project.apiUrl, project.token) : undefined
+  }
+
   start(projects: ProjectRegistration[], onStop?: () => void): void {
     this.onAllStopped = onStop
 
@@ -712,11 +714,7 @@ class DockerSupervisor {
       const projectDockerfile = path.join(projectConfigHostDir, 'Dockerfile')
       if (fs.existsSync(projectDockerfile)) {
         try {
-          // Use project-specific ApiClient so the token matches the projectCode in the request
-          const projectApiClientForBuild = this.agentId
-            ? new ApiClient(project.apiUrl, project.token)
-            : undefined
-          await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, projectApiClientForBuild, this.agentId)
+          await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, this.createProjectApiClient(project), this.agentId)
           // Copy the docker-customization-hash file written by the container so the
           // next container startup knows the current customization was already built.
           const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
@@ -807,9 +805,7 @@ class DockerSupervisor {
 
     // Stream container stdout/stderr to host terminal and API for real-time log viewing
     // Use project-specific ApiClient so the token matches the projectCode in the request
-    const projectApiClient = this.agentId
-      ? new ApiClient(project.apiUrl, project.token)
-      : undefined
+    const projectApiClient = this.createProjectApiClient(project)
     if (projectApiClient && this.agentId) {
       const sessionId = makeSessionId()
       let seq = 0
@@ -984,13 +980,10 @@ export function runInDocker(opts: DockerRunOptions): void {
     // Per-project container mode (new architecture)
     logger.info(`[docker] Starting ${projects.length} project container(s)...`)
 
-    // ログストリーミング用の ApiClient を生成して opts に注入する
-    // （opts から未渡しの場合のみ。テスト等で外部から渡された場合はそちらを優先）
     const agentId = config?.agentId ?? os.hostname()
     const enrichedOpts: DockerRunOptions = {
       ...opts,
       agentId: opts.agentId ?? agentId,
-      apiClient: opts.apiClient ?? new ApiClient(projects[0].apiUrl, projects[0].token),
     }
 
     const supervisor = new DockerSupervisor(version, enrichedOpts)

@@ -2282,9 +2282,13 @@ describe('DockerSupervisor log streaming', () => {
   })
 
   it('should truncate container fullLog when it exceeds 2 MB limit', async () => {
+    const { ApiClient: MockApiClient } = require('../../src/api-client')
     const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
     const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
-    const mockApiClient = { submitLogChunk: mockSubmitLogChunk, saveSessionLog: mockSaveSessionLog }
+    MockApiClient.mockImplementation(() => ({
+      submitLogChunk: mockSubmitLogChunk,
+      saveSessionLog: mockSaveSessionLog,
+    }))
 
     const fakeChild = Object.assign(new EventEmitter(), {
       kill: jest.fn(),
@@ -2298,7 +2302,7 @@ describe('DockerSupervisor log streaming', () => {
       projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
     })
 
-    runInDocker({ apiClient: mockApiClient as never, agentId: 'agent-1' })
+    runInDocker({ agentId: 'agent-1' })
     resetIsDockerRunning()
 
     // Emit data exceeding 2MB limit
