@@ -54,7 +54,7 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: npx jest --coverage --forceExit --runInBand --collectCoverageFrom='[]'
+        run: npx jest --coverage
         timeout-minutes: 5
 
       - name: Unit Test Report
