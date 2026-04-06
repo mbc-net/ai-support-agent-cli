@@ -54,7 +54,15 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: npm run test:cov
+        run: |
+          npm run test:cov &
+          TEST_PID=$!
+          ( sleep 240 && kill -9 -$(ps -o pgid= -p $TEST_PID | tr -d ' ') 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
         timeout-minutes: 5
 
       - name: Unit Test Report

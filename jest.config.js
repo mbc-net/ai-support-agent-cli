@@ -2,7 +2,7 @@ module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
   testMatch: ['**/__tests__/**/*.spec.ts'],
-  coverageProvider: 'v8',
+  coverageProvider: 'babel',
   collectCoverageFrom: ['src/**/*.ts', '!src/index.ts', '!src/__mocks__/**'],
   coverageThreshold: {
     global: {

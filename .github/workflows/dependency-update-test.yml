@@ -29,7 +29,15 @@ jobs:
         run: npm run build
 
       - name: Run tests
-        run: timeout 480 npm run test:cov
+        run: |
+          npm run test:cov &
+          TEST_PID=$!
+          ( sleep 480 && kill -9 -$(ps -o pgid= -p $TEST_PID | tr -d ' ') 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
         timeout-minutes: 10
 
       - name: Security audit
@@ -91,7 +99,15 @@ jobs:
         run: npm run build
 
       - name: Run all tests
-        run: timeout 480 npm run test:cov
+        run: |
+          npm run test:cov &
+          TEST_PID=$!
+          ( sleep 480 && kill -9 -$(ps -o pgid= -p $TEST_PID | tr -d ' ') 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
         timeout-minutes: 10
 
       - name: Report status
