@@ -465,7 +465,7 @@ describe('handleNotification: agent-log and unknown actions', () => {
     jest.clearAllMocks()
   })
 
-  it('should silently return on agent-log action without "Ignoring notification" log', async () => {
+  it('should silently return on agent-log action without any log output (infinite loop prevention)', async () => {
     const deps = createMockDeps()
     const state = createMockState()
     const ctx = makeCtx(state)
@@ -476,8 +476,8 @@ describe('handleNotification: agent-log and unknown actions', () => {
       content: { agentId: 'agent-1', logType: 'container', seq: 1, text: 'some log' },
     })
 
-    const debugCalls = (logger.debug as jest.Mock).mock.calls.map((c: unknown[]) => String(c[0]))
-    expect(debugCalls.some((m: string) => m.includes('Ignoring notification'))).toBe(false)
+    // agent-log受信時はdebugログも含め一切ログ出力しない（無限ループ防止）
+    expect(logger.debug).not.toHaveBeenCalled()
     expect(logger.warn).not.toHaveBeenCalled()
     expect(logger.info).not.toHaveBeenCalled()
   })

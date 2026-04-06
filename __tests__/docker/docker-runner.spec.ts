@@ -2214,9 +2214,15 @@ describe('DockerSupervisor log streaming', () => {
   })
 
   it('should stream container logs to apiClient when provided', async () => {
+    // DockerSupervisorはプロジェクト固有のApiClientを new ApiClient(project.apiUrl, project.token) で作成する
+    // ApiClientはモック済みなので、そのモックインスタンスのメソッドを通じて検証する
+    const { ApiClient: MockApiClient } = require('../../src/api-client')
     const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
     const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
-    const mockApiClient = { submitLogChunk: mockSubmitLogChunk, saveSessionLog: mockSaveSessionLog }
+    MockApiClient.mockImplementation(() => ({
+      submitLogChunk: mockSubmitLogChunk,
+      saveSessionLog: mockSaveSessionLog,
+    }))
 
     const fakeChild = Object.assign(new EventEmitter(), {
       kill: jest.fn(),
@@ -2230,8 +2236,11 @@ describe('DockerSupervisor log streaming', () => {
       projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
     })
 
-    runInDocker({ apiClient: mockApiClient as never, agentId: 'agent-1' })
+    runInDocker({ agentId: 'agent-1' })
     resetIsDockerRunning()
+
+    // ApiClientがプロジェクトのapiUrl/tokenで生成されていることを確認
+    expect(MockApiClient).toHaveBeenCalledWith('http://api-a', 'token-a')
 
     // Emit log data
     fakeChild.stdout.emit('data', Buffer.from('container output'))

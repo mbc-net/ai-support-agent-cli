@@ -659,13 +659,11 @@ class DockerSupervisor {
   private opts: DockerRunOptions
   private version: string
   private onAllStopped: (() => void) | undefined
-  private apiClient: ApiClient | undefined
   private agentId: string | undefined
 
   constructor(version: string, opts: DockerRunOptions) {
     this.version = version
     this.opts = opts
-    this.apiClient = opts.apiClient
     this.agentId = opts.agentId
   }
 
@@ -714,7 +712,11 @@ class DockerSupervisor {
       const projectDockerfile = path.join(projectConfigHostDir, 'Dockerfile')
       if (fs.existsSync(projectDockerfile)) {
         try {
-          await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, this.apiClient, this.agentId)
+          // Use project-specific ApiClient so the token matches the projectCode in the request
+          const projectApiClientForBuild = this.agentId
+            ? new ApiClient(project.apiUrl, project.token)
+            : undefined
+          await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, projectApiClientForBuild, this.agentId)
           // Copy the docker-customization-hash file written by the container so the
           // next container startup knows the current customization was already built.
           const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
@@ -804,13 +806,17 @@ class DockerSupervisor {
     this.handles.set(key, handle)
 
     // Stream container stdout/stderr to host terminal and API for real-time log viewing
-    if (this.apiClient && this.agentId) {
+    // Use project-specific ApiClient so the token matches the projectCode in the request
+    const projectApiClient = this.agentId
+      ? new ApiClient(project.apiUrl, project.token)
+      : undefined
+    if (projectApiClient && this.agentId) {
       const sessionId = makeSessionId()
       let seq = 0
       let fullLog = ''
       let logTruncated = false
       let buf = ''
-      const apiClient = this.apiClient
+      const apiClient = projectApiClient
       const agentId = this.agentId
 
       const flush = async (): Promise<void> => {
