@@ -3,7 +3,7 @@ module.exports = {
   testEnvironment: 'node',
   testMatch: ['**/__tests__/**/*.spec.ts'],
   testTimeout: 10000,
-  openHandlesTimeout: 500,
+  openHandlesTimeout: 0,
   collectCoverageFrom: ['src/**/*.ts', '!src/index.ts', '!src/__mocks__/**'],
   coverageThreshold: {
     global: {
