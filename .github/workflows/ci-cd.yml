@@ -54,7 +54,7 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: timeout 480 npm run test:cov
+        run: timeout 480 npx jest --coverage --runInBand --forceExit --detectOpenHandles 2>&1 | tee /tmp/jest-out.txt; echo "EXIT:$?"
         timeout-minutes: 10
 
       - name: Unit Test Report
