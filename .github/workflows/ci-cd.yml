@@ -53,8 +53,8 @@ jobs:
         run: npm audit --audit-level=high
         continue-on-error: true
 
-      - name: Run Unit Tests with Coverage
-        run: npm run test:cov
+      - name: Run Unit Tests
+        run: npm test
         timeout-minutes: 5
 
       - name: Unit Test Report
