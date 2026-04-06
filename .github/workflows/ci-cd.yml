@@ -54,7 +54,7 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: npm run test:cov
+        run: npm test
         timeout-minutes: 5
 
       - name: Unit Test Report
