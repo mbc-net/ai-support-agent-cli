@@ -54,7 +54,7 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: npx jest --coverage
+        run: npx jest --coverage --maxWorkers=2
         timeout-minutes: 5
 
       - name: Unit Test Report
