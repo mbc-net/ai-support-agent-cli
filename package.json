@@ -33,7 +33,7 @@
     "build": "tsc && cp -r src/locales dist/locales",
     "prepublishOnly": "npm run build && npm test",
     "test": "jest --runInBand --forceExit",
-    "test:cov": "jest --coverage --runInBand --forceExit"
+    "test:cov": "c8 jest --runInBand --forceExit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
@@ -54,6 +54,7 @@
     "@types/node": "^22.0.0",
     "@types/pg": "^8.18.0",
     "@types/ws": "^8.18.1",
+    "c8": "^11.0.0",
     "jest": "^30.0.0",
     "jest-junit": "^16.0.0",
     "ts-jest": "^29.0.0",

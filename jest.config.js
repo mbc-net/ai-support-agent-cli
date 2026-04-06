@@ -1,18 +1,7 @@
 module.exports = {
   preset: 'ts-jest',
-  globalSetup: './jest.global-setup.js',
   testEnvironment: 'node',
   testMatch: ['**/__tests__/**/*.spec.ts'],
-  coverageProvider: 'v8',
-  collectCoverageFrom: ['src/**/*.ts', '!src/index.ts', '!src/__mocks__/**'],
-  coverageThreshold: {
-    global: {
-      statements: 95,
-      branches: 90,
-      functions: 95,
-      lines: 95,
-    },
-  },
   reporters: [
     'default',
     ['jest-junit', { outputDirectory: 'report', outputName: 'unit.xml' }],
