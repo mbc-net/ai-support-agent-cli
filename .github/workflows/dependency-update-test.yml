@@ -29,8 +29,17 @@ jobs:
         run: npm run build
 
       - name: Run tests
-        run: npm run test:cov
-        timeout-minutes: 5
+        run: |
+          setsid npm run test:cov &
+          TEST_PID=$!
+          TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
+          ( sleep 300; echo "Killing stale test group $TEST_PGID"; kill -- -$TEST_PGID 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
+        timeout-minutes: 8
 
       - name: Security audit
         run: npm audit --audit-level=high
@@ -91,8 +100,17 @@ jobs:
         run: npm run build
 
       - name: Run all tests
-        run: npm run test:cov
-        timeout-minutes: 5
+        run: |
+          setsid npm run test:cov &
+          TEST_PID=$!
+          TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
+          ( sleep 300; echo "Killing stale test group $TEST_PGID"; kill -- -$TEST_PGID 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
+        timeout-minutes: 8
 
       - name: Report status
         if: failure()
