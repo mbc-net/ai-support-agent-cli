@@ -1,8 +1,9 @@
 module.exports = {
   preset: 'ts-jest',
+  globalSetup: './jest.global-setup.js',
   testEnvironment: 'node',
   testMatch: ['**/__tests__/**/*.spec.ts'],
-  coverageProvider: 'babel',
+  coverageProvider: 'v8',
   collectCoverageFrom: ['src/**/*.ts', '!src/index.ts', '!src/__mocks__/**'],
   coverageThreshold: {
     global: {

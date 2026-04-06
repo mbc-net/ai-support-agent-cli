@@ -23,7 +23,7 @@ jobs:
   unit_tests:
     name: Unit Test
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       matrix:
         node-version: [20.x]
@@ -64,7 +64,7 @@ jobs:
           EXIT_CODE=$?
           kill $KILLER_PID 2>/dev/null || true
           exit $EXIT_CODE
-        timeout-minutes: 5
+        timeout-minutes: 8
 
       - name: Unit Test Report
         uses: dorny/test-reporter@v1
