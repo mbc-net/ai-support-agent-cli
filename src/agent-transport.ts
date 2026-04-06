@@ -199,6 +199,9 @@ export async function handleNotification(
   logger.debug(`${deps.prefix} Notification received: action=${notification.action}, content=${JSON.stringify(content).substring(0, LOG_RESULT_LIMIT)}`)
 
   switch (notification.action) {
+    case 'agent-log':
+      // コンテナログのストリーミング通知はエージェント側では処理不要（無限ループ防止のためlogなし）
+      return
     case 'agent-command': {
       const commandId = content.commandId as string
       const targetAgentId = content.agentId as string

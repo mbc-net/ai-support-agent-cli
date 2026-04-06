@@ -589,6 +589,79 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('submitLogChunk', () => {
+    it('should submit log chunk with correct parameters', async () => {
+      mockInstance.post.mockResolvedValue({ data: {} })
+
+      await client.submitLogChunk({
+        agentId: 'agent-1',
+        projectCode: 'TEST_01',
+        logType: 'docker-build',
+        sessionId: '20240101T120000',
+        seq: 0,
+        text: 'Building image...',
+      })
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/logs/chunk',
+        {
+          agentId: 'agent-1',
+          projectCode: 'TEST_01',
+          logType: 'docker-build',
+          sessionId: '20240101T120000',
+          seq: 0,
+          text: 'Building image...',
+        },
+        undefined,
+      )
+    })
+
+    it('should submit container log chunk', async () => {
+      mockInstance.post.mockResolvedValue({ data: {} })
+
+      await client.submitLogChunk({
+        agentId: 'agent-1',
+        projectCode: 'TEST_01',
+        logType: 'container',
+        sessionId: '20240101T120000',
+        seq: 5,
+        text: 'Running...',
+      })
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/logs/chunk',
+        expect.objectContaining({ logType: 'container', seq: 5 }),
+        undefined,
+      )
+    })
+  })
+
+  describe('saveSessionLog', () => {
+    it('should save session log with extended timeout', async () => {
+      mockInstance.post.mockResolvedValue({ data: {} })
+
+      await client.saveSessionLog({
+        agentId: 'agent-1',
+        projectCode: 'TEST_01',
+        logType: 'docker-build',
+        sessionId: '20240101T120000',
+        content: 'Full build log content here',
+      })
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/logs/session',
+        {
+          agentId: 'agent-1',
+          projectCode: 'TEST_01',
+          logType: 'docker-build',
+          sessionId: '20240101T120000',
+          content: 'Full build log content here',
+        },
+        { timeout: 30_000 },
+      )
+    })
+  })
+
   describe('getUploadUrl', () => {
     it('should request upload URL with correct parameters', async () => {
       mockInstance.post.mockResolvedValue({

@@ -441,3 +441,59 @@ describe('processCommand processing flag', () => {
     expect(state.processing).toBe(false)
   })
 })
+
+describe('handleNotification: agent-log and unknown actions', () => {
+  const { logger } = require('../src/logger')
+
+  function makeCtx(state: TransportState): CommandContext {
+    return {
+      configSyncState: {
+        currentConfigHash: undefined,
+        projectConfig: undefined,
+        serverConfig: null,
+        availableChatModes: [],
+        activeChatMode: undefined,
+        mcpConfigPath: undefined,
+        dockerCustomizationHash: undefined,
+      },
+      configSyncDeps: {} as any,
+      transportState: state,
+    } as unknown as CommandContext
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('should silently return on agent-log action without "Ignoring notification" log', async () => {
+    const deps = createMockDeps()
+    const state = createMockState()
+    const ctx = makeCtx(state)
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n1', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: 'agent-log',
+      content: { agentId: 'agent-1', logType: 'container', seq: 1, text: 'some log' },
+    })
+
+    const debugCalls = (logger.debug as jest.Mock).mock.calls.map((c: unknown[]) => String(c[0]))
+    expect(debugCalls.some((m: string) => m.includes('Ignoring notification'))).toBe(false)
+    expect(logger.warn).not.toHaveBeenCalled()
+    expect(logger.info).not.toHaveBeenCalled()
+  })
+
+  it('should log "Ignoring notification" for truly unknown actions', async () => {
+    const deps = createMockDeps()
+    const state = createMockState()
+    const ctx = makeCtx(state)
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n2', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: 'some-unknown-action',
+      content: {},
+    })
+
+    const debugCalls = (logger.debug as jest.Mock).mock.calls.map((c: unknown[]) => String(c[0]))
+    expect(debugCalls.some((m: string) => m.includes('Ignoring notification with action: some-unknown-action'))).toBe(true)
+  })
+})

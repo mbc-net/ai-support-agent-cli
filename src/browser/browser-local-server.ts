@@ -43,6 +43,7 @@ export class BrowserLocalServer {
       })
 
       // Bind to 127.0.0.1 only, port 0 = random available port
+      server.unref()
       server.listen(0, '127.0.0.1', () => {
         const addr = server.address()
         if (addr && typeof addr === 'object') {
