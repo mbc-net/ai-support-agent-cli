@@ -53,39 +53,21 @@ jobs:
         run: npm audit --audit-level=high
         continue-on-error: true
 
-      - name: Run Unit Tests (first 10 suites with coverage)
-        run: |
-          timeout 120 npx jest --forceExit --coverage \
-            __tests__/api-client.integration.spec.ts \
-            __tests__/terminal/terminal-websocket.spec.ts \
-            "__tests__/commands/api-chat-executor.spec.ts" \
-            __tests__/command-executor.spec.ts \
-            __tests__/docker/docker-runner.spec.ts \
-            "__tests__/commands/shell-executor.spec.ts" \
-            __tests__/vscode/vscode-server.spec.ts \
-            "__tests__/commands/chat-executor.spec.ts" \
-            __tests__/project-agent.spec.ts \
-            __tests__/project-worker.spec.ts \
-            2>&1
-          echo "First 10 done: $?"
-        timeout-minutes: 4
-
-      - name: Run Unit Tests (next 10 suites with coverage)
-        run: |
-          timeout 120 npx jest --forceExit --coverage \
-            __tests__/agent-runner.spec.ts \
-            "__tests__/mcp/tools/browser/playwright-loader.spec.ts" \
-            __tests__/vscode/vscode-tunnel-websocket.spec.ts \
-            "__tests__/cli/service/darwin-service.spec.ts" \
-            __tests__/terminal/terminal-session.spec.ts \
-            __tests__/commands/dispatch.spec.ts \
-            __tests__/open-compat.spec.ts \
-            "__tests__/commands/docker-commands.spec.ts" \
-            "__tests__/commands/process-executor.spec.ts" \
-            __tests__/agent-transport-ws.spec.ts \
-            2>&1
-          echo "Next 10 done: $?"
-        timeout-minutes: 4
+      - name: Test suite 1 - api-client.integration
+        run: timeout 60 npx jest --forceExit --coverage __tests__/api-client.integration.spec.ts 2>&1; echo "exit:$?"
+        timeout-minutes: 2
+      - name: Test suite 2 - terminal-websocket
+        run: timeout 60 npx jest --forceExit --coverage __tests__/terminal/terminal-websocket.spec.ts 2>&1; echo "exit:$?"
+        timeout-minutes: 2
+      - name: Test suite 3 - vscode-tunnel-websocket
+        run: timeout 60 npx jest --forceExit --coverage __tests__/vscode/vscode-tunnel-websocket.spec.ts 2>&1; echo "exit:$?"
+        timeout-minutes: 2
+      - name: Test suite 4 - docker-runner
+        run: timeout 60 npx jest --forceExit --coverage __tests__/docker/docker-runner.spec.ts 2>&1; echo "exit:$?"
+        timeout-minutes: 2
+      - name: Test suite 5 - project-agent
+        run: timeout 60 npx jest --forceExit --coverage __tests__/project-agent.spec.ts 2>&1; echo "exit:$?"
+        timeout-minutes: 2
 
       - name: Unit Test Report
         uses: dorny/test-reporter@v1
