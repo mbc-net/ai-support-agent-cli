@@ -53,21 +53,9 @@ jobs:
         run: npm audit --audit-level=high
         continue-on-error: true
 
-      - name: Test suite 1 - api-client.integration
-        run: timeout 60 npx jest --forceExit --coverage __tests__/api-client.integration.spec.ts 2>&1; echo "exit:$?"
-        timeout-minutes: 2
-      - name: Test suite 2 - terminal-websocket
-        run: timeout 60 npx jest --forceExit --coverage __tests__/terminal/terminal-websocket.spec.ts 2>&1; echo "exit:$?"
-        timeout-minutes: 2
-      - name: Test suite 3 - vscode-tunnel-websocket
-        run: timeout 60 npx jest --forceExit --coverage __tests__/vscode/vscode-tunnel-websocket.spec.ts 2>&1; echo "exit:$?"
-        timeout-minutes: 2
-      - name: Test suite 4 - docker-runner
-        run: timeout 60 npx jest --forceExit --coverage __tests__/docker/docker-runner.spec.ts 2>&1; echo "exit:$?"
-        timeout-minutes: 2
-      - name: Test suite 5 - project-agent
-        run: timeout 60 npx jest --forceExit --coverage __tests__/project-agent.spec.ts 2>&1; echo "exit:$?"
-        timeout-minutes: 2
+      - name: Run Unit Tests
+        run: npm run test:cov
+        timeout-minutes: 5
 
       - name: Unit Test Report
         uses: dorny/test-reporter@v1
