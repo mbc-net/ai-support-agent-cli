@@ -54,7 +54,7 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests with Coverage
-        run: timeout 240 npm run test:cov
+        run: timeout --kill-after=10 240 npx jest --coverage --runInBand --verbose 2>&1 | tee /tmp/test-output.txt; EXIT=$?; tail -50 /tmp/test-output.txt; exit $EXIT
         timeout-minutes: 5
 
       - name: Unit Test Report
