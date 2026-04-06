@@ -22,7 +22,7 @@ permissions:
 jobs:
   unit_tests:
     name: Unit Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     strategy:
       matrix:
@@ -54,8 +54,8 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: timeout 480 npx jest --coverage --runInBand --forceExit --detectOpenHandles 2>&1 | tee /tmp/jest-out.txt; echo "EXIT:$?"
-        timeout-minutes: 10
+        run: npm run test:cov
+        timeout-minutes: 5
 
       - name: Unit Test Report
         uses: dorny/test-reporter@v1
