@@ -54,7 +54,16 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: npm test
+        run: |
+          setsid npm test &
+          TEST_PID=$!
+          TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
+          ( sleep 180; echo "Killing stale test group $TEST_PGID"; kill -- -$TEST_PGID 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
         timeout-minutes: 5
 
       - name: Unit Test Report
