@@ -2,8 +2,7 @@ module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
   testMatch: ['**/__tests__/**/*.spec.ts'],
-  testTimeout: 10000,
-  openHandlesTimeout: 0,
+  coverageProvider: 'v8',
   collectCoverageFrom: ['src/**/*.ts', '!src/index.ts', '!src/__mocks__/**'],
   coverageThreshold: {
     global: {
