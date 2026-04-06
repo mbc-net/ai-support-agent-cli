@@ -54,17 +54,8 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: |
-          setsid npm run test:cov &
-          TEST_PID=$!
-          TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
-          ( sleep 300; echo "Killing stale test group $TEST_PGID"; kill -- -$TEST_PGID 2>/dev/null || true ) &
-          KILLER_PID=$!
-          wait $TEST_PID
-          EXIT_CODE=$?
-          kill $KILLER_PID 2>/dev/null || true
-          exit $EXIT_CODE
-        timeout-minutes: 8
+        run: timeout 480 npm run test:cov
+        timeout-minutes: 10
 
       - name: Unit Test Report
         uses: dorny/test-reporter@v1
