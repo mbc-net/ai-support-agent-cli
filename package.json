@@ -33,7 +33,7 @@
     "build": "tsc && cp -r src/locales dist/locales",
     "prepublishOnly": "npm run build && npm test",
     "test": "jest --forceExit",
-    "test:cov": "jest --coverage --forceExit"
+    "test:cov": "jest --coverage --forceExit --maxWorkers=2"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
