@@ -134,7 +134,7 @@ export class ChildProcessManager {
       this.restartTimers.delete(projectCode)
       if (this.stopping) return
       this.spawnChild(projectCode, managed.startMessage)
-    }, CHILD_PROCESS_RESTART_DELAY_MS)
+    }, CHILD_PROCESS_RESTART_DELAY_MS).unref()
     this.restartTimers.set(projectCode, timer)
   }
 
