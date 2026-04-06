@@ -53,18 +53,39 @@ jobs:
         run: npm audit --audit-level=high
         continue-on-error: true
 
-      - name: Run Unit Tests
+      - name: Run Unit Tests (first 10 suites with coverage)
         run: |
-          setsid npm run test:cov &
-          TEST_PID=$!
-          TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
-          ( sleep 180; echo "Killing stale test group $TEST_PGID"; kill -- -$TEST_PGID 2>/dev/null || true ) &
-          KILLER_PID=$!
-          wait $TEST_PID
-          EXIT_CODE=$?
-          kill $KILLER_PID 2>/dev/null || true
-          exit $EXIT_CODE
-        timeout-minutes: 5
+          timeout 120 npx jest --forceExit --coverage \
+            __tests__/api-client.integration.spec.ts \
+            __tests__/terminal/terminal-websocket.spec.ts \
+            "__tests__/commands/api-chat-executor.spec.ts" \
+            __tests__/command-executor.spec.ts \
+            __tests__/docker/docker-runner.spec.ts \
+            "__tests__/commands/shell-executor.spec.ts" \
+            __tests__/vscode/vscode-server.spec.ts \
+            "__tests__/commands/chat-executor.spec.ts" \
+            __tests__/project-agent.spec.ts \
+            __tests__/project-worker.spec.ts \
+            2>&1
+          echo "First 10 done: $?"
+        timeout-minutes: 4
+
+      - name: Run Unit Tests (next 10 suites with coverage)
+        run: |
+          timeout 120 npx jest --forceExit --coverage \
+            __tests__/agent-runner.spec.ts \
+            "__tests__/mcp/tools/browser/playwright-loader.spec.ts" \
+            __tests__/vscode/vscode-tunnel-websocket.spec.ts \
+            "__tests__/cli/service/darwin-service.spec.ts" \
+            __tests__/terminal/terminal-session.spec.ts \
+            __tests__/commands/dispatch.spec.ts \
+            __tests__/open-compat.spec.ts \
+            "__tests__/commands/docker-commands.spec.ts" \
+            "__tests__/commands/process-executor.spec.ts" \
+            __tests__/agent-transport-ws.spec.ts \
+            2>&1
+          echo "Next 10 done: $?"
+        timeout-minutes: 4
 
       - name: Unit Test Report
         uses: dorny/test-reporter@v1
