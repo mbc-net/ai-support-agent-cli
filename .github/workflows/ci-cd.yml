@@ -22,11 +22,11 @@ permissions:
 jobs:
   unit_tests:
     name: Unit Test
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       matrix:
-        node-version: [20.x]
+        node-version: [22.x]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,7 +54,7 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: npm test
+        run: npm run test:cov
         timeout-minutes: 5
 
       - name: Unit Test Report
