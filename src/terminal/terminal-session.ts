@@ -17,15 +17,42 @@ import {
 } from './sandbox-init-script'
 
 /**
- * node-pty を遅延ロードする。
- * optionalDependency のため、ネイティブビルドが失敗した環境では利用不可。
+ * Minimal subset of node-pty's IPty interface used by TerminalSession.
+ * Defined locally so that tsc does not require node-pty's type declarations
+ * at compile time (node-pty is an optionalDependency whose native build may
+ * be absent in CI or non-desktop environments).
  */
+interface IPty {
+  readonly pid: number
+  readonly cols: number
+  readonly rows: number
+  onData: (listener: (data: string) => void) => void
+  onExit: (listener: (e: { exitCode: number; signal?: number }) => void) => void
+  write(data: string): void
+  resize(cols: number, rows: number): void
+  kill(signal?: string): void
+}
+
+interface PtyModule {
+  spawn(
+    file: string,
+    args: string[],
+    options: {
+      name?: string
+      cols?: number
+      rows?: number
+      cwd?: string
+      env?: Record<string, string>
+    },
+  ): IPty
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let pty: typeof import('node-pty') | null = null
+let pty: PtyModule | null = null
 let ptyLoadError: string | null = null
 try {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  pty = require('node-pty')
+  pty = require('node-pty') as PtyModule
 } catch (e) /* istanbul ignore next -- only when native build fails */ {
   ptyLoadError = e instanceof Error ? e.message : String(e)
   logger.debug(`[terminal] node-pty is not available: ${ptyLoadError}`)
@@ -65,7 +92,7 @@ export class TerminalSession {
   readonly cwd: string
   readonly createdAt: number
   private lastActivity: number
-  private readonly ptyProcess: import('node-pty').IPty
+  private readonly ptyProcess: IPty
   private sandboxTmpDir: string | null = null
   private dataCallback: DataCallback | null = null
   private exitCallback: ExitCallback | null = null
