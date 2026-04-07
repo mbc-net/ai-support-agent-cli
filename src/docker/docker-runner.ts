@@ -727,8 +727,8 @@ class DockerSupervisor {
         process.exit(0)
       })
     }
-    this.sigintHandler = (): void => shutdown()
-    this.sigtermHandler = (): void => shutdown()
+    this.sigintHandler = (): void => { logger.info('[docker] SIGINT received, shutting down...'); shutdown() }
+    this.sigtermHandler = (): void => { logger.info('[docker] SIGTERM received, shutting down...'); shutdown() }
     process.on('SIGINT', this.sigintHandler)
     process.on('SIGTERM', this.sigtermHandler)
   }
