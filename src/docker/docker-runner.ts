@@ -663,6 +663,8 @@ class DockerSupervisor {
   private readonly defaultAgentId: string | undefined
   /** Per-project agentId updated when the container registers with the API. */
   private projectAgentIds = new Map<string, string>()
+  private sigintHandler: (() => void) | undefined
+  private sigtermHandler: (() => void) | undefined
 
   constructor(version: string, opts: DockerRunOptions) {
     this.version = version
@@ -700,21 +702,25 @@ class DockerSupervisor {
       shuttingDown = true
       // Set updating flag so the close handler does not call process.exit again
       this.updating = true
+      if (this.sigintHandler) process.removeListener('SIGINT', this.sigintHandler)
+      if (this.sigtermHandler) process.removeListener('SIGTERM', this.sigtermHandler)
       logger.info(t('runner.shuttingDown'))
       const closedPromises = [...this.handles.values()].map((h) => h.closedPromise)
       this.stopAll()
       onStop?.()
-      const timeout = setTimeout(() => {
+      const shutdownTimer = setTimeout(() => {
         logger.warn('[docker] Shutdown timed out waiting for log flush; forcing exit')
         process.exit(0)
       }, 10_000).unref()
       void Promise.all(closedPromises).then(() => {
-        clearTimeout(timeout)
+        clearTimeout(shutdownTimer)
         process.exit(0)
       })
     }
-    process.once('SIGINT', () => shutdown())
-    process.once('SIGTERM', () => shutdown())
+    this.sigintHandler = (): void => shutdown()
+    this.sigtermHandler = (): void => shutdown()
+    process.on('SIGINT', this.sigintHandler)
+    process.on('SIGTERM', this.sigtermHandler)
   }
 
   private getImageTag(project: ProjectRegistration): string {
