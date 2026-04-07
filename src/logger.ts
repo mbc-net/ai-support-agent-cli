@@ -88,7 +88,8 @@ export function makeLinePrefixer(
 ): (chunk: string) => void {
   let lineBuffer = ''
   return (chunk: string): void => {
-    lineBuffer += chunk
+    // Normalize \r\n → \n so that \r does not reset the cursor before the prefix
+    lineBuffer += chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
     const newlineIdx = lineBuffer.lastIndexOf('\n')
     if (newlineIdx === -1) return // no complete line yet — keep buffering
     const complete = lineBuffer.slice(0, newlineIdx + 1)

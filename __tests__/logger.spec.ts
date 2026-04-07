@@ -272,6 +272,25 @@ describe('logger', () => {
       expect(output[1]).toBe('P> partial done\n')
     })
 
+    it('should normalize CRLF to LF to prevent cursor reset before prefix', () => {
+      const output: string[] = []
+      const write = makeLinePrefixer('P> ', (s) => output.push(s))
+
+      write('line1\r\nline2\r\n')
+      expect(output).toHaveLength(1)
+      expect(output[0]).toBe('P> line1\nP> line2\n')
+      expect(output[0]).not.toContain('\r')
+    })
+
+    it('should normalize bare CR to LF', () => {
+      const output: string[] = []
+      const write = makeLinePrefixer('P> ', (s) => output.push(s))
+
+      write('line1\rline2\r')
+      expect(output).toHaveLength(1)
+      expect(output[0]).not.toContain('\r')
+    })
+
     it('should prevent interleaving from two concurrent prefixers on the same stream', () => {
       const combined: string[] = []
       const writeA = makeLinePrefixer('[A] ', (s) => combined.push(s))
