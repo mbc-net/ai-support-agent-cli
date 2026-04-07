@@ -891,7 +891,7 @@ class DockerSupervisor {
 
       if (code === DOCKER_RESTART_EXIT_CODE && !this.updating) {
         logger.info(`[docker] Container ${key} requested restart. Rebuilding image if needed...`)
-        void this.rebuildAndRestart(project, projectConfigHostDir).catch((err) => {
+        void this.rebuildAndRestart(project, projectConfigHostDir, true).catch((err) => {
           logger.error(`[docker] Restart failed: ${err instanceof Error ? err.message : String(err)}`)
         })
         return
