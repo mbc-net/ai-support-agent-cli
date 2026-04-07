@@ -645,6 +645,9 @@ interface DockerContainerHandle {
   child: ChildProcess
   version: string
   closeHandled: boolean
+  /** Resolves when the container process has exited and all log flushes have been initiated. */
+  closedPromise: Promise<void>
+  resolveClosed: () => void
 }
 
 /**
@@ -698,9 +701,17 @@ class DockerSupervisor {
       // Set updating flag so the close handler does not call process.exit again
       this.updating = true
       logger.info(t('runner.shuttingDown'))
+      const closedPromises = [...this.handles.values()].map((h) => h.closedPromise)
       this.stopAll()
       onStop?.()
-      process.exit(0)
+      const timeout = setTimeout(() => {
+        logger.warn('[docker] Shutdown timed out waiting for log flush; forcing exit')
+        process.exit(0)
+      }, 10_000).unref()
+      void Promise.all(closedPromises).then(() => {
+        clearTimeout(timeout)
+        process.exit(0)
+      })
     }
     process.on('SIGINT', () => shutdown())
     process.on('SIGTERM', () => shutdown())
@@ -832,11 +843,15 @@ class DockerSupervisor {
     logger.info(`[docker] Starting container for project: ${key}`)
     const child = spawn('docker', dockerArgs, { stdio: ['inherit', 'pipe', 'pipe'] })
 
+    let resolveClosed!: () => void
+    const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve })
     const handle: DockerContainerHandle = {
       project,
       child,
       version: this.version,
       closeHandled: false,
+      closedPromise,
+      resolveClosed,
     }
     this.handles.set(key, handle)
 
@@ -907,13 +922,17 @@ class DockerSupervisor {
           if (fullLog) {
             void apiClient.saveSessionLog({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, content: fullLog })
               .catch((e: unknown) => logger.warn(`[docker] S3 upload failed: ${e}`))
+              .finally(() => { handle.resolveClosed() })
+          } else {
+            handle.resolveClosed()
           }
-        })
+        }).catch(() => { handle.resolveClosed() }).catch(() => { handle.resolveClosed() })
       })
     } else {
       // No log streaming: forward to host terminal directly
       child.stdout?.on('data', (d: Buffer) => process.stdout.write(d))
       child.stderr?.on('data', (d: Buffer) => process.stderr.write(d))
+      child.on('close', () => { handle.resolveClosed() })
     }
 
     child.on('error', (err) => {
