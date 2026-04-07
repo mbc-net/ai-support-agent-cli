@@ -706,12 +706,14 @@ class DockerSupervisor {
     }
   }
 
-  private async rebuildAndRestart(project: ProjectRegistration, projectConfigHostDir: string): Promise<void> {
+  private async rebuildAndRestart(project: ProjectRegistration, projectConfigHostDir: string, forceIfDockerfileExists = false): Promise<void> {
     const rebuildMarker = path.join(projectConfigHostDir, 'docker-rebuild-needed')
-    if (fs.existsSync(rebuildMarker)) {
-      fs.unlinkSync(rebuildMarker)
+    const projectDockerfile = path.join(projectConfigHostDir, 'Dockerfile')
+    const hasMarker = fs.existsSync(rebuildMarker)
+    const shouldBuild = hasMarker || (forceIfDockerfileExists && fs.existsSync(projectDockerfile))
+    if (shouldBuild) {
+      if (hasMarker) fs.unlinkSync(rebuildMarker)
       // The container writes Dockerfile into its configDir root, which maps to projectConfigHostDir on host.
-      const projectDockerfile = path.join(projectConfigHostDir, 'Dockerfile')
       if (fs.existsSync(projectDockerfile)) {
         try {
           await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, this.createProjectApiClient(project), this.agentId)
@@ -757,6 +759,20 @@ class DockerSupervisor {
   private spawnProject(project: ProjectRegistration): void {
     const key = this.projectKey(project)
     const projectConfigHostDir = getProjectConfigHostDir(project)
+
+    // Pre-startup hash check: if docker-customization-hash !== docker-built-hash,
+    // rebuild before starting the container (handles the case where config changed while agent was stopped)
+    const customizationHashPath = path.join(projectConfigHostDir, 'docker-customization-hash')
+    const builtHashPath = path.join(projectConfigHostDir, 'docker-built-hash')
+    if (fs.existsSync(customizationHashPath) && fs.existsSync(builtHashPath)) {
+      const customizationHash = fs.readFileSync(customizationHashPath, 'utf-8').trim()
+      const builtHash = fs.readFileSync(builtHashPath, 'utf-8').trim()
+      if (customizationHash !== builtHash) {
+        logger.info(`[docker] Pre-startup hash mismatch for ${key}, rebuilding before start...`)
+        void this.rebuildAndRestart(project, projectConfigHostDir, true)
+        return
+      }
+    }
 
     const { mounts, envArgs } = buildProjectVolumeMounts(project, projectConfigHostDir)
 

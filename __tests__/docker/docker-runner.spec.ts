@@ -1958,6 +1958,80 @@ describe('docker-runner', () => {
         expect.stringContaining('docker-built-hash'),
       )
     })
+
+    it('should start container normally when pre-startup hashes match', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeContainerChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeContainerChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      // Both hash files exist with matching hashes, no project-specific image
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        return ps.endsWith('docker-customization-hash') || ps.endsWith('docker-built-hash')
+      })
+      mockReadFileSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        if (ps.endsWith('docker-customization-hash')) return 'same-hash' as any
+        if (ps.endsWith('docker-built-hash')) return 'same-hash' as any
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      runInDocker({})
+      resetIsDockerRunning()
+
+      await Promise.resolve()
+
+      // Should NOT have called docker build
+      const dockerBuildCall = mockSpawn.mock.calls.find(
+        (c) => Array.isArray(c[1]) && (c[1] as string[]).includes('build'),
+      )
+      expect(dockerBuildCall).toBeUndefined()
+      // Container should have started directly (no rebuild)
+      expect(mockSpawn).toHaveBeenCalledTimes(1)
+      // Close the container so the supervisor exits cleanly
+      fakeContainerChild.emit('close', 0)
+      await Promise.resolve()
+    })
+
+    it('should skip pre-startup rebuild when only one hash file exists', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeContainerChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeContainerChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      // Only docker-customization-hash exists (no docker-built-hash) -> skip pre-startup check
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        return ps.endsWith('docker-customization-hash')
+      })
+
+      runInDocker({})
+      resetIsDockerRunning()
+
+      await Promise.resolve()
+
+      // Should NOT have called docker build
+      const dockerBuildCall = mockSpawn.mock.calls.find(
+        (c) => Array.isArray(c[1]) && (c[1] as string[]).includes('build'),
+      )
+      expect(dockerBuildCall).toBeUndefined()
+      // Container should have started directly
+      expect(mockSpawn).toHaveBeenCalledTimes(1)
+      // Close the container so the supervisor exits cleanly
+      fakeContainerChild.emit('close', 0)
+      await Promise.resolve()
+    })
   })
 })
 
