@@ -297,6 +297,13 @@ export class ProjectAgent {
 
       // Report docker build error (if any) via heartbeat
       if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+        // Write the server-assigned agentId so the host DockerSupervisor can use it for log storage
+        try {
+          fs.writeFileSync(path.join(getConfigDir(), 'docker-registered-agent-id'), result.agentId, 'utf-8')
+        } catch (err) {
+          logger.warn(`${this.prefix} Failed to write docker-registered-agent-id: ${getErrorMessage(err)}`)
+        }
+
         const buildErrorPath = path.join(getConfigDir(), 'docker-build-error')
         let dockerBuildError: string | undefined
         try {

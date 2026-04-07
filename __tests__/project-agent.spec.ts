@@ -2013,4 +2013,117 @@ describe('ProjectAgent', () => {
       expect(initProjectDir).toHaveBeenCalledWith(project, undefined)
     })
   })
+
+  describe('docker-registered-agent-id', () => {
+    it('should write docker-registered-agent-id file after registration when running in Docker', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs') as { writeFileSync: jest.Mock; readFileSync: jest.Mock; existsSync: jest.Mock }
+      const writtenFiles: Record<string, string> = {}
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation((...args: unknown[]) => {
+        writtenFiles[String(args[0])] = String(args[1])
+      })
+
+      try {
+        mockClient.register.mockResolvedValue({
+          agentId: 'server-assigned-uuid-1234',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id'))
+        expect(registeredIdEntry).toBeDefined()
+        expect(registeredIdEntry![1]).toBe('server-assigned-uuid-1234')
+
+        agent.stop()
+      } finally {
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should not write docker-registered-agent-id file when not running in Docker', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+
+      const mockFs = require('fs') as { writeFileSync: jest.Mock }
+      const writtenFiles: Record<string, string> = {}
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation((...args: unknown[]) => {
+        writtenFiles[String(args[0])] = String(args[1])
+      })
+
+      try {
+        mockClient.register.mockResolvedValue({
+          agentId: 'server-assigned-uuid-1234',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id'))
+        expect(registeredIdEntry).toBeUndefined()
+
+        agent.stop()
+      } finally {
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should warn but continue if writing docker-registered-agent-id fails', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs') as { writeFileSync: jest.Mock }
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation((...args: unknown[]) => {
+        if (String(args[0]).endsWith('docker-registered-agent-id')) {
+          throw new Error('EACCES: permission denied')
+        }
+      })
+
+      try {
+        mockClient.register.mockResolvedValue({
+          agentId: 'server-assigned-uuid-1234',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        // Should warn but not crash
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to write docker-registered-agent-id'),
+        )
+        // Heartbeat should still proceed
+        expect(mockClient.heartbeat).toHaveBeenCalled()
+
+        agent.stop()
+      } finally {
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+  })
 })

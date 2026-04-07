@@ -20,6 +20,7 @@ jest.mock('fs', () => ({
   writeFileSync: jest.fn(),
   copyFileSync: jest.fn(),
   mkdirSync: jest.fn(),
+  watch: jest.fn(() => ({ close: jest.fn() })),
 }))
 
 jest.mock('../../src/docker/dockerfile-path', () => ({
@@ -73,7 +74,7 @@ jest.mock('../../src/update-checker', () => ({
 
 import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
-import { existsSync, realpathSync, readFileSync, unlinkSync, copyFileSync, mkdirSync } from 'fs'
+import { existsSync, realpathSync, readFileSync, unlinkSync, copyFileSync, mkdirSync, watch as fsWatch } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
 import { reExecProcess, performUpdate } from '../../src/update-checker'
@@ -108,6 +109,7 @@ const mockUnlinkSync = unlinkSync as jest.MockedFunction<typeof unlinkSync>
 const mockPerformUpdate = performUpdate as jest.MockedFunction<typeof performUpdate>
 const mockCopyFileSync = copyFileSync as jest.MockedFunction<typeof copyFileSync>
 const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>
+const mockFsWatch = fsWatch as jest.MockedFunction<typeof fsWatch>
 
 describe('docker-runner', () => {
   const originalEnv = process.env
@@ -2032,6 +2034,140 @@ describe('docker-runner', () => {
       fakeContainerChild.emit('close', 0)
       await Promise.resolve()
     })
+
+    it('should log and trigger rebuild when pre-startup hashes do not match', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeContainerChild = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: null, stderr: null })
+      mockSpawn.mockReturnValue(fakeContainerChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      // Both hash files exist but with different hashes
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        return ps.endsWith('docker-customization-hash') || ps.endsWith('docker-built-hash')
+      })
+      mockReadFileSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        if (ps.endsWith('docker-customization-hash')) return 'new-hash' as any
+        if (ps.endsWith('docker-built-hash')) return 'old-hash' as any
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      runInDocker({})
+      resetIsDockerRunning()
+
+      await Promise.resolve()
+
+      // Should have logged the mismatch
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.stringContaining('Pre-startup hash mismatch for mbc/PROJ_A, rebuilding before start...'),
+      )
+      // spawnProject returns early, container not started synchronously
+      const dockerRunCall = mockSpawn.mock.calls.find(
+        (c) => Array.isArray(c[1]) && (c[1] as string[]).includes('run'),
+      )
+      expect(dockerRunCall).toBeUndefined()
+    })
+
+    it('should use docker-registered-agent-id from file if it exists before container start', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeContainerChild = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: null, stderr: null })
+      mockSpawn.mockReturnValue(fakeContainerChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'hostname-based-id',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        return ps.endsWith('docker-registered-agent-id')
+      })
+      mockReadFileSync.mockImplementation((p: unknown) => {
+        if (String(p).endsWith('docker-registered-agent-id')) return 'server-assigned-uuid-5678' as any
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      runInDocker({})
+      resetIsDockerRunning()
+
+      await Promise.resolve()
+
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.stringContaining('Using registered agentId for mbc/PROJ_A: server-assigned-uuid-5678'),
+      )
+      // Container should start
+      expect(mockSpawn).toHaveBeenCalledTimes(1)
+      fakeContainerChild.emit('close', 0)
+      await Promise.resolve()
+    })
+
+    it('should set up fs.watch for docker-registered-agent-id when agentId is configured', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeContainerChild = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: null, stderr: null })
+      mockSpawn.mockReturnValue(fakeContainerChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'hostname-based-id',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      // No docker-registered-agent-id yet (container not yet registered)
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+      resetIsDockerRunning()
+
+      await Promise.resolve()
+
+      // fs.watch should be called on the project config directory
+      expect(mockFsWatch).toHaveBeenCalledWith(
+        expect.stringContaining('mbc'),
+        expect.any(Function),
+      )
+      fakeContainerChild.emit('close', 0)
+      await Promise.resolve()
+    })
+
+    it('should skip agentId update when docker-registered-agent-id matches current agentId', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeContainerChild = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: null, stderr: null })
+      mockSpawn.mockReturnValue(fakeContainerChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'already-correct-id',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      // docker-registered-agent-id has the same value as the current agentId
+      mockExistsSync.mockImplementation((p: unknown) => {
+        return String(p).endsWith('docker-registered-agent-id')
+      })
+      mockReadFileSync.mockImplementation((p: unknown) => {
+        if (String(p).endsWith('docker-registered-agent-id')) return 'already-correct-id' as any
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      runInDocker({ agentId: 'already-correct-id' })
+      resetIsDockerRunning()
+
+      await Promise.resolve()
+
+      // Should NOT log an agentId update since IDs are identical
+      expect(logger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('Using registered agentId for'),
+      )
+      fakeContainerChild.emit('close', 0)
+      await Promise.resolve()
+    })
   })
 })
 
@@ -2281,6 +2417,9 @@ describe('DockerSupervisor log streaming', () => {
     jest.clearAllMocks()
     mockExecFileSync.mockReturnValue(Buffer.from(''))
     mockExitInner = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    mockFsWatch.mockReturnValue({ close: jest.fn() } as any)
+    mockExistsSync.mockReturnValue(false)
+    mockReadFileSync.mockImplementation(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) })
   })
 
   afterEach(() => {
@@ -2391,5 +2530,168 @@ describe('DockerSupervisor log streaming', () => {
     await Promise.resolve()
 
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('2 MB limit'))
+  })
+
+  it('should update agentId via fs.watch callback when docker-registered-agent-id is written', async () => {
+    const { ApiClient: MockApiClient } = require('../../src/api-client')
+    const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
+    const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
+    MockApiClient.mockImplementation(() => ({
+      submitLogChunk: mockSubmitLogChunk,
+      saveSessionLog: mockSaveSessionLog,
+    }))
+
+    const fakeChild = Object.assign(new EventEmitter(), {
+      kill: jest.fn(),
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    mockSpawn.mockReturnValue(fakeChild as never)
+    mockLoadConfig.mockReturnValue({
+      agentId: 'hostname-based-id',
+      createdAt: '2024-01-01',
+      projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
+    })
+
+    let watchCallback: ((eventType: string, filename: string | null) => void) | undefined
+    mockFsWatch.mockImplementation((_dir: unknown, cb: unknown) => {
+      watchCallback = cb as (eventType: string, filename: string | null) => void
+      return { close: jest.fn() } as any
+    })
+
+    runInDocker({ agentId: 'hostname-based-id' })
+    resetIsDockerRunning()
+
+    // Simulate the container writing docker-registered-agent-id after registration
+    mockReadFileSync.mockImplementation((p: unknown) => {
+      if (String(p).endsWith('docker-registered-agent-id')) return 'server-assigned-uuid-9999' as any
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    })
+
+    // Trigger the fs.watch callback (simulating file creation)
+    watchCallback?.('rename', 'docker-registered-agent-id')
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('Container registered with agentId: server-assigned-uuid-9999'),
+    )
+
+    // Verify the agentId is used for subsequent log chunks
+    fakeChild.stdout.emit('data', Buffer.from('container log after registration'))
+    fakeChild.emit('close', 0)
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mockSaveSessionLog).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: 'server-assigned-uuid-9999',
+      projectCode: 'PROJ_A',
+    }))
+  })
+
+  it('should ignore fs.watch callback for other filenames', async () => {
+    const { ApiClient: MockApiClient } = require('../../src/api-client')
+    MockApiClient.mockImplementation(() => ({
+      submitLogChunk: jest.fn().mockResolvedValue(undefined),
+      saveSessionLog: jest.fn().mockResolvedValue(undefined),
+    }))
+
+    const fakeChild = Object.assign(new EventEmitter(), {
+      kill: jest.fn(),
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    mockSpawn.mockReturnValue(fakeChild as never)
+    mockLoadConfig.mockReturnValue({
+      agentId: 'hostname-based-id',
+      createdAt: '2024-01-01',
+      projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
+    })
+
+    let watchCallback: ((eventType: string, filename: string | null) => void) | undefined
+    mockFsWatch.mockImplementation((_dir: unknown, cb: unknown) => {
+      watchCallback = cb as (eventType: string, filename: string | null) => void
+      return { close: jest.fn() } as any
+    })
+
+    runInDocker({ agentId: 'hostname-based-id' })
+    resetIsDockerRunning()
+
+    // Trigger with a different filename — should be ignored
+    watchCallback?.('rename', 'some-other-file')
+
+    // No agentId update logged
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('Container registered with agentId'),
+    )
+
+    fakeChild.emit('close', 0)
+    await Promise.resolve()
+  })
+
+  it('should handle fs.watch setup failure gracefully', async () => {
+    const { ApiClient: MockApiClient } = require('../../src/api-client')
+    MockApiClient.mockImplementation(() => ({
+      submitLogChunk: jest.fn().mockResolvedValue(undefined),
+      saveSessionLog: jest.fn().mockResolvedValue(undefined),
+    }))
+
+    const fakeChild = Object.assign(new EventEmitter(), {
+      kill: jest.fn(),
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    mockSpawn.mockReturnValue(fakeChild as never)
+    mockLoadConfig.mockReturnValue({
+      agentId: 'agent-1',
+      createdAt: '2024-01-01',
+      projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
+    })
+
+    // Simulate fs.watch throwing (directory doesn't exist)
+    mockFsWatch.mockImplementation(() => { throw new Error('ENOENT: no such file or directory') })
+
+    runInDocker({ agentId: 'agent-1' })
+    resetIsDockerRunning()
+
+    // Container should still start despite watch failure
+    expect(mockSpawn).toHaveBeenCalledTimes(1)
+
+    fakeChild.emit('close', 0)
+    await Promise.resolve()
+  })
+
+  it('should handle submitLogChunk errors in DockerSupervisor gracefully', async () => {
+    const { ApiClient: MockApiClient } = require('../../src/api-client')
+    const mockSubmitLogChunk = jest.fn().mockRejectedValue(new Error('network error'))
+    const mockSaveSessionLog = jest.fn().mockRejectedValue(new Error('s3 error'))
+    MockApiClient.mockImplementation(() => ({
+      submitLogChunk: mockSubmitLogChunk,
+      saveSessionLog: mockSaveSessionLog,
+    }))
+
+    const fakeChild = Object.assign(new EventEmitter(), {
+      kill: jest.fn(),
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    mockSpawn.mockReturnValue(fakeChild as never)
+    mockLoadConfig.mockReturnValue({
+      agentId: 'agent-1',
+      createdAt: '2024-01-01',
+      projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
+    })
+
+    runInDocker({ agentId: 'agent-1' })
+    resetIsDockerRunning()
+
+    fakeChild.stdout.emit('data', Buffer.from('some log'))
+    fakeChild.emit('close', 0)
+    // Multiple flushes needed: close -> flush() -> submitLogChunk (rejected) -> catch -> then -> saveSessionLog (rejected) -> catch
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+
+    // Should warn about chunk failure
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('log chunk failed'))
+    // Should warn about S3 upload failure
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('S3 upload failed'))
   })
 })

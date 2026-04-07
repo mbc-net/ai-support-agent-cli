@@ -774,6 +774,17 @@ class DockerSupervisor {
       }
     }
 
+    // Load the server-assigned agentId written by the container after registration.
+    // This ensures logs are stored under the same agentId shown in the Web UI.
+    const registeredAgentIdPath = path.join(projectConfigHostDir, 'docker-registered-agent-id')
+    if (fs.existsSync(registeredAgentIdPath)) {
+      const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
+      if (registeredId && registeredId !== this.agentId) {
+        logger.info(`[docker] Using registered agentId for ${key}: ${registeredId}`)
+        this.agentId = registeredId
+      }
+    }
+
     const { mounts, envArgs } = buildProjectVolumeMounts(project, projectConfigHostDir)
 
     const containerArgs = [
@@ -829,7 +840,31 @@ class DockerSupervisor {
       let logTruncated = false
       let buf = ''
       const apiClient = projectApiClient
-      const agentId = this.agentId
+      // Use a getter so that if the container writes docker-registered-agent-id after startup,
+      // subsequent log chunks are stored under the correct server-assigned agentId.
+      const supervisor = this
+      const getAgentId = (): string => supervisor.agentId ?? ''
+
+      // Watch for the registered agentId file written by the container after registration
+      const noopWatcher: Pick<fs.FSWatcher, 'close'> = { close: () => undefined }
+      let registeredIdWatcher: Pick<fs.FSWatcher, 'close'> = noopWatcher
+      try {
+        registeredIdWatcher = fs.watch(projectConfigHostDir, (eventType, filename) => {
+          if (filename === 'docker-registered-agent-id' && (eventType === 'rename' || eventType === 'change')) {
+            try {
+              const newId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
+              if (newId && newId !== supervisor.agentId) {
+                logger.info(`[docker] Container registered with agentId: ${newId} (was: ${supervisor.agentId})`)
+                supervisor.agentId = newId
+              }
+            } catch {
+              // File may not exist yet if rename event fires before write completes
+            }
+          }
+        })
+      } catch {
+        // Directory watch may fail if projectConfigHostDir doesn't exist yet — ignore
+      }
 
       const flush = async (): Promise<void> => {
         if (!buf) return
@@ -845,7 +880,7 @@ class DockerSupervisor {
             logger.warn(`[docker] Container log for ${key} exceeded 2 MB limit; remaining output will not be saved to S3`)
           }
         }
-        await apiClient.submitLogChunk({ agentId, projectCode: project.projectCode, logType: 'container', sessionId, seq: ++seq, text })
+        await apiClient.submitLogChunk({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, seq: ++seq, text })
           .catch((e: unknown) => logger.warn(`[docker] log chunk failed: ${e}`))
       }
 
@@ -855,10 +890,11 @@ class DockerSupervisor {
       child.stderr?.on('data', (d: Buffer) => { process.stderr.write(d); buf += d.toString() })
 
       child.on('close', () => {
+        registeredIdWatcher.close()
         clearInterval(flushTimer)
         void flush().then(() => {
           if (fullLog) {
-            void apiClient.saveSessionLog({ agentId, projectCode: project.projectCode, logType: 'container', sessionId, content: fullLog })
+            void apiClient.saveSessionLog({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, content: fullLog })
               .catch((e: unknown) => logger.warn(`[docker] S3 upload failed: ${e}`))
           }
         })
