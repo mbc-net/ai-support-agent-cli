@@ -650,6 +650,8 @@ interface DockerContainerHandle {
   /** Resolves when the container process has exited and all log flushes have been initiated. */
   closedPromise: Promise<void>
   resolveClosed: () => void
+  /** Path to the --cidfile written by docker run; used to read the container ID for docker stop. */
+  cidFile: string
 }
 
 /**
@@ -838,8 +840,9 @@ class DockerSupervisor {
 
     const interactive = process.stdin.isTTY ? ['-it'] : ['-i']
     const imageTag = this.getImageTag(project)
+    const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
     const dockerArgs = [
-      'run', '--rm', ...interactive,
+      'run', '--rm', '--cidfile', cidFile, ...interactive,
       ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
       ...mounts,
       ...buildDevMounts(),
@@ -860,6 +863,7 @@ class DockerSupervisor {
       closeHandled: false,
       closedPromise,
       resolveClosed,
+      cidFile,
     }
     this.handles.set(key, handle)
 
@@ -951,6 +955,8 @@ class DockerSupervisor {
       if (handle.closeHandled) return
       handle.closeHandled = true
       this.handles.delete(key)
+      // Clean up cidfile
+      try { fs.unlinkSync(handle.cidFile) } catch { /* ignore */ }
 
       if (code === DOCKER_UPDATE_EXIT_CODE && !this.updating) {
         this.updating = true
@@ -983,7 +989,22 @@ class DockerSupervisor {
     for (const [key, handle] of this.handles) {
       if (!handle.closeHandled) {
         logger.info(`[docker] Stopping container for project: ${key}`)
-        handle.child.kill('SIGTERM')
+        // Try docker stop via cidfile first (more reliable than SIGTERM to docker run process)
+        let stopped = false
+        try {
+          if (fs.existsSync(handle.cidFile)) {
+            const containerId = fs.readFileSync(handle.cidFile, 'utf-8').trim()
+            if (containerId) {
+              execFileSync('docker', ['stop', '--time', '5', containerId], { stdio: 'ignore' })
+              stopped = true
+            }
+          }
+        } catch {
+          // Ignore errors — fall through to child.kill
+        }
+        if (!stopped) {
+          handle.child.kill('SIGTERM')
+        }
       }
     }
   }
