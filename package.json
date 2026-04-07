@@ -32,7 +32,7 @@
     "dev": "node --env-file-if-exists=.env --require ts-node/register src/index.ts",
     "build": "tsc && cp -r src/locales dist/locales",
     "prepublishOnly": "npm run build && npm test",
-    "test": "jest --runInBand --forceExit",
+    "test": "jest",
     "test:cov": "jest --coverage"
   },
   "dependencies": {
