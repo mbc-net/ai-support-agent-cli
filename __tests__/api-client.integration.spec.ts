@@ -39,6 +39,7 @@ beforeAll((done) => {
       res.end(JSON.stringify(nextResponse.body))
     })
   })
+  server.unref()
   server.listen(0, '127.0.0.1', () => {
     const addr = server.address()
     if (addr && typeof addr === 'object') {

@@ -165,7 +165,7 @@ export class VsCodeServer {
     this.idleTimer = setTimeout(() => {
       logger.info('[vscode-server] Idle timeout reached, stopping')
       this.stop()
-    }, VSCODE_IDLE_TIMEOUT_MS)
+    }, VSCODE_IDLE_TIMEOUT_MS).unref()
   }
 
   private startHealthCheck(): void {

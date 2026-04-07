@@ -15,6 +15,16 @@ import { validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
 import { startConfigWatcher, startTokenWatcher } from './config-watcher'
 
+/**
+ * トークン文字列から tokenId を抽出する
+ * トークン形式: {tenantCode}:{tokenId}:{rawToken}
+ * tokenId は API で agentId として使用され、コンテナ再起動時もエントリが増殖しない
+ */
+export function extractTokenId(token: string): string | undefined {
+  const parts = token.split(':')
+  return parts.length === 3 ? parts[1] : undefined
+}
+
 export interface RunnerOptions {
   token?: string
   apiUrl?: string
@@ -200,7 +210,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
       process.exit(1)
     }
     logger.warn(t('runner.cliTokenWarning'))
-    const agentId = config?.agentId ?? os.hostname()
+    const agentId = extractTokenId(options.token) ?? config?.agentId ?? os.hostname()
     const project: ProjectRegistration = {
       tenantCode: 'unknown',
       projectCode: PROJECT_CODE_CLI_DIRECT,
@@ -242,7 +252,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
         apiUrl: envApiUrl,
       }
 
-      runSingleProject(project, os.hostname(), options)
+      runSingleProject(project, extractTokenId(envToken) ?? os.hostname(), options)
       return
     }
 
@@ -274,7 +284,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     }
   }
 
-  const agentId = config.agentId ?? os.hostname()
+  const agentId = extractTokenId(projects[0].token) ?? config.agentId ?? os.hostname()
   const { pollInterval, heartbeatInterval } = resolveIntervals(options)
 
   logger.info(t('runner.startingMulti', { count: projects.length }))

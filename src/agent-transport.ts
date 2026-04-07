@@ -196,6 +196,11 @@ export async function handleNotification(
       ? JSON.parse(notification.content)
       : (notification.content ?? {})
 
+  // agent-log通知はログ出力せずに早期return（無限ループ防止）
+  if (notification.action === 'agent-log') {
+    return
+  }
+
   logger.debug(`${deps.prefix} Notification received: action=${notification.action}, content=${JSON.stringify(content).substring(0, LOG_RESULT_LIMIT)}`)
 
   switch (notification.action) {
