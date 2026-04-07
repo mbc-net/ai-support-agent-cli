@@ -22,7 +22,7 @@ permissions:
 jobs:
   unit_tests:
     name: Unit Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     strategy:
       matrix:

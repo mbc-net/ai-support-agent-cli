@@ -11,7 +11,7 @@ permissions:
 jobs:
   dependency-check:
     name: Dependency Update Validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,7 +73,7 @@ jobs:
 
   extended-matrix-test:
     name: Extended Matrix Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         node-version: [20.x, 22.x, 24.x]
