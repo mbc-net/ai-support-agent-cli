@@ -844,12 +844,12 @@ class DockerSupervisor {
       containerArgs.push('--update-channel', this.opts.updateChannel)
     }
 
-    // Always use -i (no -t) in supervisor mode so Ctrl+C on the host does NOT propagate
-    // directly into the container via the TTY. Shutdown is handled exclusively by docker stop.
+    // No -i/-t flags: the container does not need stdin. stdout/stderr are
+    // captured via pipe. Shutdown is handled exclusively via docker stop.
     const imageTag = this.getImageTag(project)
     const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
     const dockerArgs = [
-      'run', '--rm', '--cidfile', cidFile, '-i',
+      'run', '--rm', '--cidfile', cidFile,
       ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
       ...mounts,
       ...buildDevMounts(),
