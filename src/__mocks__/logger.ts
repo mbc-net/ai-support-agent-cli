@@ -6,3 +6,8 @@ export const logger = {
   success: jest.fn(),
   setVerbose: jest.fn(),
 }
+
+export const getProjectColor = jest.fn().mockReturnValue('\x1b[36m')
+export const resetProjectColors = jest.fn()
+export const prefixLines = jest.fn().mockImplementation((text: string) => text)
+export const maskSecrets = jest.fn().mockImplementation((text: string) => text)

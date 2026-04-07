@@ -4,8 +4,73 @@ const COLORS = {
   green: '\x1b[32m',
   yellow: '\x1b[33m',
   blue: '\x1b[34m',
+  magenta: '\x1b[35m',
+  cyan: '\x1b[36m',
   gray: '\x1b[90m',
+  brightRed: '\x1b[91m',
+  brightGreen: '\x1b[92m',
+  brightYellow: '\x1b[93m',
+  brightBlue: '\x1b[94m',
+  brightMagenta: '\x1b[95m',
+  brightCyan: '\x1b[96m',
+  white: '\x1b[97m',
 } as const
+
+/** Colors cycled through for per-project prefixes */
+const PROJECT_COLOR_CYCLE = [
+  COLORS.cyan,
+  COLORS.magenta,
+  COLORS.brightGreen,
+  COLORS.brightYellow,
+  COLORS.brightCyan,
+  COLORS.brightMagenta,
+  COLORS.brightBlue,
+  COLORS.white,
+] as const
+
+const projectColorMap = new Map<string, string>()
+let colorIndex = 0
+
+/**
+ * Returns a consistent ANSI color code for the given project key.
+ * Each unique key gets the next color in the cycle.
+ */
+export function getProjectColor(projectKey: string): string {
+  let color = projectColorMap.get(projectKey)
+  if (!color) {
+    color = PROJECT_COLOR_CYCLE[colorIndex % PROJECT_COLOR_CYCLE.length]
+    colorIndex++
+    projectColorMap.set(projectKey, color)
+  }
+  return color
+}
+
+/** Reset project color assignments (for testing). */
+export function resetProjectColors(): void {
+  projectColorMap.clear()
+  colorIndex = 0
+}
+
+/**
+ * Prepend each line of `text` with a colored project prefix.
+ * Partial last lines (no trailing newline) are also prefixed.
+ */
+export function prefixLines(text: string, prefix: string): string {
+  if (!text) return text
+  const lines = text.split('\n')
+  // If text ends with \n, the last element is '' — skip prefixing the empty trailing element
+  const hasTrailingNewline = text.endsWith('\n')
+  const result: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (i === lines.length - 1 && hasTrailingNewline && line === '') {
+      result.push('')
+    } else {
+      result.push(`${prefix}${line}`)
+    }
+  }
+  return result.join('\n')
+}
 
 let verboseEnabled = false
 

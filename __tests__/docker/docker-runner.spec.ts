@@ -65,6 +65,10 @@ jest.mock('../../src/logger', () => ({
     warn: jest.fn(),
     debug: jest.fn(),
   },
+  getProjectColor: jest.fn().mockReturnValue('\x1b[36m'),
+  resetProjectColors: jest.fn(),
+  prefixLines: jest.fn().mockImplementation((text: string) => text),
+  maskSecrets: jest.fn().mockImplementation((text: string) => text),
 }))
 
 jest.mock('../../src/update-checker', () => ({

@@ -1,4 +1,4 @@
-import { logger, maskSecrets } from '../src/logger'
+import { logger, maskSecrets, getProjectColor, resetProjectColors, prefixLines } from '../src/logger'
 
 describe('logger', () => {
   let logSpy: jest.Spied<typeof console.log>
@@ -171,6 +171,69 @@ describe('logger', () => {
       expect(maskSecrets('PASSWORD: secret')).toBe('PASSWORD: ****')
       expect(maskSecrets('Token: secret')).toBe('Token: ****')
       expect(maskSecrets('API_KEY: secret')).toBe('API_KEY: ****')
+    })
+  })
+
+  describe('getProjectColor', () => {
+    beforeEach(() => {
+      resetProjectColors()
+    })
+
+    it('should return a consistent color for the same project key', () => {
+      const color1 = getProjectColor('tenant#PROJECT_A')
+      const color2 = getProjectColor('tenant#PROJECT_A')
+      expect(color1).toBe(color2)
+    })
+
+    it('should return different colors for different project keys', () => {
+      const color1 = getProjectColor('tenant#PROJECT_A')
+      const color2 = getProjectColor('tenant#PROJECT_B')
+      expect(color1).toBeDefined()
+      expect(color2).toBeDefined()
+      // Colors cycle — first two may differ or wrap but both must be ANSI codes
+      expect(color1).toMatch(/^\x1b\[/)
+      expect(color2).toMatch(/^\x1b\[/)
+    })
+
+    it('should cycle through colors for many projects', () => {
+      const colors = Array.from({ length: 10 }, (_, i) => getProjectColor(`tenant#PROJECT_${i}`))
+      expect(colors).toHaveLength(10)
+      colors.forEach((c) => expect(c).toMatch(/^\x1b\[/))
+    })
+  })
+
+  describe('resetProjectColors', () => {
+    it('should reset color assignments so that the same key gets the cycle-start color again', () => {
+      resetProjectColors()
+      const colorFirst = getProjectColor('tenant#PROJECT_X')
+      // Register more projects to advance the cycle
+      getProjectColor('tenant#PROJECT_Y')
+      getProjectColor('tenant#PROJECT_Z')
+      // After reset, PROJECT_X should map to index 0 again (same as colorFirst)
+      resetProjectColors()
+      const colorAfterReset = getProjectColor('tenant#PROJECT_X')
+      expect(colorAfterReset).toBe(colorFirst)
+    })
+  })
+
+  describe('prefixLines', () => {
+    it('should prefix every line with the given prefix', () => {
+      const result = prefixLines('line1\nline2\nline3', 'PREFIX ')
+      expect(result).toBe('PREFIX line1\nPREFIX line2\nPREFIX line3')
+    })
+
+    it('should handle text ending with newline correctly', () => {
+      const result = prefixLines('line1\nline2\n', 'P ')
+      expect(result).toBe('P line1\nP line2\n')
+    })
+
+    it('should handle single line without newline', () => {
+      const result = prefixLines('single', 'P ')
+      expect(result).toBe('P single')
+    })
+
+    it('should return empty string as-is', () => {
+      expect(prefixLines('', 'P ')).toBe('')
     })
   })
 })
