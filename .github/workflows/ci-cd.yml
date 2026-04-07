@@ -57,7 +57,7 @@ jobs:
         run: npm run test:cov
         timeout-minutes: 5
         env:
-          NODE_OPTIONS: --max-old-space-size=4096
+          UV_USE_IO_URING: "0"
 
       - name: Unit Test Report
         uses: dorny/test-reporter@v1

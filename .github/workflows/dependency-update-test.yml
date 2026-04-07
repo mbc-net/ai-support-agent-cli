@@ -29,16 +29,10 @@ jobs:
         run: npm run build
 
       - name: Run tests
-        run: |
-          npm run test:cov &
-          TEST_PID=$!
-          ( sleep 480 && kill -9 -$(ps -o pgid= -p $TEST_PID | tr -d ' ') 2>/dev/null || true ) &
-          KILLER_PID=$!
-          wait $TEST_PID
-          EXIT_CODE=$?
-          kill $KILLER_PID 2>/dev/null || true
-          exit $EXIT_CODE
+        run: npm run test:cov
         timeout-minutes: 10
+        env:
+          UV_USE_IO_URING: "0"
 
       - name: Security audit
         run: npm audit --audit-level=high
@@ -99,16 +93,10 @@ jobs:
         run: npm run build
 
       - name: Run all tests
-        run: |
-          npm run test:cov &
-          TEST_PID=$!
-          ( sleep 480 && kill -9 -$(ps -o pgid= -p $TEST_PID | tr -d ' ') 2>/dev/null || true ) &
-          KILLER_PID=$!
-          wait $TEST_PID
-          EXIT_CODE=$?
-          kill $KILLER_PID 2>/dev/null || true
-          exit $EXIT_CODE
+        run: npm run test:cov
         timeout-minutes: 10
+        env:
+          UV_USE_IO_URING: "0"
 
       - name: Report status
         if: failure()
