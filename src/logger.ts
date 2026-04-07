@@ -72,6 +72,31 @@ export function prefixLines(text: string, prefix: string): string {
   return result.join('\n')
 }
 
+/**
+ * Creates a stateful line-buffering writer that ensures each output line
+ * is prefixed atomically. Chunks that don't end with a newline are held in
+ * a buffer until the next chunk completes the line, preventing interleaved
+ * output from concurrent projects from splitting a single line across writes.
+ *
+ * @param prefix  The colored project prefix string to prepend to each line.
+ * @param write   The underlying write function (e.g. process.stdout.write).
+ * @returns A function that accepts raw text chunks.
+ */
+export function makeLinePrefixer(
+  prefix: string,
+  write: (s: string) => void,
+): (chunk: string) => void {
+  let lineBuffer = ''
+  return (chunk: string): void => {
+    lineBuffer += chunk
+    const newlineIdx = lineBuffer.lastIndexOf('\n')
+    if (newlineIdx === -1) return // no complete line yet — keep buffering
+    const complete = lineBuffer.slice(0, newlineIdx + 1)
+    lineBuffer = lineBuffer.slice(newlineIdx + 1)
+    write(prefixLines(complete, prefix))
+  }
+}
+
 let verboseEnabled = false
 
 function timestamp(): string {

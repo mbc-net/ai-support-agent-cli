@@ -8,7 +8,7 @@ import { getDockerfilePath, getDockerContextDir, resolveDockerfile, getProjectIm
 import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE, DOCKER_RESTART_EXIT_CODE } from '../constants'
 import { getConfigDir, getProjectList, loadConfig } from '../config-manager'
 import { t } from '../i18n'
-import { logger, getProjectColor, prefixLines } from '../logger'
+import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { isNewerVersion, isValidVersion } from '../utils/version'
@@ -233,9 +233,10 @@ export async function buildProjectImage(
       '-f', dockerfilePath, contextDir,
     ], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, BUILDKIT_PROGRESS: 'plain' } })
 
+    const writePrefixed = makeLinePrefixer(prefix, (s) => process.stdout.write(s))
     const onData = (d: Buffer): void => {
       const text = d.toString()
-      process.stdout.write(prefixLines(text, prefix))
+      writePrefixed(text)
       buf += text
       if (buf.length > 4096) {
         void flush()
@@ -933,8 +934,10 @@ class DockerSupervisor {
 
       const flushTimer = setInterval(() => { void flush() }, 1_000).unref()
 
-      child.stdout?.on('data', (d: Buffer) => { const t = d.toString(); process.stdout.write(prefixLines(t, logPrefix)); buf += t })
-      child.stderr?.on('data', (d: Buffer) => { const t = d.toString(); process.stderr.write(prefixLines(t, logPrefix)); buf += t })
+      const writeStdout = makeLinePrefixer(logPrefix, (s) => process.stdout.write(s))
+      const writeStderr = makeLinePrefixer(logPrefix, (s) => process.stderr.write(s))
+      child.stdout?.on('data', (d: Buffer) => { const t = d.toString(); writeStdout(t); buf += t })
+      child.stderr?.on('data', (d: Buffer) => { const t = d.toString(); writeStderr(t); buf += t })
 
       child.on('close', () => {
         registeredIdWatcher.close()
@@ -951,8 +954,10 @@ class DockerSupervisor {
       })
     } else {
       // No log streaming: forward to host terminal directly with colored prefix
-      child.stdout?.on('data', (d: Buffer) => process.stdout.write(prefixLines(d.toString(), logPrefix)))
-      child.stderr?.on('data', (d: Buffer) => process.stderr.write(prefixLines(d.toString(), logPrefix)))
+      const writeStdoutDirect = makeLinePrefixer(logPrefix, (s) => process.stdout.write(s))
+      const writeStderrDirect = makeLinePrefixer(logPrefix, (s) => process.stderr.write(s))
+      child.stdout?.on('data', (d: Buffer) => writeStdoutDirect(d.toString()))
+      child.stderr?.on('data', (d: Buffer) => writeStderrDirect(d.toString()))
       child.on('close', () => { handle.resolveClosed() })
     }
 

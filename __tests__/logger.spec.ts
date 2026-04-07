@@ -1,4 +1,4 @@
-import { logger, maskSecrets, getProjectColor, resetProjectColors, prefixLines } from '../src/logger'
+import { logger, maskSecrets, getProjectColor, resetProjectColors, prefixLines, makeLinePrefixer } from '../src/logger'
 
 describe('logger', () => {
   let logSpy: jest.Spied<typeof console.log>
@@ -234,6 +234,57 @@ describe('logger', () => {
 
     it('should return empty string as-is', () => {
       expect(prefixLines('', 'P ')).toBe('')
+    })
+  })
+
+  describe('makeLinePrefixer', () => {
+    it('should buffer partial lines and only write complete lines', () => {
+      const output: string[] = []
+      const write = makeLinePrefixer('P> ', (s) => output.push(s))
+
+      write('hello ')   // no newline — buffered
+      expect(output).toHaveLength(0)
+
+      write('world\n')  // completes the line
+      expect(output).toHaveLength(1)
+      expect(output[0]).toBe('P> hello world\n')
+    })
+
+    it('should handle multiple complete lines in one chunk', () => {
+      const output: string[] = []
+      const write = makeLinePrefixer('P> ', (s) => output.push(s))
+
+      write('line1\nline2\nline3\n')
+      expect(output).toHaveLength(1)
+      expect(output[0]).toBe('P> line1\nP> line2\nP> line3\n')
+    })
+
+    it('should retain trailing partial line for next chunk', () => {
+      const output: string[] = []
+      const write = makeLinePrefixer('P> ', (s) => output.push(s))
+
+      write('line1\npartial')
+      expect(output).toHaveLength(1)
+      expect(output[0]).toBe('P> line1\n')
+
+      write(' done\n')
+      expect(output).toHaveLength(2)
+      expect(output[1]).toBe('P> partial done\n')
+    })
+
+    it('should prevent interleaving from two concurrent prefixers on the same stream', () => {
+      const combined: string[] = []
+      const writeA = makeLinePrefixer('[A] ', (s) => combined.push(s))
+      const writeB = makeLinePrefixer('[B] ', (s) => combined.push(s))
+
+      // Simulate interleaved partial chunks
+      writeA('hello ')
+      writeB('world ')
+      writeA('from A\n')  // A completes — writes atomically
+      writeB('from B\n')  // B completes — writes atomically
+
+      expect(combined[0]).toBe('[A] hello from A\n')
+      expect(combined[1]).toBe('[B] world from B\n')
     })
   })
 })

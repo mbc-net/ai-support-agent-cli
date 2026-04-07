@@ -69,6 +69,7 @@ jest.mock('../../src/logger', () => ({
   resetProjectColors: jest.fn(),
   prefixLines: jest.fn().mockImplementation((text: string) => text),
   maskSecrets: jest.fn().mockImplementation((text: string) => text),
+  makeLinePrefixer: jest.fn().mockImplementation((_prefix: string, write: (s: string) => void) => (chunk: string) => write(chunk)),
 }))
 
 jest.mock('../../src/update-checker', () => ({
