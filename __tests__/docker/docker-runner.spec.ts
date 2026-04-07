@@ -1634,16 +1634,16 @@ describe('docker-runner', () => {
       })
       mockExistsSync.mockReturnValue(false)
 
-      const processOnSpy = jest.spyOn(process, 'on')
+      const processOnceSpy = jest.spyOn(process, 'once')
       runInDocker({})
 
-      const sigintCall = processOnSpy.mock.calls.find(call => call[0] === 'SIGINT')
+      const sigintCall = processOnceSpy.mock.calls.find(call => call[0] === 'SIGINT')
       expect(sigintCall).toBeDefined()
       const handler = sigintCall![1] as () => void
       handler()
 
       expect(fakeChild.kill).toHaveBeenCalledWith('SIGTERM')
-      processOnSpy.mockRestore()
+      processOnceSpy.mockRestore()
     })
 
     describe('shutdown with fake timers', () => {
@@ -1670,11 +1670,11 @@ describe('docker-runner', () => {
         const osMod = require('os') as typeof import('os')
         const hostnameSpy = jest.spyOn(osMod, 'hostname').mockReturnValue('')
 
-        const processOnSpy = jest.spyOn(process, 'on')
+        const processOnceSpy = jest.spyOn(process, 'once')
         runInDocker({})
         hostnameSpy.mockRestore()
 
-        const sigintCall = processOnSpy.mock.calls.find(call => call[0] === 'SIGINT')
+        const sigintCall = processOnceSpy.mock.calls.find(call => call[0] === 'SIGINT')
         const handler = sigintCall![1] as () => void
         handler()
 
@@ -1684,7 +1684,7 @@ describe('docker-runner', () => {
         for (let i = 0; i < 5; i++) await Promise.resolve()
 
         expect(mockExitShutdown).toHaveBeenCalledWith(0)
-        processOnSpy.mockRestore()
+        processOnceSpy.mockRestore()
         mockExitShutdown.mockRestore()
       })
 
@@ -1711,10 +1711,10 @@ describe('docker-runner', () => {
         })
         mockExistsSync.mockReturnValue(false)
 
-        const processOnSpy = jest.spyOn(process, 'on')
+        const processOnceSpy = jest.spyOn(process, 'once')
         runInDocker({ agentId: 'agent-1' })
 
-        const sigintCall = processOnSpy.mock.calls.find(call => call[0] === 'SIGINT')
+        const sigintCall = processOnceSpy.mock.calls.find(call => call[0] === 'SIGINT')
         const handler = sigintCall![1] as () => void
         handler()
 
@@ -1731,7 +1731,7 @@ describe('docker-runner', () => {
 
         expect(mockExitShutdown).toHaveBeenCalledWith(0)
         expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Shutdown timed out'))
-        processOnSpy.mockRestore()
+        processOnceSpy.mockRestore()
         mockExitShutdown.mockRestore()
       })
     })

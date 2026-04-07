@@ -713,8 +713,8 @@ class DockerSupervisor {
         process.exit(0)
       })
     }
-    process.on('SIGINT', () => shutdown())
-    process.on('SIGTERM', () => shutdown())
+    process.once('SIGINT', () => shutdown())
+    process.once('SIGTERM', () => shutdown())
   }
 
   private getImageTag(project: ProjectRegistration): string {
