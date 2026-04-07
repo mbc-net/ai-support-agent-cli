@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        node-version: [20.x]
+        node-version: [22.x]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,7 +54,16 @@ jobs:
         continue-on-error: true
 
       - name: Run Unit Tests
-        run: npm test
+        run: |
+          setsid npm test &
+          TEST_PID=$!
+          TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
+          ( sleep 180 && kill -- -$TEST_PGID 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
         timeout-minutes: 5
 
   security_scan:
