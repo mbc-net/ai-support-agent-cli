@@ -838,11 +838,12 @@ class DockerSupervisor {
       containerArgs.push('--update-channel', this.opts.updateChannel)
     }
 
-    const interactive = process.stdin.isTTY ? ['-it'] : ['-i']
+    // Always use -i (no -t) in supervisor mode so Ctrl+C on the host does NOT propagate
+    // directly into the container via the TTY. Shutdown is handled exclusively by docker stop.
     const imageTag = this.getImageTag(project)
     const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
     const dockerArgs = [
-      'run', '--rm', '--cidfile', cidFile, ...interactive,
+      'run', '--rm', '--cidfile', cidFile, '-i',
       ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
       ...mounts,
       ...buildDevMounts(),
@@ -989,13 +990,14 @@ class DockerSupervisor {
     for (const [key, handle] of this.handles) {
       if (!handle.closeHandled) {
         logger.info(`[docker] Stopping container for project: ${key}`)
-        // Try docker stop via cidfile first (more reliable than SIGTERM to docker run process)
+        // Try docker stop via cidfile (more reliable than SIGTERM to docker run process).
+        // Use spawn (non-blocking) so we don't stall the Node.js event loop during shutdown.
         let stopped = false
         try {
           if (fs.existsSync(handle.cidFile)) {
             const containerId = fs.readFileSync(handle.cidFile, 'utf-8').trim()
             if (containerId) {
-              execFileSync('docker', ['stop', '--time', '5', containerId], { stdio: 'ignore' })
+              spawn('docker', ['stop', '--time', '5', containerId], { stdio: 'ignore' })
               stopped = true
             }
           }
