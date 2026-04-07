@@ -125,6 +125,9 @@ describe('docker-runner', () => {
   afterEach(() => {
     process.env = originalEnv
     mockExit.mockRestore()
+    // Remove any SIGINT/SIGTERM listeners registered by DockerSupervisor during the test
+    process.removeAllListeners('SIGINT')
+    process.removeAllListeners('SIGTERM')
   })
 
   describe('checkDockerAvailable', () => {
@@ -1622,6 +1625,7 @@ describe('docker-runner', () => {
     })
 
     it('should handle SIGINT and SIGTERM in multi-project mode', () => {
+      jest.useFakeTimers()
       mockExecFileSync.mockReturnValue(Buffer.from(''))
       const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
       mockSpawn.mockReturnValue(fakeChild as never)
@@ -1644,6 +1648,114 @@ describe('docker-runner', () => {
 
       expect(fakeChild.kill).toHaveBeenCalledWith('SIGTERM')
       processOnSpy.mockRestore()
+      jest.clearAllTimers()
+      jest.useRealTimers()
+    })
+
+    describe('shutdown with fake timers', () => {
+      let mockExitShutdownOuter: jest.SpyInstance
+
+      beforeEach(() => {
+        // Keep process.exit mocked throughout the describe block to prevent
+        // async Promise.all callbacks from calling the real process.exit after
+        // mockRestore() in the test body.
+        mockExitShutdownOuter = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      })
+
+      afterEach(async () => {
+        // Clear all pending fake timers before switching back to real timers,
+        // so that shutdown setTimeout callbacks don't fire after mockRestore.
+        jest.clearAllTimers()
+        jest.useRealTimers()
+        // Flush any pending microtasks (e.g. Promise.all callbacks) before restoring
+        // process.exit, so they still hit the mock rather than the real exit.
+        for (let i = 0; i < 10; i++) await Promise.resolve()
+        mockExitShutdownOuter.mockRestore()
+      })
+
+      it('should call process.exit after all containers close on shutdown', async () => {
+        jest.useFakeTimers()
+        mockExecFileSync.mockReturnValue(Buffer.from(''))
+        const fakeChild = Object.assign(new EventEmitter(), {
+          kill: jest.fn(),
+          stdout: new EventEmitter(),
+          stderr: new EventEmitter(),
+        })
+        mockSpawn.mockReturnValue(fakeChild as never)
+        mockLoadConfig.mockReturnValue({
+          createdAt: '2024-01-01',
+          projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
+        })
+        mockExistsSync.mockReturnValue(false)
+        // No agentId → else branch (no S3), resolveClosed called immediately on close
+        const osMod = require('os') as typeof import('os')
+        const hostnameSpy = jest.spyOn(osMod, 'hostname').mockReturnValue('')
+
+        const processOnSpy = jest.spyOn(process, 'on')
+        runInDocker({})
+        hostnameSpy.mockRestore()
+
+        const sigintCall = processOnSpy.mock.calls.find(call => call[0] === 'SIGINT')
+        const handler = sigintCall![1] as () => void
+        handler()
+
+        // Container close resolves closedPromise → process.exit should be called
+        fakeChild.emit('close', 0)
+        // Need multiple microtask ticks: close → resolveClosed → Promise.all resolves → .then callback
+        for (let i = 0; i < 5; i++) await Promise.resolve()
+
+        expect(mockExitShutdownOuter).toHaveBeenCalledWith(0)
+        processOnSpy.mockRestore()
+      })
+
+      it('should force exit via timeout when log flush takes too long on shutdown', async () => {
+        jest.useFakeTimers()
+        mockExecFileSync.mockReturnValue(Buffer.from(''))
+        const { ApiClient: MockApiClient } = require('../../src/api-client')
+        // Use a controllable promise so we can resolve it after the test to avoid leaks
+        let resolveSaveSessionLog!: () => void
+        const saveSessionLogPromise = new Promise<void>((resolve) => { resolveSaveSessionLog = resolve })
+        MockApiClient.mockImplementation(() => ({
+          submitLogChunk: jest.fn().mockResolvedValue(undefined),
+          saveSessionLog: jest.fn().mockReturnValue(saveSessionLogPromise),
+        }))
+        const fakeChild = Object.assign(new EventEmitter(), {
+          kill: jest.fn(),
+          stdout: new EventEmitter(),
+          stderr: new EventEmitter(),
+        })
+        mockSpawn.mockReturnValue(fakeChild as never)
+        mockLoadConfig.mockReturnValue({
+          agentId: 'agent-1',
+          createdAt: '2024-01-01',
+          projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
+        })
+        mockExistsSync.mockReturnValue(false)
+
+        const processOnSpy = jest.spyOn(process, 'on')
+        runInDocker({ agentId: 'agent-1' })
+
+        const sigintCall = processOnSpy.mock.calls.find(call => call[0] === 'SIGINT')
+        const handler = sigintCall![1] as () => void
+        handler()
+
+        // Emit log data and close — saveSessionLog will not resolve until we call resolveSaveSessionLog
+        fakeChild.stdout.emit('data', Buffer.from('some log'))
+        fakeChild.emit('close', 0)
+        for (let i = 0; i < 5; i++) await Promise.resolve()
+
+        // process.exit should not be called yet
+        expect(mockExitShutdownOuter).not.toHaveBeenCalled()
+
+        // Advance fake timer by 10 seconds to trigger timeout
+        jest.advanceTimersByTime(10_000)
+
+        expect(mockExitShutdownOuter).toHaveBeenCalledWith(0)
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Shutdown timed out'))
+        processOnSpy.mockRestore()
+        // Resolve the dangling promise to allow the worker to clean up
+        resolveSaveSessionLog()
+      })
     })
 
     it('should handle realpathSync failure for project.projectDir (skip mount)', () => {
@@ -2478,18 +2590,25 @@ describe('DockerSupervisor log streaming', () => {
       stderr: new EventEmitter(),
     })
     mockSpawn.mockReturnValue(fakeChild as never)
+    // Omit agentId and mock os.hostname to return empty string
+    // so createProjectApiClient returns undefined → else branch is taken
+    const osMod = require('os') as typeof import('os')
+    const hostnameSpy = jest.spyOn(osMod, 'hostname').mockReturnValue('')
     mockLoadConfig.mockReturnValue({
-      agentId: 'agent-1',
       createdAt: '2024-01-01',
       projects: [{ tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' }],
     })
 
     runInDocker({})
     resetIsDockerRunning()
+    hostnameSpy.mockRestore()
 
     const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
     fakeChild.stdout.emit('data', Buffer.from('hello'))
     writeSpy.mockRestore()
+
+    // Emit close to cover resolveClosed() in the no-log-streaming branch
+    fakeChild.emit('close', 0)
 
     // No error thrown — test passes if no exception
   })
