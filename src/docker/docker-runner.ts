@@ -231,7 +231,7 @@ export async function buildProjectImage(
       'build', '-t', imageTag, '--pull=false', '--progress=plain',
       '--build-arg', `AGENT_VERSION=${baseVersion}`,
       '-f', dockerfilePath, contextDir,
-    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    ], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, BUILDKIT_PROGRESS: 'plain' } })
 
     const onData = (d: Buffer): void => {
       const text = d.toString()
