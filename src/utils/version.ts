@@ -31,8 +31,22 @@ export function isNewerVersion(current: string, latest: string): boolean {
   // Both have pre-release or both don't — same version
   if (!c.pre && !l.pre) return false
 
-  // Both have pre-release — compare lexicographically
-  return l.pre! > c.pre!
+  // Both have pre-release — compare segment by segment, treating numeric parts as numbers
+  const cParts = c.pre!.split('.')
+  const lParts = l.pre!.split('.')
+  const len = Math.max(cParts.length, lParts.length)
+  for (let i = 0; i < len; i++) {
+    const cp = cParts[i] ?? ''
+    const lp = lParts[i] ?? ''
+    const cn = Number(cp)
+    const ln = Number(lp)
+    if (!isNaN(cn) && !isNaN(ln)) {
+      if (ln !== cn) return ln > cn
+    } else {
+      if (lp !== cp) return lp > cp
+    }
+  }
+  return false
 }
 
 /**
