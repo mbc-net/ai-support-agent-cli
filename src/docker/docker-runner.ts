@@ -862,7 +862,7 @@ class DockerSupervisor {
     const colorReset = '\x1b[0m'
     const logPrefix = `${projectColor}[${key}]${colorReset} `
     logger.info(`[docker] Starting container for project: ${key}`)
-    const child = spawn('docker', dockerArgs, { stdio: ['inherit', 'pipe', 'pipe'] })
+    const child = spawn('docker', dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
 
     let resolveClosed!: () => void
     const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve })
