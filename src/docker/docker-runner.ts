@@ -862,7 +862,11 @@ class DockerSupervisor {
     const colorReset = '\x1b[0m'
     const logPrefix = `${projectColor}[${key}]${colorReset} `
     logger.info(`[docker] Starting container for project: ${key}`)
-    const child = spawn('docker', dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+    // detached: true puts docker run in its own process group so that Ctrl+C
+    // on the host terminal (which sends SIGINT to the foreground process group)
+    // does NOT kill docker run directly. Shutdown is handled exclusively by
+    // the Node.js SIGINT/SIGTERM handler calling stopAll() -> docker stop.
+    const child = spawn('docker', dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
 
     let resolveClosed!: () => void
     const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve })
