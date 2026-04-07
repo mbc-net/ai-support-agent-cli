@@ -89,7 +89,7 @@ jobs:
     name: Publish
     needs: unit_tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -137,14 +137,16 @@ jobs:
 
       - name: Publish to npm (Pre-release)
         if: steps.release-type.outputs.prerelease == 'true'
-        run: npm publish --access public --provenance --tag ${{ steps.release-type.outputs.tag }}
+        run: npm publish --access public --ignore-scripts --tag ${{ steps.release-type.outputs.tag }}
+        timeout-minutes: 5
 
       - name: Publish to npm (Production)
         if: steps.release-type.outputs.prerelease == 'false'
-        run: npm publish --access public --provenance
+        run: npm publish --access public --ignore-scripts
+        timeout-minutes: 5
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}

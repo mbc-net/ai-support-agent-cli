@@ -8,7 +8,7 @@ import { getDockerfilePath, getDockerContextDir, resolveDockerfile, getProjectIm
 import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE, DOCKER_RESTART_EXIT_CODE } from '../constants'
 import { getConfigDir, getProjectList, loadConfig } from '../config-manager'
 import { t } from '../i18n'
-import { logger } from '../logger'
+import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { isNewerVersion, isValidVersion } from '../utils/version'
@@ -193,6 +193,10 @@ export async function buildProjectImage(
 ): Promise<void> {
   const imageTag = getProjectImageTag(tenantCode, projectCode, baseVersion)
   const contextDir = getDockerContextDir()
+  const projectKey = `${tenantCode}#${projectCode}`
+  const color = getProjectColor(projectKey)
+  const reset = '\x1b[0m'
+  const prefix = `${color}[${projectKey}]${reset} `
   logger.info(`[docker] Building project image: ${imageTag}`)
 
   const sessionId = makeSessionId()
@@ -224,14 +228,16 @@ export async function buildProjectImage(
   let buildError: Error | undefined
   await new Promise<void>((resolve, reject) => {
     const proc = spawn('docker', [
-      'build', '-t', imageTag, '--pull=false',
+      'build', '-t', imageTag, '--pull=false', '--progress=plain',
       '--build-arg', `AGENT_VERSION=${baseVersion}`,
       '-f', dockerfilePath, contextDir,
-    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    ], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, BUILDKIT_PROGRESS: 'plain' } })
 
+    const writePrefixed = makeLinePrefixer(prefix, (s) => process.stdout.write(s))
     const onData = (d: Buffer): void => {
-      process.stdout.write(d)
-      buf += d.toString()
+      const text = d.toString()
+      writePrefixed(text)
+      buf += text
       if (buf.length > 4096) {
         void flush()
       }
@@ -715,7 +721,7 @@ class DockerSupervisor {
       const shutdownTimer = setTimeout(() => {
         logger.warn('[docker] Shutdown timed out waiting for log flush; forcing exit')
         process.exit(0)
-      }, this.opts.shutdownTimeoutMs ?? 10_000).unref()
+      }, this.opts.shutdownTimeoutMs ?? 10_000)
       void Promise.all(closedPromises).then(() => {
         clearTimeout(shutdownTimer)
         process.exit(0)
@@ -838,11 +844,12 @@ class DockerSupervisor {
       containerArgs.push('--update-channel', this.opts.updateChannel)
     }
 
-    const interactive = process.stdin.isTTY ? ['-it'] : ['-i']
+    // Always use -i (no -t) in supervisor mode so Ctrl+C on the host does NOT propagate
+    // directly into the container via the TTY. Shutdown is handled exclusively by docker stop.
     const imageTag = this.getImageTag(project)
     const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
     const dockerArgs = [
-      'run', '--rm', '--cidfile', cidFile, ...interactive,
+      'run', '--rm', '--cidfile', cidFile, '-i',
       ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
       ...mounts,
       ...buildDevMounts(),
@@ -851,6 +858,9 @@ class DockerSupervisor {
       ...containerArgs,
     ]
 
+    const projectColor = getProjectColor(key)
+    const colorReset = '\x1b[0m'
+    const logPrefix = `${projectColor}[${key}]${colorReset} `
     logger.info(`[docker] Starting container for project: ${key}`)
     const child = spawn('docker', dockerArgs, { stdio: ['inherit', 'pipe', 'pipe'] })
 
@@ -924,8 +934,10 @@ class DockerSupervisor {
 
       const flushTimer = setInterval(() => { void flush() }, 1_000).unref()
 
-      child.stdout?.on('data', (d: Buffer) => { process.stdout.write(d); buf += d.toString() })
-      child.stderr?.on('data', (d: Buffer) => { process.stderr.write(d); buf += d.toString() })
+      const writeStdout = makeLinePrefixer(logPrefix, (s) => process.stdout.write(s))
+      const writeStderr = makeLinePrefixer(logPrefix, (s) => process.stderr.write(s))
+      child.stdout?.on('data', (d: Buffer) => { const t = d.toString(); writeStdout(t); buf += t })
+      child.stderr?.on('data', (d: Buffer) => { const t = d.toString(); writeStderr(t); buf += t })
 
       child.on('close', () => {
         registeredIdWatcher.close()
@@ -941,9 +953,11 @@ class DockerSupervisor {
         }).catch(() => { handle.resolveClosed() }).catch(() => { handle.resolveClosed() })
       })
     } else {
-      // No log streaming: forward to host terminal directly
-      child.stdout?.on('data', (d: Buffer) => process.stdout.write(d))
-      child.stderr?.on('data', (d: Buffer) => process.stderr.write(d))
+      // No log streaming: forward to host terminal directly with colored prefix
+      const writeStdoutDirect = makeLinePrefixer(logPrefix, (s) => process.stdout.write(s))
+      const writeStderrDirect = makeLinePrefixer(logPrefix, (s) => process.stderr.write(s))
+      child.stdout?.on('data', (d: Buffer) => writeStdoutDirect(d.toString()))
+      child.stderr?.on('data', (d: Buffer) => writeStderrDirect(d.toString()))
       child.on('close', () => { handle.resolveClosed() })
     }
 
@@ -989,13 +1003,14 @@ class DockerSupervisor {
     for (const [key, handle] of this.handles) {
       if (!handle.closeHandled) {
         logger.info(`[docker] Stopping container for project: ${key}`)
-        // Try docker stop via cidfile first (more reliable than SIGTERM to docker run process)
+        // Try docker stop via cidfile (more reliable than SIGTERM to docker run process).
+        // Use spawn (non-blocking) so we don't stall the Node.js event loop during shutdown.
         let stopped = false
         try {
           if (fs.existsSync(handle.cidFile)) {
             const containerId = fs.readFileSync(handle.cidFile, 'utf-8').trim()
             if (containerId) {
-              execFileSync('docker', ['stop', '--time', '5', containerId], { stdio: 'ignore' })
+              spawn('docker', ['stop', '--time', '5', containerId], { stdio: 'ignore' })
               stopped = true
             }
           }
