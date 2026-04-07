@@ -11,7 +11,7 @@ permissions:
 jobs:
   dependency-check:
     name: Dependency Update Validation
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,10 +29,8 @@ jobs:
         run: npm run build
 
       - name: Run tests
-        run: npm run test:cov
+        run: npm test
         timeout-minutes: 10
-        env:
-          UV_USE_IO_URING: "0"
 
       - name: Security audit
         run: npm audit --audit-level=high
@@ -73,7 +71,7 @@ jobs:
 
   extended-matrix-test:
     name: Extended Matrix Test
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         node-version: [20.x, 22.x, 24.x]
@@ -93,10 +91,8 @@ jobs:
         run: npm run build
 
       - name: Run all tests
-        run: npm run test:cov
+        run: npm test
         timeout-minutes: 10
-        env:
-          UV_USE_IO_URING: "0"
 
       - name: Report status
         if: failure()
