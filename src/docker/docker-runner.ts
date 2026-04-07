@@ -88,6 +88,8 @@ export interface DockerRunOptions {
   project?: string
   /** Agent ID for log streaming */
   agentId?: string
+  /** Timeout in ms before forcing exit during shutdown (default 10000). Used for testing. */
+  shutdownTimeoutMs?: number
 }
 
 export function checkDockerAvailable(): boolean {
@@ -711,7 +713,7 @@ class DockerSupervisor {
       const shutdownTimer = setTimeout(() => {
         logger.warn('[docker] Shutdown timed out waiting for log flush; forcing exit')
         process.exit(0)
-      }, 10_000).unref()
+      }, this.opts.shutdownTimeoutMs ?? 10_000).unref()
       void Promise.all(closedPromises).then(() => {
         clearTimeout(shutdownTimer)
         process.exit(0)

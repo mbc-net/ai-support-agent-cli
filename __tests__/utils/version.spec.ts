@@ -29,8 +29,14 @@ describe('isNewerVersion', () => {
     expect(isNewerVersion('1.0.0', '1.0.0-beta.1')).toBe(false)
   })
 
-  it('should compare pre-release versions lexicographically', () => {
+  it('should compare pre-release versions lexicographically for non-numeric parts', () => {
     expect(isNewerVersion('1.0.0-alpha.1', '1.0.0-beta.1')).toBe(true)
+  })
+
+  it('should compare numeric pre-release suffixes numerically (not lexicographically)', () => {
+    expect(isNewerVersion('1.0.0-beta.2', '1.0.0-beta.10')).toBe(true)
+    expect(isNewerVersion('1.0.0-beta.10', '1.0.0-beta.2')).toBe(false)
+    expect(isNewerVersion('1.0.0-beta.10', '1.0.0-beta.11')).toBe(true)
   })
 
   it('should return false when pre-release versions are identical', () => {
