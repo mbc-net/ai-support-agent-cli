@@ -657,20 +657,30 @@ class DockerSupervisor {
   private opts: DockerRunOptions
   private version: string
   private onAllStopped: (() => void) | undefined
-  private agentId: string | undefined
+  private readonly defaultAgentId: string | undefined
+  /** Per-project agentId updated when the container registers with the API. */
+  private projectAgentIds = new Map<string, string>()
 
   constructor(version: string, opts: DockerRunOptions) {
     this.version = version
     this.opts = opts
-    this.agentId = opts.agentId
+    this.defaultAgentId = opts.agentId
   }
 
   private projectKey(project: ProjectRegistration): string {
     return `${project.tenantCode}/${project.projectCode}`
   }
 
+  private getProjectAgentId(project: ProjectRegistration): string | undefined {
+    return this.projectAgentIds.get(this.projectKey(project)) ?? this.defaultAgentId
+  }
+
+  private setProjectAgentId(project: ProjectRegistration, agentId: string): void {
+    this.projectAgentIds.set(this.projectKey(project), agentId)
+  }
+
   private createProjectApiClient(project: ProjectRegistration): ApiClient | undefined {
-    return this.agentId ? new ApiClient(project.apiUrl, project.token) : undefined
+    return this.getProjectAgentId(project) ? new ApiClient(project.apiUrl, project.token) : undefined
   }
 
   start(projects: ProjectRegistration[], onStop?: () => void): void {
@@ -716,7 +726,7 @@ class DockerSupervisor {
       // The container writes Dockerfile into its configDir root, which maps to projectConfigHostDir on host.
       if (fs.existsSync(projectDockerfile)) {
         try {
-          await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, this.createProjectApiClient(project), this.agentId)
+          await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, this.createProjectApiClient(project), this.getProjectAgentId(project))
           // Copy the docker-customization-hash file written by the container so the
           // next container startup knows the current customization was already built.
           const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
@@ -779,9 +789,9 @@ class DockerSupervisor {
     const registeredAgentIdPath = path.join(projectConfigHostDir, 'docker-registered-agent-id')
     if (fs.existsSync(registeredAgentIdPath)) {
       const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
-      if (registeredId && registeredId !== this.agentId) {
+      if (registeredId && registeredId !== this.getProjectAgentId(project)) {
         logger.info(`[docker] Using registered agentId for ${key}: ${registeredId}`)
-        this.agentId = registeredId
+        this.setProjectAgentId(project, registeredId)
       }
     }
 
@@ -833,7 +843,7 @@ class DockerSupervisor {
     // Stream container stdout/stderr to host terminal and API for real-time log viewing
     // Use project-specific ApiClient so the token matches the projectCode in the request
     const projectApiClient = this.createProjectApiClient(project)
-    if (projectApiClient && this.agentId) {
+    if (projectApiClient && this.getProjectAgentId(project)) {
       const sessionId = makeSessionId()
       let seq = 0
       let fullLog = ''
@@ -843,7 +853,7 @@ class DockerSupervisor {
       // Use a getter so that if the container writes docker-registered-agent-id after startup,
       // subsequent log chunks are stored under the correct server-assigned agentId.
       const supervisor = this
-      const getAgentId = (): string => supervisor.agentId ?? ''
+      const getAgentId = (): string => supervisor.getProjectAgentId(project) ?? ''
 
       // Watch for the registered agentId file written by the container after registration
       const noopWatcher: Pick<fs.FSWatcher, 'close'> = { close: () => undefined }
@@ -853,9 +863,10 @@ class DockerSupervisor {
           if (filename === 'docker-registered-agent-id' && (eventType === 'rename' || eventType === 'change')) {
             try {
               const newId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
-              if (newId && newId !== supervisor.agentId) {
-                logger.info(`[docker] Container registered with agentId: ${newId} (was: ${supervisor.agentId})`)
-                supervisor.agentId = newId
+              const currentId = supervisor.getProjectAgentId(project)
+              if (newId && newId !== currentId) {
+                logger.info(`[docker] Container registered with agentId: ${newId} (was: ${currentId})`)
+                supervisor.setProjectAgentId(project, newId)
               }
             } catch {
               // File may not exist yet if rename event fires before write completes
