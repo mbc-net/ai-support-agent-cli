@@ -45,25 +45,25 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     chardet==5.*
 
 # =============================================================================
-# Layer 3: System CLIs and tools (stable — external binary downloads)
+# Layer 3: System CLIs — external binary downloads (stable, rarely changes)
+# Combined into as few RUN steps as possible to minimise layer count while
+# keeping logically distinct tools separable when they do need updating.
 # =============================================================================
 
-# AWS CLI v2
+# AWS CLI v2 + Session Manager Plugin
+# Note: AWS uses "ubuntu_64bit" for x86_64/amd64 and "ubuntu_arm64" for arm64
 RUN curl -fSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip \
     && unzip /tmp/awscliv2.zip -d /tmp \
     && /tmp/aws/install \
-    && rm -rf /tmp/aws /tmp/awscliv2.zip
-
-# AWS Session Manager Plugin
-# Note: AWS uses "ubuntu_64bit" for x86_64/amd64 and "ubuntu_arm64" for arm64
-RUN ARCH=$(dpkg --print-architecture) \
+    && rm -rf /tmp/aws /tmp/awscliv2.zip \
+    && ARCH=$(dpkg --print-architecture) \
     && if [ "$ARCH" = "amd64" ]; then SSM_ARCH="64bit"; else SSM_ARCH="$ARCH"; fi \
     && curl -fSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_${SSM_ARCH}/session-manager-plugin.deb" \
         -o /tmp/session-manager-plugin.deb \
     && dpkg -i /tmp/session-manager-plugin.deb \
     && rm /tmp/session-manager-plugin.deb
 
-# MSSQL tools (amd64 only)
+# MSSQL tools (amd64 only — kept separate due to conditional apt-get)
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then \
       curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /usr/share/keyrings/microsoft.gpg \
@@ -90,6 +90,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && dpkg -i /tmp/glab.deb \
     && rm /tmp/glab.deb
 
+# code-server (VS Code Server) — kept separate; version tied to code-server releases
+RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local \
+    && code-server --version
+
 # =============================================================================
 # Layer 4: Node.js global tools (stable — version-pinned)
 # =============================================================================
@@ -104,20 +108,19 @@ RUN npm install -g \
     marked@15 turndown@7 \
     && npm cache clean --force
 
-# code-server (VS Code Server)
-RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local \
-    && code-server --version
-
-# Playwright: install Chromium browser binary + OS dependencies (fonts, libX11, etc.)
-# Browser binary is architecture-independent and rarely changes, so cache it before npm packages.
-# The playwright npm package will be installed later as peer of @ai-support-agent/cli.
-# Use /opt/playwright-browsers so all users (root, node, arbitrary UID) can access the browser.
+# =============================================================================
+# Layer 5: Playwright browser binary (large, stable — cache before app packages)
+# Browser binary is architecture-independent and rarely changes, so it is
+# installed before AGENT_VERSION so the layer stays cached on version bumps.
+# The playwright npm package is installed later as a peer of @ai-support-agent/cli.
+# Use /opt/playwright-browsers so all users (root, node, arbitrary UID) can access it.
+# =============================================================================
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 RUN npx playwright install --with-deps chromium \
     && chmod -R 755 /opt/playwright-browsers
 
 # =============================================================================
-# Layer 5: Application packages (changes on every version bump)
+# Layer 6: Application packages (changes on every version bump)
 # ARG placed here so layers above remain cached when AGENT_VERSION changes.
 # =============================================================================
 ARG AGENT_VERSION=latest
@@ -130,7 +133,7 @@ RUN cd /usr/local/lib/node_modules/@ai-support-agent/cli \
     && npm install playwright
 
 # =============================================================================
-# Layer 6: Permissions and runtime setup (lightweight, changes rarely)
+# Layer 7: Permissions and runtime setup (lightweight, changes rarely)
 # =============================================================================
 
 # Fix npm cache/global directory permissions for runtime user (may run as non-root)
