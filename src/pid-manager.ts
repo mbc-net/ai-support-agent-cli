@@ -71,12 +71,15 @@ export function readPidFile(): number | null {
 /**
  * 指定PIDのプロセスが生存しているか確認する。
  * process.kill(pid, 0) は実際にシグナルを送らず存在チェックのみ行う。
+ * EPERM（権限なし）の場合はプロセスが存在しているため true を返す。
  */
 export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
     return true
-  } catch {
+  } catch (err) {
+    // EPERM: プロセスは存在するが送信権限がない → 生存中とみなす
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return true
     return false
   }
 }

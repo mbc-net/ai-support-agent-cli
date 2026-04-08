@@ -99,9 +99,15 @@ describe('pid-manager', () => {
     })
 
     it('should return true when another alive process pid is recorded', () => {
-      // process.pid は生きているが、「別プロセス」のように見せるため
-      // isProcessAlive をモックして true を返す別のPIDを設定
-      jest.spyOn(process, 'kill').mockImplementation(() => true as never)
+      // PID 9999 のプロセスが生存しているように process.kill をモック
+      jest.spyOn(process, 'kill').mockImplementation(() => undefined as never)
+      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), '9999', 'utf-8')
+      expect(isAlreadyRunning()).toBe(true)
+    })
+
+    it('should return true when EPERM is thrown (process exists but no permission)', () => {
+      const epermError = Object.assign(new Error('EPERM'), { code: 'EPERM' })
+      jest.spyOn(process, 'kill').mockImplementation(() => { throw epermError })
       fs.writeFileSync(path.join(tmpDir, 'agent.pid'), '9999', 'utf-8')
       expect(isAlreadyRunning()).toBe(true)
     })
