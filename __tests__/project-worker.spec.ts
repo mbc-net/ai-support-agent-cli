@@ -96,7 +96,7 @@ describe('project-worker', () => {
 
   const startMessage: IpcStartMessage = {
     type: 'start',
-    project: { projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api' },
+    project: { tenantCode: 'mbc', projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api' },
     agentId: 'agent-1',
     options: { pollInterval: 3000, heartbeatInterval: 60000 },
   }

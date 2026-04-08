@@ -56,7 +56,7 @@ describe('config-manager', () => {
           agentId: 'test-agent',
           createdAt: '2026-01-01T00:00:00Z',
           projects: [
-            { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+            { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
           ],
         }),
       )
@@ -70,7 +70,7 @@ describe('config-manager', () => {
 
   describe('saveConfig', () => {
     it('should create config directory and save config', () => {
-      saveConfig({ projects: [{ projectCode: 'test', token: 'new-token', apiUrl: 'http://localhost:3030' }] })
+      saveConfig({ projects: [{ tenantCode: 'mbc', projectCode: 'test', token: 'new-token', apiUrl: 'http://localhost:3030' }] })
 
       const config = loadConfig()
       expect(config?.projects).toHaveLength(1)
@@ -79,8 +79,8 @@ describe('config-manager', () => {
     })
 
     it('should merge with existing config', () => {
-      saveConfig({ projects: [{ projectCode: 'p1', token: 'token1', apiUrl: 'http://localhost:3030' }] })
-      saveConfig({ projects: [{ projectCode: 'p2', token: 'token2', apiUrl: 'http://localhost:3031' }] })
+      saveConfig({ projects: [{ tenantCode: 'mbc', projectCode: 'p1', token: 'token1', apiUrl: 'http://localhost:3030' }] })
+      saveConfig({ projects: [{ tenantCode: 'mbc', projectCode: 'p2', token: 'token2', apiUrl: 'http://localhost:3031' }] })
 
       const config = loadConfig()
       expect(config?.projects).toHaveLength(1)
@@ -96,7 +96,7 @@ describe('config-manager', () => {
       expect(statBefore.mode & 0o777).toBe(0o755)
 
       // saveConfig should enforce 0o700
-      saveConfig({ projects: [{ projectCode: 'test', token: 'tok', apiUrl: 'http://test' }] })
+      saveConfig({ projects: [{ tenantCode: 'mbc', projectCode: 'test', token: 'tok', apiUrl: 'http://test' }] })
 
       const statAfter = fs.statSync(TEST_CONFIG_DIR)
       expect(statAfter.mode & 0o777).toBe(0o700)
@@ -105,7 +105,7 @@ describe('config-manager', () => {
     it('should create new config directory with 0o700', () => {
       expect(fs.existsSync(TEST_CONFIG_DIR)).toBe(false)
 
-      saveConfig({ projects: [{ projectCode: 'test', token: 'tok', apiUrl: 'http://test' }] })
+      saveConfig({ projects: [{ tenantCode: 'mbc', projectCode: 'test', token: 'tok', apiUrl: 'http://test' }] })
 
       const stat = fs.statSync(TEST_CONFIG_DIR)
       expect(stat.mode & 0o777).toBe(0o700)
@@ -127,7 +127,7 @@ describe('config-manager', () => {
 
   describe('clearConfig', () => {
     it('should remove config file', () => {
-      saveConfig({ projects: [{ projectCode: 'test', token: 'test', apiUrl: 'http://test' }] })
+      saveConfig({ projects: [{ tenantCode: 'mbc', projectCode: 'test', token: 'test', apiUrl: 'http://test' }] })
       expect(loadConfig()).not.toBeNull()
 
       clearConfig()
@@ -152,6 +152,7 @@ describe('config-manager', () => {
       expect(config).not.toBeNull()
       expect(config?.projects).toHaveLength(1)
       expect(config?.projects?.[0]).toEqual({
+        tenantCode: 'unknown',
         projectCode: 'default',
         token: 'legacy-token',
         apiUrl: 'http://legacy-api',
@@ -172,7 +173,7 @@ describe('config-manager', () => {
           agentId: 'modern-agent',
           createdAt: '2026-01-01T00:00:00Z',
           projects: [
-            { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+            { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
           ],
         }),
       )
@@ -186,8 +187,8 @@ describe('config-manager', () => {
   describe('getProjectList', () => {
     it('should return projects array', () => {
       const projects = [
-        { projectCode: 'p1', token: 't1', apiUrl: 'http://a1' },
-        { projectCode: 'p2', token: 't2', apiUrl: 'http://a2' },
+        { tenantCode: 'mbc', projectCode: 'p1', token: 't1', apiUrl: 'http://a1' },
+        { tenantCode: 'mbc', projectCode: 'p2', token: 't2', apiUrl: 'http://a2' },
       ]
       const result = getProjectList({
         agentId: 'test',
@@ -204,12 +205,38 @@ describe('config-manager', () => {
       })
       expect(result).toEqual([])
     })
+
+    it('should extract tenantCode from token when tenantCode is missing', () => {
+      const projects = [
+        { tenantCode: '', projectCode: 'p1', token: '00000001:uuid:secret', apiUrl: 'http://a1' },
+      ]
+      const result = getProjectList({
+        agentId: 'test',
+        createdAt: '2026-01-01',
+        projects,
+      })
+      expect(result).toHaveLength(1)
+      expect(result[0].tenantCode).toBe('00000001')
+      expect(result[0].projectCode).toBe('p1')
+    })
+
+    it('should skip project with no tenantCode and unparseable token', () => {
+      const projects = [
+        { tenantCode: '', projectCode: 'p1', token: 'invalid', apiUrl: 'http://a1' },
+      ]
+      const result = getProjectList({
+        agentId: 'test',
+        createdAt: '2026-01-01',
+        projects,
+      })
+      expect(result).toHaveLength(0)
+    })
   })
 
   describe('addProject', () => {
     it('should add a new project', () => {
       saveConfig({})
-      addProject({ projectCode: 'new-proj', token: 'new-token', apiUrl: 'http://new' })
+      addProject({ tenantCode: 'mbc', projectCode: 'new-proj', token: 'new-token', apiUrl: 'http://new' })
       const config = loadConfig()
       expect(config?.projects).toHaveLength(1)
       expect(config?.projects?.[0].projectCode).toBe('new-proj')
@@ -217,8 +244,8 @@ describe('config-manager', () => {
 
     it('should upsert existing project', () => {
       saveConfig({})
-      addProject({ projectCode: 'proj', token: 'token1', apiUrl: 'http://api1' })
-      addProject({ projectCode: 'proj', token: 'token2', apiUrl: 'http://api2' })
+      addProject({ tenantCode: 'mbc', projectCode: 'proj', token: 'token1', apiUrl: 'http://api1' })
+      addProject({ tenantCode: 'mbc', projectCode: 'proj', token: 'token2', apiUrl: 'http://api2' })
       const config = loadConfig()
       expect(config?.projects).toHaveLength(1)
       expect(config?.projects?.[0].token).toBe('token2')
@@ -228,8 +255,8 @@ describe('config-manager', () => {
   describe('removeProject', () => {
     it('should remove an existing project and return true', () => {
       saveConfig({})
-      addProject({ projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
-      addProject({ projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' })
+      addProject({ tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
+      addProject({ tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' })
 
       const removed = removeProject('proj-a')
       expect(removed).toBe(true)
@@ -241,7 +268,7 @@ describe('config-manager', () => {
 
     it('should return false when project does not exist', () => {
       saveConfig({})
-      addProject({ projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
+      addProject({ tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
 
       const removed = removeProject('nonexistent')
       expect(removed).toBe(false)
@@ -261,7 +288,7 @@ describe('config-manager', () => {
   describe('setProjectDir', () => {
     it('should return true and set projectDir when project exists', () => {
       saveConfig({})
-      addProject({ projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
+      addProject({ tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
 
       const result = setProjectDir('proj-a', '/home/user/projects/proj-a')
       expect(result).toBe(true)
@@ -272,7 +299,7 @@ describe('config-manager', () => {
 
     it('should return false when project does not exist', () => {
       saveConfig({})
-      addProject({ projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
+      addProject({ tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
 
       const result = setProjectDir('nonexistent', '/some/path')
       expect(result).toBe(false)
@@ -284,8 +311,8 @@ describe('config-manager', () => {
 
     it('should only update the targeted project when multiple projects exist', () => {
       saveConfig({})
-      addProject({ projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
-      addProject({ projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' })
+      addProject({ tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
+      addProject({ tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' })
 
       const result = setProjectDir('proj-b', '/home/user/projects/proj-b')
       expect(result).toBe(true)
@@ -321,7 +348,7 @@ describe('config-manager', () => {
   describe('saveConfig defaultProjectDir merge', () => {
     it('should merge defaultProjectDir when provided', () => {
       saveConfig({
-        projects: [{ projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' }],
+        projects: [{ tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' }],
       })
 
       saveConfig({ defaultProjectDir: '/home/user/projects/{projectCode}' })

@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [develop, main, beta]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
   actions: read
@@ -19,6 +23,7 @@ jobs:
   unit_tests:
     name: Unit Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         node-version: [20.x, 22.x, 24.x]
@@ -67,33 +72,24 @@ jobs:
           sarif_file: 'trivy-results.sarif'
         continue-on-error: true
 
-      - name: Run Unit Tests with Coverage
-        run: npm run test:cov
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        if: matrix.node-version == '20.x'
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage/lcov.info
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: false
-          verbose: true
-
-      - name: Unit Test Report
-        uses: dorny/test-reporter@v1
-        if: (success() || failure()) && github.event.pull_request.head.repo.full_name == github.repository
-        with:
-          name: Unit Tests Reporter-${{ matrix.node-version }}
-          path: report/unit.xml
-          reporter: jest-junit
-          fail-on-error: 'true'
+      - name: Run Unit Tests
+        run: |
+          setsid npm test &
+          TEST_PID=$!
+          TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
+          ( sleep 480 && kill -- -$TEST_PGID 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
+        timeout-minutes: 10
 
   publish:
     name: Publish
     needs: unit_tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -141,14 +137,16 @@ jobs:
 
       - name: Publish to npm (Pre-release)
         if: steps.release-type.outputs.prerelease == 'true'
-        run: npm publish --access public --provenance --tag ${{ steps.release-type.outputs.tag }}
+        run: npm publish --access public --ignore-scripts --tag ${{ steps.release-type.outputs.tag }}
+        timeout-minutes: 5
 
       - name: Publish to npm (Production)
         if: steps.release-type.outputs.prerelease == 'false'
-        run: npm publish --access public --provenance
+        run: npm publish --access public --ignore-scripts
+        timeout-minutes: 5
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}

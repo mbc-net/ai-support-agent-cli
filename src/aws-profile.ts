@@ -66,9 +66,7 @@ export function writeAwsConfig(
 ): void {
   try {
     const awsDir = getAwsDir(projectDir)
-    if (!fs.existsSync(awsDir)) {
-      fs.mkdirSync(awsDir, { recursive: true, mode: 0o700 })
-    }
+    fs.mkdirSync(awsDir, { recursive: true, mode: 0o700 })
 
     const content = generateAwsConfig(projectCode, accounts)
     const configPath = path.join(awsDir, 'config')
@@ -119,9 +117,7 @@ export function writeAwsCredentials(
 ): void {
   try {
     const awsDir = getAwsDir(projectDir)
-    if (!fs.existsSync(awsDir)) {
-      fs.mkdirSync(awsDir, { recursive: true, mode: 0o700 })
-    }
+    fs.mkdirSync(awsDir, { recursive: true, mode: 0o700 })
 
     const content = generateAwsCredentials(projectCode, credentialMap)
     const credentialsPath = path.join(awsDir, 'credentials')

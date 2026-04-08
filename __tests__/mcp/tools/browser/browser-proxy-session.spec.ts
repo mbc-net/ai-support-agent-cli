@@ -43,6 +43,7 @@ describe('BrowserProxySession', () => {
       })
     })
 
+    mockServer.unref()
     await new Promise<void>((resolve) => {
       mockServer.listen(0, '127.0.0.1', () => {
         const addr = mockServer.address()
@@ -216,6 +217,7 @@ describe('BrowserProxySession', () => {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end('not-json')
       })
+      badServer.unref()
       const badPort = await new Promise<number>((resolve) => {
         badServer.listen(0, '127.0.0.1', () => {
           const addr = badServer.address()

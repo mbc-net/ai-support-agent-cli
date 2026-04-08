@@ -14,7 +14,7 @@ export const ALLOWED_EXTENSIONS = new Set([
   '.log', '.html', '.css', '.js', '.ts', '.py', '.sh',
   '.sql', '.env', '.conf', '.cfg', '.ini', '.toml',
   '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp',
-  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.pptx',
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
   '.zip', '.tar', '.gz',
 ])
 

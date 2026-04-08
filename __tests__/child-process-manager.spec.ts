@@ -36,7 +36,7 @@ describe('ChildProcessManager', () => {
     manager = new ChildProcessManager()
   })
 
-  const project = { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api' }
+  const project = { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api' }
   const options = { pollInterval: 3000, heartbeatInterval: 30000 }
 
   describe('forkProject', () => {
@@ -134,7 +134,7 @@ describe('ChildProcessManager', () => {
       expect(manager.getRunningCount()).toBe(1)
 
       manager.forkProject(
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
         'agent-1',
         options,
       )
@@ -193,7 +193,7 @@ describe('ChildProcessManager', () => {
     it('should handle multiple children with mixed busy states', async () => {
       manager.forkProject(project, 'agent-1', options)
       manager.forkProject(
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
         'agent-1',
         options,
       )
@@ -253,7 +253,7 @@ describe('ChildProcessManager', () => {
     it('should send shutdown to all children and wait for exit', async () => {
       manager.forkProject(project, 'agent-1', options)
       manager.forkProject(
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
         'agent-1',
         options,
       )

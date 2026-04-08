@@ -8,6 +8,7 @@ import { parseString } from './utils'
 export interface AuthResult {
   token: string
   apiUrl?: string
+  tenantCode?: string
   projectCode?: string
 }
 
@@ -84,6 +85,7 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
               callbackResolve({
                 token,
                 apiUrl: parseString(data.apiUrl) ?? undefined,
+                tenantCode: parseString(data.tenantCode) ?? undefined,
                 projectCode: parseString(data.projectCode) ?? undefined,
               })
             }

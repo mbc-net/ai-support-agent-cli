@@ -5,6 +5,7 @@ import {
   startProjectAgent,
   setupShutdownHandlers,
   resolveAutoUpdateConfig,
+  extractTokenId,
 } from '../src/agent-runner'
 import { AppSyncSubscriber } from '../src/appsync-subscriber'
 import { AGENT_VERSION } from '../src/constants'
@@ -19,6 +20,12 @@ jest.mock('../src/api-client')
 jest.mock('../src/commands')
 jest.mock('../src/config-manager')
 jest.mock('../src/logger')
+jest.mock('../src/pid-manager', () => ({
+  writePidFile: jest.fn(),
+  removePidFile: jest.fn(),
+  isAlreadyRunning: jest.fn().mockReturnValue(false),
+  readPidFile: jest.fn().mockReturnValue(null),
+}))
 
 const mockForkProject = jest.fn()
 const mockStopAll = jest.fn().mockResolvedValue(undefined)
@@ -215,6 +222,20 @@ describe('agent-runner', () => {
     },
   ))
 
+  it('should use tenantCode/projectCode from --project flag when falling back to env vars', withEnvVars(
+    { AI_SUPPORT_AGENT_TOKEN: 'env-token', AI_SUPPORT_AGENT_API_URL: 'http://env-api' },
+    async () => {
+      mockedLoadConfig.mockReturnValue(null)
+
+      const promise = startAgent({ project: 'mytenant/MYPROJECT' })
+      await jest.advanceTimersByTimeAsync(100)
+      await promise
+
+      // ApiClient is called with the env API URL and token
+      expect(MockApiClient).toHaveBeenCalledWith('http://env-api', 'env-token')
+    },
+  ))
+
   it('should call process.exit(1) when no config and no env vars', withEnvVars(
     {},
     async () => {
@@ -231,8 +252,8 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -265,7 +286,7 @@ describe('agent-runner', () => {
       agentId: 'single-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -335,7 +356,7 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -360,8 +381,8 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -448,7 +469,7 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -492,8 +513,8 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -520,8 +541,8 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     }
 
@@ -576,8 +597,8 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
-        { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -607,7 +628,7 @@ describe('agent-runner', () => {
       agentId: 'multi-agent',
       createdAt: '2024-01-01',
       projects: [
-        { projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
       ],
     }
     mockedLoadConfig.mockReturnValue(mockConfig)
@@ -618,7 +639,7 @@ describe('agent-runner', () => {
     await promise
 
     // Simulate new project added via config watcher
-    const newProject = { projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' }
+    const newProject = { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' }
     capturedConfigCallbacks.onProjectAdded!(newProject)
 
     expect(mockForkProject).toHaveBeenCalledWith(
@@ -702,6 +723,64 @@ describe('agent-runner', () => {
 
     expect(captureException).toHaveBeenCalledWith('rejected reason', { handler: 'unhandledRejection' })
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('rejected reason'))
+  })
+
+  describe('--project flag filtering', () => {
+    it('should filter to matching tenantCode/projectCode when --project is set', async () => {
+      const mockConfig = {
+        agentId: 'multi-agent',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+          { tenantCode: 'mbc', projectCode: 'PROJ_B', token: 'token-b', apiUrl: 'http://api-b' },
+        ],
+      }
+      mockedLoadConfig.mockReturnValue(mockConfig)
+      mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+      const promise = startAgent({ project: 'mbc/PROJ_A' })
+      await jest.advanceTimersByTimeAsync(100)
+      await promise
+
+      // Only PROJ_A should be forked
+      expect(mockForkProject).toHaveBeenCalledTimes(1)
+      expect(mockForkProject).toHaveBeenCalledWith(
+        expect.objectContaining({ projectCode: 'PROJ_A', tenantCode: 'mbc' }),
+        expect.any(String),
+        expect.any(Object),
+      )
+    })
+
+    it('should call process.exit(1) when --project has no slash (tenantCode is required)', async () => {
+      const mockConfig = {
+        agentId: 'multi-agent',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+          { tenantCode: 'mbc', projectCode: 'PROJ_B', token: 'token-b', apiUrl: 'http://api-b' },
+        ],
+      }
+      mockedLoadConfig.mockReturnValue(mockConfig)
+      mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+      await expect(startAgent({ project: 'PROJ_A' })).rejects.toThrow('process.exit called')
+      expect(exitSpy).toHaveBeenCalledWith(1)
+    })
+
+    it('should call process.exit(1) when --project has no matching project', async () => {
+      const mockConfig = {
+        agentId: 'multi-agent',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      }
+      mockedLoadConfig.mockReturnValue(mockConfig)
+      mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+      await expect(startAgent({ project: 'mbc/NONEXISTENT' })).rejects.toThrow('process.exit called')
+      expect(exitSpy).toHaveBeenCalledWith(1)
+    })
   })
 })
 
@@ -808,7 +887,7 @@ describe('startProjectAgent', () => {
     jest.restoreAllMocks()
   })
 
-  const project = { projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api' }
+  const project = { tenantCode: 'mbc', projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api' }
   const intervals = { pollInterval: 5000, heartbeatInterval: 30000 }
 
   it('should log error and not start timers when registration fails', async () => {
@@ -875,9 +954,9 @@ describe('startProjectAgent', () => {
 
     await jest.advanceTimersByTimeAsync(100)
 
-    expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'agent-1')
-    expect(mockedExecuteCommand).toHaveBeenCalledWith('execute_command', { command: 'echo hi' }, expect.objectContaining({ commandId: 'cmd-1', client: mockClient, serverConfig: expect.any(Object), agentId: 'agent-1' }))
-    expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'agent-1')
+    expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'test-id')
+    expect(mockedExecuteCommand).toHaveBeenCalledWith('execute_command', { command: 'echo hi' }, expect.objectContaining({ commandId: 'cmd-1', client: mockClient, serverConfig: expect.any(Object), agentId: 'test-id' }))
+    expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'test-id')
 
     agent.stop()
   })
@@ -1064,5 +1143,136 @@ describe('resolveAutoUpdateConfig', () => {
   it('should disable auto-update when autoUpdate is false', () => {
     const result = resolveAutoUpdateConfig({ autoUpdate: false })
     expect(result.enabled).toBe(false)
+  })
+})
+
+describe('extractTokenId', () => {
+  it('should extract tokenId from valid token format', () => {
+    expect(extractTokenId('mbc:abc-123-uuid:raw-secret-token')).toBe('abc-123-uuid')
+  })
+
+  it('should return undefined when token has more than 3 parts (invalid format)', () => {
+    expect(extractTokenId('tenant:token-id:raw:token:with:colons')).toBeUndefined()
+  })
+
+  it('should return undefined when token has fewer than 3 parts', () => {
+    expect(extractTokenId('tenant:tokenId')).toBeUndefined()
+  })
+
+  it('should return undefined when token has no colons', () => {
+    expect(extractTokenId('invalidtoken')).toBeUndefined()
+  })
+
+  it('should return empty string when tokenId part is empty', () => {
+    expect(extractTokenId('tenant::rawtoken')).toBe('')
+  })
+})
+
+describe('startAgent tokenId-based agentId', () => {
+  let mockRegister: jest.Mock
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    jest.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called')
+    })
+    jest.spyOn(process, 'on').mockImplementation((() => process) as typeof process.on)
+    jest.useFakeTimers()
+
+    mockRegister = jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql', appsyncApiKey: 'da2-testkey123', transportMode: 'realtime' })
+    const mockInstance = {
+      register: mockRegister,
+      heartbeat: jest.fn().mockResolvedValue({ success: true }),
+      getPendingCommands: jest.fn().mockResolvedValue([]),
+      getCommand: jest.fn(),
+      submitResult: jest.fn(),
+      getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
+      getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
+      updateToken: jest.fn(),
+      setTenantCode: jest.fn(),
+      setProjectCode: jest.fn(),
+    }
+    ;(ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(() => mockInstance as unknown as ApiClient)
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
+    jest.restoreAllMocks()
+  })
+
+  it('should use tokenId from CLI token as agentId in register call', async () => {
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'mbc:cli-token-id:raw-secret',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    // register is called with tokenId as agentId
+    expect(mockRegister).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'cli-token-id' }),
+    )
+  })
+
+  it('should use tokenId from env token as agentId in register call', async () => {
+    const saved = process.env.AI_SUPPORT_AGENT_TOKEN
+    const savedUrl = process.env.AI_SUPPORT_AGENT_API_URL
+    process.env.AI_SUPPORT_AGENT_TOKEN = 'tenant:env-token-id:raw-secret'
+    process.env.AI_SUPPORT_AGENT_API_URL = 'http://env-api'
+    try {
+      mockedLoadConfig.mockReturnValue(null)
+
+      const promise = startAgent({})
+      await jest.advanceTimersByTimeAsync(100)
+      await promise
+
+      expect(mockRegister).toHaveBeenCalledWith(
+        expect.objectContaining({ agentId: 'env-token-id' }),
+      )
+    } finally {
+      if (saved === undefined) delete process.env.AI_SUPPORT_AGENT_TOKEN
+      else process.env.AI_SUPPORT_AGENT_TOKEN = saved
+      if (savedUrl === undefined) delete process.env.AI_SUPPORT_AGENT_API_URL
+      else process.env.AI_SUPPORT_AGENT_API_URL = savedUrl
+    }
+  })
+
+  it('should use tokenId from config project token as agentId in forkProject', async () => {
+    const mockConfig = {
+      agentId: 'ignored-agent-id',
+      createdAt: '2024-01-01',
+      projects: [
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'mbc:config-token-id:raw-secret', apiUrl: 'http://api-a' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(mockForkProject).toHaveBeenCalledWith(
+      expect.any(Object),
+      'config-token-id',
+      expect.any(Object),
+    )
+  })
+
+  it('should fall back to hostname when CLI token has no colons', async () => {
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'legacy-token-without-colons',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(mockRegister).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: os.hostname() }),
+    )
   })
 })

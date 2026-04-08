@@ -45,6 +45,7 @@ program
   .option('--no-docker', t('cmd.start.noDocker'))
   .option('--dockerfile <path>', t('cmd.start.dockerfile'))
   .option('--no-dockerfile-sync', t('cmd.start.noDockerfileSync'))
+  .option('--project <tenantCode/projectCode>', t('cmd.start.project'))
   .action(async (opts: {
     token?: string
     apiUrl?: string
@@ -56,6 +57,7 @@ program
     docker: boolean
     dockerfile?: string
     dockerfileSync: boolean
+    project?: string
   }) => {
     if (opts.docker) {
       const { runInDocker } = await import('./docker/docker-runner')
@@ -69,6 +71,7 @@ program
         updateChannel: opts.updateChannel,
         dockerfile: opts.dockerfile,
         dockerfileSync: opts.dockerfileSync,
+        project: opts.project,
       })
       return
     }
@@ -81,7 +84,16 @@ program
       verbose: opts.verbose,
       autoUpdate: opts.autoUpdate,
       updateChannel: updateChannel as ReleaseChannel | undefined,
+      project: opts.project,
     })
+  })
+
+program
+  .command('stop')
+  .description(t('cmd.stop'))
+  .action(async () => {
+    const { stopAgent } = await import('./commands/stop-agent')
+    await stopAgent()
   })
 
 registerAuthCommands(program)
@@ -97,7 +109,7 @@ program
     if (project?.projectDir || config?.defaultProjectDir) {
       try {
         const projectDir = resolveProjectDir(
-          { projectCode, token: '', apiUrl: '', projectDir: project?.projectDir },
+          { tenantCode: project?.tenantCode ?? 'unknown', projectCode, token: '', apiUrl: '', projectDir: project?.projectDir },
           config?.defaultProjectDir,
         )
         const metadataDir = getMetadataDir(projectDir)

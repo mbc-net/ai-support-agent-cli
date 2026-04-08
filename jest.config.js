@@ -2,6 +2,12 @@ module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
   testMatch: ['**/__tests__/**/*.spec.ts'],
+  coverageProvider: 'babel',
+  globals: {
+    'ts-jest': {
+      isolatedModules: true,
+    },
+  },
   collectCoverageFrom: ['src/**/*.ts', '!src/index.ts', '!src/__mocks__/**'],
   coverageThreshold: {
     global: {

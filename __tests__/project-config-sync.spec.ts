@@ -201,15 +201,18 @@ describe('project-config-sync', () => {
       )
     })
 
-    it('should not create cache directory if it already exists', () => {
-      mockedFs.existsSync.mockReturnValue(true)
+    it('should always call mkdir (recursive) even if cache directory already exists', () => {
+      mockedFs.mkdirSync.mockImplementation(() => '' as unknown as string)
       mockedFs.writeFileSync.mockImplementation(() => {})
       mockedFs.renameSync.mockImplementation(() => {})
 
       const config = createMockConfig()
       saveCachedConfig('/projects/test', config)
 
-      expect(mockedFs.mkdirSync).not.toHaveBeenCalled()
+      expect(mockedFs.mkdirSync).toHaveBeenCalledWith(
+        expect.stringContaining(path.join('.ai-support-agent', 'cache')),
+        { recursive: true, mode: 0o700 },
+      )
     })
 
     it('should write config with atomic write (tmp + rename)', () => {

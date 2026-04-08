@@ -13,6 +13,8 @@ describe('TerminalWebSocket', () => {
     server = new WebSocket.Server({ port: 0 }, () => {
       const addr = server.address()
       serverPort = typeof addr === 'object' && addr !== null ? addr.port : 0
+      // Unref the underlying HTTP server so it doesn't keep Jest alive after tests
+      ;(server as unknown as { _server: { unref(): void } })._server?.unref()
       done()
     })
   })

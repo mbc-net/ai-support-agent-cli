@@ -43,6 +43,7 @@ function migrateConfigIfNeeded(raw: LegacyAgentConfig): AgentConfig {
       lastConnected: raw.lastConnected,
       language: raw.language,
       projects: [{
+        tenantCode: 'unknown',
         projectCode: PROJECT_CODE_DEFAULT,
         token: raw.token,
         apiUrl: raw.apiUrl,
@@ -122,7 +123,7 @@ export function addProject(registration: ProjectRegistration): void {
   const config = loadConfig()
   const projects = config?.projects ?? []
   const existing = projects.findIndex(
-    (p) => p.projectCode === registration.projectCode,
+    (p) => p.tenantCode === registration.tenantCode && p.projectCode === registration.projectCode,
   )
   if (existing >= 0) {
     projects[existing] = registration
@@ -147,12 +148,27 @@ export function removeProject(projectCode: string): boolean {
 }
 
 /**
- * Get registered project list
+ * Get registered project list.
+ * Projects without tenantCode are skipped with a warning (legacy entries).
  */
 export function getProjectList(
   config: AgentConfig,
 ): ProjectRegistration[] {
-  return config.projects ?? []
+  const projects = config.projects ?? []
+  return projects.flatMap((p) => {
+    if (!p.tenantCode) {
+      // Token format is "{tenantCode}:{uuid}:{secret}" — extract tenantCode automatically
+      const tokenParts = p.token?.split(':')
+      if (tokenParts && tokenParts.length >= 3) {
+        const extractedTenantCode = tokenParts[0]
+        logger.info(`[config] Project "${p.projectCode}" has no tenantCode; extracted "${extractedTenantCode}" from token.`)
+        return [{ ...p, tenantCode: extractedTenantCode }]
+      }
+      logger.warn(`[config] Project "${p.projectCode}" has no tenantCode and will be skipped. Re-run "agent login" to fix.`)
+      return []
+    }
+    return [p]
+  })
 }
 
 /**

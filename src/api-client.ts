@@ -31,7 +31,7 @@ export class ApiClient {
 
   constructor(apiUrl: string, token: string) {
     const parsed = new URL(apiUrl)
-    if (parsed.protocol === 'http:' && parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost') {
+    if (parsed.protocol === 'http:' && parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost' && parsed.hostname !== 'host.docker.internal') {
       if (process.env.AI_SUPPORT_AGENT_ALLOW_HTTP === 'true') {
         logger.warn('API URL uses HTTP (not HTTPS). Token may be transmitted in plain text.')
       } else {
@@ -126,6 +126,7 @@ export class ApiClient {
     activeChatMode?: string,
     ipAddress?: string,
     configHash?: string,
+    dockerBuildError?: string,
   ): Promise<HeartbeatResponse | void> {
     logger.debug('Sending heartbeat')
     return this.post<HeartbeatResponse>(API_ENDPOINTS.HEARTBEAT(this.tenantCode), {
@@ -138,6 +139,7 @@ export class ApiClient {
       ...(activeChatMode !== undefined && { activeChatMode }),
       ...(ipAddress && { ipAddress }),
       ...(configHash && { configHash }),
+      ...(dockerBuildError !== undefined && { dockerBuildError }),
     })
   }
 
@@ -231,6 +233,29 @@ export class ApiClient {
     this.validateCommandId(commandId)
     logger.debug(`Submitting chat chunk ${chunk.index} (${chunk.type}) for command: ${commandId}`)
     await this.postVoid(API_ENDPOINTS.COMMAND_CHUNKS(this.tenantCode, commandId), chunk, { params: { agentId } })
+  }
+
+  async submitLogChunk(params: {
+    agentId: string
+    projectCode: string
+    logType: 'docker-build' | 'container'
+    sessionId: string
+    seq: number
+    text: string
+  }): Promise<void> {
+    await this.postVoid(API_ENDPOINTS.LOG_CHUNK(this.tenantCode), params)
+  }
+
+  async saveSessionLog(params: {
+    agentId: string
+    projectCode: string
+    logType: 'docker-build' | 'container'
+    sessionId: string
+    content: string
+  }): Promise<void> {
+    await this.postVoid(API_ENDPOINTS.LOG_SESSION(this.tenantCode), params, {
+      timeout: 30_000,
+    })
   }
 
   async getUploadUrl(data: {

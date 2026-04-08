@@ -223,7 +223,6 @@ describe('aws-profile', () => {
 
       writeAwsConfig(projectDir, 'MBC_01', accounts)
 
-      expect(mockedFs.existsSync).toHaveBeenCalledWith(awsDir)
       expect(mockedFs.mkdirSync).toHaveBeenCalledWith(awsDir, { recursive: true, mode: 0o700 })
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
         tmpPath,
@@ -233,14 +232,14 @@ describe('aws-profile', () => {
       expect(mockedFs.renameSync).toHaveBeenCalledWith(tmpPath, configPath)
     })
 
-    it('should skip mkdir if aws directory already exists', () => {
-      mockedFs.existsSync.mockReturnValue(true)
+    it('should always call mkdir (recursive) even if aws directory already exists', () => {
+      mockedFs.mkdirSync.mockReturnValue(undefined)
       mockedFs.writeFileSync.mockReturnValue(undefined)
       mockedFs.renameSync.mockReturnValue(undefined)
 
       writeAwsConfig(projectDir, 'MBC_01', [])
 
-      expect(mockedFs.mkdirSync).not.toHaveBeenCalled()
+      expect(mockedFs.mkdirSync).toHaveBeenCalledWith(awsDir, { recursive: true, mode: 0o700 })
     })
 
     it('should handle write errors gracefully', () => {
@@ -363,7 +362,6 @@ describe('aws-profile', () => {
 
       writeAwsCredentials(projectDir, 'MBC_01', credentialMap)
 
-      expect(mockedFs.existsSync).toHaveBeenCalledWith(awsDir)
       expect(mockedFs.mkdirSync).toHaveBeenCalledWith(awsDir, { recursive: true, mode: 0o700 })
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
         tmpPath,
@@ -373,14 +371,14 @@ describe('aws-profile', () => {
       expect(mockedFs.renameSync).toHaveBeenCalledWith(tmpPath, credentialsPath)
     })
 
-    it('should skip mkdir if aws directory already exists', () => {
-      mockedFs.existsSync.mockReturnValue(true)
+    it('should always call mkdir (recursive) even if aws directory already exists', () => {
+      mockedFs.mkdirSync.mockReturnValue(undefined)
       mockedFs.writeFileSync.mockReturnValue(undefined)
       mockedFs.renameSync.mockReturnValue(undefined)
 
       writeAwsCredentials(projectDir, 'MBC_01', new Map())
 
-      expect(mockedFs.mkdirSync).not.toHaveBeenCalled()
+      expect(mockedFs.mkdirSync).toHaveBeenCalledWith(awsDir, { recursive: true, mode: 0o700 })
     })
 
     it('should handle write errors gracefully', () => {

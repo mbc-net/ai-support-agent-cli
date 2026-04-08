@@ -14,6 +14,17 @@ import { detectChannelFromVersion } from './update-checker'
 import { validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
 import { startConfigWatcher, startTokenWatcher } from './config-watcher'
+import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
+
+/**
+ * トークン文字列から tokenId を抽出する
+ * トークン形式: {tenantCode}:{tokenId}:{rawToken}
+ * tokenId は API で agentId として使用され、コンテナ再起動時もエントリが増殖しない
+ */
+export function extractTokenId(token: string): string | undefined {
+  const parts = token.split(':')
+  return parts.length === 3 ? parts[1] : undefined
+}
 
 export interface RunnerOptions {
   token?: string
@@ -23,6 +34,12 @@ export interface RunnerOptions {
   verbose?: boolean
   autoUpdate?: boolean
   updateChannel?: ReleaseChannel
+  /**
+   * Filter to a single project. Format: "tenantCode/projectCode"
+   * When set, only the matching project is started.
+   * Used by DockerSupervisor to spawn one container per project.
+   */
+  project?: string
 }
 
 export function startProjectAgent(
@@ -62,11 +79,13 @@ export function setupShutdownHandlers(
   target: ShutdownTarget,
   updater?: AutoUpdaterHandle,
 ): void {
+  writePidFile()
   let shuttingDown = false
   const shutdown = async (): Promise<void> => {
     if (shuttingDown) return
     shuttingDown = true
     logger.info(t('runner.shuttingDown'))
+    removePidFile()
     updater?.stop()
     if (target.kind === 'processManager') {
       await target.processManager.stopAll()
@@ -165,6 +184,12 @@ function runSingleProject(
 export async function startAgent(options: RunnerOptions): Promise<void> {
   await initSentry()
 
+  // 二重起動防止チェック
+  if (isAlreadyRunning()) {
+    logger.error(`Agent is already running (PID: ${readPidFile()}). Use "ai-support-agent stop" to stop it first.`)
+    process.exit(1)
+  }
+
   // グローバルエラーハンドラ（非同期エラーでの静かなクラッシュを防止）
   process.on('uncaughtException', (error) => {
     captureException(error, { handler: 'uncaughtException' })
@@ -194,8 +219,9 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
       process.exit(1)
     }
     logger.warn(t('runner.cliTokenWarning'))
-    const agentId = config?.agentId ?? os.hostname()
+    const agentId = extractTokenId(options.token) ?? config?.agentId ?? os.hostname()
     const project: ProjectRegistration = {
+      tenantCode: 'unknown',
       projectCode: PROJECT_CODE_CLI_DIRECT,
       token: options.token,
       apiUrl: options.apiUrl,
@@ -216,13 +242,26 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
         process.exit(1)
       }
       logger.info(t('runner.envTokenWarning'))
+
+      // When --project is specified (e.g. from DockerSupervisor), use its tenantCode/projectCode
+      let tenantCode = 'unknown'
+      let projectCode = PROJECT_CODE_ENV_DEFAULT
+      if (options.project) {
+        const slashIdx = options.project.indexOf('/')
+        if (slashIdx >= 0) {
+          tenantCode = options.project.substring(0, slashIdx)
+          projectCode = options.project.substring(slashIdx + 1)
+        }
+      }
+
       const project: ProjectRegistration = {
-        projectCode: PROJECT_CODE_ENV_DEFAULT,
+        tenantCode,
+        projectCode,
         token: envToken,
         apiUrl: envApiUrl,
       }
 
-      runSingleProject(project, os.hostname(), options)
+      runSingleProject(project, extractTokenId(envToken) ?? os.hostname(), options)
       return
     }
 
@@ -230,13 +269,31 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     process.exit(1)
   }
 
-  const projects = getProjectList(config)
+  let projects = getProjectList(config)
   if (projects.length === 0) {
     logger.error(t('runner.noProjects'))
     process.exit(1)
   }
 
-  const agentId = config.agentId ?? os.hostname()
+  // Filter to a single project when --project flag is specified (e.g. "mbc/PROJ_A")
+  if (options.project) {
+    const slashIdx = options.project.indexOf('/')
+    if (slashIdx < 0) {
+      logger.error(`[runner] --project must be in "tenantCode/projectCode" format: ${options.project}`)
+      process.exit(1)
+    }
+    const tenantCode = options.project.substring(0, slashIdx)
+    const projectCode = options.project.substring(slashIdx + 1)
+    projects = projects.filter(
+      (p) => p.tenantCode === tenantCode && p.projectCode === projectCode,
+    )
+    if (projects.length === 0) {
+      logger.error(`[runner] Project not found: ${options.project}`)
+      process.exit(1)
+    }
+  }
+
+  const agentId = extractTokenId(projects[0].token) ?? config.agentId ?? os.hostname()
   const { pollInterval, heartbeatInterval } = resolveIntervals(options)
 
   logger.info(t('runner.startingMulti', { count: projects.length }))

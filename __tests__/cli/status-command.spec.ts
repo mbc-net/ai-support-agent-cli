@@ -23,7 +23,7 @@ describe('cli/status-command', () => {
         createdAt: '2024-01-01',
         lastConnected: '2024-06-01',
         projects: [
-          { projectCode: 'proj-a', token: 'abcdef', apiUrl: 'http://api-a' },
+          { tenantCode: 'mbc', projectCode: 'proj-a', token: 'abcdef', apiUrl: 'http://api-a' },
         ],
       }
       mockedGetProjectList.mockReturnValue(config.projects!)
@@ -77,7 +77,7 @@ describe('cli/status-command', () => {
         agentId: 'test-agent',
         createdAt: '2024-01-01',
         projects: [
-          { projectCode: 'proj-a', token: 'ab', apiUrl: 'http://api-a' },
+          { tenantCode: 'mbc', projectCode: 'proj-a', token: 'ab', apiUrl: 'http://api-a' },
         ],
       }
       mockedGetProjectList.mockReturnValue(config.projects!)

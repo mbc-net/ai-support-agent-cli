@@ -326,7 +326,7 @@ async function downloadAttachments(
     const downloadResult = await downloadChatFiles(client, agentId, chatFiles, projectDir, conversationId)
     cleanup = downloadResult.cleanup
     if (downloadResult.downloadedPaths.length > 0) {
-      filePathsNotice = `\n\n<attached_files>\n${downloadResult.downloadedPaths.map((p) => `- ${p}`).join('\n')}\n</attached_files>`
+      filePathsNotice = `\n\n<attached_files>\nThe following files have been downloaded to local paths. Use the Read tool to read them directly — do NOT use read_conversation_file for these.\n${downloadResult.downloadedPaths.map((p) => `- ${p}`).join('\n')}\n</attached_files>`
       logger.info(`[chat] Downloaded ${downloadResult.downloadedPaths.length} files for command [${commandId}]`)
     }
     if (downloadResult.failedCount > 0 && sendChunk) {

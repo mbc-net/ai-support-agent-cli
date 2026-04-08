@@ -90,6 +90,7 @@ describe('project-dir', () => {
   describe('resolveProjectDir', () => {
     it('should use project.projectDir when set', () => {
       const project = {
+        tenantCode: 'mbc',
         projectCode: 'MBC_01',
         token: 'tok',
         apiUrl: 'http://api',
@@ -100,6 +101,7 @@ describe('project-dir', () => {
 
     it('should use project.projectDir with ~ expansion', () => {
       const project = {
+        tenantCode: 'mbc',
         projectCode: 'MBC_01',
         token: 'tok',
         apiUrl: 'http://api',
@@ -109,38 +111,45 @@ describe('project-dir', () => {
     })
 
     it('should use defaultProjectDir template when project.projectDir is not set', () => {
-      const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
+      const project = { tenantCode: 'mbc', projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
       expect(resolveProjectDir(project, '~/custom-base/{projectCode}')).toBe(
         '/home/testuser/custom-base/MBC_01',
       )
     })
 
     it('should use default template when neither projectDir nor defaultProjectDir is set', () => {
-      const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
+      const project = { tenantCode: 'mbc', projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
       expect(resolveProjectDir(project)).toBe(
-        path.join('/home/testuser/.ai-support-agent', 'projects', 'MBC_01'),
+        path.join('/home/testuser/.ai-support-agent', 'projects', 'mbc', 'MBC_01'),
+      )
+    })
+
+    it('should use tenantCode in default template when tenantCode is set', () => {
+      const project = { tenantCode: 'mbc', projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
+      expect(resolveProjectDir(project)).toBe(
+        path.join('/home/testuser/.ai-support-agent', 'projects', 'mbc', 'MBC_01'),
       )
     })
 
     it('should use custom CONFIG_DIR for default template', () => {
       mockedGetConfigDir.mockReturnValue('/custom/config/dir')
-      const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
+      const project = { tenantCode: 'mbc', projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
       expect(resolveProjectDir(project)).toBe(
-        path.join('/custom/config/dir', 'projects', 'MBC_01'),
+        path.join('/custom/config/dir', 'projects', 'mbc', 'MBC_01'),
       )
     })
 
     it('should use absolute CONFIG_DIR path for default template', () => {
       mockedGetConfigDir.mockReturnValue('/tmp/beta')
-      const project = { projectCode: 'PROJ_A', token: 'tok', apiUrl: 'http://api' }
+      const project = { tenantCode: 'myorg', projectCode: 'PROJ_A', token: 'tok', apiUrl: 'http://api' }
       expect(resolveProjectDir(project)).toBe(
-        path.join('/tmp/beta', 'projects', 'PROJ_A'),
+        path.join('/tmp/beta', 'projects', 'myorg', 'PROJ_A'),
       )
     })
 
     it('should use container dir mapping from AI_SUPPORT_AGENT_PROJECT_DIR_MAP', () => {
       process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP = 'MBC_01=/workspace/projects/MBC_01;PROJ_B=/workspace/projects/PROJ_B'
-      const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
+      const project = { tenantCode: 'mbc', projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
       expect(resolveProjectDir(project)).toBe('/workspace/projects/MBC_01')
       delete process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP
     })
@@ -148,6 +157,7 @@ describe('project-dir', () => {
     it('should prioritize container dir mapping over project.projectDir', () => {
       process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP = 'MBC_01=/container/path'
       const project = {
+        tenantCode: 'mbc',
         projectCode: 'MBC_01',
         token: 'tok',
         apiUrl: 'http://api',
@@ -160,6 +170,7 @@ describe('project-dir', () => {
     it('should fall through when project code is not in container dir mapping', () => {
       process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP = 'OTHER=/workspace/projects/OTHER'
       const project = {
+        tenantCode: 'mbc',
         projectCode: 'MBC_01',
         token: 'tok',
         apiUrl: 'http://api',
@@ -171,13 +182,14 @@ describe('project-dir', () => {
 
     it('should handle malformed entries in AI_SUPPORT_AGENT_PROJECT_DIR_MAP', () => {
       process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP = 'badentry;MBC_01=/good/path;=noprojectcode'
-      const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
+      const project = { tenantCode: 'mbc', projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
       expect(resolveProjectDir(project)).toBe('/good/path')
       delete process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP
     })
 
     it('should prioritize project.projectDir over defaultProjectDir', () => {
       const project = {
+        tenantCode: 'mbc',
         projectCode: 'MBC_01',
         token: 'tok',
         apiUrl: 'http://api',
@@ -357,17 +369,17 @@ describe('project-dir', () => {
   describe('initProjectDir', () => {
     it('should resolve project dir and create directories', () => {
       mockedFs.existsSync.mockReturnValue(false)
-      const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
+      const project = { tenantCode: 'mbc', projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
       const result = initProjectDir(project)
 
-      expect(result).toBe(path.join('/home/testuser/.ai-support-agent', 'projects', 'MBC_01'))
+      expect(result).toBe(path.join('/home/testuser/.ai-support-agent', 'projects', 'mbc', 'MBC_01'))
       // Verify directories were created (mkdirSync was called)
       expect(mockedFs.mkdirSync).toHaveBeenCalled()
     })
 
     it('should use defaultProjectDir when provided', () => {
       mockedFs.existsSync.mockReturnValue(false)
-      const project = { projectCode: 'PROJ_A', token: 'tok', apiUrl: 'http://api' }
+      const project = { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'tok', apiUrl: 'http://api' }
       const result = initProjectDir(project, '~/custom/{projectCode}')
 
       expect(result).toBe('/home/testuser/custom/PROJ_A')
@@ -376,6 +388,7 @@ describe('project-dir', () => {
     it('should use project.projectDir when set', () => {
       mockedFs.existsSync.mockReturnValue(false)
       const project = {
+        tenantCode: 'mbc',
         projectCode: 'PROJ_A',
         token: 'tok',
         apiUrl: 'http://api',
@@ -388,7 +401,7 @@ describe('project-dir', () => {
 
     it('should log initialization info', () => {
       mockedFs.existsSync.mockReturnValue(false)
-      const project = { projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
+      const project = { tenantCode: 'mbc', projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
       initProjectDir(project)
 
       expect(logger.info).toHaveBeenCalledTimes(1)
@@ -397,6 +410,7 @@ describe('project-dir', () => {
     it('should return the resolved path', () => {
       mockedFs.existsSync.mockReturnValue(true)
       const project = {
+        tenantCode: 'mbc',
         projectCode: 'TEST',
         token: 'tok',
         apiUrl: 'http://api',

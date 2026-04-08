@@ -59,8 +59,8 @@ describe('commands/set-project-dir', () => {
       createdAt: '2024-01-01',
       defaultProjectDir: '~/default/{projectCode}',
       projects: [
-        { projectCode: 'MBC_01', token: 'token-1', apiUrl: 'http://api-1' },
-        { projectCode: 'MBC_02', token: 'token-2', apiUrl: 'http://api-2' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 'token-1', apiUrl: 'http://api-1' },
+        { tenantCode: 'mbc', projectCode: 'MBC_02', token: 'token-2', apiUrl: 'http://api-2' },
       ],
     }
 

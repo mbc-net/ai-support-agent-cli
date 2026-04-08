@@ -30,7 +30,17 @@ jobs:
         run: npm run build
 
       - name: Run tests
-        run: npm test
+        run: |
+          setsid npm test &
+          TEST_PID=$!
+          TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
+          ( sleep 480 && kill -- -$TEST_PGID 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
+        timeout-minutes: 10
 
       - name: Security audit
         run: npm audit --audit-level=high
@@ -91,7 +101,17 @@ jobs:
         run: npm run build
 
       - name: Run all tests
-        run: npm test
+        run: |
+          setsid npm test &
+          TEST_PID=$!
+          TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
+          ( sleep 480 && kill -- -$TEST_PGID 2>/dev/null || true ) &
+          KILLER_PID=$!
+          wait $TEST_PID
+          EXIT_CODE=$?
+          kill $KILLER_PID 2>/dev/null || true
+          exit $EXIT_CODE
+        timeout-minutes: 10
 
       - name: Report status
         if: failure()

@@ -7,7 +7,7 @@ import { AppSyncSubscriber } from './appsync-subscriber'
 import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, performSyncRepository, refreshChatMode } from './agent-config-sync'
 import type { RepoSyncResult } from './repo-sync'
 import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, startVsCodeTunnel, stopTransport } from './agent-transport'
-import { AGENT_VERSION, INITIAL_CONFIG_SYNC_MAX_RETRIES, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS } from './constants'
+import { AGENT_VERSION, DOCKER_RESTART_EXIT_CODE, INITIAL_CONFIG_SYNC_MAX_RETRIES, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS } from './constants'
 import { getConfigDir } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
@@ -15,6 +15,7 @@ import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import { submitPendingResults } from './pending-result-store'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
+import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
 import { getErrorMessage, isAuthenticationError } from './utils'
 
@@ -39,6 +40,7 @@ export class ProjectAgent {
     availableChatModes: [],
     activeChatMode: undefined,
     mcpConfigPath: undefined,
+    dockerCustomizationHash: undefined, // will be initialized in constructor from docker-built-hash
   }
 
   private configSyncDeps: ConfigSyncDeps
@@ -77,6 +79,9 @@ export class ProjectAgent {
       token: this.token,
       projectCode: this.projectCode,
       localAgentChatMode,
+      onDockerRebuild: process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1'
+        ? () => { void this.performDockerRebuild() }
+        : undefined,
     }
 
     this.transportDeps = {
@@ -90,6 +95,22 @@ export class ProjectAgent {
       projectCode: this.projectCode,
       pollInterval: this.options.pollInterval,
       heartbeatInterval: this.options.heartbeatInterval,
+    }
+
+    // When running inside Docker, initialize dockerCustomizationHash from the
+    // docker-built-hash file so we don't trigger a rebuild for already-built customizations.
+    // AI_SUPPORT_AGENT_CONFIG_DIR is mounted to the per-project config dir directly,
+    // so docker-built-hash lives at the root of getConfigDir().
+    if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+      const builtHashPath = path.join(getConfigDir(), 'docker-built-hash')
+      try {
+        const builtHash = fs.readFileSync(builtHashPath, 'utf-8').trim()
+        if (builtHash) {
+          this.configSyncState.dockerCustomizationHash = builtHash
+        }
+      } catch {
+        // File does not exist yet — first startup, leave dockerCustomizationHash as undefined
+      }
     }
   }
 
@@ -128,6 +149,9 @@ export class ProjectAgent {
   async performConfigSync(): Promise<void> {
     // ブラウザローカルポートを動的に更新（VSCode tunnel接続後に判明）
     this.configSyncDeps.browserLocalPort = this.transportState.vsCodeWs?.getBrowserLocalPort()
+    // API通知の configHash はRDS同期前の古い値の可能性があるため、
+    // config_update を受け取ったときは currentConfigHash をリセットして強制再同期する
+    this.configSyncState.currentConfigHash = undefined
     await performConfigSync(this.configSyncDeps, this.configSyncState)
   }
 
@@ -143,16 +167,55 @@ export class ProjectAgent {
     logger.info(`${this.prefix} Reboot requested, scheduling restart...`)
     this.stop()
     setTimeout(() => {
-      // When running inside a Docker container or as a child process (forked by
-      // ChildProcessManager), just exit cleanly. The host-side runner (launchd /
-      // docker-runner) will restart the process automatically via KeepAlive or
-      // the container restart loop.
-      // reExecProcess() from a worker would spawn a duplicate runner process.
-      if (process.send || process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+      // In Docker mode, exit with DOCKER_RESTART_EXIT_CODE so DockerSupervisor
+      // restarts only this project's container.
+      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+        process.exit(DOCKER_RESTART_EXIT_CODE)
+      } else if (process.send) {
+        // Running as a child process (forked by ChildProcessManager) — exit cleanly.
+        // The parent runner will restart the process automatically.
         process.exit(0)
       } else {
         reExecProcess()
       }
+    }, 1000)
+  }
+
+  async performDockerRebuild(): Promise<void> {
+    logger.info(`${this.prefix} Docker rebuild requested, scheduling restart...`)
+    this.stop()
+    setTimeout(() => {
+      // Inside Docker, AI_SUPPORT_AGENT_CONFIG_DIR is mounted to the per-project config dir directly.
+      // All docker-related files live at the root of getConfigDir() (not in a projects sub-path).
+      const configDir = getConfigDir()
+      const markerPath = path.join(configDir, 'docker-rebuild-needed')
+      try {
+        fs.mkdirSync(configDir, { recursive: true })
+
+        // Generate and write project-specific Dockerfile from dockerCustomization.
+        // Place it at configDir/Dockerfile so DockerSupervisor can find it via getProjectDockerfilePath()
+        // on the host (which maps to the same mounted directory).
+        const dockerCustomization = this.configSyncState.projectConfig?.agent?.dockerCustomization
+        const aptPackages = dockerCustomization?.aptPackages ?? []
+        const npmPackages = dockerCustomization?.npmPackages ?? []
+        const commands = dockerCustomization?.commands ?? []
+        const timezone = dockerCustomization?.timezone
+        const dockerfileContent = generateProjectDockerfile(AGENT_VERSION, aptPackages, npmPackages, commands, timezone)
+        const dockerfilePath = path.join(configDir, 'Dockerfile')
+        fs.writeFileSync(dockerfilePath, dockerfileContent)
+        logger.info(`${this.prefix} Project Dockerfile written: ${dockerfilePath}`)
+
+        // Save the dockerCustomization hash so DockerSupervisor can copy it to docker-built-hash after build
+        fs.writeFileSync(
+          path.join(configDir, 'docker-customization-hash'),
+          this.configSyncState.dockerCustomizationHash ?? '',
+        )
+
+        fs.writeFileSync(markerPath, '')
+      } catch (err) {
+        logger.warn(`${this.prefix} Failed to write docker-rebuild-needed marker: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      process.exit(DOCKER_RESTART_EXIT_CODE)
     }, 1000)
   }
 
@@ -221,17 +284,58 @@ export class ProjectAgent {
         logger.info(`${this.prefix} Server assigned projectCode: ${result.projectCode} (was: ${this.projectCode})`)
         this.projectCode = result.projectCode
         // Re-initialize projectDir with the server-assigned projectCode
-        this.projectDir = initProjectDir({ projectCode: this.projectCode, token: this.token, apiUrl: this.apiUrl })
+        this.projectDir = initProjectDir({ tenantCode: this.tenantCode || 'unknown', projectCode: this.projectCode, token: this.token, apiUrl: this.apiUrl })
         this.configSyncDeps = { ...this.configSyncDeps, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }
       }
       this.prefix = `[${this.tenantCode}#${this.projectCode}]`
       this.configSyncDeps = { ...this.configSyncDeps, prefix: this.prefix }
       this.client.setTenantCode(this.tenantCode)
       this.client.setProjectCode(this.projectCode)
-      this.transportDeps = { ...this.transportDeps, tenantCode: this.tenantCode, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }
+      this.transportDeps = { ...this.transportDeps, agentId: result.agentId, tenantCode: this.tenantCode, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }
       logger.success(t('runner.registered', { prefix: this.prefix, agentId: result.agentId }))
       logger.debug(`${this.prefix} Register response: transportMode=${result.transportMode ?? 'none'}, appsyncUrl=${result.appsyncUrl ? 'present' : 'absent'}, wsEnabled=${result.wsEnabled}`)
       logger.debug(`${this.prefix} Full register response keys: ${JSON.stringify(Object.keys(result))}`)
+
+      // Report docker build error (if any) via heartbeat
+      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+        // Write the server-assigned agentId so the host DockerSupervisor can use it for log storage
+        try {
+          fs.writeFileSync(path.join(getConfigDir(), 'docker-registered-agent-id'), result.agentId, 'utf-8')
+        } catch (err) {
+          logger.warn(`${this.prefix} Failed to write docker-registered-agent-id: ${getErrorMessage(err)}`)
+        }
+
+        const buildErrorPath = path.join(getConfigDir(), 'docker-build-error')
+        let dockerBuildError: string | undefined
+        try {
+          dockerBuildError = fs.readFileSync(buildErrorPath, 'utf-8').trim() || undefined
+        } catch {
+          // File does not exist — no build error
+        }
+        if (dockerBuildError !== undefined) {
+          try {
+            await this.client.heartbeat(
+              result.agentId,
+              { platform: os.platform(), arch: os.arch(), cpuUsage: 0, memoryUsage: 0, uptime: os.uptime() },
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              dockerBuildError,
+            )
+            // Delete the error file after successful report to avoid re-reporting on next startup
+            try {
+              fs.unlinkSync(buildErrorPath)
+            } catch {
+              // Ignore deletion failure — will be re-reported next time
+            }
+          } catch (err: unknown) {
+            logger.warn(`${this.prefix} Failed to report docker build error: ${getErrorMessage(err)}`)
+            // Keep the file so it can be reported on next startup
+          }
+        }
+      }
     } catch (error) {
       if (isAuthenticationError(error)) {
         logger.error(t('runner.authError', { prefix: this.prefix, detail: getErrorMessage(error) }))
@@ -273,12 +377,20 @@ export class ProjectAgent {
       return
     }
     logger.info(`${this.prefix} Starting subscription mode (realtime)`)
+    // When running inside a Docker container, localhost refers to the container itself.
+    // Convert localhost/127.0.0.1 to host.docker.internal so the container can reach the host.
+    const resolvedAppsyncUrl = process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1'
+      ? result.appsyncUrl.replace(
+          /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
+          (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
+        )
+      : result.appsyncUrl
     await startSubscriptionMode(
       this.transportDeps,
       this.transportState,
       commandContext,
       AppSyncSubscriber,
-      result.appsyncUrl,
+      resolvedAppsyncUrl,
       result.appsyncApiKey,
     )
 
@@ -286,8 +398,14 @@ export class ProjectAgent {
 
     // Start terminal WebSocket connection (only if server has WS gateway enabled)
     if (result.wsEnabled) {
-      startTerminalWebSocket(this.transportDeps, this.transportState, result.wsUrl)
-      startVsCodeTunnel(this.transportDeps, this.transportState, result.wsUrl)
+      const resolvedWsUrl = (result.wsUrl && process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1')
+        ? result.wsUrl.replace(
+            /^(wss?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
+            (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
+          )
+        : result.wsUrl
+      startTerminalWebSocket(this.transportDeps, this.transportState, resolvedWsUrl)
+      startVsCodeTunnel(this.transportDeps, this.transportState, resolvedWsUrl)
     } else {
       logger.debug(`${this.prefix} Terminal/VS Code WebSocket skipped (wsEnabled=false)`)
     }

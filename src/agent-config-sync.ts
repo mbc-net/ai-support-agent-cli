@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 
@@ -22,6 +23,7 @@ export interface ConfigSyncState {
   availableChatModes: AgentChatMode[]
   activeChatMode: AgentChatMode | undefined
   mcpConfigPath: string | undefined
+  dockerCustomizationHash: string | undefined
 }
 
 export interface ConfigSyncDeps {
@@ -33,6 +35,8 @@ export interface ConfigSyncDeps {
   projectCode: string
   localAgentChatMode: AgentChatMode | undefined
   browserLocalPort?: number
+  /** Called when Docker customization changes (Docker mode only) */
+  onDockerRebuild?: () => void
 }
 
 /**
@@ -172,6 +176,22 @@ export async function applyProjectConfig(
     } catch (error) {
       logger.warn(`${deps.prefix} Failed to set up SSH config: ${getErrorMessage(error)}`)
     }
+  }
+
+  // Detect Docker customization changes and trigger rebuild if needed
+  if (deps.onDockerRebuild) {
+    const newDockerHash = createHash('md5').update(JSON.stringify(config.agent.dockerCustomization ?? null)).digest('hex')
+    const noCustomizationHash = createHash('md5').update(JSON.stringify(null)).digest('hex')
+    const prevDockerHash = state.dockerCustomizationHash
+    // Trigger rebuild if:
+    // - Hash changed (includes first sync where prevDockerHash is undefined)
+    // - AND new config has actual packages (not null/empty)
+    // This ensures containers always rebuild on startup when packages are configured.
+    if (prevDockerHash !== newDockerHash && newDockerHash !== noCustomizationHash) {
+      logger.info(`${deps.prefix} Docker customization changed, triggering rebuild...`)
+      deps.onDockerRebuild()
+    }
+    state.dockerCustomizationHash = newDockerHash
   }
 
   logger.info(`${deps.prefix} Config applied (hash: ${config.configHash})`)

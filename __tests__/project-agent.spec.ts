@@ -96,7 +96,7 @@ describe('ProjectAgent', () => {
     disconnect: jest.Mock
   }
 
-  const project = { projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api' }
+  const project = { tenantCode: 'mbc', projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api' }
   const options = { pollInterval: 5000, heartbeatInterval: 30000 }
 
   beforeEach(() => {
@@ -305,6 +305,64 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
+    it('should convert localhost appsyncUrl to host.docker.internal when in Docker', async () => {
+      const originalEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      try {
+        process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+        mockClient.register.mockResolvedValue({
+          agentId: 'test-id',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'http://localhost:4001/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        expect(MockAppSyncSubscriber).toHaveBeenCalledWith(
+          'http://host.docker.internal:4001/graphql',
+          'da2-testkey123',
+        )
+
+        agent.stop()
+      } finally {
+        if (originalEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalEnv
+      }
+    })
+
+    it('should not convert appsyncUrl when not in Docker', async () => {
+      const originalEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      try {
+        delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        mockClient.register.mockResolvedValue({
+          agentId: 'test-id',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'http://localhost:4001/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        expect(MockAppSyncSubscriber).toHaveBeenCalledWith(
+          'http://localhost:4001/graphql',
+          'da2-testkey123',
+        )
+
+        agent.stop()
+      } finally {
+        if (originalEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalEnv
+      }
+    })
+
     it('should handle notification from subscription', async () => {
       mockClient.getCommand.mockResolvedValue({
         commandId: 'cmd-1',
@@ -335,9 +393,9 @@ describe('ProjectAgent', () => {
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'agent-1')
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-1', 'test-id')
       expect(mockedExecuteCommand).toHaveBeenCalled()
-      expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'agent-1')
+      expect(mockClient.submitResult).toHaveBeenCalledWith('cmd-1', { success: true, data: 'hi' }, 'test-id')
 
       agent.stop()
     })
@@ -433,7 +491,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#789',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-other-proj', type: 'execute_command', agentId: 'agent-1', tenantCode: 'test-tenant', projectCode: 'OTHER_PROJ' },
+        content: { commandId: 'cmd-other-proj', type: 'execute_command', agentId: 'test-id', tenantCode: 'test-tenant', projectCode: 'OTHER_PROJ' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -458,7 +516,7 @@ describe('ProjectAgent', () => {
         sk: 'CMD#789',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-other-tenant', type: 'execute_command', agentId: 'agent-1', tenantCode: 'other-tenant', projectCode: 'test-proj' },
+        content: { commandId: 'cmd-other-tenant', type: 'execute_command', agentId: 'test-id', tenantCode: 'other-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
@@ -490,12 +548,12 @@ describe('ProjectAgent', () => {
         sk: 'CMD#101',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-match-proj', type: 'execute_command', agentId: 'agent-1', tenantCode: 'test-tenant', projectCode: 'test-proj' },
+        content: { commandId: 'cmd-match-proj', type: 'execute_command', agentId: 'test-id', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-match-proj', 'agent-1')
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-match-proj', 'test-id')
 
       agent.stop()
     })
@@ -573,12 +631,12 @@ describe('ProjectAgent', () => {
         sk: 'CMD#101',
         tenantCode: 'test-tenant',
         action: 'agent-command',
-        content: { commandId: 'cmd-match', type: 'execute_command', agentId: 'agent-1', tenantCode: 'test-tenant', projectCode: 'test-proj' },
+        content: { commandId: 'cmd-match', type: 'execute_command', agentId: 'test-id', tenantCode: 'test-tenant', projectCode: 'test-proj' },
       })
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-match', 'agent-1')
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-match', 'test-id')
 
       agent.stop()
     })
@@ -605,8 +663,8 @@ describe('ProjectAgent', () => {
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(mockClient.getPendingCommands).toHaveBeenCalledWith('agent-1')
-      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-pending', 'agent-1')
+      expect(mockClient.getPendingCommands).toHaveBeenCalledWith('test-id')
+      expect(mockClient.getCommand).toHaveBeenCalledWith('cmd-pending', 'test-id')
       expect(mockedExecuteCommand).toHaveBeenCalled()
 
       agent.stop()
@@ -661,7 +719,7 @@ describe('ProjectAgent', () => {
       expect(mockClient.submitResult).toHaveBeenCalledWith(
         'cmd-err',
         expect.objectContaining({ success: false, error: expect.any(String) }),
-        'agent-1',
+        'test-id',
       )
 
       agent.stop()
@@ -809,7 +867,7 @@ describe('ProjectAgent', () => {
     })
 
     it('should write AWS config when project config has AWS accounts and projectDir', async () => {
-      const projectWithDir = { projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api', projectDir: '/tmp/proj' }
+      const projectWithDir = { tenantCode: 'mbc', projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api', projectDir: '/tmp/proj' }
       const mockConfig = {
         configHash: 'aws-hash',
         project: { projectCode: 'test-proj', projectName: 'Test' },
@@ -889,7 +947,7 @@ describe('ProjectAgent', () => {
 
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Config update detected'))
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Config update notification received'))
 
       // Wait for debounce
       await jest.advanceTimersByTimeAsync(3000)
@@ -1343,7 +1401,7 @@ describe('ProjectAgent', () => {
       }
     })
 
-    it('should call process.exit(0) instead of reExecProcess when running in Docker', async () => {
+    it('should call process.exit(43) instead of reExecProcess when running in Docker', async () => {
       const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
       const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
       process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
@@ -1362,8 +1420,8 @@ describe('ProjectAgent', () => {
         // Advance past setTimeout(1000)
         await jest.advanceTimersByTimeAsync(1000)
 
-        // In Docker mode, exits cleanly without spawning a new process
-        expect(mockExit).toHaveBeenCalledWith(0)
+        // In Docker mode, exits with DOCKER_RESTART_EXIT_CODE (43) so DockerSupervisor can restart
+        expect(mockExit).toHaveBeenCalledWith(43)
         expect(mockedReExecProcess).not.toHaveBeenCalled()
       } finally {
         mockExit.mockRestore()
@@ -1597,9 +1655,348 @@ describe('ProjectAgent', () => {
     })
   })
 
+  describe('onDockerRebuild callback', () => {
+    it('should call performDockerRebuild when onDockerRebuild is invoked', () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        const performDockerRebuildSpy = jest.spyOn(agent as unknown as { performDockerRebuild: () => Promise<void> }, 'performDockerRebuild').mockResolvedValue(undefined)
+        const deps = (agent as unknown as { configSyncDeps: { onDockerRebuild?: () => void } }).configSyncDeps
+        expect(deps.onDockerRebuild).toBeDefined()
+        deps.onDockerRebuild?.()
+        expect(performDockerRebuildSpy).toHaveBeenCalledTimes(1)
+      } finally {
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+  })
+
+  describe('performDockerRebuild', () => {
+    it('should write docker-rebuild-needed marker and exit with 43', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockMkdirSync = jest.spyOn(mockFs, 'mkdirSync').mockImplementation(() => undefined)
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation(() => undefined)
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        await agent.performDockerRebuild()
+
+        expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Docker rebuild requested'))
+
+        // Advance past setTimeout(1000)
+        await jest.advanceTimersByTimeAsync(1000)
+
+        expect(mockWriteFileSync).toHaveBeenCalled()
+        expect(mockExit).toHaveBeenCalledWith(43)
+      } finally {
+        mockExit.mockRestore()
+        mockMkdirSync.mockRestore()
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) {
+          delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        } else {
+          process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+        }
+      }
+    })
+
+    it('should write Dockerfile with apt/npm packages from dockerCustomization', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockMkdirSync = jest.spyOn(mockFs, 'mkdirSync').mockImplementation(() => undefined)
+      const writtenFiles: Record<string, string> = {}
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation((...args: unknown[]) => {
+        writtenFiles[String(args[0])] = String(args[1])
+      })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        // Set projectConfig with dockerCustomization
+        const state = (agent as unknown as { configSyncState: { projectConfig: unknown; dockerCustomizationHash: string } }).configSyncState
+        state.projectConfig = {
+          configHash: 'hash',
+          project: { projectCode: 'TEST_01', projectName: 'Test' },
+          agent: {
+            agentEnabled: true,
+            builtinAgentEnabled: true,
+            builtinFallbackEnabled: true,
+            externalAgentEnabled: true,
+            allowedTools: [],
+            dockerCustomization: { aptPackages: ['curl'], npmPackages: ['typescript'] },
+          },
+        }
+        state.dockerCustomizationHash = 'some-hash'
+
+        await agent.performDockerRebuild()
+        await jest.advanceTimersByTimeAsync(1000)
+
+        // Check that Dockerfile was written with package content
+        const dockerfileEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('Dockerfile'))
+        expect(dockerfileEntry).toBeDefined()
+        expect(dockerfileEntry?.[1]).toContain('curl')
+        expect(dockerfileEntry?.[1]).toContain('typescript')
+      } finally {
+        mockExit.mockRestore()
+        mockMkdirSync.mockRestore()
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should log warn when writing marker fails', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockMkdirSync = jest.spyOn(mockFs, 'mkdirSync').mockImplementation(() => { throw new Error('permission denied') })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        await agent.performDockerRebuild()
+        await jest.advanceTimersByTimeAsync(1000)
+
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to write docker-rebuild-needed marker'))
+        expect(mockExit).toHaveBeenCalledWith(43)
+      } finally {
+        mockExit.mockRestore()
+        mockMkdirSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+  })
+
+  describe('docker-built-hash initialization', () => {
+    it('should initialize dockerCustomizationHash from docker-built-hash file when in Docker', () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((...args: unknown[]) => {
+        if (String(args[0]).endsWith('docker-built-hash')) return 'abc123hash'
+        throw new Error('ENOENT')
+      })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        // Access internal state via type cast for testing
+        const state = (agent as unknown as { configSyncState: { dockerCustomizationHash: string | undefined } }).configSyncState
+        expect(state.dockerCustomizationHash).toBe('abc123hash')
+      } finally {
+        mockReadFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should leave dockerCustomizationHash undefined when docker-built-hash file does not exist', () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((..._args: unknown[]) => {
+        throw new Error('ENOENT')
+      })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        const state = (agent as unknown as { configSyncState: { dockerCustomizationHash: string | undefined } }).configSyncState
+        expect(state.dockerCustomizationHash).toBeUndefined()
+      } finally {
+        mockReadFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should not read docker-built-hash when not in Docker', () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+
+      const mockFs = require('fs')
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync')
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        const state = (agent as unknown as { configSyncState: { dockerCustomizationHash: string | undefined } }).configSyncState
+        expect(state.dockerCustomizationHash).toBeUndefined()
+        expect(mockReadFileSync).not.toHaveBeenCalledWith(expect.stringContaining('docker-built-hash'), expect.anything())
+      } finally {
+        mockReadFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should read docker-built-hash from getConfigDir() root when in Docker', () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs')
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((..._args: unknown[]) => {
+        throw new Error('ENOENT')
+      })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        expect(agent).toBeDefined()
+        // Should have tried to read from configDir root (not a sub-path with tenantCode)
+        expect(mockReadFileSync).toHaveBeenCalledWith(
+          expect.stringContaining('docker-built-hash'),
+          'utf-8',
+        )
+      } finally {
+        mockReadFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+  })
+
+  describe('performUpdate - write update-version.json failure', () => {
+    it('should log warn when writing update-version.json fails in Docker mode', async () => {
+      const originalSend = process.send
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      Object.defineProperty(process, 'send', { value: jest.fn(), writable: true, configurable: true })
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const { writeFileSync } = require('fs') as { writeFileSync: jest.Mock }
+      writeFileSync.mockImplementation(() => { throw new Error('disk full') })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+        await agent.performUpdate()
+        await jest.advanceTimersByTimeAsync(1000)
+
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to write update-version.json'),
+        )
+        expect(mockExit).toHaveBeenCalledWith(0)
+      } finally {
+        mockExit.mockRestore()
+        Object.defineProperty(process, 'send', { value: originalSend, writable: true, configurable: true })
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+  })
+
+  describe('onReboot and onUpdate callbacks', () => {
+    it('should pass onReboot callback that calls performReboot', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      const performRebootSpy = jest.spyOn(agent as unknown as { performReboot: () => Promise<void> }, 'performReboot').mockResolvedValue(undefined)
+
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      // Get commandContext via subscriber callback
+      const subscribeCall = mockSubscriber.subscribe.mock.calls[0]
+      const notificationHandler = subscribeCall?.[0]
+      if (notificationHandler) {
+        // Trigger a notification that invokes onReboot via command
+        // Instead, access commandContext directly via the onReboot path
+      }
+
+      // Access private commandContext through the agent internals
+      const agentAny = agent as unknown as { performReboot: () => Promise<void> }
+      await agentAny.performReboot()
+      expect(performRebootSpy).toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('should pass onUpdate callback that calls performUpdate', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      const performUpdateSpy = jest.spyOn(agent as unknown as { performUpdate: () => Promise<void> }, 'performUpdate').mockResolvedValue(undefined)
+
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const agentAny = agent as unknown as { performUpdate: () => Promise<void> }
+      await agentAny.performUpdate()
+      expect(performUpdateSpy).toHaveBeenCalled()
+
+      agent.stop()
+    })
+  })
+
+  describe('registerAndStart - wsUrl Docker URL resolution', () => {
+    it('should resolve localhost wsUrl to host.docker.internal when in Docker and wsEnabled', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const agentTransport = require('../src/agent-transport')
+      const startTerminalWsSpy = jest.spyOn(agentTransport, 'startTerminalWebSocket').mockImplementation(() => {})
+
+      mockClient.register.mockResolvedValue({
+        agentId: 'test-id',
+        tenantCode: 'test-tenant',
+        appsyncUrl: 'https://example.appsync-api.amazonaws.com/graphql',
+        appsyncApiKey: 'da2-testkey',
+        transportMode: 'realtime',
+        wsEnabled: true,
+        wsUrl: 'ws://127.0.0.1:3030',
+      })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        expect(startTerminalWsSpy).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.stringContaining('host.docker.internal'),
+        )
+      } finally {
+        startTerminalWsSpy.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should return early when appsyncUrl is missing', async () => {
+      mockClient.register.mockResolvedValue({
+        agentId: 'test-id',
+        tenantCode: 'test-tenant',
+        appsyncUrl: null,
+        appsyncApiKey: null,
+        transportMode: 'realtime',
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('AppSync credentials missing'),
+      )
+      expect(MockAppSyncSubscriber).not.toHaveBeenCalled()
+    })
+  })
+
   describe('project directory', () => {
     it('should initialize project directory when projectDir is set', () => {
-      const projectWithDir = { projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api', projectDir: '/tmp/proj' }
+      const projectWithDir = { tenantCode: 'mbc', projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api', projectDir: '/tmp/proj' }
       const agent = new ProjectAgent(projectWithDir, 'agent-1', options)
       expect(agent).toBeDefined()
     })
@@ -1614,6 +2011,119 @@ describe('ProjectAgent', () => {
       const agent = new ProjectAgent(project, 'agent-1', options)
       expect(agent).toBeDefined()
       expect(initProjectDir).toHaveBeenCalledWith(project, undefined)
+    })
+  })
+
+  describe('docker-registered-agent-id', () => {
+    it('should write docker-registered-agent-id file after registration when running in Docker', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs') as { writeFileSync: jest.Mock; readFileSync: jest.Mock; existsSync: jest.Mock }
+      const writtenFiles: Record<string, string> = {}
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation((...args: unknown[]) => {
+        writtenFiles[String(args[0])] = String(args[1])
+      })
+
+      try {
+        mockClient.register.mockResolvedValue({
+          agentId: 'server-assigned-uuid-1234',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id'))
+        expect(registeredIdEntry).toBeDefined()
+        expect(registeredIdEntry![1]).toBe('server-assigned-uuid-1234')
+
+        agent.stop()
+      } finally {
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should not write docker-registered-agent-id file when not running in Docker', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+
+      const mockFs = require('fs') as { writeFileSync: jest.Mock }
+      const writtenFiles: Record<string, string> = {}
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation((...args: unknown[]) => {
+        writtenFiles[String(args[0])] = String(args[1])
+      })
+
+      try {
+        mockClient.register.mockResolvedValue({
+          agentId: 'server-assigned-uuid-1234',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id'))
+        expect(registeredIdEntry).toBeUndefined()
+
+        agent.stop()
+      } finally {
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should warn but continue if writing docker-registered-agent-id fails', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs') as { writeFileSync: jest.Mock }
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation((...args: unknown[]) => {
+        if (String(args[0]).endsWith('docker-registered-agent-id')) {
+          throw new Error('EACCES: permission denied')
+        }
+      })
+
+      try {
+        mockClient.register.mockResolvedValue({
+          agentId: 'server-assigned-uuid-1234',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(100)
+
+        // Should warn but not crash
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to write docker-registered-agent-id'),
+        )
+        // Heartbeat should still proceed
+        expect(mockClient.heartbeat).toHaveBeenCalled()
+
+        agent.stop()
+      } finally {
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
     })
   })
 })

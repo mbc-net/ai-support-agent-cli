@@ -5,11 +5,24 @@ import { Command } from 'commander'
 
 import { getDockerfilePath, getConfigDockerfilePath } from '../docker/dockerfile-path'
 import { loadConfig } from '../config-manager'
+import { AGENT_VERSION } from '../constants'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { computeUnifiedDiff } from '../utils/unified-diff'
 
 export function registerDockerCommands(program: Command): void {
+  program
+    .command('docker-build')
+    .description(t('cmd.dockerBuild'))
+    .option('--dockerfile <path>', t('cmd.dockerBuild.dockerfile'))
+    .action(async (opts: { dockerfile?: string }) => {
+      const { buildImage } = await import('../docker/docker-runner')
+      const dockerfilePath = opts.dockerfile ? path.resolve(opts.dockerfile) : undefined
+      logger.info(t('docker.building'))
+      buildImage(AGENT_VERSION, dockerfilePath)
+      logger.success(t('docker.buildComplete', { version: AGENT_VERSION }))
+    })
+
   program
     .command('docker-diff-dockerfile')
     .description(t('cmd.dockerDiffDockerfile'))

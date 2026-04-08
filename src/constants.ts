@@ -126,6 +126,8 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/e2e-test-executions/${executionId}/steps`,
   E2E_EXECUTION_SCRIPT: (tenantCode: string, _projectCode: string, executionId: string) =>
     `/api/${tenantCode}/agent/e2e-test-executions/${executionId}/script`,
+  LOG_CHUNK: (tenantCode: string) => `/api/${tenantCode}/agent/logs/chunk`,
+  LOG_SESSION: (tenantCode: string) => `/api/${tenantCode}/agent/logs/session`,
 } as const
 
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000
@@ -167,6 +169,10 @@ export const APPSYNC_RECONNECT_BASE_DELAY_MS = 1000
 // Exit code used by the in-container agent to signal "update complete, rebuild image"
 // Must be distinct from 0 (clean stop) and 1 (error) to avoid false restarts on SIGINT.
 export const DOCKER_UPDATE_EXIT_CODE = 42
+
+// Exit code used by the in-container agent to signal "restart this project's container only"
+// Used when Docker customization changes or a reboot is requested for a single project.
+export const DOCKER_RESTART_EXIT_CODE = 43
 
 // Graceful update deferral
 export const UPDATE_BUSY_WAIT_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes max wait for busy agents
