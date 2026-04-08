@@ -1,12 +1,12 @@
 import { logger, maskSecrets, getProjectColor, resetProjectColors, prefixLines, makeLinePrefixer, stripCursorCodes } from '../src/logger'
 
 describe('logger', () => {
-  let logSpy: jest.Spied<typeof console.log>
-  let errorSpy: jest.Spied<typeof console.error>
+  let stdoutSpy: jest.SpyInstance
+  let stderrSpy: jest.SpyInstance
 
   beforeEach(() => {
-    logSpy = jest.spyOn(console, 'log').mockImplementation()
-    errorSpy = jest.spyOn(console, 'error').mockImplementation()
+    stdoutSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true)
     logger.setVerbose(false)
   })
 
@@ -15,37 +15,37 @@ describe('logger', () => {
   })
 
   describe('info', () => {
-    it('should output INFO formatted message to console.log', () => {
+    it('should output INFO formatted message to stdout', () => {
       logger.info('test message')
-      expect(logSpy).toHaveBeenCalledTimes(1)
-      expect(logSpy.mock.calls[0][0]).toContain('INFO')
-      expect(logSpy.mock.calls[0][0]).toContain('test message')
+      expect(stdoutSpy).toHaveBeenCalledTimes(1)
+      expect(stdoutSpy.mock.calls[0][0]).toContain('INFO')
+      expect(stdoutSpy.mock.calls[0][0]).toContain('test message')
     })
   })
 
   describe('warn', () => {
-    it('should output WARN formatted message to console.log', () => {
+    it('should output WARN formatted message to stdout', () => {
       logger.warn('warning message')
-      expect(logSpy).toHaveBeenCalledTimes(1)
-      expect(logSpy.mock.calls[0][0]).toContain('WARN')
-      expect(logSpy.mock.calls[0][0]).toContain('warning message')
+      expect(stdoutSpy).toHaveBeenCalledTimes(1)
+      expect(stdoutSpy.mock.calls[0][0]).toContain('WARN')
+      expect(stdoutSpy.mock.calls[0][0]).toContain('warning message')
     })
   })
 
   describe('error', () => {
-    it('should output ERROR formatted message to console.error', () => {
+    it('should output ERROR formatted message to stderr', () => {
       logger.error('error message')
-      expect(errorSpy).toHaveBeenCalledTimes(1)
-      expect(errorSpy.mock.calls[0][0]).toContain('ERROR')
-      expect(errorSpy.mock.calls[0][0]).toContain('error message')
+      expect(stderrSpy).toHaveBeenCalledTimes(1)
+      expect(stderrSpy.mock.calls[0][0]).toContain('ERROR')
+      expect(stderrSpy.mock.calls[0][0]).toContain('error message')
     })
   })
 
   describe('success', () => {
-    it('should output message with checkmark to console.log', () => {
+    it('should output message with checkmark to stdout', () => {
       logger.success('done')
-      expect(logSpy).toHaveBeenCalledTimes(1)
-      const output = logSpy.mock.calls[0][0] as string
+      expect(stdoutSpy).toHaveBeenCalledTimes(1)
+      const output = stdoutSpy.mock.calls[0][0] as string
       expect(output).toContain('done')
     })
   })
@@ -53,15 +53,15 @@ describe('logger', () => {
   describe('debug', () => {
     it('should not output when verbose is false', () => {
       logger.debug('hidden message')
-      expect(logSpy).not.toHaveBeenCalled()
+      expect(stdoutSpy).not.toHaveBeenCalled()
     })
 
     it('should output DEBUG formatted message when verbose is true', () => {
       logger.setVerbose(true)
       logger.debug('debug message')
-      expect(logSpy).toHaveBeenCalledTimes(1)
-      expect(logSpy.mock.calls[0][0]).toContain('DEBUG')
-      expect(logSpy.mock.calls[0][0]).toContain('debug message')
+      expect(stdoutSpy).toHaveBeenCalledTimes(1)
+      expect(stdoutSpy.mock.calls[0][0]).toContain('DEBUG')
+      expect(stdoutSpy.mock.calls[0][0]).toContain('debug message')
     })
   })
 
@@ -69,38 +69,38 @@ describe('logger', () => {
     it('should enable debug output when set to true', () => {
       logger.setVerbose(true)
       logger.debug('visible')
-      expect(logSpy).toHaveBeenCalledTimes(1)
+      expect(stdoutSpy).toHaveBeenCalledTimes(1)
     })
 
     it('should disable debug output when set back to false', () => {
       logger.setVerbose(true)
       logger.setVerbose(false)
       logger.debug('hidden')
-      expect(logSpy).not.toHaveBeenCalled()
+      expect(stdoutSpy).not.toHaveBeenCalled()
     })
   })
 
   describe('secret masking', () => {
     it('should mask log messages containing secrets', () => {
       logger.info('password: my-secret-pass')
-      expect(logSpy).toHaveBeenCalledTimes(1)
-      const output = logSpy.mock.calls[0][0] as string
+      expect(stdoutSpy).toHaveBeenCalledTimes(1)
+      const output = stdoutSpy.mock.calls[0][0] as string
       expect(output).not.toContain('my-secret-pass')
       expect(output).toContain('****')
     })
 
     it('should mask Bearer tokens in log output', () => {
       logger.info('Header: Bearer eyJhbGciOiJIUzI1NiJ9.token')
-      expect(logSpy).toHaveBeenCalledTimes(1)
-      const output = logSpy.mock.calls[0][0] as string
+      expect(stdoutSpy).toHaveBeenCalledTimes(1)
+      const output = stdoutSpy.mock.calls[0][0] as string
       expect(output).not.toContain('eyJhbGciOiJIUzI1NiJ9.token')
       expect(output).toContain('Bearer ****')
     })
 
     it('should mask AWS access key IDs in log output', () => {
       logger.info('Found key: AKIAIOSFODNN7EXAMPLE')
-      expect(logSpy).toHaveBeenCalledTimes(1)
-      const output = logSpy.mock.calls[0][0] as string
+      expect(stdoutSpy).toHaveBeenCalledTimes(1)
+      const output = stdoutSpy.mock.calls[0][0] as string
       expect(output).not.toContain('AKIAIOSFODNN7EXAMPLE')
       expect(output).toContain('AKIA****')
     })

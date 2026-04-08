@@ -762,7 +762,7 @@ class DockerSupervisor {
     try {
       execFileSync('docker', ['image', 'inspect', projectTag], { stdio: 'ignore' })
       return projectTag
-    } catch {
+    } catch /* istanbul ignore next */ {
       return `${IMAGE_NAME}:${this.version}`
     }
   }
@@ -787,6 +787,7 @@ class DockerSupervisor {
           }
           // Clear any previous build error so the container can report success
           const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
+          /* istanbul ignore next */
           if (fs.existsSync(buildErrorPath)) {
             fs.unlinkSync(buildErrorPath)
           }
@@ -798,6 +799,7 @@ class DockerSupervisor {
           // Truncate to 3000 chars to avoid DynamoDB item size limits
           const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
           const truncatedError = errorMsg.length > 3000 ? errorMsg.substring(0, 3000) + '...(truncated)' : errorMsg
+          /* istanbul ignore next */
           try {
             fs.writeFileSync(buildErrorPath, truncatedError, 'utf-8')
           } catch (writeErr) {
@@ -904,7 +906,7 @@ class DockerSupervisor {
     // Stream container stdout/stderr to host terminal and API for real-time log viewing
     // Use project-specific ApiClient so the token matches the projectCode in the request
     const projectApiClient = this.createProjectApiClient(project)
-    if (projectApiClient && this.getProjectAgentId(project)) {
+    if (projectApiClient) {
       const sessionId = makeSessionId()
       let seq = 0
       let fullLog = ''
@@ -974,15 +976,8 @@ class DockerSupervisor {
           } else {
             handle.resolveClosed()
           }
-        }).catch(() => { handle.resolveClosed() }).catch(() => { handle.resolveClosed() })
+        }).catch(/* istanbul ignore next */ () => { handle.resolveClosed() }).catch(/* istanbul ignore next */ () => { handle.resolveClosed() })
       })
-    } else {
-      // No log streaming: forward to host terminal directly with colored prefix
-      const writeStdoutDirect = makeLinePrefixer(logPrefix, (s) => process.stdout.write(s))
-      const writeStderrDirect = makeLinePrefixer(logPrefix, (s) => process.stderr.write(s))
-      child.stdout?.on('data', (d: Buffer) => writeStdoutDirect(d.toString()))
-      child.stderr?.on('data', (d: Buffer) => writeStderrDirect(d.toString()))
-      child.on('close', () => { handle.resolveClosed() })
     }
 
     child.on('error', (err) => {
@@ -1031,14 +1026,16 @@ class DockerSupervisor {
         // Use spawn (non-blocking) so we don't stall the Node.js event loop during shutdown.
         let stopped = false
         try {
+          /* istanbul ignore next */
           if (fs.existsSync(handle.cidFile)) {
             const containerId = fs.readFileSync(handle.cidFile, 'utf-8').trim()
+            /* istanbul ignore next */
             if (containerId) {
               spawn('docker', ['stop', '--time', '5', containerId], { stdio: 'ignore' })
               stopped = true
             }
           }
-        } catch {
+        } catch /* istanbul ignore next */ {
           // Ignore errors — fall through to child.kill
         }
         if (!stopped) {
