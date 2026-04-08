@@ -648,9 +648,18 @@ function buildProjectVolumeMounts(
 
 /**
  * Get the host-side per-project config directory.
- * Located at: ~/.ai-support-agent/projects/{tenantCode}/{projectCode}/.ai-support-agent/
+ *
+ * New path: ~/.ai-support-agent/projects/{tenantCode}/{projectCode}/.ai-support-agent/
+ * Legacy path: ~/.ai-support-agent/projects/{projectCode}/.ai-support-agent/
+ *
+ * If the legacy path exists (projects registered with older agent versions),
+ * it is returned to preserve continuity. Otherwise the new path is used.
  */
 function getProjectConfigHostDir(project: ProjectRegistration): string {
+  const legacyPath = path.join(getConfigDir(), 'projects', project.projectCode, '.ai-support-agent')
+  if (fs.existsSync(legacyPath)) {
+    return legacyPath
+  }
   return path.join(getConfigDir(), 'projects', project.tenantCode, project.projectCode, '.ai-support-agent')
 }
 
