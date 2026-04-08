@@ -110,6 +110,8 @@ import {
   buildProjectImage,
   validatePackageNames,
   migrateProjectConfigDir,
+  buildContainerName,
+  removeStaleContainer,
 } from '../../src/docker/docker-runner'
 
 const mockExecFileSync = execFileSync as jest.MockedFunction<typeof execFileSync>
@@ -506,6 +508,43 @@ describe('docker-runner', () => {
       const args = buildContainerArgs({ project: 'mbc/PROJ_A' })
       expect(args).toContain('--project')
       expect(args).toContain('mbc/PROJ_A')
+    })
+  })
+
+  describe('buildContainerName', () => {
+    it('should build name with tenantCode and projectCode', () => {
+      expect(buildContainerName('mbc', 'PROJ_A')).toBe('ai-mbc-proj-a')
+    })
+
+    it('should include agentId when provided', () => {
+      expect(buildContainerName('mbc', 'PROJ_A', 'agent-123')).toBe('ai-mbc-proj-a-agent-123')
+    })
+
+    it('should lowercase all components', () => {
+      expect(buildContainerName('MBC', 'MBC_01')).toBe('ai-mbc-mbc-01')
+    })
+
+    it('should replace underscores and other non-alphanumeric chars with hyphens', () => {
+      expect(buildContainerName('my_tenant', 'MY_PROJECT')).toBe('ai-my-tenant-my-project')
+    })
+
+    it('should handle agentId with special characters', () => {
+      expect(buildContainerName('mbc', 'PROJ_A', 'uuid_abc.123')).toBe('ai-mbc-proj-a-uuid-abc-123')
+    })
+  })
+
+  describe('removeStaleContainer', () => {
+    it('should call docker rm -f with the container name', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      removeStaleContainer('ai-mbc-proj-a')
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'docker', ['rm', '-f', 'ai-mbc-proj-a'], { stdio: 'ignore' },
+      )
+    })
+
+    it('should not throw when docker rm -f fails (container does not exist)', () => {
+      mockExecFileSync.mockImplementation(() => { throw new Error('no such container') })
+      expect(() => removeStaleContainer('ai-mbc-proj-a')).not.toThrow()
     })
   })
 
@@ -1227,6 +1266,49 @@ describe('docker-runner', () => {
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
       expect(spawnArgs).toContain('--project')
       expect(spawnArgs).toContain('mbc/PROJ_A')
+    })
+
+    it('should pass --name with ai-{tenantCode}-{projectCode} format to docker run', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      const nameIdx = spawnArgs.indexOf('--name')
+      expect(nameIdx).toBeGreaterThan(-1)
+      expect(spawnArgs[nameIdx + 1]).toBe('ai-mbc-proj-a-agent-1')
+    })
+
+    it('should call docker rm -f before starting each container to remove stale containers', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const rmCall = mockExecFileSync.mock.calls.find(
+        (c) => Array.isArray(c[1]) && (c[1] as string[]).includes('rm'),
+      )
+      expect(rmCall).toBeDefined()
+      expect(rmCall![1]).toEqual(['rm', '-f', 'ai-mbc-proj-a-agent-1'])
     })
 
     it('should pass per-project token and apiUrl as env vars', () => {

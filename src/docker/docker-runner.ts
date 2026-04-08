@@ -279,6 +279,31 @@ export interface ProjectDirMapping {
   projectCode: string
 }
 
+/**
+ * Build a deterministic container name for a project.
+ * Format: asa-{tenantCode}-{projectCode}-{agentId}
+ * All components are lowercased and non-alphanumeric chars (except hyphens) are replaced with hyphens.
+ */
+export function buildContainerName(tenantCode: string, projectCode: string, agentId?: string): string {
+  const sanitize = (s: string): string => s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
+  const parts = ['ai', sanitize(tenantCode), sanitize(projectCode)]
+  if (agentId) parts.push(sanitize(agentId))
+  return parts.join('-')
+}
+
+/**
+ * Remove a stale container with the given name if it exists.
+ * This handles the case where a previous run crashed and left a container behind,
+ * which would prevent `docker run --name` from succeeding.
+ */
+export function removeStaleContainer(containerName: string): void {
+  try {
+    execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore' })
+  } catch {
+    // Container does not exist or docker rm failed — ignore
+  }
+}
+
 export function buildVolumeMounts(): { mounts: string[]; projectMappings: ProjectDirMapping[] } {
   const home = os.homedir()
   const mounts: string[] = []
@@ -913,9 +938,11 @@ class DockerSupervisor {
     // No -i/-t flags: the container does not need stdin. stdout/stderr are
     // captured via pipe. Shutdown is handled exclusively via docker stop.
     const imageTag = this.getImageTag(project)
+    const containerName = buildContainerName(project.tenantCode, project.projectCode, this.opts.agentId)
+    removeStaleContainer(containerName)
     const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
     const dockerArgs = [
-      'run', '--rm', '--cidfile', cidFile,
+      'run', '--rm', '--name', containerName, '--cidfile', cidFile,
       ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
       ...mounts,
       ...buildDevMounts(),
