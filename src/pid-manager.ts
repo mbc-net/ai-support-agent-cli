@@ -18,10 +18,17 @@ export function getPidFilePath(): string {
 /**
  * 既存の pidファイルを確認し、プロセスが生存中なら true を返す。
  * 複数起動防止チェックに使用する。
+ *
+ * Dockerコンテナ内ではPID 1は常にinitプロセスとして生存しているため、
+ * 前のコンテナが残した agent.pid の値が 1 でも誤検知となる。
+ * 自分自身がPID 1でない場合にPID 1が記録されていたらstaleとみなす。
  */
 export function isAlreadyRunning(): boolean {
   const existingPid = readPidFile()
   if (existingPid === null) return false
+  // コンテナ内でPID 1は常に生存しているが、前コンテナのstaleなpidファイルの可能性がある
+  // 自分自身がPID 1でない場合にPID 1が記録されていたらstaleとみなす
+  if (existingPid === 1 && process.pid !== 1) return false
   return isProcessAlive(existingPid)
 }
 
@@ -64,12 +71,15 @@ export function readPidFile(): number | null {
 /**
  * 指定PIDのプロセスが生存しているか確認する。
  * process.kill(pid, 0) は実際にシグナルを送らず存在チェックのみ行う。
+ * EPERM（権限なし）の場合はプロセスが存在しているため true を返す。
  */
 export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
     return true
-  } catch {
+  } catch (err) {
+    // EPERM: プロセスは存在するが送信権限がない → 生存中とみなす
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return true
     return false
   }
 }
