@@ -186,7 +186,8 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
 
   // 二重起動防止チェック
   if (isAlreadyRunning()) {
-    logger.error(`Agent is already running (PID: ${readPidFile()}). Use "ai-support-agent stop" to stop it first.`)
+    const entry = readPidFile()
+    logger.error(`Agent is already running (PID: ${entry?.pid ?? '?'}). Use "ai-support-agent stop" to stop it first.`)
     process.exit(1)
   }
 

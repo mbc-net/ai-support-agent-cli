@@ -22,12 +22,14 @@ async function waitForExit(pid: number): Promise<boolean> {
 }
 
 export async function stopAgent(): Promise<void> {
-  const pid = readPidFile()
+  const entry = readPidFile()
 
-  if (pid === null) {
+  if (entry === null) {
     logger.warn(t('stop.notRunning', { path: getPidFilePath() }))
     return
   }
+
+  const { pid } = entry
 
   if (!isProcessAlive(pid)) {
     logger.warn(t('stop.staleProcess', { pid }))
