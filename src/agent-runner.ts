@@ -14,6 +14,7 @@ import { detectChannelFromVersion } from './update-checker'
 import { validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
 import { startConfigWatcher, startTokenWatcher } from './config-watcher'
+import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
 
 /**
  * トークン文字列から tokenId を抽出する
@@ -78,11 +79,13 @@ export function setupShutdownHandlers(
   target: ShutdownTarget,
   updater?: AutoUpdaterHandle,
 ): void {
+  writePidFile()
   let shuttingDown = false
   const shutdown = async (): Promise<void> => {
     if (shuttingDown) return
     shuttingDown = true
     logger.info(t('runner.shuttingDown'))
+    removePidFile()
     updater?.stop()
     if (target.kind === 'processManager') {
       await target.processManager.stopAll()
@@ -180,6 +183,12 @@ function runSingleProject(
 
 export async function startAgent(options: RunnerOptions): Promise<void> {
   await initSentry()
+
+  // 二重起動防止チェック
+  if (isAlreadyRunning()) {
+    logger.error(`Agent is already running (PID: ${readPidFile()}). Use "ai-support-agent stop" to stop it first.`)
+    process.exit(1)
+  }
 
   // グローバルエラーハンドラ（非同期エラーでの静かなクラッシュを防止）
   process.on('uncaughtException', (error) => {

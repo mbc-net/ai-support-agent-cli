@@ -20,6 +20,12 @@ jest.mock('../src/api-client')
 jest.mock('../src/commands')
 jest.mock('../src/config-manager')
 jest.mock('../src/logger')
+jest.mock('../src/pid-manager', () => ({
+  writePidFile: jest.fn(),
+  removePidFile: jest.fn(),
+  isAlreadyRunning: jest.fn().mockReturnValue(false),
+  readPidFile: jest.fn().mockReturnValue(null),
+}))
 
 const mockForkProject = jest.fn()
 const mockStopAll = jest.fn().mockResolvedValue(undefined)

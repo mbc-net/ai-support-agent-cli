@@ -7,6 +7,7 @@ import * as path from 'path'
 import { getDockerfilePath, getDockerContextDir, resolveDockerfile, getProjectImageTag } from './dockerfile-path'
 import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE, DOCKER_RESTART_EXIT_CODE } from '../constants'
 import { getConfigDir, getProjectList, loadConfig } from '../config-manager'
+import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from '../pid-manager'
 import { t } from '../i18n'
 import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
@@ -751,6 +752,7 @@ class DockerSupervisor {
       this.updating = true
       if (this.sigintHandler) process.removeListener('SIGINT', this.sigintHandler)
       if (this.sigtermHandler) process.removeListener('SIGTERM', this.sigtermHandler)
+      removePidFile()
       logger.info(t('runner.shuttingDown'))
       const closedPromises = [...this.handles.values()].map((h) => h.closedPromise)
       this.stopAll()
@@ -1100,6 +1102,13 @@ export function runInDocker(opts: DockerRunOptions): void {
   }
   isDockerRunning = true
 
+  // 二重起動防止チェック
+  if (isAlreadyRunning()) {
+    logger.error(`Agent is already running (PID: ${readPidFile()}). Use "ai-support-agent stop" to stop it first.`)
+    process.exit(1)
+    return
+  }
+
   if (!checkDockerAvailable()) {
     logger.error(t('docker.notAvailable'))
     process.exit(1)
@@ -1171,6 +1180,7 @@ export function runInDocker(opts: DockerRunOptions): void {
       agentId: opts.agentId ?? agentId,
     }
 
+    writePidFile()
     const supervisor = new DockerSupervisor(version, enrichedOpts)
     supervisor.start(projects, () => { isDockerRunning = false })
     return

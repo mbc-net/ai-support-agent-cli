@@ -51,6 +51,14 @@
   "config.migrating": "Migrating config from legacy single-token format to multi-project format...",
   "config.migrated": "Config migrated successfully.",
 
+  "cmd.stop": "Stop the running agent",
+  "stop.stopping": "Sending stop signal to agent (PID: {{pid}})...",
+  "stop.stopped": "Agent stopped.",
+  "stop.notRunning": "No running agent found (pid file not found: {{path}})",
+  "stop.staleProcess": "Agent process (PID: {{pid}}) is no longer running. Cleaning up stale pid file.",
+  "stop.signalFailed": "Failed to send stop signal to PID {{pid}}: {{message}}",
+  "stop.timeout": "Agent did not stop within timeout (PID: {{pid}}). It may still be running.",
+
   "runner.starting": "Starting agent...",
   "runner.startedSingle": "Agent started (poll: {{pollInterval}}ms, heartbeat: {{heartbeatInterval}}ms)",
   "runner.stopHint": "Press Ctrl+C to stop",
