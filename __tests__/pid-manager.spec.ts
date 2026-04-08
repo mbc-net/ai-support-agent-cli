@@ -43,9 +43,14 @@ describe('pid-manager', () => {
       expect(readPidFile()).toBeNull()
     })
 
-    it('should return pid when file exists', () => {
+    it('should return PidEntry for new format "{hostname}:{pid}"', () => {
+      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), 'myhost:1234', 'utf-8')
+      expect(readPidFile()).toEqual({ hostname: 'myhost', pid: 1234 })
+    })
+
+    it('should return PidEntry with empty hostname for legacy format (number only)', () => {
       fs.writeFileSync(path.join(tmpDir, 'agent.pid'), '1234', 'utf-8')
-      expect(readPidFile()).toBe(1234)
+      expect(readPidFile()).toEqual({ hostname: '', pid: 1234 })
     })
 
     it('should return null for invalid content', () => {
@@ -53,21 +58,34 @@ describe('pid-manager', () => {
       expect(readPidFile()).toBeNull()
     })
 
-    it('should return null for zero', () => {
-      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), '0', 'utf-8')
+    it('should return null for zero pid', () => {
+      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), 'host:0', 'utf-8')
       expect(readPidFile()).toBeNull()
     })
 
     it('should return null for negative pid', () => {
+      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), 'host:-1', 'utf-8')
+      expect(readPidFile()).toBeNull()
+    })
+
+    it('should return null for legacy zero', () => {
+      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), '0', 'utf-8')
+      expect(readPidFile()).toBeNull()
+    })
+
+    it('should return null for legacy negative pid', () => {
       fs.writeFileSync(path.join(tmpDir, 'agent.pid'), '-1', 'utf-8')
       expect(readPidFile()).toBeNull()
     })
   })
 
   describe('writePidFile / removePidFile', () => {
-    it('should write current pid and remove it', () => {
+    it('should write current hostname and pid, then remove', () => {
       writePidFile()
-      expect(readPidFile()).toBe(process.pid)
+      const entry = readPidFile()
+      expect(entry).not.toBeNull()
+      expect(entry!.pid).toBe(process.pid)
+      expect(entry!.hostname).toBe(os.hostname())
       removePidFile()
       expect(readPidFile()).toBeNull()
     })
@@ -83,7 +101,6 @@ describe('pid-manager', () => {
     })
 
     it('should return false for non-existent pid', () => {
-      // 非常に大きなPIDは存在しないはず
       expect(isProcessAlive(9999999)).toBe(false)
     })
   })
@@ -93,34 +110,36 @@ describe('pid-manager', () => {
       expect(isAlreadyRunning()).toBe(false)
     })
 
-    it('should return true when pid is own process (process is alive)', () => {
+    it('should return true when same hostname and pid is own process', () => {
       writePidFile()
       expect(isAlreadyRunning()).toBe(true)
     })
 
-    it('should return true when another alive process pid is recorded', () => {
-      // PID 9999 のプロセスが生存しているように process.kill をモック
+    it('should return true when same hostname and another alive process pid is recorded', () => {
       jest.spyOn(process, 'kill').mockImplementation(() => undefined as never)
-      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), '9999', 'utf-8')
+      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), `${os.hostname()}:9999`, 'utf-8')
       expect(isAlreadyRunning()).toBe(true)
     })
 
     it('should return true when EPERM is thrown (process exists but no permission)', () => {
       const epermError = Object.assign(new Error('EPERM'), { code: 'EPERM' })
       jest.spyOn(process, 'kill').mockImplementation(() => { throw epermError })
-      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), '9999', 'utf-8')
+      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), `${os.hostname()}:9999`, 'utf-8')
       expect(isAlreadyRunning()).toBe(true)
     })
 
-    it('should return false when pid 1 is recorded and current pid is not 1 (Docker stale pid)', () => {
-      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), '1', 'utf-8')
-      // 現在のプロセスはPID 1ではないはず（テスト環境）
-      expect(process.pid).not.toBe(1)
+    it('should return false when hostname differs (stale pid from another container)', () => {
+      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), 'other-container-id:1', 'utf-8')
       expect(isAlreadyRunning()).toBe(false)
     })
 
-    it('should return false when recorded process is dead', () => {
-      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), '9999999', 'utf-8')
+    it('should return false for legacy format (no hostname) — treated as stale', () => {
+      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), '9999', 'utf-8')
+      expect(isAlreadyRunning()).toBe(false)
+    })
+
+    it('should return false when recorded process is dead (same hostname)', () => {
+      fs.writeFileSync(path.join(tmpDir, 'agent.pid'), `${os.hostname()}:9999999`, 'utf-8')
       expect(isAlreadyRunning()).toBe(false)
     })
   })

@@ -35,8 +35,8 @@ describe('pid-manager', () => {
 
   it('should write and read pid file', () => {
     writePidFile()
-    const pid = readPidFile()
-    expect(pid).toBe(process.pid)
+    const entry = readPidFile()
+    expect(entry?.pid).toBe(process.pid)
   })
 
   it('should return null when pid file does not exist', () => {
@@ -71,7 +71,7 @@ describe('pid-manager', () => {
     writePidFile()
     // 2回目の呼び出し: ディレクトリはすでに存在する（!existsSync が false のブランチ）
     writePidFile()
-    expect(readPidFile()).toBe(process.pid)
+    expect(readPidFile()?.pid).toBe(process.pid)
   })
 
   it('isProcessAlive should return true for current process', () => {
