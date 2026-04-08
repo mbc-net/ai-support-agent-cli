@@ -150,11 +150,16 @@ export function generateProjectDockerfile(
   aptPackages: string[],
   npmPackages: string[],
   commands: string[] = [],
+  timezone?: string,
 ): string {
   validatePackageNames(aptPackages, 'apt')
   validatePackageNames(npmPackages, 'npm')
 
   const lines = [`FROM ${IMAGE_NAME}:${baseVersion}`]
+  if (timezone) {
+    // Override the TZ env var set by docker run, allowing per-project custom timezone
+    lines.push(`ENV TZ=${timezone}`)
+  }
   if (aptPackages.length > 0) {
     lines.push(
       `RUN apt-get update && apt-get install -y --no-install-recommends \\`,
@@ -219,8 +224,8 @@ export async function buildProjectImage(
         logger.warn('[docker] Build log exceeded 2 MB limit; remaining output will not be saved to S3')
       }
     }
-    if (apiClient && agentId) {
-      await apiClient.submitLogChunk({ agentId, projectCode, logType: 'docker-build', sessionId, seq: ++seq, text })
+    if (apiClient) {
+      await apiClient.submitLogChunk({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, seq: ++seq, text })
         .catch((e: unknown) => logger.warn(`[docker] Failed to send log chunk: ${e}`))
     }
   }
@@ -253,8 +258,8 @@ export async function buildProjectImage(
 
   await flush()
 
-  if (apiClient && agentId && fullLog) {
-    await apiClient.saveSessionLog({ agentId, projectCode, logType: 'docker-build', sessionId, content: fullLog })
+  if (apiClient && fullLog) {
+    await apiClient.saveSessionLog({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, content: fullLog })
       .catch((e: unknown) => logger.warn(`[docker] Failed to upload build log to S3: ${e}`))
   }
 
@@ -611,6 +616,11 @@ function buildProjectVolumeMounts(
     }
   }
 
+  // Pass host timezone so container clocks match the host by default.
+  // The per-project Dockerfile can override this with ENV TZ= if a custom timezone is configured.
+  const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone
+  envArgs.push('-e', `TZ=${hostTz}`)
+
   // Project dir mapping: single project only
   const containerProjectDir = `${CONTAINER_PROJECTS_BASE}/${project.projectCode}`
   const blockedPrefixes = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
@@ -694,8 +704,8 @@ class DockerSupervisor {
     this.projectAgentIds.set(this.projectKey(project), agentId)
   }
 
-  private createProjectApiClient(project: ProjectRegistration): ApiClient | undefined {
-    return this.getProjectAgentId(project) ? new ApiClient(project.apiUrl, project.token) : undefined
+  private createProjectApiClient(project: ProjectRegistration): ApiClient {
+    return new ApiClient(project.apiUrl, project.token)
   }
 
   start(projects: ProjectRegistration[], onStop?: () => void): void {

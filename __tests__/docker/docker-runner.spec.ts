@@ -70,6 +70,7 @@ jest.mock('../../src/logger', () => ({
   prefixLines: jest.fn().mockImplementation((text: string) => text),
   maskSecrets: jest.fn().mockImplementation((text: string) => text),
   makeLinePrefixer: jest.fn().mockImplementation((_prefix: string, write: (s: string) => void) => (chunk: string) => write(chunk)),
+  stripCursorCodes: jest.fn().mockImplementation((text: string) => text),
 }))
 
 jest.mock('../../src/update-checker', () => ({
@@ -429,6 +430,13 @@ describe('docker-runner', () => {
       expect(args[1]).toBe('AI_SUPPORT_AGENT_IN_DOCKER=1')
       expect(args[2]).toBe('-e')
       expect(args[3]).toBe('HOME=/home/node')
+    })
+
+    it('should not include TZ (TZ is added by buildProjectVolumeMounts for per-project containers)', () => {
+      const args = buildEnvArgs([])
+      // Legacy buildEnvArgs does not include TZ; per-project containers use buildProjectVolumeMounts
+      const tzArg = args.find((a: string) => a.startsWith('TZ='))
+      expect(tzArg).toBeUndefined()
     })
   })
 
@@ -2321,12 +2329,40 @@ describe('generateProjectDockerfile', () => {
     expect(result).toContain('npm install -g typescript')
   })
 
+  it('should include RUN command when commands are given', () => {
+    const result = generateProjectDockerfile('1.0.0', [], [], ['echo hello'])
+    expect(result).toContain('RUN echo hello')
+  })
+
+  it('should throw when command contains forbidden characters', () => {
+    expect(() => generateProjectDockerfile('1.0.0', [], [], ['rm -rf /; evil'])).toThrow('Invalid command')
+  })
+
   it('should throw when apt package name is invalid', () => {
     expect(() => generateProjectDockerfile('1.0.0', ['curl; evil'], [])).toThrow('Invalid apt package name')
   })
 
   it('should throw when npm package name is invalid', () => {
     expect(() => generateProjectDockerfile('1.0.0', [], ['ts; evil'])).toThrow('Invalid npm package name')
+  })
+
+  it('should include ENV TZ when timezone is provided', () => {
+    const result = generateProjectDockerfile('1.0.0', [], [], [], 'Asia/Tokyo')
+    expect(result).toContain('ENV TZ=Asia/Tokyo')
+  })
+
+  it('should place ENV TZ before RUN instructions', () => {
+    const result = generateProjectDockerfile('1.0.0', ['curl'], [], [], 'UTC')
+    const lines = result.split('\n')
+    const tzIdx = lines.findIndex((l) => l.startsWith('ENV TZ='))
+    const runIdx = lines.findIndex((l) => l.startsWith('RUN'))
+    expect(tzIdx).toBeGreaterThan(-1)
+    expect(tzIdx).toBeLessThan(runIdx)
+  })
+
+  it('should not include ENV TZ when timezone is not provided', () => {
+    const result = generateProjectDockerfile('1.0.0', [], [])
+    expect(result).not.toContain('ENV TZ=')
   })
 })
 

@@ -21,6 +21,7 @@ export interface ProjectConfigResponse {
       aptPackages?: string[]
       npmPackages?: string[]
       commands?: string[]
+      timezone?: string
     }
   }
   aws?: {
