@@ -168,24 +168,24 @@ export const logger = {
   },
 
   info(message: string): void {
-    process.stdout.write(formatLog('INFO ', COLORS.green, message) + '\n')
+    console.log(formatLog('INFO ', COLORS.green, message))
   },
 
   warn(message: string): void {
-    process.stdout.write(formatLog('WARN ', COLORS.yellow, message) + '\n')
+    console.log(formatLog('WARN ', COLORS.yellow, message))
   },
 
   error(message: string): void {
-    process.stderr.write(formatLog('ERROR', COLORS.red, message) + '\n')
+    console.error(formatLog('ERROR', COLORS.red, message))
   },
 
   debug(message: string): void {
     if (verboseEnabled) {
-      process.stdout.write(formatLog('DEBUG', COLORS.blue, message) + '\n')
+      console.log(formatLog('DEBUG', COLORS.blue, message))
     }
   },
 
   success(message: string): void {
-    process.stdout.write(`${COLORS.green}✓${COLORS.reset} ${message}\n`)
+    console.log(`${COLORS.green}✓${COLORS.reset} ${message}`)
   },
 }
