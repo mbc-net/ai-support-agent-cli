@@ -82,6 +82,8 @@ jest.mock('../../src/update-checker', () => ({
 jest.mock('../../src/pid-manager', () => ({
   writePidFile: jest.fn(),
   removePidFile: jest.fn(),
+  isAlreadyRunning: jest.fn().mockReturnValue(false),
+  readPidFile: jest.fn().mockReturnValue(null),
 }))
 
 import { execFileSync, spawn } from 'child_process'

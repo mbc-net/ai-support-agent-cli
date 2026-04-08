@@ -7,7 +7,7 @@ import * as path from 'path'
 import { getDockerfilePath, getDockerContextDir, resolveDockerfile, getProjectImageTag } from './dockerfile-path'
 import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE, DOCKER_RESTART_EXIT_CODE } from '../constants'
 import { getConfigDir, getProjectList, loadConfig } from '../config-manager'
-import { writePidFile, removePidFile } from '../pid-manager'
+import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from '../pid-manager'
 import { t } from '../i18n'
 import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
@@ -1101,6 +1101,13 @@ export function runInDocker(opts: DockerRunOptions): void {
     return
   }
   isDockerRunning = true
+
+  // 二重起動防止チェック
+  if (isAlreadyRunning()) {
+    logger.error(`Agent is already running (PID: ${readPidFile()}). Use "ai-support-agent stop" to stop it first.`)
+    process.exit(1)
+    return
+  }
 
   if (!checkDockerAvailable()) {
     logger.error(t('docker.notAvailable'))

@@ -14,7 +14,7 @@ import { detectChannelFromVersion } from './update-checker'
 import { validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
 import { startConfigWatcher, startTokenWatcher } from './config-watcher'
-import { writePidFile, removePidFile } from './pid-manager'
+import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
 
 /**
  * トークン文字列から tokenId を抽出する
@@ -183,6 +183,12 @@ function runSingleProject(
 
 export async function startAgent(options: RunnerOptions): Promise<void> {
   await initSentry()
+
+  // 二重起動防止チェック
+  if (isAlreadyRunning()) {
+    logger.error(`Agent is already running (PID: ${readPidFile()}). Use "ai-support-agent stop" to stop it first.`)
+    process.exit(1)
+  }
 
   // グローバルエラーハンドラ（非同期エラーでの静かなクラッシュを防止）
   process.on('uncaughtException', (error) => {

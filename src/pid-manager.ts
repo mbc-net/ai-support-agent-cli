@@ -15,6 +15,16 @@ export function getPidFilePath(): string {
   return path.join(getConfigDir(), PID_FILE_NAME)
 }
 
+/**
+ * 既存の pidファイルを確認し、プロセスが生存中なら true を返す。
+ * 複数起動防止チェックに使用する。
+ */
+export function isAlreadyRunning(): boolean {
+  const existingPid = readPidFile()
+  if (existingPid === null) return false
+  return isProcessAlive(existingPid)
+}
+
 /** 現在のプロセス PID を pidファイルに書き込む */
 export function writePidFile(): void {
   const pidPath = getPidFilePath()
