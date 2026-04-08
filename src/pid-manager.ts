@@ -5,8 +5,10 @@
  * ai-support-agent stop コマンドで SIGTERM を送信して正常停止させる。
  *
  * ファイル形式: "{hostname}:{pid}"
- * ホスト名（コンテナIDを含む）も一緒に記録することで、コンテナ再起動後に
- * 前コンテナのstaleなPIDファイルを正しく無効化できる。
+ * ホスト名も一緒に記録することで、コンテナ再起動後にstaleなPIDファイルを無効化できる。
+ * Dockerコンテナのデフォルトホスト名はコンテナIDの短縮形（例: 26890c1018aa）であり、
+ * 再起動のたびに変わるため、前のコンテナが残したPIDファイルとは一致しない。
+ * NOTE: docker run に --hostname を指定するとこの仕組みが壊れるため、指定してはいけない。
  */
 import * as fs from 'fs'
 import * as os from 'os'
