@@ -20,6 +20,7 @@ jest.mock('fs', () => ({
   writeFileSync: jest.fn(),
   copyFileSync: jest.fn(),
   mkdirSync: jest.fn(),
+  renameSync: jest.fn(),
   watch: jest.fn(() => ({ close: jest.fn() })),
 }))
 
@@ -80,7 +81,7 @@ jest.mock('../../src/update-checker', () => ({
 
 import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
-import { existsSync, realpathSync, readFileSync, unlinkSync, copyFileSync, mkdirSync, watch as fsWatch } from 'fs'
+import { existsSync, realpathSync, readFileSync, unlinkSync, copyFileSync, mkdirSync, renameSync, watch as fsWatch } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
 import { reExecProcess, performUpdate } from '../../src/update-checker'
@@ -101,6 +102,7 @@ import {
   generateProjectDockerfile,
   buildProjectImage,
   validatePackageNames,
+  migrateProjectConfigDir,
 } from '../../src/docker/docker-runner'
 
 const mockExecFileSync = execFileSync as jest.MockedFunction<typeof execFileSync>
@@ -115,6 +117,7 @@ const mockUnlinkSync = unlinkSync as jest.MockedFunction<typeof unlinkSync>
 const mockPerformUpdate = performUpdate as jest.MockedFunction<typeof performUpdate>
 const mockCopyFileSync = copyFileSync as jest.MockedFunction<typeof copyFileSync>
 const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>
+const mockRenameSync = renameSync as jest.MockedFunction<typeof renameSync>
 const mockFsWatch = fsWatch as jest.MockedFunction<typeof fsWatch>
 
 describe('docker-runner', () => {
@@ -2337,6 +2340,67 @@ describe('docker-runner', () => {
       fakeContainerChild.emit('close', 0)
       await Promise.resolve()
     })
+  })
+})
+
+describe('migrateProjectConfigDir', () => {
+  const project = { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token', apiUrl: 'http://api' }
+
+  beforeEach(() => {
+    mockGetConfigDir.mockReturnValue('/mock/config-dir')
+    mockMkdirSync.mockReset()
+    mockRenameSync.mockReset()
+  })
+
+  it('should migrate legacy dir to new tenantCode-based path', () => {
+    mockExistsSync.mockImplementation((p: unknown) => {
+      const ps = String(p)
+      if (ps === '/mock/config-dir/projects/PROJ_A') return true   // legacy exists
+      if (ps === '/mock/config-dir/projects/mbc/PROJ_A') return false // new does not exist
+      return false
+    })
+
+    migrateProjectConfigDir(project)
+
+    expect(mockMkdirSync).toHaveBeenCalledWith('/mock/config-dir/projects/mbc', expect.objectContaining({ recursive: true }))
+    expect(mockRenameSync).toHaveBeenCalledWith(
+      '/mock/config-dir/projects/PROJ_A',
+      '/mock/config-dir/projects/mbc/PROJ_A',
+    )
+  })
+
+  it('should do nothing when legacy dir does not exist', () => {
+    mockExistsSync.mockReturnValue(false)
+
+    migrateProjectConfigDir(project)
+
+    expect(mockRenameSync).not.toHaveBeenCalled()
+    expect(mockMkdirSync).not.toHaveBeenCalled()
+  })
+
+  it('should do nothing when new dir already exists', () => {
+    mockExistsSync.mockImplementation((p: unknown) => {
+      const ps = String(p)
+      if (ps === '/mock/config-dir/projects/PROJ_A') return true    // legacy exists
+      if (ps === '/mock/config-dir/projects/mbc/PROJ_A') return true // new also exists
+      return false
+    })
+
+    migrateProjectConfigDir(project)
+
+    expect(mockRenameSync).not.toHaveBeenCalled()
+  })
+
+  it('should warn on rename failure and not throw', () => {
+    mockExistsSync.mockImplementation((p: unknown) => {
+      const ps = String(p)
+      if (ps === '/mock/config-dir/projects/PROJ_A') return true
+      if (ps === '/mock/config-dir/projects/mbc/PROJ_A') return false
+      return false
+    })
+    mockRenameSync.mockImplementation(() => { throw new Error('EACCES') })
+
+    expect(() => migrateProjectConfigDir(project)).not.toThrow()
   })
 })
 
