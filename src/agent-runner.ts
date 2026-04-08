@@ -14,6 +14,7 @@ import { detectChannelFromVersion } from './update-checker'
 import { validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
 import { startConfigWatcher, startTokenWatcher } from './config-watcher'
+import { writePidFile, removePidFile } from './pid-manager'
 
 /**
  * トークン文字列から tokenId を抽出する
@@ -78,11 +79,13 @@ export function setupShutdownHandlers(
   target: ShutdownTarget,
   updater?: AutoUpdaterHandle,
 ): void {
+  writePidFile()
   let shuttingDown = false
   const shutdown = async (): Promise<void> => {
     if (shuttingDown) return
     shuttingDown = true
     logger.info(t('runner.shuttingDown'))
+    removePidFile()
     updater?.stop()
     if (target.kind === 'processManager') {
       await target.processManager.stopAll()

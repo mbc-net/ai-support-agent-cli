@@ -88,6 +88,14 @@ program
     })
   })
 
+program
+  .command('stop')
+  .description(t('cmd.stop'))
+  .action(async () => {
+    const { stopAgent } = await import('./commands/stop-agent')
+    await stopAgent()
+  })
+
 registerAuthCommands(program)
 
 program

@@ -51,6 +51,14 @@
   "config.migrating": "設定を旧形式（単一トークン）からマルチプロジェクト形式に移行中...",
   "config.migrated": "設定の移行が完了しました。",
 
+  "cmd.stop": "実行中のエージェントを停止",
+  "stop.stopping": "エージェントに停止シグナルを送信中 (PID: {{pid}})...",
+  "stop.stopped": "エージェントを停止しました。",
+  "stop.notRunning": "実行中のエージェントが見つかりません（pidファイルが存在しません: {{path}}）",
+  "stop.staleProcess": "エージェントプロセス (PID: {{pid}}) はすでに終了しています。古いpidファイルを削除しました。",
+  "stop.signalFailed": "PID {{pid}} への停止シグナル送信に失敗しました: {{message}}",
+  "stop.timeout": "タイムアウト: エージェントが停止しませんでした (PID: {{pid}})。プロセスがまだ実行中の可能性があります。",
+
   "runner.starting": "エージェントを起動中...",
   "runner.startedSingle": "エージェント起動完了 (poll: {{pollInterval}}ms, heartbeat: {{heartbeatInterval}}ms)",
   "runner.stopHint": "Ctrl+C で停止します",
