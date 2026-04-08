@@ -155,12 +155,19 @@ export function getProjectList(
   config: AgentConfig,
 ): ProjectRegistration[] {
   const projects = config.projects ?? []
-  return projects.filter((p) => {
+  return projects.flatMap((p) => {
     if (!p.tenantCode) {
+      // Token format is "{tenantCode}:{uuid}:{secret}" — extract tenantCode automatically
+      const tokenParts = p.token?.split(':')
+      if (tokenParts && tokenParts.length >= 3) {
+        const extractedTenantCode = tokenParts[0]
+        logger.info(`[config] Project "${p.projectCode}" has no tenantCode; extracted "${extractedTenantCode}" from token.`)
+        return [{ ...p, tenantCode: extractedTenantCode }]
+      }
       logger.warn(`[config] Project "${p.projectCode}" has no tenantCode and will be skipped. Re-run "agent login" to fix.`)
-      return false
+      return []
     }
-    return true
+    return [p]
   })
 }
 

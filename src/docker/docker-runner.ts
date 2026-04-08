@@ -774,6 +774,17 @@ class DockerSupervisor {
     const shouldBuild = hasMarker || (forceIfDockerfileExists && fs.existsSync(projectDockerfile))
     if (shouldBuild) {
       if (hasMarker) fs.unlinkSync(rebuildMarker)
+
+      // Load the registered agentId before building so build logs are stored under
+      // the correct agentId (the one shown in the Web UI), not the host agentId.
+      const registeredAgentIdPath = path.join(projectConfigHostDir, 'docker-registered-agent-id')
+      if (fs.existsSync(registeredAgentIdPath)) {
+        const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
+        if (registeredId && registeredId !== this.getProjectAgentId(project)) {
+          this.setProjectAgentId(project, registeredId)
+        }
+      }
+
       // The container writes Dockerfile into its configDir root, which maps to projectConfigHostDir on host.
       if (fs.existsSync(projectDockerfile)) {
         try {
