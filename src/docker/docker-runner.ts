@@ -731,6 +731,20 @@ class DockerSupervisor {
     this.sigtermHandler = (): void => { logger.info('[docker] SIGTERM received, shutting down...'); shutdown() }
     process.on('SIGINT', this.sigintHandler)
     process.on('SIGTERM', this.sigtermHandler)
+
+    // On macOS/Linux, Ctrl+C may not deliver SIGINT to Node.js when the terminal
+    // is in cooked mode and child processes share the process group. As a fallback,
+    // read \x03 (ETX) directly from stdin when it is a TTY in raw mode.
+    /* istanbul ignore next -- TTY-only path, not testable in CI */
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true)
+      process.stdin.resume()
+      process.stdin.on('data', (chunk: Buffer) => {
+        if (chunk[0] === 0x03) { // Ctrl+C
+          shutdown()
+        }
+      })
+    }
   }
 
   private getImageTag(project: ProjectRegistration): string {
@@ -862,11 +876,7 @@ class DockerSupervisor {
     const colorReset = '\x1b[0m'
     const logPrefix = `${projectColor}[${key}]${colorReset} `
     logger.info(`[docker] Starting container for project: ${key}`)
-    // detached: true puts docker run in its own process group so that Ctrl+C
-    // on the host terminal (which sends SIGINT to the foreground process group)
-    // does NOT kill docker run directly. Shutdown is handled exclusively by
-    // the Node.js SIGINT/SIGTERM handler calling stopAll() -> docker stop.
-    const child = spawn('docker', dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+    const child = spawn('docker', dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
 
     let resolveClosed!: () => void
     const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve })
