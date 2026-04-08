@@ -1,4 +1,4 @@
-import { logger, maskSecrets, getProjectColor, resetProjectColors, prefixLines, makeLinePrefixer } from '../src/logger'
+import { logger, maskSecrets, getProjectColor, resetProjectColors, prefixLines, makeLinePrefixer, stripCursorCodes } from '../src/logger'
 
 describe('logger', () => {
   let logSpy: jest.Spied<typeof console.log>
@@ -304,6 +304,112 @@ describe('logger', () => {
 
       expect(combined[0]).toBe('[A] hello from A\n')
       expect(combined[1]).toBe('[B] world from B\n')
+    })
+
+    it('should strip cursor-movement codes but preserve color codes', () => {
+      const output: string[] = []
+      const write = makeLinePrefixer('P> ', (s) => output.push(s))
+
+      // Simulate docker build output: erase-line + cursor-to-col-1 + color
+      write('\x1b[2K\x1b[1G\x1b[32mStep 1/5\x1b[0m\n')
+      expect(output).toHaveLength(1)
+      expect(output[0]).toContain('\x1b[32m')     // SGR color preserved
+      expect(output[0]).not.toContain('\x1b[2K')  // erase-line stripped
+      expect(output[0]).not.toContain('\x1b[1G')  // cursor-to-col stripped
+    })
+  })
+
+  describe('stripCursorCodes', () => {
+    it('should strip cursor up (A)', () => {
+      expect(stripCursorCodes('before\x1b[2Aafter')).toBe('beforeafter')
+    })
+
+    it('should strip cursor down (B)', () => {
+      expect(stripCursorCodes('before\x1b[1Bafter')).toBe('beforeafter')
+    })
+
+    it('should strip cursor forward (C)', () => {
+      expect(stripCursorCodes('\x1b[5Ctext')).toBe('text')
+    })
+
+    it('should strip cursor back (D)', () => {
+      expect(stripCursorCodes('text\x1b[3D')).toBe('text')
+    })
+
+    it('should strip cursor horizontal absolute with no param (G)', () => {
+      expect(stripCursorCodes('\x1b[Ghello')).toBe('hello')
+    })
+
+    it('should strip cursor position with two params (H)', () => {
+      expect(stripCursorCodes('\x1b[1;1Htext')).toBe('text')
+    })
+
+    it('should strip erase-in-line with no param (K)', () => {
+      expect(stripCursorCodes('line\x1b[K')).toBe('line')
+    })
+
+    it('should strip erase-entire-line (2K)', () => {
+      expect(stripCursorCodes('\x1b[2Kline')).toBe('line')
+    })
+
+    it('should strip erase-in-display (2J)', () => {
+      expect(stripCursorCodes('\x1b[2Jtext')).toBe('text')
+    })
+
+    it('should strip save cursor (s)', () => {
+      expect(stripCursorCodes('\x1b[stext')).toBe('text')
+    })
+
+    it('should strip restore cursor (u)', () => {
+      expect(stripCursorCodes('text\x1b[u')).toBe('text')
+    })
+
+    it('should strip hide cursor (?25l)', () => {
+      expect(stripCursorCodes('\x1b[?25ltext')).toBe('text')
+    })
+
+    it('should strip show cursor (?25h)', () => {
+      expect(stripCursorCodes('text\x1b[?25h')).toBe('text')
+    })
+
+    it('should strip bracketed paste mode on (?2004h)', () => {
+      expect(stripCursorCodes('\x1b[?2004htext')).toBe('text')
+    })
+
+    it('should strip bracketed paste mode off (?2004l)', () => {
+      expect(stripCursorCodes('text\x1b[?2004l')).toBe('text')
+    })
+
+    it('should NOT strip SGR color codes (m)', () => {
+      const colored = '\x1b[32mgreen text\x1b[0m'
+      expect(stripCursorCodes(colored)).toBe(colored)
+    })
+
+    it('should NOT strip bold/reset SGR codes', () => {
+      const bold = '\x1b[1mbold\x1b[0m'
+      expect(stripCursorCodes(bold)).toBe(bold)
+    })
+
+    it('should NOT strip 256-color SGR codes', () => {
+      const c256 = '\x1b[38;5;200mtext\x1b[0m'
+      expect(stripCursorCodes(c256)).toBe(c256)
+    })
+
+    it('should strip mixed cursor codes while preserving color in docker-like output', () => {
+      const dockerLine = '\x1b[2K\x1b[1G\x1b[32mStep 1/5 :\x1b[0m FROM node:18'
+      expect(stripCursorCodes(dockerLine)).toBe('\x1b[32mStep 1/5 :\x1b[0m FROM node:18')
+    })
+
+    it('should handle text with no escape sequences unchanged', () => {
+      expect(stripCursorCodes('plain text')).toBe('plain text')
+    })
+
+    it('should handle empty string', () => {
+      expect(stripCursorCodes('')).toBe('')
+    })
+
+    it('should strip multiple cursor codes in one string', () => {
+      expect(stripCursorCodes('\x1b[?25l\x1b[2K\x1b[Gloading...\x1b[?25h')).toBe('loading...')
     })
   })
 })

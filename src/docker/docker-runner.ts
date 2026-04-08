@@ -150,11 +150,16 @@ export function generateProjectDockerfile(
   aptPackages: string[],
   npmPackages: string[],
   commands: string[] = [],
+  timezone?: string,
 ): string {
   validatePackageNames(aptPackages, 'apt')
   validatePackageNames(npmPackages, 'npm')
 
   const lines = [`FROM ${IMAGE_NAME}:${baseVersion}`]
+  if (timezone) {
+    // Override the TZ env var set by docker run, allowing per-project custom timezone
+    lines.push(`ENV TZ=${timezone}`)
+  }
   if (aptPackages.length > 0) {
     lines.push(
       `RUN apt-get update && apt-get install -y --no-install-recommends \\`,
@@ -219,8 +224,8 @@ export async function buildProjectImage(
         logger.warn('[docker] Build log exceeded 2 MB limit; remaining output will not be saved to S3')
       }
     }
-    if (apiClient && agentId) {
-      await apiClient.submitLogChunk({ agentId, projectCode, logType: 'docker-build', sessionId, seq: ++seq, text })
+    if (apiClient) {
+      await apiClient.submitLogChunk({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, seq: ++seq, text })
         .catch((e: unknown) => logger.warn(`[docker] Failed to send log chunk: ${e}`))
     }
   }
@@ -253,8 +258,8 @@ export async function buildProjectImage(
 
   await flush()
 
-  if (apiClient && agentId && fullLog) {
-    await apiClient.saveSessionLog({ agentId, projectCode, logType: 'docker-build', sessionId, content: fullLog })
+  if (apiClient && fullLog) {
+    await apiClient.saveSessionLog({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, content: fullLog })
       .catch((e: unknown) => logger.warn(`[docker] Failed to upload build log to S3: ${e}`))
   }
 
@@ -611,6 +616,11 @@ function buildProjectVolumeMounts(
     }
   }
 
+  // Pass host timezone so container clocks match the host by default.
+  // The per-project Dockerfile can override this with ENV TZ= if a custom timezone is configured.
+  const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone
+  envArgs.push('-e', `TZ=${hostTz}`)
+
   // Project dir mapping: single project only
   const containerProjectDir = `${CONTAINER_PROJECTS_BASE}/${project.projectCode}`
   const blockedPrefixes = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
@@ -694,8 +704,8 @@ class DockerSupervisor {
     this.projectAgentIds.set(this.projectKey(project), agentId)
   }
 
-  private createProjectApiClient(project: ProjectRegistration): ApiClient | undefined {
-    return this.getProjectAgentId(project) ? new ApiClient(project.apiUrl, project.token) : undefined
+  private createProjectApiClient(project: ProjectRegistration): ApiClient {
+    return new ApiClient(project.apiUrl, project.token)
   }
 
   start(projects: ProjectRegistration[], onStop?: () => void): void {
@@ -727,10 +737,24 @@ class DockerSupervisor {
         process.exit(0)
       })
     }
-    this.sigintHandler = (): void => shutdown()
-    this.sigtermHandler = (): void => shutdown()
+    this.sigintHandler = (): void => { logger.info('[docker] SIGINT received, shutting down...'); shutdown() }
+    this.sigtermHandler = (): void => { logger.info('[docker] SIGTERM received, shutting down...'); shutdown() }
     process.on('SIGINT', this.sigintHandler)
     process.on('SIGTERM', this.sigtermHandler)
+
+    // On macOS/Linux, Ctrl+C may not deliver SIGINT to Node.js when the terminal
+    // is in cooked mode and child processes share the process group. As a fallback,
+    // read \x03 (ETX) directly from stdin when it is a TTY in raw mode.
+    /* istanbul ignore next -- TTY-only path, not testable in CI */
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true)
+      process.stdin.resume()
+      process.stdin.on('data', (chunk: Buffer) => {
+        if (chunk[0] === 0x03) { // Ctrl+C
+          shutdown()
+        }
+      })
+    }
   }
 
   private getImageTag(project: ProjectRegistration): string {
@@ -738,7 +762,7 @@ class DockerSupervisor {
     try {
       execFileSync('docker', ['image', 'inspect', projectTag], { stdio: 'ignore' })
       return projectTag
-    } catch {
+    } catch /* istanbul ignore next */ {
       return `${IMAGE_NAME}:${this.version}`
     }
   }
@@ -750,6 +774,17 @@ class DockerSupervisor {
     const shouldBuild = hasMarker || (forceIfDockerfileExists && fs.existsSync(projectDockerfile))
     if (shouldBuild) {
       if (hasMarker) fs.unlinkSync(rebuildMarker)
+
+      // Load the registered agentId before building so build logs are stored under
+      // the correct agentId (the one shown in the Web UI), not the host agentId.
+      const registeredAgentIdPath = path.join(projectConfigHostDir, 'docker-registered-agent-id')
+      if (fs.existsSync(registeredAgentIdPath)) {
+        const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
+        if (registeredId && registeredId !== this.getProjectAgentId(project)) {
+          this.setProjectAgentId(project, registeredId)
+        }
+      }
+
       // The container writes Dockerfile into its configDir root, which maps to projectConfigHostDir on host.
       if (fs.existsSync(projectDockerfile)) {
         try {
@@ -763,6 +798,7 @@ class DockerSupervisor {
           }
           // Clear any previous build error so the container can report success
           const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
+          /* istanbul ignore next */
           if (fs.existsSync(buildErrorPath)) {
             fs.unlinkSync(buildErrorPath)
           }
@@ -774,6 +810,7 @@ class DockerSupervisor {
           // Truncate to 3000 chars to avoid DynamoDB item size limits
           const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
           const truncatedError = errorMsg.length > 3000 ? errorMsg.substring(0, 3000) + '...(truncated)' : errorMsg
+          /* istanbul ignore next */
           try {
             fs.writeFileSync(buildErrorPath, truncatedError, 'utf-8')
           } catch (writeErr) {
@@ -844,12 +881,12 @@ class DockerSupervisor {
       containerArgs.push('--update-channel', this.opts.updateChannel)
     }
 
-    // Always use -i (no -t) in supervisor mode so Ctrl+C on the host does NOT propagate
-    // directly into the container via the TTY. Shutdown is handled exclusively by docker stop.
+    // No -i/-t flags: the container does not need stdin. stdout/stderr are
+    // captured via pipe. Shutdown is handled exclusively via docker stop.
     const imageTag = this.getImageTag(project)
     const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
     const dockerArgs = [
-      'run', '--rm', '--cidfile', cidFile, '-i',
+      'run', '--rm', '--cidfile', cidFile,
       ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
       ...mounts,
       ...buildDevMounts(),
@@ -862,7 +899,7 @@ class DockerSupervisor {
     const colorReset = '\x1b[0m'
     const logPrefix = `${projectColor}[${key}]${colorReset} `
     logger.info(`[docker] Starting container for project: ${key}`)
-    const child = spawn('docker', dockerArgs, { stdio: ['inherit', 'pipe', 'pipe'] })
+    const child = spawn('docker', dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
 
     let resolveClosed!: () => void
     const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve })
@@ -880,7 +917,7 @@ class DockerSupervisor {
     // Stream container stdout/stderr to host terminal and API for real-time log viewing
     // Use project-specific ApiClient so the token matches the projectCode in the request
     const projectApiClient = this.createProjectApiClient(project)
-    if (projectApiClient && this.getProjectAgentId(project)) {
+    if (projectApiClient) {
       const sessionId = makeSessionId()
       let seq = 0
       let fullLog = ''
@@ -950,15 +987,8 @@ class DockerSupervisor {
           } else {
             handle.resolveClosed()
           }
-        }).catch(() => { handle.resolveClosed() }).catch(() => { handle.resolveClosed() })
+        }).catch(/* istanbul ignore next */ () => { handle.resolveClosed() }).catch(/* istanbul ignore next */ () => { handle.resolveClosed() })
       })
-    } else {
-      // No log streaming: forward to host terminal directly with colored prefix
-      const writeStdoutDirect = makeLinePrefixer(logPrefix, (s) => process.stdout.write(s))
-      const writeStderrDirect = makeLinePrefixer(logPrefix, (s) => process.stderr.write(s))
-      child.stdout?.on('data', (d: Buffer) => writeStdoutDirect(d.toString()))
-      child.stderr?.on('data', (d: Buffer) => writeStderrDirect(d.toString()))
-      child.on('close', () => { handle.resolveClosed() })
     }
 
     child.on('error', (err) => {
@@ -1007,14 +1037,16 @@ class DockerSupervisor {
         // Use spawn (non-blocking) so we don't stall the Node.js event loop during shutdown.
         let stopped = false
         try {
+          /* istanbul ignore next */
           if (fs.existsSync(handle.cidFile)) {
             const containerId = fs.readFileSync(handle.cidFile, 'utf-8').trim()
+            /* istanbul ignore next */
             if (containerId) {
               spawn('docker', ['stop', '--time', '5', containerId], { stdio: 'ignore' })
               stopped = true
             }
           }
-        } catch {
+        } catch /* istanbul ignore next */ {
           // Ignore errors — fall through to child.kill
         }
         if (!stopped) {

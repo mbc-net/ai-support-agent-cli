@@ -205,6 +205,32 @@ describe('config-manager', () => {
       })
       expect(result).toEqual([])
     })
+
+    it('should extract tenantCode from token when tenantCode is missing', () => {
+      const projects = [
+        { tenantCode: '', projectCode: 'p1', token: '00000001:uuid:secret', apiUrl: 'http://a1' },
+      ]
+      const result = getProjectList({
+        agentId: 'test',
+        createdAt: '2026-01-01',
+        projects,
+      })
+      expect(result).toHaveLength(1)
+      expect(result[0].tenantCode).toBe('00000001')
+      expect(result[0].projectCode).toBe('p1')
+    })
+
+    it('should skip project with no tenantCode and unparseable token', () => {
+      const projects = [
+        { tenantCode: '', projectCode: 'p1', token: 'invalid', apiUrl: 'http://a1' },
+      ]
+      const result = getProjectList({
+        agentId: 'test',
+        createdAt: '2026-01-01',
+        projects,
+      })
+      expect(result).toHaveLength(0)
+    })
   })
 
   describe('addProject', () => {

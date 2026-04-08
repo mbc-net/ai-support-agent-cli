@@ -73,6 +73,30 @@ export function prefixLines(text: string, prefix: string): string {
 }
 
 /**
+ * Regex matching ANSI CSI escape sequences that move the cursor or erase
+ * screen content — but NOT SGR color/formatting codes (which end in `m`).
+ *
+ * Covers:
+ *   \x1b[<n>A-H  — cursor movement (up/down/forward/back/next-line/prev-line/
+ *                   horizontal-absolute/position)
+ *   \x1b[<n>J    — erase in display
+ *   \x1b[<n>K    — erase in line
+ *   \x1b[<n>S/T  — scroll up/down
+ *   \x1b[<n>f    — horizontal vertical position
+ *   \x1b[s/u     — save/restore cursor position
+ *   \x1b[?<n>h/l — DEC private modes (hide/show cursor, bracketed paste, etc.)
+ */
+const CURSOR_CODE_RE = /\x1b\[[\d;]*[A-HJKSTfsu]|\x1b\[\?[\d;]*[hl]/g
+
+/**
+ * Strip ANSI cursor-movement and erase escape sequences from `text`.
+ * SGR color/formatting codes (`\x1b[...m`) are intentionally preserved.
+ */
+export function stripCursorCodes(text: string): string {
+  return text.replace(CURSOR_CODE_RE, '')
+}
+
+/**
  * Creates a stateful line-buffering writer that ensures each output line
  * is prefixed atomically. Chunks that don't end with a newline are held in
  * a buffer until the next chunk completes the line, preventing interleaved
@@ -88,8 +112,9 @@ export function makeLinePrefixer(
 ): (chunk: string) => void {
   let lineBuffer = ''
   return (chunk: string): void => {
-    // Normalize \r\n → \n so that \r does not reset the cursor before the prefix
-    lineBuffer += chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    // Normalize \r\n → \n, bare \r → \n, then strip cursor-movement codes
+    const normalized = chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    lineBuffer += stripCursorCodes(normalized)
     const newlineIdx = lineBuffer.lastIndexOf('\n')
     if (newlineIdx === -1) return // no complete line yet — keep buffering
     const complete = lineBuffer.slice(0, newlineIdx + 1)

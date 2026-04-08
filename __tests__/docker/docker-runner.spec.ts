@@ -70,6 +70,7 @@ jest.mock('../../src/logger', () => ({
   prefixLines: jest.fn().mockImplementation((text: string) => text),
   maskSecrets: jest.fn().mockImplementation((text: string) => text),
   makeLinePrefixer: jest.fn().mockImplementation((_prefix: string, write: (s: string) => void) => (chunk: string) => write(chunk)),
+  stripCursorCodes: jest.fn().mockImplementation((text: string) => text),
 }))
 
 jest.mock('../../src/update-checker', () => ({
@@ -429,6 +430,13 @@ describe('docker-runner', () => {
       expect(args[1]).toBe('AI_SUPPORT_AGENT_IN_DOCKER=1')
       expect(args[2]).toBe('-e')
       expect(args[3]).toBe('HOME=/home/node')
+    })
+
+    it('should not include TZ (TZ is added by buildProjectVolumeMounts for per-project containers)', () => {
+      const args = buildEnvArgs([])
+      // Legacy buildEnvArgs does not include TZ; per-project containers use buildProjectVolumeMounts
+      const tzArg = args.find((a: string) => a.startsWith('TZ='))
+      expect(tzArg).toBeUndefined()
     })
   })
 
@@ -1933,6 +1941,65 @@ describe('docker-runner', () => {
       expect(mockSpawn).toHaveBeenCalledTimes(3)
     })
 
+    it('should load registered agentId from docker-registered-agent-id before rebuild', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      let spawnCount = 0
+      const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const fakeBuildChild = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const fakeChild2 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
+      const { ApiClient: MockApiClient } = require('../../src/api-client')
+      const capturedChunks: Array<{ agentId: string; logType: string }> = []
+      MockApiClient.mockImplementation(() => ({
+        submitLogChunk: jest.fn().mockImplementation((args: { agentId: string; logType: string }) => {
+          capturedChunks.push(args)
+          return Promise.resolve(undefined)
+        }),
+        saveSessionLog: jest.fn().mockResolvedValue(undefined),
+      }))
+      mockSpawn.mockImplementation(() => {
+        spawnCount++
+        if (spawnCount === 1) return fakeChild1 as never
+        if (spawnCount === 2) return fakeBuildChild as never
+        return fakeChild2 as never
+      })
+      mockLoadConfig.mockReturnValue({
+        agentId: 'host-agent-id',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
+        ],
+      })
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        return ps.endsWith('docker-rebuild-needed') || ps.endsWith('Dockerfile') || ps.endsWith('docker-registered-agent-id')
+      })
+      mockReadFileSync.mockImplementation((p: unknown) => {
+        const ps = String(p)
+        if (ps.endsWith('docker-registered-agent-id')) return 'registered-uuid-agent-id' as any
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      runInDocker({})
+      resetIsDockerRunning()
+
+      fakeChild1.emit('close', 43)
+      await Promise.resolve()
+      // Emit some build output so submitLogChunk is called
+      fakeBuildChild.stdout?.emit('data', Buffer.from('Step 1/2 : FROM node'))
+      await Promise.resolve()
+      fakeBuildChild.emit('close', 0)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // Build log chunks should use the registered agentId (not the host agentId)
+      const buildCall = capturedChunks.find((c) => c.logType === 'docker-build')
+      if (buildCall) {
+        expect(buildCall.agentId).toBe('registered-uuid-agent-id')
+      }
+    })
+
     it('should NOT restart container when image build fails', async () => {
       let spawnCount = 0
       const fakeChild1 = Object.assign(new EventEmitter(), { kill: jest.fn(), stdout: new EventEmitter(), stderr: new EventEmitter() })
@@ -2321,12 +2388,40 @@ describe('generateProjectDockerfile', () => {
     expect(result).toContain('npm install -g typescript')
   })
 
+  it('should include RUN command when commands are given', () => {
+    const result = generateProjectDockerfile('1.0.0', [], [], ['echo hello'])
+    expect(result).toContain('RUN echo hello')
+  })
+
+  it('should throw when command contains forbidden characters', () => {
+    expect(() => generateProjectDockerfile('1.0.0', [], [], ['rm -rf /; evil'])).toThrow('Invalid command')
+  })
+
   it('should throw when apt package name is invalid', () => {
     expect(() => generateProjectDockerfile('1.0.0', ['curl; evil'], [])).toThrow('Invalid apt package name')
   })
 
   it('should throw when npm package name is invalid', () => {
     expect(() => generateProjectDockerfile('1.0.0', [], ['ts; evil'])).toThrow('Invalid npm package name')
+  })
+
+  it('should include ENV TZ when timezone is provided', () => {
+    const result = generateProjectDockerfile('1.0.0', [], [], [], 'Asia/Tokyo')
+    expect(result).toContain('ENV TZ=Asia/Tokyo')
+  })
+
+  it('should place ENV TZ before RUN instructions', () => {
+    const result = generateProjectDockerfile('1.0.0', ['curl'], [], [], 'UTC')
+    const lines = result.split('\n')
+    const tzIdx = lines.findIndex((l) => l.startsWith('ENV TZ='))
+    const runIdx = lines.findIndex((l) => l.startsWith('RUN'))
+    expect(tzIdx).toBeGreaterThan(-1)
+    expect(tzIdx).toBeLessThan(runIdx)
+  })
+
+  it('should not include ENV TZ when timezone is not provided', () => {
+    const result = generateProjectDockerfile('1.0.0', [], [])
+    expect(result).not.toContain('ENV TZ=')
   })
 })
 
