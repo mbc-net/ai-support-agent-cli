@@ -1,17 +1,13 @@
 import { TOKEN_WATCH_INTERVAL_MS } from './constants'
 import { loadConfig, getProjectList } from './config-manager'
 import { logger } from './logger'
+import { projectKey } from './project-key'
 import type { ProjectRegistration } from './types'
 
 export interface ConfigWatcherCallbacks {
   onTokenUpdate: (project: ProjectRegistration, newToken: string) => void
   onProjectAdded: (project: ProjectRegistration) => void
   onProjectRemoved: (project: ProjectRegistration) => void
-}
-
-/** Internal map key that uniquely identifies a project across tenants */
-function projectKey(p: ProjectRegistration): string {
-  return `${p.tenantCode}/${p.projectCode}`
 }
 
 /**
@@ -64,8 +60,10 @@ export function startConfigWatcher(
           callbacks.onProjectRemoved(project)
         }
       }
-    } catch {
-      // Config may be in the middle of being written; ignore read errors
+    } catch (err) {
+      // Config may be in the middle of being written; only warn on unexpected errors
+      if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') return
+      logger.warn(`[config-watcher] Error reading config: ${err instanceof Error ? err.message : String(err)}`)
     }
   }, TOKEN_WATCH_INTERVAL_MS)
 

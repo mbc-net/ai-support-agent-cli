@@ -43,28 +43,33 @@ export type ParentToChildMessage =
 
 export interface IpcStartedMessage {
   type: 'started'
+  tenantCode: string
   projectCode: string
 }
 
 export interface IpcErrorMessage {
   type: 'error'
+  tenantCode: string
   projectCode: string
   message: string
 }
 
 export interface IpcStoppedMessage {
   type: 'stopped'
+  tenantCode: string
   projectCode: string
 }
 
 export interface IpcBusyResponseMessage {
   type: 'busy_response'
+  tenantCode: string
   projectCode: string
   busy: boolean
 }
 
 export interface IpcUpdateCompleteMessage {
   type: 'update_complete'
+  tenantCode: string
   projectCode: string
 }
 
@@ -102,13 +107,13 @@ export function isChildToParentMessage(msg: unknown): msg is ChildToParentMessag
   if (!isObject(msg)) return false
   const { type } = msg
   if (type === 'started' || type === 'stopped' || type === 'update_complete') {
-    return typeof msg.projectCode === 'string'
+    return typeof msg.tenantCode === 'string' && typeof msg.projectCode === 'string'
   }
   if (type === 'error') {
-    return typeof msg.projectCode === 'string' && typeof msg.message === 'string'
+    return typeof msg.tenantCode === 'string' && typeof msg.projectCode === 'string' && typeof msg.message === 'string'
   }
   if (type === 'busy_response') {
-    return typeof msg.projectCode === 'string' && typeof msg.busy === 'boolean'
+    return typeof msg.tenantCode === 'string' && typeof msg.projectCode === 'string' && typeof msg.busy === 'boolean'
   }
   return false
 }

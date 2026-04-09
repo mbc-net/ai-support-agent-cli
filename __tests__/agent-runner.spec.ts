@@ -558,7 +558,7 @@ describe('agent-runner', () => {
         getRunningCount: mockGetRunningCount,
         isAnyBusy: mockIsAnyBusy,
         stopProject: jest.fn(),
-        onUpdateComplete: undefined as (() => void) | undefined,
+        onUpdateComplete: undefined as ((project: { tenantCode: string; projectCode: string; token: string; apiUrl: string }) => void) | undefined,
       }
       return capturedManager
     })
@@ -574,8 +574,8 @@ describe('agent-runner', () => {
       expect(capturedManager).not.toBeNull()
       expect(typeof capturedManager.onUpdateComplete).toBe('function')
 
-      // Trigger onUpdateComplete
-      capturedManager.onUpdateComplete()
+      // Trigger onUpdateComplete with a project (new signature)
+      capturedManager.onUpdateComplete({ tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
       await jest.advanceTimersByTimeAsync(100)
       await Promise.resolve()
 

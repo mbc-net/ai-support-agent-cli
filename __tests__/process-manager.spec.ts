@@ -66,7 +66,7 @@ describe('ChildProcessManager', () => {
 
       manager.forkProject(project, 'agent-1', options)
 
-      mockChild.emit('message', { type: 'started', projectCode: 'proj-a' })
+      mockChild.emit('message', { type: 'started', tenantCode: 'mbc', projectCode: 'proj-a' })
 
       expect(logger.info).toHaveBeenCalledWith(
         expect.stringContaining('proj-a started'),
@@ -79,7 +79,7 @@ describe('ChildProcessManager', () => {
 
       manager.forkProject(project, 'agent-1', options)
 
-      mockChild.emit('message', { type: 'error', projectCode: 'proj-a', message: 'boom' })
+      mockChild.emit('message', { type: 'error', tenantCode: 'mbc', projectCode: 'proj-a', message: 'boom' })
 
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('boom'),
@@ -92,7 +92,7 @@ describe('ChildProcessManager', () => {
 
       manager.forkProject(project, 'agent-1', options)
 
-      mockChild.emit('message', { type: 'stopped', projectCode: 'proj-a' })
+      mockChild.emit('message', { type: 'stopped', tenantCode: 'mbc', projectCode: 'proj-a' })
 
       expect(logger.info).toHaveBeenCalledWith(
         expect.stringContaining('proj-a stopped'),
@@ -179,7 +179,7 @@ describe('ChildProcessManager', () => {
       }
 
       // Child sends started -> counter should reset
-      children[3].emit('message', { type: 'started', projectCode: 'proj-a' })
+      children[3].emit('message', { type: 'started', tenantCode: 'mbc', projectCode: 'proj-a' })
 
       // Now it should be able to restart again from 0
       const child5 = createMockChild()

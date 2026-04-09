@@ -13,7 +13,7 @@ import type { AgentChatMode, AutoUpdateConfig, ProjectRegistration, ReleaseChann
 import { detectChannelFromVersion } from './update-checker'
 import { validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
-import { startConfigWatcher, startTokenWatcher } from './config-watcher'
+import { startConfigWatcher } from './config-watcher'
 import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
 
 /**
@@ -165,8 +165,12 @@ function runSingleProject(
 
   let tokenWatcher: { stop: () => void } | undefined
   if (enableTokenWatcher) {
-    tokenWatcher = startTokenWatcher([project], (_project, newToken) => {
-      started.agent.updateToken(newToken)
+    tokenWatcher = startConfigWatcher([project], {
+      onTokenUpdate: (_project, newToken) => {
+        started.agent.updateToken(newToken)
+      },
+      onProjectAdded: () => {},
+      onProjectRemoved: () => {},
     })
   }
 
@@ -313,8 +317,8 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   // In Docker mode, when a worker completes an update, exit the runner with
   // DOCKER_UPDATE_EXIT_CODE so the host-side runInDocker() rebuilds the image.
   if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
-    processManager.onUpdateComplete = () => {
-      logger.info('[docker] Worker update complete. Exiting container to rebuild image...')
+    processManager.onUpdateComplete = (project) => {
+      logger.info(`[docker] Worker update complete (${project.tenantCode}/${project.projectCode}). Exiting container to rebuild image...`)
       void processManager.stopAll().then(() => process.exit(DOCKER_UPDATE_EXIT_CODE))
     }
   }

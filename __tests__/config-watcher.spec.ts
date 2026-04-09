@@ -225,10 +225,9 @@ describe('startConfigWatcher', () => {
     watcher.stop()
   })
 
-  it('should ignore config read errors', () => {
-    mockedLoadConfig.mockImplementation(() => {
-      throw new Error('ENOENT: file not found')
-    })
+  it('should silently ignore ENOENT errors (file not yet written)', () => {
+    const enoentError = Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' })
+    mockedLoadConfig.mockImplementation(() => { throw enoentError })
 
     const callbacks = {
       onTokenUpdate: jest.fn(),
@@ -242,6 +241,25 @@ describe('startConfigWatcher', () => {
     expect(callbacks.onTokenUpdate).not.toHaveBeenCalled()
     expect(callbacks.onProjectAdded).not.toHaveBeenCalled()
     expect(callbacks.onProjectRemoved).not.toHaveBeenCalled()
+
+    watcher.stop()
+  })
+
+  it('should log a warning for unexpected errors', () => {
+    mockedLoadConfig.mockImplementation(() => {
+      throw new Error('unexpected read failure')
+    })
+
+    const callbacks = {
+      onTokenUpdate: jest.fn(),
+      onProjectAdded: jest.fn(),
+      onProjectRemoved: jest.fn(),
+    }
+    const watcher = startConfigWatcher(projects, callbacks)
+
+    jest.advanceTimersByTime(5000)
+
+    expect(callbacks.onTokenUpdate).not.toHaveBeenCalled()
 
     watcher.stop()
   })

@@ -11,12 +11,8 @@ import {
 import type { ChildToParentMessage, IpcStartMessage, IpcBusyResponseMessage } from './ipc-types'
 import { isChildToParentMessage } from './ipc-types'
 import { logger } from './logger'
+import { projectKey } from './project-key'
 import type { AgentChatMode, ProjectRegistration } from './types'
-
-/** Internal map key that uniquely identifies a project across tenants */
-function projectKey(project: ProjectRegistration): string {
-  return `${project.tenantCode}/${project.projectCode}`
-}
 
 interface ManagedProcess {
   child: ChildProcess
@@ -30,7 +26,7 @@ export class ChildProcessManager {
   private readonly restartTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly busyResponseHandlers: Array<(msg: IpcBusyResponseMessage) => void> = []
   private stopping = false
-  onUpdateComplete?: () => void
+  onUpdateComplete?: (project: ProjectRegistration) => void
 
   forkProject(
     project: ProjectRegistration,
@@ -95,6 +91,7 @@ export class ChildProcessManager {
   }
 
   private handleChildMessage(key: string, msg: ChildToParentMessage): void {
+    const managed = this.processes.get(key)
     switch (msg.type) {
       case 'started':
         logger.info(`Project ${key} started in child process`)
@@ -113,7 +110,7 @@ export class ChildProcessManager {
         break
       case 'update_complete':
         logger.info(`Project ${key} update complete, notifying runner`)
-        this.onUpdateComplete?.()
+        if (managed) this.onUpdateComplete?.(managed.project)
         break
     }
   }
@@ -261,13 +258,7 @@ export class ChildProcessManager {
 
       const handler = (msg: IpcBusyResponseMessage): void => {
         if (msg.busy) anyBusy = true
-        // pending keys are tenantCode/projectCode; match by projectCode suffix
-        for (const key of pending) {
-          if (key === msg.projectCode || key.endsWith(`/${msg.projectCode}`)) {
-            pending.delete(key)
-            break
-          }
-        }
+        pending.delete(`${msg.tenantCode}/${msg.projectCode}`)
         if (pending.size === 0) {
           cleanup()
           resolve(anyBusy)
