@@ -85,17 +85,12 @@ export class ChildProcessManager {
     logger.info(`Forked child process for ${key} (pid=${child.pid})`)
   }
 
-  private resetRestartCount(key: string): void {
-    const managed = this.processes.get(key)
-    if (managed) managed.restartCount = 0
-  }
-
   private handleChildMessage(key: string, msg: ChildToParentMessage): void {
     const managed = this.processes.get(key)
     switch (msg.type) {
       case 'started':
         logger.info(`Project ${key} started in child process`)
-        this.resetRestartCount(key)
+        if (managed) managed.restartCount = 0
         break
       case 'error':
         logger.error(`Project ${key} error: ${msg.message}`)
@@ -146,7 +141,6 @@ export class ChildProcessManager {
   async stopProject(project: ProjectRegistration, timeoutMs: number = CHILD_PROCESS_STOP_TIMEOUT_MS): Promise<void> {
     const key = projectKey(project)
 
-    // pending restart timer があればキャンセル
     const restartTimer = this.restartTimers.get(key)
     if (restartTimer) {
       clearTimeout(restartTimer)
@@ -198,10 +192,10 @@ export class ChildProcessManager {
   }
 
   sendUpdateToAll(): void {
-    for (const [projectCode, managed] of this.processes) {
+    for (const [key, managed] of this.processes) {
       if (managed.child.connected) {
         managed.child.send({ type: 'update' })
-        logger.debug(`Sent update to ${projectCode}`)
+        logger.debug(`Sent update to ${key}`)
       }
     }
   }
@@ -214,16 +208,16 @@ export class ChildProcessManager {
 
     const shutdownPromises: Promise<void>[] = []
 
-    for (const [projectCode, managed] of this.processes) {
+    for (const [key, managed] of this.processes) {
       if (managed.child.connected) {
         managed.child.send({ type: 'shutdown' })
-        logger.debug(`Sent shutdown to ${projectCode}`)
+        logger.debug(`Sent shutdown to ${key}`)
       }
 
       shutdownPromises.push(
         new Promise<void>((resolve) => {
           const timer = setTimeout(() => {
-            logger.warn(`Force killing ${projectCode} (timeout)`)
+            logger.warn(`Force killing ${key} (timeout)`)
             managed.child.kill('SIGKILL')
             resolve()
           }, timeoutMs)
@@ -241,13 +235,18 @@ export class ChildProcessManager {
   }
 
   async isAnyBusy(timeoutMs: number = BUSY_QUERY_TIMEOUT_MS): Promise<boolean> {
-    const connectedProcesses = Array.from(this.processes.entries())
-      .filter(([, m]) => m.child.connected)
+    const connected: ManagedProcess[] = []
+    const pending = new Set<string>()
+    for (const [key, m] of this.processes) {
+      if (m.child.connected) {
+        connected.push(m)
+        pending.add(key)
+      }
+    }
 
-    if (connectedProcesses.length === 0) return false
+    if (connected.length === 0) return false
 
     return new Promise<boolean>((resolve) => {
-      const pending = new Set(connectedProcesses.map(([code]) => code))
       let anyBusy = false
 
       const timer = setTimeout(() => {
@@ -258,7 +257,7 @@ export class ChildProcessManager {
 
       const handler = (msg: IpcBusyResponseMessage): void => {
         if (msg.busy) anyBusy = true
-        pending.delete(`${msg.tenantCode}/${msg.projectCode}`)
+        pending.delete(projectKey(msg))
         if (pending.size === 0) {
           cleanup()
           resolve(anyBusy)
@@ -273,7 +272,7 @@ export class ChildProcessManager {
 
       this.busyResponseHandlers.push(handler)
 
-      for (const [, managed] of connectedProcesses) {
+      for (const managed of connected) {
         managed.child.send({ type: 'busy_query' })
       }
     })

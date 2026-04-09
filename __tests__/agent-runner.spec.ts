@@ -7,6 +7,7 @@ import {
   resolveAutoUpdateConfig,
   extractTokenId,
 } from '../src/agent-runner'
+import type { ProjectRegistration } from '../src/types'
 import { AppSyncSubscriber } from '../src/appsync-subscriber'
 import { AGENT_VERSION } from '../src/constants'
 import { getSystemInfo, getLocalIpAddress } from '../src/system-info'
@@ -558,7 +559,7 @@ describe('agent-runner', () => {
         getRunningCount: mockGetRunningCount,
         isAnyBusy: mockIsAnyBusy,
         stopProject: jest.fn(),
-        onUpdateComplete: undefined as ((project: { tenantCode: string; projectCode: string; token: string; apiUrl: string }) => void) | undefined,
+        onUpdateComplete: undefined as ((project: ProjectRegistration) => void) | undefined,
       }
       return capturedManager
     })
@@ -574,7 +575,6 @@ describe('agent-runner', () => {
       expect(capturedManager).not.toBeNull()
       expect(typeof capturedManager.onUpdateComplete).toBe('function')
 
-      // Trigger onUpdateComplete with a project (new signature)
       capturedManager.onUpdateComplete({ tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' })
       await jest.advanceTimersByTimeAsync(100)
       await Promise.resolve()
