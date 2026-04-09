@@ -46,7 +46,10 @@ describe('startConfigWatcher', () => {
     jest.advanceTimersByTime(5000)
 
     expect(callbacks.onTokenUpdate).toHaveBeenCalledTimes(1)
-    expect(callbacks.onTokenUpdate).toHaveBeenCalledWith('proj-a', 'new-token-a')
+    expect(callbacks.onTokenUpdate).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
+      'new-token-a',
+    )
     expect(callbacks.onProjectAdded).not.toHaveBeenCalled()
     expect(callbacks.onProjectRemoved).not.toHaveBeenCalled()
 
@@ -97,7 +100,9 @@ describe('startConfigWatcher', () => {
     jest.advanceTimersByTime(5000)
 
     expect(callbacks.onProjectRemoved).toHaveBeenCalledTimes(1)
-    expect(callbacks.onProjectRemoved).toHaveBeenCalledWith('proj-b')
+    expect(callbacks.onProjectRemoved).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+    )
     expect(callbacks.onTokenUpdate).not.toHaveBeenCalled()
     expect(callbacks.onProjectAdded).not.toHaveBeenCalled()
 
@@ -128,11 +133,16 @@ describe('startConfigWatcher', () => {
 
     jest.advanceTimersByTime(5000)
 
-    expect(callbacks.onTokenUpdate).toHaveBeenCalledWith('proj-a', 'new-token-a')
+    expect(callbacks.onTokenUpdate).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
+      'new-token-a',
+    )
     expect(callbacks.onProjectAdded).toHaveBeenCalledWith(
       { tenantCode: 'mbc', projectCode: 'proj-c', token: 'token-c', apiUrl: 'http://api-c' },
     )
-    expect(callbacks.onProjectRemoved).toHaveBeenCalledWith('proj-b')
+    expect(callbacks.onProjectRemoved).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+    )
 
     watcher.stop()
   })
@@ -283,7 +293,10 @@ describe('startTokenWatcher (legacy wrapper)', () => {
 
     jest.advanceTimersByTime(5000)
 
-    expect(callback).toHaveBeenCalledWith('proj-a', 'new-token')
+    expect(callback).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'new-token', apiUrl: 'http://api-a' },
+      'new-token',
+    )
 
     watcher.stop()
   })

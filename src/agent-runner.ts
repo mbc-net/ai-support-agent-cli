@@ -165,7 +165,7 @@ function runSingleProject(
 
   let tokenWatcher: { stop: () => void } | undefined
   if (enableTokenWatcher) {
-    tokenWatcher = startTokenWatcher([project], (_projectCode, newToken) => {
+    tokenWatcher = startTokenWatcher([project], (_project, newToken) => {
       started.agent.updateToken(newToken)
     })
   }
@@ -329,16 +329,16 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   const updater = initAutoUpdater(options, config, client, agentId, () => processManager.stopAll(), () => processManager.isAnyBusy())
 
   const configWatcher = startConfigWatcher(projects, {
-    onTokenUpdate: (projectCode, newToken) => {
-      processManager.sendTokenUpdate(projectCode, newToken)
+    onTokenUpdate: (project, newToken) => {
+      processManager.sendTokenUpdate(project, newToken)
     },
     onProjectAdded: (project) => {
-      logger.info(`Hot-adding project: ${project.projectCode}`)
+      logger.info(`Hot-adding project: ${project.tenantCode}/${project.projectCode}`)
       processManager.forkProject(project, agentId, forkOptions)
     },
-    onProjectRemoved: (projectCode) => {
-      logger.info(`Hot-removing project: ${projectCode}`)
-      void processManager.stopProject(projectCode)
+    onProjectRemoved: (project) => {
+      logger.info(`Hot-removing project: ${project.tenantCode}/${project.projectCode}`)
+      void processManager.stopProject(project)
     },
   })
 

@@ -58,11 +58,12 @@ describe('ChildProcessManager', () => {
   describe('hasProject', () => {
     it('should return true for forked project', () => {
       manager.forkProject(project, 'agent-1', options)
-      expect(manager.hasProject('proj-a')).toBe(true)
+      expect(manager.hasProject(project)).toBe(true)
     })
 
     it('should return false for unknown project', () => {
-      expect(manager.hasProject('proj-unknown')).toBe(false)
+      const unknown = { tenantCode: 'mbc', projectCode: 'proj-unknown', token: 't', apiUrl: 'http://api' }
+      expect(manager.hasProject(unknown)).toBe(false)
     })
   })
 
@@ -71,9 +72,9 @@ describe('ChildProcessManager', () => {
       manager.forkProject(project, 'agent-1', options)
       const child = fork.mock.results[0].value
 
-      expect(manager.hasProject('proj-a')).toBe(true)
+      expect(manager.hasProject(project)).toBe(true)
 
-      const stopPromise = manager.stopProject('proj-a')
+      const stopPromise = manager.stopProject(project)
 
       expect(child.send).toHaveBeenCalledWith({ type: 'shutdown' })
 
@@ -82,11 +83,12 @@ describe('ChildProcessManager', () => {
 
       await stopPromise
 
-      expect(manager.hasProject('proj-a')).toBe(false)
+      expect(manager.hasProject(project)).toBe(false)
     })
 
     it('should do nothing for unknown project', async () => {
-      await manager.stopProject('proj-unknown')
+      const unknown = { tenantCode: 'mbc', projectCode: 'proj-unknown', token: 't', apiUrl: 'http://api' }
+      await manager.stopProject(unknown)
       // Should not throw
     })
 
@@ -96,7 +98,7 @@ describe('ChildProcessManager', () => {
 
       jest.useFakeTimers()
 
-      const stopPromise = manager.stopProject('proj-a', 100)
+      const stopPromise = manager.stopProject(project, 100)
 
       // Don't emit exit — let it timeout
       jest.advanceTimersByTime(200)
@@ -104,7 +106,7 @@ describe('ChildProcessManager', () => {
       await stopPromise
 
       expect(child.kill).toHaveBeenCalledWith('SIGKILL')
-      expect(manager.hasProject('proj-a')).toBe(false)
+      expect(manager.hasProject(project)).toBe(false)
 
       jest.useRealTimers()
     })
@@ -115,13 +117,14 @@ describe('ChildProcessManager', () => {
       manager.forkProject(project, 'agent-1', options)
       const child = fork.mock.results[0].value
 
-      manager.sendTokenUpdate('proj-a', 'new-token')
+      manager.sendTokenUpdate(project, 'new-token')
 
       expect(child.send).toHaveBeenCalledWith({ type: 'token_update', token: 'new-token' })
     })
 
     it('should do nothing for unknown project', () => {
-      manager.sendTokenUpdate('proj-unknown', 'new-token')
+      const unknown = { tenantCode: 'mbc', projectCode: 'proj-unknown', token: 't', apiUrl: 'http://api' }
+      manager.sendTokenUpdate(unknown, 'new-token')
       // Should not throw
     })
   })

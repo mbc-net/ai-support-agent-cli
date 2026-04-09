@@ -254,7 +254,7 @@ describe('ChildProcessManager', () => {
       mockFork.mockReturnValue(mockChild)
 
       manager.forkProject(project, 'agent-1', options)
-      manager.sendTokenUpdate('proj-a', 'new-token')
+      manager.sendTokenUpdate(project, 'new-token')
 
       expect(mockChild.send).toHaveBeenCalledWith({
         type: 'token_update',
@@ -268,7 +268,7 @@ describe('ChildProcessManager', () => {
       mockFork.mockReturnValueOnce(child1).mockReturnValueOnce(child2)
 
       manager.forkProject(project, 'agent-1', options)
-      manager.sendTokenUpdate('proj-a', 'new-token')
+      manager.sendTokenUpdate(project, 'new-token')
 
       // Simulate crash and restart
       child1.emit('exit', 1, null)
@@ -284,7 +284,8 @@ describe('ChildProcessManager', () => {
     })
 
     it('should not throw for unknown project code', () => {
-      expect(() => manager.sendTokenUpdate('unknown-proj', 'new-token')).not.toThrow()
+      const unknown = { tenantCode: 'mbc', projectCode: 'unknown-proj', token: 't', apiUrl: 'http://api' }
+      expect(() => manager.sendTokenUpdate(unknown, 'new-token')).not.toThrow()
     })
 
     it('should skip disconnected child process', () => {
@@ -292,7 +293,7 @@ describe('ChildProcessManager', () => {
       mockFork.mockReturnValue(mockChild)
 
       manager.forkProject(project, 'agent-1', options)
-      manager.sendTokenUpdate('proj-a', 'new-token')
+      manager.sendTokenUpdate(project, 'new-token')
 
       // send was called once for start only, not for token_update
       expect(mockChild.send).toHaveBeenCalledTimes(1)

@@ -42,7 +42,10 @@ describe('startTokenWatcher', () => {
     jest.advanceTimersByTime(5000)
 
     expect(callback).toHaveBeenCalledTimes(1)
-    expect(callback).toHaveBeenCalledWith('proj-a', 'new-token-a')
+    expect(callback).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
+      'new-token-a',
+    )
 
     watcher.stop()
   })
@@ -152,7 +155,10 @@ describe('startTokenWatcher', () => {
 
     jest.advanceTimersByTime(5000)
     expect(callback).toHaveBeenCalledTimes(1)
-    expect(callback).toHaveBeenCalledWith('proj-a', 'token-a-v2')
+    expect(callback).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a-v2', apiUrl: 'http://api-a' },
+      'token-a-v2',
+    )
 
     jest.advanceTimersByTime(5000)
     // Should not fire again because token hasn't changed since v2

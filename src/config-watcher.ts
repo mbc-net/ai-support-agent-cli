@@ -4,9 +4,14 @@ import { logger } from './logger'
 import type { ProjectRegistration } from './types'
 
 export interface ConfigWatcherCallbacks {
-  onTokenUpdate: (projectCode: string, newToken: string) => void
+  onTokenUpdate: (project: ProjectRegistration, newToken: string) => void
   onProjectAdded: (project: ProjectRegistration) => void
-  onProjectRemoved: (projectCode: string) => void
+  onProjectRemoved: (project: ProjectRegistration) => void
+}
+
+/** Internal map key that uniquely identifies a project across tenants */
+function projectKey(p: ProjectRegistration): string {
+  return `${p.tenantCode}/${p.projectCode}`
 }
 
 /**
@@ -22,7 +27,7 @@ export function startConfigWatcher(
 ): { stop: () => void } {
   const currentProjects = new Map<string, ProjectRegistration>()
   for (const p of initialProjects) {
-    currentProjects.set(p.projectCode, { ...p })
+    currentProjects.set(projectKey(p), { ...p })
   }
 
   const timer = setInterval(() => {
@@ -31,31 +36,32 @@ export function startConfigWatcher(
       if (!config) return
 
       const configProjects = getProjectList(config)
-      const configProjectCodes = new Set<string>()
+      const configKeys = new Set<string>()
 
       for (const cp of configProjects) {
-        configProjectCodes.add(cp.projectCode)
+        const key = projectKey(cp)
+        configKeys.add(key)
 
-        const existing = currentProjects.get(cp.projectCode)
+        const existing = currentProjects.get(key)
         if (!existing) {
           // New project added
-          logger.info(`Config watcher: new project detected: ${cp.projectCode}`)
-          currentProjects.set(cp.projectCode, { ...cp })
+          logger.info(`Config watcher: new project detected: ${key}`)
+          currentProjects.set(key, { ...cp })
           callbacks.onProjectAdded(cp)
         } else if (cp.token !== existing.token) {
           // Token changed
-          logger.debug(`Config watcher: token changed for ${cp.projectCode}`)
-          currentProjects.set(cp.projectCode, { ...cp })
-          callbacks.onTokenUpdate(cp.projectCode, cp.token)
+          logger.debug(`Config watcher: token changed for ${key}`)
+          currentProjects.set(key, { ...cp })
+          callbacks.onTokenUpdate(cp, cp.token)
         }
       }
 
       // Detect removed projects
-      for (const projectCode of currentProjects.keys()) {
-        if (!configProjectCodes.has(projectCode)) {
-          logger.info(`Config watcher: project removed: ${projectCode}`)
-          currentProjects.delete(projectCode)
-          callbacks.onProjectRemoved(projectCode)
+      for (const [key, project] of currentProjects) {
+        if (!configKeys.has(key)) {
+          logger.info(`Config watcher: project removed: ${key}`)
+          currentProjects.delete(key)
+          callbacks.onProjectRemoved(project)
         }
       }
     } catch {
@@ -73,7 +79,7 @@ export function startConfigWatcher(
  */
 export function startTokenWatcher(
   projects: ProjectRegistration[],
-  onTokenUpdate: (projectCode: string, newToken: string) => void,
+  onTokenUpdate: (project: ProjectRegistration, newToken: string) => void,
 ): { stop: () => void } {
   return startConfigWatcher(projects, {
     onTokenUpdate,
