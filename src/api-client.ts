@@ -23,6 +23,12 @@ import type {
   VersionInfo,
 } from './types'
 
+/** Extract tenantCode from token format: {tenantCode}:{tokenId}:{rawToken} */
+function extractTenantCodeFromToken(token: string): string {
+  const parts = token.split(':')
+  return parts.length >= 3 ? parts[0] : ''
+}
+
 export class ApiClient {
   private readonly client: AxiosInstance
   private readonly retry: RetryStrategy
@@ -41,11 +47,7 @@ export class ApiClient {
       }
     }
 
-    // Parse tenantCode from token format: {tenantCode}:{tokenId}:{rawToken}
-    const tokenParts = token.split(':')
-    if (tokenParts.length >= 3) {
-      this.tenantCode = tokenParts[0]
-    }
+    this.tenantCode = extractTenantCodeFromToken(token)
 
     this.client = axios.create({
       baseURL: apiUrl,
@@ -72,12 +74,7 @@ export class ApiClient {
 
   updateToken(newToken: string): void {
     this.client.defaults.headers['Authorization'] = `Bearer ${newToken}`
-
-    // Re-extract tenantCode from new token format: {tenantCode}:{tokenId}:{rawToken}
-    const tokenParts = newToken.split(':')
-    if (tokenParts.length >= 3) {
-      this.tenantCode = tokenParts[0]
-    }
+    this.tenantCode = extractTenantCodeFromToken(newToken)
   }
 
   private async get<T>(url: string, config?: AxiosRequestConfig): Promise<T> {

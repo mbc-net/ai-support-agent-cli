@@ -145,6 +145,35 @@ describe('db-query tool', () => {
         expect(result.valid).toBe(false)
         expect(result.error).toBe('SQL comments are not allowed')
       })
+
+      describe('string literal false positive prevention', () => {
+        it('should allow single-quoted string containing --', () => {
+          const result = validateSql("SELECT '-- not a comment' FROM t")
+          expect(result.valid).toBe(true)
+        })
+
+        it('should allow double-quoted string containing /* */', () => {
+          const result = validateSql('SELECT "/* not a comment */" FROM t')
+          expect(result.valid).toBe(true)
+        })
+
+        it('should allow string containing # character', () => {
+          const result = validateSql("SELECT '#hashtag' FROM t")
+          expect(result.valid).toBe(true)
+        })
+
+        it('should still reject real -- comment after a string literal', () => {
+          const result = validateSql("SELECT 'text' FROM t -- real comment")
+          expect(result.valid).toBe(false)
+          expect(result.error).toBe('SQL comments are not allowed')
+        })
+
+        it('should still reject real /* comment even with string literals present', () => {
+          const result = validateSql("SELECT 'text' FROM t /* comment */")
+          expect(result.valid).toBe(false)
+          expect(result.error).toBe('SQL comments are not allowed')
+        })
+      })
     })
 
     describe('multiple statement detection', () => {

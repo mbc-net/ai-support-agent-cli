@@ -15,9 +15,20 @@ jest.mock('../src/i18n', () => ({
   },
 }))
 
+jest.mock('../src/config-manager', () => ({
+  loadConfig: jest.fn(),
+  getProjectList: jest.fn(),
+}))
+
+jest.mock('../src/docker/docker-runner', () => ({
+  ensureImage: jest.fn().mockReturnValue('0.1.0'),
+}))
+
 import { execSync } from 'child_process'
 import { Command } from 'commander'
 import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 import {
   generatePlist,
   installService,
@@ -28,16 +39,37 @@ import {
   stopService,
   uninstallService,
 } from '../src/cli/service-command'
+import { loadConfig, getProjectList } from '../src/config-manager'
 import { logger } from '../src/logger'
 
 const mockedFs = jest.mocked(fs)
 const mockedExecSync = jest.mocked(execSync)
+const mockedLoadConfig = jest.mocked(loadConfig)
+const mockedGetProjectList = jest.mocked(getProjectList)
+
+const mockProjects = [
+  { tenantCode: 'mbc', projectCode: 'MBC_01', token: 'token-01', apiUrl: 'https://api.example.com' },
+]
+const mockProjectPlists = [
+  {
+    label: 'com.ai-support-agent.cli.mbc.mbc-01',
+    plistPath: path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.ai-support-agent.cli.mbc.mbc-01.plist'),
+  },
+]
 
 describe('service-command orchestrator', () => {
   const originalPlatform = process.platform
 
   beforeEach(() => {
     jest.clearAllMocks()
+    // Default: per-project mode with one project
+    mockedLoadConfig.mockReturnValue({ projects: {} } as ReturnType<typeof loadConfig>)
+    mockedGetProjectList.mockReturnValue(mockProjects)
+    // readdirSync returns per-project plists
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedFs.readdirSync.mockReturnValue([
+      'com.ai-support-agent.cli.mbc.mbc-01.plist',
+    ] as any)
   })
 
   afterEach(() => {
@@ -45,15 +77,18 @@ describe('service-command orchestrator', () => {
   })
 
   describe('installService', () => {
-    it('should delegate to DarwinServiceStrategy on macOS', () => {
+    it('should delegate to DarwinServiceStrategy on macOS', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
       mockedFs.existsSync.mockReturnValue(true)
 
-      installService({})
+      await installService({})
 
-      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1)
-      const [writtenPath] = mockedFs.writeFileSync.mock.calls[0] as [string, string, string]
-      expect(writtenPath).toContain('LaunchAgents')
+      // per-project mode: update-and-restart.sh + wrapper script + plist = 3 writes
+      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(3)
+      const plistCall = mockedFs.writeFileSync.mock.calls.find(
+        (call) => String(call[0]).endsWith('.plist'),
+      )
+      expect(plistCall?.[0]).toContain('LaunchAgents')
     })
 
     it('should delegate to LinuxServiceStrategy on Linux', () => {
@@ -77,17 +112,17 @@ describe('service-command orchestrator', () => {
       )
     })
 
-    it('should default to Docker mode (no --no-docker in plist)', () => {
+    it('should default to Docker mode (no --no-docker in plist)', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
       mockedFs.existsSync.mockReturnValue(true)
 
-      installService({})
+      await installService({})
 
-      const content = mockedFs.writeFileSync.mock.calls[0]?.[1] as string
-      // Default docker=undefined is treated as docker=true by commander's --no-docker
-      // But when called programmatically with {}, docker is undefined → !docker is true → adds --no-docker
-      // This tests the programmatic call behavior
-      expect(content).toContain('start')
+      // wrapper script should contain docker run
+      const wrapperCall = mockedFs.writeFileSync.mock.calls.find(
+        (call) => String(call[0]).endsWith('run.sh'),
+      )
+      expect(wrapperCall?.[1]).toContain('docker run')
     })
   })
 
@@ -99,7 +134,7 @@ describe('service-command orchestrator', () => {
       uninstallService()
 
       expect(mockedFs.unlinkSync).toHaveBeenCalledWith(
-        expect.stringContaining('com.ai-support-agent.cli.plist'),
+        expect.stringContaining('com.ai-support-agent.cli.mbc.mbc-01.plist'),
       )
     })
 
@@ -143,7 +178,6 @@ describe('service-command orchestrator', () => {
   describe('startService', () => {
     it('should delegate to DarwinServiceStrategy on macOS', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       startService()
@@ -181,7 +215,6 @@ describe('service-command orchestrator', () => {
   describe('stopService', () => {
     it('should delegate to DarwinServiceStrategy on macOS', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       stopService()
@@ -219,7 +252,6 @@ describe('service-command orchestrator', () => {
   describe('restartService', () => {
     it('should delegate to DarwinServiceStrategy on macOS', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       restartService()
@@ -255,9 +287,10 @@ describe('service-command orchestrator', () => {
   })
 
   describe('serviceStatus', () => {
-    it('should show not installed on macOS when plist missing', () => {
+    it('should show not installed on macOS when no plists found', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(false)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
 
       serviceStatus({})
 
@@ -266,7 +299,6 @@ describe('service-command orchestrator', () => {
 
     it('should show running on macOS when service is loaded', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from('"PID" = 12345;'))
 
       serviceStatus({})
@@ -278,7 +310,6 @@ describe('service-command orchestrator', () => {
 
     it('should show stopped on macOS when service is not loaded', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockImplementation(() => { throw new Error('not loaded') })
 
       serviceStatus({})
@@ -288,7 +319,6 @@ describe('service-command orchestrator', () => {
 
     it('should show log dir info', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from('"PID" = 123;'))
 
       serviceStatus({})
@@ -300,7 +330,6 @@ describe('service-command orchestrator', () => {
 
     it('should show log file paths when verbose', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from('"PID" = 123;'))
 
       serviceStatus({ verbose: true })
@@ -342,7 +371,7 @@ describe('service-command orchestrator', () => {
       expect(subNames).toContain('status')
     })
 
-    it('should invoke installService via service install command (Docker by default)', () => {
+    it('should invoke installService via service install command (Docker by default)', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
       mockedFs.existsSync.mockReturnValue(true)
 
@@ -350,15 +379,18 @@ describe('service-command orchestrator', () => {
       program.exitOverride()
       registerServiceCommands(program)
 
-      program.parse(['service', 'install'], { from: 'user' })
+      await program.parseAsync(['service', 'install'], { from: 'user' })
 
-      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1)
-      const content = mockedFs.writeFileSync.mock.calls[0]?.[1] as string
-      // Docker is default (commander --no-docker sets docker=true by default)
-      expect(content).not.toContain('--no-docker')
+      // per-project mode: update-and-restart.sh + wrapper + plist = 3 writes
+      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(3)
+      // wrapper script should use docker run (Docker mode by default)
+      const wrapperCall = mockedFs.writeFileSync.mock.calls.find(
+        (call) => String(call[0]).endsWith('run.sh'),
+      )
+      expect(wrapperCall?.[1]).toContain('docker run')
     })
 
-    it('should pass --no-docker to service install', () => {
+    it('should pass --no-docker to service install', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
       mockedFs.existsSync.mockReturnValue(true)
 
@@ -366,14 +398,12 @@ describe('service-command orchestrator', () => {
       program.exitOverride()
       registerServiceCommands(program)
 
-      program.parse(['service', 'install', '--no-docker'], { from: 'user' })
+      await program.parseAsync(['service', 'install', '--no-docker'], { from: 'user' })
 
-      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1)
-      const content = mockedFs.writeFileSync.mock.calls[0]?.[1] as string
-      expect(content).toContain('--no-docker')
+      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(3)
     })
 
-    it('should invoke via legacy install-service command', () => {
+    it('should invoke via legacy install-service command', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
       mockedFs.existsSync.mockReturnValue(true)
 
@@ -381,11 +411,13 @@ describe('service-command orchestrator', () => {
       program.exitOverride()
       registerServiceCommands(program)
 
-      program.parse(['install-service', '--verbose'], { from: 'user' })
+      await program.parseAsync(['install-service', '--verbose'], { from: 'user' })
 
-      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1)
-      const content = mockedFs.writeFileSync.mock.calls[0]?.[1] as string
-      expect(content).toContain('--verbose')
+      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(3)
+      const wrapperCall = mockedFs.writeFileSync.mock.calls.find(
+        (call) => String(call[0]).endsWith('run.sh'),
+      )
+      expect(wrapperCall?.[1]).toContain('--verbose')
     })
 
     it('should invoke uninstallService via service uninstall command', () => {
@@ -403,7 +435,6 @@ describe('service-command orchestrator', () => {
 
     it('should invoke startService via service start command', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       const program = new Command()
@@ -420,7 +451,6 @@ describe('service-command orchestrator', () => {
 
     it('should invoke stopService via service stop command', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       const program = new Command()
@@ -437,7 +467,6 @@ describe('service-command orchestrator', () => {
 
     it('should invoke restartService via service restart command', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       const program = new Command()
@@ -454,7 +483,6 @@ describe('service-command orchestrator', () => {
 
     it('should invoke serviceStatus via service status command', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from('"PID" = 999;'))
 
       const program = new Command()
@@ -483,7 +511,6 @@ describe('service-command orchestrator', () => {
 
     it('should invoke via legacy restart-service command', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
-      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       const program = new Command()

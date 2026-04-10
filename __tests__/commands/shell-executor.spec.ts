@@ -32,7 +32,7 @@ describe('shell-executor', () => {
   it('should block dangerous rm -rf / command', async () => {
     const result = await executeShellCommand({ command: 'rm -rf /' })
     expectFailure(result)
-    expect(result.error).toContain('Blocked dangerous command pattern')
+    expect(result.error).toContain('Command blocked: contains a prohibited pattern')
   })
 
   it('should allow safe rm commands', async () => {

@@ -10,6 +10,13 @@ import {
   TERMINAL_WS_MAX_RECONNECT_RETRIES,
   TERMINAL_WS_RECONNECT_BASE_DELAY_MS,
 } from './constants'
+
+const MIN_TERMINAL_SIZE = 1
+const MAX_TERMINAL_SIZE = 1000
+
+function clampTerminalSize(value: number): number {
+  return Math.min(Math.max(Math.floor(value), MIN_TERMINAL_SIZE), MAX_TERMINAL_SIZE)
+}
 import { TerminalSessionManager } from './terminal-session-manager'
 
 /**
@@ -191,8 +198,12 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       })
       return
     }
-    const decoded = Buffer.from(msg.data, 'base64').toString('utf-8')
-    session.write(decoded)
+    try {
+      const decoded = Buffer.from(msg.data, 'base64').toString('utf-8')
+      session.write(decoded)
+    } catch (err) {
+      logger.warn(`[terminal-ws] Invalid base64 data in stdin (session=${msg.sessionId}): ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   private handleResize(msg: TerminalServerMessage): void {
@@ -200,7 +211,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     const session = this.manager.getSession(msg.sessionId)
     if (!session) return
     if (typeof msg.cols === 'number' && typeof msg.rows === 'number') {
-      session.resize(msg.cols, msg.rows)
+      session.resize(clampTerminalSize(msg.cols), clampTerminalSize(msg.rows))
     }
   }
 

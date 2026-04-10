@@ -14,10 +14,6 @@ export { getCliEntryPoint, getNodePath }
 
 const SERVICE_LABEL = 'com.ai-support-agent.cli'
 
-function getPlistPath(): string {
-  return path.join(os.homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`)
-}
-
 function getLogDir(): string {
   return path.join(os.homedir(), 'Library', 'Logs', 'ai-support-agent')
 }
@@ -330,8 +326,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     const projects = config ? getProjectList(config) : []
 
     if (projects.length === 0) {
-      // Fallback: legacy single-plist mode (no registered projects with tenantCode)
-      this.installLegacy(options)
+      logger.error(t('service.noProjectsConfigured'))
       return
     }
 
@@ -347,12 +342,6 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents')
     if (!fs.existsSync(launchAgentsDir)) {
       fs.mkdirSync(launchAgentsDir, { recursive: true })
-    }
-
-    // Warn about legacy plist if it still exists
-    const legacyPlistPath = getPlistPath()
-    if (fs.existsSync(legacyPlistPath)) {
-      logger.warn(t('service.legacyPlistFound', { path: legacyPlistPath }))
     }
 
     const servicesDir = getServicesDir()
@@ -414,68 +403,18 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     logger.info(t('service.noLogRotation'))
   }
 
-  private installLegacy(options: ServiceOptions): void {
-    const plistPath = getPlistPath()
-    const logDir = getLogDir()
-    const nodePath = getNodePath()
-    const entryPoint = getCliEntryPoint()
+  uninstall(): void {
+    const projectPlists = getAllProjectPlists()
 
-    if (!fs.existsSync(entryPoint)) {
-      logger.error(t('service.entryPointNotFound', { path: entryPoint }))
+    if (projectPlists.length === 0) {
+      logger.warn(t('service.notInstalled'))
       return
     }
 
-    if (!fs.existsSync(logDir)) {
-      fs.mkdirSync(logDir, { recursive: true })
-    }
-
-    const launchAgentsDir = path.dirname(plistPath)
-    if (!fs.existsSync(launchAgentsDir)) {
-      fs.mkdirSync(launchAgentsDir, { recursive: true })
-    }
-
-    if (fs.existsSync(plistPath)) {
-      logger.info(t('service.overwriting', { path: plistPath }))
-    }
-
-    const plist = generatePlist({
-      nodePath,
-      entryPoint,
-      logDir,
-      verbose: options.verbose,
-      docker: options.docker,
-    })
-    fs.writeFileSync(plistPath, plist, 'utf-8')
-
-    logger.success(t('service.installed', { path: plistPath }))
-    logger.info(t('service.loadHint', { path: plistPath }))
-    logger.info(t('service.logDir', { path: logDir }))
-    logger.info(t('service.noLogRotation'))
-  }
-
-  uninstall(): void {
-    let removed = false
-
-    // Remove all per-project plists
-    const projectPlists = getAllProjectPlists()
     for (const { plistPath } of projectPlists) {
       if (fs.existsSync(plistPath)) {
         fs.unlinkSync(plistPath)
-        removed = true
       }
-    }
-
-    // Remove legacy plist if present
-    const legacyPlistPath = getPlistPath()
-    if (fs.existsSync(legacyPlistPath)) {
-      logger.info(t('service.unloadHint', { label: SERVICE_LABEL }))
-      fs.unlinkSync(legacyPlistPath)
-      removed = true
-    }
-
-    if (!removed) {
-      logger.warn(t('service.notInstalled'))
-      return
     }
 
     logger.success(t('service.uninstalled'))
@@ -485,19 +424,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     const projectPlists = getAllProjectPlists()
 
     if (projectPlists.length === 0) {
-      // Fallback to legacy
-      const plistPath = getPlistPath()
-      if (!fs.existsSync(plistPath)) {
-        logger.error(t('service.notInstalled'))
-        return
-      }
-      try {
-        execSync(`launchctl load ${plistPath}`, { stdio: 'pipe' })
-        logger.success(t('service.started'))
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        logger.error(t('service.startFailed', { message }))
-      }
+      logger.error(t('service.notInstalled'))
       return
     }
 
@@ -520,19 +447,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     const projectPlists = getAllProjectPlists()
 
     if (projectPlists.length === 0) {
-      // Fallback to legacy
-      const plistPath = getPlistPath()
-      if (!fs.existsSync(plistPath)) {
-        logger.error(t('service.notInstalled'))
-        return
-      }
-      try {
-        execSync(`launchctl remove ${SERVICE_LABEL}`, { stdio: 'pipe' })
-        logger.success(t('service.stopped'))
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        logger.error(t('service.stopFailed', { message }))
-      }
+      logger.error(t('service.notInstalled'))
       return
     }
 
@@ -555,24 +470,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     const projectPlists = getAllProjectPlists()
 
     if (projectPlists.length === 0) {
-      // Fallback to legacy
-      const plistPath = getPlistPath()
-      if (!fs.existsSync(plistPath)) {
-        logger.error(t('service.notInstalled'))
-        return
-      }
-      try {
-        try {
-          execSync(`launchctl remove ${SERVICE_LABEL}`, { stdio: 'pipe' })
-        } catch {
-          // Service may not be loaded — ignore
-        }
-        execSync(`launchctl load ${plistPath}`, { stdio: 'pipe' })
-        logger.success(t('service.restarted'))
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        logger.error(t('service.restartFailed', { message }))
-      }
+      logger.error(t('service.notInstalled'))
       return
     }
 
@@ -601,28 +499,13 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     const logDir = getLogDir()
 
     if (projectPlists.length === 0) {
-      // Fallback to legacy
-      const plistPath = getPlistPath()
-      if (!fs.existsSync(plistPath)) {
-        return { installed: false, running: false }
-      }
-      try {
-        const output = execSync(`launchctl list ${SERVICE_LABEL}`, { stdio: 'pipe' }).toString()
-        const pidMatch = output.match(/"PID"\s*=\s*(\d+)/)
-        const pid = pidMatch ? parseInt(pidMatch[1], 10) : undefined
-        return { installed: true, running: pid !== undefined, pid, logDir }
-      } catch {
-        return { installed: true, running: false, logDir }
-      }
+      return { installed: false, running: false }
     }
 
-    // Multi-project mode: report overall status
     let anyRunning = false
-    let anyInstalled = false
     let firstPid: number | undefined
 
     for (const { label } of projectPlists) {
-      anyInstalled = true
       try {
         const output = execSync(`launchctl list ${label}`, { stdio: 'pipe' }).toString()
         const pidMatch = output.match(/"PID"\s*=\s*(\d+)/)
@@ -635,9 +518,6 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       }
     }
 
-    if (!anyInstalled) {
-      return { installed: false, running: false }
-    }
     return { installed: true, running: anyRunning, pid: firstPid, logDir }
   }
 }
