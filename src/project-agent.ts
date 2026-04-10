@@ -256,7 +256,7 @@ export class ProjectAgent {
             logger.warn(`[update] Failed to write update-version.json: ${err instanceof Error ? err.message : String(err)}`)
           }
         }
-        process.send({ type: 'update_complete', projectCode: this.projectCode })
+        process.send({ type: 'update_complete', tenantCode: this.tenantCode, projectCode: this.projectCode })
         process.exit(0)
       } else {
         reExecProcess(installMethod)

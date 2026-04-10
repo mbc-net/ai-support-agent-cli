@@ -502,325 +502,60 @@ describe('getAllProjectPlists', () => {
 })
 
 // ---------------------------------------------------------------------------
-// DarwinServiceStrategy — legacy mode (no registered projects)
+// DarwinServiceStrategy — no projects configured
 // ---------------------------------------------------------------------------
-describe('DarwinServiceStrategy — legacy mode', () => {
+describe('DarwinServiceStrategy — no projects configured', () => {
   const strategy = new DarwinServiceStrategy()
 
   beforeEach(() => {
-    // Default: no projects → legacy mode
     mockedLoadConfig.mockReturnValue(null)
     mockedGetProjectList.mockReturnValue([])
-    // readdirSync returns no per-project plists by default
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     mockedFs.readdirSync.mockReturnValue([] as any)
   })
 
-  describe('install', () => {
-    it('should reject if entry point does not exist', async () => {
-      mockedFs.existsSync.mockReturnValue(false)
+  it('install should log error when no projects configured', async () => {
+    await strategy.install({})
 
-      await strategy.install({})
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.entryPointNotFound'),
-      )
-    })
-
-    it('should create plist file', async () => {
-      mockedFs.existsSync
-        .mockReturnValueOnce(true)  // entry point
-        .mockReturnValueOnce(true)  // log dir
-        .mockReturnValueOnce(true)  // LaunchAgents dir
-        .mockReturnValueOnce(false) // plist does not exist (no overwrite warning)
-
-      await strategy.install({})
-
-      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1)
-      const [writtenPath, content] = mockedFs.writeFileSync.mock.calls[0] as [string, string, string]
-      expect(writtenPath).toContain('LaunchAgents')
-      expect(writtenPath).toContain('com.ai-support-agent.cli.plist')
-      expect(content).toContain('com.ai-support-agent.cli')
-      expect(logger.success).toHaveBeenCalled()
-    })
-
-    it('should create log directory if it does not exist', async () => {
-      mockedFs.existsSync
-        .mockReturnValueOnce(true)  // entry point
-        .mockReturnValueOnce(false) // log dir
-        .mockReturnValueOnce(true)  // LaunchAgents dir
-
-      await strategy.install({})
-
-      expect(mockedFs.mkdirSync).toHaveBeenCalledWith(
-        path.join(os.homedir(), 'Library', 'Logs', 'ai-support-agent'),
-        { recursive: true },
-      )
-    })
-
-    it('should create LaunchAgents directory if it does not exist', async () => {
-      mockedFs.existsSync
-        .mockReturnValueOnce(true)  // entry point
-        .mockReturnValueOnce(true)  // log dir
-        .mockReturnValueOnce(false) // LaunchAgents dir
-
-      await strategy.install({})
-
-      expect(mockedFs.mkdirSync).toHaveBeenCalledWith(
-        path.join(os.homedir(), 'Library', 'LaunchAgents'),
-        { recursive: true },
-      )
-    })
-
-    it('should pass verbose option to plist generation', async () => {
-      mockedFs.existsSync.mockReturnValue(true)
-
-      await strategy.install({ verbose: true })
-
-      const content = mockedFs.writeFileSync.mock.calls[0]?.[1] as string
-      expect(content).toContain('--verbose')
-    })
-
-    it('should log info when overwriting existing plist', async () => {
-      mockedFs.existsSync.mockReturnValue(true)
-
-      await strategy.install({})
-
-      expect(logger.info).toHaveBeenCalledWith(
-        expect.stringContaining('service.overwriting'),
-      )
-    })
-
-    it('should log no-log-rotation notice', async () => {
-      mockedFs.existsSync.mockReturnValue(true)
-
-      await strategy.install({})
-
-      expect(logger.info).toHaveBeenCalledWith('service.noLogRotation')
-    })
+    expect(logger.error).toHaveBeenCalledWith('service.noProjectsConfigured')
   })
 
-  describe('uninstall', () => {
-    it('should warn if no plist exists', () => {
-      mockedFs.existsSync.mockReturnValue(false)
+  it('uninstall should warn when no plists found', () => {
+    strategy.uninstall()
 
-      strategy.uninstall()
-
-      expect(logger.warn).toHaveBeenCalledWith('service.notInstalled')
-    })
-
-    it('should delete legacy plist file when it exists', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-
-      strategy.uninstall()
-
-      expect(mockedFs.unlinkSync).toHaveBeenCalledWith(
-        path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.ai-support-agent.cli.plist'),
-      )
-      expect(logger.success).toHaveBeenCalled()
-    })
-
-    it('should show unload hint before deleting plist', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-
-      strategy.uninstall()
-
-      const infoCallOrder = (logger.info as jest.Mock).mock.invocationCallOrder[0]
-      const unlinkCallOrder = (mockedFs.unlinkSync as jest.Mock).mock.invocationCallOrder[0]
-      expect(infoCallOrder).toBeLessThan(unlinkCallOrder!)
-    })
+    expect(logger.warn).toHaveBeenCalledWith('service.notInstalled')
   })
 
-  describe('start', () => {
-    it('should error if no plist exists', () => {
-      mockedFs.existsSync.mockReturnValue(false)
+  it('start should log error when not installed', () => {
+    strategy.start()
 
-      strategy.start()
-
-      expect(logger.error).toHaveBeenCalledWith('service.notInstalled')
-      expect(mockedExecSync).not.toHaveBeenCalled()
-    })
-
-    it('should load the service', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync.mockReturnValue(Buffer.from(''))
-
-      strategy.start()
-
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('launchctl load'),
-        { stdio: 'pipe' },
-      )
-      expect(logger.success).toHaveBeenCalledWith('service.started')
-    })
-
-    it('should log error if load fails', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync.mockImplementation(() => { throw new Error('load failed') })
-
-      strategy.start()
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.startFailed'),
-      )
-    })
-
-    it('should handle non-Error throw from start', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync.mockImplementation(() => { throw 'string start error' })
-
-      strategy.start()
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.startFailed'),
-      )
-    })
+    expect(logger.error).toHaveBeenCalledWith('service.notInstalled')
+    expect(mockedExecSync).not.toHaveBeenCalled()
   })
 
-  describe('stop', () => {
-    it('should error if no plist exists', () => {
-      mockedFs.existsSync.mockReturnValue(false)
+  it('stop should log error when not installed', () => {
+    strategy.stop()
 
-      strategy.stop()
-
-      expect(logger.error).toHaveBeenCalledWith('service.notInstalled')
-      expect(mockedExecSync).not.toHaveBeenCalled()
-    })
-
-    it('should remove the service', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync.mockReturnValue(Buffer.from(''))
-
-      strategy.stop()
-
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        'launchctl remove com.ai-support-agent.cli',
-        { stdio: 'pipe' },
-      )
-      expect(logger.success).toHaveBeenCalledWith('service.stopped')
-    })
-
-    it('should log error if remove fails', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync.mockImplementation(() => { throw new Error('remove failed') })
-
-      strategy.stop()
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.stopFailed'),
-      )
-    })
-
-    it('should handle non-Error throw from stop', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync.mockImplementation(() => { throw 'string stop error' })
-
-      strategy.stop()
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.stopFailed'),
-      )
-    })
+    expect(logger.error).toHaveBeenCalledWith('service.notInstalled')
+    expect(mockedExecSync).not.toHaveBeenCalled()
   })
 
-  describe('restart', () => {
-    it('should error if no plist exists', () => {
-      mockedFs.existsSync.mockReturnValue(false)
+  it('restart should log error when not installed', () => {
+    strategy.restart()
 
-      strategy.restart()
-
-      expect(logger.error).toHaveBeenCalledWith('service.notInstalled')
-      expect(mockedExecSync).not.toHaveBeenCalled()
-    })
-
-    it('should remove and reload the service', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync.mockReturnValue(Buffer.from(''))
-
-      strategy.restart()
-
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        'launchctl remove com.ai-support-agent.cli',
-        { stdio: 'pipe' },
-      )
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('launchctl load'),
-        { stdio: 'pipe' },
-      )
-      expect(logger.success).toHaveBeenCalledWith('service.restarted')
-    })
-
-    it('should succeed even if remove fails (service not loaded)', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync
-        .mockImplementationOnce(() => { throw new Error('not loaded') })
-        .mockReturnValueOnce(Buffer.from(''))
-
-      strategy.restart()
-
-      expect(logger.success).toHaveBeenCalledWith('service.restarted')
-    })
-
-    it('should log error if load fails', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync
-        .mockReturnValueOnce(Buffer.from(''))  // remove succeeds
-        .mockImplementationOnce(() => { throw new Error('load failed') })
-
-      strategy.restart()
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.restartFailed'),
-      )
-    })
+    expect(logger.error).toHaveBeenCalledWith('service.notInstalled')
+    expect(mockedExecSync).not.toHaveBeenCalled()
   })
 
-  describe('status', () => {
-    it('should return not installed when plist does not exist', () => {
-      mockedFs.existsSync.mockReturnValue(false)
+  it('status should return not installed', () => {
+    const result = strategy.status()
 
-      const result = strategy.status()
-
-      expect(result).toEqual({ installed: false, running: false })
-    })
-
-    it('should return running with PID when service is loaded', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync.mockReturnValue(Buffer.from('"PID" = 12345;'))
-
-      const result = strategy.status()
-
-      expect(result.installed).toBe(true)
-      expect(result.running).toBe(true)
-      expect(result.pid).toBe(12345)
-      expect(result.logDir).toBeTruthy()
-    })
-
-    it('should return installed but not running when launchctl list fails', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync.mockImplementation(() => { throw new Error('not loaded') })
-
-      const result = strategy.status()
-
-      expect(result.installed).toBe(true)
-      expect(result.running).toBe(false)
-      expect(result.logDir).toBeTruthy()
-    })
-
-    it('should return installed but not running when PID is not in output', () => {
-      mockedFs.existsSync.mockReturnValue(true)
-      mockedExecSync.mockReturnValue(Buffer.from('"Label" = "com.ai-support-agent.cli";'))
-
-      const result = strategy.status()
-
-      expect(result.installed).toBe(true)
-      expect(result.running).toBe(false)
-    })
+    expect(result).toEqual({ installed: false, running: false })
   })
 })
 
 // ---------------------------------------------------------------------------
-// DarwinServiceStrategy — multi-project mode (projects registered)
+// DarwinServiceStrategy — per-project mode (projects registered)
 // ---------------------------------------------------------------------------
 describe('DarwinServiceStrategy — multi-project mode', () => {
   const strategy = new DarwinServiceStrategy()
@@ -904,19 +639,6 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
       expect(logger.info).toHaveBeenCalledWith('service.noLogRotation')
     })
 
-    it('should warn about legacy plist if present', async () => {
-      mockedFs.existsSync.mockImplementation((p: unknown) => {
-        if (String(p).endsWith('com.ai-support-agent.cli.plist')) return true
-        return true
-      })
-
-      await strategy.install({})
-
-      expect(logger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('service.legacyPlistFound'),
-      )
-    })
-
     it('should create missing directories', async () => {
       mockedFs.existsSync.mockReturnValue(false)
 
@@ -957,13 +679,13 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
       expect(logger.success).toHaveBeenCalledWith('service.uninstalled')
     })
 
-    it('should also delete legacy plist if present', () => {
+    it('should only delete per-project plists (not legacy plist)', () => {
       mockedFs.existsSync.mockReturnValue(true)
 
       strategy.uninstall()
 
       const legacyPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.ai-support-agent.cli.plist')
-      expect(mockedFs.unlinkSync).toHaveBeenCalledWith(legacyPath)
+      expect(mockedFs.unlinkSync).not.toHaveBeenCalledWith(legacyPath)
     })
   })
 

@@ -58,11 +58,26 @@ describe('ChildProcessManager', () => {
   describe('hasProject', () => {
     it('should return true for forked project', () => {
       manager.forkProject(project, 'agent-1', options)
-      expect(manager.hasProject('proj-a')).toBe(true)
+      expect(manager.hasProject(project)).toBe(true)
     })
 
     it('should return false for unknown project', () => {
-      expect(manager.hasProject('proj-unknown')).toBe(false)
+      const unknown = { tenantCode: 'mbc', projectCode: 'proj-unknown', token: 't', apiUrl: 'http://api' }
+      expect(manager.hasProject(unknown)).toBe(false)
+    })
+
+    it('should distinguish projects with same projectCode but different tenantCode', () => {
+      const projectTenantA = { tenantCode: 'tenant-a', projectCode: 'PROJ_1', token: 'tok-a', apiUrl: 'http://api-a' }
+      const projectTenantB = { tenantCode: 'tenant-b', projectCode: 'PROJ_1', token: 'tok-b', apiUrl: 'http://api-b' }
+
+      manager.forkProject(projectTenantA, 'agent-1', options)
+      expect(manager.hasProject(projectTenantA)).toBe(true)
+      expect(manager.hasProject(projectTenantB)).toBe(false)
+
+      manager.forkProject(projectTenantB, 'agent-1', options)
+      expect(manager.hasProject(projectTenantA)).toBe(true)
+      expect(manager.hasProject(projectTenantB)).toBe(true)
+      expect(manager.getRunningCount()).toBe(2)
     })
   })
 
@@ -71,9 +86,9 @@ describe('ChildProcessManager', () => {
       manager.forkProject(project, 'agent-1', options)
       const child = fork.mock.results[0].value
 
-      expect(manager.hasProject('proj-a')).toBe(true)
+      expect(manager.hasProject(project)).toBe(true)
 
-      const stopPromise = manager.stopProject('proj-a')
+      const stopPromise = manager.stopProject(project)
 
       expect(child.send).toHaveBeenCalledWith({ type: 'shutdown' })
 
@@ -82,12 +97,34 @@ describe('ChildProcessManager', () => {
 
       await stopPromise
 
-      expect(manager.hasProject('proj-a')).toBe(false)
+      expect(manager.hasProject(project)).toBe(false)
     })
 
     it('should do nothing for unknown project', async () => {
-      await manager.stopProject('proj-unknown')
+      const unknown = { tenantCode: 'mbc', projectCode: 'proj-unknown', token: 't', apiUrl: 'http://api' }
+      await manager.stopProject(unknown)
       // Should not throw
+    })
+
+    it('should cancel pending restart timer when stopping a project', async () => {
+      jest.useFakeTimers()
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value
+
+      // Simulate unexpected exit to trigger restart timer
+      child._emit('exit', 1, null)
+
+      // Stop the project before the restart timer fires
+      const stopPromise = manager.stopProject(project, 100)
+      jest.advanceTimersByTime(100)
+      await stopPromise
+
+      // Even after restart delay the fork should not be called again (timer cancelled)
+      jest.advanceTimersByTime(10000)
+      expect(fork).toHaveBeenCalledTimes(1)
+      expect(manager.hasProject(project)).toBe(false)
+
+      jest.useRealTimers()
     })
 
     it('should force kill if child does not exit within timeout', async () => {
@@ -96,7 +133,7 @@ describe('ChildProcessManager', () => {
 
       jest.useFakeTimers()
 
-      const stopPromise = manager.stopProject('proj-a', 100)
+      const stopPromise = manager.stopProject(project, 100)
 
       // Don't emit exit — let it timeout
       jest.advanceTimersByTime(200)
@@ -104,7 +141,7 @@ describe('ChildProcessManager', () => {
       await stopPromise
 
       expect(child.kill).toHaveBeenCalledWith('SIGKILL')
-      expect(manager.hasProject('proj-a')).toBe(false)
+      expect(manager.hasProject(project)).toBe(false)
 
       jest.useRealTimers()
     })
@@ -115,13 +152,14 @@ describe('ChildProcessManager', () => {
       manager.forkProject(project, 'agent-1', options)
       const child = fork.mock.results[0].value
 
-      manager.sendTokenUpdate('proj-a', 'new-token')
+      manager.sendTokenUpdate(project, 'new-token')
 
       expect(child.send).toHaveBeenCalledWith({ type: 'token_update', token: 'new-token' })
     })
 
     it('should do nothing for unknown project', () => {
-      manager.sendTokenUpdate('proj-unknown', 'new-token')
+      const unknown = { tenantCode: 'mbc', projectCode: 'proj-unknown', token: 't', apiUrl: 'http://api' }
+      manager.sendTokenUpdate(unknown, 'new-token')
       // Should not throw
     })
   })
@@ -156,7 +194,7 @@ describe('ChildProcessManager', () => {
       child.send.mockImplementation((msg: { type: string }) => {
         if (msg.type === 'busy_query') {
           // Trigger the message handler with busy_response
-          child._emit('message', { type: 'busy_response', projectCode: 'proj-a', busy: false })
+          child._emit('message', { type: 'busy_response', tenantCode: 'mbc', projectCode: 'proj-a', busy: false })
         }
       })
 
@@ -170,7 +208,7 @@ describe('ChildProcessManager', () => {
 
       child.send.mockImplementation((msg: { type: string }) => {
         if (msg.type === 'busy_query') {
-          child._emit('message', { type: 'busy_response', projectCode: 'proj-a', busy: true })
+          child._emit('message', { type: 'busy_response', tenantCode: 'mbc', projectCode: 'proj-a', busy: true })
         }
       })
 
@@ -203,12 +241,12 @@ describe('ChildProcessManager', () => {
       // proj-a is not busy, proj-b is busy
       children[0].send.mockImplementation((msg: { type: string }) => {
         if (msg.type === 'busy_query') {
-          children[0]._emit('message', { type: 'busy_response', projectCode: 'proj-a', busy: false })
+          children[0]._emit('message', { type: 'busy_response', tenantCode: 'mbc', projectCode: 'proj-a', busy: false })
         }
       })
       children[1].send.mockImplementation((msg: { type: string }) => {
         if (msg.type === 'busy_query') {
-          children[1]._emit('message', { type: 'busy_response', projectCode: 'proj-b', busy: true })
+          children[1]._emit('message', { type: 'busy_response', tenantCode: 'mbc', projectCode: 'proj-b', busy: true })
         }
       })
 
@@ -224,19 +262,44 @@ describe('ChildProcessManager', () => {
       const result = await manager.isAnyBusy()
       expect(result).toBe(false)
     })
+
+    it('should correctly distinguish busy state across tenants with same projectCode', async () => {
+      const projectTenantA = { tenantCode: 'tenant-a', projectCode: 'PROJ_1', token: 'tok-a', apiUrl: 'http://api-a' }
+      const projectTenantB = { tenantCode: 'tenant-b', projectCode: 'PROJ_1', token: 'tok-b', apiUrl: 'http://api-b' }
+
+      manager.forkProject(projectTenantA, 'agent-1', options)
+      manager.forkProject(projectTenantB, 'agent-1', options)
+
+      const children = fork.mock.results.map((r: { value: unknown }) => r.value) as any[]
+
+      // tenant-a not busy, tenant-b is busy — same projectCode 'PROJ_1'
+      children[0].send.mockImplementation((msg: { type: string }) => {
+        if (msg.type === 'busy_query') {
+          children[0]._emit('message', { type: 'busy_response', tenantCode: 'tenant-a', projectCode: 'PROJ_1', busy: false })
+        }
+      })
+      children[1].send.mockImplementation((msg: { type: string }) => {
+        if (msg.type === 'busy_query') {
+          children[1]._emit('message', { type: 'busy_response', tenantCode: 'tenant-b', projectCode: 'PROJ_1', busy: true })
+        }
+      })
+
+      const result = await manager.isAnyBusy()
+      expect(result).toBe(true)
+    })
   })
 
   describe('update_complete message', () => {
-    it('should call onUpdateComplete when worker sends update_complete', () => {
+    it('should call onUpdateComplete with project when worker sends update_complete', () => {
       const onUpdateComplete = jest.fn()
       manager.onUpdateComplete = onUpdateComplete
 
       manager.forkProject(project, 'agent-1', options)
       const child = fork.mock.results[0].value as any
 
-      child._emit('message', { type: 'update_complete', projectCode: 'proj-a' })
+      child._emit('message', { type: 'update_complete', tenantCode: 'mbc', projectCode: 'proj-a' })
 
-      expect(onUpdateComplete).toHaveBeenCalled()
+      expect(onUpdateComplete).toHaveBeenCalledWith(project)
     })
 
     it('should not throw when onUpdateComplete is not set', () => {
@@ -244,7 +307,7 @@ describe('ChildProcessManager', () => {
       const child = fork.mock.results[0].value as any
 
       expect(() => {
-        child._emit('message', { type: 'update_complete', projectCode: 'proj-a' })
+        child._emit('message', { type: 'update_complete', tenantCode: 'mbc', projectCode: 'proj-a' })
       }).not.toThrow()
     })
   })

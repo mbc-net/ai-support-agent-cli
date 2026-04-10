@@ -172,6 +172,35 @@ describe('logger', () => {
       expect(maskSecrets('Token: secret')).toBe('Token: ****')
       expect(maskSecrets('API_KEY: secret')).toBe('API_KEY: ****')
     })
+
+    it('should mask JWT tokens', () => {
+      const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c'
+      const result = maskSecrets(`token: ${jwt}`)
+      expect(result).not.toContain('SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c')
+    })
+
+    it('should mask GitHub personal access tokens', () => {
+      const ghToken = 'ghp_1234567890abcdefghij1234567890ABCDEF12'
+      // Test without "token:" prefix so the specific pattern is used, not the generic keyword pattern
+      const result = maskSecrets(`git push with ${ghToken}`)
+      expect(result).not.toContain(ghToken)
+      expect(result).toContain('gh**_****')
+    })
+
+    it('should mask GitLab personal access tokens', () => {
+      const glToken = 'glpat-abcdefghij1234567890'
+      // Test without "token:" prefix so the specific pattern is used, not the generic keyword pattern
+      const result = maskSecrets(`CI using ${glToken} here`)
+      expect(result).not.toContain(glToken)
+      expect(result).toContain('glpat-****')
+    })
+
+    it('should mask PEM private keys', () => {
+      const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----'
+      const result = maskSecrets(`key: ${pem}`)
+      expect(result).not.toContain('MIIEowIBAAKCAQEA')
+      expect(result).toContain('[PRIVATE KEY REDACTED]')
+    })
   })
 
   describe('getProjectColor', () => {

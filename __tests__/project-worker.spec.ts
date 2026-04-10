@@ -135,6 +135,7 @@ describe('project-worker', () => {
       expect(mockStart).toHaveBeenCalled()
       expect(processSendSpy).toHaveBeenCalledWith({
         type: 'started',
+        tenantCode: 'mbc',
         projectCode: 'test-proj',
       })
     })
@@ -154,6 +155,7 @@ describe('project-worker', () => {
       expect(mockStop).toHaveBeenCalled()
       expect(processSendSpy).toHaveBeenCalledWith({
         type: 'stopped',
+        tenantCode: 'mbc',
         projectCode: 'test-proj',
       })
       expect(exitSpy).toHaveBeenCalledWith(0)
@@ -189,6 +191,7 @@ describe('project-worker', () => {
 
       expect(processSendSpy).toHaveBeenCalledWith({
         type: 'error',
+        tenantCode: 'mbc',
         projectCode: 'test-proj',
         message: 'init failed',
       })
@@ -236,6 +239,7 @@ describe('project-worker', () => {
 
       expect(processSendSpy).toHaveBeenCalledWith({
         type: 'busy_response',
+        tenantCode: 'mbc',
         projectCode: 'test-proj',
         busy: false,
       })
@@ -255,6 +259,7 @@ describe('project-worker', () => {
 
       expect(processSendSpy).toHaveBeenCalledWith({
         type: 'busy_response',
+        tenantCode: 'mbc',
         projectCode: 'test-proj',
         busy: true,
       })
@@ -269,6 +274,7 @@ describe('project-worker', () => {
 
       expect(processSendSpy).toHaveBeenCalledWith({
         type: 'busy_response',
+        tenantCode: 'unknown',
         projectCode: 'unknown',
         busy: false,
       })

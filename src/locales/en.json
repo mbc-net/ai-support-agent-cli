@@ -176,6 +176,7 @@
   "service.loadHint": "To start the service now, run: launchctl load {{path}}",
   "service.loadHintMulti": "To start all services, run: ai-support-agent service start",
   "service.legacyPlistFound": "Found legacy plist at {{path}}. Run 'service uninstall' to remove it.",
+  "service.noProjectsConfigured": "No projects configured. Run 'ai-support-agent configure' to register a project first.",
   "service.logDir": "Logs will be written to: {{path}}",
   "service.notInstalled": "LaunchAgent plist not found. Service is not installed.",
   "service.uninstalled": "LaunchAgent plist removed.",

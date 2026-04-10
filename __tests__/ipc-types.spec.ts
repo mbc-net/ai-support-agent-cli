@@ -73,39 +73,53 @@ describe('isParentToChildMessage', () => {
 describe('isChildToParentMessage', () => {
   it('should accept a started message', () => {
     expect(
-      isChildToParentMessage({ type: 'started', projectCode: 'p1' }),
+      isChildToParentMessage({ type: 'started', tenantCode: 'mbc', projectCode: 'p1' }),
     ).toBe(true)
   })
 
   it('should accept a stopped message', () => {
     expect(
-      isChildToParentMessage({ type: 'stopped', projectCode: 'p1' }),
+      isChildToParentMessage({ type: 'stopped', tenantCode: 'mbc', projectCode: 'p1' }),
     ).toBe(true)
   })
 
   it('should accept an error message', () => {
     expect(
-      isChildToParentMessage({ type: 'error', projectCode: 'p1', message: 'fail' }),
+      isChildToParentMessage({ type: 'error', tenantCode: 'mbc', projectCode: 'p1', message: 'fail' }),
     ).toBe(true)
   })
 
+  it('should reject started without tenantCode', () => {
+    expect(isChildToParentMessage({ type: 'started', projectCode: 'p1' })).toBe(false)
+  })
+
   it('should reject started without projectCode', () => {
-    expect(isChildToParentMessage({ type: 'started' })).toBe(false)
+    expect(isChildToParentMessage({ type: 'started', tenantCode: 'mbc' })).toBe(false)
+  })
+
+  it('should reject stopped without tenantCode', () => {
+    expect(isChildToParentMessage({ type: 'stopped', projectCode: 'p1' })).toBe(false)
   })
 
   it('should reject stopped without projectCode', () => {
-    expect(isChildToParentMessage({ type: 'stopped' })).toBe(false)
+    expect(isChildToParentMessage({ type: 'stopped', tenantCode: 'mbc' })).toBe(false)
   })
 
   it('should reject error without message', () => {
     expect(
-      isChildToParentMessage({ type: 'error', projectCode: 'p1' }),
+      isChildToParentMessage({ type: 'error', tenantCode: 'mbc', projectCode: 'p1' }),
     ).toBe(false)
   })
 
   it('should reject error without projectCode', () => {
     expect(
-      isChildToParentMessage({ type: 'error', message: 'fail' }),
+      isChildToParentMessage({ type: 'error', tenantCode: 'mbc', message: 'fail' }),
+    ).toBe(false)
+  })
+
+  it('should reject error without tenantCode', () => {
+    expect(
+      isChildToParentMessage({ type: 'error', projectCode: 'p1', message: 'fail' }),
     ).toBe(false)
   })
 
@@ -118,28 +132,34 @@ describe('isChildToParentMessage', () => {
 
   it('should accept a busy_response message', () => {
     expect(
-      isChildToParentMessage({ type: 'busy_response', projectCode: 'p1', busy: true }),
+      isChildToParentMessage({ type: 'busy_response', tenantCode: 'mbc', projectCode: 'p1', busy: true }),
     ).toBe(true)
     expect(
-      isChildToParentMessage({ type: 'busy_response', projectCode: 'p1', busy: false }),
+      isChildToParentMessage({ type: 'busy_response', tenantCode: 'mbc', projectCode: 'p1', busy: false }),
     ).toBe(true)
+  })
+
+  it('should reject busy_response without tenantCode', () => {
+    expect(
+      isChildToParentMessage({ type: 'busy_response', projectCode: 'p1', busy: true }),
+    ).toBe(false)
   })
 
   it('should reject busy_response without projectCode', () => {
     expect(
-      isChildToParentMessage({ type: 'busy_response', busy: true }),
+      isChildToParentMessage({ type: 'busy_response', tenantCode: 'mbc', busy: true }),
     ).toBe(false)
   })
 
   it('should reject busy_response without busy', () => {
     expect(
-      isChildToParentMessage({ type: 'busy_response', projectCode: 'p1' }),
+      isChildToParentMessage({ type: 'busy_response', tenantCode: 'mbc', projectCode: 'p1' }),
     ).toBe(false)
   })
 
   it('should reject busy_response with non-boolean busy', () => {
     expect(
-      isChildToParentMessage({ type: 'busy_response', projectCode: 'p1', busy: 'yes' }),
+      isChildToParentMessage({ type: 'busy_response', tenantCode: 'mbc', projectCode: 'p1', busy: 'yes' }),
     ).toBe(false)
   })
 

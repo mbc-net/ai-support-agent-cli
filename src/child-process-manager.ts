@@ -11,6 +11,7 @@ import {
 import type { ChildToParentMessage, IpcStartMessage, IpcBusyResponseMessage } from './ipc-types'
 import { isChildToParentMessage } from './ipc-types'
 import { logger } from './logger'
+import { projectKey } from './project-key'
 import type { AgentChatMode, ProjectRegistration } from './types'
 
 interface ManagedProcess {
@@ -25,7 +26,7 @@ export class ChildProcessManager {
   private readonly restartTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly busyResponseHandlers: Array<(msg: IpcBusyResponseMessage) => void> = []
   private stopping = false
-  onUpdateComplete?: () => void
+  onUpdateComplete?: (project: ProjectRegistration) => void
 
   forkProject(
     project: ProjectRegistration,
@@ -44,10 +45,10 @@ export class ChildProcessManager {
       options,
     }
 
-    this.spawnChild(project.projectCode, startMessage)
+    this.spawnChild(projectKey(project), startMessage)
   }
 
-  private spawnChild(projectCode: string, startMessage: IpcStartMessage): void {
+  private spawnChild(key: string, startMessage: IpcStartMessage): void {
     // ts-node 環境では .ts ファイルを使用、ビルド後は .js ファイルを使用
     const jsPath = join(__dirname, 'project-worker.js')
     const tsPath = join(__dirname, 'project-worker.ts')
@@ -61,45 +62,41 @@ export class ChildProcessManager {
     const managed: ManagedProcess = {
       child,
       project: startMessage.project,
-      restartCount: this.processes.get(projectCode)?.restartCount ?? 0,
+      restartCount: this.processes.get(key)?.restartCount ?? 0,
       startMessage,
     }
 
-    this.processes.set(projectCode, managed)
+    this.processes.set(key, managed)
 
     child.on('message', (msg: unknown) => {
       if (!isChildToParentMessage(msg)) return
-      this.handleChildMessage(msg)
+      this.handleChildMessage(key, msg)
     })
 
     child.on('exit', (code, signal) => {
       if (this.stopping) return
       logger.warn(
-        `Child process for ${projectCode} exited (code=${code}, signal=${signal})`,
+        `Child process for ${key} exited (code=${code}, signal=${signal})`,
       )
-      this.handleChildExit(projectCode)
+      this.handleChildExit(key)
     })
 
     child.send(startMessage)
-    logger.info(`Forked child process for ${projectCode} (pid=${child.pid})`)
+    logger.info(`Forked child process for ${key} (pid=${child.pid})`)
   }
 
-  private resetRestartCount(projectCode: string): void {
-    const managed = this.processes.get(projectCode)
-    if (managed) managed.restartCount = 0
-  }
-
-  private handleChildMessage(msg: ChildToParentMessage): void {
+  private handleChildMessage(key: string, msg: ChildToParentMessage): void {
+    const managed = this.processes.get(key)
     switch (msg.type) {
       case 'started':
-        logger.info(`Project ${msg.projectCode} started in child process`)
-        this.resetRestartCount(msg.projectCode)
+        logger.info(`Project ${key} started in child process`)
+        if (managed) managed.restartCount = 0
         break
       case 'error':
-        logger.error(`Project ${msg.projectCode} error: ${msg.message}`)
+        logger.error(`Project ${key} error: ${msg.message}`)
         break
       case 'stopped':
-        logger.info(`Project ${msg.projectCode} stopped`)
+        logger.info(`Project ${key} stopped`)
         break
       case 'busy_response':
         for (const handler of this.busyResponseHandlers) {
@@ -107,59 +104,60 @@ export class ChildProcessManager {
         }
         break
       case 'update_complete':
-        logger.info(`Project ${msg.projectCode} update complete, notifying runner`)
-        this.onUpdateComplete?.()
+        logger.info(`Project ${key} update complete, notifying runner`)
+        if (managed) this.onUpdateComplete?.(managed.project)
         break
     }
   }
 
-  private handleChildExit(projectCode: string): void {
-    const managed = this.processes.get(projectCode)
+  private handleChildExit(key: string): void {
+    const managed = this.processes.get(key)
     if (!managed) return
 
     if (managed.restartCount >= CHILD_PROCESS_MAX_RESTARTS) {
       logger.error(
-        `Project ${projectCode} exceeded max restarts (${CHILD_PROCESS_MAX_RESTARTS}). Not restarting.`,
+        `Project ${key} exceeded max restarts (${CHILD_PROCESS_MAX_RESTARTS}). Not restarting.`,
       )
-      this.processes.delete(projectCode)
+      this.processes.delete(key)
       return
     }
 
     managed.restartCount++
     logger.info(
-      `Restarting ${projectCode} in ${CHILD_PROCESS_RESTART_DELAY_MS}ms (attempt ${managed.restartCount}/${CHILD_PROCESS_MAX_RESTARTS})`,
+      `Restarting ${key} in ${CHILD_PROCESS_RESTART_DELAY_MS}ms (attempt ${managed.restartCount}/${CHILD_PROCESS_MAX_RESTARTS})`,
     )
 
     const timer = setTimeout(() => {
-      this.restartTimers.delete(projectCode)
+      this.restartTimers.delete(key)
       if (this.stopping) return
-      this.spawnChild(projectCode, managed.startMessage)
+      this.spawnChild(key, managed.startMessage)
     }, CHILD_PROCESS_RESTART_DELAY_MS).unref()
-    this.restartTimers.set(projectCode, timer)
+    this.restartTimers.set(key, timer)
   }
 
   /**
    * 特定プロジェクトの子プロセスを graceful shutdown する
    */
-  async stopProject(projectCode: string, timeoutMs: number = CHILD_PROCESS_STOP_TIMEOUT_MS): Promise<void> {
-    // pending restart timer があればキャンセル
-    const restartTimer = this.restartTimers.get(projectCode)
+  async stopProject(project: ProjectRegistration, timeoutMs: number = CHILD_PROCESS_STOP_TIMEOUT_MS): Promise<void> {
+    const key = projectKey(project)
+
+    const restartTimer = this.restartTimers.get(key)
     if (restartTimer) {
       clearTimeout(restartTimer)
-      this.restartTimers.delete(projectCode)
+      this.restartTimers.delete(key)
     }
 
-    const managed = this.processes.get(projectCode)
+    const managed = this.processes.get(key)
     if (!managed) return
 
     if (managed.child.connected) {
       managed.child.send({ type: 'shutdown' })
-      logger.debug(`Sent shutdown to ${projectCode}`)
+      logger.debug(`Sent shutdown to ${key}`)
     }
 
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
-        logger.warn(`Force killing ${projectCode} (timeout)`)
+        logger.warn(`Force killing ${key} (timeout)`)
         managed.child.kill('SIGKILL')
         resolve()
       }, timeoutMs)
@@ -170,21 +168,22 @@ export class ChildProcessManager {
       })
     })
 
-    this.processes.delete(projectCode)
-    logger.info(`Project ${projectCode} stopped and removed`)
+    this.processes.delete(key)
+    logger.info(`Project ${key} stopped and removed`)
   }
 
-  hasProject(projectCode: string): boolean {
-    return this.processes.has(projectCode)
+  hasProject(project: ProjectRegistration): boolean {
+    return this.processes.has(projectKey(project))
   }
 
-  sendTokenUpdate(projectCode: string, newToken: string): void {
-    const managed = this.processes.get(projectCode)
+  sendTokenUpdate(project: ProjectRegistration, newToken: string): void {
+    const key = projectKey(project)
+    const managed = this.processes.get(key)
     if (!managed) return
 
     if (managed.child.connected) {
       managed.child.send({ type: 'token_update', token: newToken })
-      logger.debug(`Sent token update to ${projectCode}`)
+      logger.debug(`Sent token update to ${key}`)
     }
 
     // Update stored token so restarts use the new token
@@ -193,10 +192,10 @@ export class ChildProcessManager {
   }
 
   sendUpdateToAll(): void {
-    for (const [projectCode, managed] of this.processes) {
+    for (const [key, managed] of this.processes) {
       if (managed.child.connected) {
         managed.child.send({ type: 'update' })
-        logger.debug(`Sent update to ${projectCode}`)
+        logger.debug(`Sent update to ${key}`)
       }
     }
   }
@@ -209,16 +208,16 @@ export class ChildProcessManager {
 
     const shutdownPromises: Promise<void>[] = []
 
-    for (const [projectCode, managed] of this.processes) {
+    for (const [key, managed] of this.processes) {
       if (managed.child.connected) {
         managed.child.send({ type: 'shutdown' })
-        logger.debug(`Sent shutdown to ${projectCode}`)
+        logger.debug(`Sent shutdown to ${key}`)
       }
 
       shutdownPromises.push(
         new Promise<void>((resolve) => {
           const timer = setTimeout(() => {
-            logger.warn(`Force killing ${projectCode} (timeout)`)
+            logger.warn(`Force killing ${key} (timeout)`)
             managed.child.kill('SIGKILL')
             resolve()
           }, timeoutMs)
@@ -236,13 +235,18 @@ export class ChildProcessManager {
   }
 
   async isAnyBusy(timeoutMs: number = BUSY_QUERY_TIMEOUT_MS): Promise<boolean> {
-    const connectedProcesses = Array.from(this.processes.entries())
-      .filter(([, m]) => m.child.connected)
+    const connected: ManagedProcess[] = []
+    const pending = new Set<string>()
+    for (const [key, m] of this.processes) {
+      if (m.child.connected) {
+        connected.push(m)
+        pending.add(key)
+      }
+    }
 
-    if (connectedProcesses.length === 0) return false
+    if (connected.length === 0) return false
 
     return new Promise<boolean>((resolve) => {
-      const pending = new Set(connectedProcesses.map(([code]) => code))
       let anyBusy = false
 
       const timer = setTimeout(() => {
@@ -253,7 +257,7 @@ export class ChildProcessManager {
 
       const handler = (msg: IpcBusyResponseMessage): void => {
         if (msg.busy) anyBusy = true
-        pending.delete(msg.projectCode)
+        pending.delete(projectKey(msg))
         if (pending.size === 0) {
           cleanup()
           resolve(anyBusy)
@@ -268,7 +272,7 @@ export class ChildProcessManager {
 
       this.busyResponseHandlers.push(handler)
 
-      for (const [, managed] of connectedProcesses) {
+      for (const managed of connected) {
         managed.child.send({ type: 'busy_query' })
       }
     })

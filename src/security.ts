@@ -17,6 +17,12 @@ export const BLOCKED_COMMAND_PATTERNS = [
   /:\(\)\s*\{.*\};\s*:/,
   /\bchmod\s+.*\s+\/(?!\w)/,                       // chmod on root
   /\bchown\s+.*\s+\/(?!\w)/,                       // chown on root
+  // curl/wget data exfiltration and remote code execution
+  /\bcurl\b.*\s(-d|--data|--data-raw|--data-binary|--upload-file|-T|-F|--form)\b/i,
+  /\bwget\b.*\s(--post-data|--post-file|--body-data|--body-file)\b/i,
+  /\bcurl\b.*\s-[A-Za-z]*d[A-Za-z]*\s+@/i,        // curl -d @file (file content upload)
+  /\bcurl\b[^|]*\|\s*(ba?sh|sh|zsh|python\d*|ruby|perl|node)\b/i,  // curl | sh (remote execution)
+  /\bwget\b[^|]*\|\s*(ba?sh|sh|zsh|python\d*|ruby|perl|node)\b/i,  // wget | sh (remote execution)
 ]
 
 export const BLOCKED_PATH_PREFIXES = [
@@ -54,7 +60,7 @@ export function buildSafeEnv(): Record<string, string> {
 export function validateCommand(command: string): string | null {
   for (const pattern of BLOCKED_COMMAND_PATTERNS) {
     if (pattern.test(command)) {
-      return `Blocked dangerous command pattern: ${pattern}`
+      return 'Command blocked: contains a prohibited pattern'
     }
   }
   return null

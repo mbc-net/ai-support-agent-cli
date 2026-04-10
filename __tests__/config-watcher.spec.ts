@@ -46,7 +46,10 @@ describe('startConfigWatcher', () => {
     jest.advanceTimersByTime(5000)
 
     expect(callbacks.onTokenUpdate).toHaveBeenCalledTimes(1)
-    expect(callbacks.onTokenUpdate).toHaveBeenCalledWith('proj-a', 'new-token-a')
+    expect(callbacks.onTokenUpdate).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
+      'new-token-a',
+    )
     expect(callbacks.onProjectAdded).not.toHaveBeenCalled()
     expect(callbacks.onProjectRemoved).not.toHaveBeenCalled()
 
@@ -97,7 +100,9 @@ describe('startConfigWatcher', () => {
     jest.advanceTimersByTime(5000)
 
     expect(callbacks.onProjectRemoved).toHaveBeenCalledTimes(1)
-    expect(callbacks.onProjectRemoved).toHaveBeenCalledWith('proj-b')
+    expect(callbacks.onProjectRemoved).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+    )
     expect(callbacks.onTokenUpdate).not.toHaveBeenCalled()
     expect(callbacks.onProjectAdded).not.toHaveBeenCalled()
 
@@ -128,11 +133,16 @@ describe('startConfigWatcher', () => {
 
     jest.advanceTimersByTime(5000)
 
-    expect(callbacks.onTokenUpdate).toHaveBeenCalledWith('proj-a', 'new-token-a')
+    expect(callbacks.onTokenUpdate).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'new-token-a', apiUrl: 'http://api-a' },
+      'new-token-a',
+    )
     expect(callbacks.onProjectAdded).toHaveBeenCalledWith(
       { tenantCode: 'mbc', projectCode: 'proj-c', token: 'token-c', apiUrl: 'http://api-c' },
     )
-    expect(callbacks.onProjectRemoved).toHaveBeenCalledWith('proj-b')
+    expect(callbacks.onProjectRemoved).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+    )
 
     watcher.stop()
   })
@@ -215,10 +225,9 @@ describe('startConfigWatcher', () => {
     watcher.stop()
   })
 
-  it('should ignore config read errors', () => {
-    mockedLoadConfig.mockImplementation(() => {
-      throw new Error('ENOENT: file not found')
-    })
+  it('should silently ignore ENOENT errors (file not yet written)', () => {
+    const enoentError = Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' })
+    mockedLoadConfig.mockImplementation(() => { throw enoentError })
 
     const callbacks = {
       onTokenUpdate: jest.fn(),
@@ -232,6 +241,25 @@ describe('startConfigWatcher', () => {
     expect(callbacks.onTokenUpdate).not.toHaveBeenCalled()
     expect(callbacks.onProjectAdded).not.toHaveBeenCalled()
     expect(callbacks.onProjectRemoved).not.toHaveBeenCalled()
+
+    watcher.stop()
+  })
+
+  it('should log a warning for unexpected errors', () => {
+    mockedLoadConfig.mockImplementation(() => {
+      throw new Error('unexpected read failure')
+    })
+
+    const callbacks = {
+      onTokenUpdate: jest.fn(),
+      onProjectAdded: jest.fn(),
+      onProjectRemoved: jest.fn(),
+    }
+    const watcher = startConfigWatcher(projects, callbacks)
+
+    jest.advanceTimersByTime(5000)
+
+    expect(callbacks.onTokenUpdate).not.toHaveBeenCalled()
 
     watcher.stop()
   })
@@ -283,7 +311,10 @@ describe('startTokenWatcher (legacy wrapper)', () => {
 
     jest.advanceTimersByTime(5000)
 
-    expect(callback).toHaveBeenCalledWith('proj-a', 'new-token')
+    expect(callback).toHaveBeenCalledWith(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'new-token', apiUrl: 'http://api-a' },
+      'new-token',
+    )
 
     watcher.stop()
   })

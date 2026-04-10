@@ -8,6 +8,16 @@ import { mcpErrorResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-r
 /** コメントインジェクション検出パターン */
 const COMMENT_PATTERNS = ['--', '/*', '*/', '#']
 
+/**
+ * SQL文字列リテラル（シングル・ダブルクォート）を除去する。
+ * コメントパターン検査前に適用することで、文字列リテラル内の '--' 等の誤検知を防ぐ。
+ */
+function stripStringLiterals(sql: string): string {
+  return sql
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+}
+
 /** 時間ベース・ブラインドSQLインジェクション検出パターン */
 const TIME_BASED_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
   { pattern: /\bDBMS_LOCK\.SLEEP\s*\(/i, name: 'DBMS_LOCK.SLEEP' },
@@ -50,8 +60,10 @@ export function validateSql(
   const upper = trimmed.toUpperCase()
 
   // コメントインジェクション検出（最優先）
+  // 文字列リテラルを除去してからチェックすることで、リテラル内の '--' 等の誤検知を防ぐ
+  const stripped = stripStringLiterals(trimmed)
   for (const pattern of COMMENT_PATTERNS) {
-    if (trimmed.includes(pattern)) {
+    if (stripped.includes(pattern)) {
       return { valid: false, error: 'SQL comments are not allowed' }
     }
   }
