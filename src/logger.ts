@@ -137,14 +137,21 @@ function timestamp(): string {
 }
 
 const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
+  // PEM private key blocks (must be first to avoid partial masking by other patterns)
+  { pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, replacement: '[PRIVATE KEY REDACTED]' },
   // AWS Access Key IDs
   { pattern: /(AKIA[A-Z0-9]{16})/g, replacement: 'AKIA****' },
-  // Key-value pairs with secret-like keys
-  { pattern: /((?:password|secret|token|api_key|apikey|access_key|secret_key|session_token|authorization)\s*[:=]\s*["']?)([^\s"',}{]+)/gi, replacement: '$1****' },
+  // GitHub/GitLab personal access tokens (before generic token: pattern)
+  { pattern: /\bgh[pos]_[A-Za-z0-9]{36,}\b/g, replacement: 'gh**_****' },
+  { pattern: /\bglpat-[A-Za-z0-9_-]{10,}\b/g, replacement: 'glpat-****' },
+  // JWT tokens (3-part base64url separated by dots)
+  { pattern: /\b(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\.[A-Za-z0-9_-]+/g, replacement: '$1.****' },
   // Bearer tokens
   { pattern: /(Bearer\s+)[^\s]+/gi, replacement: '$1****' },
   // Database connection strings (postgres://user:pass@host, mysql://user:pass@host, etc.)
   { pattern: /((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|rediss):\/\/[^:]+:)[^@]+(@)/gi, replacement: '$1****$2' },
+  // Key-value pairs with secret-like keys (last to avoid masking well-formatted tokens above)
+  { pattern: /((?:password|secret|token|api_key|apikey|access_key|secret_key|session_token|authorization)\s*[:=]\s*["']?)([^\s"',}{]+)/gi, replacement: '$1****' },
 ]
 
 /** Mask secrets in log messages */

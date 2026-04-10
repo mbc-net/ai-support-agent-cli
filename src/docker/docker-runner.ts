@@ -189,6 +189,23 @@ export function generateProjectDockerfile(
 /** Maximum total log size kept in memory per session (2 MB). Older content is discarded. */
 const MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024
 
+/**
+ * docker build プロセスに渡す環境変数を必要最小限に絞る。
+ * process.env をそのまま渡すと API キー等の機密情報が漏洩するため、
+ * ビルドに必要な変数のみを明示的に選択する。
+ */
+function buildDockerEnv(): NodeJS.ProcessEnv {
+  const ALLOWED_KEYS = ['PATH', 'HOME', 'USER', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL']
+  const env: NodeJS.ProcessEnv = {}
+  for (const key of ALLOWED_KEYS) {
+    if (process.env[key] !== undefined) {
+      env[key] = process.env[key]
+    }
+  }
+  env['BUILDKIT_PROGRESS'] = 'plain'
+  return env
+}
+
 export async function buildProjectImage(
   tenantCode: string,
   projectCode: string,
@@ -237,7 +254,7 @@ export async function buildProjectImage(
       'build', '-t', imageTag, '--pull=false', '--progress=plain',
       '--build-arg', `AGENT_VERSION=${baseVersion}`,
       '-f', dockerfilePath, contextDir,
-    ], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, BUILDKIT_PROGRESS: 'plain' } })
+    ], { stdio: ['ignore', 'pipe', 'pipe'], env: buildDockerEnv() })
 
     const writePrefixed = makeLinePrefixer(prefix, (s) => process.stdout.write(s))
     const onData = (d: Buffer): void => {

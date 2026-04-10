@@ -39,7 +39,7 @@ describe('command-executor', () => {
         command: 'rm -rf /',
       })
       expectFailure(result)
-      expect(result.error).toContain('Blocked dangerous command pattern')
+      expect(result.error).toContain('Command blocked: contains a prohibited pattern')
     })
 
     it('should block mkfs command', async () => {
@@ -47,7 +47,7 @@ describe('command-executor', () => {
         command: 'mkfs.ext4 /dev/sda1',
       })
       expectFailure(result)
-      expect(result.error).toContain('Blocked dangerous command pattern')
+      expect(result.error).toContain('Command blocked: contains a prohibited pattern')
     })
 
     it('should block dd to device command', async () => {
@@ -55,7 +55,7 @@ describe('command-executor', () => {
         command: 'dd if=/dev/zero of=/dev/sda',
       })
       expectFailure(result)
-      expect(result.error).toContain('Blocked dangerous command pattern')
+      expect(result.error).toContain('Command blocked: contains a prohibited pattern')
     })
 
     it('should block fork bomb command', async () => {
@@ -63,7 +63,7 @@ describe('command-executor', () => {
         command: ':(){ :|:& };:',
       })
       expectFailure(result)
-      expect(result.error).toContain('Blocked dangerous command pattern')
+      expect(result.error).toContain('Command blocked: contains a prohibited pattern')
     })
 
     it('should block fork bomb variant with spaces', async () => {
@@ -71,7 +71,7 @@ describe('command-executor', () => {
         command: ':() { :|:& };:',
       })
       expectFailure(result)
-      expect(result.error).toContain('Blocked dangerous command pattern')
+      expect(result.error).toContain('Command blocked: contains a prohibited pattern')
     })
 
     it('should allow safe rm commands', async () => {

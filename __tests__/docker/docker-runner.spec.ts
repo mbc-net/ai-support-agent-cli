@@ -2602,6 +2602,35 @@ describe('buildProjectImage', () => {
     )
   })
 
+  it('should not pass secret env vars to docker build process', async () => {
+    const fakeProc = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+    })
+    const mockSpawnFn = spawn as jest.MockedFunction<typeof spawn>
+    mockSpawnFn.mockReturnValue(fakeProc as never)
+
+    // Set secret env vars in process.env
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-secret-key'
+    process.env.AI_SUPPORT_AGENT_TOKEN = 'secret-token'
+    process.env.AWS_SECRET_ACCESS_KEY = 'aws-secret'
+
+    const promise = buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile')
+    fakeProc.emit('close', 0)
+    await promise
+
+    const spawnCall = mockSpawnFn.mock.calls[0]
+    const spawnOptions = spawnCall[2] as { env?: Record<string, string> }
+    const passedEnv = spawnOptions?.env ?? {}
+
+    // Secret vars should NOT be in the env passed to docker build
+    expect(passedEnv['ANTHROPIC_API_KEY']).toBeUndefined()
+    expect(passedEnv['AI_SUPPORT_AGENT_TOKEN']).toBeUndefined()
+    expect(passedEnv['AWS_SECRET_ACCESS_KEY']).toBeUndefined()
+    // BUILDKIT_PROGRESS should always be set
+    expect(passedEnv['BUILDKIT_PROGRESS']).toBe('plain')
+  })
+
   it('should throw when docker build exits with non-zero code', async () => {
     const fakeProc = Object.assign(new EventEmitter(), {
       stdout: new EventEmitter(),

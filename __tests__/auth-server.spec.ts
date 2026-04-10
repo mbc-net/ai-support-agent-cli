@@ -116,6 +116,31 @@ describe('auth-server', () => {
     }
   })
 
+  it('should respond 415 when Content-Type is not application/json', async () => {
+    const { url, stop } = await startAuthServer(0)
+    try {
+      const parsed = new URL(`${url}/callback`)
+      const res = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
+        const req = http.request(
+          { hostname: parsed.hostname, port: parsed.port, path: parsed.pathname, method: 'POST',
+            headers: { 'Content-Type': 'text/plain' } },
+          (r) => {
+            let data = ''
+            r.on('data', (chunk) => (data += chunk))
+            r.on('end', () => resolve({ statusCode: r.statusCode ?? 0, body: data }))
+          },
+        )
+        req.on('error', reject)
+        req.write('{"token":"x","nonce":"y"}')
+        req.end()
+      })
+      expect(res.statusCode).toBe(415)
+      expect(JSON.parse(res.body)).toEqual({ error: 'Unsupported Media Type: expected application/json' })
+    } finally {
+      stop()
+    }
+  })
+
   it('should respond 413 when body exceeds 64KB', async () => {
     const { url, stop } = await startAuthServer(0)
     try {

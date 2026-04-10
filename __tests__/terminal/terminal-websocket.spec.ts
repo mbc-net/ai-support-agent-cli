@@ -489,4 +489,72 @@ describe('TerminalWebSocket', () => {
     terminalWs = createTerminalWs()
     void terminalWs.connect()
   })
+
+  it('should handle invalid base64 data in stdin gracefully', (done) => {
+    server.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+        if (msg.type === 'ready') {
+          // Send invalid base64 data — should not crash
+          const invalidBase64Msg: TerminalServerMessage = {
+            type: 'stdin',
+            sessionId: msg.sessionId,
+            data: '!!!invalid-base64!!!',
+          }
+          ws.send(JSON.stringify(invalidBase64Msg))
+
+          // After a brief delay, verify the session is still alive
+          setTimeout(() => {
+            const manager = terminalWs.getSessionManager()
+            const session = manager.getSession(msg.sessionId)
+            expect(session).toBeDefined()
+
+            const closeMsg: TerminalServerMessage = { type: 'close', sessionId: msg.sessionId }
+            ws.send(JSON.stringify(closeMsg))
+            done()
+          }, 50)
+        }
+      })
+
+      ws.send(JSON.stringify({ type: 'open', sessionId: 'invalid-b64-session' }))
+    })
+
+    terminalWs = createTerminalWs()
+    void terminalWs.connect()
+  })
+
+  it('should clamp cols/rows to valid range on resize', (done) => {
+    server.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+        if (msg.type === 'ready') {
+          // Send oversized resize values
+          const resizeMsg: TerminalServerMessage = {
+            type: 'resize',
+            sessionId: msg.sessionId,
+            cols: 999999,
+            rows: -5,
+          }
+          ws.send(JSON.stringify(resizeMsg))
+
+          setTimeout(() => {
+            const manager = terminalWs.getSessionManager()
+            const session = manager.getSession(msg.sessionId)
+            // cols should be clamped to MAX (1000), rows clamped to MIN (1)
+            expect(session?.cols).toBe(1000)
+            expect(session?.rows).toBe(1)
+
+            const closeMsg: TerminalServerMessage = { type: 'close', sessionId: msg.sessionId }
+            ws.send(JSON.stringify(closeMsg))
+            done()
+          }, 50)
+        }
+      })
+
+      ws.send(JSON.stringify({ type: 'open', sessionId: 'clamp-resize-session' }))
+    })
+
+    terminalWs = createTerminalWs()
+    void terminalWs.connect()
+  })
 })

@@ -38,6 +38,12 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
       }
 
       if (req.method === 'POST' && req.url === '/callback') {
+        const contentType = req.headers['content-type'] ?? ''
+        if (!contentType.startsWith('application/json')) {
+          res.writeHead(415, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Unsupported Media Type: expected application/json' }))
+          return
+        }
         let body = ''
         let bodySize = 0
         req.on('data', (chunk: Buffer) => {

@@ -42,5 +42,53 @@ describe('browser-security', () => {
       expect(result.valid).toBe(false)
       expect(result.reason).toContain('Invalid URL')
     })
+
+    describe('SSRF prevention', () => {
+      it('should reject localhost', () => {
+        const result = validateUrl('http://localhost/admin')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should reject 127.0.0.1', () => {
+        const result = validateUrl('http://127.0.0.1/')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should reject 10.x.x.x (RFC1918)', () => {
+        const result = validateUrl('http://10.0.0.1/secret')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should reject 192.168.x.x (RFC1918)', () => {
+        const result = validateUrl('http://192.168.1.1/')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should reject 172.16.x.x (RFC1918)', () => {
+        const result = validateUrl('http://172.16.0.1/')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should reject 169.254.x.x (AWS metadata link-local)', () => {
+        const result = validateUrl('http://169.254.169.254/latest/meta-data/')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should allow public IP addresses', () => {
+        expect(validateUrl('http://8.8.8.8/')).toEqual({ valid: true })
+        expect(validateUrl('https://1.1.1.1/')).toEqual({ valid: true })
+      })
+
+      it('should allow public domain names', () => {
+        expect(validateUrl('https://example.com/')).toEqual({ valid: true })
+        expect(validateUrl('https://api.github.com/')).toEqual({ valid: true })
+      })
+    })
   })
 })
