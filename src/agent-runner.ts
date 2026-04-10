@@ -15,16 +15,9 @@ import { validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
 import { startConfigWatcher } from './config-watcher'
 import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
+import { extractTokenId } from './utils/token-utils'
 
-/**
- * トークン文字列から tokenId を抽出する
- * トークン形式: {tenantCode}:{tokenId}:{rawToken}
- * tokenId は API で agentId として使用され、コンテナ再起動時もエントリが増殖しない
- */
-export function extractTokenId(token: string): string | undefined {
-  const parts = token.split(':')
-  return parts.length === 3 ? parts[1] : undefined
-}
+export { extractTokenId }
 
 export interface RunnerOptions {
   token?: string

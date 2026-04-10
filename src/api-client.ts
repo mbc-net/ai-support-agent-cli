@@ -3,6 +3,7 @@ import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios'
 import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL } from './constants'
 import { logger } from './logger'
 import { RetryStrategy } from './retry-strategy'
+import { extractTenantCodeFromToken } from './utils/token-utils'
 import type {
   AgentCommand,
   AgentServerConfig,
@@ -23,11 +24,6 @@ import type {
   VersionInfo,
 } from './types'
 
-/** Extract tenantCode from token format: {tenantCode}:{tokenId}:{rawToken} */
-function extractTenantCodeFromToken(token: string): string {
-  const parts = token.split(':')
-  return parts.length >= 3 ? parts[0] : ''
-}
 
 export class ApiClient {
   private readonly client: AxiosInstance

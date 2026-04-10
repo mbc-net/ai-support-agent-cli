@@ -10,7 +10,7 @@ import {
   processList,
   processKill,
 } from '../../src/commands'
-import { _getRunningProcesses } from '../../src/commands/chat-executor'
+import { _getRunningProcesses } from '../../src/commands/process-manager'
 import { _getRunningApiChats } from '../../src/commands/api-chat-executor'
 import type { CommandDispatch } from '../../src/types'
 

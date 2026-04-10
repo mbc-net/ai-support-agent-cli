@@ -1,76 +1,25 @@
-import { execFileSync, spawn } from 'child_process'
-import type { ChildProcess } from 'child_process'
-import * as fs from 'fs'
+/**
+ * Docker runner — main entry point for Docker-based execution
+ *
+ * Orchestrates Docker availability check, image build, and container supervision.
+ * Supports both legacy single-container mode and per-project supervisor mode.
+ */
+
+import { spawn } from 'child_process'
 import * as os from 'os'
-import * as path from 'path'
 
-import { getDockerfilePath, getDockerContextDir, resolveDockerfile, getProjectImageTag } from './dockerfile-path'
-import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE, DOCKER_RESTART_EXIT_CODE } from '../constants'
-import { getConfigDir, getProjectList, loadConfig } from '../config-manager'
-import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from '../pid-manager'
+import { DOCKER_UPDATE_EXIT_CODE } from '../constants'
+import { getProjectList, loadConfig } from '../config-manager'
+import { writePidFile, isAlreadyRunning, readPidFile } from '../pid-manager'
 import { t } from '../i18n'
-import { logger, getProjectColor, makeLinePrefixer } from '../logger'
-import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
+import { logger } from '../logger'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
-import { isNewerVersion, isValidVersion } from '../utils/version'
-import { performUpdate, reExecProcess } from '../update-checker'
-import { ApiClient } from '../api-client'
-import type { ProjectRegistration } from '../types'
-
-function makeSessionId(): string {
-  const d = new Date()
-  const pad = (n: number, len = 2): string => String(n).padStart(len, '0')
-  return (
-    String(d.getFullYear()) +
-    pad(d.getMonth() + 1) +
-    pad(d.getDate()) +
-    pad(d.getHours()) +
-    pad(d.getMinutes()) +
-    pad(d.getSeconds())
-  )
-}
-
-/** Convert a path.relative() result to POSIX format for container use */
-function toPosixRelative(relativePath: string): string {
-  return relativePath.split(path.sep).join('/')
-}
-
-/**
- * Returns true when running via ts-node (i.e. `npm run dev`).
- * In this case, local dist/ should be mounted into containers instead of
- * relying on the npm-installed package inside the image.
- */
-function isRunningViaTsNode(): boolean {
-  const sym = Symbol.for('ts-node.register.instance')
-  return !!(process as unknown as { [key: symbol]: unknown })[sym]
-}
-
-/**
- * Returns extra volume mount args to overlay the local dist/ into the container
- * when running in dev mode (ts-node), so the container uses local source code.
- * Returns an empty array when not in dev mode.
- */
-function buildDevMounts(): string[] {
-  if (!isRunningViaTsNode()) return []
-  // __dirname is agent/src/docker — walk up two levels to get agent/
-  const agentRoot = path.resolve(__dirname, '..', '..')
-  const distDir = path.join(agentRoot, 'dist')
-  const localesDir = path.join(agentRoot, 'src', 'locales')
-  const containerBase = '/usr/local/lib/node_modules/@ai-support-agent/cli'
-  return [
-    '-v', `${distDir}:${containerBase}/dist:ro`,
-    '-v', `${localesDir}:${containerBase}/dist/locales:ro`,
-  ]
-}
-
-const IMAGE_NAME = 'ai-support-agent'
-const PASSTHROUGH_ENV_VARS = [
-  'AI_SUPPORT_AGENT_TOKEN',
-  'AI_SUPPORT_AGENT_API_URL',
-  'AI_SUPPORT_AGENT_CONFIG_DIR',
-  'ANTHROPIC_API_KEY',
-  'CLAUDE_CODE_OAUTH_TOKEN',
-]
+import { IMAGE_NAME, checkDockerAvailable } from './docker-utils'
+import { ensureImage } from './version-manager'
+import { syncDockerfileToConfigDir } from './dockerfile-sync'
+import { buildVolumeMounts, buildEnvArgs } from './volume-mount-builder'
+import { DockerSupervisor } from './docker-supervisor'
+import { installUpdateAndRestart } from './update-handler'
 
 export interface DockerRunOptions {
   token?: string
@@ -91,343 +40,6 @@ export interface DockerRunOptions {
   agentId?: string
   /** Timeout in ms before forcing exit during shutdown (default 10000). Used for testing. */
   shutdownTimeoutMs?: number
-}
-
-export function checkDockerAvailable(): boolean {
-  try {
-    execFileSync('docker', ['info'], { stdio: 'ignore' })
-    return true
-  } catch {
-    return false
-  }
-}
-
-export function imageExists(version: string): boolean {
-  try {
-    execFileSync('docker', ['image', 'inspect', `${IMAGE_NAME}:${version}`], { stdio: 'ignore' })
-    return true
-  } catch {
-    return false
-  }
-}
-
-export function buildImage(version: string, customDockerfile?: string): void {
-  const { dockerfilePath, contextDir } = resolveDockerfile(customDockerfile)
-  logger.info(t('docker.building'))
-  if (customDockerfile) {
-    logger.info(t('docker.usingCustomDockerfile', { path: dockerfilePath }))
-  }
-  execFileSync(
-    'docker',
-    ['build', '-t', `${IMAGE_NAME}:${version}`, '--pull=false', '--build-arg', `AGENT_VERSION=${version}`, '-f', dockerfilePath, contextDir],
-    { stdio: 'inherit' },
-  )
-  logger.success(t('docker.buildComplete'))
-}
-
-/** Allowlist for apt package names: letters, digits, hyphens, dots, plus signs, colons */
-const APT_PACKAGE_RE = /^[a-zA-Z0-9][a-zA-Z0-9+\-.:]*$/
-/** Allowlist for npm package names: scoped (@scope/name) or plain, with version (@x.y.z) */
-const NPM_PACKAGE_RE = /^(@[a-zA-Z0-9_\-.]+\/)?[a-zA-Z0-9_\-.]+(@[a-zA-Z0-9._\-^~*]+)?$/
-
-/**
- * Validate a list of package names against an allowlist regex.
- * Throws if any name is invalid to prevent Dockerfile injection.
- */
-export function validatePackageNames(packages: string[], type: 'apt' | 'npm'): void {
-  const re = type === 'apt' ? APT_PACKAGE_RE : NPM_PACKAGE_RE
-  for (const pkg of packages) {
-    if (!re.test(pkg)) {
-      throw new Error(`Invalid ${type} package name: "${pkg}"`)
-    }
-  }
-}
-
-/**
- * Generate a per-project Dockerfile that extends the base agent image.
- */
-export function generateProjectDockerfile(
-  baseVersion: string,
-  aptPackages: string[],
-  npmPackages: string[],
-  commands: string[] = [],
-  timezone?: string,
-): string {
-  validatePackageNames(aptPackages, 'apt')
-  validatePackageNames(npmPackages, 'npm')
-
-  const lines = [`FROM ${IMAGE_NAME}:${baseVersion}`]
-  if (timezone) {
-    // Override the TZ env var set by docker run, allowing per-project custom timezone
-    lines.push(`ENV TZ=${timezone}`)
-  }
-  if (aptPackages.length > 0) {
-    lines.push(
-      `RUN apt-get update && apt-get install -y --no-install-recommends \\`,
-      `    ${aptPackages.join(' \\\n    ')} \\`,
-      `    && rm -rf /var/lib/apt/lists/*`,
-    )
-  }
-  if (npmPackages.length > 0) {
-    lines.push(
-      `RUN npm install -g ${npmPackages.join(' ')} && npm cache clean --force`,
-    )
-  }
-  for (const cmd of commands) {
-    if (/[\n\r|`;$()]/.test(cmd)) {
-      throw new Error(`Invalid command (contains forbidden character): "${cmd.substring(0, 50)}"`)
-    }
-    lines.push(`RUN ${cmd}`)
-  }
-  return lines.join('\n') + '\n'
-}
-
-/**
- * Build a per-project Docker image using the given Dockerfile.
- * Streams stdout/stderr to both the host terminal and the API (for real-time log viewing).
- */
-/** Maximum total log size kept in memory per session (2 MB). Older content is discarded. */
-const MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024
-
-/**
- * docker build プロセスに渡す環境変数を必要最小限に絞る。
- * process.env をそのまま渡すと API キー等の機密情報が漏洩するため、
- * ビルドに必要な変数のみを明示的に選択する。
- */
-function buildDockerEnv(): NodeJS.ProcessEnv {
-  const ALLOWED_KEYS = ['PATH', 'HOME', 'USER', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL']
-  const env: NodeJS.ProcessEnv = {}
-  for (const key of ALLOWED_KEYS) {
-    if (process.env[key] !== undefined) {
-      env[key] = process.env[key]
-    }
-  }
-  env['BUILDKIT_PROGRESS'] = 'plain'
-  return env
-}
-
-export async function buildProjectImage(
-  tenantCode: string,
-  projectCode: string,
-  baseVersion: string,
-  dockerfilePath: string,
-  apiClient?: ApiClient,
-  agentId?: string,
-): Promise<void> {
-  const imageTag = getProjectImageTag(tenantCode, projectCode, baseVersion)
-  const contextDir = getDockerContextDir()
-  const projectKey = `${tenantCode}#${projectCode}`
-  const color = getProjectColor(projectKey)
-  const reset = '\x1b[0m'
-  const prefix = `${color}[${projectKey}]${reset} `
-  logger.info(`[docker] Building project image: ${imageTag}`)
-
-  const sessionId = makeSessionId()
-  let seq = 0
-  let fullLog = ''
-  let logTruncated = false
-  let buf = ''
-
-  const flush = async (): Promise<void> => {
-    if (!buf) return
-    const text = buf
-    buf = ''
-    if (!logTruncated) {
-      if (fullLog.length + text.length <= MAX_SESSION_LOG_BYTES) {
-        fullLog += text
-      } else {
-        const remaining = MAX_SESSION_LOG_BYTES - fullLog.length
-        fullLog += remaining > 0 ? text.slice(0, remaining) : ''
-        logTruncated = true
-        logger.warn('[docker] Build log exceeded 2 MB limit; remaining output will not be saved to S3')
-      }
-    }
-    if (apiClient) {
-      await apiClient.submitLogChunk({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, seq: ++seq, text })
-        .catch((e: unknown) => logger.warn(`[docker] Failed to send log chunk: ${e}`))
-    }
-  }
-
-  let buildError: Error | undefined
-  await new Promise<void>((resolve, reject) => {
-    const proc = spawn('docker', [
-      'build', '-t', imageTag, '--pull=false', '--progress=plain',
-      '--build-arg', `AGENT_VERSION=${baseVersion}`,
-      '-f', dockerfilePath, contextDir,
-    ], { stdio: ['ignore', 'pipe', 'pipe'], env: buildDockerEnv() })
-
-    const writePrefixed = makeLinePrefixer(prefix, (s) => process.stdout.write(s))
-    const onData = (d: Buffer): void => {
-      const text = d.toString()
-      writePrefixed(text)
-      buf += text
-      if (buf.length > 4096) {
-        void flush()
-      }
-    }
-    proc.stdout?.on('data', onData)
-    proc.stderr?.on('data', onData)
-    proc.on('error', (err) => reject(err))
-    proc.on('close', (code) => {
-      if (code === 0) resolve()
-      else reject(new Error(`docker build exited with code ${code}`))
-    })
-  }).catch((e: unknown) => { buildError = e instanceof Error ? e : new Error(String(e)) })
-
-  await flush()
-
-  if (apiClient && fullLog) {
-    await apiClient.saveSessionLog({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, content: fullLog })
-      .catch((e: unknown) => logger.warn(`[docker] Failed to upload build log to S3: ${e}`))
-  }
-
-  if (buildError) throw buildError
-  logger.success(`[docker] Project image built: ${imageTag}`)
-}
-
-/** Container-internal base path for project directories */
-const CONTAINER_PROJECTS_BASE = '/workspace/projects'
-/** Container-internal home directory */
-const CONTAINER_HOME = '/home/node'
-
-export interface ProjectDirMapping {
-  hostDir: string
-  containerDir: string
-  projectCode: string
-}
-
-/**
- * Build a deterministic container name for a project.
- * Format: asa-{tenantCode}-{projectCode}-{agentId}
- * All components are lowercased and non-alphanumeric chars (except hyphens) are replaced with hyphens.
- */
-export function buildContainerName(tenantCode: string, projectCode: string, agentId?: string): string {
-  const sanitize = (s: string): string => s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
-  const parts = ['ai', sanitize(tenantCode), sanitize(projectCode)]
-  if (agentId) parts.push(sanitize(agentId))
-  return parts.join('-')
-}
-
-/**
- * Remove a stale container with the given name if it exists.
- * This handles the case where a previous run crashed and left a container behind,
- * which would prevent `docker run --name` from succeeding.
- */
-export function removeStaleContainer(containerName: string): void {
-  try {
-    execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore' })
-  } catch {
-    // Container does not exist or docker rm failed — ignore
-  }
-}
-
-export function buildVolumeMounts(): { mounts: string[]; projectMappings: ProjectDirMapping[] } {
-  const home = os.homedir()
-  const mounts: string[] = []
-  const projectMappings: ProjectDirMapping[] = []
-
-  // Claude Code OAuth tokens and config — mount to container home
-  const claudeDir = path.join(home, '.claude')
-  if (fs.existsSync(claudeDir)) {
-    mounts.push('-v', `${claudeDir}:${path.posix.join(CONTAINER_HOME, '.claude')}:rw`)
-  }
-  const claudeJson = path.join(home, '.claude.json')
-  if (fs.existsSync(claudeJson)) {
-    mounts.push('-v', `${claudeJson}:${path.posix.join(CONTAINER_HOME, '.claude.json')}:rw`)
-  }
-
-  // Agent config — mount to container home
-  const agentConfigDir = getConfigDir()
-  if (fs.existsSync(agentConfigDir)) {
-    const relativeToHome = path.relative(home, agentConfigDir)
-    const isUnderHome = !relativeToHome.startsWith('..')
-    const containerConfigDir = isUnderHome
-      ? path.posix.join(CONTAINER_HOME, toPosixRelative(relativeToHome))
-      : `/workspace/.config/ai-support-agent`
-    mounts.push('-v', `${agentConfigDir}:${containerConfigDir}:rw`)
-  }
-
-  // AWS credentials — mount to container home
-  const awsDir = path.join(home, '.aws')
-  if (fs.existsSync(awsDir)) {
-    mounts.push('-v', `${awsDir}:${path.posix.join(CONTAINER_HOME, '.aws')}:ro`)
-  }
-
-  // Custom project directories — mount to /workspace/projects/{projectCode}
-  const config = loadConfig()
-  if (config?.projects) {
-    const mounted = new Set<string>()
-    const blockedPrefixes = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
-    for (const project of config.projects) {
-      if (project.projectDir && !mounted.has(project.projectDir) && fs.existsSync(project.projectDir)) {
-        let resolved: string
-        try {
-          resolved = fs.realpathSync(project.projectDir)
-        } catch {
-          logger.warn(`[docker] Cannot resolve path, skipping: ${project.projectDir}`)
-          continue
-        }
-        const isBlocked = blockedPrefixes.some((prefix) => {
-          const prefixWithoutSlash = prefix.replace(/\/$/, '')
-          return resolved === prefixWithoutSlash || resolved.startsWith(prefix)
-        })
-        if (isBlocked) {
-          logger.warn(`[docker] Skipping blocked path for volume mount: ${project.projectDir}`)
-          continue
-        }
-        const containerDir = `${CONTAINER_PROJECTS_BASE}/${project.projectCode}`
-        mounts.push('-v', `${project.projectDir}:${containerDir}:rw`)
-        projectMappings.push({
-          hostDir: project.projectDir,
-          containerDir,
-          projectCode: project.projectCode,
-        })
-        mounted.add(project.projectDir)
-      }
-    }
-  }
-
-  return { mounts, projectMappings }
-}
-
-export function buildEnvArgs(projectMappings: ProjectDirMapping[]): string[] {
-  const args: string[] = []
-
-  // Mark process as running inside a Docker container
-  args.push('-e', 'AI_SUPPORT_AGENT_IN_DOCKER=1')
-
-  // Set HOME to container-internal path (not host path)
-  args.push('-e', `HOME=${CONTAINER_HOME}`)
-
-  // Map config dir to container-internal path
-  const hostConfigDir = getConfigDir()
-  const home = os.homedir()
-  const relativeToHome = path.relative(home, hostConfigDir)
-  const isUnderHome = !relativeToHome.startsWith('..')
-  const containerConfigDir = isUnderHome
-    ? path.posix.join(CONTAINER_HOME, toPosixRelative(relativeToHome))
-    : `/workspace/.config/ai-support-agent`
-
-  for (const key of PASSTHROUGH_ENV_VARS) {
-    if (process.env[key]) {
-      if (key === 'AI_SUPPORT_AGENT_CONFIG_DIR') {
-        args.push('-e', `${key}=${containerConfigDir}`)
-      } else {
-        args.push('-e', `${key}=${process.env[key]}`)
-      }
-    }
-  }
-
-  // Pass project directory mappings so agent uses container-internal paths
-  if (projectMappings.length > 0) {
-    // Format: projectCode=containerDir;projectCode2=containerDir2
-    const mapping = projectMappings
-      .map((m) => `${m.projectCode}=${m.containerDir}`)
-      .join(';')
-    args.push('-e', `AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${mapping}`)
-  }
-
-  return args
 }
 
 export function buildContainerArgs(opts: DockerRunOptions): string[] {
@@ -461,675 +73,6 @@ export function buildContainerArgs(opts: DockerRunOptions): string[] {
   return args
 }
 
-let cachedInstalledVersion: string | null = null
-
-/**
- * Get the currently installed version of @ai-support-agent/cli from npm global.
- * Falls back to AGENT_VERSION if npm query fails.
- * Result is cached after the first call.
- *
- * NOTE: Must only be called from host-side code (i.e. runInDocker).
- * Inside a Docker container the process runs with --no-docker, so
- * ensureImage() / getInstalledVersion() are never reached.
- */
-export function getInstalledVersion(): string {
-  if (cachedInstalledVersion !== null) return cachedInstalledVersion
-  try {
-    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-    const output = execFileSync(npmCmd, ['list', '-g', '--json', '--depth=0'], {
-      encoding: 'utf-8',
-      timeout: 10_000,
-    })
-    const parsed = JSON.parse(output) as {
-      dependencies?: Record<string, { version?: string }>
-    }
-    const version = parsed.dependencies?.['@ai-support-agent/cli']?.version
-    if (version && isValidVersion(version)) {
-      cachedInstalledVersion = version
-      return version
-    }
-  } catch {
-    // npm list failed — fall back to compile-time version
-  }
-  cachedInstalledVersion = AGENT_VERSION
-  return AGENT_VERSION
-}
-
-/**
- * Reset the cached installed version (for testing).
- */
-export function resetInstalledVersionCache(): void {
-  cachedInstalledVersion = null
-}
-
-export function ensureImage(customDockerfile?: string): string {
-  const installedVersion = getInstalledVersion()
-  // Use the installed version if it is newer than the compile-time version
-  const version = isNewerVersion(AGENT_VERSION, installedVersion) ? installedVersion : AGENT_VERSION
-  if (!imageExists(version)) {
-    buildImage(version, customDockerfile)
-  } else {
-    logger.info(t('docker.imageFound', { version }))
-  }
-  return version
-}
-
-export function dockerLogin(): void {
-  logger.info(t('docker.loginStep1'))
-  console.log('')
-  console.log('  claude setup-token')
-  console.log('')
-  logger.info(t('docker.loginStep2'))
-  console.log('')
-  console.log('  export CLAUDE_CODE_OAUTH_TOKEN=<token>')
-  console.log('  ai-support-agent start')
-  console.log('')
-  logger.info(t('docker.loginStep3'))
-}
-
-/**
- * Called on the host after a container exits with DOCKER_UPDATE_EXIT_CODE.
- * Reads the new version from a project-specific config dir (written by the container),
- * installs it on the host with npm, then re-execs the process so ensureImage()
- * picks up the newly installed version and rebuilds the Docker image.
- */
-async function installUpdateAndRestart(projectConfigDir?: string): Promise<void> {
-  let newVersion: string | undefined
-  // First try project-specific config dir, fall back to global config dir
-  const searchDirs = projectConfigDir
-    ? [projectConfigDir, getConfigDir()]
-    : [getConfigDir()]
-
-  for (const dir of searchDirs) {
-    try {
-      const versionFile = path.join(dir, 'update-version.json')
-      const raw = fs.readFileSync(versionFile, 'utf-8')
-      const parsed = JSON.parse(raw) as { version?: string }
-      if (parsed.version && isValidVersion(parsed.version)) {
-        newVersion = parsed.version
-      }
-      fs.unlinkSync(versionFile)
-      break
-    } catch {
-      // File does not exist in this dir — try next
-    }
-  }
-
-  if (newVersion) {
-    logger.info(`[docker] Installing @ai-support-agent/cli@${newVersion} on host...`)
-    // Always use 'global' install method on the host side regardless of how the
-    // host process was originally launched (it may be detected as 'local' in
-    // service/systemd environments where the script path is under node_modules).
-    const result = await performUpdate(newVersion, 'global')
-    if (!result.success) {
-      logger.warn(`[docker] Host npm install failed: ${result.error ?? 'unknown'}. Proceeding with existing version.`)
-    } else {
-      // Invalidate the cached installed version so ensureImage() re-reads it
-      resetInstalledVersionCache()  // defined in this file
-    }
-  }
-
-  reExecProcess()
-}
-
-/**
- * Copy the bundled Dockerfile (and entrypoint.sh) to the config directory
- * on first run so users can customise it.
- * Does NOT overwrite an existing file — user edits are preserved.
- * Exported for testing.
- */
-export function syncDockerfileToConfigDir(): void {
-  const configDir = getConfigDir()
-  const destDockerfile = path.join(configDir, 'Dockerfile')
-
-  if (fs.existsSync(destDockerfile)) return // preserve existing file
-
-  try {
-    const srcDockerfile = getDockerfilePath()
-    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 })
-    fs.copyFileSync(srcDockerfile, destDockerfile)
-
-    // Also copy entrypoint.sh which the bundled Dockerfile references via COPY
-    const srcEntrypoint = path.join(getDockerContextDir(), 'docker', 'entrypoint.sh')
-    const destEntrypoint = path.join(configDir, 'docker', 'entrypoint.sh')
-    if (fs.existsSync(srcEntrypoint)) {
-      fs.mkdirSync(path.dirname(destEntrypoint), { recursive: true })
-      fs.copyFileSync(srcEntrypoint, destEntrypoint)
-    }
-
-    logger.info(t('docker.dockerfileSynced', { path: destDockerfile }))
-  } catch (err) {
-    logger.warn(t('docker.dockerfileSyncFailed', { message: err instanceof Error ? err.message : String(err) }))
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Per-project volume mount helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Build volume mounts and env args for a single project container.
- * Each project gets its own isolated config dir under ~/.ai-support-agent/projects/{tenantCode}/{projectCode}/.ai-support-agent/
- */
-function buildProjectVolumeMounts(
-  project: ProjectRegistration,
-  projectConfigHostDir: string,
-): { mounts: string[]; envArgs: string[] } {
-  const home = os.homedir()
-  const mounts: string[] = []
-  const envArgs: string[] = []
-
-  // Claude Code OAuth tokens and config — mount to container home
-  const claudeDir = path.join(home, '.claude')
-  if (fs.existsSync(claudeDir)) {
-    mounts.push('-v', `${claudeDir}:${path.posix.join(CONTAINER_HOME, '.claude')}:rw`)
-  }
-  const claudeJson = path.join(home, '.claude.json')
-  if (fs.existsSync(claudeJson)) {
-    mounts.push('-v', `${claudeJson}:${path.posix.join(CONTAINER_HOME, '.claude.json')}:rw`)
-  }
-
-  // Per-project isolated config dir — mounts to /home/node/.ai-support-agent inside container
-  const containerConfigDir = path.posix.join(CONTAINER_HOME, '.ai-support-agent')
-  fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
-  mounts.push('-v', `${projectConfigHostDir}:${containerConfigDir}:rw`)
-
-  // Standard env vars for per-project container
-  envArgs.push('-e', 'AI_SUPPORT_AGENT_IN_DOCKER=1')
-  envArgs.push('-e', `HOME=${CONTAINER_HOME}`)
-  envArgs.push('-e', `AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir}`)
-
-  // Pass token and apiUrl per-project
-  if (project.token) {
-    envArgs.push('-e', `AI_SUPPORT_AGENT_TOKEN=${project.token}`)
-  }
-  if (project.apiUrl) {
-    // Replace localhost/127.0.0.1 with host.docker.internal so the container can reach the host
-    const containerApiUrl = project.apiUrl.replace(
-      /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
-      (_, scheme, _host, port) => `${scheme}host.docker.internal${port ?? ''}`,
-    )
-    envArgs.push('-e', `AI_SUPPORT_AGENT_API_URL=${containerApiUrl}`)
-  }
-
-  // Pass ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN if set
-  for (const key of ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'] as const) {
-    if (process.env[key]) {
-      envArgs.push('-e', `${key}=${process.env[key]}`)
-    }
-  }
-
-  // Pass host timezone so container clocks match the host by default.
-  // The per-project Dockerfile can override this with ENV TZ= if a custom timezone is configured.
-  const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone
-  envArgs.push('-e', `TZ=${hostTz}`)
-
-  // Project dir mapping: single project only
-  const containerProjectDir = `${CONTAINER_PROJECTS_BASE}/${project.projectCode}`
-  const blockedPrefixes = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
-  if (project.projectDir && fs.existsSync(project.projectDir)) {
-    let resolved: string
-    try {
-      resolved = fs.realpathSync(project.projectDir)
-      const isBlocked = blockedPrefixes.some((prefix) => {
-        const prefixWithoutSlash = prefix.replace(/\/$/, '')
-        return resolved === prefixWithoutSlash || resolved.startsWith(prefix)
-      })
-      if (!isBlocked) {
-        mounts.push('-v', `${project.projectDir}:${containerProjectDir}:rw`)
-        envArgs.push('-e', `AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${project.projectCode}=${containerProjectDir}`)
-      } else {
-        logger.warn(`[docker] Skipping blocked path for volume mount: ${project.projectDir}`)
-      }
-    } catch {
-      logger.warn(`[docker] Cannot resolve path, skipping: ${project.projectDir}`)
-    }
-  }
-
-  return { mounts, envArgs }
-}
-
-/**
- * Migrate per-project config directory from the legacy layout to the current layout.
- *
- * Legacy: ~/.ai-support-agent/projects/{projectCode}/
- * Current: ~/.ai-support-agent/projects/{tenantCode}/{projectCode}/
- *
- * Older agent versions stored project data without a tenantCode path segment.
- * This function moves the directory once so the current code finds it in the right place.
- */
-export function migrateProjectConfigDir(project: ProjectRegistration): void {
-  const configBase = path.join(getConfigDir(), 'projects')
-  const legacyDir = path.join(configBase, project.projectCode)
-  const newDir = path.join(configBase, project.tenantCode, project.projectCode)
-
-  if (!fs.existsSync(legacyDir)) return       // nothing to migrate
-  if (fs.existsSync(newDir)) return            // already migrated
-
-  try {
-    fs.mkdirSync(path.join(configBase, project.tenantCode), { recursive: true, mode: 0o700 })
-    fs.renameSync(legacyDir, newDir)
-    logger.info(`[docker] Migrated project config dir: ${legacyDir} → ${newDir}`)
-  } catch (err) {
-    logger.warn(`[docker] Failed to migrate project config dir for ${project.projectCode}: ${err instanceof Error ? err.message : String(err)}`)
-  }
-}
-
-/**
- * Get the host-side per-project config directory.
- * Located at: ~/.ai-support-agent/projects/{tenantCode}/{projectCode}/.ai-support-agent/
- */
-function getProjectConfigHostDir(project: ProjectRegistration): string {
-  return path.join(getConfigDir(), 'projects', project.tenantCode, project.projectCode, '.ai-support-agent')
-}
-
-// ---------------------------------------------------------------------------
-// DockerSupervisor: one container per project
-// ---------------------------------------------------------------------------
-
-interface DockerContainerHandle {
-  project: ProjectRegistration
-  child: ChildProcess
-  version: string
-  closeHandled: boolean
-  /** Resolves when the container process has exited and all log flushes have been initiated. */
-  closedPromise: Promise<void>
-  resolveClosed: () => void
-  /** Path to the --cidfile written by docker run; used to read the container ID for docker stop. */
-  cidFile: string
-}
-
-/**
- * Manages one Docker container per project.
- * Spawned from runInDocker() when multiple projects are configured.
- */
-class DockerSupervisor {
-  private handles = new Map<string, DockerContainerHandle>()
-  private updating = false
-  private opts: DockerRunOptions
-  private version: string
-  private onAllStopped: (() => void) | undefined
-  private readonly defaultAgentId: string | undefined
-  /** Per-project agentId updated when the container registers with the API. */
-  private projectAgentIds = new Map<string, string>()
-  private sigintHandler: (() => void) | undefined
-  private sigtermHandler: (() => void) | undefined
-
-  constructor(version: string, opts: DockerRunOptions) {
-    this.version = version
-    this.opts = opts
-    this.defaultAgentId = opts.agentId
-  }
-
-  private projectKey(project: ProjectRegistration): string {
-    return `${project.tenantCode}/${project.projectCode}`
-  }
-
-  private getProjectAgentId(project: ProjectRegistration): string | undefined {
-    return this.projectAgentIds.get(this.projectKey(project)) ?? this.defaultAgentId
-  }
-
-  private setProjectAgentId(project: ProjectRegistration, agentId: string): void {
-    this.projectAgentIds.set(this.projectKey(project), agentId)
-  }
-
-  private createProjectApiClient(project: ProjectRegistration): ApiClient {
-    return new ApiClient(project.apiUrl, project.token)
-  }
-
-  start(projects: ProjectRegistration[], onStop?: () => void): void {
-    this.onAllStopped = onStop
-
-    for (const project of projects) {
-      migrateProjectConfigDir(project)
-      this.spawnProject(project)
-    }
-
-    // Setup shutdown handlers
-    let shuttingDown = false
-    const shutdown = (): void => {
-      if (shuttingDown) return
-      shuttingDown = true
-      // Set updating flag so the close handler does not call process.exit again
-      this.updating = true
-      if (this.sigintHandler) process.removeListener('SIGINT', this.sigintHandler)
-      if (this.sigtermHandler) process.removeListener('SIGTERM', this.sigtermHandler)
-      removePidFile()
-      logger.info(t('runner.shuttingDown'))
-      const closedPromises = [...this.handles.values()].map((h) => h.closedPromise)
-      this.stopAll()
-      onStop?.()
-      const shutdownTimer = setTimeout(() => {
-        logger.warn('[docker] Shutdown timed out waiting for log flush; forcing exit')
-        process.exit(0)
-      }, this.opts.shutdownTimeoutMs ?? 10_000)
-      void Promise.all(closedPromises).then(() => {
-        clearTimeout(shutdownTimer)
-        process.exit(0)
-      })
-    }
-    this.sigintHandler = (): void => { logger.info('[docker] SIGINT received, shutting down...'); shutdown() }
-    this.sigtermHandler = (): void => { logger.info('[docker] SIGTERM received, shutting down...'); shutdown() }
-    process.on('SIGINT', this.sigintHandler)
-    process.on('SIGTERM', this.sigtermHandler)
-
-    // On macOS/Linux, Ctrl+C may not deliver SIGINT to Node.js when the terminal
-    // is in cooked mode and child processes share the process group. As a fallback,
-    // read \x03 (ETX) directly from stdin when it is a TTY in raw mode.
-    /* istanbul ignore next -- TTY-only path, not testable in CI */
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true)
-      process.stdin.resume()
-      process.stdin.on('data', (chunk: Buffer) => {
-        if (chunk[0] === 0x03) { // Ctrl+C
-          shutdown()
-        }
-      })
-    }
-  }
-
-  private getImageTag(project: ProjectRegistration): string {
-    const projectTag = getProjectImageTag(project.tenantCode, project.projectCode, this.version)
-    try {
-      execFileSync('docker', ['image', 'inspect', projectTag], { stdio: 'ignore' })
-      return projectTag
-    } catch /* istanbul ignore next */ {
-      return `${IMAGE_NAME}:${this.version}`
-    }
-  }
-
-  private async rebuildAndRestart(project: ProjectRegistration, projectConfigHostDir: string, forceIfDockerfileExists = false): Promise<void> {
-    const rebuildMarker = path.join(projectConfigHostDir, 'docker-rebuild-needed')
-    const projectDockerfile = path.join(projectConfigHostDir, 'Dockerfile')
-    const hasMarker = fs.existsSync(rebuildMarker)
-    const shouldBuild = hasMarker || (forceIfDockerfileExists && fs.existsSync(projectDockerfile))
-    if (shouldBuild) {
-      if (hasMarker) fs.unlinkSync(rebuildMarker)
-
-      // Load the registered agentId before building so build logs are stored under
-      // the correct agentId (the one shown in the Web UI), not the host agentId.
-      const registeredAgentIdPath = path.join(projectConfigHostDir, 'docker-registered-agent-id')
-      if (fs.existsSync(registeredAgentIdPath)) {
-        const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
-        if (registeredId && registeredId !== this.getProjectAgentId(project)) {
-          this.setProjectAgentId(project, registeredId)
-        }
-      }
-
-      // The container writes Dockerfile into its configDir root, which maps to projectConfigHostDir on host.
-      if (fs.existsSync(projectDockerfile)) {
-        try {
-          await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, this.createProjectApiClient(project), this.getProjectAgentId(project))
-          // Copy the docker-customization-hash file written by the container so the
-          // next container startup knows the current customization was already built.
-          const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
-          const dstHash = path.join(projectConfigHostDir, 'docker-built-hash')
-          if (fs.existsSync(srcHash)) {
-            fs.copyFileSync(srcHash, dstHash)
-          }
-          // Clear any previous build error so the container can report success
-          const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
-          /* istanbul ignore next */
-          if (fs.existsSync(buildErrorPath)) {
-            fs.unlinkSync(buildErrorPath)
-          }
-        } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err)
-          logger.error(`[docker] Image build failed: ${errorMsg}`)
-          logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
-          // Write the error message so the container can report it via heartbeat
-          // Truncate to 3000 chars to avoid DynamoDB item size limits
-          const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
-          const truncatedError = errorMsg.length > 3000 ? errorMsg.substring(0, 3000) + '...(truncated)' : errorMsg
-          /* istanbul ignore next */
-          try {
-            fs.writeFileSync(buildErrorPath, truncatedError, 'utf-8')
-          } catch (writeErr) {
-            logger.warn(`[docker] Failed to write build error file: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`)
-          }
-          // Write docker-built-hash even on failure so the next startup does not
-          // attempt the same failed build again. The container starts with the
-          // previous (base) image until the configuration is fixed and changed.
-          const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
-          const dstHash = path.join(projectConfigHostDir, 'docker-built-hash')
-          if (fs.existsSync(srcHash)) {
-            fs.copyFileSync(srcHash, dstHash)
-          }
-        }
-      }
-    }
-    this.spawnProject(project)
-  }
-
-  private spawnProject(project: ProjectRegistration): void {
-    const key = this.projectKey(project)
-    const projectConfigHostDir = getProjectConfigHostDir(project)
-
-    // Pre-startup hash check: if docker-customization-hash !== docker-built-hash,
-    // rebuild before starting the container (handles the case where config changed while agent was stopped)
-    const customizationHashPath = path.join(projectConfigHostDir, 'docker-customization-hash')
-    const builtHashPath = path.join(projectConfigHostDir, 'docker-built-hash')
-    if (fs.existsSync(customizationHashPath) && fs.existsSync(builtHashPath)) {
-      const customizationHash = fs.readFileSync(customizationHashPath, 'utf-8').trim()
-      const builtHash = fs.readFileSync(builtHashPath, 'utf-8').trim()
-      if (customizationHash !== builtHash) {
-        logger.info(`[docker] Pre-startup hash mismatch for ${key}, rebuilding before start...`)
-        void this.rebuildAndRestart(project, projectConfigHostDir, true)
-        return
-      }
-    }
-
-    // Load the server-assigned agentId written by the container after registration.
-    // This ensures logs are stored under the same agentId shown in the Web UI.
-    const registeredAgentIdPath = path.join(projectConfigHostDir, 'docker-registered-agent-id')
-    if (fs.existsSync(registeredAgentIdPath)) {
-      const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
-      if (registeredId && registeredId !== this.getProjectAgentId(project)) {
-        logger.info(`[docker] Using registered agentId for ${key}: ${registeredId}`)
-        this.setProjectAgentId(project, registeredId)
-      }
-    }
-
-    const { mounts, envArgs } = buildProjectVolumeMounts(project, projectConfigHostDir)
-
-    const containerArgs = [
-      'ai-support-agent', 'start', '--no-docker',
-      '--project', key,
-    ]
-    if (this.opts.pollInterval !== undefined) {
-      containerArgs.push('--poll-interval', String(this.opts.pollInterval))
-    }
-    if (this.opts.heartbeatInterval !== undefined) {
-      containerArgs.push('--heartbeat-interval', String(this.opts.heartbeatInterval))
-    }
-    if (this.opts.verbose) {
-      containerArgs.push('--verbose')
-    }
-    if (this.opts.autoUpdate === false) {
-      containerArgs.push('--no-auto-update')
-    }
-    if (this.opts.updateChannel) {
-      containerArgs.push('--update-channel', this.opts.updateChannel)
-    }
-
-    // No -i/-t flags: the container does not need stdin. stdout/stderr are
-    // captured via pipe. Shutdown is handled exclusively via docker stop.
-    const imageTag = this.getImageTag(project)
-    const containerName = buildContainerName(project.tenantCode, project.projectCode, this.opts.agentId)
-    removeStaleContainer(containerName)
-    const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
-    const dockerArgs = [
-      'run', '--rm', '--name', containerName, '--cidfile', cidFile,
-      ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
-      ...mounts,
-      ...buildDevMounts(),
-      ...envArgs,
-      imageTag,
-      ...containerArgs,
-    ]
-
-    const projectColor = getProjectColor(key)
-    const colorReset = '\x1b[0m'
-    const logPrefix = `${projectColor}[${key}]${colorReset} `
-    logger.info(`[docker] Starting container for project: ${key}`)
-    const child = spawn('docker', dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
-
-    let resolveClosed!: () => void
-    const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve })
-    const handle: DockerContainerHandle = {
-      project,
-      child,
-      version: this.version,
-      closeHandled: false,
-      closedPromise,
-      resolveClosed,
-      cidFile,
-    }
-    this.handles.set(key, handle)
-
-    // Stream container stdout/stderr to host terminal and API for real-time log viewing
-    // Use project-specific ApiClient so the token matches the projectCode in the request
-    const projectApiClient = this.createProjectApiClient(project)
-    if (projectApiClient) {
-      const sessionId = makeSessionId()
-      let seq = 0
-      let fullLog = ''
-      let logTruncated = false
-      let buf = ''
-      const apiClient = projectApiClient
-      // Use a getter so that if the container writes docker-registered-agent-id after startup,
-      // subsequent log chunks are stored under the correct server-assigned agentId.
-      const supervisor = this
-      const getAgentId = (): string => supervisor.getProjectAgentId(project) ?? ''
-
-      // Watch for the registered agentId file written by the container after registration
-      const noopWatcher: Pick<fs.FSWatcher, 'close'> = { close: () => undefined }
-      let registeredIdWatcher: Pick<fs.FSWatcher, 'close'> = noopWatcher
-      try {
-        registeredIdWatcher = fs.watch(projectConfigHostDir, (eventType, filename) => {
-          if (filename === 'docker-registered-agent-id' && (eventType === 'rename' || eventType === 'change')) {
-            try {
-              const newId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
-              const currentId = supervisor.getProjectAgentId(project)
-              if (newId && newId !== currentId) {
-                logger.info(`[docker] Container registered with agentId: ${newId} (was: ${currentId})`)
-                supervisor.setProjectAgentId(project, newId)
-              }
-            } catch {
-              // File may not exist yet if rename event fires before write completes
-            }
-          }
-        })
-      } catch {
-        // Directory watch may fail if projectConfigHostDir doesn't exist yet — ignore
-      }
-
-      const flush = async (): Promise<void> => {
-        if (!buf) return
-        const text = buf
-        buf = ''
-        if (!logTruncated) {
-          if (fullLog.length + text.length <= MAX_SESSION_LOG_BYTES) {
-            fullLog += text
-          } else {
-            const remaining = MAX_SESSION_LOG_BYTES - fullLog.length
-            fullLog += remaining > 0 ? text.slice(0, remaining) : ''
-            logTruncated = true
-            logger.warn(`[docker] Container log for ${key} exceeded 2 MB limit; remaining output will not be saved to S3`)
-          }
-        }
-        await apiClient.submitLogChunk({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, seq: ++seq, text })
-          .catch((e: unknown) => logger.warn(`[docker] log chunk failed: ${e}`))
-      }
-
-      const flushTimer = setInterval(() => { void flush() }, 1_000).unref()
-
-      const writeStdout = makeLinePrefixer(logPrefix, (s) => process.stdout.write(s))
-      const writeStderr = makeLinePrefixer(logPrefix, (s) => process.stderr.write(s))
-      child.stdout?.on('data', (d: Buffer) => { const t = d.toString(); writeStdout(t); buf += t })
-      child.stderr?.on('data', (d: Buffer) => { const t = d.toString(); writeStderr(t); buf += t })
-
-      child.on('close', () => {
-        registeredIdWatcher.close()
-        clearInterval(flushTimer)
-        void flush().then(() => {
-          if (fullLog) {
-            void apiClient.saveSessionLog({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, content: fullLog })
-              .catch((e: unknown) => logger.warn(`[docker] S3 upload failed: ${e}`))
-              .finally(() => { handle.resolveClosed() })
-          } else {
-            handle.resolveClosed()
-          }
-        }).catch(/* istanbul ignore next */ () => { handle.resolveClosed() }).catch(/* istanbul ignore next */ () => { handle.resolveClosed() })
-      })
-    }
-
-    child.on('error', (err) => {
-      logger.error(`[docker] Container error for ${key}: ${err.message}`)
-    })
-
-    child.on('close', (code) => {
-      if (handle.closeHandled) return
-      handle.closeHandled = true
-      this.handles.delete(key)
-      // Clean up cidfile
-      try { fs.unlinkSync(handle.cidFile) } catch { /* ignore */ }
-
-      if (code === DOCKER_UPDATE_EXIT_CODE && !this.updating) {
-        this.updating = true
-        logger.info(`[docker] Container ${key} exited for update. Stopping all containers and rebuilding...`)
-        this.stopAll()
-        void installUpdateAndRestart(projectConfigHostDir).catch((err) => {
-          logger.error(`[docker] Update failed: ${err instanceof Error ? err.message : String(err)}`)
-          process.exit(1)
-        })
-        return
-      }
-
-      if (code === DOCKER_RESTART_EXIT_CODE && !this.updating) {
-        logger.info(`[docker] Container ${key} requested restart. Rebuilding image if needed...`)
-        void this.rebuildAndRestart(project, projectConfigHostDir, true).catch((err) => {
-          logger.error(`[docker] Restart failed: ${err instanceof Error ? err.message : String(err)}`)
-        })
-        return
-      }
-
-      if (this.handles.size === 0 && !this.updating) {
-        // All containers have exited cleanly
-        this.onAllStopped?.()
-        process.exit(code ?? 0)
-      }
-    })
-  }
-
-  stopAll(): void {
-    for (const [key, handle] of this.handles) {
-      if (!handle.closeHandled) {
-        logger.info(`[docker] Stopping container for project: ${key}`)
-        // Try docker stop via cidfile (more reliable than SIGTERM to docker run process).
-        // Use spawn (non-blocking) so we don't stall the Node.js event loop during shutdown.
-        let stopped = false
-        try {
-          /* istanbul ignore next */
-          if (fs.existsSync(handle.cidFile)) {
-            const containerId = fs.readFileSync(handle.cidFile, 'utf-8').trim()
-            /* istanbul ignore next */
-            if (containerId) {
-              spawn('docker', ['stop', '--time', '5', containerId], { stdio: 'ignore' })
-              stopped = true
-            }
-          }
-        } catch /* istanbul ignore next */ {
-          // Ignore errors — fall through to child.kill
-        }
-        if (!stopped) {
-          handle.child.kill('SIGTERM')
-        }
-      }
-    }
-  }
-}
-
 let isDockerRunning = false
 
 /** Reset the running flag (for testing). */
@@ -1138,8 +81,7 @@ export function resetIsDockerRunning(): void {
 }
 
 export function runInDocker(opts: DockerRunOptions): void {
-  // Guard against multiple concurrent invocations (e.g. auto-updater and
-  // server-triggered update firing at the same time).
+  // Guard against multiple concurrent invocations
   if (isDockerRunning) {
     logger.warn('[docker] runInDocker called while already running — ignoring duplicate call')
     return
@@ -1174,10 +116,9 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   // Determine projects to run (skip entries without tenantCode)
   const allProjects = config ? getProjectList(config) : []
-  let projects: ProjectRegistration[]
+  let projects: ReturnType<typeof getProjectList>
 
   if (opts.project) {
-    // Single-project mode (e.g. for testing or external invocation)
     const slashIdx = opts.project.indexOf('/')
     if (slashIdx < 0) {
       logger.error(`[docker] --project must be in "tenantCode/projectCode" format: ${opts.project}`)
@@ -1191,7 +132,6 @@ export function runInDocker(opts: DockerRunOptions): void {
     )
     if (projects.length === 0) {
       if (opts.token || process.env.AI_SUPPORT_AGENT_TOKEN) {
-        // Fallback: create a temporary project from env/CLI args
         projects = [{
           tenantCode,
           projectCode,
@@ -1205,17 +145,14 @@ export function runInDocker(opts: DockerRunOptions): void {
       }
     }
   } else if (allProjects.length > 0) {
-    // Multi-project supervisor mode: one container per project
     projects = allProjects
   } else {
-    // No config: run single container with legacy volume mount approach
     projects = []
   }
 
   ensureClaudeJsonIntegrity()
 
   if (projects.length > 0) {
-    // Per-project container mode (new architecture)
     logger.info(`[docker] Starting ${projects.length} project container(s)...`)
 
     const agentId = config?.agentId ?? os.hostname()
@@ -1231,7 +168,6 @@ export function runInDocker(opts: DockerRunOptions): void {
   }
 
   // Legacy fallback: single container handling all projects via shared volume mount
-  // (used when no projects are registered in config — e.g. token/apiUrl passed via CLI)
   logger.info(t('docker.starting'))
 
   const { mounts, projectMappings } = buildVolumeMounts()
@@ -1267,13 +203,10 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   let closeHandled = false
   child.on('close', (code) => {
-    // Guard against duplicate close events
     if (closeHandled) return
     closeHandled = true
     isDockerRunning = false
 
-    // DOCKER_UPDATE_EXIT_CODE signals "update installed, rebuild image and restart".
-    // Any other exit (including 0 from SIGINT) exits the host process as-is.
     if (code === DOCKER_UPDATE_EXIT_CODE) {
       logger.info('[docker] Container exited for update. Rebuilding image and restarting...')
       void installUpdateAndRestart()
@@ -1282,3 +215,22 @@ export function runInDocker(opts: DockerRunOptions): void {
     process.exit(code ?? 0)
   })
 }
+
+// Re-exports for backward compatibility
+export {
+  checkDockerAvailable,
+  imageExists,
+  buildImage,
+  buildContainerName,
+  removeStaleContainer,
+  dockerLogin,
+} from './docker-utils'
+export { validatePackageNames } from './docker-security'
+export { generateProjectDockerfile } from './dockerfile-generator'
+export { syncDockerfileToConfigDir } from './dockerfile-sync'
+export { buildProjectImage } from './project-image-builder'
+export { buildVolumeMounts, buildEnvArgs, buildProjectVolumeMounts } from './volume-mount-builder'
+export type { ProjectDirMapping } from './volume-mount-builder'
+export { getInstalledVersion, resetInstalledVersionCache, ensureImage } from './version-manager'
+export { migrateProjectConfigDir } from './project-config'
+export { DockerSupervisor } from './docker-supervisor'
