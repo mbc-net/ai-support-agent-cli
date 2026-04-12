@@ -17,7 +17,7 @@ import { submitPendingResults } from './pending-result-store'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
-import { getErrorMessage, isAuthenticationError } from './utils'
+import { getErrorMessage, isAuthenticationError, resolveUrlForDocker } from './utils'
 
 export interface ProjectAgentOptions {
   pollInterval: number
@@ -379,12 +379,7 @@ export class ProjectAgent {
     logger.info(`${this.prefix} Starting subscription mode (realtime)`)
     // When running inside a Docker container, localhost refers to the container itself.
     // Convert localhost/127.0.0.1 to host.docker.internal so the container can reach the host.
-    const resolvedAppsyncUrl = process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1'
-      ? result.appsyncUrl.replace(
-          /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
-          (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
-        )
-      : result.appsyncUrl
+    const resolvedAppsyncUrl = resolveUrlForDocker(result.appsyncUrl)
     await startSubscriptionMode(
       this.transportDeps,
       this.transportState,
@@ -398,12 +393,7 @@ export class ProjectAgent {
 
     // Start terminal WebSocket connection (only if server has WS gateway enabled)
     if (result.wsEnabled) {
-      const resolvedWsUrl = (result.wsUrl && process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1')
-        ? result.wsUrl.replace(
-            /^(wss?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
-            (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
-          )
-        : result.wsUrl
+      const resolvedWsUrl = result.wsUrl ? resolveUrlForDocker(result.wsUrl) : result.wsUrl
       startTerminalWebSocket(this.transportDeps, this.transportState, resolvedWsUrl)
       startVsCodeTunnel(this.transportDeps, this.transportState, resolvedWsUrl)
     } else {

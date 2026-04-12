@@ -67,3 +67,16 @@ export function buildWsUrl(apiUrl: string, path: string): string {
     .replace(/^http:/, 'ws:')
     .replace(/\/$/, '') + path
 }
+
+/**
+ * Docker コンテナ内から host の URL にアクセスするため
+ * localhost / 127.0.0.1 を host.docker.internal に変換する。
+ * `AI_SUPPORT_AGENT_IN_DOCKER` が `'1'` のときのみ変換する。
+ */
+export function resolveUrlForDocker(url: string): string {
+  if (process.env.AI_SUPPORT_AGENT_IN_DOCKER !== '1') return url
+  return url.replace(
+    /^((?:https?|wss?):\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
+    (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
+  )
+}
