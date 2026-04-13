@@ -1,14 +1,13 @@
 import type { ApiClient } from '../../src/api-client'
 import {
-  cancelChatProcess,
   executeChatCommand,
-  _getRunningProcesses,
   buildClaudeArgs as reExportedBuildClaudeArgs,
   buildCleanEnv as reExportedBuildCleanEnv,
   _resetCleanEnvCache as reExportedResetCleanEnvCache,
   buildConversationFileNotice,
   buildMetadataNotice,
 } from '../../src/commands/chat-executor'
+import { cancelProcess as cancelChatProcess, _getRunningProcesses } from '../../src/commands/process-manager'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED } from '../../src/constants'
 import type { AgentServerConfig, ChatPayload, ProjectConfigResponse } from '../../src/types'
 import { createMockChildProcess } from '../helpers/mock-factory'
