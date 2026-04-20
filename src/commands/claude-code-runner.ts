@@ -8,7 +8,7 @@ import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { StreamLineParser } from '../utils/stream-parser'
 
 import { buildClaudeArgs, buildCleanEnv } from './claude-code-args'
-import { processStreamJsonLine } from './claude-code-stream'
+import { processStreamJsonLine, type StreamJsonUsage } from './claude-code-stream'
 
 // Re-export for backward compatibility
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-args'
@@ -18,6 +18,7 @@ export type { StreamJsonContentBlock, StreamJsonLine, StreamJsonMcpServer } from
 /** Claude Code CLI の実行結果 */
 export interface ClaudeCodeResult {
   text: string
+  usage?: StreamJsonUsage
   metadata: {
     args: string[]
     exitCode: number | null
@@ -110,6 +111,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     }
 
     let resultText = ''
+    let resultUsage: StreamJsonUsage | undefined
     const streamParser = new StreamLineParser()
     // テキストチャンクの重複送信を防ぐため、前回送信済みテキスト長を追跡
     let sentTextLength = 0
@@ -136,9 +138,10 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     child.stdout.on('data', (data: Buffer) => {
       activityTimeout.reset()
       streamParser.push(data.toString(), (line) => {
-        const { newSentTextLength, text, toolExecutionChange } = processStreamJsonLine(line, sendChunk, child.pid ?? 0, { sentTextLength, pendingFileUploadIds, pendingToolNames })
+        const { newSentTextLength, text, toolExecutionChange, usage } = processStreamJsonLine(line, sendChunk, child.pid ?? 0, { sentTextLength, pendingFileUploadIds, pendingToolNames })
         sentTextLength = newSentTextLength
         if (text !== undefined) resultText = text
+        if (usage !== undefined) resultUsage = usage
         // ツール実行開始時はタイマーを一時停止（ツール実行中はstdout出力がないため）
         // ツール実行完了時はタイマーを再開
         if (toolExecutionChange === 'started') {
@@ -175,6 +178,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
       if (code === 0) {
         resolve({
           text: resultText,
+          usage: resultUsage,
           metadata: {
             args: metadataArgs,
             exitCode: code,

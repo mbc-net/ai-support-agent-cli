@@ -223,12 +223,26 @@ async function executeClaudeCodeChat(
     } finally {
       processManager.remove(commandId)
     }
-    logger.info(`[chat] Chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, duration=${result.metadata.durationMs}ms`)
-    // 完了チャンクを送信（metadata + toolCalls を含める）
+    const usageLog = result.usage
+      ? ` in=${result.usage.input_tokens} out=${result.usage.output_tokens} cost=$${result.usage.total_cost_usd?.toFixed(6) ?? '?'}`
+      : ''
+    logger.info(`[chat] Chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, duration=${result.metadata.durationMs}ms${usageLog}`)
+    // 完了チャンクを送信（metadata + toolCalls + usage を含める）
+    const usage = result.usage
+      ? {
+          totalInputTokens: result.usage.input_tokens,
+          totalOutputTokens: result.usage.output_tokens,
+          totalTokens: result.usage.input_tokens + result.usage.output_tokens,
+          cacheCreationInputTokens: result.usage.cache_creation_input_tokens,
+          cacheReadInputTokens: result.usage.cache_read_input_tokens,
+          totalCostUsd: result.usage.total_cost_usd,
+        }
+      : undefined
     await sendDoneChunk(sendChunk, {
       text: result.text,
       metadata: result.metadata,
       ...(collectedToolCalls.length > 0 ? { toolCalls: collectedToolCalls } : {}),
+      ...(usage ? { usage } : {}),
     })
 
     // 一時ファイルをクリーンアップ
