@@ -348,6 +348,60 @@ describe('chat-executor', () => {
       expect(doneContent.toolCalls).toBeUndefined()
     })
 
+    it('should include usage in done chunk when result event has usage', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-done-usage', client: mockClient, agentId: 'agent-1' })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonAssistant('response')))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response', {
+        usage: { input_tokens: 1000, output_tokens: 200, cache_creation_input_tokens: 500, cache_read_input_tokens: 300 },
+        total_cost_usd: 0.01234,
+      })))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+
+      const doneCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) => (call[1] as { type: string }).type === 'done',
+      )
+      expect(doneCall).toBeTruthy()
+      const doneContent = JSON.parse((doneCall[1] as { content: string }).content)
+      expect(doneContent.usage).toEqual({
+        totalInputTokens: 1000,
+        totalOutputTokens: 200,
+        totalTokens: 1200,
+        cacheCreationInputTokens: 500,
+        cacheReadInputTokens: 300,
+        totalCostUsd: 0.01234,
+      })
+    })
+
+    it('should not include usage in done chunk when result event has no usage', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-done-no-usage', client: mockClient, agentId: 'agent-1' })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonAssistant('response')))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const doneCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) => (call[1] as { type: string }).type === 'done',
+      )
+      const doneContent = JSON.parse((doneCall[1] as { content: string }).content)
+      expect(doneContent.usage).toBeUndefined()
+    })
+
     it('should send delta chunks for text in assistant messages', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockChildProcess()

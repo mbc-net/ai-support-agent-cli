@@ -23,6 +23,15 @@ export interface StreamJsonMcpServer {
   error?: string
 }
 
+/** stream-json result イベントの usage 情報（CLI の生出力フィールド名を snake_case で保持） */
+export interface StreamJsonUsage {
+  input_tokens: number
+  output_tokens: number
+  cache_creation_input_tokens?: number
+  cache_read_input_tokens?: number
+  total_cost_usd?: number  // CLI の result.total_cost_usd をマージして格納
+}
+
 /** stream-json の1行（NDJSON）の型定義 */
 export interface StreamJsonLine {
   type: string
@@ -31,6 +40,9 @@ export interface StreamJsonLine {
     content?: StreamJsonContentBlock[]
   }
   result?: string
+  // result イベントのフィールド（usage と total_cost_usd は別フィールドとして並存）
+  usage?: Omit<StreamJsonUsage, 'total_cost_usd'>
+  total_cost_usd?: number
   // init イベントのフィールド
   tools?: string[]
   mcp_servers?: StreamJsonMcpServer[]
@@ -44,14 +56,15 @@ const FILE_UPLOAD_TOOL_NAME = 'mcp__ai-support-agent__file_upload'
  * sendChunk は fire-and-forget で呼び出される（同期的に状態を返すため）
  *
  * @returns newSentTextLength: 送信済みテキスト長, text: resultイベントのテキスト(undefinedなら未取得),
- *          toolExecutionChange: ツール実行状態の変化 ('started' | 'finished' | undefined)
+ *          toolExecutionChange: ツール実行状態の変化 ('started' | 'finished' | undefined),
+ *          usage: resultイベントのトークン使用量・コスト情報(undefinedなら未取得)
  */
 export function processStreamJsonLine(
   line: string,
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
   pid: number,
   state: { sentTextLength: number; pendingFileUploadIds?: Set<string>; pendingToolNames?: Map<string, string> },
-): { newSentTextLength: number; text?: string; toolExecutionChange?: 'started' | 'finished' } {
+): { newSentTextLength: number; text?: string; toolExecutionChange?: 'started' | 'finished'; usage?: StreamJsonUsage } {
   const parsed = safeJsonParse<StreamJsonLine>(line)
   if (!parsed) {
     logger.debug(`[chat] stream-json parse error (pid=${pid}): ${line.substring(0, LOG_DEBUG_LIMIT)}`)
@@ -163,7 +176,14 @@ export function processStreamJsonLine(
   }
 
   if (parsed.type === 'result' && parsed.result !== undefined) {
-    return { newSentTextLength: state.sentTextLength, text: parsed.result }
+    const usage = parsed.usage
+      ? { ...parsed.usage, total_cost_usd: parsed.total_cost_usd }
+      : undefined
+    return {
+      newSentTextLength: state.sentTextLength,
+      text: parsed.result,
+      usage,
+    }
   }
 
   if (parsed.type === 'system' && parsed.subtype === 'init') {
