@@ -25,11 +25,13 @@ function makeToolUseLine(name: string, id: string, input?: Record<string, unknow
   })
 }
 
-function makeResultLine(result: string): string {
+function makeResultLine(result: string, usage?: { input_tokens: number; output_tokens: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number }, total_cost_usd?: number): string {
   return JSON.stringify({
     type: 'result',
     subtype: 'success',
     result,
+    ...(usage ? { usage } : {}),
+    ...(total_cost_usd !== undefined ? { total_cost_usd } : {}),
   })
 }
 
@@ -301,6 +303,18 @@ describe('claude-code-runner', () => {
       const result = processStreamJsonLine(line, sendChunk, 123, { sentTextLength: 0 })
 
       expect(result.text).toBe('Final answer')
+      expect(result.usage).toBeUndefined()
+    })
+
+    it('should extract usage and cost from result event', () => {
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const usage = { input_tokens: 1000, output_tokens: 200, cache_creation_input_tokens: 500, cache_read_input_tokens: 300 }
+      const line = makeResultLine('Final answer', usage, 0.0123)
+
+      const result = processStreamJsonLine(line, sendChunk, 123, { sentTextLength: 0 })
+
+      expect(result.text).toBe('Final answer')
+      expect(result.usage).toEqual({ ...usage, total_cost_usd: 0.0123 })
     })
 
     it('should handle init event without error', () => {
@@ -910,6 +924,25 @@ describe('claude-code-runner', () => {
       expect(result.metadata.exitCode).toBe(0)
       expect(result.metadata.hasStderr).toBe(false)
       expect(typeof result.metadata.durationMs).toBe('number')
+      expect(result.usage).toBeUndefined()
+    })
+
+    it('should resolve with usage and cost from result event', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      const usage = { input_tokens: 500, output_tokens: 100, cache_creation_input_tokens: 200, cache_read_input_tokens: 50 }
+      mockProcess.emitStdout('data', Buffer.from(makeResultLine('hi', usage, 0.00654) + '\n'))
+      mockProcess.emit('close', 0)
+
+      const result = await handle.result
+
+      expect(result.usage).toEqual({ ...usage, total_cost_usd: 0.00654 })
     })
 
     it('should send delta chunks for text in assistant messages', async () => {

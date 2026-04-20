@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl } from '../src/utils'
+import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl, resolveUrlForDocker } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -282,5 +282,49 @@ describe('buildWsUrl', () => {
 
   it('should strip trailing slash', () => {
     expect(buildWsUrl('https://api.example.com/', '/ws/terminal')).toBe('wss://api.example.com/ws/terminal')
+  })
+})
+
+describe('resolveUrlForDocker', () => {
+  const ENV_KEY = 'AI_SUPPORT_AGENT_IN_DOCKER'
+
+  afterEach(() => {
+    delete process.env[ENV_KEY]
+  })
+
+  it('should return URL unchanged when not in Docker', () => {
+    delete process.env[ENV_KEY]
+    expect(resolveUrlForDocker('https://localhost:3000/path')).toBe('https://localhost:3000/path')
+    expect(resolveUrlForDocker('wss://127.0.0.1:4000')).toBe('wss://127.0.0.1:4000')
+  })
+
+  it('should replace localhost in https URL when in Docker', () => {
+    process.env[ENV_KEY] = '1'
+    expect(resolveUrlForDocker('https://localhost:3000/path')).toBe('https://host.docker.internal:3000/path')
+  })
+
+  it('should replace 127.0.0.1 in https URL when in Docker', () => {
+    process.env[ENV_KEY] = '1'
+    expect(resolveUrlForDocker('https://127.0.0.1:3000')).toBe('https://host.docker.internal:3000')
+  })
+
+  it('should replace localhost in wss URL when in Docker', () => {
+    process.env[ENV_KEY] = '1'
+    expect(resolveUrlForDocker('wss://localhost:4000')).toBe('wss://host.docker.internal:4000')
+  })
+
+  it('should replace localhost in ws URL when in Docker', () => {
+    process.env[ENV_KEY] = '1'
+    expect(resolveUrlForDocker('ws://localhost:4000')).toBe('ws://host.docker.internal:4000')
+  })
+
+  it('should not modify non-localhost URL even when in Docker', () => {
+    process.env[ENV_KEY] = '1'
+    expect(resolveUrlForDocker('https://api.example.com')).toBe('https://api.example.com')
+  })
+
+  it('should handle URL without port', () => {
+    process.env[ENV_KEY] = '1'
+    expect(resolveUrlForDocker('https://localhost')).toBe('https://host.docker.internal')
   })
 })
