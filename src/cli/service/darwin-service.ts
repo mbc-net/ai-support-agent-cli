@@ -261,6 +261,13 @@ export function generateWrapperScript(opts: {
   return `#!/bin/bash
 set -uo pipefail
 
+# Load nvm if available so that node/npm are on PATH when launched as a launchd service
+export NVM_DIR="\${HOME}/.nvm"
+# shellcheck disable=SC1091
+[ -s "\${NVM_DIR}/nvm.sh" ] && source "\${NVM_DIR}/nvm.sh" --no-use
+# Also try Homebrew node as fallback
+export PATH="/opt/homebrew/bin:/usr/local/bin:\${PATH}"
+
 REBUILD_MARKER="${opts.projectConfigHostDir}/docker-rebuild-needed"
 if [ -f "$REBUILD_MARKER" ]; then
   rm -f "$REBUILD_MARKER"
