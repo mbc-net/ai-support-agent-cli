@@ -311,6 +311,14 @@ describe('generateWrapperScript', () => {
     expect(result).toContain('--project mbc/MBC_01')
   })
 
+  it('should load nvm and set PATH for launchd compatibility', () => {
+    const result = generateWrapperScript(baseOpts)
+
+    expect(result).toContain('NVM_DIR')
+    expect(result).toContain('nvm.sh')
+    expect(result).toContain('/opt/homebrew/bin:/usr/local/bin')
+  })
+
   it('should exit with error when version cannot be determined', () => {
     const result = generateWrapperScript(baseOpts)
 
@@ -447,6 +455,14 @@ describe('generateUpdateScript', () => {
     expect(result).toContain('npm install -g')
     expect(result).toContain('@ai-support-agent/cli@')
     expect(result).toContain('ai-support-agent service install')
+  })
+
+  it('should load nvm and set PATH for launchd compatibility', () => {
+    const result = generateUpdateScript()
+
+    expect(result).toContain('NVM_DIR')
+    expect(result).toContain('nvm.sh')
+    expect(result).toContain('/opt/homebrew/bin:/usr/local/bin')
   })
 
   it('should record failure but still reload services when npm install fails', () => {

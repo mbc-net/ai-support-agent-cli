@@ -313,6 +313,13 @@ export function generateUpdateScript(): string {
   return `#!/bin/bash
 set -uo pipefail
 
+# Load nvm if available so that node/npm are on PATH when launched as a launchd service
+export NVM_DIR="\${HOME}/.nvm"
+# shellcheck disable=SC1091
+[ -s "\${NVM_DIR}/nvm.sh" ] && source "\${NVM_DIR}/nvm.sh"
+# Also try Homebrew node as fallback
+export PATH="/opt/homebrew/bin:/usr/local/bin:\${PATH}"
+
 # 1. Unload all per-project LaunchAgent services
 for plist in "${launchAgentsDir}"/com.ai-support-agent.cli.*.plist; do
   [ -f "$plist" ] || continue
