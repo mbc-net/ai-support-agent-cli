@@ -24,13 +24,9 @@ jest.mock('../../../src/config-manager', () => ({
   getProjectList: jest.fn(),
 }))
 
-// Mock docker-runner (used by async install with projects)
-jest.mock('../../../src/docker/docker-runner', () => ({
-  ensureImage: jest.fn().mockReturnValue('0.1.0'),
-}))
-
 import { execSync } from 'child_process'
 import * as fs from 'fs'
+import { IMAGE_NAME } from '../../../src/docker/docker-utils'
 import {
   DarwinServiceStrategy,
   generatePlist,
@@ -292,7 +288,7 @@ describe('generateProjectPlist', () => {
 // ---------------------------------------------------------------------------
 describe('generateWrapperScript', () => {
   const baseOpts = {
-    imageTag: 'ai-support-agent:0.1.0',
+    imageName: IMAGE_NAME,
     tenantCode: 'mbc',
     projectCode: 'MBC_01',
     projectConfigHostDir: '/Users/test/.ai-support-agent/projects/mbc/MBC_01/.ai-support-agent',
@@ -306,9 +302,47 @@ describe('generateWrapperScript', () => {
 
     expect(result).toContain('#!/bin/bash')
     expect(result).toContain('docker run --rm -i')
-    expect(result).toContain('ai-support-agent:0.1.0')
+    // image tag is resolved dynamically at runtime via npm root -g
+    expect(result).toContain('IMAGE_TAG="ai-support-agent:')
+    expect(result).toContain('"$IMAGE_TAG"')
+    expect(result).toContain('npm root -g')
+    expect(result).toContain('@ai-support-agent/cli/package.json')
     expect(result).toContain('ai-support-agent start --no-docker')
     expect(result).toContain('--project mbc/MBC_01')
+  })
+
+  it('should exit with error when version cannot be determined', () => {
+    const result = generateWrapperScript(baseOpts)
+
+    expect(result).toContain('if [ -z "$_INSTALLED_VERSION" ]')
+    expect(result).toContain('Could not determine installed version')
+    expect(result).toContain('exit 1')
+    // must NOT use :- fallback to latest
+    expect(result).not.toContain(':-latest')
+  })
+
+  it('should build CLI package.json path via separate variable (not inline $() concatenation)', () => {
+    const result = generateWrapperScript(baseOpts)
+
+    // _NPM_ROOT must be set first, then _CLI_PKG_JSON built from it
+    expect(result).toContain('_NPM_ROOT=$(npm root -g')
+    // eslint-disable-next-line no-template-curly-in-string
+    expect(result).toContain('_CLI_PKG_JSON="${_NPM_ROOT}/@ai-support-agent/cli/package.json"')
+    // must NOT concatenate string directly after $() — invalid shell syntax
+    expect(result).not.toMatch(/\$\(npm root -g[^)]*\)\//)
+  })
+
+  it('should include container name derived from tenantCode and projectCode', () => {
+    const result = generateWrapperScript(baseOpts)
+
+    expect(result).toContain('--name "ai-mbc-mbc-01"')
+    expect(result).toContain('docker rm -f "ai-mbc-mbc-01"')
+  })
+
+  it('should sanitize special characters in container name', () => {
+    const result = generateWrapperScript({ ...baseOpts, tenantCode: 'my_tenant', projectCode: 'MY.PROJECT' })
+
+    expect(result).toContain('--name "ai-my-tenant-my-project"')
   })
 
   it('should convert localhost to host.docker.internal in apiUrl', () => {
@@ -413,6 +447,29 @@ describe('generateUpdateScript', () => {
     expect(result).toContain('npm install -g')
     expect(result).toContain('@ai-support-agent/cli@')
     expect(result).toContain('ai-support-agent service install')
+  })
+
+  it('should record failure but still reload services when npm install fails', () => {
+    const result = generateUpdateScript()
+
+    expect(result).toContain('if ! npm install -g')
+    expect(result).toContain('_INSTALL_OK=false')
+    // launchctl load must appear after the install block (services always reloaded)
+    const installIdx = result.indexOf('_INSTALL_OK=false')
+    const reloadIdx = result.indexOf('launchctl load')
+    expect(reloadIdx).toBeGreaterThan(installIdx)
+    expect(result).not.toContain('npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet 2>/dev/null || true')
+  })
+
+  it('should record failure but still reload services when service install fails', () => {
+    const result = generateUpdateScript()
+
+    expect(result).toContain('elif ! ai-support-agent service install')
+    expect(result).not.toContain('ai-support-agent service install 2>/dev/null || true')
+    // exit 1 appears after launchctl load (services reloaded before failing)
+    const reloadIdx = result.indexOf('launchctl load')
+    const exitOneIdx = result.lastIndexOf('exit 1')
+    expect(exitOneIdx).toBeGreaterThan(reloadIdx)
   })
 
   it('should exit 0', () => {
