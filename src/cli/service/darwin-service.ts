@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { loadConfig, getProjectList } from '../../config-manager'
+import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { escapeXml } from './escape-xml'
@@ -204,7 +205,7 @@ function toContainerApiUrl(apiUrl: string): string {
 
 /** Generate a bash wrapper script that runs docker for one project */
 export function generateWrapperScript(opts: {
-  imageTag: string
+  imageName: string
   tenantCode: string
   projectCode: string
   projectConfigHostDir: string
@@ -253,6 +254,10 @@ export function generateWrapperScript(opts: {
   ]
   if (opts.verbose) containerArgs.push('--verbose')
 
+  // Sanitize tenant/project codes the same way buildContainerName does
+  const sanitize = (s: string): string => s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
+  const containerName = `ai-${sanitize(opts.tenantCode)}-${sanitize(opts.projectCode)}`
+
   return `#!/bin/bash
 set -uo pipefail
 
@@ -262,10 +267,23 @@ if [ -f "$REBUILD_MARKER" ]; then
   ai-support-agent docker-build 2>/dev/null || true
 fi
 
-docker run --rm -i \\
+# Resolve the installed version at runtime so the image stays current after npm updates
+_NPM_ROOT=$(npm root -g 2>/dev/null)
+_CLI_PKG_JSON="\${_NPM_ROOT}/@ai-support-agent/cli/package.json"
+_INSTALLED_VERSION=$(node -p "require('\${_CLI_PKG_JSON}').version" 2>/dev/null || echo "")
+if [ -z "$_INSTALLED_VERSION" ]; then
+  echo "ERROR: Could not determine installed version of @ai-support-agent/cli" >&2
+  exit 1
+fi
+IMAGE_TAG="${opts.imageName}:\${_INSTALLED_VERSION}"
+
+# Remove stale container if it exists (e.g. from a previous crash)
+docker rm -f "${containerName}" 2>/dev/null || true
+
+docker run --rm -i --name "${containerName}" \\
 ${mountLines.join('\n')}
 ${envLines.join('\n')}
-  ${opts.imageTag} \\
+  "\$IMAGE_TAG" \\
   ${containerArgs.join(' ')}
 
 EXIT_CODE=$?
@@ -296,20 +314,30 @@ done
 
 # 2. Install new version if update-version.json exists
 VERSION_FILE="${configDir}/update-version.json"
+_INSTALL_OK=true
 if [ -f "$VERSION_FILE" ]; then
   NEW_VERSION=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$VERSION_FILE','utf-8')).version||'')}catch(e){console.log('')}" 2>/dev/null || echo "")
   rm -f "$VERSION_FILE"
   if [ -n "$NEW_VERSION" ]; then
-    npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet 2>/dev/null || true
-    ai-support-agent service install 2>/dev/null || true
+    if ! npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet; then
+      echo "ERROR: npm install -g @ai-support-agent/cli@$NEW_VERSION failed" >&2
+      _INSTALL_OK=false
+    elif ! ai-support-agent service install; then
+      echo "ERROR: ai-support-agent service install failed" >&2
+      _INSTALL_OK=false
+    fi
   fi
 fi
 
-# 3. Reload all per-project LaunchAgent services
+# 3. Reload all per-project LaunchAgent services (always, even if install failed)
 for plist in "${launchAgentsDir}"/com.ai-support-agent.cli.*.plist; do
   [ -f "$plist" ] || continue
   launchctl load "$plist" 2>/dev/null || true
 done
+
+if [ "$_INSTALL_OK" = "false" ]; then
+  exit 1
+fi
 
 exit 0
 `
@@ -329,10 +357,6 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       logger.error(t('service.noProjectsConfigured'))
       return
     }
-
-    // Per-project mode: generate one plist + wrapper script per project
-    const { ensureImage } = await import('../../docker/docker-runner')
-    const imageTag = `ai-support-agent:${ensureImage()}`
 
     const logDir = getLogDir()
     if (!fs.existsSync(logDir)) {
@@ -371,7 +395,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
 
       const wrapperScriptPath = path.join(projectServiceDir, 'run.sh')
       const wrapperScript = generateWrapperScript({
-        imageTag,
+        imageName: IMAGE_NAME,
         tenantCode,
         projectCode,
         projectConfigHostDir,
