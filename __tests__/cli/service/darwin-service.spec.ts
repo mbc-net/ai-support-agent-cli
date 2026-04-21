@@ -396,6 +396,14 @@ describe('generateWrapperScript', () => {
     expect(result).toContain('ai-support-agent docker-build')
   })
 
+  it('should auto-build Docker image when it does not exist locally', () => {
+    const result = generateWrapperScript(baseOpts)
+
+    expect(result).toContain('docker image inspect "$IMAGE_TAG"')
+    expect(result).toContain('ai-support-agent docker-build || { echo "ERROR: docker-build failed')
+    expect(result).toContain('exit 1; }')
+  })
+
   it('should include ANTHROPIC_API_KEY when provided', () => {
     const result = generateWrapperScript({ ...baseOpts, anthropicApiKey: 'sk-ant-test' })
 
