@@ -284,6 +284,12 @@ if [ -z "$_INSTALLED_VERSION" ]; then
 fi
 IMAGE_TAG="${opts.imageName}:\${_INSTALLED_VERSION}"
 
+# Auto-build Docker image if the required version does not exist locally
+if ! docker image inspect "\$IMAGE_TAG" >/dev/null 2>&1; then
+  echo "Docker image \$IMAGE_TAG not found — building..." >&2
+  ai-support-agent docker-build
+fi
+
 # Remove stale container if it exists (e.g. from a previous crash)
 docker rm -f "${containerName}" 2>/dev/null || true
 
