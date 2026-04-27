@@ -173,10 +173,7 @@ export function generateProjectPlist(opts: {
     <true/>
 
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
 
     <key>StandardOutPath</key>
     <string>${escapeXml(path.join(opts.logDir, 'agent.out.log'))}</string>
@@ -284,6 +281,12 @@ if [ -z "$_INSTALLED_VERSION" ]; then
 fi
 IMAGE_TAG="${opts.imageName}:\${_INSTALLED_VERSION}"
 
+# Auto-build Docker image if the required version does not exist locally
+if ! docker image inspect "\$IMAGE_TAG" >/dev/null 2>&1; then
+  echo "Docker image \$IMAGE_TAG not found — building..." >&2
+  ai-support-agent docker-build || { echo "ERROR: docker-build failed — cannot start container" >&2; exit 1; }
+fi
+
 # Remove stale container if it exists (e.g. from a previous crash)
 docker rm -f "${containerName}" 2>/dev/null || true
 
@@ -312,6 +315,13 @@ export function generateUpdateScript(): string {
 
   return `#!/bin/bash
 set -uo pipefail
+
+# Load nvm if available so that node/npm are on PATH when launched as a launchd service
+export NVM_DIR="\${HOME}/.nvm"
+# shellcheck disable=SC1091
+[ -s "\${NVM_DIR}/nvm.sh" ] && source "\${NVM_DIR}/nvm.sh"
+# Also try Homebrew node as fallback
+export PATH="/opt/homebrew/bin:/usr/local/bin:\${PATH}"
 
 # 1. Unload all per-project LaunchAgent services
 for plist in "${launchAgentsDir}"/com.ai-support-agent.cli.*.plist; do

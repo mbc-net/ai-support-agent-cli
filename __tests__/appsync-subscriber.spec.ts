@@ -49,13 +49,17 @@ describe('AppSyncSubscriber', () => {
   const appsyncUrl = 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql'
   const apiKey = 'da2-testkey123'
 
+  let exitSpy: jest.SpyInstance
+
   beforeEach(() => {
     jest.clearAllMocks()
     jest.useFakeTimers()
     mockWsInstance = null
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
   })
 
   afterEach(() => {
+    exitSpy.mockRestore()
     jest.useRealTimers()
   })
 
