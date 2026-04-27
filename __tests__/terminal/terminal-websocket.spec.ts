@@ -8,8 +8,10 @@ describe('TerminalWebSocket', () => {
   let server: WebSocket.Server
   let serverPort: number
   let terminalWs: TerminalWebSocket
+  let exitSpy: jest.SpyInstance
 
   beforeEach((done) => {
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
     server = new WebSocket.Server({ port: 0 }, () => {
       const addr = server.address()
       serverPort = typeof addr === 'object' && addr !== null ? addr.port : 0
@@ -20,6 +22,7 @@ describe('TerminalWebSocket', () => {
   })
 
   afterEach((done) => {
+    exitSpy.mockRestore()
     if (terminalWs) terminalWs.disconnect()
     server.close(() => done())
   })
