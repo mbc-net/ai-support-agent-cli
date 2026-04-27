@@ -173,10 +173,7 @@ export function generateProjectPlist(opts: {
     <true/>
 
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
 
     <key>StandardOutPath</key>
     <string>${escapeXml(path.join(opts.logDir, 'agent.out.log'))}</string>

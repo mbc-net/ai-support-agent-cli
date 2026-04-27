@@ -249,7 +249,7 @@ describe('generatePlist', () => {
 // generateProjectPlist
 // ---------------------------------------------------------------------------
 describe('generateProjectPlist', () => {
-  it('should generate valid per-project plist with KeepAlive.SuccessfulExit=false', () => {
+  it('should generate valid per-project plist with KeepAlive=true', () => {
     const result = generateProjectPlist({
       label: 'com.ai-support-agent.cli.mbc.mbc-01',
       wrapperScriptPath: '/Users/test/.ai-support-agent/services/mbc-mbc-01/run.sh',
@@ -260,13 +260,10 @@ describe('generateProjectPlist', () => {
     expect(result).toContain('<string>com.ai-support-agent.cli.mbc.mbc-01</string>')
     expect(result).toContain('<string>/bin/bash</string>')
     expect(result).toContain('/Users/test/.ai-support-agent/services/mbc-mbc-01/run.sh')
-    expect(result).toContain('<key>KeepAlive</key>')
-    expect(result).toContain('<key>SuccessfulExit</key>')
-    expect(result).toContain('<false/>')
+    expect(result).toMatch(/<key>KeepAlive<\/key>\s*<true\/>/)
+    expect(result).not.toContain('<key>SuccessfulExit</key>')
     expect(result).toContain('agent.out.log')
     expect(result).toContain('agent.err.log')
-    // Should NOT have <true/> as KeepAlive value
-    expect(result).not.toMatch(/<key>KeepAlive<\/key>\s*<true\/>/)
   })
 
   it('should include PATH and HOME in environment variables', () => {

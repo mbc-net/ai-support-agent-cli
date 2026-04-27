@@ -18,6 +18,7 @@ describe('attemptReconnect', () => {
       logPrefix: '[test]',
       connectFn: jest.fn().mockResolvedValue(undefined),
       isClosedFn: jest.fn().mockReturnValue(false),
+      onMaxRetriesExceeded: jest.fn(),
       ...overrides,
     }
   }
@@ -65,11 +66,13 @@ describe('attemptReconnect', () => {
 
   it('should stop after max retries', async () => {
     const connectFn = jest.fn().mockRejectedValue(new Error('fail'))
+    const onMaxRetriesExceeded = jest.fn()
     const attemptsRef = { current: 0 }
 
     const promise = attemptReconnect(attemptsRef, buildOptions({
       connectFn,
       maxRetries: 2,
+      onMaxRetriesExceeded,
     }))
 
     // First attempt: delay = 1000ms
@@ -81,6 +84,7 @@ describe('attemptReconnect', () => {
 
     expect(connectFn).toHaveBeenCalledTimes(2)
     expect(attemptsRef.current).toBe(2)
+    expect(onMaxRetriesExceeded).toHaveBeenCalledTimes(1)
   })
 
   it('should not reconnect when already closed', async () => {
@@ -99,16 +103,38 @@ describe('attemptReconnect', () => {
 
   it('should not reconnect when max retries already reached', async () => {
     const connectFn = jest.fn()
+    const onMaxRetriesExceeded = jest.fn()
     const attemptsRef = { current: 3 }
 
     const promise = attemptReconnect(attemptsRef, buildOptions({
       connectFn,
       maxRetries: 3,
+      onMaxRetriesExceeded,
     }))
 
     await promise
 
     expect(connectFn).not.toHaveBeenCalled()
+    expect(onMaxRetriesExceeded).toHaveBeenCalledTimes(1)
+  })
+
+  it('should call process.exit(1) by default when max retries exceeded', async () => {
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    const connectFn = jest.fn()
+    const attemptsRef = { current: 3 }
+
+    const options: ReconnectOptions = {
+      maxRetries: 3,
+      baseDelayMs: 1000,
+      logPrefix: '[test]',
+      connectFn,
+      isClosedFn: jest.fn().mockReturnValue(false),
+    }
+
+    await attemptReconnect(attemptsRef, options)
+
+    expect(exitSpy).toHaveBeenCalledWith(1)
+    exitSpy.mockRestore()
   })
 
   it('should abort if closed during delay', async () => {
