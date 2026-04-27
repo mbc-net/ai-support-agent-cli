@@ -9,18 +9,29 @@ export interface ReconnectOptions {
   connectFn: () => Promise<void>
   onReconnectedFn?: () => void
   isClosedFn: () => boolean
+  /** Max retries 到達時の処理。デフォルト: process.exit(1) */
+  onMaxRetriesExceeded?: () => void
 }
 
 export async function attemptReconnect(
   attemptsRef: { current: number },
   options: ReconnectOptions,
 ): Promise<void> {
-  const { maxRetries, baseDelayMs, logPrefix, connectFn, onReconnectedFn, isClosedFn } = options
+  const {
+    maxRetries,
+    baseDelayMs,
+    logPrefix,
+    connectFn,
+    onReconnectedFn,
+    isClosedFn,
+    onMaxRetriesExceeded = () => process.exit(1),
+  } = options
 
-  if (isClosedFn() || attemptsRef.current >= maxRetries) {
-    if (attemptsRef.current >= maxRetries) {
-      logger.error(`${logPrefix} Max reconnect attempts reached`)
-    }
+  if (isClosedFn()) return
+
+  if (attemptsRef.current >= maxRetries) {
+    logger.error(`${logPrefix} Max reconnect attempts reached. Exiting for process restart...`)
+    onMaxRetriesExceeded()
     return
   }
 

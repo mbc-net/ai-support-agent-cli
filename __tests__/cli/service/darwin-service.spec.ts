@@ -249,7 +249,7 @@ describe('generatePlist', () => {
 // generateProjectPlist
 // ---------------------------------------------------------------------------
 describe('generateProjectPlist', () => {
-  it('should generate valid per-project plist with KeepAlive.SuccessfulExit=false', () => {
+  it('should generate valid per-project plist with KeepAlive=true', () => {
     const result = generateProjectPlist({
       label: 'com.ai-support-agent.cli.mbc.mbc-01',
       wrapperScriptPath: '/Users/test/.ai-support-agent/services/mbc-mbc-01/run.sh',
@@ -260,13 +260,10 @@ describe('generateProjectPlist', () => {
     expect(result).toContain('<string>com.ai-support-agent.cli.mbc.mbc-01</string>')
     expect(result).toContain('<string>/bin/bash</string>')
     expect(result).toContain('/Users/test/.ai-support-agent/services/mbc-mbc-01/run.sh')
-    expect(result).toContain('<key>KeepAlive</key>')
-    expect(result).toContain('<key>SuccessfulExit</key>')
-    expect(result).toContain('<false/>')
+    expect(result).toMatch(/<key>KeepAlive<\/key>\s*<true\/>/)
+    expect(result).not.toContain('<key>SuccessfulExit</key>')
     expect(result).toContain('agent.out.log')
     expect(result).toContain('agent.err.log')
-    // Should NOT have <true/> as KeepAlive value
-    expect(result).not.toMatch(/<key>KeepAlive<\/key>\s*<true\/>/)
   })
 
   it('should include PATH and HOME in environment variables', () => {
@@ -309,6 +306,14 @@ describe('generateWrapperScript', () => {
     expect(result).toContain('@ai-support-agent/cli/package.json')
     expect(result).toContain('ai-support-agent start --no-docker')
     expect(result).toContain('--project mbc/MBC_01')
+  })
+
+  it('should load nvm and set PATH for launchd compatibility', () => {
+    const result = generateWrapperScript(baseOpts)
+
+    expect(result).toContain('NVM_DIR')
+    expect(result).toContain('nvm.sh')
+    expect(result).toContain('/opt/homebrew/bin:/usr/local/bin')
   })
 
   it('should exit with error when version cannot be determined', () => {
@@ -388,6 +393,14 @@ describe('generateWrapperScript', () => {
     expect(result).toContain('ai-support-agent docker-build')
   })
 
+  it('should auto-build Docker image when it does not exist locally', () => {
+    const result = generateWrapperScript(baseOpts)
+
+    expect(result).toContain('docker image inspect "$IMAGE_TAG"')
+    expect(result).toContain('ai-support-agent docker-build || { echo "ERROR: docker-build failed')
+    expect(result).toContain('exit 1; }')
+  })
+
   it('should include ANTHROPIC_API_KEY when provided', () => {
     const result = generateWrapperScript({ ...baseOpts, anthropicApiKey: 'sk-ant-test' })
 
@@ -447,6 +460,14 @@ describe('generateUpdateScript', () => {
     expect(result).toContain('npm install -g')
     expect(result).toContain('@ai-support-agent/cli@')
     expect(result).toContain('ai-support-agent service install')
+  })
+
+  it('should load nvm and set PATH for launchd compatibility', () => {
+    const result = generateUpdateScript()
+
+    expect(result).toContain('NVM_DIR')
+    expect(result).toContain('nvm.sh')
+    expect(result).toContain('/opt/homebrew/bin:/usr/local/bin')
   })
 
   it('should record failure but still reload services when npm install fails', () => {
