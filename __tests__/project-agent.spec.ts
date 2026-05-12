@@ -196,42 +196,226 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
-    it('should log error and not start timers when registration fails', async () => {
+    it('should retry indefinitely on registration failure with exponential backoff', async () => {
+      // Fix Math.random so jitter (±50%) collapses to the base delay.
+      const randomSpy = jest.spyOn(global.Math, 'random').mockReturnValue(0.5)
+      mockClient.register
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce({
+          agentId: 'test-id',
+          tenantCode: 'test-tenant',
+          projectCode: 'TEST_PROJECT',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      // First attempt
+      await jest.advanceTimersByTimeAsync(10)
+      expect(mockClient.register).toHaveBeenCalledTimes(1)
+      expect(logger.warn).toHaveBeenCalledWith('runner.registerStartedFailing')
+
+      // First backoff = 1000ms (attempt 0). Advance past that, second attempt runs.
+      await jest.advanceTimersByTimeAsync(1500)
+      expect(mockClient.register).toHaveBeenCalledTimes(2)
+
+      // Second backoff = 2000ms (attempt 1). Advance past that, third attempt runs (success).
+      await jest.advanceTimersByTimeAsync(2500)
+      expect(mockClient.register).toHaveBeenCalledTimes(3)
+
+      agent.stop()
+      randomSpy.mockRestore()
+    })
+
+    it('should retry AppSync credentials missing as a regular registration failure', async () => {
+      mockClient.register
+        .mockResolvedValueOnce({
+          agentId: 'test-id',
+          tenantCode: 'test-tenant',
+          appsyncUrl: '',
+          appsyncApiKey: '',
+          transportMode: 'realtime',
+        })
+        .mockResolvedValueOnce({
+          agentId: 'test-id',
+          tenantCode: 'test-tenant',
+          projectCode: 'TEST_PROJECT',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+      const randomSpy = jest.spyOn(global.Math, 'random').mockReturnValue(0.5)
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(10)
+      expect(mockClient.register).toHaveBeenCalledTimes(1)
+      expect(logger.warn).toHaveBeenCalledWith('runner.registerStartedFailing')
+
+      await jest.advanceTimersByTimeAsync(1500)
+      expect(mockClient.register).toHaveBeenCalledTimes(2)
+
+      agent.stop()
+      randomSpy.mockRestore()
+    })
+
+    it('should cancel the register loop on stop()', async () => {
       mockClient.register.mockRejectedValue(new Error('Network error'))
 
       const agent = new ProjectAgent(project, 'agent-1', options)
       agent.start()
 
-      await jest.advanceTimersByTimeAsync(100)
+      await jest.advanceTimersByTimeAsync(10)
+      expect(mockClient.register).toHaveBeenCalledTimes(1)
 
-      expect(logger.error).toHaveBeenCalledWith('runner.registerFailed')
+      agent.stop()
 
-      // Timers should not fire
-      mockClient.heartbeat.mockClear()
-      mockClient.getPendingCommands.mockClear()
-      await jest.advanceTimersByTimeAsync(60000)
+      // After stop(), no further register attempts even after long waits.
+      await jest.advanceTimersByTimeAsync(120_000)
+      expect(mockClient.register).toHaveBeenCalledTimes(1)
+    })
 
-      expect(mockClient.heartbeat).not.toHaveBeenCalled()
-      expect(mockClient.getPendingCommands).not.toHaveBeenCalled()
+    it('should abort the in-flight backoff sleep when stop() runs mid-delay', async () => {
+      mockClient.register.mockRejectedValue(new Error('Network error'))
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      // First register attempt has failed and we are now sleeping the backoff.
+      await jest.advanceTimersByTimeAsync(10)
+      expect(mockClient.register).toHaveBeenCalledTimes(1)
+
+      // stop() during the sleep should abort the AbortController and unblock the loop
+      // without waiting for the timer.
+      agent.stop()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // Even after the original delay would have elapsed, no second register fires.
+      await jest.advanceTimersByTimeAsync(5_000)
+      expect(mockClient.register).toHaveBeenCalledTimes(1)
+    })
+
+    it('should not start a second register loop if one is in progress', async () => {
+      mockClient.register.mockRejectedValue(new Error('Network error'))
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      agent.start() // second start() must be a no-op
+
+      await jest.advanceTimersByTimeAsync(10)
+      expect(mockClient.register).toHaveBeenCalledTimes(1)
+      expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('Register loop already running'))
 
       agent.stop()
     })
 
-    it('should log error and not start when AppSync credentials are missing', async () => {
+    it('should warn only on edge transitions during repeated identical failures', async () => {
+      // Edge-triggered logging: only the first failure should warn; subsequent
+      // identical failures go to debug to avoid log flooding (Zabbix-style).
+      const randomSpy = jest.spyOn(global.Math, 'random').mockReturnValue(0.5)
+      mockClient.register.mockRejectedValue(new Error('Network error'))
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      // First failure: 1 warn
+      await jest.advanceTimersByTimeAsync(10)
+      const warnCallsForKey = (key: string) =>
+        (logger.warn as jest.Mock).mock.calls.filter((c: unknown[]) => c[0] === key).length
+      expect(warnCallsForKey('runner.registerStartedFailing')).toBe(1)
+
+      // Drive 3 more failures with the same error. They should remain at debug, not warn.
+      for (let i = 0; i < 3; i++) {
+        await jest.advanceTimersByTimeAsync(120_000)
+      }
+      expect(warnCallsForKey('runner.registerStartedFailing')).toBe(1)
+      expect(mockClient.register.mock.calls.length).toBeGreaterThanOrEqual(3)
+      expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('Registration still failing'))
+
+      agent.stop()
+      randomSpy.mockRestore()
+    })
+
+    it('should warn again when the failure mode changes (network -> auth)', async () => {
+      const { AxiosError, AxiosHeaders } = require('axios')
+      const authError = new AxiosError('Unauthorized', 'ERR_BAD_REQUEST', undefined, undefined, {
+        status: 401,
+        statusText: 'Unauthorized',
+        data: {},
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      })
+      mockClient.register
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValue(authError)
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(10)
+      expect(logger.warn).toHaveBeenCalledWith('runner.registerStartedFailing')
+
+      // Second identical network failure must not warn.
+      await jest.advanceTimersByTimeAsync(2_000)
+      expect(
+        (logger.warn as jest.Mock).mock.calls.filter((c: unknown[]) => c[0] === 'runner.registerStartedFailing').length,
+      ).toBe(1)
+
+      // The mode transitions to auth — must warn with the auth key.
+      await jest.advanceTimersByTimeAsync(5_000)
+      expect(logger.warn).toHaveBeenCalledWith('runner.authErrorStartedFailing')
+
+      agent.stop()
+    })
+
+    it('should log a recovery info message when register succeeds after failures', async () => {
+      mockClient.register
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce({
+          agentId: 'test-id',
+          tenantCode: 'test-tenant',
+          projectCode: 'TEST_PROJECT',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+
+      const randomSpy = jest.spyOn(global.Math, 'random').mockReturnValue(0.5)
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(10)
+      expect(logger.warn).toHaveBeenCalledWith('runner.registerStartedFailing')
+
+      await jest.advanceTimersByTimeAsync(2_000)
+      expect(logger.info).toHaveBeenCalledWith('runner.registerWorkingAgain')
+
+      agent.stop()
+      randomSpy.mockRestore()
+    })
+
+    it('should not log recovery info on first successful register (no prior failure)', async () => {
       mockClient.register.mockResolvedValue({
         agentId: 'test-id',
         tenantCode: 'test-tenant',
-        appsyncUrl: '',
-        appsyncApiKey: '',
+        projectCode: 'TEST_PROJECT',
+        appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+        appsyncApiKey: 'da2-testkey123',
         transportMode: 'realtime',
       })
 
       const agent = new ProjectAgent(project, 'agent-1', options)
       agent.start()
-
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('AppSync credentials missing'))
+      expect(logger.info).not.toHaveBeenCalledWith('runner.registerWorkingAgain')
 
       agent.stop()
     })
@@ -1632,24 +1816,49 @@ describe('ProjectAgent', () => {
     })
   })
 
-  describe('register 401 error', () => {
-    it('should log authError when registration returns 401', async () => {
+  describe('register auth error', () => {
+    function makeAuthError(status: number) {
       const { AxiosError, AxiosHeaders } = require('axios')
-      const error401 = new AxiosError('Unauthorized', 'ERR_BAD_REQUEST', undefined, undefined, {
-        status: 401,
-        statusText: 'Unauthorized',
+      return new AxiosError('Auth error', 'ERR_BAD_REQUEST', undefined, undefined, {
+        status,
+        statusText: status === 401 ? 'Unauthorized' : 'Forbidden',
         data: { message: 'Invalid token' },
         headers: {},
         config: { headers: new AxiosHeaders() },
       })
-      mockClient.register.mockRejectedValue(error401)
+    }
+
+    it('should retry with a long delay on 401 and warn', async () => {
+      const randomSpy = jest.spyOn(global.Math, 'random').mockReturnValue(0.5)
+      mockClient.register.mockRejectedValue(makeAuthError(401))
 
       const agent = new ProjectAgent(project, 'agent-1', options)
       agent.start()
 
-      await jest.advanceTimersByTimeAsync(100)
+      await jest.advanceTimersByTimeAsync(10)
+      expect(mockClient.register).toHaveBeenCalledTimes(1)
+      expect(logger.warn).toHaveBeenCalledWith('runner.authErrorStartedFailing')
 
-      expect(logger.error).toHaveBeenCalledWith('runner.authError')
+      // Auth floor is 5 minutes. Advancing 1 minute must not trigger another attempt.
+      await jest.advanceTimersByTimeAsync(60_000)
+      expect(mockClient.register).toHaveBeenCalledTimes(1)
+
+      // After ~5 minutes total, the next attempt runs.
+      await jest.advanceTimersByTimeAsync(5 * 60 * 1000)
+      expect(mockClient.register).toHaveBeenCalledTimes(2)
+
+      agent.stop()
+      randomSpy.mockRestore()
+    })
+
+    it('should also treat 403 as an auth error', async () => {
+      mockClient.register.mockRejectedValue(makeAuthError(403))
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(10)
+      expect(logger.warn).toHaveBeenCalledWith('runner.authErrorStartedFailing')
 
       agent.stop()
     })
@@ -1974,7 +2183,7 @@ describe('ProjectAgent', () => {
       }
     })
 
-    it('should return early when appsyncUrl is missing', async () => {
+    it('should retry when appsyncUrl is missing instead of starting the subscriber', async () => {
       mockClient.register.mockResolvedValue({
         agentId: 'test-id',
         tenantCode: 'test-tenant',
@@ -1987,10 +2196,9 @@ describe('ProjectAgent', () => {
       agent.start()
       await jest.advanceTimersByTimeAsync(100)
 
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('AppSync credentials missing'),
-      )
+      expect(logger.warn).toHaveBeenCalledWith('runner.registerStartedFailing')
       expect(MockAppSyncSubscriber).not.toHaveBeenCalled()
+      agent.stop()
     })
   })
 

@@ -58,7 +58,9 @@ export function validateApiUrl(url: string): string | null {
 }
 
 export function isAuthenticationError(error: unknown): boolean {
-  return axios.isAxiosError(error) && error.response?.status === 401
+  if (!axios.isAxiosError(error)) return false
+  const status = error.response?.status
+  return status === 401 || status === 403
 }
 
 export function buildWsUrl(apiUrl: string, path: string): string {

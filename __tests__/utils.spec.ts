@@ -250,10 +250,21 @@ describe('isAuthenticationError', () => {
     expect(isAuthenticationError(error)).toBe(true)
   })
 
-  it('should return false for 403 AxiosError', () => {
+  it('should return true for 403 AxiosError', () => {
     const error = new AxiosError('Forbidden', 'ERR_BAD_REQUEST', undefined, undefined, {
       status: 403,
       statusText: 'Forbidden',
+      data: {},
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(isAuthenticationError(error)).toBe(true)
+  })
+
+  it('should return false for 500 AxiosError', () => {
+    const error = new AxiosError('Server Error', 'ERR_BAD_RESPONSE', undefined, undefined, {
+      status: 500,
+      statusText: 'Server Error',
       data: {},
       headers: {},
       config: { headers: new AxiosHeaders() },

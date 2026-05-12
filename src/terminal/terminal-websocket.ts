@@ -3,6 +3,7 @@ import * as path from 'path'
 import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../base-websocket'
+import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import { logger } from '../logger'
 import { buildWsUrl } from '../utils'
 
@@ -59,6 +60,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     super({
       maxReconnectRetries: TERMINAL_WS_MAX_RECONNECT_RETRIES,
       reconnectBaseDelayMs: TERMINAL_WS_RECONNECT_BASE_DELAY_MS,
+      reconnectMaxDelayMs: WS_RECONNECT_MAX_DELAY_MS,
       logPrefix: '[terminal-ws]',
     })
     this.manager = new TerminalSessionManager()

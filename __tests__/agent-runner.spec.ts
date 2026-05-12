@@ -890,7 +890,7 @@ describe('startProjectAgent', () => {
   const project = { tenantCode: 'mbc', projectCode: 'test-proj', token: 'tok', apiUrl: 'http://api' }
   const intervals = { pollInterval: 5000, heartbeatInterval: 30000 }
 
-  it('should log error and not start timers when registration fails', async () => {
+  it('should log retry warning and keep heartbeat dormant when registration fails', async () => {
     mockClient.register.mockRejectedValue(new Error('Network error'))
 
     const agent = startProjectAgent(project, 'agent-1', intervals)
@@ -899,12 +899,12 @@ describe('startProjectAgent', () => {
     await jest.advanceTimersByTimeAsync(100)
 
     // t() returns the key when translations are not loaded (logger is mocked)
-    expect(logger.error).toHaveBeenCalledWith('runner.registerFailed')
+    expect(logger.warn).toHaveBeenCalledWith('runner.registerStartedFailing')
 
-    // Advance well past heartbeat/poll intervals — they should NOT fire
+    // Heartbeat/poll must stay dormant while registration has not succeeded yet.
     mockClient.heartbeat.mockClear()
     mockClient.getPendingCommands.mockClear()
-    await jest.advanceTimersByTimeAsync(60000)
+    await jest.advanceTimersByTimeAsync(30_000)
 
     expect(mockClient.heartbeat).not.toHaveBeenCalled()
     expect(mockClient.getPendingCommands).not.toHaveBeenCalled()

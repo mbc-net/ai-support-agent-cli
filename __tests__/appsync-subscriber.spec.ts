@@ -408,8 +408,8 @@ describe('AppSyncSubscriber', () => {
     })
   })
 
-  describe('max reconnect attempts', () => {
-    it('should stop reconnecting after max retries', async () => {
+  describe('persistent reconnect', () => {
+    it('should keep reconnecting past the historical 5-attempt limit', async () => {
       const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
       subscriber.subscribe('test-tenant', jest.fn())
 
@@ -418,22 +418,23 @@ describe('AppSyncSubscriber', () => {
       mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })
       await connectPromise
 
-      // Simulate unexpected close and fail reconnections 5 times (MAX_RECONNECT_RETRIES)
-      for (let i = 0; i < 5; i++) {
+      // Drive 6 reconnect cycles (one more than the old 5-attempt cap). Each
+      // round simulates a close, lets the backoff timer fire (capped at 60s),
+      // and fails the reconnect attempt.
+      const wsInstances = new Set<unknown>()
+      wsInstances.add(mockWsInstance)
+      for (let i = 0; i < 6; i++) {
         mockWsInstance!.simulateClose()
-        const delay = 1000 * Math.pow(2, i)
-        await jest.advanceTimersByTimeAsync(delay)
-        // Fail the reconnect
+        await jest.advanceTimersByTimeAsync(60_000)
+        wsInstances.add(mockWsInstance)
         mockWsInstance!.simulateError(new Error('Connection refused'))
       }
 
-      // After 5 failures, the last close should not trigger another reconnect
-      const wsAfterMaxRetries = mockWsInstance
-      mockWsInstance!.simulateClose()
-      await jest.advanceTimersByTimeAsync(100000)
+      // The subscriber must have produced fresh WebSocket instances every cycle
+      // (i.e. reconnect kept running past the old 5-attempt limit).
+      expect(wsInstances.size).toBeGreaterThan(5)
 
-      // No new WebSocket should be created
-      expect(mockWsInstance).toBe(wsAfterMaxRetries)
+      subscriber.disconnect()
     })
   })
 
