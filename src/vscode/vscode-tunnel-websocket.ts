@@ -2,6 +2,7 @@ import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../base-websocket'
 import { BrowserLocalServer } from '../browser/browser-local-server'
+import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import { logger } from '../logger'
 import { getErrorMessage, buildWsUrl } from '../utils'
 import { BrowserSessionManager } from '../mcp/tools/browser/browser-session-manager'
@@ -157,6 +158,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     super({
       maxReconnectRetries: VSCODE_WS_MAX_RECONNECT_RETRIES,
       reconnectBaseDelayMs: VSCODE_WS_RECONNECT_BASE_DELAY_MS,
+      reconnectMaxDelayMs: WS_RECONNECT_MAX_DELAY_MS,
       logPrefix: '[vscode-ws]',
     })
     this.wsUrl = buildWsUrl(apiUrl, '/ws/agent-vscode')

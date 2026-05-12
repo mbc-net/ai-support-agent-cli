@@ -1,7 +1,12 @@
 import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from './base-websocket'
-import { APPSYNC_MAX_RECONNECT_RETRIES, APPSYNC_RECONNECT_BASE_DELAY_MS, DEFAULT_APPSYNC_TIMEOUT_MS } from './constants'
+import {
+  APPSYNC_MAX_RECONNECT_RETRIES,
+  APPSYNC_RECONNECT_BASE_DELAY_MS,
+  DEFAULT_APPSYNC_TIMEOUT_MS,
+  WS_RECONNECT_MAX_DELAY_MS,
+} from './constants'
 import { logger } from './logger'
 
 export interface AppSyncNotification {
@@ -47,6 +52,7 @@ export class AppSyncSubscriber extends BaseWebSocketConnection<AppSyncMessage> {
     super({
       maxReconnectRetries: APPSYNC_MAX_RECONNECT_RETRIES,
       reconnectBaseDelayMs: APPSYNC_RECONNECT_BASE_DELAY_MS,
+      reconnectMaxDelayMs: WS_RECONNECT_MAX_DELAY_MS,
       logPrefix: 'AppSync:',
     })
     this.apiKey = apiKey

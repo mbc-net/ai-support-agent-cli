@@ -7,6 +7,8 @@ import { attemptReconnect } from './ws-reconnect'
 export interface BaseWebSocketOptions {
   maxReconnectRetries: number
   reconnectBaseDelayMs: number
+  /** 再接続バックオフの上限 (ms)。省略時は cap なし。 */
+  reconnectMaxDelayMs?: number
   logPrefix: string
 }
 
@@ -125,6 +127,7 @@ export abstract class BaseWebSocketConnection<TMessage> {
     await attemptReconnect(this.reconnectAttemptsRef, {
       maxRetries: this.options.maxReconnectRetries,
       baseDelayMs: this.options.reconnectBaseDelayMs,
+      maxDelayMs: this.options.reconnectMaxDelayMs,
       logPrefix: this.options.logPrefix,
       connectFn: () => this.doConnect(),
       onReconnectedFn: () => this.onReconnected(),

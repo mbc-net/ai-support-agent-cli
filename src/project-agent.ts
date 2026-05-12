@@ -7,7 +7,16 @@ import { AppSyncSubscriber } from './appsync-subscriber'
 import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, performSyncRepository, refreshChatMode } from './agent-config-sync'
 import type { RepoSyncResult } from './repo-sync'
 import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, startVsCodeTunnel, stopTransport } from './agent-transport'
-import { AGENT_VERSION, DOCKER_RESTART_EXIT_CODE, INITIAL_CONFIG_SYNC_MAX_RETRIES, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS } from './constants'
+import {
+  AGENT_VERSION,
+  DOCKER_RESTART_EXIT_CODE,
+  INITIAL_CONFIG_SYNC_MAX_RETRIES,
+  INITIAL_CONFIG_SYNC_RETRY_DELAY_MS,
+  REGISTER_AUTH_ERROR_DELAY_MS,
+  REGISTER_RETRY_BASE_DELAY_MS,
+  REGISTER_RETRY_MAX_DELAY_MS,
+} from './constants'
+import { calculateBackoff } from './retry-strategy'
 import { getConfigDir } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
@@ -55,6 +64,18 @@ export class ProjectAgent {
   }
 
   private transportDeps: TransportDeps
+
+  // Persistent registration loop state. start() spawns a loop that retries
+  // register() forever with exponential backoff so a transient network outage
+  // does not leave the agent in a silent zombie state.
+  private isRegistering = false
+  private registerLoopCancelled = false
+  private registerAttempt = 0
+  private registerAbortController: AbortController | null = null
+  // Edge-triggered logging: warn only when the failure mode changes or recovers,
+  // and emit debug for the noisy intermediate retries. Patterned on Zabbix's
+  // "started to fail" / "is working again" log pair.
+  private lastRegisterError: { isAuth: boolean; message: string } | null = null
 
   constructor(
     project: ProjectRegistration,
@@ -115,12 +136,21 @@ export class ProjectAgent {
   }
 
   start(): void {
-    this.registerAndStart().catch((error) => {
-      logger.error(t('runner.unexpectedError', { message: getErrorMessage(error) }))
+    if (this.isRegistering) {
+      logger.debug(`${this.prefix} Register loop already running, skip start()`)
+      return
+    }
+    this.isRegistering = true
+    this.registerLoopCancelled = false
+    this.registerAttempt = 0
+    void this.runRegisterLoop().finally(() => {
+      this.isRegistering = false
     })
   }
 
   stop(): void {
+    this.registerLoopCancelled = true
+    this.registerAbortController?.abort()
     stopTransport(this.transportState)
   }
 
@@ -142,8 +172,10 @@ export class ProjectAgent {
     // Token change may alter tenantCode/projectCode (embedded in token format).
     // Re-register to ensure the agent record matches the new token's identity.
     logger.info(`${this.prefix} Re-registering after token update...`)
-    stopTransport(this.transportState)
-    this.start()
+    this.stop()
+    // Defer start() so the in-flight register loop unwinds (isRegistering -> false)
+    // before the next start() flips it back on.
+    setImmediate(() => this.start())
   }
 
   async performConfigSync(): Promise<void> {
@@ -337,12 +369,9 @@ export class ProjectAgent {
         }
       }
     } catch (error) {
-      if (isAuthenticationError(error)) {
-        logger.error(t('runner.authError', { prefix: this.prefix, detail: getErrorMessage(error) }))
-      } else {
-        logger.error(t('runner.registerFailed', { prefix: this.prefix, message: getErrorMessage(error) }))
-      }
-      return
+      // Surface registration errors to the outer runRegisterLoop so it can retry
+      // with exponential backoff instead of leaving the agent silently idle.
+      throw error
     }
 
     // Submit any pending results from previous sessions
@@ -373,8 +402,9 @@ export class ProjectAgent {
     }
 
     if (!result.appsyncUrl || !result.appsyncApiKey) {
-      logger.error(`${this.prefix} AppSync credentials missing. Cannot start agent.`)
-      return
+      // Propagate to runRegisterLoop so we retry — credentials may appear once
+      // a server-side rollout completes.
+      throw new Error('AppSync credentials missing in register response')
     }
     logger.info(`${this.prefix} Starting subscription mode (realtime)`)
     // When running inside a Docker container, localhost refers to the container itself.
@@ -399,5 +429,92 @@ export class ProjectAgent {
     } else {
       logger.debug(`${this.prefix} Terminal/VS Code WebSocket skipped (wsEnabled=false)`)
     }
+  }
+
+  private async runRegisterLoop(): Promise<void> {
+    while (!this.registerLoopCancelled) {
+      try {
+        await this.registerAndStart()
+        // Edge-triggered recovery log: only emit when we were previously failing.
+        if (this.lastRegisterError !== null) {
+          logger.info(
+            t('runner.registerWorkingAgain', {
+              prefix: this.prefix,
+              attempts: this.registerAttempt,
+            }),
+          )
+          this.lastRegisterError = null
+        }
+        this.registerAttempt = 0
+        return
+      } catch (error) {
+        if (this.registerLoopCancelled) return
+
+        const isAuth = isAuthenticationError(error)
+        const message = getErrorMessage(error)
+        const baseDelayMs = isAuth ? REGISTER_AUTH_ERROR_DELAY_MS : REGISTER_RETRY_BASE_DELAY_MS
+        let delay = calculateBackoff({ baseDelayMs, attempt: this.registerAttempt, jitter: true })
+        delay = Math.min(delay, REGISTER_RETRY_MAX_DELAY_MS)
+        if (isAuth) {
+          // Floor at REGISTER_AUTH_ERROR_DELAY_MS so we never hammer the auth path.
+          delay = Math.max(delay, REGISTER_AUTH_ERROR_DELAY_MS)
+        }
+        this.registerAttempt++
+
+        // Edge-triggered failure log: only warn on a new failure or a change in
+        // error mode (network -> auth, different error message). Subsequent
+        // identical failures stay at debug level to avoid log flooding during
+        // long outages.
+        const isFirstFailure = this.lastRegisterError === null
+        const isModeChange =
+          this.lastRegisterError !== null &&
+          (this.lastRegisterError.isAuth !== isAuth ||
+            this.lastRegisterError.message !== message)
+        const shouldWarn = isFirstFailure || isModeChange
+
+        if (shouldWarn) {
+          if (isAuth) {
+            logger.warn(
+              t('runner.authErrorStartedFailing', {
+                prefix: this.prefix,
+                delayMs: delay,
+                detail: message,
+              }),
+            )
+          } else {
+            logger.warn(
+              t('runner.registerStartedFailing', {
+                prefix: this.prefix,
+                delayMs: delay,
+                message,
+              }),
+            )
+          }
+        } else {
+          logger.debug(
+            `${this.prefix} Registration still failing (attempt ${this.registerAttempt}, next retry in ${delay}ms): ${message}`,
+          )
+        }
+
+        this.lastRegisterError = { isAuth, message }
+        await this.cancellableSleep(delay)
+      }
+    }
+  }
+
+  private cancellableSleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const controller = new AbortController()
+      this.registerAbortController = controller
+      const timer = setTimeout(() => {
+        this.registerAbortController = null
+        resolve()
+      }, ms)
+      controller.signal.addEventListener('abort', () => {
+        clearTimeout(timer)
+        this.registerAbortController = null
+        resolve()
+      })
+    })
   }
 }

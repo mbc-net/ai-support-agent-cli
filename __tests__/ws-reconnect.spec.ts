@@ -3,12 +3,17 @@ import { attemptReconnect, ReconnectOptions } from '../src/ws-reconnect'
 jest.mock('../src/logger')
 
 describe('attemptReconnect', () => {
+  let randomSpy: jest.SpyInstance<number, []>
+
   beforeEach(() => {
     jest.useFakeTimers()
+    // Lock jitter (±50% factor) to 1.0 so delays remain equal to base * 2^attempt.
+    randomSpy = jest.spyOn(global.Math, 'random').mockReturnValue(0.5)
   })
 
   afterEach(() => {
     jest.useRealTimers()
+    randomSpy.mockRestore()
   })
 
   function buildOptions(overrides: Partial<ReconnectOptions> = {}): ReconnectOptions {
@@ -193,19 +198,61 @@ describe('attemptReconnect', () => {
     const connectFn = jest.fn().mockResolvedValue(undefined)
     const attemptsRef = { current: 0 }
 
+    // With Math.random pinned to 0.5, jitter factor is (0.5 + 0.5*0.5) = 0.75
+    // so attempt=0 with baseDelayMs=500 yields a 375ms delay.
     const promise = attemptReconnect(attemptsRef, buildOptions({
       connectFn,
       baseDelayMs: 500,
     }))
 
-    // Should not have connected yet at 400ms
-    await jest.advanceTimersByTimeAsync(400)
+    // Not yet at 300ms.
+    await jest.advanceTimersByTimeAsync(300)
     expect(connectFn).not.toHaveBeenCalled()
 
-    // Should connect at 500ms
+    // Connects by 400ms (jittered to 375ms).
     await jest.advanceTimersByTimeAsync(100)
     await promise
 
     expect(connectFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('should respect maxDelayMs cap', async () => {
+    const connectFn = jest.fn().mockResolvedValue(undefined)
+    // attempt=10 would normally back off 1024s, but the cap should clamp it to 60s.
+    const attemptsRef = { current: 10 }
+
+    const promise = attemptReconnect(attemptsRef, buildOptions({
+      connectFn,
+      baseDelayMs: 1000,
+      maxDelayMs: 60_000,
+      maxRetries: 20,
+    }))
+
+    await jest.advanceTimersByTimeAsync(59_000)
+    expect(connectFn).not.toHaveBeenCalled()
+
+    await jest.advanceTimersByTimeAsync(1_000)
+    await promise
+    expect(connectFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('should retry indefinitely when maxRetries is Infinity', async () => {
+    const connectFn = jest.fn().mockRejectedValue(new Error('fail'))
+    const onMaxRetriesExceeded = jest.fn()
+    const attemptsRef = { current: 0 }
+
+    void attemptReconnect(attemptsRef, buildOptions({
+      connectFn,
+      maxRetries: Number.POSITIVE_INFINITY,
+      maxDelayMs: 60_000,
+      onMaxRetriesExceeded,
+    }))
+
+    // Drive enough wall-clock to exceed the original 5-attempt limit.
+    for (let i = 0; i < 5; i++) {
+      await jest.advanceTimersByTimeAsync(60_000)
+    }
+    expect(onMaxRetriesExceeded).not.toHaveBeenCalled()
+    expect(connectFn.mock.calls.length).toBeGreaterThanOrEqual(5)
   })
 })

@@ -11,7 +11,7 @@ export const VSCODE_BIND_HOST = '127.0.0.1'
 export const VSCODE_WS_RECONNECT_BASE_DELAY_MS = 1000
 
 /** WebSocket 最大再接続リトライ */
-export const VSCODE_WS_MAX_RECONNECT_RETRIES = 5
+export const VSCODE_WS_MAX_RECONNECT_RETRIES = Number.POSITIVE_INFINITY
 
 /** HTTP レスポンスボディのチャンクサイズ（512KB） */
 export const HTTP_RESPONSE_CHUNK_SIZE = 512 * 1024
