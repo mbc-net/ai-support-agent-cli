@@ -163,8 +163,20 @@ export const CHILD_PROCESS_STOP_TIMEOUT_MS = 10000
 export const TOKEN_WATCH_INTERVAL_MS = 5000
 
 // WebSocket reconnect
-export const APPSYNC_MAX_RECONNECT_RETRIES = 5
+// Infinity: the agent should never give up reconnecting from a transient network outage.
+// Combine with WS_RECONNECT_MAX_DELAY_MS to cap the exponential backoff.
+export const APPSYNC_MAX_RECONNECT_RETRIES = Number.POSITIVE_INFINITY
 export const APPSYNC_RECONNECT_BASE_DELAY_MS = 1000
+export const WS_RECONNECT_MAX_DELAY_MS = 60_000
+
+// Registration retry (persistent)
+// register() failures used to leave the process in a silent zombie state.
+// Retry forever with exponential backoff + jitter, capped at REGISTER_RETRY_MAX_DELAY_MS.
+// 401/403 use a longer floor (REGISTER_AUTH_ERROR_DELAY_MS) to avoid hammering the server
+// when the token is permanently invalid.
+export const REGISTER_RETRY_BASE_DELAY_MS = 1_000
+export const REGISTER_RETRY_MAX_DELAY_MS = 60_000
+export const REGISTER_AUTH_ERROR_DELAY_MS = 5 * 60 * 1000
 
 // Exit code used by the in-container agent to signal "update complete, rebuild image"
 // Must be distinct from 0 (clean stop) and 1 (error) to avoid false restarts on SIGINT.

@@ -55,7 +55,7 @@
     "@types/pg": "^8.18.0",
     "@types/ws": "^8.18.1",
     "jest": "^30.0.0",
-    "jest-junit": "^16.0.0",
+    "jest-junit": "^17.0.0",
     "ts-jest": "^29.0.0",
     "ts-node": "^10.9.0",
     "typescript": "^5.9.0"

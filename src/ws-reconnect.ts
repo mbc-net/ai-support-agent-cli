@@ -5,6 +5,8 @@ import { getErrorMessage } from './utils'
 export interface ReconnectOptions {
   maxRetries: number
   baseDelayMs: number
+  /** Backoff delay 上限 (ms)。省略時は cap なし。 */
+  maxDelayMs?: number
   logPrefix: string
   connectFn: () => Promise<void>
   onReconnectedFn?: () => void
@@ -20,6 +22,7 @@ export async function attemptReconnect(
   const {
     maxRetries,
     baseDelayMs,
+    maxDelayMs,
     logPrefix,
     connectFn,
     onReconnectedFn,
@@ -36,7 +39,10 @@ export async function attemptReconnect(
   }
 
   attemptsRef.current++
-  const delay = calculateBackoff({ baseDelayMs, attempt: attemptsRef.current - 1, jitter: false })
+  let delay = calculateBackoff({ baseDelayMs, attempt: attemptsRef.current - 1, jitter: true })
+  if (maxDelayMs !== undefined) {
+    delay = Math.min(delay, maxDelayMs)
+  }
   logger.info(`${logPrefix} Reconnecting in ${delay}ms (attempt ${attemptsRef.current}/${maxRetries})`)
 
   await new Promise<void>((resolve) => setTimeout(resolve, delay))
