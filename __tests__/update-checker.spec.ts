@@ -456,18 +456,34 @@ describe('performUpdate', () => {
     expect(result.error).toContain('npm ERR! 404 Not Found')
   })
 
-  it('should fallback to stderr when error.message is empty', async () => {
-    const error = new Error('')
+  it('should append stderr to error.message so the real cause is visible', async () => {
+    const error = new Error('Command failed: npm install -g @ai-support-agent/cli@1.2.3')
     mockedExecFileSync.mockReturnValue('/usr/local\n')
     mockedAccessSync.mockImplementation(() => undefined)
     mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: Error, stdout: string, stderr: string) => void) => {
-      callback(error, '', 'stderr output here')
+      callback(error, '', 'npm ERR! code ENOTFOUND\nnpm ERR! syscall getaddrinfo')
     })
 
     const result = await performUpdate('1.2.3', 'global')
 
     expect(result.success).toBe(false)
-    expect(result.error).toBe('stderr output here')
+    expect(result.error).toContain('Command failed: npm install -g @ai-support-agent/cli@1.2.3')
+    expect(result.error).toContain('stderr: npm ERR! code ENOTFOUND')
+    expect(result.error).toContain('npm ERR! syscall getaddrinfo')
+  })
+
+  it('should fall back to Unknown error when both error.message and stderr are empty', async () => {
+    const error = new Error('')
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: Error, stdout: string, stderr: string) => void) => {
+      callback(error, '', '')
+    })
+
+    const result = await performUpdate('1.2.3', 'global')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toBe('Unknown error')
   })
 
   it('should use npm.cmd on Windows', async () => {
@@ -488,18 +504,50 @@ describe('performUpdate', () => {
     )
   })
 
-  it('should fallback to Unknown error when both message and stderr are empty', async () => {
-    const error = new Error('')
+  it('should use a per-project npm cache dir when cacheScope is provided', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' })
     mockedExecFileSync.mockReturnValue('/usr/local\n')
     mockedAccessSync.mockImplementation(() => undefined)
-    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: Error, stdout: string, stderr: string) => void) => {
-      callback(error, '', '')
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
+      callback(null)
     })
 
-    const result = await performUpdate('1.2.3', 'global')
+    await performUpdate('1.2.3', 'global', 'mbc-MBC_CQRS_SERVERLESS')
 
-    expect(result.success).toBe(false)
-    expect(result.error).toBe('Unknown error')
+    const args = mockedExecFile.mock.calls[0][1] as string[]
+    const cacheIdx = args.indexOf('--cache')
+    expect(cacheIdx).toBeGreaterThanOrEqual(0)
+    expect(args[cacheIdx + 1]).toMatch(/[/\\]\.npm-update-cache-mbc-MBC_CQRS_SERVERLESS$/)
+  })
+
+  it('should sanitize cacheScope to a path-safe form', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
+      callback(null)
+    })
+
+    await performUpdate('1.2.3', 'global', '../etc/passwd')
+
+    const args = mockedExecFile.mock.calls[0][1] as string[]
+    const cacheIdx = args.indexOf('--cache')
+    expect(args[cacheIdx + 1]).toMatch(/[/\\]\.npm-update-cache-___etc_passwd$/)
+  })
+
+  it('should default to the shared cache dir when cacheScope is omitted', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
+      callback(null)
+    })
+
+    await performUpdate('1.2.3', 'global')
+
+    const args = mockedExecFile.mock.calls[0][1] as string[]
+    const cacheIdx = args.indexOf('--cache')
+    expect(args[cacheIdx + 1]).toMatch(/[/\\]\.npm-update-cache$/)
   })
 })
 

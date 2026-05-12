@@ -1663,7 +1663,7 @@ describe('ProjectAgent', () => {
         expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Update requested'))
         expect(mockClient.getVersionInfo).toHaveBeenCalledWith('latest')
         expect(mockedDetectInstallMethod).toHaveBeenCalled()
-        expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.2', 'global')
+        expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.2', 'global', expect.any(String))
         expect(logger.success).toHaveBeenCalledWith(expect.stringContaining('Update to 0.0.2 successful'))
         expect(mockSubscriber.disconnect).toHaveBeenCalled()
 
@@ -1690,7 +1690,7 @@ describe('ProjectAgent', () => {
 
         await agent.performUpdate()
 
-        expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.2', 'global')
+        expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.2', 'global', expect.any(String))
         expect(logger.success).toHaveBeenCalledWith(expect.stringContaining('Update to 0.0.2 successful'))
 
         // Advance past setTimeout(1000)
@@ -1762,7 +1762,7 @@ describe('ProjectAgent', () => {
         await agent.performUpdate()
 
         expect(mockClient.getVersionInfo).toHaveBeenCalledWith('beta')
-        expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.22-beta.3', 'global')
+        expect(mockedPerformUpdate).toHaveBeenCalledWith('0.0.22-beta.3', 'global', expect.any(String))
 
         agent.stop()
       } finally {

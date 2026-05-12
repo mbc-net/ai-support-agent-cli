@@ -136,7 +136,12 @@ function execNpmCommand(
   return new Promise((resolve) => {
     execFile(cmd, cmdArgs, { timeout: NPM_INSTALL_TIMEOUT }, (error, _stdout, stderr) => {
       if (error) {
-        const message = error.message || stderr || 'Unknown error'
+        // Node's execFile error.message is just "Command failed: <cmd>", which
+        // hides the npm output. Combine both so the actual cause (E403, EACCES,
+        // ENOTFOUND, cache lock, etc.) reaches the agent log.
+        const trimmedStderr = stderr?.toString().trim()
+        const baseMessage = error.message?.trim() || 'Unknown error'
+        const message = trimmedStderr ? `${baseMessage}\nstderr: ${trimmedStderr}` : baseMessage
         resolve({ success: false, error: message })
         return
       }
@@ -152,6 +157,7 @@ function execNpmCommand(
 export async function performUpdate(
   version: string,
   method?: InstallMethod,
+  cacheScope?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const installMethod = method ?? detectInstallMethod()
 
@@ -167,8 +173,12 @@ export async function performUpdate(
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
   const args = ['install', '-g', `@ai-support-agent/cli@${version}`]
 
-  // Use a user-writable cache directory to avoid root-owned cache issues in Docker containers
-  const tmpCacheDir = path.join(os.tmpdir(), '.npm-update-cache')
+  // Use a user-writable cache directory to avoid root-owned cache issues in Docker containers.
+  // Suffix per-project when available so 16 sibling containers don't collide on the shared
+  // /tmp/.npm-update-cache cacache lock when the auto-updater fires for all of them at once.
+  const safeScope = cacheScope?.replace(/[^A-Za-z0-9_-]/g, '_') || ''
+  const cacheDirName = safeScope ? `.npm-update-cache-${safeScope}` : '.npm-update-cache'
+  const tmpCacheDir = path.join(os.tmpdir(), cacheDirName)
   args.push('--cache', tmpCacheDir)
 
   const needsSudo = !hasGlobalWritePermission() && isSudoAvailable()

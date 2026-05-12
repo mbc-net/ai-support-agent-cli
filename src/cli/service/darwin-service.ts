@@ -323,36 +323,81 @@ export NVM_DIR="\${HOME}/.nvm"
 # Also try Homebrew node as fallback
 export PATH="/opt/homebrew/bin:/usr/local/bin:\${PATH}"
 
+LOG_PREFIX="[update-and-restart $(date '+%Y-%m-%dT%H:%M:%S%z')]"
+
 # 1. Unload all per-project LaunchAgent services
 for plist in "${launchAgentsDir}"/com.ai-support-agent.cli.*.plist; do
   [ -f "$plist" ] || continue
   launchctl unload "$plist" 2>/dev/null || true
 done
 
-# 2. Install new version if update-version.json exists
+# 2. Install new version if update-version.json exists.
+# Capture npm/service-install stderr so the real cause (E403, EACCES, cache
+# lock, ENOTFOUND, ...) reaches the user instead of being swallowed.
 VERSION_FILE="${configDir}/update-version.json"
 _INSTALL_OK=true
 if [ -f "$VERSION_FILE" ]; then
   NEW_VERSION=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$VERSION_FILE','utf-8')).version||'')}catch(e){console.log('')}" 2>/dev/null || echo "")
   rm -f "$VERSION_FILE"
   if [ -n "$NEW_VERSION" ]; then
-    if ! npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet; then
-      echo "ERROR: npm install -g @ai-support-agent/cli@$NEW_VERSION failed" >&2
+    NPM_OUTPUT=$(npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet 2>&1)
+    NPM_STATUS=$?
+    if [ "$NPM_STATUS" -ne 0 ]; then
+      echo "$LOG_PREFIX ERROR: npm install -g @ai-support-agent/cli@$NEW_VERSION failed (exit $NPM_STATUS)" >&2
+      echo "$NPM_OUTPUT" >&2
       _INSTALL_OK=false
-    elif ! ai-support-agent service install; then
-      echo "ERROR: ai-support-agent service install failed" >&2
-      _INSTALL_OK=false
+    else
+      SI_OUTPUT=$(ai-support-agent service install 2>&1)
+      SI_STATUS=$?
+      if [ "$SI_STATUS" -ne 0 ]; then
+        echo "$LOG_PREFIX ERROR: ai-support-agent service install failed (exit $SI_STATUS)" >&2
+        echo "$SI_OUTPUT" >&2
+        _INSTALL_OK=false
+      fi
     fi
   fi
 fi
 
-# 3. Reload all per-project LaunchAgent services (always, even if install failed)
+# 3. Reload all per-project LaunchAgent services (always, even if install
+# failed) with retry + post-load verification. The shared-host mac-studio has
+# seen launchctl load silently no-op for individual plists during a fleet
+# update; if we don't verify each label was actually registered, the service
+# stays down until someone notices manually.
+reload_plist() {
+  local plist="$1"
+  local label
+  label=$(basename "$plist" .plist)
+  local attempt
+  for attempt in 1 2 3; do
+    local out
+    out=$(launchctl load "$plist" 2>&1)
+    local status=$?
+    if [ "$status" -eq 0 ] && launchctl list "$label" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      sleep "$attempt"
+      launchctl unload "$plist" >/dev/null 2>&1 || true
+    fi
+    echo "$LOG_PREFIX WARN: launchctl load attempt $attempt/3 for $label failed (exit $status): $out" >&2
+  done
+  echo "$LOG_PREFIX ERROR: launchctl load $label gave up after 3 attempts" >&2
+  return 1
+}
+
+_RELOAD_FAILED=0
 for plist in "${launchAgentsDir}"/com.ai-support-agent.cli.*.plist; do
   [ -f "$plist" ] || continue
-  launchctl load "$plist" 2>/dev/null || true
+  if ! reload_plist "$plist"; then
+    _RELOAD_FAILED=$((_RELOAD_FAILED + 1))
+  fi
 done
 
-if [ "$_INSTALL_OK" = "false" ]; then
+if [ "$_RELOAD_FAILED" -gt 0 ]; then
+  echo "$LOG_PREFIX ERROR: $_RELOAD_FAILED LaunchAgent(s) failed to reload" >&2
+fi
+
+if [ "$_INSTALL_OK" = "false" ] || [ "$_RELOAD_FAILED" -gt 0 ]; then
   exit 1
 fi
 
