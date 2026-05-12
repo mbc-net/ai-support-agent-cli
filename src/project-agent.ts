@@ -262,7 +262,8 @@ export class ProjectAgent {
     }
     logger.info(`${this.prefix} Updating to version ${targetVersion}...`)
     const installMethod = detectInstallMethod()
-    const result = await performUpdate(targetVersion, installMethod)
+    const cacheScope = `${this.tenantCode}-${this.projectCode}`
+    const result = await performUpdate(targetVersion, installMethod, cacheScope)
     if (!result.success) {
       throw new Error(`Update failed: ${result.error ?? 'Unknown error'}`)
     }
