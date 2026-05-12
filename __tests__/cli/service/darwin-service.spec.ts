@@ -473,24 +473,75 @@ describe('generateUpdateScript', () => {
   it('should record failure but still reload services when npm install fails', () => {
     const result = generateUpdateScript()
 
-    expect(result).toContain('if ! npm install -g')
+    expect(result).toContain('npm install -g')
     expect(result).toContain('_INSTALL_OK=false')
     // launchctl load must appear after the install block (services always reloaded)
     const installIdx = result.indexOf('_INSTALL_OK=false')
     const reloadIdx = result.indexOf('launchctl load')
     expect(reloadIdx).toBeGreaterThan(installIdx)
+  })
+
+  it('should capture npm install stderr instead of discarding it', () => {
+    const result = generateUpdateScript()
+
+    // Output is captured into NPM_OUTPUT and echoed on failure so the real
+    // npm error reaches the agent log (after redaction).
+    expect(result).toContain('NPM_OUTPUT=$(npm install -g')
+    expect(result).toContain('"$NPM_OUTPUT" | redact_secrets')
     expect(result).not.toContain('npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet 2>/dev/null || true')
   })
 
   it('should record failure but still reload services when service install fails', () => {
     const result = generateUpdateScript()
 
-    expect(result).toContain('elif ! ai-support-agent service install')
+    expect(result).toContain('SI_OUTPUT=$(ai-support-agent service install')
+    expect(result).toContain('"$SI_OUTPUT" | redact_secrets')
     expect(result).not.toContain('ai-support-agent service install 2>/dev/null || true')
     // exit 1 appears after launchctl load (services reloaded before failing)
     const reloadIdx = result.indexOf('launchctl load')
     const exitOneIdx = result.lastIndexOf('exit 1')
     expect(exitOneIdx).toBeGreaterThan(reloadIdx)
+  })
+
+  it('should retry launchd reload and verify each label was registered', () => {
+    const result = generateUpdateScript()
+
+    // reload_plist helper retries up to 3 times and verifies via launchctl list
+    expect(result).toContain('reload_plist()')
+    expect(result).toContain('for attempt in 1 2 3')
+    expect(result).toContain('launchctl list "$label"')
+    expect(result).toContain('_RELOAD_FAILED')
+    // exit non-zero when any reload failed so the launchd "exit 1" surfaces
+    expect(result).toContain('_RELOAD_FAILED" -gt 0')
+  })
+
+  it('should not unload plists inside the retry loop (would SIGTERM the running child)', () => {
+    const result = generateUpdateScript()
+
+    const reloadStart = result.indexOf('reload_plist()')
+    expect(reloadStart).toBeGreaterThan(-1)
+    // Find the end of the reload_plist function (next closing brace after for-loop body)
+    const reloadBody = result.slice(reloadStart, result.indexOf('\n}\n', reloadStart) + 2)
+    expect(reloadBody).not.toContain('launchctl unload')
+  })
+
+  it('should redact secrets from npm/service-install stderr before echoing', () => {
+    const result = generateUpdateScript()
+
+    expect(result).toContain('redact_secrets()')
+    expect(result).toContain('Bearer ')
+    expect(result).toContain('authToken')
+    expect(result).toContain('X-Auth-Token')
+    expect(result).toContain('| redact_secrets >&2')
+    // Both npm and service-install outputs must pass through the redactor.
+    expect(result).toContain('"$NPM_OUTPUT" | redact_secrets')
+    expect(result).toContain('"$SI_OUTPUT" | redact_secrets')
+  })
+
+  it('should use UTC date for the log prefix to avoid macOS/GNU date drift', () => {
+    const result = generateUpdateScript()
+
+    expect(result).toContain("date -u '+%Y-%m-%dT%H:%M:%SZ'")
   })
 
   it('should exit 0', () => {

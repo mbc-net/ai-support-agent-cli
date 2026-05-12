@@ -1,4 +1,5 @@
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 
 import { ApiClient } from './api-client'
@@ -40,6 +41,16 @@ export function startAutoUpdater(
     checking = true
 
     try {
+      // Inside a Docker container the image pins @ai-support-agent/cli, so
+      // npm-installing a new version into the container is throw-away work
+      // (it disappears on the next start) and races against the host-side
+      // DockerSupervisor that owns the real upgrade flow. Only UI-initiated
+      // `update` commands should run inside the container.
+      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+        logger.debug('Auto-update skipped (running inside Docker container)')
+        return
+      }
+
       const installMethod = detectInstallMethod()
       if (installMethod === 'dev' || installMethod === 'local') {
         logger.debug(`Auto-update skipped (install method: ${installMethod})`)
@@ -88,7 +99,11 @@ export function startAutoUpdater(
 
       // Perform the update
       logger.info(t('update.installing', { version: targetVersion }))
-      const result = await performUpdate(targetVersion, installMethod)
+      // Scope the npm cache by host so sibling containers on the same host
+      // don't trip cacache's exclusive lock when their auto-updaters fire
+      // together. The agent-driven path uses tenant/project; here we don't
+      // know either, so fall back to the hostname.
+      const result = await performUpdate(targetVersion, installMethod, os.hostname())
 
       if (!result.success) {
         lastFailedVersion = targetVersion

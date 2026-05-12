@@ -93,7 +93,7 @@ describe('startAutoUpdater', () => {
 
     await jest.advanceTimersByTimeAsync(30_000)
 
-    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'global')
+    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'global', expect.any(String))
     expect(stopAll).toHaveBeenCalled()
     expect(mockedReExecProcess).toHaveBeenCalledWith('global')
 
@@ -139,7 +139,7 @@ describe('startAutoUpdater', () => {
 
     await jest.advanceTimersByTimeAsync(30_000)
 
-    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'global')
+    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'global', expect.any(String))
     expect(stopAll).toHaveBeenCalled()
     expect(mockedReExecProcess).toHaveBeenCalledWith('global')
 
@@ -240,7 +240,7 @@ describe('startAutoUpdater', () => {
     await jest.advanceTimersByTimeAsync(30_000)
 
     // performUpdate was called and failed with permission error
-    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'global')
+    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'global', expect.any(String))
 
     updater.stop()
   })
@@ -403,17 +403,18 @@ describe('startAutoUpdater', () => {
     await jest.advanceTimersByTimeAsync(30_000)
 
     expect(client.getVersionInfo).toHaveBeenCalled()
-    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'npx')
+    expect(mockedPerformUpdate).toHaveBeenCalledWith('2.0.0', 'npx', expect.any(String))
     expect(mockedReExecProcess).toHaveBeenCalledWith('npx')
 
     updater.stop()
   })
 
-  it('should exit with DOCKER_UPDATE_EXIT_CODE instead of reExecProcess when in Docker container', async () => {
+  it('should skip auto-update entirely when running inside a Docker container', async () => {
+    // Inside the container the image pins @ai-support-agent/cli, so an
+    // auto-update would either disappear on the next start or race the host
+    // DockerSupervisor. The agent must defer to the UI-driven update flow.
     const originalEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
     process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
-    const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
-    mockedFs.writeFileSync.mockImplementation(() => {})
 
     try {
       const client = createMockClient()
@@ -424,20 +425,12 @@ describe('startAutoUpdater', () => {
 
       await jest.advanceTimersByTimeAsync(30_000)
 
-      expect(stopAll).toHaveBeenCalled()
-      // update-version.json must be written before exiting so the host-side
-      // installUpdateAndRestart() can read the new version and run npm install
-      expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
-        path.join('/tmp/test-config', 'update-version.json'),
-        JSON.stringify({ version: '2.0.0' }),
-        'utf-8',
-      )
-      expect(mockExit).toHaveBeenCalledWith(42)
-      expect(mockedReExecProcess).not.toHaveBeenCalled()
+      expect(client.getVersionInfo).not.toHaveBeenCalled()
+      expect(mockedPerformUpdate).not.toHaveBeenCalled()
+      expect(stopAll).not.toHaveBeenCalled()
 
       updater.stop()
     } finally {
-      mockExit.mockRestore()
       if (originalEnv === undefined) {
         delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
       } else {
