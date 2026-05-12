@@ -125,6 +125,20 @@ function resolveGlobalBinaryScript(): string {
 /**
  * Run npm install command and return result.
  */
+/**
+ * Best-effort secret redaction for npm output. npm's verbose errors can echo
+ * Bearer tokens, _authToken=..., basic-auth registry URLs, and X-Auth-Token
+ * headers. We forward this string to agent.err.log → Sentry/heartbeat, so the
+ * blast radius is wider than the local log file.
+ */
+export function redactSecrets(input: string): string {
+  return input
+    .replace(/(Bearer )[A-Za-z0-9._-]+/gi, '$1***REDACTED***')
+    .replace(/((?:_)?authToken\s*[:=]\s*"?)[^"\s]+/gi, '$1***REDACTED***')
+    .replace(/(X-Auth-Token:\s*)\S+/gi, '$1***REDACTED***')
+    .replace(/(https?:\/\/)[^/:\s@]+:[^@/\s]+@/gi, '$1***REDACTED***@')
+}
+
 function execNpmCommand(
   npmCmd: string,
   args: string[],
@@ -138,10 +152,12 @@ function execNpmCommand(
       if (error) {
         // Node's execFile error.message is just "Command failed: <cmd>", which
         // hides the npm output. Combine both so the actual cause (E403, EACCES,
-        // ENOTFOUND, cache lock, etc.) reaches the agent log.
+        // ENOTFOUND, cache lock, etc.) reaches the agent log — with secrets
+        // redacted before we hand the string off to higher layers.
         const trimmedStderr = stderr?.toString().trim()
-        const baseMessage = error.message?.trim() || 'Unknown error'
-        const message = trimmedStderr ? `${baseMessage}\nstderr: ${trimmedStderr}` : baseMessage
+        const baseMessage = redactSecrets(error.message?.trim() || 'Unknown error')
+        const redactedStderr = trimmedStderr ? redactSecrets(trimmedStderr) : ''
+        const message = redactedStderr ? `${baseMessage} | stderr: ${redactedStderr}` : baseMessage
         resolve({ success: false, error: message })
         return
       }
@@ -176,7 +192,10 @@ export async function performUpdate(
   // Use a user-writable cache directory to avoid root-owned cache issues in Docker containers.
   // Suffix per-project when available so 16 sibling containers don't collide on the shared
   // /tmp/.npm-update-cache cacache lock when the auto-updater fires for all of them at once.
-  const safeScope = cacheScope?.replace(/[^A-Za-z0-9_-]/g, '_') || ''
+  // Cap at 64 characters so the directory name stays well under ENAMETOOLONG even on
+  // ecryptfs / older filesystems that enforce a 143-byte limit on single path components.
+  const CACHE_SCOPE_MAX = 64
+  const safeScope = (cacheScope?.replace(/[^A-Za-z0-9_-]/g, '_') || '').slice(0, CACHE_SCOPE_MAX)
   const cacheDirName = safeScope ? `.npm-update-cache-${safeScope}` : '.npm-update-cache'
   const tmpCacheDir = path.join(os.tmpdir(), cacheDirName)
   args.push('--cache', tmpCacheDir)

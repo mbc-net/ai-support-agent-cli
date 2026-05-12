@@ -11,6 +11,7 @@ import {
   isSudoAvailable,
   performUpdate,
   reExecProcess,
+  redactSecrets,
   resetGlobalPrefixCache,
 } from '../src/update-checker'
 
@@ -461,15 +462,38 @@ describe('performUpdate', () => {
     mockedExecFileSync.mockReturnValue('/usr/local\n')
     mockedAccessSync.mockImplementation(() => undefined)
     mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: Error, stdout: string, stderr: string) => void) => {
-      callback(error, '', 'npm ERR! code ENOTFOUND\nnpm ERR! syscall getaddrinfo')
+      callback(error, '', 'npm ERR! code ENOTFOUND npm ERR! syscall getaddrinfo')
     })
 
     const result = await performUpdate('1.2.3', 'global')
 
     expect(result.success).toBe(false)
     expect(result.error).toContain('Command failed: npm install -g @ai-support-agent/cli@1.2.3')
-    expect(result.error).toContain('stderr: npm ERR! code ENOTFOUND')
+    expect(result.error).toContain('| stderr: npm ERR! code ENOTFOUND')
     expect(result.error).toContain('npm ERR! syscall getaddrinfo')
+  })
+
+  it('should redact bearer tokens and basic-auth URLs from forwarded stderr', async () => {
+    const error = new Error('Command failed: npm install -g @ai-support-agent/cli@1.2.3')
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: Error, stdout: string, stderr: string) => void) => {
+      callback(
+        error,
+        '',
+        'npm ERR! Bearer ey1234567890abcdef _authToken=npm_supersecret https://u:p@registry.npmjs.org/foo',
+      )
+    })
+
+    const result = await performUpdate('1.2.3', 'global')
+
+    expect(result.success).toBe(false)
+    expect(result.error).not.toContain('ey1234567890abcdef')
+    expect(result.error).not.toContain('npm_supersecret')
+    expect(result.error).not.toContain('u:p@registry.npmjs.org')
+    expect(result.error).toContain('Bearer ***REDACTED***')
+    expect(result.error).toContain('_authToken=***REDACTED***')
+    expect(result.error).toContain('***REDACTED***@registry.npmjs.org')
   })
 
   it('should fall back to Unknown error when both error.message and stderr are empty', async () => {
@@ -548,6 +572,53 @@ describe('performUpdate', () => {
     const args = mockedExecFile.mock.calls[0][1] as string[]
     const cacheIdx = args.indexOf('--cache')
     expect(args[cacheIdx + 1]).toMatch(/[/\\]\.npm-update-cache$/)
+  })
+
+  it('should truncate an oversize cacheScope to bound path length', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
+    mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
+      callback(null)
+    })
+
+    const longScope = 'A'.repeat(200)
+    await performUpdate('1.2.3', 'global', longScope)
+
+    const args = mockedExecFile.mock.calls[0][1] as string[]
+    const cacheIdx = args.indexOf('--cache')
+    const dir = args[cacheIdx + 1] as string
+    const basename = dir.split(/[/\\]/).pop()!
+    expect(basename.length).toBeLessThanOrEqual('.npm-update-cache-'.length + 64)
+    expect(basename.startsWith('.npm-update-cache-')).toBe(true)
+  })
+})
+
+describe('redactSecrets', () => {
+  it('should redact Bearer tokens', () => {
+    expect(redactSecrets('Authorization: Bearer eyJabc.def123-XYZ')).toBe(
+      'Authorization: Bearer ***REDACTED***',
+    )
+  })
+
+  it('should redact npm _authToken and authToken values', () => {
+    expect(redactSecrets('_authToken=npm_secret_abc.123')).toBe('_authToken=***REDACTED***')
+    expect(redactSecrets('authToken : "abc.def.ghi"')).toBe('authToken : "***REDACTED***"')
+  })
+
+  it('should redact X-Auth-Token headers', () => {
+    expect(redactSecrets('X-Auth-Token: token-xyz-7890')).toBe('X-Auth-Token: ***REDACTED***')
+  })
+
+  it('should redact basic-auth credentials in URLs', () => {
+    expect(redactSecrets('https://user:hunter2@registry.npmjs.org/foo')).toBe(
+      'https://***REDACTED***@registry.npmjs.org/foo',
+    )
+  })
+
+  it('should leave non-secret text unchanged', () => {
+    const input = 'npm ERR! code E401\nnpm ERR! 401 Unauthorized'
+    expect(redactSecrets(input)).toBe(input)
   })
 })
 

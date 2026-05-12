@@ -323,7 +323,19 @@ export NVM_DIR="\${HOME}/.nvm"
 # Also try Homebrew node as fallback
 export PATH="/opt/homebrew/bin:/usr/local/bin:\${PATH}"
 
-LOG_PREFIX="[update-and-restart $(date '+%Y-%m-%dT%H:%M:%S%z')]"
+LOG_PREFIX="[update-and-restart $(date -u '+%Y-%m-%dT%H:%M:%SZ')]"
+
+# Best-effort secret redaction for command output that we echo to stderr.
+# npm/login flows leak Bearer tokens, _authToken=..., and registry URLs with
+# embedded basic-auth, all of which the agent log forwards to Sentry/heartbeat.
+redact_secrets() {
+  sed -E \\
+    -e 's#(Bearer )[A-Za-z0-9._-]+#\\1***REDACTED***#gi' \\
+    -e 's#(authToken[[:space:]]*[:=][[:space:]]*"?)[^"[:space:]]+#\\1***REDACTED***#gi' \\
+    -e 's#(_authToken[[:space:]]*[:=][[:space:]]*"?)[^"[:space:]]+#\\1***REDACTED***#gi' \\
+    -e 's#(X-Auth-Token:[[:space:]]*)[^[:space:]]+#\\1***REDACTED***#gi' \\
+    -e 's#(https?://)[^/:[:space:]@]+:[^@/[:space:]]+@#\\1***REDACTED***@#gi'
+}
 
 # 1. Unload all per-project LaunchAgent services
 for plist in "${launchAgentsDir}"/com.ai-support-agent.cli.*.plist; do
@@ -344,14 +356,14 @@ if [ -f "$VERSION_FILE" ]; then
     NPM_STATUS=$?
     if [ "$NPM_STATUS" -ne 0 ]; then
       echo "$LOG_PREFIX ERROR: npm install -g @ai-support-agent/cli@$NEW_VERSION failed (exit $NPM_STATUS)" >&2
-      echo "$NPM_OUTPUT" >&2
+      printf '%s\\n' "$NPM_OUTPUT" | redact_secrets >&2
       _INSTALL_OK=false
     else
       SI_OUTPUT=$(ai-support-agent service install 2>&1)
       SI_STATUS=$?
       if [ "$SI_STATUS" -ne 0 ]; then
         echo "$LOG_PREFIX ERROR: ai-support-agent service install failed (exit $SI_STATUS)" >&2
-        echo "$SI_OUTPUT" >&2
+        printf '%s\\n' "$SI_OUTPUT" | redact_secrets >&2
         _INSTALL_OK=false
       fi
     fi
@@ -363,6 +375,12 @@ fi
 # seen launchctl load silently no-op for individual plists during a fleet
 # update; if we don't verify each label was actually registered, the service
 # stays down until someone notices manually.
+# Reload a single plist and verify the label was actually registered.
+# Note: we never call launchctl unload inside the retry loop — once the agent
+# is running, an unload sends SIGTERM to the long-lived run.sh child and would
+# kill an in-flight command. launchctl load on an already-loaded plist is a
+# safe no-op (it just prints "service already loaded" and exits non-zero),
+# which is fine: the subsequent launchctl list check is the source of truth.
 reload_plist() {
   local plist="$1"
   local label
@@ -371,15 +389,14 @@ reload_plist() {
   for attempt in 1 2 3; do
     local out
     out=$(launchctl load "$plist" 2>&1)
-    local status=$?
-    if [ "$status" -eq 0 ] && launchctl list "$label" >/dev/null 2>&1; then
+    # Tolerate "service already loaded" — what matters is post-condition.
+    if launchctl list "$label" >/dev/null 2>&1; then
       return 0
     fi
     if [ "$attempt" -lt 3 ]; then
       sleep "$attempt"
-      launchctl unload "$plist" >/dev/null 2>&1 || true
     fi
-    echo "$LOG_PREFIX WARN: launchctl load attempt $attempt/3 for $label failed (exit $status): $out" >&2
+    echo "$LOG_PREFIX WARN: launchctl load attempt $attempt/3 for $label not yet registered: $out" >&2
   done
   echo "$LOG_PREFIX ERROR: launchctl load $label gave up after 3 attempts" >&2
   return 1
