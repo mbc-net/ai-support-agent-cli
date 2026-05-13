@@ -3,6 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { ApiClient } from './api-client'
+import { AlertProcessor } from './alert-processor'
 import { AppSyncSubscriber } from './appsync-subscriber'
 import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, performSyncRepository, refreshChatMode } from './agent-config-sync'
 import type { RepoSyncResult } from './repo-sync'
@@ -76,6 +77,7 @@ export class ProjectAgent {
   // and emit debug for the noisy intermediate retries. Patterned on Zabbix's
   // "started to fail" / "is working again" log pair.
   private lastRegisterError: { isAuth: boolean; message: string } | null = null
+  private alertPollingTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(
     project: ProjectRegistration,
@@ -151,6 +153,10 @@ export class ProjectAgent {
   stop(): void {
     this.registerLoopCancelled = true
     this.registerAbortController?.abort()
+    if (this.alertPollingTimer) {
+      clearInterval(this.alertPollingTimer)
+      this.alertPollingTimer = null
+    }
     stopTransport(this.transportState)
   }
 
@@ -420,6 +426,31 @@ export class ProjectAgent {
     )
 
     startHeartbeat(this.transportDeps, this.transportState, this.configSyncState, this.configSyncDeps)
+
+    // Start CloudWatch Alert polling if enabled in project config
+    const projectConfig = this.configSyncState.projectConfig
+    if (projectConfig?.cloudwatch?.enabled) {
+      const alertProcessor = new AlertProcessor(
+        this.client,
+        this.transportDeps.tenantCode,
+        this.transportDeps.projectCode,
+      )
+      // 起動時フォールバック: 蓄積された pending アラームを処理
+      void alertProcessor.checkPendingAlerts()
+
+      // 前のポーリングタイマーをクリア（再起動などで二重登録を防止）
+      if (this.alertPollingTimer) {
+        clearInterval(this.alertPollingTimer)
+      }
+
+      // 定期ポーリング（Web 画面で設定した間隔）クラスフィールドで管理して stop() でクリア
+      const pollingIntervalMs = projectConfig.cloudwatch.pollingIntervalMs
+      this.alertPollingTimer = setInterval(
+        () => void alertProcessor.checkPendingAlerts(),
+        pollingIntervalMs,
+      )
+      logger.info(`${this.prefix} CloudWatch Alert polling started (interval: ${pollingIntervalMs}ms)`)
+    }
 
     // Start terminal WebSocket connection (only if server has WS gateway enabled)
     if (result.wsEnabled) {

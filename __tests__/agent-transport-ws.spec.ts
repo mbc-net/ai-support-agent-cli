@@ -496,4 +496,74 @@ describe('handleNotification: agent-log and unknown actions', () => {
     const debugCalls = (logger.debug as jest.Mock).mock.calls.map((c: unknown[]) => String(c[0]))
     expect(debugCalls.some((m: string) => m.includes('Ignoring notification with action: some-unknown-action'))).toBe(true)
   })
+
+  describe('alert-created action', () => {
+    const createAlertClient = () => ({
+      heartbeat: jest.fn().mockResolvedValue({}),
+      getPendingCommands: jest.fn().mockResolvedValue([]),
+      getCommand: jest.fn(),
+      submitResult: jest.fn(),
+      getPendingAlerts: jest.fn().mockResolvedValue({ items: [], total: 0 }),
+      getAlert: jest.fn().mockResolvedValue(null),
+      updateAlertStatus: jest.fn().mockResolvedValue(undefined),
+      findActiveIssueByAlarmName: jest.fn().mockResolvedValue(null),
+      createIssueFromAlert: jest.fn().mockResolvedValue({ id: 'AI_SU000001' }),
+    } as unknown as TransportDeps['client'])
+
+    it('should process alert for matching projectCode', async () => {
+      const deps = createMockDeps({ client: createAlertClient() })
+      const state = createMockState()
+      const ctx = makeCtx(state)
+
+      await handleNotification(deps, state, ctx, {
+        id: 'n3', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+        action: 'alert-created',
+        content: {
+          projectCode: 'TEST_PROJ',
+          alertNumber: 'AL000001',
+          alarmName: 'CPUHigh',
+        },
+      })
+
+      // updateAlertStatus called with 'processing' (alert processing started)
+      expect((deps.client as Record<string, jest.Mock>).updateAlertStatus).toHaveBeenCalledWith(
+        'test', 'TEST_PROJ', 'AL000001', { status: 'processing' },
+      )
+    })
+
+    it('should ignore alert for different projectCode', async () => {
+      const deps = createMockDeps({ client: createAlertClient() })
+      const state = createMockState()
+      const ctx = makeCtx(state)
+
+      await handleNotification(deps, state, ctx, {
+        id: 'n4', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+        action: 'alert-created',
+        content: {
+          projectCode: 'OTHER_PROJ',
+          alertNumber: 'AL000001',
+          alarmName: 'CPUHigh',
+        },
+      })
+
+      expect((deps.client as Record<string, jest.Mock>).updateAlertStatus).not.toHaveBeenCalled()
+    })
+
+    it('should ignore alert when alertNumber is missing', async () => {
+      const deps = createMockDeps({ client: createAlertClient() })
+      const state = createMockState()
+      const ctx = makeCtx(state)
+
+      await handleNotification(deps, state, ctx, {
+        id: 'n5', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+        action: 'alert-created',
+        content: {
+          projectCode: 'TEST_PROJ',
+          // alertNumber is missing
+        },
+      })
+
+      expect((deps.client as Record<string, jest.Mock>).updateAlertStatus).not.toHaveBeenCalled()
+    })
+  })
 })
