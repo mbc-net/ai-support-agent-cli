@@ -1,4 +1,5 @@
 import { ChildProcessManager } from '../src/child-process-manager'
+import { CHILD_PROCESS_MAX_RESTARTS } from '../src/constants'
 
 jest.mock('child_process', () => ({
   fork: jest.fn().mockImplementation(() => {
@@ -24,9 +25,13 @@ jest.mock('child_process', () => ({
     return child
   }),
 }))
+jest.mock('fs', () => ({
+  existsSync: jest.fn().mockReturnValue(false),
+}))
 jest.mock('../src/logger')
 
 const { fork } = require('child_process') as { fork: jest.Mock }
+const { existsSync } = require('fs') as { existsSync: jest.Mock }
 
 describe('ChildProcessManager', () => {
   let manager: ChildProcessManager
@@ -333,6 +338,201 @@ describe('ChildProcessManager', () => {
       await stopPromise
 
       expect(manager.getRunningCount()).toBe(0)
+    })
+
+    it('should skip disconnected children when shutting down all', async () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+      child.connected = false
+
+      jest.useFakeTimers()
+      const stopPromise = manager.stopAll(100)
+      jest.advanceTimersByTime(200)
+      await stopPromise
+
+      // child.send should not have been called with shutdown (was connected=false)
+      expect(child.send).not.toHaveBeenCalledWith({ type: 'shutdown' })
+      expect(manager.getRunningCount()).toBe(0)
+      jest.useRealTimers()
+    })
+  })
+
+  describe('spawnChild: .js file path', () => {
+    it('should use empty execArgv when .js worker file exists', () => {
+      existsSync.mockReturnValue(true)
+
+      manager.forkProject(project, 'agent-1', options)
+
+      const [, , forkOptions] = fork.mock.calls[0]
+      expect(forkOptions.execArgv).toEqual([])
+
+      existsSync.mockReturnValue(false)
+    })
+
+    it('should use ts-node execArgv when .js worker file does not exist', () => {
+      existsSync.mockReturnValue(false)
+
+      manager.forkProject(project, 'agent-1', options)
+
+      const [, , forkOptions] = fork.mock.calls[0]
+      expect(forkOptions.execArgv).toEqual(['--require', 'ts-node/register'])
+    })
+  })
+
+  describe('handleChildMessage', () => {
+    it('should handle started message when managed is null (key removed between fork and message)', () => {
+      // This tests the `if (managed)` guard on line 93 when managed is absent
+      // We indirectly trigger handleChildMessage via the message event on a forked child
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+
+      // Remove from processes map so managed will be undefined in handleChildMessage
+      ;(manager as any).processes.delete(`mbc/proj-a`)
+
+      // Should not throw even though managed is undefined
+      expect(() => {
+        child._emit('message', { type: 'started', tenantCode: 'mbc', projectCode: 'proj-a' })
+      }).not.toThrow()
+    })
+
+    it('should handle error message from child', () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+
+      expect(() => {
+        child._emit('message', { type: 'error', tenantCode: 'mbc', projectCode: 'proj-a', message: 'something went wrong' })
+      }).not.toThrow()
+    })
+
+    it('should handle stopped message from child', () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+
+      expect(() => {
+        child._emit('message', { type: 'stopped', tenantCode: 'mbc', projectCode: 'proj-a' })
+      }).not.toThrow()
+    })
+
+    it('should reset restartCount to 0 on started message', () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+      const key = 'mbc/proj-a'
+      const managed = (manager as any).processes.get(key)
+      managed.restartCount = 3
+
+      child._emit('message', { type: 'started', tenantCode: 'mbc', projectCode: 'proj-a' })
+
+      expect(managed.restartCount).toBe(0)
+    })
+  })
+
+  describe('handleChildExit', () => {
+    it('should do nothing when managed is null (key already removed)', () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+
+      // Remove the entry so handleChildExit finds no managed process
+      ;(manager as any).processes.delete('mbc/proj-a')
+
+      expect(() => {
+        child._emit('exit', 1, null)
+      }).not.toThrow()
+
+      // No restart timer should be set
+      expect((manager as any).restartTimers.size).toBe(0)
+    })
+
+    it('should not restart when restartCount >= CHILD_PROCESS_MAX_RESTARTS', () => {
+      jest.useFakeTimers()
+
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+      const key = 'mbc/proj-a'
+      const managed = (manager as any).processes.get(key)
+
+      // Set restartCount to the maximum
+      managed.restartCount = CHILD_PROCESS_MAX_RESTARTS
+
+      child._emit('exit', 1, null)
+
+      // Process should be removed and no restart timer created
+      expect(manager.hasProject(project)).toBe(false)
+      expect((manager as any).restartTimers.size).toBe(0)
+
+      // Even after waiting, fork should only have been called once (initial)
+      jest.advanceTimersByTime(60000)
+      expect(fork).toHaveBeenCalledTimes(1)
+
+      jest.useRealTimers()
+    })
+
+    it('should not restart when stopping=true at timer fire time', () => {
+      jest.useFakeTimers()
+
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+
+      // Trigger an exit to schedule restart timer
+      child._emit('exit', 1, null)
+
+      // Before the timer fires, set stopping = true
+      ;(manager as any).stopping = true
+
+      // Fire the restart timer
+      jest.advanceTimersByTime(60000)
+
+      // fork should still only have been called once (no restart)
+      expect(fork).toHaveBeenCalledTimes(1)
+
+      jest.useRealTimers()
+    })
+  })
+
+  describe('sendUpdateToAll', () => {
+    it('should skip disconnected children', () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+      child.connected = false
+
+      manager.sendUpdateToAll()
+
+      // send should only have been called with the initial start message, not update
+      const updateCalls = (child.send as jest.Mock).mock.calls.filter(
+        (call: unknown[]) => (call[0] as { type: string }).type === 'update',
+      )
+      expect(updateCalls).toHaveLength(0)
+    })
+
+    it('should send update to connected children', () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+      // child.connected is true by default from the mock
+
+      manager.sendUpdateToAll()
+
+      expect(child.send).toHaveBeenCalledWith({ type: 'update' })
+    })
+  })
+
+  describe('handleChildExit: normal restart', () => {
+    it('should spawn a new child after restart delay when not stopping', () => {
+      jest.useFakeTimers()
+
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+
+      // Trigger exit to schedule restart
+      child._emit('exit', 1, null)
+
+      expect(fork).toHaveBeenCalledTimes(1)
+
+      // Advance past the restart delay
+      jest.advanceTimersByTime(60000)
+
+      // A new child should have been forked
+      expect(fork).toHaveBeenCalledTimes(2)
+
+      jest.useRealTimers()
     })
   })
 })
