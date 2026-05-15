@@ -96,6 +96,7 @@ export interface ProjectConfigResponse {
       description?: string
     }>
   }
+  cloudwatch?: CloudwatchConfig
 }
 
 export interface DbCredentials {
@@ -137,6 +138,14 @@ export interface BrowserCredentials {
   customFields?: Record<string, string>
 }
 
+export interface CloudwatchConfig {
+  enabled: boolean
+  /** サーバーが分 × 60000 に変換済みの ms 値 */
+  pollingIntervalMs: number
+  /** 読み取り専用。SNS サブスクリプション登録時に使用する URL */
+  webhookUrl: string
+}
+
 export interface CachedProjectConfig {
   cachedAt: string
   configHash: string
@@ -148,5 +157,7 @@ export interface CachedProjectConfig {
         projectKey: string
       }>
     }
+    // cloudwatch はセンシティブ情報を含まないためキャッシュ対象
+    cloudwatch?: CloudwatchConfig
   }
 }

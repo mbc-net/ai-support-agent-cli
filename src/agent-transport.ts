@@ -1,4 +1,5 @@
 import type { ApiClient } from './api-client'
+import { AlertProcessor } from './alert-processor'
 import { type AppSyncSubscriber, type AppSyncNotification } from './appsync-subscriber'
 import { LOG_PAYLOAD_LIMIT, LOG_RESULT_LIMIT } from './constants'
 import { t } from './i18n'
@@ -77,6 +78,9 @@ export async function startSubscriptionMode(
   state.subscriber.onReconnect(() => {
     logger.info(`${deps.prefix} Reconnected, checking for pending commands...`)
     void checkPendingCommands(deps, ctx)
+    // Alert のフォールバック: 再接続時に pending アラームを一括処理
+    const alertProcessor = new AlertProcessor(deps.client, deps.tenantCode, deps.projectCode)
+    void alertProcessor.checkPendingAlerts()
   })
 }
 
@@ -247,6 +251,16 @@ export async function handleNotification(
       logger.info(`${deps.prefix} Config update notification received, scheduling sync`)
       ctx.configSyncState.currentConfigHash = undefined
       state.configSyncDebounceTimer = scheduleConfigSync(ctx.configSyncDeps, ctx.configSyncState, state.configSyncDebounceTimer)
+      break
+    }
+    case 'alert-created': {
+      const alertProjectCode = content.projectCode as string | undefined
+      const alertNumber = content.alertNumber as string | undefined
+      if (alertProjectCode === deps.projectCode && alertNumber) {
+        logger.info(`${deps.prefix} Alert received: ${alertNumber} (alarm: ${content.alarmName ?? 'unknown'})`)
+        const processor = new AlertProcessor(deps.client, deps.tenantCode, deps.projectCode)
+        await processor.processAlert(alertNumber)
+      }
       break
     }
     default:

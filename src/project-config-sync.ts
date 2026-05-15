@@ -84,6 +84,8 @@ export function saveCachedConfig(
               ),
             }
           : undefined,
+        // cloudwatch: センシティブ情報なし。ネットワーク障害時も設定を保持するためキャッシュ対象
+        cloudwatch: config.cloudwatch,
       },
     }
 

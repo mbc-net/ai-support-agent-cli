@@ -7,10 +7,12 @@ jest.mock('../src/logger')
 // Mock WebSocket
 class MockWebSocket extends EventEmitter {
   static OPEN = 1
+  static CLOSING = 2
   static CLOSED = 3
   readyState = MockWebSocket.OPEN
   send = jest.fn()
   close = jest.fn()
+  terminate = jest.fn()
 
   constructor(public url: string, public protocols?: string[]) {
     super()
@@ -41,6 +43,7 @@ jest.mock('ws', () => {
     return mockWsInstance
   }
   Object.defineProperty(MockWS, 'OPEN', { value: 1 })
+  Object.defineProperty(MockWS, 'CLOSING', { value: 2 })
   Object.defineProperty(MockWS, 'CLOSED', { value: 3 })
   return { __esModule: true, default: MockWS }
 })
@@ -524,6 +527,188 @@ describe('AppSyncSubscriber', () => {
 
       const startCall = JSON.parse(mockWsInstance!.send.mock.calls[1][0])
       expect(startCall.type).toBe('start')
+
+      subscriber.disconnect()
+    })
+  })
+
+  describe('connection_ack without resolveConnect (reconnect path)', () => {
+    it('should handle connection_ack during reconnect without resolveConnect', async () => {
+      const handler = jest.fn()
+      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      subscriber.subscribe('test-tenant', handler)
+
+      const connectPromise = subscriber.connect()
+      mockWsInstance!.simulateOpen()
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 5000 } })
+      await connectPromise
+
+      const firstWs = mockWsInstance!
+
+      // Simulate unexpected close to trigger reconnect
+      firstWs.simulateClose()
+      await jest.advanceTimersByTimeAsync(1000)
+
+      // New WebSocket should be created; simulate open and connection_ack without resolveConnect
+      expect(mockWsInstance).not.toBe(firstWs)
+      mockWsInstance!.simulateOpen()
+      // This connection_ack arrives on the reconnected ws — resolveConnect is undefined
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 5000 } })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      // Subscription should have been re-sent
+      expect(mockWsInstance!.send).toHaveBeenCalled()
+      const startCall = JSON.parse(mockWsInstance!.send.mock.calls[mockWsInstance!.send.mock.calls.length - 1][0])
+      expect(startCall.type).toBe('start')
+
+      subscriber.disconnect()
+    })
+
+    it('should use DEFAULT_APPSYNC_TIMEOUT_MS when connectionTimeoutMs is missing in connection_ack', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      const connectPromise = subscriber.connect()
+      mockWsInstance!.simulateOpen()
+      // Send connection_ack without connectionTimeoutMs (falls back to default)
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: {} })
+      await connectPromise
+
+      // Default timeout should be set; advance past a short period to confirm no premature close
+      const ws = mockWsInstance!
+      await jest.advanceTimersByTimeAsync(1000)
+      expect(ws.close).not.toHaveBeenCalled()
+
+      subscriber.disconnect()
+    })
+  })
+
+  describe('onParsedMessage connection_ack without resolveConnect', () => {
+    it('should not crash when connection_ack arrives without resolveConnect (direct call)', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      const connectPromise = subscriber.connect()
+      mockWsInstance!.simulateOpen()
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 5000 } })
+      await connectPromise
+
+      // Call onParsedMessage directly without resolveConnect to cover the false branch
+      // This simulates the reconnect code path where resolveConnect is not provided
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(subscriber as any).onParsedMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 5000 } })
+
+      // Should not throw; subscription should be re-sent
+      expect(mockWsInstance!.send.mock.calls.length).toBeGreaterThan(0)
+
+      subscriber.disconnect()
+    })
+  })
+
+  describe('sendSubscription when ws is not OPEN', () => {
+    it('should not send subscription when ws readyState is not OPEN', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      const connectPromise = subscriber.connect()
+      mockWsInstance!.simulateOpen()
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })
+      await connectPromise
+
+      const initialSendCount = mockWsInstance!.send.mock.calls.length
+
+      // Set readyState to CLOSING (not OPEN) then trigger sendSubscription via subscribe
+      mockWsInstance!.readyState = 2 // CLOSING
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      // No additional send should happen since ws is not OPEN
+      expect(mockWsInstance!.send.mock.calls.length).toBe(initialSendCount)
+
+      subscriber.disconnect()
+    })
+
+    it('should not send subscription when ws is null', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      const connectPromise = subscriber.connect()
+      mockWsInstance!.simulateOpen()
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })
+      await connectPromise
+
+      const initialSendCount = mockWsInstance!.send.mock.calls.length
+
+      // Manually set ws to null and call sendSubscription via onParsedMessage
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(subscriber as any).ws = null
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(subscriber as any).onParsedMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })
+
+      // No additional send should happen since ws is null
+      expect(mockWsInstance!.send.mock.calls.length).toBe(initialSendCount)
+    })
+  })
+
+  describe('onDisconnect send error handling', () => {
+    it('should ignore errors thrown during stop message send on disconnect', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      const connectPromise = subscriber.connect()
+      mockWsInstance!.simulateOpen()
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })
+      await connectPromise
+
+      // Make ws.send throw on the next call
+      mockWsInstance!.send.mockImplementationOnce(() => {
+        throw new Error('send failed during disconnect')
+      })
+
+      // disconnect should not throw even if send throws
+      expect(() => subscriber.disconnect()).not.toThrow()
+    })
+  })
+
+  describe('keep-alive timeout with ws null', () => {
+    it('should not throw when ws is null when keep-alive timeout fires', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      const connectPromise = subscriber.connect()
+      mockWsInstance!.simulateOpen()
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 1000 } })
+      await connectPromise
+
+      // Nullify ws before timeout fires to cover the `if (this.ws)` false branch
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(subscriber as any).ws = null
+
+      // Advance past the keep-alive timeout
+      await expect(jest.advanceTimersByTimeAsync(1500)).resolves.toBeUndefined()
+
+      // Should not throw even with null ws
+    })
+  })
+
+  describe('resetKeepAliveTimer when keepAliveTimeoutMs is zero', () => {
+    it('should not set a timer when keepAliveTimeoutMs is 0', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      const connectPromise = subscriber.connect()
+      mockWsInstance!.simulateOpen()
+      // connection_ack with connectionTimeoutMs = 0 → keepAliveTimeoutMs stays 0
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 0 } })
+      await connectPromise
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((subscriber as any).keepAliveTimer).toBeNull()
+
+      // ka message also calls resetKeepAliveTimer; with timeoutMs=0 it should be a no-op
+      mockWsInstance!.simulateMessage({ type: 'ka' })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((subscriber as any).keepAliveTimer).toBeNull()
 
       subscriber.disconnect()
     })
