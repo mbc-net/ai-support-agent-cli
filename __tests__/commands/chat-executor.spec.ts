@@ -63,6 +63,38 @@ jest.mock('child_process', () => ({
   spawn: jest.fn(),
 }))
 
+// Mock file-transfer for downloadAttachments tests
+jest.mock('../../src/commands/file-transfer', () => ({
+  downloadChatFiles: jest.fn().mockResolvedValue({
+    downloadedPaths: [],
+    failedCount: 0,
+    cleanup: jest.fn(),
+  }),
+  parseChatFiles: jest.fn().mockImplementation((files: unknown) => {
+    if (!Array.isArray(files)) return []
+    return files.filter(
+      (item): item is object =>
+        typeof item === 'object' &&
+        item !== null &&
+        typeof (item as Record<string, unknown>).fileId === 'string' &&
+        typeof (item as Record<string, unknown>).filename === 'string' &&
+        typeof (item as Record<string, unknown>).contentType === 'string' &&
+        typeof (item as Record<string, unknown>).fileSize === 'number',
+    )
+  }),
+  parseConversationFiles: jest.fn().mockImplementation((files: unknown) => {
+    if (!Array.isArray(files)) return []
+    return files.filter(
+      (f): f is object =>
+        f != null &&
+        typeof f === 'object' &&
+        typeof (f as Record<string, unknown>).fileId === 'string' &&
+        typeof (f as Record<string, unknown>).s3Key === 'string' &&
+        typeof (f as Record<string, unknown>).filename === 'string',
+    )
+  }),
+}))
+
 describe('chat-executor', () => {
   const mockClient = {
     submitChatChunk: jest.fn().mockResolvedValue(undefined),
@@ -1541,4 +1573,385 @@ describe('chat-executor', () => {
     })
   })
 
+  describe('tool_call and tool_result JSON handling in sendChunk wrapper', () => {
+    it('should send tool_call chunk and accumulate tool calls when assistant has tool_use blocks', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const mockClientWithSpy = {
+        submitChatChunk: jest.fn().mockResolvedValue(undefined),
+      } as unknown as ApiClient
+
+      const resultPromise = executeChatCommand({
+        payload: { message: 'Test' },
+        commandId: 'cmd-tool-call-acc',
+        client: mockClientWithSpy,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+
+      // Send assistant message with tool_use block
+      const toolUseLine = JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Bash', id: 'tool-1', input: { command: 'ls' } },
+          ],
+        },
+      }) + '\n'
+      mockProcess.emitStdout('data', Buffer.from(toolUseLine))
+
+      // Send result
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('done')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+
+      // tool_call chunk should have been submitted
+      expect(mockClientWithSpy.submitChatChunk).toHaveBeenCalledWith(
+        'cmd-tool-call-acc',
+        expect.objectContaining({ type: 'tool_call' }),
+        'agent-1',
+      )
+
+      // done chunk should include toolCalls collected during the run
+      const doneCall = (mockClientWithSpy.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) => (call[1] as { type: string }).type === 'done',
+      )
+      expect(doneCall).toBeTruthy()
+      const doneContent = JSON.parse((doneCall[1] as { content: string }).content)
+      expect(doneContent.toolCalls).toHaveLength(1)
+      expect(doneContent.toolCalls[0].toolName).toBe('Bash')
+    })
+
+    it('should merge tool_result into collected tool_calls by toolName', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const mockClientWithSpy = {
+        submitChatChunk: jest.fn().mockResolvedValue(undefined),
+      } as unknown as ApiClient
+
+      const resultPromise = executeChatCommand({
+        payload: { message: 'Test' },
+        commandId: 'cmd-tool-result-merge',
+        client: mockClientWithSpy,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+
+      // Send assistant message with tool_use block
+      const toolUseLine = JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Bash', id: 'tool-2', input: { command: 'ls' } },
+          ],
+        },
+      }) + '\n'
+      mockProcess.emitStdout('data', Buffer.from(toolUseLine))
+
+      // Send user message with tool_result
+      const toolResultLine = JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'tool-2',
+              content: 'ls output',
+            },
+          ],
+        },
+      }) + '\n'
+      mockProcess.emitStdout('data', Buffer.from(toolResultLine))
+
+      // Send follow-up assistant text and result
+      mockProcess.emitStdout('data', Buffer.from(ndjsonAssistant('final answer')))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('final answer')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+
+      // Verify tool_result chunk was submitted
+      expect(mockClientWithSpy.submitChatChunk).toHaveBeenCalledWith(
+        'cmd-tool-result-merge',
+        expect.objectContaining({ type: 'tool_result' }),
+        'agent-1',
+      )
+
+      // Verify done chunk includes toolCalls with merged result
+      const doneCall = (mockClientWithSpy.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) => (call[1] as { type: string }).type === 'done',
+      )
+      expect(doneCall).toBeTruthy()
+      const doneContent = JSON.parse((doneCall[1] as { content: string }).content)
+      expect(doneContent.toolCalls).toHaveLength(1)
+      expect(doneContent.toolCalls[0].toolName).toBe('Bash')
+      // The result should have been merged into the tool call entry
+      expect(doneContent.toolCalls[0].success).toBeDefined()
+    })
+  })
+
+  describe('downloadAttachments: failedCount > 0 path', () => {
+    it('should send failure notice delta chunk when file downloads partially fail', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { downloadChatFiles } = require('../../src/commands/file-transfer')
+      ;(downloadChatFiles as jest.Mock).mockResolvedValueOnce({
+        downloadedPaths: [],
+        failedCount: 2,
+        cleanup: jest.fn(),
+      })
+
+      const mockClientWithSpy = {
+        submitChatChunk: jest.fn().mockResolvedValue(undefined),
+      } as unknown as ApiClient
+
+      const resultPromise = executeChatCommand({
+        payload: {
+          message: 'Test',
+          files: [
+            { fileId: 'f1', s3Key: 'uploads/f1.txt', filename: 'a.txt', contentType: 'text/plain', fileSize: 100 },
+          ],
+          conversationId: 'conv-1',
+        },
+        commandId: 'cmd-file-fail',
+        client: mockClientWithSpy,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectDir: '/mock/project',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('done')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      // failedCount > 0 triggers a delta chunk with failure notice
+      const deltaCall = (mockClientWithSpy.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) =>
+          (call[1] as { type: string }).type === 'delta' &&
+          (call[1] as { content: string }).content.includes('2件のファイル'),
+      )
+      expect(deltaCall).toBeDefined()
+    })
+
+    it('should not send failure notice delta chunk when all file downloads succeed', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { downloadChatFiles } = require('../../src/commands/file-transfer')
+      ;(downloadChatFiles as jest.Mock).mockResolvedValueOnce({
+        downloadedPaths: ['/mock/project/.chat-files/conv-2/a.txt'],
+        failedCount: 0,
+        cleanup: jest.fn(),
+      })
+
+      const mockClientWithSpy = {
+        submitChatChunk: jest.fn().mockResolvedValue(undefined),
+      } as unknown as ApiClient
+
+      const resultPromise = executeChatCommand({
+        payload: {
+          message: 'Test',
+          files: [
+            { fileId: 'f2', s3Key: 'uploads/f2.txt', filename: 'b.txt', contentType: 'text/plain', fileSize: 200 },
+          ],
+          conversationId: 'conv-2',
+        },
+        commandId: 'cmd-file-ok',
+        client: mockClientWithSpy,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectDir: '/mock/project',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('done')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      // failedCount === 0, no failure notice delta should be sent (only the attached_files delta)
+      const failureDeltaCall = (mockClientWithSpy.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) =>
+          (call[1] as { type: string }).type === 'delta' &&
+          (call[1] as { content: string }).content.includes('件のファイル'),
+      )
+      expect(failureDeltaCall).toBeUndefined()
+    })
+  })
+
+})
+
+// Isolated module tests for sendChunk JSON parse error paths
+// These use jest.isolateModules to mock runClaudeCode and inject invalid JSON directly into sendChunk
+describe('chat-executor: sendChunk JSON parse error handling (isolated)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('should log warning when tool_call chunk has invalid JSON (line 108 branch)', async () => {
+    let capturedSendChunk: ((type: string, content: string) => Promise<void>) | undefined
+
+    await jest.isolateModulesAsync(async () => {
+      jest.doMock('../../src/logger')
+      jest.doMock('../../src/commands/claude-code-runner', () => ({
+        runClaudeCode: jest.fn().mockImplementation((opts: { sendChunk: (type: string, content: string) => Promise<void> }) => {
+          capturedSendChunk = opts.sendChunk
+          return {
+            result: Promise.resolve({
+              text: 'done',
+              metadata: { args: [], exitCode: 0, hasStderr: false, durationMs: 10 },
+            }),
+            cancel: jest.fn(),
+          }
+        }),
+        buildClaudeArgs: jest.fn().mockReturnValue([]),
+        buildCleanEnv: jest.fn().mockReturnValue({}),
+        _resetCleanEnvCache: jest.fn(),
+      }))
+      jest.doMock('../../src/commands/file-transfer', () => ({
+        downloadChatFiles: jest.fn().mockResolvedValue({ downloadedPaths: [], failedCount: 0, cleanup: jest.fn() }),
+        parseChatFiles: jest.fn().mockReturnValue([]),
+        parseConversationFiles: jest.fn().mockReturnValue([]),
+      }))
+      jest.doMock('../../src/project-dir', () => ({
+        getAutoAddDirs: jest.fn().mockReturnValue([]),
+        getWorkspaceDir: jest.fn((d: string) => `${d}/workspace`),
+      }))
+      jest.doMock('../../src/aws-credential-builder', () => ({
+        buildAwsProfileCredentials: jest.fn().mockResolvedValue({ env: undefined, errors: [], ssoAuthRequired: [] }),
+        buildSingleAccountAwsEnv: jest.fn().mockResolvedValue({ env: undefined, errors: [], ssoAuthRequired: [] }),
+      }))
+      jest.doMock('../../src/git-credential-setup', () => ({
+        buildGitCredentialEnv: jest.fn().mockResolvedValue({ env: {}, cleanup: jest.fn() }),
+      }))
+      jest.doMock('../../src/commands/api-chat-executor', () => ({
+        executeApiChatCommand: jest.fn(),
+      }))
+      jest.doMock('../../src/utils/claude-settings', () => ({
+        ensureAllowedToolsInSettings: jest.fn(),
+      }))
+      jest.doMock('../../src/commands/shared-chat-utils', () => {
+        const actual = jest.requireActual('../../src/commands/shared-chat-utils')
+        return actual
+      })
+
+      const { executeChatCommand: isolatedExecuteChatCommand } = await import('../../src/commands/chat-executor')
+      const { logger } = await import('../../src/logger')
+      const warnSpy = jest.spyOn(logger, 'warn')
+
+      const mockClient = { submitChatChunk: jest.fn().mockResolvedValue(undefined) } as unknown as import('../../src/api-client').ApiClient
+
+      const resultPromise = isolatedExecuteChatCommand({
+        payload: { message: 'Test' },
+        commandId: 'cmd-isolated-tool-call-err',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+      })
+
+      // Wait for runClaudeCode to be called and capturedSendChunk to be set
+      await new Promise((r) => setTimeout(r, 20))
+
+      // Inject invalid JSON via tool_call chunk directly into the sendChunk wrapper
+      if (capturedSendChunk) {
+        await capturedSendChunk('tool_call', 'invalid-json{not-valid')
+      }
+
+      await resultPromise
+
+      // The warn should have been called for the parse error
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to parse tool_call JSON'))
+    })
+  })
+
+  it('should log warning when tool_result chunk has invalid JSON (line 123 branch)', async () => {
+    let capturedSendChunk: ((type: string, content: string) => Promise<void>) | undefined
+
+    await jest.isolateModulesAsync(async () => {
+      jest.doMock('../../src/logger')
+      jest.doMock('../../src/commands/claude-code-runner', () => ({
+        runClaudeCode: jest.fn().mockImplementation((opts: { sendChunk: (type: string, content: string) => Promise<void> }) => {
+          capturedSendChunk = opts.sendChunk
+          return {
+            result: Promise.resolve({
+              text: 'done',
+              metadata: { args: [], exitCode: 0, hasStderr: false, durationMs: 10 },
+            }),
+            cancel: jest.fn(),
+          }
+        }),
+        buildClaudeArgs: jest.fn().mockReturnValue([]),
+        buildCleanEnv: jest.fn().mockReturnValue({}),
+        _resetCleanEnvCache: jest.fn(),
+      }))
+      jest.doMock('../../src/commands/file-transfer', () => ({
+        downloadChatFiles: jest.fn().mockResolvedValue({ downloadedPaths: [], failedCount: 0, cleanup: jest.fn() }),
+        parseChatFiles: jest.fn().mockReturnValue([]),
+        parseConversationFiles: jest.fn().mockReturnValue([]),
+      }))
+      jest.doMock('../../src/project-dir', () => ({
+        getAutoAddDirs: jest.fn().mockReturnValue([]),
+        getWorkspaceDir: jest.fn((d: string) => `${d}/workspace`),
+      }))
+      jest.doMock('../../src/aws-credential-builder', () => ({
+        buildAwsProfileCredentials: jest.fn().mockResolvedValue({ env: undefined, errors: [], ssoAuthRequired: [] }),
+        buildSingleAccountAwsEnv: jest.fn().mockResolvedValue({ env: undefined, errors: [], ssoAuthRequired: [] }),
+      }))
+      jest.doMock('../../src/git-credential-setup', () => ({
+        buildGitCredentialEnv: jest.fn().mockResolvedValue({ env: {}, cleanup: jest.fn() }),
+      }))
+      jest.doMock('../../src/commands/api-chat-executor', () => ({
+        executeApiChatCommand: jest.fn(),
+      }))
+      jest.doMock('../../src/utils/claude-settings', () => ({
+        ensureAllowedToolsInSettings: jest.fn(),
+      }))
+      jest.doMock('../../src/commands/shared-chat-utils', () => {
+        const actual = jest.requireActual('../../src/commands/shared-chat-utils')
+        return actual
+      })
+
+      const { executeChatCommand: isolatedExecuteChatCommand } = await import('../../src/commands/chat-executor')
+      const { logger } = await import('../../src/logger')
+      const warnSpy = jest.spyOn(logger, 'warn')
+
+      const mockClient = { submitChatChunk: jest.fn().mockResolvedValue(undefined) } as unknown as import('../../src/api-client').ApiClient
+
+      const resultPromise = isolatedExecuteChatCommand({
+        payload: { message: 'Test' },
+        commandId: 'cmd-isolated-tool-result-err',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 20))
+
+      // Inject invalid JSON via tool_result chunk directly into the sendChunk wrapper
+      if (capturedSendChunk) {
+        await capturedSendChunk('tool_result', 'invalid-json{not-valid')
+      }
+
+      await resultPromise
+
+      // The warn should have been called for the parse error
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to parse tool_result JSON'))
+    })
+  })
 })
