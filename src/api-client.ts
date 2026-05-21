@@ -13,6 +13,7 @@ import type {
   CommandResult,
   DbCredentials,
   HeartbeatResponse,
+  PendingAlert,
   PendingCommand,
   ProjectConfigResponse,
   ReleaseChannel,
@@ -312,6 +313,76 @@ export class ApiClient {
     await this.putVoid(
       API_ENDPOINTS.E2E_EXECUTION_SCRIPT(tenantCode, projectCode, executionId),
       body,
+    )
+  }
+
+  // === Alert (CloudWatch Alarm) ===
+
+  async getPendingAlerts(
+    tenantCode: string,
+    projectCode: string,
+  ): Promise<{ items: PendingAlert[]; total: number }> {
+    return this.get(API_ENDPOINTS.ALERTS(tenantCode, projectCode), {
+      params: { status: 'pending', limit: 20 },
+    })
+  }
+
+  async getAlert(
+    tenantCode: string,
+    projectCode: string,
+    alertNumber: string,
+  ): Promise<PendingAlert | null> {
+    try {
+      return await this.get<PendingAlert>(
+        API_ENDPOINTS.ALERT(tenantCode, projectCode, alertNumber),
+      )
+    } catch {
+      return null
+    }
+  }
+
+  async updateAlertStatus(
+    tenantCode: string,
+    projectCode: string,
+    alertNumber: string,
+    body: { status: string; issueId?: string; failureReason?: string },
+  ): Promise<void> {
+    await this.putVoid(
+      API_ENDPOINTS.ALERT_STATUS(tenantCode, projectCode, alertNumber),
+      body,
+    )
+  }
+
+  /** 同じ alarmName の未解決 Issue（open/received/in_progress）を検索する */
+  async findActiveIssueByAlarmName(
+    tenantCode: string,
+    projectCode: string,
+    alarmName: string,
+  ): Promise<{ id: string } | null> {
+    const result = await this.get<{ items: Array<{ id: string }> }>(
+      API_ENDPOINTS.ISSUES(tenantCode, projectCode),
+      {
+        params: {
+          source: 'alert',
+          alarmName,
+          statuses: 'open,received,in_progress',
+          limit: 1,
+        },
+      },
+    )
+    return result.items.length > 0 ? { id: result.items[0].id } : null
+  }
+
+  /** Alert 専用 Issue 作成エンドポイント経由で Issue を作成する（alarmName を attributes に保存するため専用） */
+  async createIssueFromAlert(
+    tenantCode: string,
+    projectCode: string,
+    alertNumber: string,
+    priority: string,
+  ): Promise<{ id: string }> {
+    return this.post<{ id: string }>(
+      API_ENDPOINTS.ALERT_CREATE_ISSUE(tenantCode, projectCode, alertNumber),
+      { priority },
     )
   }
 }

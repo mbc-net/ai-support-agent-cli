@@ -1260,5 +1260,111 @@ describe('claude-code-runner', () => {
 
       expect(result.text).toBe('split result')
     })
+
+    it('should not kill process if already killed', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+      mockProcess.killed = true
+      handle.cancel()
+      expect(mockProcess.kill).not.toHaveBeenCalled()
+      mockProcess.emit('close', 0)
+      await handle.result
+    })
+
+    it('should send SIGKILL after SIGTERM if process is still running', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+      handle.cancel() // calls killFn → SIGTERM
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGTERM')
+      jest.advanceTimersByTime(5000) // CHAT_SIGKILL_DELAY
+      // process still not killed
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGKILL')
+      mockProcess.emit('close', 143)
+      await expect(handle.result).rejects.toThrow()
+    })
+
+    it('should not send SIGKILL if process was killed before delay', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+      handle.cancel() // SIGTERM
+      mockProcess.killed = true // process dies before SIGKILL timer
+      jest.advanceTimersByTime(5000)
+      expect(mockProcess.kill).toHaveBeenCalledTimes(1) // only SIGTERM
+      expect(mockProcess.kill).not.toHaveBeenCalledWith('SIGKILL')
+      mockProcess.emit('close', 143)
+      await expect(handle.result).rejects.toThrow()
+    })
+
+    it('should reject when exit code is null', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+      mockProcess.emit('close', null)
+      await expect(handle.result).rejects.toThrow()
+    })
+
+    it('should set e2eExecutionId and e2eTestCaseId env vars from policyContext', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({
+        message: 'hello',
+        sendChunk,
+        policyContext: {
+          e2eExecutionId: 'exec-123',
+          e2eTestCaseId: 'tc-456',
+        },
+      })
+      mockProcess.emit('close', 0)
+      await handle.result
+      const env = spawn.mock.calls[0][2].env
+      expect(env).toHaveProperty('AI_SUPPORT_E2E_EXECUTION_ID', 'exec-123')
+      expect(env).toHaveProperty('AI_SUPPORT_E2E_TEST_CASE_ID', 'tc-456')
+    })
+
+    it('should set browserSessionId env var from policyContext', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({
+        message: 'hello',
+        sendChunk,
+        policyContext: { browserSessionId: 'sess-abc' },
+      })
+      mockProcess.emit('close', 0)
+      await handle.result
+      const env = spawn.mock.calls[0][2].env
+      expect(env).toHaveProperty('AI_SUPPORT_BROWSER_SESSION_ID', 'sess-abc')
+    })
+
+    it('should clear sigkillTimer when close event fires after cancel', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+      // Advance past CHAT_TIMEOUT to trigger SIGTERM + start sigkillTimer
+      jest.advanceTimersByTime(300_000)
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGTERM')
+      // Process closes before SIGKILL delay — sigkillTimer should be cleared
+      mockProcess.emit('close', 143)
+      await expect(handle.result).rejects.toThrow()
+      // Advance past SIGKILL delay — kill should NOT have been called with SIGKILL
+      jest.advanceTimersByTime(5_000)
+      expect(mockProcess.kill).not.toHaveBeenCalledWith('SIGKILL')
+    })
   })
 })

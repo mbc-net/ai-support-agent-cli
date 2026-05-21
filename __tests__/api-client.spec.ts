@@ -892,4 +892,116 @@ describe('ApiClient', () => {
       )
     })
   })
+
+  describe('Alert API methods', () => {
+    const mockAlertItem = {
+      alertNumber: 'AL000001',
+      alarmName: 'CPUHigh',
+      state: 'ALARM',
+      reason: 'Threshold Crossed',
+      timestamp: '2026-05-13T00:00:00Z',
+      namespace: 'AWS/ECS',
+      metricName: 'CPUUtilization',
+      dimensions: [],
+      status: 'pending',
+      tenantCode: 'tenant1',
+      projectCode: 'MBC_01',
+    }
+
+    describe('getPendingAlerts', () => {
+      it('should GET pending alerts with status=pending', async () => {
+        mockInstance.get.mockResolvedValue({ data: { items: [mockAlertItem], total: 1 } })
+
+        const result = await client.getPendingAlerts('tenant1', 'MBC_01')
+
+        expect(result.items).toHaveLength(1)
+        expect(mockInstance.get).toHaveBeenCalledWith(
+          '/api/tenant1/projects/MBC_01/alerts',
+          expect.objectContaining({ params: { status: 'pending', limit: 20 } }),
+        )
+      })
+    })
+
+    describe('getAlert', () => {
+      it('should GET a single alert by alertNumber', async () => {
+        mockInstance.get.mockResolvedValue({ data: mockAlertItem })
+
+        const result = await client.getAlert('tenant1', 'MBC_01', 'AL000001')
+
+        expect(result).toEqual(mockAlertItem)
+        expect(mockInstance.get).toHaveBeenCalledWith(
+          '/api/tenant1/projects/MBC_01/alerts/AL000001',
+          undefined,
+        )
+      })
+
+      it('should return null when alert not found', async () => {
+        mockInstance.get.mockRejectedValue({ response: { status: 404 } })
+
+        const result = await client.getAlert('tenant1', 'MBC_01', 'AL999999')
+
+        expect(result).toBeNull()
+      })
+    })
+
+    describe('updateAlertStatus', () => {
+      it('should PUT alert status update', async () => {
+        mockInstance.put.mockResolvedValue({})
+
+        await client.updateAlertStatus('tenant1', 'MBC_01', 'AL000001', {
+          status: 'processed',
+          issueId: 'AI_SU000001',
+        })
+
+        expect(mockInstance.put).toHaveBeenCalledWith(
+          '/api/tenant1/projects/MBC_01/alerts/AL000001/status',
+          { status: 'processed', issueId: 'AI_SU000001' },
+          undefined,
+        )
+      })
+    })
+
+    describe('findActiveIssueByAlarmName', () => {
+      it('should return issue id when active issue found', async () => {
+        mockInstance.get.mockResolvedValue({ data: { items: [{ id: 'AI_SU000001' }] } })
+
+        const result = await client.findActiveIssueByAlarmName('tenant1', 'MBC_01', 'CPUHigh')
+
+        expect(result).toEqual({ id: 'AI_SU000001' })
+        expect(mockInstance.get).toHaveBeenCalledWith(
+          '/api/tenant1/projects/MBC_01/issues',
+          expect.objectContaining({
+            params: expect.objectContaining({
+              source: 'alert',
+              alarmName: 'CPUHigh',
+              statuses: 'open,received,in_progress',
+            }),
+          }),
+        )
+      })
+
+      it('should return null when no active issue found', async () => {
+        mockInstance.get.mockResolvedValue({ data: { items: [] } })
+
+        const result = await client.findActiveIssueByAlarmName('tenant1', 'MBC_01', 'CPUHigh')
+
+        expect(result).toBeNull()
+      })
+    })
+
+    describe('createIssueFromAlert', () => {
+      it('should POST to alert create-issue endpoint with priority only', async () => {
+        mockInstance.post.mockResolvedValue({ data: { id: 'AI_SU000001' } })
+
+        const result = await client.createIssueFromAlert('tenant1', 'MBC_01', 'AL000001', 'urgent')
+
+        expect(result).toEqual({ id: 'AI_SU000001' })
+        expect(mockInstance.post).toHaveBeenCalledWith(
+          '/api/tenant1/projects/MBC_01/alerts/AL000001/create-issue',
+          { priority: 'urgent' },
+          undefined,
+        )
+      })
+    })
+  })
 })
