@@ -3,6 +3,8 @@ FROM node:24-slim
 # =============================================================================
 # Layer 1: OS packages (most stable — rarely changes)
 # =============================================================================
+# Bust cache when Debian GPG signatures expire (bump this date to force full rebuild)
+ARG APT_CACHE_BUST=2026-05-21
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip git openssh-client vim jq \
     default-mysql-client postgresql-client \
