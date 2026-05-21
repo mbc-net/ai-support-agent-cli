@@ -2334,4 +2334,56 @@ describe('ProjectAgent', () => {
       }
     })
   })
+
+  describe('CloudWatch Alert polling', () => {
+    it('should start alert polling when cloudwatch is enabled in project config', async () => {
+      const syncProjectConfigMock = syncProjectConfig as jest.MockedFunction<typeof syncProjectConfig>
+      syncProjectConfigMock.mockResolvedValue({
+        configHash: 'abc123',
+        project: { projectCode: 'test-proj', projectName: 'Test' },
+        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+        cloudwatch: {
+          enabled: true,
+          pollingIntervalMs: 1000,  // 1秒に設定してテストで進める
+          webhookUrl: 'https://api.example.com/webhooks/cloudwatch/mbc/MBC_01',
+        },
+      })
+
+      // Mock getPendingAlerts for AlertProcessor
+      ;(mockClient as Record<string, jest.Mock>).getPendingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+      ;(mockClient as Record<string, jest.Mock>).getAlert = jest.fn().mockResolvedValue(null)
+      ;(mockClient as Record<string, jest.Mock>).updateAlertStatus = jest.fn().mockResolvedValue(undefined)
+      ;(mockClient as Record<string, jest.Mock>).findActiveIssueByAlarmName = jest.fn().mockResolvedValue(null)
+      ;(mockClient as Record<string, jest.Mock>).createIssueFromAlert = jest.fn().mockResolvedValue({ id: 'AI_SU000001' })
+
+      const agent = new ProjectAgent(project, 'alert-test-agent', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(200)
+
+      // Polling should be set up (AlertProcessor.checkPendingAlerts called on start)
+      expect((mockClient as Record<string, jest.Mock>).getPendingAlerts).toHaveBeenCalled()
+
+      // ポーリングタイマーをトリガー（setInterval コールバックをカバー）
+      await jest.advanceTimersByTimeAsync(1100)
+      expect((mockClient as Record<string, jest.Mock>).getPendingAlerts).toHaveBeenCalledTimes(2)
+
+      // stop でタイマークリアも確認
+      agent.stop()
+
+      syncProjectConfigMock.mockRestore()
+    })
+
+    it('should not start alert polling when cloudwatch is disabled', async () => {
+      // Default mock does not include cloudwatch config
+      ;(mockClient as Record<string, jest.Mock>).getPendingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+
+      const agent = new ProjectAgent(project, 'no-alert-agent', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(200)
+
+      expect((mockClient as Record<string, jest.Mock>).getPendingAlerts).not.toHaveBeenCalled()
+
+      agent.stop()
+    })
+  })
 })
