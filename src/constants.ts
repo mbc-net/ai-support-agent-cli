@@ -75,6 +75,8 @@ export const CHAT_TOOL_EXECUTION_TIMEOUT = 1_800_000
 export const CHAT_SIGKILL_DELAY = 5_000
 export const CLAUDE_DETECT_TIMEOUT_MS = 5_000
 export const DEFAULT_APPSYNC_TIMEOUT_MS = 300_000
+export const CHAT_RETRY_DELAY_MS = 3000
+export const CHAT_MAX_ATTEMPTS = 2
 
 // Log truncation
 export const LOG_MESSAGE_LIMIT = 100
@@ -128,6 +130,17 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/e2e-test-executions/${executionId}/script`,
   LOG_CHUNK: (tenantCode: string) => `/api/${tenantCode}/agent/logs/chunk`,
   LOG_SESSION: (tenantCode: string) => `/api/${tenantCode}/agent/logs/session`,
+  // Alert 関連エンドポイント
+  ALERTS: (tenantCode: string, projectCode: string) =>
+    `/api/${tenantCode}/projects/${projectCode}/alerts`,
+  ALERT: (tenantCode: string, projectCode: string, alertNumber: string) =>
+    `/api/${tenantCode}/projects/${projectCode}/alerts/${alertNumber}`,
+  ALERT_STATUS: (tenantCode: string, projectCode: string, alertNumber: string) =>
+    `/api/${tenantCode}/projects/${projectCode}/alerts/${alertNumber}/status`,
+  ALERT_CREATE_ISSUE: (tenantCode: string, projectCode: string, alertNumber: string) =>
+    `/api/${tenantCode}/projects/${projectCode}/alerts/${alertNumber}/create-issue`,
+  ISSUES: (tenantCode: string, projectCode: string) =>
+    `/api/${tenantCode}/projects/${projectCode}/issues`,
 } as const
 
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000
