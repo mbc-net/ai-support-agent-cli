@@ -1,6 +1,6 @@
 import { ApiClient } from '../api-client'
 import { type AwsCredentialResult, buildAwsProfileCredentials, buildSingleAccountAwsEnv } from '../aws-credential-builder'
-import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, LOG_MESSAGE_LIMIT } from '../constants'
+import { CHAT_MAX_ATTEMPTS, CHAT_RETRY_DELAY_MS, ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, LOG_MESSAGE_LIMIT } from '../constants'
 import { buildGitCredentialEnv } from '../git-credential-setup'
 import { logger } from '../logger'
 import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatFileInfo, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
@@ -74,10 +74,54 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
 
 /**
  * Claude Code CLI を使用してチャットメッセージを処理する
+ * 失敗した場合に最大 CHAT_MAX_ATTEMPTS 回試行する（キャンセル時を除く）
+ */
+async function executeClaudeCodeChat(
+  payload: ChatPayload,
+  commandId: string,
+  client: ApiClient,
+  agentId: string,
+  serverConfig?: AgentServerConfig,
+  projectDir?: string,
+  projectConfig?: ProjectConfigResponse,
+  mcpConfigPath?: string,
+  tenantCode?: string,
+  browserLocalPort?: number,
+): Promise<CommandResult> {
+  let lastResult: CommandResult = { success: false, error: 'Chat command failed after all retry attempts' }
+
+  for (let attempt = 1; attempt <= CHAT_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      logger.info(`[chat] Retrying chat command [${commandId}] (attempt ${attempt}/${CHAT_MAX_ATTEMPTS})`)
+      await new Promise<void>((resolve) => setTimeout(resolve, CHAT_RETRY_DELAY_MS))
+    }
+
+    const result = await executeClaudeCodeChatOnce(
+      payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort,
+    )
+
+    if (result.success) return result
+
+    // キャンセルされた場合はリトライしない
+    const errorMsg = typeof result.error === 'string' ? result.error : ''
+    if (errorMsg.toLowerCase().includes('cancel')) return result
+
+    lastResult = result
+
+    if (attempt < CHAT_MAX_ATTEMPTS) {
+      logger.warn(`[chat] Chat command failed [${commandId}], will retry: ${errorMsg}`)
+    }
+  }
+
+  return lastResult
+}
+
+/**
+ * Claude Code CLI を使用してチャットメッセージを1回試行する
  * サブプロセスとして起動し、stdout をストリーミングで読み取り、
  * チャンクとしてAPIに送信する
  */
-async function executeClaudeCodeChat(
+async function executeClaudeCodeChatOnce(
   payload: ChatPayload,
   commandId: string,
   client: ApiClient,
