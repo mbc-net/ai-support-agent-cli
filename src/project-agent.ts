@@ -11,6 +11,7 @@ import { type TransportDeps, type TransportState, startSubscriptionMode, startHe
 import {
   AGENT_VERSION,
   DOCKER_RESTART_EXIT_CODE,
+  DOCKER_UPDATE_EXIT_CODE,
   INITIAL_CONFIG_SYNC_MAX_RETRIES,
   INITIAL_CONFIG_SYNC_RETRY_DELAY_MS,
   REGISTER_AUTH_ERROR_DELAY_MS,
@@ -276,25 +277,22 @@ export class ProjectAgent {
     logger.success(`${this.prefix} Update to ${targetVersion} successful, restarting...`)
     this.stop()
     setTimeout(() => {
+      // Inside a Docker container (spawned via `docker run`), process.send is
+      // not available. Exit with DOCKER_UPDATE_EXIT_CODE so the host-side
+      // DockerSupervisor detects the update and calls installUpdateAndRestart().
+      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+        try {
+          const versionFile = path.join(getConfigDir(), 'update-version.json')
+          fs.writeFileSync(versionFile, JSON.stringify({ version: targetVersion }), 'utf-8')
+        } catch (err) {
+          logger.warn(`[update] Failed to write update-version.json: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        process.exit(DOCKER_UPDATE_EXIT_CODE)
+        return
+      }
       // When running as a child process (forked by ChildProcessManager),
       // notify the parent runner and exit cleanly.
-      // In Docker mode the runner exits with DOCKER_UPDATE_EXIT_CODE so the
-      // host-side runInDocker() rebuilds the image for the new version.
-      // reExecProcess() from a worker would spawn a new runner process
-      // in addition to the existing parent, causing duplicate auto-update.
       if (process.send) {
-        // Write the new version to a file in the config directory so the host-side
-        // runInDocker() can read it and install the correct version before rebuilding
-        // the Docker image. The config directory is volume-mounted and accessible
-        // from both inside the container and the host.
-        if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
-          try {
-            const versionFile = path.join(getConfigDir(), 'update-version.json')
-            fs.writeFileSync(versionFile, JSON.stringify({ version: targetVersion }), 'utf-8')
-          } catch (err) {
-            logger.warn(`[update] Failed to write update-version.json: ${err instanceof Error ? err.message : String(err)}`)
-          }
-        }
         process.send({ type: 'update_complete', tenantCode: this.tenantCode, projectCode: this.projectCode })
         process.exit(0)
       } else {
