@@ -92,6 +92,7 @@ import { existsSync, realpathSync, readFileSync, unlinkSync, copyFileSync, mkdir
 import { getConfigDir, loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
 import { reExecProcess, performUpdate } from '../../src/update-checker'
+import { resetDockerPathCache } from '../../src/docker/docker-utils'
 import {
   checkDockerAvailable,
   imageExists,
@@ -136,6 +137,7 @@ describe('docker-runner', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     process.env = { ...originalEnv }
+    resetDockerPathCache()
     mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
     mockExistsSync.mockReturnValue(false)
   })
