@@ -206,5 +206,11 @@
   "service.status.notInstalled": "サービスはインストールされていません。",
   "service.status.running": "サービスは実行中です（PID: {{pid}}）。",
   "service.status.stopped": "サービスはインストール済みですが停止中です。",
-  "service.status.logHint": "ログ:\n  stdout: {{outLog}}\n  stderr: {{errLog}}"
+  "service.status.logHint": "ログ:\n  stdout: {{outLog}}\n  stderr: {{errLog}}",
+  "service.autoStartFailed": "警告: プロジェクトのサービス自動起動に失敗しました: {{message}}",
+  "service.autoStartNotSupported": "サービスの自動起動はmacOSのみ対応しています。'ai-support-agent service install' 後に 'ai-support-agent service start' で手動起動してください。",
+  "service.loadWarning": "警告: LaunchAgent {{label}} が正しくロードされていない可能性があります。'ai-support-agent service start' で再試行してください。",
+  "service.status.noProjects": "登録済みプロジェクトがありません。'ai-support-agent configure --token <token>' でプロジェクトを登録してください。",
+  "service.status.projectRunning": "✓ {{projectCode}}: 実行中 (PID: {{pid}})",
+  "service.status.projectStopped": "✗ {{projectCode}}: 停止中"
 }

@@ -8,7 +8,17 @@ import {
 } from '../config-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
+import type { ProjectRegistration } from '../types'
 import { getErrorMessage, validateApiUrl } from '../utils'
+import { installAndStartProject } from './service-command'
+
+function tryInstallAndStartProject(registration: ProjectRegistration): void {
+  try {
+    installAndStartProject(registration)
+  } catch (error) {
+    logger.warn(t('service.autoStartFailed', { message: getErrorMessage(error) }))
+  }
+}
 
 async function performBrowserAuth(opts: {
   url: string
@@ -57,7 +67,9 @@ async function performBrowserAuth(opts: {
     process.exit(1)
   }
   const projectCode = result.projectCode ?? PROJECT_CODE_DEFAULT
-  addProject({ tenantCode: result.tenantCode, projectCode, token: result.token, apiUrl })
+  const registration: ProjectRegistration = { tenantCode: result.tenantCode, projectCode, token: result.token, apiUrl }
+  addProject(registration)
+  tryInstallAndStartProject(registration)
   return { projectCode }
 }
 
@@ -130,12 +142,14 @@ export function registerAuthCommands(program: Command): void {
         process.exit(1)
       }
 
-      addProject({
+      const registration: ProjectRegistration = {
         tenantCode,
         projectCode,
         token: opts.token,
         apiUrl: opts.apiUrl,
-      })
+      }
+      addProject(registration)
+      tryInstallAndStartProject(registration)
       logger.success(t('config.projectSaved', { projectCode }))
     })
 }

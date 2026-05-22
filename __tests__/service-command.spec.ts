@@ -32,6 +32,7 @@ import * as path from 'path'
 import {
   generatePlist,
   installService,
+  installAndStartProject,
   registerServiceCommands,
   restartService,
   serviceStatus,
@@ -297,24 +298,51 @@ describe('service-command orchestrator', () => {
       expect(logger.warn).toHaveBeenCalledWith('service.status.notInstalled')
     })
 
-    it('should show running on macOS when service is loaded', () => {
+    it('should show noProjects message on macOS when projects array is empty', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' })
+      // readdirSync returns one plist but launchctl list will throw (not running) — we need
+      // to simulate status() returning projects=[] by having readdirSync return empty here
+      // while installed=true. Achieve by keeping one plist but making status return empty projects.
+      // Easiest: override readdirSync so getAllProjectPlists returns [] but status.installed is true.
+      // DarwinServiceStrategy.status() returns installed:false when no plists, so we can't get
+      // projects=[] via the normal flow. Test the serviceStatus() branch directly via a mock:
+      // Instead, verify that the noProjects key is used when status.projects exists but is empty.
+      // We'll test via the real DarwinServiceStrategy with a single plist but no PID — that gives
+      // projects=[{running:false}], not empty. So we test the empty case via a spy on strategy.status.
+      const { DarwinServiceStrategy } = require('../src/cli/service/darwin-service')
+      const spy = jest.spyOn(DarwinServiceStrategy.prototype, 'status').mockReturnValue({
+        installed: true,
+        running: false,
+        projects: [],
+        logDir: '/tmp/logs',
+      })
+
+      serviceStatus({})
+
+      expect(logger.warn).toHaveBeenCalledWith('service.status.noProjects')
+      spy.mockRestore()
+    })
+
+    it('should show per-project running status on macOS', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
       mockedExecSync.mockReturnValue(Buffer.from('"PID" = 12345;'))
 
       serviceStatus({})
 
       expect(logger.success).toHaveBeenCalledWith(
-        expect.stringContaining('service.status.running'),
+        expect.stringContaining('service.status.projectRunning'),
       )
     })
 
-    it('should show stopped on macOS when service is not loaded', () => {
+    it('should show per-project stopped status on macOS when not loaded', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' })
       mockedExecSync.mockImplementation(() => { throw new Error('not loaded') })
 
       serviceStatus({})
 
-      expect(logger.warn).toHaveBeenCalledWith('service.status.stopped')
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('service.status.projectStopped'),
+      )
     })
 
     it('should show log dir info', () => {
@@ -492,7 +520,7 @@ describe('service-command orchestrator', () => {
       program.parse(['service', 'status'], { from: 'user' })
 
       expect(logger.success).toHaveBeenCalledWith(
-        expect.stringContaining('service.status.running'),
+        expect.stringContaining('service.status.projectRunning'),
       )
     })
 
@@ -522,6 +550,42 @@ describe('service-command orchestrator', () => {
       expect(mockedExecSync).toHaveBeenCalledWith(
         expect.stringContaining('launchctl'),
         expect.any(Object),
+      )
+    })
+  })
+
+  describe('installAndStartProject', () => {
+    const project = {
+      tenantCode: '00000005',
+      projectCode: 'SMART_QUOTE',
+      token: '00000005:uuid:secret',
+      apiUrl: 'https://api.ai-support-agent.com',
+    }
+
+    it('should write service files and call launchctl load on macOS', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' })
+      mockedFs.existsSync.mockReturnValue(false)
+      mockedFs.mkdirSync.mockReturnValue(undefined)
+      mockedFs.writeFileSync.mockReturnValue(undefined)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      installAndStartProject(project)
+
+      const loadCall = (mockedExecSync as jest.Mock).mock.calls.find(
+        (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('launchctl load'),
+      )
+      expect(loadCall).toBeDefined()
+    })
+
+    it('should be a no-op on non-Darwin platforms but log a notice', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' })
+
+      installAndStartProject(project)
+
+      expect(mockedFs.writeFileSync).not.toHaveBeenCalled()
+      expect(mockedExecSync).not.toHaveBeenCalled()
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.stringContaining('service.autoStartNotSupported'),
       )
     })
   })

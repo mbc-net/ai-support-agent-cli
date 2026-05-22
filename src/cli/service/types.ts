@@ -3,11 +3,19 @@ export interface ServiceOptions {
   docker?: boolean
 }
 
+export interface ProjectStatus {
+  label: string
+  projectCode: string
+  running: boolean
+  pid?: number
+}
+
 export interface ServiceStatus {
   installed: boolean
   running: boolean
   pid?: number
   logDir?: string
+  projects?: ProjectStatus[]
 }
 
 export interface ServiceStrategy {

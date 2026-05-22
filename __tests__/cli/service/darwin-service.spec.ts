@@ -36,6 +36,8 @@ import {
   getProjectLabel,
   getProjectPlistPath,
   getAllProjectPlists,
+  writeProjectServiceFiles,
+  installAndStartProject,
 } from '../../../src/cli/service/darwin-service'
 import { logger } from '../../../src/logger'
 import { loadConfig, getProjectList } from '../../../src/config-manager'
@@ -826,7 +828,7 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
 
       for (const { plistPath } of mockProjectPlists) {
         expect(mockedExecSync).toHaveBeenCalledWith(
-          `launchctl load ${plistPath}`,
+          `launchctl load "${plistPath}"`,
           { stdio: 'pipe' },
         )
       }
@@ -855,7 +857,7 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
 
       for (const { label } of mockProjectPlists) {
         expect(mockedExecSync).toHaveBeenCalledWith(
-          `launchctl remove ${label}`,
+          `launchctl remove "${label}"`,
           { stdio: 'pipe' },
         )
       }
@@ -884,11 +886,11 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
 
       for (const { label, plistPath } of mockProjectPlists) {
         expect(mockedExecSync).toHaveBeenCalledWith(
-          `launchctl remove ${label}`,
+          `launchctl remove "${label}"`,
           { stdio: 'pipe' },
         )
         expect(mockedExecSync).toHaveBeenCalledWith(
-          `launchctl load ${plistPath}`,
+          `launchctl load "${plistPath}"`,
           { stdio: 'pipe' },
         )
       }
@@ -931,6 +933,20 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
       expect(result.pid).toBe(12345)
     })
 
+    it('should return per-project status in projects array', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from('"PID" = 111;')) // mbc-01 running
+        .mockReturnValueOnce(Buffer.from('"Label" = "...";')) // mbc-02 no PID
+
+      const result = strategy.status()
+
+      expect(result.projects).toHaveLength(2)
+      expect(result.projects![0].running).toBe(true)
+      expect(result.projects![0].pid).toBe(111)
+      expect(result.projects![1].running).toBe(false)
+      expect(result.projects![1].pid).toBeUndefined()
+    })
+
     it('should return running=false when no project is running', () => {
       mockedExecSync.mockImplementation(() => { throw new Error('not loaded') })
 
@@ -938,6 +954,7 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
 
       expect(result.installed).toBe(true)
       expect(result.running).toBe(false)
+      expect(result.projects?.every(p => !p.running)).toBe(true)
     })
 
     it('should return logDir', () => {
@@ -948,5 +965,143 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
       expect(result.logDir).toBeTruthy()
       expect(result.logDir).toContain('ai-support-agent')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// writeProjectServiceFiles
+// ---------------------------------------------------------------------------
+describe('writeProjectServiceFiles', () => {
+  const project = {
+    tenantCode: '00000005',
+    projectCode: 'SMART_QUOTE',
+    token: '00000005:uuid:secret',
+    apiUrl: 'https://api.ai-support-agent.com',
+  }
+
+  beforeEach(() => {
+    mockedFs.existsSync.mockReturnValue(false)
+    mockedFs.mkdirSync.mockReturnValue(undefined)
+    mockedFs.writeFileSync.mockReturnValue(undefined)
+  })
+
+  it('should create service dirs, write run.sh and plist, return plist path', () => {
+    const plistPath = writeProjectServiceFiles(project)
+
+    expect(plistPath).toContain('com.ai-support-agent.cli.00000005.smart-quote.plist')
+    expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('run.sh'),
+      expect.any(String),
+      expect.objectContaining({ mode: 0o700 }),
+    )
+    expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('.plist'),
+      expect.any(String),
+      'utf-8',
+    )
+  })
+
+  it('should embed the token and apiUrl in the wrapper script', () => {
+    writeProjectServiceFiles(project)
+
+    const runShCall = mockedFs.writeFileSync.mock.calls.find(
+      (call) => typeof call[0] === 'string' && (call[0] as string).endsWith('run.sh'),
+    )
+    expect(runShCall).toBeDefined()
+    const script = runShCall![1] as string
+    expect(script).toContain(project.token)
+    expect(script).toContain(project.apiUrl)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// installAndStartProject
+// ---------------------------------------------------------------------------
+describe('installAndStartProject', () => {
+  const project = {
+    tenantCode: '00000005',
+    projectCode: 'SMART_QUOTE',
+    token: '00000005:uuid:secret',
+    apiUrl: 'https://api.ai-support-agent.com',
+  }
+
+  beforeEach(() => {
+    mockedFs.existsSync.mockReturnValue(false)
+    mockedFs.mkdirSync.mockReturnValue(undefined)
+    mockedFs.writeFileSync.mockReturnValue(undefined)
+    mockedExecSync.mockReturnValue(Buffer.from(''))
+  })
+
+  it('should remove existing service before loading (idempotent update)', () => {
+    installAndStartProject(project)
+
+    const removeCall = (mockedExecSync as jest.Mock).mock.calls.find(
+      (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('launchctl remove'),
+    )
+    expect(removeCall).toBeDefined()
+    // Verify the label is quoted to handle labels with hyphens/special chars
+    expect(removeCall![0]).toBe('launchctl remove "com.ai-support-agent.cli.00000005.smart-quote"')
+  })
+
+  it('should write service files and call launchctl load', () => {
+    installAndStartProject(project)
+
+    const loadCall = (mockedExecSync as jest.Mock).mock.calls.find(
+      (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('launchctl load'),
+    )
+    expect(loadCall).toBeDefined()
+    expect(loadCall![0]).toContain('com.ai-support-agent.cli.00000005.smart-quote.plist')
+  })
+
+  it('should call launchctl list to verify the service loaded', () => {
+    installAndStartProject(project)
+
+    const listCall = (mockedExecSync as jest.Mock).mock.calls.find(
+      (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('launchctl list'),
+    )
+    expect(listCall).toBeDefined()
+    expect(listCall![0]).toContain('com.ai-support-agent.cli.00000005.smart-quote')
+  })
+
+  it('should not throw when launchctl remove fails (not yet loaded)', () => {
+    mockedExecSync.mockImplementation((cmd: unknown) => {
+      if (typeof cmd === 'string' && cmd.includes('launchctl remove')) {
+        throw new Error('no such process')
+      }
+      return Buffer.from('')
+    })
+
+    expect(() => installAndStartProject(project)).not.toThrow()
+  })
+
+  it('should warn and return early when launchctl load fails', () => {
+    mockedExecSync.mockImplementation((cmd: unknown) => {
+      if (typeof cmd === 'string' && cmd.includes('launchctl load')) {
+        throw new Error('permission denied')
+      }
+      return Buffer.from('')
+    })
+
+    installAndStartProject(project)
+
+    expect(logger.warn).toHaveBeenCalled()
+    // launchctl list should NOT be called after load failure
+    const listCall = (mockedExecSync as jest.Mock).mock.calls.find(
+      (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('launchctl list'),
+    )
+    expect(listCall).toBeUndefined()
+  })
+
+  it('should log warning when launchctl list fails after load', () => {
+    mockedExecSync.mockImplementation((cmd: unknown) => {
+      if (typeof cmd === 'string' && cmd.includes('launchctl list')) {
+        throw new Error('not registered')
+      }
+      return Buffer.from('')
+    })
+
+    installAndStartProject(project)
+
+    expect(logger.warn).toHaveBeenCalled()
   })
 })
