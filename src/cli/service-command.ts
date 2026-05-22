@@ -2,9 +2,10 @@ import type { Command } from 'commander'
 
 import { t } from '../i18n'
 import { logger } from '../logger'
-import { DarwinServiceStrategy, generatePlist } from './service/darwin-service'
+import { DarwinServiceStrategy, generatePlist, installAndStartProject as darwinInstallAndStartProject } from './service/darwin-service'
 import { LinuxServiceStrategy } from './service/linux-service'
 import type { ServiceStrategy } from './service/types'
+import type { ProjectRegistration } from '../types'
 import { Win32ServiceStrategy } from './service/win32-service'
 
 function getStrategy(): ServiceStrategy | null {
@@ -78,10 +79,26 @@ export function serviceStatus(options: { verbose?: boolean }): void {
     return
   }
 
-  if (status.running) {
-    logger.success(t('service.status.running', { pid: String(status.pid ?? '?') }))
+  // Per-project breakdown (Darwin)
+  if (status.projects) {
+    if (status.projects.length === 0) {
+      logger.warn(t('service.status.noProjects'))
+    } else {
+      for (const p of status.projects) {
+        if (p.running) {
+          logger.success(t('service.status.projectRunning', { projectCode: p.projectCode, pid: String(p.pid ?? '?') }))
+        } else {
+          logger.warn(t('service.status.projectStopped', { projectCode: p.projectCode }))
+        }
+      }
+    }
   } else {
-    logger.warn(t('service.status.stopped'))
+    // Non-Darwin fallback: single aggregate status
+    if (status.running) {
+      logger.success(t('service.status.running', { pid: String(status.pid ?? '?') }))
+    } else {
+      logger.warn(t('service.status.stopped'))
+    }
   }
 
   if (status.logDir) {
@@ -169,6 +186,23 @@ export function registerServiceCommands(program: Command): void {
     .action(() => {
       restartService()
     })
+}
+
+/**
+ * Install service files and immediately start a single project.
+ * Called automatically after addProject() so users don't need to run
+ * install-service manually after registering a token.
+ * No-op on non-Darwin platforms where per-project LaunchAgents don't apply.
+ */
+export function installAndStartProject(
+  project: ProjectRegistration,
+  options: { verbose?: boolean } = {},
+): void {
+  if (process.platform !== 'darwin') {
+    logger.info(t('service.autoStartNotSupported'))
+    return
+  }
+  darwinInstallAndStartProject(project, options)
 }
 
 // Re-export for backward compatibility

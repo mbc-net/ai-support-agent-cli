@@ -3,6 +3,8 @@ FROM node:24-slim
 # =============================================================================
 # Layer 1: OS packages (most stable — rarely changes)
 # =============================================================================
+# Bust cache when Debian GPG signatures expire (bump this date to force full rebuild)
+ARG APT_CACHE_BUST=2026-05-21
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip git openssh-client vim jq \
     default-mysql-client postgresql-client \
@@ -76,11 +78,17 @@ RUN ARCH=$(dpkg --print-architecture) && \
 ENV PATH="$PATH:/opt/mssql-tools18/bin"
 
 # GitHub CLI + GitLab CLI (combined to reduce apt-get update calls)
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+# Re-install debian-archive-keyring to refresh GPG keys before apt-get update.
+# This prevents "invalid signature" errors when this layer runs on a cached
+# base where the Debian signing keys have been rotated since the cache was built.
+RUN apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false \
+        -o Acquire::Check-Date=false || true \
+    && apt-get install -y --allow-unauthenticated debian-archive-keyring \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false \
+    && apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/* \
     && ARCH=$(dpkg --print-architecture) \
