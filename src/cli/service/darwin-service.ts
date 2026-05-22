@@ -4,6 +4,8 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { loadConfig, getProjectList } from '../../config-manager'
+import type { ProjectRegistration } from '../../types'
+import type { ProjectStatus } from './types'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
@@ -426,6 +428,111 @@ exit 0
 // DarwinServiceStrategy
 // ---------------------------------------------------------------------------
 
+function getUpdateScriptPath(): string {
+  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
+    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
+    : path.join(os.homedir(), '.ai-support-agent')
+  return path.join(configDir, 'update-and-restart.sh')
+}
+
+/**
+ * Write run.sh and plist for a single project. Does NOT launchctl load.
+ * Returns the plist path.
+ *
+ * NOTE: This function does NOT generate update-and-restart.sh. Callers that
+ * invoke this directly (not via installAndStartProject or install()) are
+ * responsible for ensuring update-and-restart.sh exists at getUpdateScriptPath().
+ */
+export function writeProjectServiceFiles(
+  project: ProjectRegistration,
+  options: { verbose?: boolean } = {},
+): string {
+  const { tenantCode, projectCode } = project
+  const projectKey = `${tenantCode}-${projectCode.toLowerCase()}`
+
+  const logDir = getLogDir()
+  const projectLogDir = path.join(logDir, projectKey)
+  if (!fs.existsSync(projectLogDir)) {
+    fs.mkdirSync(projectLogDir, { recursive: true, mode: 0o700 })
+  }
+
+  const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents')
+  if (!fs.existsSync(launchAgentsDir)) {
+    fs.mkdirSync(launchAgentsDir, { recursive: true })
+  }
+
+  const servicesDir = getServicesDir()
+  const projectServiceDir = path.join(servicesDir, projectKey)
+  if (!fs.existsSync(projectServiceDir)) {
+    fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
+  }
+
+  const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
+  if (!fs.existsSync(projectConfigHostDir)) {
+    fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
+  }
+
+  const updateScriptPath = getUpdateScriptPath()
+  const wrapperScriptPath = path.join(projectServiceDir, 'run.sh')
+  const wrapperScript = generateWrapperScript({
+    imageName: IMAGE_NAME,
+    tenantCode,
+    projectCode,
+    projectConfigHostDir,
+    projectDir: project.projectDir,
+    token: project.token,
+    apiUrl: project.apiUrl,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    claudeCodeOauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+    verbose: options.verbose,
+    updateScriptPath,
+  })
+  fs.writeFileSync(wrapperScriptPath, wrapperScript, { mode: 0o700 })
+
+  const label = getProjectLabel(tenantCode, projectCode)
+  const plistPath = getProjectPlistPath(tenantCode, projectCode)
+  const plist = generateProjectPlist({ label, wrapperScriptPath, logDir: projectLogDir })
+  fs.writeFileSync(plistPath, plist, 'utf-8')
+
+  return plistPath
+}
+
+/**
+ * Install service files and immediately start a single project via launchctl.
+ * Idempotent: unloads any existing service before loading so that token/config
+ * updates take effect immediately.
+ */
+export function installAndStartProject(
+  project: ProjectRegistration,
+  options: { verbose?: boolean } = {},
+): void {
+  const updateScriptPath = getUpdateScriptPath()
+  const updateScript = generateUpdateScript()
+  fs.writeFileSync(updateScriptPath, updateScript, { mode: 0o700 })
+
+  const plistPath = writeProjectServiceFiles(project, options)
+  const label = getProjectLabel(project.tenantCode, project.projectCode)
+
+  // Unload first so that updated run.sh / token changes take effect.
+  // Ignore errors — the service may not be loaded yet.
+  try { execSync(`launchctl remove "${label}"`, { stdio: 'pipe' }) } catch { /* not loaded */ }
+
+  try {
+    execSync(`launchctl load "${plistPath}"`, { stdio: 'pipe' })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    logger.warn(t('service.loadWarning', { label: `${label}: ${message}` }))
+    return
+  }
+
+  // Verify the service actually registered after load
+  try {
+    execSync(`launchctl list "${label}"`, { stdio: 'pipe' })
+  } catch {
+    logger.warn(t('service.loadWarning', { label }))
+  }
+}
+
 export class DarwinServiceStrategy implements ServiceStrategy {
   async install(options: ServiceOptions): Promise<void> {
     // Load project list from config
@@ -447,57 +554,13 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       fs.mkdirSync(launchAgentsDir, { recursive: true })
     }
 
-    const servicesDir = getServicesDir()
-    const updateScriptPath = path.join(
-      process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-        ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-        : path.join(os.homedir(), '.ai-support-agent'),
-      'update-and-restart.sh',
-    )
-
-    // Generate update-and-restart.sh
+    const updateScriptPath = getUpdateScriptPath()
     const updateScript = generateUpdateScript()
     fs.writeFileSync(updateScriptPath, updateScript, { mode: 0o700 })
 
     for (const project of projects) {
-      const { tenantCode, projectCode } = project
-      const projectKey = `${tenantCode}-${projectCode.toLowerCase()}`
-      const projectServiceDir = path.join(servicesDir, projectKey)
-      if (!fs.existsSync(projectServiceDir)) {
-        fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
-      }
-
-      const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-      if (!fs.existsSync(projectConfigHostDir)) {
-        fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
-      }
-
-      const wrapperScriptPath = path.join(projectServiceDir, 'run.sh')
-      const wrapperScript = generateWrapperScript({
-        imageName: IMAGE_NAME,
-        tenantCode,
-        projectCode,
-        projectConfigHostDir,
-        projectDir: project.projectDir,
-        token: project.token,
-        apiUrl: project.apiUrl,
-        anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-        claudeCodeOauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
-        verbose: options.verbose,
-        updateScriptPath,
-      })
-      fs.writeFileSync(wrapperScriptPath, wrapperScript, { mode: 0o700 })
-
-      const label = getProjectLabel(tenantCode, projectCode)
-      const plistPath = getProjectPlistPath(tenantCode, projectCode)
-      const projectLogDir = path.join(logDir, projectKey)
-      if (!fs.existsSync(projectLogDir)) {
-        fs.mkdirSync(projectLogDir, { recursive: true })
-      }
-
-      const plist = generateProjectPlist({ label, wrapperScriptPath, logDir: projectLogDir })
-      fs.writeFileSync(plistPath, plist, 'utf-8')
-
+      const { projectCode } = project
+      const plistPath = writeProjectServiceFiles(project, { verbose: options.verbose })
       logger.success(t('service.projectInstalled', { projectCode, path: plistPath }))
     }
 
@@ -534,7 +597,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     let failed = false
     for (const { plistPath } of projectPlists) {
       try {
-        execSync(`launchctl load ${plistPath}`, { stdio: 'pipe' })
+        execSync(`launchctl load "${plistPath}"`, { stdio: 'pipe' })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         logger.error(t('service.startFailed', { message }))
@@ -557,7 +620,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     let failed = false
     for (const { label } of projectPlists) {
       try {
-        execSync(`launchctl remove ${label}`, { stdio: 'pipe' })
+        execSync(`launchctl remove "${label}"`, { stdio: 'pipe' })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         logger.error(t('service.stopFailed', { message }))
@@ -581,11 +644,11 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     for (const { label, plistPath } of projectPlists) {
       try {
         try {
-          execSync(`launchctl remove ${label}`, { stdio: 'pipe' })
+          execSync(`launchctl remove "${label}"`, { stdio: 'pipe' })
         } catch {
           // Service may not be loaded — ignore
         }
-        execSync(`launchctl load ${plistPath}`, { stdio: 'pipe' })
+        execSync(`launchctl load "${plistPath}"`, { stdio: 'pipe' })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         logger.error(t('service.restartFailed', { message }))
@@ -605,22 +668,31 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       return { installed: false, running: false }
     }
 
+    const projects: ProjectStatus[] = []
     let anyRunning = false
     let firstPid: number | undefined
 
     for (const { label } of projectPlists) {
+      // Extract projectCode from label: com.ai-support-agent.cli.{tenant}.{project}
+      const parts = label.split('.')
+      const projectCode = parts.slice(4).join('.').toUpperCase().replace(/-/g, '_')
+      let running = false
+      let pid: number | undefined
       try {
-        const output = execSync(`launchctl list ${label}`, { stdio: 'pipe' }).toString()
+        const output = execSync(`launchctl list "${label}"`, { stdio: 'pipe' }).toString()
         const pidMatch = output.match(/"PID"\s*=\s*(\d+)/)
         if (pidMatch) {
+          running = true
+          pid = parseInt(pidMatch[1], 10)
           anyRunning = true
-          if (!firstPid) firstPid = parseInt(pidMatch[1], 10)
+          if (!firstPid) firstPid = pid
         }
       } catch {
-        // Not loaded
+        // Not loaded — running stays false
       }
+      projects.push({ label, projectCode, running, pid })
     }
 
-    return { installed: true, running: anyRunning, pid: firstPid, logDir }
+    return { installed: true, running: anyRunning, pid: firstPid, logDir, projects }
   }
 }

@@ -6,11 +6,15 @@ import { addProject } from '../../src/config-manager'
 import { DEFAULT_LOGIN_URL } from '../../src/constants'
 import { logger } from '../../src/logger'
 import { registerAuthCommands } from '../../src/cli/auth-commands'
+import { installAndStartProject } from '../../src/cli/service-command'
 
 jest.mock('../../src/api-client')
 jest.mock('../../src/auth-server')
 jest.mock('../../src/config-manager')
 jest.mock('../../src/logger')
+jest.mock('../../src/cli/service-command', () => ({
+  installAndStartProject: jest.fn(),
+}))
 jest.mock('open', () => ({
   __esModule: true,
   default: jest.fn().mockResolvedValue(undefined),
@@ -19,6 +23,7 @@ jest.mock('open', () => ({
 const mockedStartAuthServer = startAuthServer as jest.MockedFunction<typeof startAuthServer>
 const mockedAddProject = addProject as jest.MockedFunction<typeof addProject>
 const MockedApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
+const mockedInstallAndStartProject = installAndStartProject as jest.MockedFunction<typeof installAndStartProject>
 
 describe('cli/auth-commands', () => {
   let exitSpy: jest.Spied<typeof process.exit>
@@ -110,6 +115,12 @@ describe('cli/auth-commands', () => {
       expect(MockedApiClient).toHaveBeenCalledWith('http://my-api', 'my-token')
       expect(mockGetProjectConfig).toHaveBeenCalled()
       expect(mockedAddProject).toHaveBeenCalledWith({
+        tenantCode: expect.any(String),
+        projectCode: 'RESOLVED_01',
+        token: 'my-token',
+        apiUrl: 'http://my-api',
+      })
+      expect(mockedInstallAndStartProject).toHaveBeenCalledWith({
         tenantCode: expect.any(String),
         projectCode: 'RESOLVED_01',
         token: 'my-token',
@@ -214,7 +225,43 @@ describe('cli/auth-commands', () => {
         token: 'auth-token',
         apiUrl: 'http://callback-api',
       })
+      expect(mockedInstallAndStartProject).toHaveBeenCalledWith({
+        tenantCode: expect.any(String),
+        projectCode: 'my-proj',
+        token: 'auth-token',
+        apiUrl: 'http://callback-api',
+      })
       expect(logger.success).toHaveBeenCalled()
+    })
+
+    it('should succeed even when installAndStartProject throws', async () => {
+      mockedInstallAndStartProject.mockImplementation(() => {
+        throw new Error('launchctl failed')
+      })
+      mockedStartAuthServer.mockResolvedValue({
+        url: 'http://localhost:12345',
+        nonce: 'test-nonce',
+        waitForCallback: jest.fn().mockResolvedValue({
+          token: 'auth-token',
+          apiUrl: 'http://callback-api',
+          projectCode: 'my-proj',
+          tenantCode: 'mbc',
+        }),
+        stop: jest.fn(),
+      })
+
+      const program = new Command()
+        .exitOverride()
+        .configureOutput({ writeOut: () => {}, writeErr: () => {} })
+
+      registerAuthCommands(program)
+
+      const loginCmd = program.commands.find((cmd) => cmd.name() === 'login')!
+      await loginCmd.parseAsync(['node', 'test', '--url', 'http://my-web'])
+
+      expect(mockedAddProject).toHaveBeenCalled()
+      expect(logger.success).toHaveBeenCalled()
+      expect(logger.warn).toHaveBeenCalled()
     })
 
     it('should exit with error when auth server fails', async () => {
