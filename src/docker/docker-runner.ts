@@ -14,7 +14,7 @@ import { writePidFile, isAlreadyRunning, readPidFile } from '../pid-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
-import { IMAGE_NAME, checkDockerAvailable } from './docker-utils'
+import { IMAGE_NAME, checkDockerAvailable, getDockerPath } from './docker-utils'
 import { ensureImage } from './version-manager'
 import { syncDockerfileToConfigDir } from './dockerfile-sync'
 import { buildVolumeMounts, buildEnvArgs } from './volume-mount-builder'
@@ -185,7 +185,7 @@ export function runInDocker(opts: DockerRunOptions): void {
     ...containerArgs,
   ]
 
-  const child = spawn('docker', dockerArgs, {
+  const child = spawn(getDockerPath(), dockerArgs, {
     stdio: 'inherit',
   })
 
