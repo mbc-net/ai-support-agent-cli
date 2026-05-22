@@ -1728,7 +1728,7 @@ describe('ProjectAgent', () => {
           expect.stringContaining('0.0.2'),
           'utf-8',
         )
-        expect(mockExit).toHaveBeenCalledWith(0)
+        expect(mockExit).toHaveBeenCalledWith(42)
       } finally {
         mockExit.mockRestore()
         Object.defineProperty(process, 'send', { value: originalSend, writable: true, configurable: true })
@@ -2099,7 +2099,7 @@ describe('ProjectAgent', () => {
         expect(logger.warn).toHaveBeenCalledWith(
           expect.stringContaining('Failed to write update-version.json'),
         )
-        expect(mockExit).toHaveBeenCalledWith(0)
+        expect(mockExit).toHaveBeenCalledWith(42)
       } finally {
         mockExit.mockRestore()
         Object.defineProperty(process, 'send', { value: originalSend, writable: true, configurable: true })
