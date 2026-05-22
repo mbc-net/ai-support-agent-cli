@@ -18,7 +18,7 @@ import { removePidFile } from '../pid-manager'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
 import type { DockerRunOptions } from './docker-runner'
-import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, resolveImageTag } from './docker-utils'
+import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, resolveImageTag, getDockerPath } from './docker-utils'
 import { buildProjectVolumeMounts } from './volume-mount-builder'
 import { buildDevMounts } from './docker-utils'
 import { buildProjectImage } from './project-image-builder'
@@ -252,7 +252,7 @@ export class DockerSupervisor {
     const colorReset = '\x1b[0m'
     const logPrefix = `${projectColor}[${key}]${colorReset} `
     logger.info(`[docker] Starting container for project: ${key}`)
-    const child = spawn('docker', dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(getDockerPath(), dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
 
     let resolveClosed!: () => void
     const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve })
@@ -390,7 +390,7 @@ export class DockerSupervisor {
             const containerId = fs.readFileSync(handle.cidFile, 'utf-8').trim()
             /* istanbul ignore next */
             if (containerId) {
-              spawn('docker', ['stop', '--time', '5', containerId], { stdio: 'ignore' })
+              spawn(getDockerPath(), ['stop', '--time', '5', containerId], { stdio: 'ignore' })
               stopped = true
             }
           }

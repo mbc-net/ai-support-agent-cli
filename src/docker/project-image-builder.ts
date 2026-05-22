@@ -11,7 +11,7 @@ import { getProjectImageTag } from './dockerfile-path'
 import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { ApiClient } from '../api-client'
 import { buildDockerEnv } from './dockerfile-generator'
-import { makeSessionId } from './docker-utils'
+import { makeSessionId, getDockerPath } from './docker-utils'
 
 /** Maximum total log size kept in memory per session (2 MB). Older content is discarded. */
 const MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024
@@ -64,7 +64,7 @@ export async function buildProjectImage(
 
   let buildError: Error | undefined
   await new Promise<void>((resolve, reject) => {
-    const proc = spawn('docker', [
+    const proc = spawn(getDockerPath(), [
       'build', '-t', imageTag, '--pull=false', '--progress=plain',
       '--build-arg', `AGENT_VERSION=${baseVersion}`,
       '-f', dockerfilePath, contextDir,

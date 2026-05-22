@@ -5,6 +5,9 @@
  */
 
 import { execFileSync } from 'child_process'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 
 import { resolveDockerfile } from './dockerfile-path'
 import { AGENT_VERSION } from '../constants'
@@ -13,9 +16,60 @@ import { logger } from '../logger'
 
 export const IMAGE_NAME = 'ai-support-agent'
 
+/**
+ * Resolve the docker binary path, searching common locations when `docker` is
+ * not on the current PATH (e.g. when launched from a launchd service or a
+ * non-interactive SSH session that does not load the user shell profile).
+ */
+function resolveDockerPath(): string {
+  // Check well-known locations when docker is not on PATH
+  const candidates = [
+    '/usr/local/bin/docker',
+    '/opt/homebrew/bin/docker',
+    path.join(os.homedir(), '.docker', 'bin', 'docker'),
+    '/Applications/Docker.app/Contents/Resources/bin/docker',
+  ]
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate
+    }
+  }
+  // Fall back to PATH lookup — works when shell profile is sourced
+  return 'docker'
+}
+
+/**
+ * Set DOCKER_HOST to the user's Docker Desktop socket when not already set,
+ * so that docker commands work even in environments without the default
+ * /var/run/docker.sock (e.g. Docker Desktop on macOS).
+ */
+function ensureDockerHost(): void {
+  if (process.env.DOCKER_HOST) return
+  const macSocket = path.join(os.homedir(), '.docker', 'run', 'docker.sock')
+  if (fs.existsSync(macSocket)) {
+    process.env.DOCKER_HOST = `unix://${macSocket}`
+  }
+}
+
+let _dockerPath: string | undefined
+
+export function getDockerPath(): string {
+  if (!_dockerPath) {
+    ensureDockerHost()
+    _dockerPath = resolveDockerPath()
+  }
+  return _dockerPath
+}
+
+/** Reset the cached docker path and DOCKER_HOST — for use in tests only. */
+export function resetDockerPathCache(): void {
+  _dockerPath = undefined
+  delete process.env.DOCKER_HOST
+}
+
 export function checkDockerAvailable(): boolean {
   try {
-    execFileSync('docker', ['info'], { stdio: 'ignore' })
+    execFileSync(getDockerPath(), ['info'], { stdio: 'ignore' })
     return true
   } catch {
     return false
@@ -24,7 +78,7 @@ export function checkDockerAvailable(): boolean {
 
 export function imageExists(version: string): boolean {
   try {
-    execFileSync('docker', ['image', 'inspect', `${IMAGE_NAME}:${version}`], { stdio: 'ignore' })
+    execFileSync(getDockerPath(), ['image', 'inspect', `${IMAGE_NAME}:${version}`], { stdio: 'ignore' })
     return true
   } catch {
     return false
@@ -38,7 +92,7 @@ export function buildImage(version: string, customDockerfile?: string): void {
     logger.info(t('docker.usingCustomDockerfile', { path: dockerfilePath }))
   }
   execFileSync(
-    'docker',
+    getDockerPath(),
     ['build', '-t', `${IMAGE_NAME}:${version}`, '--pull=false', '--build-arg', `AGENT_VERSION=${version}`, '-f', dockerfilePath, contextDir],
     { stdio: 'inherit' },
   )
@@ -64,7 +118,7 @@ export function buildContainerName(tenantCode: string, projectCode: string, agen
  */
 export function removeStaleContainer(containerName: string): void {
   try {
-    execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore' })
+    execFileSync(getDockerPath(), ['rm', '-f', containerName], { stdio: 'ignore' })
   } catch {
     // Container does not exist or docker rm failed — ignore
   }
@@ -137,7 +191,7 @@ export function makeSessionId(): string {
 /** Check if a project-specific image tag exists; fall back to base image tag. */
 export function resolveImageTag(projectTag: string, baseTag: string): string {
   try {
-    execFileSync('docker', ['image', 'inspect', projectTag], { stdio: 'ignore' })
+    execFileSync(getDockerPath(), ['image', 'inspect', projectTag], { stdio: 'ignore' })
     return projectTag
   } catch /* istanbul ignore next */ {
     return baseTag
