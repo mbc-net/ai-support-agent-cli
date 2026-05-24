@@ -585,7 +585,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     // Detect sanitize() collisions where two valid projectCodes map to the
     // same plist label (e.g. `MBC_01` and `MBC-01` → `com.ai-support-agent.cli.<t>.mbc-01`).
     // Shared helper guarantees identical semantics with the Linux wrapper.
-    const collisions = detectInstallCollisions(projects, getProjectLabel)
+    const { collisions } = detectInstallCollisions(projects, getProjectLabel)
     // Dedup collision/duplicate error logs so an N-times-listed entry
     // doesn't produce N identical error lines.
     const reportedCollisionLabels = new Set<string>()
@@ -594,20 +594,26 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     let failedCount = 0
     for (const project of projects) {
       const { projectCode } = project
-      const label = getProjectLabel(project.tenantCode, projectCode)
       const fqn = `${project.tenantCode}/${projectCode}`
       const collision = collisions.get(fqn)
       if (collision) {
-        if (!reportedCollisionLabels.has(collision.name)) {
-          const messageKey = collision.others.length === 0
-            ? 'service.projectDuplicateEntry'
-            : 'service.projectUnitNameCollision'
+        // Pick the more actionable message: literal duplicates ask the
+        // user to "remove the duplicate row"; sanitize-collisions ask
+        // them to "rename one of the projectCodes". A single config can
+        // exhibit BOTH at once; dedup per (label, messageKey) tuple so
+        // both hints fire and the order of config rows doesn't decide
+        // which one the user sees. Mirror of the Linux wrapper.
+        const messageKey = collision.isDuplicate
+          ? 'service.projectDuplicateEntry'
+          : 'service.projectUnitNameCollision'
+        const dedupKey = `${collision.name}\x00${messageKey}`
+        if (!reportedCollisionLabels.has(dedupKey)) {
           logger.error(t(messageKey, {
             projectCode,
             unitName: collision.name,
             others: collision.others.join(', '),
           }))
-          reportedCollisionLabels.add(collision.name)
+          reportedCollisionLabels.add(dedupKey)
         }
         failedCount += 1
         continue
@@ -624,10 +630,6 @@ export class DarwinServiceStrategy implements ServiceStrategy {
         logger.error(t('service.projectInstallFailed', { projectCode, message }))
         failedCount += 1
       }
-      // Suppress unused-var lint — `label` is reserved for future use
-      // (e.g. richer success message). The collision lookup above already
-      // uses it via the `getProjectLabel` call.
-      void label
     }
     const anyInstallFailed = failedCount > 0
 

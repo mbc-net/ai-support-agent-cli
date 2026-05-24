@@ -52,6 +52,31 @@ export interface CollisionInfo {
   name: string
   /** Other configured `<tenantCode>/<projectCode>` tuples mapping to the same name. */
   others: string[]
+  /**
+   * True when this FQN appears more than once in config (literal
+   * duplicate entry). The caller should surface a different message in
+   * that case ("remove the duplicate row" vs. "rename one of the codes").
+   * `isDuplicate` and `others.length > 0` can BOTH be true when a config
+   * contains both a literal duplicate AND a sanitize-collision sibling
+   * (e.g. `[mbc/MBC_01, mbc/MBC_01, mbc/MBC-01]`).
+   */
+  isDuplicate: boolean
+}
+
+export interface CollisionDetectionResult {
+  /**
+   * FQN (`<tenantCode>/<projectCode>`) → sanitized unit-name / plist-label
+   * for every project that passed `isProjectCodeSafe`. Callers that need
+   * the sanitized name later (orphan-protection sets, unit-file paths)
+   * can read it from here instead of recomputing via `nameFn`.
+   */
+  names: Map<string, string>
+  /**
+   * FQN → CollisionInfo for projects that conflict with another
+   * configured entry (sanitize-collision and/or literal duplicate).
+   * Projects without conflict are absent from this map.
+   */
+  collisions: Map<string, CollisionInfo>
 }
 
 /**
@@ -59,13 +84,13 @@ export interface CollisionInfo {
  *
  * `nameFn` derives the per-platform unit-name / plist-label from
  * (tenantCode, projectCode). Codes that fail `isProjectCodeSafe` are
- * skipped (they're refused independently by writeProjectServiceFiles, and
- * including them here would falsely collide with a valid sibling like
- * `MBC;01` + `MBC-01`).
+ * skipped from collision counting (they're refused independently by
+ * `writeProjectServiceFiles`, and including them here would falsely
+ * collide with a valid sibling like `MBC;01` + `MBC-01`).
  *
- * Returns a Map keyed by FQN (`<tenant>/<project>`) where each value is
- * `CollisionInfo` describing the conflict. Projects without a collision
- * are absent from the map (caller iterates `projects` and probes by FQN).
+ * The returned `names` map covers ALL projects that passed validation
+ * (single source of truth — callers should not recompute via `nameFn`
+ * again). The `collisions` map only includes FQNs with a conflict.
  *
  * Shared between linux-service and darwin-service to keep the two
  * platforms from drifting on collision semantics.
@@ -73,27 +98,36 @@ export interface CollisionInfo {
 export function detectInstallCollisions(
   projects: ProjectRegistration[],
   nameFn: (tenantCode: string, projectCode: string) => string,
-): Map<string, CollisionInfo> {
+): CollisionDetectionResult {
+  const names = new Map<string, string>()
   // First pass: bucket FQN tuples by sanitized name, skipping unsafe codes.
+  // Keep duplicate FQNs in the array so we can detect literal duplicates
+  // (`fqns.length > uniqueFqns.length`) independently of sanitize-collisions.
   const nameToFqns = new Map<string, string[]>()
   for (const project of projects) {
     if (!isProjectCodeSafe(project.tenantCode) || !isProjectCodeSafe(project.projectCode)) continue
     const name = nameFn(project.tenantCode, project.projectCode)
     const fqn = `${project.tenantCode}/${project.projectCode}`
+    names.set(fqn, name)
     const existing = nameToFqns.get(name)
     if (existing) existing.push(fqn)
     else nameToFqns.set(name, [fqn])
   }
-  // Second pass: project FQN → CollisionInfo for entries with >1 mapping.
+  // Second pass: report a CollisionInfo entry for any FQN involved in a
+  // sanitize-collision OR a literal duplicate.
   const collisions = new Map<string, CollisionInfo>()
   for (const [name, fqns] of nameToFqns) {
-    if (fqns.length <= 1) continue
-    // Deduplicate per-fqn: each unique FQN gets one CollisionInfo entry.
     const uniqueFqns = Array.from(new Set(fqns))
+    // No conflict at all: one entry, listed once.
+    if (fqns.length === 1) continue
+    // Count occurrences per FQN to detect literal duplicates.
+    const fqnCounts = new Map<string, number>()
+    for (const fqn of fqns) fqnCounts.set(fqn, (fqnCounts.get(fqn) ?? 0) + 1)
     for (const fqn of uniqueFqns) {
       const others = uniqueFqns.filter((f) => f !== fqn)
-      collisions.set(fqn, { name, others })
+      const isDuplicate = (fqnCounts.get(fqn) ?? 0) > 1
+      collisions.set(fqn, { name, others, isDuplicate })
     }
   }
-  return collisions
+  return { names, collisions }
 }

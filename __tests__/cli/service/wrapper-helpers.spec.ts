@@ -187,16 +187,19 @@ describe('detectInstallCollisions', () => {
   })
   const naiveName = (t: string, p: string) => `${t.toLowerCase()}-${p.toLowerCase().replace(/_/g, '-')}`
 
-  it('returns an empty map when no projects collide', () => {
-    const collisions = detectInstallCollisions(
+  it('returns an empty collisions map and a names map covering every safe project when none collide', () => {
+    const { names, collisions } = detectInstallCollisions(
       [proj('mbc', 'MBC_01'), proj('mbc', 'MBC_02')],
       naiveName,
     )
     expect(collisions.size).toBe(0)
+    // names map is the canonical fqn → sanitized-name source of truth.
+    expect(names.get('mbc/MBC_01')).toBe('mbc-mbc-01')
+    expect(names.get('mbc/MBC_02')).toBe('mbc-mbc-02')
   })
 
-  it('detects sanitize collisions across distinct projects (others is non-empty)', () => {
-    const collisions = detectInstallCollisions(
+  it('detects sanitize collisions across distinct projects (others is non-empty, isDuplicate false)', () => {
+    const { collisions } = detectInstallCollisions(
       [proj('mbc', 'MBC_01'), proj('mbc', 'MBC-01')],
       naiveName,
     )
@@ -204,36 +207,58 @@ describe('detectInstallCollisions', () => {
     const a = collisions.get('mbc/MBC_01')!
     expect(a.name).toBe('mbc-mbc-01')
     expect(a.others).toEqual(['mbc/MBC-01'])
+    expect(a.isDuplicate).toBe(false)
     const b = collisions.get('mbc/MBC-01')!
-    expect(b.name).toBe('mbc-mbc-01')
     expect(b.others).toEqual(['mbc/MBC_01'])
+    expect(b.isDuplicate).toBe(false)
   })
 
-  it('returns others=[] for literal duplicates (same tenant+project pair listed twice)', () => {
-    const collisions = detectInstallCollisions(
+  it('flags isDuplicate=true (and others=[]) for literal duplicates (same tenant+project pair listed twice)', () => {
+    const { collisions } = detectInstallCollisions(
       [proj('mbc', 'MBC_01'), proj('mbc', 'MBC_01')],
       naiveName,
     )
-    // Both entries map to the same FQN; collisions map has one entry with
-    // others=[] so caller can route to projectDuplicateEntry message.
     expect(collisions.size).toBe(1)
     const info = collisions.get('mbc/MBC_01')!
     expect(info.others).toEqual([])
+    expect(info.isDuplicate).toBe(true)
+  })
+
+  it('flags BOTH isDuplicate=true AND others=non-empty when the same fqn is doubled alongside a sanitize-colliding sibling', () => {
+    // Regression for AA1: [mbc/MBC_01, mbc/MBC_01, mbc/MBC-01].
+    // Previously the helper only exposed `others.length === 0` as the
+    // duplicate signal, so this mixed case routed to the generic
+    // collision message and silently swallowed the duplicate-row hint.
+    // The new isDuplicate flag surfaces it cleanly.
+    const { collisions } = detectInstallCollisions(
+      [proj('mbc', 'MBC_01'), proj('mbc', 'MBC_01'), proj('mbc', 'MBC-01')],
+      naiveName,
+    )
+    const dup = collisions.get('mbc/MBC_01')!
+    expect(dup.isDuplicate).toBe(true)
+    expect(dup.others).toEqual(['mbc/MBC-01'])
+    const other = collisions.get('mbc/MBC-01')!
+    expect(other.isDuplicate).toBe(false)
+    expect(other.others).toEqual(['mbc/MBC_01'])
   })
 
   it('skips entries with invalid (non-safe) tenant or project codes', () => {
     // `MBC;01` would sanitize-collide with `MBC-01` if naively counted.
     // The helper must skip the invalid sibling so the valid one is NOT
     // refused for a fake collision.
-    const collisions = detectInstallCollisions(
+    const { names, collisions } = detectInstallCollisions(
       [proj('mbc', 'MBC;01'), proj('mbc', 'MBC-01')],
       naiveName,
     )
     expect(collisions.size).toBe(0)
+    // names map also excludes the invalid entry — caller can use it as a
+    // safe-only iteration set.
+    expect(names.has('mbc/MBC;01')).toBe(false)
+    expect(names.get('mbc/MBC-01')).toBe('mbc-mbc-01')
   })
 
-  it('handles 3+ entries on the same sanitized name', () => {
-    const collisions = detectInstallCollisions(
+  it('handles 3+ distinct entries on the same sanitized name', () => {
+    const { collisions } = detectInstallCollisions(
       [proj('mbc', 'MBC_01'), proj('mbc', 'MBC-01'), proj('mbc', 'mbc-01')],
       naiveName,
     )
@@ -241,5 +266,6 @@ describe('detectInstallCollisions', () => {
     // Each entry's `others` contains the other two FQNs (sorted not guaranteed).
     const a = collisions.get('mbc/MBC_01')!
     expect(new Set(a.others)).toEqual(new Set(['mbc/MBC-01', 'mbc/mbc-01']))
+    expect(a.isDuplicate).toBe(false)
   })
 })

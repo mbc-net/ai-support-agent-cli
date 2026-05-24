@@ -1003,6 +1003,56 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
       )
     })
 
+    it('should emit BOTH duplicate and collision hints when a config has duplicates AND a sanitize-colliding sibling', () => {
+      // Regression for AA1 + BB1: when config has `[MBC_01, MBC_01, MBC-01]`,
+      // the user needs to know about TWO problems: the duplicate row
+      // (cheap fix: remove it) and the sanitize-collision sibling (rename
+      // one of the codes). Both messages must fire, regardless of which
+      // config row appears first.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't3', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectDuplicateEntry'),
+      )
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
+
+    it('should emit BOTH hints even when the sanitize-colliding sibling appears FIRST in config (order-independent)', () => {
+      // BB1: previously the dedup keyed on unit-name only, so config row
+      // order decided which hint fired. With (name, messageKey) dedup
+      // both still surface regardless of order.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't3', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectDuplicateEntry'),
+      )
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
+
     it('should log a partialInstallSummary warning when at least one project fails', () => {
       // Sanity: when ANY project install fails, a single summary line at
       // the end tells operators not to trust the surrounding success logs.

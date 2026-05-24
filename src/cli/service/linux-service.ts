@@ -634,23 +634,30 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     const updateScript = generateUpdateScript()
     writeFileEnsuringMode(updateScriptPath, updateScript, 0o700)
 
+    // Detect sanitize() collisions where two distinct valid codes
+    // (e.g. `MBC_01` and `MBC-01`) map to the same unit name and would
+    // silently overwrite each other. The helper also returns a `names` map
+    // (fqn → sanitized unit name) so we don't recompute via sanitize()
+    // multiple times per project — keeping the orphan-protection set and
+    // the per-project loop in sync with a single source of truth.
+    const { names: safeUnitNames, collisions } = detectInstallCollisions(projects, getProjectUnitName)
+
     // Pre-compute the expected unit names from the INPUT config (before any
     // validation), so a project whose install fails this run is NOT treated
     // as an orphan and accidentally disabled / unlinked. Failure modes:
     //   - invalid projectCode (rejected by assertProjectCodeIsSafe)
     //   - filesystem error during write
     // For both, the previously-installed unit on disk should stay in place.
-    // `getProjectUnitName` uses sanitize() (pure regex replace) and cannot
-    // throw on string input, so no defensive try/catch is needed.
+    // We include INVALID codes too (via getProjectUnitName, which sanitize()
+    // tolerates) so a typo'd entry's prior unit is still protected.
     const expectedUnitNames = new Set<string>()
     for (const project of projects) {
-      expectedUnitNames.add(getProjectUnitName(project.tenantCode, project.projectCode))
+      const fqn = `${project.tenantCode}/${project.projectCode}`
+      expectedUnitNames.add(
+        safeUnitNames.get(fqn) ?? getProjectUnitName(project.tenantCode, project.projectCode),
+      )
     }
-    // Detect sanitize() collisions where two distinct valid codes
-    // (e.g. `MBC_01` and `MBC-01`) map to the same unit name and would
-    // silently overwrite each other. Shared helper guarantees identical
-    // semantics between linux and darwin install paths.
-    const collisions = detectInstallCollisions(projects, getProjectUnitName)
+
     // Track which colliding unit-names we've already reported so the same
     // duplicate/collision error doesn't log N times for an N-times-listed
     // entry.
@@ -659,25 +666,31 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
     let failedCount = 0
     for (const project of projects) {
-      const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
       const fqn = `${project.tenantCode}/${project.projectCode}`
       // Refuse to install when this project shares its sanitized unit name
       // with another configured project — we can't tell which one should
       // win, and last-write would silently lose the first.
       const collision = collisions.get(fqn)
       if (collision) {
-        if (!reportedCollisionNames.has(collision.name)) {
-          // `others` is empty when the same `<tenant>/<project>` tuple is
-          // listed twice in config (true duplicate). Use the clearer key.
-          const messageKey = collision.others.length === 0
-            ? 'service.projectDuplicateEntry'
-            : 'service.projectUnitNameCollision'
+        // Pick the more actionable message: literal duplicates ask the
+        // user to "remove the duplicate row"; sanitize-collisions ask
+        // them to "rename one of the projectCodes". A single config can
+        // exhibit BOTH at once (the duplicate row AND a sibling that
+        // collides); when that happens we want both hints to fire — so
+        // dedup is per (unit-name, messageKey) tuple, not just unit-name.
+        // Otherwise the row-order of config would silently decide which
+        // hint the user sees.
+        const messageKey = collision.isDuplicate
+          ? 'service.projectDuplicateEntry'
+          : 'service.projectUnitNameCollision'
+        const dedupKey = `${collision.name}\x00${messageKey}`
+        if (!reportedCollisionNames.has(dedupKey)) {
           logger.error(t(messageKey, {
             projectCode: project.projectCode,
             unitName: collision.name,
             others: collision.others.join(', '),
           }))
-          reportedCollisionNames.add(collision.name)
+          reportedCollisionNames.add(dedupKey)
         }
         failedCount += 1
         continue
@@ -689,6 +702,13 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       // every other project.
       try {
         const unitPath = writeProjectServiceFiles(project, { verbose: options.verbose })
+        // safeUnitNames is the single source of truth for valid codes;
+        // fall back to recomputation only on the impossible-by-contract
+        // path where safeUnitNames is missing the fqn (defensive — should
+        // not happen because writeProjectServiceFiles asserts the codes
+        // first).
+        const unitName = safeUnitNames.get(fqn)
+          ?? getProjectUnitName(project.tenantCode, project.projectCode)
         writtenUnits.push({
           projectCode: project.projectCode,
           unitPath,

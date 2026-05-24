@@ -928,6 +928,25 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
       )
     })
 
+    it('should emit BOTH duplicate and collision hints when a config has duplicates AND a sanitize-colliding sibling', async () => {
+      // Darwin mirror of the linux BB1 test.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't3', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectDuplicateEntry'),
+      )
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
+
     it('should suppress the start hint and log lines when ALL projects fail (no plists written)', async () => {
       // Z1 regression: if every project is refused, the post-loop info
       // hints (loadHintMulti, logDir, noLogRotation) used to fire and
@@ -964,6 +983,29 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
           && (call[0] as string).includes('service.projectDuplicateEntry'),
       )
       expect(dupCalls).toHaveLength(1)
+    })
+
+    it('should include failed/total/succeeded counts in the partialInstallSummary message', async () => {
+      // Coverage parity with the Linux test. Guards against a refactor
+      // that drops the count args on Darwin only.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_03', token: 't3', apiUrl: 'https://api' },
+      ])
+
+      const tMod = jest.requireMock('../../../src/i18n') as { t: jest.Mock }
+      const tSpy = jest.spyOn(tMod, 't')
+
+      await strategy.install({})
+
+      expect(tSpy).toHaveBeenCalledWith('service.partialInstallSummary', expect.objectContaining({
+        failed: '1',
+        total: '3',
+        succeeded: '2',
+      }))
+      tSpy.mockRestore()
     })
   })
 
