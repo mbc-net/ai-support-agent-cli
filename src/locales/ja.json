@@ -214,6 +214,7 @@
   "service.restarted": "サービスを再起動しました。",
   "service.restartFailed": "サービスの再起動に失敗しました: {{message}}",
   "service.status.notInstalled": "サービスはインストールされていません。",
+  "service.systemUnitDetected": "システムスコープの systemd ユニットを検出しました: {{path}}。本 CLI が管理するのは ~/.config/systemd/user 配下のユーザースコープのみで、システムスコープは管理できません。両方を同時に動かすとコンテナが重複起動します。`sudo rm {{path}}` と `sudo systemctl daemon-reload` で不要なユニットを削除してから、`ai-support-agent service install` で公式のユーザースコープサービスをセットアップしてください。",
   "service.status.running": "サービスは実行中です（PID: {{pid}}）。",
   "service.status.stopped": "サービスはインストール済みですが停止中です。",
   "service.status.logHint": "ログ:\n  stdout: {{outLog}}\n  stderr: {{errLog}}",
