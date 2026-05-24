@@ -114,6 +114,32 @@ export function getAllProjectUnits(): Array<{ unitName: string; unitPath: string
   return results
 }
 
+/**
+ * Detect ai-support-agent unit files manually placed under /etc/systemd/system/.
+ *
+ * The CLI only manages user-scope units (~/.config/systemd/user/). System-scope
+ * units have to be created out-of-band (typically `sudo cp` by an operator) and
+ * the CLI cannot manage them — but it can still warn the user that a stray
+ * unit exists, since running both at the same time creates duplicate Docker
+ * containers and confusing "not installed" diagnostics from `service status`.
+ *
+ * Returns the absolute paths of matching unit files. Returns an empty list
+ * when the directory is unreadable (e.g. permission denied on a hardened host).
+ */
+export function detectSystemSystemdUnits(): string[] {
+  const systemDir = '/etc/systemd/system'
+  const prefix = SERVICE_PREFIX
+  try {
+    const files = fs.readdirSync(systemDir)
+    return files
+      .filter((f) => f.startsWith(prefix) && f.endsWith('.service'))
+      .map((f) => path.join(systemDir, f))
+  } catch {
+    // Directory missing or permission denied — nothing to report.
+    return []
+  }
+}
+
 /** Returns the host-side per-project config dir (mirrors what docker-runner uses) */
 function getProjectConfigHostDir(tenantCode: string, projectCode: string): string {
   const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
@@ -905,6 +931,15 @@ export class LinuxServiceStrategy implements ServiceStrategy {
   status(): ServiceStatus {
     const projectUnits = getAllProjectUnits()
     const logDir = getLogDir()
+
+    // Warn about stray system-scope units that the CLI cannot manage. Running
+    // these alongside user units leads to duplicate Docker containers and the
+    // misleading "Service is not installed" diagnostic. The check is best
+    // effort: a permission-denied read is treated as "no stray units found".
+    const strayUnits = detectSystemSystemdUnits()
+    for (const unitPath of strayUnits) {
+      logger.warn(t('service.systemUnitDetected', { path: unitPath }))
+    }
 
     if (projectUnits.length === 0) {
       return { installed: false, running: false }
