@@ -78,6 +78,20 @@ jest.mock('../../src/logger', () => ({
 jest.mock('../../src/update-checker', () => ({
   reExecProcess: jest.fn(),
   performUpdate: jest.fn().mockResolvedValue({ success: true }),
+  detectChannelFromVersion: jest.fn().mockReturnValue('latest'),
+}))
+
+jest.mock('../../src/auto-updater', () => ({
+  startAutoUpdater: jest.fn().mockReturnValue({ stop: jest.fn() }),
+}))
+
+jest.mock('../../src/system-info', () => ({
+  getSystemInfo: jest.fn(() => ({ platform: 'linux', arch: 'x64' })),
+}))
+
+jest.mock('../../src/cli/validators', () => ({
+  validateUpdateChannel: jest.fn((channel?: string) => channel),
+  parseIntervalOrExit: jest.fn((value?: string | number) => Number(value ?? 0)),
 }))
 
 jest.mock('../../src/pid-manager', () => ({

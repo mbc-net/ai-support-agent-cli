@@ -214,6 +214,7 @@
   "service.restarted": "Service restarted successfully.",
   "service.restartFailed": "Failed to restart service: {{message}}",
   "service.status.notInstalled": "Service is not installed.",
+  "service.systemUnitDetected": "A system-scope systemd unit was detected at {{path}}. The CLI only manages user-scope units under ~/.config/systemd/user and cannot manage system-scope units. Running both at once causes duplicate containers. Remove the stray unit with `sudo rm {{path}}` and `sudo systemctl daemon-reload`, then use `ai-support-agent service install` to set up the official user-scope service.",
   "service.status.running": "Service is running (PID: {{pid}}).",
   "service.status.stopped": "Service is installed but not running.",
   "service.status.logHint": "Logs:\n  stdout: {{outLog}}\n  stderr: {{errLog}}",
