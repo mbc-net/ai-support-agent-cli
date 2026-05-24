@@ -8,11 +8,14 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { assertProjectCodeIsSafe } from '../cli/service/wrapper-helpers'
 import { getConfigDir, loadConfig } from '../config-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
-import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
+import {
+  assertProjectCodeIsSafe,
+  BLOCKED_PATH_PREFIXES,
+  getSensitiveHomePaths,
+} from '../security'
 import type { ProjectRegistration } from '../types'
 import { toPosixRelative } from './docker-utils'
 

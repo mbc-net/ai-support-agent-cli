@@ -837,6 +837,176 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
       // Two valid projects, one plist each.
       expect(plistCalls).toHaveLength(2)
     })
+
+    it('should refuse to install when two projects sanitize to the same plist label', async () => {
+      // sanitize() inside getProjectLabel collapses `_` and `-` to `-`, so
+      // `MBC_01` and `MBC-01` both produce 'com.ai-support-agent.cli.mbc.mbc-01'.
+      // Without collision detection the second project's writeProjectServiceFiles
+      // would silently overwrite the first's plist.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't2', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+      const plistCalls = mockedFs.writeFileSync.mock.calls.filter(
+        (call) => String(call[0]).endsWith('.plist'),
+      )
+      expect(plistCalls).toHaveLength(0)
+    })
+
+    it('should log partialInstallSummary when at least one project fails via collision (darwin asymmetry fix)', async () => {
+      // Regression: darwin install() used to swallow per-project failures
+      // silently. A wrapping script could not tell that some projects
+      // were refused — orphan-cleanup-skip on Linux communicated this,
+      // but Darwin has no cleanup phase. Now both platforms emit the
+      // same partialInstallSummary warning at the end.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't2', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
+
+    it('should log partialInstallSummary when at least one project fails via invalid code', async () => {
+      // Coverage parity with the Linux throw-path test.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
+
+    it('should NOT log partialInstallSummary when all projects install successfully', async () => {
+      // Negative case — sanity check that the warning is gated.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
+
+    it('should use projectDuplicateEntry message when the same tenant/project pair appears twice', async () => {
+      // True literal duplicate. The collision helper deduplicates FQNs and
+      // returns `others=[]`, which must route to the dedicated duplicate
+      // key instead of the generic collision message rendering empty `()`.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectDuplicateEntry'),
+      )
+      expect(logger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
+
+    it('should emit BOTH duplicate and collision hints when a config has duplicates AND a sanitize-colliding sibling', async () => {
+      // Darwin mirror of the linux BB1 test.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't3', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectDuplicateEntry'),
+      )
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
+
+    it('should suppress the start hint and log lines when ALL projects fail (no plists written)', async () => {
+      // Z1 regression: if every project is refused, the post-loop info
+      // hints (loadHintMulti, logDir, noLogRotation) used to fire and
+      // tell the user to start services that do not exist. Skip them.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't1', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.info).not.toHaveBeenCalledWith('service.loadHintMulti')
+      expect(logger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.logDir'),
+      )
+      expect(logger.info).not.toHaveBeenCalledWith('service.noLogRotation')
+    })
+
+    it('should report only ONE collision error per shared label even when listed many times', async () => {
+      // Z5 regression: an N-times-listed entry used to emit N identical
+      // error lines. The reportedCollisionLabels Set in install() now
+      // deduplicates them.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't3', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      const dupCalls = (logger.error as jest.Mock).mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string'
+          && (call[0] as string).includes('service.projectDuplicateEntry'),
+      )
+      expect(dupCalls).toHaveLength(1)
+    })
+
+    it('should include failed/total/succeeded counts in the partialInstallSummary message', async () => {
+      // Coverage parity with the Linux test. Guards against a refactor
+      // that drops the count args on Darwin only.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_03', token: 't3', apiUrl: 'https://api' },
+      ])
+
+      const tMod = jest.requireMock('../../../src/i18n') as { t: jest.Mock }
+      const tSpy = jest.spyOn(tMod, 't')
+
+      await strategy.install({})
+
+      expect(tSpy).toHaveBeenCalledWith('service.partialInstallSummary', expect.objectContaining({
+        failed: '1',
+        total: '3',
+        succeeded: '2',
+      }))
+      tSpy.mockRestore()
+    })
   })
 
   describe('uninstall', () => {
