@@ -3,7 +3,7 @@ import type { Command } from 'commander'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { DarwinServiceStrategy, generatePlist, installAndStartProject as darwinInstallAndStartProject } from './service/darwin-service'
-import { LinuxServiceStrategy } from './service/linux-service'
+import { LinuxServiceStrategy, installAndStartProject as linuxInstallAndStartProject } from './service/linux-service'
 import type { ServiceStrategy } from './service/types'
 import type { ProjectRegistration } from '../types'
 import { Win32ServiceStrategy } from './service/win32-service'
@@ -192,17 +192,25 @@ export function registerServiceCommands(program: Command): void {
  * Install service files and immediately start a single project.
  * Called automatically after addProject() so users don't need to run
  * install-service manually after registering a token.
- * No-op on non-Darwin platforms where per-project LaunchAgents don't apply.
+ *
+ * Supported platforms:
+ * - darwin: per-project LaunchAgents
+ * - linux: per-project systemd --user units
+ * Other platforms log a hint and skip.
  */
 export function installAndStartProject(
   project: ProjectRegistration,
   options: { verbose?: boolean } = {},
 ): void {
-  if (process.platform !== 'darwin') {
-    logger.info(t('service.autoStartNotSupported'))
+  if (process.platform === 'darwin') {
+    darwinInstallAndStartProject(project, options)
     return
   }
-  darwinInstallAndStartProject(project, options)
+  if (process.platform === 'linux') {
+    linuxInstallAndStartProject(project, options)
+    return
+  }
+  logger.info(t('service.autoStartNotSupported'))
 }
 
 // Re-export for backward compatibility
