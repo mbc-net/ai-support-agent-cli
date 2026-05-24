@@ -371,6 +371,15 @@ describe('generateWrapperScript', () => {
     expect(result).toContain("AI_SUPPORT_AGENT_PROJECT_DIR_MAP='MBC_01=/workspace/projects/MBC_01'")
   })
 
+  it('should fall back to the default project dir when projectDir is empty string (not nullish)', () => {
+    // `??` would keep '' as the source and emit `-v ':/workspace/...:rw'`,
+    // which docker rejects. `||` short-circuits to the default mount.
+    const result = generateWrapperScript({ ...baseOpts, projectDir: '' })
+
+    expect(result).not.toMatch(/-v\s+'?:\/workspace/)
+    expect(result).toContain("'/home/user/.ai-support-agent/projects/mbc/MBC_01:/workspace/projects/MBC_01:rw'")
+  })
+
   it('should shell-quote tokens containing shell metacharacters', () => {
     const result = generateWrapperScript({ ...baseOpts, token: "abc$(rm -rf ~) `id` 'oops'\"" })
 
@@ -1205,6 +1214,44 @@ describe('writeProjectServiceFiles', () => {
     expect(mockedFs.chmodSync).toHaveBeenCalledWith(
       expect.stringContaining('run.sh'),
       0o700,
+    )
+  })
+
+  it('should reject projectCodes that would break PROJECT_DIR_MAP parsing', () => {
+    // ';' is the multi-entry separator; '=' is the key/value separator.
+    // Either one in the projectCode would silently truncate the env map
+    // and silently re-introduce the doubly-nested layout this PR fixes.
+    expect(() => writeProjectServiceFiles({ ...project, projectCode: 'A;B' })).toThrow(
+      /service\.invalidProjectCode/,
+    )
+    expect(() => writeProjectServiceFiles({ ...project, projectCode: 'A=B' })).toThrow(
+      /service\.invalidProjectCode/,
+    )
+  })
+
+  it('should reject tenantCodes containing PROJECT_DIR_MAP separators', () => {
+    expect(() => writeProjectServiceFiles({ ...project, tenantCode: 't;x' })).toThrow(
+      /service\.invalidProjectCode/,
+    )
+  })
+
+  it('should drop project.projectDir when the host path does not exist and fall back to default', () => {
+    // existsSync mocked false → validation drops projectDir → wrapper falls
+    // back to default mount. Without this guard the wrapper would emit a
+    // `-v <missing-path>:/workspace/projects/<code>:rw` line which docker
+    // auto-creates as root-owned and then the --user invocation can't
+    // write into it (the exact failure mode from commit 11cbed1).
+    mockedFs.existsSync.mockReturnValue(false)
+
+    writeProjectServiceFiles({ ...project, projectDir: '/nonexistent/path' })
+
+    const runShCall = mockedFs.writeFileSync.mock.calls.find(
+      (call) => typeof call[0] === 'string' && (call[0] as string).endsWith('run.sh'),
+    )
+    const script = runShCall![1] as string
+    expect(script).not.toContain('/nonexistent/path')
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('service.projectDirMissing'),
     )
   })
 })

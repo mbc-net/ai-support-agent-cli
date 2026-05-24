@@ -10,6 +10,7 @@ import {
   getSensitiveHomePaths,
   resolveAndValidatePath,
   SAFE_ENV_KEYS,
+  validateBindMountPathSync,
   validateCommand,
   validateFilePath,
 } from '../src/security'
@@ -467,6 +468,30 @@ describe('security regression tests', () => {
       // Access to ~/.ssh directory itself should be blocked
       const result = await validateFilePath(path.join(home, '.ssh'))
       expect(result).toContain('Access denied')
+    })
+  })
+
+  describe('validateBindMountPathSync', () => {
+    it('returns null for a safe absolute path', () => {
+      expect(validateBindMountPathSync('/tmp')).toBeNull()
+    })
+
+    it('rejects /etc', () => {
+      const result = validateBindMountPathSync('/etc')
+      expect(result).toContain('Access denied')
+    })
+
+    it('rejects ~/.ssh', () => {
+      const sshPath = path.join(os.homedir(), '.ssh')
+      const result = validateBindMountPathSync(sshPath)
+      expect(result).toContain('Access denied')
+    })
+
+    it('does not throw when realpathSync fails and the path falls back to absolute', () => {
+      // Non-existent path → realpathSync throws → falls back to resolve;
+      // the fallback should still be evaluated against blocked prefixes.
+      expect(validateBindMountPathSync('/nonexistent-path-12345')).toBeNull()
+      expect(validateBindMountPathSync('/etc/nonexistent-subpath')).toContain('Access denied')
     })
   })
 
