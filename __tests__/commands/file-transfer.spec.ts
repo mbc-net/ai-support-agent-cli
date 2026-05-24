@@ -186,8 +186,30 @@ describe('file-transfer', () => {
       expect(mockedCreateWriteStream).toHaveBeenCalledWith('/tmp/project/.chat-files/conv-1/test.txt')
       expect(mockedPipeline).toHaveBeenCalledWith(mockStream, mockWriter)
       expect(result.downloadedPaths).toEqual(['/tmp/project/.chat-files/conv-1/test.txt'])
+      expect(result.imagePaths).toEqual([])
       expect(result.failedCount).toBe(0)
       expect(typeof result.cleanup).toBe('function')
+    })
+
+    it('should separate image files into imagePaths', async () => {
+      const imageFiles: ChatFileInfo[] = [
+        { fileId: 'f1', s3Key: 'key1', filename: 'photo.png', contentType: 'image/png', fileSize: 100 },
+      ]
+      ;(mockClient.getDownloadUrl as jest.Mock).mockResolvedValue({
+        downloadUrl: 'https://s3.example.com/photo.png',
+      })
+
+      const mockStream = new Readable({ read() { this.push(null) } })
+      mockedAxios.get.mockResolvedValue({ data: mockStream })
+      const mockWriter = {} as ReturnType<typeof createWriteStream>
+      mockedCreateWriteStream.mockReturnValue(mockWriter)
+      mockedPipeline.mockResolvedValue(undefined)
+
+      const result = await downloadChatFiles(mockClient, 'agent-1', imageFiles, '/tmp/project', 'conv-1')
+
+      expect(result.imagePaths).toEqual(['/tmp/project/.chat-files/conv-1/photo.png'])
+      expect(result.downloadedPaths).toEqual([])
+      expect(result.failedCount).toBe(0)
     })
 
     it('should sanitize path traversal in filenames', async () => {

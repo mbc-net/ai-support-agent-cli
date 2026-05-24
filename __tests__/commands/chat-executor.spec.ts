@@ -67,6 +67,7 @@ jest.mock('child_process', () => ({
 jest.mock('../../src/commands/file-transfer', () => ({
   downloadChatFiles: jest.fn().mockResolvedValue({
     downloadedPaths: [],
+    imagePaths: [],
     failedCount: 0,
     cleanup: jest.fn(),
   }),
@@ -1820,6 +1821,7 @@ describe('chat-executor', () => {
       const { downloadChatFiles } = require('../../src/commands/file-transfer')
       ;(downloadChatFiles as jest.Mock).mockResolvedValueOnce({
         downloadedPaths: [],
+        imagePaths: [],
         failedCount: 2,
         cleanup: jest.fn(),
       })
@@ -1866,6 +1868,7 @@ describe('chat-executor', () => {
       const { downloadChatFiles } = require('../../src/commands/file-transfer')
       ;(downloadChatFiles as jest.Mock).mockResolvedValueOnce({
         downloadedPaths: ['/mock/project/.chat-files/conv-2/a.txt'],
+        imagePaths: [],
         failedCount: 0,
         cleanup: jest.fn(),
       })
@@ -1905,6 +1908,138 @@ describe('chat-executor', () => {
     })
   })
 
+  describe('downloadAttachments: image vs non-image branching', () => {
+    it('should pass image-only attachments as @path lines without <attached_files>', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { downloadChatFiles } = require('../../src/commands/file-transfer')
+      ;(downloadChatFiles as jest.Mock).mockResolvedValueOnce({
+        downloadedPaths: [],
+        imagePaths: ['/mock/project/.chat-files/conv-img/screenshot.png'],
+        failedCount: 0,
+        cleanup: jest.fn(),
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: {
+          message: 'see attached',
+          files: [
+            { fileId: 'f1', s3Key: 'uploads/f1.png', filename: 'screenshot.png', contentType: 'image/png', fileSize: 100 },
+          ],
+          conversationId: 'conv-img',
+        },
+        commandId: 'cmd-image-only',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectDir: '/mock/project',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('done')))
+      mockProcess.emit('close', 0)
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const args = spawnCall[1] as string[]
+      const finalMessage = args[args.length - 1]
+      expect(finalMessage).toContain('@/mock/project/.chat-files/conv-img/screenshot.png')
+      expect(finalMessage).not.toContain('<attached_files>')
+    })
+
+    it('should pass non-image attachments inside <attached_files> with Read-tool guidance', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { downloadChatFiles } = require('../../src/commands/file-transfer')
+      ;(downloadChatFiles as jest.Mock).mockResolvedValueOnce({
+        downloadedPaths: ['/mock/project/.chat-files/conv-txt/notes.txt'],
+        imagePaths: [],
+        failedCount: 0,
+        cleanup: jest.fn(),
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: {
+          message: 'review',
+          files: [
+            { fileId: 'f1', s3Key: 'uploads/f1.txt', filename: 'notes.txt', contentType: 'text/plain', fileSize: 100 },
+          ],
+          conversationId: 'conv-txt',
+        },
+        commandId: 'cmd-text-only',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectDir: '/mock/project',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('done')))
+      mockProcess.emit('close', 0)
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const args = spawnCall[1] as string[]
+      const finalMessage = args[args.length - 1]
+      expect(finalMessage).toContain('<attached_files>')
+      expect(finalMessage).toContain('/mock/project/.chat-files/conv-txt/notes.txt')
+      expect(finalMessage).toContain('Use the Read tool to read them directly')
+      expect(finalMessage).toContain('do NOT use read_conversation_file')
+      expect(finalMessage).not.toContain('@/mock/project/.chat-files/conv-txt/notes.txt')
+    })
+
+    it('should pass mixed image + non-image attachments with @path block and <attached_files> joined by blank line', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const { downloadChatFiles } = require('../../src/commands/file-transfer')
+      ;(downloadChatFiles as jest.Mock).mockResolvedValueOnce({
+        downloadedPaths: ['/mock/project/.chat-files/conv-mix/notes.txt'],
+        imagePaths: ['/mock/project/.chat-files/conv-mix/diagram.png'],
+        failedCount: 0,
+        cleanup: jest.fn(),
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: {
+          message: 'both attached',
+          files: [
+            { fileId: 'f1', s3Key: 'uploads/f1.png', filename: 'diagram.png', contentType: 'image/png', fileSize: 100 },
+            { fileId: 'f2', s3Key: 'uploads/f2.txt', filename: 'notes.txt', contentType: 'text/plain', fileSize: 200 },
+          ],
+          conversationId: 'conv-mix',
+        },
+        commandId: 'cmd-mixed',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectDir: '/mock/project',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('done')))
+      mockProcess.emit('close', 0)
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const args = spawnCall[1] as string[]
+      const finalMessage = args[args.length - 1]
+      expect(finalMessage).toContain('@/mock/project/.chat-files/conv-mix/diagram.png')
+      expect(finalMessage).toContain('<attached_files>')
+      expect(finalMessage).toContain('/mock/project/.chat-files/conv-mix/notes.txt')
+      // @path 行と <attached_files> ブロックが \n\n で区切られている
+      const idxAtPath = finalMessage.indexOf('@/mock/project/.chat-files/conv-mix/diagram.png')
+      const idxAttached = finalMessage.indexOf('<attached_files>')
+      expect(idxAtPath).toBeLessThan(idxAttached)
+      expect(finalMessage.slice(idxAtPath, idxAttached)).toContain('\n\n')
+    })
+  })
+
 })
 
 // Isolated module tests for sendChunk JSON parse error paths
@@ -1935,7 +2070,7 @@ describe('chat-executor: sendChunk JSON parse error handling (isolated)', () => 
         _resetCleanEnvCache: jest.fn(),
       }))
       jest.doMock('../../src/commands/file-transfer', () => ({
-        downloadChatFiles: jest.fn().mockResolvedValue({ downloadedPaths: [], failedCount: 0, cleanup: jest.fn() }),
+        downloadChatFiles: jest.fn().mockResolvedValue({ downloadedPaths: [], imagePaths: [], failedCount: 0, cleanup: jest.fn() }),
         parseChatFiles: jest.fn().mockReturnValue([]),
         parseConversationFiles: jest.fn().mockReturnValue([]),
       }))
@@ -2011,7 +2146,7 @@ describe('chat-executor: sendChunk JSON parse error handling (isolated)', () => 
         _resetCleanEnvCache: jest.fn(),
       }))
       jest.doMock('../../src/commands/file-transfer', () => ({
-        downloadChatFiles: jest.fn().mockResolvedValue({ downloadedPaths: [], failedCount: 0, cleanup: jest.fn() }),
+        downloadChatFiles: jest.fn().mockResolvedValue({ downloadedPaths: [], imagePaths: [], failedCount: 0, cleanup: jest.fn() }),
         parseChatFiles: jest.fn().mockReturnValue([]),
         parseConversationFiles: jest.fn().mockReturnValue([]),
       }))
