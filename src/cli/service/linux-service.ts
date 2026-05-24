@@ -9,7 +9,7 @@ import { t } from '../../i18n'
 import { logger } from '../../logger'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
-import { assertProjectCodeIsSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import { assertProjectCodeIsSafe, isProjectCodeSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
 import type {
   ProjectStatus,
   ServiceConfig,
@@ -654,29 +654,32 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     // Collision counting must ONLY include codes that would actually be
     // installable. Otherwise a typo'd entry (e.g. `MBC;01`, rejected later
     // by assertProjectCodeIsSafe) would sanitize-collide with a valid
-    // sibling (`MBC-01`) and deny-install the valid one too. Filter codes
-    // through the same validator used inside writeProjectServiceFiles.
-    const isInstallable = (code: string): boolean => {
-      try { assertProjectCodeIsSafe(code); return true } catch { return false }
-    }
+    // sibling (`MBC-01`) and deny-install the valid one too. Use the pure
+    // predicate variant so we don't pay i18n + Error construction cost on
+    // every rejected input.
     const expectedUnitNames = new Set<string>()
+    // Stores `<tenantCode>/<projectCode>` tuples per unit name so the
+    // collision error can identify EACH conflicting entry (not just the
+    // projectCode, which may itself repeat across tenants or be a literal
+    // duplicate in config).
     const unitNameCounts = new Map<string, string[]>()
     for (const project of projects) {
       const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
       expectedUnitNames.add(unitName)
       // Only count toward collisions if both codes pass validation. A code
-      // that fails assertProjectCodeIsSafe will be refused by its own loop
+      // that fails the safety check will be refused by its own loop
       // iteration regardless; including it here would falsely collide with
       // a valid sibling.
-      if (isInstallable(project.tenantCode) && isInstallable(project.projectCode)) {
+      if (isProjectCodeSafe(project.tenantCode) && isProjectCodeSafe(project.projectCode)) {
+        const fqn = `${project.tenantCode}/${project.projectCode}`
         const existing = unitNameCounts.get(unitName)
-        if (existing) existing.push(project.projectCode)
-        else unitNameCounts.set(unitName, [project.projectCode])
+        if (existing) existing.push(fqn)
+        else unitNameCounts.set(unitName, [fqn])
       }
     }
     const collidingUnitNames = new Set<string>()
-    for (const [unitName, codes] of unitNameCounts) {
-      if (codes.length > 1) collidingUnitNames.add(unitName)
+    for (const [unitName, fqns] of unitNameCounts) {
+      if (fqns.length > 1) collidingUnitNames.add(unitName)
     }
 
     const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
@@ -687,8 +690,15 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       // with another configured project — we can't tell which one should
       // win, and last-write would silently lose the first.
       if (collidingUnitNames.has(unitName)) {
-        const others = (unitNameCounts.get(unitName) ?? []).filter((c) => c !== project.projectCode)
-        logger.error(t('service.projectUnitNameCollision', {
+        const selfFqn = `${project.tenantCode}/${project.projectCode}`
+        const others = (unitNameCounts.get(unitName) ?? []).filter((fqn) => fqn !== selfFqn)
+        // `others` can be empty when the same `<tenant>/<project>` tuple is
+        // listed twice in config (true duplicate). Fall back to a clearer
+        // message in that case.
+        const messageKey = others.length === 0
+          ? 'service.projectDuplicateEntry'
+          : 'service.projectUnitNameCollision'
+        logger.error(t(messageKey, {
           projectCode: project.projectCode,
           unitName,
           others: others.join(', '),
@@ -768,6 +778,14 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     logger.info(t('service.loadHintMulti'))
     logger.info(t('service.logDir', { path: logDir }))
     logger.info(t('service.noLogRotation'))
+
+    // Surface a single summary line at the end so scripts wrapping
+    // `service install` (or operators scanning a long log) can tell that
+    // SOME project was refused — useful when per-project errors scroll
+    // off-screen behind the success lines for the projects that did install.
+    if (anyInstallFailed) {
+      logger.warn(t('service.partialInstallSummary'))
+    }
   }
 
   uninstall(): void {

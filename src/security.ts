@@ -68,6 +68,16 @@ export function validateCommand(command: string): string | null {
 }
 
 /**
+ * Pure predicate variant of `assertProjectCodeIsSafe`. Use this when you
+ * only need a yes/no answer (e.g. pre-pass filters) without paying the
+ * i18n + Error construction cost the assert variant incurs on every
+ * rejected input.
+ */
+export function isProjectCodeSafe(projectCode: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(projectCode)
+}
+
+/**
  * Reject projectCodes / tenantCodes whose characters would break the
  * `AI_SUPPORT_AGENT_PROJECT_DIR_MAP` env format.
  *
@@ -84,7 +94,7 @@ export function validateCommand(command: string): string | null {
  * avoids a layering inversion where `docker/*` reaches into `cli/*`.
  */
 export function assertProjectCodeIsSafe(projectCode: string): void {
-  if (!/^[A-Za-z0-9_-]+$/.test(projectCode)) {
+  if (!isProjectCodeSafe(projectCode)) {
     throw new Error(t('service.invalidProjectCode', { projectCode }))
   }
 }

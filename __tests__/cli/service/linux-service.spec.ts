@@ -978,6 +978,65 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
         expect.stringContaining('service.projectUnitNameCollision'),
       )
     })
+
+    it('should use projectDuplicateEntry message when the same tenant/project pair appears twice', () => {
+      // True literal duplicate: same tenantCode AND projectCode listed twice.
+      // The `others` filter (excluding self FQN) returns []; the error
+      // message must NOT render an empty `()` parenthetical via the
+      // generic collision template — use the dedicated duplicate-entry key.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectDuplicateEntry'),
+      )
+      expect(logger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
+
+    it('should log a partialInstallSummary warning when at least one project fails', () => {
+      // Sanity: when ANY project install fails, a single summary line at
+      // the end tells operators not to trust the surrounding success logs.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
+
+    it('should NOT log partialInstallSummary when all projects install successfully', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
   })
 
   describe('uninstall', () => {

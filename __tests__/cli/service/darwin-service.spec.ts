@@ -859,6 +859,54 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
       )
       expect(plistCalls).toHaveLength(0)
     })
+
+    it('should log partialInstallSummary when at least one project fails via collision (darwin asymmetry fix)', async () => {
+      // Regression: darwin install() used to swallow per-project failures
+      // silently. A wrapping script could not tell that some projects
+      // were refused — orphan-cleanup-skip on Linux communicated this,
+      // but Darwin has no cleanup phase. Now both platforms emit the
+      // same partialInstallSummary warning at the end.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't2', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
+
+    it('should log partialInstallSummary when at least one project fails via invalid code', async () => {
+      // Coverage parity with the Linux throw-path test.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
+
+    it('should NOT log partialInstallSummary when all projects install successfully', async () => {
+      // Negative case — sanity check that the warning is gated.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
   })
 
   describe('uninstall', () => {

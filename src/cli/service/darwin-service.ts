@@ -12,7 +12,7 @@ import { logger } from '../../logger'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
-import { assertProjectCodeIsSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import { assertProjectCodeIsSafe, isProjectCodeSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
 
 export { getCliEntryPoint, getNodePath }
 
@@ -587,35 +587,44 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     // Refuse to install either so the second can't silently overwrite the
     // first's plist. Same defense as the Linux wrapper.
     //
-    // Only count codes that pass assertProjectCodeIsSafe — an invalid
-    // sibling (e.g. `MBC;01`) will be refused anyway, and including it
-    // here would falsely collide with a valid `MBC-01` and refuse it too.
-    const isInstallable = (code: string): boolean => {
-      try { assertProjectCodeIsSafe(code); return true } catch { return false }
-    }
+    // Only count codes that pass the safety check — an invalid sibling
+    // (e.g. `MBC;01`) will be refused anyway, and including it here would
+    // falsely collide with a valid `MBC-01` and refuse it too. Use the
+    // pure predicate variant to skip i18n + Error construction.
+    //
+    // Store `<tenantCode>/<projectCode>` tuples so collisions across
+    // different tenants (or literal duplicate entries) can be reported
+    // unambiguously.
     const labelCounts = new Map<string, string[]>()
     for (const project of projects) {
-      if (!isInstallable(project.tenantCode) || !isInstallable(project.projectCode)) continue
+      if (!isProjectCodeSafe(project.tenantCode) || !isProjectCodeSafe(project.projectCode)) continue
       const label = getProjectLabel(project.tenantCode, project.projectCode)
+      const fqn = `${project.tenantCode}/${project.projectCode}`
       const existing = labelCounts.get(label)
-      if (existing) existing.push(project.projectCode)
-      else labelCounts.set(label, [project.projectCode])
+      if (existing) existing.push(fqn)
+      else labelCounts.set(label, [fqn])
     }
     const collidingLabels = new Set<string>()
-    for (const [label, codes] of labelCounts) {
-      if (codes.length > 1) collidingLabels.add(label)
+    for (const [label, fqns] of labelCounts) {
+      if (fqns.length > 1) collidingLabels.add(label)
     }
 
+    let anyInstallFailed = false
     for (const project of projects) {
       const { projectCode } = project
       const label = getProjectLabel(project.tenantCode, projectCode)
       if (collidingLabels.has(label)) {
-        const others = (labelCounts.get(label) ?? []).filter((c) => c !== projectCode)
-        logger.error(t('service.projectUnitNameCollision', {
+        const selfFqn = `${project.tenantCode}/${projectCode}`
+        const others = (labelCounts.get(label) ?? []).filter((fqn) => fqn !== selfFqn)
+        const messageKey = others.length === 0
+          ? 'service.projectDuplicateEntry'
+          : 'service.projectUnitNameCollision'
+        logger.error(t(messageKey, {
           projectCode,
           unitName: label,
           others: others.join(', '),
         }))
+        anyInstallFailed = true
         continue
       }
       // Per-project failures must not abort the loop — log and continue so
@@ -627,12 +636,23 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         logger.error(t('service.projectInstallFailed', { projectCode, message }))
+        anyInstallFailed = true
       }
     }
 
     logger.info(t('service.loadHintMulti'))
     logger.info(t('service.logDir', { path: logDir }))
     logger.info(t('service.noLogRotation'))
+
+    // Surface a single summary line at the end so scripts wrapping
+    // `service install` (or operators scanning a long log) can tell that
+    // SOME project was refused, even when other projects logged success.
+    // The Linux wrapper communicates this via the `!anyInstallFailed`
+    // orphan-cleanup skip; Darwin has no orphan cleanup, so we emit an
+    // explicit summary instead.
+    if (anyInstallFailed) {
+      logger.warn(t('service.partialInstallSummary'))
+    }
   }
 
   uninstall(): void {

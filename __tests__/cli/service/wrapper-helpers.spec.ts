@@ -17,12 +17,21 @@ jest.mock('../../../src/i18n', () => ({
 import * as fs from 'fs'
 import {
   assertProjectCodeIsSafe,
+  isProjectCodeSafe,
   shellQuote,
   validateProjectDirForMount,
 } from '../../../src/cli/service/wrapper-helpers'
 import { logger } from '../../../src/logger'
 
 const mockedFs = jest.mocked(fs)
+
+// Hoist mock reset to file scope so each test (across all describe blocks)
+// starts with a clean slate. Without this, mock state set by a test in
+// `validateProjectDirForMount` would leak into a future test in
+// `shellQuote` or `assertProjectCodeIsSafe` if reordered.
+beforeEach(() => {
+  jest.clearAllMocks()
+})
 
 describe('shellQuote', () => {
   it('wraps a plain value in POSIX single quotes', () => {
@@ -101,10 +110,31 @@ describe('assertProjectCodeIsSafe', () => {
   })
 })
 
-describe('validateProjectDirForMount', () => {
-  beforeEach(() => {
-    jest.clearAllMocks()
+describe('isProjectCodeSafe (pure predicate)', () => {
+  it('returns true for the same set assertProjectCodeIsSafe accepts', () => {
+    expect(isProjectCodeSafe('mbc')).toBe(true)
+    expect(isProjectCodeSafe('MBC_01')).toBe(true)
+    expect(isProjectCodeSafe('MBC-01')).toBe(true)
+    expect(isProjectCodeSafe('00000005')).toBe(true)
   })
+
+  it('returns false for the same set assertProjectCodeIsSafe rejects', () => {
+    expect(isProjectCodeSafe('')).toBe(false)
+    expect(isProjectCodeSafe('A;B')).toBe(false)
+    expect(isProjectCodeSafe('A=B')).toBe(false)
+    expect(isProjectCodeSafe('a/b')).toBe(false)
+    expect(isProjectCodeSafe('プロジェクト')).toBe(false)
+  })
+
+  it('does NOT throw on rejected input (unlike the assert variant)', () => {
+    // The pure predicate is meant for fast pre-pass filters where the
+    // i18n + Error construction overhead would be wasted.
+    expect(() => isProjectCodeSafe('A;B')).not.toThrow()
+  })
+})
+
+describe('validateProjectDirForMount', () => {
+  // (Mocks are reset at file scope; no per-describe beforeEach needed.)
 
   it('returns undefined and does not warn when projectDir is undefined', () => {
     expect(validateProjectDirForMount(undefined)).toBeUndefined()

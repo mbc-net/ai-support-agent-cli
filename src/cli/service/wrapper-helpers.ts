@@ -4,11 +4,11 @@ import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { validateBindMountPathSync } from '../../security'
 
-// Re-export the projectCode validator that now lives in `src/security.ts` so
+// Re-export the projectCode validators that now live in `src/security.ts` so
 // existing call sites (linux-service / darwin-service) can continue to import
-// it from here. The actual implementation moved to avoid a layering
-// inversion (the docker supervisor also needs it).
-export { assertProjectCodeIsSafe } from '../../security'
+// them from here. The actual implementations moved to avoid a layering
+// inversion (the docker supervisor also needs them).
+export { assertProjectCodeIsSafe, isProjectCodeSafe } from '../../security'
 
 /**
  * POSIX shell single-quote a value so it can be safely interpolated into a
