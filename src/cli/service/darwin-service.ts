@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { loadConfig, getProjectList } from '../../config-manager'
+import { validateBindMountPathSync } from '../../security'
 import type { ProjectRegistration } from '../../types'
 import type { ProjectStatus } from './types'
 import { IMAGE_NAME } from '../../docker/docker-utils'
@@ -12,6 +13,45 @@ import { logger } from '../../logger'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
+
+/**
+ * POSIX shell single-quote a value for safe bash interpolation. See the
+ * Linux wrapper for the rationale (defense against $, backticks, spaces,
+ * quotes in any user-supplied path or projectCode value).
+ */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * Reject projectCodes whose characters would break the
+ * `AI_SUPPORT_AGENT_PROJECT_DIR_MAP` env format. Same policy as the Linux
+ * wrapper (allow `[A-Za-z0-9_-]`).
+ */
+export function assertProjectCodeIsSafe(projectCode: string): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(projectCode)) {
+    throw new Error(t('service.invalidProjectCode', { projectCode }))
+  }
+}
+
+/**
+ * Validate a user-supplied project.projectDir for use as a bind mount.
+ * Drops the value (returns undefined) when the path is empty, missing, or
+ * blocked, so the wrapper falls back to the default per-project dir.
+ */
+export function validateProjectDirForMount(projectDir: string | undefined): string | undefined {
+  if (!projectDir) return undefined
+  if (!fs.existsSync(projectDir)) {
+    logger.warn(t('service.projectDirMissing', { path: projectDir }))
+    return undefined
+  }
+  const blockedError = validateBindMountPathSync(projectDir)
+  if (blockedError) {
+    logger.warn(t('service.projectDirBlocked', { path: projectDir, message: blockedError }))
+    return undefined
+  }
+  return projectDir
+}
 
 export { getCliEntryPoint, getNodePath }
 
@@ -228,7 +268,9 @@ export function generateWrapperScript(opts: {
   // re-derive `<configDir>/projects/<t>/<p>` and double-nest the workspace
   // tree.
   const containerProjectDir = `/workspace/projects/${opts.projectCode}`
-  const hostProjectDir = opts.projectDir ?? path.dirname(opts.projectConfigHostDir)
+  // `||` (not `??`) so an empty string falls back to the default; an empty
+  // hostProjectDir would emit `-v :/workspace/...:rw` which docker rejects.
+  const hostProjectDir = opts.projectDir || path.dirname(opts.projectConfigHostDir)
 
   const mountLines: string[] = [
     `  -v "${homeDir}/.claude:${containerHome}/.claude:rw" \\`,
@@ -236,7 +278,10 @@ export function generateWrapperScript(opts: {
   ]
   // Mount .claude.json only if it's a regular file (not a directory)
   mountLines.push(`  -v "${homeDir}/.claude.json:${containerHome}/.claude.json:rw" \\`)
-  mountLines.push(`  -v "${hostProjectDir}:${containerProjectDir}:rw" \\`)
+  // New project-dir mount: shell-quote the user-supplied projectDir so a
+  // host path containing `$` / backtick / space cannot expand at runtime
+  // (the legacy `"..."` mounts above use raw double-quotes for back-compat).
+  mountLines.push(`  -v ${shellQuote(`${hostProjectDir}:${containerProjectDir}:rw`)} \\`)
 
   const envLines: string[] = [
     `  -e AI_SUPPORT_AGENT_IN_DOCKER=1 \\`,
@@ -244,7 +289,10 @@ export function generateWrapperScript(opts: {
     `  -e AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir} \\`,
     `  -e AI_SUPPORT_AGENT_TOKEN=${opts.token} \\`,
     `  -e AI_SUPPORT_AGENT_API_URL=${containerApiUrl} \\`,
-    `  -e AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${opts.projectCode}=${containerProjectDir} \\`,
+    // Shell-quote so neither projectCode nor containerProjectDir can be
+    // shell-interpreted (projectCode is validated to [A-Za-z0-9_-] at
+    // install time, but quoting is defense in depth).
+    `  -e AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${shellQuote(`${opts.projectCode}=${containerProjectDir}`)} \\`,
   ]
   if (opts.anthropicApiKey) {
     envLines.push(`  -e ANTHROPIC_API_KEY=${opts.anthropicApiKey} \\`)
@@ -454,6 +502,10 @@ export function writeProjectServiceFiles(
   options: { verbose?: boolean } = {},
 ): string {
   const { tenantCode, projectCode } = project
+  // Reject codes whose characters would break the PROJECT_DIR_MAP env format
+  // (`;` separator, `=` key/value).
+  assertProjectCodeIsSafe(projectCode)
+  assertProjectCodeIsSafe(tenantCode)
   const projectKey = `${tenantCode}-${projectCode.toLowerCase()}`
 
   const logDir = getLogDir()
@@ -478,6 +530,11 @@ export function writeProjectServiceFiles(
     fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
   }
 
+  // Validate project.projectDir same way the Linux wrapper does. If
+  // missing, empty, or blocked (e.g. `/etc`, `~/.ssh`), drop it so
+  // generateWrapperScript falls back to the safe default mount.
+  const validatedProjectDir = validateProjectDirForMount(project.projectDir)
+
   const updateScriptPath = getUpdateScriptPath()
   const wrapperScriptPath = path.join(projectServiceDir, 'run.sh')
   const wrapperScript = generateWrapperScript({
@@ -485,7 +542,7 @@ export function writeProjectServiceFiles(
     tenantCode,
     projectCode,
     projectConfigHostDir,
-    projectDir: project.projectDir,
+    projectDir: validatedProjectDir,
     token: project.token,
     apiUrl: project.apiUrl,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,

@@ -7,6 +7,7 @@ import { loadConfig, getProjectList } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { validateBindMountPathSync } from '../../security'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type {
@@ -58,6 +59,49 @@ function shellQuote(value: string): string {
 function writeFileEnsuringMode(filePath: string, content: string, mode: number): void {
   fs.writeFileSync(filePath, content, { mode })
   fs.chmodSync(filePath, mode)
+}
+
+/**
+ * Reject projectCodes whose characters would break
+ * `AI_SUPPORT_AGENT_PROJECT_DIR_MAP` parsing.
+ *
+ * The env value uses `;` as entry separator and `=` as key/value separator;
+ * a projectCode containing either would silently truncate the map and let
+ * `resolveProjectDir()` fall back to the default template, silently
+ * re-introducing the doubly-nested layout this PR is trying to prevent.
+ * Allow `[A-Za-z0-9_-]` only — matching the configured naming convention
+ * (UPPER_SNAKE_CASE for project, lower_snake_case for tenant).
+ */
+export function assertProjectCodeIsSafe(projectCode: string): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(projectCode)) {
+    throw new Error(t('service.invalidProjectCode', { projectCode }))
+  }
+}
+
+/**
+ * Validate a user-supplied project.projectDir for use as a bind mount in
+ * the generated wrapper script.
+ *
+ * Returns the original value when the path is acceptable, or `undefined`
+ * when it should be dropped (and the wrapper should fall back to the
+ * default per-project dir). Emits a warning log so the user is aware that
+ * their configured projectDir was ignored.
+ *
+ * Rejects: empty string, non-string, non-existent paths, paths under
+ * BLOCKED_PATH_PREFIXES / getSensitiveHomePaths (e.g. `/etc`, `~/.ssh`).
+ */
+export function validateProjectDirForMount(projectDir: string | undefined): string | undefined {
+  if (!projectDir) return undefined
+  if (!fs.existsSync(projectDir)) {
+    logger.warn(t('service.projectDirMissing', { path: projectDir }))
+    return undefined
+  }
+  const blockedError = validateBindMountPathSync(projectDir)
+  if (blockedError) {
+    logger.warn(t('service.projectDirBlocked', { path: projectDir, message: blockedError }))
+    return undefined
+  }
+  return projectDir
 }
 
 /**
@@ -272,10 +316,16 @@ export function generateWrapperScript(opts: {
   //   resolveProjectDir() does NOT fall back to the default template, which
   //   would otherwise be `<configDir>/projects/<t>/<p>` and produce a
   //   doubly-nested layout on disk.
+  // containerProjectDir is a Linux-style absolute path inside the docker
+  // container, so it's safe to hard-code with forward slashes regardless of
+  // the host platform that generated the wrapper.
   const containerProjectDir = `/workspace/projects/${opts.projectCode}`
-  // path.posix is correct here because we're emitting Linux container paths
-  // regardless of where the wrapper is generated.
-  const hostProjectDir = opts.projectDir ?? path.dirname(opts.projectConfigHostDir)
+  // hostProjectDir is a HOST path; the Linux wrapper is only generated on
+  // Linux hosts so `path.dirname` (which equals path.posix.dirname there)
+  // is correct. `||` (not `??`) — an empty `opts.projectDir` must fall
+  // back to the default; an empty hostProjectDir would emit
+  // `-v :/workspace/...:rw` which docker rejects.
+  const hostProjectDir = opts.projectDir || path.dirname(opts.projectConfigHostDir)
 
   const mountLines: string[] = [
     `  -v ${shellQuote(`${homeDir}/.claude:${containerHome}/.claude:rw`)} \\`,
@@ -485,6 +535,9 @@ export function writeProjectServiceFiles(
   options: { verbose?: boolean } = {},
 ): string {
   const { tenantCode, projectCode } = project
+  // Reject codes that would break the PROJECT_DIR_MAP env format.
+  assertProjectCodeIsSafe(projectCode)
+  assertProjectCodeIsSafe(tenantCode)
   const projectKey = `${sanitize(tenantCode)}-${sanitize(projectCode)}`
 
   const logDir = getLogDir()
@@ -509,6 +562,16 @@ export function writeProjectServiceFiles(
     fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
   }
 
+  // Validate project.projectDir the same way buildProjectVolumeMounts does on
+  // the interactive path. If the user-supplied dir is empty, doesn't exist,
+  // or points at a blocked path (/etc, ~/.ssh, etc.), drop it and let
+  // generateWrapperScript fall back to the default mount derived from
+  // projectConfigHostDir. Without this check the wrapper would emit
+  // `-v <bad-path>:/workspace/projects/<code>:rw` unconditionally and
+  // either crash on start (empty/missing) or expose host secrets to the
+  // container (blocked prefix).
+  const validatedProjectDir = validateProjectDirForMount(project.projectDir)
+
   const updateScriptPath = getUpdateScriptPath()
   const wrapperScriptPath = path.join(projectServiceDir, 'run.sh')
   const wrapperScript = generateWrapperScript({
@@ -516,7 +579,7 @@ export function writeProjectServiceFiles(
     tenantCode,
     projectCode,
     projectConfigHostDir,
-    projectDir: project.projectDir,
+    projectDir: validatedProjectDir,
     token: project.token,
     apiUrl: project.apiUrl,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
