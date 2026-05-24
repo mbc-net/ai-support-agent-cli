@@ -74,6 +74,14 @@ export function validateCommand(command: string): string | null {
  * is OK to bind-mount into a container.
  */
 export function validateBindMountPathSync(hostPath: string): string | null {
+  // Empty / falsy / whitespace-only path: reject up front. `fs.realpathSync('')`
+  // returns the process cwd (and `realpathSync(' ')` throws → falls back to
+  // `path.resolve(' ')` = `<cwd>/ `) which then likely passes the
+  // blocked-prefix check, making the function answer "safe" for what is
+  // clearly a misconfigured value.
+  if (!hostPath || !hostPath.trim()) {
+    return 'Access denied: empty path'
+  }
   let resolved: string
   try {
     const real = fs.realpathSync(hostPath)

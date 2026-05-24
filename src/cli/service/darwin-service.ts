@@ -4,7 +4,6 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { loadConfig, getProjectList } from '../../config-manager'
-import { validateBindMountPathSync } from '../../security'
 import type { ProjectRegistration } from '../../types'
 import type { ProjectStatus } from './types'
 import { IMAGE_NAME } from '../../docker/docker-utils'
@@ -13,45 +12,7 @@ import { logger } from '../../logger'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
-
-/**
- * POSIX shell single-quote a value for safe bash interpolation. See the
- * Linux wrapper for the rationale (defense against $, backticks, spaces,
- * quotes in any user-supplied path or projectCode value).
- */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`
-}
-
-/**
- * Reject projectCodes whose characters would break the
- * `AI_SUPPORT_AGENT_PROJECT_DIR_MAP` env format. Same policy as the Linux
- * wrapper (allow `[A-Za-z0-9_-]`).
- */
-export function assertProjectCodeIsSafe(projectCode: string): void {
-  if (!/^[A-Za-z0-9_-]+$/.test(projectCode)) {
-    throw new Error(t('service.invalidProjectCode', { projectCode }))
-  }
-}
-
-/**
- * Validate a user-supplied project.projectDir for use as a bind mount.
- * Drops the value (returns undefined) when the path is empty, missing, or
- * blocked, so the wrapper falls back to the default per-project dir.
- */
-export function validateProjectDirForMount(projectDir: string | undefined): string | undefined {
-  if (!projectDir) return undefined
-  if (!fs.existsSync(projectDir)) {
-    logger.warn(t('service.projectDirMissing', { path: projectDir }))
-    return undefined
-  }
-  const blockedError = validateBindMountPathSync(projectDir)
-  if (blockedError) {
-    logger.warn(t('service.projectDirBlocked', { path: projectDir, message: blockedError }))
-    return undefined
-  }
-  return projectDir
-}
+import { assertProjectCodeIsSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
 
 export { getCliEntryPoint, getNodePath }
 
@@ -623,8 +584,16 @@ export class DarwinServiceStrategy implements ServiceStrategy {
 
     for (const project of projects) {
       const { projectCode } = project
-      const plistPath = writeProjectServiceFiles(project, { verbose: options.verbose })
-      logger.success(t('service.projectInstalled', { projectCode, path: plistPath }))
+      // Per-project failures must not abort the loop — log and continue so
+      // the remaining valid projects still get their plists written. See
+      // the Linux wrapper for the same pattern.
+      try {
+        const plistPath = writeProjectServiceFiles(project, { verbose: options.verbose })
+        logger.success(t('service.projectInstalled', { projectCode, path: plistPath }))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        logger.error(t('service.projectInstallFailed', { projectCode, message }))
+      }
     }
 
     logger.info(t('service.loadHintMulti'))
