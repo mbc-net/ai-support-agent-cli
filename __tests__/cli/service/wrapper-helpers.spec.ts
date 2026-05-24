@@ -17,6 +17,7 @@ jest.mock('../../../src/i18n', () => ({
 import * as fs from 'fs'
 import {
   assertProjectCodeIsSafe,
+  detectInstallCollisions,
   isProjectCodeSafe,
   shellQuote,
   validateProjectDirForMount,
@@ -174,5 +175,71 @@ describe('validateProjectDirForMount', () => {
 
     expect(result).toBe('/home/user/work')
     expect(logger.warn).not.toHaveBeenCalled()
+  })
+})
+
+describe('detectInstallCollisions', () => {
+  const proj = (tenantCode: string, projectCode: string) => ({
+    tenantCode,
+    projectCode,
+    token: 't',
+    apiUrl: 'https://api',
+  })
+  const naiveName = (t: string, p: string) => `${t.toLowerCase()}-${p.toLowerCase().replace(/_/g, '-')}`
+
+  it('returns an empty map when no projects collide', () => {
+    const collisions = detectInstallCollisions(
+      [proj('mbc', 'MBC_01'), proj('mbc', 'MBC_02')],
+      naiveName,
+    )
+    expect(collisions.size).toBe(0)
+  })
+
+  it('detects sanitize collisions across distinct projects (others is non-empty)', () => {
+    const collisions = detectInstallCollisions(
+      [proj('mbc', 'MBC_01'), proj('mbc', 'MBC-01')],
+      naiveName,
+    )
+    expect(collisions.size).toBe(2)
+    const a = collisions.get('mbc/MBC_01')!
+    expect(a.name).toBe('mbc-mbc-01')
+    expect(a.others).toEqual(['mbc/MBC-01'])
+    const b = collisions.get('mbc/MBC-01')!
+    expect(b.name).toBe('mbc-mbc-01')
+    expect(b.others).toEqual(['mbc/MBC_01'])
+  })
+
+  it('returns others=[] for literal duplicates (same tenant+project pair listed twice)', () => {
+    const collisions = detectInstallCollisions(
+      [proj('mbc', 'MBC_01'), proj('mbc', 'MBC_01')],
+      naiveName,
+    )
+    // Both entries map to the same FQN; collisions map has one entry with
+    // others=[] so caller can route to projectDuplicateEntry message.
+    expect(collisions.size).toBe(1)
+    const info = collisions.get('mbc/MBC_01')!
+    expect(info.others).toEqual([])
+  })
+
+  it('skips entries with invalid (non-safe) tenant or project codes', () => {
+    // `MBC;01` would sanitize-collide with `MBC-01` if naively counted.
+    // The helper must skip the invalid sibling so the valid one is NOT
+    // refused for a fake collision.
+    const collisions = detectInstallCollisions(
+      [proj('mbc', 'MBC;01'), proj('mbc', 'MBC-01')],
+      naiveName,
+    )
+    expect(collisions.size).toBe(0)
+  })
+
+  it('handles 3+ entries on the same sanitized name', () => {
+    const collisions = detectInstallCollisions(
+      [proj('mbc', 'MBC_01'), proj('mbc', 'MBC-01'), proj('mbc', 'mbc-01')],
+      naiveName,
+    )
+    expect(collisions.size).toBe(3)
+    // Each entry's `others` contains the other two FQNs (sorted not guaranteed).
+    const a = collisions.get('mbc/MBC_01')!
+    expect(new Set(a.others)).toEqual(new Set(['mbc/MBC-01', 'mbc/mbc-01']))
   })
 })

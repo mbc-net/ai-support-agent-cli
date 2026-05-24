@@ -195,7 +195,7 @@
   "service.projectInstallFailed": "プロジェクト {{projectCode}} のサービスインストールに失敗しました: {{message}}。残りのプロジェクトの処理を続行します。",
   "service.projectUnitNameCollision": "プロジェクト {{projectCode}} のサービスをインストールできません: sanitize 後のユニット名 '{{unitName}}' が他のプロジェクト ({{others}}) と衝突しています。projectCode を変更して別々のユニット名に分けてください。",
   "service.projectDuplicateEntry": "プロジェクト {{projectCode}} のサービスをインストールできません: 同じ <tenant>/<project> 組み合わせが config に複数登録されています (ユニット名 '{{unitName}}')。重複を削除してください。",
-  "service.partialInstallSummary": "警告: 一部のプロジェクトのインストールに失敗しました（上記のエラー参照）。他のプロジェクトは正常に処理されています。",
+  "service.partialInstallSummary": "警告: {{total}} プロジェクト中 {{failed}} のインストールに失敗しました（上記のエラー参照）。成功: {{succeeded}}。",
   "docker.projectSpawnFailed": "プロジェクト {{projectCode}} のコンテナ起動に失敗しました: {{message}}。残りのプロジェクトの処理を続行します。",
   "docker.projectDirChmodFailed": "警告: プロジェクトディレクトリへの chmod 0o700 に失敗しました ({{path}}): {{message}}。他のローカルユーザーが内容を一覧できる可能性があります。",
   "service.overwriting": "既存のサービスファイルが見つかりました: {{path}}。上書きします。",

@@ -907,6 +907,64 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
         expect.stringContaining('service.partialInstallSummary'),
       )
     })
+
+    it('should use projectDuplicateEntry message when the same tenant/project pair appears twice', async () => {
+      // True literal duplicate. The collision helper deduplicates FQNs and
+      // returns `others=[]`, which must route to the dedicated duplicate
+      // key instead of the generic collision message rendering empty `()`.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectDuplicateEntry'),
+      )
+      expect(logger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
+
+    it('should suppress the start hint and log lines when ALL projects fail (no plists written)', async () => {
+      // Z1 regression: if every project is refused, the post-loop info
+      // hints (loadHintMulti, logDir, noLogRotation) used to fire and
+      // tell the user to start services that do not exist. Skip them.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't1', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.info).not.toHaveBeenCalledWith('service.loadHintMulti')
+      expect(logger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.logDir'),
+      )
+      expect(logger.info).not.toHaveBeenCalledWith('service.noLogRotation')
+    })
+
+    it('should report only ONE collision error per shared label even when listed many times', async () => {
+      // Z5 regression: an N-times-listed entry used to emit N identical
+      // error lines. The reportedCollisionLabels Set in install() now
+      // deduplicates them.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't3', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      const dupCalls = (logger.error as jest.Mock).mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string'
+          && (call[0] as string).includes('service.projectDuplicateEntry'),
+      )
+      expect(dupCalls).toHaveLength(1)
+    })
   })
 
   describe('uninstall', () => {

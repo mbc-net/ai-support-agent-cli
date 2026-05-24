@@ -12,7 +12,7 @@ import { logger } from '../../logger'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
-import { assertProjectCodeIsSafe, isProjectCodeSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
 
 export { getCliEntryPoint, getNodePath }
 
@@ -582,49 +582,34 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     const updateScript = generateUpdateScript()
     fs.writeFileSync(updateScriptPath, updateScript, { mode: 0o700 })
 
-    // Detect sanitize() collisions: two valid projectCodes can map to the
+    // Detect sanitize() collisions where two valid projectCodes map to the
     // same plist label (e.g. `MBC_01` and `MBC-01` → `com.ai-support-agent.cli.<t>.mbc-01`).
-    // Refuse to install either so the second can't silently overwrite the
-    // first's plist. Same defense as the Linux wrapper.
-    //
-    // Only count codes that pass the safety check — an invalid sibling
-    // (e.g. `MBC;01`) will be refused anyway, and including it here would
-    // falsely collide with a valid `MBC-01` and refuse it too. Use the
-    // pure predicate variant to skip i18n + Error construction.
-    //
-    // Store `<tenantCode>/<projectCode>` tuples so collisions across
-    // different tenants (or literal duplicate entries) can be reported
-    // unambiguously.
-    const labelCounts = new Map<string, string[]>()
-    for (const project of projects) {
-      if (!isProjectCodeSafe(project.tenantCode) || !isProjectCodeSafe(project.projectCode)) continue
-      const label = getProjectLabel(project.tenantCode, project.projectCode)
-      const fqn = `${project.tenantCode}/${project.projectCode}`
-      const existing = labelCounts.get(label)
-      if (existing) existing.push(fqn)
-      else labelCounts.set(label, [fqn])
-    }
-    const collidingLabels = new Set<string>()
-    for (const [label, fqns] of labelCounts) {
-      if (fqns.length > 1) collidingLabels.add(label)
-    }
+    // Shared helper guarantees identical semantics with the Linux wrapper.
+    const collisions = detectInstallCollisions(projects, getProjectLabel)
+    // Dedup collision/duplicate error logs so an N-times-listed entry
+    // doesn't produce N identical error lines.
+    const reportedCollisionLabels = new Set<string>()
 
-    let anyInstallFailed = false
+    let installedCount = 0
+    let failedCount = 0
     for (const project of projects) {
       const { projectCode } = project
       const label = getProjectLabel(project.tenantCode, projectCode)
-      if (collidingLabels.has(label)) {
-        const selfFqn = `${project.tenantCode}/${projectCode}`
-        const others = (labelCounts.get(label) ?? []).filter((fqn) => fqn !== selfFqn)
-        const messageKey = others.length === 0
-          ? 'service.projectDuplicateEntry'
-          : 'service.projectUnitNameCollision'
-        logger.error(t(messageKey, {
-          projectCode,
-          unitName: label,
-          others: others.join(', '),
-        }))
-        anyInstallFailed = true
+      const fqn = `${project.tenantCode}/${projectCode}`
+      const collision = collisions.get(fqn)
+      if (collision) {
+        if (!reportedCollisionLabels.has(collision.name)) {
+          const messageKey = collision.others.length === 0
+            ? 'service.projectDuplicateEntry'
+            : 'service.projectUnitNameCollision'
+          logger.error(t(messageKey, {
+            projectCode,
+            unitName: collision.name,
+            others: collision.others.join(', '),
+          }))
+          reportedCollisionLabels.add(collision.name)
+        }
+        failedCount += 1
         continue
       }
       // Per-project failures must not abort the loop — log and continue so
@@ -633,25 +618,39 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       try {
         const plistPath = writeProjectServiceFiles(project, { verbose: options.verbose })
         logger.success(t('service.projectInstalled', { projectCode, path: plistPath }))
+        installedCount += 1
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         logger.error(t('service.projectInstallFailed', { projectCode, message }))
-        anyInstallFailed = true
+        failedCount += 1
       }
+      // Suppress unused-var lint — `label` is reserved for future use
+      // (e.g. richer success message). The collision lookup above already
+      // uses it via the `getProjectLabel` call.
+      void label
+    }
+    const anyInstallFailed = failedCount > 0
+
+    // Hide the "now run `service start`" hint when nothing was installed —
+    // misleading the user to start services that don't exist.
+    if (installedCount > 0) {
+      logger.info(t('service.loadHintMulti'))
+      logger.info(t('service.logDir', { path: logDir }))
+      logger.info(t('service.noLogRotation'))
     }
 
-    logger.info(t('service.loadHintMulti'))
-    logger.info(t('service.logDir', { path: logDir }))
-    logger.info(t('service.noLogRotation'))
-
-    // Surface a single summary line at the end so scripts wrapping
+    // Surface a summary line with counts so scripts wrapping
     // `service install` (or operators scanning a long log) can tell that
     // SOME project was refused, even when other projects logged success.
     // The Linux wrapper communicates this via the `!anyInstallFailed`
     // orphan-cleanup skip; Darwin has no orphan cleanup, so we emit an
     // explicit summary instead.
     if (anyInstallFailed) {
-      logger.warn(t('service.partialInstallSummary'))
+      logger.warn(t('service.partialInstallSummary', {
+        failed: String(failedCount),
+        total: String(projects.length),
+        succeeded: String(installedCount),
+      }))
     }
   }
 

@@ -1037,6 +1037,76 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
         expect.stringContaining('service.partialInstallSummary'),
       )
     })
+
+    it('should suppress the start hint and log lines when ALL projects fail (no units written)', () => {
+      // Z1 regression: if every project is refused, the post-loop info
+      // hints (loadHintMulti / logDir / noLogRotation) used to fire and
+      // tell the user to start services that do not exist. Skip them.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't1', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.info).not.toHaveBeenCalledWith('service.loadHintMulti')
+      expect(logger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.logDir'),
+      )
+      expect(logger.info).not.toHaveBeenCalledWith('service.noLogRotation')
+    })
+
+    it('should report only ONE collision error per shared unit name even when listed many times', () => {
+      // Z5 regression: an N-times-listed entry used to emit N identical
+      // error lines. The reportedCollisionNames Set in install() now
+      // deduplicates them.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't3', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      const dupCalls = (logger.error as jest.Mock).mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string'
+          && (call[0] as string).includes('service.projectDuplicateEntry'),
+      )
+      expect(dupCalls).toHaveLength(1)
+    })
+
+    it('should include failed/total/succeeded counts in the partialInstallSummary message', () => {
+      // Z4: partialInstallSummary now templates `{{failed}} of {{total}} ... {{succeeded}}`
+      // so a wrapping script / operator can tell the failure ratio at a glance.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_03', token: 't3', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      const tMod = jest.requireMock('../../../src/i18n') as { t: jest.Mock }
+      const tSpy = jest.spyOn(tMod, 't')
+
+      strategy.install({})
+
+      expect(tSpy).toHaveBeenCalledWith('service.partialInstallSummary', expect.objectContaining({
+        failed: '1',
+        total: '3',
+        succeeded: '2',
+      }))
+      tSpy.mockRestore()
+    })
   })
 
   describe('uninstall', () => {

@@ -9,7 +9,7 @@ import { t } from '../../i18n'
 import { logger } from '../../logger'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
-import { assertProjectCodeIsSafe, isProjectCodeSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
 import type {
   ProjectStatus,
   ServiceConfig,
@@ -640,70 +640,46 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     //   - invalid projectCode (rejected by assertProjectCodeIsSafe)
     //   - filesystem error during write
     // For both, the previously-installed unit on disk should stay in place.
-    // Single pass over `projects` populates BOTH:
-    //   - expectedUnitNames: protects pre-existing unit files from the
-    //     orphan-cleanup pass even when their install fails this run.
-    //   - unitNameCounts → collidingUnitNames: detects sanitize() collisions
-    //     where two distinct valid codes (e.g. `MBC_01` and `MBC-01`) map to
-    //     the same unit name and would silently overwrite each other.
-    // Keeping the two data structures in one loop guarantees they cannot
-    // drift (e.g. one loop catching a future throw the other doesn't).
     // `getProjectUnitName` uses sanitize() (pure regex replace) and cannot
     // throw on string input, so no defensive try/catch is needed.
-    //
-    // Collision counting must ONLY include codes that would actually be
-    // installable. Otherwise a typo'd entry (e.g. `MBC;01`, rejected later
-    // by assertProjectCodeIsSafe) would sanitize-collide with a valid
-    // sibling (`MBC-01`) and deny-install the valid one too. Use the pure
-    // predicate variant so we don't pay i18n + Error construction cost on
-    // every rejected input.
     const expectedUnitNames = new Set<string>()
-    // Stores `<tenantCode>/<projectCode>` tuples per unit name so the
-    // collision error can identify EACH conflicting entry (not just the
-    // projectCode, which may itself repeat across tenants or be a literal
-    // duplicate in config).
-    const unitNameCounts = new Map<string, string[]>()
     for (const project of projects) {
-      const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
-      expectedUnitNames.add(unitName)
-      // Only count toward collisions if both codes pass validation. A code
-      // that fails the safety check will be refused by its own loop
-      // iteration regardless; including it here would falsely collide with
-      // a valid sibling.
-      if (isProjectCodeSafe(project.tenantCode) && isProjectCodeSafe(project.projectCode)) {
-        const fqn = `${project.tenantCode}/${project.projectCode}`
-        const existing = unitNameCounts.get(unitName)
-        if (existing) existing.push(fqn)
-        else unitNameCounts.set(unitName, [fqn])
-      }
+      expectedUnitNames.add(getProjectUnitName(project.tenantCode, project.projectCode))
     }
-    const collidingUnitNames = new Set<string>()
-    for (const [unitName, fqns] of unitNameCounts) {
-      if (fqns.length > 1) collidingUnitNames.add(unitName)
-    }
+    // Detect sanitize() collisions where two distinct valid codes
+    // (e.g. `MBC_01` and `MBC-01`) map to the same unit name and would
+    // silently overwrite each other. Shared helper guarantees identical
+    // semantics between linux and darwin install paths.
+    const collisions = detectInstallCollisions(projects, getProjectUnitName)
+    // Track which colliding unit-names we've already reported so the same
+    // duplicate/collision error doesn't log N times for an N-times-listed
+    // entry.
+    const reportedCollisionNames = new Set<string>()
 
     const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
-    let anyInstallFailed = false
+    let failedCount = 0
     for (const project of projects) {
       const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
+      const fqn = `${project.tenantCode}/${project.projectCode}`
       // Refuse to install when this project shares its sanitized unit name
       // with another configured project — we can't tell which one should
       // win, and last-write would silently lose the first.
-      if (collidingUnitNames.has(unitName)) {
-        const selfFqn = `${project.tenantCode}/${project.projectCode}`
-        const others = (unitNameCounts.get(unitName) ?? []).filter((fqn) => fqn !== selfFqn)
-        // `others` can be empty when the same `<tenant>/<project>` tuple is
-        // listed twice in config (true duplicate). Fall back to a clearer
-        // message in that case.
-        const messageKey = others.length === 0
-          ? 'service.projectDuplicateEntry'
-          : 'service.projectUnitNameCollision'
-        logger.error(t(messageKey, {
-          projectCode: project.projectCode,
-          unitName,
-          others: others.join(', '),
-        }))
-        anyInstallFailed = true
+      const collision = collisions.get(fqn)
+      if (collision) {
+        if (!reportedCollisionNames.has(collision.name)) {
+          // `others` is empty when the same `<tenant>/<project>` tuple is
+          // listed twice in config (true duplicate). Use the clearer key.
+          const messageKey = collision.others.length === 0
+            ? 'service.projectDuplicateEntry'
+            : 'service.projectUnitNameCollision'
+          logger.error(t(messageKey, {
+            projectCode: project.projectCode,
+            unitName: collision.name,
+            others: collision.others.join(', '),
+          }))
+          reportedCollisionNames.add(collision.name)
+        }
+        failedCount += 1
         continue
       }
       // Per-project failures (invalid projectCode, fs errors etc.) must not
@@ -721,9 +697,10 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         logger.error(t('service.projectInstallFailed', { projectCode: project.projectCode, message }))
-        anyInstallFailed = true
+        failedCount += 1
       }
     }
+    const anyInstallFailed = failedCount > 0
 
     // Remove orphaned per-project units for projects that are no longer in
     // config. Without this, `service start` / `status` would keep iterating
@@ -775,16 +752,25 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       logger.success(t('service.projectInstalled', { projectCode, path: unitPath }))
     }
 
-    logger.info(t('service.loadHintMulti'))
-    logger.info(t('service.logDir', { path: logDir }))
-    logger.info(t('service.noLogRotation'))
+    // Hide the "now run `service start`" hint when nothing was installed —
+    // otherwise the user sees the hint to start services that don't exist,
+    // followed by the failure summary at the very end.
+    if (writtenUnits.length > 0) {
+      logger.info(t('service.loadHintMulti'))
+      logger.info(t('service.logDir', { path: logDir }))
+      logger.info(t('service.noLogRotation'))
+    }
 
-    // Surface a single summary line at the end so scripts wrapping
-    // `service install` (or operators scanning a long log) can tell that
-    // SOME project was refused — useful when per-project errors scroll
-    // off-screen behind the success lines for the projects that did install.
+    // Surface a summary line so scripts wrapping `service install` and
+    // operators scanning a long log can tell that SOME project was refused.
+    // Include counts (failed / total / succeeded) so the severity is
+    // immediately legible without grepping per-line errors.
     if (anyInstallFailed) {
-      logger.warn(t('service.partialInstallSummary'))
+      logger.warn(t('service.partialInstallSummary', {
+        failed: String(failedCount),
+        total: String(projects.length),
+        succeeded: String(writtenUnits.length),
+      }))
     }
   }
 
