@@ -260,16 +260,29 @@ export function generateWrapperScript(opts: {
   const qContainerName = shellQuote(containerName)
   const qProjectArg = shellQuote(`${opts.tenantCode}/${opts.projectCode}`)
 
+  // Project directory mount strategy:
+  // - projectConfigHostDir (~/.ai-support-agent/projects/<t>/<p>/.ai-support-agent)
+  //   mounts to /home/node/.ai-support-agent inside the container. This is the
+  //   per-project metadata dir that docker-supervisor writes hash files into.
+  // - The PROJECT DIR itself (~/.ai-support-agent/projects/<t>/<p>) — the
+  //   parent of projectConfigHostDir — is mounted separately so the agent's
+  //   ensureProjectDirs() writes workspace/, uploads/ to the right place
+  //   inside the project dir (not double-nested under the metadata dir).
+  // - AI_SUPPORT_AGENT_PROJECT_DIR_MAP pins the in-container project dir so
+  //   resolveProjectDir() does NOT fall back to the default template, which
+  //   would otherwise be `<configDir>/projects/<t>/<p>` and produce a
+  //   doubly-nested layout on disk.
+  const containerProjectDir = `/workspace/projects/${opts.projectCode}`
+  // path.posix is correct here because we're emitting Linux container paths
+  // regardless of where the wrapper is generated.
+  const hostProjectDir = opts.projectDir ?? path.dirname(opts.projectConfigHostDir)
+
   const mountLines: string[] = [
     `  -v ${shellQuote(`${homeDir}/.claude:${containerHome}/.claude:rw`)} \\`,
     `  -v ${shellQuote(`${opts.projectConfigHostDir}:${containerConfigDir}:rw`)} \\`,
     `  -v ${shellQuote(`${homeDir}/.claude.json:${containerHome}/.claude.json:rw`)} \\`,
+    `  -v ${shellQuote(`${hostProjectDir}:${containerProjectDir}:rw`)} \\`,
   ]
-
-  if (opts.projectDir) {
-    const containerProjectDir = `/workspace/projects/${opts.projectCode}`
-    mountLines.push(`  -v ${shellQuote(`${opts.projectDir}:${containerProjectDir}:rw`)} \\`)
-  }
 
   const envLines: string[] = [
     `  -e AI_SUPPORT_AGENT_IN_DOCKER=1 \\`,
@@ -277,6 +290,9 @@ export function generateWrapperScript(opts: {
     `  -e AI_SUPPORT_AGENT_CONFIG_DIR=${qContainerConfigDir} \\`,
     `  -e AI_SUPPORT_AGENT_TOKEN=${qToken} \\`,
     `  -e AI_SUPPORT_AGENT_API_URL=${qApiUrl} \\`,
+    // Pin the in-container project dir so the agent does not re-derive it
+    // from `${CONFIG_DIR}/projects/<t>/<p>` (which would double-nest).
+    `  -e AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${shellQuote(`${opts.projectCode}=${containerProjectDir}`)} \\`,
   ]
   if (opts.anthropicApiKey) {
     envLines.push(`  -e ANTHROPIC_API_KEY=${shellQuote(opts.anthropicApiKey)} \\`)
