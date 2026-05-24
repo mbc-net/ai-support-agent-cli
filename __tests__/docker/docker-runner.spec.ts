@@ -21,6 +21,7 @@ jest.mock('fs', () => ({
   copyFileSync: jest.fn(),
   mkdirSync: jest.fn(),
   renameSync: jest.fn(),
+  chmodSync: jest.fn(),
   watch: jest.fn(() => ({ close: jest.fn() })),
 }))
 
@@ -1509,6 +1510,156 @@ describe('docker-runner', () => {
       }
       expect(vArgs.some((v) => v.includes('.claude:'))).toBe(true)
       expect(vArgs.some((v) => v.includes('.claude.json:'))).toBe(true)
+    })
+
+    it('should mount the default project dir (parent of projectConfigHostDir) and set PROJECT_DIR_MAP when project.projectDir is NOT set', () => {
+      // Regression: without this mount + env, the in-container agent would
+      // resolve projectDir to `${CONFIG_DIR}/projects/<t>/<p>` which lives
+      // INSIDE the projectConfigHostDir bind-mount, producing a doubly
+      // nested workspace tree on disk.
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'tok', apiUrl: 'http://api' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      const vArgs: string[] = []
+      const eArgs: string[] = []
+      for (let i = 0; i < spawnArgs.length; i++) {
+        if (spawnArgs[i] === '-v' && i + 1 < spawnArgs.length) vArgs.push(spawnArgs[i + 1])
+        if (spawnArgs[i] === '-e' && i + 1 < spawnArgs.length) eArgs.push(spawnArgs[i + 1])
+      }
+      // The default project dir mount targets /workspace/projects/<code>
+      expect(vArgs.some((v) => v.includes(':/workspace/projects/PROJ_A:rw'))).toBe(true)
+      expect(eArgs).toContain('AI_SUPPORT_AGENT_PROJECT_DIR_MAP=PROJ_A=/workspace/projects/PROJ_A')
+    })
+
+    it('should warn (not fail) when chmodSync on the default project dir fails', () => {
+      // Pre-existing project dirs created with default umask end up 0o755;
+      // chmod-to-0o700 may fail on read-only fs or foreign owner. We must
+      // surface a warning (silent failure would defeat the security intent).
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'tok', apiUrl: 'http://api' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+      // chmodSync throws on the default-project-dir path only
+      const chmodSpy = jest.spyOn(require('fs'), 'chmodSync').mockImplementation((p: unknown) => {
+        if (typeof p === 'string' && p.includes('/projects/mbc/PROJ_A')) {
+          throw new Error('EROFS')
+        }
+      })
+
+      try {
+        runInDocker({})
+      } finally {
+        chmodSpy.mockRestore()
+      }
+
+      const loggerMock = require('../../src/logger').logger
+      expect(loggerMock.warn).toHaveBeenCalledWith(
+        expect.stringContaining('docker.projectDirChmodFailed'),
+      )
+    })
+
+    it('should NOT spawn a container for a project whose projectCode contains PROJECT_DIR_MAP separators', () => {
+      // Same validation that the linux/darwin wrappers do at install time.
+      // Without this check, a corrupt env map would let resolveProjectDir
+      // fall back to the default template and re-introduce the doubly
+      // nested layout the prior PR fixed.
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'X;Y', token: 'tok', apiUrl: 'http://api' },
+        ],
+      })
+
+      runInDocker({})
+
+      // The supervisor's per-project try/catch logs the failure via
+      // docker.projectSpawnFailed (docker-specific key — not the service
+      // install key) and skips the spawn.
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('docker.projectSpawnFailed'),
+      )
+      expect(mockSpawn).not.toHaveBeenCalled()
+    })
+
+    it('should still spawn valid projects when one config entry has an invalid projectCode', () => {
+      // Regression for the supervisor-symmetry partial-failure bug: a
+      // single bad projectCode used to abort the entire start loop. The
+      // try/catch around spawnProject now lets the rest through.
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'tA', apiUrl: 'http://api' },
+          { tenantCode: 'mbc', projectCode: 'X;Y', token: 'tB', apiUrl: 'http://api' },
+          { tenantCode: 'mbc', projectCode: 'PROJ_C', token: 'tC', apiUrl: 'http://api' },
+        ],
+      })
+      mockExistsSync.mockReturnValue(false)
+
+      runInDocker({})
+
+      // PROJ_A and PROJ_C should have spawned; X;Y should not.
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('should NOT emit a duplicate default mount when project.projectDir is set', () => {
+      // Docker errors on duplicate target paths; the default project-dir
+      // mount must yield to the explicit projectDir mount.
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        projects: [
+          {
+            tenantCode: 'mbc',
+            projectCode: 'PROJ_A',
+            token: 'tok',
+            apiUrl: 'http://api',
+            projectDir: '/explicit/proj-a',
+          },
+        ],
+      })
+      mockExistsSync.mockImplementation((p: unknown) => p === '/explicit/proj-a')
+      mockRealpathSync.mockImplementation((p: unknown) => p as string)
+
+      runInDocker({})
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+      const vArgs: string[] = []
+      for (let i = 0; i < spawnArgs.length; i++) {
+        if (spawnArgs[i] === '-v' && i + 1 < spawnArgs.length) vArgs.push(spawnArgs[i + 1])
+      }
+      const projectMounts = vArgs.filter((v) => v.endsWith(':/workspace/projects/PROJ_A:rw'))
+      expect(projectMounts).toHaveLength(1)
+      expect(projectMounts[0]).toBe('/explicit/proj-a:/workspace/projects/PROJ_A:rw')
     })
 
     it('should mount projectDir and set PROJECT_DIR_MAP when project.projectDir exists', () => {

@@ -440,6 +440,25 @@ describe('generateWrapperScript', () => {
 
     expect(result).toContain('/Users/test/.ai-support-agent/projects/mbc/MBC_01/.ai-support-agent:/home/node/.ai-support-agent:rw')
   })
+
+  it('should mount the parent of projectConfigHostDir as the in-container project dir when projectDir is NOT provided', () => {
+    // Regression for the double-nesting bug: same as the Linux wrapper.
+    const result = generateWrapperScript(baseOpts)
+
+    // New project-dir mount is shell-quoted (POSIX single quotes)
+    expect(result).toContain("'/Users/test/.ai-support-agent/projects/mbc/MBC_01:/workspace/projects/MBC_01:rw'")
+    // env value is shell-quoted to defend against shell metacharacters
+    expect(result).toContain("AI_SUPPORT_AGENT_PROJECT_DIR_MAP='MBC_01=/workspace/projects/MBC_01'")
+  })
+
+  it('should shell-quote the new project-dir mount even when projectDir contains $', () => {
+    // The legacy `"..."`-quoted mounts above expand $; the NEW project-dir
+    // mount uses shellQuote so a host path with `$` is bind-mounted
+    // literally instead of being shell-expanded at launchd start time.
+    const result = generateWrapperScript({ ...baseOpts, projectDir: '/Users/test/$work/proj-a' })
+
+    expect(result).toContain("-v '/Users/test/$work/proj-a:/workspace/projects/MBC_01:rw'")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -796,6 +815,28 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
         else process.env.AI_SUPPORT_AGENT_CONFIG_DIR = originalConfigDir
       }
     })
+
+    it('should not abort the install loop when one project has an invalid projectCode', async () => {
+      // Regression: same as the Linux test. One bad project must not stop
+      // the rest from being installed.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_03', token: 't3', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectInstallFailed'),
+      )
+      const plistCalls = mockedFs.writeFileSync.mock.calls.filter(
+        (call) => String(call[0]).endsWith('.plist'),
+      )
+      // Two valid projects, one plist each.
+      expect(plistCalls).toHaveLength(2)
+    })
   })
 
   describe('uninstall', () => {
@@ -1011,6 +1052,40 @@ describe('writeProjectServiceFiles', () => {
     const script = runShCall![1] as string
     expect(script).toContain(project.token)
     expect(script).toContain(project.apiUrl)
+  })
+
+  it('should reject projectCodes that would break PROJECT_DIR_MAP parsing', () => {
+    // ';' is the multi-entry separator; '=' is the key/value separator.
+    // Either one in the projectCode would silently truncate the env map.
+    expect(() => writeProjectServiceFiles({ ...project, projectCode: 'A;B' })).toThrow(
+      /service\.invalidProjectCode/,
+    )
+    expect(() => writeProjectServiceFiles({ ...project, projectCode: 'A=B' })).toThrow(
+      /service\.invalidProjectCode/,
+    )
+  })
+
+  it('should reject tenantCodes containing PROJECT_DIR_MAP separators', () => {
+    expect(() => writeProjectServiceFiles({ ...project, tenantCode: 't;x' })).toThrow(
+      /service\.invalidProjectCode/,
+    )
+  })
+
+  it('should drop project.projectDir when the host path does not exist and fall back to default', () => {
+    // existsSync mocked false (default) → validation drops projectDir → wrapper
+    // falls back to default mount. Without this guard the wrapper would emit a
+    // `-v <missing-path>:/workspace/projects/<code>:rw` line which docker
+    // auto-creates as root-owned.
+    writeProjectServiceFiles({ ...project, projectDir: '/nonexistent/path' })
+
+    const runShCall = mockedFs.writeFileSync.mock.calls.find(
+      (call) => typeof call[0] === 'string' && (call[0] as string).endsWith('run.sh'),
+    )
+    const script = runShCall![1] as string
+    expect(script).not.toContain('/nonexistent/path')
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('service.projectDirMissing'),
+    )
   })
 })
 

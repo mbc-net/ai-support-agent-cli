@@ -8,7 +8,9 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { assertProjectCodeIsSafe } from '../cli/service/wrapper-helpers'
 import { getConfigDir, loadConfig } from '../config-manager'
+import { t } from '../i18n'
 import { logger } from '../logger'
 import { BLOCKED_PATH_PREFIXES, getSensitiveHomePaths } from '../security'
 import type { ProjectRegistration } from '../types'
@@ -158,6 +160,15 @@ export function buildProjectVolumeMounts(
   project: ProjectRegistration,
   projectConfigHostDir: string,
 ): { mounts: string[]; envArgs: string[] } {
+  // Match the service-wrapper path: reject project/tenant codes whose
+  // characters would break the AI_SUPPORT_AGENT_PROJECT_DIR_MAP env format
+  // (semicolon = entry separator, equals = key/value separator). Without
+  // this, the supervisor would emit a corrupt env and `resolveProjectDir()`
+  // inside the container would silently fall back to the default template
+  // — re-introducing the doubly-nested layout the recent fix addresses.
+  assertProjectCodeIsSafe(project.projectCode)
+  assertProjectCodeIsSafe(project.tenantCode)
+
   const home = os.homedir()
   const mounts: string[] = []
   const envArgs: string[] = []
@@ -206,20 +217,31 @@ export function buildProjectVolumeMounts(
   const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone
   envArgs.push('-e', `TZ=${hostTz}`)
 
-  // Project dir mapping: single project only
+  // Project dir mounting.
+  //
+  // Two cases:
+  //   (a) `project.projectDir` is set, exists, and is NOT in BLOCKED_PATH_PREFIXES
+  //       → mount that explicit dir at /workspace/projects/<code>.
+  //   (b) Otherwise → mount the parent of projectConfigHostDir
+  //       (i.e. ~/.ai-support-agent/projects/<t>/<p>) at the same path.
+  //
+  // Always emit AI_SUPPORT_AGENT_PROJECT_DIR_MAP for /workspace/projects/<code>
+  // so the in-container `resolveProjectDir()` does NOT fall back to
+  // `${CONFIG_DIR}/projects/<t>/<p>`, which lives INSIDE the metadata
+  // mount and produces a doubly nested workspace tree on disk.
   const containerProjectDir = `${CONTAINER_PROJECTS_BASE}/${project.projectCode}`
   const blockedPrefixes = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
+  let projectDirMounted = false
   if (project.projectDir && fs.existsSync(project.projectDir)) {
-    let resolved: string
     try {
-      resolved = fs.realpathSync(project.projectDir)
+      const resolved = fs.realpathSync(project.projectDir)
       const isBlocked = blockedPrefixes.some((prefix) => {
         const prefixWithoutSlash = prefix.replace(/\/$/, '')
         return resolved === prefixWithoutSlash || resolved.startsWith(prefix)
       })
       if (!isBlocked) {
         mounts.push('-v', `${project.projectDir}:${containerProjectDir}:rw`)
-        envArgs.push('-e', `AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${project.projectCode}=${containerProjectDir}`)
+        projectDirMounted = true
       } else {
         logger.warn(`[docker] Skipping blocked path for volume mount: ${project.projectDir}`)
       }
@@ -227,6 +249,30 @@ export function buildProjectVolumeMounts(
       logger.warn(`[docker] Cannot resolve path, skipping: ${project.projectDir}`)
     }
   }
+  if (!projectDirMounted) {
+    // Fallback: mount the parent of projectConfigHostDir so the in-container
+    // agent has a valid /workspace/projects/<code> to write workspace/,
+    // uploads/, etc. into. Without this, ensureProjectDirs would mkdir
+    // inside the metadata bind-mount and produce the doubly nested layout.
+    const defaultHostProjectDir = path.dirname(projectConfigHostDir)
+    // The `mode` option on fs.mkdirSync only applies to newly-created leaves.
+    // When the parent (`<configDir>/projects/<t>/<p>`) already exists — as it
+    // does after the line-177 recursive mkdir of projectConfigHostDir
+    // populated it via umask (typically 0o755) — the mode option is silently
+    // ignored. Follow up with chmodSync so the project dir is actually 0o700
+    // and not world-listable on multi-user hosts.
+    fs.mkdirSync(defaultHostProjectDir, { recursive: true, mode: 0o700 })
+    try {
+      fs.chmodSync(defaultHostProjectDir, 0o700)
+    } catch (error) {
+      // Don't fail the install — but DO surface the warning so multi-user
+      // hosts aren't silently left with a 0o755 bind-mount source.
+      const message = error instanceof Error ? error.message : String(error)
+      logger.warn(t('docker.projectDirChmodFailed', { path: defaultHostProjectDir, message }))
+    }
+    mounts.push('-v', `${defaultHostProjectDir}:${containerProjectDir}:rw`)
+  }
+  envArgs.push('-e', `AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${project.projectCode}=${containerProjectDir}`)
 
   return { mounts, envArgs }
 }

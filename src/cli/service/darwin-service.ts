@@ -12,6 +12,7 @@ import { logger } from '../../logger'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
+import { assertProjectCodeIsSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
 
 export { getCliEntryPoint, getNodePath }
 
@@ -221,17 +222,27 @@ export function generateWrapperScript(opts: {
   const homeDir = os.homedir()
   const containerApiUrl = toContainerApiUrl(opts.apiUrl)
 
+  // Project directory mount strategy: mirror the Linux wrapper. The metadata
+  // dir (projectConfigHostDir) mounts to /home/node/.ai-support-agent for
+  // hash files; the project dir itself mounts to /workspace/projects/<code>
+  // and is pinned via AI_SUPPORT_AGENT_PROJECT_DIR_MAP so the agent does NOT
+  // re-derive `<configDir>/projects/<t>/<p>` and double-nest the workspace
+  // tree.
+  const containerProjectDir = `/workspace/projects/${opts.projectCode}`
+  // `||` (not `??`) so an empty string falls back to the default; an empty
+  // hostProjectDir would emit `-v :/workspace/...:rw` which docker rejects.
+  const hostProjectDir = opts.projectDir || path.dirname(opts.projectConfigHostDir)
+
   const mountLines: string[] = [
     `  -v "${homeDir}/.claude:${containerHome}/.claude:rw" \\`,
     `  -v "${opts.projectConfigHostDir}:${containerConfigDir}:rw" \\`,
   ]
   // Mount .claude.json only if it's a regular file (not a directory)
   mountLines.push(`  -v "${homeDir}/.claude.json:${containerHome}/.claude.json:rw" \\`)
-
-  if (opts.projectDir) {
-    const containerProjectDir = `/workspace/projects/${opts.projectCode}`
-    mountLines.push(`  -v "${opts.projectDir}:${containerProjectDir}:rw" \\`)
-  }
+  // New project-dir mount: shell-quote the user-supplied projectDir so a
+  // host path containing `$` / backtick / space cannot expand at runtime
+  // (the legacy `"..."` mounts above use raw double-quotes for back-compat).
+  mountLines.push(`  -v ${shellQuote(`${hostProjectDir}:${containerProjectDir}:rw`)} \\`)
 
   const envLines: string[] = [
     `  -e AI_SUPPORT_AGENT_IN_DOCKER=1 \\`,
@@ -239,6 +250,10 @@ export function generateWrapperScript(opts: {
     `  -e AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir} \\`,
     `  -e AI_SUPPORT_AGENT_TOKEN=${opts.token} \\`,
     `  -e AI_SUPPORT_AGENT_API_URL=${containerApiUrl} \\`,
+    // Shell-quote so neither projectCode nor containerProjectDir can be
+    // shell-interpreted (projectCode is validated to [A-Za-z0-9_-] at
+    // install time, but quoting is defense in depth).
+    `  -e AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${shellQuote(`${opts.projectCode}=${containerProjectDir}`)} \\`,
   ]
   if (opts.anthropicApiKey) {
     envLines.push(`  -e ANTHROPIC_API_KEY=${opts.anthropicApiKey} \\`)
@@ -448,6 +463,10 @@ export function writeProjectServiceFiles(
   options: { verbose?: boolean } = {},
 ): string {
   const { tenantCode, projectCode } = project
+  // Reject codes whose characters would break the PROJECT_DIR_MAP env format
+  // (`;` separator, `=` key/value).
+  assertProjectCodeIsSafe(projectCode)
+  assertProjectCodeIsSafe(tenantCode)
   const projectKey = `${tenantCode}-${projectCode.toLowerCase()}`
 
   const logDir = getLogDir()
@@ -472,6 +491,11 @@ export function writeProjectServiceFiles(
     fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
   }
 
+  // Validate project.projectDir same way the Linux wrapper does. If
+  // missing, empty, or blocked (e.g. `/etc`, `~/.ssh`), drop it so
+  // generateWrapperScript falls back to the safe default mount.
+  const validatedProjectDir = validateProjectDirForMount(project.projectDir)
+
   const updateScriptPath = getUpdateScriptPath()
   const wrapperScriptPath = path.join(projectServiceDir, 'run.sh')
   const wrapperScript = generateWrapperScript({
@@ -479,7 +503,7 @@ export function writeProjectServiceFiles(
     tenantCode,
     projectCode,
     projectConfigHostDir,
-    projectDir: project.projectDir,
+    projectDir: validatedProjectDir,
     token: project.token,
     apiUrl: project.apiUrl,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
@@ -560,8 +584,16 @@ export class DarwinServiceStrategy implements ServiceStrategy {
 
     for (const project of projects) {
       const { projectCode } = project
-      const plistPath = writeProjectServiceFiles(project, { verbose: options.verbose })
-      logger.success(t('service.projectInstalled', { projectCode, path: plistPath }))
+      // Per-project failures must not abort the loop — log and continue so
+      // the remaining valid projects still get their plists written. See
+      // the Linux wrapper for the same pattern.
+      try {
+        const plistPath = writeProjectServiceFiles(project, { verbose: options.verbose })
+        logger.success(t('service.projectInstalled', { projectCode, path: plistPath }))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        logger.error(t('service.projectInstallFailed', { projectCode, message }))
+      }
     }
 
     logger.info(t('service.loadHintMulti'))

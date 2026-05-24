@@ -66,6 +66,39 @@ export function validateCommand(command: string): string | null {
   return null
 }
 
+/**
+ * Synchronous variant of `validateFilePath`'s blocked-prefix check, for use
+ * at script-generation / install time where async fs APIs aren't available.
+ * Resolves the path via `realpathSync` when possible (falls back to the raw
+ * path) and reports a blocking prefix if any. Returns `null` when the path
+ * is OK to bind-mount into a container.
+ */
+export function validateBindMountPathSync(hostPath: string): string | null {
+  // Empty / falsy / whitespace-only path: reject up front. `fs.realpathSync('')`
+  // returns the process cwd (and `realpathSync(' ')` throws → falls back to
+  // `path.resolve(' ')` = `<cwd>/ `) which then likely passes the
+  // blocked-prefix check, making the function answer "safe" for what is
+  // clearly a misconfigured value.
+  if (!hostPath || !hostPath.trim()) {
+    return 'Access denied: empty path'
+  }
+  let resolved: string
+  try {
+    const real = fs.realpathSync(hostPath)
+    resolved = typeof real === 'string' && real.length > 0 ? real : path.resolve(hostPath)
+  } catch {
+    resolved = path.resolve(hostPath)
+  }
+  const allBlocked = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
+  for (const prefix of allBlocked) {
+    const prefixWithoutSlash = prefix.replace(/\/$/, '')
+    if (resolved === prefixWithoutSlash || resolved.startsWith(prefix)) {
+      return `Access denied: ${prefix} paths are blocked`
+    }
+  }
+  return null
+}
+
 export async function validateFilePath(filePath: string, baseDir?: string): Promise<string | null> {
   // Resolve relative paths against baseDir (project directory) when provided
   const toResolve = baseDir && !path.isAbsolute(filePath) ? path.resolve(baseDir, filePath) : filePath

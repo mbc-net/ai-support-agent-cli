@@ -9,6 +9,7 @@ import { t } from '../../i18n'
 import { logger } from '../../logger'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
+import { assertProjectCodeIsSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
 import type {
   ProjectStatus,
   ServiceConfig,
@@ -36,15 +37,6 @@ function getLogDir(): string {
 
 function sanitize(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
-}
-
-/**
- * POSIX shell single-quote a value so it can be safely interpolated into a
- * bash script. Wraps the value in single quotes and escapes any embedded
- * single quote as `'\''`. The result is always exactly one shell argument.
- */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
 /**
@@ -260,16 +252,35 @@ export function generateWrapperScript(opts: {
   const qContainerName = shellQuote(containerName)
   const qProjectArg = shellQuote(`${opts.tenantCode}/${opts.projectCode}`)
 
+  // Project directory mount strategy:
+  // - projectConfigHostDir (~/.ai-support-agent/projects/<t>/<p>/.ai-support-agent)
+  //   mounts to /home/node/.ai-support-agent inside the container. This is the
+  //   per-project metadata dir that docker-supervisor writes hash files into.
+  // - The PROJECT DIR itself (~/.ai-support-agent/projects/<t>/<p>) — the
+  //   parent of projectConfigHostDir — is mounted separately so the agent's
+  //   ensureProjectDirs() writes workspace/, uploads/ to the right place
+  //   inside the project dir (not double-nested under the metadata dir).
+  // - AI_SUPPORT_AGENT_PROJECT_DIR_MAP pins the in-container project dir so
+  //   resolveProjectDir() does NOT fall back to the default template, which
+  //   would otherwise be `<configDir>/projects/<t>/<p>` and produce a
+  //   doubly-nested layout on disk.
+  // containerProjectDir is a Linux-style absolute path inside the docker
+  // container, so it's safe to hard-code with forward slashes regardless of
+  // the host platform that generated the wrapper.
+  const containerProjectDir = `/workspace/projects/${opts.projectCode}`
+  // hostProjectDir is a HOST path; the Linux wrapper is only generated on
+  // Linux hosts so `path.dirname` (which equals path.posix.dirname there)
+  // is correct. `||` (not `??`) — an empty `opts.projectDir` must fall
+  // back to the default; an empty hostProjectDir would emit
+  // `-v :/workspace/...:rw` which docker rejects.
+  const hostProjectDir = opts.projectDir || path.dirname(opts.projectConfigHostDir)
+
   const mountLines: string[] = [
     `  -v ${shellQuote(`${homeDir}/.claude:${containerHome}/.claude:rw`)} \\`,
     `  -v ${shellQuote(`${opts.projectConfigHostDir}:${containerConfigDir}:rw`)} \\`,
     `  -v ${shellQuote(`${homeDir}/.claude.json:${containerHome}/.claude.json:rw`)} \\`,
+    `  -v ${shellQuote(`${hostProjectDir}:${containerProjectDir}:rw`)} \\`,
   ]
-
-  if (opts.projectDir) {
-    const containerProjectDir = `/workspace/projects/${opts.projectCode}`
-    mountLines.push(`  -v ${shellQuote(`${opts.projectDir}:${containerProjectDir}:rw`)} \\`)
-  }
 
   const envLines: string[] = [
     `  -e AI_SUPPORT_AGENT_IN_DOCKER=1 \\`,
@@ -277,6 +288,9 @@ export function generateWrapperScript(opts: {
     `  -e AI_SUPPORT_AGENT_CONFIG_DIR=${qContainerConfigDir} \\`,
     `  -e AI_SUPPORT_AGENT_TOKEN=${qToken} \\`,
     `  -e AI_SUPPORT_AGENT_API_URL=${qApiUrl} \\`,
+    // Pin the in-container project dir so the agent does not re-derive it
+    // from `${CONFIG_DIR}/projects/<t>/<p>` (which would double-nest).
+    `  -e AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${shellQuote(`${opts.projectCode}=${containerProjectDir}`)} \\`,
   ]
   if (opts.anthropicApiKey) {
     envLines.push(`  -e ANTHROPIC_API_KEY=${shellQuote(opts.anthropicApiKey)} \\`)
@@ -326,7 +340,18 @@ fi
 # Remove stale container if it exists (e.g. from a previous crash)
 docker rm -f ${qContainerName} 2>/dev/null || true
 
+# Run the container as the invoking user so that bind-mounted host
+# directories (token wrapper, project config, .claude state) remain
+# writable inside the container. The docker image's entrypoint adds
+# the runtime UID to /etc/passwd dynamically so unknown UIDs still
+# get a usable home. Without --user, root inside the container can't
+# write to host paths owned by the unprivileged service user under
+# rootless docker / userns-remap setups (EACCES on mkdir).
+_DOCKER_UID=$(id -u)
+_DOCKER_GID=$(id -g)
+
 docker run --rm -i --name ${qContainerName} \\
+  --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\
 ${mountLines.join('\n')}
 ${envLines.join('\n')}
   "\$IMAGE_TAG" \\
@@ -458,6 +483,9 @@ export function writeProjectServiceFiles(
   options: { verbose?: boolean } = {},
 ): string {
   const { tenantCode, projectCode } = project
+  // Reject codes that would break the PROJECT_DIR_MAP env format.
+  assertProjectCodeIsSafe(projectCode)
+  assertProjectCodeIsSafe(tenantCode)
   const projectKey = `${sanitize(tenantCode)}-${sanitize(projectCode)}`
 
   const logDir = getLogDir()
@@ -482,6 +510,16 @@ export function writeProjectServiceFiles(
     fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
   }
 
+  // Validate project.projectDir the same way buildProjectVolumeMounts does on
+  // the interactive path. If the user-supplied dir is empty, doesn't exist,
+  // or points at a blocked path (/etc, ~/.ssh, etc.), drop it and let
+  // generateWrapperScript fall back to the default mount derived from
+  // projectConfigHostDir. Without this check the wrapper would emit
+  // `-v <bad-path>:/workspace/projects/<code>:rw` unconditionally and
+  // either crash on start (empty/missing) or expose host secrets to the
+  // container (blocked prefix).
+  const validatedProjectDir = validateProjectDirForMount(project.projectDir)
+
   const updateScriptPath = getUpdateScriptPath()
   const wrapperScriptPath = path.join(projectServiceDir, 'run.sh')
   const wrapperScript = generateWrapperScript({
@@ -489,7 +527,7 @@ export function writeProjectServiceFiles(
     tenantCode,
     projectCode,
     projectConfigHostDir,
-    projectDir: project.projectDir,
+    projectDir: validatedProjectDir,
     token: project.token,
     apiUrl: project.apiUrl,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
@@ -596,34 +634,68 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     const updateScript = generateUpdateScript()
     writeFileEnsuringMode(updateScriptPath, updateScript, 0o700)
 
-    const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
+    // Pre-compute the expected unit names from the INPUT config (before any
+    // validation), so a project whose install fails this run is NOT treated
+    // as an orphan and accidentally disabled / unlinked. Failure modes:
+    //   - invalid projectCode (rejected by assertProjectCodeIsSafe)
+    //   - filesystem error during write
+    // For both, the previously-installed unit on disk should stay in place.
+    // We use a best-effort unit-name computation that tolerates invalid codes
+    // (getProjectUnitName uses sanitize which never throws).
     const expectedUnitNames = new Set<string>()
     for (const project of projects) {
-      const unitPath = writeProjectServiceFiles(project, { verbose: options.verbose })
-      const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
-      expectedUnitNames.add(unitName)
-      writtenUnits.push({
-        projectCode: project.projectCode,
-        unitPath,
-        unitFile: `${unitName}.service`,
-      })
+      try {
+        expectedUnitNames.add(getProjectUnitName(project.tenantCode, project.projectCode))
+      } catch { /* tolerate — orphan cleanup just won't protect this project */ }
+    }
+
+    const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
+    let anyInstallFailed = false
+    for (const project of projects) {
+      // Per-project failures (invalid projectCode, fs errors etc.) must not
+      // abort the entire install — log the error and continue so the
+      // remaining valid projects still get their wrappers written and
+      // enabled. Otherwise one stale entry in config could silently break
+      // every other project.
+      try {
+        const unitPath = writeProjectServiceFiles(project, { verbose: options.verbose })
+        const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
+        writtenUnits.push({
+          projectCode: project.projectCode,
+          unitPath,
+          unitFile: `${unitName}.service`,
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        logger.error(t('service.projectInstallFailed', { projectCode: project.projectCode, message }))
+        anyInstallFailed = true
+      }
     }
 
     // Remove orphaned per-project units for projects that are no longer in
     // config. Without this, `service start` / `status` would keep iterating
     // over stale units with outdated tokens because getAllProjectUnits()
     // walks the filesystem, not the config.
-    for (const { unitName, unitPath } of getAllProjectUnits()) {
-      if (expectedUnitNames.has(unitName)) continue
-      const orphanUnitFile = `${unitName}.service`
-      try {
-        execSync(`systemctl --user disable --now "${orphanUnitFile}"`, { stdio: 'pipe' })
-      } catch { /* not loaded — ignore */ }
-      try {
-        if (fs.existsSync(unitPath)) fs.unlinkSync(unitPath)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        logger.warn(t('service.orphanUnitRemoveFailed', { unit: orphanUnitFile, message }))
+    //
+    // SAFETY: when any project install failed this run, SKIP orphan cleanup
+    // entirely. A failed validation could otherwise destructively deregister
+    // a previously-running unit just because the user mistyped one entry in
+    // config — and worse, sanitize() collapses `;`/`_`/`.` all to `-`, so a
+    // typo'd projectCode can collide with a different project's unit name
+    // and remove THE WRONG unit.
+    if (!anyInstallFailed) {
+      for (const { unitName, unitPath } of getAllProjectUnits()) {
+        if (expectedUnitNames.has(unitName)) continue
+        const orphanUnitFile = `${unitName}.service`
+        try {
+          execSync(`systemctl --user disable --now "${orphanUnitFile}"`, { stdio: 'pipe' })
+        } catch { /* not loaded — ignore */ }
+        try {
+          if (fs.existsSync(unitPath)) fs.unlinkSync(unitPath)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          logger.warn(t('service.orphanUnitRemoveFailed', { unit: orphanUnitFile, message }))
+        }
       }
     }
 

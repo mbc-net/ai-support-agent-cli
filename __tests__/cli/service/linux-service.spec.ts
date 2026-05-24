@@ -225,6 +225,19 @@ describe('generateWrapperScript', () => {
     expect(result).toContain("--project 'mbc/MBC_01'")
   })
 
+  it('should run the container as the invoking user (--user uid:gid)', () => {
+    // Without --user, a container started by a systemd --user service runs
+    // as root inside the container but bind-mounted host paths owned by the
+    // unprivileged service user are not writable (EACCES on mkdir under
+    // rootless docker or userns-remap setups), so the agent fails to
+    // initialize the per-project workspace on first start.
+    const result = generateWrapperScript(baseOpts)
+
+    expect(result).toContain('_DOCKER_UID=$(id -u)')
+    expect(result).toContain('_DOCKER_GID=$(id -g)')
+    expect(result).toContain('--user "${_DOCKER_UID}:${_DOCKER_GID}"')
+  })
+
   it('should load nvm and set PATH for systemd compatibility', () => {
     const result = generateWrapperScript(baseOpts)
 
@@ -343,6 +356,28 @@ describe('generateWrapperScript', () => {
     const result = generateWrapperScript(baseOpts)
 
     expect(result).toContain("'/home/user/.ai-support-agent/projects/mbc/MBC_01/.ai-support-agent:/home/node/.ai-support-agent:rw'")
+  })
+
+  it('should mount the parent of projectConfigHostDir as the in-container project dir when projectDir is NOT provided', () => {
+    // Regression for the double-nesting bug: without this mount + env, the
+    // in-container `ensureProjectDirs` resolves the project dir to
+    // `${CONFIG_DIR}/projects/<t>/<p>` inside the metadata bind-mount,
+    // producing `<host>/.ai-support-agent/projects/<t>/<p>/.ai-support-agent/projects/<t>/<p>/workspace/...`.
+    const result = generateWrapperScript(baseOpts)
+
+    // The default project-dir mount source is the PARENT of projectConfigHostDir
+    expect(result).toContain("'/home/user/.ai-support-agent/projects/mbc/MBC_01:/workspace/projects/MBC_01:rw'")
+    // The agent's resolveProjectDir() must short-circuit via the env map
+    expect(result).toContain("AI_SUPPORT_AGENT_PROJECT_DIR_MAP='MBC_01=/workspace/projects/MBC_01'")
+  })
+
+  it('should fall back to the default project dir when projectDir is empty string (not nullish)', () => {
+    // `??` would keep '' as the source and emit `-v ':/workspace/...:rw'`,
+    // which docker rejects. `||` short-circuits to the default mount.
+    const result = generateWrapperScript({ ...baseOpts, projectDir: '' })
+
+    expect(result).not.toMatch(/-v\s+'?:\/workspace/)
+    expect(result).toContain("'/home/user/.ai-support-agent/projects/mbc/MBC_01:/workspace/projects/MBC_01:rw'")
   })
 
   it('should shell-quote tokens containing shell metacharacters', () => {
@@ -796,6 +831,64 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
         expect.stringContaining('service.orphanUnitRemoveFailed'),
       )
     })
+
+    it('should not abort the install loop when one project has an invalid projectCode', () => {
+      // Regression: a single bad project (`X;Y` is rejected by
+      // assertProjectCodeIsSafe) used to throw out of the loop and skip
+      // every subsequent project. Now we log and continue.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_03', token: 't3', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      // Error logged for the bad project, but valid projects still got
+      // their unit files written.
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectInstallFailed'),
+      )
+      const unitCalls = mockedFs.writeFileSync.mock.calls.filter(
+        (call) => String(call[0]).endsWith('.service'),
+      )
+      expect(unitCalls).toHaveLength(2)
+      expect(unitCalls[0][0]).toContain('mbc-mbc-01.service')
+      expect(unitCalls[1][0]).toContain('mbc-mbc-03.service')
+    })
+
+    it('should SKIP orphan cleanup when any project install fails (avoid destructive deregistration)', () => {
+      // Regression: previously, if validation rejected one project and
+      // pre-existing units for that project (or, worse, a sibling whose
+      // sanitized name collides) were on disk, the orphan loop would
+      // disable --now and unlink them. A typo in one project's code
+      // should not silently kill a different project's running unit.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+      ])
+      // The filesystem has a pre-existing unit for some old project the
+      // user removed. Without the skip, this would normally be cleaned up.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([
+        'ai-support-agent-mbc-mbc-old.service',
+      ] as any)
+
+      strategy.install({})
+
+      // Orphan cleanup must be skipped (no systemctl disable --now, no unlink).
+      const disableCalls = (mockedExecSync as jest.Mock).mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('disable --now'),
+      )
+      expect(disableCalls).toHaveLength(0)
+      expect(mockedFs.unlinkSync).not.toHaveBeenCalled()
+    })
   })
 
   describe('uninstall', () => {
@@ -1179,6 +1272,44 @@ describe('writeProjectServiceFiles', () => {
     expect(mockedFs.chmodSync).toHaveBeenCalledWith(
       expect.stringContaining('run.sh'),
       0o700,
+    )
+  })
+
+  it('should reject projectCodes that would break PROJECT_DIR_MAP parsing', () => {
+    // ';' is the multi-entry separator; '=' is the key/value separator.
+    // Either one in the projectCode would silently truncate the env map
+    // and silently re-introduce the doubly-nested layout this PR fixes.
+    expect(() => writeProjectServiceFiles({ ...project, projectCode: 'A;B' })).toThrow(
+      /service\.invalidProjectCode/,
+    )
+    expect(() => writeProjectServiceFiles({ ...project, projectCode: 'A=B' })).toThrow(
+      /service\.invalidProjectCode/,
+    )
+  })
+
+  it('should reject tenantCodes containing PROJECT_DIR_MAP separators', () => {
+    expect(() => writeProjectServiceFiles({ ...project, tenantCode: 't;x' })).toThrow(
+      /service\.invalidProjectCode/,
+    )
+  })
+
+  it('should drop project.projectDir when the host path does not exist and fall back to default', () => {
+    // existsSync mocked false → validation drops projectDir → wrapper falls
+    // back to default mount. Without this guard the wrapper would emit a
+    // `-v <missing-path>:/workspace/projects/<code>:rw` line which docker
+    // auto-creates as root-owned and then the --user invocation can't
+    // write into it (the exact failure mode from commit 11cbed1).
+    mockedFs.existsSync.mockReturnValue(false)
+
+    writeProjectServiceFiles({ ...project, projectDir: '/nonexistent/path' })
+
+    const runShCall = mockedFs.writeFileSync.mock.calls.find(
+      (call) => typeof call[0] === 'string' && (call[0] as string).endsWith('run.sh'),
+    )
+    const script = runShCall![1] as string
+    expect(script).not.toContain('/nonexistent/path')
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('service.projectDirMissing'),
     )
   })
 })
