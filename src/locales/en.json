@@ -193,6 +193,7 @@
   "service.projectDirBlocked": "Warning: configured projectDir is rejected ({{message}}): {{path}}. Falling back to the default per-project directory.",
   "service.invalidProjectCode": "Invalid projectCode: contains characters disallowed in AI_SUPPORT_AGENT_PROJECT_DIR_MAP ({{projectCode}}). Allowed characters: [A-Za-z0-9_-].",
   "service.projectInstallFailed": "Failed to install service for project {{projectCode}}: {{message}}. Continuing with the remaining projects.",
+  "service.projectUnitNameCollision": "Cannot install service for project {{projectCode}}: its sanitized unit name '{{unitName}}' collides with another configured project ({{others}}). Rename one of the projectCodes so they sanitize to distinct unit names.",
   "docker.projectSpawnFailed": "Failed to spawn docker container for project {{projectCode}}: {{message}}. Continuing with the remaining projects.",
   "docker.projectDirChmodFailed": "Warning: chmod 0o700 on the per-project bind-mount source failed ({{path}}): {{message}}. Other local users may be able to list the directory.",
   "service.overwriting": "Existing service file found at {{path}}. Overwriting.",

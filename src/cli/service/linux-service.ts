@@ -640,18 +640,62 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     //   - invalid projectCode (rejected by assertProjectCodeIsSafe)
     //   - filesystem error during write
     // For both, the previously-installed unit on disk should stay in place.
-    // We use a best-effort unit-name computation that tolerates invalid codes
-    // (getProjectUnitName uses sanitize which never throws).
+    // Single pass over `projects` populates BOTH:
+    //   - expectedUnitNames: protects pre-existing unit files from the
+    //     orphan-cleanup pass even when their install fails this run.
+    //   - unitNameCounts → collidingUnitNames: detects sanitize() collisions
+    //     where two distinct valid codes (e.g. `MBC_01` and `MBC-01`) map to
+    //     the same unit name and would silently overwrite each other.
+    // Keeping the two data structures in one loop guarantees they cannot
+    // drift (e.g. one loop catching a future throw the other doesn't).
+    // `getProjectUnitName` uses sanitize() (pure regex replace) and cannot
+    // throw on string input, so no defensive try/catch is needed.
+    //
+    // Collision counting must ONLY include codes that would actually be
+    // installable. Otherwise a typo'd entry (e.g. `MBC;01`, rejected later
+    // by assertProjectCodeIsSafe) would sanitize-collide with a valid
+    // sibling (`MBC-01`) and deny-install the valid one too. Filter codes
+    // through the same validator used inside writeProjectServiceFiles.
+    const isInstallable = (code: string): boolean => {
+      try { assertProjectCodeIsSafe(code); return true } catch { return false }
+    }
     const expectedUnitNames = new Set<string>()
+    const unitNameCounts = new Map<string, string[]>()
     for (const project of projects) {
-      try {
-        expectedUnitNames.add(getProjectUnitName(project.tenantCode, project.projectCode))
-      } catch { /* tolerate — orphan cleanup just won't protect this project */ }
+      const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
+      expectedUnitNames.add(unitName)
+      // Only count toward collisions if both codes pass validation. A code
+      // that fails assertProjectCodeIsSafe will be refused by its own loop
+      // iteration regardless; including it here would falsely collide with
+      // a valid sibling.
+      if (isInstallable(project.tenantCode) && isInstallable(project.projectCode)) {
+        const existing = unitNameCounts.get(unitName)
+        if (existing) existing.push(project.projectCode)
+        else unitNameCounts.set(unitName, [project.projectCode])
+      }
+    }
+    const collidingUnitNames = new Set<string>()
+    for (const [unitName, codes] of unitNameCounts) {
+      if (codes.length > 1) collidingUnitNames.add(unitName)
     }
 
     const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
     let anyInstallFailed = false
     for (const project of projects) {
+      const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
+      // Refuse to install when this project shares its sanitized unit name
+      // with another configured project — we can't tell which one should
+      // win, and last-write would silently lose the first.
+      if (collidingUnitNames.has(unitName)) {
+        const others = (unitNameCounts.get(unitName) ?? []).filter((c) => c !== project.projectCode)
+        logger.error(t('service.projectUnitNameCollision', {
+          projectCode: project.projectCode,
+          unitName,
+          others: others.join(', '),
+        }))
+        anyInstallFailed = true
+        continue
+      }
       // Per-project failures (invalid projectCode, fs errors etc.) must not
       // abort the entire install — log the error and continue so the
       // remaining valid projects still get their wrappers written and
@@ -659,7 +703,6 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       // every other project.
       try {
         const unitPath = writeProjectServiceFiles(project, { verbose: options.verbose })
-        const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
         writtenUnits.push({
           projectCode: project.projectCode,
           unitPath,

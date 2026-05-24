@@ -4,6 +4,12 @@ import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { validateBindMountPathSync } from '../../security'
 
+// Re-export the projectCode validator that now lives in `src/security.ts` so
+// existing call sites (linux-service / darwin-service) can continue to import
+// it from here. The actual implementation moved to avoid a layering
+// inversion (the docker supervisor also needs it).
+export { assertProjectCodeIsSafe } from '../../security'
+
 /**
  * POSIX shell single-quote a value so it can be safely interpolated into a
  * bash script. Wraps the value in single quotes and escapes any embedded
@@ -11,26 +17,6 @@ import { validateBindMountPathSync } from '../../security'
  */
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
-}
-
-/**
- * Reject projectCodes whose characters would break the
- * `AI_SUPPORT_AGENT_PROJECT_DIR_MAP` env format.
- *
- * The env value uses `;` as entry separator and `=` as key/value separator;
- * a projectCode containing either would silently truncate the map and let
- * `resolveProjectDir()` fall back to the default template, silently
- * re-introducing the doubly-nested layout that the recent PRs are trying
- * to prevent. Allow `[A-Za-z0-9_-]` only — matching the configured naming
- * convention (UPPER_SNAKE_CASE for project, lower_snake_case for tenant).
- *
- * Also used by the supervisor path (`buildProjectVolumeMounts`) so the
- * fail-open isn't reintroduced via interactive mode.
- */
-export function assertProjectCodeIsSafe(projectCode: string): void {
-  if (!/^[A-Za-z0-9_-]+$/.test(projectCode)) {
-    throw new Error(t('service.invalidProjectCode', { projectCode }))
-  }
 }
 
 /**

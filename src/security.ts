@@ -3,6 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { ERR_NO_FILE_PATH_SPECIFIED } from './constants'
+import { t } from './i18n'
 import type { CommandResult } from './types'
 import { parseString } from './utils'
 
@@ -64,6 +65,28 @@ export function validateCommand(command: string): string | null {
     }
   }
   return null
+}
+
+/**
+ * Reject projectCodes / tenantCodes whose characters would break the
+ * `AI_SUPPORT_AGENT_PROJECT_DIR_MAP` env format.
+ *
+ * The env value uses `;` as entry separator and `=` as key/value separator;
+ * a code containing either would silently truncate the map and let
+ * `resolveProjectDir()` fall back to the default template, silently
+ * re-introducing the doubly-nested layout the recent fixes prevent.
+ * Allow `[A-Za-z0-9_-]` only — matching the naming convention
+ * (UPPER_SNAKE_CASE for project, lower_snake_case for tenant).
+ *
+ * Lives in `security.ts` (not `cli/service/wrapper-helpers.ts`) because
+ * it's called by both the install path (cli/service/*) AND the docker
+ * supervisor path (docker/volume-mount-builder.ts). Keeping it here
+ * avoids a layering inversion where `docker/*` reaches into `cli/*`.
+ */
+export function assertProjectCodeIsSafe(projectCode: string): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(projectCode)) {
+    throw new Error(t('service.invalidProjectCode', { projectCode }))
+  }
 }
 
 /**

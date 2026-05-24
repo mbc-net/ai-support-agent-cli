@@ -837,6 +837,28 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
       // Two valid projects, one plist each.
       expect(plistCalls).toHaveLength(2)
     })
+
+    it('should refuse to install when two projects sanitize to the same plist label', async () => {
+      // sanitize() inside getProjectLabel collapses `_` and `-` to `-`, so
+      // `MBC_01` and `MBC-01` both produce 'com.ai-support-agent.cli.mbc.mbc-01'.
+      // Without collision detection the second project's writeProjectServiceFiles
+      // would silently overwrite the first's plist.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't2', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+      const plistCalls = mockedFs.writeFileSync.mock.calls.filter(
+        (call) => String(call[0]).endsWith('.plist'),
+      )
+      expect(plistCalls).toHaveLength(0)
+    })
   })
 
   describe('uninstall', () => {

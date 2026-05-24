@@ -582,8 +582,42 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     const updateScript = generateUpdateScript()
     fs.writeFileSync(updateScriptPath, updateScript, { mode: 0o700 })
 
+    // Detect sanitize() collisions: two valid projectCodes can map to the
+    // same plist label (e.g. `MBC_01` and `MBC-01` → `com.ai-support-agent.cli.<t>.mbc-01`).
+    // Refuse to install either so the second can't silently overwrite the
+    // first's plist. Same defense as the Linux wrapper.
+    //
+    // Only count codes that pass assertProjectCodeIsSafe — an invalid
+    // sibling (e.g. `MBC;01`) will be refused anyway, and including it
+    // here would falsely collide with a valid `MBC-01` and refuse it too.
+    const isInstallable = (code: string): boolean => {
+      try { assertProjectCodeIsSafe(code); return true } catch { return false }
+    }
+    const labelCounts = new Map<string, string[]>()
+    for (const project of projects) {
+      if (!isInstallable(project.tenantCode) || !isInstallable(project.projectCode)) continue
+      const label = getProjectLabel(project.tenantCode, project.projectCode)
+      const existing = labelCounts.get(label)
+      if (existing) existing.push(project.projectCode)
+      else labelCounts.set(label, [project.projectCode])
+    }
+    const collidingLabels = new Set<string>()
+    for (const [label, codes] of labelCounts) {
+      if (codes.length > 1) collidingLabels.add(label)
+    }
+
     for (const project of projects) {
       const { projectCode } = project
+      const label = getProjectLabel(project.tenantCode, projectCode)
+      if (collidingLabels.has(label)) {
+        const others = (labelCounts.get(label) ?? []).filter((c) => c !== projectCode)
+        logger.error(t('service.projectUnitNameCollision', {
+          projectCode,
+          unitName: label,
+          others: others.join(', '),
+        }))
+        continue
+      }
       // Per-project failures must not abort the loop — log and continue so
       // the remaining valid projects still get their plists written. See
       // the Linux wrapper for the same pattern.

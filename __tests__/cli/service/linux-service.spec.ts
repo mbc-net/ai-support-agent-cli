@@ -889,6 +889,95 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
       expect(disableCalls).toHaveLength(0)
       expect(mockedFs.unlinkSync).not.toHaveBeenCalled()
     })
+
+    it('control: SHOULD run orphan cleanup when all projects install successfully (catches a refactor that drops cleanup entirely)', () => {
+      // Sanity check that the SKIP test above is meaningful: with the same
+      // filesystem setup (orphan unit on disk) but ALL projects valid,
+      // orphan cleanup MUST fire — otherwise the SKIP-on-failure test
+      // could pass vacuously if cleanup were dropped from both paths.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([
+        'ai-support-agent-mbc-mbc-01.service',   // expected, will not be cleaned
+        'ai-support-agent-mbc-mbc-old.service',  // orphan, MUST be cleaned
+      ] as any)
+
+      strategy.install({})
+
+      // Orphan cleanup must fire for the legacy unit.
+      const disableOldCalls = (mockedExecSync as jest.Mock).mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('mbc-old'),
+      )
+      expect(disableOldCalls.length).toBeGreaterThan(0)
+      expect(mockedFs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('ai-support-agent-mbc-mbc-old.service'),
+      )
+    })
+
+    it('should refuse to install when two projects sanitize to the same unit name', () => {
+      // sanitize() collapses `_` and `-` (and other non-[a-z0-9-] chars) to
+      // `-`, so `MBC_01` and `MBC-01` both produce `ai-support-agent-mbc-mbc-01`.
+      // Without collision detection the second project's writeProjectServiceFiles
+      // silently overwrites the first.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't2', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      // Both colliding projects must be refused with the collision error.
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+      // No unit file should have been written for the colliding pair.
+      const unitCalls = mockedFs.writeFileSync.mock.calls.filter(
+        (call) => String(call[0]).endsWith('.service'),
+      )
+      expect(unitCalls).toHaveLength(0)
+    })
+
+    it('should NOT deny-install a valid project whose sanitized name "collides" only with an invalid sibling', () => {
+      // Regression: collision detection used to count EVERY sanitized
+      // unit name including those of codes that would be rejected by
+      // assertProjectCodeIsSafe. So `MBC;01` (invalid) + `MBC-01` (valid)
+      // both sanitize to `mbc-01`, falsely marking MBC-01 as colliding
+      // and denying its install. Now we only count installable codes.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC;01', token: 't1', apiUrl: 'https://api' },  // invalid
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't2', apiUrl: 'https://api' },  // valid
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      // MBC;01 was refused by assertProjectCodeIsSafe (invalidProjectCode),
+      // NOT by the collision detection.
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectInstallFailed'),
+      )
+      // The valid sibling MBC-01 must still be written.
+      const unitCalls = mockedFs.writeFileSync.mock.calls.filter(
+        (call) => String(call[0]).endsWith('.service'),
+      )
+      expect(unitCalls).toHaveLength(1)
+      expect(unitCalls[0][0]).toContain('mbc-mbc-01.service')
+      // No collision error should fire — the only failure was the invalid code.
+      expect(logger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
   })
 
   describe('uninstall', () => {
