@@ -244,7 +244,14 @@ export function buildProjectVolumeMounts(
     // uploads/, etc. into. Without this, ensureProjectDirs would mkdir
     // inside the metadata bind-mount and produce the doubly nested layout.
     const defaultHostProjectDir = path.dirname(projectConfigHostDir)
+    // The `mode` option on fs.mkdirSync only applies to newly-created leaves.
+    // When the parent (`<configDir>/projects/<t>/<p>`) already exists — as it
+    // does after the line-177 recursive mkdir of projectConfigHostDir
+    // populated it via umask (typically 0o755) — the mode option is silently
+    // ignored. Follow up with chmodSync so the project dir is actually 0o700
+    // and not world-listable on multi-user hosts.
     fs.mkdirSync(defaultHostProjectDir, { recursive: true, mode: 0o700 })
+    try { fs.chmodSync(defaultHostProjectDir, 0o700) } catch { /* ignore */ }
     mounts.push('-v', `${defaultHostProjectDir}:${containerProjectDir}:rw`)
   }
   envArgs.push('-e', `AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${project.projectCode}=${containerProjectDir}`)
