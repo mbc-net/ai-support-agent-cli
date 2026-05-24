@@ -225,6 +225,19 @@ describe('generateWrapperScript', () => {
     expect(result).toContain("--project 'mbc/MBC_01'")
   })
 
+  it('should run the container as the invoking user (--user uid:gid)', () => {
+    // Without --user, a container started by a systemd --user service runs
+    // as root inside the container but bind-mounted host paths owned by the
+    // unprivileged service user are not writable (EACCES on mkdir under
+    // rootless docker or userns-remap setups), so the agent fails to
+    // initialize the per-project workspace on first start.
+    const result = generateWrapperScript(baseOpts)
+
+    expect(result).toContain('_DOCKER_UID=$(id -u)')
+    expect(result).toContain('_DOCKER_GID=$(id -g)')
+    expect(result).toContain('--user "${_DOCKER_UID}:${_DOCKER_GID}"')
+  })
+
   it('should load nvm and set PATH for systemd compatibility', () => {
     const result = generateWrapperScript(baseOpts)
 
@@ -343,6 +356,19 @@ describe('generateWrapperScript', () => {
     const result = generateWrapperScript(baseOpts)
 
     expect(result).toContain("'/home/user/.ai-support-agent/projects/mbc/MBC_01/.ai-support-agent:/home/node/.ai-support-agent:rw'")
+  })
+
+  it('should mount the parent of projectConfigHostDir as the in-container project dir when projectDir is NOT provided', () => {
+    // Regression for the double-nesting bug: without this mount + env, the
+    // in-container `ensureProjectDirs` resolves the project dir to
+    // `${CONFIG_DIR}/projects/<t>/<p>` inside the metadata bind-mount,
+    // producing `<host>/.ai-support-agent/projects/<t>/<p>/.ai-support-agent/projects/<t>/<p>/workspace/...`.
+    const result = generateWrapperScript(baseOpts)
+
+    // The default project-dir mount source is the PARENT of projectConfigHostDir
+    expect(result).toContain("'/home/user/.ai-support-agent/projects/mbc/MBC_01:/workspace/projects/MBC_01:rw'")
+    // The agent's resolveProjectDir() must short-circuit via the env map
+    expect(result).toContain("AI_SUPPORT_AGENT_PROJECT_DIR_MAP='MBC_01=/workspace/projects/MBC_01'")
   })
 
   it('should shell-quote tokens containing shell metacharacters', () => {

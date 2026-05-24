@@ -221,17 +221,22 @@ export function generateWrapperScript(opts: {
   const homeDir = os.homedir()
   const containerApiUrl = toContainerApiUrl(opts.apiUrl)
 
+  // Project directory mount strategy: mirror the Linux wrapper. The metadata
+  // dir (projectConfigHostDir) mounts to /home/node/.ai-support-agent for
+  // hash files; the project dir itself mounts to /workspace/projects/<code>
+  // and is pinned via AI_SUPPORT_AGENT_PROJECT_DIR_MAP so the agent does NOT
+  // re-derive `<configDir>/projects/<t>/<p>` and double-nest the workspace
+  // tree.
+  const containerProjectDir = `/workspace/projects/${opts.projectCode}`
+  const hostProjectDir = opts.projectDir ?? path.dirname(opts.projectConfigHostDir)
+
   const mountLines: string[] = [
     `  -v "${homeDir}/.claude:${containerHome}/.claude:rw" \\`,
     `  -v "${opts.projectConfigHostDir}:${containerConfigDir}:rw" \\`,
   ]
   // Mount .claude.json only if it's a regular file (not a directory)
   mountLines.push(`  -v "${homeDir}/.claude.json:${containerHome}/.claude.json:rw" \\`)
-
-  if (opts.projectDir) {
-    const containerProjectDir = `/workspace/projects/${opts.projectCode}`
-    mountLines.push(`  -v "${opts.projectDir}:${containerProjectDir}:rw" \\`)
-  }
+  mountLines.push(`  -v "${hostProjectDir}:${containerProjectDir}:rw" \\`)
 
   const envLines: string[] = [
     `  -e AI_SUPPORT_AGENT_IN_DOCKER=1 \\`,
@@ -239,6 +244,7 @@ export function generateWrapperScript(opts: {
     `  -e AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir} \\`,
     `  -e AI_SUPPORT_AGENT_TOKEN=${opts.token} \\`,
     `  -e AI_SUPPORT_AGENT_API_URL=${containerApiUrl} \\`,
+    `  -e AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${opts.projectCode}=${containerProjectDir} \\`,
   ]
   if (opts.anthropicApiKey) {
     envLines.push(`  -e ANTHROPIC_API_KEY=${opts.anthropicApiKey} \\`)

@@ -440,6 +440,14 @@ describe('generateWrapperScript', () => {
 
     expect(result).toContain('/Users/test/.ai-support-agent/projects/mbc/MBC_01/.ai-support-agent:/home/node/.ai-support-agent:rw')
   })
+
+  it('should mount the parent of projectConfigHostDir as the in-container project dir when projectDir is NOT provided', () => {
+    // Regression for the double-nesting bug: same as the Linux wrapper.
+    const result = generateWrapperScript(baseOpts)
+
+    expect(result).toContain('/Users/test/.ai-support-agent/projects/mbc/MBC_01:/workspace/projects/MBC_01:rw')
+    expect(result).toContain('AI_SUPPORT_AGENT_PROJECT_DIR_MAP=MBC_01=/workspace/projects/MBC_01')
+  })
 })
 
 // ---------------------------------------------------------------------------
