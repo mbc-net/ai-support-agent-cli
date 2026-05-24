@@ -269,6 +269,29 @@ describe('generateWrapperScript', () => {
     expect(result).not.toContain('127.0.0.1')
   })
 
+  it('should NOT replace localhost when it is a prefix of a longer hostname', () => {
+    // Without the regex anchor, `http://localhost.example.com` would
+    // partially match the `localhost` prefix and become
+    // `http://host.docker.internal.example.com` — a different host.
+    const result = generateWrapperScript({ ...baseOpts, apiUrl: 'http://localhost.example.com/api' })
+
+    expect(result).toContain("AI_SUPPORT_AGENT_API_URL='http://localhost.example.com/api'")
+    expect(result).not.toContain('host.docker.internal')
+  })
+
+  it('should NOT replace 127.0.0.1 when it is a prefix of a longer host', () => {
+    const result = generateWrapperScript({ ...baseOpts, apiUrl: 'http://127.0.0.1.nip.io/api' })
+
+    expect(result).toContain("AI_SUPPORT_AGENT_API_URL='http://127.0.0.1.nip.io/api'")
+    expect(result).not.toContain('host.docker.internal')
+  })
+
+  it('should convert localhost without port when path follows directly', () => {
+    const result = generateWrapperScript({ ...baseOpts, apiUrl: 'http://localhost/api' })
+
+    expect(result).toContain("AI_SUPPORT_AGENT_API_URL='http://host.docker.internal/api'")
+  })
+
   it('should handle exit 42 by delegating to update script', () => {
     const result = generateWrapperScript(baseOpts)
 
@@ -723,6 +746,56 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
         expect.stringContaining('service.daemonReloadFailed'),
       )
     })
+
+    it('should disable and remove orphaned units for projects no longer in config', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      // Config has mbc-01 and mbc-02 (from mockProjects). Filesystem also
+      // has an orphan mbc-99 that was registered previously and then removed.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([
+        'ai-support-agent-mbc-mbc-01.service',
+        'ai-support-agent-mbc-mbc-02.service',
+        'ai-support-agent-mbc-mbc-99.service',
+      ] as any)
+
+      strategy.install({})
+
+      // The orphan must be disabled and its unit file removed.
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'systemctl --user disable --now "ai-support-agent-mbc-mbc-99.service"',
+        { stdio: 'pipe' },
+      )
+      expect(mockedFs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('ai-support-agent-mbc-mbc-99.service'),
+      )
+      // Live units are NOT removed.
+      expect(mockedFs.unlinkSync).not.toHaveBeenCalledWith(
+        expect.stringContaining('ai-support-agent-mbc-mbc-01.service'),
+      )
+    })
+
+    it('should warn but continue when orphan removal unlink fails', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([
+        'ai-support-agent-mbc-mbc-01.service',
+        'ai-support-agent-mbc-mbc-02.service',
+        'ai-support-agent-mbc-mbc-99.service',
+      ] as any)
+      mockedFs.unlinkSync.mockImplementation((p: unknown) => {
+        if (typeof p === 'string' && p.includes('mbc-99')) {
+          throw new Error('EACCES')
+        }
+      })
+
+      strategy.install({})
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('service.orphanUnitRemoveFailed'),
+      )
+    })
   })
 
   describe('uninstall', () => {
@@ -797,9 +870,29 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
       strategy.start()
 
       expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.startFailed'),
+        expect.stringContaining('service.unitStartFailed'),
       )
       expect(logger.success).not.toHaveBeenCalled()
+    })
+
+    it('should pass the failing unit name to the i18n message for start failures', () => {
+      // Capture t() invocations to ensure operator gets unit context.
+      const tMod = jest.requireMock('../../../src/i18n') as { t: jest.Mock }
+      const tSpy = jest.spyOn(tMod, 't')
+      mockedExecSync.mockImplementation((cmd: unknown) => {
+        if (typeof cmd === 'string' && cmd.includes('mbc-02')) {
+          throw new Error('start failed')
+        }
+        return Buffer.from('')
+      })
+
+      strategy.start()
+
+      expect(tSpy).toHaveBeenCalledWith('service.unitStartFailed', expect.objectContaining({
+        unit: 'ai-support-agent-mbc-mbc-02.service',
+        message: expect.stringContaining('start failed'),
+      }))
+      tSpy.mockRestore()
     })
 
     it('should handle non-Error throw from start', () => {
@@ -814,7 +907,7 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
       strategy.start()
 
       expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.startFailed'),
+        expect.stringContaining('service.unitStartFailed'),
       )
     })
   })
@@ -845,7 +938,7 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
       strategy.stop()
 
       expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.stopFailed'),
+        expect.stringContaining('service.unitStopFailed'),
       )
       expect(logger.success).not.toHaveBeenCalled()
     })
@@ -862,7 +955,7 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
       strategy.stop()
 
       expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.stopFailed'),
+        expect.stringContaining('service.unitStopFailed'),
       )
     })
   })
@@ -910,7 +1003,7 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
       strategy.restart()
 
       expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.restartFailed'),
+        expect.stringContaining('service.unitRestartFailed'),
       )
     })
 
@@ -926,7 +1019,7 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
       strategy.restart()
 
       expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.restartFailed'),
+        expect.stringContaining('service.unitRestartFailed'),
       )
     })
   })
@@ -1076,6 +1169,18 @@ describe('writeProjectServiceFiles', () => {
     expect(script).toContain(project.token)
     expect(script).toContain(project.apiUrl)
   })
+
+  it('should chmod 0o700 on the wrapper script to enforce mode on overwrite', () => {
+    // fs.writeFileSync({ mode }) only applies on file CREATION. To guarantee
+    // 0o700 on an existing (possibly world-readable) wrapper, we follow up
+    // with an explicit chmod.
+    writeProjectServiceFiles(project)
+
+    expect(mockedFs.chmodSync).toHaveBeenCalledWith(
+      expect.stringContaining('run.sh'),
+      0o700,
+    )
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1174,7 +1279,11 @@ describe('installAndStartProject', () => {
 
     installAndStartProject(project)
 
-    expect(logger.warn).toHaveBeenCalled()
+    // Uses the same i18n key as LinuxServiceStrategy.install() for the same
+    // root cause, so support logs can correlate.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('service.daemonReloadFailed'),
+    )
     // Should not proceed to start
     const startCall = (mockedExecSync as jest.Mock).mock.calls.find(
       (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('systemctl --user start'),

@@ -48,17 +48,35 @@ function shellQuote(value: string): string {
 }
 
 /**
+ * Write a file with content and enforce mode. `fs.writeFileSync({ mode })`
+ * only applies the mode when the file is *created*; overwriting an existing
+ * file inherits the prior permissions, so a previously world-readable
+ * wrapper script (e.g. left by an older install or an out-of-band edit)
+ * would retain its lax mode despite containing bearer tokens. Explicit
+ * chmod after write guarantees the desired permissions either way.
+ */
+function writeFileEnsuringMode(filePath: string, content: string, mode: number): void {
+  fs.writeFileSync(filePath, content, { mode })
+  fs.chmodSync(filePath, mode)
+}
+
+/**
  * Escape a value for use inside a systemd unit (ExecStart, Environment, etc.).
  * Per `man 5 systemd.service`, `man 5 systemd.exec` and `man 5 systemd.unit`:
+ * - Backslash is the escape character; the literal backslash must be written
+ *   as `\\`.
  * - `$` in command lines triggers Environment variable expansion (`$FOO`); the
  *   literal dollar sign must be written as `$$`.
  * - `%` triggers specifier expansion (`%h`, `%u`, etc.); the literal percent
  *   sign must be written as `%%`.
  * - Whitespace separates argv tokens and must be escaped as `\x20`.
- * - Backslash and double-quote also need escaping.
+ * - Double-quote, tab, and newline also need backslash escaping.
  *
- * `$` must be doubled BEFORE other replacements so we don't double already
- * inserted backslash-escaped characters that don't contain `$`.
+ * Ordering matters: backslash MUST be doubled first so that the backslashes
+ * we subsequently introduce (e.g. `\"`, `\x20`) are not themselves re-doubled.
+ * `$` → `$$` and `%` → `%%` are independent of the backslash pass because
+ * they don't introduce a backslash. In JS replace strings, `$$` denotes a
+ * literal `$`, so `'$$$$'` produces `$$` and `'%%'` produces `%%`.
  */
 function systemdEscape(value: string): string {
   return value
@@ -197,9 +215,12 @@ WantedBy=default.target
 
 /** Convert localhost/127.0.0.1 to host.docker.internal for container use */
 function toContainerApiUrl(apiUrl: string): string {
+  // The host portion must be terminated by `:`, `/`, or end-of-string;
+  // otherwise URLs like `http://localhost.example.com` would partially match
+  // and produce `http://host.docker.internal.example.com` (a different host).
   return apiUrl.replace(
-    /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
-    (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
+    /^(https?:\/\/)(localhost|127\.0\.0\.1)(?=$|[:/])/,
+    (_, scheme: string) => `${scheme}host.docker.internal`,
   )
 }
 
@@ -372,7 +393,9 @@ done
 VERSION_FILE=${qVersionFile}
 _INSTALL_OK=true
 if [ -f "$VERSION_FILE" ]; then
-  NEW_VERSION=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$VERSION_FILE','utf-8')).version||'')}catch(e){console.log('')}" 2>/dev/null || echo "")
+  # Pass the path via env var so an apostrophe (or other JS string metachar) in
+  # HOME or AI_SUPPORT_AGENT_CONFIG_DIR cannot break the JS string literal.
+  NEW_VERSION=$(VERSION_FILE="$VERSION_FILE" node -e "try{console.log(JSON.parse(require('fs').readFileSync(process.env.VERSION_FILE,'utf-8')).version||'')}catch(e){console.log('')}" 2>/dev/null || echo "")
   rm -f "$VERSION_FILE"
   if [ -n "$NEW_VERSION" ]; then
     NPM_OUTPUT=$(npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet 2>&1)
@@ -474,7 +497,9 @@ export function writeProjectServiceFiles(
     verbose: options.verbose,
     updateScriptPath,
   })
-  fs.writeFileSync(wrapperScriptPath, wrapperScript, { mode: 0o700 })
+  // 0o700 — wrapper embeds the agent token (and optionally ANTHROPIC_API_KEY
+  // / CLAUDE_CODE_OAUTH_TOKEN) as shell-quoted literals. See writeFileEnsuringMode.
+  writeFileEnsuringMode(wrapperScriptPath, wrapperScript, 0o700)
 
   const unitName = getProjectUnitName(tenantCode, projectCode)
   const unitPath = getProjectUnitFilePath(tenantCode, projectCode)
@@ -495,18 +520,19 @@ export function installAndStartProject(
 ): void {
   const updateScriptPath = getUpdateScriptPath()
   const updateScript = generateUpdateScript()
-  fs.writeFileSync(updateScriptPath, updateScript, { mode: 0o700 })
+  writeFileEnsuringMode(updateScriptPath, updateScript, 0o700)
 
   writeProjectServiceFiles(project, options)
   const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
   const unitFile = `${unitName}.service`
 
-  // Reload systemd so the new/updated unit is recognised.
+  // Reload systemd so the new/updated unit is recognised. Use the same
+  // diagnostic key as the strategy install() so support logs can correlate.
   try {
     execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    logger.warn(t('service.loadWarning', { label: `${unitName}: ${message}` }))
+    logger.warn(t('service.daemonReloadFailed', { message }))
     return
   }
 
@@ -568,16 +594,37 @@ export class LinuxServiceStrategy implements ServiceStrategy {
 
     const updateScriptPath = getUpdateScriptPath()
     const updateScript = generateUpdateScript()
-    fs.writeFileSync(updateScriptPath, updateScript, { mode: 0o700 })
+    writeFileEnsuringMode(updateScriptPath, updateScript, 0o700)
 
     const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
+    const expectedUnitNames = new Set<string>()
     for (const project of projects) {
       const unitPath = writeProjectServiceFiles(project, { verbose: options.verbose })
+      const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
+      expectedUnitNames.add(unitName)
       writtenUnits.push({
         projectCode: project.projectCode,
         unitPath,
-        unitFile: `${getProjectUnitName(project.tenantCode, project.projectCode)}.service`,
+        unitFile: `${unitName}.service`,
       })
+    }
+
+    // Remove orphaned per-project units for projects that are no longer in
+    // config. Without this, `service start` / `status` would keep iterating
+    // over stale units with outdated tokens because getAllProjectUnits()
+    // walks the filesystem, not the config.
+    for (const { unitName, unitPath } of getAllProjectUnits()) {
+      if (expectedUnitNames.has(unitName)) continue
+      const orphanUnitFile = `${unitName}.service`
+      try {
+        execSync(`systemctl --user disable --now "${orphanUnitFile}"`, { stdio: 'pipe' })
+      } catch { /* not loaded — ignore */ }
+      try {
+        if (fs.existsSync(unitPath)) fs.unlinkSync(unitPath)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        logger.warn(t('service.orphanUnitRemoveFailed', { unit: orphanUnitFile, message }))
+      }
     }
 
     // Reload systemd so the new/updated units are recognised, then enable
@@ -646,11 +693,14 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     }
 
     for (const { unitName } of projectUnits) {
+      const unit = `${unitName}.service`
       try {
-        execSync(`systemctl --user start "${unitName}.service"`, { stdio: 'pipe' })
+        execSync(`systemctl --user start "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        logger.error(t('service.startFailed', { message }))
+        // Include unit name so operators can identify the failing project
+        // when start runs over N units.
+        logger.error(t('service.unitStartFailed', { unit, message }))
         failed = true
       }
     }
@@ -669,11 +719,12 @@ export class LinuxServiceStrategy implements ServiceStrategy {
 
     let failed = false
     for (const { unitName } of projectUnits) {
+      const unit = `${unitName}.service`
       try {
-        execSync(`systemctl --user stop "${unitName}.service"`, { stdio: 'pipe' })
+        execSync(`systemctl --user stop "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        logger.error(t('service.stopFailed', { message }))
+        logger.error(t('service.unitStopFailed', { unit, message }))
         failed = true
       }
     }
@@ -698,11 +749,12 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     }
 
     for (const { unitName } of projectUnits) {
+      const unit = `${unitName}.service`
       try {
-        execSync(`systemctl --user restart "${unitName}.service"`, { stdio: 'pipe' })
+        execSync(`systemctl --user restart "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        logger.error(t('service.restartFailed', { message }))
+        logger.error(t('service.unitRestartFailed', { unit, message }))
         failed = true
       }
     }
