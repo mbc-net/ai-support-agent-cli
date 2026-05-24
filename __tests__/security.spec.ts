@@ -493,6 +493,12 @@ describe('security regression tests', () => {
       expect(validateBindMountPathSync('/nonexistent-path-12345')).toBeNull()
       expect(validateBindMountPathSync('/etc/nonexistent-subpath')).toContain('Access denied')
     })
+
+    it('rejects empty string up front (does not fall back to cwd via realpathSync)', () => {
+      // `fs.realpathSync('')` returns the process cwd, which would likely
+      // pass the blocked-prefix check and let an empty hostPath through.
+      expect(validateBindMountPathSync('')).toContain('Access denied')
+    })
   })
 
   describe('ALLOWED_SIGNALS: signal allowlist enforcement', () => {

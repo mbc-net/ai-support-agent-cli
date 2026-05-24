@@ -815,6 +815,28 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
         else process.env.AI_SUPPORT_AGENT_CONFIG_DIR = originalConfigDir
       }
     })
+
+    it('should not abort the install loop when one project has an invalid projectCode', async () => {
+      // Regression: same as the Linux test. One bad project must not stop
+      // the rest from being installed.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_03', token: 't3', apiUrl: 'https://api' },
+      ])
+
+      await strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectInstallFailed'),
+      )
+      const plistCalls = mockedFs.writeFileSync.mock.calls.filter(
+        (call) => String(call[0]).endsWith('.plist'),
+      )
+      // Two valid projects, one plist each.
+      expect(plistCalls).toHaveLength(2)
+    })
   })
 
   describe('uninstall', () => {

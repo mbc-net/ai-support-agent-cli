@@ -7,9 +7,9 @@ import { loadConfig, getProjectList } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
-import { validateBindMountPathSync } from '../../security'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
+import { assertProjectCodeIsSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
 import type {
   ProjectStatus,
   ServiceConfig,
@@ -40,15 +40,6 @@ function sanitize(s: string): string {
 }
 
 /**
- * POSIX shell single-quote a value so it can be safely interpolated into a
- * bash script. Wraps the value in single quotes and escapes any embedded
- * single quote as `'\''`. The result is always exactly one shell argument.
- */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`
-}
-
-/**
  * Write a file with content and enforce mode. `fs.writeFileSync({ mode })`
  * only applies the mode when the file is *created*; overwriting an existing
  * file inherits the prior permissions, so a previously world-readable
@@ -59,49 +50,6 @@ function shellQuote(value: string): string {
 function writeFileEnsuringMode(filePath: string, content: string, mode: number): void {
   fs.writeFileSync(filePath, content, { mode })
   fs.chmodSync(filePath, mode)
-}
-
-/**
- * Reject projectCodes whose characters would break
- * `AI_SUPPORT_AGENT_PROJECT_DIR_MAP` parsing.
- *
- * The env value uses `;` as entry separator and `=` as key/value separator;
- * a projectCode containing either would silently truncate the map and let
- * `resolveProjectDir()` fall back to the default template, silently
- * re-introducing the doubly-nested layout this PR is trying to prevent.
- * Allow `[A-Za-z0-9_-]` only — matching the configured naming convention
- * (UPPER_SNAKE_CASE for project, lower_snake_case for tenant).
- */
-export function assertProjectCodeIsSafe(projectCode: string): void {
-  if (!/^[A-Za-z0-9_-]+$/.test(projectCode)) {
-    throw new Error(t('service.invalidProjectCode', { projectCode }))
-  }
-}
-
-/**
- * Validate a user-supplied project.projectDir for use as a bind mount in
- * the generated wrapper script.
- *
- * Returns the original value when the path is acceptable, or `undefined`
- * when it should be dropped (and the wrapper should fall back to the
- * default per-project dir). Emits a warning log so the user is aware that
- * their configured projectDir was ignored.
- *
- * Rejects: empty string, non-string, non-existent paths, paths under
- * BLOCKED_PATH_PREFIXES / getSensitiveHomePaths (e.g. `/etc`, `~/.ssh`).
- */
-export function validateProjectDirForMount(projectDir: string | undefined): string | undefined {
-  if (!projectDir) return undefined
-  if (!fs.existsSync(projectDir)) {
-    logger.warn(t('service.projectDirMissing', { path: projectDir }))
-    return undefined
-  }
-  const blockedError = validateBindMountPathSync(projectDir)
-  if (blockedError) {
-    logger.warn(t('service.projectDirBlocked', { path: projectDir, message: blockedError }))
-    return undefined
-  }
-  return projectDir
 }
 
 /**
@@ -686,34 +634,68 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     const updateScript = generateUpdateScript()
     writeFileEnsuringMode(updateScriptPath, updateScript, 0o700)
 
-    const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
+    // Pre-compute the expected unit names from the INPUT config (before any
+    // validation), so a project whose install fails this run is NOT treated
+    // as an orphan and accidentally disabled / unlinked. Failure modes:
+    //   - invalid projectCode (rejected by assertProjectCodeIsSafe)
+    //   - filesystem error during write
+    // For both, the previously-installed unit on disk should stay in place.
+    // We use a best-effort unit-name computation that tolerates invalid codes
+    // (getProjectUnitName uses sanitize which never throws).
     const expectedUnitNames = new Set<string>()
     for (const project of projects) {
-      const unitPath = writeProjectServiceFiles(project, { verbose: options.verbose })
-      const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
-      expectedUnitNames.add(unitName)
-      writtenUnits.push({
-        projectCode: project.projectCode,
-        unitPath,
-        unitFile: `${unitName}.service`,
-      })
+      try {
+        expectedUnitNames.add(getProjectUnitName(project.tenantCode, project.projectCode))
+      } catch { /* tolerate — orphan cleanup just won't protect this project */ }
+    }
+
+    const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
+    let anyInstallFailed = false
+    for (const project of projects) {
+      // Per-project failures (invalid projectCode, fs errors etc.) must not
+      // abort the entire install — log the error and continue so the
+      // remaining valid projects still get their wrappers written and
+      // enabled. Otherwise one stale entry in config could silently break
+      // every other project.
+      try {
+        const unitPath = writeProjectServiceFiles(project, { verbose: options.verbose })
+        const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
+        writtenUnits.push({
+          projectCode: project.projectCode,
+          unitPath,
+          unitFile: `${unitName}.service`,
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        logger.error(t('service.projectInstallFailed', { projectCode: project.projectCode, message }))
+        anyInstallFailed = true
+      }
     }
 
     // Remove orphaned per-project units for projects that are no longer in
     // config. Without this, `service start` / `status` would keep iterating
     // over stale units with outdated tokens because getAllProjectUnits()
     // walks the filesystem, not the config.
-    for (const { unitName, unitPath } of getAllProjectUnits()) {
-      if (expectedUnitNames.has(unitName)) continue
-      const orphanUnitFile = `${unitName}.service`
-      try {
-        execSync(`systemctl --user disable --now "${orphanUnitFile}"`, { stdio: 'pipe' })
-      } catch { /* not loaded — ignore */ }
-      try {
-        if (fs.existsSync(unitPath)) fs.unlinkSync(unitPath)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        logger.warn(t('service.orphanUnitRemoveFailed', { unit: orphanUnitFile, message }))
+    //
+    // SAFETY: when any project install failed this run, SKIP orphan cleanup
+    // entirely. A failed validation could otherwise destructively deregister
+    // a previously-running unit just because the user mistyped one entry in
+    // config — and worse, sanitize() collapses `;`/`_`/`.` all to `-`, so a
+    // typo'd projectCode can collide with a different project's unit name
+    // and remove THE WRONG unit.
+    if (!anyInstallFailed) {
+      for (const { unitName, unitPath } of getAllProjectUnits()) {
+        if (expectedUnitNames.has(unitName)) continue
+        const orphanUnitFile = `${unitName}.service`
+        try {
+          execSync(`systemctl --user disable --now "${orphanUnitFile}"`, { stdio: 'pipe' })
+        } catch { /* not loaded — ignore */ }
+        try {
+          if (fs.existsSync(unitPath)) fs.unlinkSync(unitPath)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          logger.warn(t('service.orphanUnitRemoveFailed', { unit: orphanUnitFile, message }))
+        }
       }
     }
 

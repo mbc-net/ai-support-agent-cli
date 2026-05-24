@@ -831,6 +831,64 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
         expect.stringContaining('service.orphanUnitRemoveFailed'),
       )
     })
+
+    it('should not abort the install loop when one project has an invalid projectCode', () => {
+      // Regression: a single bad project (`X;Y` is rejected by
+      // assertProjectCodeIsSafe) used to throw out of the loop and skip
+      // every subsequent project. Now we log and continue.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_03', token: 't3', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      // Error logged for the bad project, but valid projects still got
+      // their unit files written.
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectInstallFailed'),
+      )
+      const unitCalls = mockedFs.writeFileSync.mock.calls.filter(
+        (call) => String(call[0]).endsWith('.service'),
+      )
+      expect(unitCalls).toHaveLength(2)
+      expect(unitCalls[0][0]).toContain('mbc-mbc-01.service')
+      expect(unitCalls[1][0]).toContain('mbc-mbc-03.service')
+    })
+
+    it('should SKIP orphan cleanup when any project install fails (avoid destructive deregistration)', () => {
+      // Regression: previously, if validation rejected one project and
+      // pre-existing units for that project (or, worse, a sibling whose
+      // sanitized name collides) were on disk, the orphan loop would
+      // disable --now and unlink them. A typo in one project's code
+      // should not silently kill a different project's running unit.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+      ])
+      // The filesystem has a pre-existing unit for some old project the
+      // user removed. Without the skip, this would normally be cleaned up.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([
+        'ai-support-agent-mbc-mbc-old.service',
+      ] as any)
+
+      strategy.install({})
+
+      // Orphan cleanup must be skipped (no systemctl disable --now, no unlink).
+      const disableCalls = (mockedExecSync as jest.Mock).mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('disable --now'),
+      )
+      expect(disableCalls).toHaveLength(0)
+      expect(mockedFs.unlinkSync).not.toHaveBeenCalled()
+    })
   })
 
   describe('uninstall', () => {
