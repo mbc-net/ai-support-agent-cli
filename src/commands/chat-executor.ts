@@ -365,9 +365,24 @@ async function downloadAttachments(
   if (chatFiles.length > 0 && projectDir && conversationId) {
     const downloadResult = await downloadChatFiles(client, agentId, chatFiles, projectDir, conversationId)
     cleanup = downloadResult.cleanup
+    const parts: string[] = []
+    // 画像ファイルは @path 形式で付加（Claude Code CLI が画像として認識する）
+    if (downloadResult.imagePaths.length > 0) {
+      parts.push(downloadResult.imagePaths.map((p) => `@${p}`).join('\n'))
+    }
+    // 非画像ファイルは <attached_files> リストとして付加
+    // ローカルパスにダウンロード済みなので Read tool で読むよう明示し、
+    // S3 上の会話ファイル用 read_conversation_file との混同を防ぐ
     if (downloadResult.downloadedPaths.length > 0) {
-      filePathsNotice = `\n\n<attached_files>\nThe following files have been downloaded to local paths. Use the Read tool to read them directly — do NOT use read_conversation_file for these.\n${downloadResult.downloadedPaths.map((p) => `- ${p}`).join('\n')}\n</attached_files>`
-      logger.info(`[chat] Downloaded ${downloadResult.downloadedPaths.length} files for command [${commandId}]`)
+      parts.push(
+        `<attached_files>\nThe following files have been downloaded to local paths. Use the Read tool to read them directly — do NOT use read_conversation_file for these.\n${downloadResult.downloadedPaths.map((p) => `- ${p}`).join('\n')}\n</attached_files>`,
+      )
+    }
+    if (parts.length > 0) {
+      filePathsNotice = '\n\n' + parts.join('\n\n')
+      logger.info(
+        `[chat] Downloaded ${downloadResult.imagePaths.length} image(s) and ${downloadResult.downloadedPaths.length} file(s) for command [${commandId}]`,
+      )
     }
     if (downloadResult.failedCount > 0 && sendChunk) {
       await sendChunk('delta', `⚠️ ${downloadResult.failedCount}件のファイルのダウンロードに失敗しました\n\n`)

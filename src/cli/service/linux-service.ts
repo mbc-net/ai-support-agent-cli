@@ -9,7 +9,7 @@ import { t } from '../../i18n'
 import { logger } from '../../logger'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
-import { assertProjectCodeIsSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
 import type {
   ProjectStatus,
   ServiceConfig,
@@ -634,24 +634,67 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     const updateScript = generateUpdateScript()
     writeFileEnsuringMode(updateScriptPath, updateScript, 0o700)
 
+    // Detect sanitize() collisions where two distinct valid codes
+    // (e.g. `MBC_01` and `MBC-01`) map to the same unit name and would
+    // silently overwrite each other. The helper also returns a `names` map
+    // (fqn → sanitized unit name) so we don't recompute via sanitize()
+    // multiple times per project — keeping the orphan-protection set and
+    // the per-project loop in sync with a single source of truth.
+    const { names: safeUnitNames, collisions } = detectInstallCollisions(projects, getProjectUnitName)
+
     // Pre-compute the expected unit names from the INPUT config (before any
     // validation), so a project whose install fails this run is NOT treated
     // as an orphan and accidentally disabled / unlinked. Failure modes:
     //   - invalid projectCode (rejected by assertProjectCodeIsSafe)
     //   - filesystem error during write
     // For both, the previously-installed unit on disk should stay in place.
-    // We use a best-effort unit-name computation that tolerates invalid codes
-    // (getProjectUnitName uses sanitize which never throws).
+    // We include INVALID codes too (via getProjectUnitName, which sanitize()
+    // tolerates) so a typo'd entry's prior unit is still protected.
     const expectedUnitNames = new Set<string>()
     for (const project of projects) {
-      try {
-        expectedUnitNames.add(getProjectUnitName(project.tenantCode, project.projectCode))
-      } catch { /* tolerate — orphan cleanup just won't protect this project */ }
+      const fqn = `${project.tenantCode}/${project.projectCode}`
+      expectedUnitNames.add(
+        safeUnitNames.get(fqn) ?? getProjectUnitName(project.tenantCode, project.projectCode),
+      )
     }
 
+    // Track which colliding unit-names we've already reported so the same
+    // duplicate/collision error doesn't log N times for an N-times-listed
+    // entry.
+    const reportedCollisionNames = new Set<string>()
+
     const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
-    let anyInstallFailed = false
+    let failedCount = 0
     for (const project of projects) {
+      const fqn = `${project.tenantCode}/${project.projectCode}`
+      // Refuse to install when this project shares its sanitized unit name
+      // with another configured project — we can't tell which one should
+      // win, and last-write would silently lose the first.
+      const collision = collisions.get(fqn)
+      if (collision) {
+        // Pick the more actionable message: literal duplicates ask the
+        // user to "remove the duplicate row"; sanitize-collisions ask
+        // them to "rename one of the projectCodes". A single config can
+        // exhibit BOTH at once (the duplicate row AND a sibling that
+        // collides); when that happens we want both hints to fire — so
+        // dedup is per (unit-name, messageKey) tuple, not just unit-name.
+        // Otherwise the row-order of config would silently decide which
+        // hint the user sees.
+        const messageKey = collision.isDuplicate
+          ? 'service.projectDuplicateEntry'
+          : 'service.projectUnitNameCollision'
+        const dedupKey = `${collision.name}\x00${messageKey}`
+        if (!reportedCollisionNames.has(dedupKey)) {
+          logger.error(t(messageKey, {
+            projectCode: project.projectCode,
+            unitName: collision.name,
+            others: collision.others.join(', '),
+          }))
+          reportedCollisionNames.add(dedupKey)
+        }
+        failedCount += 1
+        continue
+      }
       // Per-project failures (invalid projectCode, fs errors etc.) must not
       // abort the entire install — log the error and continue so the
       // remaining valid projects still get their wrappers written and
@@ -659,7 +702,13 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       // every other project.
       try {
         const unitPath = writeProjectServiceFiles(project, { verbose: options.verbose })
-        const unitName = getProjectUnitName(project.tenantCode, project.projectCode)
+        // safeUnitNames is the single source of truth for valid codes;
+        // fall back to recomputation only on the impossible-by-contract
+        // path where safeUnitNames is missing the fqn (defensive — should
+        // not happen because writeProjectServiceFiles asserts the codes
+        // first).
+        const unitName = safeUnitNames.get(fqn)
+          ?? getProjectUnitName(project.tenantCode, project.projectCode)
         writtenUnits.push({
           projectCode: project.projectCode,
           unitPath,
@@ -668,9 +717,10 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         logger.error(t('service.projectInstallFailed', { projectCode: project.projectCode, message }))
-        anyInstallFailed = true
+        failedCount += 1
       }
     }
+    const anyInstallFailed = failedCount > 0
 
     // Remove orphaned per-project units for projects that are no longer in
     // config. Without this, `service start` / `status` would keep iterating
@@ -722,9 +772,26 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       logger.success(t('service.projectInstalled', { projectCode, path: unitPath }))
     }
 
-    logger.info(t('service.loadHintMulti'))
-    logger.info(t('service.logDir', { path: logDir }))
-    logger.info(t('service.noLogRotation'))
+    // Hide the "now run `service start`" hint when nothing was installed —
+    // otherwise the user sees the hint to start services that don't exist,
+    // followed by the failure summary at the very end.
+    if (writtenUnits.length > 0) {
+      logger.info(t('service.loadHintMulti'))
+      logger.info(t('service.logDir', { path: logDir }))
+      logger.info(t('service.noLogRotation'))
+    }
+
+    // Surface a summary line so scripts wrapping `service install` and
+    // operators scanning a long log can tell that SOME project was refused.
+    // Include counts (failed / total / succeeded) so the severity is
+    // immediately legible without grepping per-line errors.
+    if (anyInstallFailed) {
+      logger.warn(t('service.partialInstallSummary', {
+        failed: String(failedCount),
+        total: String(projects.length),
+        succeeded: String(writtenUnits.length),
+      }))
+    }
   }
 
   uninstall(): void {
