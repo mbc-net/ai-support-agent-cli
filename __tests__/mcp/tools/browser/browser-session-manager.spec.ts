@@ -1,4 +1,8 @@
-import { BrowserSessionManager } from '../../../../src/mcp/tools/browser/browser-session-manager'
+import {
+  BrowserSessionManager,
+  DEFAULT_MAX_BROWSER_SESSIONS,
+  getMaxBrowserSessionsFromEnv,
+} from '../../../../src/mcp/tools/browser/browser-session-manager'
 
 jest.mock('../../../../src/mcp/tools/browser/playwright-loader', () => ({
   loadPlaywright: jest.fn(),
@@ -53,13 +57,17 @@ describe('BrowserSessionManager', () => {
       )
     })
 
-    it('should use default maxSessions of 3', async () => {
-      await manager.getOrCreate('session-1')
-      await manager.getOrCreate('session-2')
-      await manager.getOrCreate('session-3')
+    it('should use the documented default maxSessions', async () => {
+      // The default should match DEFAULT_MAX_BROWSER_SESSIONS so the cap
+      // surfaces to operators via that exported constant.
+      for (let i = 1; i <= DEFAULT_MAX_BROWSER_SESSIONS; i++) {
+        await manager.getOrCreate(`session-${i}`)
+      }
 
-      await expect(manager.getOrCreate('session-4')).rejects.toThrow(
-        'Max browser sessions reached (3)',
+      await expect(
+        manager.getOrCreate(`session-${DEFAULT_MAX_BROWSER_SESSIONS + 1}`),
+      ).rejects.toThrow(
+        `Max browser sessions reached (${DEFAULT_MAX_BROWSER_SESSIONS})`,
       )
     })
   })
@@ -242,5 +250,36 @@ describe('BrowserSessionManager', () => {
 
       expect(manager.size).toBe(1)
     })
+  })
+})
+
+describe('getMaxBrowserSessionsFromEnv', () => {
+  it('returns the default when BROWSER_MAX_SESSIONS is unset', () => {
+    expect(getMaxBrowserSessionsFromEnv({})).toBe(DEFAULT_MAX_BROWSER_SESSIONS)
+  })
+
+  it('returns the default when BROWSER_MAX_SESSIONS is empty', () => {
+    expect(getMaxBrowserSessionsFromEnv({ BROWSER_MAX_SESSIONS: '' })).toBe(
+      DEFAULT_MAX_BROWSER_SESSIONS,
+    )
+  })
+
+  it('parses a positive integer override', () => {
+    expect(getMaxBrowserSessionsFromEnv({ BROWSER_MAX_SESSIONS: '10' })).toBe(10)
+  })
+
+  it('falls back to default when the override is not a number', () => {
+    expect(
+      getMaxBrowserSessionsFromEnv({ BROWSER_MAX_SESSIONS: 'lots' }),
+    ).toBe(DEFAULT_MAX_BROWSER_SESSIONS)
+  })
+
+  it('falls back to default when the override is zero or negative', () => {
+    expect(getMaxBrowserSessionsFromEnv({ BROWSER_MAX_SESSIONS: '0' })).toBe(
+      DEFAULT_MAX_BROWSER_SESSIONS,
+    )
+    expect(getMaxBrowserSessionsFromEnv({ BROWSER_MAX_SESSIONS: '-3' })).toBe(
+      DEFAULT_MAX_BROWSER_SESSIONS,
+    )
   })
 })
