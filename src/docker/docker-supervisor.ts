@@ -78,8 +78,20 @@ export class DockerSupervisor {
     this.onAllStopped = onStop
 
     for (const project of projects) {
-      migrateProjectConfigDir(project)
-      this.spawnProject(project)
+      // Per-project spawn failures (e.g. invalid projectCode rejected by
+      // buildProjectVolumeMounts, transient fs errors) must not abort the
+      // start loop — log and continue so the remaining valid projects still
+      // come up. Without this, one stale entry in config would silently
+      // take the entire fleet down. Use the docker-specific i18n key so
+      // operators aren't misled into looking at the systemd/launchd install
+      // subsystem when the actual failure is in the docker spawn path.
+      try {
+        migrateProjectConfigDir(project)
+        this.spawnProject(project)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        logger.error(t('docker.projectSpawnFailed', { projectCode: project.projectCode, message }))
+      }
     }
 
     // Setup shutdown handlers
