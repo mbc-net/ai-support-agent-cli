@@ -2,7 +2,14 @@ import * as fs from 'fs'
 
 import { t } from '../../i18n'
 import { logger } from '../../logger'
-import { validateBindMountPathSync } from '../../security'
+import { isProjectCodeSafe, validateBindMountPathSync } from '../../security'
+import type { ProjectRegistration } from '../../types'
+
+// Re-export the projectCode validators that now live in `src/security.ts` so
+// existing call sites (linux-service / darwin-service) can continue to import
+// them from here. The actual implementations moved to avoid a layering
+// inversion (the docker supervisor also needs them).
+export { assertProjectCodeIsSafe, isProjectCodeSafe } from '../../security'
 
 /**
  * POSIX shell single-quote a value so it can be safely interpolated into a
@@ -11,26 +18,6 @@ import { validateBindMountPathSync } from '../../security'
  */
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
-}
-
-/**
- * Reject projectCodes whose characters would break the
- * `AI_SUPPORT_AGENT_PROJECT_DIR_MAP` env format.
- *
- * The env value uses `;` as entry separator and `=` as key/value separator;
- * a projectCode containing either would silently truncate the map and let
- * `resolveProjectDir()` fall back to the default template, silently
- * re-introducing the doubly-nested layout that the recent PRs are trying
- * to prevent. Allow `[A-Za-z0-9_-]` only — matching the configured naming
- * convention (UPPER_SNAKE_CASE for project, lower_snake_case for tenant).
- *
- * Also used by the supervisor path (`buildProjectVolumeMounts`) so the
- * fail-open isn't reintroduced via interactive mode.
- */
-export function assertProjectCodeIsSafe(projectCode: string): void {
-  if (!/^[A-Za-z0-9_-]+$/.test(projectCode)) {
-    throw new Error(t('service.invalidProjectCode', { projectCode }))
-  }
 }
 
 /**
@@ -58,4 +45,89 @@ export function validateProjectDirForMount(projectDir: string | undefined): stri
     return undefined
   }
   return projectDir
+}
+
+export interface CollisionInfo {
+  /** The conflicting unit name / plist label (already sanitized). */
+  name: string
+  /** Other configured `<tenantCode>/<projectCode>` tuples mapping to the same name. */
+  others: string[]
+  /**
+   * True when this FQN appears more than once in config (literal
+   * duplicate entry). The caller should surface a different message in
+   * that case ("remove the duplicate row" vs. "rename one of the codes").
+   * `isDuplicate` and `others.length > 0` can BOTH be true when a config
+   * contains both a literal duplicate AND a sanitize-collision sibling
+   * (e.g. `[mbc/MBC_01, mbc/MBC_01, mbc/MBC-01]`).
+   */
+  isDuplicate: boolean
+}
+
+export interface CollisionDetectionResult {
+  /**
+   * FQN (`<tenantCode>/<projectCode>`) → sanitized unit-name / plist-label
+   * for every project that passed `isProjectCodeSafe`. Callers that need
+   * the sanitized name later (orphan-protection sets, unit-file paths)
+   * can read it from here instead of recomputing via `nameFn`.
+   */
+  names: Map<string, string>
+  /**
+   * FQN → CollisionInfo for projects that conflict with another
+   * configured entry (sanitize-collision and/or literal duplicate).
+   * Projects without conflict are absent from this map.
+   */
+  collisions: Map<string, CollisionInfo>
+}
+
+/**
+ * Detect sanitize() collisions across configured projects.
+ *
+ * `nameFn` derives the per-platform unit-name / plist-label from
+ * (tenantCode, projectCode). Codes that fail `isProjectCodeSafe` are
+ * skipped from collision counting (they're refused independently by
+ * `writeProjectServiceFiles`, and including them here would falsely
+ * collide with a valid sibling like `MBC;01` + `MBC-01`).
+ *
+ * The returned `names` map covers ALL projects that passed validation
+ * (single source of truth — callers should not recompute via `nameFn`
+ * again). The `collisions` map only includes FQNs with a conflict.
+ *
+ * Shared between linux-service and darwin-service to keep the two
+ * platforms from drifting on collision semantics.
+ */
+export function detectInstallCollisions(
+  projects: ProjectRegistration[],
+  nameFn: (tenantCode: string, projectCode: string) => string,
+): CollisionDetectionResult {
+  const names = new Map<string, string>()
+  // First pass: bucket FQN tuples by sanitized name, skipping unsafe codes.
+  // Keep duplicate FQNs in the array so we can detect literal duplicates
+  // (`fqns.length > uniqueFqns.length`) independently of sanitize-collisions.
+  const nameToFqns = new Map<string, string[]>()
+  for (const project of projects) {
+    if (!isProjectCodeSafe(project.tenantCode) || !isProjectCodeSafe(project.projectCode)) continue
+    const name = nameFn(project.tenantCode, project.projectCode)
+    const fqn = `${project.tenantCode}/${project.projectCode}`
+    names.set(fqn, name)
+    const existing = nameToFqns.get(name)
+    if (existing) existing.push(fqn)
+    else nameToFqns.set(name, [fqn])
+  }
+  // Second pass: report a CollisionInfo entry for any FQN involved in a
+  // sanitize-collision OR a literal duplicate.
+  const collisions = new Map<string, CollisionInfo>()
+  for (const [name, fqns] of nameToFqns) {
+    const uniqueFqns = Array.from(new Set(fqns))
+    // No conflict at all: one entry, listed once.
+    if (fqns.length === 1) continue
+    // Count occurrences per FQN to detect literal duplicates.
+    const fqnCounts = new Map<string, number>()
+    for (const fqn of fqns) fqnCounts.set(fqn, (fqnCounts.get(fqn) ?? 0) + 1)
+    for (const fqn of uniqueFqns) {
+      const others = uniqueFqns.filter((f) => f !== fqn)
+      const isDuplicate = (fqnCounts.get(fqn) ?? 0) > 1
+      collisions.set(fqn, { name, others, isDuplicate })
+    }
+  }
+  return { names, collisions }
 }

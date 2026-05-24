@@ -12,7 +12,7 @@ import { logger } from '../../logger'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
-import { assertProjectCodeIsSafe, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
 
 export { getCliEntryPoint, getNodePath }
 
@@ -582,23 +582,78 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     const updateScript = generateUpdateScript()
     fs.writeFileSync(updateScriptPath, updateScript, { mode: 0o700 })
 
+    // Detect sanitize() collisions where two valid projectCodes map to the
+    // same plist label (e.g. `MBC_01` and `MBC-01` → `com.ai-support-agent.cli.<t>.mbc-01`).
+    // Shared helper guarantees identical semantics with the Linux wrapper.
+    const { collisions } = detectInstallCollisions(projects, getProjectLabel)
+    // Dedup collision/duplicate error logs so an N-times-listed entry
+    // doesn't produce N identical error lines.
+    const reportedCollisionLabels = new Set<string>()
+
+    let installedCount = 0
+    let failedCount = 0
     for (const project of projects) {
       const { projectCode } = project
+      const fqn = `${project.tenantCode}/${projectCode}`
+      const collision = collisions.get(fqn)
+      if (collision) {
+        // Pick the more actionable message: literal duplicates ask the
+        // user to "remove the duplicate row"; sanitize-collisions ask
+        // them to "rename one of the projectCodes". A single config can
+        // exhibit BOTH at once; dedup per (label, messageKey) tuple so
+        // both hints fire and the order of config rows doesn't decide
+        // which one the user sees. Mirror of the Linux wrapper.
+        const messageKey = collision.isDuplicate
+          ? 'service.projectDuplicateEntry'
+          : 'service.projectUnitNameCollision'
+        const dedupKey = `${collision.name}\x00${messageKey}`
+        if (!reportedCollisionLabels.has(dedupKey)) {
+          logger.error(t(messageKey, {
+            projectCode,
+            unitName: collision.name,
+            others: collision.others.join(', '),
+          }))
+          reportedCollisionLabels.add(dedupKey)
+        }
+        failedCount += 1
+        continue
+      }
       // Per-project failures must not abort the loop — log and continue so
       // the remaining valid projects still get their plists written. See
       // the Linux wrapper for the same pattern.
       try {
         const plistPath = writeProjectServiceFiles(project, { verbose: options.verbose })
         logger.success(t('service.projectInstalled', { projectCode, path: plistPath }))
+        installedCount += 1
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         logger.error(t('service.projectInstallFailed', { projectCode, message }))
+        failedCount += 1
       }
     }
+    const anyInstallFailed = failedCount > 0
 
-    logger.info(t('service.loadHintMulti'))
-    logger.info(t('service.logDir', { path: logDir }))
-    logger.info(t('service.noLogRotation'))
+    // Hide the "now run `service start`" hint when nothing was installed —
+    // misleading the user to start services that don't exist.
+    if (installedCount > 0) {
+      logger.info(t('service.loadHintMulti'))
+      logger.info(t('service.logDir', { path: logDir }))
+      logger.info(t('service.noLogRotation'))
+    }
+
+    // Surface a summary line with counts so scripts wrapping
+    // `service install` (or operators scanning a long log) can tell that
+    // SOME project was refused, even when other projects logged success.
+    // The Linux wrapper communicates this via the `!anyInstallFailed`
+    // orphan-cleanup skip; Darwin has no orphan cleanup, so we emit an
+    // explicit summary instead.
+    if (anyInstallFailed) {
+      logger.warn(t('service.partialInstallSummary', {
+        failed: String(failedCount),
+        total: String(projects.length),
+        succeeded: String(installedCount),
+      }))
+    }
   }
 
   uninstall(): void {

@@ -499,6 +499,15 @@ describe('security regression tests', () => {
       // pass the blocked-prefix check and let an empty hostPath through.
       expect(validateBindMountPathSync('')).toContain('Access denied')
     })
+
+    it('rejects whitespace-only paths', () => {
+      // `' '` is truthy but trim() reveals it's empty content. Without the
+      // .trim() guard, realpathSync(' ') throws → fallback path.resolve(' ')
+      // returns `<cwd>/ ` which likely passes blocked-prefix check.
+      expect(validateBindMountPathSync(' ')).toContain('Access denied')
+      expect(validateBindMountPathSync('   ')).toContain('Access denied')
+      expect(validateBindMountPathSync('\t\n')).toContain('Access denied')
+    })
   })
 
   describe('ALLOWED_SIGNALS: signal allowlist enforcement', () => {

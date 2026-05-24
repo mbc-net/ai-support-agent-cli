@@ -889,6 +889,274 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
       expect(disableCalls).toHaveLength(0)
       expect(mockedFs.unlinkSync).not.toHaveBeenCalled()
     })
+
+    it('control: SHOULD run orphan cleanup when all projects install successfully (catches a refactor that drops cleanup entirely)', () => {
+      // Sanity check that the SKIP test above is meaningful: with the same
+      // filesystem setup (orphan unit on disk) but ALL projects valid,
+      // orphan cleanup MUST fire — otherwise the SKIP-on-failure test
+      // could pass vacuously if cleanup were dropped from both paths.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([
+        'ai-support-agent-mbc-mbc-01.service',   // expected, will not be cleaned
+        'ai-support-agent-mbc-mbc-old.service',  // orphan, MUST be cleaned
+      ] as any)
+
+      strategy.install({})
+
+      // Orphan cleanup must fire for the legacy unit.
+      const disableOldCalls = (mockedExecSync as jest.Mock).mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('mbc-old'),
+      )
+      expect(disableOldCalls.length).toBeGreaterThan(0)
+      expect(mockedFs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('ai-support-agent-mbc-mbc-old.service'),
+      )
+    })
+
+    it('should refuse to install when two projects sanitize to the same unit name', () => {
+      // sanitize() collapses `_` and `-` (and other non-[a-z0-9-] chars) to
+      // `-`, so `MBC_01` and `MBC-01` both produce `ai-support-agent-mbc-mbc-01`.
+      // Without collision detection the second project's writeProjectServiceFiles
+      // silently overwrites the first.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't2', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      // Both colliding projects must be refused with the collision error.
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+      // No unit file should have been written for the colliding pair.
+      const unitCalls = mockedFs.writeFileSync.mock.calls.filter(
+        (call) => String(call[0]).endsWith('.service'),
+      )
+      expect(unitCalls).toHaveLength(0)
+    })
+
+    it('should NOT deny-install a valid project whose sanitized name "collides" only with an invalid sibling', () => {
+      // Regression: collision detection used to count EVERY sanitized
+      // unit name including those of codes that would be rejected by
+      // assertProjectCodeIsSafe. So `MBC;01` (invalid) + `MBC-01` (valid)
+      // both sanitize to `mbc-01`, falsely marking MBC-01 as colliding
+      // and denying its install. Now we only count installable codes.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC;01', token: 't1', apiUrl: 'https://api' },  // invalid
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't2', apiUrl: 'https://api' },  // valid
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      // MBC;01 was refused by assertProjectCodeIsSafe (invalidProjectCode),
+      // NOT by the collision detection.
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectInstallFailed'),
+      )
+      // The valid sibling MBC-01 must still be written.
+      const unitCalls = mockedFs.writeFileSync.mock.calls.filter(
+        (call) => String(call[0]).endsWith('.service'),
+      )
+      expect(unitCalls).toHaveLength(1)
+      expect(unitCalls[0][0]).toContain('mbc-mbc-01.service')
+      // No collision error should fire — the only failure was the invalid code.
+      expect(logger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
+
+    it('should use projectDuplicateEntry message when the same tenant/project pair appears twice', () => {
+      // True literal duplicate: same tenantCode AND projectCode listed twice.
+      // The `others` filter (excluding self FQN) returns []; the error
+      // message must NOT render an empty `()` parenthetical via the
+      // generic collision template — use the dedicated duplicate-entry key.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectDuplicateEntry'),
+      )
+      expect(logger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
+
+    it('should emit BOTH duplicate and collision hints when a config has duplicates AND a sanitize-colliding sibling', () => {
+      // Regression for AA1 + BB1: when config has `[MBC_01, MBC_01, MBC-01]`,
+      // the user needs to know about TWO problems: the duplicate row
+      // (cheap fix: remove it) and the sanitize-collision sibling (rename
+      // one of the codes). Both messages must fire, regardless of which
+      // config row appears first.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't3', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectDuplicateEntry'),
+      )
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
+
+    it('should emit BOTH hints even when the sanitize-colliding sibling appears FIRST in config (order-independent)', () => {
+      // BB1: previously the dedup keyed on unit-name only, so config row
+      // order decided which hint fired. With (name, messageKey) dedup
+      // both still surface regardless of order.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC-01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't3', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectDuplicateEntry'),
+      )
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+    })
+
+    it('should log a partialInstallSummary warning when at least one project fails', () => {
+      // Sanity: when ANY project install fails, a single summary line at
+      // the end tells operators not to trust the surrounding success logs.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
+
+    it('should NOT log partialInstallSummary when all projects install successfully', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
+
+    it('should suppress the start hint and log lines when ALL projects fail (no units written)', () => {
+      // Z1 regression: if every project is refused, the post-loop info
+      // hints (loadHintMulti / logDir / noLogRotation) used to fire and
+      // tell the user to start services that do not exist. Skip them.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't1', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      expect(logger.info).not.toHaveBeenCalledWith('service.loadHintMulti')
+      expect(logger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.logDir'),
+      )
+      expect(logger.info).not.toHaveBeenCalledWith('service.noLogRotation')
+    })
+
+    it('should report only ONE collision error per shared unit name even when listed many times', () => {
+      // Z5 regression: an N-times-listed entry used to emit N identical
+      // error lines. The reportedCollisionNames Set in install() now
+      // deduplicates them.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't3', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      strategy.install({})
+
+      const dupCalls = (logger.error as jest.Mock).mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string'
+          && (call[0] as string).includes('service.projectDuplicateEntry'),
+      )
+      expect(dupCalls).toHaveLength(1)
+    })
+
+    it('should include failed/total/succeeded counts in the partialInstallSummary message', () => {
+      // Z4: partialInstallSummary now templates `{{failed}} of {{total}} ... {{succeeded}}`
+      // so a wrapping script / operator can tell the failure ratio at a glance.
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      mockedGetProjectList.mockReturnValue([
+        { tenantCode: 'mbc', projectCode: 'MBC_01', token: 't1', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'X;Y', token: 't2', apiUrl: 'https://api' },
+        { tenantCode: 'mbc', projectCode: 'MBC_03', token: 't3', apiUrl: 'https://api' },
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([] as any)
+
+      const tMod = jest.requireMock('../../../src/i18n') as { t: jest.Mock }
+      const tSpy = jest.spyOn(tMod, 't')
+
+      strategy.install({})
+
+      expect(tSpy).toHaveBeenCalledWith('service.partialInstallSummary', expect.objectContaining({
+        failed: '1',
+        total: '3',
+        succeeded: '2',
+      }))
+      tSpy.mockRestore()
+    })
   })
 
   describe('uninstall', () => {

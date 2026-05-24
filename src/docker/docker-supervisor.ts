@@ -78,13 +78,22 @@ export class DockerSupervisor {
     this.onAllStopped = onStop
 
     for (const project of projects) {
-      // Per-project spawn failures (e.g. invalid projectCode rejected by
-      // buildProjectVolumeMounts, transient fs errors) must not abort the
-      // start loop — log and continue so the remaining valid projects still
-      // come up. Without this, one stale entry in config would silently
-      // take the entire fleet down. Use the docker-specific i18n key so
-      // operators aren't misled into looking at the systemd/launchd install
-      // subsystem when the actual failure is in the docker spawn path.
+      // Per-project SYNCHRONOUS failures must not abort the start loop —
+      // log and continue so the remaining valid projects still come up.
+      // Failure surfaces covered:
+      //   - `assertProjectCodeIsSafe` in `buildProjectVolumeMounts` (sync throw)
+      //   - mkdir / chmod errors building the per-project mount
+      // NOT covered (these are async, surface via child process events):
+      //   - container start failures after `spawn()` returns
+      //   - container exit non-zero
+      // `migrateProjectConfigDir` swallows mkdir/rename errors via its own
+      // try/catch, but the `fs.existsSync` checks BEFORE that try/catch can
+      // still throw on a permission-denied or I/O error. Wrapping migrate
+      // in this outer try is therefore not purely defensive — it also
+      // covers that surface; future readers should not remove the outer
+      // try assuming migrate is fully internally-fault-tolerant.
+      // Use the docker-specific i18n key so operators aren't misled into
+      // looking at the systemd/launchd install subsystem.
       try {
         migrateProjectConfigDir(project)
         this.spawnProject(project)
