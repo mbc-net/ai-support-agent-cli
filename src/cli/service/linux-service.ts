@@ -326,7 +326,18 @@ fi
 # Remove stale container if it exists (e.g. from a previous crash)
 docker rm -f ${qContainerName} 2>/dev/null || true
 
+# Run the container as the invoking user so that bind-mounted host
+# directories (token wrapper, project config, .claude state) remain
+# writable inside the container. The docker image's entrypoint adds
+# the runtime UID to /etc/passwd dynamically so unknown UIDs still
+# get a usable home. Without --user, root inside the container can't
+# write to host paths owned by the unprivileged service user under
+# rootless docker / userns-remap setups (EACCES on mkdir).
+_DOCKER_UID=$(id -u)
+_DOCKER_GID=$(id -g)
+
 docker run --rm -i --name ${qContainerName} \\
+  --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\
 ${mountLines.join('\n')}
 ${envLines.join('\n')}
   "\$IMAGE_TAG" \\
