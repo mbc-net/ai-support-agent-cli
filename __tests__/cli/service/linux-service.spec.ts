@@ -225,6 +225,19 @@ describe('generateWrapperScript', () => {
     expect(result).toContain("--project 'mbc/MBC_01'")
   })
 
+  it('should run the container as the invoking user (--user uid:gid)', () => {
+    // Without --user, a container started by a systemd --user service runs
+    // as root inside the container but bind-mounted host paths owned by the
+    // unprivileged service user are not writable (EACCES on mkdir under
+    // rootless docker or userns-remap setups), so the agent fails to
+    // initialize the per-project workspace on first start.
+    const result = generateWrapperScript(baseOpts)
+
+    expect(result).toContain('_DOCKER_UID=$(id -u)')
+    expect(result).toContain('_DOCKER_GID=$(id -g)')
+    expect(result).toContain('--user "${_DOCKER_UID}:${_DOCKER_GID}"')
+  })
+
   it('should load nvm and set PATH for systemd compatibility', () => {
     const result = generateWrapperScript(baseOpts)
 
