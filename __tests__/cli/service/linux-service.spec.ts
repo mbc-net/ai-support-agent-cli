@@ -36,6 +36,7 @@ import {
   getProjectUnitName,
   getProjectUnitFilePath,
   getAllProjectUnits,
+  detectSystemSystemdUnits,
   writeProjectServiceFiles,
   installAndStartProject,
 } from '../../../src/cli/service/linux-service'
@@ -1760,5 +1761,100 @@ describe('installAndStartProject', () => {
     installAndStartProject(project)
 
     expect(logger.warn).toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// detectSystemSystemdUnits — stray /etc/systemd/system unit detection
+// ---------------------------------------------------------------------------
+describe('detectSystemSystemdUnits', () => {
+  it('returns matching unit files under /etc/systemd/system', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedFs.readdirSync.mockImplementation(((dir: any) => {
+      if (dir === '/etc/systemd/system') {
+        return [
+          'ai-support-agent.service',
+          'ai-support-agent-foo-bar.service',
+          'unrelated.service',
+          'ai-support-agent-readme.txt',
+        ] as unknown as fs.Dirent[]
+      }
+      return [] as unknown as fs.Dirent[]
+    }) as typeof fs.readdirSync)
+
+    const units = detectSystemSystemdUnits()
+
+    expect(units).toEqual([
+      '/etc/systemd/system/ai-support-agent.service',
+      '/etc/systemd/system/ai-support-agent-foo-bar.service',
+    ])
+  })
+
+  it('returns an empty list when the directory cannot be read', () => {
+    mockedFs.readdirSync.mockImplementation(() => {
+      throw new Error('EACCES')
+    })
+
+    expect(detectSystemSystemdUnits()).toEqual([])
+  })
+
+  it('returns an empty list when no matching files exist', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedFs.readdirSync.mockReturnValue(['cron.service', 'sshd.service'] as any)
+
+    expect(detectSystemSystemdUnits()).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LinuxServiceStrategy.status — warns on stray system-scope units
+// ---------------------------------------------------------------------------
+describe('LinuxServiceStrategy.status — stray system unit warning', () => {
+  it('emits a warning when a stray system-scope unit is detected', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedFs.readdirSync.mockImplementation(((dir: any) => {
+      if (dir === '/etc/systemd/system') {
+        return ['ai-support-agent.service'] as unknown as fs.Dirent[]
+      }
+      // user systemd dir → no project units
+      return [] as unknown as fs.Dirent[]
+    }) as typeof fs.readdirSync)
+
+    const strategy = new LinuxServiceStrategy()
+    const result = strategy.status()
+
+    expect(result).toEqual({ installed: false, running: false })
+    // The i18n mock returns the bare translation key without interpolation,
+    // so we assert on the key rather than the rendered message.
+    expect(logger.warn).toHaveBeenCalledWith('service.systemUnitDetected')
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('emits one warning per stray unit when multiple exist', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedFs.readdirSync.mockImplementation(((dir: any) => {
+      if (dir === '/etc/systemd/system') {
+        return [
+          'ai-support-agent.service',
+          'ai-support-agent-foo.service',
+        ] as unknown as fs.Dirent[]
+      }
+      return [] as unknown as fs.Dirent[]
+    }) as typeof fs.readdirSync)
+
+    const strategy = new LinuxServiceStrategy()
+    strategy.status()
+
+    expect(logger.warn).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not warn when no stray system-scope unit exists', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedFs.readdirSync.mockReturnValue([] as any)
+
+    const strategy = new LinuxServiceStrategy()
+    strategy.status()
+
+    expect(logger.warn).not.toHaveBeenCalled()
   })
 })
