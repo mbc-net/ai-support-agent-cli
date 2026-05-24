@@ -98,9 +98,12 @@ describe('service-command orchestrator', () => {
 
       installService({})
 
-      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1)
-      const [writtenPath] = mockedFs.writeFileSync.mock.calls[0] as [string, string, string]
-      expect(writtenPath).toContain('systemd')
+      // per-project mode: update-and-restart.sh + wrapper + unit = 3 writes
+      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(3)
+      const unitCall = mockedFs.writeFileSync.mock.calls.find(
+        (call) => String(call[0]).endsWith('.service'),
+      )
+      expect(unitCall?.[0]).toContain('systemd')
     })
 
     it('should reject unsupported platforms', () => {
@@ -142,11 +145,16 @@ describe('service-command orchestrator', () => {
     it('should delegate to LinuxServiceStrategy on Linux', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' })
       mockedFs.existsSync.mockReturnValue(true)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([
+        'ai-support-agent-mbc-mbc-01.service',
+      ] as any)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
 
       uninstallService()
 
       expect(mockedFs.unlinkSync).toHaveBeenCalledWith(
-        expect.stringContaining('ai-support-agent.service'),
+        expect.stringContaining('ai-support-agent-mbc-mbc-01.service'),
       )
     })
 
@@ -192,6 +200,10 @@ describe('service-command orchestrator', () => {
     it('should delegate to LinuxServiceStrategy on Linux', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' })
       mockedFs.existsSync.mockReturnValue(true)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([
+        'ai-support-agent-mbc-mbc-01.service',
+      ] as any)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       startService()
@@ -229,6 +241,10 @@ describe('service-command orchestrator', () => {
     it('should delegate to LinuxServiceStrategy on Linux', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' })
       mockedFs.existsSync.mockReturnValue(true)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([
+        'ai-support-agent-mbc-mbc-01.service',
+      ] as any)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       stopService()
@@ -266,6 +282,10 @@ describe('service-command orchestrator', () => {
     it('should delegate to LinuxServiceStrategy on Linux', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' })
       mockedFs.existsSync.mockReturnValue(true)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockedFs.readdirSync.mockReturnValue([
+        'ai-support-agent-mbc-mbc-01.service',
+      ] as any)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       restartService()
@@ -577,8 +597,24 @@ describe('service-command orchestrator', () => {
       expect(loadCall).toBeDefined()
     })
 
-    it('should be a no-op on non-Darwin platforms but log a notice', () => {
+    it('should write service files and call systemctl start on Linux', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' })
+      mockedFs.existsSync.mockReturnValue(false)
+      mockedFs.mkdirSync.mockReturnValue(undefined)
+      mockedFs.writeFileSync.mockReturnValue(undefined)
+      mockedExecSync.mockReturnValue(Buffer.from('active'))
+
+      installAndStartProject(project)
+
+      const startCall = (mockedExecSync as jest.Mock).mock.calls.find(
+        (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('systemctl --user start'),
+      )
+      expect(startCall).toBeDefined()
+      expect(startCall![0]).toContain('ai-support-agent-00000005-smart-quote.service')
+    })
+
+    it('should log autoStartNotSupported notice on unsupported platforms', () => {
+      Object.defineProperty(process, 'platform', { value: 'freebsd' })
 
       installAndStartProject(project)
 
