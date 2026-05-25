@@ -144,8 +144,16 @@ describe('generateProjectServiceUnit', () => {
     expect(result).toContain('ExecStart=/bin/bash /home/user/.ai-support-agent/services/mbc-mbc-01/run.sh')
     expect(result).toContain('Restart=always')
     expect(result).toContain('RestartSec=10')
-    expect(result).toContain('StandardOutput=append:/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/agent.out.log')
-    expect(result).toContain('StandardError=append:/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/agent.err.log')
+    // systemd unit captures the WRAPPER's stdout/stderr (bootstrap noise).
+    // The agent's actual stdout/stderr is rotated into agent.out.log /
+    // agent.err.log inside the wrapper itself — those paths are NOT used
+    // here to avoid a double-write race with the rotator. See
+    // generateProjectServiceUnit for the full rationale.
+    expect(result).toContain('StandardOutput=append:/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/wrapper.out.log')
+    expect(result).toContain('StandardError=append:/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/wrapper.err.log')
+    // Must NOT include the rotated-file paths — those belong to the rotator only.
+    expect(result).not.toContain('StandardOutput=append:/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/agent.out.log')
+    expect(result).not.toContain('StandardError=append:/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/agent.err.log')
     expect(result).toContain('[Install]')
     expect(result).toContain('WantedBy=default.target')
   })
@@ -171,7 +179,7 @@ describe('generateProjectServiceUnit', () => {
 
     // systemd parses ExecStart on unescaped whitespace; spaces must be \x20
     expect(result).toContain('ExecStart=/bin/bash /home/jane\\x20doe/.ai-support-agent/services/mbc-mbc-01/run.sh')
-    expect(result).toContain('StandardOutput=append:/home/jane\\x20doe/.local/share/ai-support-agent/logs/mbc-mbc-01/agent.out.log')
+    expect(result).toContain('StandardOutput=append:/home/jane\\x20doe/.local/share/ai-support-agent/logs/mbc-mbc-01/wrapper.out.log')
   })
 
   it('should systemd-escape `$` to `$$` to prevent variable expansion', () => {
@@ -411,6 +419,39 @@ describe('generateWrapperScript', () => {
     const result = generateWrapperScript({ ...baseOpts, anthropicApiKey: 'sk-ant-$BAD' })
 
     expect(result).toContain("ANTHROPIC_API_KEY='sk-ant-$BAD'")
+  })
+
+  it('should pipe stdout AND stderr through separate ai-support-agent log-rotate subprocesses when logDir is provided', () => {
+    // Per-project log rotation: stdout → agent.out.log, stderr → agent.err.log,
+    // each through its own `ai-support-agent log-rotate --no-tee` subprocess
+    // (process substitution so $? remains docker's exit). --no-tee prevents
+    // the rotator from duplicating bytes back to the systemd-captured stdout.
+    const result = generateWrapperScript({
+      ...baseOpts,
+      logDir: '/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01',
+    })
+
+    // stdout → agent.out.log via process substitution
+    expect(result).toContain(
+      "> >(ai-support-agent log-rotate --no-tee '/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/agent.out.log')",
+    )
+    // stderr → agent.err.log via process substitution (with >&2 to keep
+    // launchd/systemd seeing nothing from the rotator's own stdout)
+    expect(result).toContain(
+      "2> >(ai-support-agent log-rotate --no-tee '/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/agent.err.log' >&2)",
+    )
+    // `wait` flushes the process-substitution children before the wrapper exits
+    expect(result).toContain('wait 2>/dev/null')
+    // EXIT_CODE is set from docker's exit (NOT via pipefail, so the rotator
+    // can never mask docker's own exit code — important for the exit-42
+    // update path).
+    expect(result).toContain('EXIT_CODE=$?')
+  })
+
+  it('should NOT pipe through log-rotate when logDir is omitted (back-compat for callers that construct the wrapper without logDir)', () => {
+    const result = generateWrapperScript(baseOpts)
+
+    expect(result).not.toContain('ai-support-agent log-rotate')
   })
 })
 

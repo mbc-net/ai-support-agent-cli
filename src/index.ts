@@ -4,6 +4,7 @@ import { Command } from 'commander'
 
 import { startAgent } from './agent-runner'
 import { registerAuthCommands } from './cli/auth-commands'
+import { registerLogRotateCommand } from './cli/log-rotate-command'
 import { registerServiceCommands } from './cli/service-command'
 import { registerStatusCommand } from './cli/status-command'
 import { registerSetProjectDirCommand } from './commands/set-project-dir'
@@ -196,5 +197,6 @@ registerDockerCommands(program)
 registerStatusCommand(program)
 registerServiceCommands(program)
 registerSetProjectDirCommand(program)
+registerLogRotateCommand(program)
 
 program.parse()

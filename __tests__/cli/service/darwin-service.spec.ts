@@ -264,8 +264,14 @@ describe('generateProjectPlist', () => {
     expect(result).toContain('/Users/test/.ai-support-agent/services/mbc-mbc-01/run.sh')
     expect(result).toMatch(/<key>KeepAlive<\/key>\s*<true\/>/)
     expect(result).not.toContain('<key>SuccessfulExit</key>')
-    expect(result).toContain('agent.out.log')
-    expect(result).toContain('agent.err.log')
+    // launchd's StandardOut/ErrPath capture WRAPPER bootstrap noise; the
+    // agent's actual stdout/stderr is rotated into agent.out.log /
+    // agent.err.log inside the wrapper. The plist must use the wrapper.*
+    // paths to avoid a double-write race with the rotator.
+    expect(result).toContain('wrapper.out.log')
+    expect(result).toContain('wrapper.err.log')
+    expect(result).not.toContain('>/Users/test/Library/Logs/ai-support-agent/mbc-mbc-01/agent.out.log<')
+    expect(result).not.toContain('>/Users/test/Library/Logs/ai-support-agent/mbc-mbc-01/agent.err.log<')
   })
 
   it('should include PATH and HOME in environment variables', () => {
@@ -458,6 +464,27 @@ describe('generateWrapperScript', () => {
     const result = generateWrapperScript({ ...baseOpts, projectDir: '/Users/test/$work/proj-a' })
 
     expect(result).toContain("-v '/Users/test/$work/proj-a:/workspace/projects/MBC_01:rw'")
+  })
+
+  it('should pipe stdout AND stderr through separate ai-support-agent log-rotate subprocesses when logDir is provided', () => {
+    // Darwin mirror of the linux test: stdout → agent.out.log, stderr →
+    // agent.err.log via process substitution + --no-tee.
+    const result = generateWrapperScript({
+      ...baseOpts,
+      logDir: '/Users/test/Library/Logs/ai-support-agent/mbc-mbc-01',
+    })
+
+    expect(result).toContain(
+      '> >(ai-support-agent log-rotate --no-tee "/Users/test/Library/Logs/ai-support-agent/mbc-mbc-01/agent.out.log")',
+    )
+    expect(result).toContain(
+      '2> >(ai-support-agent log-rotate --no-tee "/Users/test/Library/Logs/ai-support-agent/mbc-mbc-01/agent.err.log" >&2)',
+    )
+  })
+
+  it('should NOT pipe through log-rotate when logDir is omitted', () => {
+    const result = generateWrapperScript(baseOpts)
+    expect(result).not.toContain('ai-support-agent log-rotate')
   })
 })
 
