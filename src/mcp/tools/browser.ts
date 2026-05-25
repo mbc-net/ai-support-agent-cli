@@ -16,7 +16,10 @@ import { logger } from '../../logger'
 import { BrowserProxySession } from './browser/browser-proxy-session'
 import { validateUrl } from './browser/browser-security'
 import { BrowserSession } from './browser/browser-session'
-import { BrowserSessionManager } from './browser/browser-session-manager'
+import {
+  BrowserSessionManager,
+  getMaxBrowserSessionsFromEnv,
+} from './browser/browser-session-manager'
 import { isPlaywrightAvailable } from './browser/playwright-loader'
 import { tryClickSelectors, tryFillSelectors } from './browser/selector-utils'
 import { mcpErrorResponse, mcpTextImageResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
@@ -111,7 +114,7 @@ export function registerBrowserTools(server: McpServer, apiClient: ApiClient, se
   }
 
   const defaultSession = new BrowserSession()
-  const manager = sessionManager ?? new BrowserSessionManager()
+  const manager = sessionManager ?? new BrowserSessionManager(getMaxBrowserSessionsFromEnv())
 
   registerBrowserNavigateTool(server, defaultSession, manager)
   registerBrowserCloseTool(server, defaultSession, manager)

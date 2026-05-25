@@ -178,11 +178,22 @@ export function generateProjectPlist(opts: {
     <key>KeepAlive</key>
     <true/>
 
+    <!--
+      The launchd plist captures the WRAPPER SCRIPT stdout/stderr only
+      (startup banners, pre-docker bootstrap errors). The agent stdout
+      and stderr are pipe-rotated by ai-support-agent log-rotate and
+      written to agent.out.log / agent.err.log inside the wrapper. Those
+      paths are deliberately NOT used here to avoid a double-write race
+      where both launchd and the rotator append to the same file
+      (rotation would orphan launchd open fd, and the rotated generation
+      would grow without bound). The wrapper.* files have no rotation
+      but stay tiny because only bootstrap noise lands there.
+    -->
     <key>StandardOutPath</key>
-    <string>${escapeXml(path.join(opts.logDir, 'agent.out.log'))}</string>
+    <string>${escapeXml(path.join(opts.logDir, 'wrapper.out.log'))}</string>
 
     <key>StandardErrorPath</key>
-    <string>${escapeXml(path.join(opts.logDir, 'agent.err.log'))}</string>
+    <string>${escapeXml(path.join(opts.logDir, 'wrapper.err.log'))}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -216,6 +227,18 @@ export function generateWrapperScript(opts: {
   claudeCodeOauthToken?: string
   verbose?: boolean
   updateScriptPath: string
+  /**
+   * Per-project log directory. When set, the wrapper redirects the docker
+   * subprocess's stdout and stderr into separate `ai-support-agent
+   * log-rotate --no-tee` subprocesses, producing `agent.out.log` /
+   * `agent.err.log` (plus rotated generations `.1` … `.N`) under this
+   * directory. The launchd plist's `StandardOutPath` / `StandardErrorPath`
+   * point at separate `wrapper.out.log` / `wrapper.err.log` files (NOT
+   * the rotator-owned paths) to avoid a double-write race where
+   * launchd's open fd would otherwise keep appending to a rotated
+   * generation.
+   */
+  logDir?: string
 }): string {
   const containerHome = '/home/node'
   const containerConfigDir = `${containerHome}/.ai-support-agent`
@@ -307,6 +330,49 @@ fi
 # Remove stale container if it exists (e.g. from a previous crash)
 docker rm -f "${containerName}" 2>/dev/null || true
 
+${opts.logDir ? `\
+# Pipe stdout and stderr through SEPARATE \`ai-support-agent log-rotate\`
+# subprocesses so the active log files are bounded (default 5MB × 5
+# generations) AND each stream lands in its own file (agent.out.log /
+# agent.err.log) — matching the pre-rotation layout that operators tail.
+#
+# Both rotators are invoked with \`--no-tee\` so they DO NOT echo back to
+# stdout/stderr. The launchd plist's StandardOutPath/ErrorPath is pointed
+# at separate wrapper.*.log files (NOT the agent.*.log paths owned by
+# the rotators), so we don't get a double-write race where launchd
+# silently keeps appending to a rotated generation.
+#
+# We use named FIFOs + background rotators (rather than process
+# substitution \`> >(cmd)\`) because macOS ships /bin/bash 3.2 where
+# bare \`wait\` does not reap proc-sub children — they would be SIGKILLed
+# on launchd unload, losing the last few KB of logs. Background jobs
+# started with \`&\` set \$! reliably on every supported bash.
+_ROT_DIR=$(mktemp -d -t ai-support-agent-rot)
+trap 'rm -rf "\$_ROT_DIR" 2>/dev/null || true' EXIT
+mkfifo "\$_ROT_DIR/out" "\$_ROT_DIR/err"
+ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.out.log`)} < "\$_ROT_DIR/out" &
+_ROT_OUT_PID=$!
+ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.err.log`)} < "\$_ROT_DIR/err" >&2 &
+_ROT_ERR_PID=$!
+
+docker run --rm -i --name "${containerName}" \\
+${mountLines.join('\n')}
+${envLines.join('\n')}
+  "\$IMAGE_TAG" \\
+  ${containerArgs.join(' ')} \\
+   > "\$_ROT_DIR/out" 2> "\$_ROT_DIR/err"
+
+# Redirecting to a FIFO does not propagate the rotator's exit into \$?,
+# so EXIT_CODE is purely docker's exit status. The exit-42 update path
+# is preserved (the rotator can never mask it).
+EXIT_CODE=$?
+
+# Wait on the rotators explicitly so they drain their FIFO before the
+# wrapper exits (launchd will SIGKILL stragglers otherwise). docker
+# closed its write end on exit, so each rotator sees EOF on stdin and
+# exits naturally; the wait is bounded by pipe-buffer drain time.
+wait "\$_ROT_OUT_PID" "\$_ROT_ERR_PID" 2>/dev/null || true
+` : `\
 docker run --rm -i --name "${containerName}" \\
 ${mountLines.join('\n')}
 ${envLines.join('\n')}
@@ -314,7 +380,7 @@ ${envLines.join('\n')}
   ${containerArgs.join(' ')}
 
 EXIT_CODE=$?
-
+`}
 if [ "$EXIT_CODE" -eq 42 ]; then
   exec "${opts.updateScriptPath}"
 fi
@@ -510,6 +576,7 @@ export function writeProjectServiceFiles(
     claudeCodeOauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
     verbose: options.verbose,
     updateScriptPath,
+    logDir: projectLogDir,
   })
   fs.writeFileSync(wrapperScriptPath, wrapperScript, { mode: 0o700 })
 
