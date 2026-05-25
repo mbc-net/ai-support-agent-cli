@@ -421,31 +421,40 @@ describe('generateWrapperScript', () => {
     expect(result).toContain("ANTHROPIC_API_KEY='sk-ant-$BAD'")
   })
 
-  it('should pipe stdout AND stderr through separate ai-support-agent log-rotate subprocesses when logDir is provided', () => {
-    // Per-project log rotation: stdout → agent.out.log, stderr → agent.err.log,
-    // each through its own `ai-support-agent log-rotate --no-tee` subprocess
-    // (process substitution so $? remains docker's exit). --no-tee prevents
-    // the rotator from duplicating bytes back to the systemd-captured stdout.
+  it('should stream stdout/stderr through background log-rotate subprocesses via named FIFOs when logDir is provided', () => {
+    // Per-project log rotation: stdout → agent.out.log, stderr → agent.err.log
+    // via background `ai-support-agent log-rotate --no-tee` subprocesses
+    // reading from named FIFOs (NOT process substitution — that's not
+    // reapable by bash 3.2 / macOS's /bin/bash via bare `wait`). The
+    // explicit `_ROT_OUT_PID` / `_ROT_ERR_PID` capture lets us wait on
+    // the rotators portably so they drain before the wrapper exits.
     const result = generateWrapperScript({
       ...baseOpts,
       logDir: '/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01',
     })
 
-    // stdout → agent.out.log via process substitution
+    // FIFOs created in a per-run temp dir
+    expect(result).toContain('mkfifo "$_ROT_DIR/out" "$_ROT_DIR/err"')
+    // Background rotators reading from FIFOs with shell-quoted log paths
     expect(result).toContain(
-      "> >(ai-support-agent log-rotate --no-tee '/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/agent.out.log')",
+      "ai-support-agent log-rotate --no-tee '/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/agent.out.log' < \"$_ROT_DIR/out\" &",
     )
-    // stderr → agent.err.log via process substitution (with >&2 to keep
-    // launchd/systemd seeing nothing from the rotator's own stdout)
     expect(result).toContain(
-      "2> >(ai-support-agent log-rotate --no-tee '/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/agent.err.log' >&2)",
+      "ai-support-agent log-rotate --no-tee '/home/user/.local/share/ai-support-agent/logs/mbc-mbc-01/agent.err.log' < \"$_ROT_DIR/err\" >&2 &",
     )
-    // `wait` flushes the process-substitution children before the wrapper exits
-    expect(result).toContain('wait 2>/dev/null')
+    // PID capture for explicit wait
+    expect(result).toContain('_ROT_OUT_PID=$!')
+    expect(result).toContain('_ROT_ERR_PID=$!')
+    // docker writes to FIFOs (not to >(cmd) process substitution)
+    expect(result).toContain('> "$_ROT_DIR/out" 2> "$_ROT_DIR/err"')
+    // Explicit wait on captured PIDs so rotators drain before exit
+    expect(result).toContain('wait "$_ROT_OUT_PID" "$_ROT_ERR_PID" 2>/dev/null')
     // EXIT_CODE is set from docker's exit (NOT via pipefail, so the rotator
     // can never mask docker's own exit code — important for the exit-42
     // update path).
     expect(result).toContain('EXIT_CODE=$?')
+    // tmpdir is cleaned up on wrapper exit (EXIT trap)
+    expect(result).toContain("trap 'rm -rf \"$_ROT_DIR\"")
   })
 
   it('should NOT pipe through log-rotate when logDir is omitted (back-compat for callers that construct the wrapper without logDir)', () => {

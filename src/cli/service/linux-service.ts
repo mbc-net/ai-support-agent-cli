@@ -412,25 +412,39 @@ ${opts.logDir ? `\
 #
 # Process substitution \`> >(cmd)\` / \`2> >(cmd)\` is bash-only; the
 # shebang at line 1 (\`#!/bin/bash\`) guarantees it.
+# Stream stdout/stderr to background rotator subprocesses via named FIFOs
+# so we have EXPLICIT PIDs to wait on. Process substitution (\`> >(cmd)\`)
+# is simpler but its children are not in the job table on bash 3.2
+# (macOS's /bin/bash) — bare \`wait\` returns immediately, allowing the
+# service-stop signal to SIGKILL the rotator mid-flush and lose the last
+# few KB of logs. Background jobs started with \`&\` set \$! reliably on
+# every supported bash, so this layout is portable.
+_ROT_DIR=$(mktemp -d -t ai-support-agent-rot.XXXXXX)
+trap 'rm -rf "\$_ROT_DIR" 2>/dev/null || true' EXIT
+mkfifo "\$_ROT_DIR/out" "\$_ROT_DIR/err"
+ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.out.log`)} < "\$_ROT_DIR/out" &
+_ROT_OUT_PID=$!
+ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.err.log`)} < "\$_ROT_DIR/err" >&2 &
+_ROT_ERR_PID=$!
+
 docker run --rm -i --name ${qContainerName} \\
   --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\
 ${mountLines.join('\n')}
 ${envLines.join('\n')}
   "\$IMAGE_TAG" \\
   ${containerArgs.join(' ')} \\
-   > >(ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.out.log`)}) \\
-  2> >(ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.err.log`)} >&2)
+   > "\$_ROT_DIR/out" 2> "\$_ROT_DIR/err"
 
-# \`> >(...)\` does not propagate the subshell exit into \$?, so EXIT_CODE
-# is purely docker's exit status. The exit-42 update path is preserved
-# (the rotator can never mask it).
+# Redirecting to a FIFO does not propagate the rotator's exit into \$?,
+# so EXIT_CODE is purely docker's exit status. The exit-42 update path is
+# preserved (the rotator can never mask it).
 EXIT_CODE=$?
 
-# Give the rotator children a moment to flush before the wrapper exits;
-# otherwise systemd's cgroup termination can SIGKILL them mid-write.
-# 'wait' without arguments waits for ALL background jobs (the two process
-# substitutions). Brief; bounded by the pipe-buffer drain time.
-wait 2>/dev/null || true
+# Wait on the rotators explicitly so they drain their FIFO before the
+# wrapper exits (service supervisor will SIGKILL stragglers otherwise).
+# docker closed its write end on exit, so each rotator sees EOF on stdin
+# and exits naturally; the wait is bounded by pipe-buffer drain time.
+wait "\$_ROT_OUT_PID" "\$_ROT_ERR_PID" 2>/dev/null || true
 ` : `\
 docker run --rm -i --name ${qContainerName} \\
   --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\

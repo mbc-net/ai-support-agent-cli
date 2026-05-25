@@ -48,7 +48,17 @@ export function resolveRotateOptions(opts: RotateOptions):
   if (maxBytes === null || maxBytes <= 0) {
     return { ok: false, error: t('logRotate.invalidMaxSize', { value: opts.maxSize ?? '' }) }
   }
-  const maxFiles = opts.maxFiles !== undefined ? parseInt(opts.maxFiles, 10) : DEFAULT_MAX_FILES
+  // Reject any non-integer input outright (e.g. `5.9`, `3abc`, `7 `). parseInt
+  // would silently truncate / accept these, which contradicts the strict
+  // parseSize() above and surprises operators.
+  let maxFiles: number
+  if (opts.maxFiles === undefined) {
+    maxFiles = DEFAULT_MAX_FILES
+  } else if (/^\d+$/.test(opts.maxFiles)) {
+    maxFiles = Number(opts.maxFiles)
+  } else {
+    return { ok: false, error: t('logRotate.invalidMaxFiles', { value: opts.maxFiles }) }
+  }
   if (!Number.isFinite(maxFiles) || maxFiles < 0) {
     return { ok: false, error: t('logRotate.invalidMaxFiles', { value: opts.maxFiles ?? '' }) }
   }

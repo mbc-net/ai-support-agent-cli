@@ -342,24 +342,36 @@ ${opts.logDir ? `\
 # the rotators), so we don't get a double-write race where launchd
 # silently keeps appending to a rotated generation.
 #
-# Process substitution \`> >(cmd)\` / \`2> >(cmd)\` is bash-only; the
-# shebang (\`#!/bin/bash\`) guarantees it.
+# We use named FIFOs + background rotators (rather than process
+# substitution \`> >(cmd)\`) because macOS ships /bin/bash 3.2 where
+# bare \`wait\` does not reap proc-sub children — they would be SIGKILLed
+# on launchd unload, losing the last few KB of logs. Background jobs
+# started with \`&\` set \$! reliably on every supported bash.
+_ROT_DIR=$(mktemp -d -t ai-support-agent-rot)
+trap 'rm -rf "\$_ROT_DIR" 2>/dev/null || true' EXIT
+mkfifo "\$_ROT_DIR/out" "\$_ROT_DIR/err"
+ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.out.log`)} < "\$_ROT_DIR/out" &
+_ROT_OUT_PID=$!
+ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.err.log`)} < "\$_ROT_DIR/err" >&2 &
+_ROT_ERR_PID=$!
+
 docker run --rm -i --name "${containerName}" \\
 ${mountLines.join('\n')}
 ${envLines.join('\n')}
   "\$IMAGE_TAG" \\
   ${containerArgs.join(' ')} \\
-   > >(ai-support-agent log-rotate --no-tee "${opts.logDir}/agent.out.log") \\
-  2> >(ai-support-agent log-rotate --no-tee "${opts.logDir}/agent.err.log" >&2)
+   > "\$_ROT_DIR/out" 2> "\$_ROT_DIR/err"
 
-# \`> >(...)\` does not propagate the subshell exit into \$?, so EXIT_CODE
-# is purely docker's exit status. The exit-42 update path is preserved
-# (the rotator can never mask it).
+# Redirecting to a FIFO does not propagate the rotator's exit into \$?,
+# so EXIT_CODE is purely docker's exit status. The exit-42 update path
+# is preserved (the rotator can never mask it).
 EXIT_CODE=$?
 
-# Give the rotator children a moment to flush before the wrapper exits;
-# otherwise launchd's signal sequence can SIGKILL them mid-write.
-wait 2>/dev/null || true
+# Wait on the rotators explicitly so they drain their FIFO before the
+# wrapper exits (launchd will SIGKILL stragglers otherwise). docker
+# closed its write end on exit, so each rotator sees EOF on stdin and
+# exits naturally; the wait is bounded by pipe-buffer drain time.
+wait "\$_ROT_OUT_PID" "\$_ROT_ERR_PID" 2>/dev/null || true
 ` : `\
 docker run --rm -i --name "${containerName}" \\
 ${mountLines.join('\n')}
