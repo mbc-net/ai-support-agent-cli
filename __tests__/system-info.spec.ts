@@ -25,6 +25,12 @@ describe('system-info', () => {
       expect(typeof info.cpuUsage).toBe('number')
       expect(typeof info.memoryUsage).toBe('number')
       expect(typeof info.uptime).toBe('number')
+      // diskUsagePercent は number または undefined のいずれか（環境依存）
+      if (info.diskUsagePercent !== undefined) {
+        expect(typeof info.diskUsagePercent).toBe('number')
+        expect(info.diskUsagePercent).toBeGreaterThanOrEqual(0)
+        expect(info.diskUsagePercent).toBeLessThanOrEqual(100)
+      }
     })
   })
 
@@ -90,5 +96,37 @@ describe('system-info', () => {
       const ip = getLocalIpAddress()
       expect(ip).toBeUndefined()
     })
+  })
+})
+
+describe('getDiskUsagePercent', () => {
+  const { getDiskUsagePercent } = require('../src/system-info') as typeof import('../src/system-info')
+  const fs = require('fs') as typeof import('fs')
+
+  afterEach(() => {
+    jest.restoreAllMocks()
+  })
+
+  it('returns a percentage when fs.statfsSync is available', () => {
+    if (typeof (fs as unknown as { statfsSync?: unknown }).statfsSync !== 'function') {
+      // Node < 18.15: skip
+      return
+    }
+    const result = getDiskUsagePercent('/tmp')
+    expect(typeof result).toBe('number')
+    expect(result).toBeGreaterThanOrEqual(0)
+    expect(result).toBeLessThanOrEqual(100)
+  })
+
+  it('returns undefined if statfsSync throws', () => {
+    const orig = (fs as unknown as { statfsSync?: (p: string) => unknown }).statfsSync
+    if (typeof orig !== 'function') return
+    jest
+      .spyOn(fs as unknown as { statfsSync: (p: string) => unknown }, 'statfsSync')
+      .mockImplementation(() => {
+        throw new Error('ENOENT')
+      })
+    const result = getDiskUsagePercent('/nonexistent')
+    expect(result).toBeUndefined()
   })
 })

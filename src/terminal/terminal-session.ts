@@ -100,6 +100,44 @@ export class TerminalSession {
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private onIdleTimeout: (() => void) | null = null
 
+  /**
+   * 過去の terminal-sandbox-* ディレクトリを一括削除する。
+   *
+   * 通常は session 終了時 (kill / onExit) に `cleanupTmpDir` で削除されるが、
+   * agent process が SIGKILL / クラッシュした場合は孤立した sandbox dir が
+   * `/tmp` に残る。長期稼働で累積すると ENOSPC を引き起こすため、起動時に
+   * クリーンアップする。
+   *
+   * デフォルトは 24 時間以上前の sandbox のみ削除。`maxAgeMs=0` で全削除。
+   *
+   * @param maxAgeMs 削除対象とする経過時間 (ms)。0 で全削除
+   * @returns 削除した件数
+   */
+  static cleanupStaleSandboxes(maxAgeMs: number = 24 * 60 * 60 * 1000): number {
+    const tmpDir = os.tmpdir()
+    let removed = 0
+    let entries: string[]
+    try {
+      entries = fs.readdirSync(tmpDir)
+    } catch {
+      return 0
+    }
+    const now = Date.now()
+    for (const name of entries) {
+      if (!name.startsWith('terminal-sandbox-')) continue
+      const fullPath = path.join(tmpDir, name)
+      try {
+        const stat = fs.statSync(fullPath)
+        if (maxAgeMs > 0 && now - stat.mtimeMs < maxAgeMs) continue
+        fs.rmSync(fullPath, { recursive: true, force: true })
+        removed++
+      } catch {
+        // ignore individual failures
+      }
+    }
+    return removed
+  }
+
   constructor(sessionId: string, options: TerminalSessionOptions = {}) {
     /* istanbul ignore if -- only when native build fails */
     if (!pty) {
