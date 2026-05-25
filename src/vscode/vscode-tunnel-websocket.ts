@@ -5,7 +5,10 @@ import { BrowserLocalServer } from '../browser/browser-local-server'
 import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import { logger } from '../logger'
 import { getErrorMessage, buildWsUrl } from '../utils'
-import { BrowserSessionManager } from '../mcp/tools/browser/browser-session-manager'
+import {
+  BrowserSessionManager,
+  getMaxBrowserSessionsFromEnv,
+} from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
 import { executePlaywrightScript } from '../browser/browser-script-executor'
 
@@ -145,7 +148,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private vsCodeServer: VsCodeServer | null = null
   private wsProxy: VsCodeWsProxy | null = null
   private readonly portForwardSessions = new Map<string, { targetPort: number; wsProxy: VsCodeWsProxy }>()
-  readonly browserSessionManager = new BrowserSessionManager()
+  readonly browserSessionManager = new BrowserSessionManager(getMaxBrowserSessionsFromEnv())
   private browserLocalServer: BrowserLocalServer | null = null
   private browserLocalPort = 0
 
