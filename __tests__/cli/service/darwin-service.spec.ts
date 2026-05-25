@@ -466,20 +466,42 @@ describe('generateWrapperScript', () => {
     expect(result).toContain("-v '/Users/test/$work/proj-a:/workspace/projects/MBC_01:rw'")
   })
 
-  it('should pipe stdout AND stderr through separate ai-support-agent log-rotate subprocesses when logDir is provided', () => {
+  it('should stream stdout/stderr through background log-rotate subprocesses via named FIFOs when logDir is provided', () => {
     // Darwin mirror of the linux test: stdout → agent.out.log, stderr →
-    // agent.err.log via process substitution + --no-tee.
+    // agent.err.log via background `ai-support-agent log-rotate --no-tee`
+    // reading from named FIFOs (NOT process substitution — bash 3.2
+    // on macOS can't reap proc-sub children via bare `wait`). PIDs are
+    // captured and waited on explicitly so rotators drain before exit.
     const result = generateWrapperScript({
       ...baseOpts,
       logDir: '/Users/test/Library/Logs/ai-support-agent/mbc-mbc-01',
     })
 
+    expect(result).toContain('mkfifo "$_ROT_DIR/out" "$_ROT_DIR/err"')
     expect(result).toContain(
-      '> >(ai-support-agent log-rotate --no-tee "/Users/test/Library/Logs/ai-support-agent/mbc-mbc-01/agent.out.log")',
+      "ai-support-agent log-rotate --no-tee '/Users/test/Library/Logs/ai-support-agent/mbc-mbc-01/agent.out.log' < \"$_ROT_DIR/out\" &",
     )
     expect(result).toContain(
-      '2> >(ai-support-agent log-rotate --no-tee "/Users/test/Library/Logs/ai-support-agent/mbc-mbc-01/agent.err.log" >&2)',
+      "ai-support-agent log-rotate --no-tee '/Users/test/Library/Logs/ai-support-agent/mbc-mbc-01/agent.err.log' < \"$_ROT_DIR/err\" >&2 &",
     )
+    expect(result).toContain('_ROT_OUT_PID=$!')
+    expect(result).toContain('_ROT_ERR_PID=$!')
+    expect(result).toContain('> "$_ROT_DIR/out" 2> "$_ROT_DIR/err"')
+    expect(result).toContain('wait "$_ROT_OUT_PID" "$_ROT_ERR_PID" 2>/dev/null')
+    expect(result).toContain('EXIT_CODE=$?')
+    expect(result).toContain("trap 'rm -rf \"$_ROT_DIR\"")
+  })
+
+  it('should NOT use process substitution for log-rotate on darwin (bash 3.2 incompatibility)', () => {
+    // Regression guard: process substitution `> >(cmd)` was the original
+    // implementation but its children are not reapable on bash 3.2 (macOS
+    // /bin/bash). The wrapper must use named FIFOs + background jobs.
+    const result = generateWrapperScript({
+      ...baseOpts,
+      logDir: '/Users/test/Library/Logs/ai-support-agent/mbc-mbc-01',
+    })
+    expect(result).not.toContain('> >(ai-support-agent log-rotate')
+    expect(result).not.toContain('2> >(ai-support-agent log-rotate')
   })
 
   it('should NOT pipe through log-rotate when logDir is omitted', () => {

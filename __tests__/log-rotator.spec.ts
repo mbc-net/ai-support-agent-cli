@@ -162,4 +162,45 @@ describe('RotatingFileWriter', () => {
     expect(w.write('あ')).toBe(3) // 0xE3 0x81 0x82
     w.close()
   })
+
+  it('re-throws non-ENOENT errors from rotate() rename (no silent overwrite)', () => {
+    // Mid-rotation rename failures (EBUSY, EACCES, EXDEV...) must abort the
+    // rotation — silently swallowing them would let the next iteration's
+    // rename overwrite the orphaned next-younger generation, losing data.
+    // We make `.4` a *directory* (non-empty) so renaming it onto a regular
+    // file path `.5` fails on POSIX with ENOTDIR/EISDIR — a real-filesystem
+    // way to trigger a non-ENOENT error without mocking fs.
+    const w = new RotatingFileWriter({ filePath: active, maxBytes: 3, maxFiles: 5 })
+    w.write('AAA') // active=AAA
+    w.write('BBB') // .1=AAA, active=BBB
+    w.write('CCC') // .2=AAA, .1=BBB, active=CCC
+    w.write('DDD') // .3=AAA, .2=BBB, .1=CCC, active=DDD
+    w.write('EEE') // .4=AAA, .3=BBB, .2=CCC, .1=DDD, active=EEE
+    w.close()
+
+    // Replace `.4` (file) with a non-empty directory: rename(.4, .5) fails
+    // with EISDIR/ENOTEMPTY on most POSIX kernels (renaming a dir over a
+    // non-existent path is OK, but the inner contents make the operation
+    // ambiguous when the destination ends up holding files).
+    const before3 = fs.readFileSync(`${active}.3`, 'utf-8')
+    fs.unlinkSync(`${active}.4`)
+    fs.mkdirSync(`${active}.4`)
+    fs.writeFileSync(path.join(`${active}.4`, 'blocker'), 'x')
+    // Also pre-create `.5` as a non-empty directory so the rename target is
+    // a directory that is NOT empty → ENOTEMPTY on rename(dir, dir).
+    fs.mkdirSync(`${active}.5`)
+    fs.writeFileSync(path.join(`${active}.5`, 'blocker'), 'y')
+
+    const w2 = new RotatingFileWriter({ filePath: active, maxBytes: 3, maxFiles: 5 })
+    // active already holds 'EEE' (3 bytes). The next write of 'FFF' pushes
+    // it past maxBytes=3 → triggers rotate → unlink(.5) fails with EPERM
+    // (it's a non-empty directory) and the error propagates.
+    expect(() => w2.write('FFF')).toThrow()
+    w2.close()
+
+    // Critical: because rotate() aborted on the failing step, the orphaned
+    // `.3` generation was NOT overwritten by a subsequent `.3 → .4` rename.
+    expect(fs.existsSync(`${active}.3`)).toBe(true)
+    expect(fs.readFileSync(`${active}.3`, 'utf-8')).toBe(before3)
+  })
 })

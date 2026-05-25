@@ -138,4 +138,16 @@ describe('resolveRotateOptions', () => {
     expect(r.ok).toBe(true)
     if (r.ok) expect(r.value.maxFiles).toBe(0)
   })
+
+  // --max-files must be a strict integer. parseInt() would silently truncate
+  // these inputs (`5.9` → 5, `3abc` → 3), giving the operator a surprising
+  // value instead of the localized error parseSize gives for the same shape.
+  it.each(['5.9', '3.5', '3abc', '7 garbage', '5x', '1e3'])(
+    'rejects non-integer --max-files=%s',
+    (value) => {
+      const r = resolveRotateOptions({ maxFiles: value })
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.error).toContain('logRotate.invalidMaxFiles')
+    },
+  )
 })
