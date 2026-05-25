@@ -289,3 +289,76 @@ describe('TerminalSessionManager', () => {
     }, 20)
   })
 })
+
+// cleanupStaleSandboxes の挙動を unit テストする。実ファイル操作は
+// fs を spy する形ではなく、tmpdir に短命ディレクトリを作って検証する。
+describe('TerminalSession.cleanupStaleSandboxes', () => {
+  const os = require('os') as typeof import('os')
+  const fs = require('fs') as typeof import('fs')
+  const path = require('path') as typeof import('path')
+
+  function makeStaleDir(name: string, mtimeMs: number): string {
+    const fullPath = path.join(os.tmpdir(), name)
+    fs.mkdirSync(fullPath, { recursive: true })
+    // mtime を過去にする
+    const t = new Date(mtimeMs)
+    fs.utimesSync(fullPath, t, t)
+    return fullPath
+  }
+
+  afterEach(() => {
+    // テストで作った残骸を掃除
+    const tmp = os.tmpdir()
+    for (const name of fs.readdirSync(tmp)) {
+      if (name.startsWith('terminal-sandbox-jest-')) {
+        try {
+          fs.rmSync(path.join(tmp, name), { recursive: true, force: true })
+        } catch { /* ignore */ }
+      }
+    }
+  })
+
+  it('24 時間以上古いものを削除する', () => {
+    const oldPath = makeStaleDir(
+      'terminal-sandbox-jest-old-' + Math.random().toString(36).slice(2),
+      Date.now() - 25 * 60 * 60 * 1000,
+    )
+    expect(fs.existsSync(oldPath)).toBe(true)
+
+    const removed = TerminalSession.cleanupStaleSandboxes()
+    expect(removed).toBeGreaterThanOrEqual(1)
+    expect(fs.existsSync(oldPath)).toBe(false)
+  })
+
+  it('新しいもの (24 時間以内) は残す', () => {
+    const freshPath = makeStaleDir(
+      'terminal-sandbox-jest-fresh-' + Math.random().toString(36).slice(2),
+      Date.now() - 1000, // 1 秒前
+    )
+
+    TerminalSession.cleanupStaleSandboxes()
+    expect(fs.existsSync(freshPath)).toBe(true)
+  })
+
+  it('maxAgeMs=0 で全削除する', () => {
+    const freshPath = makeStaleDir(
+      'terminal-sandbox-jest-all-' + Math.random().toString(36).slice(2),
+      Date.now() - 1000,
+    )
+
+    const removed = TerminalSession.cleanupStaleSandboxes(0)
+    expect(removed).toBeGreaterThanOrEqual(1)
+    expect(fs.existsSync(freshPath)).toBe(false)
+  })
+
+  it('terminal-sandbox- プレフィックス以外には触れない', () => {
+    const otherPath = path.join(os.tmpdir(), 'other-jest-' + Math.random().toString(36).slice(2))
+    require('fs').mkdirSync(otherPath, { recursive: true })
+    try {
+      TerminalSession.cleanupStaleSandboxes(0)
+      expect(fs.existsSync(otherPath)).toBe(true)
+    } finally {
+      try { fs.rmSync(otherPath, { recursive: true, force: true }) } catch { /* ignore */ }
+    }
+  })
+})

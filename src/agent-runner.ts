@@ -16,6 +16,7 @@ import { ApiClient } from './api-client'
 import { startConfigWatcher } from './config-watcher'
 import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
 import { extractTokenId } from './utils/token-utils'
+import { TerminalSession } from './terminal/terminal-session'
 
 export { extractTokenId }
 
@@ -201,6 +202,20 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
 
   if (options.verbose) {
     logger.setVerbose(true)
+  }
+
+  // 起動時に古い terminal-sandbox ディレクトリを掃除する。
+  // セッション終了時の cleanupTmpDir が SIGKILL / クラッシュで走らなかった
+  // 場合に /tmp/terminal-sandbox-* が累積し、ENOSPC を引き起こすため。
+  // 24 時間以上前のものだけを対象とし、現在稼働中の他 process の sandbox は
+  // 触らない (mtime ベース)。
+  try {
+    const removed = TerminalSession.cleanupStaleSandboxes()
+    if (removed > 0) {
+      logger.info(`Cleaned up ${removed} stale terminal-sandbox dir(s) in /tmp`)
+    }
+  } catch (err) {
+    logger.warn(`Failed to clean up stale terminal-sandbox dirs: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   const config = loadConfig()
