@@ -209,8 +209,18 @@ export function generateProjectServiceUnit(opts: {
 }): string {
   const escapedWrapper = systemdEscape(opts.wrapperScriptPath)
   const escapedHome = systemdEscape(os.homedir())
-  const escapedOutLog = systemdEscape(path.join(opts.logDir, 'agent.out.log'))
-  const escapedErrLog = systemdEscape(path.join(opts.logDir, 'agent.err.log'))
+  // The systemd unit captures the WRAPPER SCRIPT's own stdout/stderr
+  // (startup banners, `echo "ERROR: ..." >&2` lines from the wrapper, the
+  // pre-docker bootstrap output). The agent's actual stdout/stderr is
+  // pipe-rotated by `ai-support-agent log-rotate` and written to
+  // agent.out.log / agent.err.log inside the wrapper itself — those paths
+  // are deliberately NOT used here to avoid a double-write race where both
+  // systemd and the rotator append to the same file (rotation would orphan
+  // systemd's open fd, and the rotated generation would grow without
+  // bound). The wrapper.* files have no rotation but stay tiny because
+  // only the bootstrap noise lands there.
+  const escapedOutLog = systemdEscape(path.join(opts.logDir, 'wrapper.out.log'))
+  const escapedErrLog = systemdEscape(path.join(opts.logDir, 'wrapper.err.log'))
   return `[Unit]
 Description=AI Support Agent (${opts.unitName})
 After=network-online.target
@@ -255,6 +265,18 @@ export function generateWrapperScript(opts: {
   claudeCodeOauthToken?: string
   verbose?: boolean
   updateScriptPath: string
+  /**
+   * Per-project log directory. When set, the wrapper redirects the docker
+   * subprocess's stdout and stderr into separate `ai-support-agent
+   * log-rotate --no-tee` subprocesses, producing `agent.out.log` /
+   * `agent.err.log` (plus rotated generations `.1` … `.N`) under this
+   * directory. The systemd unit's `StandardOutput` / `StandardError`
+   * point at separate `wrapper.out.log` / `wrapper.err.log` files (NOT
+   * the rotator-owned paths) to avoid a double-write race where
+   * systemd's open fd would otherwise keep appending to a rotated
+   * generation.
+   */
+  logDir?: string
 }): string {
   const containerHome = '/home/node'
   const containerConfigDir = `${containerHome}/.ai-support-agent`
@@ -376,6 +398,40 @@ docker rm -f ${qContainerName} 2>/dev/null || true
 _DOCKER_UID=$(id -u)
 _DOCKER_GID=$(id -g)
 
+${opts.logDir ? `\
+# Pipe stdout and stderr through SEPARATE \`ai-support-agent log-rotate\`
+# subprocesses so the active log files are bounded (default 5MB × 5
+# generations) AND each stream lands in its own file (agent.out.log /
+# agent.err.log) — matching the pre-rotation layout that operators tail.
+#
+# Both rotators are invoked with \`--no-tee\` so they DO NOT echo back to
+# stdout/stderr. The systemd unit's StandardOutput/Error is pointed at
+# separate wrapper.*.log files (NOT the agent.*.log paths owned by the
+# rotators), so we don't get a double-write race where systemd silently
+# keeps appending to a rotated generation.
+#
+# Process substitution \`> >(cmd)\` / \`2> >(cmd)\` is bash-only; the
+# shebang at line 1 (\`#!/bin/bash\`) guarantees it.
+docker run --rm -i --name ${qContainerName} \\
+  --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\
+${mountLines.join('\n')}
+${envLines.join('\n')}
+  "\$IMAGE_TAG" \\
+  ${containerArgs.join(' ')} \\
+   > >(ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.out.log`)}) \\
+  2> >(ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.err.log`)} >&2)
+
+# \`> >(...)\` does not propagate the subshell exit into \$?, so EXIT_CODE
+# is purely docker's exit status. The exit-42 update path is preserved
+# (the rotator can never mask it).
+EXIT_CODE=$?
+
+# Give the rotator children a moment to flush before the wrapper exits;
+# otherwise systemd's cgroup termination can SIGKILL them mid-write.
+# 'wait' without arguments waits for ALL background jobs (the two process
+# substitutions). Brief; bounded by the pipe-buffer drain time.
+wait 2>/dev/null || true
+` : `\
 docker run --rm -i --name ${qContainerName} \\
   --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\
 ${mountLines.join('\n')}
@@ -384,7 +440,7 @@ ${envLines.join('\n')}
   ${containerArgs.join(' ')}
 
 EXIT_CODE=$?
-
+`}
 if [ "$EXIT_CODE" -eq 42 ]; then
   exec ${qUpdateScriptPath}
 fi
@@ -560,6 +616,7 @@ export function writeProjectServiceFiles(
     claudeCodeOauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
     verbose: options.verbose,
     updateScriptPath,
+    logDir: projectLogDir,
   })
   // 0o700 — wrapper embeds the agent token (and optionally ANTHROPIC_API_KEY
   // / CLAUDE_CODE_OAUTH_TOKEN) as shell-quoted literals. See writeFileEnsuringMode.
