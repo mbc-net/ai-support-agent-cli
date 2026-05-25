@@ -116,33 +116,37 @@ export class RotatingFileWriter {
    * `maxFiles` is unlinked. After rotation the active path is empty.
    *
    * Rename order is high → low so we never overwrite a live generation
-   * mid-rotation. All steps tolerate ENOENT (a generation may not exist
-   * yet) so a fresh install does not crash on the first rotation.
+   * mid-rotation. ENOENT is tolerated (a generation may not exist yet);
+   * any other error aborts the rotation by re-throwing — continuing past
+   * e.g. EBUSY/EACCES on a mid-loop rename would overwrite the orphaned
+   * next-younger generation and cause silent data loss.
    */
   private rotate(): void {
     this.close()
     // Drop the oldest generation that would otherwise outlive maxFiles.
     if (this.maxFiles <= 0) {
       // No history requested — just remove the active file.
-      try { fs.unlinkSync(this.filePath) } catch { /* not present */ }
+      try { fs.unlinkSync(this.filePath) } catch (err) { rethrowUnlessENOENT(err) }
       this.currentSize = 0
       return
     }
     const oldest = `${this.filePath}.${this.maxFiles}`
-    try { fs.unlinkSync(oldest) } catch { /* not present */ }
+    try { fs.unlinkSync(oldest) } catch (err) { rethrowUnlessENOENT(err) }
     // Shift `<path>.(i-1)` → `<path>.i` for i = maxFiles..2.
     for (let i = this.maxFiles; i >= 2; i--) {
       const src = `${this.filePath}.${i - 1}`
       const dst = `${this.filePath}.${i}`
-      try { fs.renameSync(src, dst) } catch { /* src not present */ }
+      try { fs.renameSync(src, dst) } catch (err) { rethrowUnlessENOENT(err) }
     }
-    // Finally promote the active file to `.1`.
-    try {
-      fs.renameSync(this.filePath, `${this.filePath}.1`)
-    } catch {
-      // Active file may have been removed externally between the size
-      // check and the rename — that's fine; ensureOpen() will recreate it.
-    }
+    // Finally promote the active file to `.1`. ENOENT here is fine — the
+    // active file may have been removed externally between the size check
+    // and the rename; ensureOpen() will recreate it on the next write.
+    try { fs.renameSync(this.filePath, `${this.filePath}.1`) } catch (err) { rethrowUnlessENOENT(err) }
     this.currentSize = 0
   }
+}
+
+function rethrowUnlessENOENT(err: unknown): void {
+  if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') return
+  throw err
 }
