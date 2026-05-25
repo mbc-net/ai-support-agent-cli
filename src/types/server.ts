@@ -30,6 +30,12 @@ export interface SystemInfo {
   cpuUsage: number
   memoryUsage: number
   uptime: number
+  /**
+   * /tmp (または相当する temp dir) の使用率 (0-100)。取得失敗時は undefined。
+   * agent 側で 85% を超えたら warning ログを出す。サーバ側でも閾値超過の通知に
+   * 利用可能。
+   */
+  diskUsagePercent?: number
 }
 
 export interface HeartbeatResponse {
