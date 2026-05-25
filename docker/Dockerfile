@@ -117,15 +117,15 @@ RUN npm install -g \
     && npm cache clean --force
 
 # =============================================================================
-# Layer 5: Playwright browser binary (large, stable — cache before app packages)
-# Browser binary is architecture-independent and rarely changes, so it is
-# installed before AGENT_VERSION so the layer stays cached on version bumps.
-# The playwright npm package is installed later as a peer of @ai-support-agent/cli.
-# Use /opt/playwright-browsers so all users (root, node, arbitrary UID) can access it.
+# Layer 5: System dependencies for Playwright Chromium
+# Browser binary itself is installed in Layer 6 with the playwright version
+# that actually ships with @ai-support-agent/cli, to avoid Chromium revision
+# mismatch (e.g. `Executable doesn't exist at .../chromium_headless_shell-XXXX`).
+# This layer installs only the OS packages so the heavier work below can use
+# `playwright install` without `--with-deps` (no apt-get on the runtime path).
 # =============================================================================
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
-RUN npx playwright install --with-deps chromium \
-    && chmod -R 755 /opt/playwright-browsers
+RUN npx --yes playwright install-deps chromium
 
 # =============================================================================
 # Layer 6: Application packages (changes on every version bump)
@@ -135,10 +135,17 @@ ARG AGENT_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code @ai-support-agent/cli@${AGENT_VERSION} backlog-mcp-server \
     && npm cache clean --force
 
-# Install playwright npm package as peer of @ai-support-agent/cli so require('playwright') resolves.
-# Browser binary is already installed above; this only adds the Node.js bindings (~3MB).
+# Install playwright npm package as peer of @ai-support-agent/cli, then download
+# the Chromium binary matching THIS playwright's expected revision.
+# Doing the binary download *after* the peer install guarantees that the
+# revision under /opt/playwright-browsers matches what playwright runtime
+# resolves, fixing the "Executable doesn't exist at ..." error that occurred
+# when `npx playwright install` (Layer 5) picked a newer playwright via npx
+# cache than the one pinned by @ai-support-agent/cli's peer dep.
 RUN cd /usr/local/lib/node_modules/@ai-support-agent/cli \
-    && npm install playwright
+    && npm install playwright \
+    && node node_modules/playwright/cli.js install chromium \
+    && chmod -R 755 /opt/playwright-browsers
 
 # =============================================================================
 # Layer 7: Permissions and runtime setup (lightweight, changes rarely)
