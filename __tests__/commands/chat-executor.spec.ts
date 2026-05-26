@@ -176,6 +176,59 @@ describe('chat-executor', () => {
         basePayload, 'cmd-3', mockClient, serverConfig, 'agent-1',
       )
     })
+
+    it('warns when api mode is selected with Web-configured envVars', async () => {
+      const { logger } = require('../../src/logger')
+      const warnSpy = jest.spyOn(logger, 'warn')
+
+      const projectConfig: ProjectConfigResponse = {
+        configHash: 'h1',
+        project: { projectCode: 'MBC_01', projectName: 'MBC' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+        envVars: { ANTHROPIC_API_KEY: 'sk-from-web' },
+      }
+
+      await executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-api-warn',
+        client: mockClient,
+        activeChatMode: 'api',
+        agentId: 'agent-1',
+        projectConfig,
+      })
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('API mode is selected but Web-configured envVars'),
+      )
+      warnSpy.mockRestore()
+    })
+
+    it('does not warn when api mode is selected without envVars', async () => {
+      const { logger } = require('../../src/logger')
+      const warnSpy = jest.spyOn(logger, 'warn')
+      warnSpy.mockClear()
+
+      await executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-api-clean',
+        client: mockClient,
+        activeChatMode: 'api',
+        agentId: 'agent-1',
+      })
+
+      const envVarsWarns = warnSpy.mock.calls.filter((call: unknown[]) =>
+        typeof call[0] === 'string' &&
+        (call[0] as string).includes('Web-configured envVars'),
+      )
+      expect(envVarsWarns).toHaveLength(0)
+      warnSpy.mockRestore()
+    })
   })
 
   describe('agentId validation', () => {

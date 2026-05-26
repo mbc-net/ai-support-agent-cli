@@ -121,55 +121,68 @@ export async function applyProjectConfig(
 ): Promise<void> {
   // キャッシュフォールバック中は envVars が抜けているため、前回値を保持する
   // （Web で設定された ANTHROPIC_API_KEY 等が一時的なネットワーク断で消えるのを防ぐ）
+  // null/undefined どちらも『キャッシュに envVars 無し』とみなす。
   const previousEnvVars = state.projectConfig?.envVars
-  if (options.fromCache && config.envVars === undefined && previousEnvVars) {
-    logger.warn(
-      `${deps.prefix} Config restored from cache; preserving last-known envVars (${Object.keys(previousEnvVars).length} keys)`,
-    )
-    config = { ...config, envVars: previousEnvVars }
+  let effectiveConfig = config
+  if (options.fromCache && config.envVars == null) {
+    if (previousEnvVars) {
+      logger.warn(
+        `${deps.prefix} Config restored from cache; preserving last-known envVars (${Object.keys(previousEnvVars).length} keys)`,
+      )
+      // shallow copy で previousEnvVars と state を切り離す（後続変更による副作用を防ぐ）
+      effectiveConfig = { ...config, envVars: { ...previousEnvVars } }
+    } else {
+      // 起動直後にネットワーク断でキャッシュからロードした場合、前回値も無い
+      // → Web 設定 (CLAUDE_CODE#API_KEY 等) が次回 sync まで効かないことを明示
+      logger.warn(
+        `${deps.prefix} Config restored from cache and no previous envVars in memory; ` +
+          `Web-configured env overrides (CLAUDE_CODE#* / ENV#*) will be unavailable ` +
+          `until the next successful network sync`,
+      )
+    }
   }
 
-  state.currentConfigHash = config.configHash
-  state.projectConfig = config
+  state.currentConfigHash = effectiveConfig.configHash
+  state.projectConfig = effectiveConfig
 
   // Update serverConfig from project config
   state.serverConfig = {
-    agentEnabled: config.agent.agentEnabled,
-    builtinAgentEnabled: config.agent.builtinAgentEnabled,
-    builtinFallbackEnabled: config.agent.builtinFallbackEnabled,
-    externalAgentEnabled: config.agent.externalAgentEnabled,
+    agentEnabled: effectiveConfig.agent.agentEnabled,
+    builtinAgentEnabled: effectiveConfig.agent.builtinAgentEnabled,
+    builtinFallbackEnabled: effectiveConfig.agent.builtinFallbackEnabled,
+    externalAgentEnabled: effectiveConfig.agent.externalAgentEnabled,
     chatMode: 'agent',
     claudeCodeConfig: {
-      allowedTools: config.agent.allowedTools,
-      addDirs: config.agent.claudeCodeConfig?.additionalDirs,
-      systemPrompt: config.agent.claudeCodeConfig?.appendSystemPrompt,
+      allowedTools: effectiveConfig.agent.allowedTools,
+      addDirs: effectiveConfig.agent.claudeCodeConfig?.additionalDirs,
+      systemPrompt: effectiveConfig.agent.claudeCodeConfig?.appendSystemPrompt,
     },
   }
 
   // Write AWS config file if project directory and AWS accounts are configured
-  if (deps.projectDir && config.aws?.accounts?.length) {
+  if (deps.projectDir && effectiveConfig.aws?.accounts?.length) {
     try {
-      writeAwsConfig(deps.projectDir, config.project.projectCode, config.aws.accounts)
+      writeAwsConfig(deps.projectDir, effectiveConfig.project.projectCode, effectiveConfig.aws.accounts)
     } catch (error) {
       logger.warn(`${deps.prefix} Failed to write AWS config: ${getErrorMessage(error)}`)
     }
   }
 
   // Log database configuration
-  if (config.databases?.length) {
-    logger.info(`${deps.prefix} Databases configured: ${config.databases.map(db => `${db.name}(${db.engine})`).join(', ')}`)
+  if (effectiveConfig.databases?.length) {
+    logger.info(`${deps.prefix} Databases configured: ${effectiveConfig.databases.map(db => `${db.name}(${db.engine})`).join(', ')}`)
   }
 
   // Log repository configuration
-  if (config.repositories?.length) {
-    logger.info(`${deps.prefix} Repositories configured: ${config.repositories.map(r => `${r.repositoryName}(${r.provider})`).join(', ')}`)
+  if (effectiveConfig.repositories?.length) {
+    logger.info(`${deps.prefix} Repositories configured: ${effectiveConfig.repositories.map(r => `${r.repositoryName}(${r.provider})`).join(', ')}`)
   }
 
   // Write MCP config file if project directory is available
   if (deps.projectDir) {
     try {
       const mcpServerPath = resolveMcpServerPath()
-      const backlogConfigs = config.backlog?.items?.map((item) => ({
+      const backlogConfigs = effectiveConfig.backlog?.items?.map((item) => ({
         domain: item.domain,
         apiKey: item.apiKey,
       }))
@@ -190,10 +203,10 @@ export async function applyProjectConfig(
   }
 
   // Set up SSH config if SSH hosts are configured and project directory is available
-  if (config.ssh?.enabled && config.ssh.hosts?.length && deps.projectDir) {
+  if (effectiveConfig.ssh?.enabled && effectiveConfig.ssh.hosts?.length && deps.projectDir) {
     try {
       const sshDir = getSshDir(deps.projectDir)
-      await setupSshConfig(deps.client, config.ssh, sshDir)
+      await setupSshConfig(deps.client, effectiveConfig.ssh, sshDir)
     } catch (error) {
       logger.warn(`${deps.prefix} Failed to set up SSH config: ${getErrorMessage(error)}`)
     }
@@ -202,20 +215,22 @@ export async function applyProjectConfig(
   // envVars override（CLAUDE_CODE# / ENV# from Web 設定）— spawn 時に注入
   // 注: API モード (executeApiChatCommand) はこの envVars を参照しない。
   //     `claude_code` モードでのみ spawn 時に env として注入される。
-  // ノイズ抑制のため、キー集合に変化があったときだけログを出す。
-  if (config.envVars && Object.keys(config.envVars).length > 0) {
-    const overriddenKeys = Object.keys(config.envVars).sort()
-    const previousKeys = previousEnvVars
-      ? Object.keys(previousEnvVars).sort().join(',')
-      : ''
-    if (previousKeys !== overriddenKeys.join(',')) {
-      logger.info(`${deps.prefix} envVars override: ${overriddenKeys.join(', ')}`)
+  // ログ方針: キー集合だけでなく値のハッシュも比較し、value rotation も検知する。
+  // 全消去 (non-empty → empty) も明示的にログに残す。
+  const previousSignature = computeEnvVarsSignature(previousEnvVars)
+  const newSignature = computeEnvVarsSignature(effectiveConfig.envVars)
+  if (previousSignature !== newSignature) {
+    if (effectiveConfig.envVars && Object.keys(effectiveConfig.envVars).length > 0) {
+      const overriddenKeys = Object.keys(effectiveConfig.envVars).sort()
+      logger.info(`${deps.prefix} envVars override updated: ${overriddenKeys.join(', ')}`)
+    } else if (previousEnvVars && Object.keys(previousEnvVars).length > 0) {
+      logger.info(`${deps.prefix} envVars override cleared (no Web-configured env vars)`)
     }
   }
 
   // Detect Docker customization changes and trigger rebuild if needed
   if (deps.onDockerRebuild) {
-    const newDockerHash = createHash('md5').update(JSON.stringify(config.agent.dockerCustomization ?? null)).digest('hex')
+    const newDockerHash = createHash('md5').update(JSON.stringify(effectiveConfig.agent.dockerCustomization ?? null)).digest('hex')
     const noCustomizationHash = createHash('md5').update(JSON.stringify(null)).digest('hex')
     const prevDockerHash = state.dockerCustomizationHash
     // Trigger rebuild if:
@@ -229,7 +244,18 @@ export async function applyProjectConfig(
     state.dockerCustomizationHash = newDockerHash
   }
 
-  logger.info(`${deps.prefix} Config applied (hash: ${config.configHash})`)
+  logger.info(`${deps.prefix} Config applied (hash: ${effectiveConfig.configHash})`)
+}
+
+/**
+ * envVars マップの内容を表す安定文字列を返す。
+ * キーをソートして value も含めて連結することで、キー追加/削除だけでなく
+ * 値の rotation も検知できるシグネチャになる。
+ */
+function computeEnvVarsSignature(envVars: Record<string, string> | undefined): string {
+  if (!envVars) return ''
+  const sortedKeys = Object.keys(envVars).sort()
+  return sortedKeys.map((k) => `${k}=${envVars[k]}`).join('\n')
 }
 
 export interface SyncRepositoryOptions {

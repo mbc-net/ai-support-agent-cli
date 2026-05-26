@@ -63,6 +63,16 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
 
   const mode = activeChatMode ?? 'claude_code'
 
+  // API モードでは projectConfig.envVars が反映されないため、Web で
+  // 設定されている envVars がある場合に warn を出す（ユーザーへの hint）。
+  if (mode === 'api' && projectConfig?.envVars && Object.keys(projectConfig.envVars).length > 0) {
+    const keys = Object.keys(projectConfig.envVars).sort().join(', ')
+    logger.warn(
+      `[chat] API mode is selected but Web-configured envVars (${keys}) are not applied in API mode. ` +
+        `These overrides are only effective in claude_code mode.`,
+    )
+  }
+
   switch (mode) {
     case 'api':
       return executeApiChatCommand(payload, commandId, client, serverConfig, agentId)

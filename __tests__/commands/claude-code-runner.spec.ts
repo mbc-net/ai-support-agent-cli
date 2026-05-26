@@ -1467,6 +1467,8 @@ describe('claude-code-runner', () => {
           NULLY: null as unknown as string,
           NUMERIC: 42 as unknown as string,
           UNDEFINED: undefined as unknown as string,
+          BOOLY: true as unknown as string,
+          OBJECTY: {} as unknown as string,
         },
       })
       mockProcess.emit('close', 0)
@@ -1477,6 +1479,8 @@ describe('claude-code-runner', () => {
       expect(env.NULLY).toBeUndefined()
       expect(env.NUMERIC).toBeUndefined()
       expect(env.UNDEFINED).toBeUndefined()
+      expect(env.BOOLY).toBeUndefined()
+      expect(env.OBJECTY).toBeUndefined()
     })
 
     it('should clear sigkillTimer when close event fires after cancel', async () => {

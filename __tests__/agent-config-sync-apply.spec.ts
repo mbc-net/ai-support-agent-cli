@@ -253,4 +253,164 @@ describe('applyProjectConfig - error handling branches', () => {
       ANTHROPIC_API_KEY: 'sk-from-cache',
     })
   })
+
+  it('treats envVars: null in cache as missing (preserves previous envVars)', async () => {
+    const deps = makeDeps()
+    const state = makeState({
+      projectConfig: {
+        configHash: 'prev',
+        project: { projectCode: 'TEST_01', projectName: 'Test' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+        envVars: { ANTHROPIC_API_KEY: 'sk-from-server' },
+      },
+    })
+    // 想定外パスとして envVars が null 化したケース
+    const cachedConfig = makeBaseConfig({ envVars: null as unknown as undefined })
+
+    await applyProjectConfig(deps, state, cachedConfig, { fromCache: true })
+
+    expect(state.projectConfig?.envVars).toEqual({
+      ANTHROPIC_API_KEY: 'sk-from-server',
+    })
+  })
+
+  it('warns when cache fallback runs with no previous envVars (cold start)', async () => {
+    const { logger } = require('../src/logger')
+    const warnSpy = jest.spyOn(logger, 'warn')
+
+    const deps = makeDeps()
+    const state = makeState() // state.projectConfig undefined
+    const cachedConfig = makeBaseConfig({ envVars: undefined })
+
+    await applyProjectConfig(deps, state, cachedConfig, { fromCache: true })
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Web-configured env overrides'),
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('does not mutate the original config parameter passed in by the caller', async () => {
+    const deps = makeDeps()
+    const state = makeState({
+      projectConfig: {
+        configHash: 'prev',
+        project: { projectCode: 'TEST_01', projectName: 'Test' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+        envVars: { ANTHROPIC_API_KEY: 'sk-prev' },
+      },
+    })
+    const cachedConfig = makeBaseConfig({ envVars: undefined })
+    const snapshot = JSON.parse(JSON.stringify(cachedConfig))
+
+    await applyProjectConfig(deps, state, cachedConfig, { fromCache: true })
+
+    // 呼び出し元の cachedConfig オブジェクトは変更されない（envVars は undefined のまま）
+    expect(cachedConfig).toEqual(snapshot)
+  })
+
+  it('logs envVars value rotation even when key set is unchanged', async () => {
+    const { logger } = require('../src/logger')
+    const infoSpy = jest.spyOn(logger, 'info')
+
+    const deps = makeDeps()
+    const state = makeState({
+      projectConfig: {
+        configHash: 'prev',
+        project: { projectCode: 'TEST_01', projectName: 'Test' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+        envVars: { ANTHROPIC_API_KEY: 'sk-old' },
+      },
+    })
+    const rotatedConfig = makeBaseConfig({
+      envVars: { ANTHROPIC_API_KEY: 'sk-new' }, // same key, new value
+    })
+
+    await applyProjectConfig(deps, state, rotatedConfig)
+
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.stringContaining('envVars override updated'),
+    )
+    infoSpy.mockRestore()
+  })
+
+  it('logs envVars clearing when previous had keys and new has none', async () => {
+    const { logger } = require('../src/logger')
+    const infoSpy = jest.spyOn(logger, 'info')
+
+    const deps = makeDeps()
+    const state = makeState({
+      projectConfig: {
+        configHash: 'prev',
+        project: { projectCode: 'TEST_01', projectName: 'Test' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+        envVars: { ANTHROPIC_API_KEY: 'sk-old' },
+      },
+    })
+    const clearedConfig = makeBaseConfig({ envVars: undefined })
+
+    await applyProjectConfig(deps, state, clearedConfig)
+
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.stringContaining('envVars override cleared'),
+    )
+    infoSpy.mockRestore()
+  })
+
+  it('does not log envVars info when the value set is unchanged', async () => {
+    const { logger } = require('../src/logger')
+    const infoSpy = jest.spyOn(logger, 'info')
+    infoSpy.mockClear()
+
+    const deps = makeDeps()
+    const state = makeState({
+      projectConfig: {
+        configHash: 'prev',
+        project: { projectCode: 'TEST_01', projectName: 'Test' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+        envVars: { ANTHROPIC_API_KEY: 'sk-same' },
+      },
+    })
+    const unchangedConfig = makeBaseConfig({
+      envVars: { ANTHROPIC_API_KEY: 'sk-same' },
+    })
+
+    await applyProjectConfig(deps, state, unchangedConfig)
+
+    const envVarsCalls = infoSpy.mock.calls.filter((call: unknown[]) =>
+      typeof call[0] === 'string' && (call[0] as string).includes('envVars override'),
+    )
+    expect(envVarsCalls).toHaveLength(0)
+    infoSpy.mockRestore()
+  })
 })
