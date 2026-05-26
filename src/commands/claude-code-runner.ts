@@ -94,8 +94,11 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     }
 
     // Web 設定（CLAUDE_CODE# / ENV#）の env 上書き — 最後にマージして cleanEnv より優先
+    // 非文字列値（null/undefined/数値等）は spawn が文字列化して "null" 等が
+    // env として設定されてしまうため、防御的に typeof チェックする
     if (envVarsOverride) {
       for (const [key, value] of Object.entries(envVarsOverride)) {
+        if (typeof value !== 'string' || value === '') continue
         env[key] = value
       }
     }

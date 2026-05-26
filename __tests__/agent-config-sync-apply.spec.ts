@@ -174,4 +174,83 @@ describe('applyProjectConfig - error handling branches', () => {
 
     expect(state.projectConfig?.envVars).toBeUndefined()
   })
+
+  it('preserves previous envVars when applying cache fallback config', async () => {
+    const deps = makeDeps()
+    const state = makeState({
+      projectConfig: {
+        configHash: 'prev',
+        project: { projectCode: 'TEST_01', projectName: 'Test' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+        envVars: { ANTHROPIC_API_KEY: 'sk-from-server' },
+      },
+    })
+    // キャッシュ復元時は envVars が undefined になっている
+    const cachedConfig = makeBaseConfig({ envVars: undefined })
+
+    await applyProjectConfig(deps, state, cachedConfig, { fromCache: true })
+
+    // 前回の envVars が保持されている
+    expect(state.projectConfig?.envVars).toEqual({
+      ANTHROPIC_API_KEY: 'sk-from-server',
+    })
+  })
+
+  it('does not preserve envVars when fromCache is false and new config omits envVars', async () => {
+    const deps = makeDeps()
+    const state = makeState({
+      projectConfig: {
+        configHash: 'prev',
+        project: { projectCode: 'TEST_01', projectName: 'Test' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+        envVars: { ANTHROPIC_API_KEY: 'sk-old' },
+      },
+    })
+    // サーバから envVars 無しが明示的に来た場合は前回値を捨てる
+    const newConfig = makeBaseConfig({ envVars: undefined })
+
+    await applyProjectConfig(deps, state, newConfig, { fromCache: false })
+
+    expect(state.projectConfig?.envVars).toBeUndefined()
+  })
+
+  it('uses cache-supplied envVars when present (does not over-preserve)', async () => {
+    const deps = makeDeps()
+    const state = makeState({
+      projectConfig: {
+        configHash: 'prev',
+        project: { projectCode: 'TEST_01', projectName: 'Test' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+        envVars: { ANTHROPIC_API_KEY: 'sk-old' },
+      },
+    })
+    // 万一キャッシュに envVars が入っていた場合はそれを優先する
+    const cachedConfig = makeBaseConfig({
+      envVars: { ANTHROPIC_API_KEY: 'sk-from-cache' },
+    })
+
+    await applyProjectConfig(deps, state, cachedConfig, { fromCache: true })
+
+    expect(state.projectConfig?.envVars).toEqual({
+      ANTHROPIC_API_KEY: 'sk-from-cache',
+    })
+  })
 })

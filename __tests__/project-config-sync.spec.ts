@@ -54,7 +54,7 @@ describe('project-config-sync', () => {
 
       const result = await syncProjectConfig(client, 'old-hash', undefined, '[test]')
 
-      expect(result).toEqual(config)
+      expect(result).toEqual({ config, fromCache: false })
       expect(client.getProjectConfig).toHaveBeenCalledTimes(1)
     })
 
@@ -64,7 +64,7 @@ describe('project-config-sync', () => {
 
       const result = await syncProjectConfig(client, undefined, undefined, '[test]')
 
-      expect(result).toEqual(config)
+      expect(result).toEqual({ config, fromCache: false })
     })
 
     it('should return null when hash is same', async () => {
@@ -86,7 +86,7 @@ describe('project-config-sync', () => {
 
       const result = await syncProjectConfig(client, 'old-hash', '/projects/test', '[test]')
 
-      expect(result).toEqual(config)
+      expect(result).toEqual({ config, fromCache: false })
       // saveCachedConfig should have been called (verify via fs calls)
       expect(mockedFs.writeFileSync).toHaveBeenCalled()
       expect(mockedFs.renameSync).toHaveBeenCalled()
@@ -98,7 +98,7 @@ describe('project-config-sync', () => {
 
       const result = await syncProjectConfig(client, 'old-hash', undefined, '[test]')
 
-      expect(result).toEqual(config)
+      expect(result).toEqual({ config, fromCache: false })
       expect(mockedFs.writeFileSync).not.toHaveBeenCalled()
     })
 
@@ -129,8 +129,9 @@ describe('project-config-sync', () => {
       const result = await syncProjectConfig(client, 'old-hash', '/projects/test', '[test]')
 
       expect(result).not.toBeNull()
-      expect(result?.configHash).toBe('cached-hash')
-      expect(result?.project.projectCode).toBe('TEST_01')
+      expect(result?.config.configHash).toBe('cached-hash')
+      expect(result?.config.project.projectCode).toBe('TEST_01')
+      expect(result?.fromCache).toBe(true)
     })
 
     it('should return null on failure when no cache exists', async () => {

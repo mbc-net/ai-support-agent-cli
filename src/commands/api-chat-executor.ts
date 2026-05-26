@@ -63,6 +63,11 @@ export function _getRunningApiChats(): Map<string, { cancel: () => void }> {
 /**
  * Anthropic API を直接呼び出してチャットメッセージを処理する
  * エージェントが持つ ANTHROPIC_API_KEY で Claude を呼び出す
+ *
+ * 注意: Web で設定された `projectConfig.envVars`（CLAUDE_CODE#API_KEY 等）は
+ * 現状この経路では参照されない。`claude_code` モード（spawn 経由）のみ
+ * Web 設定の env オーバーライドが有効。API モードでの per-project キー切替
+ * 対応は別タスクで実装予定。
  */
 export async function executeApiChatCommand(
   payload: ChatPayload,

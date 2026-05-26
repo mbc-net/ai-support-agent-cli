@@ -1453,6 +1453,32 @@ describe('claude-code-runner', () => {
       expect(env).not.toHaveProperty('AI_SUPPORT_TENANT_CODE')
     })
 
+    it('should skip non-string and empty values in envVarsOverride', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({
+        message: 'hello',
+        sendChunk,
+        envVarsOverride: {
+          VALID: 'ok',
+          EMPTY: '',
+          NULLY: null as unknown as string,
+          NUMERIC: 42 as unknown as string,
+          UNDEFINED: undefined as unknown as string,
+        },
+      })
+      mockProcess.emit('close', 0)
+      await handle.result
+      const env = spawn.mock.calls[0][2].env
+      expect(env.VALID).toBe('ok')
+      expect(env.EMPTY).toBeUndefined()
+      expect(env.NULLY).toBeUndefined()
+      expect(env.NUMERIC).toBeUndefined()
+      expect(env.UNDEFINED).toBeUndefined()
+    })
+
     it('should clear sigkillTimer when close event fires after cancel', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockChildProcess()

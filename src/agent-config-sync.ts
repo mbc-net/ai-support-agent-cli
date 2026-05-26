@@ -47,14 +47,14 @@ export async function performConfigSync(
   deps: ConfigSyncDeps,
   state: ConfigSyncState,
 ): Promise<boolean> {
-  const config = await syncProjectConfig(
+  const result = await syncProjectConfig(
     deps.client,
     state.currentConfigHash,
     deps.projectDir,
     deps.prefix,
   )
-  if (config) {
-    await applyProjectConfig(deps, state, config)
+  if (result) {
+    await applyProjectConfig(deps, state, result.config, { fromCache: result.fromCache })
     return true
   }
   return false
@@ -100,6 +100,16 @@ export async function performSetup(
   logger.info(`${deps.prefix} Setup completed`)
 }
 
+/** Options for applyProjectConfig */
+export interface ApplyProjectConfigOptions {
+  /**
+   * `true` のとき、`config` はディスクキャッシュから復元したもので、
+   * 秘匿情報 (envVars 等) が抜けている可能性がある。
+   * 直前まで適用していた envVars を保持してネットワーク断時の劣化を防ぐ。
+   */
+  fromCache?: boolean
+}
+
 /**
  * Apply project config to state (update serverConfig, write AWS/MCP config files).
  */
@@ -107,7 +117,18 @@ export async function applyProjectConfig(
   deps: ConfigSyncDeps,
   state: ConfigSyncState,
   config: ProjectConfigResponse,
+  options: ApplyProjectConfigOptions = {},
 ): Promise<void> {
+  // キャッシュフォールバック中は envVars が抜けているため、前回値を保持する
+  // （Web で設定された ANTHROPIC_API_KEY 等が一時的なネットワーク断で消えるのを防ぐ）
+  const previousEnvVars = state.projectConfig?.envVars
+  if (options.fromCache && config.envVars === undefined && previousEnvVars) {
+    logger.warn(
+      `${deps.prefix} Config restored from cache; preserving last-known envVars (${Object.keys(previousEnvVars).length} keys)`,
+    )
+    config = { ...config, envVars: previousEnvVars }
+  }
+
   state.currentConfigHash = config.configHash
   state.projectConfig = config
 
@@ -179,9 +200,17 @@ export async function applyProjectConfig(
   }
 
   // envVars override（CLAUDE_CODE# / ENV# from Web 設定）— spawn 時に注入
+  // 注: API モード (executeApiChatCommand) はこの envVars を参照しない。
+  //     `claude_code` モードでのみ spawn 時に env として注入される。
+  // ノイズ抑制のため、キー集合に変化があったときだけログを出す。
   if (config.envVars && Object.keys(config.envVars).length > 0) {
     const overriddenKeys = Object.keys(config.envVars).sort()
-    logger.info(`${deps.prefix} envVars override: ${overriddenKeys.join(', ')}`)
+    const previousKeys = previousEnvVars
+      ? Object.keys(previousEnvVars).sort().join(',')
+      : ''
+    if (previousKeys !== overriddenKeys.join(',')) {
+      logger.info(`${deps.prefix} envVars override: ${overriddenKeys.join(', ')}`)
+    }
   }
 
   // Detect Docker customization changes and trigger rebuild if needed

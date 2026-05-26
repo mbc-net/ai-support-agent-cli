@@ -18,9 +18,12 @@ jest.mock('../src/chat-mode-detector', () => ({
 }))
 jest.mock('../src/project-config-sync', () => ({
   syncProjectConfig: jest.fn().mockResolvedValue({
-    configHash: 'default-hash',
-    project: { projectCode: 'test-proj', projectName: 'Test' },
-    agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+    config: {
+      configHash: 'default-hash',
+      project: { projectCode: 'test-proj', projectName: 'Test' },
+      agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+    },
+    fromCache: false,
   }),
 }))
 jest.mock('../src/project-dir', () => ({
@@ -1038,7 +1041,7 @@ describe('ProjectAgent', () => {
           claudeCodeConfig: { additionalDirs: ['/extra'], appendSystemPrompt: 'Be helpful' },
         },
       }
-      mockedSyncProjectConfig.mockResolvedValueOnce(mockConfig)
+      mockedSyncProjectConfig.mockResolvedValueOnce({ config: mockConfig, fromCache: false })
 
       const agent = new ProjectAgent(project, 'agent-1', options)
       agent.start()
@@ -1068,7 +1071,7 @@ describe('ProjectAgent', () => {
           ],
         },
       }
-      mockedSyncProjectConfig.mockResolvedValueOnce(mockConfig)
+      mockedSyncProjectConfig.mockResolvedValueOnce({ config: mockConfig, fromCache: false })
 
       const agent = new ProjectAgent(projectWithDir, 'agent-1', options, undefined, undefined)
       agent.start()
@@ -1177,9 +1180,12 @@ describe('ProjectAgent', () => {
       mockedSyncProjectConfig
         .mockResolvedValueOnce(null)
         .mockResolvedValueOnce({
-          configHash: 'retry-hash',
-          project: { projectCode: 'test-proj', projectName: 'Test' },
-          agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+          config: {
+            configHash: 'retry-hash',
+            project: { projectCode: 'test-proj', projectName: 'Test' },
+            agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+          },
+          fromCache: false,
         })
 
       const agent = new ProjectAgent(project, 'agent-1', options)
@@ -1228,9 +1234,12 @@ describe('ProjectAgent', () => {
     it('should not schedule config sync when configHash is same in heartbeat', async () => {
       // First sync returns a config with hash
       mockedSyncProjectConfig.mockResolvedValueOnce({
-        configHash: 'same-hash',
-        project: { projectCode: 'test-proj', projectName: 'Test' },
-        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+        config: {
+          configHash: 'same-hash',
+          project: { projectCode: 'test-proj', projectName: 'Test' },
+          agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+        },
+        fromCache: false,
       })
       // Heartbeat returns same hash
       mockClient.heartbeat.mockResolvedValue({ success: true, configHash: 'same-hash' })
@@ -1255,7 +1264,7 @@ describe('ProjectAgent', () => {
         project: { projectCode: 'test-proj', projectName: 'Test' },
         agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
       }
-      mockedSyncProjectConfig.mockResolvedValueOnce(mockConfig)
+      mockedSyncProjectConfig.mockResolvedValueOnce({ config: mockConfig, fromCache: false })
 
       mockClient.getCommand.mockResolvedValue({
         commandId: 'cmd-cfg',
@@ -1347,7 +1356,7 @@ describe('ProjectAgent', () => {
           { repositoryId: 'repo-1', repositoryCode: 'my-repo', repositoryName: 'my-repo', repositoryUrl: 'https://github.com/org/repo.git', provider: 'github', branch: 'main', authMethod: 'token' },
         ],
       }
-      mockedSyncProjectConfig.mockResolvedValue(mockConfig)
+      mockedSyncProjectConfig.mockResolvedValue({ config: mockConfig, fromCache: false })
       mockedSyncRepositories.mockResolvedValue([
         { repositoryId: 'repo-1', repositoryCode: 'my-repo', repositoryName: 'my-repo', status: 'cloned' },
       ])
@@ -1379,7 +1388,7 @@ describe('ProjectAgent', () => {
           { repositoryId: 'repo-1', repositoryCode: 'my-repo', repositoryName: 'my-repo', repositoryUrl: 'https://github.com/org/repo.git', provider: 'github', branch: 'main', authMethod: 'token' },
         ],
       }
-      mockedSyncProjectConfig.mockResolvedValue(mockConfig)
+      mockedSyncProjectConfig.mockResolvedValue({ config: mockConfig, fromCache: false })
       mockedSyncRepositories.mockRejectedValue(new Error('Sync failed'))
 
       const agent = new ProjectAgent(project, 'agent-1', options)
@@ -1407,7 +1416,7 @@ describe('ProjectAgent', () => {
           ],
         },
       }
-      mockedSyncProjectConfig.mockResolvedValue(mockConfig)
+      mockedSyncProjectConfig.mockResolvedValue({ config: mockConfig, fromCache: false })
 
       const agent = new ProjectAgent(project, 'agent-1', options)
       agent.start()
@@ -2339,14 +2348,17 @@ describe('ProjectAgent', () => {
     it('should start alert polling when cloudwatch is enabled in project config', async () => {
       const syncProjectConfigMock = syncProjectConfig as jest.MockedFunction<typeof syncProjectConfig>
       syncProjectConfigMock.mockResolvedValue({
-        configHash: 'abc123',
-        project: { projectCode: 'test-proj', projectName: 'Test' },
-        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
-        cloudwatch: {
-          enabled: true,
-          pollingIntervalMs: 1000,  // 1秒に設定してテストで進める
-          webhookUrl: 'https://api.example.com/webhooks/cloudwatch/mbc/MBC_01',
+        config: {
+          configHash: 'abc123',
+          project: { projectCode: 'test-proj', projectName: 'Test' },
+          agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+          cloudwatch: {
+            enabled: true,
+            pollingIntervalMs: 1000,  // 1秒に設定してテストで進める
+            webhookUrl: 'https://api.example.com/webhooks/cloudwatch/mbc/MBC_01',
+          },
         },
+        fromCache: false,
       })
 
       // Mock getPendingAlerts for AlertProcessor
