@@ -47,6 +47,11 @@ export interface TerminalAgentMessage {
   rows?: number
 }
 
+import type { EnvVarsProvider } from '../env-vars-filter'
+
+// 既存の re-export（後方互換）
+export type { EnvVarsProvider } from '../env-vars-filter'
+
 export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMessage> {
   private readonly manager: TerminalSessionManager
   private readonly wsUrl: string
@@ -56,6 +61,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     private readonly token: string,
     private readonly agentId: string,
     private readonly projectDir?: string,
+    private readonly envVarsProvider?: EnvVarsProvider,
   ) {
     super({
       maxReconnectRetries: TERMINAL_WS_MAX_RECONNECT_RETRIES,
@@ -147,10 +153,22 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       cwd = msg.cwd
     }
 
+    // envVars を provider から取得。configSync が未完了 or キャッシュ
+    // フォールバックで envVars が無い場合は undefined になる。その場合は
+    // Web 設定 (CLAUDE_CODE#API_KEY 等) が PTY に反映されないため warn を出す。
+    const envVarsOverride = this.envVarsProvider?.()
+    if (this.envVarsProvider && !envVarsOverride) {
+      logger.warn(
+        `[terminal] Opening session ${serverSessionId} before envVars are available; ` +
+          `Web-configured env overrides will not apply until the next successful config sync`,
+      )
+    }
+
     const session = this.manager.createSessionWithId(serverSessionId, {
       cols: msg.cols,
       rows: msg.rows,
       cwd,
+      envVarsOverride,
     })
 
     if (!session) {

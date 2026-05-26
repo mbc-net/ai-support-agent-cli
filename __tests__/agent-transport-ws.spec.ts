@@ -123,6 +123,7 @@ describe('startTerminalWebSocket', () => {
       'test-token',
       'agent-1',
       '/test/project/workspace',
+      undefined, // envVarsProvider (configSyncState 未指定時)
     )
     expect(state.terminalWs).not.toBeNull()
     expect(mockConnect).toHaveBeenCalled()
@@ -147,7 +148,42 @@ describe('startTerminalWebSocket', () => {
       'test-token',
       'agent-1',
       '/test/project/workspace',
+      undefined,
     )
+  })
+
+  it('passes envVarsProvider that returns configSyncState.projectConfig.envVars', () => {
+    const { isNodePtyAvailable, TerminalWebSocket } = require('../src/terminal')
+    isNodePtyAvailable.mockReturnValue(true)
+
+    const mockConnect = jest.fn().mockResolvedValue(undefined)
+    TerminalWebSocket.mockImplementation(() => ({
+      connect: mockConnect,
+    }))
+
+    const deps = createMockDeps()
+    const state = createMockState()
+    const configSyncState = {
+      currentConfigHash: 'h1',
+      projectConfig: {
+        configHash: 'h1',
+        project: { projectCode: 'P', projectName: 'P' },
+        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+        envVars: { ANTHROPIC_API_KEY: 'sk-web' },
+      },
+      serverConfig: null,
+      availableChatModes: [],
+      activeChatMode: undefined,
+      mcpConfigPath: undefined,
+      dockerCustomizationHash: undefined,
+    }
+
+    startTerminalWebSocket(deps, state, undefined, configSyncState as any)
+
+    const call = TerminalWebSocket.mock.calls[0]
+    const provider = call[4] as () => Record<string, string> | undefined
+    expect(provider).toBeDefined()
+    expect(provider()).toEqual({ ANTHROPIC_API_KEY: 'sk-web' })
   })
 
   it('should handle connection failure gracefully', async () => {
@@ -196,6 +232,7 @@ describe('startVsCodeTunnel', () => {
       'test-token',
       'agent-1',
       '/test/project/workspace/repos',
+      undefined, // envVarsProvider (configSyncState 未指定時)
     )
     expect(state.vsCodeWs).not.toBeNull()
     expect(mockConnect).toHaveBeenCalled()
@@ -219,7 +256,40 @@ describe('startVsCodeTunnel', () => {
       'test-token',
       'agent-1',
       '/test/project/workspace/repos',
+      undefined,
     )
+  })
+
+  it('passes envVarsProvider to VsCodeTunnelWebSocket when configSyncState is supplied', () => {
+    const { VsCodeTunnelWebSocket } = require('../src/vscode')
+
+    const mockConnect = jest.fn().mockResolvedValue(undefined)
+    VsCodeTunnelWebSocket.mockImplementation(() => ({
+      connect: mockConnect,
+    }))
+
+    const deps = createMockDeps()
+    const state = createMockState()
+    const configSyncState = {
+      currentConfigHash: 'h1',
+      projectConfig: {
+        configHash: 'h1',
+        project: { projectCode: 'P', projectName: 'P' },
+        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+        envVars: { ANTHROPIC_MODEL: 'claude-sonnet-4-6' },
+      },
+      serverConfig: null,
+      availableChatModes: [],
+      activeChatMode: undefined,
+      mcpConfigPath: undefined,
+      dockerCustomizationHash: undefined,
+    }
+
+    startVsCodeTunnel(deps, state, undefined, configSyncState as any)
+
+    const provider = VsCodeTunnelWebSocket.mock.calls[0][4] as () => Record<string, string> | undefined
+    expect(provider).toBeDefined()
+    expect(provider()).toEqual({ ANTHROPIC_MODEL: 'claude-sonnet-4-6' })
   })
 
   it('should handle connection failure gracefully', async () => {
@@ -1322,6 +1392,7 @@ describe('startTerminalWebSocket: no projectDir', () => {
       deps.token,
       deps.agentId,
       undefined,
+      undefined,
     )
   })
 })
@@ -1346,6 +1417,7 @@ describe('startVsCodeTunnel: no projectDir', () => {
       deps.apiUrl,
       deps.token,
       deps.agentId,
+      undefined,
       undefined,
     )
   })

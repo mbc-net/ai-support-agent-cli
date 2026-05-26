@@ -454,8 +454,8 @@ export class ProjectAgent {
     // Start terminal WebSocket connection (only if server has WS gateway enabled)
     if (result.wsEnabled) {
       const resolvedWsUrl = result.wsUrl ? resolveUrlForDocker(result.wsUrl) : result.wsUrl
-      startTerminalWebSocket(this.transportDeps, this.transportState, resolvedWsUrl)
-      startVsCodeTunnel(this.transportDeps, this.transportState, resolvedWsUrl)
+      startTerminalWebSocket(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
+      startVsCodeTunnel(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
     } else {
       logger.debug(`${this.prefix} Terminal/VS Code WebSocket skipped (wsEnabled=false)`)
     }
