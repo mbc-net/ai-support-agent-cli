@@ -69,9 +69,12 @@ jest.mock('../src/project-dir', () => ({
 }))
 jest.mock('../src/project-config-sync', () => ({
   syncProjectConfig: jest.fn().mockResolvedValue({
-    configHash: 'default-hash',
-    project: { projectCode: 'test-proj', projectName: 'Test' },
-    agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+    config: {
+      configHash: 'default-hash',
+      project: { projectCode: 'test-proj', projectName: 'Test' },
+      agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+    },
+    fromCache: false,
   }),
 }))
 jest.mock('../src/aws-profile', () => ({
