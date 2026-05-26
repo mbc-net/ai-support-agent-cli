@@ -5,6 +5,7 @@ import * as path from 'path'
 import { filterEnvVarsOverride } from '../env-vars-filter'
 import { logger } from '../logger'
 import { buildSafeEnv } from '../security'
+import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
 import {
   SESSION_IDLE_TIMEOUT_MS,
@@ -205,7 +206,9 @@ export class TerminalSession {
 
     // Claude Code 対話モードは ~/.claude.json の oauthAccount キーが
     // 存在しないと CLAUDE_CODE_OAUTH_TOKEN env を持っていても /login プロンプトを出す。
-    // PTY 起動前に oauthAccount placeholder を確保する。
+    // PTY 起動前に、(1) JSON 破損があれば backup から復元、(2) oauthAccount placeholder
+    // を確保する。両者は ~/.claude.json を触るため順序が重要 (integrity 先 → oauth-sync 後)。
+    ensureClaudeJsonIntegrity()
     ensureClaudeJsonOAuthAccount(filteredOverride, {
       prefix: `[terminal:${sessionId}]`,
     })

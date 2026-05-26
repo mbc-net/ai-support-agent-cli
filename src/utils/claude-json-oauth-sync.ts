@@ -13,8 +13,18 @@
  * envVarsOverride に `CLAUDE_CODE_OAUTH_TOKEN` が含まれていれば
  * `~/.claude.json` の `oauthAccount` キーを確保する。
  *
- * 他フィールドは保持し、`oauthAccount` も既にあれば触らない (再 login 後の
- * 正規メタデータを上書きしないため)。
+ * 設計上の注意:
+ *
+ * - `~/.claude.json` はホスト/コンテナで volume mount 共有されているケースが
+ *   多い (mbc-ai-01 では複数プロジェクトコンテナが同一ファイルを参照)。
+ *   並列 spawn による lost-update を防ぐため、`O_CREAT|O_EXCL` lockfile
+ *   方式で排他制御する。
+ * - atomic write: 一時ファイルに書き込んでから rename で置換する。
+ *   書き込み途中で kill されても破損ファイルが残らない。
+ * - mode 0o600 を明示的に chmod する。`writeFileSync` の mode は
+ *   既存ファイルには適用されない Node.js 仕様への対策。
+ * - 既存 `oauthAccount` が **オブジェクト型** の場合のみ温存する。
+ *   `false`/`""`/`0`/`[]`/`null` 等の不正値は再生成対象とする。
  */
 
 import * as fs from 'fs'
@@ -28,15 +38,166 @@ function getClaudeJsonPath(): string {
   return path.join(os.homedir(), '.claude.json')
 }
 
+/** 排他ロック用ファイル */
+function getLockPath(): string {
+  return path.join(os.homedir(), '.claude.json.lock')
+}
+
+/** 破損ファイルダンプ用パス（タイムスタンプ付） */
+function getBrokenDumpPath(): string {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-')
+  return path.join(os.homedir(), `.claude.json.broken-${ts}`)
+}
+
+/** ロック取得試行間隔・最大試行数 */
+const LOCK_RETRY_INTERVAL_MS = 50
+const LOCK_RETRY_MAX = 40 // 50ms × 40 = 最大 2 秒待つ
+/** ロックファイルがこの年齢を超えていたら stale とみなして奪う */
+const LOCK_STALE_MS = 30_000
+
+/**
+ * `O_CREAT|O_EXCL` で lock ファイルを排他作成する。
+ * 既に存在し、stale 判定でない場合は false を返す。
+ */
+function acquireLock(lockPath: string): number | null {
+  try {
+    const fd = fs.openSync(lockPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600)
+    return fd
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException
+    if (err.code === 'EEXIST') {
+      // stale check
+      try {
+        const stat = fs.statSync(lockPath)
+        if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+          logger.warn(
+            `[claude-json-sync] Removing stale lock file (age ${Math.round(
+              (Date.now() - stat.mtimeMs) / 1000,
+            )}s)`,
+          )
+          fs.unlinkSync(lockPath)
+          // 再帰でもう一度試行
+          return acquireLock(lockPath)
+        }
+      } catch {
+        // stat 失敗時はロック取得失敗扱い
+      }
+      return null
+    }
+    throw error
+  }
+}
+
+function releaseLock(fd: number, lockPath: string): void {
+  try {
+    fs.closeSync(fd)
+  } catch {
+    // 既に閉じている可能性
+  }
+  try {
+    fs.unlinkSync(lockPath)
+  } catch {
+    // 既に削除されている可能性
+  }
+}
+
+/**
+ * lock を取得して fn を実行。取得できなければ null 返却。
+ * 短時間（最大 2 秒）リトライする。
+ */
+function withLock<T>(lockPath: string, fn: () => T): T | null {
+  for (let i = 0; i < LOCK_RETRY_MAX; i++) {
+    const fd = acquireLock(lockPath)
+    if (fd !== null) {
+      try {
+        return fn()
+      } finally {
+        releaseLock(fd, lockPath)
+      }
+    }
+    // busy-wait（同期）。Node.js の同期 spawn 直前のため非同期化しない
+    const start = Date.now()
+    while (Date.now() - start < LOCK_RETRY_INTERVAL_MS) {
+      // spin
+    }
+  }
+  return null
+}
+
+/**
+ * トップレベルが plain object かどうか
+ */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value)
+  )
+}
+
+/**
+ * 既存 oauthAccount が「有効な object（再 login 済みの正規メタデータ）」か。
+ * 空オブジェクト `{}` も placeholder として有効とみなす（再書き込みを避ける）。
+ * 配列・プリミティブ・null は無効として再生成する。
+ */
+function hasValidOauthAccount(data: Record<string, unknown>): boolean {
+  if (!('oauthAccount' in data)) return false
+  const v = data.oauthAccount
+  return isPlainObject(v)
+}
+
+/**
+ * OAuth token の妥当性を簡易検証。
+ * - 文字列でなければ無効
+ * - trim 後に空ならば無効
+ * - `'undefined'` / `'null'` の literal を弾く
+ */
+function isAcceptableToken(token: unknown): boolean {
+  if (typeof token !== 'string') return false
+  const trimmed = token.trim()
+  if (trimmed === '') return false
+  if (trimmed === 'undefined' || trimmed === 'null') return false
+  return true
+}
+
+/**
+ * atomic write: tmp + rename で書き換え。書き込み後に明示的に chmod 0o600。
+ */
+function atomicWriteJson(targetPath: string, data: unknown): void {
+  // 同じディレクトリに tmp を作る（cross-device rename を避ける）
+  const dir = path.dirname(targetPath)
+  const tmpPath = path.join(dir, `.claude.json.tmp.${process.pid}.${Date.now()}`)
+  // claude CLI と同じく minified で書く（差分ノイズを抑える）
+  const json = JSON.stringify(data)
+  fs.writeFileSync(tmpPath, json, { mode: 0o600 })
+  // mode は新規作成時のみ反映されるため、念のため明示的に chmod
+  try {
+    fs.chmodSync(tmpPath, 0o600)
+  } catch {
+    // chmod 失敗は致命的ではないため続行
+  }
+  fs.renameSync(tmpPath, targetPath)
+  // rename 後にも target の mode を保証
+  try {
+    fs.chmodSync(targetPath, 0o600)
+  } catch {
+    // chmod 失敗は致命的ではない
+  }
+}
+
 /**
  * envVarsOverride に `CLAUDE_CODE_OAUTH_TOKEN` が含まれていれば、
- * `~/.claude.json` に `oauthAccount` キーを存在させる。
+ * `~/.claude.json` に `oauthAccount` キー（オブジェクト）を存在させる。
  *
  * 動作:
- * - envVarsOverride に CLAUDE_CODE_OAUTH_TOKEN が無い場合は何もしない
- * - `~/.claude.json` が存在しない場合は最小限の JSON で新規作成
- * - 既に `oauthAccount` キーがあれば変更しない（既存値を温存）
- * - 無ければ `oauthAccount: {}` を追加してマージ書き込み
+ * - envVarsOverride に CLAUDE_CODE_OAUTH_TOKEN が無い / 不正な場合は何もしない
+ * - 並列 spawn での lost update を防ぐため lockfile で排他
+ * - `~/.claude.json` が存在しない or 破損している場合は最小限の JSON で新規作成
+ *   (破損時は `.claude.json.broken-<ts>` にバックアップを残す)
+ * - トップレベルが object でない場合 (配列/プリミティブ) は corrupted 扱い
+ * - 既に `oauthAccount` がオブジェクトとして存在すれば変更しない
+ *   (既存値が空オブジェクト `{}` でも書き換え発生せず、mtime も変化しない)
+ * - atomic write + 明示的 chmod 0o600
  *
  * 失敗は warn してスキップ（spawn 自体は止めない）。
  */
@@ -44,43 +205,22 @@ export function ensureClaudeJsonOAuthAccount(
   envVarsOverride: Record<string, string> | undefined,
   ctx: { prefix: string },
 ): void {
-  if (!envVarsOverride?.CLAUDE_CODE_OAUTH_TOKEN) return
+  const token = envVarsOverride?.CLAUDE_CODE_OAUTH_TOKEN
+  if (!isAcceptableToken(token)) return
 
   const claudeJsonPath = getClaudeJsonPath()
+  const lockPath = getLockPath()
   try {
-    let data: Record<string, unknown> = {}
-    if (fs.existsSync(claudeJsonPath)) {
-      const raw = fs.readFileSync(claudeJsonPath, 'utf-8')
-      try {
-        data = JSON.parse(raw)
-      } catch {
-        // 既存ファイルが壊れている場合は最小限から作り直す
-        logger.warn(
-          `${ctx.prefix} ~/.claude.json is corrupted; recreating minimal file for OAuth login`,
-        )
-        data = {}
-      }
-    }
-
-    // 既に oauthAccount が存在すれば触らない（再 login 済みの正規メタデータを温存）
-    if (
-      typeof data === 'object' &&
-      data !== null &&
-      'oauthAccount' in data &&
-      data.oauthAccount !== null &&
-      data.oauthAccount !== undefined
-    ) {
-      return
-    }
-
-    // oauthAccount: {} を追加して書き戻し
-    const next = { ...data, oauthAccount: {} }
-    fs.writeFileSync(claudeJsonPath, JSON.stringify(next, null, 2), {
-      mode: 0o600,
+    const result = withLock(lockPath, () => {
+      return syncOauthAccount(claudeJsonPath, ctx)
     })
-    logger.info(
-      `${ctx.prefix} Added oauthAccount placeholder to ~/.claude.json to enable Claude Code interactive mode with CLAUDE_CODE_OAUTH_TOKEN`,
-    )
+    if (result === null) {
+      logger.warn(
+        `${ctx.prefix} Could not acquire lock on ${lockPath} after ${
+          (LOCK_RETRY_INTERVAL_MS * LOCK_RETRY_MAX) / 1000
+        }s; skipping oauthAccount sync (another agent process may be writing)`,
+      )
+    }
   } catch (error) {
     logger.warn(
       `${ctx.prefix} Failed to sync ~/.claude.json for OAuth login: ${
@@ -88,4 +228,63 @@ export function ensureClaudeJsonOAuthAccount(
       }`,
     )
   }
+}
+
+/**
+ * ロック取得済み前提で実行する同期本体。
+ */
+function syncOauthAccount(
+  claudeJsonPath: string,
+  ctx: { prefix: string },
+): 'updated' | 'noop' | 'created' {
+  let data: Record<string, unknown> = {}
+  let needBackup = false
+
+  if (fs.existsSync(claudeJsonPath)) {
+    const raw = fs.readFileSync(claudeJsonPath, 'utf-8')
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      needBackup = true
+      parsed = null
+    }
+    if (isPlainObject(parsed)) {
+      data = parsed
+    } else if (parsed !== null) {
+      // 配列 / 文字列 / 数値 / boolean 等のトップレベル値 → corrupted 扱い
+      needBackup = true
+    }
+    if (needBackup) {
+      // 破損データを後で確認できるよう退避
+      try {
+        const dumpPath = getBrokenDumpPath()
+        fs.writeFileSync(dumpPath, raw, { mode: 0o600 })
+        logger.warn(
+          `${ctx.prefix} ~/.claude.json was corrupted or non-object; dumped to ${dumpPath} and recreating minimal file`,
+        )
+      } catch {
+        logger.warn(
+          `${ctx.prefix} ~/.claude.json was corrupted; recreating minimal file (backup dump failed)`,
+        )
+      }
+      data = {}
+    }
+  }
+
+  // 既存 oauthAccount がオブジェクトとして存在すれば変更しない
+  if (hasValidOauthAccount(data)) {
+    return 'noop'
+  }
+
+  // 追加 or 不正値の上書き
+  const wasPresent = 'oauthAccount' in data
+  const next = { ...data, oauthAccount: {} }
+  atomicWriteJson(claudeJsonPath, next)
+  logger.info(
+    `${ctx.prefix} ${
+      wasPresent ? 'Replaced invalid oauthAccount with placeholder' : 'Added oauthAccount placeholder'
+    } in ~/.claude.json (CLAUDE_CODE_OAUTH_TOKEN authentication)`,
+  )
+  return wasPresent ? 'updated' : 'created'
 }
