@@ -45,6 +45,52 @@ export function buildOpenFolderDisableKeybindings(): Array<{ key: string; comman
   ]
 }
 
+/**
+ * `claude` コマンドのシェル関数 wrapper を生成する。
+ *
+ * 目的:
+ *   `CLAUDE_CODE_OAUTH_TOKEN` env が設定されている場合、対話モードでも
+ *   `claude` が `/login` プロンプトを出さないように `--settings` 引数で
+ *   token を渡す。claude CLI v2.1.150 では env だけだと対話モード起動時に
+ *   keychain / oauthAccount セッションがないと login プロンプトに進むが、
+ *   `--settings '{"env":{"CLAUDE_CODE_OAUTH_TOKEN":"..."}}'` で渡すと
+ *   非対話・対話どちらも認証通過する。
+ *
+ * 設計:
+ *   - シェル関数として実装することで `claude "$@"` の引数展開を安全に行う
+ *   - token が設定されていなければ wrapper は何もしない (素の claude を呼ぶ)
+ *   - ユーザーが --settings を明示指定している場合は wrapper を適用しない
+ *     (シンプルな引数チェックで判定)
+ *   - 関数を unset で先に消すことで rc ファイルの再読み込みでも問題なし
+ */
+function buildClaudeWrapperFunction(): string {
+  return `
+# Claude Code wrapper: 対話モードで OAuth Token を --settings 経由で渡す
+# (env だけでは claude CLI v2.1.x が対話モードで /login プロンプトを出すため)
+unset -f claude 2>/dev/null
+claude() {
+  if [ -z "\${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
+    command claude "\$@"
+    return $?
+  fi
+  # ユーザーが --settings を明示指定している場合は上書きしない
+  for arg in "\$@"; do
+    case "\${arg}" in
+      --settings|--settings=*)
+        command claude "\$@"
+        return $?
+        ;;
+    esac
+  done
+  # OAuth token を --settings 経由で渡す
+  # JSON 内でダブルクォートが必要なため heredoc で安全に組み立て
+  local __settings_json
+  __settings_json=$(printf '{"env":{"CLAUDE_CODE_OAUTH_TOKEN":"%s"}}' "\${CLAUDE_CODE_OAUTH_TOKEN}")
+  command claude --settings "\${__settings_json}" "\$@"
+}
+`
+}
+
 export function buildSandboxInitScript(projectDir: string): string {
   // シェル変数に埋め込む際にシングルクォートをエスケープ
   const escaped = projectDir.replace(/'/g, "'\\''")
@@ -104,5 +150,5 @@ if [ -n "\${ZSH_VERSION}" ]; then
   autoload -Uz add-zsh-hook 2>/dev/null
   add-zsh-hook precmd __sandbox_check 2>/dev/null
 fi
-`
+${buildClaudeWrapperFunction()}`
 }
