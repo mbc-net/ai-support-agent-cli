@@ -55,10 +55,18 @@ const DENYLIST_EXACT = new Set<string>([
 const DENYLIST_PREFIX = ['LD_', 'DYLD_', 'AI_SUPPORT_', 'BASH_FUNC_']
 
 /**
- * `CLAUDE_CODE_*` を直接書き込むのは禁止 (CLAUDE_CODE_OAUTH_TOKEN を含む)。
- * 正規経路は CLAUDE_CODE# プレフィックスのみで、api 側の固定マップを経由する。
+ * `CLAUDE_CODE_*` を直接書き込むのは原則禁止。
+ *
+ * **例外**: `CLAUDE_CODE_OAUTH_TOKEN` は api 側 `AgentEnvVarsService` が
+ * `CLAUDE_CODE#OAUTH_TOKEN` を正規にマップして送ってくる env 名そのもの。
+ * これを agent 側で弾くと OAuth 認証経路が壊れる（PR #300 後の regression）。
+ *
+ * api 側は ENV# 経由での `CLAUDE_CODE_OAUTH_TOKEN` 直書きを完全に拒否しており、
+ * agent に届く `CLAUDE_CODE_OAUTH_TOKEN` は CLAUDE_CODE# 固定マップ由来のみ。
+ * よって agent 側ではこのキーのみ通し、他の `CLAUDE_CODE_*`（SSE_PORT 等）は引き続き拒否する。
  */
 function isProtectedClaudeCodeKey(envName: string): boolean {
+  if (envName === 'CLAUDE_CODE_OAUTH_TOKEN') return false
   return envName.startsWith('CLAUDE_CODE_')
 }
 
