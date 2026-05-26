@@ -157,6 +157,11 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     private readonly token: string,
     private readonly agentId: string,
     private readonly projectDir?: string,
+    /**
+     * code-server セッション起動時に最新の envVars を取り出す関数。
+     * Web 設定が agent プロセス起動後に到着するため関数渡しで遅延評価する。
+     */
+    private readonly envVarsProvider?: () => Record<string, string> | undefined,
   ) {
     super({
       maxReconnectRetries: VSCODE_WS_MAX_RECONNECT_RETRIES,
@@ -329,7 +334,10 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
 
     try {
-      this.vsCodeServer = new VsCodeServer({ projectDir })
+      this.vsCodeServer = new VsCodeServer({
+        projectDir,
+        envVarsOverride: this.envVarsProvider?.(),
+      })
       await this.vsCodeServer.start()
       this.wsProxy = new VsCodeWsProxy(this.vsCodeServer.getPort())
 

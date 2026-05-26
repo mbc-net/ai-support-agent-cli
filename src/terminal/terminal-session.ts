@@ -69,6 +69,14 @@ export interface TerminalSessionOptions {
   cols?: number
   rows?: number
   cwd?: string
+  /**
+   * Web 設定（CLAUDE_CODE# / ENV# 由来）から流れてくる env オーバーレイ。
+   * PTY 環境に最後にマージされ、ユーザーが対話シェルから `claude` を起動した
+   * 際にも Web の `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` /
+   * `ANTHROPIC_MODEL` 等が効くようにする。
+   * 含まれないキーは PTY が継承する process.env をそのまま残す。
+   */
+  envVarsOverride?: Record<string, string>
 }
 
 export interface TerminalSessionInfo {
@@ -177,6 +185,16 @@ export class TerminalSession {
     } else {
       fs.writeFileSync(path.join(tmpDir, '.bashrc'), buildBashRcContent(sandboxScript))
       shellArgs.push('--rcfile', path.join(tmpDir, '.bashrc'))
+    }
+
+    // Web 設定（CLAUDE_CODE# / ENV#）由来の env オーバーレイを最後にマージ。
+    // 含まれないキーは safeEnv (= process.env から PATH/TERM 等を引き継いだもの) が残る。
+    // 非文字列・空文字値は claude-code-runner と同じポリシーで skip。
+    if (options.envVarsOverride) {
+      for (const [key, value] of Object.entries(options.envVarsOverride)) {
+        if (typeof value !== 'string' || value === '') continue
+        env[key] = value
+      }
     }
 
     this.ptyProcess = pty.spawn(shell, shellArgs, {

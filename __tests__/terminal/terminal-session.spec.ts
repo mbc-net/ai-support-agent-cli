@@ -176,6 +176,79 @@ describe('TerminalSession', () => {
     })
     // Don't write anything — session should idle-timeout and kill itself
   })
+
+  describe('envVarsOverride', () => {
+    it('passes envVarsOverride values to pty.spawn env', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      session = new TerminalSession('test-env-1', {
+        envVarsOverride: {
+          ANTHROPIC_API_KEY: 'sk-from-web',
+          ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+        },
+      })
+
+      const call = spawnSpy.mock.calls[0]
+      const env = call[2].env as Record<string, string>
+      expect(env.ANTHROPIC_API_KEY).toBe('sk-from-web')
+      expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
+      // TERM などの safeEnv キーも残っている
+      expect(env.TERM).toBe('xterm-256color')
+    })
+
+    it('skips non-string and empty values', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      session = new TerminalSession('test-env-2', {
+        envVarsOverride: {
+          VALID: 'ok',
+          EMPTY: '',
+          NULLY: null as unknown as string,
+          NUMERIC: 42 as unknown as string,
+          BOOLY: true as unknown as string,
+        },
+      })
+
+      const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+      expect(env.VALID).toBe('ok')
+      expect(env.EMPTY).toBeUndefined()
+      expect(env.NULLY).toBeUndefined()
+      expect(env.NUMERIC).toBeUndefined()
+      expect(env.BOOLY).toBeUndefined()
+    })
+
+    it('does not change spawn env when envVarsOverride is absent', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      session = new TerminalSession('test-env-3')
+
+      const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+      // envVarsOverride 未指定でもエラーにならない
+      expect(env.TERM).toBe('xterm-256color')
+      expect(env.ANTHROPIC_API_KEY).toBeUndefined()
+    })
+
+    it('envVarsOverride overrides safeEnv values for the same key', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      // TERM は safeEnv 経由で 'xterm-256color' が設定されているが、
+      // envVarsOverride で上書き可能
+      session = new TerminalSession('test-env-4', {
+        envVarsOverride: { TERM: 'overridden' },
+      })
+
+      const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+      expect(env.TERM).toBe('overridden')
+    })
+  })
 })
 
 describe('TerminalSessionManager', () => {

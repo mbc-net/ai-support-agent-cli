@@ -47,6 +47,14 @@ export interface TerminalAgentMessage {
   rows?: number
 }
 
+/**
+ * セッション起動時に注入する env を都度取得するための provider。
+ *
+ * 関数として渡すのは、Web 設定の更新（heartbeat 経由の config sync）が
+ * agent プロセス起動後に到着し、PTY を開くタイミングで最新値を反映するため。
+ */
+export type EnvVarsProvider = () => Record<string, string> | undefined
+
 export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMessage> {
   private readonly manager: TerminalSessionManager
   private readonly wsUrl: string
@@ -56,6 +64,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     private readonly token: string,
     private readonly agentId: string,
     private readonly projectDir?: string,
+    private readonly envVarsProvider?: EnvVarsProvider,
   ) {
     super({
       maxReconnectRetries: TERMINAL_WS_MAX_RECONNECT_RETRIES,
@@ -151,6 +160,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       cols: msg.cols,
       rows: msg.rows,
       cwd,
+      envVarsOverride: this.envVarsProvider?.(),
     })
 
     if (!session) {

@@ -171,6 +171,64 @@ describe('VsCodeServer', () => {
       )
     })
 
+    it('should pass envVarsOverride values to spawn env', async () => {
+      mockHealthCheckSuccess()
+      server = new VsCodeServer({
+        projectDir: '/test/project',
+        envVarsOverride: {
+          ANTHROPIC_API_KEY: 'sk-from-web',
+          ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+        },
+      })
+
+      await server.start()
+
+      const spawnCall = (child_process.spawn as jest.Mock).mock.calls[0]
+      const env = spawnCall[2].env as Record<string, string>
+      expect(env.ANTHROPIC_API_KEY).toBe('sk-from-web')
+      expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
+      // XDG は依然として設定される
+      expect(env.XDG_DATA_HOME).toBe('/test/project/.vscode-server/data')
+    })
+
+    it('should skip non-string and empty values in envVarsOverride', async () => {
+      mockHealthCheckSuccess()
+      server = new VsCodeServer({
+        projectDir: '/test/project',
+        envVarsOverride: {
+          VALID: 'ok',
+          EMPTY: '',
+          NULLY: null as unknown as string,
+          NUMERIC: 42 as unknown as string,
+        },
+      })
+
+      await server.start()
+
+      const spawnCall = (child_process.spawn as jest.Mock).mock.calls[0]
+      const env = spawnCall[2].env as Record<string, string>
+      expect(env.VALID).toBe('ok')
+      expect(env.EMPTY).toBeUndefined()
+      expect(env.NULLY).toBeUndefined()
+      expect(env.NUMERIC).toBeUndefined()
+    })
+
+    it('envVarsOverride overrides XDG values for the same key', async () => {
+      mockHealthCheckSuccess()
+      server = new VsCodeServer({
+        projectDir: '/test/project',
+        envVarsOverride: {
+          XDG_DATA_HOME: '/override/data',
+        },
+      })
+
+      await server.start()
+
+      const spawnCall = (child_process.spawn as jest.Mock).mock.calls[0]
+      const env = spawnCall[2].env as Record<string, string>
+      expect(env.XDG_DATA_HOME).toBe('/override/data')
+    })
+
     it('should log stdout data', async () => {
       mockHealthCheckSuccess()
       const { logger } = require('../../src/logger')

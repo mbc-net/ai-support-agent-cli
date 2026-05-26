@@ -25,6 +25,13 @@ import {
 export interface VsCodeServerOptions {
   projectDir: string
   port?: number
+  /**
+   * Web 設定 (CLAUDE_CODE# / ENV#) 由来の env オーバーレイ。code-server プロセス
+   * の env にマージされ、VS Code 内蔵ターミナルから起動した子プロセスにも
+   * 継承される。これにより VS Code ターミナルで `claude` を起動した際にも
+   * Web 設定が反映される。
+   */
+  envVarsOverride?: Record<string, string>
 }
 
 /**
@@ -39,6 +46,7 @@ export class VsCodeServer {
   private port: number
   private readonly requestedPort: number
   private readonly projectDir: string
+  private readonly envVarsOverride: Record<string, string> | undefined
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private healthTimer: ReturnType<typeof setInterval> | null = null
   private running = false
@@ -47,6 +55,7 @@ export class VsCodeServer {
     this.requestedPort = options.port ?? VSCODE_DEFAULT_PORT
     this.port = this.requestedPort
     this.projectDir = options.projectDir
+    this.envVarsOverride = options.envVarsOverride
   }
 
   get isRunning(): boolean {
@@ -77,6 +86,21 @@ export class VsCodeServer {
       logger.warn(`[vscode-server] Failed to setup terminal sandbox: ${getErrorMessage(error)}`)
     }
 
+    // 注: process.env をベースに XDG → envVarsOverride の順で上書き
+    // envVarsOverride を最後にマージすることで Web 設定が host env を上書き
+    const codeServerEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      // code-server が XDG ディレクトリを使うよう設定
+      XDG_DATA_HOME: `${this.projectDir}/.vscode-server/data`,
+      XDG_CONFIG_HOME: `${this.projectDir}/.vscode-server/config`,
+    }
+    if (this.envVarsOverride) {
+      for (const [key, value] of Object.entries(this.envVarsOverride)) {
+        if (typeof value !== 'string' || value === '') continue
+        codeServerEnv[key] = value
+      }
+    }
+
     this.process = spawn('code-server', [
       '--bind-addr', `${VSCODE_BIND_HOST}:${this.port}`,
       '--auth', 'none',
@@ -86,12 +110,7 @@ export class VsCodeServer {
       this.projectDir,
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        // code-server が XDG ディレクトリを使うよう設定
-        XDG_DATA_HOME: `${this.projectDir}/.vscode-server/data`,
-        XDG_CONFIG_HOME: `${this.projectDir}/.vscode-server/config`,
-      },
+      env: codeServerEnv,
     })
 
     // spawn の error イベント（コマンド未発見等）を検知するための Promise
