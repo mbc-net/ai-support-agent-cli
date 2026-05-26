@@ -1350,6 +1350,139 @@ describe('claude-code-runner', () => {
       expect(env).toHaveProperty('AI_SUPPORT_BROWSER_SESSION_ID', 'sess-abc')
     })
 
+    it('should apply envVarsOverride to spawn environment', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({
+        message: 'hello',
+        sendChunk,
+        envVarsOverride: {
+          ANTHROPIC_API_KEY: 'sk-web-override',
+          ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+          GIT_AUTHOR_NAME: 'Bot',
+        },
+      })
+      mockProcess.emit('close', 0)
+      await handle.result
+      const env = spawn.mock.calls[0][2].env
+      expect(env).toHaveProperty('ANTHROPIC_API_KEY', 'sk-web-override')
+      expect(env).toHaveProperty('ANTHROPIC_MODEL', 'claude-sonnet-4-6')
+      expect(env).toHaveProperty('GIT_AUTHOR_NAME', 'Bot')
+    })
+
+    it('should let envVarsOverride win over cleanEnv values', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const originalEnv = process.env
+      process.env = { ...originalEnv, ANTHROPIC_API_KEY: 'sk-local-only' }
+      _resetCleanEnvCache()
+      try {
+        const handle = runClaudeCode({
+          message: 'hello',
+          sendChunk,
+          envVarsOverride: { ANTHROPIC_API_KEY: 'sk-web' },
+        })
+        mockProcess.emit('close', 0)
+        await handle.result
+        const env = spawn.mock.calls[0][2].env
+        expect(env.ANTHROPIC_API_KEY).toBe('sk-web')
+      } finally {
+        process.env = originalEnv
+        _resetCleanEnvCache()
+      }
+    })
+
+    it('should keep cleanEnv values when envVarsOverride does not include that key', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const originalEnv = process.env
+      process.env = { ...originalEnv, ANTHROPIC_API_KEY: 'sk-local-kept' }
+      _resetCleanEnvCache()
+      try {
+        const handle = runClaudeCode({
+          message: 'hello',
+          sendChunk,
+          envVarsOverride: { ANTHROPIC_MODEL: 'claude-sonnet-4-6' },
+        })
+        mockProcess.emit('close', 0)
+        await handle.result
+        const env = spawn.mock.calls[0][2].env
+        expect(env.ANTHROPIC_API_KEY).toBe('sk-local-kept')
+        expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
+      } finally {
+        process.env = originalEnv
+        _resetCleanEnvCache()
+      }
+    })
+
+    it('should win over awsEnv when same key is set', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({
+        message: 'hello',
+        sendChunk,
+        awsEnv: { AWS_REGION: 'us-east-1' },
+        envVarsOverride: { AWS_REGION: 'ap-northeast-1' },
+      })
+      mockProcess.emit('close', 0)
+      await handle.result
+      const env = spawn.mock.calls[0][2].env
+      expect(env.AWS_REGION).toBe('ap-northeast-1')
+    })
+
+    it('should not change spawn env when envVarsOverride is undefined', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+      mockProcess.emit('close', 0)
+      await handle.result
+      const env = spawn.mock.calls[0][2].env
+      // envVarsOverride 未指定でもエラーにならず、policyContext 等が混入しない
+      expect(env).not.toHaveProperty('AI_SUPPORT_TENANT_CODE')
+    })
+
+    it('should skip non-string and empty values in envVarsOverride', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({
+        message: 'hello',
+        sendChunk,
+        envVarsOverride: {
+          VALID: 'ok',
+          EMPTY: '',
+          NULLY: null as unknown as string,
+          NUMERIC: 42 as unknown as string,
+          UNDEFINED: undefined as unknown as string,
+          BOOLY: true as unknown as string,
+          OBJECTY: {} as unknown as string,
+        },
+      })
+      mockProcess.emit('close', 0)
+      await handle.result
+      const env = spawn.mock.calls[0][2].env
+      expect(env.VALID).toBe('ok')
+      expect(env.EMPTY).toBeUndefined()
+      expect(env.NULLY).toBeUndefined()
+      expect(env.NUMERIC).toBeUndefined()
+      expect(env.UNDEFINED).toBeUndefined()
+      expect(env.BOOLY).toBeUndefined()
+      expect(env.OBJECTY).toBeUndefined()
+    })
+
     it('should clear sigkillTimer when close event fires after cancel', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockChildProcess()
