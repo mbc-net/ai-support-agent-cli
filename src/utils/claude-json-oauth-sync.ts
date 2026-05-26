@@ -161,23 +161,67 @@ function isAcceptableToken(token: unknown): boolean {
 }
 
 /**
- * atomic write: tmp + rename で書き換え。書き込み後に明示的に chmod 0o600。
+ * 書き換え戦略:
+ *
+ * 1. **tmp + rename (atomic)**: tmp ファイルに書いてから `fs.renameSync` で
+ *    原子的に置換。POSIX rename atomicity により、書き込み途中で kill されても
+ *    破損ファイルが残らない。**ローカルディスク上のファイルでは最善**。
+ *
+ * 2. **直接 write (fallback)**: rename が `EBUSY` で失敗した場合に使う。
+ *    Linux では **docker bind mount された個別ファイル** に対する rename が
+ *    `EBUSY` で拒否される（マウントポイント自体を置換することになるため）。
+ *    mbc-ai-01 では `~/.claude.json` がコンテナにファイル単位で bind mount
+ *    されており、この経路が必須。
+ *    fallback では partial write 耐性が無いが、ホスト側のロックで並列性は
+ *    既に防いでいるため運用上の影響は限定的。
+ *
+ * いずれの経路でも書き込み後に明示的に `chmod 0o600` を呼ぶ。
  */
 function atomicWriteJson(targetPath: string, data: unknown): void {
-  // 同じディレクトリに tmp を作る（cross-device rename を避ける）
-  const dir = path.dirname(targetPath)
-  const tmpPath = path.join(dir, `.claude.json.tmp.${process.pid}.${Date.now()}`)
   // claude CLI と同じく minified で書く（差分ノイズを抑える）
   const json = JSON.stringify(data)
-  fs.writeFileSync(tmpPath, json, { mode: 0o600 })
-  // mode は新規作成時のみ反映されるため、念のため明示的に chmod
+
+  // Path 1: tmp + rename を試す（atomic）
+  const dir = path.dirname(targetPath)
+  const tmpPath = path.join(dir, `.claude.json.tmp.${process.pid}.${Date.now()}`)
+  let tmpWritten = false
   try {
-    fs.chmodSync(tmpPath, 0o600)
-  } catch {
-    // chmod 失敗は致命的ではないため続行
+    fs.writeFileSync(tmpPath, json, { mode: 0o600 })
+    tmpWritten = true
+    try {
+      fs.chmodSync(tmpPath, 0o600)
+    } catch {
+      // chmod 失敗は致命的ではない
+    }
+    fs.renameSync(tmpPath, targetPath)
+    tmpWritten = false // rename 成功 → tmp は無くなった
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException
+    if (err.code === 'EBUSY' || err.code === 'EXDEV' || err.code === 'EPERM') {
+      // EBUSY: docker bind mount された file への rename (Linux の制約)
+      // EXDEV: cross-device link (まず起きないが念のため)
+      // EPERM: 一部 FS で rename 不可
+      // → 直接 write にフォールバック
+      logger.debug(
+        `[claude-json-sync] rename failed (${err.code}); falling back to direct write (bind-mount path)`,
+      )
+      fs.writeFileSync(targetPath, json, { mode: 0o600 })
+    } else {
+      // 他のエラーは上位に伝播
+      throw error
+    }
+  } finally {
+    // tmp が残っていれば掃除
+    if (tmpWritten) {
+      try {
+        fs.unlinkSync(tmpPath)
+      } catch {
+        // 既に消えていれば無視
+      }
+    }
   }
-  fs.renameSync(tmpPath, targetPath)
-  // rename 後にも target の mode を保証
+
+  // 最終的な target に対して mode を保証 (既存ファイルは writeFileSync の mode を無視するため)
   try {
     fs.chmodSync(targetPath, 0o600)
   } catch {
