@@ -152,16 +152,27 @@ describe('filterEnvVarsOverride', () => {
   })
 
   describe('CLAUDE_CODE_*', () => {
-    it('rejects all CLAUDE_CODE_* including OAUTH_TOKEN', () => {
+    it('allows CLAUDE_CODE_OAUTH_TOKEN (legitimate auth env from api mapping)', () => {
+      // api 側 AgentEnvVarsService は CLAUDE_CODE#OAUTH_TOKEN を
+      // CLAUDE_CODE_OAUTH_TOKEN にマップして送る。これを弾くと OAuth 認証が
+      // 壊れるため、agent 側ではこのキーのみ allowlist する。
+      const result = filterEnvVarsOverride(
+        { CLAUDE_CODE_OAUTH_TOKEN: 'oauth-token-value' },
+        ctx,
+      )
+      expect(result).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'oauth-token-value' })
+    })
+
+    it('rejects other CLAUDE_CODE_* keys (SSE_PORT etc.) but allows OAUTH_TOKEN', () => {
       const result = filterEnvVarsOverride(
         {
           CLAUDE_CODE_SSE_PORT: '12345',
-          CLAUDE_CODE_OAUTH_TOKEN: 'must-not-be-allowed-via-ENV',
+          CLAUDE_CODE_OAUTH_TOKEN: 'oauth-ok',
           CLAUDE_CODE_FOO: 'whatever',
         },
         ctx,
       )
-      expect(result).toEqual({})
+      expect(result).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'oauth-ok' })
     })
   })
 
