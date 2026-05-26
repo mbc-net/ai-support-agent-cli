@@ -5,6 +5,7 @@ import * as path from 'path'
 import { filterEnvVarsOverride } from '../env-vars-filter'
 import { logger } from '../logger'
 import { buildSafeEnv } from '../security'
+import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
 import {
   SESSION_IDLE_TIMEOUT_MS,
   TERMINAL_DEFAULT_COLS,
@@ -201,6 +202,13 @@ export class TerminalSession {
     for (const [key, value] of Object.entries(filteredOverride)) {
       env[key] = value
     }
+
+    // Claude Code 対話モードは ~/.claude.json の oauthAccount キーが
+    // 存在しないと CLAUDE_CODE_OAUTH_TOKEN env を持っていても /login プロンプトを出す。
+    // PTY 起動前に oauthAccount placeholder を確保する。
+    ensureClaudeJsonOAuthAccount(filteredOverride, {
+      prefix: `[terminal:${sessionId}]`,
+    })
 
     this.ptyProcess = pty.spawn(shell, shellArgs, {
       name: 'xterm-256color',
