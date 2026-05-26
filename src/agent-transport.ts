@@ -136,11 +136,13 @@ export function startHeartbeat(
 /**
  * Start terminal WebSocket connection.
  * @param wsUrl - サーバーから返されたWebSocket URL（指定時はapiUrlの代わりに使用）
+ * @param configSyncState - PTY セッション起動時に最新の envVars を取り出すための参照
  */
 export function startTerminalWebSocket(
   deps: TransportDeps,
   state: TransportState,
   wsUrl?: string,
+  configSyncState?: ConfigSyncState,
 ): void {
   if (!isNodePtyAvailable()) {
     logger.warn(`${deps.prefix} Terminal WebSocket skipped: node-pty is not available (native build may have failed)`)
@@ -155,6 +157,7 @@ export function startTerminalWebSocket(
     deps.token,
     deps.agentId,
     terminalDir,
+    configSyncState ? () => configSyncState.projectConfig?.envVars : undefined,
   )
 
   state.terminalWs.connect().catch((error) => {
@@ -165,11 +168,13 @@ export function startTerminalWebSocket(
 /**
  * Start VS Code tunnel WebSocket connection.
  * @param wsUrl - サーバーから返されたWebSocket URL（指定時はapiUrlの代わりに使用）
+ * @param configSyncState - code-server プロセス起動時に最新の envVars を取り出すための参照
  */
 export function startVsCodeTunnel(
   deps: TransportDeps,
   state: TransportState,
   wsUrl?: string,
+  configSyncState?: ConfigSyncState,
 ): void {
   const baseUrl = wsUrl ?? deps.apiUrl
   const reposDir = deps.projectDir ? getReposDir(deps.projectDir) : undefined
@@ -178,6 +183,7 @@ export function startVsCodeTunnel(
     deps.token,
     deps.agentId,
     reposDir,
+    configSyncState ? () => configSyncState.projectConfig?.envVars : undefined,
   )
 
   state.vsCodeWs.connect().catch((error) => {

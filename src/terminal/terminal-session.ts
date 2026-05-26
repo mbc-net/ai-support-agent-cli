@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { filterEnvVarsOverride } from '../env-vars-filter'
 import { logger } from '../logger'
 import { buildSafeEnv } from '../security'
 import {
@@ -69,6 +70,14 @@ export interface TerminalSessionOptions {
   cols?: number
   rows?: number
   cwd?: string
+  /**
+   * Web 設定（CLAUDE_CODE# / ENV# 由来）から流れてくる env オーバーレイ。
+   * PTY 環境に最後にマージされ、ユーザーが対話シェルから `claude` を起動した
+   * 際にも Web の `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` /
+   * `ANTHROPIC_MODEL` 等が効くようにする。
+   * 含まれないキーは PTY が継承する process.env をそのまま残す。
+   */
+  envVarsOverride?: Record<string, string>
 }
 
 export interface TerminalSessionInfo {
@@ -177,6 +186,20 @@ export class TerminalSession {
     } else {
       fs.writeFileSync(path.join(tmpDir, '.bashrc'), buildBashRcContent(sandboxScript))
       shellArgs.push('--rcfile', path.join(tmpDir, '.bashrc'))
+    }
+
+    // Web 設定（CLAUDE_CODE# / ENV#）由来の env オーバーレイを最後にマージ。
+    // 含まれないキーは safeEnv (= process.env から PATH/TERM 等を引き継いだもの) が残る。
+    //
+    // 二層防御: api 側 AgentEnvVarsService が既に denylist フィルタを通している
+    // はずだが、agent 側でも filterEnvVarsOverride を通して PATH/ZDOTDIR 等の
+    // sandbox 関連キーが上書きされないことを保証する。これにより api 側の
+    // regression や別経路からの流入があっても sandbox を維持できる。
+    const filteredOverride = filterEnvVarsOverride(options.envVarsOverride, {
+      prefix: `[terminal:${sessionId}]`,
+    })
+    for (const [key, value] of Object.entries(filteredOverride)) {
+      env[key] = value
     }
 
     this.ptyProcess = pty.spawn(shell, shellArgs, {
