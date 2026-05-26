@@ -147,6 +147,52 @@ function hasValidOauthAccount(data: Record<string, unknown>): boolean {
 }
 
 /**
+ * onboarding 完了 flag が既に正しくセットされているか。
+ * `hasCompletedOnboarding: true` + `lastOnboardingVersion: string` の両方が必要。
+ */
+function hasValidOnboardingFlags(data: Record<string, unknown>): boolean {
+  return (
+    data.hasCompletedOnboarding === true &&
+    typeof data.lastOnboardingVersion === 'string' &&
+    data.lastOnboardingVersion.length > 0
+  )
+}
+
+/**
+ * インストール済み claude CLI のバージョンを取得する。
+ *
+ * `~/.claude.json` の `lastOnboardingVersion` に書き込むため、claude CLI 本体の
+ * package.json から実バージョンを読む。これにより claude をアップデートしても
+ * version 文字列が古いまま残らない。
+ *
+ * 取得失敗時はフォールバック値を返す。実機検証で `lastOnboardingVersion` は
+ * 何かしらの string であれば onboarding スキップが有効になる挙動を確認済み。
+ */
+function detectClaudeVersion(): string {
+  const candidates = [
+    '/usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json',
+    '/usr/lib/node_modules/@anthropic-ai/claude-code/package.json',
+    path.join(os.homedir(), '.npm-global/lib/node_modules/@anthropic-ai/claude-code/package.json'),
+  ]
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate)) continue
+      const raw = fs.readFileSync(candidate, 'utf-8')
+      const pkg = JSON.parse(raw) as { version?: unknown }
+      if (typeof pkg.version === 'string' && pkg.version.length > 0) {
+        return pkg.version
+      }
+    } catch {
+      // 次の候補を試す
+    }
+  }
+  // フォールバック: 適当な version 文字列。claude CLI は string であれば
+  // 内容を厳密にバージョン比較しないと推測される（実機検証では '2.1.150' で
+  // OK だった）が、固定値だと将来の挙動変化に弱いため UNKNOWN を埋める
+  return 'unknown'
+}
+
+/**
  * OAuth token の妥当性を簡易検証。
  * - 文字列でなければ無効
  * - trim 後に空ならば無効
@@ -231,16 +277,25 @@ function atomicWriteJson(targetPath: string, data: unknown): void {
 
 /**
  * envVarsOverride に `CLAUDE_CODE_OAUTH_TOKEN` が含まれていれば、
- * `~/.claude.json` に `oauthAccount` キー（オブジェクト）を存在させる。
+ * `~/.claude.json` を以下の状態にする:
  *
- * 動作:
+ * 1. `oauthAccount` キー（オブジェクト）を存在させる
+ * 2. `hasCompletedOnboarding: true` を設定
+ * 3. `lastOnboardingVersion` に claude CLI の実バージョンを設定
+ *
+ * 1 だけでは対話 (TTY) モードで claude が "Select login method:" を出す。
+ * 2 + 3 を加えることで onboarding wizard を完全にスキップし、
+ * `CLAUDE_CODE_OAUTH_TOKEN` env だけで対話 REPL が起動する。
+ *
+ * 動作詳細:
  * - envVarsOverride に CLAUDE_CODE_OAUTH_TOKEN が無い / 不正な場合は何もしない
  * - 並列 spawn での lost update を防ぐため lockfile で排他
  * - `~/.claude.json` が存在しない or 破損している場合は最小限の JSON で新規作成
  *   (破損時は `.claude.json.broken-<ts>` にバックアップを残す)
  * - トップレベルが object でない場合 (配列/プリミティブ) は corrupted 扱い
- * - 既に `oauthAccount` がオブジェクトとして存在すれば変更しない
- *   (既存値が空オブジェクト `{}` でも書き換え発生せず、mtime も変化しない)
+ * - 既に 3 つすべて有効な値で揃っていれば変更しない (no-op、mtime も変化しない)
+ * - 不足キーのみを追加し、既存の正規メタデータ (実 OAuth login 由来の
+ *   accountUuid 等) は温存
  * - atomic write + 明示的 chmod 0o600
  *
  * 失敗は warn してスキップ（spawn 自体は止めない）。
@@ -316,19 +371,34 @@ function syncOauthAccount(
     }
   }
 
-  // 既存 oauthAccount がオブジェクトとして存在すれば変更しない
-  if (hasValidOauthAccount(data)) {
+  // 既に 3 つすべて揃っていれば no-op
+  const oauthAccountValid = hasValidOauthAccount(data)
+  const onboardingValid = hasValidOnboardingFlags(data)
+  if (oauthAccountValid && onboardingValid) {
     return 'noop'
   }
 
-  // 追加 or 不正値の上書き
-  const wasPresent = 'oauthAccount' in data
-  const next = { ...data, oauthAccount: {} }
+  // 不足分を補完する diff を構築
+  const next: Record<string, unknown> = { ...data }
+  const changes: string[] = []
+
+  if (!oauthAccountValid) {
+    const wasPresent = 'oauthAccount' in data
+    next.oauthAccount = {}
+    changes.push(wasPresent ? 'replaced invalid oauthAccount' : 'added oauthAccount')
+  }
+
+  if (!onboardingValid) {
+    next.hasCompletedOnboarding = true
+    if (typeof data.lastOnboardingVersion !== 'string' || data.lastOnboardingVersion === '') {
+      next.lastOnboardingVersion = detectClaudeVersion()
+    }
+    changes.push('set onboarding flags')
+  }
+
   atomicWriteJson(claudeJsonPath, next)
   logger.info(
-    `${ctx.prefix} ${
-      wasPresent ? 'Replaced invalid oauthAccount with placeholder' : 'Added oauthAccount placeholder'
-    } in ~/.claude.json (CLAUDE_CODE_OAUTH_TOKEN authentication)`,
+    `${ctx.prefix} Updated ~/.claude.json for CLAUDE_CODE_OAUTH_TOKEN authentication: ${changes.join(', ')}`,
   )
-  return wasPresent ? 'updated' : 'created'
+  return oauthAccountValid && onboardingValid ? 'noop' : 'updated'
 }
