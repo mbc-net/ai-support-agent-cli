@@ -92,14 +92,17 @@ describe('ensureClaudeJsonOAuthAccount', () => {
   })
 
   describe('new file creation', () => {
-    it('creates ~/.claude.json with oauthAccount: {} when file does not exist', () => {
+    it('creates ~/.claude.json with oauthAccount + onboarding flags when file does not exist', () => {
       ensureClaudeJsonOAuthAccount(
         { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-xxx' },
         { prefix: '[test]' },
       )
       expect(fs.existsSync(claudeJsonPath)).toBe(true)
       const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
-      expect(data).toEqual({ oauthAccount: {} })
+      expect(data.oauthAccount).toEqual({})
+      expect(data.hasCompletedOnboarding).toBe(true)
+      expect(typeof data.lastOnboardingVersion).toBe('string')
+      expect(data.lastOnboardingVersion.length).toBeGreaterThan(0)
     })
 
     it('writes file with 0o600 permission (new file)', () => {
@@ -135,7 +138,7 @@ describe('ensureClaudeJsonOAuthAccount', () => {
   })
 
   describe('merge with existing file', () => {
-    it('adds oauthAccount: {} while preserving other top-level fields', () => {
+    it('adds oauthAccount + onboarding flags while preserving other top-level fields', () => {
       fs.writeFileSync(
         claudeJsonPath,
         JSON.stringify({
@@ -149,15 +152,15 @@ describe('ensureClaudeJsonOAuthAccount', () => {
         { prefix: '[test]' },
       )
       const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
-      expect(data).toEqual({
-        numStartups: 5,
-        installMethod: 'native',
-        userID: 'user-uuid',
-        oauthAccount: {},
-      })
+      expect(data.numStartups).toBe(5)
+      expect(data.installMethod).toBe('native')
+      expect(data.userID).toBe('user-uuid')
+      expect(data.oauthAccount).toEqual({})
+      expect(data.hasCompletedOnboarding).toBe(true)
+      expect(typeof data.lastOnboardingVersion).toBe('string')
     })
 
-    it('does not overwrite a valid oauthAccount object with metadata', () => {
+    it('does not overwrite a valid oauthAccount object with metadata but still adds onboarding flags', () => {
       fs.writeFileSync(
         claudeJsonPath,
         JSON.stringify({
@@ -173,17 +176,27 @@ describe('ensureClaudeJsonOAuthAccount', () => {
         { prefix: '[test]' },
       )
       const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
+      // 既存 oauthAccount は温存
       expect(data.oauthAccount).toEqual({
         accountUuid: 'real-uuid',
         emailAddress: 'user@example.com',
       })
       expect(data.userID).toBe('user-uuid')
+      // onboarding flags は不足していたので追加される
+      expect(data.hasCompletedOnboarding).toBe(true)
+      expect(typeof data.lastOnboardingVersion).toBe('string')
     })
 
-    it('does not touch file when existing oauthAccount is already a valid empty object (no write)', () => {
-      fs.writeFileSync(claudeJsonPath, JSON.stringify({ oauthAccount: {} }))
+    it('does not touch file when oauthAccount + onboarding flags are all valid (no write)', () => {
+      fs.writeFileSync(
+        claudeJsonPath,
+        JSON.stringify({
+          oauthAccount: {},
+          hasCompletedOnboarding: true,
+          lastOnboardingVersion: '2.1.150',
+        }),
+      )
       const beforeMtime = fs.statSync(claudeJsonPath).mtimeMs
-      // mtime resolution が秒単位の FS でも検証できるよう、少し待つ
       const start = Date.now()
       while (Date.now() - start < 20) { /* spin */ }
       ensureClaudeJsonOAuthAccount(
@@ -191,8 +204,62 @@ describe('ensureClaudeJsonOAuthAccount', () => {
         { prefix: '[test]' },
       )
       const afterMtime = fs.statSync(claudeJsonPath).mtimeMs
-      // 書き込みが起きていなければ mtime は変わらない（少なくとも増えない）
       expect(afterMtime).toBe(beforeMtime)
+    })
+
+    it('adds only onboarding flags when oauthAccount is already valid but flags are missing', () => {
+      fs.writeFileSync(
+        claudeJsonPath,
+        JSON.stringify({
+          oauthAccount: { accountUuid: 'real-uuid' },
+          // hasCompletedOnboarding と lastOnboardingVersion なし
+        }),
+      )
+      ensureClaudeJsonOAuthAccount(
+        { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-xxx' },
+        { prefix: '[test]' },
+      )
+      const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
+      expect(data.oauthAccount).toEqual({ accountUuid: 'real-uuid' })
+      expect(data.hasCompletedOnboarding).toBe(true)
+      expect(typeof data.lastOnboardingVersion).toBe('string')
+    })
+
+    it('replaces hasCompletedOnboarding=false with true', () => {
+      fs.writeFileSync(
+        claudeJsonPath,
+        JSON.stringify({
+          oauthAccount: {},
+          hasCompletedOnboarding: false,
+        }),
+      )
+      ensureClaudeJsonOAuthAccount(
+        { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-xxx' },
+        { prefix: '[test]' },
+      )
+      const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
+      expect(data.hasCompletedOnboarding).toBe(true)
+      expect(typeof data.lastOnboardingVersion).toBe('string')
+    })
+
+    it('preserves existing lastOnboardingVersion if it is a non-empty string', () => {
+      fs.writeFileSync(
+        claudeJsonPath,
+        JSON.stringify({
+          oauthAccount: {},
+          hasCompletedOnboarding: false,
+          lastOnboardingVersion: '2.0.99',
+        }),
+      )
+      ensureClaudeJsonOAuthAccount(
+        { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-xxx' },
+        { prefix: '[test]' },
+      )
+      const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
+      // hasCompletedOnboarding は false → true に修正される
+      expect(data.hasCompletedOnboarding).toBe(true)
+      // lastOnboardingVersion は既存値が温存される (上書きしない)
+      expect(data.lastOnboardingVersion).toBe('2.0.99')
     })
 
     it('replaces invalid oauthAccount values (false / "" / 0 / [] / null) with empty object', () => {
@@ -221,7 +288,8 @@ describe('ensureClaudeJsonOAuthAccount', () => {
         { prefix: '[test]' },
       )
       const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
-      expect(data).toEqual({ oauthAccount: {} })
+      expect(data.oauthAccount).toEqual({})
+      expect(data.hasCompletedOnboarding).toBe(true)
       // backup ファイル（.claude.json.broken-*）が作られている
       const files = fs.readdirSync(tmpHome).filter((f) => f.startsWith('.claude.json.broken-'))
       expect(files.length).toBeGreaterThanOrEqual(1)
@@ -236,7 +304,8 @@ describe('ensureClaudeJsonOAuthAccount', () => {
         { prefix: '[test]' },
       )
       const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
-      expect(data).toEqual({ oauthAccount: {} })
+      expect(data.oauthAccount).toEqual({})
+      expect(data.hasCompletedOnboarding).toBe(true)
     })
 
     it('treats top-level string as corrupted and recreates', () => {
@@ -246,7 +315,8 @@ describe('ensureClaudeJsonOAuthAccount', () => {
         { prefix: '[test]' },
       )
       const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
-      expect(data).toEqual({ oauthAccount: {} })
+      expect(data.oauthAccount).toEqual({})
+      expect(data.hasCompletedOnboarding).toBe(true)
     })
 
     it('treats top-level number as corrupted and recreates', () => {
@@ -256,7 +326,8 @@ describe('ensureClaudeJsonOAuthAccount', () => {
         { prefix: '[test]' },
       )
       const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
-      expect(data).toEqual({ oauthAccount: {} })
+      expect(data.oauthAccount).toEqual({})
+      expect(data.hasCompletedOnboarding).toBe(true)
     })
 
     it('handles top-level JSON null by recreating (without dumping backup since null parses)', () => {
@@ -266,7 +337,8 @@ describe('ensureClaudeJsonOAuthAccount', () => {
         { prefix: '[test]' },
       )
       const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
-      expect(data).toEqual({ oauthAccount: {} })
+      expect(data.oauthAccount).toEqual({})
+      expect(data.hasCompletedOnboarding).toBe(true)
     })
   })
 
@@ -284,7 +356,8 @@ describe('ensureClaudeJsonOAuthAccount', () => {
       // stale lock が削除され、~/.claude.json が作られている
       expect(fs.existsSync(claudeJsonPath)).toBe(true)
       const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
-      expect(data).toEqual({ oauthAccount: {} })
+      expect(data.oauthAccount).toEqual({})
+      expect(data.hasCompletedOnboarding).toBe(true)
       // ロックも解放されている
       expect(fs.existsSync(lockPath)).toBe(false)
     })
