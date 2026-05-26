@@ -178,6 +178,12 @@ export async function applyProjectConfig(
     }
   }
 
+  // envVars override（CLAUDE_CODE# / ENV# from Web 設定）— spawn 時に注入
+  if (config.envVars && Object.keys(config.envVars).length > 0) {
+    const overriddenKeys = Object.keys(config.envVars).sort()
+    logger.info(`${deps.prefix} envVars override: ${overriddenKeys.join(', ')}`)
+  }
+
   // Detect Docker customization changes and trigger rebuild if needed
   if (deps.onDockerRebuild) {
     const newDockerHash = createHash('md5').update(JSON.stringify(config.agent.dockerCustomization ?? null)).digest('hex')

@@ -258,6 +258,7 @@ async function executeClaudeCodeChatOnce(
           e2eTestCaseId: payload.policyContext.e2eTestCaseId,
         }),
       },
+      envVarsOverride: projectConfig?.envVars,
     })
     // プロセスを管理 Map に登録
     processManager.register(commandId, handle)

@@ -146,4 +146,32 @@ describe('applyProjectConfig - error handling branches', () => {
 
     await expect(applyProjectConfig(deps, state, config)).resolves.not.toThrow()
   })
+
+  it('should store envVars on state.projectConfig', async () => {
+    const deps = makeDeps()
+    const state = makeState()
+    const config = makeBaseConfig({
+      envVars: {
+        ANTHROPIC_API_KEY: 'sk-test',
+        ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+      },
+    })
+
+    await applyProjectConfig(deps, state, config)
+
+    expect(state.projectConfig?.envVars).toEqual({
+      ANTHROPIC_API_KEY: 'sk-test',
+      ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+    })
+  })
+
+  it('should not throw when envVars is undefined', async () => {
+    const deps = makeDeps()
+    const state = makeState()
+    const config = makeBaseConfig()
+
+    await applyProjectConfig(deps, state, config)
+
+    expect(state.projectConfig?.envVars).toBeUndefined()
+  })
 })
