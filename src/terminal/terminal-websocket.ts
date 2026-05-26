@@ -47,13 +47,10 @@ export interface TerminalAgentMessage {
   rows?: number
 }
 
-/**
- * セッション起動時に注入する env を都度取得するための provider。
- *
- * 関数として渡すのは、Web 設定の更新（heartbeat 経由の config sync）が
- * agent プロセス起動後に到着し、PTY を開くタイミングで最新値を反映するため。
- */
-export type EnvVarsProvider = () => Record<string, string> | undefined
+import type { EnvVarsProvider } from '../env-vars-filter'
+
+// 既存の re-export（後方互換）
+export type { EnvVarsProvider } from '../env-vars-filter'
 
 export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMessage> {
   private readonly manager: TerminalSessionManager
@@ -156,11 +153,22 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       cwd = msg.cwd
     }
 
+    // envVars を provider から取得。configSync が未完了 or キャッシュ
+    // フォールバックで envVars が無い場合は undefined になる。その場合は
+    // Web 設定 (CLAUDE_CODE#API_KEY 等) が PTY に反映されないため warn を出す。
+    const envVarsOverride = this.envVarsProvider?.()
+    if (this.envVarsProvider && !envVarsOverride) {
+      logger.warn(
+        `[terminal] Opening session ${serverSessionId} before envVars are available; ` +
+          `Web-configured env overrides will not apply until the next successful config sync`,
+      )
+    }
+
     const session = this.manager.createSessionWithId(serverSessionId, {
       cols: msg.cols,
       rows: msg.rows,
       cwd,
-      envVarsOverride: this.envVarsProvider?.(),
+      envVarsOverride,
     })
 
     if (!session) {

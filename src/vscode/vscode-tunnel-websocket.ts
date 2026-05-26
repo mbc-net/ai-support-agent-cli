@@ -3,6 +3,7 @@ import WebSocket from 'ws'
 import { BaseWebSocketConnection } from '../base-websocket'
 import { BrowserLocalServer } from '../browser/browser-local-server'
 import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
+import type { EnvVarsProvider } from '../env-vars-filter'
 import { logger } from '../logger'
 import { getErrorMessage, buildWsUrl } from '../utils'
 import {
@@ -146,6 +147,12 @@ const LIVE_VIEW_INTERVAL_MS = 200
 export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerMessage> {
   private readonly wsUrl: string
   private vsCodeServer: VsCodeServer | null = null
+  /**
+   * 起動中の vsCodeServer に注入した envVars の signature。
+   * 後続セッション要求時に envVars に変化があれば code-server を再起動する。
+   * sorted key=value を join したもの。空オブジェクトは ''。
+   */
+  private vsCodeServerEnvSignature: string = ''
   private wsProxy: VsCodeWsProxy | null = null
   private readonly portForwardSessions = new Map<string, { targetPort: number; wsProxy: VsCodeWsProxy }>()
   readonly browserSessionManager = new BrowserSessionManager(getMaxBrowserSessionsFromEnv())
@@ -161,7 +168,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
      * code-server セッション起動時に最新の envVars を取り出す関数。
      * Web 設定が agent プロセス起動後に到着するため関数渡しで遅延評価する。
      */
-    private readonly envVarsProvider?: () => Record<string, string> | undefined,
+    private readonly envVarsProvider?: EnvVarsProvider,
   ) {
     super({
       maxReconnectRetries: VSCODE_WS_MAX_RECONNECT_RETRIES,
@@ -321,8 +328,18 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       return
     }
 
-    // 既存のサーバーがあれば再利用
-    if (this.vsCodeServer?.isRunning) {
+    // 最新の envVars を取得して signature を計算
+    const envVarsOverride = this.envVarsProvider?.()
+    if (this.envVarsProvider && !envVarsOverride) {
+      logger.warn(
+        `[vscode-server] Opening session ${sessionId} before envVars are available; ` +
+          `Web-configured env overrides will not apply until the next successful config sync`,
+      )
+    }
+    const newEnvSignature = computeEnvSignature(envVarsOverride)
+
+    // 既存のサーバーがあり、かつ envVars に変化が無ければ再利用
+    if (this.vsCodeServer?.isRunning && this.vsCodeServerEnvSignature === newEnvSignature) {
       this.vsCodeServer.touch()
       this.send({
         type: 'vscode_ready',
@@ -333,11 +350,23 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       return
     }
 
+    // envVars が変化した場合は古い code-server を停止して新しい env で起動し直す
+    // (例: ANTHROPIC_API_KEY ローテーション後の最初のセッションで反映される)
+    if (this.vsCodeServer?.isRunning) {
+      logger.info(
+        `[vscode-server] envVars changed since last code-server start; restarting`,
+      )
+      await this.vsCodeServer.stop()
+      this.vsCodeServer = null
+      this.wsProxy = null
+    }
+
     try {
       this.vsCodeServer = new VsCodeServer({
         projectDir,
-        envVarsOverride: this.envVarsProvider?.(),
+        envVarsOverride,
       })
+      this.vsCodeServerEnvSignature = newEnvSignature
       await this.vsCodeServer.start()
       this.wsProxy = new VsCodeWsProxy(this.vsCodeServer.getPort())
 
@@ -817,4 +846,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private send(msg: VsCodeAgentMessage): void {
     this.sendMessage(msg)
   }
+}
+
+/**
+ * envVars マップを安定文字列に変換する。
+ * code-server の env に変化があったかの差分判定に使う。
+ */
+function computeEnvSignature(envVars: Record<string, string> | undefined): string {
+  if (!envVars) return ''
+  const keys = Object.keys(envVars).sort()
+  return keys.map((k) => `${k}=${envVars[k]}`).join('\n')
 }

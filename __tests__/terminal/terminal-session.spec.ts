@@ -234,19 +234,55 @@ describe('TerminalSession', () => {
       expect(env.ANTHROPIC_API_KEY).toBeUndefined()
     })
 
-    it('envVarsOverride overrides safeEnv values for the same key', () => {
+    it('envVarsOverride overrides safeEnv values for the same key (non-protected)', () => {
       const pty = require('node-pty')
       const spawnSpy = pty.spawn as jest.Mock
       spawnSpy.mockClear()
 
-      // TERM は safeEnv 経由で 'xterm-256color' が設定されているが、
-      // envVarsOverride で上書き可能
+      // TERM は denylist に含まれないため上書き可能。
+      // 一方 PATH/ZDOTDIR/XDG_* は filterEnvVarsOverride で弾かれる (別テスト)。
       session = new TerminalSession('test-env-4', {
         envVarsOverride: { TERM: 'overridden' },
       })
 
       const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
       expect(env.TERM).toBe('overridden')
+    })
+
+    it('does NOT allow ZDOTDIR override (sandbox anchor protection)', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      session = new TerminalSession('test-env-5', {
+        envVarsOverride: { ZDOTDIR: '/tmp/evil' },
+      })
+
+      const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+      // ZDOTDIR は agent が sandbox の .zshrc を指すために設定する内部値。
+      // envVarsOverride からの値は filter で弾かれ、agent が設定した tmpDir のまま。
+      // (zsh shell でない場合は ZDOTDIR が設定されない or 上書き不可)
+      expect(env.ZDOTDIR).not.toBe('/tmp/evil')
+    })
+
+    it('does NOT allow PATH or LD_PRELOAD override (defense in depth)', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      session = new TerminalSession('test-env-6', {
+        envVarsOverride: {
+          PATH: '/tmp/evil:/usr/bin',
+          LD_PRELOAD: '/tmp/evil.so',
+          NODE_OPTIONS: '--inspect-brk=0.0.0.0:9229',
+        },
+      })
+
+      const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+      // PATH は safeEnv 由来の値が残るはず (envVarsOverride で上書きされない)
+      expect(env.PATH).not.toBe('/tmp/evil:/usr/bin')
+      expect(env.LD_PRELOAD).toBeUndefined()
+      expect(env.NODE_OPTIONS).toBeUndefined()
     })
   })
 })

@@ -213,12 +213,13 @@ describe('VsCodeServer', () => {
       expect(env.NUMERIC).toBeUndefined()
     })
 
-    it('envVarsOverride overrides XDG values for the same key', async () => {
+    it('does NOT allow XDG_DATA_HOME / XDG_CONFIG_HOME override (sandbox anchor protection)', async () => {
       mockHealthCheckSuccess()
       server = new VsCodeServer({
         projectDir: '/test/project',
         envVarsOverride: {
           XDG_DATA_HOME: '/override/data',
+          XDG_CONFIG_HOME: '/override/config',
         },
       })
 
@@ -226,7 +227,29 @@ describe('VsCodeServer', () => {
 
       const spawnCall = (child_process.spawn as jest.Mock).mock.calls[0]
       const env = spawnCall[2].env as Record<string, string>
-      expect(env.XDG_DATA_HOME).toBe('/override/data')
+      // agent 側の filterEnvVarsOverride が XDG_* を弾くため、
+      // 元の '/test/project/.vscode-server/data' のままになる
+      expect(env.XDG_DATA_HOME).toBe('/test/project/.vscode-server/data')
+      expect(env.XDG_CONFIG_HOME).toBe('/test/project/.vscode-server/config')
+    })
+
+    it('does NOT allow PATH / LD_PRELOAD override in code-server env (defense in depth)', async () => {
+      mockHealthCheckSuccess()
+      server = new VsCodeServer({
+        projectDir: '/test/project',
+        envVarsOverride: {
+          PATH: '/tmp/evil',
+          LD_PRELOAD: '/tmp/evil.so',
+        },
+      })
+
+      await server.start()
+
+      const spawnCall = (child_process.spawn as jest.Mock).mock.calls[0]
+      const env = spawnCall[2].env as Record<string, string>
+      // host の PATH が継承される (envVarsOverride で上書きされない)
+      expect(env.PATH).not.toBe('/tmp/evil')
+      expect(env.LD_PRELOAD).toBeUndefined()
     })
 
     it('should log stdout data', async () => {

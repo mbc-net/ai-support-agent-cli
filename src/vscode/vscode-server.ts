@@ -4,6 +4,7 @@ import * as http from 'http'
 import * as net from 'net'
 import * as path from 'path'
 
+import { filterEnvVarsOverride } from '../env-vars-filter'
 import { logger } from '../logger'
 import {
   buildSandboxInitScript,
@@ -88,17 +89,23 @@ export class VsCodeServer {
 
     // 注: process.env をベースに XDG → envVarsOverride の順で上書き
     // envVarsOverride を最後にマージすることで Web 設定が host env を上書き
+    //
+    // 二層防御: api 側 denylist で PATH/XDG_*/ZDOTDIR 等は弾かれる想定だが、
+    // agent 側でも filterEnvVarsOverride を通して sandbox 関連キーが
+    // 上書きされないことを保証する。特に XDG_DATA_HOME / XDG_CONFIG_HOME は
+    // VS Code 内蔵ターミナルの sandbox プロファイル / ワークスペース信頼設定の
+    // アンカーになっているため、上書きされると sandbox が外れる。
     const codeServerEnv: NodeJS.ProcessEnv = {
       ...process.env,
       // code-server が XDG ディレクトリを使うよう設定
       XDG_DATA_HOME: `${this.projectDir}/.vscode-server/data`,
       XDG_CONFIG_HOME: `${this.projectDir}/.vscode-server/config`,
     }
-    if (this.envVarsOverride) {
-      for (const [key, value] of Object.entries(this.envVarsOverride)) {
-        if (typeof value !== 'string' || value === '') continue
-        codeServerEnv[key] = value
-      }
+    const filteredOverride = filterEnvVarsOverride(this.envVarsOverride, {
+      prefix: '[vscode-server]',
+    })
+    for (const [key, value] of Object.entries(filteredOverride)) {
+      codeServerEnv[key] = value
     }
 
     this.process = spawn('code-server', [
