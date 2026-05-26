@@ -176,6 +176,59 @@ describe('chat-executor', () => {
         basePayload, 'cmd-3', mockClient, serverConfig, 'agent-1',
       )
     })
+
+    it('warns when api mode is selected with Web-configured envVars', async () => {
+      const { logger } = require('../../src/logger')
+      const warnSpy = jest.spyOn(logger, 'warn')
+
+      const projectConfig: ProjectConfigResponse = {
+        configHash: 'h1',
+        project: { projectCode: 'MBC_01', projectName: 'MBC' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+        envVars: { ANTHROPIC_API_KEY: 'sk-from-web' },
+      }
+
+      await executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-api-warn',
+        client: mockClient,
+        activeChatMode: 'api',
+        agentId: 'agent-1',
+        projectConfig,
+      })
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('API mode is selected but Web-configured envVars'),
+      )
+      warnSpy.mockRestore()
+    })
+
+    it('does not warn when api mode is selected without envVars', async () => {
+      const { logger } = require('../../src/logger')
+      const warnSpy = jest.spyOn(logger, 'warn')
+      warnSpy.mockClear()
+
+      await executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-api-clean',
+        client: mockClient,
+        activeChatMode: 'api',
+        agentId: 'agent-1',
+      })
+
+      const envVarsWarns = warnSpy.mock.calls.filter((call: unknown[]) =>
+        typeof call[0] === 'string' &&
+        (call[0] as string).includes('Web-configured envVars'),
+      )
+      expect(envVarsWarns).toHaveLength(0)
+      warnSpy.mockRestore()
+    })
   })
 
   describe('agentId validation', () => {
@@ -1351,6 +1404,84 @@ describe('chat-executor', () => {
       expect(env).not.toHaveProperty('AI_SUPPORT_TENANT_CODE')
       expect(env).not.toHaveProperty('AI_SUPPORT_PROJECT_CODE')
       expect(env).not.toHaveProperty('AI_SUPPORT_CONVERSATION_ID')
+    })
+  })
+
+  describe('Web 設定の envVars オーバーレイ', () => {
+    it('should apply projectConfig.envVars to spawn env', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const projectConfigWithEnvVars: ProjectConfigResponse = {
+        configHash: 'test',
+        project: { projectCode: 'MBC_01', projectName: 'MBC' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+        envVars: {
+          ANTHROPIC_API_KEY: 'sk-web-mbc',
+          ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+          GIT_AUTHOR_NAME: 'Bot',
+        },
+      }
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-env-vars', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        projectConfig: projectConfigWithEnvVars,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const env = spawnCall[2].env
+      expect(env).toHaveProperty('ANTHROPIC_API_KEY', 'sk-web-mbc')
+      expect(env).toHaveProperty('ANTHROPIC_MODEL', 'claude-sonnet-4-6')
+      expect(env).toHaveProperty('GIT_AUTHOR_NAME', 'Bot')
+    })
+
+    it('should not change env when projectConfig.envVars is undefined', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const projectConfigNoEnvVars: ProjectConfigResponse = {
+        configHash: 'test',
+        project: { projectCode: 'MBC_01', projectName: 'MBC' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+        },
+      }
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-no-env-vars', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        projectConfig: projectConfigNoEnvVars,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const env = spawnCall[2].env
+      // process.env から継承される PATH 等は残るが、Web 設定由来のキーは無いはず
+      expect(env).not.toHaveProperty('GIT_AUTHOR_NAME')
     })
   })
 

@@ -56,6 +56,13 @@ export interface RunClaudeCodeOptions {
   cwd?: string
   systemPrompt?: string
   policyContext?: PolicyContext
+  /**
+   * Web 設定（CLAUDE_CODE# / ENV#）由来の環境変数オーバーレイ。
+   *
+   * cleanEnv → awsEnv → policyContext の最後にマージされ、含まれるキーのみ
+   * 上書きする。含まれないキーは process.env の値が残る。
+   */
+  envVarsOverride?: Record<string, string>
 }
 
 /**
@@ -63,7 +70,7 @@ export interface RunClaudeCodeOptions {
  * ClaudeCodeHandle を返す: result Promise と kill 関数
  */
 export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
-  const { message, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt, policyContext } = options
+  const { message, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt, policyContext, envVarsOverride } = options
 
   let killFn: () => void = () => { /* noop until child is spawned */ }
 
@@ -84,6 +91,16 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
       if (policyContext.browserLocalPort) env.AI_SUPPORT_BROWSER_LOCAL_PORT = String(policyContext.browserLocalPort)
       if (policyContext.e2eExecutionId) env.AI_SUPPORT_E2E_EXECUTION_ID = policyContext.e2eExecutionId
       if (policyContext.e2eTestCaseId) env.AI_SUPPORT_E2E_TEST_CASE_ID = policyContext.e2eTestCaseId
+    }
+
+    // Web 設定（CLAUDE_CODE# / ENV#）の env 上書き — 最後にマージして cleanEnv より優先
+    // 非文字列値（null/undefined/数値等）は spawn が文字列化して "null" 等が
+    // env として設定されてしまうため、防御的に typeof チェックする
+    if (envVarsOverride) {
+      for (const [key, value] of Object.entries(envVarsOverride)) {
+        if (typeof value !== 'string' || value === '') continue
+        env[key] = value
+      }
     }
     const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt })
 

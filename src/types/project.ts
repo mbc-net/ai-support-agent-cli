@@ -97,6 +97,13 @@ export interface ProjectConfigResponse {
     }>
   }
   cloudwatch?: CloudwatchConfig
+  /**
+   * Claude Code spawn 時に注入する環境変数オーバーレイ。
+   *
+   * 含まれるキーは process.env を上書きし、含まれないキーは agent ホストの
+   * `process.env` がそのまま残る。値は復号済み（secret も平文）。
+   */
+  envVars?: Record<string, string>
 }
 
 export interface DbCredentials {
@@ -149,7 +156,7 @@ export interface CloudwatchConfig {
 export interface CachedProjectConfig {
   cachedAt: string
   configHash: string
-  config: Omit<ProjectConfigResponse, 'aws' | 'backlog'> & {
+  config: Omit<ProjectConfigResponse, 'aws' | 'backlog' | 'envVars'> & {
     backlog?: {
       items: Array<{
         id: string

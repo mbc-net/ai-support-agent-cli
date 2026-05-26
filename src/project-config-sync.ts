@@ -10,6 +10,19 @@ import { atomicWriteFile } from './utils'
 const CACHE_FILE_NAME = 'project-config.json'
 
 /**
+ * Result of a project config sync attempt.
+ *
+ * `fromCache: true` indicates the response came from the on-disk fallback cache
+ * (server was unreachable). The cache intentionally omits secrets (aws / backlog.apiKey
+ * / envVars), so callers should preserve previously-applied secret state instead of
+ * overwriting it with the cache-derived config.
+ */
+export interface SyncProjectConfigResult {
+  config: ProjectConfigResponse
+  fromCache: boolean
+}
+
+/**
  * Sync project config from server.
  * Returns the config if it was updated (different hash), or null if unchanged.
  */
@@ -18,7 +31,7 @@ export async function syncProjectConfig(
   currentHash: string | undefined,
   projectDir: string | undefined,
   prefix: string,
-): Promise<ProjectConfigResponse | null> {
+): Promise<SyncProjectConfigResult | null> {
   try {
     const config = await client.getProjectConfig()
 
@@ -33,7 +46,7 @@ export async function syncProjectConfig(
       saveCachedConfig(projectDir, config)
     }
 
-    return config
+    return { config, fromCache: false }
   } catch (error) {
     logger.warn(`${prefix} Failed to sync project config: ${error}`)
 
@@ -44,9 +57,12 @@ export async function syncProjectConfig(
         logger.info(`${prefix} Using cached config (hash: ${cached.configHash})`)
         const { configHash: _hash, ...rest } = cached.config
         return {
-          configHash: cached.configHash,
-          ...rest,
-        } as ProjectConfigResponse
+          config: {
+            configHash: cached.configHash,
+            ...rest,
+          } as ProjectConfigResponse,
+          fromCache: true,
+        }
       }
     }
 
