@@ -6,6 +6,7 @@ import * as path from 'path'
 
 import { filterEnvVarsOverride } from '../env-vars-filter'
 import { logger } from '../logger'
+import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
 import {
   buildSandboxInitScript,
@@ -111,7 +112,9 @@ export class VsCodeServer {
 
     // Claude Code 対話モード (VS Code 内蔵ターミナルから claude を実行) は
     // ~/.claude.json の oauthAccount キーが存在しないと CLAUDE_CODE_OAUTH_TOKEN env を
-    // 持っていても /login プロンプトを出す。code-server 起動前に placeholder を確保する。
+    // 持っていても /login プロンプトを出す。code-server 起動前に、
+    // (1) JSON 破損があれば backup から復元、(2) oauthAccount placeholder を確保。
+    ensureClaudeJsonIntegrity()
     ensureClaudeJsonOAuthAccount(filteredOverride, {
       prefix: '[vscode-server]',
     })
