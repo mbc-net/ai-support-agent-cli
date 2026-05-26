@@ -2,12 +2,21 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-// os.homedir は読み取り専用 getter なので、モジュール mock で差し替える
+// os.homedir / fs.renameSync は ESM の getter 由来で書き換え不可なので
+// モジュール mock で差し替える
 jest.mock('os', () => {
   const actual = jest.requireActual<typeof os>('os')
   return {
     ...actual,
     homedir: jest.fn(actual.homedir),
+  }
+})
+
+jest.mock('fs', () => {
+  const actual = jest.requireActual<typeof fs>('fs')
+  return {
+    ...actual,
+    renameSync: jest.fn(actual.renameSync),
   }
 })
 
@@ -297,6 +306,88 @@ describe('ensureClaudeJsonOAuthAccount', () => {
       )
       const tmpFiles = fs.readdirSync(tmpHome).filter((f) => f.startsWith('.claude.json.tmp.'))
       expect(tmpFiles).toHaveLength(0)
+    })
+
+    describe('fallback to direct write when rename fails (docker bind-mount)', () => {
+      const actualFs = jest.requireActual<typeof fs>('fs')
+
+      afterEach(() => {
+        // 各テスト後に実装に戻す
+        ;(fs.renameSync as jest.Mock).mockImplementation(actualFs.renameSync)
+      })
+
+      function patchRenameToThrow(code: string) {
+        ;(fs.renameSync as jest.Mock).mockImplementation(() => {
+          const err = new Error(`${code}: simulated`) as NodeJS.ErrnoException
+          err.code = code
+          throw err
+        })
+      }
+
+      it('falls back when EBUSY (the actual docker bind-mount case on mbc-ai-01)', () => {
+        fs.writeFileSync(claudeJsonPath, JSON.stringify({ existing: true }))
+        patchRenameToThrow('EBUSY')
+
+        expect(() =>
+          ensureClaudeJsonOAuthAccount(
+            { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-xxx' },
+            { prefix: '[test]' },
+          ),
+        ).not.toThrow()
+
+        const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
+        expect(data.existing).toBe(true)
+        expect(data.oauthAccount).toEqual({})
+        // tmp 残骸も掃除されている
+        const tmpFiles = fs
+          .readdirSync(tmpHome)
+          .filter((f) => f.startsWith('.claude.json.tmp.'))
+        expect(tmpFiles).toHaveLength(0)
+      })
+
+      it('falls back on EXDEV (cross-device rename)', () => {
+        fs.writeFileSync(claudeJsonPath, JSON.stringify({ a: 1 }))
+        patchRenameToThrow('EXDEV')
+
+        ensureClaudeJsonOAuthAccount(
+          { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-xxx' },
+          { prefix: '[test]' },
+        )
+
+        const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
+        expect(data.a).toBe(1)
+        expect(data.oauthAccount).toEqual({})
+      })
+
+      it('falls back on EPERM', () => {
+        fs.writeFileSync(claudeJsonPath, JSON.stringify({ a: 1 }))
+        patchRenameToThrow('EPERM')
+
+        ensureClaudeJsonOAuthAccount(
+          { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-xxx' },
+          { prefix: '[test]' },
+        )
+
+        const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
+        expect(data.a).toBe(1)
+        expect(data.oauthAccount).toEqual({})
+      })
+
+      it('propagates non-recoverable rename errors (e.g. ENOSPC) without fallback', () => {
+        fs.writeFileSync(claudeJsonPath, JSON.stringify({ a: 1 }))
+        patchRenameToThrow('ENOSPC')
+
+        // 上位の try/catch で warn にだけ変換され、throw はしない
+        expect(() =>
+          ensureClaudeJsonOAuthAccount(
+            { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-xxx' },
+            { prefix: '[test]' },
+          ),
+        ).not.toThrow()
+        // fallback 経路が走らないので oauthAccount は追加されていない
+        const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
+        expect(data.oauthAccount).toBeUndefined()
+      })
     })
   })
 
