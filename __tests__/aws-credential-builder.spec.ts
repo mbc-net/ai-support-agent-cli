@@ -305,6 +305,46 @@ describe('aws-credential-builder', () => {
       ])
     })
 
+    it('should use empty string for accountId when accountId is not a string in SSO error', async () => {
+      const ssoError = new axios.AxiosError(
+        'Request failed',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        {
+          status: 422,
+          statusText: 'Unprocessable Entity',
+          data: {
+            statusCode: 422,
+            error: 'SSO_AUTH_REQUIRED',
+            message: 'SSO token expired',
+            accountId: 12345678, // number instead of string
+            accountName: 'dev',
+          },
+          headers: {},
+          config: {} as never,
+        },
+      )
+
+      const client = {
+        getAwsCredentials: jest.fn()
+          .mockRejectedValueOnce(ssoError)
+          .mockResolvedValueOnce({
+            accessKeyId: 'AKIA_STG',
+            secretAccessKey: 'secret_stg',
+            region: 'us-east-1',
+          }),
+      } as unknown as ApiClient
+
+      const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+
+      expect(result.errors[0]).toContain('SSO認証の有効期限が切れています')
+      // accountId should be empty string when it's not a string type
+      expect(result.ssoAuthRequired).toEqual([
+        { accountId: '', accountName: 'dev' },
+      ])
+    })
+
     it('should include response details for non-SSO 422 errors', async () => {
       const apiError = new axios.AxiosError(
         'Request failed',
@@ -517,6 +557,38 @@ describe('aws-credential-builder', () => {
       expect(result.errors[0]).toContain('管理画面からSSO再認証')
       expect(result.ssoAuthRequired).toEqual([
         { accountId: '123456789012', accountName: 'prod-account' },
+      ])
+    })
+
+    it('should use empty string for accountId when accountId is not a string in SSO error', async () => {
+      const ssoError = new axios.AxiosError(
+        'Request failed',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        {
+          status: 422,
+          statusText: 'Unprocessable Entity',
+          data: {
+            statusCode: 422,
+            error: 'SSO_AUTH_REQUIRED',
+            message: 'SSO token expired',
+            accountId: null, // null instead of string
+          },
+          headers: {},
+          config: {} as never,
+        },
+      )
+
+      const client = {
+        getAwsCredentials: jest.fn().mockRejectedValue(ssoError),
+      } as unknown as ApiClient
+
+      const result = await buildSingleAccountAwsEnv(client, 'my-account')
+
+      expect(result.errors[0]).toContain('SSO認証の有効期限が切れています')
+      expect(result.ssoAuthRequired).toEqual([
+        { accountId: '', accountName: 'my-account' },
       ])
     })
 

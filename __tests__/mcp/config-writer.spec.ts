@@ -156,6 +156,35 @@ describe('config-writer', () => {
       expect(content.mcpServers.backlog).toBeUndefined()
     })
 
+    it('should include browserLocalPort env var when provided', () => {
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+        undefined,
+        undefined,
+        9222,
+      )
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_BROWSER_LOCAL_PORT).toBe('9222')
+    })
+
+    it('should not include browserLocalPort env var when not provided', () => {
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_BROWSER_LOCAL_PORT).toBeUndefined()
+    })
+
     it('should use first backlog config when multiple provided', () => {
       const configPath = writeMcpConfig(
         testDir,
