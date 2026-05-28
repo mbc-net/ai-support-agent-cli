@@ -289,6 +289,108 @@ describe('commands/dispatch', () => {
     })
   })
 
+  describe('sync_repository dispatch', () => {
+    it('should return error when onSyncRepository callback is not provided', async () => {
+      const result = await executeCommand('sync_repository' as any, { repositoryCode: 'repo-1' })
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toBe('sync_repository command requires onSyncRepository callback')
+      }
+    })
+
+    it('should return error when repositoryCode is missing', async () => {
+      const onSyncRepository = jest.fn()
+      const result = await executeCommand('sync_repository' as any, {}, { onSyncRepository })
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toBe('repositoryCode is required for sync_repository')
+      }
+    })
+
+    it('should return error when repositoryCode is an empty string', async () => {
+      const onSyncRepository = jest.fn()
+      const result = await executeCommand('sync_repository' as any, { repositoryCode: '' }, { onSyncRepository })
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toBe('repositoryCode is required for sync_repository')
+      }
+    })
+
+    it('should dispatch sync_repository without a branch (overrideBranch is undefined)', async () => {
+      const onSyncRepository = jest.fn().mockResolvedValue({ success: true, synced: ['repo-1'] })
+      const result = await executeCommand('sync_repository' as any, { repositoryCode: 'repo-1' }, { onSyncRepository })
+      expect(result.success).toBe(true)
+      expect(onSyncRepository).toHaveBeenCalledWith('repo-1', undefined)
+    })
+
+    it('should dispatch sync_repository with a branch string', async () => {
+      const onSyncRepository = jest.fn().mockResolvedValue({ success: true, synced: ['repo-1'] })
+      const result = await executeCommand('sync_repository' as any, { repositoryCode: 'repo-1', branch: 'main' }, { onSyncRepository })
+      expect(result.success).toBe(true)
+      expect(onSyncRepository).toHaveBeenCalledWith('repo-1', 'main')
+    })
+
+    it('should dispatch sync_repository with an empty branch string (treated as no branch)', async () => {
+      const onSyncRepository = jest.fn().mockResolvedValue({ success: true, synced: ['repo-1'] })
+      const result = await executeCommand('sync_repository' as any, { repositoryCode: 'repo-1', branch: '' }, { onSyncRepository })
+      expect(result.success).toBe(true)
+      // Empty string branch is falsy, so overrideBranch should be undefined
+      expect(onSyncRepository).toHaveBeenCalledWith('repo-1', undefined)
+    })
+
+    it('should dispatch sync_repository via CommandDispatch', async () => {
+      const onSyncRepository = jest.fn().mockResolvedValue({ result: 'ok' })
+      const dispatch: CommandDispatch = {
+        type: 'sync_repository',
+        payload: { repositoryCode: 'my-repo', branch: 'develop' },
+      }
+      const result = await executeCommand(dispatch, { onSyncRepository })
+      expect(result.success).toBe(true)
+      expect(onSyncRepository).toHaveBeenCalledWith('my-repo', 'develop')
+    })
+  })
+
+  describe('e2e_test dispatch', () => {
+    it('should return error when commandId and client are not provided', async () => {
+      const result = await executeCommand('e2e_test' as any, { executionId: 'exec-1' })
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toBe('e2e_test command requires commandId and client')
+      }
+    })
+
+    it('should return error when only commandId is provided (no client)', async () => {
+      const result = await executeCommand('e2e_test' as any, { executionId: 'exec-1' }, { commandId: 'cmd-1' })
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toBe('e2e_test command requires commandId and client')
+      }
+    })
+  })
+
+  describe('missing payload fields log coverage', () => {
+    // These tests trigger the `?? ''` branches in logger.debug calls
+    // when payload fields are undefined (e.g. file_write without path)
+
+    it('should handle file_write with no path field in payload', async () => {
+      // No path key — triggers path ?? '' in the debug log
+      const result = await executeCommand('file_write' as any, { content: 'hello' })
+      expect(result.success).toBe(false)
+    })
+
+    it('should handle file_list with no path field in payload', async () => {
+      const result = await executeCommand('file_list' as any, {})
+      // file_list with no path typically returns error or empty listing
+      expect(result).toBeDefined()
+    })
+
+    it('should handle process_kill with no pid field in payload', async () => {
+      // No pid key — triggers pid ?? '' in the debug log
+      const result = await executeCommand('process_kill' as any, {})
+      expect(result.success).toBe(false)
+    })
+  })
+
   describe('re-exports', () => {
     it('should export executeShellCommand', () => {
       expect(typeof executeShellCommand).toBe('function')

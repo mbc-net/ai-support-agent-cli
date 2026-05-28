@@ -492,6 +492,39 @@ describe('refreshChatMode', () => {
     debugSpy.mockRestore()
   })
 
+  it('should log claudeCodeConfig debug info with undefined allowedTools and addDirs', async () => {
+    // Covers the `?.join(', ') ?? ''` branches when allowedTools/addDirs are undefined
+    const mockClient = {
+      getConfig: jest.fn().mockResolvedValue({
+        agentEnabled: true,
+        builtinAgentEnabled: false,
+        builtinFallbackEnabled: false,
+        externalAgentEnabled: true,
+        chatMode: 'agent',
+        claudeCodeConfig: {
+          // allowedTools and addDirs intentionally absent (undefined)
+        },
+      } as AgentServerConfig),
+    } as unknown as ApiClient
+
+    const { logger } = require('../src/logger')
+    const debugSpy = jest.spyOn(logger, 'debug')
+
+    const deps = makeDeps({ client: mockClient })
+    const state = makeState()
+
+    await refreshChatMode(deps, state, true)
+
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('claudeCodeConfig'))
+    // When allowedTools is undefined, the output should contain empty brackets
+    const claudeCodeCall = debugSpy.mock.calls.find((c: unknown[]) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('claudeCodeConfig'),
+    )
+    expect(claudeCodeCall).toBeDefined()
+    expect(claudeCodeCall![0] as string).toContain('allowedTools=[]')
+    debugSpy.mockRestore()
+  })
+
   it('should handle getConfig failure gracefully when not verbose', async () => {
     const mockClient = {
       getConfig: jest.fn().mockRejectedValue(new Error('Connection refused')),
