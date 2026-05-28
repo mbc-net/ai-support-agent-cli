@@ -135,7 +135,7 @@ export class VsCodeServer {
     const proc = this.process
     const spawnError = new Promise<never>((_, reject) => {
       proc.on('error', (err) => {
-        logger.error(`[vscode-server] Failed to spawn: ${err.message}`)
+        logger.error(`[vscode-server] Failed to spawn: ${getErrorMessage(err)}`)
         reject(new Error(
           `code-server is not installed or not in PATH. Install it with: npm install -g code-server`,
         ))

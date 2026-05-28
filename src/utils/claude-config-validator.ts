@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 
 import { logger } from '../logger'
+import { getErrorMessage } from '../utils'
 
 /**
  * .claude.json の整合性を検証し、破損していれば復元する。
@@ -56,6 +57,6 @@ export function ensureClaudeJsonIntegrity(): void {
     // バックアップも破損 or 不在 → {} にリセット
     fs.writeFileSync(claudeJsonPath, '{}', { mode: 0o600 })
   } catch (error) {
-    logger.warn(`Failed to validate/repair .claude.json: ${error instanceof Error ? error.message : String(error)}`)
+    logger.warn(`Failed to validate/repair .claude.json: ${getErrorMessage(error)}`)
   }
 }

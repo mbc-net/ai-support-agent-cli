@@ -7,6 +7,7 @@ import { loadConfig, getProjectList } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { getErrorMessage } from '../../utils'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
@@ -666,7 +667,7 @@ export function installAndStartProject(
   try {
     execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = getErrorMessage(error)
     logger.warn(t('service.daemonReloadFailed', { message }))
     return
   }
@@ -680,14 +681,14 @@ export function installAndStartProject(
   try {
     execSync(`systemctl --user enable "${unitFile}"`, { stdio: 'pipe' })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = getErrorMessage(error)
     logger.warn(t('service.enableFailed', { unit: unitFile, message }))
   }
 
   try {
     execSync(`systemctl --user start "${unitFile}"`, { stdio: 'pipe' })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = getErrorMessage(error)
     logger.warn(t('service.loadWarning', { label: `${unitName}: ${message}` }))
     return
   }
@@ -812,7 +813,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
           unitFile: `${unitName}.service`,
         })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.projectInstallFailed', { projectCode: project.projectCode, message }))
         failedCount += 1
       }
@@ -840,7 +841,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
         try {
           if (fs.existsSync(unitPath)) fs.unlinkSync(unitPath)
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
+          const message = getErrorMessage(error)
           logger.warn(t('service.orphanUnitRemoveFailed', { unit: orphanUnitFile, message }))
         }
       }
@@ -856,14 +857,14 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     try {
       execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = getErrorMessage(error)
       logger.warn(t('service.daemonReloadFailed', { message }))
     }
     for (const { projectCode, unitPath, unitFile } of writtenUnits) {
       try {
         execSync(`systemctl --user enable "${unitFile}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.warn(t('service.enableFailed', { unit: unitFile, message }))
       }
       logger.success(t('service.projectInstalled', { projectCode, path: unitPath }))
@@ -933,7 +934,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       try {
         execSync(`systemctl --user start "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         // Include unit name so operators can identify the failing project
         // when start runs over N units.
         logger.error(t('service.unitStartFailed', { unit, message }))
@@ -959,7 +960,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       try {
         execSync(`systemctl --user stop "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.unitStopFailed', { unit, message }))
         failed = true
       }
@@ -989,7 +990,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       try {
         execSync(`systemctl --user restart "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.unitRestartFailed', { unit, message }))
         failed = true
       }
