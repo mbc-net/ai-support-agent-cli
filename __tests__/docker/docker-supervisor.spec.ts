@@ -45,10 +45,20 @@ jest.mock('../../src/logger', () => ({
     debug: jest.fn(),
   },
   getProjectColor: jest.fn().mockReturnValue('\x1b[36m'),
+  // Do NOT forward to the SUT's real write callback (which targets
+  // process.stdout.write). Spying on / writing to process.stdout.write inside a
+  // test silently swallows or blocks Jest's own reporter output, which hangs the
+  // Jest worker on CI. Instead, route writes into an in-memory sink that tests
+  // can inspect via `getPrefixerWrites()`.
   makeLinePrefixer: jest.fn().mockImplementation(
-    (_prefix: string, write: (s: string) => void) => (chunk: string) => write(chunk),
+    (_prefix: string, _write: (s: string) => void) => (chunk: string) => {
+      mockPrefixerWrites.push(chunk)
+    },
   ),
 }))
+
+/** In-memory capture of everything the line-prefixer would have written. */
+const mockPrefixerWrites: string[] = []
 
 jest.mock('../../src/pid-manager', () => ({
   removePidFile: jest.fn(),
@@ -174,6 +184,7 @@ describe('DockerSupervisor', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    mockPrefixerWrites.length = 0
     mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
     mockExistsSync.mockReturnValue(false)
     mockReadFileSync.mockImplementation(() => {
@@ -1147,18 +1158,13 @@ describe('DockerSupervisor', () => {
       const supervisor = new DockerSupervisor('1.0.0', makeOpts())
       supervisor.start([makeProject()])
 
-      // Emit stdout data — should write to process.stdout
-      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
-      const stderrWriteSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true)
-
+      // Emit stdout/stderr data — the supervisor routes it through the
+      // line-prefixer (mocked above to capture into mockPrefixerWrites).
       fakeChild.stdout.emit('data', Buffer.from('hello stdout\n'))
       fakeChild.stderr.emit('data', Buffer.from('hello stderr\n'))
 
-      expect(stdoutWriteSpy).toHaveBeenCalled()
-      expect(stderrWriteSpy).toHaveBeenCalled()
-
-      stdoutWriteSpy.mockRestore()
-      stderrWriteSpy.mockRestore()
+      expect(mockPrefixerWrites).toContain('hello stdout\n')
+      expect(mockPrefixerWrites).toContain('hello stderr\n')
     })
 
     it('saves session log when fullLog is non-empty after container closes', async () => {
@@ -1279,35 +1285,29 @@ describe('DockerSupervisor', () => {
       const fakeChild = makeFakeChild()
       mockSpawn.mockReturnValue(fakeChild as never)
 
-      // Suppress stdout/stderr to avoid large output
-      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
-      const stderrWriteSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true)
+      // Note: container output is routed through the mocked line-prefixer
+      // (captured into mockPrefixerWrites), so no real stdout writes occur and
+      // we must NOT spy on process.stdout.write (that hangs the Jest worker).
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
 
-      try {
-        const supervisor = new DockerSupervisor('1.0.0', makeOpts())
-        supervisor.start([makeProject()])
+      // Emit 3 chunks of ~700 KB each to exceed the 2 MB limit
+      // The data handler just accumulates into buf; flush() is called on close
+      const chunkSize = 700 * 1024
+      const chunk = Buffer.alloc(chunkSize, 'z')
 
-        // Emit 3 chunks of ~700 KB each to exceed the 2 MB limit
-        // The data handler just accumulates into buf; flush() is called on close
-        const chunkSize = 700 * 1024
-        const chunk = Buffer.alloc(chunkSize, 'z')
+      fakeChild.stdout.emit('data', chunk)
+      fakeChild.stdout.emit('data', chunk)
+      fakeChild.stdout.emit('data', chunk)
 
-        fakeChild.stdout.emit('data', chunk)
-        fakeChild.stdout.emit('data', chunk)
-        fakeChild.stdout.emit('data', chunk)
+      // Close the container — flush() will be called in the close handler
+      fakeChild.emit('close', 0)
 
-        // Close the container — flush() will be called in the close handler
-        fakeChild.emit('close', 0)
-
-        // Allow the flush promise chain to settle
-        await Promise.resolve()
-        await Promise.resolve()
-        await new Promise((r) => setImmediate(r))
-        await new Promise((r) => setImmediate(r))
-      } finally {
-        stdoutWriteSpy.mockRestore()
-        stderrWriteSpy.mockRestore()
-      }
+      // Allow the flush promise chain to settle
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
 
       // logTruncated warning should have been emitted during flush
       expect(logger.warn).toHaveBeenCalledWith(
@@ -1745,11 +1745,9 @@ describe('DockerSupervisor', () => {
       const supervisor = new DockerSupervisor('1.0.0', makeOpts())
       supervisor.start([makeProject()])
 
-      // Emit data so fullLog is non-empty (triggers saveSessionLog)
+      // Emit data so fullLog is non-empty (triggers saveSessionLog). Output is
+      // routed through the mocked line-prefixer (no real stdout write).
       fakeChild.stdout.emit('data', Buffer.from('some log line\n'))
-
-      // Suppress stdout writes from test output
-      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
 
       // Close the container — flush + saveSessionLog chain runs
       fakeChild.emit('close', 0)
@@ -1762,8 +1760,6 @@ describe('DockerSupervisor', () => {
       for (let i = 0; i < 5; i++) {
         await new Promise((r) => setImmediate(r))
       }
-
-      stdoutWriteSpy.mockRestore()
 
       // saveSessionLog threw → warning logged via .catch
       expect(mockSaveSessionLog).toHaveBeenCalled()
@@ -1800,10 +1796,10 @@ describe('DockerSupervisor', () => {
     })
   })
 
-  // ─── rebuildAndRestart: shouldBuild=true but no Dockerfile (line 173) ─────
+  // ─── rebuildAndRestart: shouldBuild=true but no Dockerfile ──────────────────
 
-  describe('rebuildAndRestart: shouldBuild=true but Dockerfile missing', () => {
-    it('skips buildProjectImage when rebuild marker exists but Dockerfile does not', async () => {
+  describe('rebuildAndRestart: marker exists but no Dockerfile (line 173 false branch)', () => {
+    it('skips build and calls spawnProject directly when marker exists but no Dockerfile', async () => {
       mockExistsSync.mockReset()
       mockReadFileSync.mockReset()
       mockUnlinkSync.mockReset()
@@ -1811,7 +1807,8 @@ describe('DockerSupervisor', () => {
         throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
       })
 
-      // docker-rebuild-needed marker exists but Dockerfile does NOT
+      // Only docker-rebuild-needed exists; Dockerfile does NOT exist
+      // This exercises the false branch of `if (fs.existsSync(projectDockerfile))` (line 173)
       mockExistsSync.mockImplementation((p: unknown) => {
         const s = p as string
         return s.endsWith('docker-rebuild-needed') &&
@@ -1832,25 +1829,24 @@ describe('DockerSupervisor', () => {
       const supervisor = new DockerSupervisor('1.0.0', makeOpts())
       supervisor.start([makeProject()])
 
-      fakeChild1.emit('close', 43) // DOCKER_RESTART_EXIT_CODE
+      fakeChild1.emit('close', 43)
       for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
 
-      // shouldBuild=true (marker exists), but Dockerfile does NOT exist
-      // → buildProjectImage should NOT be called
+      // Build should NOT be called (no Dockerfile)
       expect(mockBuildProjectImage).not.toHaveBeenCalled()
-      // marker should still be deleted
+      // But marker should be deleted (hasMarker=true → unlinkSync)
       expect(mockUnlinkSync).toHaveBeenCalledWith(
         expect.stringContaining('docker-rebuild-needed'),
       )
-      // spawnProject should still be called for restart
+      // spawnProject is still called (initial + restart)
       expect(mockSpawn).toHaveBeenCalledTimes(2)
     })
   })
 
-  // ─── rebuildAndRestart: error message > 3000 chars (line 191) ─────────────
+  // ─── rebuildAndRestart: error message > 3000 chars (line 191) ────────────────
 
-  describe('rebuildAndRestart: long build error message truncation', () => {
-    it('truncates error messages longer than 3000 characters', async () => {
+  describe('rebuildAndRestart: long error message truncation (line 191)', () => {
+    it('truncates error message when longer than 3000 characters', async () => {
       mockExistsSync.mockReset()
       mockReadFileSync.mockReset()
       mockUnlinkSync.mockReset()
@@ -1858,24 +1854,18 @@ describe('DockerSupervisor', () => {
         throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
       })
 
-      // Dockerfile exists so build is triggered
+      // Dockerfile exists (marker too) so build is triggered
       mockExistsSync.mockImplementation((p: unknown) => {
         const s = p as string
-        return s.endsWith('Dockerfile') &&
-          !s.endsWith('docker-rebuild-needed') &&
+        return (s.endsWith('docker-rebuild-needed') || s.endsWith('Dockerfile')) &&
           !s.endsWith('docker-registered-agent-id') &&
           !s.endsWith('docker-customization-hash') &&
           !s.endsWith('docker-built-hash')
       })
 
-      // buildProjectImage throws with a very long error message (>3000 chars)
-      const longError = 'E'.repeat(3100)
-      mockBuildProjectImage.mockRejectedValueOnce(new Error(longError))
-
-      // Override getErrorMessage to return the full long string
-      const { getErrorMessage } = require('../../src/utils')
-      const mockGetErrorMessage = getErrorMessage as jest.MockedFunction<typeof import('../../src/utils').getErrorMessage>
-      mockGetErrorMessage.mockReturnValueOnce(longError)
+      // Throw an error message longer than 3000 chars
+      const longErrorMsg = 'x'.repeat(3500)
+      mockBuildProjectImage.mockRejectedValueOnce(new Error(longErrorMsg))
 
       const fakeChild1 = makeFakeChild()
       const fakeChild2 = makeFakeChild()
@@ -1885,28 +1875,86 @@ describe('DockerSupervisor', () => {
         return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
       })
 
+      const { writeFileSync } = require('fs') as typeof import('fs')
+      const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>
+
       const supervisor = new DockerSupervisor('1.0.0', makeOpts())
       supervisor.start([makeProject()])
 
-      fakeChild1.emit('close', 43) // DOCKER_RESTART_EXIT_CODE
+      fakeChild1.emit('close', 43)
       for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
 
-      // writeFileSync called with the truncated error (not the full 3100-char string)
-      const { writeFileSync } = require('fs') as typeof import('fs')
-      const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>
-      const writeCall = mockWriteFileSync.mock.calls.find(
-        (args) => typeof args[0] === 'string' && (args[0] as string).includes('docker-build-error'),
+      // writeFileSync should have been called with the truncated error (3000 chars + '...(truncated)')
+      // (the /* istanbul ignore next */ try/catch wraps it but the inner call is covered)
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('[docker] Image build failed'),
       )
-      if (writeCall) {
-        // Truncated content ends with '...(truncated)'
-        expect(writeCall[1]).toMatch(/\.\.\.\(truncated\)$/)
-      }
+      // The error message sent to writeFileSync should be at most 3000 + '...(truncated)'.length
+      const writeCallArgs = mockWriteFileSync.mock.calls.find(
+        (call) => typeof call[1] === 'string' && (call[1] as string).includes('...(truncated)'),
+      )
+      expect(writeCallArgs).toBeDefined()
+      expect((writeCallArgs![1] as string).length).toBe(3000 + '...(truncated)'.length)
     })
   })
 
-  // ─── log streaming: logTruncated=true on re-entry (line 330) ─────────────
-  // ─── log streaming: remaining <= 0 (line 335) ─────────────────────────────
+  // ─── close handler: onAllStopped callback + null exit code ───────────────────
 
+  describe('close handler: onAllStopped and null exit code', () => {
+    it('calls onAllStopped callback when all containers exit cleanly', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockExistsSync.mockReturnValue(false)
+
+      const onAllStopped = jest.fn()
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      // Access onAllStopped via the start method's optional parameter
+      // We need to trigger the `this.onAllStopped?.()` call by having all containers exit.
+      // The onAllStopped is set internally via `this.onAllStopped = onStop` in start().
+      // However, the close handler calls `this.onAllStopped?.()` not `onStop`.
+      // We use the fact that start() sets `this.onAllStopped = onStop` (private field).
+      // We pass onAllStopped as a stand-in for onStop, but since it's the SIGINT/SIGTERM
+      // callback in the tests above, we need a different approach here.
+      //
+      // The `onAllStopped` in the close handler is this.onAllStopped which is set from
+      // the start() parameter. But start() sets `this.onAllStopped = onStop` ONLY if
+      // onStop is passed. Looking at the code:
+      //   start(projects, onStop) { this.onAllStopped = onStop; ... }
+      // The onStop in the close handler is accessed via `this.onAllStopped?.()`.
+      // To cover this, pass an onStop to start() and then let all containers exit.
+      //
+      // Note: the onStop callback in shutdown() is different from onAllStopped in the close handler.
+      // In shutdown(), `onStop?.()` is called. In the close handler, `this.onAllStopped?.()` is called.
+      // Both are set from the start() `onStop` parameter.
+
+      supervisor.start([makeProject()], onAllStopped)
+
+      fakeChild.emit('close', 0)
+
+      expect(onAllStopped).toHaveBeenCalled()
+      expect(mockExit).toHaveBeenCalledWith(0)
+    })
+
+    it('calls process.exit(0) when container exits with null code', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockExistsSync.mockReturnValue(false)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      // Emit close with null exit code → `process.exit(code ?? 0)` → process.exit(0)
+      fakeChild.emit('close', null)
+
+      expect(mockExit).toHaveBeenCalledWith(0)
+    })
+  })
+
+  // log streaming lines 330 (logTruncated=true re-entry) and 335 (remaining <= 0).
+  // Previously these tests were skipped because they spied on process.stdout.write
+  // to suppress large output; that spy blocks Jest's own reporter output and hangs
+  // the worker on CI. The line-prefixer is now mocked to capture writes in memory
+  // (mockPrefixerWrites), so no real stdout write — and no spy — is needed.
   describe('log streaming: flush when already truncated (logTruncated=true branch)', () => {
     it('skips fullLog update on second flush when already truncated (via two close events)', async () => {
       // Strategy: trigger two separate flushes using the close-handler flush path.
@@ -1939,8 +1987,6 @@ describe('DockerSupervisor', () => {
       const fakeChild = makeFakeChild()
       mockSpawn.mockReturnValue(fakeChild as never)
 
-      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
-
       try {
         const supervisor = new DockerSupervisor('1.0.0', makeOpts())
         supervisor.start([makeProject()])
@@ -1963,7 +2009,6 @@ describe('DockerSupervisor', () => {
         await Promise.resolve()
       } finally {
         jest.useRealTimers()
-        stdoutWriteSpy.mockRestore()
       }
 
       // Warn about truncation should have been emitted at least once
@@ -1989,8 +2034,6 @@ describe('DockerSupervisor', () => {
 
       const fakeChild = makeFakeChild()
       mockSpawn.mockReturnValue(fakeChild as never)
-
-      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
 
       try {
         const supervisor = new DockerSupervisor('1.0.0', makeOpts())
@@ -2019,7 +2062,6 @@ describe('DockerSupervisor', () => {
         await Promise.resolve()
       } finally {
         jest.useRealTimers()
-        stdoutWriteSpy.mockRestore()
       }
 
       // Truncation warning should fire on second flush

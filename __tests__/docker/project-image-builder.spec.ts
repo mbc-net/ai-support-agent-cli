@@ -20,10 +20,19 @@ jest.mock('../../src/logger', () => ({
     debug: jest.fn(),
   },
   getProjectColor: jest.fn().mockReturnValue('\x1b[36m'),
+  // Capture writes in memory instead of forwarding to the SUT's real write
+  // callback (process.stdout.write). Writing through to (or spying on)
+  // process.stdout.write inside a test interferes with Jest's own reporter and
+  // hangs the Jest worker on CI.
   makeLinePrefixer: jest.fn().mockImplementation(
-    (_prefix: string, write: (s: string) => void) => (chunk: string) => write(chunk),
+    (_prefix: string, _write: (s: string) => void) => (chunk: string) => {
+      mockPrefixerWrites.push(chunk)
+    },
   ),
 }))
+
+/** In-memory capture of everything the line-prefixer would have written. */
+const mockPrefixerWrites: string[] = []
 
 jest.mock('../../src/docker/dockerfile-path', () => ({
   getProjectImageTag: jest.fn(
@@ -85,6 +94,7 @@ describe('buildProjectImage', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    mockPrefixerWrites.length = 0
   })
 
   it('builds image successfully and logs success', async () => {
