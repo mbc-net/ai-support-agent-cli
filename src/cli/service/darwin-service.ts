@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER } from '../../constants'
 import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
 import type { ProjectRegistration } from '../../types'
 import type { ProjectStatus } from './types'
@@ -105,10 +106,10 @@ export function generatePlist(options: ServiceConfig): string {
   const { nodePath, entryPoint, logDir, verbose, docker } = options
   const args = [nodePath, entryPoint, 'start']
   if (!docker) {
-    args.push('--no-docker')
+    args.push(CLI_FLAG_NO_DOCKER)
   }
   if (verbose) {
-    args.push('--verbose')
+    args.push(CLI_FLAG_VERBOSE)
   }
 
   const programArgs = args
@@ -285,10 +286,10 @@ export function generateWrapperScript(opts: {
   }
 
   const containerArgs = [
-    'ai-support-agent', 'start', '--no-docker',
+    'ai-support-agent', 'start', CLI_FLAG_NO_DOCKER,
     `--project ${opts.tenantCode}/${opts.projectCode}`,
   ]
-  if (opts.verbose) containerArgs.push('--verbose')
+  if (opts.verbose) containerArgs.push(CLI_FLAG_VERBOSE)
 
   // Sanitize tenant/project codes the same way buildContainerName does
   const sanitize = (s: string): string => s.toLowerCase().replace(/[^a-z0-9-]/g, '-')

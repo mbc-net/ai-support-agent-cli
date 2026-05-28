@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER } from '../../constants'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { getErrorMessage } from '../../utils'
@@ -21,10 +22,10 @@ export function generateTaskXml(options: ServiceConfig): string {
   const { nodePath, entryPoint, verbose, docker } = options
   const args = [entryPoint, 'start']
   if (!docker) {
-    args.push('--no-docker')
+    args.push(CLI_FLAG_NO_DOCKER)
   }
   if (verbose) {
-    args.push('--verbose')
+    args.push(CLI_FLAG_VERBOSE)
   }
 
   return `<?xml version="1.0" encoding="UTF-16"?>

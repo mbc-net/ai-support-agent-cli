@@ -12,6 +12,9 @@ import * as path from 'path'
 
 import { getProjectImageTag } from './dockerfile-path'
 import {
+  CLI_FLAG_VERBOSE,
+  CLI_FLAG_NO_AUTO_UPDATE,
+  CLI_FLAG_NO_DOCKER,
   DOCKER_MARKER_BUILT_HASH,
   DOCKER_MARKER_CUSTOMIZATION_HASH,
   DOCKER_MARKER_REBUILD_NEEDED,
@@ -244,7 +247,7 @@ export class DockerSupervisor {
     const { mounts, envArgs } = buildProjectVolumeMounts(project, projectConfigHostDir)
 
     const containerArgs = [
-      'ai-support-agent', 'start', '--no-docker',
+      'ai-support-agent', 'start', CLI_FLAG_NO_DOCKER,
       '--project', key,
     ]
     if (this.opts.pollInterval !== undefined) {
@@ -254,10 +257,10 @@ export class DockerSupervisor {
       containerArgs.push('--heartbeat-interval', String(this.opts.heartbeatInterval))
     }
     if (this.opts.verbose) {
-      containerArgs.push('--verbose')
+      containerArgs.push(CLI_FLAG_VERBOSE)
     }
     if (this.opts.autoUpdate === false) {
-      containerArgs.push('--no-auto-update')
+      containerArgs.push(CLI_FLAG_NO_AUTO_UPDATE)
     }
     if (this.opts.updateChannel) {
       containerArgs.push('--update-channel', this.opts.updateChannel)
