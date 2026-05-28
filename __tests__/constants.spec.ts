@@ -102,6 +102,12 @@ describe('constants', () => {
     expect(constants.LOG_DEBUG_LIMIT).toBe(200)
     expect(constants.CHUNK_LOG_LIMIT).toBe(100)
 
+    // CLI flag constants
+    expect(constants.CLI_FLAG_VERBOSE).toBe('--verbose')
+    expect(constants.CLI_FLAG_NO_DOCKER).toBe('--no-docker')
+    expect(constants.CLI_FLAG_NO_DOCKERFILE_SYNC).toBe('--no-dockerfile-sync')
+    expect(constants.CLI_FLAG_NO_AUTO_UPDATE).toBe('--no-auto-update')
+
     // API endpoints
     expect(constants.API_ENDPOINTS.REGISTER('tenant1')).toBe('/api/tenant1/agent/register')
     expect(constants.API_ENDPOINTS.HEARTBEAT('tenant1')).toBe('/api/tenant1/agent/heartbeat')

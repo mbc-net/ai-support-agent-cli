@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER } from '../../constants'
 import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
@@ -160,10 +161,10 @@ export function generateServiceUnit(options: ServiceConfig): string {
   const { nodePath, entryPoint, logDir, verbose, docker } = options
   const execArgs = [nodePath, entryPoint, 'start']
   if (!docker) {
-    execArgs.push('--no-docker')
+    execArgs.push(CLI_FLAG_NO_DOCKER)
   }
   if (verbose) {
-    execArgs.push('--verbose')
+    execArgs.push(CLI_FLAG_VERBOSE)
   }
 
   return `[Unit]
@@ -337,10 +338,10 @@ export function generateWrapperScript(opts: {
   }
 
   const containerArgs = [
-    'ai-support-agent', 'start', '--no-docker',
+    'ai-support-agent', 'start', CLI_FLAG_NO_DOCKER,
     `--project ${qProjectArg}`,
   ]
-  if (opts.verbose) containerArgs.push('--verbose')
+  if (opts.verbose) containerArgs.push(CLI_FLAG_VERBOSE)
 
   return `#!/bin/bash
 set -uo pipefail

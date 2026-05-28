@@ -11,7 +11,13 @@ import * as os from 'os'
 import { ApiClient } from '../api-client'
 import { type AutoUpdaterHandle, startAutoUpdater } from '../auto-updater'
 import { validateUpdateChannel } from '../cli/validators'
-import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE } from '../constants'
+import {
+  AGENT_VERSION,
+  CLI_FLAG_VERBOSE,
+  CLI_FLAG_NO_AUTO_UPDATE,
+  CLI_FLAG_NO_DOCKER,
+  DOCKER_UPDATE_EXIT_CODE,
+} from '../constants'
 import { getProjectList, loadConfig } from '../config-manager'
 import { getSystemInfo } from '../system-info'
 import type { AutoUpdateConfig, ReleaseChannel } from '../types'
@@ -50,7 +56,7 @@ export interface DockerRunOptions {
 }
 
 export function buildContainerArgs(opts: DockerRunOptions): string[] {
-  const args: string[] = ['ai-support-agent', 'start', '--no-docker']
+  const args: string[] = ['ai-support-agent', 'start', CLI_FLAG_NO_DOCKER]
 
   if (opts.token) {
     args.push('--token', opts.token)
@@ -65,10 +71,10 @@ export function buildContainerArgs(opts: DockerRunOptions): string[] {
     args.push('--heartbeat-interval', String(opts.heartbeatInterval))
   }
   if (opts.verbose) {
-    args.push('--verbose')
+    args.push(CLI_FLAG_VERBOSE)
   }
   if (opts.autoUpdate === false) {
-    args.push('--no-auto-update')
+    args.push(CLI_FLAG_NO_AUTO_UPDATE)
   }
   if (opts.updateChannel) {
     args.push('--update-channel', opts.updateChannel)

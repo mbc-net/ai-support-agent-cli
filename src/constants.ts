@@ -229,3 +229,9 @@ export const NOTIFICATION_ACTION = {
   ALERT_CREATED: 'alert-created',
   AGENT_LOG: 'agent-log',
 } as const
+
+// CLI flag constants
+export const CLI_FLAG_VERBOSE = '--verbose'
+export const CLI_FLAG_NO_DOCKER = '--no-docker'
+export const CLI_FLAG_NO_DOCKERFILE_SYNC = '--no-dockerfile-sync'
+export const CLI_FLAG_NO_AUTO_UPDATE = '--no-auto-update'
