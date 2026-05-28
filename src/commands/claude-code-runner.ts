@@ -10,6 +10,7 @@ import { StreamLineParser } from '../utils/stream-parser'
 
 import { buildClaudeArgs, buildCleanEnv } from './claude-code-args'
 import { processStreamJsonLine, type StreamJsonUsage } from './claude-code-stream'
+import { isErrnoException } from '../utils'
 
 // Re-export for backward compatibility
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-args'
@@ -183,7 +184,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     child.on('error', (error) => {
       activityTimeout.clear()
       if (sigkillTimer) clearTimeout(sigkillTimer)
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (isErrnoException(error, 'ENOENT')) {
         reject(new Error(ERR_CLAUDE_CLI_NOT_FOUND))
       } else {
         reject(error)

@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { isErrnoException } from './utils'
 
 /**
  * Default rotation policy: rotate when the active file would exceed 5 MiB,
@@ -147,6 +148,6 @@ export class RotatingFileWriter {
 }
 
 function rethrowUnlessENOENT(err: unknown): void {
-  if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') return
+  if (isErrnoException(err, 'ENOENT')) return
   throw err
 }

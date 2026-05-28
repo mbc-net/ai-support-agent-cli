@@ -3,6 +3,7 @@ import { loadConfig, getProjectList } from './config-manager'
 import { logger } from './logger'
 import { projectKey } from './project-key'
 import type { ProjectRegistration } from './types'
+import { isErrnoException } from './utils'
 
 export interface ConfigWatcherCallbacks {
   onTokenUpdate: (project: ProjectRegistration, newToken: string) => void
@@ -62,7 +63,7 @@ export function startConfigWatcher(
       }
     } catch (err: unknown) {
       // Config may be in the middle of being written; only warn on unexpected errors
-      if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') return
+      if (isErrnoException(err, 'ENOENT')) return
       logger.warn(`[config-watcher] Error reading config: ${err instanceof Error ? err.message : String(err)}`)
     }
   }, TOKEN_WATCH_INTERVAL_MS)
