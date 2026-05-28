@@ -12,6 +12,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
+import { LOCALHOST_ADDRESS } from '../../constants'
 import { logger } from '../../logger'
 import { BrowserProxySession } from './browser/browser-proxy-session'
 import { validateUrl } from './browser/browser-security'
@@ -43,7 +44,7 @@ async function getActiveSession(sessionManager: BrowserSessionManager, fallbackS
     // If local port is set, use proxy session (child process context)
     if (localPort) {
       logger.debug(`[browser] Using proxy session: sessionId=${browserSessionId}, port=${localPort}`)
-      return new BrowserProxySession(`http://127.0.0.1:${localPort}`, browserSessionId)
+      return new BrowserProxySession(`http://${LOCALHOST_ADDRESS}:${localPort}`, browserSessionId)
     }
   }
 
@@ -52,7 +53,7 @@ async function getActiveSession(sessionManager: BrowserSessionManager, fallbackS
     const sessionId = resolvedProxySessionId ?? await resolveFirstSessionId(localPort)
     if (sessionId) {
       logger.debug(`[browser] Using resolved proxy session: sessionId=${sessionId}, port=${localPort}`)
-      return new BrowserProxySession(`http://127.0.0.1:${localPort}`, sessionId)
+      return new BrowserProxySession(`http://${LOCALHOST_ADDRESS}:${localPort}`, sessionId)
     }
   }
 
@@ -70,7 +71,7 @@ async function resolveFirstSessionId(localPort: string): Promise<string | null> 
 
   for (let i = 0; i < maxRetries; i++) {
     try {
-      const data = await httpGet(`http://127.0.0.1:${localPort}/sessions/first`)
+      const data = await httpGet(`http://${LOCALHOST_ADDRESS}:${localPort}/sessions/first`)
       const parsed = JSON.parse(data) as { sessionId?: string }
       if (parsed.sessionId) {
         resolvedProxySessionId = parsed.sessionId

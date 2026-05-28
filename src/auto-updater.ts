@@ -148,7 +148,7 @@ export function startAutoUpdater(
         try {
           const versionFile = path.join(getConfigDir(), 'update-version.json')
           atomicWriteFile(versionFile, JSON.stringify({ version: targetVersion }))
-        } catch (err) {
+        } catch (err: unknown) {
           logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
         }
         process.exit(DOCKER_UPDATE_EXIT_CODE)

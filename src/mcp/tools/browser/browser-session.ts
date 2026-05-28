@@ -4,6 +4,8 @@
  * Supports live view streaming (JPEG frames) and direct interaction.
  */
 
+import type { Browser, BrowserContext, Page } from 'playwright'
+
 import { logger } from '../../../logger'
 import { BrowserActionLog } from './browser-action-log'
 import { BROWSER_IDLE_TIMEOUT_MS } from './browser-types'
@@ -11,16 +13,9 @@ import { DeviceEmulation, DEVICE_PRESETS } from './device-presets'
 import { getElementAtPoint, getFocusedElementInfo } from './element-info'
 import { loadPlaywright } from './playwright-loader'
 
-// Playwright types (used loosely to avoid hard dependency)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Browser = any
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Page = any
-
 export class BrowserSession {
   private browser: Browser | null = null
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private context: any = null
+  private context: BrowserContext | null = null
   private page: Page | null = null
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private readonly idleTimeoutMs: number
@@ -60,8 +55,10 @@ export class BrowserSession {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     })
-    this.context = await this.browser.newContext()
-    this.page = await this.context.newPage()
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    this.context = await this.browser!.newContext()
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    this.page = await this.context!.newPage()
     return this.page
   }
 
@@ -192,7 +189,8 @@ export class BrowserSession {
       capturing = true
       void (async () => {
         try {
-          const buffer = await this.page.screenshot({ fullPage: false, type: 'jpeg', quality: 50 }) as Buffer
+          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+          const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: 50 }) as Buffer
           onFrame(buffer.toString('base64'))
         } catch (error) {
           logger.debug(`[browser] Live view screenshot error: ${String(error)}`)
@@ -240,7 +238,7 @@ export class BrowserSession {
     const elementInfo = await getElementAtPoint(this.page, x, y)
 
     await this.page.mouse.click(x, y, {
-      button: button || 'left',
+      button: (button as 'left' | 'right' | 'middle' | undefined) ?? 'left',
       clickCount: clickCount || 1,
     })
 
