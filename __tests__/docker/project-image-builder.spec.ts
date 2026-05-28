@@ -92,9 +92,24 @@ describe('buildProjectImage', () => {
     saveSessionLog: jest.fn().mockResolvedValue(undefined),
   }
 
+  let stdoutWriteSpy: jest.SpyInstance
+  let stderrWriteSpy: jest.SpyInstance
+
   beforeEach(() => {
     jest.clearAllMocks()
     mockPrefixerWrites.length = 0
+    // Suppress direct process.stdout/stderr writes. Several tests emit multi-megabyte
+    // log chunks that flow through the (mocked) line prefixer to process.stdout.write.
+    // Writing megabytes to a blocking pipe (as on CI runners) can wedge the Jest worker
+    // in an uninterruptible write() syscall, hanging the whole run. Mocking the writes
+    // keeps the data path covered without ever touching the real fd.
+    stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    stderrWriteSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  })
+
+  afterEach(() => {
+    stdoutWriteSpy.mockRestore()
+    stderrWriteSpy.mockRestore()
   })
 
   it('builds image successfully and logs success', async () => {
