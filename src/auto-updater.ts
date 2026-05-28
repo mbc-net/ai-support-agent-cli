@@ -1,4 +1,3 @@
-import fs from 'fs'
 import os from 'os'
 import path from 'path'
 
@@ -8,7 +7,7 @@ import { getConfigDir } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AutoUpdateConfig } from './types'
-import { getErrorMessage } from './utils'
+import { atomicWriteFile, getErrorMessage } from './utils'
 import { detectInstallMethod, isNewerVersion, isValidVersion, performUpdate, reExecProcess } from './update-checker'
 
 export interface AutoUpdaterHandle {
@@ -148,7 +147,7 @@ export function startAutoUpdater(
         // The config directory is volume-mounted and accessible from both sides.
         try {
           const versionFile = path.join(getConfigDir(), 'update-version.json')
-          fs.writeFileSync(versionFile, JSON.stringify({ version: targetVersion }), 'utf-8')
+          atomicWriteFile(versionFile, JSON.stringify({ version: targetVersion }))
         } catch (err) {
           logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
         }

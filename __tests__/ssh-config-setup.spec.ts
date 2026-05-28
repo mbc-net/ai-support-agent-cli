@@ -40,6 +40,7 @@ describe('ssh-config-setup', () => {
     jest.clearAllMocks()
     mockedFs.existsSync.mockReturnValue(false)
     mockedFs.writeFileSync.mockImplementation(() => {})
+    mockedFs.renameSync.mockImplementation(() => {})
     mockedFs.mkdirSync.mockImplementation(() => '' as unknown as string)
     mockedFs.readFileSync.mockReturnValue('')
     mockedFs.readdirSync.mockReturnValue([])
@@ -108,9 +109,13 @@ describe('ssh-config-setup', () => {
       }, FAKE_SSH_DIR)
 
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
-        path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1'),
+        path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1') + '.tmp',
         creds.privateKey,
         { mode: 0o600 },
+      )
+      expect(mockedFs.renameSync).toHaveBeenCalledWith(
+        path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1') + '.tmp',
+        path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1'),
       )
     })
 
@@ -153,7 +158,7 @@ describe('ssh-config-setup', () => {
       }, FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config') + '.tmp',
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
@@ -189,7 +194,7 @@ describe('ssh-config-setup', () => {
       }, FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config') + '.tmp',
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
@@ -213,7 +218,7 @@ describe('ssh-config-setup', () => {
       }, FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config') + '.tmp',
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
@@ -246,7 +251,7 @@ describe('ssh-config-setup', () => {
       }, FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config') + '.tmp',
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
@@ -274,7 +279,7 @@ describe('ssh-config-setup', () => {
       }, FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config') + '.tmp',
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
@@ -294,7 +299,7 @@ describe('ssh-config-setup', () => {
 
       let keyWritten = false
       mockedFs.writeFileSync.mockImplementation(((filePath: string) => {
-        if ((filePath as string).endsWith('config')) {
+        if ((filePath as string).endsWith('config.tmp')) {
           throw new Error('ENOSPC: no space left on device')
         }
         keyWritten = true
@@ -322,7 +327,7 @@ describe('ssh-config-setup', () => {
       }, FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config') + '.tmp',
       )
       expect(configWriteCall).toBeUndefined()
     })
@@ -347,7 +352,7 @@ describe('ssh-config-setup', () => {
       cleanupSshConfig(FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config') + '.tmp',
       )
       expect(configWriteCall).toBeDefined()
       const configContent = configWriteCall![1] as string
@@ -422,7 +427,7 @@ describe('ssh-config-setup', () => {
       cleanupSshConfig(FAKE_SSH_DIR)
 
       const configWriteCall = mockedFs.writeFileSync.mock.calls.find(
-        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config'),
+        (call) => (call[0] as string) === path.join(FAKE_SSH_DIR, 'config') + '.tmp',
       )
       expect(configWriteCall).toBeDefined()
       expect(configWriteCall![1]).toBe('')
