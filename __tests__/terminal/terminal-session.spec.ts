@@ -1,3 +1,6 @@
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 import { EventEmitter } from 'events'
 
 import * as constants from '../../src/terminal/constants'
@@ -283,6 +286,98 @@ describe('TerminalSession', () => {
       expect(env.PATH).not.toBe('/tmp/evil:/usr/bin')
       expect(env.LD_PRELOAD).toBeUndefined()
       expect(env.NODE_OPTIONS).toBeUndefined()
+    })
+
+    describe('GIT_SSH_KEY_CONTENT_BASE64 SSH key setup', () => {
+      it('GIT_SSH_KEY_CONTENT_BASE64 を検出したら GIT_SSH_COMMAND を設定する', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-content\n-----END OPENSSH PRIVATE KEY-----'
+        const base64Key = Buffer.from(pemKey).toString('base64')
+
+        session = new TerminalSession('test-ssh-1', {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: base64Key,
+          },
+        })
+
+        const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+        // GIT_SSH_COMMAND が設定されている
+        expect(env.GIT_SSH_COMMAND).toMatch(/ssh -i .*ssh-key-test-ssh-1/)
+        expect(env.GIT_SSH_COMMAND).toContain('-o StrictHostKeyChecking=no')
+        // 元の変数は PTY には渡らない
+        expect(env.GIT_SSH_KEY_CONTENT_BASE64).toBeUndefined()
+      })
+
+      it('SSH 鍵ファイルが実際に作成されている', () => {
+        const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-file-content\n-----END OPENSSH PRIVATE KEY-----'
+        const base64Key = Buffer.from(pemKey).toString('base64')
+
+        session = new TerminalSession('test-ssh-2', {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: base64Key,
+          },
+        })
+
+        const expectedPath = path.join(os.tmpdir(), 'ssh-key-test-ssh-2')
+        expect(fs.existsSync(expectedPath)).toBe(true)
+        const content = fs.readFileSync(expectedPath, 'utf-8')
+        expect(content).toBe(pemKey)
+      })
+
+      it('セッション終了時に SSH 鍵ファイルが削除される', (done) => {
+        const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-cleanup\n-----END OPENSSH PRIVATE KEY-----'
+        const base64Key = Buffer.from(pemKey).toString('base64')
+
+        session = new TerminalSession('test-ssh-3', {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: base64Key,
+          },
+        })
+
+        const expectedPath = path.join(os.tmpdir(), 'ssh-key-test-ssh-3')
+        expect(fs.existsSync(expectedPath)).toBe(true)
+
+        session.onExit(() => {
+          expect(fs.existsSync(expectedPath)).toBe(false)
+          done()
+        })
+        session.kill()
+      })
+
+      it('GIT_SSH_KEY_CONTENT_BASE64 がない場合は GIT_SSH_COMMAND を設定しない', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        session = new TerminalSession('test-ssh-4', {
+          envVarsOverride: {
+            ANTHROPIC_API_KEY: 'sk-test',
+          },
+        })
+
+        const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+        expect(env.GIT_SSH_COMMAND).toBeUndefined()
+      })
+
+      it('無効な base64 データでも安全にスキップする', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        // 無効な base64（書き込みは成功するが、デコード後の内容は不正）
+        // この場合でも crash せずにセッションが作成される
+        session = new TerminalSession('test-ssh-5', {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: 'valid-base64-but-not-a-key',
+          },
+        })
+
+        // セッションは正常に作成される
+        expect(session.isAlive()).toBe(true)
+      })
     })
   })
 })

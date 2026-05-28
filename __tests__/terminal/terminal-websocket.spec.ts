@@ -560,4 +560,38 @@ describe('TerminalWebSocket', () => {
     terminalWs = createTerminalWs()
     void terminalWs.connect()
   })
+
+  it('should handle server-sent envVarsOverride in open message', (done) => {
+    const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key\n-----END OPENSSH PRIVATE KEY-----'
+    const base64Key = Buffer.from(pemKey).toString('base64')
+
+    server.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+        if (msg.type === 'ready') {
+          // セッションが envVarsOverride を含む open メッセージで正常に作成された
+          expect(msg.sessionId).toBe('ssh-env-session')
+
+          const closeMsg: TerminalServerMessage = { type: 'close', sessionId: msg.sessionId }
+          ws.send(JSON.stringify(closeMsg))
+          done()
+        }
+      })
+
+      // サーバーから GIT_SSH_KEY_CONTENT_BASE64 を含む open メッセージを送信
+      const openMsg: TerminalServerMessage = {
+        type: 'open',
+        sessionId: 'ssh-env-session',
+        cols: 80,
+        rows: 24,
+        envVarsOverride: {
+          GIT_SSH_KEY_CONTENT_BASE64: base64Key,
+        },
+      }
+      ws.send(JSON.stringify(openMsg))
+    })
+
+    terminalWs = createTerminalWs()
+    void terminalWs.connect()
+  })
 })
