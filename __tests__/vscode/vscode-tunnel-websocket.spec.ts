@@ -466,6 +466,89 @@ describe('VsCodeTunnelWebSocket', () => {
     })
   })
 
+  describe('sendHttpResponse', () => {
+    it('should send a single message when body is within chunk size', () => {
+      const msg = { requestId: 'req-s1', sessionId: 'sess-s1' }
+      const response = { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: 'small body' }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendHttpResponse(msg, response)
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({
+        type: 'http_response',
+        requestId: 'req-s1',
+        sessionId: 'sess-s1',
+        statusCode: 200,
+        headers: { 'content-type': 'text/plain' },
+        body: 'small body',
+      })
+    })
+
+    it('should delegate to sendChunkedHttpResponse when body exceeds chunk size', () => {
+      const largeBody = 'x'.repeat(600000)
+      const msg = { requestId: 'req-s2', sessionId: 'sess-s2' }
+      const response = { statusCode: 200, headers: { 'content-type': 'text/html' }, body: largeBody }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendHttpResponse(msg, response)
+      // Multiple chunks expected
+      expect(sentMessages.length).toBeGreaterThan(1)
+      expect(sentMessages[0].bodyChunkIndex).toBe(0)
+    })
+  })
+
+  describe('sendChunkedHttpResponse', () => {
+    it('should split response body into multiple chunks', () => {
+      const largeBody = 'a'.repeat(600000)
+      const msg = { requestId: 'req-c1', sessionId: 'sess-c1' }
+      const response = { statusCode: 200, headers: { 'x-custom': 'yes' }, body: largeBody }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendChunkedHttpResponse(msg, response)
+      expect(sentMessages.length).toBeGreaterThan(1)
+      // First chunk carries headers
+      expect(sentMessages[0].headers).toEqual({ 'x-custom': 'yes' })
+      // Subsequent chunks do not carry headers
+      for (let i = 1; i < sentMessages.length; i++) {
+        expect(sentMessages[i].headers).toBeUndefined()
+      }
+    })
+
+    it('should set bodyChunkIndex and bodyChunkTotal correctly', () => {
+      const body = 'b'.repeat(600000)
+      const msg = { requestId: 'req-c2', sessionId: 'sess-c2' }
+      const response = { statusCode: 200, headers: {}, body }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendChunkedHttpResponse(msg, response)
+      const total = sentMessages[0].bodyChunkTotal!
+      expect(total).toBeGreaterThan(1)
+      sentMessages.forEach((m, idx) => {
+        expect(m.bodyChunkIndex).toBe(idx)
+        expect(m.bodyChunkTotal).toBe(total)
+      })
+    })
+
+    it('should reconstruct original body from chunks', () => {
+      const body = 'c'.repeat(700000)
+      const msg = { requestId: 'req-c3', sessionId: 'sess-c3' }
+      const response = { statusCode: 200, headers: {}, body }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendChunkedHttpResponse(msg, response)
+      const reconstructed = sentMessages.map(m => m.body ?? '').join('')
+      expect(reconstructed).toBe(body)
+    })
+
+    it('should forward requestId and sessionId to every chunk', () => {
+      const body = 'd'.repeat(600000)
+      const msg = { requestId: 'req-c4', sessionId: 'sess-c4' }
+      const response = { statusCode: 302, headers: {}, body }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendChunkedHttpResponse(msg, response)
+      for (const m of sentMessages) {
+        expect(m.requestId).toBe('req-c4')
+        expect(m.sessionId).toBe('sess-c4')
+        expect(m.statusCode).toBe(302)
+      }
+    })
+  })
+
   describe('handleWsFrame', () => {
     it('should do nothing if server not running', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
