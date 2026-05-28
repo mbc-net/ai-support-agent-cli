@@ -942,6 +942,124 @@ describe('DockerSupervisor', () => {
         'container-registered-agent',
       )
     })
+
+    it('skips setProjectAgentId when registered agentId matches current agentId', async () => {
+      mockExistsSync.mockReset()
+      mockReadFileSync.mockReset()
+      mockUnlinkSync.mockReset()
+
+      // registered-agent-id file exists and contains the SAME agentId as the supervisor
+      const sameAgentId = 'same-agent-id'
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return (
+          s.endsWith('docker-rebuild-needed') ||
+          s.endsWith('Dockerfile') ||
+          s.endsWith('docker-registered-agent-id')
+        ) &&
+          !s.endsWith('docker-customization-hash') &&
+          !s.endsWith('docker-built-hash')
+      })
+      mockReadFileSync.mockImplementation((p: unknown) => {
+        if (typeof p === 'string' && p.endsWith('docker-registered-agent-id')) {
+          // Return the same agentId the supervisor already has → setProjectAgentId should NOT be called
+          return sameAgentId
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      const fakeChild1 = makeFakeChild()
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
+
+      // Start with agentId = sameAgentId so the registered id matches
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts({ agentId: sameAgentId }))
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43)
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+
+      // Build still happens but agentId is the same (unchanged)
+      expect(mockBuildProjectImage).toHaveBeenCalledWith(
+        'mbc',
+        'PROJ_A',
+        '1.0.0',
+        expect.any(String),
+        expect.anything(),
+        sameAgentId,
+      )
+    })
+
+    it('sets agentId from registered-agent-id file during rebuild when no prior agentId is set', async () => {
+      // This test covers the true branch of line 168:
+      // `registeredId && registeredId !== this.getProjectAgentId(project)`
+      // when the agentId was never set during initial spawn (no watcher callback fired).
+      mockExistsSync.mockReset()
+      mockReadFileSync.mockReset()
+      mockUnlinkSync.mockReset()
+
+      const newAgentId = 'rebuild-agent-id'
+
+      // During initial spawn: docker-registered-agent-id does NOT exist (no watcher update)
+      // During rebuild: marker + Dockerfile + docker-registered-agent-id DO exist
+      let rebuildPhase = false
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        if (!rebuildPhase) {
+          // Initial spawn: only irrelevant files exist, no registered-agent-id
+          return false
+        }
+        // Rebuild phase: registered-agent-id, marker, Dockerfile all exist
+        return (
+          s.endsWith('docker-rebuild-needed') ||
+          s.endsWith('Dockerfile') ||
+          s.endsWith('docker-registered-agent-id')
+        ) && !s.endsWith('docker-customization-hash') && !s.endsWith('docker-built-hash')
+      })
+      mockReadFileSync.mockImplementation((p: unknown) => {
+        if (typeof p === 'string' && p.endsWith('docker-registered-agent-id')) {
+          return newAgentId
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      const fakeChild1 = makeFakeChild()
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
+
+      // No defaultAgentId → getProjectAgentId returns undefined
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      // Transition to rebuild phase before the close event
+      rebuildPhase = true
+      fakeChild1.emit('close', 43)
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+
+      // buildProjectImage should be called with the new agent ID from the file
+      expect(mockBuildProjectImage).toHaveBeenCalledWith(
+        'mbc',
+        'PROJ_A',
+        '1.0.0',
+        expect.any(String),
+        expect.anything(),
+        newAgentId,
+      )
+    })
   })
 
   // ─── stopAll() ────────────────────────────────────────────────────────────
