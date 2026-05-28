@@ -2184,6 +2184,7 @@ describe('ProjectAgent', () => {
           expect.anything(),
           expect.anything(),
           expect.stringContaining('host.docker.internal'),
+          expect.anything(), // configSyncState
         )
       } finally {
         startTerminalWsSpy.mockRestore()

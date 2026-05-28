@@ -68,6 +68,9 @@ describe('constants', () => {
     expect(constants.ANTHROPIC_API_URL).toBe('https://api.anthropic.com/v1/messages')
     expect(constants.DEFAULT_MAX_TOKENS).toBe(4096)
 
+    // Delayed restart
+    expect(constants.DELAYED_RESTART_MS).toBe(1_000)
+
     // Chat executor
     expect(constants.CHAT_TIMEOUT).toBe(300_000)
     expect(constants.CHAT_SIGKILL_DELAY).toBe(5_000)

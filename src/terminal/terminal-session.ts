@@ -2,8 +2,11 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { filterEnvVarsOverride } from '../env-vars-filter'
 import { logger } from '../logger'
 import { buildSafeEnv } from '../security'
+import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
+import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
 import {
   SESSION_IDLE_TIMEOUT_MS,
   TERMINAL_DEFAULT_COLS,
@@ -69,6 +72,14 @@ export interface TerminalSessionOptions {
   cols?: number
   rows?: number
   cwd?: string
+  /**
+   * Web 設定（CLAUDE_CODE# / ENV# 由来）から流れてくる env オーバーレイ。
+   * PTY 環境に最後にマージされ、ユーザーが対話シェルから `claude` を起動した
+   * 際にも Web の `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` /
+   * `ANTHROPIC_MODEL` 等が効くようにする。
+   * 含まれないキーは PTY が継承する process.env をそのまま残す。
+   */
+  envVarsOverride?: Record<string, string>
 }
 
 export interface TerminalSessionInfo {
@@ -84,6 +95,15 @@ export interface TerminalSessionInfo {
 type DataCallback = (data: string) => void
 type ExitCallback = (code: number | null) => void
 
+/**
+ * SSH キーの環境変数名
+ *
+ * API サーバーが base64 エンコードされた PEM 秘密鍵をこの変数名で送ってくる。
+ * TerminalSession はこれを検出してファイルに書き出し、GIT_SSH_COMMAND を設定する。
+ * この変数自体は PTY には渡さない（ファイルパスが GIT_SSH_COMMAND 経由で参照される）。
+ */
+export const GIT_SSH_KEY_ENV_NAME = 'GIT_SSH_KEY_CONTENT_BASE64'
+
 export class TerminalSession {
   readonly sessionId: string
   readonly pid: number
@@ -94,6 +114,7 @@ export class TerminalSession {
   private lastActivity: number
   private readonly ptyProcess: IPty
   private sandboxTmpDir: string | null = null
+  private sshKeyFile: string | null = null
   private dataCallback: DataCallback | null = null
   private exitCallback: ExitCallback | null = null
   private exited = false
@@ -179,6 +200,50 @@ export class TerminalSession {
       shellArgs.push('--rcfile', path.join(tmpDir, '.bashrc'))
     }
 
+    // Web 設定（CLAUDE_CODE# / ENV#）由来の env オーバーレイを最後にマージ。
+    // 含まれないキーは safeEnv (= process.env から PATH/TERM 等を引き継いだもの) が残る。
+    //
+    // 二層防御: api 側 AgentEnvVarsService が既に denylist フィルタを通している
+    // はずだが、agent 側でも filterEnvVarsOverride を通して PATH/ZDOTDIR 等の
+    // sandbox 関連キーが上書きされないことを保証する。これにより api 側の
+    // regression や別経路からの流入があっても sandbox を維持できる。
+    //
+    // GIT_SSH_KEY_CONTENT_BASE64 は特別扱い: フィルタに通す前に取り出し、
+    // ファイルに書き出して GIT_SSH_COMMAND として設定する。
+    const rawOverride = options.envVarsOverride ?? {}
+    const sshKeyBase64 = rawOverride[GIT_SSH_KEY_ENV_NAME]
+    const overrideWithoutSshKey: Record<string, string> = { ...rawOverride }
+    delete overrideWithoutSshKey[GIT_SSH_KEY_ENV_NAME]
+
+    if (sshKeyBase64) {
+      try {
+        const pemContent = Buffer.from(sshKeyBase64, 'base64').toString('utf-8')
+        const sshKeyPath = path.join(os.tmpdir(), `ssh-key-${sessionId}`)
+        fs.writeFileSync(sshKeyPath, pemContent, { mode: 0o600 })
+        this.sshKeyFile = sshKeyPath
+        env.GIT_SSH_COMMAND = `ssh -i ${sshKeyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`
+        logger.debug(`[terminal:${sessionId}] SSH key configured for git operations`)
+      } catch {
+        logger.warn(`[terminal:${sessionId}] Failed to set up SSH key for git; continuing without SSH key`)
+      }
+    }
+
+    const filteredOverride = filterEnvVarsOverride(overrideWithoutSshKey, {
+      prefix: `[terminal:${sessionId}]`,
+    })
+    for (const [key, value] of Object.entries(filteredOverride)) {
+      env[key] = value
+    }
+
+    // Claude Code 対話モードは ~/.claude.json の oauthAccount キーが
+    // 存在しないと CLAUDE_CODE_OAUTH_TOKEN env を持っていても /login プロンプトを出す。
+    // PTY 起動前に、(1) JSON 破損があれば backup から復元、(2) oauthAccount placeholder
+    // を確保する。両者は ~/.claude.json を触るため順序が重要 (integrity 先 → oauth-sync 後)。
+    ensureClaudeJsonIntegrity()
+    ensureClaudeJsonOAuthAccount(filteredOverride, {
+      prefix: `[terminal:${sessionId}]`,
+    })
+
     this.ptyProcess = pty.spawn(shell, shellArgs, {
       name: 'xterm-256color',
       cols: this.cols,
@@ -249,6 +314,14 @@ export class TerminalSession {
         // ignore cleanup errors
       }
       this.sandboxTmpDir = null
+    }
+    if (this.sshKeyFile) {
+      try {
+        fs.rmSync(this.sshKeyFile, { force: true })
+      } catch {
+        // ignore cleanup errors
+      }
+      this.sshKeyFile = null
     }
   }
 

@@ -1,3 +1,6 @@
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 import { EventEmitter } from 'events'
 
 import * as constants from '../../src/terminal/constants'
@@ -175,6 +178,207 @@ describe('TerminalSession', () => {
       done()
     })
     // Don't write anything — session should idle-timeout and kill itself
+  })
+
+  describe('envVarsOverride', () => {
+    it('passes envVarsOverride values to pty.spawn env', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      session = new TerminalSession('test-env-1', {
+        envVarsOverride: {
+          ANTHROPIC_API_KEY: 'sk-from-web',
+          ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+        },
+      })
+
+      const call = spawnSpy.mock.calls[0]
+      const env = call[2].env as Record<string, string>
+      expect(env.ANTHROPIC_API_KEY).toBe('sk-from-web')
+      expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
+      // TERM などの safeEnv キーも残っている
+      expect(env.TERM).toBe('xterm-256color')
+    })
+
+    it('skips non-string and empty values', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      session = new TerminalSession('test-env-2', {
+        envVarsOverride: {
+          VALID: 'ok',
+          EMPTY: '',
+          NULLY: null as unknown as string,
+          NUMERIC: 42 as unknown as string,
+          BOOLY: true as unknown as string,
+        },
+      })
+
+      const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+      expect(env.VALID).toBe('ok')
+      expect(env.EMPTY).toBeUndefined()
+      expect(env.NULLY).toBeUndefined()
+      expect(env.NUMERIC).toBeUndefined()
+      expect(env.BOOLY).toBeUndefined()
+    })
+
+    it('does not change spawn env when envVarsOverride is absent', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      session = new TerminalSession('test-env-3')
+
+      const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+      // envVarsOverride 未指定でもエラーにならない
+      expect(env.TERM).toBe('xterm-256color')
+      expect(env.ANTHROPIC_API_KEY).toBeUndefined()
+    })
+
+    it('envVarsOverride overrides safeEnv values for the same key (non-protected)', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      // TERM は denylist に含まれないため上書き可能。
+      // 一方 PATH/ZDOTDIR/XDG_* は filterEnvVarsOverride で弾かれる (別テスト)。
+      session = new TerminalSession('test-env-4', {
+        envVarsOverride: { TERM: 'overridden' },
+      })
+
+      const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+      expect(env.TERM).toBe('overridden')
+    })
+
+    it('does NOT allow ZDOTDIR override (sandbox anchor protection)', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      session = new TerminalSession('test-env-5', {
+        envVarsOverride: { ZDOTDIR: '/tmp/evil' },
+      })
+
+      const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+      // ZDOTDIR は agent が sandbox の .zshrc を指すために設定する内部値。
+      // envVarsOverride からの値は filter で弾かれ、agent が設定した tmpDir のまま。
+      // (zsh shell でない場合は ZDOTDIR が設定されない or 上書き不可)
+      expect(env.ZDOTDIR).not.toBe('/tmp/evil')
+    })
+
+    it('does NOT allow PATH or LD_PRELOAD override (defense in depth)', () => {
+      const pty = require('node-pty')
+      const spawnSpy = pty.spawn as jest.Mock
+      spawnSpy.mockClear()
+
+      session = new TerminalSession('test-env-6', {
+        envVarsOverride: {
+          PATH: '/tmp/evil:/usr/bin',
+          LD_PRELOAD: '/tmp/evil.so',
+          NODE_OPTIONS: '--inspect-brk=0.0.0.0:9229',
+        },
+      })
+
+      const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+      // PATH は safeEnv 由来の値が残るはず (envVarsOverride で上書きされない)
+      expect(env.PATH).not.toBe('/tmp/evil:/usr/bin')
+      expect(env.LD_PRELOAD).toBeUndefined()
+      expect(env.NODE_OPTIONS).toBeUndefined()
+    })
+
+    describe('GIT_SSH_KEY_CONTENT_BASE64 SSH key setup', () => {
+      it('GIT_SSH_KEY_CONTENT_BASE64 を検出したら GIT_SSH_COMMAND を設定する', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-content\n-----END OPENSSH PRIVATE KEY-----'
+        const base64Key = Buffer.from(pemKey).toString('base64')
+
+        session = new TerminalSession('test-ssh-1', {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: base64Key,
+          },
+        })
+
+        const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+        // GIT_SSH_COMMAND が設定されている
+        expect(env.GIT_SSH_COMMAND).toMatch(/ssh -i .*ssh-key-test-ssh-1/)
+        expect(env.GIT_SSH_COMMAND).toContain('-o StrictHostKeyChecking=no')
+        // 元の変数は PTY には渡らない
+        expect(env.GIT_SSH_KEY_CONTENT_BASE64).toBeUndefined()
+      })
+
+      it('SSH 鍵ファイルが実際に作成されている', () => {
+        const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-file-content\n-----END OPENSSH PRIVATE KEY-----'
+        const base64Key = Buffer.from(pemKey).toString('base64')
+
+        session = new TerminalSession('test-ssh-2', {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: base64Key,
+          },
+        })
+
+        const expectedPath = path.join(os.tmpdir(), 'ssh-key-test-ssh-2')
+        expect(fs.existsSync(expectedPath)).toBe(true)
+        const content = fs.readFileSync(expectedPath, 'utf-8')
+        expect(content).toBe(pemKey)
+      })
+
+      it('セッション終了時に SSH 鍵ファイルが削除される', (done) => {
+        const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-cleanup\n-----END OPENSSH PRIVATE KEY-----'
+        const base64Key = Buffer.from(pemKey).toString('base64')
+
+        session = new TerminalSession('test-ssh-3', {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: base64Key,
+          },
+        })
+
+        const expectedPath = path.join(os.tmpdir(), 'ssh-key-test-ssh-3')
+        expect(fs.existsSync(expectedPath)).toBe(true)
+
+        session.onExit(() => {
+          expect(fs.existsSync(expectedPath)).toBe(false)
+          done()
+        })
+        session.kill()
+      })
+
+      it('GIT_SSH_KEY_CONTENT_BASE64 がない場合は GIT_SSH_COMMAND を設定しない', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        session = new TerminalSession('test-ssh-4', {
+          envVarsOverride: {
+            ANTHROPIC_API_KEY: 'sk-test',
+          },
+        })
+
+        const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+        expect(env.GIT_SSH_COMMAND).toBeUndefined()
+      })
+
+      it('無効な base64 データでも安全にスキップする', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        // 無効な base64（書き込みは成功するが、デコード後の内容は不正）
+        // この場合でも crash せずにセッションが作成される
+        session = new TerminalSession('test-ssh-5', {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: 'valid-base64-but-not-a-key',
+          },
+        })
+
+        // セッションは正常に作成される
+        expect(session.isAlive()).toBe(true)
+      })
+    })
   })
 })
 

@@ -62,6 +62,17 @@ describe('sentry', () => {
       const options = mockInit.mock.calls[0][0]
       expect(options.environment).toBe('staging')
     })
+
+    it('SENTRY_ENVIRONMENT と NODE_ENV が未設定の場合は production にフォールバック', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      delete process.env.SENTRY_ENVIRONMENT
+      delete process.env.NODE_ENV
+      const { initSentry: init } = require('../src/sentry')
+      await init()
+      const options = mockInit.mock.calls[0][0]
+      expect(options.environment).toBe('production')
+    })
   })
 
   describe('captureException', () => {
@@ -163,6 +174,32 @@ describe('sentry', () => {
       const result = beforeSend(event)
       expect(result.breadcrumbs[0].message).toBe('token=****')
       expect(result.breadcrumbs[1].message).toBe('normal message')
+    })
+
+    it('breadcrumbs がないイベントをそのまま返す', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = { message: 'an error without breadcrumbs' }
+      const result = beforeSend(event)
+      expect(result).toEqual(event)
+    })
+
+    it('breadcrumb の message が undefined の場合はそのまま保持する', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = {
+        breadcrumbs: [
+          { category: 'navigation' }, // no message field
+        ],
+      }
+      const result = beforeSend(event)
+      expect(result.breadcrumbs[0].message).toBeUndefined()
     })
   })
 

@@ -202,4 +202,42 @@ describe('buildSandboxInitScript', () => {
     const script = buildSandboxInitScript('/tmp/project')
     expect(script).toContain('restricted: cannot leave project directory')
   })
+
+  describe('claude wrapper function', () => {
+    it('defines a claude() shell function', () => {
+      const script = buildSandboxInitScript('/tmp/project')
+      expect(script).toContain('claude()')
+    })
+
+    it('unsets any previous claude function (rc reload safety)', () => {
+      const script = buildSandboxInitScript('/tmp/project')
+      expect(script).toContain('unset -f claude')
+    })
+
+    it('skips wrapper logic when CLAUDE_CODE_OAUTH_TOKEN is empty', () => {
+      const script = buildSandboxInitScript('/tmp/project')
+      expect(script).toMatch(/if \[ -z "\$\{CLAUDE_CODE_OAUTH_TOKEN\}" \]/)
+    })
+
+    it('preserves user-supplied --settings argument (does not override)', () => {
+      const script = buildSandboxInitScript('/tmp/project')
+      // ユーザーが --settings を渡している場合は素の claude にパススルー
+      expect(script).toContain('--settings|--settings=*')
+    })
+
+    it('passes CLAUDE_CODE_OAUTH_TOKEN through --settings JSON', () => {
+      const script = buildSandboxInitScript('/tmp/project')
+      // printf で settings JSON を組み立てて --settings に渡す
+      expect(script).toContain('CLAUDE_CODE_OAUTH_TOKEN')
+      expect(script).toContain('--settings')
+      expect(script).toMatch(/printf .*\{"env":\{"CLAUDE_CODE_OAUTH_TOKEN":"%s"\}\}/)
+    })
+
+    it('uses command claude (not recursive function call)', () => {
+      const script = buildSandboxInitScript('/tmp/project')
+      // 関数内では command builtin で外部 claude を呼ぶ (関数自身を再帰呼び出ししない)
+      expect(script).toContain('command claude')
+      expect(script).not.toMatch(/[^d]\s+claude\s+"\$@"/) // command なしの claude "$@" は出てこない
+    })
+  })
 })

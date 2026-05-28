@@ -5,6 +5,7 @@ import { logger } from '../logger'
 import type { ChatChunkType } from '../types'
 import { createActivityTimeout } from '../utils/activity-timeout'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
+import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
 import { StreamLineParser } from '../utils/stream-parser'
 
 import { buildClaudeArgs, buildCleanEnv } from './claude-code-args'
@@ -105,6 +106,10 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt })
 
     ensureClaudeJsonIntegrity()
+    // Web 経由で OAuth Token が設定されているなら ~/.claude.json の
+    // oauthAccount キーを確保する。chat の --print 経路でも将来の claude CLI
+    // 仕様変更で要求される可能性があるため defensive に呼ぶ。
+    ensureClaudeJsonOAuthAccount(envVarsOverride, { prefix: '[chat]' })
 
     const child = spawn('claude', args, {
       stdio: ['ignore', 'pipe', 'pipe'],

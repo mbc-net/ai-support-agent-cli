@@ -10,6 +10,7 @@ import type { RepoSyncResult } from './repo-sync'
 import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, startVsCodeTunnel, stopTransport } from './agent-transport'
 import {
   AGENT_VERSION,
+  DELAYED_RESTART_MS,
   DOCKER_RESTART_EXIT_CODE,
   DOCKER_UPDATE_EXIT_CODE,
   INITIAL_CONFIG_SYNC_MAX_RETRIES,
@@ -217,7 +218,7 @@ export class ProjectAgent {
       } else {
         reExecProcess()
       }
-    }, 1000)
+    }, DELAYED_RESTART_MS)
   }
 
   async performDockerRebuild(): Promise<void> {
@@ -252,10 +253,10 @@ export class ProjectAgent {
 
         fs.writeFileSync(markerPath, '')
       } catch (err) {
-        logger.warn(`${this.prefix} Failed to write docker-rebuild-needed marker: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`${this.prefix} Failed to write docker-rebuild-needed marker: ${getErrorMessage(err)}`)
       }
       process.exit(DOCKER_RESTART_EXIT_CODE)
-    }, 1000)
+    }, DELAYED_RESTART_MS)
   }
 
   async performUpdate(): Promise<void> {
@@ -285,7 +286,7 @@ export class ProjectAgent {
           const versionFile = path.join(getConfigDir(), 'update-version.json')
           fs.writeFileSync(versionFile, JSON.stringify({ version: targetVersion }), 'utf-8')
         } catch (err) {
-          logger.warn(`[update] Failed to write update-version.json: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
         }
         process.exit(DOCKER_UPDATE_EXIT_CODE)
         return
@@ -298,7 +299,7 @@ export class ProjectAgent {
       } else {
         reExecProcess(installMethod)
       }
-    }, 1000)
+    }, DELAYED_RESTART_MS)
   }
 
   private async registerAndStart(): Promise<void> {
@@ -454,8 +455,8 @@ export class ProjectAgent {
     // Start terminal WebSocket connection (only if server has WS gateway enabled)
     if (result.wsEnabled) {
       const resolvedWsUrl = result.wsUrl ? resolveUrlForDocker(result.wsUrl) : result.wsUrl
-      startTerminalWebSocket(this.transportDeps, this.transportState, resolvedWsUrl)
-      startVsCodeTunnel(this.transportDeps, this.transportState, resolvedWsUrl)
+      startTerminalWebSocket(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
+      startVsCodeTunnel(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
     } else {
       logger.debug(`${this.prefix} Terminal/VS Code WebSocket skipped (wsEnabled=false)`)
     }

@@ -11,7 +11,7 @@ import { captureException, flushSentry, initSentry } from './sentry'
 import { getSystemInfo } from './system-info'
 import type { AgentChatMode, AutoUpdateConfig, ProjectRegistration, ReleaseChannel } from './types'
 import { detectChannelFromVersion } from './update-checker'
-import { validateApiUrl } from './utils'
+import { getErrorMessage, validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
 import { startConfigWatcher } from './config-watcher'
 import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
@@ -122,7 +122,7 @@ function initAutoUpdater(
     stopAllAgents,
     (error) => {
       void client.heartbeat(agentId, getSystemInfo(), error).catch((err) => {
-        logger.warn(`[auto-update] Failed to send error heartbeat: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`[auto-update] Failed to send error heartbeat: ${getErrorMessage(err)}`)
       })
     },
     isAnyAgentBusy,
@@ -215,7 +215,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
       logger.info(`Cleaned up ${removed} stale terminal-sandbox dir(s) in /tmp`)
     }
   } catch (err) {
-    logger.warn(`Failed to clean up stale terminal-sandbox dirs: ${err instanceof Error ? err.message : String(err)}`)
+    logger.warn(`Failed to clean up stale terminal-sandbox dirs: ${getErrorMessage(err)}`)
   }
 
   const config = loadConfig()

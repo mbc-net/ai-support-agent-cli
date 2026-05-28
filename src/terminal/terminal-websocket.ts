@@ -31,6 +31,13 @@ export interface TerminalServerMessage {
   rows?: number
   cwd?: string
   message?: string
+  /**
+   * Additional environment variables to inject into the PTY session.
+   * Merged on top of the provider-based envVarsOverride.
+   * GIT_SSH_KEY_CONTENT_BASE64: base64-encoded PEM private key to set up
+   * GIT_SSH_COMMAND for the session (processed by TerminalSession).
+   */
+  envVarsOverride?: Record<string, string>
 }
 
 /**
@@ -47,6 +54,11 @@ export interface TerminalAgentMessage {
   rows?: number
 }
 
+import type { EnvVarsProvider } from '../env-vars-filter'
+
+// 既存の re-export（後方互換）
+export type { EnvVarsProvider } from '../env-vars-filter'
+
 export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMessage> {
   private readonly manager: TerminalSessionManager
   private readonly wsUrl: string
@@ -56,6 +68,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     private readonly token: string,
     private readonly agentId: string,
     private readonly projectDir?: string,
+    private readonly envVarsProvider?: EnvVarsProvider,
   ) {
     super({
       maxReconnectRetries: TERMINAL_WS_MAX_RECONNECT_RETRIES,
@@ -147,10 +160,30 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       cwd = msg.cwd
     }
 
+    // envVars を provider から取得。configSync が未完了 or キャッシュ
+    // フォールバックで envVars が無い場合は undefined になる。その場合は
+    // Web 設定 (CLAUDE_CODE#API_KEY 等) が PTY に反映されないため warn を出す。
+    const providerEnvVars = this.envVarsProvider?.()
+    if (this.envVarsProvider && !providerEnvVars) {
+      logger.warn(
+        `[terminal] Opening session ${serverSessionId} before envVars are available; ` +
+          `Web-configured env overrides will not apply until the next successful config sync`,
+      )
+    }
+
+    // サーバー送信の envVarsOverride (SSH鍵等) と provider の env をマージ。
+    // provider が undefined でも、サーバー送信分だけ適用できるようにする。
+    // マージ優先度: provider (configSync 由来) > server (session-specific 由来)
+    const envVarsOverride: Record<string, string> | undefined =
+      msg.envVarsOverride || providerEnvVars
+        ? { ...(msg.envVarsOverride ?? {}), ...(providerEnvVars ?? {}) }
+        : undefined
+
     const session = this.manager.createSessionWithId(serverSessionId, {
       cols: msg.cols,
       rows: msg.rows,
       cwd,
+      envVarsOverride,
     })
 
     if (!session) {
