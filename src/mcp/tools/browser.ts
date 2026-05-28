@@ -12,15 +12,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
+import { LOCALHOST_ADDRESS } from '../../constants'
 import { logger } from '../../logger'
 import { BrowserProxySession } from './browser/browser-proxy-session'
 import { validateUrl } from './browser/browser-security'
 import { BrowserSession } from './browser/browser-session'
 import { BrowserSessionManager, getMaxBrowserSessionsFromEnv } from './browser/browser-session-manager'
 import {
-  BROWSER_TIMEOUT_PAGE_LOAD_MS,
   BROWSER_TIMEOUT_REQUEST_MS,
-  BROWSER_TIMEOUT_SELECTOR_MS,
+  SELECTOR_TIMEOUT_NAVIGATION_MS,
+  SELECTOR_TIMEOUT_SINGLE_MS,
 } from './browser/browser-types'
 import { isPlaywrightAvailable } from './browser/playwright-loader'
 import { tryClickSelectors, tryFillSelectors } from './browser/selector-utils'
@@ -45,7 +46,7 @@ async function getActiveSession(sessionManager: BrowserSessionManager, fallbackS
     // If local port is set, use proxy session (child process context)
     if (localPort) {
       logger.debug(`[browser] Using proxy session: sessionId=${browserSessionId}, port=${localPort}`)
-      return new BrowserProxySession(`http://127.0.0.1:${localPort}`, browserSessionId)
+      return new BrowserProxySession(`http://${LOCALHOST_ADDRESS}:${localPort}`, browserSessionId)
     }
   }
 
@@ -54,7 +55,7 @@ async function getActiveSession(sessionManager: BrowserSessionManager, fallbackS
     const sessionId = resolvedProxySessionId ?? await resolveFirstSessionId(localPort)
     if (sessionId) {
       logger.debug(`[browser] Using resolved proxy session: sessionId=${sessionId}, port=${localPort}`)
-      return new BrowserProxySession(`http://127.0.0.1:${localPort}`, sessionId)
+      return new BrowserProxySession(`http://${LOCALHOST_ADDRESS}:${localPort}`, sessionId)
     }
   }
 
@@ -72,7 +73,7 @@ async function resolveFirstSessionId(localPort: string): Promise<string | null> 
 
   for (let i = 0; i < maxRetries; i++) {
     try {
-      const data = await httpGet(`http://127.0.0.1:${localPort}/sessions/first`)
+      const data = await httpGet(`http://${LOCALHOST_ADDRESS}:${localPort}/sessions/first`)
       const parsed = JSON.parse(data) as { sessionId?: string }
       if (parsed.sessionId) {
         resolvedProxySessionId = parsed.sessionId
@@ -168,10 +169,10 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
 
       const page = await session.getPage()
 
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: BROWSER_TIMEOUT_PAGE_LOAD_MS })
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
 
       if (waitForSelector) {
-        await page.waitForSelector(waitForSelector, { timeout: BROWSER_TIMEOUT_SELECTOR_MS })
+        await page.waitForSelector(waitForSelector, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
       }
 
       if (waitForTimeout) {
@@ -321,7 +322,7 @@ function registerBrowserGetTextTool(server: McpServer, defaultSession: BrowserSe
       }
 
       const page = await session.getPage()
-      const text: string = await page.locator(target).innerText({ timeout: BROWSER_TIMEOUT_SELECTOR_MS })
+      const text: string = await page.locator(target).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
 
       // Truncate to 50KB to avoid overwhelming the context
       const maxLength = 50 * 1024
@@ -370,7 +371,7 @@ function registerBrowserLoginTool(
       } else {
         // Navigate to base URL
         const page = await session.getPage()
-        await page.goto(credentials.baseUrl, { waitUntil: 'domcontentloaded', timeout: BROWSER_TIMEOUT_PAGE_LOAD_MS })
+        await page.goto(credentials.baseUrl, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
 
         title = await page.title()
         currentUrl = page.url()
@@ -423,7 +424,7 @@ function registerBrowserExtractTool(server: McpServer, defaultSession: BrowserSe
       }
 
       const page = await session.getPage()
-      const text: string = await page.locator(selector).innerText({ timeout: BROWSER_TIMEOUT_SELECTOR_MS })
+      const text: string = await page.locator(selector).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
 
       // Truncate to 50KB to avoid overwhelming the context
       const maxLength = 50 * 1024

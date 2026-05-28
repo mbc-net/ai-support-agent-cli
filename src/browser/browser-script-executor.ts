@@ -8,8 +8,8 @@
 
 import { logger } from '../logger'
 import {
-  BROWSER_TIMEOUT_PAGE_LOAD_MS,
-  BROWSER_TIMEOUT_SELECTOR_MS,
+  SELECTOR_TIMEOUT_NAVIGATION_MS,
+  SELECTOR_TIMEOUT_SINGLE_MS,
 } from '../mcp/tools/browser/browser-types'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -157,19 +157,19 @@ export async function executePlaywrightScript(
     try {
       switch (step.type) {
         case 'goto':
-          await page.goto(step.args.url, { waitUntil: 'domcontentloaded', timeout: BROWSER_TIMEOUT_PAGE_LOAD_MS })
+          await page.goto(step.args.url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
           session.actionLog.add('chat', 'navigate', step.args.url)
           break
         case 'click':
-          await page.click(step.args.selector, { timeout: BROWSER_TIMEOUT_SELECTOR_MS })
+          await page.click(step.args.selector, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
           session.actionLog.add('chat', 'click', step.args.selector)
           break
         case 'fill':
-          await page.fill(step.args.selector, step.args.value, { timeout: BROWSER_TIMEOUT_SELECTOR_MS })
+          await page.fill(step.args.selector, step.args.value, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
           session.actionLog.add('chat', 'fill', `${step.args.selector} "${step.args.value}"`)
           break
         case 'innerText': {
-          const text: string = await page.locator(step.args.selector).innerText({ timeout: BROWSER_TIMEOUT_SELECTOR_MS })
+          const text: string = await page.locator(step.args.selector).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
           session.variables.set(step.args.variableName, text)
           const preview = text.replace(/\s+/g, ' ').trim()
           const previewText = preview.length > 100 ? preview.substring(0, 100) + '…' : preview

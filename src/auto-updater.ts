@@ -149,7 +149,7 @@ export function startAutoUpdater(
         try {
           const versionFile = path.join(getConfigDir(), 'update-version.json')
           fs.writeFileSync(versionFile, JSON.stringify({ version: targetVersion }), 'utf-8')
-        } catch (err) {
+        } catch (err: unknown) {
           logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
         }
         process.exit(DOCKER_UPDATE_EXIT_CODE)

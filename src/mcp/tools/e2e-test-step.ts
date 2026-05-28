@@ -60,7 +60,7 @@ export function registerE2eTestStepTool(
             const buffer = await browserSession.screenshot(true)
             screenshotBase64 = buffer.toString('base64')
             logger.debug(`[e2e_test] Screenshot captured for step ${args.stepNumber} (${(buffer.length / 1024).toFixed(1)}KB)`)
-          } catch (err) {
+          } catch (err: unknown) {
             logger.warn(
               `[e2e_test] Failed to capture screenshot for step ${args.stepNumber}: ${err instanceof Error ? err.message : String(err)}`,
             )
