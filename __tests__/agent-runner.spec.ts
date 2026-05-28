@@ -115,6 +115,12 @@ jest.mock('os', () => {
   }
 })
 
+jest.mock('../src/terminal/terminal-session', () => ({
+  TerminalSession: {
+    cleanupStaleSandboxes: jest.fn().mockReturnValue(0),
+  },
+}))
+
 const MockApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
 const mockedLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>
 const mockedGetProjectList = getProjectList as jest.MockedFunction<typeof getProjectList>
@@ -158,6 +164,11 @@ describe('agent-runner', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    const { TerminalSession } = require('../src/terminal/terminal-session')
+    TerminalSession.cleanupStaleSandboxes.mockReturnValue(0)
+    const { isAlreadyRunning, readPidFile } = require('../src/pid-manager')
+    isAlreadyRunning.mockReturnValue(false)
+    readPidFile.mockReturnValue(null)
     capturedConfigCallbacks = {}
     processHandlers.clear()
 
@@ -784,6 +795,87 @@ describe('agent-runner', () => {
       await expect(startAgent({ project: 'mbc/NONEXISTENT' })).rejects.toThrow('process.exit called')
       expect(exitSpy).toHaveBeenCalledWith(1)
     })
+  })
+
+  it('should call process.exit(1) when agent is already running', async () => {
+    const { isAlreadyRunning, readPidFile } = require('../src/pid-manager')
+    isAlreadyRunning.mockReturnValue(true)
+    readPidFile.mockReturnValue({ pid: 12345, startedAt: new Date().toISOString() })
+
+    await expect(startAgent({})).rejects.toThrow('process.exit called')
+
+    expect(exitSpy).toHaveBeenCalledWith(1)
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('12345'),
+    )
+  })
+
+  it('should log info message when cleanupStaleSandboxes removes at least one dir', async () => {
+    const { TerminalSession } = require('../src/terminal/terminal-session')
+    TerminalSession.cleanupStaleSandboxes.mockReturnValue(3)
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('Cleaned up 3 stale terminal-sandbox dir(s)'),
+    )
+  })
+
+  it('should log warning when cleanupStaleSandboxes throws', async () => {
+    const { TerminalSession } = require('../src/terminal/terminal-session')
+    TerminalSession.cleanupStaleSandboxes.mockImplementation(() => { throw new Error('cleanup failed') })
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to clean up stale terminal-sandbox dirs'),
+    )
+  })
+
+  it('should hot-remove project when config watcher detects removed project', async () => {
+    const mockStopProject = jest.fn().mockResolvedValue(undefined)
+    const { ChildProcessManager } = require('../src/child-process-manager')
+    ChildProcessManager.mockImplementation(() => ({
+      forkProject: mockForkProject,
+      stopAll: mockStopAll,
+      stopProject: mockStopProject,
+      sendUpdateToAll: jest.fn(),
+      sendTokenUpdate: mockSendTokenUpdate,
+      getRunningCount: jest.fn().mockReturnValue(0),
+      isAnyBusy: jest.fn().mockResolvedValue(false),
+    }))
+
+    const mockConfig = {
+      agentId: 'multi-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    const removedProject = { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' }
+    capturedConfigCallbacks.onProjectRemoved!(removedProject as unknown as string)
+
+    expect(mockStopProject).toHaveBeenCalledWith(removedProject)
   })
 })
 

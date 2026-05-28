@@ -290,6 +290,68 @@ describe('project-config-sync', () => {
       expect(writtenData.config.documentation).toEqual(config.documentation)
     })
 
+    it('should exclude backlog apiKey from cached data but keep other backlog fields', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedFs.writeFileSync.mockImplementation(() => {})
+      mockedFs.renameSync.mockImplementation(() => {})
+
+      const config = createMockConfig({
+        backlog: {
+          items: [
+            {
+              spaceKey: 'MY_SPACE',
+              projectKey: 'MY_PROJ',
+              apiKey: 'secret-api-key-12345',
+            },
+            {
+              spaceKey: 'OTHER_SPACE',
+              projectKey: 'OTHER_PROJ',
+              apiKey: 'another-secret-key',
+            },
+          ],
+        },
+      })
+
+      saveCachedConfig('/projects/test', config)
+
+      const writtenData = JSON.parse(
+        (mockedFs.writeFileSync as jest.Mock).mock.calls[0][1] as string,
+      ) as CachedProjectConfig
+
+      expect(writtenData.config.backlog).toBeDefined()
+      expect(writtenData.config.backlog!.items).toHaveLength(2)
+      // apiKey should be excluded
+      expect(writtenData.config.backlog!.items[0]).not.toHaveProperty('apiKey')
+      expect(writtenData.config.backlog!.items[1]).not.toHaveProperty('apiKey')
+      // other fields should be preserved
+      expect(writtenData.config.backlog!.items[0].spaceKey).toBe('MY_SPACE')
+      expect(writtenData.config.backlog!.items[0].projectKey).toBe('MY_PROJ')
+      expect(writtenData.config.backlog!.items[1].spaceKey).toBe('OTHER_SPACE')
+    })
+
+    it('should include cloudwatch in cached data', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedFs.writeFileSync.mockImplementation(() => {})
+      mockedFs.renameSync.mockImplementation(() => {})
+
+      const config = createMockConfig({
+        cloudwatch: {
+          logGroupName: '/aws/ecs/my-service',
+          region: 'ap-northeast-1',
+          accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+          secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+        },
+      })
+
+      saveCachedConfig('/projects/test', config)
+
+      const writtenData = JSON.parse(
+        (mockedFs.writeFileSync as jest.Mock).mock.calls[0][1] as string,
+      ) as CachedProjectConfig
+
+      expect(writtenData.config.cloudwatch).toEqual(config.cloudwatch)
+    })
+
     it('should handle write errors gracefully', () => {
       mockedFs.existsSync.mockReturnValue(true)
       mockedFs.writeFileSync.mockImplementation(() => {
