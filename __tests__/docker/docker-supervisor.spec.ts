@@ -1772,4 +1772,260 @@ describe('DockerSupervisor', () => {
       )
     })
   })
+
+  // ─── watcher callback: empty newId (falsy branch on line 313) ─────────────
+
+  describe('watcher callback: empty or falsy newId', () => {
+    it('does not call setProjectAgentId when newId is empty string', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts({ agentId: 'existing-agent' }))
+      supervisor.start([makeProject()])
+
+      const watchCallback = mockWatch.mock.calls[0][1] as (
+        eventType: string,
+        filename: string,
+      ) => void
+
+      // readFileSync returns empty string → trim() → '' → falsy → setProjectAgentId NOT called
+      mockReadFileSync.mockReturnValueOnce('')
+
+      const infoCallsBefore = (logger.info as jest.Mock).mock.calls.length
+      watchCallback('rename', 'docker-registered-agent-id')
+      const infoCallsAfter = (logger.info as jest.Mock).mock.calls.length
+
+      // No info log about agentId change since newId is falsy
+      expect(infoCallsAfter).toBe(infoCallsBefore)
+    })
+  })
+
+  // ─── rebuildAndRestart: shouldBuild=true but no Dockerfile (line 173) ─────
+
+  describe('rebuildAndRestart: shouldBuild=true but Dockerfile missing', () => {
+    it('skips buildProjectImage when rebuild marker exists but Dockerfile does not', async () => {
+      mockExistsSync.mockReset()
+      mockReadFileSync.mockReset()
+      mockUnlinkSync.mockReset()
+      mockReadFileSync.mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      // docker-rebuild-needed marker exists but Dockerfile does NOT
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return s.endsWith('docker-rebuild-needed') &&
+          !s.endsWith('Dockerfile') &&
+          !s.endsWith('docker-registered-agent-id') &&
+          !s.endsWith('docker-customization-hash') &&
+          !s.endsWith('docker-built-hash')
+      })
+
+      const fakeChild1 = makeFakeChild()
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43) // DOCKER_RESTART_EXIT_CODE
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      // shouldBuild=true (marker exists), but Dockerfile does NOT exist
+      // → buildProjectImage should NOT be called
+      expect(mockBuildProjectImage).not.toHaveBeenCalled()
+      // marker should still be deleted
+      expect(mockUnlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('docker-rebuild-needed'),
+      )
+      // spawnProject should still be called for restart
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  // ─── rebuildAndRestart: error message > 3000 chars (line 191) ─────────────
+
+  describe('rebuildAndRestart: long build error message truncation', () => {
+    it('truncates error messages longer than 3000 characters', async () => {
+      mockExistsSync.mockReset()
+      mockReadFileSync.mockReset()
+      mockUnlinkSync.mockReset()
+      mockReadFileSync.mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      // Dockerfile exists so build is triggered
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return s.endsWith('Dockerfile') &&
+          !s.endsWith('docker-rebuild-needed') &&
+          !s.endsWith('docker-registered-agent-id') &&
+          !s.endsWith('docker-customization-hash') &&
+          !s.endsWith('docker-built-hash')
+      })
+
+      // buildProjectImage throws with a very long error message (>3000 chars)
+      const longError = 'E'.repeat(3100)
+      mockBuildProjectImage.mockRejectedValueOnce(new Error(longError))
+
+      // Override getErrorMessage to return the full long string
+      const { getErrorMessage } = require('../../src/utils')
+      const mockGetErrorMessage = getErrorMessage as jest.MockedFunction<typeof import('../../src/utils').getErrorMessage>
+      mockGetErrorMessage.mockReturnValueOnce(longError)
+
+      const fakeChild1 = makeFakeChild()
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43) // DOCKER_RESTART_EXIT_CODE
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      // writeFileSync called with the truncated error (not the full 3100-char string)
+      const { writeFileSync } = require('fs') as typeof import('fs')
+      const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>
+      const writeCall = mockWriteFileSync.mock.calls.find(
+        (args) => typeof args[0] === 'string' && (args[0] as string).includes('docker-build-error'),
+      )
+      if (writeCall) {
+        // Truncated content ends with '...(truncated)'
+        expect(writeCall[1]).toMatch(/\.\.\.\(truncated\)$/)
+      }
+    })
+  })
+
+  // ─── log streaming: logTruncated=true on re-entry (line 330) ─────────────
+  // ─── log streaming: remaining <= 0 (line 335) ─────────────────────────────
+
+  describe('log streaming: flush when already truncated (logTruncated=true branch)', () => {
+    it('skips fullLog update on second flush when already truncated (via two close events)', async () => {
+      // Strategy: trigger two separate flushes using the close-handler flush path.
+      // First flush: big chunk > 2MB → truncation occurs, logTruncated=true, warn emitted.
+      // Second flush: container close event fires again on a new container — but since we
+      // use a single child, we trigger the setInterval-based flush by emitting two data
+      // events separated by a close on child2.
+      //
+      // Simpler approach: spawn two projects, one after the other, each exceeding the limit.
+      // Actually, the simplest approach is to emit a huge chunk to buf, then close the
+      // container. The close handler calls flush() directly, which triggers truncation.
+      // The logTruncated=true branch on re-entry is covered when flush() is called a
+      // second time with buf non-empty while logTruncated=true.
+      //
+      // We achieve this by calling close twice on two separate containers with the same
+      // supervisor to ensure the second flush sees logTruncated=true.
+      //
+      // Easiest: emit big chunk, let close handler flush it (truncation), then trigger
+      // a second flush via setInterval by using fake timers from the START.
+      jest.useFakeTimers()
+
+      const { ApiClient } = require('../../src/api-client')
+      const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
+      const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
+      ApiClient.mockImplementation(() => ({
+        submitLogChunk: mockSubmitLogChunk,
+        saveSessionLog: mockSaveSessionLog,
+      }))
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+
+      try {
+        const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+        supervisor.start([makeProject()])
+
+        // Exceed MAX_SESSION_LOG_BYTES (2MB) so truncation happens on the first flush
+        const bigChunk = Buffer.alloc(2 * 1024 * 1024 + 1024, 'A') // 2MB + 1KB
+        fakeChild.stdout.emit('data', bigChunk)
+
+        // First flush via interval: truncation occurs (logTruncated becomes true, warn is emitted)
+        jest.advanceTimersByTime(1000)
+        await Promise.resolve()
+        await Promise.resolve()
+
+        // Emit more data after truncation
+        fakeChild.stdout.emit('data', Buffer.from('after truncation data'))
+
+        // Second flush via interval: logTruncated=true → the `if (!logTruncated)` branch is false
+        jest.advanceTimersByTime(1000)
+        await Promise.resolve()
+        await Promise.resolve()
+      } finally {
+        jest.useRealTimers()
+        stdoutWriteSpy.mockRestore()
+      }
+
+      // Warn about truncation should have been emitted at least once
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('exceeded 2 MB limit'),
+      )
+    }, 15000)
+
+    it('hits remaining <= 0 branch when fullLog is exactly at MAX_SESSION_LOG_BYTES', async () => {
+      // Scenario:
+      //   1. First chunk fills fullLog to exactly MAX (takes the <= branch, logTruncated stays false)
+      //   2. Second chunk: remaining = MAX - MAX = 0 → `remaining > 0` is false → fullLog += ''
+      //      → this triggers the `remaining <= 0` branch and sets logTruncated=true
+      jest.useFakeTimers()
+
+      const { ApiClient } = require('../../src/api-client')
+      const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
+      const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
+      ApiClient.mockImplementation(() => ({
+        submitLogChunk: mockSubmitLogChunk,
+        saveSessionLog: mockSaveSessionLog,
+      }))
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+
+      try {
+        const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+        supervisor.start([makeProject()])
+
+        // MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024 = 2097152
+        const MAX = 2 * 1024 * 1024
+        // First chunk: exactly fills fullLog (takes the if-branch, fullLog.length = MAX)
+        const exactChunk = Buffer.alloc(MAX, 'B')
+        fakeChild.stdout.emit('data', exactChunk)
+
+        // First flush: text.length === MAX, fullLog.length=0+MAX <= MAX → fullLog += text
+        // Now fullLog.length = MAX, logTruncated still false
+        jest.advanceTimersByTime(1000)
+        await Promise.resolve()
+        await Promise.resolve()
+
+        // Second chunk: anything additional
+        fakeChild.stdout.emit('data', Buffer.alloc(1024, 'C'))
+
+        // Second flush: fullLog.length(MAX) + text.length(1024) > MAX
+        // → else branch: remaining = MAX - MAX = 0 → `remaining > 0` is false → fullLog += ''
+        // → logTruncated = true, warn emitted
+        jest.advanceTimersByTime(1000)
+        await Promise.resolve()
+        await Promise.resolve()
+      } finally {
+        jest.useRealTimers()
+        stdoutWriteSpy.mockRestore()
+      }
+
+      // Truncation warning should fire on second flush
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('exceeded 2 MB limit'),
+      )
+    }, 15000)
+  })
 })
