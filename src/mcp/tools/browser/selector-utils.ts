@@ -21,7 +21,7 @@ export async function tryClickSelectors(page: any, selectors: string, options?: 
     const sel = selectors.trim()
     if (options?.waitForNavigation) {
       await Promise.all([
-        page.waitForNavigation({ timeout: 30000 }).catch(() => { /* navigation may not happen */ }),
+        page.waitForNavigation({ timeout: 30000 }).catch(() => undefined /* navigation may not happen */),
         page.click(sel, { timeout: 10000 }),
       ])
     } else {
@@ -39,7 +39,7 @@ export async function tryClickSelectors(page: any, selectors: string, options?: 
 
       if (options?.waitForNavigation) {
         await Promise.all([
-          page.waitForNavigation({ timeout: 30000 }).catch(() => { /* navigation may not happen */ }),
+          page.waitForNavigation({ timeout: 30000 }).catch(() => undefined /* navigation may not happen */),
           page.click(candidate, { timeout: 5000 }),
         ])
       } else {
