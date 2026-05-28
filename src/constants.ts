@@ -214,3 +214,11 @@ export const BUSY_QUERY_TIMEOUT_MS = 5_000                  // 5 seconds for IPC
 
 // Delayed restart (reboot / update / docker rebuild)
 export const DELAYED_RESTART_MS = 1_000
+
+// AppSync notification action names
+export const NOTIFICATION_ACTION = {
+  AGENT_COMMAND: 'agent-command',
+  CONFIG_UPDATE: 'config-update',
+  ALERT_CREATED: 'alert-created',
+  AGENT_LOG: 'agent-log',
+} as const

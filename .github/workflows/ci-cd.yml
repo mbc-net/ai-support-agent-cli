@@ -77,13 +77,13 @@ jobs:
           setsid npm test &
           TEST_PID=$!
           TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
-          ( sleep 480 && kill -- -$TEST_PGID 2>/dev/null || true ) &
+          ( sleep 300 && kill -- -$TEST_PGID 2>/dev/null || true ) &
           KILLER_PID=$!
           wait $TEST_PID
           EXIT_CODE=$?
           kill $KILLER_PID 2>/dev/null || true
           exit $EXIT_CODE
-        timeout-minutes: 10
+        timeout-minutes: 6
 
   publish:
     name: Publish

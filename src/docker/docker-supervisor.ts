@@ -358,15 +358,19 @@ export class DockerSupervisor {
       child.on('close', () => {
         registeredIdWatcher.close()
         clearInterval(flushTimer)
-        void flush().then(() => {
-          if (fullLog) {
-            void apiClient.saveSessionLog({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, content: fullLog })
-              .catch((e: unknown) => logger.warn(`[docker] S3 upload failed: ${e}`))
-              .finally(() => { handle.resolveClosed() })
-          } else {
+        void (async () => {
+          try {
+            await flush()
+            if (fullLog) {
+              await apiClient.saveSessionLog({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, content: fullLog })
+                .catch((e: unknown) => logger.warn(`[docker] S3 upload failed: ${e}`))
+            }
+          } catch /* istanbul ignore next */ {
+            // ignore flush / saveSessionLog errors — always resolve so shutdown can proceed
+          } finally {
             handle.resolveClosed()
           }
-        }).catch(/* istanbul ignore next */ () => { handle.resolveClosed() }).catch(/* istanbul ignore next */ () => { handle.resolveClosed() })
+        })()
       })
     }
 
