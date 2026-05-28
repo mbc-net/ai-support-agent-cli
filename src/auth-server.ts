@@ -1,7 +1,7 @@
 import * as crypto from 'crypto'
 import * as http from 'http'
 
-import { AUTH_TIMEOUT, ERR_AUTH_SERVER_START_FAILED, MAX_AUTH_BODY_SIZE } from './constants'
+import { AUTH_TIMEOUT, ERR_AUTH_SERVER_START_FAILED, LOCALHOST_ADDRESS, MAX_AUTH_BODY_SIZE } from './constants'
 import { t } from './i18n'
 import { parseString } from './utils'
 
@@ -27,7 +27,7 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
 
     const server = http.createServer((req, res) => {
       // CORS headers
-      res.setHeader('Access-Control-Allow-Origin', allowedOrigin ?? 'http://127.0.0.1')
+      res.setHeader('Access-Control-Allow-Origin', allowedOrigin ?? `http://${LOCALHOST_ADDRESS}`)
       res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
 
@@ -109,14 +109,14 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
 
     const listenPort = port ?? 0 // 0 = OS auto-assign
 
-    server.listen(listenPort, '127.0.0.1', () => {
+    server.listen(listenPort, LOCALHOST_ADDRESS, () => {
       const addr = server.address()
       if (!addr || typeof addr === 'string') {
         reject(new Error(ERR_AUTH_SERVER_START_FAILED))
         return
       }
 
-      const serverUrl = `http://127.0.0.1:${addr.port}`
+      const serverUrl = `http://${LOCALHOST_ADDRESS}:${addr.port}`
 
       const stop = (): void => {
         if (timeoutId) {

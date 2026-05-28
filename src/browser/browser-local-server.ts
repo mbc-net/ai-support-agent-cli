@@ -8,6 +8,7 @@
 
 import http from 'http'
 
+import { LOCALHOST_ADDRESS } from '../constants'
 import { logger } from '../logger'
 import { BrowserSessionManager } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
@@ -42,14 +43,14 @@ export class BrowserLocalServer {
         reject(err)
       })
 
-      // Bind to 127.0.0.1 only, port 0 = random available port
+      // Bind to LOCALHOST_ADDRESS only, port 0 = random available port
       server.unref()
-      server.listen(0, '127.0.0.1', () => {
+      server.listen(0, LOCALHOST_ADDRESS, () => {
         const addr = server.address()
         if (addr && typeof addr === 'object') {
           this.port = addr.port
           this.server = server
-          logger.info(`[browser-local-server] Listening on 127.0.0.1:${this.port}`)
+          logger.info(`[browser-local-server] Listening on ${LOCALHOST_ADDRESS}:${this.port}`)
           resolve(this.port)
         } else {
           reject(new Error('Failed to get server address'))
