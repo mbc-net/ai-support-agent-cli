@@ -15,7 +15,7 @@ import {
   buildOpenFolderDisableKeybindings,
   isZshShell,
 } from '../terminal/sandbox-init-script'
-import { getErrorMessage } from '../utils'
+import { getErrorMessage, readJsonSync } from '../utils'
 
 import {
   VSCODE_DEFAULT_PORT,
@@ -363,7 +363,7 @@ export class VsCodeServer {
     // 既存 settings.json があればマージ（profiles キーは deep merge）
     let existing: Record<string, unknown> = {}
     try {
-      existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+      existing = readJsonSync<Record<string, unknown>>(settingsPath)
     } catch {
       // ignore — file doesn't exist or is malformed
     }
