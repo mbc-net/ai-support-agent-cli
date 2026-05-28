@@ -86,7 +86,21 @@ export function resolveRotateOptions(opts: RotateOptions):
  * Lives outside the normal agent process tree so a crash in the agent
  * never strands the writer (it just sees EOF on stdin and exits).
  */
-function runLogRotate(filePath: string, opts: RotateOptions): void {
+/**
+ * Sink the tee writes its chunks to. Defaults to the real stdout but is
+ * injectable so tests can observe tee behaviour without spying on
+ * `process.stdout.write` — spying on / replacing `process.stdout.write` inside
+ * a test interferes with Jest's own reporter and hangs the Jest worker on CI.
+ */
+export interface TeeSink {
+  write(chunk: Buffer): void
+}
+
+function runLogRotate(
+  filePath: string,
+  opts: RotateOptions,
+  teeSink: TeeSink = process.stdout,
+): void {
   const resolved = resolveRotateOptions(opts)
   if (!resolved.ok) {
     logger.error(resolved.error)
@@ -107,7 +121,7 @@ function runLogRotate(filePath: string, opts: RotateOptions): void {
   process.stdin.on('data', (chunk: Buffer) => {
     try {
       writer.write(chunk)
-      if (teeEnabled) process.stdout.write(chunk)
+      if (teeEnabled) teeSink.write(chunk)
     } catch (error) {
       // A write error means the disk filled, perms changed, etc. Don't
       // crash the wrapper — fall back to passthrough so the agent's output
@@ -115,7 +129,7 @@ function runLogRotate(filePath: string, opts: RotateOptions): void {
       const message = getErrorMessage(error)
       logger.error(t('logRotate.writeFailed', { path: filePath, message }))
       exitCode = 1
-      if (teeEnabled) process.stdout.write(chunk)
+      if (teeEnabled) teeSink.write(chunk)
     }
   })
   process.stdin.on('end', stop)
@@ -128,7 +142,10 @@ function runLogRotate(filePath: string, opts: RotateOptions): void {
   process.on('SIGHUP', () => stop())
 }
 
-export function registerLogRotateCommand(program: Command): void {
+export function registerLogRotateCommand(
+  program: Command,
+  teeSink: TeeSink = process.stdout,
+): void {
   program
     .command('log-rotate')
     .description(t('cmd.logRotate'))
@@ -137,6 +154,6 @@ export function registerLogRotateCommand(program: Command): void {
     .option('--max-files <n>', t('cmd.logRotate.maxFiles'), `${DEFAULT_MAX_FILES}`)
     .option('--no-tee', t('cmd.logRotate.noTee'))
     .action((filePath: string, opts: RotateOptions) => {
-      runLogRotate(filePath, opts)
+      runLogRotate(filePath, opts, teeSink)
     })
 }

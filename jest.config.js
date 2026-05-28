@@ -1,5 +1,6 @@
 module.exports = {
   coverageProvider: 'babel',
+  forceExit: true,
   projects: [
     // Unit tests
     {
