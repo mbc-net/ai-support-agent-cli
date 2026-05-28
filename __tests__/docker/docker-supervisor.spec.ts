@@ -1239,27 +1239,39 @@ describe('DockerSupervisor', () => {
       const fakeChild = makeFakeChild()
       mockSpawn.mockReturnValue(fakeChild as never)
 
-      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
-      supervisor.start([makeProject()])
+      // Suppress direct process.stdout/stderr writes. This test emits 2.5 MB of log
+      // data that flows through the (mocked) line prefixer to process.stdout.write.
+      // Writing megabytes to a blocking pipe (as on CI runners) can wedge the Jest
+      // worker in an uninterruptible write() syscall, hanging the whole run.
+      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      const stderrWriteSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true)
 
-      // Emit 2.5 MB of data to exceed 2 MB limit
-      const largeChunk = 'x'.repeat(512 * 1024) // 512 KB per chunk
-
-      jest.useFakeTimers()
       try {
-        // Emit 5 chunks via flushTimer
-        for (let i = 0; i < 5; i++) {
-          fakeChild.stdout.emit('data', Buffer.from(largeChunk))
-          jest.advanceTimersByTime(1000) // trigger the flushTimer interval
-          await Promise.resolve()
-          await Promise.resolve()
-        }
+        const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+        supervisor.start([makeProject()])
 
-        fakeChild.emit('close', 0)
-        await Promise.resolve()
-        await Promise.resolve()
+        // Emit 2.5 MB of data to exceed 2 MB limit
+        const largeChunk = 'x'.repeat(512 * 1024) // 512 KB per chunk
+
+        jest.useFakeTimers()
+        try {
+          // Emit 5 chunks via flushTimer
+          for (let i = 0; i < 5; i++) {
+            fakeChild.stdout.emit('data', Buffer.from(largeChunk))
+            jest.advanceTimersByTime(1000) // trigger the flushTimer interval
+            await Promise.resolve()
+            await Promise.resolve()
+          }
+
+          fakeChild.emit('close', 0)
+          await Promise.resolve()
+          await Promise.resolve()
+        } finally {
+          jest.useRealTimers()
+        }
       } finally {
-        jest.useRealTimers()
+        stdoutWriteSpy.mockRestore()
+        stderrWriteSpy.mockRestore()
       }
 
       expect(logger.warn).toHaveBeenCalledWith(
