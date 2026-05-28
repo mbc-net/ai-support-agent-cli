@@ -12,6 +12,7 @@ import { getErrorMessage } from '../../utils'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import { buildDockerRunWithLogRotate } from './service-template-helpers'
 import type {
   ProjectStatus,
   ServiceConfig,
@@ -343,6 +344,19 @@ export function generateWrapperScript(opts: {
   ]
   if (opts.verbose) containerArgs.push(CLI_FLAG_VERBOSE)
 
+  const dockerRunBlock = buildDockerRunWithLogRotate({
+    buildDockerRun: (outputRedirect) => [
+      `docker run --rm -i --name ${qContainerName} \\`,
+      `  --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\`,
+      mountLines.join('\n'),
+      envLines.join('\n'),
+      `  "\$IMAGE_TAG" \\`,
+      `  ${containerArgs.join(' ')}${outputRedirect}`,
+    ].join('\n'),
+    logDir: opts.logDir,
+    supervisorLabel: 'systemd',
+  })
+
   return `#!/bin/bash
 set -uo pipefail
 
@@ -388,63 +402,7 @@ docker rm -f ${qContainerName} 2>/dev/null || true
 _DOCKER_UID=$(id -u)
 _DOCKER_GID=$(id -g)
 
-${opts.logDir ? `\
-# Pipe stdout and stderr through SEPARATE \`ai-support-agent log-rotate\`
-# subprocesses so the active log files are bounded (default 5MB × 5
-# generations) AND each stream lands in its own file (agent.out.log /
-# agent.err.log) — matching the pre-rotation layout that operators tail.
-#
-# Both rotators are invoked with \`--no-tee\` so they DO NOT echo back to
-# stdout/stderr. The systemd unit's StandardOutput/Error is pointed at
-# separate wrapper.*.log files (NOT the agent.*.log paths owned by the
-# rotators), so we don't get a double-write race where systemd silently
-# keeps appending to a rotated generation.
-#
-# Process substitution \`> >(cmd)\` / \`2> >(cmd)\` is bash-only; the
-# shebang at line 1 (\`#!/bin/bash\`) guarantees it.
-# Stream stdout/stderr to background rotator subprocesses via named FIFOs
-# so we have EXPLICIT PIDs to wait on. Process substitution (\`> >(cmd)\`)
-# is simpler but its children are not in the job table on bash 3.2
-# (macOS's /bin/bash) — bare \`wait\` returns immediately, allowing the
-# service-stop signal to SIGKILL the rotator mid-flush and lose the last
-# few KB of logs. Background jobs started with \`&\` set \$! reliably on
-# every supported bash, so this layout is portable.
-_ROT_DIR=$(mktemp -d -t ai-support-agent-rot.XXXXXX)
-trap 'rm -rf "\$_ROT_DIR" 2>/dev/null || true' EXIT
-mkfifo "\$_ROT_DIR/out" "\$_ROT_DIR/err"
-ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.out.log`)} < "\$_ROT_DIR/out" &
-_ROT_OUT_PID=$!
-ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.err.log`)} < "\$_ROT_DIR/err" >&2 &
-_ROT_ERR_PID=$!
-
-docker run --rm -i --name ${qContainerName} \\
-  --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\
-${mountLines.join('\n')}
-${envLines.join('\n')}
-  "\$IMAGE_TAG" \\
-  ${containerArgs.join(' ')} \\
-   > "\$_ROT_DIR/out" 2> "\$_ROT_DIR/err"
-
-# Redirecting to a FIFO does not propagate the rotator's exit into \$?,
-# so EXIT_CODE is purely docker's exit status. The exit-42 update path is
-# preserved (the rotator can never mask it).
-EXIT_CODE=$?
-
-# Wait on the rotators explicitly so they drain their FIFO before the
-# wrapper exits (service supervisor will SIGKILL stragglers otherwise).
-# docker closed its write end on exit, so each rotator sees EOF on stdin
-# and exits naturally; the wait is bounded by pipe-buffer drain time.
-wait "\$_ROT_OUT_PID" "\$_ROT_ERR_PID" 2>/dev/null || true
-` : `\
-docker run --rm -i --name ${qContainerName} \\
-  --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\
-${mountLines.join('\n')}
-${envLines.join('\n')}
-  "\$IMAGE_TAG" \\
-  ${containerArgs.join(' ')}
-
-EXIT_CODE=$?
-`}
+${dockerRunBlock}
 if [ "$EXIT_CODE" -eq 42 ]; then
   exec ${qUpdateScriptPath}
 fi
