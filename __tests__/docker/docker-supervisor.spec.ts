@@ -1800,11 +1800,159 @@ describe('DockerSupervisor', () => {
     })
   })
 
-  // Note: rebuildAndRestart line 173 (shouldBuild=true but no Dockerfile) and line 191
-  // (error message truncation) are covered indirectly via the integration tests above.
-  // Direct tests for these branches cause setInterval-based log flush loops that hang
-  // the Jest worker when fakeTimers interact with the supervisor's internal flush timer.
+  // ─── rebuildAndRestart: shouldBuild=true but no Dockerfile ──────────────────
 
+  describe('rebuildAndRestart: marker exists but no Dockerfile (line 173 false branch)', () => {
+    it('skips build and calls spawnProject directly when marker exists but no Dockerfile', async () => {
+      mockExistsSync.mockReset()
+      mockReadFileSync.mockReset()
+      mockUnlinkSync.mockReset()
+      mockReadFileSync.mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      // Only docker-rebuild-needed exists; Dockerfile does NOT exist
+      // This exercises the false branch of `if (fs.existsSync(projectDockerfile))` (line 173)
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return s.endsWith('docker-rebuild-needed') &&
+          !s.endsWith('Dockerfile') &&
+          !s.endsWith('docker-registered-agent-id') &&
+          !s.endsWith('docker-customization-hash') &&
+          !s.endsWith('docker-built-hash')
+      })
+
+      const fakeChild1 = makeFakeChild()
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      // Build should NOT be called (no Dockerfile)
+      expect(mockBuildProjectImage).not.toHaveBeenCalled()
+      // But marker should be deleted (hasMarker=true → unlinkSync)
+      expect(mockUnlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('docker-rebuild-needed'),
+      )
+      // spawnProject is still called (initial + restart)
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  // ─── rebuildAndRestart: error message > 3000 chars (line 191) ────────────────
+
+  describe('rebuildAndRestart: long error message truncation (line 191)', () => {
+    it('truncates error message when longer than 3000 characters', async () => {
+      mockExistsSync.mockReset()
+      mockReadFileSync.mockReset()
+      mockUnlinkSync.mockReset()
+      mockReadFileSync.mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      // Dockerfile exists (marker too) so build is triggered
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return (s.endsWith('docker-rebuild-needed') || s.endsWith('Dockerfile')) &&
+          !s.endsWith('docker-registered-agent-id') &&
+          !s.endsWith('docker-customization-hash') &&
+          !s.endsWith('docker-built-hash')
+      })
+
+      // Throw an error message longer than 3000 chars
+      const longErrorMsg = 'x'.repeat(3500)
+      mockBuildProjectImage.mockRejectedValueOnce(new Error(longErrorMsg))
+
+      const fakeChild1 = makeFakeChild()
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
+
+      const { writeFileSync } = require('fs') as typeof import('fs')
+      const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      // writeFileSync should have been called with the truncated error (3000 chars + '...(truncated)')
+      // (the /* istanbul ignore next */ try/catch wraps it but the inner call is covered)
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('[docker] Image build failed'),
+      )
+      // The error message sent to writeFileSync should be at most 3000 + '...(truncated)'.length
+      const writeCallArgs = mockWriteFileSync.mock.calls.find(
+        (call) => typeof call[1] === 'string' && (call[1] as string).includes('...(truncated)'),
+      )
+      expect(writeCallArgs).toBeDefined()
+      expect((writeCallArgs![1] as string).length).toBe(3000 + '...(truncated)'.length)
+    })
+  })
+
+  // ─── close handler: onAllStopped callback + null exit code ───────────────────
+
+  describe('close handler: onAllStopped and null exit code', () => {
+    it('calls onAllStopped callback when all containers exit cleanly', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockExistsSync.mockReturnValue(false)
+
+      const onAllStopped = jest.fn()
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      // Access onAllStopped via the start method's optional parameter
+      // We need to trigger the `this.onAllStopped?.()` call by having all containers exit.
+      // The onAllStopped is set internally via `this.onAllStopped = onStop` in start().
+      // However, the close handler calls `this.onAllStopped?.()` not `onStop`.
+      // We use the fact that start() sets `this.onAllStopped = onStop` (private field).
+      // We pass onAllStopped as a stand-in for onStop, but since it's the SIGINT/SIGTERM
+      // callback in the tests above, we need a different approach here.
+      //
+      // The `onAllStopped` in the close handler is this.onAllStopped which is set from
+      // the start() parameter. But start() sets `this.onAllStopped = onStop` ONLY if
+      // onStop is passed. Looking at the code:
+      //   start(projects, onStop) { this.onAllStopped = onStop; ... }
+      // The onStop in the close handler is accessed via `this.onAllStopped?.()`.
+      // To cover this, pass an onStop to start() and then let all containers exit.
+      //
+      // Note: the onStop callback in shutdown() is different from onAllStopped in the close handler.
+      // In shutdown(), `onStop?.()` is called. In the close handler, `this.onAllStopped?.()` is called.
+      // Both are set from the start() `onStop` parameter.
+
+      supervisor.start([makeProject()], onAllStopped)
+
+      fakeChild.emit('close', 0)
+
+      expect(onAllStopped).toHaveBeenCalled()
+      expect(mockExit).toHaveBeenCalledWith(0)
+    })
+
+    it('calls process.exit(0) when container exits with null code', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockExistsSync.mockReturnValue(false)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      // Emit close with null exit code → `process.exit(code ?? 0)` → process.exit(0)
+      fakeChild.emit('close', null)
+
+      expect(mockExit).toHaveBeenCalledWith(0)
+    })
+  })
 
   // Note: log streaming lines 330 (logTruncated=true re-entry) and 335 (remaining <= 0)
   // cannot be tested directly: jest.useFakeTimers() freezes the supervisor's internal
