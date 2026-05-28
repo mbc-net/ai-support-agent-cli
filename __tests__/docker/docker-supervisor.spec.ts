@@ -182,6 +182,7 @@ describe('DockerSupervisor', () => {
   })
 
   afterEach(() => {
+    jest.useRealTimers()
     mockExit.mockRestore()
     process.removeAllListeners('SIGINT')
     process.removeAllListeners('SIGTERM')
@@ -339,6 +340,7 @@ describe('DockerSupervisor', () => {
     })
 
     it('calls onStop callback when SIGINT is received', () => {
+      jest.useFakeTimers()
       const fakeChild = makeFakeChild()
       mockSpawn.mockReturnValue(fakeChild as never)
 
@@ -360,6 +362,7 @@ describe('DockerSupervisor', () => {
     })
 
     it('does not call onStop twice when shutdown triggered twice', () => {
+      jest.useFakeTimers()
       const fakeChild = makeFakeChild()
       mockSpawn.mockReturnValue(fakeChild as never)
 
@@ -625,15 +628,22 @@ describe('DockerSupervisor', () => {
     })
 
     it('triggers rebuildAndRestart when exit code is DOCKER_RESTART_EXIT_CODE (43)', async () => {
-      const fakeChild = makeFakeChild()
-      mockSpawn.mockReturnValue(fakeChild as never)
+      const fakeChild1 = makeFakeChild()
+      // fakeChild2 never emits 'close' to avoid infinite rebuild loop
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
 
       const supervisor = new DockerSupervisor('1.0.0', makeOpts())
       supervisor.start([makeProject()])
 
-      fakeChild.emit('close', 43)
+      fakeChild1.emit('close', 43)
       await Promise.resolve()
       await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
 
       // rebuildAndRestart will eventually call spawnProject again
       // mockBuildProjectImage shows that no build was triggered (no Dockerfile)
@@ -743,15 +753,22 @@ describe('DockerSupervisor', () => {
       // Trigger restart via exit code 43 (no Dockerfile present)
       mockExistsSync.mockReturnValue(false)
 
-      const fakeChild = makeFakeChild()
-      mockSpawn.mockReturnValue(fakeChild as never)
+      const fakeChild1 = makeFakeChild()
+      // fakeChild2 never emits 'close' to avoid infinite rebuild loop
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
 
       const supervisor = new DockerSupervisor('1.0.0', makeOpts())
       supervisor.start([makeProject()])
 
-      fakeChild.emit('close', 43)
+      fakeChild1.emit('close', 43)
       await Promise.resolve()
       await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
 
       expect(mockBuildProjectImage).not.toHaveBeenCalled()
       // Spawned twice: initial + restart
@@ -958,6 +975,7 @@ describe('DockerSupervisor', () => {
     })
 
     it('calls stopAll on all containers when SIGTERM is received', () => {
+      jest.useFakeTimers()
       const fakeChild1 = makeFakeChild()
       const fakeChild2 = makeFakeChild()
       let callNum = 0
