@@ -96,7 +96,10 @@ describe('AlertProcessor', () => {
 
     it('should not throw when updateAlertStatus fails on alert-not-found path', async () => {
       mockClient.getAlert.mockResolvedValue(null)
-      mockClient.updateAlertStatus.mockRejectedValue(new Error('Network error'))
+      // First call (processing) succeeds; second call (failed status) rejects
+      mockClient.updateAlertStatus
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('Network error'))
 
       await expect(processor.processAlert('AL000001')).resolves.not.toThrow()
     })
@@ -174,6 +177,16 @@ describe('AlertProcessor', () => {
         'tenant1', 'MBC_01', 'AL000001',
         expect.objectContaining({ status: 'failed', failureReason: 'Network error' }),
       )
+    })
+
+    it('should not throw when updateAlertStatus fails in outer catch block', async () => {
+      mockClient.getAlert.mockRejectedValue(new Error('DB error'))
+      // First call (processing) succeeds; second call in catch block rejects
+      mockClient.updateAlertStatus
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('Status update failed'))
+
+      await expect(processor.processAlert('AL000001')).resolves.not.toThrow()
     })
   })
 
@@ -263,6 +276,30 @@ describe('AlertProcessor - buildPriorityPrompt (via determinePriority)', () => {
     await processor.processAlert('AL000001')
 
     expect(capturedPrompts[0]).toContain('（なし）')
+
+    process.env.ANTHROPIC_API_KEY = originalKey
+  })
+
+  it('should handle null namespace and metricName in prompt', async () => {
+    const originalKey = process.env.ANTHROPIC_API_KEY
+    process.env.ANTHROPIC_API_KEY = 'test-key'
+
+    const mockClient = createMockClient()
+    const processor = new AlertProcessor(mockClient as never, 'tenant1', 'MBC_01')
+
+    const alertNoMetrics = { ...mockAlert, namespace: null, metricName: null }
+    mockClient.getAlert.mockResolvedValue(alertNoMetrics)
+
+    const capturedPrompts: string[] = []
+    mockedAxios.post = jest.fn().mockImplementation((_url, body) => {
+      capturedPrompts.push(body.messages[0].content)
+      return Promise.resolve({ data: { content: [{ text: 'medium' }] } })
+    })
+
+    await processor.processAlert('AL000001')
+
+    // When namespace/metricName are null, the prompt should use empty strings
+    expect(capturedPrompts[0]).toContain('メトリクス: /')
 
     process.env.ANTHROPIC_API_KEY = originalKey
   })
