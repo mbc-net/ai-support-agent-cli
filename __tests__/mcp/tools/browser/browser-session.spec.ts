@@ -7,7 +7,15 @@ jest.mock('../../../../src/mcp/tools/browser/playwright-loader', () => ({
 
 jest.mock('../../../../src/logger')
 
+jest.mock('../../../../src/mcp/tools/browser/element-info', () => ({
+  getElementAtPoint: jest.fn(),
+  getFocusedElementInfo: jest.fn(),
+}))
+
 import { loadPlaywright } from '../../../../src/mcp/tools/browser/playwright-loader'
+import { getFocusedElementInfo } from '../../../../src/mcp/tools/browser/element-info'
+
+const mockGetFocusedElementInfo = getFocusedElementInfo as jest.MockedFunction<typeof getFocusedElementInfo>
 
 const mockLoadPlaywright = loadPlaywright as jest.MockedFunction<typeof loadPlaywright>
 
@@ -20,6 +28,9 @@ describe('BrowserSession', () => {
   beforeEach(() => {
     jest.useFakeTimers()
 
+    // Default: no focused element
+    mockGetFocusedElementInfo.mockResolvedValue(null)
+
     mockPage = {
       goto: jest.fn().mockResolvedValue(undefined),
       title: jest.fn().mockResolvedValue('Test Page'),
@@ -30,6 +41,10 @@ describe('BrowserSession', () => {
       addInitScript: jest.fn().mockResolvedValue(undefined),
       reload: jest.fn().mockResolvedValue(undefined),
       viewportSize: jest.fn().mockReturnValue({ width: 1280, height: 720 }),
+      keyboard: {
+        type: jest.fn().mockResolvedValue(undefined),
+        press: jest.fn().mockResolvedValue(undefined),
+      },
     }
 
     mockContext = {
@@ -363,6 +378,79 @@ describe('BrowserSession', () => {
       expect(mockPage.setViewportSize).toHaveBeenCalledWith({ width: 1024, height: 768 })
       // No context recreation for unknown device
       expect(mockBrowser.newContext).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('executeKeyboardType', () => {
+    it('should log fill action when focused element is an input', async () => {
+      mockGetFocusedElementInfo.mockResolvedValue({
+        tagName: 'input',
+        selector: '#username',
+        text: '',
+        attributes: {},
+        isVisible: true,
+        boundingBox: null,
+      })
+
+      const session = new BrowserSession()
+      await session.getPage()
+
+      await session.executeKeyboardType('hello')
+
+      expect(mockPage.keyboard.type).toHaveBeenCalledWith('hello')
+    })
+
+    it('should log fill action when focused element is a textarea', async () => {
+      mockGetFocusedElementInfo.mockResolvedValue({
+        tagName: 'textarea',
+        selector: '#message',
+        text: '',
+        attributes: {},
+        isVisible: true,
+        boundingBox: null,
+      })
+
+      const session = new BrowserSession()
+      await session.getPage()
+
+      await session.executeKeyboardType('world')
+
+      expect(mockPage.keyboard.type).toHaveBeenCalledWith('world')
+    })
+
+    it('should log type action when focused element is not fillable', async () => {
+      mockGetFocusedElementInfo.mockResolvedValue({
+        tagName: 'div',
+        selector: '#editor',
+        text: '',
+        attributes: {},
+        isVisible: true,
+        boundingBox: null,
+      })
+
+      const session = new BrowserSession()
+      await session.getPage()
+
+      await session.executeKeyboardType('some text')
+
+      expect(mockPage.keyboard.type).toHaveBeenCalledWith('some text')
+    })
+
+    it('should log type action when no element is focused', async () => {
+      mockGetFocusedElementInfo.mockResolvedValue(null)
+
+      const session = new BrowserSession()
+      await session.getPage()
+
+      await session.executeKeyboardType('typing freely')
+
+      expect(mockPage.keyboard.type).toHaveBeenCalledWith('typing freely')
+    })
+
+    it('should throw when no active page', async () => {
+      const session = new BrowserSession()
+      // Don't call getPage() — no active page
+      await expect(session.executeKeyboardType('text')).rejects.toThrow('No active browser page')
     })
   })
 
