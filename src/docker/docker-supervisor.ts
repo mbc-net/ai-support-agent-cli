@@ -375,7 +375,7 @@ export class DockerSupervisor {
     }
 
     child.on('error', (err) => {
-      logger.error(`[docker] Container error for ${key}: ${err.message}`)
+      logger.error(`[docker] Container error for ${key}: ${getErrorMessage(err)}`)
     })
 
     child.on('close', (code) => {

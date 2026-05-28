@@ -3,6 +3,7 @@ import type { Command } from 'commander'
 import { t } from '../i18n'
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_FILES, RotatingFileWriter } from '../log-rotator'
 import { logger } from '../logger'
+import { getErrorMessage } from '../utils'
 
 /**
  * Parse a human-readable size literal (`5MB`, `1024`, `5KB`) into bytes.
@@ -125,7 +126,7 @@ function runLogRotate(
       // A write error means the disk filled, perms changed, etc. Don't
       // crash the wrapper — fall back to passthrough so the agent's output
       // still reaches systemd/launchd's StandardOutput. Log once.
-      const message = error instanceof Error ? error.message : String(error)
+      const message = getErrorMessage(error)
       logger.error(t('logRotate.writeFailed', { path: filePath, message }))
       exitCode = 1
       if (teeEnabled) teeSink.write(chunk)

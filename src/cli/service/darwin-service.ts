@@ -9,6 +9,7 @@ import type { ProjectStatus } from './types'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { getErrorMessage } from '../../utils'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
@@ -602,7 +603,7 @@ export function installAndStartProject(
   try {
     execSync(`launchctl load "${plistPath}"`, { stdio: 'pipe' })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = getErrorMessage(error)
     logger.warn(t('service.loadWarning', { label: `${label}: ${message}` }))
     return
   }
@@ -684,7 +685,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
         logger.success(t('service.projectInstalled', { projectCode, path: plistPath }))
         installedCount += 1
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.projectInstallFailed', { projectCode, message }))
         failedCount += 1
       }
@@ -744,7 +745,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       try {
         execSync(`launchctl load "${plistPath}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.startFailed', { message }))
         failed = true
       }
@@ -767,7 +768,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       try {
         execSync(`launchctl remove "${label}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.stopFailed', { message }))
         failed = true
       }
@@ -795,7 +796,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
         }
         execSync(`launchctl load "${plistPath}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.restartFailed', { message }))
         failed = true
       }

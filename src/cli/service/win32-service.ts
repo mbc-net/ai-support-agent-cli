@@ -5,6 +5,7 @@ import * as path from 'path'
 
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { getErrorMessage } from '../../utils'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
@@ -82,7 +83,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
         stdio: 'pipe',
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = getErrorMessage(error)
       logger.error(t('service.schtasksFailed', { message }))
       return
     } finally {
@@ -110,7 +111,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
     try {
       execSync(`schtasks /Delete /TN "${TASK_NAME}" /F`, { stdio: 'pipe' })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = getErrorMessage(error)
       logger.error(t('service.schtasksFailed', { message }))
       return
     }
@@ -130,7 +131,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
       execSync(`schtasks /Run /TN "${TASK_NAME}"`, { stdio: 'pipe' })
       logger.success(t('service.started'))
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = getErrorMessage(error)
       logger.error(t('service.startFailed', { message }))
     }
   }
@@ -147,7 +148,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
       execSync(`schtasks /End /TN "${TASK_NAME}"`, { stdio: 'pipe' })
       logger.success(t('service.stopped'))
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = getErrorMessage(error)
       logger.error(t('service.stopFailed', { message }))
     }
   }
@@ -170,7 +171,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
       execSync(`schtasks /Run /TN "${TASK_NAME}"`, { stdio: 'pipe' })
       logger.success(t('service.restarted'))
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = getErrorMessage(error)
       logger.error(t('service.restartFailed', { message }))
     }
   }
