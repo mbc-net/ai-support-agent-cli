@@ -9,6 +9,7 @@
 import http from 'http'
 
 import { logger } from '../logger'
+import type { BrowserSession } from '../mcp/tools/browser/browser-session'
 import { BrowserSessionManager } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
 import { tryClickSelectors, tryFillSelectors } from '../mcp/tools/browser/selector-utils'
@@ -175,8 +176,7 @@ export class BrowserLocalServer {
    * for chat operations via BrowserLocalServer we use onActionLog to
    * ensure delivery even before the Web browser panel is connected.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private emitActionLog(sessionId: string, session: any, action: string, details: string): void {
+  private emitActionLog(sessionId: string, session: BrowserSession, action: string, details: string): void {
     const entry = { timestamp: Date.now(), source: 'chat' as const, action, details }
     // Add to log without triggering onChange (to avoid double notification)
     session.actionLog.addEntry(entry)
@@ -185,8 +185,7 @@ export class BrowserLocalServer {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async handleNavigate(res: http.ServerResponse, sessionId: string, session: any, params: Record<string, unknown>): Promise<void> {
+  private async handleNavigate(res: http.ServerResponse, sessionId: string, session: BrowserSession, params: Record<string, unknown>): Promise<void> {
     const url = params.url as string
     if (!url) {
       sendJson(res, 400, { error: 'Missing url' })
@@ -212,7 +211,7 @@ export class BrowserLocalServer {
 
     const title: string = await page.title()
     const currentUrl: string = page.url()
-    const screenshotBuffer = await session.screenshot(params.fullPage ?? true)
+    const screenshotBuffer = await session.screenshot((params.fullPage as boolean | undefined) ?? true)
     const base64 = screenshotBuffer.toString('base64')
 
     this.emitActionLog(sessionId, session, 'navigate', url)
@@ -220,8 +219,7 @@ export class BrowserLocalServer {
     sendJson(res, 200, { title, url: currentUrl, screenshot: base64 })
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async handleClick(res: http.ServerResponse, sessionId: string, session: any, params: Record<string, unknown>): Promise<void> {
+  private async handleClick(res: http.ServerResponse, sessionId: string, session: BrowserSession, params: Record<string, unknown>): Promise<void> {
     const selector = params.selector as string
     if (!selector) {
       sendJson(res, 400, { error: 'Missing selector' })
@@ -246,8 +244,7 @@ export class BrowserLocalServer {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async handleFill(res: http.ServerResponse, sessionId: string, session: any, params: Record<string, unknown>): Promise<void> {
+  private async handleFill(res: http.ServerResponse, sessionId: string, session: BrowserSession, params: Record<string, unknown>): Promise<void> {
     const selector = params.selector as string
     const value = params.value as string
     if (!selector || value === undefined) {
@@ -269,8 +266,7 @@ export class BrowserLocalServer {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async handleGetText(res: http.ServerResponse, sessionId: string, session: any, params: Record<string, unknown>): Promise<void> {
+  private async handleGetText(res: http.ServerResponse, sessionId: string, session: BrowserSession, params: Record<string, unknown>): Promise<void> {
     const page = await session.getPage()
     const target = (params.selector as string) ?? 'body'
     const text: string = await page.locator(target).innerText({ timeout: 10000 })
@@ -282,8 +278,7 @@ export class BrowserLocalServer {
     sendJson(res, 200, { text: truncated })
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async handleExtract(res: http.ServerResponse, sessionId: string, session: any, params: Record<string, unknown>): Promise<void> {
+  private async handleExtract(res: http.ServerResponse, sessionId: string, session: BrowserSession, params: Record<string, unknown>): Promise<void> {
     const selector = params.selector as string
     const variableName = params.variableName as string
     if (!selector || !variableName) {
@@ -305,26 +300,22 @@ export class BrowserLocalServer {
     sendJson(res, 200, { text: truncated })
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async handleScreenshot(res: http.ServerResponse, session: any, params: Record<string, unknown>): Promise<void> {
-    const screenshotBuffer = await session.screenshot(params.fullPage ?? true)
+  private async handleScreenshot(res: http.ServerResponse, session: BrowserSession, params: Record<string, unknown>): Promise<void> {
+    const screenshotBuffer = await session.screenshot((params.fullPage as boolean | undefined) ?? true)
     const base64 = screenshotBuffer.toString('base64')
     sendJson(res, 200, { screenshot: base64 })
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private handleGetUrl(res: http.ServerResponse, session: any): void {
+  private handleGetUrl(res: http.ServerResponse, session: BrowserSession): void {
     sendJson(res, 200, { url: session.getCurrentUrl() })
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async handleGetTitle(res: http.ServerResponse, session: any): Promise<void> {
+  private async handleGetTitle(res: http.ServerResponse, session: BrowserSession): Promise<void> {
     const title = await session.getPageTitle()
     sendJson(res, 200, { title })
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private handleGetVariable(res: http.ServerResponse, sessionId: string, session: any, name: string): void {
+  private handleGetVariable(res: http.ServerResponse, sessionId: string, session: BrowserSession, name: string): void {
     const value = session.variables.get(name)
     if (value === undefined) {
       sendJson(res, 404, { error: `Variable not found: ${name}` })
@@ -334,8 +325,7 @@ export class BrowserLocalServer {
     sendJson(res, 200, { name, value })
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async handleSetVariable(res: http.ServerResponse, sessionId: string, session: any, params: Record<string, unknown>): Promise<void> {
+  private async handleSetVariable(res: http.ServerResponse, sessionId: string, session: BrowserSession, params: Record<string, unknown>): Promise<void> {
     const name = params.name as string
     const value = params.value as string
     if (!name || value === undefined) {
@@ -347,8 +337,7 @@ export class BrowserLocalServer {
     sendJson(res, 200, { ok: true })
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async handleExecuteScript(res: http.ServerResponse, sessionId: string, session: any, params: Record<string, unknown>): Promise<void> {
+  private async handleExecuteScript(res: http.ServerResponse, sessionId: string, session: BrowserSession, params: Record<string, unknown>): Promise<void> {
     const script = params.script as string
     if (!script) {
       sendJson(res, 400, { error: 'Missing script' })
@@ -368,8 +357,7 @@ export class BrowserLocalServer {
     sendJson(res, 200, result)
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private handleListVariables(res: http.ServerResponse, session: any): void {
+  private handleListVariables(res: http.ServerResponse, session: BrowserSession): void {
     const entries = Array.from(session.variables.entries()) as [string, string][]
     sendJson(res, 200, { variables: Object.fromEntries(entries) })
   }
