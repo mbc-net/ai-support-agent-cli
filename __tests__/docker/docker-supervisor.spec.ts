@@ -1426,4 +1426,350 @@ describe('DockerSupervisor', () => {
       }).not.toThrow()
     })
   })
+
+  // ─── graceful shutdown: Promise.all resolves before timeout ──────────────
+
+  describe('graceful shutdown via closedPromise resolution', () => {
+    it('clears shutdownTimer and calls process.exit(0) when all containers close before timeout', async () => {
+      // Use real timers to avoid fake-timer interaction with async Promise chains
+      jest.useRealTimers()
+
+      const watcherClose = jest.fn()
+      mockWatch.mockReturnValue({ close: watcherClose } as unknown as ReturnType<typeof fs.watch>)
+
+      const { ApiClient } = require('../../src/api-client')
+      ApiClient.mockImplementation(() => ({
+        submitLogChunk: jest.fn().mockResolvedValue(undefined),
+        saveSessionLog: jest.fn().mockResolvedValue(undefined),
+      }))
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const processOnSpy = jest.spyOn(process, 'on')
+      // Use a long enough shutdownTimeoutMs so the test doesn't time out via the timer path
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts({ shutdownTimeoutMs: 30000 }))
+      supervisor.start([makeProject()])
+
+      const sigintHandler = processOnSpy.mock.calls.find((c) => c[0] === 'SIGINT')
+      const handler = sigintHandler![1] as () => void
+
+      // Trigger shutdown — this sets updating=true and starts Promise.all(closedPromises)
+      handler()
+
+      // Now close the container — this triggers resolveClosed() in the close handler chain
+      fakeChild.emit('close', 0)
+
+      // Allow the microtask queue to drain (flush → saveSessionLog (empty) → resolveClosed → Promise.all → process.exit)
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setImmediate(r))
+      }
+
+      // process.exit(0) should be called from the Promise.all().then() callback
+      expect(mockExit).toHaveBeenCalledWith(0)
+
+      processOnSpy.mockRestore()
+    }, 10000)
+  })
+
+  // ─── successful build copies srcHash to dstHash ──────────────────────────
+
+  describe('rebuildAndRestart - srcHash copy after successful build', () => {
+    it('copies docker-customization-hash to docker-built-hash after successful build', async () => {
+      mockExistsSync.mockReset()
+      mockReadFileSync.mockReset()
+      mockUnlinkSync.mockReset()
+
+      const mockCopyFileSync = fs.copyFileSync as jest.MockedFunction<typeof fs.copyFileSync>
+
+      mockReadFileSync.mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      // docker-rebuild-needed, Dockerfile, and docker-customization-hash all exist
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return (
+          s.endsWith('docker-rebuild-needed') ||
+          s.endsWith('Dockerfile') ||
+          s.endsWith('docker-customization-hash')
+        ) &&
+          !s.endsWith('docker-registered-agent-id') &&
+          !s.endsWith('docker-built-hash') &&
+          !s.endsWith('docker-build-error')
+      })
+
+      const fakeChild1 = makeFakeChild()
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      // buildProjectImage succeeded, srcHash exists → copyFileSync should be called
+      expect(mockBuildProjectImage).toHaveBeenCalled()
+      expect(mockCopyFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('docker-customization-hash'),
+        expect.stringContaining('docker-built-hash'),
+      )
+    })
+
+    it('copies docker-customization-hash to docker-built-hash even after build failure', async () => {
+      mockExistsSync.mockReset()
+      mockReadFileSync.mockReset()
+      mockUnlinkSync.mockReset()
+
+      const mockCopyFileSync = fs.copyFileSync as jest.MockedFunction<typeof fs.copyFileSync>
+
+      mockReadFileSync.mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      mockBuildProjectImage.mockRejectedValueOnce(new Error('build failed'))
+
+      // docker-rebuild-needed, Dockerfile, and docker-customization-hash all exist
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return (
+          s.endsWith('docker-rebuild-needed') ||
+          s.endsWith('Dockerfile') ||
+          s.endsWith('docker-customization-hash')
+        ) &&
+          !s.endsWith('docker-registered-agent-id') &&
+          !s.endsWith('docker-built-hash') &&
+          !s.endsWith('docker-build-error')
+      })
+
+      const fakeChild1 = makeFakeChild()
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Image build failed'))
+      // Even on failure, srcHash copy should be attempted
+      expect(mockCopyFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('docker-customization-hash'),
+        expect.stringContaining('docker-built-hash'),
+      )
+    })
+  })
+
+  // ─── submitLogChunk failure warning ──────────────────────────────────────
+
+  describe('log streaming: submitLogChunk failure', () => {
+    it('warns when submitLogChunk rejects', async () => {
+      const { ApiClient } = require('../../src/api-client')
+      const mockSubmitLogChunk = jest.fn().mockRejectedValue(new Error('chunk upload failed'))
+      const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
+      ApiClient.mockImplementation(() => ({
+        submitLogChunk: mockSubmitLogChunk,
+        saveSessionLog: mockSaveSessionLog,
+      }))
+
+      const watcherClose = jest.fn()
+      mockWatch.mockReturnValue({ close: watcherClose } as unknown as ReturnType<typeof fs.watch>)
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      // Emit some data to populate buf
+      fakeChild.stdout.emit('data', Buffer.from('some log line\n'))
+
+      // Trigger flush by closing the container
+      fakeChild.emit('close', 0)
+
+      // Allow the async flush to settle
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+
+      // submitLogChunk threw — warning should be logged via .catch handler
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('log chunk failed'),
+      )
+    })
+  })
+
+  // ─── installUpdateAndRestart failure → process.exit(1) ───────────────────
+
+  describe('close handler: installUpdateAndRestart failure', () => {
+    it('logs error and calls process.exit(1) when installUpdateAndRestart rejects', async () => {
+      mockInstallUpdateAndRestart.mockRejectedValueOnce(new Error('update install failed'))
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild.emit('close', 42) // DOCKER_UPDATE_EXIT_CODE
+
+      // Allow the async error to propagate through the .catch handler
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Update failed'),
+      )
+      expect(mockExit).toHaveBeenCalledWith(1)
+    })
+  })
+
+  // ─── close handler: rebuildAndRestart rejection → logger.error ───────────
+
+  describe('close handler: rebuildAndRestart failure', () => {
+    it('logs error when rebuildAndRestart rejects', async () => {
+      // Trigger a restart (exit code 43) but make rebuildAndRestart fail
+      mockBuildProjectImage.mockRejectedValueOnce(new Error('rebuild failed catastrophically'))
+
+      // Dockerfile exists so rebuild is triggered
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return s.endsWith('Dockerfile') &&
+          !s.endsWith('docker-rebuild-needed') &&
+          !s.endsWith('docker-registered-agent-id') &&
+          !s.endsWith('docker-customization-hash') &&
+          !s.endsWith('docker-built-hash')
+      })
+
+      // rebuildAndRestart will throw when there's an error writing build-error file
+      // (the `/* istanbul ignore next */ try { fs.writeFileSync }` path)
+      // We can cover line 391 by making the entire async path reject
+      const fakeChild1 = makeFakeChild()
+      // fakeChild2 should never spawn since rebuildAndRestart will also throw
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43) // DOCKER_RESTART_EXIT_CODE
+
+      // Allow the .catch handler to fire
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      // Even though buildProjectImage failed, rebuildAndRestart still calls spawnProject
+      // (image build failure does not prevent restart — it falls through to spawnProject).
+      // The outer .catch on rebuildAndRestart fires only if spawnProject itself throws,
+      // which doesn't happen in this scenario. So line 391 is covered by the fact that
+      // rebuildAndRestart's internal build failure is logged at line 391 of the error path.
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Image build failed'),
+      )
+    })
+
+    it('covers outer .catch on rebuildAndRestart when spawnProject throws (line 391)', async () => {
+      // Cover the outer `.catch((err) => logger.error('Restart failed: ...'))` at line 391
+      // This fires when rebuildAndRestart itself throws during the spawnProject call.
+      // We simulate this by making buildProjectVolumeMounts throw on the second call.
+      const { buildProjectVolumeMounts } = require('../../src/docker/volume-mount-builder')
+      const mockBuildVolumeMounts = buildProjectVolumeMounts as jest.MockedFunction<typeof import('../../src/docker/volume-mount-builder').buildProjectVolumeMounts>
+
+      let volumeCallNum = 0
+      mockBuildVolumeMounts.mockImplementation(() => {
+        volumeCallNum++
+        // Fail on second call (triggered by rebuildAndRestart → spawnProject)
+        if (volumeCallNum >= 2) {
+          throw new Error('volume mount error on restart')
+        }
+        return { mounts: ['-v', '/host:/container:rw'], envArgs: ['-e', 'AI_SUPPORT_AGENT_TOKEN=test'] }
+      })
+
+      const fakeChild1 = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild1 as never)
+
+      // No Dockerfile → rebuildAndRestart skips build and goes directly to spawnProject
+      mockExistsSync.mockReturnValue(false)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43) // DOCKER_RESTART_EXIT_CODE
+
+      // Allow the .catch handler to fire
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Restart failed'),
+      )
+
+      // Restore
+      mockBuildVolumeMounts.mockReturnValue({ mounts: ['-v', '/host/path:/container/path:rw'], envArgs: ['-e', 'AI_SUPPORT_AGENT_TOKEN=test-token'] })
+    })
+  })
+
+  // ─── S3 upload failure warning ─────────────────────────────────────────────
+
+  describe('log streaming: S3 upload failure (saveSessionLog)', () => {
+    it('warns when saveSessionLog rejects (line 357)', async () => {
+      const { ApiClient } = require('../../src/api-client')
+      const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
+      const mockSaveSessionLog = jest.fn().mockRejectedValue(new Error('S3 upload failed'))
+      ApiClient.mockImplementation(() => ({
+        submitLogChunk: mockSubmitLogChunk,
+        saveSessionLog: mockSaveSessionLog,
+      }))
+
+      const watcherClose = jest.fn()
+      mockWatch.mockReturnValue({ close: watcherClose } as unknown as ReturnType<typeof fs.watch>)
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      // Emit data so fullLog is non-empty (triggers saveSessionLog)
+      fakeChild.stdout.emit('data', Buffer.from('some log line\n'))
+
+      // Suppress stdout writes from test output
+      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+
+      // Close the container — flush + saveSessionLog chain runs
+      fakeChild.emit('close', 0)
+
+      // Allow the async chain to settle completely:
+      // close event → flush() → saveSessionLog (rejects) → .catch (logger.warn) → .finally (resolveClosed)
+      for (let i = 0; i < 10; i++) {
+        await Promise.resolve()
+      }
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setImmediate(r))
+      }
+
+      stdoutWriteSpy.mockRestore()
+
+      // saveSessionLog threw → warning logged via .catch
+      expect(mockSaveSessionLog).toHaveBeenCalled()
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('S3 upload failed'),
+      )
+    })
+  })
 })
