@@ -63,6 +63,7 @@ jest.mock('../src/config-manager', () => ({
 jest.mock('fs', () => ({
   ...jest.requireActual('fs'),
   writeFileSync: jest.fn(),
+  renameSync: jest.fn(),
 }))
 
 const MockApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
@@ -1735,7 +1736,7 @@ describe('ProjectAgent', () => {
         expect(writeFileSync).toHaveBeenCalledWith(
           expect.stringContaining('update-version.json'),
           expect.stringContaining('0.0.2'),
-          'utf-8',
+          { mode: 0o600 },
         )
         expect(mockExit).toHaveBeenCalledWith(42)
       } finally {
@@ -1963,7 +1964,7 @@ describe('ProjectAgent', () => {
         await jest.advanceTimersByTimeAsync(1000)
 
         // Check that Dockerfile was written with package content
-        const dockerfileEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('Dockerfile'))
+        const dockerfileEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('Dockerfile.tmp'))
         expect(dockerfileEntry).toBeDefined()
         expect(dockerfileEntry?.[1]).toContain('curl')
         expect(dockerfileEntry?.[1]).toContain('typescript')
@@ -2335,7 +2336,7 @@ describe('ProjectAgent', () => {
 
         await jest.advanceTimersByTimeAsync(100)
 
-        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id'))
+        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id.tmp'))
         expect(registeredIdEntry).toBeDefined()
         expect(registeredIdEntry![1]).toBe('server-assigned-uuid-1234')
 
@@ -2371,7 +2372,7 @@ describe('ProjectAgent', () => {
 
         await jest.advanceTimersByTimeAsync(100)
 
-        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id'))
+        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id.tmp'))
         expect(registeredIdEntry).toBeUndefined()
 
         agent.stop()
@@ -2388,7 +2389,7 @@ describe('ProjectAgent', () => {
 
       const mockFs = require('fs') as { writeFileSync: jest.Mock }
       const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation((...args: unknown[]) => {
-        if (String(args[0]).endsWith('docker-registered-agent-id')) {
+        if (String(args[0]).endsWith('docker-registered-agent-id.tmp')) {
           throw new Error('EACCES: permission denied')
         }
       })
@@ -2616,7 +2617,7 @@ describe('ProjectAgent', () => {
         await jest.advanceTimersByTimeAsync(1000)
 
         // docker-customization-hash should be written with empty string
-        const hashEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-customization-hash'))
+        const hashEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-customization-hash.tmp'))
         expect(hashEntry).toBeDefined()
         expect(hashEntry![1]).toBe('')
       } finally {

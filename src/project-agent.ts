@@ -33,7 +33,7 @@ import { submitPendingResults } from './pending-result-store'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
-import { getErrorMessage, isAuthenticationError, resolveUrlForDocker } from './utils'
+import { atomicWriteFile, getErrorMessage, isAuthenticationError, resolveUrlForDocker } from './utils'
 
 export interface ProjectAgentOptions {
   pollInterval: number
@@ -246,16 +246,16 @@ export class ProjectAgent {
         const timezone = dockerCustomization?.timezone
         const dockerfileContent = generateProjectDockerfile(AGENT_VERSION, aptPackages, npmPackages, commands, timezone)
         const dockerfilePath = path.join(configDir, 'Dockerfile')
-        fs.writeFileSync(dockerfilePath, dockerfileContent)
+        atomicWriteFile(dockerfilePath, dockerfileContent)
         logger.info(`${this.prefix} Project Dockerfile written: ${dockerfilePath}`)
 
         // Save the dockerCustomization hash so DockerSupervisor can copy it to docker-built-hash after build
-        fs.writeFileSync(
+        atomicWriteFile(
           path.join(configDir, DOCKER_MARKER_CUSTOMIZATION_HASH),
           this.configSyncState.dockerCustomizationHash ?? '',
         )
 
-        fs.writeFileSync(markerPath, '')
+        atomicWriteFile(markerPath, '')
       } catch (err: unknown) {
         logger.warn(`${this.prefix} Failed to write ${DOCKER_MARKER_REBUILD_NEEDED} marker: ${getErrorMessage(err)}`)
       }
@@ -288,7 +288,7 @@ export class ProjectAgent {
       if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
         try {
           const versionFile = path.join(getConfigDir(), 'update-version.json')
-          fs.writeFileSync(versionFile, JSON.stringify({ version: targetVersion }), 'utf-8')
+          atomicWriteFile(versionFile, JSON.stringify({ version: targetVersion }))
         } catch (err: unknown) {
           logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
         }
@@ -342,7 +342,7 @@ export class ProjectAgent {
       if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
         // Write the server-assigned agentId so the host DockerSupervisor can use it for log storage
         try {
-          fs.writeFileSync(path.join(getConfigDir(), DOCKER_MARKER_REGISTERED_AGENT_ID), result.agentId, 'utf-8')
+          atomicWriteFile(path.join(getConfigDir(), DOCKER_MARKER_REGISTERED_AGENT_ID), result.agentId)
         } catch (err: unknown) {
           logger.warn(`${this.prefix} Failed to write ${DOCKER_MARKER_REGISTERED_AGENT_ID}: ${getErrorMessage(err)}`)
         }

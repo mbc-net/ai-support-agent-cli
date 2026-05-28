@@ -120,6 +120,14 @@ jest.mock('../../src/docker/update-handler', () => ({
 
 jest.mock('../../src/utils', () => ({
   getErrorMessage: jest.fn((e: unknown) => (e instanceof Error ? e.message : String(e))),
+  // The real atomicWriteFile writes the content to a temp file and renames it onto
+  // the target path. For the supervisor tests we only care that the (truncated)
+  // content lands at the target path, so forward to the mocked fs.writeFileSync.
+  atomicWriteFile: jest.fn((filePath: string, content: string) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { writeFileSync } = require('fs') as typeof import('fs')
+    writeFileSync(filePath, content, 'utf-8')
+  }),
 }))
 
 import { spawn } from 'child_process'

@@ -24,7 +24,7 @@ import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { removePidFile } from '../pid-manager'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
-import { getErrorMessage } from '../utils'
+import { atomicWriteFile, getErrorMessage } from '../utils'
 import type { DockerRunOptions } from './docker-runner'
 import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, resolveImageTag, getDockerPath } from './docker-utils'
 import { buildProjectVolumeMounts } from './volume-mount-builder'
@@ -198,7 +198,7 @@ export class DockerSupervisor {
           const truncatedError = errorMsg.length > 3000 ? errorMsg.substring(0, 3000) + '...(truncated)' : errorMsg
           /* istanbul ignore next */
           try {
-            fs.writeFileSync(buildErrorPath, truncatedError, 'utf-8')
+            atomicWriteFile(buildErrorPath, truncatedError)
           } catch (writeErr) {
             logger.warn(`[docker] Failed to write build error file: ${getErrorMessage(writeErr)}`)
           }
