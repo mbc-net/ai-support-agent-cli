@@ -1,4 +1,5 @@
 import { startTerminalWebSocket, startVsCodeTunnel, startHeartbeat, handleNotification, startSubscriptionMode, checkPendingCommands, stopTransport, TransportDeps, TransportState, CommandContext } from '../src/agent-transport'
+import { NOTIFICATION_ACTION } from '../src/constants'
 
 // Mock all dependencies
 jest.mock('../src/terminal', () => ({
@@ -472,7 +473,7 @@ describe('processCommand processing flag', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n1', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: {
         commandId: 'cmd-1',
         agentId: 'agent-1',
@@ -503,7 +504,7 @@ describe('processCommand processing flag', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n2', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: {
         commandId: 'cmd-2',
         agentId: 'agent-1',
@@ -547,7 +548,7 @@ describe('handleNotification: agent-log and unknown actions', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n1', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-log',
+      action: NOTIFICATION_ACTION.AGENT_LOG,
       content: { agentId: 'agent-1', logType: 'container', seq: 1, text: 'some log' },
     })
 
@@ -592,7 +593,7 @@ describe('handleNotification: agent-log and unknown actions', () => {
 
       await handleNotification(deps, state, ctx, {
         id: 'n3', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-        action: 'alert-created',
+        action: NOTIFICATION_ACTION.ALERT_CREATED,
         content: {
           projectCode: 'TEST_PROJ',
           alertNumber: 'AL000001',
@@ -613,7 +614,7 @@ describe('handleNotification: agent-log and unknown actions', () => {
 
       await handleNotification(deps, state, ctx, {
         id: 'n4', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-        action: 'alert-created',
+        action: NOTIFICATION_ACTION.ALERT_CREATED,
         content: {
           projectCode: 'OTHER_PROJ',
           alertNumber: 'AL000001',
@@ -631,7 +632,7 @@ describe('handleNotification: agent-log and unknown actions', () => {
 
       await handleNotification(deps, state, ctx, {
         id: 'n5', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-        action: 'alert-created',
+        action: NOTIFICATION_ACTION.ALERT_CREATED,
         content: {
           projectCode: 'TEST_PROJ',
           // alertNumber is missing
@@ -799,7 +800,7 @@ describe('startSubscriptionMode', () => {
     // Trigger with an agent-log notification (early return, no side effects)
     subscribeCallback!({
       id: 'n1', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-log',
+      action: NOTIFICATION_ACTION.AGENT_LOG,
       content: {},
     })
 
@@ -971,7 +972,7 @@ describe('handleNotification: agent-command filtering branches', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n1', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: {
         commandId: 'cmd-x',
         agentId: 'other-agent-999',
@@ -995,7 +996,7 @@ describe('handleNotification: agent-command filtering branches', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n2', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: {
         commandId: 'cmd-x',
         agentId: 'agent-1',
@@ -1019,7 +1020,7 @@ describe('handleNotification: agent-command filtering branches', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n3', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: {
         commandId: 'cmd-x',
         agentId: 'agent-1',
@@ -1043,7 +1044,7 @@ describe('handleNotification: agent-command filtering branches', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n4', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: {
         commandId: 'cmd-x',
         agentId: 'agent-1',
@@ -1067,7 +1068,7 @@ describe('handleNotification: agent-command filtering branches', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n5', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: {
         commandId: 'cmd-x',
         agentId: 'agent-1',
@@ -1091,7 +1092,7 @@ describe('handleNotification: agent-command filtering branches', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n6', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: {
         // commandId is missing
         agentId: 'agent-1',
@@ -1118,7 +1119,7 @@ describe('handleNotification: agent-command filtering branches', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n7', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'config-update',
+      action: NOTIFICATION_ACTION.CONFIG_UPDATE,
       content: {},
     })
 
@@ -1154,7 +1155,7 @@ describe('handleNotification: agent-command filtering branches', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n8', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: JSON.stringify(contentObj) as any,
     })
 
@@ -1305,7 +1306,7 @@ describe('processCommand: submitResult failure in error handler (line 343)', () 
 
     await handleNotification(deps, state, ctx, {
       id: 'n1', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: {
         commandId: 'cmd-fail',
         agentId: 'agent-1',
@@ -1538,7 +1539,7 @@ describe('handleNotification: null content branch (line 201)', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n2', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: {
         commandId: 'cmd-no-type',
         agentId: 'agent-1',
@@ -1570,7 +1571,7 @@ describe('handleNotification: null content branch (line 201)', () => {
 
       await handleNotification(deps, state, ctx, {
         id: 'n3', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-        action: 'alert-created',
+        action: NOTIFICATION_ACTION.ALERT_CREATED,
         content: {
           projectCode: 'TEST_PROJ',
           alertNumber: 'AL000999',
@@ -1632,7 +1633,7 @@ describe('processCommand: failed result branches (lines 322-329)', () => {
 
     await handleNotification(deps, state, ctx, {
       id: 'n1', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
-      action: 'agent-command',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
       content: {
         commandId: 'cmd-fail-result',
         agentId: 'agent-1',
