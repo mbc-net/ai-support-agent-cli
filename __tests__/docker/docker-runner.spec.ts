@@ -114,6 +114,7 @@ import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
 import { existsSync, realpathSync, readFileSync, unlinkSync, copyFileSync, mkdirSync, renameSync, watch as fsWatch } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
+import { NPM_COMMAND } from '../../src/constants'
 import { logger } from '../../src/logger'
 import { reExecProcess, performUpdate } from '../../src/update-checker'
 import { resetDockerPathCache } from '../../src/docker/docker-utils'
@@ -684,34 +685,25 @@ describe('docker-runner', () => {
       expect(result).toMatch(/^\d+\.\d+\.\d+/)
     })
 
-    it('should use npm.cmd on win32 platform', () => {
-      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
-      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
-
-      try {
-        mockExecFileSync.mockImplementation((cmd: unknown, args?: unknown) => {
-          const argsArr = args as string[] | undefined
-          if (argsArr && argsArr[0] === 'list') {
-            return Buffer.from(JSON.stringify({
-              dependencies: { '@ai-support-agent/cli': { version: '1.5.0' } },
-            }))
-          }
-          return Buffer.from('')
-        })
-
-        const result = getInstalledVersion()
-        expect(result).toBe('1.5.0')
-        // Verify npm.cmd was used
-        const listCalls = mockExecFileSync.mock.calls.filter(
-          call => (call[1] as string[] | undefined)?.[0] === 'list',
-        )
-        expect(listCalls.length).toBeGreaterThan(0)
-        expect(listCalls[0][0]).toBe('npm.cmd')
-      } finally {
-        if (originalPlatform) {
-          Object.defineProperty(process, 'platform', originalPlatform)
+    it('should use NPM_COMMAND (platform-specific npm binary) to list packages', () => {
+      mockExecFileSync.mockImplementation((cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') {
+          return Buffer.from(JSON.stringify({
+            dependencies: { '@ai-support-agent/cli': { version: '1.5.0' } },
+          }))
         }
-      }
+        return Buffer.from('')
+      })
+
+      const result = getInstalledVersion()
+      expect(result).toBe('1.5.0')
+      // Verify NPM_COMMAND (the platform-specific constant) was used
+      const listCalls = mockExecFileSync.mock.calls.filter(
+        call => (call[1] as string[] | undefined)?.[0] === 'list',
+      )
+      expect(listCalls.length).toBeGreaterThan(0)
+      expect(listCalls[0][0]).toBe(NPM_COMMAND)
     })
   })
 
