@@ -17,10 +17,12 @@ import { logger } from '../../logger'
 import { BrowserProxySession } from './browser/browser-proxy-session'
 import { validateUrl } from './browser/browser-security'
 import { BrowserSession } from './browser/browser-session'
+import { BrowserSessionManager, getMaxBrowserSessionsFromEnv } from './browser/browser-session-manager'
 import {
-  BrowserSessionManager,
-  getMaxBrowserSessionsFromEnv,
-} from './browser/browser-session-manager'
+  BROWSER_TIMEOUT_REQUEST_MS,
+  SELECTOR_TIMEOUT_NAVIGATION_MS,
+  SELECTOR_TIMEOUT_SINGLE_MS,
+} from './browser/browser-types'
 import { isPlaywrightAvailable } from './browser/playwright-loader'
 import { tryClickSelectors, tryFillSelectors } from './browser/selector-utils'
 import { mcpErrorResponse, mcpTextImageResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
@@ -95,7 +97,7 @@ async function resolveFirstSessionId(localPort: string): Promise<string | null> 
  */
 function httpGet(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    http.get(url, { timeout: 3000 }, (res) => {
+    http.get(url, { timeout: BROWSER_TIMEOUT_REQUEST_MS }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', (chunk: Buffer) => chunks.push(chunk))
       res.on('end', () => resolve(Buffer.concat(chunks).toString()))
@@ -167,10 +169,10 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
 
       const page = await session.getPage()
 
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
 
       if (waitForSelector) {
-        await page.waitForSelector(waitForSelector, { timeout: 10000 })
+        await page.waitForSelector(waitForSelector, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
       }
 
       if (waitForTimeout) {
@@ -320,7 +322,7 @@ function registerBrowserGetTextTool(server: McpServer, defaultSession: BrowserSe
       }
 
       const page = await session.getPage()
-      const text: string = await page.locator(target).innerText({ timeout: 10000 })
+      const text: string = await page.locator(target).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
 
       // Truncate to 50KB to avoid overwhelming the context
       const maxLength = 50 * 1024
@@ -369,7 +371,7 @@ function registerBrowserLoginTool(
       } else {
         // Navigate to base URL
         const page = await session.getPage()
-        await page.goto(credentials.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+        await page.goto(credentials.baseUrl, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
 
         title = await page.title()
         currentUrl = page.url()
@@ -422,7 +424,7 @@ function registerBrowserExtractTool(server: McpServer, defaultSession: BrowserSe
       }
 
       const page = await session.getPage()
-      const text: string = await page.locator(selector).innerText({ timeout: 10000 })
+      const text: string = await page.locator(selector).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
 
       // Truncate to 50KB to avoid overwhelming the context
       const maxLength = 50 * 1024
