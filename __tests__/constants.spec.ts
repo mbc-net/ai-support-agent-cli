@@ -57,6 +57,9 @@ describe('constants', () => {
     expect(constants.MAX_FILE_READ_SIZE).toBe(10 * 1024 * 1024)
     expect(constants.PROCESS_LIST_TIMEOUT).toBe(10_000)
 
+    // Localhost address
+    expect(constants.LOCALHOST_ADDRESS).toBe('127.0.0.1')
+
     // Project code defaults
     expect(constants.PROJECT_CODE_DEFAULT).toBe('default')
     expect(constants.PROJECT_CODE_CLI_DIRECT).toBe('cli-direct')

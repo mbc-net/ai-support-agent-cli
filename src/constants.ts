@@ -47,6 +47,9 @@ export const MAX_DIR_ENTRIES = 1000
 // Hidden entries to exclude from file listings
 export const HIDDEN_ENTRIES = ['.claude']
 
+// Loopback address used when binding local HTTP servers and building local URLs
+export const LOCALHOST_ADDRESS = '127.0.0.1'
+
 // Default login URL (production)
 export const DEFAULT_LOGIN_URL = 'https://ai-support-agent.com'
 
