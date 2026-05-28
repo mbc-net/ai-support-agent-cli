@@ -204,23 +204,25 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     // Start browser local server for inter-process communication
     if (!this.browserLocalServer) {
-      this.browserLocalServer = new BrowserLocalServer(this.browserSessionManager)
+      const localServer = new BrowserLocalServer(this.browserSessionManager)
+      this.browserLocalServer = localServer
       // Forward action log entries from chat-initiated operations to the Web UI
-      this.browserLocalServer.onActionLog = (notification) => {
+      localServer.onActionLog = (notification) => {
         this.send({
           type: 'browser_action_log',
           sessionId: notification.sessionId,
           entries: [notification.entry],
         })
       }
-      this.browserLocalServerStartPromise = this.browserLocalServer.start()
-        .then((port) => {
+      this.browserLocalServerStartPromise = (async () => {
+        try {
+          const port = await localServer.start()
           this.browserLocalPort = port
           logger.info(`[vscode-ws] Browser local server started on port ${port}`)
-        })
-        .catch((err) => {
+        } catch (err) {
           logger.error(`[vscode-ws] Failed to start browser local server: ${getErrorMessage(err)}`)
-        })
+        }
+      })()
     }
 
     resolve()
@@ -408,9 +410,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
 
     if (!targetPort) {
+      // vsCodeServer is guaranteed non-null here: the early-return guard above
+      // (line: `if (!targetPort && !this.vsCodeServer?.isRunning)`) ensures we only
+      // reach this point when vsCodeServer is running.
       this.vsCodeServer!.touch()
     }
 
+    // vsCodeServer is guaranteed non-null when targetPort is absent:
+    // the early-return guard above ensures vsCodeServer.isRunning when !targetPort.
     const port = targetPort ?? this.vsCodeServer!.getPort()
 
     try {
@@ -472,6 +479,9 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     if (!proxy) return
 
     if (!pfSession) {
+      // vsCodeServer is guaranteed non-null here: the early-return guard above
+      // (`if (!pfSession && (!this.vsCodeServer?.isRunning || !this.wsProxy))`)
+      // ensures we only reach this point when vsCodeServer.isRunning is true.
       this.vsCodeServer!.touch()
     }
     const subSocketId = msg.subSocketId

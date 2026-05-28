@@ -32,8 +32,9 @@ export function isNewerVersion(current: string, latest: string): boolean {
   if (!c.pre && !l.pre) return false
 
   // Both have pre-release — compare segment by segment, treating numeric parts as numbers
-  const cParts = c.pre!.split('.')
-  const lParts = l.pre!.split('.')
+  // c.pre and l.pre are both non-null here: earlier guards eliminate the null cases
+  const cParts = c.pre.split('.')
+  const lParts = l.pre.split('.')
   const len = Math.max(cParts.length, lParts.length)
   for (let i = 0; i < len; i++) {
     const cp = cParts[i] ?? ''
