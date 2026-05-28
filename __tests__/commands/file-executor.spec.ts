@@ -3,7 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { fileDelete, fileList, fileMkdir, fileRead, fileRename, fileWrite } from '../../src/commands/file-executor'
-import { ERR_NO_CONTENT_SPECIFIED, ERR_NO_FILE_PATH_SPECIFIED } from '../../src/constants'
+import { ERR_NO_CONTENT_SPECIFIED, ERR_NO_FILE_PATH_SPECIFIED, MAX_FILE_READ_SIZE, MAX_FILE_WRITE_SIZE } from '../../src/constants'
 import type { CommandResult } from '../../src/types'
 
 function expectFailure(result: CommandResult): asserts result is { success: false; error: string; data?: unknown } {
@@ -12,6 +12,23 @@ function expectFailure(result: CommandResult): asserts result is { success: fals
 
 describe('file-executor', () => {
   describe('fileRead', () => {
+    it('should return error for file exceeding MAX_FILE_READ_SIZE', async () => {
+      const tmpFile = path.join(os.tmpdir(), `test-large-read-${Date.now()}.txt`)
+      fs.writeFileSync(tmpFile, 'data')
+
+      // Mock stat to return a size exceeding the limit
+      const statSpy = jest.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: MAX_FILE_READ_SIZE + 1,
+      } as fs.Stats)
+
+      const result = await fileRead({ path: tmpFile })
+      expectFailure(result)
+      expect(result.error).toContain('File too large')
+
+      statSpy.mockRestore()
+      fs.unlinkSync(tmpFile)
+    })
+
     it('should read a file', async () => {
       const tmpFile = path.join(os.tmpdir(), `test-fread-${Date.now()}.txt`)
       fs.writeFileSync(tmpFile, 'test content')
@@ -51,6 +68,26 @@ describe('file-executor', () => {
   })
 
   describe('fileWrite', () => {
+    it('should return error when content exceeds MAX_FILE_WRITE_SIZE', async () => {
+      const tmpFile = path.join(os.tmpdir(), `test-large-write-${Date.now()}.txt`)
+      const largeContent = 'A'.repeat(MAX_FILE_WRITE_SIZE + 1)
+
+      const result = await fileWrite({ path: tmpFile, content: largeContent })
+      expectFailure(result)
+      expect(result.error).toContain('Content too large')
+    })
+
+    it('should create directories when createDirectories is true', async () => {
+      const tmpDir = path.join(os.tmpdir(), `test-create-dirs-${Date.now()}`)
+      const tmpFile = path.join(tmpDir, 'nested', 'file.txt')
+
+      const result = await fileWrite({ path: tmpFile, content: 'data', createDirectories: true })
+      expect(result.success).toBe(true)
+      expect(fs.existsSync(tmpFile)).toBe(true)
+
+      fs.rmSync(tmpDir, { recursive: true })
+    })
+
     it('should write a file', async () => {
       const tmpFile = path.join(os.tmpdir(), `test-fwrite-${Date.now()}.txt`)
 
@@ -90,6 +127,30 @@ describe('file-executor', () => {
       const result = await fileList({ path: '/proc/' })
       expectFailure(result)
       expect(result.error).toContain('Access denied')
+    })
+
+    it('should use empty size and modified when lstat fails for an entry', async () => {
+      // Create a temp directory with a file, then make lstat fail by using a symlink
+      // that points to a non-existent target — lstat itself succeeds on the symlink,
+      // but we can test the catch branch by creating a file then removing it between
+      // readdir and lstat. Instead, mock fs.promises.lstat at the module level.
+      const mockFs = jest.spyOn(fs.promises, 'lstat').mockRejectedValueOnce(new Error('ENOENT'))
+
+      const tmpDir = path.join(os.tmpdir(), `test-lstat-fail-${Date.now()}`)
+      fs.mkdirSync(tmpDir)
+      fs.writeFileSync(path.join(tmpDir, 'test.txt'), 'data')
+
+      const result = await fileList({ path: tmpDir })
+      expect(result.success).toBe(true)
+      const data = result.data as { items: Array<{ name: string; size: number; modified: string }> }
+      // The entry that failed lstat should have size=0 and modified=''
+      const item = data.items.find(i => i.name === 'test.txt')
+      expect(item).toBeDefined()
+      expect(item!.size).toBe(0)
+      expect(item!.modified).toBe('')
+
+      mockFs.mockRestore()
+      fs.rmSync(tmpDir, { recursive: true })
     })
   })
 

@@ -330,6 +330,29 @@ describe('read-conversation-file tool', () => {
       expect(result.content[0].type).toBe('text')
       expect(result.content[0].text).toContain('README')
     })
+
+    it('should handle empty filename gracefully (uses fallback empty extension)', async () => {
+      // An empty string filename: split('.') => [''], pop() => '' which is falsy — ?? '' covers this
+      const mockClient = {
+        getDownloadUrl: jest.fn().mockResolvedValue({
+          downloadUrl: 'https://s3.example.com/noname',
+        }),
+      } as unknown as ApiClient
+
+      setupTool(mockClient)
+
+      mockedAxios.get.mockResolvedValue({ data: 'Some content' })
+
+      // filename with only a dot — pop() returns '' (empty string), which ?? '' still covers
+      const result = await toolCallback({
+        fileId: 'file-dot',
+        s3Key: 'uploads/file-dot',
+        filename: '.',
+      }) as { content: Array<{ type: string; text: string }> }
+
+      // Should not throw; will be treated as binary/text/unknown depending on extension ''
+      expect(result.content).toBeDefined()
+    })
   })
 
   describe('error handling', () => {
