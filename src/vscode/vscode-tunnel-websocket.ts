@@ -428,42 +428,64 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         body: msg.body,
       })
 
-      // レスポンスボディが大きい場合はチャンク分割
-      const bodyLength = response.body.length
-      if (bodyLength > HTTP_RESPONSE_CHUNK_SIZE) {
-        const totalChunks = Math.ceil(bodyLength / HTTP_RESPONSE_CHUNK_SIZE)
-        for (let i = 0; i < totalChunks; i++) {
-          const chunk = response.body.substring(
-            i * HTTP_RESPONSE_CHUNK_SIZE,
-            (i + 1) * HTTP_RESPONSE_CHUNK_SIZE,
-          )
-          this.send({
-            type: 'http_response',
-            requestId: msg.requestId,
-            sessionId: msg.sessionId,
-            statusCode: response.statusCode,
-            headers: i === 0 ? response.headers : undefined,
-            body: chunk,
-            bodyChunkIndex: i,
-            bodyChunkTotal: totalChunks,
-          })
-        }
-      } else {
-        this.send({
-          type: 'http_response',
-          requestId: msg.requestId,
-          sessionId: msg.sessionId,
-          statusCode: response.statusCode,
-          headers: response.headers,
-          body: response.body,
-        })
-      }
+      this.sendHttpResponse(msg, response)
     } catch (error) {
       this.send({
         type: 'error',
         requestId: msg.requestId,
         sessionId: msg.sessionId,
         message: `HTTP proxy error: ${getErrorMessage(error)}`,
+      })
+    }
+  }
+
+  /**
+   * レスポンスをチャンク分割して送信する。
+   * ボディが HTTP_RESPONSE_CHUNK_SIZE 以下の場合は単一メッセージで送信する。
+   */
+  private sendHttpResponse(
+    msg: VsCodeServerMessage,
+    response: { statusCode: number; headers: Record<string, string>; body: string },
+  ): void {
+    // レスポンスボディが大きい場合はチャンク分割
+    const bodyLength = response.body.length
+    if (bodyLength > HTTP_RESPONSE_CHUNK_SIZE) {
+      this.sendChunkedHttpResponse(msg, response)
+    } else {
+      this.send({
+        type: 'http_response',
+        requestId: msg.requestId,
+        sessionId: msg.sessionId,
+        statusCode: response.statusCode,
+        headers: response.headers,
+        body: response.body,
+      })
+    }
+  }
+
+  /**
+   * レスポンスボディを HTTP_RESPONSE_CHUNK_SIZE ごとに分割して複数メッセージで送信する。
+   */
+  private sendChunkedHttpResponse(
+    msg: VsCodeServerMessage,
+    response: { statusCode: number; headers: Record<string, string>; body: string },
+  ): void {
+    const bodyLength = response.body.length
+    const totalChunks = Math.ceil(bodyLength / HTTP_RESPONSE_CHUNK_SIZE)
+    for (let i = 0; i < totalChunks; i++) {
+      const chunk = response.body.substring(
+        i * HTTP_RESPONSE_CHUNK_SIZE,
+        (i + 1) * HTTP_RESPONSE_CHUNK_SIZE,
+      )
+      this.send({
+        type: 'http_response',
+        requestId: msg.requestId,
+        sessionId: msg.sessionId,
+        statusCode: response.statusCode,
+        headers: i === 0 ? response.headers : undefined,
+        body: chunk,
+        bodyChunkIndex: i,
+        bodyChunkTotal: totalChunks,
       })
     }
   }
