@@ -57,7 +57,7 @@ let ptyLoadError: string | null = null
 try {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   pty = require('node-pty') as PtyModule
-} catch (e) /* istanbul ignore next -- only when native build fails */ {
+} catch (e: unknown) /* istanbul ignore next -- only when native build fails */ {
   ptyLoadError = getErrorMessage(e)
   logger.debug(`[terminal] node-pty is not available: ${ptyLoadError}`)
 }

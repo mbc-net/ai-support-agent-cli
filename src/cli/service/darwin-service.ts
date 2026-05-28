@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { loadConfig, getProjectList } from '../../config-manager'
+import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
 import type { ProjectRegistration } from '../../types'
 import type { ProjectStatus } from './types'
 import { IMAGE_NAME } from '../../docker/docker-utils'
@@ -14,14 +14,26 @@ import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
 import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import {
+  getDarwinLaunchAgentsDir,
+  getDarwinLogDir,
+  getProjectConfigHostDir,
+  getProjectLogDir,
+  getProjectServiceDir,
+  getServicesDir,
+  getUpdateScriptPath,
+  getWrapperScriptPath,
+  getAgentOutLog,
+  getAgentErrLog,
+  getWrapperOutLog,
+  getWrapperErrLog,
+} from '../../utils/path-utils'
 
 export { getCliEntryPoint, getNodePath }
 
 const SERVICE_LABEL = 'com.ai-support-agent.cli'
 
-function getLogDir(): string {
-  return path.join(os.homedir(), 'Library', 'Logs', 'ai-support-agent')
-}
+const getLogDir = getDarwinLogDir
 
 // ---------------------------------------------------------------------------
 // Per-project plist helpers
@@ -37,12 +49,12 @@ export function getProjectLabel(tenantCode: string, projectCode: string): string
 /** Returns the plist file path for a given project */
 export function getProjectPlistPath(tenantCode: string, projectCode: string): string {
   const label = getProjectLabel(tenantCode, projectCode)
-  return path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`)
+  return path.join(getDarwinLaunchAgentsDir(), `${label}.plist`)
 }
 
 /** Lists all per-project plist files under ~/Library/LaunchAgents */
 export function getAllProjectPlists(): Array<{ label: string; plistPath: string }> {
-  const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents')
+  const launchAgentsDir = getDarwinLaunchAgentsDir()
   const prefix = `${SERVICE_LABEL}.`
   const results: Array<{ label: string; plistPath: string }> = []
   try {
@@ -63,21 +75,7 @@ export function getAllProjectPlists(): Array<{ label: string; plistPath: string 
   return results
 }
 
-/** Returns the host-side per-project config dir (mirrors what docker-runner uses) */
-function getProjectConfigHostDir(tenantCode: string, projectCode: string): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'projects', tenantCode, projectCode, '.ai-support-agent')
-}
-
-/** Returns the services dir where wrapper scripts are stored */
-function getServicesDir(): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'services')
-}
+// getProjectConfigHostDir and getServicesDir are imported from ../../utils/path-utils
 
 // ---------------------------------------------------------------------------
 // plist generation
@@ -137,10 +135,10 @@ ${programArgs}
     <true/>
 
     <key>StandardOutPath</key>
-    <string>${escapeXml(path.join(logDir, 'agent.out.log'))}</string>
+    <string>${escapeXml(getAgentOutLog(logDir))}</string>
 
     <key>StandardErrorPath</key>
-    <string>${escapeXml(path.join(logDir, 'agent.err.log'))}</string>
+    <string>${escapeXml(getAgentErrLog(logDir))}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -191,10 +189,10 @@ export function generateProjectPlist(opts: {
       but stay tiny because only bootstrap noise lands there.
     -->
     <key>StandardOutPath</key>
-    <string>${escapeXml(path.join(opts.logDir, 'wrapper.out.log'))}</string>
+    <string>${escapeXml(getWrapperOutLog(opts.logDir))}</string>
 
     <key>StandardErrorPath</key>
-    <string>${escapeXml(path.join(opts.logDir, 'wrapper.err.log'))}</string>
+    <string>${escapeXml(getWrapperErrLog(opts.logDir))}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -392,10 +390,8 @@ exit "$EXIT_CODE"
 
 /** Generate the update-and-restart.sh script */
 export function generateUpdateScript(): string {
-  const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents')
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
+  const launchAgentsDir = getDarwinLaunchAgentsDir()
+  const configDir = getConfigDir()
 
   return `#!/bin/bash
 set -uo pipefail
@@ -510,12 +506,7 @@ exit 0
 // DarwinServiceStrategy
 // ---------------------------------------------------------------------------
 
-function getUpdateScriptPath(): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'update-and-restart.sh')
-}
+// getUpdateScriptPath is imported from ../../utils/path-utils
 
 /**
  * Write run.sh and plist for a single project. Does NOT launchctl load.
@@ -537,18 +528,18 @@ export function writeProjectServiceFiles(
   const projectKey = `${tenantCode}-${projectCode.toLowerCase()}`
 
   const logDir = getLogDir()
-  const projectLogDir = path.join(logDir, projectKey)
+  const projectLogDir = getProjectLogDir(logDir, projectKey)
   if (!fs.existsSync(projectLogDir)) {
     fs.mkdirSync(projectLogDir, { recursive: true, mode: 0o700 })
   }
 
-  const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents')
+  const launchAgentsDir = getDarwinLaunchAgentsDir()
   if (!fs.existsSync(launchAgentsDir)) {
     fs.mkdirSync(launchAgentsDir, { recursive: true })
   }
 
   const servicesDir = getServicesDir()
-  const projectServiceDir = path.join(servicesDir, projectKey)
+  const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
   if (!fs.existsSync(projectServiceDir)) {
     fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
   }
@@ -564,7 +555,7 @@ export function writeProjectServiceFiles(
   const validatedProjectDir = validateProjectDirForMount(project.projectDir)
 
   const updateScriptPath = getUpdateScriptPath()
-  const wrapperScriptPath = path.join(projectServiceDir, 'run.sh')
+  const wrapperScriptPath = getWrapperScriptPath(projectServiceDir)
   const wrapperScript = generateWrapperScript({
     imageName: IMAGE_NAME,
     tenantCode,
@@ -641,7 +632,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       fs.mkdirSync(logDir, { recursive: true })
     }
 
-    const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents')
+    const launchAgentsDir = getDarwinLaunchAgentsDir()
     if (!fs.existsSync(launchAgentsDir)) {
       fs.mkdirSync(launchAgentsDir, { recursive: true })
     }

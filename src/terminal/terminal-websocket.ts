@@ -236,7 +236,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     try {
       const decoded = Buffer.from(msg.data, 'base64').toString('utf-8')
       session.write(decoded)
-    } catch (err) {
+    } catch (err: unknown) {
       logger.warn(`[terminal-ws] Invalid base64 data in stdin (session=${msg.sessionId}): ${getErrorMessage(err)}`)
     }
   }

@@ -1,3 +1,8 @@
+import {
+  SELECTOR_TIMEOUT_MULTIPLE_MS,
+  SELECTOR_TIMEOUT_NAVIGATION_MS,
+  SELECTOR_TIMEOUT_SINGLE_MS,
+} from '../../../../src/mcp/tools/browser/browser-types'
 import { tryClickSelectors, tryFillSelectors } from '../../../../src/mcp/tools/browser/selector-utils'
 
 function createMockPage(matchingSelectors: string[] = []) {
@@ -18,22 +23,22 @@ describe('selector-utils', () => {
       const page = createMockPage()
       const result = await tryClickSelectors(page, '#submit')
       expect(result).toBe('#submit')
-      expect(page.click).toHaveBeenCalledWith('#submit', { timeout: 10000 })
+      expect(page.click).toHaveBeenCalledWith('#submit', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     })
 
     it('should handle single selector with waitForNavigation', async () => {
       const page = createMockPage()
       const result = await tryClickSelectors(page, '#submit', { waitForNavigation: true })
       expect(result).toBe('#submit')
-      expect(page.waitForNavigation).toHaveBeenCalled()
-      expect(page.click).toHaveBeenCalledWith('#submit', { timeout: 10000 })
+      expect(page.waitForNavigation).toHaveBeenCalledWith({ timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
+      expect(page.click).toHaveBeenCalledWith('#submit', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     })
 
     it('should try multiple selectors and return the matching one', async () => {
       const page = createMockPage(['.btn-ok'])
       const result = await tryClickSelectors(page, '#nonexistent, .btn-ok, .fallback')
       expect(result).toBe('.btn-ok')
-      expect(page.click).toHaveBeenCalledWith('.btn-ok', { timeout: 5000 })
+      expect(page.click).toHaveBeenCalledWith('.btn-ok', { timeout: SELECTOR_TIMEOUT_MULTIPLE_MS })
     })
 
     it('should try multiple selectors with waitForNavigation', async () => {
@@ -69,7 +74,7 @@ describe('selector-utils', () => {
       const page = createMockPage()
       const result = await tryClickSelectors(page, '  #submit  ')
       expect(result).toBe('#submit')
-      expect(page.click).toHaveBeenCalledWith('#submit', { timeout: 10000 })
+      expect(page.click).toHaveBeenCalledWith('#submit', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     })
   })
 
@@ -78,14 +83,14 @@ describe('selector-utils', () => {
       const page = createMockPage()
       const result = await tryFillSelectors(page, '#email', 'test@test.com')
       expect(result).toBe('#email')
-      expect(page.fill).toHaveBeenCalledWith('#email', 'test@test.com', { timeout: 10000 })
+      expect(page.fill).toHaveBeenCalledWith('#email', 'test@test.com', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     })
 
     it('should try multiple selectors and return the matching one', async () => {
       const page = createMockPage(['input[name="email"]'])
       const result = await tryFillSelectors(page, '#nonexistent, input[name="email"]', 'test@test.com')
       expect(result).toBe('input[name="email"]')
-      expect(page.fill).toHaveBeenCalledWith('input[name="email"]', 'test@test.com', { timeout: 5000 })
+      expect(page.fill).toHaveBeenCalledWith('input[name="email"]', 'test@test.com', { timeout: SELECTOR_TIMEOUT_MULTIPLE_MS })
     })
 
     it('should throw when no selector matches', async () => {

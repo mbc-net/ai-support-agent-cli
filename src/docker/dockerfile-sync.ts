@@ -39,7 +39,7 @@ export function syncDockerfileToConfigDir(): void {
     }
 
     logger.info(t('docker.dockerfileSynced', { path: destDockerfile }))
-  } catch (err) {
+  } catch (err: unknown) {
     logger.warn(t('docker.dockerfileSyncFailed', { message: getErrorMessage(err) }))
   }
 }

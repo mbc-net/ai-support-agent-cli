@@ -4,7 +4,7 @@ import * as path from 'path'
 import type { ApiClient } from './api-client'
 import { logger } from './logger'
 import type { ProjectConfigResponse, SshCredentials } from './types'
-import { getErrorMessage } from './utils'
+import { atomicWriteFile, getErrorMessage } from './utils'
 import { normalizePemKey } from './utils/pem-key'
 
 const MANAGED_BLOCK_BEGIN = '# BEGIN ai-support-agent managed'
@@ -72,7 +72,7 @@ export async function setupSshConfig(
 function writeKeyFile(sshDir: string, credentials: SshCredentials): void {
   const keyPath = path.join(sshDir, `${KEY_FILE_PREFIX}${credentials.hostId}`)
   const normalizedKey = normalizePemKey(credentials.privateKey)
-  fs.writeFileSync(keyPath, normalizedKey, { mode: 0o600 })
+  atomicWriteFile(keyPath, normalizedKey)
 }
 
 /**
@@ -103,7 +103,7 @@ function writeSshConfig(
     ? trimmed + '\n\n' + managedBlock + '\n'
     : managedBlock + '\n'
 
-  fs.writeFileSync(configPath, newContent, { mode: 0o600 })
+  atomicWriteFile(configPath, newContent)
 }
 
 /**
@@ -161,7 +161,7 @@ export function cleanupSshConfig(sshDir: string): void {
     try {
       const content = fs.readFileSync(configPath, 'utf-8')
       const cleaned = removeManagedBlock(content).trimEnd()
-      fs.writeFileSync(configPath, cleaned.length > 0 ? cleaned + '\n' : '', { mode: 0o600 })
+      atomicWriteFile(configPath, cleaned.length > 0 ? cleaned + '\n' : '')
       logger.info(`[ssh] Removed managed block from ${configPath}`)
     } catch (error) {
       logger.warn(`[ssh] Failed to clean up SSH config: ${getErrorMessage(error)}`)

@@ -11,6 +11,10 @@ import { type TransportDeps, type TransportState, startSubscriptionMode, startHe
 import {
   AGENT_VERSION,
   DELAYED_RESTART_MS,
+  DOCKER_MARKER_BUILT_HASH,
+  DOCKER_MARKER_CUSTOMIZATION_HASH,
+  DOCKER_MARKER_REBUILD_NEEDED,
+  DOCKER_MARKER_REGISTERED_AGENT_ID,
   DOCKER_RESTART_EXIT_CODE,
   DOCKER_UPDATE_EXIT_CODE,
   INITIAL_CONFIG_SYNC_MAX_RETRIES,
@@ -29,7 +33,7 @@ import { submitPendingResults } from './pending-result-store'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
-import { getErrorMessage, isAuthenticationError, resolveUrlForDocker } from './utils'
+import { atomicWriteFile, getErrorMessage, isAuthenticationError, resolveUrlForDocker } from './utils'
 
 export interface ProjectAgentOptions {
   pollInterval: number
@@ -127,7 +131,7 @@ export class ProjectAgent {
     // AI_SUPPORT_AGENT_CONFIG_DIR is mounted to the per-project config dir directly,
     // so docker-built-hash lives at the root of getConfigDir().
     if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
-      const builtHashPath = path.join(getConfigDir(), 'docker-built-hash')
+      const builtHashPath = path.join(getConfigDir(), DOCKER_MARKER_BUILT_HASH)
       try {
         const builtHash = fs.readFileSync(builtHashPath, 'utf-8').trim()
         if (builtHash) {
@@ -228,7 +232,7 @@ export class ProjectAgent {
       // Inside Docker, AI_SUPPORT_AGENT_CONFIG_DIR is mounted to the per-project config dir directly.
       // All docker-related files live at the root of getConfigDir() (not in a projects sub-path).
       const configDir = getConfigDir()
-      const markerPath = path.join(configDir, 'docker-rebuild-needed')
+      const markerPath = path.join(configDir, DOCKER_MARKER_REBUILD_NEEDED)
       try {
         fs.mkdirSync(configDir, { recursive: true })
 
@@ -242,18 +246,18 @@ export class ProjectAgent {
         const timezone = dockerCustomization?.timezone
         const dockerfileContent = generateProjectDockerfile(AGENT_VERSION, aptPackages, npmPackages, commands, timezone)
         const dockerfilePath = path.join(configDir, 'Dockerfile')
-        fs.writeFileSync(dockerfilePath, dockerfileContent)
+        atomicWriteFile(dockerfilePath, dockerfileContent)
         logger.info(`${this.prefix} Project Dockerfile written: ${dockerfilePath}`)
 
         // Save the dockerCustomization hash so DockerSupervisor can copy it to docker-built-hash after build
-        fs.writeFileSync(
-          path.join(configDir, 'docker-customization-hash'),
+        atomicWriteFile(
+          path.join(configDir, DOCKER_MARKER_CUSTOMIZATION_HASH),
           this.configSyncState.dockerCustomizationHash ?? '',
         )
 
-        fs.writeFileSync(markerPath, '')
-      } catch (err) {
-        logger.warn(`${this.prefix} Failed to write docker-rebuild-needed marker: ${getErrorMessage(err)}`)
+        atomicWriteFile(markerPath, '')
+      } catch (err: unknown) {
+        logger.warn(`${this.prefix} Failed to write ${DOCKER_MARKER_REBUILD_NEEDED} marker: ${getErrorMessage(err)}`)
       }
       process.exit(DOCKER_RESTART_EXIT_CODE)
     }, DELAYED_RESTART_MS)
@@ -284,8 +288,8 @@ export class ProjectAgent {
       if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
         try {
           const versionFile = path.join(getConfigDir(), 'update-version.json')
-          fs.writeFileSync(versionFile, JSON.stringify({ version: targetVersion }), 'utf-8')
-        } catch (err) {
+          atomicWriteFile(versionFile, JSON.stringify({ version: targetVersion }))
+        } catch (err: unknown) {
           logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
         }
         process.exit(DOCKER_UPDATE_EXIT_CODE)
@@ -338,9 +342,9 @@ export class ProjectAgent {
       if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
         // Write the server-assigned agentId so the host DockerSupervisor can use it for log storage
         try {
-          fs.writeFileSync(path.join(getConfigDir(), 'docker-registered-agent-id'), result.agentId, 'utf-8')
-        } catch (err) {
-          logger.warn(`${this.prefix} Failed to write docker-registered-agent-id: ${getErrorMessage(err)}`)
+          atomicWriteFile(path.join(getConfigDir(), DOCKER_MARKER_REGISTERED_AGENT_ID), result.agentId)
+        } catch (err: unknown) {
+          logger.warn(`${this.prefix} Failed to write ${DOCKER_MARKER_REGISTERED_AGENT_ID}: ${getErrorMessage(err)}`)
         }
 
         const buildErrorPath = path.join(getConfigDir(), 'docker-build-error')

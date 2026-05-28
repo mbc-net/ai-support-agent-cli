@@ -57,6 +57,9 @@ describe('constants', () => {
     expect(constants.MAX_FILE_READ_SIZE).toBe(10 * 1024 * 1024)
     expect(constants.PROCESS_LIST_TIMEOUT).toBe(10_000)
 
+    // Localhost address
+    expect(constants.LOCALHOST_ADDRESS).toBe('127.0.0.1')
+
     // Project code defaults
     expect(constants.PROJECT_CODE_DEFAULT).toBe('default')
     expect(constants.PROJECT_CODE_CLI_DIRECT).toBe('cli-direct')
@@ -67,6 +70,12 @@ describe('constants', () => {
     expect(constants.ANTHROPIC_API_VERSION).toBe('2023-06-01')
     expect(constants.ANTHROPIC_API_URL).toBe('https://api.anthropic.com/v1/messages')
     expect(constants.DEFAULT_MAX_TOKENS).toBe(4096)
+
+    // Docker marker filenames
+    expect(constants.DOCKER_MARKER_BUILT_HASH).toBe('docker-built-hash')
+    expect(constants.DOCKER_MARKER_REBUILD_NEEDED).toBe('docker-rebuild-needed')
+    expect(constants.DOCKER_MARKER_CUSTOMIZATION_HASH).toBe('docker-customization-hash')
+    expect(constants.DOCKER_MARKER_REGISTERED_AGENT_ID).toBe('docker-registered-agent-id')
 
     // Delayed restart
     expect(constants.DELAYED_RESTART_MS).toBe(1_000)

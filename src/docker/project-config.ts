@@ -41,7 +41,7 @@ export function migrateProjectConfigDir(project: ProjectRegistration): void {
     fs.mkdirSync(path.join(configBase, project.tenantCode), { recursive: true, mode: 0o700 })
     fs.renameSync(legacyDir, newDir)
     logger.info(`[docker] Migrated project config dir: ${legacyDir} → ${newDir}`)
-  } catch (err) {
+  } catch (err: unknown) {
     logger.warn(`[docker] Failed to migrate project config dir for ${project.projectCode}: ${getErrorMessage(err)}`)
   }
 }

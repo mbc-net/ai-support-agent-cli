@@ -61,7 +61,7 @@ export function startConfigWatcher(
           callbacks.onProjectRemoved(project)
         }
       }
-    } catch (err) {
+    } catch (err: unknown) {
       // Config may be in the middle of being written; only warn on unexpected errors
       if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') return
       logger.warn(`[config-watcher] Error reading config: ${getErrorMessage(err)}`)

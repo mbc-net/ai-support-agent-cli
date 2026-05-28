@@ -5,6 +5,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 import { ApiClient } from '../../../src/api-client'
 import { registerBrowserTools } from '../../../src/mcp/tools/browser'
+import {
+  SELECTOR_TIMEOUT_SINGLE_MS,
+} from '../../../src/mcp/tools/browser/browser-types'
 
 jest.mock('../../../src/api-client')
 jest.mock('../../../src/logger')
@@ -235,7 +238,7 @@ describe('browser tools', () => {
         waitForSelector: '#main',
       })
 
-      expect(mockPage.waitForSelector).toHaveBeenCalledWith('#main', { timeout: 10000 })
+      expect(mockPage.waitForSelector).toHaveBeenCalledWith('#main', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     })
 
     it('should wait for timeout when provided (clamped to 10s)', async () => {
@@ -258,7 +261,7 @@ describe('browser tools', () => {
         waitForTimeout: 500,
       }) as { content: Array<{ type: string; text?: string }> }
 
-      expect(mockPage.waitForSelector).toHaveBeenCalledWith('.loaded', { timeout: 10000 })
+      expect(mockPage.waitForSelector).toHaveBeenCalledWith('.loaded', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
       expect(mockPage.waitForTimeout).toHaveBeenCalledWith(500)
       expect(result.content[0].text).toContain('Test Page')
     })
@@ -296,7 +299,7 @@ describe('browser tools', () => {
       })
 
       expect(mockPage.waitForNavigation).toHaveBeenCalled()
-      expect(mockPage.click).toHaveBeenCalledWith('#link', { timeout: 10000 })
+      expect(mockPage.click).toHaveBeenCalledWith('#link', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     })
 
     it('should return text only when screenshot is false', async () => {

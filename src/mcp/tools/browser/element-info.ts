@@ -5,6 +5,8 @@
  * and text content so that chat AI can reproduce user interactions via Playwright.
  */
 
+import type { Page } from 'playwright'
+
 /** Structured information about a DOM element */
 export interface ElementInfo {
   /** Best CSS selector for Playwright (e.g., '#submit-btn', 'button:has-text("Login")') */
@@ -192,8 +194,7 @@ const FOCUSED_ELEMENT_SCRIPT = `() => {
  * Get element info at the given coordinates via page.evaluate().
  * Returns null if no element found or on error.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function getElementAtPoint(page: any, x: number, y: number): Promise<ElementInfo | null> {
+export async function getElementAtPoint(page: Page, x: number, y: number): Promise<ElementInfo | null> {
   try {
     return await page.evaluate(ELEMENT_AT_POINT_SCRIPT, { x, y }) as ElementInfo | null
   } catch {
@@ -205,8 +206,7 @@ export async function getElementAtPoint(page: any, x: number, y: number): Promis
  * Get info about the currently focused element.
  * Returns null if no element is focused or on error.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function getFocusedElementInfo(page: any): Promise<ElementInfo | null> {
+export async function getFocusedElementInfo(page: Page): Promise<ElementInfo | null> {
   try {
     return await page.evaluate(FOCUSED_ELEMENT_SCRIPT) as ElementInfo | null
   } catch {

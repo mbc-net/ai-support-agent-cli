@@ -185,7 +185,7 @@ async function executeAiMode(
       tenantCode,
       browserLocalPort: options.browserLocalPort,
     })
-  } catch (err) {
+  } catch (err: unknown) {
     const errorMessage =
       err instanceof Error ? err.message : String(err)
     logger.error(`[e2e_test] Chat execution failed: ${errorMessage}`)
@@ -264,7 +264,7 @@ async function executeScriptMode(
   let session: unknown
   try {
     session = await sessionManager.getOrCreate(`e2e-${executionId}`)
-  } catch (err) {
+  } catch (err: unknown) {
     logger.warn(`[e2e_test] Failed to create browser session: ${err instanceof Error ? err.message : String(err)}`)
     return executeAiMode(params, {
       executionId,
@@ -286,7 +286,7 @@ async function executeScriptMode(
         action: line,
         status: 'passed',
       })
-    } catch (err) {
+    } catch (err: unknown) {
       logger.warn(`[e2e_test] Failed to report step ${step}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
@@ -295,7 +295,7 @@ async function executeScriptMode(
   let scriptResult: ScriptExecutionResult
   try {
     scriptResult = await executePlaywrightScript(session, playwrightScript, onStepComplete)
-  } catch (err) {
+  } catch (err: unknown) {
     const errorMessage = err instanceof Error ? err.message : String(err)
     logger.error(`[e2e_test] Script execution error: ${errorMessage}`)
 
@@ -401,7 +401,7 @@ async function executeAiRecovery(
         tenantCode,
         browserLocalPort: params.browserLocalPort,
       })
-    } catch (err) {
+    } catch (err: unknown) {
       logger.warn(`[e2e_test] Recovery chat failed: ${err instanceof Error ? err.message : String(err)}`)
       continue
     }
@@ -422,7 +422,7 @@ async function executeAiRecovery(
     let retryResult: ScriptExecutionResult
     try {
       retryResult = await executePlaywrightScript(session, updatedScript)
-    } catch (err) {
+    } catch (err: unknown) {
       logger.warn(`[e2e_test] Recovery script execution error: ${err instanceof Error ? err.message : String(err)}`)
       continue
     }
@@ -438,7 +438,7 @@ async function executeAiRecovery(
             testCaseId,
             recoveryMode,
           })
-        } catch (err) {
+        } catch (err: unknown) {
           logger.warn(`[e2e_test] Failed to save recovered script: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
@@ -578,7 +578,7 @@ async function reportExecutionStatus(
         ...extra,
       },
     )
-  } catch (err) {
+  } catch (err: unknown) {
     logger.warn(
       `[e2e_test] Failed to update execution status: ${err instanceof Error ? err.message : String(err)}`,
     )
