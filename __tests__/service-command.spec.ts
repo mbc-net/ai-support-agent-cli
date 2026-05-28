@@ -387,6 +387,39 @@ describe('service-command orchestrator', () => {
       )
     })
 
+    it('should show aggregate running status on Win32 when service is running', () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' })
+      const { Win32ServiceStrategy } = require('../src/cli/service/win32-service')
+      const spy = jest.spyOn(Win32ServiceStrategy.prototype, 'status').mockReturnValue({
+        installed: true,
+        running: true,
+        pid: 42,
+        logDir: '/tmp/logs',
+      })
+
+      serviceStatus({})
+
+      expect(logger.success).toHaveBeenCalledWith(
+        expect.stringContaining('service.status.running'),
+      )
+      spy.mockRestore()
+    })
+
+    it('should show aggregate stopped status on Win32 when service is stopped', () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' })
+      const { Win32ServiceStrategy } = require('../src/cli/service/win32-service')
+      const spy = jest.spyOn(Win32ServiceStrategy.prototype, 'status').mockReturnValue({
+        installed: true,
+        running: false,
+        logDir: '/tmp/logs',
+      })
+
+      serviceStatus({})
+
+      expect(logger.warn).toHaveBeenCalledWith('service.status.stopped')
+      spy.mockRestore()
+    })
+
     it('should reject unsupported platforms', () => {
       Object.defineProperty(process, 'platform', { value: 'freebsd' })
 

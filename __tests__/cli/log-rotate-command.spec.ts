@@ -164,6 +164,14 @@ describe('resolveRotateOptions', () => {
       if (!r.ok) expect(r.error).toContain('logRotate.invalidMaxFiles')
     },
   )
+
+  it('rejects astronomically large --max-files that becomes Infinity after Number()', () => {
+    // A string of all digits that exceeds IEEE 754 double precision → Infinity
+    const hugeDigits = '1' + '0'.repeat(350)
+    const r = resolveRotateOptions({ maxFiles: hugeDigits })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('logRotate.invalidMaxFiles')
+  })
 })
 
 describe('runLogRotate (via registerLogRotateCommand action)', () => {
