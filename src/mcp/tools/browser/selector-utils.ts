@@ -7,6 +7,11 @@
  */
 
 import { logger } from '../../../logger'
+import {
+  BROWSER_TIMEOUT_PAGE_LOAD_MS,
+  BROWSER_TIMEOUT_SELECTOR_FALLBACK_MS,
+  BROWSER_TIMEOUT_SELECTOR_MS,
+} from './browser-types'
 
 /**
  * Try multiple comma-separated CSS selectors for a click action.
@@ -21,11 +26,11 @@ export async function tryClickSelectors(page: any, selectors: string, options?: 
     const sel = selectors.trim()
     if (options?.waitForNavigation) {
       await Promise.all([
-        page.waitForNavigation({ timeout: 30000 }).catch(() => { /* navigation may not happen */ }),
-        page.click(sel, { timeout: 10000 }),
+        page.waitForNavigation({ timeout: BROWSER_TIMEOUT_PAGE_LOAD_MS }).catch(() => { /* navigation may not happen */ }),
+        page.click(sel, { timeout: BROWSER_TIMEOUT_SELECTOR_MS }),
       ])
     } else {
-      await page.click(sel, { timeout: 10000 })
+      await page.click(sel, { timeout: BROWSER_TIMEOUT_SELECTOR_MS })
     }
     return sel
   }
@@ -39,11 +44,11 @@ export async function tryClickSelectors(page: any, selectors: string, options?: 
 
       if (options?.waitForNavigation) {
         await Promise.all([
-          page.waitForNavigation({ timeout: 30000 }).catch(() => { /* navigation may not happen */ }),
-          page.click(candidate, { timeout: 5000 }),
+          page.waitForNavigation({ timeout: BROWSER_TIMEOUT_PAGE_LOAD_MS }).catch(() => { /* navigation may not happen */ }),
+          page.click(candidate, { timeout: BROWSER_TIMEOUT_SELECTOR_FALLBACK_MS }),
         ])
       } else {
-        await page.click(candidate, { timeout: 5000 })
+        await page.click(candidate, { timeout: BROWSER_TIMEOUT_SELECTOR_FALLBACK_MS })
       }
       logger.debug(`[browser] Selector matched: ${candidate}`)
       return candidate
@@ -67,7 +72,7 @@ export async function tryFillSelectors(page: any, selectors: string, value: stri
 
   if (candidates.length <= 1) {
     const sel = selectors.trim()
-    await page.fill(sel, value, { timeout: 10000 })
+    await page.fill(sel, value, { timeout: BROWSER_TIMEOUT_SELECTOR_MS })
     return sel
   }
 
@@ -78,7 +83,7 @@ export async function tryFillSelectors(page: any, selectors: string, value: stri
       const count: number = await page.locator(candidate).count()
       if (count === 0) continue
 
-      await page.fill(candidate, value, { timeout: 5000 })
+      await page.fill(candidate, value, { timeout: BROWSER_TIMEOUT_SELECTOR_FALLBACK_MS })
       logger.debug(`[browser] Selector matched: ${candidate}`)
       return candidate
     } catch (err) {
