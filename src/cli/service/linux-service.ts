@@ -1032,7 +1032,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     }
 
     const projects: ProjectStatus[] = []
-    let anyRunning = false
+    let isAnyRunning = false
     let firstPid: number | undefined
 
     for (const { unitName } of projectUnits) {
@@ -1059,7 +1059,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
             pid = parseInt(pidMatch[1], 10)
             if (!firstPid) firstPid = pid
           }
-          anyRunning = true
+          isAnyRunning = true
         }
       } catch {
         // Not loaded — running stays false
@@ -1067,7 +1067,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       projects.push({ label: unitName, projectCode, running, pid })
     }
 
-    return { installed: true, running: anyRunning, pid: firstPid, logDir, projects }
+    return { installed: true, running: isAnyRunning, pid: firstPid, logDir, projects }
   }
 }
 

@@ -17,6 +17,7 @@ import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { removePidFile } from '../pid-manager'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
+import { getErrorMessage } from '../utils'
 import type { DockerRunOptions } from './docker-runner'
 import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, resolveImageTag, getDockerPath } from './docker-utils'
 import { buildProjectVolumeMounts } from './volume-mount-builder'
@@ -98,7 +99,7 @@ export class DockerSupervisor {
         migrateProjectConfigDir(project)
         this.spawnProject(project)
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('docker.projectSpawnFailed', { projectCode: project.projectCode, message }))
       }
     }
@@ -183,7 +184,7 @@ export class DockerSupervisor {
             fs.unlinkSync(buildErrorPath)
           }
         } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err)
+          const errorMsg = getErrorMessage(err)
           logger.error(`[docker] Image build failed: ${errorMsg}`)
           logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
           const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
@@ -192,7 +193,7 @@ export class DockerSupervisor {
           try {
             fs.writeFileSync(buildErrorPath, truncatedError, 'utf-8')
           } catch (writeErr) {
-            logger.warn(`[docker] Failed to write build error file: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`)
+            logger.warn(`[docker] Failed to write build error file: ${getErrorMessage(writeErr)}`)
           }
           const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
           const dstHash = path.join(projectConfigHostDir, 'docker-built-hash')
@@ -378,7 +379,7 @@ export class DockerSupervisor {
         logger.info(`[docker] Container ${key} exited for update. Stopping all containers and rebuilding...`)
         this.stopAll()
         void installUpdateAndRestart(projectConfigHostDir).catch((err) => {
-          logger.error(`[docker] Update failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.error(`[docker] Update failed: ${getErrorMessage(err)}`)
           process.exit(1)
         })
         return
@@ -387,7 +388,7 @@ export class DockerSupervisor {
       if (code === DOCKER_RESTART_EXIT_CODE && !this.updating) {
         logger.info(`[docker] Container ${key} requested restart. Rebuilding image if needed...`)
         void this.rebuildAndRestart(project, projectConfigHostDir, true).catch((err) => {
-          logger.error(`[docker] Restart failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.error(`[docker] Restart failed: ${getErrorMessage(err)}`)
         })
         return
       }
