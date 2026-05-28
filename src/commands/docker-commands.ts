@@ -56,7 +56,7 @@ export function registerDockerCommands(program: Command): void {
       let defaultContent: string
       try {
         defaultContent = fs.readFileSync(getDockerfilePath(), 'utf-8')
-      } catch (err) {
+      } catch (err: unknown) {
         logger.error(t('docker.diffDefaultError', { message: err instanceof Error ? err.message : String(err) }))
         return
       }

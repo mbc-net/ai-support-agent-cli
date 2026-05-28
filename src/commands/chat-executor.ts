@@ -158,7 +158,7 @@ async function executeClaudeCodeChatOnce(
     if (type === 'tool_call') {
       try {
         collectedToolCalls.push(JSON.parse(content))
-      } catch (err) {
+      } catch (err: unknown) {
         logger.warn(`[chat] Failed to parse tool_call JSON: ${err instanceof Error ? err.message : String(err)}`)
       }
     }
@@ -173,7 +173,7 @@ async function executeClaudeCodeChatOnce(
           entry.success = result.success
           entry.result = result.output
         }
-      } catch (err) {
+      } catch (err: unknown) {
         logger.warn(`[chat] Failed to parse tool_result JSON: ${err instanceof Error ? err.message : String(err)}`)
       }
     }

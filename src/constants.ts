@@ -47,6 +47,9 @@ export const MAX_DIR_ENTRIES = 1000
 // Hidden entries to exclude from file listings
 export const HIDDEN_ENTRIES = ['.claude']
 
+// Loopback address used when binding local HTTP servers and building local URLs
+export const LOCALHOST_ADDRESS = '127.0.0.1'
+
 // Default login URL (production)
 export const DEFAULT_LOGIN_URL = 'https://ai-support-agent.com'
 
@@ -190,6 +193,13 @@ export const WS_RECONNECT_MAX_DELAY_MS = 60_000
 export const REGISTER_RETRY_BASE_DELAY_MS = 1_000
 export const REGISTER_RETRY_MAX_DELAY_MS = 60_000
 export const REGISTER_AUTH_ERROR_DELAY_MS = 5 * 60 * 1000
+
+// Docker marker filenames written to the per-project config dir to coordinate
+// image build state between the in-container agent and the host DockerSupervisor.
+export const DOCKER_MARKER_BUILT_HASH = 'docker-built-hash'
+export const DOCKER_MARKER_REBUILD_NEEDED = 'docker-rebuild-needed'
+export const DOCKER_MARKER_CUSTOMIZATION_HASH = 'docker-customization-hash'
+export const DOCKER_MARKER_REGISTERED_AGENT_ID = 'docker-registered-agent-id'
 
 // Exit code used by the in-container agent to signal "update complete, rebuild image"
 // Must be distinct from 0 (clean stop) and 1 (error) to avoid false restarts on SIGINT.
