@@ -214,7 +214,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     if (removed > 0) {
       logger.info(`Cleaned up ${removed} stale terminal-sandbox dir(s) in /tmp`)
     }
-  } catch (err) {
+  } catch (err: unknown) {
     logger.warn(`Failed to clean up stale terminal-sandbox dirs: ${getErrorMessage(err)}`)
   }
 

@@ -11,7 +11,14 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getProjectImageTag } from './dockerfile-path'
-import { DOCKER_UPDATE_EXIT_CODE, DOCKER_RESTART_EXIT_CODE } from '../constants'
+import {
+  DOCKER_MARKER_BUILT_HASH,
+  DOCKER_MARKER_CUSTOMIZATION_HASH,
+  DOCKER_MARKER_REBUILD_NEEDED,
+  DOCKER_MARKER_REGISTERED_AGENT_ID,
+  DOCKER_RESTART_EXIT_CODE,
+  DOCKER_UPDATE_EXIT_CODE,
+} from '../constants'
 import { t } from '../i18n'
 import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { removePidFile } from '../pid-manager'
@@ -153,7 +160,7 @@ export class DockerSupervisor {
   }
 
   private async rebuildAndRestart(project: ProjectRegistration, projectConfigHostDir: string, forceIfDockerfileExists = false): Promise<void> {
-    const rebuildMarker = path.join(projectConfigHostDir, 'docker-rebuild-needed')
+    const rebuildMarker = path.join(projectConfigHostDir, DOCKER_MARKER_REBUILD_NEEDED)
     const projectDockerfile = path.join(projectConfigHostDir, 'Dockerfile')
     const hasMarker = fs.existsSync(rebuildMarker)
     const shouldBuild = hasMarker || (forceIfDockerfileExists && fs.existsSync(projectDockerfile))
@@ -162,7 +169,7 @@ export class DockerSupervisor {
 
       // Load the registered agentId before building so build logs are stored under
       // the correct agentId (the one shown in the Web UI), not the host agentId.
-      const registeredAgentIdPath = path.join(projectConfigHostDir, 'docker-registered-agent-id')
+      const registeredAgentIdPath = path.join(projectConfigHostDir, DOCKER_MARKER_REGISTERED_AGENT_ID)
       if (fs.existsSync(registeredAgentIdPath)) {
         const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
         if (registeredId && registeredId !== this.getProjectAgentId(project)) {
@@ -173,8 +180,8 @@ export class DockerSupervisor {
       if (fs.existsSync(projectDockerfile)) {
         try {
           await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, this.createProjectApiClient(project), this.getProjectAgentId(project))
-          const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
-          const dstHash = path.join(projectConfigHostDir, 'docker-built-hash')
+          const srcHash = path.join(projectConfigHostDir, DOCKER_MARKER_CUSTOMIZATION_HASH)
+          const dstHash = path.join(projectConfigHostDir, DOCKER_MARKER_BUILT_HASH)
           if (fs.existsSync(srcHash)) {
             fs.copyFileSync(srcHash, dstHash)
           }
@@ -183,7 +190,7 @@ export class DockerSupervisor {
           if (fs.existsSync(buildErrorPath)) {
             fs.unlinkSync(buildErrorPath)
           }
-        } catch (err) {
+        } catch (err: unknown) {
           const errorMsg = getErrorMessage(err)
           logger.error(`[docker] Image build failed: ${errorMsg}`)
           logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
@@ -195,8 +202,8 @@ export class DockerSupervisor {
           } catch (writeErr) {
             logger.warn(`[docker] Failed to write build error file: ${getErrorMessage(writeErr)}`)
           }
-          const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
-          const dstHash = path.join(projectConfigHostDir, 'docker-built-hash')
+          const srcHash = path.join(projectConfigHostDir, DOCKER_MARKER_CUSTOMIZATION_HASH)
+          const dstHash = path.join(projectConfigHostDir, DOCKER_MARKER_BUILT_HASH)
           if (fs.existsSync(srcHash)) {
             fs.copyFileSync(srcHash, dstHash)
           }
@@ -212,8 +219,8 @@ export class DockerSupervisor {
 
     // Pre-startup hash check: if docker-customization-hash !== docker-built-hash,
     // rebuild before starting the container
-    const customizationHashPath = path.join(projectConfigHostDir, 'docker-customization-hash')
-    const builtHashPath = path.join(projectConfigHostDir, 'docker-built-hash')
+    const customizationHashPath = path.join(projectConfigHostDir, DOCKER_MARKER_CUSTOMIZATION_HASH)
+    const builtHashPath = path.join(projectConfigHostDir, DOCKER_MARKER_BUILT_HASH)
     if (fs.existsSync(customizationHashPath) && fs.existsSync(builtHashPath)) {
       const customizationHash = fs.readFileSync(customizationHashPath, 'utf-8').trim()
       const builtHash = fs.readFileSync(builtHashPath, 'utf-8').trim()
@@ -225,7 +232,7 @@ export class DockerSupervisor {
     }
 
     // Load the server-assigned agentId written by the container after registration.
-    const registeredAgentIdPath = path.join(projectConfigHostDir, 'docker-registered-agent-id')
+    const registeredAgentIdPath = path.join(projectConfigHostDir, DOCKER_MARKER_REGISTERED_AGENT_ID)
     if (fs.existsSync(registeredAgentIdPath)) {
       const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
       if (registeredId && registeredId !== this.getProjectAgentId(project)) {
@@ -306,7 +313,7 @@ export class DockerSupervisor {
       let registeredIdWatcher: Pick<fs.FSWatcher, 'close'> = noopWatcher
       try {
         registeredIdWatcher = fs.watch(projectConfigHostDir, (eventType, filename) => {
-          if (filename === 'docker-registered-agent-id' && (eventType === 'rename' || eventType === 'change')) {
+          if (filename === DOCKER_MARKER_REGISTERED_AGENT_ID && (eventType === 'rename' || eventType === 'change')) {
             try {
               const newId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
               const currentId = supervisor.getProjectAgentId(project)

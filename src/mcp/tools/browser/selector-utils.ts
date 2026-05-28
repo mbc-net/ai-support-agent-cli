@@ -47,7 +47,7 @@ export async function tryClickSelectors(page: any, selectors: string, options?: 
       }
       logger.debug(`[browser] Selector matched: ${candidate}`)
       return candidate
-    } catch (err) {
+    } catch (err: unknown) {
       lastError = err as Error
       continue
     }
@@ -81,7 +81,7 @@ export async function tryFillSelectors(page: any, selectors: string, value: stri
       await page.fill(candidate, value, { timeout: 5000 })
       logger.debug(`[browser] Selector matched: ${candidate}`)
       return candidate
-    } catch (err) {
+    } catch (err: unknown) {
       lastError = err as Error
       continue
     }
