@@ -13,10 +13,24 @@ jest.mock('../../src/i18n', () => ({
   },
 }))
 
+const mockWriterWrite = jest.fn().mockReturnValue(0)
+const mockWriterClose = jest.fn()
+
+jest.mock('../../src/log-rotator', () => ({
+  DEFAULT_MAX_BYTES: 5 * 1024 * 1024,
+  DEFAULT_MAX_FILES: 5,
+  RotatingFileWriter: jest.fn().mockImplementation(() => ({
+    write: mockWriterWrite,
+    close: mockWriterClose,
+  })),
+}))
+
+import { EventEmitter } from 'events'
 import { Command } from 'commander'
 
 import { parseSize, registerLogRotateCommand, resolveRotateOptions } from '../../src/cli/log-rotate-command'
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_FILES } from '../../src/log-rotator'
+import { logger } from '../../src/logger'
 
 describe('parseSize', () => {
   it('parses bare bytes', () => {
@@ -150,4 +164,174 @@ describe('resolveRotateOptions', () => {
       if (!r.ok) expect(r.error).toContain('logRotate.invalidMaxFiles')
     },
   )
+})
+
+describe('runLogRotate (via registerLogRotateCommand action)', () => {
+  let exitSpy: jest.SpyInstance
+  let stdoutWriteSpy: jest.SpyInstance
+  let stdinEmitter: EventEmitter
+  let processOnSpy: jest.SpyInstance
+  const signalHandlers = new Map<string, () => void>()
+
+  function getActionHandler(): (filePath: string, opts: Record<string, unknown>) => void {
+    const program = new Command()
+    program.exitOverride() // prevent process.exit from commander
+    registerLogRotateCommand(program)
+    const cmd = program.commands.find((c) => c.name() === 'log-rotate')!
+    // Extract the action handler from commander internals
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (cmd as any)._actionHandler
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockWriterWrite.mockReturnValue(0)
+    mockWriterClose.mockReturnValue(undefined)
+
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+
+    stdinEmitter = new EventEmitter()
+    jest.spyOn(process.stdin, 'on').mockImplementation((event: string, handler: (...args: unknown[]) => void) => {
+      stdinEmitter.on(event, handler)
+      return process.stdin
+    })
+
+    signalHandlers.clear()
+    processOnSpy = jest.spyOn(process, 'on').mockImplementation(((event: string, handler: () => void) => {
+      signalHandlers.set(event, handler)
+      return process
+    }) as typeof process.on)
+  })
+
+  afterEach(() => {
+    exitSpy.mockRestore()
+    stdoutWriteSpy.mockRestore()
+    processOnSpy.mockRestore()
+    jest.restoreAllMocks()
+  })
+
+  it('invokes runLogRotate when commander action fires: data event writes to writer and stdout (tee enabled)', () => {
+    const program = new Command()
+    program.exitOverride()
+    registerLogRotateCommand(program)
+
+    program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log'])
+
+    const chunk = Buffer.from('hello world')
+    stdinEmitter.emit('data', chunk)
+
+    expect(mockWriterWrite).toHaveBeenCalledWith(chunk)
+    expect(stdoutWriteSpy).toHaveBeenCalledWith(chunk)
+  })
+
+  it('data event does NOT tee to stdout when --no-tee is passed', () => {
+    const program = new Command()
+    program.exitOverride()
+    registerLogRotateCommand(program)
+
+    program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log', '--no-tee'])
+
+    const chunk = Buffer.from('no tee data')
+    stdinEmitter.emit('data', chunk)
+
+    expect(mockWriterWrite).toHaveBeenCalledWith(chunk)
+    expect(stdoutWriteSpy).not.toHaveBeenCalled()
+  })
+
+  it('on stdin end, closes writer and exits with code 0', () => {
+    const program = new Command()
+    program.exitOverride()
+    registerLogRotateCommand(program)
+
+    program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log'])
+
+    stdinEmitter.emit('end')
+
+    expect(mockWriterClose).toHaveBeenCalled()
+    expect(exitSpy).toHaveBeenCalledWith(0)
+  })
+
+  it('on stdin error, closes writer and exits with code 0', () => {
+    const program = new Command()
+    program.exitOverride()
+    registerLogRotateCommand(program)
+
+    program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log'])
+
+    stdinEmitter.emit('error', new Error('read error'))
+
+    expect(mockWriterClose).toHaveBeenCalled()
+    expect(exitSpy).toHaveBeenCalledWith(0)
+  })
+
+  it('on write error, logs error, sets exitCode=1, still tees to stdout', () => {
+    mockWriterWrite.mockImplementation(() => { throw new Error('disk full') })
+
+    const program = new Command()
+    program.exitOverride()
+    registerLogRotateCommand(program)
+
+    program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log'])
+
+    const chunk = Buffer.from('data')
+    stdinEmitter.emit('data', chunk)
+
+    expect(logger.error).toHaveBeenCalled()
+    // stdout should still receive the chunk (passthrough fallback)
+    expect(stdoutWriteSpy).toHaveBeenCalledWith(chunk)
+
+    // on end, exits with exitCode 1
+    stdinEmitter.emit('end')
+    expect(exitSpy).toHaveBeenCalledWith(1)
+  })
+
+  it('on write error with no-tee, does NOT tee to stdout', () => {
+    mockWriterWrite.mockImplementation(() => { throw new Error('disk full') })
+
+    const program = new Command()
+    program.exitOverride()
+    registerLogRotateCommand(program)
+
+    program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log', '--no-tee'])
+
+    const chunk = Buffer.from('data')
+    stdinEmitter.emit('data', chunk)
+
+    // No tee on error either
+    expect(stdoutWriteSpy).not.toHaveBeenCalled()
+  })
+
+  it('registers SIGTERM, SIGINT, SIGHUP handlers that close writer and exit', () => {
+    const program = new Command()
+    program.exitOverride()
+    registerLogRotateCommand(program)
+
+    program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log'])
+
+    expect(signalHandlers.has('SIGTERM')).toBe(true)
+    expect(signalHandlers.has('SIGINT')).toBe(true)
+    expect(signalHandlers.has('SIGHUP')).toBe(true)
+
+    signalHandlers.get('SIGTERM')!()
+    expect(mockWriterClose).toHaveBeenCalled()
+    expect(exitSpy).toHaveBeenCalledWith(0)
+  })
+
+  it('calls process.exit(2) when resolveRotateOptions returns error (invalid options)', () => {
+    // Make process.exit throw to prevent further execution after exit(2)
+    exitSpy.mockImplementation(() => { throw new Error('process.exit called') })
+
+    const program = new Command()
+    program.exitOverride()
+    registerLogRotateCommand(program)
+
+    // --max-size=0 is invalid (must be > 0)
+    expect(() => {
+      program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log', '--max-size', '0'])
+    }).toThrow('process.exit called')
+
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(logger.error).toHaveBeenCalled()
+  })
 })

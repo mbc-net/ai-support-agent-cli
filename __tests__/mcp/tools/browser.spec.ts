@@ -576,5 +576,147 @@ describe('browser tools', () => {
       const result = await toolCallbacks.browser_list_variables({}) as { content: Array<{ text: string }> }
       expect(result.content[0].text).toBe('No variables set.')
     })
+
+  })
+
+  describe('inactive session error paths', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let sessionInstance: any
+
+    beforeEach(() => {
+      const { BrowserSession } = require('../../../src/mcp/tools/browser/browser-session')
+      BrowserSession.mockImplementation(() => {
+        sessionInstance = {
+          getPage: jest.fn().mockResolvedValue(mockPage),
+          isActive: jest.fn().mockReturnValue(false),
+          close: jest.fn().mockResolvedValue(undefined),
+          setViewport: jest.fn().mockResolvedValue(undefined),
+          screenshot: jest.fn().mockResolvedValue(Buffer.from('fake-screenshot')),
+          variables: new Map(),
+          actionLog: { add: jest.fn() },
+        }
+        return sessionInstance
+      })
+    })
+
+    it('browser_close returns message when session is not active', async () => {
+      setup()
+
+      const result = await toolCallbacks.browser_close({}) as { content: Array<{ text: string }> }
+      expect(result.content[0].text).toBe('No active browser session.')
+    })
+
+    it('browser_click returns error when session is not active', async () => {
+      setup()
+
+      const result = await toolCallbacks.browser_click({
+        selector: '#btn',
+        screenshot: true,
+      }) as { content: Array<{ type: string; text?: string }>; isError?: boolean }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('No active browser session')
+    })
+
+    it('browser_fill returns error when session is not active', async () => {
+      setup()
+
+      const result = await toolCallbacks.browser_fill({
+        selector: '#input',
+        value: 'test',
+      }) as { content: Array<{ type: string; text?: string }>; isError?: boolean }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('No active browser session')
+    })
+
+    it('browser_get_text returns error when session is not active', async () => {
+      setup()
+
+      const result = await toolCallbacks.browser_get_text({}) as { content: Array<{ type: string; text?: string }>; isError?: boolean }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('No active browser session')
+    })
+
+    it('browser_extract returns error when session is not active', async () => {
+      setup()
+
+      const result = await toolCallbacks.browser_extract({
+        selector: '.item',
+        variableName: 'myVar',
+      }) as { content: Array<{ type: string; text?: string }>; isError?: boolean }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('No active browser session')
+    })
+  })
+
+  describe('local session variable operations (non-proxy)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let sessionInstance: any
+
+    beforeEach(() => {
+      // Restore env to no proxy
+      delete process.env.AI_SUPPORT_BROWSER_SESSION_ID
+      delete process.env.AI_SUPPORT_BROWSER_LOCAL_PORT
+
+      const { BrowserSession } = require('../../../src/mcp/tools/browser/browser-session')
+      BrowserSession.mockImplementation(() => {
+        sessionInstance = {
+          getPage: jest.fn().mockResolvedValue(mockPage),
+          isActive: jest.fn().mockReturnValue(true),
+          close: jest.fn().mockResolvedValue(undefined),
+          setViewport: jest.fn().mockResolvedValue(undefined),
+          screenshot: jest.fn().mockResolvedValue(Buffer.from('fake-screenshot')),
+          variables: new Map(),
+          actionLog: { add: jest.fn() },
+        }
+        return sessionInstance
+      })
+    })
+
+    it('browser_set_variable sets variable in local session and logs action', async () => {
+      setup()
+
+      const result = await toolCallbacks.browser_set_variable({
+        name: 'myVar',
+        value: 'hello',
+      }) as { content: Array<{ text: string }> }
+
+      expect(result.content[0].text).toBe('Variable set: myVar')
+      expect(sessionInstance.variables.get('myVar')).toBe('hello')
+      expect(sessionInstance.actionLog.add).toHaveBeenCalledWith('chat', 'set_variable', 'myVar "hello"')
+    })
+
+    it('browser_get_variable returns variable value from local session', async () => {
+      setup()
+      sessionInstance.variables.set('existingVar', 'existingValue')
+
+      const result = await toolCallbacks.browser_get_variable({
+        name: 'existingVar',
+      }) as { content: Array<{ text: string }> }
+
+      expect(result.content[0].text).toBe('existingValue')
+      expect(sessionInstance.actionLog.add).toHaveBeenCalledWith('chat', 'get_variable', 'existingVar → "existingValue"')
+    })
+
+    it('browser_get_variable returns error for missing variable in local session', async () => {
+      setup()
+
+      const result = await toolCallbacks.browser_get_variable({
+        name: 'nonexistent',
+      }) as { content: Array<{ type: string; text?: string }>; isError?: boolean }
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('Variable not found: nonexistent')
+    })
+
+    it('browser_list_variables returns variables from local session', async () => {
+      setup()
+      sessionInstance.variables.set('a', 'alpha')
+      sessionInstance.variables.set('b', 'beta')
+
+      const result = await toolCallbacks.browser_list_variables({}) as { content: Array<{ text: string }> }
+
+      expect(result.content[0].text).toContain('a=alpha')
+      expect(result.content[0].text).toContain('b=beta')
+    })
   })
 })
