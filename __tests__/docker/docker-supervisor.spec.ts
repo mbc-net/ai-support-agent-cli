@@ -1160,5 +1160,270 @@ describe('DockerSupervisor', () => {
       stdoutWriteSpy.mockRestore()
       stderrWriteSpy.mockRestore()
     })
+
+    it('saves session log when fullLog is non-empty after container closes', async () => {
+      const { ApiClient } = require('../../src/api-client')
+      const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
+      const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
+      ApiClient.mockImplementation(() => ({
+        submitLogChunk: mockSubmitLogChunk,
+        saveSessionLog: mockSaveSessionLog,
+      }))
+
+      const watcherClose = jest.fn()
+      mockWatch.mockReturnValue({ close: watcherClose } as unknown as ReturnType<typeof fs.watch>)
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      // Emit data to populate fullLog
+      fakeChild.stdout.emit('data', Buffer.from('log output line\n'))
+
+      // Close the container (triggers flush + saveSessionLog)
+      fakeChild.emit('close', 0)
+
+      // Wait for async operations to complete
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+
+      expect(mockSaveSessionLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectCode: 'PROJ_A',
+          logType: 'container',
+          content: expect.stringContaining('log output line'),
+        }),
+      )
+    })
+
+    it('does not call saveSessionLog when fullLog is empty after container closes', async () => {
+      const { ApiClient } = require('../../src/api-client')
+      const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
+      ApiClient.mockImplementation(() => ({
+        submitLogChunk: jest.fn().mockResolvedValue(undefined),
+        saveSessionLog: mockSaveSessionLog,
+      }))
+
+      const watcherClose = jest.fn()
+      mockWatch.mockReturnValue({ close: watcherClose } as unknown as ReturnType<typeof fs.watch>)
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      // Close the container WITHOUT emitting any data (fullLog stays empty)
+      fakeChild.emit('close', 0)
+
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
+
+      // saveSessionLog should NOT be called when fullLog is empty
+      expect(mockSaveSessionLog).not.toHaveBeenCalled()
+    })
+
+    it('warns when container log exceeds 2 MB limit', async () => {
+      const { ApiClient } = require('../../src/api-client')
+      ApiClient.mockImplementation(() => ({
+        submitLogChunk: jest.fn().mockResolvedValue(undefined),
+        saveSessionLog: jest.fn().mockResolvedValue(undefined),
+      }))
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      // Emit 2.5 MB of data to exceed 2 MB limit
+      const largeChunk = 'x'.repeat(512 * 1024) // 512 KB per chunk
+
+      jest.useFakeTimers()
+      try {
+        // Emit 5 chunks via flushTimer
+        for (let i = 0; i < 5; i++) {
+          fakeChild.stdout.emit('data', Buffer.from(largeChunk))
+          jest.advanceTimersByTime(1000) // trigger the flushTimer interval
+          await Promise.resolve()
+          await Promise.resolve()
+        }
+
+        fakeChild.emit('close', 0)
+        await Promise.resolve()
+        await Promise.resolve()
+      } finally {
+        jest.useRealTimers()
+      }
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('exceeded 2 MB limit'),
+      )
+    })
+
+    it('stops updating fullLog once log is truncated (logTruncated=true branch)', async () => {
+      const { ApiClient } = require('../../src/api-client')
+      const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
+      const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
+      ApiClient.mockImplementation(() => ({
+        submitLogChunk: mockSubmitLogChunk,
+        saveSessionLog: mockSaveSessionLog,
+      }))
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      // Suppress stdout/stderr to avoid large output
+      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      const stderrWriteSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+      try {
+        const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+        supervisor.start([makeProject()])
+
+        // Emit 3 chunks of ~700 KB each to exceed the 2 MB limit
+        // The data handler just accumulates into buf; flush() is called on close
+        const chunkSize = 700 * 1024
+        const chunk = Buffer.alloc(chunkSize, 'z')
+
+        fakeChild.stdout.emit('data', chunk)
+        fakeChild.stdout.emit('data', chunk)
+        fakeChild.stdout.emit('data', chunk)
+
+        // Close the container — flush() will be called in the close handler
+        fakeChild.emit('close', 0)
+
+        // Allow the flush promise chain to settle
+        await Promise.resolve()
+        await Promise.resolve()
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+      } finally {
+        stdoutWriteSpy.mockRestore()
+        stderrWriteSpy.mockRestore()
+      }
+
+      // logTruncated warning should have been emitted during flush
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('exceeded 2 MB limit'),
+      )
+    }, 15000)
+
+    it('does not call process.exit a second time when close fires on already-handled container', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      // First close — handled
+      fakeChild.emit('close', 0)
+      expect(mockExit).toHaveBeenCalledTimes(1)
+
+      // Second close — should be ignored (closeHandled = true)
+      fakeChild.emit('close', 0)
+      // Still only called once
+      expect(mockExit).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // ─── process.getuid branch ────────────────────────────────────────────────
+
+  describe('process.getuid optional branch', () => {
+    it('omits --user flag when process.getuid is not available', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      // Temporarily remove process.getuid
+      const originalGetuid = process.getuid
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (process as any).getuid
+
+      try {
+        const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+        supervisor.start([makeProject()])
+
+        const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
+        expect(spawnArgs).not.toContain('--user')
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(process as any).getuid = originalGetuid
+      }
+    })
+  })
+
+  // ─── watcher change event ─────────────────────────────────────────────────
+
+  describe('watcher change event (not just rename)', () => {
+    it('handles change event type for docker-registered-agent-id', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts({ agentId: 'old-id' }))
+      supervisor.start([makeProject()])
+
+      // Simulate the watcher callback with 'change' event type
+      const watchCallback = mockWatch.mock.calls[0][1] as (
+        eventType: string,
+        filename: string,
+      ) => void
+
+      mockReadFileSync.mockReturnValueOnce('new-change-agent-id')
+      mockExistsSync.mockReturnValueOnce(true)
+      watchCallback('change', 'docker-registered-agent-id')
+
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.stringContaining('new-change-agent-id'),
+      )
+    })
+
+    it('ignores watcher events for files other than docker-registered-agent-id', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      const watchCallback = mockWatch.mock.calls[0][1] as (
+        eventType: string,
+        filename: string,
+      ) => void
+
+      const infoCallsBefore = (logger.info as jest.Mock).mock.calls.length
+      watchCallback('rename', 'some-other-file.json')
+      const infoCallsAfter = (logger.info as jest.Mock).mock.calls.length
+
+      // No new info calls — unrelated file ignored
+      expect(infoCallsAfter).toBe(infoCallsBefore)
+    })
+
+    it('handles readFileSync failure gracefully in watcher callback', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      const watchCallback = mockWatch.mock.calls[0][1] as (
+        eventType: string,
+        filename: string,
+      ) => void
+
+      // readFileSync throws ENOENT — should be silently caught
+      mockReadFileSync.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+      mockExistsSync.mockReturnValueOnce(true)
+
+      expect(() => {
+        watchCallback('rename', 'docker-registered-agent-id')
+      }).not.toThrow()
+    })
   })
 })
