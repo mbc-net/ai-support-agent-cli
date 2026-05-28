@@ -823,7 +823,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     }
 
     const projects: ProjectStatus[] = []
-    let anyRunning = false
+    let isAnyRunning = false
     let firstPid: number | undefined
 
     for (const { label } of projectPlists) {
@@ -838,7 +838,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
         if (pidMatch) {
           running = true
           pid = parseInt(pidMatch[1], 10)
-          anyRunning = true
+          isAnyRunning = true
           if (!firstPid) firstPid = pid
         }
       } catch {
@@ -847,6 +847,6 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       projects.push({ label, projectCode, running, pid })
     }
 
-    return { installed: true, running: anyRunning, pid: firstPid, logDir, projects }
+    return { installed: true, running: isAnyRunning, pid: firstPid, logDir, projects }
   }
 }

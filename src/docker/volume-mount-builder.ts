@@ -17,6 +17,7 @@ import {
   getSensitiveHomePaths,
 } from '../security'
 import type { ProjectRegistration } from '../types'
+import { getErrorMessage } from '../utils'
 import { toPosixRelative } from './docker-utils'
 
 /** Container-internal base path for project directories */
@@ -270,7 +271,7 @@ export function buildProjectVolumeMounts(
     } catch (error) {
       // Don't fail the install — but DO surface the warning so multi-user
       // hosts aren't silently left with a 0o755 bind-mount source.
-      const message = error instanceof Error ? error.message : String(error)
+      const message = getErrorMessage(error)
       logger.warn(t('docker.projectDirChmodFailed', { path: defaultHostProjectDir, message }))
     }
     mounts.push('-v', `${defaultHostProjectDir}:${containerProjectDir}:rw`)
