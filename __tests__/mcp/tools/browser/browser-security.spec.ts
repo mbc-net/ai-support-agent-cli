@@ -89,6 +89,50 @@ describe('browser-security', () => {
         expect(validateUrl('https://example.com/')).toEqual({ valid: true })
         expect(validateUrl('https://api.github.com/')).toEqual({ valid: true })
       })
+
+      it('should reject IPv6 loopback ::1 with brackets', () => {
+        const result = validateUrl('http://[::1]/')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should reject IPv6 unique-local fc00::/7 addresses with brackets', () => {
+        const result = validateUrl('http://[fc00::1]/')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should reject IPv6 unique-local fd00::/7 addresses with brackets', () => {
+        const result = validateUrl('http://[fd12:3456:789a::1]/')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should reject IPv6 link-local fe80:: addresses with brackets', () => {
+        const result = validateUrl('http://[fe80::1]/')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should reject 100.64.x.x (shared address space)', () => {
+        const result = validateUrl('http://100.64.0.1/')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should reject 172.31.x.x (RFC1918 upper boundary)', () => {
+        const result = validateUrl('http://172.31.255.255/')
+        expect(result.valid).toBe(false)
+        expect(result.reason).toContain('internal/private')
+      })
+
+      it('should allow 172.15.x.x (just below private range)', () => {
+        expect(validateUrl('http://172.15.0.1/')).toEqual({ valid: true })
+      })
+
+      it('should allow 172.32.x.x (just above private range)', () => {
+        expect(validateUrl('http://172.32.0.1/')).toEqual({ valid: true })
+      })
     })
   })
 })
