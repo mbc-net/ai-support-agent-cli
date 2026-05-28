@@ -1,4 +1,5 @@
 import type { IpcStartMessage } from '../src/ipc-types'
+import { logger } from '../src/logger'
 
 jest.mock('../src/logger')
 jest.mock('../src/sentry', () => ({
@@ -143,6 +144,21 @@ describe('project-worker', () => {
       })
     })
 
+    it('should enable verbose logging when options.verbose is true', async () => {
+      const worker = loadWorker()
+      worker.startWorker()
+
+      const verboseStartMessage: IpcStartMessage = {
+        ...startMessage,
+        options: { ...startMessage.options, verbose: true },
+      }
+
+      emitProcessEvent('message', verboseStartMessage)
+      await flushAsync()
+
+      expect((logger.setVerbose as jest.Mock)).toHaveBeenCalledWith(true)
+    })
+
     it('should handle shutdown message', async () => {
       const worker = loadWorker()
       worker.startWorker()
@@ -197,6 +213,28 @@ describe('project-worker', () => {
         tenantCode: 'mbc',
         projectCode: 'test-proj',
         message: 'init failed',
+      })
+    })
+
+    it('should wrap non-Error thrown value in new Error when start fails', async () => {
+      const { ProjectAgent } = require('../src/project-agent')
+      // Throw a non-Error value (string) to cover the `err instanceof Error ? err : new Error(String(err))` false branch
+      ProjectAgent.mockImplementationOnce(() => {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        throw 'string error value'
+      })
+
+      const worker = loadWorker()
+      worker.startWorker()
+
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      expect(processSendSpy).toHaveBeenCalledWith({
+        type: 'error',
+        tenantCode: 'mbc',
+        projectCode: 'test-proj',
+        message: 'string error value',
       })
     })
 
