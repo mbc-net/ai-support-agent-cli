@@ -1,10 +1,11 @@
-import { readFileSync } from 'fs'
 import * as os from 'os'
 import { join, resolve } from 'path'
 
+import { readJsonSync } from './utils'
+
 function getPackageVersion(): string {
   try {
-    const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'))
+    const pkg = readJsonSync<{ version?: string }>(join(__dirname, '..', 'package.json'))
     return pkg.version ?? '0.0.0'
   } catch {
     return '0.0.0'
