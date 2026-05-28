@@ -897,6 +897,23 @@ describe('docker-runner', () => {
       mockGetConfigDir.mockReturnValue('/mock/config-dir')
     })
 
+    it('should exit with error when another agent instance is already running', () => {
+      const { isAlreadyRunning, readPidFile } = require('../../src/pid-manager')
+      isAlreadyRunning.mockReturnValue(true)
+      readPidFile.mockReturnValue(12345)
+
+      runInDocker({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('12345'),
+      )
+      expect(mockExit).toHaveBeenCalledWith(1)
+
+      // Restore default for subsequent tests
+      isAlreadyRunning.mockReturnValue(false)
+      readPidFile.mockReturnValue(null)
+    })
+
     it('should exit with error when Docker is not available', () => {
       mockExecFileSync.mockImplementation(() => { throw new Error('not found') })
 
