@@ -3,10 +3,11 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { loadConfig, getProjectList } from '../../config-manager'
+import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { getErrorMessage } from '../../utils'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
@@ -17,19 +18,28 @@ import type {
   ServiceStatus,
   ServiceStrategy,
 } from './types'
+import {
+  getLinuxLogDir,
+  getLinuxSystemdUserDir,
+  getProjectConfigHostDir,
+  getProjectLogDir,
+  getProjectServiceDir,
+  getServicesDir,
+  getUpdateScriptPath,
+  getWrapperScriptPath,
+  getAgentOutLog,
+  getAgentErrLog,
+  getWrapperOutLog,
+  getWrapperErrLog,
+} from '../../utils/path-utils'
 
 export { getCliEntryPoint, getNodePath }
 
 const SERVICE_NAME = 'ai-support-agent.service'
 const SERVICE_PREFIX = 'ai-support-agent'
 
-function getSystemdUserDir(): string {
-  return path.join(os.homedir(), '.config', 'systemd', 'user')
-}
-
-function getLogDir(): string {
-  return path.join(os.homedir(), '.local', 'share', 'ai-support-agent', 'logs')
-}
+const getSystemdUserDir = getLinuxSystemdUserDir
+const getLogDir = getLinuxLogDir
 
 // ---------------------------------------------------------------------------
 // Per-project unit helpers
@@ -140,28 +150,7 @@ export function detectSystemSystemdUnits(): string[] {
   }
 }
 
-/** Returns the host-side per-project config dir (mirrors what docker-runner uses) */
-function getProjectConfigHostDir(tenantCode: string, projectCode: string): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'projects', tenantCode, projectCode, '.ai-support-agent')
-}
-
-/** Returns the services dir where wrapper scripts are stored */
-function getServicesDir(): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'services')
-}
-
-function getUpdateScriptPath(): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'update-and-restart.sh')
-}
+// getProjectConfigHostDir, getServicesDir, and getUpdateScriptPath are imported from ../../utils/path-utils
 
 // ---------------------------------------------------------------------------
 // Legacy single-unit generation (kept for backward compatibility / tests)
@@ -189,8 +178,8 @@ Restart=always
 RestartSec=10
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=HOME=${os.homedir()}
-StandardOutput=append:${path.join(logDir, 'agent.out.log')}
-StandardError=append:${path.join(logDir, 'agent.err.log')}
+StandardOutput=append:${getAgentOutLog(logDir)}
+StandardError=append:${getAgentErrLog(logDir)}
 
 [Install]
 WantedBy=default.target
@@ -219,8 +208,8 @@ export function generateProjectServiceUnit(opts: {
   // systemd's open fd, and the rotated generation would grow without
   // bound). The wrapper.* files have no rotation but stay tiny because
   // only the bootstrap noise lands there.
-  const escapedOutLog = systemdEscape(path.join(opts.logDir, 'wrapper.out.log'))
-  const escapedErrLog = systemdEscape(path.join(opts.logDir, 'wrapper.err.log'))
+  const escapedOutLog = systemdEscape(getWrapperOutLog(opts.logDir))
+  const escapedErrLog = systemdEscape(getWrapperErrLog(opts.logDir))
   return `[Unit]
 Description=AI Support Agent (${opts.unitName})
 After=network-online.target
@@ -465,14 +454,10 @@ exit "$EXIT_CODE"
 
 /** Generate the update-and-restart.sh script for systemd */
 export function generateUpdateScript(): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-
   // Quote interpolated paths so a HOME / config dir containing whitespace
   // or shell metacharacters doesn't word-split the generated script.
   const qSystemdDir = shellQuote(getSystemdUserDir())
-  const qVersionFile = shellQuote(path.join(configDir, 'update-version.json'))
+  const qVersionFile = shellQuote(path.join(getConfigDir(), 'update-version.json'))
 
   return `#!/bin/bash
 set -uo pipefail
@@ -585,7 +570,7 @@ export function writeProjectServiceFiles(
   const projectKey = `${sanitize(tenantCode)}-${sanitize(projectCode)}`
 
   const logDir = getLogDir()
-  const projectLogDir = path.join(logDir, projectKey)
+  const projectLogDir = getProjectLogDir(logDir, projectKey)
   if (!fs.existsSync(projectLogDir)) {
     fs.mkdirSync(projectLogDir, { recursive: true, mode: 0o700 })
   }
@@ -596,7 +581,7 @@ export function writeProjectServiceFiles(
   }
 
   const servicesDir = getServicesDir()
-  const projectServiceDir = path.join(servicesDir, projectKey)
+  const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
   if (!fs.existsSync(projectServiceDir)) {
     fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
   }
@@ -617,7 +602,7 @@ export function writeProjectServiceFiles(
   const validatedProjectDir = validateProjectDirForMount(project.projectDir)
 
   const updateScriptPath = getUpdateScriptPath()
-  const wrapperScriptPath = path.join(projectServiceDir, 'run.sh')
+  const wrapperScriptPath = getWrapperScriptPath(projectServiceDir)
   const wrapperScript = generateWrapperScript({
     imageName: IMAGE_NAME,
     tenantCode,
@@ -666,7 +651,7 @@ export function installAndStartProject(
   try {
     execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = getErrorMessage(error)
     logger.warn(t('service.daemonReloadFailed', { message }))
     return
   }
@@ -680,14 +665,14 @@ export function installAndStartProject(
   try {
     execSync(`systemctl --user enable "${unitFile}"`, { stdio: 'pipe' })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = getErrorMessage(error)
     logger.warn(t('service.enableFailed', { unit: unitFile, message }))
   }
 
   try {
     execSync(`systemctl --user start "${unitFile}"`, { stdio: 'pipe' })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = getErrorMessage(error)
     logger.warn(t('service.loadWarning', { label: `${unitName}: ${message}` }))
     return
   }
@@ -812,7 +797,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
           unitFile: `${unitName}.service`,
         })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.projectInstallFailed', { projectCode: project.projectCode, message }))
         failedCount += 1
       }
@@ -840,7 +825,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
         try {
           if (fs.existsSync(unitPath)) fs.unlinkSync(unitPath)
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
+          const message = getErrorMessage(error)
           logger.warn(t('service.orphanUnitRemoveFailed', { unit: orphanUnitFile, message }))
         }
       }
@@ -856,14 +841,14 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     try {
       execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = getErrorMessage(error)
       logger.warn(t('service.daemonReloadFailed', { message }))
     }
     for (const { projectCode, unitPath, unitFile } of writtenUnits) {
       try {
         execSync(`systemctl --user enable "${unitFile}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.warn(t('service.enableFailed', { unit: unitFile, message }))
       }
       logger.success(t('service.projectInstalled', { projectCode, path: unitPath }))
@@ -933,7 +918,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       try {
         execSync(`systemctl --user start "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         // Include unit name so operators can identify the failing project
         // when start runs over N units.
         logger.error(t('service.unitStartFailed', { unit, message }))
@@ -959,7 +944,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       try {
         execSync(`systemctl --user stop "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.unitStopFailed', { unit, message }))
         failed = true
       }
@@ -989,7 +974,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       try {
         execSync(`systemctl --user restart "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.unitRestartFailed', { unit, message }))
         failed = true
       }

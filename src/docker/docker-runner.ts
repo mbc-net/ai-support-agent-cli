@@ -20,6 +20,7 @@ import { writePidFile, isAlreadyRunning, readPidFile } from '../pid-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
+import { getErrorMessage } from '../utils'
 import { IMAGE_NAME, checkDockerAvailable, getDockerPath } from './docker-utils'
 import { ensureImage } from './version-manager'
 import { syncDockerfileToConfigDir } from './dockerfile-sync'
@@ -146,7 +147,7 @@ export function startHostAutoUpdater(
     () => supervisor.stopAll(),
     (error) => {
       void client.heartbeat(resolvedAgentId, getSystemInfo(), error).catch((err) => {
-        logger.warn(`[auto-update] Failed to send error heartbeat: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`[auto-update] Failed to send error heartbeat: ${getErrorMessage(err)}`)
       })
     },
   )
@@ -277,7 +278,7 @@ export function runInDocker(opts: DockerRunOptions): void {
   process.on('SIGTERM', () => forwardSignal('SIGTERM'))
 
   child.on('error', (err) => {
-    logger.error(t('docker.runFailed', { message: err.message }))
+    logger.error(t('docker.runFailed', { message: getErrorMessage(err) }))
     process.exit(1)
   })
 

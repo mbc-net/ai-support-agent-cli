@@ -7,6 +7,7 @@
  */
 
 import { logger } from '../logger'
+import { getErrorMessage } from '../utils'
 import {
   SELECTOR_TIMEOUT_NAVIGATION_MS,
   SELECTOR_TIMEOUT_SINGLE_MS,
@@ -203,7 +204,7 @@ export async function executePlaywrightScript(
       results.push({ line: step.raw, success: true })
       onStepComplete?.(completedSteps, totalSteps, step.raw)
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
+      const errorMessage = getErrorMessage(error)
       logger.warn(`[script-executor] Step failed: ${step.raw} — ${errorMessage}`)
       results.push({ line: step.raw, success: false, error: errorMessage })
 
