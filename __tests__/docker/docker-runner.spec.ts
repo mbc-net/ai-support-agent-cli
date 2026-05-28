@@ -71,9 +71,18 @@ jest.mock('../../src/logger', () => ({
   resetProjectColors: jest.fn(),
   prefixLines: jest.fn().mockImplementation((text: string) => text),
   maskSecrets: jest.fn().mockImplementation((text: string) => text),
-  makeLinePrefixer: jest.fn().mockImplementation((_prefix: string, write: (s: string) => void) => (chunk: string) => write(chunk)),
+  // Capture writes in memory instead of forwarding to the SUT's real write
+  // callback (process.stdout.write). Both writing through to and spying on
+  // process.stdout.write inside a test interfere with Jest's own reporter and
+  // hang the Jest worker on CI.
+  makeLinePrefixer: jest.fn().mockImplementation((_prefix: string, _write: (s: string) => void) => (chunk: string) => {
+    mockPrefixerWrites.push(chunk)
+  }),
   stripCursorCodes: jest.fn().mockImplementation((text: string) => text),
 }))
+
+/** In-memory capture of everything the line-prefixer would have written. */
+const mockPrefixerWrites: string[] = []
 
 jest.mock('../../src/update-checker', () => ({
   reExecProcess: jest.fn(),
@@ -151,6 +160,7 @@ describe('docker-runner', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    mockPrefixerWrites.length = 0
     process.env = { ...originalEnv }
     resetDockerPathCache()
     mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
@@ -3037,9 +3047,9 @@ describe('DockerSupervisor log streaming', () => {
     resetIsDockerRunning()
     hostnameSpy.mockRestore()
 
-    const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    // Output is routed through the mocked line-prefixer (captured in
+    // mockPrefixerWrites), so no real stdout write occurs.
     fakeChild.stdout.emit('data', Buffer.from('hello'))
-    writeSpy.mockRestore()
 
     // Emit close to cover resolveClosed() in the no-log-streaming branch
     fakeChild.emit('close', 0)

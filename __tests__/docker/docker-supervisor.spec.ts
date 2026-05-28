@@ -45,10 +45,20 @@ jest.mock('../../src/logger', () => ({
     debug: jest.fn(),
   },
   getProjectColor: jest.fn().mockReturnValue('\x1b[36m'),
+  // Do NOT forward to the SUT's real write callback (which targets
+  // process.stdout.write). Spying on / writing to process.stdout.write inside a
+  // test silently swallows or blocks Jest's own reporter output, which hangs the
+  // Jest worker on CI. Instead, route writes into an in-memory sink that tests
+  // can inspect via `getPrefixerWrites()`.
   makeLinePrefixer: jest.fn().mockImplementation(
-    (_prefix: string, write: (s: string) => void) => (chunk: string) => write(chunk),
+    (_prefix: string, _write: (s: string) => void) => (chunk: string) => {
+      mockPrefixerWrites.push(chunk)
+    },
   ),
 }))
+
+/** In-memory capture of everything the line-prefixer would have written. */
+const mockPrefixerWrites: string[] = []
 
 jest.mock('../../src/pid-manager', () => ({
   removePidFile: jest.fn(),
@@ -174,6 +184,7 @@ describe('DockerSupervisor', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    mockPrefixerWrites.length = 0
     mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
     mockExistsSync.mockReturnValue(false)
     mockReadFileSync.mockImplementation(() => {
@@ -1147,18 +1158,13 @@ describe('DockerSupervisor', () => {
       const supervisor = new DockerSupervisor('1.0.0', makeOpts())
       supervisor.start([makeProject()])
 
-      // Emit stdout data — should write to process.stdout
-      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
-      const stderrWriteSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true)
-
+      // Emit stdout/stderr data — the supervisor routes it through the
+      // line-prefixer (mocked above to capture into mockPrefixerWrites).
       fakeChild.stdout.emit('data', Buffer.from('hello stdout\n'))
       fakeChild.stderr.emit('data', Buffer.from('hello stderr\n'))
 
-      expect(stdoutWriteSpy).toHaveBeenCalled()
-      expect(stderrWriteSpy).toHaveBeenCalled()
-
-      stdoutWriteSpy.mockRestore()
-      stderrWriteSpy.mockRestore()
+      expect(mockPrefixerWrites).toContain('hello stdout\n')
+      expect(mockPrefixerWrites).toContain('hello stderr\n')
     })
 
     it('saves session log when fullLog is non-empty after container closes', async () => {
@@ -1279,35 +1285,29 @@ describe('DockerSupervisor', () => {
       const fakeChild = makeFakeChild()
       mockSpawn.mockReturnValue(fakeChild as never)
 
-      // Suppress stdout/stderr to avoid large output
-      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
-      const stderrWriteSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true)
+      // Note: container output is routed through the mocked line-prefixer
+      // (captured into mockPrefixerWrites), so no real stdout writes occur and
+      // we must NOT spy on process.stdout.write (that hangs the Jest worker).
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
 
-      try {
-        const supervisor = new DockerSupervisor('1.0.0', makeOpts())
-        supervisor.start([makeProject()])
+      // Emit 3 chunks of ~700 KB each to exceed the 2 MB limit
+      // The data handler just accumulates into buf; flush() is called on close
+      const chunkSize = 700 * 1024
+      const chunk = Buffer.alloc(chunkSize, 'z')
 
-        // Emit 3 chunks of ~700 KB each to exceed the 2 MB limit
-        // The data handler just accumulates into buf; flush() is called on close
-        const chunkSize = 700 * 1024
-        const chunk = Buffer.alloc(chunkSize, 'z')
+      fakeChild.stdout.emit('data', chunk)
+      fakeChild.stdout.emit('data', chunk)
+      fakeChild.stdout.emit('data', chunk)
 
-        fakeChild.stdout.emit('data', chunk)
-        fakeChild.stdout.emit('data', chunk)
-        fakeChild.stdout.emit('data', chunk)
+      // Close the container — flush() will be called in the close handler
+      fakeChild.emit('close', 0)
 
-        // Close the container — flush() will be called in the close handler
-        fakeChild.emit('close', 0)
-
-        // Allow the flush promise chain to settle
-        await Promise.resolve()
-        await Promise.resolve()
-        await new Promise((r) => setImmediate(r))
-        await new Promise((r) => setImmediate(r))
-      } finally {
-        stdoutWriteSpy.mockRestore()
-        stderrWriteSpy.mockRestore()
-      }
+      // Allow the flush promise chain to settle
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
 
       // logTruncated warning should have been emitted during flush
       expect(logger.warn).toHaveBeenCalledWith(
@@ -1745,11 +1745,9 @@ describe('DockerSupervisor', () => {
       const supervisor = new DockerSupervisor('1.0.0', makeOpts())
       supervisor.start([makeProject()])
 
-      // Emit data so fullLog is non-empty (triggers saveSessionLog)
+      // Emit data so fullLog is non-empty (triggers saveSessionLog). Output is
+      // routed through the mocked line-prefixer (no real stdout write).
       fakeChild.stdout.emit('data', Buffer.from('some log line\n'))
-
-      // Suppress stdout writes from test output
-      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
 
       // Close the container — flush + saveSessionLog chain runs
       fakeChild.emit('close', 0)
@@ -1762,8 +1760,6 @@ describe('DockerSupervisor', () => {
       for (let i = 0; i < 5; i++) {
         await new Promise((r) => setImmediate(r))
       }
-
-      stdoutWriteSpy.mockRestore()
 
       // saveSessionLog threw → warning logged via .catch
       expect(mockSaveSessionLog).toHaveBeenCalled()
@@ -1954,11 +1950,12 @@ describe('DockerSupervisor', () => {
     })
   })
 
-  // Note: log streaming lines 330 (logTruncated=true re-entry) and 335 (remaining <= 0)
-  // cannot be tested directly: jest.useFakeTimers() freezes the supervisor's internal
-  // setInterval flush timer causing the Jest worker to hang and the CI job to timeout.
-
-  xdescribe('log streaming: flush when already truncated (logTruncated=true branch)', () => {
+  // log streaming lines 330 (logTruncated=true re-entry) and 335 (remaining <= 0).
+  // Previously these tests were skipped because they spied on process.stdout.write
+  // to suppress large output; that spy blocks Jest's own reporter output and hangs
+  // the worker on CI. The line-prefixer is now mocked to capture writes in memory
+  // (mockPrefixerWrites), so no real stdout write — and no spy — is needed.
+  describe('log streaming: flush when already truncated (logTruncated=true branch)', () => {
     it('skips fullLog update on second flush when already truncated (via two close events)', async () => {
       // Strategy: trigger two separate flushes using the close-handler flush path.
       // First flush: big chunk > 2MB → truncation occurs, logTruncated=true, warn emitted.
@@ -1990,8 +1987,6 @@ describe('DockerSupervisor', () => {
       const fakeChild = makeFakeChild()
       mockSpawn.mockReturnValue(fakeChild as never)
 
-      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
-
       try {
         const supervisor = new DockerSupervisor('1.0.0', makeOpts())
         supervisor.start([makeProject()])
@@ -2014,7 +2009,6 @@ describe('DockerSupervisor', () => {
         await Promise.resolve()
       } finally {
         jest.useRealTimers()
-        stdoutWriteSpy.mockRestore()
       }
 
       // Warn about truncation should have been emitted at least once
@@ -2040,8 +2034,6 @@ describe('DockerSupervisor', () => {
 
       const fakeChild = makeFakeChild()
       mockSpawn.mockReturnValue(fakeChild as never)
-
-      const stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
 
       try {
         const supervisor = new DockerSupervisor('1.0.0', makeOpts())
@@ -2070,7 +2062,6 @@ describe('DockerSupervisor', () => {
         await Promise.resolve()
       } finally {
         jest.useRealTimers()
-        stdoutWriteSpy.mockRestore()
       }
 
       // Truncation warning should fire on second flush
