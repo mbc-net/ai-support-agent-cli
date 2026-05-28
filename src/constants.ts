@@ -66,6 +66,9 @@ export const UPDATE_CHECK_INTERVAL = 60 * 60 * 1000 // 1 hour
 export const UPDATE_CHECK_INITIAL_DELAY = 30_000 // 30 seconds
 export const NPM_INSTALL_TIMEOUT = 120_000 // 2 minutes
 
+// Platform-specific npm command (Windows uses npm.cmd, Unix/macOS uses npm)
+export const NPM_COMMAND = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+
 // Anthropic API
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6-20250514'
 export const ANTHROPIC_API_VERSION = '2023-06-01'

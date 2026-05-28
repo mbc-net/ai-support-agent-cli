@@ -39,6 +39,15 @@ describe('constants', () => {
     expect(constants.AGENT_VERSION).toBe('0.0.0')
   })
 
+  it('should export NPM_COMMAND as npm.cmd on win32 and npm elsewhere', () => {
+    // NPM_COMMAND is evaluated at module load time; verify it matches the expected value
+    // for the current platform. The platform-specific selection is covered here so that
+    // update-checker and version-manager don't each need a duplicate platform branch.
+    const constants = require('../src/constants')
+    const expected = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+    expect(constants.NPM_COMMAND).toBe(expected)
+  })
+
   it('should export all expected constant values', () => {
     const constants = require('../src/constants')
 
