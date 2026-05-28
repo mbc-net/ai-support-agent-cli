@@ -282,6 +282,97 @@ describe('VsCodeTunnelWebSocket', () => {
 
       expect(VsCodeServer).toHaveBeenCalledWith({ projectDir: '/custom/dir' })
     })
+
+    it('should warn when envVarsProvider is set but returns falsy', async () => {
+      const { logger } = require('../../src/logger')
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+
+      VsCodeServer.mockImplementation(() => ({
+        start: jest.fn().mockResolvedValue(undefined),
+        getPort: jest.fn().mockReturnValue(8443),
+        isRunning: false,
+      }))
+      VsCodeWsProxy.mockImplementation(() => ({}))
+
+      // Create a tunnel with envVarsProvider that returns undefined (not ready yet)
+      const tunnelWithProvider = new (VsCodeTunnelWebSocket as unknown as new (
+        apiUrl: string,
+        token: string,
+        agentId: string,
+        projectDir: string,
+        envVarsProvider: () => Record<string, string> | undefined,
+      ) => { handleVsCodeOpen: (msg: unknown) => Promise<void> })(
+        'https://api.example.com',
+        'test-token',
+        'agent-123',
+        '/test/project',
+        () => undefined, // envVarsProvider returns undefined → triggers warning
+      )
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnelWithProvider as any).ws = mockWs
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnelWithProvider as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-env-warn', projectDir: '/test' })
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('before envVars are available'),
+      )
+    })
+
+    it('should restart running server when envVars signature changes', async () => {
+      const { logger } = require('../../src/logger')
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+
+      const mockStop = jest.fn().mockResolvedValue(undefined)
+      const mockStart = jest.fn().mockResolvedValue(undefined)
+      const mockGetPort = jest.fn().mockReturnValue(8444)
+
+      const runningServer = { isRunning: true, touch: jest.fn(), getPort: mockGetPort, stop: mockStop }
+      VsCodeServer.mockImplementation(() => ({
+        start: mockStart,
+        getPort: mockGetPort,
+        isRunning: false,
+      }))
+      VsCodeWsProxy.mockImplementation(() => ({}))
+
+      // Set an existing running server with a different env signature
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).vsCodeServer = runningServer
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).vsCodeServerEnvSignature = 'OLD_KEY=old_value'
+
+      // Create a tunnel with envVarsProvider returning new envVars (different signature)
+      const tunnelWithProvider = new (VsCodeTunnelWebSocket as unknown as new (
+        apiUrl: string,
+        token: string,
+        agentId: string,
+        projectDir: string,
+        envVarsProvider: () => Record<string, string>,
+      ) => object)(
+        'https://api.example.com',
+        'test-token',
+        'agent-123',
+        '/test/project',
+        () => ({ NEW_KEY: 'new_value' }),
+      )
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnelWithProvider as any).ws = mockWs
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnelWithProvider as any).vsCodeServer = runningServer
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnelWithProvider as any).vsCodeServerEnvSignature = 'OLD_KEY=old_value'
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnelWithProvider as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-restart', projectDir: '/test' })
+
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.stringContaining('envVars changed since last code-server start'),
+      )
+      expect(mockStop).toHaveBeenCalled()
+      expect(mockStart).toHaveBeenCalled()
+    })
   })
 
   describe('handleVsCodeClose', () => {

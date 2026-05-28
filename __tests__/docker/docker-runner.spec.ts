@@ -71,9 +71,18 @@ jest.mock('../../src/logger', () => ({
   resetProjectColors: jest.fn(),
   prefixLines: jest.fn().mockImplementation((text: string) => text),
   maskSecrets: jest.fn().mockImplementation((text: string) => text),
-  makeLinePrefixer: jest.fn().mockImplementation((_prefix: string, write: (s: string) => void) => (chunk: string) => write(chunk)),
+  // Capture writes in memory instead of forwarding to the SUT's real write
+  // callback (process.stdout.write). Both writing through to and spying on
+  // process.stdout.write inside a test interfere with Jest's own reporter and
+  // hang the Jest worker on CI.
+  makeLinePrefixer: jest.fn().mockImplementation((_prefix: string, _write: (s: string) => void) => (chunk: string) => {
+    mockPrefixerWrites.push(chunk)
+  }),
   stripCursorCodes: jest.fn().mockImplementation((text: string) => text),
 }))
+
+/** In-memory capture of everything the line-prefixer would have written. */
+const mockPrefixerWrites: string[] = []
 
 jest.mock('../../src/update-checker', () => ({
   reExecProcess: jest.fn(),
@@ -151,6 +160,7 @@ describe('docker-runner', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    mockPrefixerWrites.length = 0
     process.env = { ...originalEnv }
     resetDockerPathCache()
     mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
@@ -672,6 +682,36 @@ describe('docker-runner', () => {
       const result = getInstalledVersion()
       expect(typeof result).toBe('string')
       expect(result).toMatch(/^\d+\.\d+\.\d+/)
+    })
+
+    it('should use npm.cmd on win32 platform', () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+
+      try {
+        mockExecFileSync.mockImplementation((cmd: unknown, args?: unknown) => {
+          const argsArr = args as string[] | undefined
+          if (argsArr && argsArr[0] === 'list') {
+            return Buffer.from(JSON.stringify({
+              dependencies: { '@ai-support-agent/cli': { version: '1.5.0' } },
+            }))
+          }
+          return Buffer.from('')
+        })
+
+        const result = getInstalledVersion()
+        expect(result).toBe('1.5.0')
+        // Verify npm.cmd was used
+        const listCalls = mockExecFileSync.mock.calls.filter(
+          call => (call[1] as string[] | undefined)?.[0] === 'list',
+        )
+        expect(listCalls.length).toBeGreaterThan(0)
+        expect(listCalls[0][0]).toBe('npm.cmd')
+      } finally {
+        if (originalPlatform) {
+          Object.defineProperty(process, 'platform', originalPlatform)
+        }
+      }
     })
   })
 
@@ -3037,9 +3077,9 @@ describe('DockerSupervisor log streaming', () => {
     resetIsDockerRunning()
     hostnameSpy.mockRestore()
 
-    const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    // Output is routed through the mocked line-prefixer (captured in
+    // mockPrefixerWrites), so no real stdout write occurs.
     fakeChild.stdout.emit('data', Buffer.from('hello'))
-    writeSpy.mockRestore()
 
     // Emit close to cover resolveClosed() in the no-log-streaming branch
     fakeChild.emit('close', 0)

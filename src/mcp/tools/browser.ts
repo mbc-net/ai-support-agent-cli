@@ -147,7 +147,7 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
     async ({ url, waitForSelector, waitForTimeout, fullPage, viewport }) => withMcpErrorHandling(async () => {
       const validation = validateUrl(url)
       if (!validation.valid) {
-        return mcpErrorResponse(validation.reason!)
+        return mcpErrorResponse(validation.reason ?? 'Invalid URL')
       }
 
       const session = await getActiveSession(manager, defaultSession)
@@ -353,7 +353,7 @@ function registerBrowserLoginTool(
 
       const validation = validateUrl(credentials.baseUrl)
       if (!validation.valid) {
-        return mcpErrorResponse(validation.reason!)
+        return mcpErrorResponse(validation.reason ?? 'Invalid URL')
       }
 
       let title: string
