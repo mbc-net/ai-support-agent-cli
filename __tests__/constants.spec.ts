@@ -68,6 +68,12 @@ describe('constants', () => {
     expect(constants.ANTHROPIC_API_URL).toBe('https://api.anthropic.com/v1/messages')
     expect(constants.DEFAULT_MAX_TOKENS).toBe(4096)
 
+    // Docker marker filenames
+    expect(constants.DOCKER_MARKER_BUILT_HASH).toBe('docker-built-hash')
+    expect(constants.DOCKER_MARKER_REBUILD_NEEDED).toBe('docker-rebuild-needed')
+    expect(constants.DOCKER_MARKER_CUSTOMIZATION_HASH).toBe('docker-customization-hash')
+    expect(constants.DOCKER_MARKER_REGISTERED_AGENT_ID).toBe('docker-registered-agent-id')
+
     // Delayed restart
     expect(constants.DELAYED_RESTART_MS).toBe(1_000)
 

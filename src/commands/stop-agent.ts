@@ -41,7 +41,7 @@ export async function stopAgent(): Promise<void> {
 
   try {
     process.kill(pid, 'SIGTERM')
-  } catch (err) {
+  } catch (err: unknown) {
     logger.error(t('stop.signalFailed', { pid, message: err instanceof Error ? err.message : String(err) }))
     return
   }

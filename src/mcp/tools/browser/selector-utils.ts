@@ -53,7 +53,7 @@ export async function tryClickSelectors(page: Page, selectors: string, options?:
       }
       logger.debug(`[browser] Selector matched: ${candidate}`)
       return candidate
-    } catch (err) {
+    } catch (err: unknown) {
       lastError = err as Error
       continue
     }
@@ -86,7 +86,7 @@ export async function tryFillSelectors(page: Page, selectors: string, value: str
       await page.fill(candidate, value, { timeout: SELECTOR_TIMEOUT_MULTIPLE_MS })
       logger.debug(`[browser] Selector matched: ${candidate}`)
       return candidate
-    } catch (err) {
+    } catch (err: unknown) {
       lastError = err as Error
       continue
     }
