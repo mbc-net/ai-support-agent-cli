@@ -87,3 +87,17 @@ export function resolveUrlForDocker(url: string): string {
     (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
   )
 }
+
+/**
+ * Type guard for NodeJS.ErrnoException.
+ * Narrows `unknown` catch values to ErrnoException and optionally checks the error code.
+ * Avoids `instanceof Error` to stay compatible with Jest's `isolatedModules` environment
+ * where filesystem errors may not pass the `instanceof` check.
+ */
+export function isErrnoException(err: unknown, code?: string): err is NodeJS.ErrnoException {
+  if (err === null || typeof err !== 'object') return false
+  const e = err as Record<string, unknown>
+  if (typeof e['message'] !== 'string') return false
+  if (!('code' in e)) return false
+  return code === undefined || e['code'] === code
+}

@@ -15,6 +15,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getConfigDir } from './config-manager'
+import { isErrnoException } from './utils'
 
 const PID_FILE_NAME = 'agent.pid'
 
@@ -96,7 +97,7 @@ export function isProcessAlive(pid: number): boolean {
     return true
   } catch (err: unknown) {
     // EPERM: プロセスは存在するが送信権限がない → 生存中とみなす
-    if ((err as NodeJS.ErrnoException).code === 'EPERM') return true
+    if (isErrnoException(err, 'EPERM')) return true
     return false
   }
 }
