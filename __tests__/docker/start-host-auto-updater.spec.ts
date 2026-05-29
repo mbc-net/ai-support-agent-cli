@@ -213,4 +213,83 @@ describe('startHostAutoUpdater', () => {
       'err',
     )
   })
+
+  it('falls back to os.hostname() when neither agentId nor config.agentId is provided', () => {
+    const supervisor = makeSupervisor()
+    startHostAutoUpdater(
+      { autoUpdate: true },
+      null,
+      baseProjects,
+      supervisor,
+      undefined,
+    )
+
+    const [, , , errorReporter] = mockStartAutoUpdater.mock.calls[0]
+    errorReporter!('err')
+
+    const instance = mockApiClientCtor.mock.results[0].value
+    // Should have called heartbeat (hostname is the fallback agentId)
+    expect(instance.heartbeat).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Object),
+      'err',
+    )
+  })
+
+  it('warns but does not throw when heartbeat fails in error reporter', async () => {
+    const { logger } = require('../../src/logger')
+    const supervisor = makeSupervisor()
+    const { ApiClient: MockApiClientLocal } = require('../../src/api-client')
+    MockApiClientLocal.mockImplementation(() => ({
+      heartbeat: jest.fn().mockRejectedValue(new Error('network error')),
+    }))
+
+    startHostAutoUpdater(
+      { autoUpdate: true },
+      null,
+      baseProjects,
+      supervisor,
+      'agent-1',
+    )
+
+    const [, , , errorReporter] = mockStartAutoUpdater.mock.calls[0]
+    // Call the error reporter — heartbeat will reject
+    errorReporter!('some-error')
+
+    // Flush microtasks so the .catch handler runs
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('[auto-update] Failed to send error heartbeat'),
+    )
+  })
+
+  it('uses config.autoUpdate channel when no CLI channel is provided', () => {
+    const supervisor = makeSupervisor()
+    startHostAutoUpdater(
+      { autoUpdate: true },
+      { agentId: 'a', autoUpdate: { channel: 'beta' as never, enabled: true } },
+      baseProjects,
+      supervisor,
+      'agent-1',
+    )
+
+    const [, config] = mockStartAutoUpdater.mock.calls[0]
+    expect(config.channel).toBe('beta')
+  })
+
+  it('CLI updateChannel overrides config.autoUpdate channel', () => {
+    const supervisor = makeSupervisor()
+    startHostAutoUpdater(
+      { autoUpdate: true, updateChannel: 'canary' },
+      { agentId: 'a', autoUpdate: { channel: 'beta' as never, enabled: true } },
+      baseProjects,
+      supervisor,
+      'agent-1',
+    )
+
+    const [, config] = mockStartAutoUpdater.mock.calls[0]
+    expect(config.channel).toBe('canary')
+  })
 })
