@@ -179,6 +179,16 @@ describe('BrowserProxySession', () => {
     expect(session.actionLog.size).toBe(1)
   })
 
+  it('should extract text and cache in variables', async () => {
+    defaultResponses['POST /browser/sess-1/extract'] = { text: 'extracted text' }
+    const session = new BrowserProxySession(`http://127.0.0.1:${port}`, 'sess-1')
+    const text = await session.extract('.element', 'myVar')
+
+    expect(text).toBe('extracted text')
+    // variables local cache should be updated
+    expect(session.variables.get('myVar')).toBe('extracted text')
+  })
+
   describe('variables Map interface', () => {
     it('should support get/set/entries on variables', () => {
       const session = new BrowserProxySession(`http://127.0.0.1:${port}`, 'sess-1')
@@ -187,6 +197,20 @@ describe('BrowserProxySession', () => {
 
       const entries = Array.from(session.variables.entries())
       expect(entries).toEqual([['key1', 'val1']])
+    })
+
+    it('should log warning and not throw when set() HTTP request fails', async () => {
+      // ProxyVariableMap.set() fires-and-forgets the HTTP request; the catch
+      // branch logs a warning rather than throwing. Use a port that refuses
+      // connections to force the catch path.
+      const session = new BrowserProxySession('http://127.0.0.1:1', 'sess-err')
+      // set() should return `this` synchronously even if the async HTTP fails
+      const ret = session.variables.set('failKey', 'failVal')
+      expect(ret).toBe(session.variables)
+      expect(session.variables.get('failKey')).toBe('failVal')
+      // Allow the fire-and-forget promise to settle so the catch branch runs
+      await new Promise<void>((resolve) => setTimeout(resolve, 200))
+      // No assertion needed on the logger mock — just verify no unhandled rejection
     })
   })
 
@@ -209,6 +233,41 @@ describe('BrowserProxySession', () => {
       // Use a non-existent session to get a 404
       const session = new BrowserProxySession(`http://127.0.0.1:${port}`, 'unknown-sess')
       await expect(session.navigate('https://example.com')).rejects.toThrow('Not found')
+    })
+
+    it('should destroy request on timeout', async () => {
+      // Create a server that accepts the connection but never responds
+      const hangServer = http.createServer((_req, _res) => {
+        // intentionally never calls res.end() — simulates a hung server
+      })
+      hangServer.unref()
+      const hangPort = await new Promise<number>((resolve) => {
+        hangServer.listen(0, '127.0.0.1', () => {
+          resolve(((hangServer.address() as { port: number }).port))
+        })
+      })
+
+      try {
+        // Monkey-patch the timeout to 50ms so the test doesn't take 60s
+        const origHttp = http.request.bind(http)
+        const patchedRequest = jest.spyOn(http, 'request').mockImplementationOnce(
+          (options: http.RequestOptions, cb: (res: http.IncomingMessage) => void) => {
+            const req = origHttp(options, cb)
+            // Override setTimeout so the callback fires after 50ms
+            const origSetTimeout = req.setTimeout.bind(req)
+            req.setTimeout = (_ms: number, timeoutCb: () => void) => {
+              return origSetTimeout(50, timeoutCb)
+            }
+            return req
+          },
+        )
+
+        const session = new BrowserProxySession(`http://127.0.0.1:${hangPort}`, 'sess-1')
+        await expect(session.getUrl()).rejects.toThrow()
+        patchedRequest.mockRestore()
+      } finally {
+        await new Promise<void>((resolve) => hangServer.close(() => resolve()))
+      }
     })
 
     it('should throw on invalid JSON response', async () => {

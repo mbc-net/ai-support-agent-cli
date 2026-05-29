@@ -288,6 +288,63 @@ describe('TerminalSession', () => {
       expect(env.NODE_OPTIONS).toBeUndefined()
     })
 
+    describe('bash shell path (lines 200-201)', () => {
+      it('writes .bashrc and uses --rcfile when SHELL is bash', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        const originalShell = process.env.SHELL
+        process.env.SHELL = '/bin/bash'
+        try {
+          session = new TerminalSession('test-bash-1', { envVarsOverride: {} })
+          const call = spawnSpy.mock.calls[0]
+          const args: string[] = call[1]
+          // bash uses --rcfile, not --login
+          expect(args).toContain('--rcfile')
+          expect(args).not.toContain('--login')
+        } finally {
+          process.env.SHELL = originalShell
+        }
+      })
+
+      it('does not set ZDOTDIR when shell is bash', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        const originalShell = process.env.SHELL
+        process.env.SHELL = '/bin/bash'
+        try {
+          session = new TerminalSession('test-bash-zdotdir')
+          const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+          // ZDOTDIR is only set for zsh
+          expect(env.ZDOTDIR).toBeUndefined()
+        } finally {
+          process.env.SHELL = originalShell
+        }
+      })
+    })
+
+    describe('PATH fallback (line 186)', () => {
+      it('sets default PATH when buildSafeEnv does not include PATH', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        const originalPath = process.env.PATH
+        delete process.env.PATH
+        try {
+          session = new TerminalSession('test-path-fallback')
+          const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+          // PATH should be set to the default fallback
+          expect(env.PATH).toBe('/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin')
+        } finally {
+          process.env.PATH = originalPath
+        }
+      })
+    })
+
     describe('GIT_SSH_KEY_CONTENT_BASE64 SSH key setup', () => {
       it('GIT_SSH_KEY_CONTENT_BASE64 を検出したら GIT_SSH_COMMAND を設定する', () => {
         const pty = require('node-pty')
@@ -345,6 +402,47 @@ describe('TerminalSession', () => {
           done()
         })
         session.kill()
+      })
+
+      it('SSH 鍵ファイル書き込み失敗時も安全にスキップする (line 228)', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        // To force the SSH key writeFileSync to fail, we write the key to a
+        // path inside a non-existent nested directory by using a session ID
+        // that contains path separators when joined with os.tmpdir().
+        // Instead, mock os.tmpdir() to return a path that exists for sandbox
+        // creation but not for SSH key writing.
+        //
+        // Simplest reliable approach: provide a base64 value that decodes to
+        // content that triggers an fs error by making the target path a
+        // directory rather than a file.
+        const sessionId = 'test-ssh-dir-collision'
+        const sshKeyPath = path.join(os.tmpdir(), `ssh-key-${sessionId}`)
+
+        // Pre-create the ssh key path as a directory so writeFileSync fails
+        // (can't write a file where a directory exists)
+        if (!fs.existsSync(sshKeyPath)) {
+          fs.mkdirSync(sshKeyPath, { recursive: true })
+        }
+
+        const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----'
+        const base64Key = Buffer.from(pemKey).toString('base64')
+
+        try {
+          session = new TerminalSession(sessionId, {
+            envVarsOverride: { GIT_SSH_KEY_CONTENT_BASE64: base64Key },
+          })
+          // Session should be created despite SSH key write failure
+          expect(session.isAlive()).toBe(true)
+          // GIT_SSH_COMMAND should NOT be set since key file write failed
+          const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+          expect(env.GIT_SSH_COMMAND).toBeUndefined()
+        } finally {
+          // Clean up the directory we created as a collision trap
+          try { fs.rmSync(sshKeyPath, { recursive: true, force: true }) } catch { /* ignore */ }
+        }
       })
 
       it('GIT_SSH_KEY_CONTENT_BASE64 がない場合は GIT_SSH_COMMAND を設定しない', () => {
@@ -553,6 +651,19 @@ describe('TerminalSession.cleanupStaleSandboxes', () => {
     const removed = TerminalSession.cleanupStaleSandboxes(0)
     expect(removed).toBeGreaterThanOrEqual(1)
     expect(fs.existsSync(freshPath)).toBe(false)
+  })
+
+  it('readdirSync が失敗した場合は 0 を返す (line 145 catch branch)', () => {
+    // Simulate readdirSync failure (e.g. permission denied on tmpdir)
+    const readdirSpy = jest.spyOn(fs, 'readdirSync').mockImplementationOnce(() => {
+      throw new Error('EACCES: permission denied')
+    })
+    try {
+      const removed = TerminalSession.cleanupStaleSandboxes()
+      expect(removed).toBe(0)
+    } finally {
+      readdirSpy.mockRestore()
+    }
   })
 
   it('terminal-sandbox- プレフィックス以外には触れない', () => {
