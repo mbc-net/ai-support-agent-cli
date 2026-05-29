@@ -359,18 +359,10 @@ export class ApiClient {
     projectCode: string,
     alarmName: string,
   ): Promise<{ id: string } | null> {
-    const result = await this.get<{ items: Array<{ id: string }> }>(
-      API_ENDPOINTS.ISSUES(tenantCode, projectCode),
-      {
-        params: {
-          source: 'alert',
-          alarmName,
-          statuses: 'open,received,in_progress',
-          limit: 1,
-        },
-      },
+    return this.get<{ id: string } | null>(
+      API_ENDPOINTS.ALERT_ACTIVE_ISSUE(tenantCode, projectCode),
+      { params: { alarmName } },
     )
-    return result.items.length > 0 ? { id: result.items[0].id } : null
   }
 
   /** Alert 専用 Issue 作成エンドポイント経由で Issue を作成する（alarmName を attributes に保存するため専用） */

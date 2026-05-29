@@ -146,6 +146,8 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/projects/${projectCode}/alerts/${alertNumber}/status`,
   ALERT_CREATE_ISSUE: (tenantCode: string, projectCode: string, alertNumber: string) =>
     `/api/${tenantCode}/projects/${projectCode}/alerts/${alertNumber}/create-issue`,
+  ALERT_ACTIVE_ISSUE: (tenantCode: string, projectCode: string) =>
+    `/api/${tenantCode}/projects/${projectCode}/alerts/active-issue`,
   ISSUES: (tenantCode: string, projectCode: string) =>
     `/api/${tenantCode}/projects/${projectCode}/issues`,
 } as const
