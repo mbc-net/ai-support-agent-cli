@@ -323,7 +323,9 @@ export class ApiClient {
     projectCode: string,
   ): Promise<{ items: PendingAlert[]; total: number }> {
     return this.get(API_ENDPOINTS.ALERTS(tenantCode, projectCode), {
-      params: { status: 'pending', limit: 20 },
+      // staleProcessingMinutes=30: 30 分以上 processing のままのアラートも pending と同様に返す
+      // processAlert の catch ブロックで failed 更新が失敗した場合のスタック救済
+      params: { status: 'pending', staleProcessingMinutes: 30, limit: 20 },
     })
   }
 

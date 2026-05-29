@@ -932,7 +932,7 @@ describe('ApiClient', () => {
     }
 
     describe('getPendingAlerts', () => {
-      it('should GET pending alerts with status=pending', async () => {
+      it('should GET pending alerts with status=pending and staleProcessingMinutes=30', async () => {
         mockInstance.get.mockResolvedValue({ data: { items: [mockAlertItem], total: 1 } })
 
         const result = await client.getPendingAlerts('tenant1', 'MBC_01')
@@ -940,7 +940,9 @@ describe('ApiClient', () => {
         expect(result.items).toHaveLength(1)
         expect(mockInstance.get).toHaveBeenCalledWith(
           '/api/tenant1/projects/MBC_01/alerts',
-          expect.objectContaining({ params: { status: 'pending', limit: 20 } }),
+          expect.objectContaining({
+            params: { status: 'pending', staleProcessingMinutes: 30, limit: 20 },
+          }),
         )
       })
     })
