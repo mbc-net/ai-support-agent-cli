@@ -45,6 +45,39 @@ describe('BrowserActionLog', () => {
       expect(entries[0].action).toBe('click')
       expect(entries[1].action).toBe('type')
     })
+
+    it('should trim oldest entries when exceeding maxEntries via add()', () => {
+      const smallLog = new BrowserActionLog(3)
+      for (let i = 0; i < 5; i++) {
+        ;(Date.now as jest.Mock).mockReturnValueOnce(1700000000000 + i)
+        smallLog.add('direct', 'click', `entry-${i}`)
+      }
+
+      const entries = smallLog.getEntries()
+      expect(entries).toHaveLength(3)
+      expect(entries[0].details).toBe('entry-2')
+      expect(entries[2].details).toBe('entry-4')
+    })
+
+    it('should call onChange callback when set', () => {
+      const onChange = jest.fn()
+      log.onChange = onChange
+
+      log.add('direct', 'click', 'Test click')
+
+      expect(onChange).toHaveBeenCalledTimes(1)
+      expect(onChange).toHaveBeenCalledWith(expect.objectContaining({
+        source: 'direct',
+        action: 'click',
+        details: 'Test click',
+      }))
+    })
+
+    it('should not call onChange when onChange is null', () => {
+      log.onChange = null
+      // Should not throw
+      expect(() => log.add('chat', 'navigate', 'https://example.com')).not.toThrow()
+    })
   })
 
   describe('addEntry', () => {

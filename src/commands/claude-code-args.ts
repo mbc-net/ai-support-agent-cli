@@ -1,5 +1,7 @@
 import os from 'os'
 
+import { CLI_FLAG_VERBOSE } from '../constants'
+
 /** CLAUDECODE / CLAUDE_CODE_* 環境変数を除外した env を構築
  *  ただし CLAUDE_CODE_OAUTH_TOKEN は認証に必要なため保持する
  *  プロセス生存中は結果不変のためキャッシュする */
@@ -32,7 +34,7 @@ export function buildClaudeArgs(
     systemPrompt?: string
   },
 ): string[] {
-  const args = ['-p', '--output-format', 'stream-json', '--verbose']
+  const args = ['-p', '--output-format', 'stream-json', CLI_FLAG_VERBOSE]
   if (options?.allowedTools?.length) {
     for (const tool of options.allowedTools) {
       args.push('--allowedTools', tool)

@@ -214,7 +214,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     if (removed > 0) {
       logger.info(`Cleaned up ${removed} stale terminal-sandbox dir(s) in /tmp`)
     }
-  } catch (err) {
+  } catch (err: unknown) {
     logger.warn(`Failed to clean up stale terminal-sandbox dirs: ${getErrorMessage(err)}`)
   }
 
@@ -327,7 +327,10 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
     processManager.onUpdateComplete = (project) => {
       logger.info(`[docker] Worker update complete (${project.tenantCode}/${project.projectCode}). Exiting container to rebuild image...`)
-      void processManager.stopAll().then(() => process.exit(DOCKER_UPDATE_EXIT_CODE))
+      void (async () => {
+        await processManager.stopAll()
+        process.exit(DOCKER_UPDATE_EXIT_CODE)
+      })()
     }
   }
 

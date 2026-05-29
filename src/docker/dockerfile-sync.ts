@@ -12,6 +12,7 @@ import { getConfigDir } from '../config-manager'
 import { getDockerfilePath, getDockerContextDir } from './dockerfile-path'
 import { t } from '../i18n'
 import { logger } from '../logger'
+import { getErrorMessage } from '../utils'
 
 /**
  * Copy the bundled Dockerfile (and entrypoint.sh) to the config directory
@@ -38,7 +39,7 @@ export function syncDockerfileToConfigDir(): void {
     }
 
     logger.info(t('docker.dockerfileSynced', { path: destDockerfile }))
-  } catch (err) {
-    logger.warn(t('docker.dockerfileSyncFailed', { message: err instanceof Error ? err.message : String(err) }))
+  } catch (err: unknown) {
+    logger.warn(t('docker.dockerfileSyncFailed', { message: getErrorMessage(err) }))
   }
 }

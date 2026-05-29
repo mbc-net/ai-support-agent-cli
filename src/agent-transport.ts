@@ -1,7 +1,7 @@
 import type { ApiClient } from './api-client'
 import { AlertProcessor } from './alert-processor'
 import { type AppSyncSubscriber, type AppSyncNotification } from './appsync-subscriber'
-import { LOG_PAYLOAD_LIMIT, LOG_RESULT_LIMIT } from './constants'
+import { LOG_PAYLOAD_LIMIT, LOG_RESULT_LIMIT, NOTIFICATION_ACTION } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
 import { getWorkspaceDir, getReposDir } from './project-dir'
@@ -207,14 +207,14 @@ export async function handleNotification(
       : (notification.content ?? {})
 
   // agent-log通知はログ出力せずに早期return（無限ループ防止）
-  if (notification.action === 'agent-log') {
+  if (notification.action === NOTIFICATION_ACTION.AGENT_LOG) {
     return
   }
 
   logger.debug(`${deps.prefix} Notification received: action=${notification.action}, content=${JSON.stringify(content).substring(0, LOG_RESULT_LIMIT)}`)
 
   switch (notification.action) {
-    case 'agent-command': {
+    case NOTIFICATION_ACTION.AGENT_COMMAND: {
       const commandId = content.commandId as string
       const targetAgentId = content.agentId as string
 
@@ -250,7 +250,7 @@ export async function handleNotification(
       await processCommand(deps, ctx, commandId)
       break
     }
-    case 'config-update': {
+    case NOTIFICATION_ACTION.CONFIG_UPDATE: {
       // APIがconfig-update通知を送るタイミングはRDS同期前の可能性があるため、
       // hashの比較は行わず常に再同期をスケジュールする。
       // hash比較による変更なしスキップはsyncProjectConfig側で行う。
@@ -259,7 +259,7 @@ export async function handleNotification(
       state.configSyncDebounceTimer = scheduleConfigSync(ctx.configSyncDeps, ctx.configSyncState, state.configSyncDebounceTimer)
       break
     }
-    case 'alert-created': {
+    case NOTIFICATION_ACTION.ALERT_CREATED: {
       const alertProjectCode = content.projectCode as string | undefined
       const alertNumber = content.alertNumber as string | undefined
       if (alertProjectCode === deps.projectCode && alertNumber) {

@@ -594,4 +594,124 @@ describe('TerminalWebSocket', () => {
     terminalWs = createTerminalWs()
     void terminalWs.connect()
   })
+
+  it('should send error when open message has no sessionId', (done) => {
+    server.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+        if (msg.type === 'error') {
+          expect(msg.sessionId).toBe('unknown')
+          expect(msg.error).toContain('Missing sessionId in open message')
+          done()
+        }
+      })
+
+      // Send open message without sessionId
+      ws.send(JSON.stringify({ type: 'open' }))
+    })
+
+    terminalWs = createTerminalWs()
+    void terminalWs.connect()
+  })
+
+  it('should use resolved cwd when cwd is a valid subdirectory', (done) => {
+    server.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+        if (msg.type === 'ready') {
+          // Session opened successfully with valid cwd inside projectDir
+          expect(msg.sessionId).toBe('valid-cwd-session')
+
+          const closeMsg: TerminalServerMessage = { type: 'close', sessionId: msg.sessionId }
+          ws.send(JSON.stringify(closeMsg))
+          done()
+        }
+        if (msg.type === 'error') {
+          // Should not get an error for valid cwd
+          done(new Error(`Unexpected error: ${msg.error}`))
+        }
+      })
+
+      // Send open message with a valid subdirectory cwd
+      const openMsg: TerminalServerMessage = {
+        type: 'open',
+        sessionId: 'valid-cwd-session',
+        cols: 80,
+        rows: 24,
+        cwd: 'subdir', // relative to /tmp — resolves to /tmp/subdir which starts with /tmp/
+      }
+      ws.send(JSON.stringify(openMsg))
+    })
+
+    terminalWs = createTerminalWs() // uses projectDir: '/tmp'
+    void terminalWs.connect()
+  })
+
+  it('should use msg.cwd directly when no projectDir is set', (done) => {
+    server.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+        if (msg.type === 'ready') {
+          expect(msg.sessionId).toBe('no-project-dir-session')
+          const closeMsg: TerminalServerMessage = { type: 'close', sessionId: msg.sessionId }
+          ws.send(JSON.stringify(closeMsg))
+          done()
+        }
+        if (msg.type === 'error') {
+          done(new Error(`Unexpected error: ${msg.error}`))
+        }
+      })
+
+      const openMsg: TerminalServerMessage = {
+        type: 'open',
+        sessionId: 'no-project-dir-session',
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp', // absolute cwd, no projectDir set
+      }
+      ws.send(JSON.stringify(openMsg))
+    })
+
+    // Create TerminalWebSocket without projectDir
+    terminalWs = new TerminalWebSocket(
+      `http://localhost:${serverPort}`,
+      'test-token',
+      'agent-1',
+    )
+    void terminalWs.connect()
+  })
+
+  it('should warn when envVarsProvider exists but returns undefined', (done) => {
+    server.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+        if (msg.type === 'ready') {
+          expect(msg.sessionId).toBe('provider-undefined-session')
+          const closeMsg: TerminalServerMessage = { type: 'close', sessionId: msg.sessionId }
+          ws.send(JSON.stringify(closeMsg))
+          done()
+        }
+        if (msg.type === 'error') {
+          done(new Error(`Unexpected error: ${msg.error}`))
+        }
+      })
+
+      ws.send(JSON.stringify({
+        type: 'open',
+        sessionId: 'provider-undefined-session',
+        cols: 80,
+        rows: 24,
+      }))
+    })
+
+    // Create TerminalWebSocket with envVarsProvider that returns undefined
+    terminalWs = new TerminalWebSocket(
+      `http://localhost:${serverPort}`,
+      'test-token',
+      'agent-1',
+      '/tmp',
+      () => undefined as unknown as Record<string, string>,
+    )
+    void terminalWs.connect()
+  })
 })

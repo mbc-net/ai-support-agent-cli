@@ -11,7 +11,13 @@ import { registerSetProjectDirCommand } from './commands/set-project-dir'
 import { registerDockerCommands } from './commands/docker-commands'
 import { resolveProjectDir, getMetadataDir } from './project-dir'
 import { parseIntervalOrExit, validateUpdateChannel } from './cli/validators'
-import { AGENT_VERSION } from './constants'
+import {
+  AGENT_VERSION,
+  CLI_FLAG_VERBOSE,
+  CLI_FLAG_NO_AUTO_UPDATE,
+  CLI_FLAG_NO_DOCKER,
+  CLI_FLAG_NO_DOCKERFILE_SYNC,
+} from './constants'
 import type { ReleaseChannel } from './types'
 import * as fs from 'fs'
 
@@ -40,12 +46,12 @@ program
   .option('--api-url <url>', t('cmd.start.apiUrl'))
   .option('--poll-interval <ms>', `${t('cmd.start.pollInterval')} (deprecated)`, '3000')
   .option('--heartbeat-interval <ms>', t('cmd.start.heartbeatInterval'), '60000')
-  .option('--verbose', t('cmd.start.verbose'))
-  .option('--no-auto-update', t('cmd.start.noAutoUpdate'))
+  .option(CLI_FLAG_VERBOSE, t('cmd.start.verbose'))
+  .option(CLI_FLAG_NO_AUTO_UPDATE, t('cmd.start.noAutoUpdate'))
   .option('--update-channel <channel>', t('cmd.start.updateChannel'))
-  .option('--no-docker', t('cmd.start.noDocker'))
+  .option(CLI_FLAG_NO_DOCKER, t('cmd.start.noDocker'))
   .option('--dockerfile <path>', t('cmd.start.dockerfile'))
-  .option('--no-dockerfile-sync', t('cmd.start.noDockerfileSync'))
+  .option(CLI_FLAG_NO_DOCKERFILE_SYNC, t('cmd.start.noDockerfileSync'))
   .option('--project <tenantCode/projectCode>', t('cmd.start.project'))
   .action(async (opts: {
     token?: string

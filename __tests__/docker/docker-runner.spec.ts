@@ -71,9 +71,18 @@ jest.mock('../../src/logger', () => ({
   resetProjectColors: jest.fn(),
   prefixLines: jest.fn().mockImplementation((text: string) => text),
   maskSecrets: jest.fn().mockImplementation((text: string) => text),
-  makeLinePrefixer: jest.fn().mockImplementation((_prefix: string, write: (s: string) => void) => (chunk: string) => write(chunk)),
+  // Capture writes in memory instead of forwarding to the SUT's real write
+  // callback (process.stdout.write). Both writing through to and spying on
+  // process.stdout.write inside a test interfere with Jest's own reporter and
+  // hang the Jest worker on CI.
+  makeLinePrefixer: jest.fn().mockImplementation((_prefix: string, _write: (s: string) => void) => (chunk: string) => {
+    mockPrefixerWrites.push(chunk)
+  }),
   stripCursorCodes: jest.fn().mockImplementation((text: string) => text),
 }))
+
+/** In-memory capture of everything the line-prefixer would have written. */
+const mockPrefixerWrites: string[] = []
 
 jest.mock('../../src/update-checker', () => ({
   reExecProcess: jest.fn(),
@@ -105,6 +114,7 @@ import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
 import { existsSync, realpathSync, readFileSync, unlinkSync, copyFileSync, mkdirSync, renameSync, watch as fsWatch } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
+import { NPM_COMMAND } from '../../src/constants'
 import { logger } from '../../src/logger'
 import { reExecProcess, performUpdate } from '../../src/update-checker'
 import { resetDockerPathCache } from '../../src/docker/docker-utils'
@@ -151,6 +161,7 @@ describe('docker-runner', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    mockPrefixerWrites.length = 0
     process.env = { ...originalEnv }
     resetDockerPathCache()
     mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
@@ -673,6 +684,27 @@ describe('docker-runner', () => {
       expect(typeof result).toBe('string')
       expect(result).toMatch(/^\d+\.\d+\.\d+/)
     })
+
+    it('should use NPM_COMMAND (platform-specific npm binary) to list packages', () => {
+      mockExecFileSync.mockImplementation((cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') {
+          return Buffer.from(JSON.stringify({
+            dependencies: { '@ai-support-agent/cli': { version: '1.5.0' } },
+          }))
+        }
+        return Buffer.from('')
+      })
+
+      const result = getInstalledVersion()
+      expect(result).toBe('1.5.0')
+      // Verify NPM_COMMAND (the platform-specific constant) was used
+      const listCalls = mockExecFileSync.mock.calls.filter(
+        call => (call[1] as string[] | undefined)?.[0] === 'list',
+      )
+      expect(listCalls.length).toBeGreaterThan(0)
+      expect(listCalls[0][0]).toBe(NPM_COMMAND)
+    })
   })
 
   describe('ensureImage', () => {
@@ -855,6 +887,23 @@ describe('docker-runner', () => {
     beforeEach(() => {
       resetIsDockerRunning()
       mockGetConfigDir.mockReturnValue('/mock/config-dir')
+    })
+
+    it('should exit with error when another agent instance is already running', () => {
+      const { isAlreadyRunning, readPidFile } = require('../../src/pid-manager')
+      isAlreadyRunning.mockReturnValue(true)
+      readPidFile.mockReturnValue(12345)
+
+      runInDocker({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('12345'),
+      )
+      expect(mockExit).toHaveBeenCalledWith(1)
+
+      // Restore default for subsequent tests
+      isAlreadyRunning.mockReturnValue(false)
+      readPidFile.mockReturnValue(null)
     })
 
     it('should exit with error when Docker is not available', () => {
@@ -3037,9 +3086,9 @@ describe('DockerSupervisor log streaming', () => {
     resetIsDockerRunning()
     hostnameSpy.mockRestore()
 
-    const writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    // Output is routed through the mocked line-prefixer (captured in
+    // mockPrefixerWrites), so no real stdout write occurs.
     fakeChild.stdout.emit('data', Buffer.from('hello'))
-    writeSpy.mockRestore()
 
     // Emit close to cover resolveClosed() in the no-log-streaming branch
     fakeChild.emit('close', 0)

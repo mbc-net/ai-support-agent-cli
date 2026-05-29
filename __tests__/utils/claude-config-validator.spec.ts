@@ -141,4 +141,18 @@ describe('ensureClaudeJsonIntegrity', () => {
       expect.stringContaining('ENOSPC: no space left on device'),
     )
   })
+
+  it('should log warning with stringified value when a non-Error is thrown', () => {
+    // Covers the `String(error)` branch in the outer catch (error not instanceof Error)
+    mockFs.existsSync.mockReturnValue(true)
+    mockFs.readFileSync.mockImplementation(() => {
+      // eslint-disable-next-line @typescript-eslint/no-throw-literal
+      throw 'plain string error'
+    })
+
+    expect(() => ensureClaudeJsonIntegrity()).not.toThrow()
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('plain string error'),
+    )
+  })
 })

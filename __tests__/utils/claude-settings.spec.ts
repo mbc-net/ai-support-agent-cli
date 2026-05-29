@@ -119,5 +119,15 @@ describe('claude-settings', () => {
 
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to update'))
     })
+
+    it('should handle non-Error throws gracefully', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+      // Throw a non-Error value (string) to cover the String(error) branch at line 64
+      mockedFs.mkdirSync.mockImplementation(() => { throw 'string error value' })
+
+      ensureAllowedToolsInSettings(['WebFetch'])
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('string error value'))
+    })
   })
 })

@@ -6,26 +6,32 @@
  * these helpers try each one sequentially and return the selector that matched.
  */
 
+import type { Page } from 'playwright'
+
 import { logger } from '../../../logger'
+import {
+  SELECTOR_TIMEOUT_MULTIPLE_MS,
+  SELECTOR_TIMEOUT_NAVIGATION_MS,
+  SELECTOR_TIMEOUT_SINGLE_MS,
+} from './browser-types'
 
 /**
  * Try multiple comma-separated CSS selectors for a click action.
  * Returns the selector that actually matched.
  * If the selector contains no commas, it is used as-is.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function tryClickSelectors(page: any, selectors: string, options?: { waitForNavigation?: boolean }): Promise<string> {
+export async function tryClickSelectors(page: Page, selectors: string, options?: { waitForNavigation?: boolean }): Promise<string> {
   const candidates = selectors.split(',').map(s => s.trim()).filter(Boolean)
 
   if (candidates.length <= 1) {
     const sel = selectors.trim()
     if (options?.waitForNavigation) {
       await Promise.all([
-        page.waitForNavigation({ timeout: 30000 }).catch(() => { /* navigation may not happen */ }),
-        page.click(sel, { timeout: 10000 }),
+        page.waitForNavigation({ timeout: SELECTOR_TIMEOUT_NAVIGATION_MS }).catch(() => undefined /* navigation may not happen */),
+        page.click(sel, { timeout: SELECTOR_TIMEOUT_SINGLE_MS }),
       ])
     } else {
-      await page.click(sel, { timeout: 10000 })
+      await page.click(sel, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     }
     return sel
   }
@@ -39,15 +45,15 @@ export async function tryClickSelectors(page: any, selectors: string, options?: 
 
       if (options?.waitForNavigation) {
         await Promise.all([
-          page.waitForNavigation({ timeout: 30000 }).catch(() => { /* navigation may not happen */ }),
-          page.click(candidate, { timeout: 5000 }),
+          page.waitForNavigation({ timeout: SELECTOR_TIMEOUT_NAVIGATION_MS }).catch(() => undefined /* navigation may not happen */),
+          page.click(candidate, { timeout: SELECTOR_TIMEOUT_MULTIPLE_MS }),
         ])
       } else {
-        await page.click(candidate, { timeout: 5000 })
+        await page.click(candidate, { timeout: SELECTOR_TIMEOUT_MULTIPLE_MS })
       }
       logger.debug(`[browser] Selector matched: ${candidate}`)
       return candidate
-    } catch (err) {
+    } catch (err: unknown) {
       lastError = err as Error
       continue
     }
@@ -61,13 +67,12 @@ export async function tryClickSelectors(page: any, selectors: string, options?: 
  * Returns the selector that actually matched.
  * If the selector contains no commas, it is used as-is.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function tryFillSelectors(page: any, selectors: string, value: string): Promise<string> {
+export async function tryFillSelectors(page: Page, selectors: string, value: string): Promise<string> {
   const candidates = selectors.split(',').map(s => s.trim()).filter(Boolean)
 
   if (candidates.length <= 1) {
     const sel = selectors.trim()
-    await page.fill(sel, value, { timeout: 10000 })
+    await page.fill(sel, value, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     return sel
   }
 
@@ -78,10 +83,10 @@ export async function tryFillSelectors(page: any, selectors: string, value: stri
       const count: number = await page.locator(candidate).count()
       if (count === 0) continue
 
-      await page.fill(candidate, value, { timeout: 5000 })
+      await page.fill(candidate, value, { timeout: SELECTOR_TIMEOUT_MULTIPLE_MS })
       logger.debug(`[browser] Selector matched: ${candidate}`)
       return candidate
-    } catch (err) {
+    } catch (err: unknown) {
       lastError = err as Error
       continue
     }

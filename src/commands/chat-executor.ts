@@ -158,8 +158,8 @@ async function executeClaudeCodeChatOnce(
     if (type === 'tool_call') {
       try {
         collectedToolCalls.push(JSON.parse(content))
-      } catch (err) {
-        logger.warn(`[chat] Failed to parse tool_call JSON: ${err instanceof Error ? err.message : String(err)}`)
+      } catch (err: unknown) {
+        logger.warn(`[chat] Failed to parse tool_call JSON: ${getErrorMessage(err)}`)
       }
     }
     // tool_result チャンクの success/output を対応する tool_call エントリにマージ
@@ -173,8 +173,8 @@ async function executeClaudeCodeChatOnce(
           entry.success = result.success
           entry.result = result.output
         }
-      } catch (err) {
-        logger.warn(`[chat] Failed to parse tool_result JSON: ${err instanceof Error ? err.message : String(err)}`)
+      } catch (err: unknown) {
+        logger.warn(`[chat] Failed to parse tool_result JSON: ${getErrorMessage(err)}`)
       }
     }
     return rawSendChunk(type, content)

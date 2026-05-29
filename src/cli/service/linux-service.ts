@@ -3,13 +3,16 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { loadConfig, getProjectList } from '../../config-manager'
+import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER } from '../../constants'
+import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { getErrorMessage } from '../../utils'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import { buildDockerRunWithLogRotate } from './service-template-helpers'
 import type {
   ProjectStatus,
   ServiceConfig,
@@ -17,19 +20,28 @@ import type {
   ServiceStatus,
   ServiceStrategy,
 } from './types'
+import {
+  getLinuxLogDir,
+  getLinuxSystemdUserDir,
+  getProjectConfigHostDir,
+  getProjectLogDir,
+  getProjectServiceDir,
+  getServicesDir,
+  getUpdateScriptPath,
+  getWrapperScriptPath,
+  getAgentOutLog,
+  getAgentErrLog,
+  getWrapperOutLog,
+  getWrapperErrLog,
+} from '../../utils/path-utils'
 
 export { getCliEntryPoint, getNodePath }
 
 const SERVICE_NAME = 'ai-support-agent.service'
 const SERVICE_PREFIX = 'ai-support-agent'
 
-function getSystemdUserDir(): string {
-  return path.join(os.homedir(), '.config', 'systemd', 'user')
-}
-
-function getLogDir(): string {
-  return path.join(os.homedir(), '.local', 'share', 'ai-support-agent', 'logs')
-}
+const getSystemdUserDir = getLinuxSystemdUserDir
+const getLogDir = getLinuxLogDir
 
 // ---------------------------------------------------------------------------
 // Per-project unit helpers
@@ -140,28 +152,7 @@ export function detectSystemSystemdUnits(): string[] {
   }
 }
 
-/** Returns the host-side per-project config dir (mirrors what docker-runner uses) */
-function getProjectConfigHostDir(tenantCode: string, projectCode: string): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'projects', tenantCode, projectCode, '.ai-support-agent')
-}
-
-/** Returns the services dir where wrapper scripts are stored */
-function getServicesDir(): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'services')
-}
-
-function getUpdateScriptPath(): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'update-and-restart.sh')
-}
+// getProjectConfigHostDir, getServicesDir, and getUpdateScriptPath are imported from ../../utils/path-utils
 
 // ---------------------------------------------------------------------------
 // Legacy single-unit generation (kept for backward compatibility / tests)
@@ -171,10 +162,10 @@ export function generateServiceUnit(options: ServiceConfig): string {
   const { nodePath, entryPoint, logDir, verbose, docker } = options
   const execArgs = [nodePath, entryPoint, 'start']
   if (!docker) {
-    execArgs.push('--no-docker')
+    execArgs.push(CLI_FLAG_NO_DOCKER)
   }
   if (verbose) {
-    execArgs.push('--verbose')
+    execArgs.push(CLI_FLAG_VERBOSE)
   }
 
   return `[Unit]
@@ -189,8 +180,8 @@ Restart=always
 RestartSec=10
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=HOME=${os.homedir()}
-StandardOutput=append:${path.join(logDir, 'agent.out.log')}
-StandardError=append:${path.join(logDir, 'agent.err.log')}
+StandardOutput=append:${getAgentOutLog(logDir)}
+StandardError=append:${getAgentErrLog(logDir)}
 
 [Install]
 WantedBy=default.target
@@ -219,8 +210,8 @@ export function generateProjectServiceUnit(opts: {
   // systemd's open fd, and the rotated generation would grow without
   // bound). The wrapper.* files have no rotation but stay tiny because
   // only the bootstrap noise lands there.
-  const escapedOutLog = systemdEscape(path.join(opts.logDir, 'wrapper.out.log'))
-  const escapedErrLog = systemdEscape(path.join(opts.logDir, 'wrapper.err.log'))
+  const escapedOutLog = systemdEscape(getWrapperOutLog(opts.logDir))
+  const escapedErrLog = systemdEscape(getWrapperErrLog(opts.logDir))
   return `[Unit]
 Description=AI Support Agent (${opts.unitName})
 After=network-online.target
@@ -348,10 +339,23 @@ export function generateWrapperScript(opts: {
   }
 
   const containerArgs = [
-    'ai-support-agent', 'start', '--no-docker',
+    'ai-support-agent', 'start', CLI_FLAG_NO_DOCKER,
     `--project ${qProjectArg}`,
   ]
-  if (opts.verbose) containerArgs.push('--verbose')
+  if (opts.verbose) containerArgs.push(CLI_FLAG_VERBOSE)
+
+  const dockerRunBlock = buildDockerRunWithLogRotate({
+    buildDockerRun: (outputRedirect) => [
+      `docker run --rm -i --name ${qContainerName} \\`,
+      `  --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\`,
+      mountLines.join('\n'),
+      envLines.join('\n'),
+      `  "\$IMAGE_TAG" \\`,
+      `  ${containerArgs.join(' ')}${outputRedirect}`,
+    ].join('\n'),
+    logDir: opts.logDir,
+    supervisorLabel: 'systemd',
+  })
 
   return `#!/bin/bash
 set -uo pipefail
@@ -398,63 +402,7 @@ docker rm -f ${qContainerName} 2>/dev/null || true
 _DOCKER_UID=$(id -u)
 _DOCKER_GID=$(id -g)
 
-${opts.logDir ? `\
-# Pipe stdout and stderr through SEPARATE \`ai-support-agent log-rotate\`
-# subprocesses so the active log files are bounded (default 5MB × 5
-# generations) AND each stream lands in its own file (agent.out.log /
-# agent.err.log) — matching the pre-rotation layout that operators tail.
-#
-# Both rotators are invoked with \`--no-tee\` so they DO NOT echo back to
-# stdout/stderr. The systemd unit's StandardOutput/Error is pointed at
-# separate wrapper.*.log files (NOT the agent.*.log paths owned by the
-# rotators), so we don't get a double-write race where systemd silently
-# keeps appending to a rotated generation.
-#
-# Process substitution \`> >(cmd)\` / \`2> >(cmd)\` is bash-only; the
-# shebang at line 1 (\`#!/bin/bash\`) guarantees it.
-# Stream stdout/stderr to background rotator subprocesses via named FIFOs
-# so we have EXPLICIT PIDs to wait on. Process substitution (\`> >(cmd)\`)
-# is simpler but its children are not in the job table on bash 3.2
-# (macOS's /bin/bash) — bare \`wait\` returns immediately, allowing the
-# service-stop signal to SIGKILL the rotator mid-flush and lose the last
-# few KB of logs. Background jobs started with \`&\` set \$! reliably on
-# every supported bash, so this layout is portable.
-_ROT_DIR=$(mktemp -d -t ai-support-agent-rot.XXXXXX)
-trap 'rm -rf "\$_ROT_DIR" 2>/dev/null || true' EXIT
-mkfifo "\$_ROT_DIR/out" "\$_ROT_DIR/err"
-ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.out.log`)} < "\$_ROT_DIR/out" &
-_ROT_OUT_PID=$!
-ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.err.log`)} < "\$_ROT_DIR/err" >&2 &
-_ROT_ERR_PID=$!
-
-docker run --rm -i --name ${qContainerName} \\
-  --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\
-${mountLines.join('\n')}
-${envLines.join('\n')}
-  "\$IMAGE_TAG" \\
-  ${containerArgs.join(' ')} \\
-   > "\$_ROT_DIR/out" 2> "\$_ROT_DIR/err"
-
-# Redirecting to a FIFO does not propagate the rotator's exit into \$?,
-# so EXIT_CODE is purely docker's exit status. The exit-42 update path is
-# preserved (the rotator can never mask it).
-EXIT_CODE=$?
-
-# Wait on the rotators explicitly so they drain their FIFO before the
-# wrapper exits (service supervisor will SIGKILL stragglers otherwise).
-# docker closed its write end on exit, so each rotator sees EOF on stdin
-# and exits naturally; the wait is bounded by pipe-buffer drain time.
-wait "\$_ROT_OUT_PID" "\$_ROT_ERR_PID" 2>/dev/null || true
-` : `\
-docker run --rm -i --name ${qContainerName} \\
-  --user "\${_DOCKER_UID}:\${_DOCKER_GID}" \\
-${mountLines.join('\n')}
-${envLines.join('\n')}
-  "\$IMAGE_TAG" \\
-  ${containerArgs.join(' ')}
-
-EXIT_CODE=$?
-`}
+${dockerRunBlock}
 if [ "$EXIT_CODE" -eq 42 ]; then
   exec ${qUpdateScriptPath}
 fi
@@ -465,14 +413,10 @@ exit "$EXIT_CODE"
 
 /** Generate the update-and-restart.sh script for systemd */
 export function generateUpdateScript(): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-
   // Quote interpolated paths so a HOME / config dir containing whitespace
   // or shell metacharacters doesn't word-split the generated script.
   const qSystemdDir = shellQuote(getSystemdUserDir())
-  const qVersionFile = shellQuote(path.join(configDir, 'update-version.json'))
+  const qVersionFile = shellQuote(path.join(getConfigDir(), 'update-version.json'))
 
   return `#!/bin/bash
 set -uo pipefail
@@ -585,7 +529,7 @@ export function writeProjectServiceFiles(
   const projectKey = `${sanitize(tenantCode)}-${sanitize(projectCode)}`
 
   const logDir = getLogDir()
-  const projectLogDir = path.join(logDir, projectKey)
+  const projectLogDir = getProjectLogDir(logDir, projectKey)
   if (!fs.existsSync(projectLogDir)) {
     fs.mkdirSync(projectLogDir, { recursive: true, mode: 0o700 })
   }
@@ -596,7 +540,7 @@ export function writeProjectServiceFiles(
   }
 
   const servicesDir = getServicesDir()
-  const projectServiceDir = path.join(servicesDir, projectKey)
+  const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
   if (!fs.existsSync(projectServiceDir)) {
     fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
   }
@@ -617,7 +561,7 @@ export function writeProjectServiceFiles(
   const validatedProjectDir = validateProjectDirForMount(project.projectDir)
 
   const updateScriptPath = getUpdateScriptPath()
-  const wrapperScriptPath = path.join(projectServiceDir, 'run.sh')
+  const wrapperScriptPath = getWrapperScriptPath(projectServiceDir)
   const wrapperScript = generateWrapperScript({
     imageName: IMAGE_NAME,
     tenantCode,
@@ -666,7 +610,7 @@ export function installAndStartProject(
   try {
     execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = getErrorMessage(error)
     logger.warn(t('service.daemonReloadFailed', { message }))
     return
   }
@@ -680,14 +624,14 @@ export function installAndStartProject(
   try {
     execSync(`systemctl --user enable "${unitFile}"`, { stdio: 'pipe' })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = getErrorMessage(error)
     logger.warn(t('service.enableFailed', { unit: unitFile, message }))
   }
 
   try {
     execSync(`systemctl --user start "${unitFile}"`, { stdio: 'pipe' })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = getErrorMessage(error)
     logger.warn(t('service.loadWarning', { label: `${unitName}: ${message}` }))
     return
   }
@@ -812,7 +756,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
           unitFile: `${unitName}.service`,
         })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.projectInstallFailed', { projectCode: project.projectCode, message }))
         failedCount += 1
       }
@@ -840,7 +784,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
         try {
           if (fs.existsSync(unitPath)) fs.unlinkSync(unitPath)
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
+          const message = getErrorMessage(error)
           logger.warn(t('service.orphanUnitRemoveFailed', { unit: orphanUnitFile, message }))
         }
       }
@@ -856,14 +800,14 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     try {
       execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = getErrorMessage(error)
       logger.warn(t('service.daemonReloadFailed', { message }))
     }
     for (const { projectCode, unitPath, unitFile } of writtenUnits) {
       try {
         execSync(`systemctl --user enable "${unitFile}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.warn(t('service.enableFailed', { unit: unitFile, message }))
       }
       logger.success(t('service.projectInstalled', { projectCode, path: unitPath }))
@@ -933,7 +877,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       try {
         execSync(`systemctl --user start "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         // Include unit name so operators can identify the failing project
         // when start runs over N units.
         logger.error(t('service.unitStartFailed', { unit, message }))
@@ -959,7 +903,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       try {
         execSync(`systemctl --user stop "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.unitStopFailed', { unit, message }))
         failed = true
       }
@@ -989,7 +933,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       try {
         execSync(`systemctl --user restart "${unit}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.unitRestartFailed', { unit, message }))
         failed = true
       }

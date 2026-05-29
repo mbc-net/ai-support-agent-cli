@@ -289,6 +289,26 @@ describe('VsCodeServer', () => {
       expect(server.isRunning).toBe(true)
       expect(callCount).toBeGreaterThanOrEqual(2)
     })
+
+    it('should throw when code-server does not become ready before startup timeout', async () => {
+      // Always fail health check to force timeout
+      ;(http.get as jest.Mock).mockImplementation(() => {
+        const req = new EventEmitter()
+        process.nextTick(() => req.emit('error', new Error('ECONNREFUSED')))
+        return req
+      })
+
+      // Import constants to mock STARTUP_TIMEOUT_MS
+      const vsCodeConstants = require('../../src/vscode/constants')
+      const origTimeout = vsCodeConstants.STARTUP_TIMEOUT_MS
+      Object.defineProperty(vsCodeConstants, 'STARTUP_TIMEOUT_MS', { value: 100, writable: true })
+
+      try {
+        await expect(server.start()).rejects.toThrow('code-server failed to start within')
+      } finally {
+        Object.defineProperty(vsCodeConstants, 'STARTUP_TIMEOUT_MS', { value: origTimeout, writable: true })
+      }
+    }, 10000)
   })
 
   describe('stop', () => {
@@ -316,6 +336,52 @@ describe('VsCodeServer', () => {
       mockProcess.kill = jest.fn(() => { throw new Error('kill failed') })
 
       expect(() => server.stop()).not.toThrow()
+    })
+
+    it('should send SIGKILL after 5 seconds if a new process starts before timeout fires', async () => {
+      jest.useFakeTimers()
+      mockHealthCheckSuccess()
+
+      await server.start()
+
+      // Save the original process ref
+      const originalProcess = mockProcess
+
+      // Call stop — this sets this.process = null and schedules SIGKILL in 5s
+      server.stop()
+      expect(originalProcess.kill).toHaveBeenCalledWith('SIGTERM')
+
+      // Simulate a new process being started (sets this.process back to non-null)
+      const newProcess = createMockProcess()
+      Object.defineProperty(newProcess, 'killed', { value: false, writable: true })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(server as any).process = newProcess
+
+      // Advance time past 5 seconds — the timeout checks this.process
+      jest.advanceTimersByTime(5001)
+
+      // SIGKILL should be called on the new process (which is not killed)
+      expect(newProcess.kill).toHaveBeenCalledWith('SIGKILL')
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(server as any).process = null
+      jest.useRealTimers()
+    })
+
+    it('should NOT send SIGKILL if process is null when timeout fires', async () => {
+      jest.useFakeTimers()
+      mockHealthCheckSuccess()
+
+      await server.start()
+      server.stop()
+
+      // At this point this.process is null (set in stop())
+      jest.advanceTimersByTime(5001)
+
+      // SIGKILL should NOT be called because this.process is null
+      expect(mockProcess.kill).not.toHaveBeenCalledWith('SIGKILL')
+
+      jest.useRealTimers()
     })
   })
 
@@ -460,6 +526,32 @@ describe('VsCodeServer', () => {
       jest.advanceTimersByTime(30001)
 
       expect(checkHealthSpy).toHaveBeenCalled()
+
+      checkHealthSpy.mockRestore()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(server as any).stopTimers()
+      jest.useRealTimers()
+    })
+
+    it('should log warning when periodic health check fails', async () => {
+      jest.useFakeTimers()
+
+      const { logger } = require('../../src/logger')
+
+      // Mock checkHealth to reject
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const checkHealthSpy = jest.spyOn(server as any, 'checkHealth').mockRejectedValue(new Error('connection refused'))
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(server as any).startHealthCheck()
+
+      jest.advanceTimersByTime(30001)
+
+      // Allow the rejected promise to be processed
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Health check failed'))
 
       checkHealthSpy.mockRestore()
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -759,6 +851,32 @@ describe('VsCodeServer', () => {
 
       expect(server.getPort()).toBe(9999)
       expect(server.isRunning).toBe(true)
+    })
+
+    it('should reject when net server address returns null in resolveAvailablePort', async () => {
+      const net = require('net')
+      const EventEmitter = require('events').EventEmitter
+
+      // First call (checkPortAvailable): port in use
+      const busyServer = new EventEmitter()
+      busyServer.listen = jest.fn().mockImplementation(() => {
+        process.nextTick(() => busyServer.emit('error', new Error('EADDRINUSE')))
+      })
+      busyServer.close = jest.fn()
+
+      // Second call (resolveAvailablePort fallback): address() returns null
+      const nullAddrServer = new EventEmitter()
+      nullAddrServer.listen = jest.fn().mockImplementation((_port: number, _host: string, cb: () => void) => { cb() })
+      nullAddrServer.close = jest.fn().mockImplementation((cb?: () => void) => { cb?.() })
+      nullAddrServer.address = jest.fn().mockReturnValue(null)
+
+      net.createServer
+        .mockReturnValueOnce(busyServer)
+        .mockReturnValueOnce(nullAddrServer)
+
+      server = new VsCodeServer({ projectDir: '/test/project' })
+
+      await expect(server.start()).rejects.toThrow('Failed to get assigned port')
     })
   })
 })

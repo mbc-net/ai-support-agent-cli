@@ -176,20 +176,13 @@ describe('resolveRotateOptions', () => {
 
 describe('runLogRotate (via registerLogRotateCommand action)', () => {
   let exitSpy: jest.SpyInstance
-  let stdoutWriteSpy: jest.SpyInstance
+  // Inject a fake tee sink instead of spying on process.stdout.write — spying on
+  // process.stdout.write inside a test interferes with Jest's own reporter and
+  // hangs the Jest worker on CI.
+  let teeSink: { write: jest.Mock }
   let stdinEmitter: EventEmitter
   let processOnSpy: jest.SpyInstance
   const signalHandlers = new Map<string, () => void>()
-
-  function getActionHandler(): (filePath: string, opts: Record<string, unknown>) => void {
-    const program = new Command()
-    program.exitOverride() // prevent process.exit from commander
-    registerLogRotateCommand(program)
-    const cmd = program.commands.find((c) => c.name() === 'log-rotate')!
-    // Extract the action handler from commander internals
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (cmd as any)._actionHandler
-  }
 
   beforeEach(() => {
     jest.clearAllMocks()
@@ -197,7 +190,7 @@ describe('runLogRotate (via registerLogRotateCommand action)', () => {
     mockWriterClose.mockReturnValue(undefined)
 
     exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
-    stdoutWriteSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    teeSink = { write: jest.fn() }
 
     stdinEmitter = new EventEmitter()
     jest.spyOn(process.stdin, 'on').mockImplementation((event: string, handler: (...args: unknown[]) => void) => {
@@ -214,7 +207,6 @@ describe('runLogRotate (via registerLogRotateCommand action)', () => {
 
   afterEach(() => {
     exitSpy.mockRestore()
-    stdoutWriteSpy.mockRestore()
     processOnSpy.mockRestore()
     jest.restoreAllMocks()
   })
@@ -222,7 +214,7 @@ describe('runLogRotate (via registerLogRotateCommand action)', () => {
   it('invokes runLogRotate when commander action fires: data event writes to writer and stdout (tee enabled)', () => {
     const program = new Command()
     program.exitOverride()
-    registerLogRotateCommand(program)
+    registerLogRotateCommand(program, teeSink)
 
     program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log'])
 
@@ -230,13 +222,13 @@ describe('runLogRotate (via registerLogRotateCommand action)', () => {
     stdinEmitter.emit('data', chunk)
 
     expect(mockWriterWrite).toHaveBeenCalledWith(chunk)
-    expect(stdoutWriteSpy).toHaveBeenCalledWith(chunk)
+    expect(teeSink.write).toHaveBeenCalledWith(chunk)
   })
 
   it('data event does NOT tee to stdout when --no-tee is passed', () => {
     const program = new Command()
     program.exitOverride()
-    registerLogRotateCommand(program)
+    registerLogRotateCommand(program, teeSink)
 
     program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log', '--no-tee'])
 
@@ -244,13 +236,13 @@ describe('runLogRotate (via registerLogRotateCommand action)', () => {
     stdinEmitter.emit('data', chunk)
 
     expect(mockWriterWrite).toHaveBeenCalledWith(chunk)
-    expect(stdoutWriteSpy).not.toHaveBeenCalled()
+    expect(teeSink.write).not.toHaveBeenCalled()
   })
 
   it('on stdin end, closes writer and exits with code 0', () => {
     const program = new Command()
     program.exitOverride()
-    registerLogRotateCommand(program)
+    registerLogRotateCommand(program, teeSink)
 
     program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log'])
 
@@ -263,7 +255,7 @@ describe('runLogRotate (via registerLogRotateCommand action)', () => {
   it('on stdin error, closes writer and exits with code 0', () => {
     const program = new Command()
     program.exitOverride()
-    registerLogRotateCommand(program)
+    registerLogRotateCommand(program, teeSink)
 
     program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log'])
 
@@ -278,7 +270,7 @@ describe('runLogRotate (via registerLogRotateCommand action)', () => {
 
     const program = new Command()
     program.exitOverride()
-    registerLogRotateCommand(program)
+    registerLogRotateCommand(program, teeSink)
 
     program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log'])
 
@@ -287,7 +279,7 @@ describe('runLogRotate (via registerLogRotateCommand action)', () => {
 
     expect(logger.error).toHaveBeenCalled()
     // stdout should still receive the chunk (passthrough fallback)
-    expect(stdoutWriteSpy).toHaveBeenCalledWith(chunk)
+    expect(teeSink.write).toHaveBeenCalledWith(chunk)
 
     // on end, exits with exitCode 1
     stdinEmitter.emit('end')
@@ -299,7 +291,7 @@ describe('runLogRotate (via registerLogRotateCommand action)', () => {
 
     const program = new Command()
     program.exitOverride()
-    registerLogRotateCommand(program)
+    registerLogRotateCommand(program, teeSink)
 
     program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log', '--no-tee'])
 
@@ -307,7 +299,7 @@ describe('runLogRotate (via registerLogRotateCommand action)', () => {
     stdinEmitter.emit('data', chunk)
 
     // No tee on error either
-    expect(stdoutWriteSpy).not.toHaveBeenCalled()
+    expect(teeSink.write).not.toHaveBeenCalled()
   })
 
   it('registers SIGTERM, SIGINT, SIGHUP handlers that close writer and exit', () => {

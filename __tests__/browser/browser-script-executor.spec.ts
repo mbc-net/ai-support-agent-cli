@@ -1,4 +1,7 @@
 import { executePlaywrightScript } from '../../src/browser/browser-script-executor'
+import {
+  SELECTOR_TIMEOUT_SINGLE_MS,
+} from '../../src/mcp/tools/browser/browser-types'
 
 jest.mock('../../src/logger')
 
@@ -49,7 +52,7 @@ describe('browser-script-executor', () => {
     )
 
     expect(result.success).toBe(true)
-    expect(mockPage.click).toHaveBeenCalledWith('#submit-btn', { timeout: 10000 })
+    expect(mockPage.click).toHaveBeenCalledWith('#submit-btn', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
   })
 
   it('should execute a fill command', async () => {
@@ -59,7 +62,7 @@ describe('browser-script-executor', () => {
     )
 
     expect(result.success).toBe(true)
-    expect(mockPage.fill).toHaveBeenCalledWith('#email', 'user@example.com', { timeout: 10000 })
+    expect(mockPage.fill).toHaveBeenCalledWith('#email', 'user@example.com', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
   })
 
   it('should execute innerText extraction and store variable', async () => {

@@ -10,6 +10,7 @@ import * as path from 'path'
 import { getConfigDir } from '../config-manager'
 import { logger } from '../logger'
 import type { ProjectRegistration } from '../types'
+import { getErrorMessage } from '../utils'
 
 /**
  * Get the host-side per-project config directory.
@@ -40,7 +41,7 @@ export function migrateProjectConfigDir(project: ProjectRegistration): void {
     fs.mkdirSync(path.join(configBase, project.tenantCode), { recursive: true, mode: 0o700 })
     fs.renameSync(legacyDir, newDir)
     logger.info(`[docker] Migrated project config dir: ${legacyDir} → ${newDir}`)
-  } catch (err) {
-    logger.warn(`[docker] Failed to migrate project config dir for ${project.projectCode}: ${err instanceof Error ? err.message : String(err)}`)
+  } catch (err: unknown) {
+    logger.warn(`[docker] Failed to migrate project config dir for ${project.projectCode}: ${getErrorMessage(err)}`)
   }
 }

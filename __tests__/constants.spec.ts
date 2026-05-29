@@ -39,6 +39,15 @@ describe('constants', () => {
     expect(constants.AGENT_VERSION).toBe('0.0.0')
   })
 
+  it('should export NPM_COMMAND as npm.cmd on win32 and npm elsewhere', () => {
+    // NPM_COMMAND is evaluated at module load time; verify it matches the expected value
+    // for the current platform. The platform-specific selection is covered here so that
+    // update-checker and version-manager don't each need a duplicate platform branch.
+    const constants = require('../src/constants')
+    const expected = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+    expect(constants.NPM_COMMAND).toBe(expected)
+  })
+
   it('should export all expected constant values', () => {
     const constants = require('../src/constants')
 
@@ -57,6 +66,9 @@ describe('constants', () => {
     expect(constants.MAX_FILE_READ_SIZE).toBe(10 * 1024 * 1024)
     expect(constants.PROCESS_LIST_TIMEOUT).toBe(10_000)
 
+    // Localhost address
+    expect(constants.LOCALHOST_ADDRESS).toBe('127.0.0.1')
+
     // Project code defaults
     expect(constants.PROJECT_CODE_DEFAULT).toBe('default')
     expect(constants.PROJECT_CODE_CLI_DIRECT).toBe('cli-direct')
@@ -67,6 +79,12 @@ describe('constants', () => {
     expect(constants.ANTHROPIC_API_VERSION).toBe('2023-06-01')
     expect(constants.ANTHROPIC_API_URL).toBe('https://api.anthropic.com/v1/messages')
     expect(constants.DEFAULT_MAX_TOKENS).toBe(4096)
+
+    // Docker marker filenames
+    expect(constants.DOCKER_MARKER_BUILT_HASH).toBe('docker-built-hash')
+    expect(constants.DOCKER_MARKER_REBUILD_NEEDED).toBe('docker-rebuild-needed')
+    expect(constants.DOCKER_MARKER_CUSTOMIZATION_HASH).toBe('docker-customization-hash')
+    expect(constants.DOCKER_MARKER_REGISTERED_AGENT_ID).toBe('docker-registered-agent-id')
 
     // Delayed restart
     expect(constants.DELAYED_RESTART_MS).toBe(1_000)
@@ -83,6 +101,12 @@ describe('constants', () => {
     expect(constants.LOG_RESULT_LIMIT).toBe(300)
     expect(constants.LOG_DEBUG_LIMIT).toBe(200)
     expect(constants.CHUNK_LOG_LIMIT).toBe(100)
+
+    // CLI flag constants
+    expect(constants.CLI_FLAG_VERBOSE).toBe('--verbose')
+    expect(constants.CLI_FLAG_NO_DOCKER).toBe('--no-docker')
+    expect(constants.CLI_FLAG_NO_DOCKERFILE_SYNC).toBe('--no-dockerfile-sync')
+    expect(constants.CLI_FLAG_NO_AUTO_UPDATE).toBe('--no-auto-update')
 
     // API endpoints
     expect(constants.API_ENDPOINTS.REGISTER('tenant1')).toBe('/api/tenant1/agent/register')

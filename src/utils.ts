@@ -1,6 +1,11 @@
 import * as fs from 'fs'
 import axios from 'axios'
 
+export function readJsonSync<T>(filePath: string): T {
+  const content = fs.readFileSync(filePath, 'utf-8')
+  return JSON.parse(content) as T
+}
+
 export function atomicWriteFile(filePath: string, content: string, mode = 0o600): void {
   const tmpPath = filePath + '.tmp'
   fs.writeFileSync(tmpPath, content, { mode })
@@ -81,4 +86,18 @@ export function resolveUrlForDocker(url: string): string {
     /^((?:https?|wss?):\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
     (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
   )
+}
+
+/**
+ * Type guard for NodeJS.ErrnoException.
+ * Narrows `unknown` catch values to ErrnoException and optionally checks the error code.
+ * Avoids `instanceof Error` to stay compatible with Jest's `isolatedModules` environment
+ * where filesystem errors may not pass the `instanceof` check.
+ */
+export function isErrnoException(err: unknown, code?: string): err is NodeJS.ErrnoException {
+  if (err === null || typeof err !== 'object') return false
+  const e = err as Record<string, unknown>
+  if (typeof e['message'] !== 'string') return false
+  if (!('code' in e)) return false
+  return code === undefined || e['code'] === code
 }

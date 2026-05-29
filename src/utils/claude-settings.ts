@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 
 import { logger } from '../logger'
+import { getErrorMessage, readJsonSync } from '../utils'
 
 /**
  * Update ~/.claude/settings.json to allow the specified tools.
@@ -30,7 +31,7 @@ export function ensureAllowedToolsInSettings(allowedTools: string[]): void {
     let settings: Record<string, unknown> = {}
     if (fs.existsSync(settingsPath)) {
       try {
-        settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>
+        settings = readJsonSync<Record<string, unknown>>(settingsPath)
       } catch {
         logger.warn('[claude-settings] settings.json is corrupted, resetting permissions')
       }
@@ -61,6 +62,6 @@ export function ensureAllowedToolsInSettings(allowedTools: string[]): void {
       logger.debug(`[claude-settings] Updated permissions.allow: ${allowList.join(', ')}`)
     }
   } catch (error) {
-    logger.warn(`[claude-settings] Failed to update settings.json: ${error instanceof Error ? error.message : String(error)}`)
+    logger.warn(`[claude-settings] Failed to update settings.json: ${getErrorMessage(error)}`)
   }
 }

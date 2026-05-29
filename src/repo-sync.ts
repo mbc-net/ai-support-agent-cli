@@ -155,17 +155,20 @@ async function pullRepository(
       timeout: GIT_FETCH_TIMEOUT,
     })
 
-    await execFileAsync('git', ['checkout', branch], {
-      cwd: repoDir,
-      env: { ...process.env, ...env },
-      timeout: GIT_CHECKOUT_TIMEOUT,
-    }).catch(() =>
-      execFileAsync('git', ['checkout', '-b', branch, `origin/${branch}`], {
+    try {
+      await execFileAsync('git', ['checkout', branch], {
         cwd: repoDir,
         env: { ...process.env, ...env },
         timeout: GIT_CHECKOUT_TIMEOUT,
-      }),
-    )
+      })
+    } catch {
+      // Branch does not exist locally yet — create it tracking the remote branch
+      await execFileAsync('git', ['checkout', '-b', branch, `origin/${branch}`], {
+        cwd: repoDir,
+        env: { ...process.env, ...env },
+        timeout: GIT_CHECKOUT_TIMEOUT,
+      })
+    }
 
     await execFileAsync('git', ['reset', '--hard', `origin/${branch}`], {
       cwd: repoDir,

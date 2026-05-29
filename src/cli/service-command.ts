@@ -1,5 +1,6 @@
 import type { Command } from 'commander'
 
+import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER } from '../constants'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { DarwinServiceStrategy, generatePlist, installAndStartProject as darwinInstallAndStartProject } from './service/darwin-service'
@@ -121,8 +122,8 @@ export function registerServiceCommands(program: Command): void {
   service
     .command('install')
     .description(t('cmd.service.install'))
-    .option('--verbose', t('cmd.service.install.verbose'))
-    .option('--no-docker', t('cmd.service.install.noDocker'))
+    .option(CLI_FLAG_VERBOSE, t('cmd.service.install.verbose'))
+    .option(CLI_FLAG_NO_DOCKER, t('cmd.service.install.noDocker'))
     .action(async (opts: { verbose?: boolean; docker?: boolean }) => {
       await installService(opts)
     })
@@ -158,7 +159,7 @@ export function registerServiceCommands(program: Command): void {
   service
     .command('status')
     .description(t('cmd.service.status'))
-    .option('--verbose', t('cmd.service.status.verbose'))
+    .option(CLI_FLAG_VERBOSE, t('cmd.service.status.verbose'))
     .action((opts: { verbose?: boolean }) => {
       serviceStatus(opts)
     })
@@ -167,8 +168,8 @@ export function registerServiceCommands(program: Command): void {
   program
     .command('install-service')
     .description(t('cmd.service.install'))
-    .option('--verbose', t('cmd.service.install.verbose'))
-    .option('--no-docker', t('cmd.service.install.noDocker'))
+    .option(CLI_FLAG_VERBOSE, t('cmd.service.install.verbose'))
+    .option(CLI_FLAG_NO_DOCKER, t('cmd.service.install.noDocker'))
     .action(async (opts: { verbose?: boolean; docker?: boolean }) => {
       await installService(opts)
     })

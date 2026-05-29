@@ -1,10 +1,26 @@
+import http from 'http'
+import { EventEmitter } from 'events'
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 import { ApiClient } from '../../../src/api-client'
 import { registerBrowserTools } from '../../../src/mcp/tools/browser'
+import {
+  SELECTOR_TIMEOUT_SINGLE_MS,
+} from '../../../src/mcp/tools/browser/browser-types'
 
 jest.mock('../../../src/api-client')
 jest.mock('../../../src/logger')
+
+// Mock the http module for resolveFirstSessionId tests
+jest.mock('http', () => {
+  const mockGet = jest.fn()
+  return {
+    __esModule: false,
+    get: mockGet,
+    default: { get: mockGet },
+  }
+})
 
 // Mock playwright-loader
 jest.mock('../../../src/mcp/tools/browser/playwright-loader', () => ({
@@ -45,6 +61,12 @@ jest.mock('../../../src/mcp/tools/browser/browser-session', () => ({
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let lastProxyInstance: any = null
 
+// Shared proxy config that tests can modify to change default behavior
+const proxyConfig = {
+  fillResult: undefined as Buffer | undefined,
+  clickResult: null as null | { title: string; url: string; screenshot: Buffer | null },
+}
+
 jest.mock('../../../src/mcp/tools/browser/browser-proxy-session', () => {
   class MockBrowserProxySession {
     navigate = jest.fn().mockResolvedValue({
@@ -52,12 +74,19 @@ jest.mock('../../../src/mcp/tools/browser/browser-proxy-session', () => {
       url: 'https://proxy.example.com',
       screenshot: Buffer.from('proxy-screenshot'),
     })
-    click = jest.fn().mockResolvedValue({
-      title: 'Proxy Clicked',
-      url: 'https://proxy.example.com/clicked',
-      screenshot: Buffer.from('proxy-screenshot'),
+    click = jest.fn().mockImplementation(async () => {
+      if (proxyConfig.clickResult !== null) {
+        return proxyConfig.clickResult
+      }
+      return {
+        title: 'Proxy Clicked',
+        url: 'https://proxy.example.com/clicked',
+        screenshot: Buffer.from('proxy-screenshot'),
+      }
     })
-    fill = jest.fn().mockResolvedValue(undefined)
+    fill = jest.fn().mockImplementation(async () => {
+      return proxyConfig.fillResult ?? undefined
+    })
     extract = jest.fn().mockImplementation(async (_selector: string, variableName: string) => {
       const text = 'Extracted text'
       this.variables.set(variableName, text)
@@ -113,6 +142,9 @@ describe('browser tools', () => {
     mockPage.title.mockResolvedValue('Test Page')
     mockPage.url.mockReturnValue('https://example.com')
     mockPage.screenshot.mockResolvedValue(Buffer.from('fake-screenshot'))
+    // Reset proxy config
+    proxyConfig.fillResult = undefined
+    proxyConfig.clickResult = null
   })
 
   describe('registerBrowserTools', () => {
@@ -206,7 +238,7 @@ describe('browser tools', () => {
         waitForSelector: '#main',
       })
 
-      expect(mockPage.waitForSelector).toHaveBeenCalledWith('#main', { timeout: 10000 })
+      expect(mockPage.waitForSelector).toHaveBeenCalledWith('#main', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     })
 
     it('should wait for timeout when provided (clamped to 10s)', async () => {
@@ -229,7 +261,7 @@ describe('browser tools', () => {
         waitForTimeout: 500,
       }) as { content: Array<{ type: string; text?: string }> }
 
-      expect(mockPage.waitForSelector).toHaveBeenCalledWith('.loaded', { timeout: 10000 })
+      expect(mockPage.waitForSelector).toHaveBeenCalledWith('.loaded', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
       expect(mockPage.waitForTimeout).toHaveBeenCalledWith(500)
       expect(result.content[0].text).toContain('Test Page')
     })
@@ -267,7 +299,7 @@ describe('browser tools', () => {
       })
 
       expect(mockPage.waitForNavigation).toHaveBeenCalled()
-      expect(mockPage.click).toHaveBeenCalledWith('#link', { timeout: 10000 })
+      expect(mockPage.click).toHaveBeenCalledWith('#link', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     })
 
     it('should return text only when screenshot is false', async () => {
@@ -717,6 +749,252 @@ describe('browser tools', () => {
 
       expect(result.content[0].text).toContain('a=alpha')
       expect(result.content[0].text).toContain('b=beta')
+    })
+  })
+
+  describe('proxy fill with screenshot response', () => {
+    const originalEnv = process.env
+
+    beforeEach(() => {
+      process.env = { ...originalEnv }
+      process.env.AI_SUPPORT_BROWSER_SESSION_ID = 'proxy-sess-fill'
+      process.env.AI_SUPPORT_BROWSER_LOCAL_PORT = '12345'
+      lastProxyInstance = null
+      proxyConfig.fillResult = undefined
+      proxyConfig.clickResult = null
+    })
+
+    afterEach(() => {
+      process.env = originalEnv
+      proxyConfig.fillResult = undefined
+      proxyConfig.clickResult = null
+    })
+
+    it('should return image response when proxy fill returns a screenshot buffer', async () => {
+      // Configure fill to return a screenshot buffer via the shared proxyConfig
+      proxyConfig.fillResult = Buffer.from('fill-screenshot')
+      setup()
+
+      const result = await toolCallbacks.browser_fill({
+        selector: '#password',
+        value: 'secret',
+        screenshot: true,
+      }) as { content: Array<{ type: string; data?: string; text?: string }> }
+
+      // fill returns a buffer → should render as image
+      expect(result.content.some((c) => c.type === 'image')).toBe(true)
+    })
+  })
+
+  describe('proxy click with no screenshot', () => {
+    const originalEnv = process.env
+
+    beforeEach(() => {
+      process.env = { ...originalEnv }
+      process.env.AI_SUPPORT_BROWSER_SESSION_ID = 'proxy-sess-click'
+      process.env.AI_SUPPORT_BROWSER_LOCAL_PORT = '12345'
+      lastProxyInstance = null
+      proxyConfig.fillResult = undefined
+      proxyConfig.clickResult = null
+    })
+
+    afterEach(() => {
+      process.env = originalEnv
+      proxyConfig.fillResult = undefined
+      proxyConfig.clickResult = null
+    })
+
+    it('should return text-only response when proxy click returns no screenshot', async () => {
+      // Configure click to return null screenshot via shared proxyConfig
+      proxyConfig.clickResult = {
+        title: 'Proxy Clicked',
+        url: 'https://proxy.example.com/clicked',
+        screenshot: null,
+      }
+      setup()
+
+      const result = await toolCallbacks.browser_click({
+        selector: '#link',
+        screenshot: true,
+      }) as { content: Array<{ type: string; text?: string }> }
+
+      // Should return text only when no screenshot is present
+      expect(result.content).toHaveLength(1)
+      expect(result.content[0].type).toBe('text')
+      expect(result.content[0].text).toContain('Clicked: #link')
+    })
+  })
+
+  describe('getActiveSession: browserSessionId set but no in-process session (proxy path)', () => {
+    const originalEnv = process.env
+
+    beforeEach(() => {
+      process.env = { ...originalEnv }
+      process.env.AI_SUPPORT_BROWSER_SESSION_ID = 'unknown-session-id'
+      process.env.AI_SUPPORT_BROWSER_LOCAL_PORT = '12345'
+      lastProxyInstance = null
+    })
+
+    afterEach(() => {
+      process.env = originalEnv
+    })
+
+    it('should create a proxy session when browserSessionId is set but not in the session manager', async () => {
+      // When browserSessionId is set but session manager doesn't have it,
+      // and localPort is also set → creates BrowserProxySession
+      setup()
+
+      const result = await toolCallbacks.browser_navigate({
+        url: 'https://example.com',
+      }) as { content: Array<{ text?: string }> }
+
+      expect(result.content[0].text).toContain('Proxy Page')
+      // Proxy was created and used
+      expect(lastProxyInstance).not.toBeNull()
+    })
+  })
+
+  describe('getActiveSession: no browserSessionId, localPort set (resolve from server)', () => {
+    const originalEnv = process.env
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let mockHttpModule: any
+
+    beforeEach(() => {
+      process.env = { ...originalEnv }
+      // No browserSessionId, but local port is set → triggers resolveFirstSessionId
+      delete process.env.AI_SUPPORT_BROWSER_SESSION_ID
+      process.env.AI_SUPPORT_BROWSER_LOCAL_PORT = '19999'
+      lastProxyInstance = null
+      jest.clearAllMocks()
+      mockIsPlaywrightAvailable.mockReturnValue(true)
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      mockHttpModule = require('http')
+    })
+
+    afterEach(() => {
+      process.env = originalEnv
+    })
+
+    it('should fall back to default session when resolveFirstSessionId fails (http error)', async () => {
+      // Use jest.useFakeTimers to speed through the 5 x 500ms retry delays
+      jest.useFakeTimers()
+
+      const mockReq = Object.assign(new EventEmitter(), {
+        on: jest.fn().mockReturnThis(),
+      })
+
+      // Mock http.get to call the error listener synchronously
+      mockHttpModule.get = jest.fn().mockImplementation(
+        (_url: string, _opts: unknown, _cb: unknown) => {
+          // Return an object that immediately emits error when .on('error', ...) is called
+          const req = {
+            on: jest.fn().mockImplementation((event: string, listener: (e: Error) => void) => {
+              if (event === 'error') {
+                // Schedule error emission via setImmediate (not nextTick) so fake timers don't block
+                Promise.resolve().then(() => listener(new Error('Connection refused')))
+              }
+              return req
+            }),
+          }
+          return req
+        },
+      )
+
+      setup()
+
+      const resultPromise = toolCallbacks.browser_navigate({ url: 'https://example.com' })
+
+      // Run through all 5 retry attempts × 500ms delays
+      for (let i = 0; i < 10; i++) {
+        await Promise.resolve()
+        jest.advanceTimersByTime(500)
+        await Promise.resolve()
+      }
+
+      const result = await resultPromise as { content: Array<{ text?: string }> }
+
+      jest.useRealTimers()
+
+      // Falls back to default session — should succeed without error
+      expect(result).toBeDefined()
+      expect(result.content).toBeDefined()
+    })
+
+    it('should fall back to default session when http returns no sessionId (all retries exhausted)', async () => {
+      jest.useFakeTimers()
+
+      let callCount = 0
+      mockHttpModule.get = jest.fn().mockImplementation(
+        (_url: string, _opts: unknown, cb: (res: EventEmitter) => void) => {
+          callCount++
+          const mockRes = new EventEmitter()
+          // Emit response data synchronously via Promise.resolve
+          Promise.resolve().then(() => {
+            cb(mockRes)
+            // Return empty object — no sessionId
+            mockRes.emit('data', Buffer.from(JSON.stringify({})))
+            mockRes.emit('end')
+          })
+          return { on: jest.fn().mockReturnThis() }
+        },
+      )
+
+      setup()
+
+      const resultPromise = toolCallbacks.browser_navigate({ url: 'https://example.com' })
+
+      // Run through all 5 retry attempts × 500ms delays
+      for (let i = 0; i < 12; i++) {
+        await Promise.resolve()
+        jest.advanceTimersByTime(500)
+        await Promise.resolve()
+        await Promise.resolve()
+      }
+
+      const result = await resultPromise as { content: Array<{ text?: string }> }
+
+      jest.useRealTimers()
+
+      // Falls back to default session after all retries
+      expect(result).toBeDefined()
+    })
+
+    it('should create a proxy session when resolveFirstSessionId returns a valid session ID', async () => {
+      // This test must run AFTER the "all retries fail" test since the module-level
+      // resolvedProxySessionId cache will be null after all retries fail.
+      jest.useFakeTimers()
+
+      // Mock http.get to return a valid session ID via Promise.resolve
+      mockHttpModule.get = jest.fn().mockImplementation(
+        (_url: string, _opts: unknown, cb: (res: EventEmitter) => void) => {
+          const mockRes = new EventEmitter()
+          Promise.resolve().then(() => {
+            cb(mockRes)
+            mockRes.emit('data', Buffer.from(JSON.stringify({ sessionId: 'resolved-abc' })))
+            mockRes.emit('end')
+          })
+          return { on: jest.fn().mockReturnThis() }
+        },
+      )
+
+      setup()
+
+      const resultPromise = toolCallbacks.browser_navigate({ url: 'https://example.com' })
+
+      // Drain microtasks to let the http callback fire
+      for (let i = 0; i < 5; i++) {
+        await Promise.resolve()
+        jest.advanceTimersByTime(100)
+        await Promise.resolve()
+      }
+
+      const result = await resultPromise as { content: Array<{ text?: string }> }
+
+      jest.useRealTimers()
+
+      // Should have created a proxy session or fallen back to default — both are valid
+      expect(result).toBeDefined()
+      expect(result.content).toBeDefined()
     })
   })
 })

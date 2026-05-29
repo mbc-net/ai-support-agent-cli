@@ -123,6 +123,24 @@ describe('shell-executor', () => {
       spawnSpy.mockRestore()
     })
 
+    it('should return generic error message for unknown error code', async () => {
+      const fakeProc = createFakeChildProcess()
+      const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
+
+      const resultPromise = executeShellCommand({ command: 'echo test' })
+      await waitForSpawn(spawnSpy)
+
+      const error = new Error('Some generic spawn error') as NodeJS.ErrnoException
+      error.code = 'EMFILE' // neither ENOENT nor EACCES
+      fakeProc.emit('error', error)
+
+      const result = await resultPromise
+      expectFailure(result)
+      expect(result.error).toContain('Some generic spawn error')
+
+      spawnSpy.mockRestore()
+    })
+
     it('should not resolve twice when error fires after close', async () => {
       const fakeProc = createFakeChildProcess()
       const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
@@ -190,6 +208,31 @@ describe('shell-executor', () => {
       const result = await resultPromise
       expectFailure(result)
       expect(result.error).toBe('Process exited with code 42')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('should not append stderr data after MAX_OUTPUT_SIZE is exceeded', async () => {
+      const fakeProc = createFakeChildProcess()
+      const spawnSpy = jest.spyOn(child_process, 'spawn').mockReturnValueOnce(fakeProc as unknown as ChildProcess)
+
+      const resultPromise = executeShellCommand({ command: 'echo test' })
+      await waitForSpawn(spawnSpy)
+
+      // First chunk: within MAX_OUTPUT_SIZE — gets appended to stderr
+      // Second chunk: pushes total over MAX_OUTPUT_SIZE — gets discarded (line 65 branch)
+      const chunkSize = Math.ceil(MAX_OUTPUT_SIZE / 2) + 1
+      const firstChunk = Buffer.alloc(chunkSize, 'E')
+      const secondChunk = Buffer.alloc(chunkSize, 'F')
+      fakeProc.stderr.emit('data', firstChunk)
+      fakeProc.stderr.emit('data', secondChunk)
+      fakeProc.emit('close', 1)
+
+      const result = await resultPromise
+      expectFailure(result)
+      // Only the first chunk was appended; second chunk was discarded
+      expect(result.error).toContain('E')
+      expect(result.error).not.toContain('F')
 
       spawnSpy.mockRestore()
     })

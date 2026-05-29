@@ -6,7 +6,7 @@ import * as path from 'path'
 import type { ApiClient } from './api-client'
 import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
-import { getErrorMessage } from './utils'
+import { atomicWriteFile, getErrorMessage } from './utils'
 import { normalizePemKey } from './utils/pem-key'
 import { createSecureTempFile } from './utils/temp-file'
 
@@ -224,6 +224,6 @@ function writeTempScript(content: string, prefix: string): string {
     os.tmpdir(),
     `${prefix}-${crypto.randomBytes(16).toString('hex')}.sh`,
   )
-  fs.writeFileSync(scriptPath, content, { mode: 0o700 })
+  atomicWriteFile(scriptPath, content, 0o700)
   return scriptPath
 }

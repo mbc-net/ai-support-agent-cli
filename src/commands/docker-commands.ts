@@ -8,6 +8,7 @@ import { loadConfig } from '../config-manager'
 import { AGENT_VERSION } from '../constants'
 import { t } from '../i18n'
 import { logger } from '../logger'
+import { getErrorMessage } from '../utils'
 import { computeUnifiedDiff } from '../utils/unified-diff'
 
 export function registerDockerCommands(program: Command): void {
@@ -56,8 +57,8 @@ export function registerDockerCommands(program: Command): void {
       let defaultContent: string
       try {
         defaultContent = fs.readFileSync(getDockerfilePath(), 'utf-8')
-      } catch (err) {
-        logger.error(t('docker.diffDefaultError', { message: err instanceof Error ? err.message : String(err) }))
+      } catch (err: unknown) {
+        logger.error(t('docker.diffDefaultError', { message: getErrorMessage(err) }))
         return
       }
 

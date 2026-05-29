@@ -642,4 +642,132 @@ describe('api-chat-executor', () => {
       expect(result.data).toBe('split')
     }
   })
+
+  it('should silently ignore unknown SSE event types', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-unknown-type', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // Send events with unknown types (ping, message_stop) — should be ignored
+    stream.emit('data', Buffer.from('data: {"type":"ping"}\n\n'))
+    stream.emit('data', Buffer.from('data: {"type":"message_stop"}\n\n'))
+    stream.emit('data', Buffer.from(
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"final"}}\n\n',
+    ))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toBe('final')
+    }
+  })
+
+  it('should skip SSE lines that do not start with "data: " prefix', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-no-prefix', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // Lines that do not start with "data: " should be skipped entirely
+    stream.emit('data', Buffer.from('event: message_start\n'))
+    stream.emit('data', Buffer.from(': comment line\n'))
+    stream.emit('data', Buffer.from('\n')) // empty separator line
+    stream.emit('data', Buffer.from('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}\n\n'))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toBe('ok')
+    }
+  })
+
+  it('should ignore content_block_start events with non-tool_use content block type', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-text-block-start', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // content_block_start with type "text" (not "tool_use") should be ignored
+    stream.emit('data', Buffer.from(
+      'data: {"type":"content_block_start","content_block":{"type":"text","text":""}}\n\n',
+    ))
+    stream.emit('data', Buffer.from(
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}\n\n',
+    ))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toBe('hello')
+    }
+
+    // No tool-use delta chunk should have been sent (only the text delta and done)
+    const deltaCalls = (mockClient.submitChatChunk as jest.Mock).mock.calls.filter(
+      (call: unknown[]) => (call[1] as { type: string }).type === 'delta',
+    )
+    expect(deltaCalls).toHaveLength(1)
+    expect((deltaCalls[0][1] as { content: string }).content).toBe('hello')
+  })
+
+  it('should handle content_block_start with null content_block gracefully', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-null-block', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // content_block_start with null content_block should be silently ignored
+    stream.emit('data', Buffer.from(
+      'data: {"type":"content_block_start","content_block":null}\n\n',
+    ))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+  })
+
+  it('should handle tool_use content_block_start with null name using "unknown" fallback', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-tool-null-name', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // content_block_start with tool_use but no name — should use "unknown" as fallback
+    stream.emit('data', Buffer.from(
+      'data: {"type":"content_block_start","content_block":{"type":"tool_use"}}\n\n',
+    ))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+
+    // Should have sent a delta chunk with "unknown" tool name
+    expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-tool-null-name', expect.objectContaining({
+      type: 'delta',
+      content: expect.stringContaining('unknown'),
+    }), 'agent-1')
+  })
 })

@@ -7,6 +7,11 @@
  */
 
 import { logger } from '../logger'
+import { getErrorMessage } from '../utils'
+import {
+  SELECTOR_TIMEOUT_NAVIGATION_MS,
+  SELECTOR_TIMEOUT_SINGLE_MS,
+} from '../mcp/tools/browser/browser-types'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type BrowserSession = any
@@ -153,19 +158,19 @@ export async function executePlaywrightScript(
     try {
       switch (step.type) {
         case 'goto':
-          await page.goto(step.args.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+          await page.goto(step.args.url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
           session.actionLog.add('chat', 'navigate', step.args.url)
           break
         case 'click':
-          await page.click(step.args.selector, { timeout: 10000 })
+          await page.click(step.args.selector, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
           session.actionLog.add('chat', 'click', step.args.selector)
           break
         case 'fill':
-          await page.fill(step.args.selector, step.args.value, { timeout: 10000 })
+          await page.fill(step.args.selector, step.args.value, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
           session.actionLog.add('chat', 'fill', `${step.args.selector} "${step.args.value}"`)
           break
         case 'innerText': {
-          const text: string = await page.locator(step.args.selector).innerText({ timeout: 10000 })
+          const text: string = await page.locator(step.args.selector).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
           session.variables.set(step.args.variableName, text)
           const preview = text.replace(/\s+/g, ' ').trim()
           const previewText = preview.length > 100 ? preview.substring(0, 100) + '…' : preview
@@ -199,7 +204,7 @@ export async function executePlaywrightScript(
       results.push({ line: step.raw, success: true })
       onStepComplete?.(completedSteps, totalSteps, step.raw)
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
+      const errorMessage = getErrorMessage(error)
       logger.warn(`[script-executor] Step failed: ${step.raw} — ${errorMessage}`)
       results.push({ line: step.raw, success: false, error: errorMessage })
 

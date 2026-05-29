@@ -1,10 +1,11 @@
-import { readFileSync } from 'fs'
 import * as os from 'os'
 import { join, resolve } from 'path'
 
+import { readJsonSync } from './utils'
+
 function getPackageVersion(): string {
   try {
-    const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'))
+    const pkg = readJsonSync<{ version?: string }>(join(__dirname, '..', 'package.json'))
     return pkg.version ?? '0.0.0'
   } catch {
     return '0.0.0'
@@ -47,6 +48,9 @@ export const MAX_DIR_ENTRIES = 1000
 // Hidden entries to exclude from file listings
 export const HIDDEN_ENTRIES = ['.claude']
 
+// Loopback address used when binding local HTTP servers and building local URLs
+export const LOCALHOST_ADDRESS = '127.0.0.1'
+
 // Default login URL (production)
 export const DEFAULT_LOGIN_URL = 'https://ai-support-agent.com'
 
@@ -62,6 +66,9 @@ export const PROJECT_CODE_ENV_DEFAULT = 'env-default'
 export const UPDATE_CHECK_INTERVAL = 60 * 60 * 1000 // 1 hour
 export const UPDATE_CHECK_INITIAL_DELAY = 30_000 // 30 seconds
 export const NPM_INSTALL_TIMEOUT = 120_000 // 2 minutes
+
+// Platform-specific npm command (Windows uses npm.cmd, Unix/macOS uses npm)
+export const NPM_COMMAND = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 
 // Anthropic API
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6-20250514'
@@ -191,6 +198,13 @@ export const REGISTER_RETRY_BASE_DELAY_MS = 1_000
 export const REGISTER_RETRY_MAX_DELAY_MS = 60_000
 export const REGISTER_AUTH_ERROR_DELAY_MS = 5 * 60 * 1000
 
+// Docker marker filenames written to the per-project config dir to coordinate
+// image build state between the in-container agent and the host DockerSupervisor.
+export const DOCKER_MARKER_BUILT_HASH = 'docker-built-hash'
+export const DOCKER_MARKER_REBUILD_NEEDED = 'docker-rebuild-needed'
+export const DOCKER_MARKER_CUSTOMIZATION_HASH = 'docker-customization-hash'
+export const DOCKER_MARKER_REGISTERED_AGENT_ID = 'docker-registered-agent-id'
+
 // Exit code used by the in-container agent to signal "update complete, rebuild image"
 // Must be distinct from 0 (clean stop) and 1 (error) to avoid false restarts on SIGINT.
 export const DOCKER_UPDATE_EXIT_CODE = 42
@@ -207,3 +221,17 @@ export const BUSY_QUERY_TIMEOUT_MS = 5_000                  // 5 seconds for IPC
 
 // Delayed restart (reboot / update / docker rebuild)
 export const DELAYED_RESTART_MS = 1_000
+
+// AppSync notification action names
+export const NOTIFICATION_ACTION = {
+  AGENT_COMMAND: 'agent-command',
+  CONFIG_UPDATE: 'config-update',
+  ALERT_CREATED: 'alert-created',
+  AGENT_LOG: 'agent-log',
+} as const
+
+// CLI flag constants
+export const CLI_FLAG_VERBOSE = '--verbose'
+export const CLI_FLAG_NO_DOCKER = '--no-docker'
+export const CLI_FLAG_NO_DOCKERFILE_SYNC = '--no-dockerfile-sync'
+export const CLI_FLAG_NO_AUTO_UPDATE = '--no-auto-update'
