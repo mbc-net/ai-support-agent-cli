@@ -38,6 +38,8 @@ import { installUpdateAndRestart } from './update-handler'
 
 /** Maximum total log size kept in memory per session (2 MB). */
 const MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024
+// API の SubmitLogChunkDto.text @MaxLength に合わせた上限（100,000 バイト）
+const MAX_LOG_CHUNK_BYTES = 100_000
 
 interface DockerContainerHandle {
   project: ProjectRegistration
@@ -347,8 +349,12 @@ export class DockerSupervisor {
             logger.warn(`[docker] Container log for ${key} exceeded 2 MB limit; remaining output will not be saved to S3`)
           }
         }
-        await apiClient.submitLogChunk({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, seq: ++seq, text })
-          .catch((e: unknown) => logger.warn(`[docker] log chunk failed: ${e}`))
+        // 1 フラッシュのテキストが API 上限を超える場合は分割して送信
+        for (let offset = 0; offset < text.length; offset += MAX_LOG_CHUNK_BYTES) {
+          const slice = text.slice(offset, offset + MAX_LOG_CHUNK_BYTES)
+          await apiClient.submitLogChunk({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, seq: ++seq, text: slice })
+            .catch((e: unknown) => logger.warn(`[docker] log chunk failed: ${e}`))
+        }
       }
 
       const flushTimer = setInterval(() => { void flush() }, 1_000).unref()
