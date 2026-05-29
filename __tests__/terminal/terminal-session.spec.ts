@@ -148,6 +148,19 @@ describe('TerminalSession', () => {
     session.kill()
   })
 
+  it('should not resize after exit (line 296 early return)', (done) => {
+    session = new TerminalSession('test-resize-after-exit')
+    session.onExit(() => {
+      // After exit, resize should be a no-op (no errors, no PTY call)
+      expect(() => session.resize(200, 50)).not.toThrow()
+      // cols/rows should remain at their pre-exit values (no update after exit)
+      expect(session.cols).toBe(80)
+      expect(session.rows).toBe(24)
+      done()
+    })
+    session.kill()
+  })
+
   it('should not kill twice', (done) => {
     session = new TerminalSession('test-9')
     session.onExit(() => {
@@ -341,6 +354,25 @@ describe('TerminalSession', () => {
           expect(env.PATH).toBe('/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin')
         } finally {
           process.env.PATH = originalPath
+        }
+      })
+    })
+
+    describe('SHELL fallback (line 178)', () => {
+      it('falls back to /bin/bash when process.env.SHELL is unset', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        const originalShell = process.env.SHELL
+        delete process.env.SHELL
+        try {
+          session = new TerminalSession('test-shell-fallback')
+          const call = spawnSpy.mock.calls[0]
+          // When SHELL is absent, TerminalSession falls back to '/bin/bash'
+          expect(call[0]).toBe('/bin/bash')
+        } finally {
+          process.env.SHELL = originalShell
         }
       })
     })
