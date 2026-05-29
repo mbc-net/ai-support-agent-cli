@@ -168,6 +168,16 @@ describe('BrowserProxySession', () => {
     expect(vars).toEqual({ foo: 'bar' })
   })
 
+  it('should return empty object when listVariables response has no variables key (line 142 ?? {})', async () => {
+    // Override the variables endpoint to return a response without the 'variables' key
+    defaultResponses['GET /browser/sess-1/variables'] = {}
+    const session = new BrowserProxySession(`http://127.0.0.1:${port}`, 'sess-1')
+    const vars = await session.listVariables()
+    expect(vars).toEqual({})
+    // Restore
+    defaultResponses['GET /browser/sess-1/variables'] = { variables: { foo: 'bar' } }
+  })
+
   it('should always report as active', () => {
     const session = new BrowserProxySession(`http://127.0.0.1:${port}`, 'sess-1')
     expect(session.isActive()).toBe(true)
@@ -220,6 +230,17 @@ describe('BrowserProxySession', () => {
       await session.variables.refresh()
       expect(session.variables.get('foo')).toBe('bar')
     })
+
+    it('should handle server response with no variables key (line 198 ?? {})', async () => {
+      // Override GET /variables to return no 'variables' key
+      defaultResponses['GET /browser/sess-1/variables'] = { ok: true }
+      const session = new BrowserProxySession(`http://127.0.0.1:${port}`, 'sess-1')
+      await session.variables.refresh()
+      // Cache should be empty after refresh with empty variables
+      expect(session.variables.get('foo')).toBeUndefined()
+      // Restore
+      defaultResponses['GET /browser/sess-1/variables'] = { variables: { foo: 'bar' } }
+    })
   })
 
   describe('error handling', () => {
@@ -229,10 +250,30 @@ describe('BrowserProxySession', () => {
       await expect(session.navigate('https://example.com')).rejects.toThrow()
     })
 
-    it('should throw on HTTP error response', async () => {
-      // Use a non-existent session to get a 404
+    it('should throw on HTTP error response with error field', async () => {
+      // Use a non-existent session to get a 404 with { error: 'Not found' }
       const session = new BrowserProxySession(`http://127.0.0.1:${port}`, 'unknown-sess')
       await expect(session.navigate('https://example.com')).rejects.toThrow('Not found')
+    })
+
+    it('should throw with HTTP status code when 4xx response has no error field (line 228 ?? fallback)', async () => {
+      // Create a server that returns 404 with a JSON body that has no 'error' key
+      const noErrorServer = http.createServer((_req, res) => {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ message: 'not found' })) // no 'error' key
+      })
+      noErrorServer.unref()
+      const noErrorPort = await new Promise<number>((resolve) => {
+        noErrorServer.listen(0, '127.0.0.1', () => {
+          resolve(((noErrorServer.address() as { port: number }).port))
+        })
+      })
+      try {
+        const session = new BrowserProxySession(`http://127.0.0.1:${noErrorPort}`, 'sess-1')
+        await expect(session.getUrl()).rejects.toThrow('HTTP 404')
+      } finally {
+        await new Promise<void>((resolve) => noErrorServer.close(() => resolve()))
+      }
     })
 
     it('should destroy request on timeout', async () => {
