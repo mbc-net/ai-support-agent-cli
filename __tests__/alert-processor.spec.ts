@@ -29,6 +29,7 @@ function createMockClient() {
     updateAlertStatus: jest.fn().mockResolvedValue(undefined),
     findActiveIssueByAlarmName: jest.fn().mockResolvedValue(null),
     createIssueFromAlert: jest.fn().mockResolvedValue({ id: 'AI_SU000001' }),
+    resolveIssueFromAlert: jest.fn().mockResolvedValue(undefined),
   }
 }
 
@@ -187,6 +188,38 @@ describe('AlertProcessor', () => {
         .mockRejectedValueOnce(new Error('Status update failed'))
 
       await expect(processor.processAlert('AL000001')).resolves.not.toThrow()
+    })
+
+    it('should resolve existing issue when state is OK and active issue exists', async () => {
+      const okAlert = { ...mockAlert, state: 'OK' as const }
+      mockClient.getAlert.mockResolvedValue(okAlert)
+      mockClient.findActiveIssueByAlarmName.mockResolvedValue({ id: 'JCCI_000071' })
+
+      await processor.processAlert('AL000001')
+
+      expect(mockClient.resolveIssueFromAlert).toHaveBeenCalledWith(
+        'tenant1', 'MBC_01', 'AL000001', 'JCCI_000071',
+      )
+      expect(mockClient.updateAlertStatus).toHaveBeenCalledWith(
+        'tenant1', 'MBC_01', 'AL000001',
+        { status: 'processed', issueId: 'JCCI_000071' },
+      )
+      expect(mockClient.createIssueFromAlert).not.toHaveBeenCalled()
+    })
+
+    it('should skip (processed) when state is OK and no active issue exists', async () => {
+      const okAlert = { ...mockAlert, state: 'OK' as const }
+      mockClient.getAlert.mockResolvedValue(okAlert)
+      mockClient.findActiveIssueByAlarmName.mockResolvedValue(null)
+
+      await processor.processAlert('AL000001')
+
+      expect(mockClient.resolveIssueFromAlert).not.toHaveBeenCalled()
+      expect(mockClient.createIssueFromAlert).not.toHaveBeenCalled()
+      expect(mockClient.updateAlertStatus).toHaveBeenCalledWith(
+        'tenant1', 'MBC_01', 'AL000001',
+        { status: 'processed' },
+      )
     })
   })
 

@@ -379,4 +379,17 @@ export class ApiClient {
       { priority },
     )
   }
+
+  /** OK 通知（アラーム解除）時に既存 Issue を resolved に更新する */
+  async resolveIssueFromAlert(
+    tenantCode: string,
+    projectCode: string,
+    alertNumber: string,
+    issueId: string,
+  ): Promise<void> {
+    await this.postVoid(
+      API_ENDPOINTS.ALERT_RESOLVE_ISSUE(tenantCode, projectCode, alertNumber),
+      { issueId },
+    )
+  }
 }

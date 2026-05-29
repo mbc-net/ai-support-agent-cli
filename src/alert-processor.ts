@@ -49,7 +49,32 @@ export class AlertProcessor {
         return
       }
 
-      // ③ 重複チェック: 同じ alarmName の未解決 Issue（open/received/in_progress）が存在するか
+      // ③ OK 通知（アラーム解除）の場合: 既存の未解決 Issue を resolved に更新して終了
+      if (alert.state === 'OK') {
+        const activeIssue = await this.client.findActiveIssueByAlarmName(
+          this.tenantCode, this.projectCode, alert.alarmName,
+        )
+        if (activeIssue) {
+          await this.client.resolveIssueFromAlert(
+            this.tenantCode, this.projectCode, alertNumber, activeIssue.id,
+          )
+          await this.client.updateAlertStatus(
+            this.tenantCode, this.projectCode, alertNumber,
+            { status: 'processed', issueId: activeIssue.id },
+          )
+          logger.info(`Alert ${alertNumber} (OK): resolved issue ${activeIssue.id} for alarm ${alert.alarmName}`)
+        } else {
+          // 未解決 Issue がなければスキップ（既に解決済みか Issue が作られていなかった）
+          await this.client.updateAlertStatus(
+            this.tenantCode, this.projectCode, alertNumber,
+            { status: 'processed' },
+          )
+          logger.info(`Alert ${alertNumber} (OK): no active issue found for alarm ${alert.alarmName}, skipped`)
+        }
+        return
+      }
+
+      // ④ 重複チェック: 同じ alarmName の未解決 Issue（open/received/in_progress）が存在するか
       // resolved / closed は重複とみなさない（再発アラームは新規 Issue を作成する）
       const activeIssue = await this.client.findActiveIssueByAlarmName(
         this.tenantCode, this.projectCode, alert.alarmName,
@@ -63,18 +88,18 @@ export class AlertProcessor {
         return
       }
 
-      // ④ Claude で優先度判定（invalid な値・API エラーはすべて 'medium' にフォールバック）
+      // ⑤ Claude で優先度判定（invalid な値・API エラーはすべて 'medium' にフォールバック）
       const rawPriority = await this.determinePriority(alert)
       const priority: Priority = (VALID_PRIORITIES as readonly string[]).includes(rawPriority)
         ? (rawPriority as Priority)
         : 'medium'
 
-      // ⑤ Issue 作成（Alert 専用エンドポイント経由で alarmName を attributes に保存）
+      // ⑥ Issue 作成（Alert 専用エンドポイント経由で alarmName を attributes に保存）
       const issue = await this.client.createIssueFromAlert(
         this.tenantCode, this.projectCode, alertNumber, priority,
       )
 
-      // ⑥ 処理済みマーク
+      // ⑦ 処理済みマーク
       await this.client.updateAlertStatus(
         this.tenantCode, this.projectCode, alertNumber,
         { status: 'processed', issueId: issue.id },
