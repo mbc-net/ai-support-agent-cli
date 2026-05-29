@@ -986,25 +986,21 @@ describe('ApiClient', () => {
 
     describe('findActiveIssueByAlarmName', () => {
       it('should return issue id when active issue found', async () => {
-        mockInstance.get.mockResolvedValue({ data: { items: [{ id: 'AI_SU000001' }] } })
+        mockInstance.get.mockResolvedValue({ data: { id: 'AI_SU000001' } })
 
         const result = await client.findActiveIssueByAlarmName('tenant1', 'MBC_01', 'CPUHigh')
 
         expect(result).toEqual({ id: 'AI_SU000001' })
         expect(mockInstance.get).toHaveBeenCalledWith(
-          '/api/tenant1/projects/MBC_01/issues',
+          '/api/tenant1/projects/MBC_01/alerts/active-issue',
           expect.objectContaining({
-            params: expect.objectContaining({
-              source: 'alert',
-              alarmName: 'CPUHigh',
-              statuses: 'open,received,in_progress',
-            }),
+            params: expect.objectContaining({ alarmName: 'CPUHigh' }),
           }),
         )
       })
 
       it('should return null when no active issue found', async () => {
-        mockInstance.get.mockResolvedValue({ data: { items: [] } })
+        mockInstance.get.mockResolvedValue({ data: null })
 
         const result = await client.findActiveIssueByAlarmName('tenant1', 'MBC_01', 'CPUHigh')
 
