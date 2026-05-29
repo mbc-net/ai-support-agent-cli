@@ -1,6 +1,11 @@
 import * as fs from 'fs'
 import axios from 'axios'
 
+export function readJsonSync<T>(filePath: string): T {
+  const content = fs.readFileSync(filePath, 'utf-8')
+  return JSON.parse(content) as T
+}
+
 export function atomicWriteFile(filePath: string, content: string, mode = 0o600): void {
   const tmpPath = filePath + '.tmp'
   fs.writeFileSync(tmpPath, content, { mode })

@@ -39,6 +39,15 @@ describe('constants', () => {
     expect(constants.AGENT_VERSION).toBe('0.0.0')
   })
 
+  it('should export NPM_COMMAND as npm.cmd on win32 and npm elsewhere', () => {
+    // NPM_COMMAND is evaluated at module load time; verify it matches the expected value
+    // for the current platform. The platform-specific selection is covered here so that
+    // update-checker and version-manager don't each need a duplicate platform branch.
+    const constants = require('../src/constants')
+    const expected = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+    expect(constants.NPM_COMMAND).toBe(expected)
+  })
+
   it('should export all expected constant values', () => {
     const constants = require('../src/constants')
 
@@ -92,6 +101,12 @@ describe('constants', () => {
     expect(constants.LOG_RESULT_LIMIT).toBe(300)
     expect(constants.LOG_DEBUG_LIMIT).toBe(200)
     expect(constants.CHUNK_LOG_LIMIT).toBe(100)
+
+    // CLI flag constants
+    expect(constants.CLI_FLAG_VERBOSE).toBe('--verbose')
+    expect(constants.CLI_FLAG_NO_DOCKER).toBe('--no-docker')
+    expect(constants.CLI_FLAG_NO_DOCKERFILE_SYNC).toBe('--no-dockerfile-sync')
+    expect(constants.CLI_FLAG_NO_AUTO_UPDATE).toBe('--no-auto-update')
 
     // API endpoints
     expect(constants.API_ENDPOINTS.REGISTER('tenant1')).toBe('/api/tenant1/agent/register')

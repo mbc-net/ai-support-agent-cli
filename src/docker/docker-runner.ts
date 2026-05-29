@@ -11,7 +11,13 @@ import * as os from 'os'
 import { ApiClient } from '../api-client'
 import { type AutoUpdaterHandle, startAutoUpdater } from '../auto-updater'
 import { validateUpdateChannel } from '../cli/validators'
-import { AGENT_VERSION, DOCKER_UPDATE_EXIT_CODE } from '../constants'
+import {
+  AGENT_VERSION,
+  CLI_FLAG_VERBOSE,
+  CLI_FLAG_NO_AUTO_UPDATE,
+  CLI_FLAG_NO_DOCKER,
+  DOCKER_UPDATE_EXIT_CODE,
+} from '../constants'
 import { getProjectList, loadConfig } from '../config-manager'
 import { getSystemInfo } from '../system-info'
 import type { AutoUpdateConfig, ReleaseChannel } from '../types'
@@ -20,6 +26,7 @@ import { writePidFile, isAlreadyRunning, readPidFile } from '../pid-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
+import { getErrorMessage } from '../utils'
 import { IMAGE_NAME, checkDockerAvailable, getDockerPath } from './docker-utils'
 import { ensureImage } from './version-manager'
 import { syncDockerfileToConfigDir } from './dockerfile-sync'
@@ -49,7 +56,7 @@ export interface DockerRunOptions {
 }
 
 export function buildContainerArgs(opts: DockerRunOptions): string[] {
-  const args: string[] = ['ai-support-agent', 'start', '--no-docker']
+  const args: string[] = ['ai-support-agent', 'start', CLI_FLAG_NO_DOCKER]
 
   if (opts.token) {
     args.push('--token', opts.token)
@@ -64,10 +71,10 @@ export function buildContainerArgs(opts: DockerRunOptions): string[] {
     args.push('--heartbeat-interval', String(opts.heartbeatInterval))
   }
   if (opts.verbose) {
-    args.push('--verbose')
+    args.push(CLI_FLAG_VERBOSE)
   }
   if (opts.autoUpdate === false) {
-    args.push('--no-auto-update')
+    args.push(CLI_FLAG_NO_AUTO_UPDATE)
   }
   if (opts.updateChannel) {
     args.push('--update-channel', opts.updateChannel)
@@ -146,7 +153,7 @@ export function startHostAutoUpdater(
     () => supervisor.stopAll(),
     (error) => {
       void client.heartbeat(resolvedAgentId, getSystemInfo(), error).catch((err) => {
-        logger.warn(`[auto-update] Failed to send error heartbeat: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`[auto-update] Failed to send error heartbeat: ${getErrorMessage(err)}`)
       })
     },
   )
@@ -277,7 +284,7 @@ export function runInDocker(opts: DockerRunOptions): void {
   process.on('SIGTERM', () => forwardSignal('SIGTERM'))
 
   child.on('error', (err) => {
-    logger.error(t('docker.runFailed', { message: err.message }))
+    logger.error(t('docker.runFailed', { message: getErrorMessage(err) }))
     process.exit(1)
   })
 

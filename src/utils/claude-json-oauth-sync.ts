@@ -32,7 +32,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { logger } from '../logger'
-import { isErrnoException } from '../utils'
+import { isErrnoException, getErrorMessage } from '../utils'
 
 /** ~/.claude.json のパスを返す */
 function getClaudeJsonPath(): string {
@@ -321,9 +321,7 @@ export function ensureClaudeJsonOAuthAccount(
     }
   } catch (error) {
     logger.warn(
-      `${ctx.prefix} Failed to sync ~/.claude.json for OAuth login: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `${ctx.prefix} Failed to sync ~/.claude.json for OAuth login: ${getErrorMessage(error)}`,
     )
   }
 }

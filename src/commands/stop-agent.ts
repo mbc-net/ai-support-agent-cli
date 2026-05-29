@@ -7,6 +7,7 @@
 import { getPidFilePath, isProcessAlive, readPidFile, removePidFile } from '../pid-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
+import { getErrorMessage } from '../utils'
 
 const WAIT_INTERVAL_MS = 200
 const WAIT_TIMEOUT_MS = 10_000
@@ -42,7 +43,7 @@ export async function stopAgent(): Promise<void> {
   try {
     process.kill(pid, 'SIGTERM')
   } catch (err: unknown) {
-    logger.error(t('stop.signalFailed', { pid, message: err instanceof Error ? err.message : String(err) }))
+    logger.error(t('stop.signalFailed', { pid, message: getErrorMessage(err) }))
     return
   }
 

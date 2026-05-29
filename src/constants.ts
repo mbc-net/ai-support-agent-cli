@@ -1,10 +1,11 @@
-import { readFileSync } from 'fs'
 import * as os from 'os'
 import { join, resolve } from 'path'
 
+import { readJsonSync } from './utils'
+
 function getPackageVersion(): string {
   try {
-    const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'))
+    const pkg = readJsonSync<{ version?: string }>(join(__dirname, '..', 'package.json'))
     return pkg.version ?? '0.0.0'
   } catch {
     return '0.0.0'
@@ -65,6 +66,9 @@ export const PROJECT_CODE_ENV_DEFAULT = 'env-default'
 export const UPDATE_CHECK_INTERVAL = 60 * 60 * 1000 // 1 hour
 export const UPDATE_CHECK_INITIAL_DELAY = 30_000 // 30 seconds
 export const NPM_INSTALL_TIMEOUT = 120_000 // 2 minutes
+
+// Platform-specific npm command (Windows uses npm.cmd, Unix/macOS uses npm)
+export const NPM_COMMAND = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 
 // Anthropic API
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6-20250514'
@@ -225,3 +229,9 @@ export const NOTIFICATION_ACTION = {
   ALERT_CREATED: 'alert-created',
   AGENT_LOG: 'agent-log',
 } as const
+
+// CLI flag constants
+export const CLI_FLAG_VERBOSE = '--verbose'
+export const CLI_FLAG_NO_DOCKER = '--no-docker'
+export const CLI_FLAG_NO_DOCKERFILE_SYNC = '--no-dockerfile-sync'
+export const CLI_FLAG_NO_AUTO_UPDATE = '--no-auto-update'

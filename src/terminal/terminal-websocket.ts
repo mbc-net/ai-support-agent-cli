@@ -5,7 +5,7 @@ import WebSocket from 'ws'
 import { BaseWebSocketConnection } from '../base-websocket'
 import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import { logger } from '../logger'
-import { buildWsUrl } from '../utils'
+import { buildWsUrl, getErrorMessage } from '../utils'
 
 import {
   TERMINAL_WS_MAX_RECONNECT_RETRIES,
@@ -237,7 +237,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       const decoded = Buffer.from(msg.data, 'base64').toString('utf-8')
       session.write(decoded)
     } catch (err: unknown) {
-      logger.warn(`[terminal-ws] Invalid base64 data in stdin (session=${msg.sessionId}): ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`[terminal-ws] Invalid base64 data in stdin (session=${msg.sessionId}): ${getErrorMessage(err)}`)
     }
   }
 

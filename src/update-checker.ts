@@ -3,7 +3,7 @@ import { accessSync, constants as fsConstants } from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { NPM_INSTALL_TIMEOUT } from './constants'
+import { NPM_COMMAND, NPM_INSTALL_TIMEOUT } from './constants'
 import { logger } from './logger'
 import type { InstallMethod, ReleaseChannel } from './types'
 // Re-export from utils/version to preserve the public API of this module
@@ -17,8 +17,7 @@ let cachedGlobalPrefix: string | null = null
  */
 export function getGlobalNpmPrefix(): string {
   if (cachedGlobalPrefix !== null) return cachedGlobalPrefix
-  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-  const result = execFileSync(npmCmd, ['prefix', '-g'], {
+  const result = execFileSync(NPM_COMMAND, ['prefix', '-g'], {
     encoding: 'utf-8',
     timeout: 10_000,
   }).trim()
@@ -186,7 +185,6 @@ export async function performUpdate(
   }
 
   // global & npx: npm install -g
-  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
   const args = ['install', '-g', `@ai-support-agent/cli@${version}`]
 
   // Use a user-writable cache directory to avoid root-owned cache issues in Docker containers.
@@ -206,7 +204,7 @@ export async function performUpdate(
   } else if (needsSudo) {
     logger.info('[update] No write permission to global npm directory, using sudo')
   }
-  return execNpmCommand(npmCmd, args, version, needsSudo)
+  return execNpmCommand(NPM_COMMAND, args, version, needsSudo)
 }
 
 /**

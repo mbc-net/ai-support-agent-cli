@@ -309,80 +309,7 @@ export class ProjectAgent {
   private async registerAndStart(): Promise<void> {
     await refreshChatMode(this.configSyncDeps, this.configSyncState, true)
 
-    let result: RegisterResponse
-    try {
-      result = await this.client.register({
-        agentId: this.agentId,
-        hostname: os.hostname(),
-        os: os.platform(),
-        arch: os.arch(),
-        ipAddress: getLocalIpAddress(),
-        capabilities: ['shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode'],
-        availableChatModes: this.configSyncState.availableChatModes,
-        activeChatMode: this.configSyncState.activeChatMode,
-      })
-      this.tenantCode = result.tenantCode
-      if (result.projectCode && result.projectCode !== this.projectCode) {
-        logger.info(`${this.prefix} Server assigned projectCode: ${result.projectCode} (was: ${this.projectCode})`)
-        this.projectCode = result.projectCode
-        // Re-initialize projectDir with the server-assigned projectCode
-        this.projectDir = initProjectDir({ tenantCode: this.tenantCode || 'unknown', projectCode: this.projectCode, token: this.token, apiUrl: this.apiUrl })
-        this.configSyncDeps = { ...this.configSyncDeps, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }
-      }
-      this.prefix = `[${this.tenantCode}#${this.projectCode}]`
-      this.configSyncDeps = { ...this.configSyncDeps, prefix: this.prefix }
-      this.client.setTenantCode(this.tenantCode)
-      this.client.setProjectCode(this.projectCode)
-      this.transportDeps = { ...this.transportDeps, agentId: result.agentId, tenantCode: this.tenantCode, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }
-      logger.success(t('runner.registered', { prefix: this.prefix, agentId: result.agentId }))
-      logger.debug(`${this.prefix} Register response: transportMode=${result.transportMode ?? 'none'}, appsyncUrl=${result.appsyncUrl ? 'present' : 'absent'}, wsEnabled=${result.wsEnabled}`)
-      logger.debug(`${this.prefix} Full register response keys: ${JSON.stringify(Object.keys(result))}`)
-
-      // Report docker build error (if any) via heartbeat
-      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
-        // Write the server-assigned agentId so the host DockerSupervisor can use it for log storage
-        try {
-          atomicWriteFile(path.join(getConfigDir(), DOCKER_MARKER_REGISTERED_AGENT_ID), result.agentId)
-        } catch (err: unknown) {
-          logger.warn(`${this.prefix} Failed to write ${DOCKER_MARKER_REGISTERED_AGENT_ID}: ${getErrorMessage(err)}`)
-        }
-
-        const buildErrorPath = path.join(getConfigDir(), 'docker-build-error')
-        let dockerBuildError: string | undefined
-        try {
-          dockerBuildError = fs.readFileSync(buildErrorPath, 'utf-8').trim() || undefined
-        } catch {
-          // File does not exist — no build error
-        }
-        if (dockerBuildError !== undefined) {
-          try {
-            await this.client.heartbeat(
-              result.agentId,
-              { platform: os.platform(), arch: os.arch(), cpuUsage: 0, memoryUsage: 0, uptime: os.uptime() },
-              undefined,
-              undefined,
-              undefined,
-              undefined,
-              undefined,
-              dockerBuildError,
-            )
-            // Delete the error file after successful report to avoid re-reporting on next startup
-            try {
-              fs.unlinkSync(buildErrorPath)
-            } catch {
-              // Ignore deletion failure — will be re-reported next time
-            }
-          } catch (err: unknown) {
-            logger.warn(`${this.prefix} Failed to report docker build error: ${getErrorMessage(err)}`)
-            // Keep the file so it can be reported on next startup
-          }
-        }
-      }
-    } catch (error) {
-      // Surface registration errors to the outer runRegisterLoop so it can retry
-      // with exponential backoff instead of leaving the agent silently idle.
-      throw error
-    }
+    const result = await this.performRegistration()
 
     // Submit any pending results from previous sessions
     await submitPendingResults()
@@ -400,6 +327,97 @@ export class ProjectAgent {
       logger.warn(`${this.prefix} Initial config sync failed after all retries`)
     }
 
+    await this.startServices(result)
+  }
+
+  /**
+   * Calls the register API, updates local state from the response, and
+   * performs any Docker-specific post-registration tasks (writing the
+   * registered-agent-id marker and reporting a docker-build-error if present).
+   *
+   * Throws on failure so the caller's retry loop can apply exponential backoff.
+   */
+  private async performRegistration(): Promise<RegisterResponse> {
+    const result = await this.client.register({
+      agentId: this.agentId,
+      hostname: os.hostname(),
+      os: os.platform(),
+      arch: os.arch(),
+      ipAddress: getLocalIpAddress(),
+      capabilities: ['shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode'],
+      availableChatModes: this.configSyncState.availableChatModes,
+      activeChatMode: this.configSyncState.activeChatMode,
+    })
+
+    this.tenantCode = result.tenantCode
+    if (result.projectCode && result.projectCode !== this.projectCode) {
+      logger.info(`${this.prefix} Server assigned projectCode: ${result.projectCode} (was: ${this.projectCode})`)
+      this.projectCode = result.projectCode
+      // Re-initialize projectDir with the server-assigned projectCode
+      this.projectDir = initProjectDir({ tenantCode: this.tenantCode || 'unknown', projectCode: this.projectCode, token: this.token, apiUrl: this.apiUrl })
+      this.configSyncDeps = { ...this.configSyncDeps, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }
+    }
+    this.prefix = `[${this.tenantCode}#${this.projectCode}]`
+    this.configSyncDeps = { ...this.configSyncDeps, prefix: this.prefix }
+    this.client.setTenantCode(this.tenantCode)
+    this.client.setProjectCode(this.projectCode)
+    this.transportDeps = { ...this.transportDeps, agentId: result.agentId, tenantCode: this.tenantCode, projectCode: this.projectCode, prefix: this.prefix, projectDir: this.projectDir }
+    logger.success(t('runner.registered', { prefix: this.prefix, agentId: result.agentId }))
+    logger.debug(`${this.prefix} Register response: transportMode=${result.transportMode ?? 'none'}, appsyncUrl=${result.appsyncUrl ? 'present' : 'absent'}, wsEnabled=${result.wsEnabled}`)
+    logger.debug(`${this.prefix} Full register response keys: ${JSON.stringify(Object.keys(result))}`)
+
+    // Report docker build error (if any) via heartbeat
+    if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+      // Write the server-assigned agentId so the host DockerSupervisor can use it for log storage
+      try {
+        atomicWriteFile(path.join(getConfigDir(), DOCKER_MARKER_REGISTERED_AGENT_ID), result.agentId)
+      } catch (err: unknown) {
+        logger.warn(`${this.prefix} Failed to write ${DOCKER_MARKER_REGISTERED_AGENT_ID}: ${getErrorMessage(err)}`)
+      }
+
+      const buildErrorPath = path.join(getConfigDir(), 'docker-build-error')
+      let dockerBuildError: string | undefined
+      try {
+        dockerBuildError = fs.readFileSync(buildErrorPath, 'utf-8').trim() || undefined
+      } catch {
+        // File does not exist — no build error
+      }
+      if (dockerBuildError !== undefined) {
+        try {
+          await this.client.heartbeat(
+            result.agentId,
+            { platform: os.platform(), arch: os.arch(), cpuUsage: 0, memoryUsage: 0, uptime: os.uptime() },
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            dockerBuildError,
+          )
+          // Delete the error file after successful report to avoid re-reporting on next startup
+          try {
+            fs.unlinkSync(buildErrorPath)
+          } catch {
+            // Ignore deletion failure — will be re-reported next time
+          }
+        } catch (err: unknown) {
+          logger.warn(`${this.prefix} Failed to report docker build error: ${getErrorMessage(err)}`)
+          // Keep the file so it can be reported on next startup
+        }
+      }
+    }
+
+    return result
+  }
+
+  /**
+   * Starts all transport-layer services using the completed register response:
+   * AppSync subscription, heartbeat, CloudWatch alert polling, and terminal/VS Code WebSocket.
+   *
+   * Throws if AppSync credentials are absent so the caller's retry loop retries the
+   * whole registration flow (credentials may appear once a server-side rollout completes).
+   */
+  private async startServices(result: RegisterResponse): Promise<void> {
     const commandContext = {
       configSyncState: this.configSyncState,
       configSyncDeps: this.configSyncDeps,

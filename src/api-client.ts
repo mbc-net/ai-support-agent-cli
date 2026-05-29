@@ -280,11 +280,11 @@ export class ApiClient {
 
   // === E2E Test ===
 
-  async updateE2eExecutionStatus(
+  async updateE2eExecutionStatus<B = Record<string, unknown>>(
     tenantCode: string,
     projectCode: string,
     executionId: string,
-    body: Record<string, unknown>,
+    body: B,
   ): Promise<void> {
     await this.putVoid(
       API_ENDPOINTS.E2E_EXECUTION_STATUS(tenantCode, projectCode, executionId),
@@ -292,11 +292,11 @@ export class ApiClient {
     )
   }
 
-  async reportE2eTestStep(
+  async reportE2eTestStep<B = Record<string, unknown>>(
     tenantCode: string,
     projectCode: string,
     executionId: string,
-    body: Record<string, unknown>,
+    body: B,
   ): Promise<void> {
     await this.postVoid(
       API_ENDPOINTS.E2E_EXECUTION_STEPS(tenantCode, projectCode, executionId),
@@ -304,11 +304,11 @@ export class ApiClient {
     )
   }
 
-  async updateE2eTestScript(
+  async updateE2eTestScript<B = Record<string, unknown>>(
     tenantCode: string,
     projectCode: string,
     executionId: string,
-    body: Record<string, unknown>,
+    body: B,
   ): Promise<void> {
     await this.putVoid(
       API_ENDPOINTS.E2E_EXECUTION_SCRIPT(tenantCode, projectCode, executionId),

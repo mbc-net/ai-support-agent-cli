@@ -22,6 +22,13 @@ jest.mock('../../../src/i18n', () => ({
 jest.mock('../../../src/config-manager', () => ({
   loadConfig: jest.fn(),
   getProjectList: jest.fn(),
+  getConfigDir: jest.fn(() => {
+    const envDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
+    if (envDir) {
+      return require('path').resolve(envDir)
+    }
+    return require('path').join(require('os').homedir(), '.ai-support-agent')
+  }),
 }))
 
 import { execSync } from 'child_process'

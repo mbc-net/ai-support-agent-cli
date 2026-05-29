@@ -7,6 +7,7 @@ import { pipeline } from 'stream/promises'
 import { ApiClient } from '../api-client'
 import { logger } from '../logger'
 import type { ChatFileInfo } from '../types'
+import { getErrorMessage } from '../utils'
 import { guessContentType, isImageMime } from '../utils/content-type'
 
 export const ALLOWED_EXTENSIONS = new Set([
@@ -69,7 +70,7 @@ export async function downloadChatFiles(
       logger.info(`[file-transfer] Downloaded file: ${file.filename} -> ${filePath}`)
     } catch (error) {
       failedCount++
-      logger.error(`[file-transfer] Failed to download file ${file.filename}: ${error instanceof Error ? error.message : String(error)}`)
+      logger.error(`[file-transfer] Failed to download file ${file.filename}: ${getErrorMessage(error)}`)
     }
   }
 
@@ -80,7 +81,7 @@ export async function downloadChatFiles(
         logger.info(`[file-transfer] Cleaned up download directory: ${downloadDir}`)
       }
     } catch (error) {
-      logger.warn(`[file-transfer] Failed to clean up download directory: ${error instanceof Error ? error.message : String(error)}`)
+      logger.warn(`[file-transfer] Failed to clean up download directory: ${getErrorMessage(error)}`)
     }
   }
 

@@ -50,6 +50,19 @@ describe('process-executor', () => {
 
       jest.restoreAllMocks()
     })
+
+    it('should pass through error result from shell command', async () => {
+      jest.spyOn(shellExecutor, 'executeShellCommand').mockResolvedValue({
+        success: false,
+        error: 'Command failed',
+      })
+
+      const result = await processList()
+      expectFailure(result)
+      expect(result.error).toBe('Command failed')
+
+      jest.restoreAllMocks()
+    })
   })
 
   describe('processKill', () => {
@@ -90,6 +103,24 @@ describe('process-executor', () => {
       expect(result.data).toBe('Sent SIGUSR1 to PID 12345')
 
       killSpy.mockRestore()
+    })
+
+    it('should return error when process.kill throws', async () => {
+      const killSpy = jest.spyOn(process, 'kill').mockImplementation(() => {
+        throw new Error('Operation not permitted')
+      })
+
+      const result = await processKill({ pid: 99999 })
+      expectFailure(result)
+      expect(result.error).toContain('Operation not permitted')
+
+      killSpy.mockRestore()
+    })
+
+    it('should reject non-integer PID', async () => {
+      const result = await processKill({ pid: 12.5 })
+      expectFailure(result)
+      expect(result.error).toContain('Invalid PID')
     })
   })
 })

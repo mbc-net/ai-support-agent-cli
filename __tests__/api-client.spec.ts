@@ -407,6 +407,29 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getBrowserCredentials', () => {
+    it('should fetch browser credentials by name', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          name: 'test-browser',
+          loginUrl: 'https://example.com/login',
+          username: 'user@example.com',
+          password: 'secret123',
+        },
+      })
+
+      const result = await client.getBrowserCredentials('test-browser')
+      expect(result.name).toBe('test-browser')
+      expect(result.loginUrl).toBe('https://example.com/login')
+      expect(result.username).toBe('user@example.com')
+      expect(result.password).toBe('secret123')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/browser-credentials',
+        { params: { name: 'test-browser' } },
+      )
+    })
+  })
+
   describe('submitResult', () => {
     it('should submit command result', async () => {
       mockInstance.post.mockResolvedValue({ data: { success: true } })

@@ -271,4 +271,31 @@ describe('auth-server', () => {
       first.stop()
     }
   })
+
+  it('should reject waitForCallback when server emits error after listening', async () => {
+    // Capture the http.Server instance so we can emit an error on it after start
+    let capturedServer: http.Server | undefined
+    const origListen = http.Server.prototype.listen
+    jest.spyOn(http.Server.prototype, 'listen').mockImplementation(function (
+      this: http.Server,
+      ...args: unknown[]
+    ) {
+      capturedServer = this
+      return origListen.apply(this, args as Parameters<typeof origListen>)
+    })
+
+    const { waitForCallback } = await startAuthServer(0)
+    jest.restoreAllMocks()
+
+    // Start waiting for callback — this sets callbackReject
+    const callbackPromise = waitForCallback()
+
+    // Emit a server error to trigger the error handler while callbackReject is set
+    const serverError = new Error('Server error after listening')
+    capturedServer!.emit('error', serverError)
+
+    await expect(callbackPromise).rejects.toThrow('Server error after listening')
+
+    capturedServer!.close()
+  })
 })
