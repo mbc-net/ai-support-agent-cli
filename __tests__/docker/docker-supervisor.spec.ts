@@ -2078,4 +2078,79 @@ describe('DockerSupervisor', () => {
       )
     }, 15000)
   })
+
+  // ─── log chunk splitting: text > 100,000 bytes ──────────────────────────
+
+  describe('log streaming: large text split into multiple chunks (MAX_LOG_CHUNK_BYTES=100,000)', () => {
+    it('splits text > 100,000 bytes into multiple submitLogChunk calls', async () => {
+      const { ApiClient } = require('../../src/api-client')
+      const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
+      const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
+      ApiClient.mockImplementation(() => ({
+        submitLogChunk: mockSubmitLogChunk,
+        saveSessionLog: mockSaveSessionLog,
+      }))
+
+      const watcherClose = jest.fn()
+      mockWatch.mockReturnValue({ close: watcherClose } as unknown as ReturnType<typeof fs.watch>)
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      // Emit 250,000 bytes of data (should produce 3 chunks: 100k + 100k + 50k)
+      const bigLog = 'x'.repeat(250_000)
+      fakeChild.stdout.emit('data', Buffer.from(bigLog))
+
+      // Trigger flush by closing the container
+      fakeChild.emit('close', 0)
+
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+
+      // Should have been called 3 times with chunks of 100k, 100k, 50k
+      expect(mockSubmitLogChunk).toHaveBeenCalledTimes(3)
+      expect(mockSubmitLogChunk.mock.calls[0][0].text).toHaveLength(100_000)
+      expect(mockSubmitLogChunk.mock.calls[1][0].text).toHaveLength(100_000)
+      expect(mockSubmitLogChunk.mock.calls[2][0].text).toHaveLength(50_000)
+      expect(mockSubmitLogChunk.mock.calls[0][0].logType).toBe('container')
+    })
+
+    it('sends a single chunk when text <= 100,000 bytes', async () => {
+      const { ApiClient } = require('../../src/api-client')
+      const mockSubmitLogChunk = jest.fn().mockResolvedValue(undefined)
+      const mockSaveSessionLog = jest.fn().mockResolvedValue(undefined)
+      ApiClient.mockImplementation(() => ({
+        submitLogChunk: mockSubmitLogChunk,
+        saveSessionLog: mockSaveSessionLog,
+      }))
+
+      const watcherClose = jest.fn()
+      mockWatch.mockReturnValue({ close: watcherClose } as unknown as ReturnType<typeof fs.watch>)
+
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      // Emit exactly 1 byte (well under limit)
+      fakeChild.stdout.emit('data', Buffer.from('hello'))
+
+      fakeChild.emit('close', 0)
+
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+
+      // Should have been called exactly once
+      expect(mockSubmitLogChunk).toHaveBeenCalledTimes(1)
+      expect(mockSubmitLogChunk.mock.calls[0][0].text).toBe('hello')
+    })
+  })
 })
