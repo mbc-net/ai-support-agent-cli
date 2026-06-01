@@ -318,12 +318,32 @@ export class ApiClient {
 
   // === Alert (CloudWatch Alarm) ===
 
+  /**
+   * pending のアラートのみを取得する（通常の高頻度ポーリング用）。
+   * processing のアラートは含めない。これにより、処理が完了しない（processing で
+   * 止まった）アラートを毎回拾って再処理する無限ループを防ぐ。
+   */
   async getPendingAlerts(
     tenantCode: string,
     projectCode: string,
   ): Promise<{ items: PendingAlert[]; total: number }> {
     return this.get(API_ENDPOINTS.ALERTS(tenantCode, projectCode), {
       params: { status: 'pending', limit: 20 },
+    })
+  }
+
+  /**
+   * 指定分数以上 processing のままスタックしたアラートを取得する
+   * （低頻度のスタック救済フロー専用）。
+   * 通常ポーリング（getPendingAlerts）とは分離し、再処理の頻度を抑える。
+   */
+  async getStaleProcessingAlerts(
+    tenantCode: string,
+    projectCode: string,
+    staleProcessingMinutes: number,
+  ): Promise<{ items: PendingAlert[]; total: number }> {
+    return this.get(API_ENDPOINTS.ALERTS(tenantCode, projectCode), {
+      params: { status: 'pending', staleProcessingMinutes, limit: 20 },
     })
   }
 
@@ -375,6 +395,19 @@ export class ApiClient {
     return this.post<{ id: string }>(
       API_ENDPOINTS.ALERT_CREATE_ISSUE(tenantCode, projectCode, alertNumber),
       { priority },
+    )
+  }
+
+  /** OK 通知（アラーム解除）時に既存 Issue を resolved に更新する */
+  async resolveIssueFromAlert(
+    tenantCode: string,
+    projectCode: string,
+    alertNumber: string,
+    issueId: string,
+  ): Promise<void> {
+    await this.postVoid(
+      API_ENDPOINTS.ALERT_RESOLVE_ISSUE(tenantCode, projectCode, alertNumber),
+      { issueId },
     )
   }
 }
