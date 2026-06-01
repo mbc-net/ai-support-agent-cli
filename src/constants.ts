@@ -62,6 +62,12 @@ export const PROJECT_CODE_DEFAULT = 'default'
 export const PROJECT_CODE_CLI_DIRECT = 'cli-direct'
 export const PROJECT_CODE_ENV_DEFAULT = 'env-default'
 
+// CloudWatch Alert stale-recovery constants.
+// processing で止まったアラートの救済は通常ポーリングから分離し、低頻度で実行する。
+// これにより processing アラートを毎回再処理して CQRS コマンドが無限増殖するのを防ぐ。
+export const ALERT_STALE_RECOVERY_INTERVAL_MS = 60 * 60 * 1000 // 1 hour
+export const ALERT_STALE_PROCESSING_MINUTES = 30 // 30 分以上 processing を救済対象とする
+
 // Auto-update constants
 export const UPDATE_CHECK_INTERVAL = 60 * 60 * 1000 // 1 hour
 export const UPDATE_CHECK_INITIAL_DELAY = 30_000 // 30 seconds
@@ -148,6 +154,8 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/projects/${projectCode}/alerts/${alertNumber}/create-issue`,
   ALERT_ACTIVE_ISSUE: (tenantCode: string, projectCode: string) =>
     `/api/${tenantCode}/projects/${projectCode}/alerts/active-issue`,
+  ALERT_RESOLVE_ISSUE: (tenantCode: string, projectCode: string, alertNumber: string) =>
+    `/api/${tenantCode}/projects/${projectCode}/alerts/${alertNumber}/resolve-issue`,
   ISSUES: (tenantCode: string, projectCode: string) =>
     `/api/${tenantCode}/projects/${projectCode}/issues`,
 } as const

@@ -2445,6 +2445,7 @@ describe('ProjectAgent', () => {
       })
 
       ;(mockClient as Record<string, jest.Mock>).getPendingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+      ;(mockClient as Record<string, jest.Mock>).getStaleProcessingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
       ;(mockClient as Record<string, jest.Mock>).getAlert = jest.fn().mockResolvedValue(null)
       ;(mockClient as Record<string, jest.Mock>).updateAlertStatus = jest.fn().mockResolvedValue(undefined)
       ;(mockClient as Record<string, jest.Mock>).findActiveIssueByAlarmName = jest.fn().mockResolvedValue(null)
@@ -2491,6 +2492,7 @@ describe('ProjectAgent', () => {
 
       // Mock getPendingAlerts for AlertProcessor
       ;(mockClient as Record<string, jest.Mock>).getPendingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+      ;(mockClient as Record<string, jest.Mock>).getStaleProcessingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
       ;(mockClient as Record<string, jest.Mock>).getAlert = jest.fn().mockResolvedValue(null)
       ;(mockClient as Record<string, jest.Mock>).updateAlertStatus = jest.fn().mockResolvedValue(undefined)
       ;(mockClient as Record<string, jest.Mock>).findActiveIssueByAlarmName = jest.fn().mockResolvedValue(null)
@@ -2507,8 +2509,15 @@ describe('ProjectAgent', () => {
       await jest.advanceTimersByTimeAsync(1100)
       expect((mockClient as Record<string, jest.Mock>).getPendingAlerts).toHaveBeenCalledTimes(2)
 
-      // stop でタイマークリアも確認
+      // スタック救済タイマーも設定されていることを確認
+      const agentInternal = agent as unknown as {
+        alertStaleRecoveryTimer: ReturnType<typeof setInterval> | null
+      }
+      expect(agentInternal.alertStaleRecoveryTimer).not.toBeNull()
+
+      // stop でタイマークリアも確認（pending/stale 両方）
       agent.stop()
+      expect(agentInternal.alertStaleRecoveryTimer).toBeNull()
 
       syncProjectConfigMock.mockRestore()
     })
@@ -2516,6 +2525,7 @@ describe('ProjectAgent', () => {
     it('should not start alert polling when cloudwatch is disabled', async () => {
       // Default mock does not include cloudwatch config
       ;(mockClient as Record<string, jest.Mock>).getPendingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+      ;(mockClient as Record<string, jest.Mock>).getStaleProcessingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
 
       const agent = new ProjectAgent(project, 'no-alert-agent', options)
       agent.start()
@@ -2546,6 +2556,7 @@ describe('ProjectAgent', () => {
       })
 
       ;(mockClient as Record<string, jest.Mock>).getPendingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+      ;(mockClient as Record<string, jest.Mock>).getStaleProcessingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
       ;(mockClient as Record<string, jest.Mock>).getAlert = jest.fn().mockResolvedValue(null)
       ;(mockClient as Record<string, jest.Mock>).updateAlertStatus = jest.fn().mockResolvedValue(undefined)
       ;(mockClient as Record<string, jest.Mock>).findActiveIssueByAlarmName = jest.fn().mockResolvedValue(null)

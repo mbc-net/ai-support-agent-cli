@@ -1,10 +1,12 @@
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 
 describe('constants', () => {
   afterEach(() => {
     jest.restoreAllMocks()
     jest.resetModules()
+    delete process.env.AI_SUPPORT_AGENT_CONFIG_DIR
   })
 
   it('should export AGENT_VERSION from package.json', () => {
@@ -37,6 +39,19 @@ describe('constants', () => {
 
     const constants = require('../src/constants')
     expect(constants.AGENT_VERSION).toBe('0.0.0')
+  })
+
+  it('should expand ~ in AI_SUPPORT_AGENT_CONFIG_DIR to home directory', () => {
+    process.env.AI_SUPPORT_AGENT_CONFIG_DIR = '~/my-config'
+    const constants = require('../src/constants')
+    const expected = path.resolve(os.homedir() + '/my-config')
+    expect(constants.CONFIG_DIR).toBe(expected)
+  })
+
+  it('should resolve absolute path from AI_SUPPORT_AGENT_CONFIG_DIR without ~', () => {
+    process.env.AI_SUPPORT_AGENT_CONFIG_DIR = '/tmp/agent-config'
+    const constants = require('../src/constants')
+    expect(constants.CONFIG_DIR).toBe('/tmp/agent-config')
   })
 
   it('should export NPM_COMMAND as npm.cmd on win32 and npm elsewhere', () => {
@@ -126,5 +141,15 @@ describe('constants', () => {
     expect(constants.API_ENDPOINTS.COMMAND_CHUNKS('tenant1', 'cmd-1')).toBe('/api/tenant1/agent/commands/cmd-1/chunks')
     expect(constants.API_ENDPOINTS.LOG_CHUNK('tenant1')).toBe('/api/tenant1/agent/logs/chunk')
     expect(constants.API_ENDPOINTS.LOG_SESSION('tenant1')).toBe('/api/tenant1/agent/logs/session')
+    expect(constants.API_ENDPOINTS.SSH_CREDENTIALS('tenant1', 'host-1')).toBe('/api/tenant1/agent/ssh-credentials/host-1')
+    expect(constants.API_ENDPOINTS.BROWSER_CREDENTIALS('tenant1')).toBe('/api/tenant1/agent/browser-credentials')
+    expect(constants.API_ENDPOINTS.E2E_EXECUTION_STATUS('tenant1', 'PROJ_01', 'exec-1')).toBe('/api/tenant1/agent/e2e-test-executions/exec-1/status')
+    expect(constants.API_ENDPOINTS.E2E_EXECUTION_STEPS('tenant1', 'PROJ_01', 'exec-1')).toBe('/api/tenant1/agent/e2e-test-executions/exec-1/steps')
+    expect(constants.API_ENDPOINTS.E2E_EXECUTION_SCRIPT('tenant1', 'PROJ_01', 'exec-1')).toBe('/api/tenant1/agent/e2e-test-executions/exec-1/script')
+    expect(constants.API_ENDPOINTS.ALERTS('tenant1', 'PROJ_01')).toBe('/api/tenant1/projects/PROJ_01/alerts')
+    expect(constants.API_ENDPOINTS.ALERT('tenant1', 'PROJ_01', '42')).toBe('/api/tenant1/projects/PROJ_01/alerts/42')
+    expect(constants.API_ENDPOINTS.ALERT_STATUS('tenant1', 'PROJ_01', '42')).toBe('/api/tenant1/projects/PROJ_01/alerts/42/status')
+    expect(constants.API_ENDPOINTS.ALERT_CREATE_ISSUE('tenant1', 'PROJ_01', '42')).toBe('/api/tenant1/projects/PROJ_01/alerts/42/create-issue')
+    expect(constants.API_ENDPOINTS.ISSUES('tenant1', 'PROJ_01')).toBe('/api/tenant1/projects/PROJ_01/issues')
   })
 })

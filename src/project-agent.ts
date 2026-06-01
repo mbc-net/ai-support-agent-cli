@@ -10,6 +10,8 @@ import type { RepoSyncResult } from './repo-sync'
 import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, startVsCodeTunnel, stopTransport } from './agent-transport'
 import {
   AGENT_VERSION,
+  ALERT_STALE_PROCESSING_MINUTES,
+  ALERT_STALE_RECOVERY_INTERVAL_MS,
   DELAYED_RESTART_MS,
   DOCKER_MARKER_BUILT_HASH,
   DOCKER_MARKER_CUSTOMIZATION_HASH,
@@ -84,6 +86,7 @@ export class ProjectAgent {
   // "started to fail" / "is working again" log pair.
   private lastRegisterError: { isAuth: boolean; message: string } | null = null
   private alertPollingTimer: ReturnType<typeof setInterval> | null = null
+  private alertStaleRecoveryTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(
     project: ProjectRegistration,
@@ -162,6 +165,10 @@ export class ProjectAgent {
     if (this.alertPollingTimer) {
       clearInterval(this.alertPollingTimer)
       this.alertPollingTimer = null
+    }
+    if (this.alertStaleRecoveryTimer) {
+      clearInterval(this.alertStaleRecoveryTimer)
+      this.alertStaleRecoveryTimer = null
     }
     stopTransport(this.transportState)
   }
@@ -464,14 +471,26 @@ export class ProjectAgent {
       if (this.alertPollingTimer) {
         clearInterval(this.alertPollingTimer)
       }
+      if (this.alertStaleRecoveryTimer) {
+        clearInterval(this.alertStaleRecoveryTimer)
+      }
 
-      // 定期ポーリング（Web 画面で設定した間隔）クラスフィールドで管理して stop() でクリア
+      // 定期ポーリング（Web 画面で設定した間隔）pending のみ取得。
+      // クラスフィールドで管理して stop() でクリア
       const pollingIntervalMs = projectConfig.cloudwatch.pollingIntervalMs
       this.alertPollingTimer = setInterval(
         () => void alertProcessor.checkPendingAlerts(),
         pollingIntervalMs,
       )
       logger.info(`${this.prefix} CloudWatch Alert polling started (interval: ${pollingIntervalMs}ms)`)
+
+      // スタック救済タイマー（低頻度）。processing で止まったアラートを
+      // 通常ポーリングとは分離して低頻度で救済する（無限ループ防止）。
+      this.alertStaleRecoveryTimer = setInterval(
+        () => void alertProcessor.recoverStaleProcessingAlerts(ALERT_STALE_PROCESSING_MINUTES),
+        ALERT_STALE_RECOVERY_INTERVAL_MS,
+      )
+      logger.info(`${this.prefix} CloudWatch Alert stale-recovery started (interval: ${ALERT_STALE_RECOVERY_INTERVAL_MS}ms, threshold: ${ALERT_STALE_PROCESSING_MINUTES}min)`)
     }
 
     // Start terminal WebSocket connection (only if server has WS gateway enabled)

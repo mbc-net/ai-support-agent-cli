@@ -292,6 +292,26 @@ describe('ApiClient', () => {
       expect(callArgs).not.toHaveProperty('availableChatModes')
       expect(callArgs).not.toHaveProperty('activeChatMode')
     })
+
+    it('should include ipAddress, configHash, dockerBuildError when provided (line 134-136)', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat(
+        'test-id',
+        { platform: 'darwin', arch: 'arm64', cpuUsage: 50, memoryUsage: 60, uptime: 1000 },
+        undefined,       // updateError
+        undefined,       // availableChatModes
+        undefined,       // activeChatMode
+        '10.0.0.1',      // ipAddress — truthy branch line 134
+        'abc123',        // configHash — truthy branch line 135
+        'build failed',  // dockerBuildError — truthy branch line 136
+      )
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).toHaveProperty('ipAddress', '10.0.0.1')
+      expect(callArgs).toHaveProperty('configHash', 'abc123')
+      expect(callArgs).toHaveProperty('dockerBuildError', 'build failed')
+    })
   })
 
   describe('getPendingCommands', () => {
@@ -932,7 +952,7 @@ describe('ApiClient', () => {
     }
 
     describe('getPendingAlerts', () => {
-      it('should GET pending alerts with status=pending', async () => {
+      it('should GET pending alerts with status=pending only (no staleProcessingMinutes)', async () => {
         mockInstance.get.mockResolvedValue({ data: { items: [mockAlertItem], total: 1 } })
 
         const result = await client.getPendingAlerts('tenant1', 'MBC_01')
@@ -940,7 +960,25 @@ describe('ApiClient', () => {
         expect(result.items).toHaveLength(1)
         expect(mockInstance.get).toHaveBeenCalledWith(
           '/api/tenant1/projects/MBC_01/alerts',
-          expect.objectContaining({ params: { status: 'pending', limit: 20 } }),
+          expect.objectContaining({
+            params: { status: 'pending', limit: 20 },
+          }),
+        )
+      })
+    })
+
+    describe('getStaleProcessingAlerts', () => {
+      it('should GET stale processing alerts with the given staleProcessingMinutes', async () => {
+        mockInstance.get.mockResolvedValue({ data: { items: [mockAlertItem], total: 1 } })
+
+        const result = await client.getStaleProcessingAlerts('tenant1', 'MBC_01', 30)
+
+        expect(result.items).toHaveLength(1)
+        expect(mockInstance.get).toHaveBeenCalledWith(
+          '/api/tenant1/projects/MBC_01/alerts',
+          expect.objectContaining({
+            params: { status: 'pending', staleProcessingMinutes: 30, limit: 20 },
+          }),
         )
       })
     })
@@ -1018,6 +1056,20 @@ describe('ApiClient', () => {
         expect(mockInstance.post).toHaveBeenCalledWith(
           '/api/tenant1/projects/MBC_01/alerts/AL000001/create-issue',
           { priority: 'urgent' },
+          undefined,
+        )
+      })
+    })
+
+    describe('resolveIssueFromAlert', () => {
+      it('should POST to resolve-issue endpoint', async () => {
+        mockInstance.post.mockResolvedValue({})
+
+        await client.resolveIssueFromAlert('tenant1', 'MBC_01', 'AL000001', 'JCCI_000071')
+
+        expect(mockInstance.post).toHaveBeenCalledWith(
+          '/api/tenant1/projects/MBC_01/alerts/AL000001/resolve-issue',
+          { issueId: 'JCCI_000071' },
           undefined,
         )
       })
