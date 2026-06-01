@@ -60,10 +60,20 @@ export class AlertProcessor {
         this.tenantCode, this.projectCode, alertNumber,
       )
       if (!alert) {
-        await this.markFailed(
-          alertNumber,
-          'Alert not found in RDS (possible sync delay)',
-        )
+        // RDS 同期遅延（DynamoDB Streams → RDS がまだ完了していない）。
+        // AppSync Push は DynamoDB 書き込み直後に飛ぶため、RDS 参照の getAlert が
+        // null になるのは回復可能な一時事象。failed に確定させると pending/processing
+        // いずれの救済フローにも乗らず永久に失われるため、pending に戻して次の通常
+        // ポーリングでの再試行に委ねる。
+        await this.client.updateAlertStatus(
+          this.tenantCode, this.projectCode, alertNumber,
+          { status: 'pending' },
+        ).catch((e) => {
+          logger.error(
+            `Alert ${alertNumber}: failed to revert to 'pending' after sync-delay null (will be retried by stale recovery): ${getErrorMessage(e)}`,
+          )
+        })
+        logger.info(`Alert ${alertNumber}: not found in RDS (sync delay), reverted to pending for retry`)
         return
       }
 

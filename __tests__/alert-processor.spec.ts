@@ -84,21 +84,27 @@ describe('AlertProcessor', () => {
       expect(mockClient.createIssueFromAlert).not.toHaveBeenCalled()
     })
 
-    it('should mark as failed when alert not found in RDS', async () => {
+    it('should revert to pending (not failed) when alert not found in RDS (sync delay)', async () => {
+      // RDS 同期遅延は回復可能。failed にせず pending に戻して再試行に委ねる
       mockClient.getAlert.mockResolvedValue(null)
 
       await processor.processAlert('AL000001')
 
+      // processing マーク後、pending に戻す（failed にはしない）
       expect(mockClient.updateAlertStatus).toHaveBeenCalledWith(
+        'tenant1', 'MBC_01', 'AL000001',
+        { status: 'pending' },
+      )
+      expect(mockClient.updateAlertStatus).not.toHaveBeenCalledWith(
         'tenant1', 'MBC_01', 'AL000001',
         expect.objectContaining({ status: 'failed' }),
       )
       expect(mockClient.createIssueFromAlert).not.toHaveBeenCalled()
     })
 
-    it('should not throw when updateAlertStatus fails on alert-not-found path', async () => {
+    it('should not throw when the pending-revert fails on alert-not-found path', async () => {
       mockClient.getAlert.mockResolvedValue(null)
-      // First call (processing) succeeds; second call (failed status) rejects
+      // First call (processing) succeeds; second call (pending revert) rejects
       mockClient.updateAlertStatus
         .mockResolvedValueOnce(undefined)
         .mockRejectedValueOnce(new Error('Network error'))
