@@ -43,22 +43,27 @@ export class AlertProcessor {
       return
     }
     this.inFlight.add(alertNumber)
+    // step① の processing マークが成功して「評価を開始した」かを追跡する。
+    // step① 自体が一時的エラーで失敗した場合、アラートの中身を一切評価して
+    // いないため failed に確定させず、pending のまま再試行可能に残す。
+    let evaluationStarted = false
     try {
       // ① 処理中マーク（他エージェントとの競合防止）
       await this.client.updateAlertStatus(
         this.tenantCode, this.projectCode, alertNumber,
         { status: 'processing' },
       )
+      evaluationStarted = true
 
       // ② Alert 詳細取得（alarmName・reason 等を優先度判定・Issue 作成に使う）
       const alert = await this.client.getAlert(
         this.tenantCode, this.projectCode, alertNumber,
       )
       if (!alert) {
-        await this.client.updateAlertStatus(
-          this.tenantCode, this.projectCode, alertNumber,
-          { status: 'failed', failureReason: 'Alert not found in RDS (possible sync delay)' },
-        ).catch(() => undefined)
+        await this.markFailed(
+          alertNumber,
+          'Alert not found in RDS (possible sync delay)',
+        )
         return
       }
 
@@ -121,22 +126,37 @@ export class AlertProcessor {
       logger.info(`Alert ${alertNumber} processed: issue ${issue.id} created with priority ${priority}`)
     } catch (error) {
       const failureReason = getErrorMessage(error).substring(0, 500)
-      logger.warn(`Alert ${alertNumber} failed: ${failureReason}`)
-      // failed 遷移は握りつぶさず、失敗もログに残す。
-      // ここで failed 更新が失敗すると status が processing のまま残り、
-      // スタック救済フロー（recoverStaleProcessingAlerts）の対象になる。
-      try {
-        await this.client.updateAlertStatus(
-          this.tenantCode, this.projectCode, alertNumber,
-          { status: 'failed', failureReason },
+      if (!evaluationStarted) {
+        // step①（processing マーク）自体が失敗 = アラートを一切評価していない。
+        // failed に確定させると pending/processing いずれの救済フローにも乗らず
+        // 永久に失われるため、failed にせず次回ポーリングでの再試行に委ねる。
+        logger.warn(
+          `Alert ${alertNumber}: failed to mark 'processing' (not evaluated, leaving for retry): ${failureReason}`,
         )
-      } catch (markErr) {
-        logger.error(
-          `Alert ${alertNumber}: failed to mark as 'failed' (will be picked up by stale recovery): ${getErrorMessage(markErr)}`,
-        )
+        return
       }
+      logger.warn(`Alert ${alertNumber} failed: ${failureReason}`)
+      await this.markFailed(alertNumber, failureReason)
     } finally {
       this.inFlight.delete(alertNumber)
+    }
+  }
+
+  /**
+   * アラートを failed に遷移させる。更新自体が失敗した場合は握りつぶさず
+   * logger.error で記録する（status は processing のまま残り、スタック救済
+   * フロー recoverStaleProcessingAlerts の対象になる）。
+   */
+  private async markFailed(alertNumber: string, failureReason: string): Promise<void> {
+    try {
+      await this.client.updateAlertStatus(
+        this.tenantCode, this.projectCode, alertNumber,
+        { status: 'failed', failureReason },
+      )
+    } catch (markErr) {
+      logger.error(
+        `Alert ${alertNumber}: failed to mark as 'failed' (will be picked up by stale recovery): ${getErrorMessage(markErr)}`,
+      )
     }
   }
 

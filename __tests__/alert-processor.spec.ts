@@ -191,6 +191,35 @@ describe('AlertProcessor', () => {
       await expect(processor.processAlert('AL000001')).resolves.not.toThrow()
     })
 
+    it('should NOT mark as failed when the initial processing update itself fails (leave for retry)', async () => {
+      // step①（processing マーク）自体が失敗 → アラート未評価なので failed にしない
+      mockClient.updateAlertStatus.mockRejectedValueOnce(new Error('transient network blip'))
+
+      await expect(processor.processAlert('AL000001')).resolves.not.toThrow()
+
+      // updateAlertStatus は processing の1回のみ。failed 更新は呼ばれない
+      expect(mockClient.updateAlertStatus).toHaveBeenCalledTimes(1)
+      expect(mockClient.updateAlertStatus).toHaveBeenCalledWith(
+        'tenant1', 'MBC_01', 'AL000001',
+        { status: 'processing' },
+      )
+      // 評価系（getAlert）も呼ばれていない
+      expect(mockClient.getAlert).not.toHaveBeenCalled()
+    })
+
+    it('should allow re-processing after the initial processing update failed (in-flight cleared)', async () => {
+      // step① 失敗後、in-flight が解放され再試行できることを確認
+      mockClient.updateAlertStatus.mockRejectedValueOnce(new Error('blip'))
+      await processor.processAlert('AL000001')
+
+      mockClient.updateAlertStatus.mockReset()
+      mockClient.updateAlertStatus.mockResolvedValue(undefined)
+
+      await processor.processAlert('AL000001')
+      // 2回目は正常に評価が進む
+      expect(mockClient.getAlert).toHaveBeenCalled()
+    })
+
     it('should resolve existing issue when state is OK and active issue exists', async () => {
       const okAlert = { ...mockAlert, state: 'OK' as const }
       mockClient.getAlert.mockResolvedValue(okAlert)
