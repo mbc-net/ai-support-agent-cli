@@ -18,6 +18,13 @@ type Priority = typeof VALID_PRIORITIES[number]
  * AppSync Push 受信時・フォールバック・定期ポーリングから呼ばれる
  */
 export class AlertProcessor {
+  /**
+   * 処理中の alertNumber を保持する重複ガード。
+   * AppSync Push とポーリングが同時に同じアラートを処理しようとしたり、
+   * 連続ポーリングで二重処理されるのを防ぐ。
+   */
+  private readonly inFlight = new Set<string>()
+
   constructor(
     private readonly client: ApiClient,
     private readonly tenantCode: string,
@@ -30,6 +37,12 @@ export class AlertProcessor {
    * DynamoDB Streams → RDS 同期がまだ完了していない場合（稀なタイミング問題）
    */
   async processAlert(alertNumber: string): Promise<void> {
+    // 重複ガード: 既に処理中の同一アラートは早期 return（二重 updateAlertStatus を防ぐ）
+    if (this.inFlight.has(alertNumber)) {
+      logger.debug(`Alert ${alertNumber} already in flight, skipping duplicate processing`)
+      return
+    }
+    this.inFlight.add(alertNumber)
     try {
       // ① 処理中マーク（他エージェントとの競合防止）
       await this.client.updateAlertStatus(
@@ -108,17 +121,30 @@ export class AlertProcessor {
       logger.info(`Alert ${alertNumber} processed: issue ${issue.id} created with priority ${priority}`)
     } catch (error) {
       const failureReason = getErrorMessage(error).substring(0, 500)
-      await this.client.updateAlertStatus(
-        this.tenantCode, this.projectCode, alertNumber,
-        { status: 'failed', failureReason },
-      ).catch(() => undefined)
       logger.warn(`Alert ${alertNumber} failed: ${failureReason}`)
+      // failed 遷移は握りつぶさず、失敗もログに残す。
+      // ここで failed 更新が失敗すると status が processing のまま残り、
+      // スタック救済フロー（recoverStaleProcessingAlerts）の対象になる。
+      try {
+        await this.client.updateAlertStatus(
+          this.tenantCode, this.projectCode, alertNumber,
+          { status: 'failed', failureReason },
+        )
+      } catch (markErr) {
+        logger.error(
+          `Alert ${alertNumber}: failed to mark as 'failed' (will be picked up by stale recovery): ${getErrorMessage(markErr)}`,
+        )
+      }
+    } finally {
+      this.inFlight.delete(alertNumber)
     }
   }
 
   /**
    * pending アラームを一括取得して処理する（フォールバック・定期ポーリング用）
-   * getPendingAlerts は内部で status=pending を固定付与する
+   * getPendingAlerts は status=pending のみ取得する（processing は含めない）。
+   * processing でスタックしたアラートの救済は recoverStaleProcessingAlerts で
+   * 低頻度に別途行う（無限ループ防止のため通常ポーリングから分離）。
    */
   async checkPendingAlerts(): Promise<void> {
     try {
@@ -134,6 +160,32 @@ export class AlertProcessor {
       }
     } catch (error) {
       logger.warn(`checkPendingAlerts failed: ${getErrorMessage(error)}`)
+    }
+  }
+
+  /**
+   * 指定分数以上 processing のままスタックしたアラートを救済する。
+   * 通常の高頻度ポーリング（checkPendingAlerts）とは分離した低頻度フローから
+   * 呼ぶこと。これにより、processing で止まったアラートを毎回再処理して
+   * CQRS コマンドが無限に増殖するのを防ぐ。
+   *
+   * @param staleProcessingMinutes この分数以上 processing のアラートを対象とする
+   */
+  async recoverStaleProcessingAlerts(staleProcessingMinutes: number): Promise<void> {
+    try {
+      const { items } = await this.client.getStaleProcessingAlerts(
+        this.tenantCode,
+        this.projectCode,
+        staleProcessingMinutes,
+      )
+      if (items.length > 0) {
+        logger.info(`Found ${items.length} stale processing alerts (>${staleProcessingMinutes}min), recovering...`)
+      }
+      for (const alert of items) {
+        await this.processAlert(alert.alertNumber)
+      }
+    } catch (error) {
+      logger.warn(`recoverStaleProcessingAlerts failed: ${getErrorMessage(error)}`)
     }
   }
 

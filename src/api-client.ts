@@ -318,14 +318,32 @@ export class ApiClient {
 
   // === Alert (CloudWatch Alarm) ===
 
+  /**
+   * pending のアラートのみを取得する（通常の高頻度ポーリング用）。
+   * processing のアラートは含めない。これにより、処理が完了しない（processing で
+   * 止まった）アラートを毎回拾って再処理する無限ループを防ぐ。
+   */
   async getPendingAlerts(
     tenantCode: string,
     projectCode: string,
   ): Promise<{ items: PendingAlert[]; total: number }> {
     return this.get(API_ENDPOINTS.ALERTS(tenantCode, projectCode), {
-      // staleProcessingMinutes=30: 30 分以上 processing のままのアラートも pending と同様に返す
-      // processAlert の catch ブロックで failed 更新が失敗した場合のスタック救済
-      params: { status: 'pending', staleProcessingMinutes: 30, limit: 20 },
+      params: { status: 'pending', limit: 20 },
+    })
+  }
+
+  /**
+   * 指定分数以上 processing のままスタックしたアラートを取得する
+   * （低頻度のスタック救済フロー専用）。
+   * 通常ポーリング（getPendingAlerts）とは分離し、再処理の頻度を抑える。
+   */
+  async getStaleProcessingAlerts(
+    tenantCode: string,
+    projectCode: string,
+    staleProcessingMinutes: number,
+  ): Promise<{ items: PendingAlert[]; total: number }> {
+    return this.get(API_ENDPOINTS.ALERTS(tenantCode, projectCode), {
+      params: { status: 'pending', staleProcessingMinutes, limit: 20 },
     })
   }
 

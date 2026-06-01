@@ -25,6 +25,7 @@ const mockAlert = {
 function createMockClient() {
   return {
     getPendingAlerts: jest.fn().mockResolvedValue({ items: [mockAlert], total: 1 }),
+    getStaleProcessingAlerts: jest.fn().mockResolvedValue({ items: [mockAlert], total: 1 }),
     getAlert: jest.fn().mockResolvedValue(mockAlert),
     updateAlertStatus: jest.fn().mockResolvedValue(undefined),
     findActiveIssueByAlarmName: jest.fn().mockResolvedValue(null),
@@ -220,6 +221,74 @@ describe('AlertProcessor', () => {
         'tenant1', 'MBC_01', 'AL000001',
         { status: 'processed' },
       )
+    })
+
+    // ── 重複処理ガード（無限ループ防止） ───────────────────────────────────
+    it('should skip duplicate processing of the same alert that is in flight', async () => {
+      // getAlert を未解決の Promise にして処理を「飛行中」のまま保持する
+      let resolveGetAlert!: (v: typeof mockAlert) => void
+      mockClient.getAlert.mockReturnValue(
+        new Promise((resolve) => { resolveGetAlert = resolve }),
+      )
+
+      // 1回目の処理を開始（await せず飛行中にする）
+      const first = processor.processAlert('AL000001')
+      // 2回目を同じ alertNumber で即座に呼ぶ → 重複ガードで早期 return
+      await processor.processAlert('AL000001')
+
+      // 2回目は updateAlertStatus('processing') を呼ばない（1回目の1回のみ）
+      expect(mockClient.updateAlertStatus).toHaveBeenCalledTimes(1)
+
+      // 1回目を完了させる
+      resolveGetAlert(mockAlert)
+      await first
+    })
+
+    it('should allow re-processing after the alert finishes (in-flight cleared)', async () => {
+      await processor.processAlert('AL000001')
+      mockClient.updateAlertStatus.mockClear()
+
+      // 完了後は再処理可能（in-flight から削除済み）
+      await processor.processAlert('AL000001')
+      expect(mockClient.updateAlertStatus).toHaveBeenCalled()
+    })
+
+    it('should log error when failed-status update itself fails', async () => {
+      mockClient.getAlert.mockRejectedValue(new Error('boom'))
+      mockClient.updateAlertStatus
+        .mockResolvedValueOnce(undefined) // processing
+        .mockRejectedValueOnce(new Error('mark-failed error')) // failed 更新が失敗
+
+      await expect(processor.processAlert('AL000001')).resolves.not.toThrow()
+
+      // failed 更新の失敗は error ログに残す（握りつぶさない）
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('failed to mark as'),
+      )
+    })
+  })
+
+  // ── スタック救済（別フロー） ─────────────────────────────────────────────
+  describe('recoverStaleProcessingAlerts', () => {
+    it('should call getStaleProcessingAlerts with the given threshold and process them', async () => {
+      await processor.recoverStaleProcessingAlerts(30)
+
+      expect(mockClient.getStaleProcessingAlerts).toHaveBeenCalledWith(
+        'tenant1', 'MBC_01', 30,
+      )
+      // 取得したアラートを処理する（updateAlertStatus が呼ばれる）
+      expect(mockClient.updateAlertStatus).toHaveBeenCalled()
+    })
+
+    it('should not throw when getStaleProcessingAlerts fails', async () => {
+      mockClient.getStaleProcessingAlerts.mockRejectedValue(new Error('network'))
+      await expect(processor.recoverStaleProcessingAlerts(30)).resolves.not.toThrow()
+    })
+
+    it('should do nothing when no stale alerts', async () => {
+      mockClient.getStaleProcessingAlerts.mockResolvedValue({ items: [], total: 0 })
+      await processor.recoverStaleProcessingAlerts(30)
+      expect(mockClient.updateAlertStatus).not.toHaveBeenCalled()
     })
   })
 
