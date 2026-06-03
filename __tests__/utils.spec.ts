@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync } from '../src/utils'
+import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -384,6 +384,51 @@ describe('isErrnoException', () => {
   it('should return true when code argument is undefined (no code filter)', () => {
     const err = Object.assign(new Error('EPERM'), { code: 'EPERM' })
     expect(isErrnoException(err, undefined)).toBe(true)
+  })
+})
+
+describe('sleep', () => {
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  it('should return a Promise', () => {
+    jest.useFakeTimers()
+    const result = sleep(1000)
+    expect(result).toBeInstanceOf(Promise)
+    jest.advanceTimersByTime(1000)
+    return result
+  })
+
+  it('should resolve after the specified delay', async () => {
+    jest.useFakeTimers()
+    let resolved = false
+    const promise = sleep(500).then(() => {
+      resolved = true
+    })
+
+    // Not yet elapsed
+    jest.advanceTimersByTime(499)
+    await Promise.resolve()
+    expect(resolved).toBe(false)
+
+    // Elapsed
+    jest.advanceTimersByTime(1)
+    await promise
+    expect(resolved).toBe(true)
+  })
+
+  it('should resolve with undefined', async () => {
+    jest.useFakeTimers()
+    const promise = sleep(0)
+    jest.advanceTimersByTime(0)
+    await expect(promise).resolves.toBeUndefined()
+  })
+
+  it('should actually wait with real timers', async () => {
+    const start = Date.now()
+    await sleep(20)
+    expect(Date.now() - start).toBeGreaterThanOrEqual(15)
   })
 })
 

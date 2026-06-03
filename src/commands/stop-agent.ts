@@ -7,7 +7,7 @@
 import { getPidFilePath, isProcessAlive, readPidFile, removePidFile } from '../pid-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
-import { getErrorMessage } from '../utils'
+import { getErrorMessage, sleep } from '../utils'
 
 const WAIT_INTERVAL_MS = 200
 const WAIT_TIMEOUT_MS = 10_000
@@ -17,7 +17,7 @@ async function waitForExit(pid: number): Promise<boolean> {
   const deadline = Date.now() + WAIT_TIMEOUT_MS
   while (Date.now() < deadline) {
     if (!isProcessAlive(pid)) return true
-    await new Promise<void>((resolve) => setTimeout(resolve, WAIT_INTERVAL_MS))
+    await sleep(WAIT_INTERVAL_MS)
   }
   return false
 }

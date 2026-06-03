@@ -15,7 +15,7 @@ import {
   buildOpenFolderDisableKeybindings,
   isZshShell,
 } from '../terminal/sandbox-init-script'
-import { getErrorMessage, readJsonSync } from '../utils'
+import { getErrorMessage, readJsonSync, sleep } from '../utils'
 
 import {
   VSCODE_DEFAULT_PORT,
@@ -249,7 +249,7 @@ export class VsCodeServer {
         await this.checkHealth()
         return
       } catch {
-        await new Promise(resolve => setTimeout(resolve, 500))
+        await sleep(500)
       }
     }
     throw new Error(`code-server failed to start within ${STARTUP_TIMEOUT_MS}ms`)

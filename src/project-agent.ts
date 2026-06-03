@@ -35,7 +35,7 @@ import { submitPendingResults } from './pending-result-store'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
-import { atomicWriteFile, getErrorMessage, isAuthenticationError, resolveUrlForDocker } from './utils'
+import { atomicWriteFile, getErrorMessage, isAuthenticationError, resolveUrlForDocker, sleep } from './utils'
 
 export interface ProjectAgentOptions {
   pollInterval: number
@@ -327,7 +327,7 @@ export class ProjectAgent {
       if (this.configSyncState.currentConfigHash) break
       if (attempt < INITIAL_CONFIG_SYNC_MAX_RETRIES) {
         logger.warn(`${this.prefix} Initial config sync attempt ${attempt} failed, retrying...`)
-        await new Promise(resolve => setTimeout(resolve, INITIAL_CONFIG_SYNC_RETRY_DELAY_MS * attempt))
+        await sleep(INITIAL_CONFIG_SYNC_RETRY_DELAY_MS * attempt)
       }
     }
     if (!this.configSyncState.currentConfigHash) {

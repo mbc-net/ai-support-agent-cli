@@ -1,6 +1,7 @@
 import axios from 'axios'
 
 import { logger } from './logger'
+import { sleep } from './utils'
 
 export interface BackoffOptions {
   baseDelayMs: number
@@ -53,7 +54,7 @@ export class RetryStrategy {
         if (attempt < maxRetries - 1) {
           const delay = calculateBackoff({ baseDelayMs, attempt })
           logger.debug(`Request failed (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms`)
-          await new Promise((resolve) => setTimeout(resolve, delay))
+          await sleep(delay)
         }
       }
     }
