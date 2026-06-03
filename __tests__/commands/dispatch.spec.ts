@@ -163,6 +163,24 @@ describe('commands/dispatch', () => {
       expect(result.success).toBe(false)
     })
 
+    it('file_rename: oldPath/newPath=undefined → ?? "" fallback in log (commands/index.ts line 72)', async () => {
+      // Cover: String(oldPath ?? '') and String(newPath ?? '') when both are undefined
+      const result = await executeCommand('file_rename', { oldPath: undefined, newPath: undefined })
+      expect(result.success).toBe(false) // undefined paths still fail validation
+    })
+
+    it('file_delete: path=undefined → ?? "" fallback in log (commands/index.ts line 78)', async () => {
+      // Cover: String(deletePath ?? '') when path is undefined
+      const result = await executeCommand('file_delete', { path: undefined })
+      expect(result.success).toBe(false)
+    })
+
+    it('file_mkdir: path=undefined → ?? "" fallback in log (commands/index.ts line 84)', async () => {
+      // Cover: String(mkdirPath ?? '') when path is undefined
+      const result = await executeCommand('file_mkdir', { path: undefined })
+      expect(result.success).toBe(false)
+    })
+
     it('should dispatch file_delete command', async () => {
       const result = await executeCommand('file_delete', { path: '/nonexistent/path/to/delete' })
       expect(result.success).toBe(false)
