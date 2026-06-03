@@ -21,6 +21,24 @@ export function atomicWriteFile(filePath: string, content: string, mode = 0o600)
 }
 
 /**
+ * unknown な catch 値からメッセージ文字列を取り出す。
+ * Error なら `.message`、それ以外は `String()` を返す。
+ * `err instanceof Error ? err.message : String(err)` の重複イディオムを集約する。
+ */
+export function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * unknown な catch 値を Error インスタンスに正規化する。
+ * Error ならそのまま、それ以外は `String()` をメッセージにした Error を生成する。
+ * `err instanceof Error ? err : new Error(String(err))` の重複イディオムを集約する。
+ */
+export function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error))
+}
+
+/**
  * エラーから詳細なメッセージを抽出する。
  * AxiosError の場合はレスポンスボディの message/error フィールドとHTTPステータスコードを含める。
  * それ以外の Error はメッセージを、非 Error は String() を返す。
@@ -40,7 +58,7 @@ export function getErrorMessage(error: unknown): string {
     return `HTTP ${status}: ${error.message}`
   }
 
-  return error instanceof Error ? error.message : String(error)
+  return toErrorMessage(error)
 }
 
 export function parseString(value: unknown): string | null {

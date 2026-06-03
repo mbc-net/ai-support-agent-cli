@@ -3,6 +3,7 @@ import { isParentToChildMessage } from './ipc-types'
 import { logger } from './logger'
 import { ProjectAgent } from './project-agent'
 import { captureException, flushSentry, initSentry } from './sentry'
+import { toError } from './utils'
 
 let agent: ProjectAgent | null = null
 let currentTenantCode = 'unknown'
@@ -56,7 +57,7 @@ function setupMessageHandler(): void {
         currentTenantCode = msg.project.tenantCode
         currentProjectCode = msg.project.projectCode
         handleStart(msg).catch((err) => {
-          const error = err instanceof Error ? err : new Error(String(err))
+          const error = toError(err)
           captureException(error)
           sendToParent({ type: 'error', tenantCode: currentTenantCode, projectCode: currentProjectCode, message: error.message })
         })

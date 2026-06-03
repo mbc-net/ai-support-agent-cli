@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep } from '../src/utils'
+import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -27,6 +27,62 @@ describe('getErrorMessage', () => {
 
   it('should handle TypeError', () => {
     expect(getErrorMessage(new TypeError('type error'))).toBe('type error')
+  })
+})
+
+describe('toErrorMessage', () => {
+  it('should return message from Error instance', () => {
+    expect(toErrorMessage(new Error('boom'))).toBe('boom')
+  })
+
+  it('should return message from Error subclasses', () => {
+    expect(toErrorMessage(new TypeError('type boom'))).toBe('type boom')
+  })
+
+  it('should stringify a non-Error string', () => {
+    expect(toErrorMessage('plain string')).toBe('plain string')
+  })
+
+  it('should stringify a number', () => {
+    expect(toErrorMessage(42)).toBe('42')
+  })
+
+  it('should stringify null', () => {
+    expect(toErrorMessage(null)).toBe('null')
+  })
+
+  it('should stringify undefined', () => {
+    expect(toErrorMessage(undefined)).toBe('undefined')
+  })
+})
+
+describe('toError', () => {
+  it('should return the same Error instance unchanged', () => {
+    const original = new Error('keep me')
+    expect(toError(original)).toBe(original)
+  })
+
+  it('should return Error subclass instances unchanged', () => {
+    const original = new TypeError('type error')
+    expect(toError(original)).toBe(original)
+  })
+
+  it('should wrap a non-Error string into an Error', () => {
+    const result = toError('wrap me')
+    expect(result).toBeInstanceOf(Error)
+    expect(result.message).toBe('wrap me')
+  })
+
+  it('should wrap a number into an Error', () => {
+    const result = toError(500)
+    expect(result).toBeInstanceOf(Error)
+    expect(result.message).toBe('500')
+  })
+
+  it('should wrap null into an Error', () => {
+    const result = toError(null)
+    expect(result).toBeInstanceOf(Error)
+    expect(result.message).toBe('null')
   })
 })
 
