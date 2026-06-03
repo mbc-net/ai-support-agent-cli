@@ -737,3 +737,31 @@ describe('reExecProcess', () => {
     expect(exitSpy).toHaveBeenCalledWith(0)
   })
 })
+
+describe('reExecProcess: method=undefined → detectInstallMethod()（line 216 branch [1]）', () => {
+  let exitSpy: jest.SpiedFunction<typeof process.exit>
+  const originalArgv = process.argv
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    resetGlobalPrefixCache()
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    mockedSpawn.mockReturnValue({ unref: jest.fn() })
+  })
+
+  afterEach(() => {
+    exitSpy.mockRestore()
+    process.argv = originalArgv
+  })
+
+  it('method が undefined の場合 detectInstallMethod() で自動検出する（line 216 branch [1]）', () => {
+    // Cover: const installMethod = method ?? detectInstallMethod()
+    // When method is not provided (undefined), detectInstallMethod() is called
+    process.argv = ['/usr/local/bin/node', '/usr/local/bin/ai-support-agent', 'start']
+
+    // Call without method argument → method=undefined → ?? detectInstallMethod()
+    reExecProcess()
+
+    expect(exitSpy).toHaveBeenCalledWith(0)
+  })
+})
