@@ -7,7 +7,7 @@ import { getConfigDir } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AutoUpdateConfig } from './types'
-import { atomicWriteFile, getErrorMessage } from './utils'
+import { atomicWriteFile, getErrorMessage, sleep } from './utils'
 import { detectInstallMethod, isNewerVersion, isValidVersion, performUpdate, reExecProcess } from './update-checker'
 
 export interface AutoUpdaterHandle {
@@ -128,7 +128,7 @@ export function startAutoUpdater(
           const busy = await isAnyAgentBusy()
           if (!busy) break
           logger.info(t('update.waitingForBusy'))
-          await new Promise<void>(r => setTimeout(r, UPDATE_BUSY_POLL_INTERVAL_MS))
+          await sleep(UPDATE_BUSY_POLL_INTERVAL_MS)
         }
       }
 
