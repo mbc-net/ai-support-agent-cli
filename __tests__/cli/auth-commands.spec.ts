@@ -194,6 +194,71 @@ describe('cli/auth-commands', () => {
     })
   })
 
+  describe('add-project action (browser auth)', () => {
+    it('should call performBrowserAuth and add project on success (project.added message key)', async () => {
+      // Covers line 107: handleBrowserAuthCommand(opts, 'project.added')
+      // Distinct from login which uses 'project.registered' key
+      mockedStartAuthServer.mockResolvedValue({
+        url: 'http://localhost:12345',
+        nonce: 'test-nonce',
+        waitForCallback: jest.fn().mockResolvedValue({
+          token: 'auth-token',
+          apiUrl: 'http://callback-api',
+          projectCode: 'my-proj',
+          tenantCode: 'mbc',
+        }),
+        stop: jest.fn(),
+      })
+
+      const program = new Command()
+        .exitOverride()
+        .configureOutput({ writeOut: () => {}, writeErr: () => {} })
+
+      registerAuthCommands(program)
+
+      const addProjectCmd = program.commands.find((cmd) => cmd.name() === 'add-project')!
+      await addProjectCmd.parseAsync(['node', 'test', '--url', 'http://my-web'])
+
+      expect(mockedAddProject).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectCode: 'my-proj',
+          tenantCode: 'mbc',
+        }),
+      )
+      expect(logger.success).toHaveBeenCalled()
+    })
+  })
+
+  describe('configure action – tenantCode not returned from API (line 140-142)', () => {
+    it('should exit with error when API returns project without tenantCode', async () => {
+      // Covers lines 140-142: if (!tenantCode) { ... process.exit(1) }
+      // This handles the edge case where getProjectConfig returns a project with no tenantCode
+      const mockGetProjectConfig = jest.fn().mockResolvedValue({
+        project: { tenantCode: null, projectCode: 'PROJ1', projectName: 'Proj' },
+        configHash: 'hash',
+        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true },
+      })
+      MockedApiClient.mockImplementation(() => ({
+        getProjectConfig: mockGetProjectConfig,
+      }) as unknown as ApiClient)
+
+      const program = new Command()
+        .exitOverride()
+        .configureOutput({ writeOut: () => {}, writeErr: () => {} })
+
+      registerAuthCommands(program)
+
+      const configureCmd = program.commands.find((cmd) => cmd.name() === 'configure')!
+      await expect(
+        configureCmd.parseAsync(['node', 'test', '--token', 'my-token', '--api-url', 'http://my-api']),
+      ).rejects.toThrow('process.exit called')
+
+      expect(exitSpy).toHaveBeenCalledWith(1)
+      expect(logger.error).toHaveBeenCalled()
+      expect(mockedAddProject).not.toHaveBeenCalled()
+    })
+  })
+
   describe('login action (browser auth)', () => {
     it('should call performBrowserAuth and add project on success', async () => {
       mockedStartAuthServer.mockResolvedValue({
