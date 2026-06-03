@@ -6,6 +6,14 @@ export function readJsonSync<T>(filePath: string): T {
   return JSON.parse(content) as T
 }
 
+/**
+ * 指定したミリ秒だけ待機する Promise を返す。
+ * `await new Promise((resolve) => setTimeout(resolve, ms))` の重複イディオムを集約する。
+ */
+export function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms))
+}
+
 export function atomicWriteFile(filePath: string, content: string, mode = 0o600): void {
   const tmpPath = filePath + '.tmp'
   fs.writeFileSync(tmpPath, content, { mode })

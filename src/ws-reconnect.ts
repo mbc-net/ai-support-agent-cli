@@ -1,6 +1,6 @@
 import { logger } from './logger'
 import { calculateBackoff } from './retry-strategy'
-import { getErrorMessage } from './utils'
+import { getErrorMessage, sleep } from './utils'
 
 export interface ReconnectOptions {
   maxRetries: number
@@ -45,7 +45,7 @@ export async function attemptReconnect(
   }
   logger.info(`${logPrefix} Reconnecting in ${delay}ms (attempt ${attemptsRef.current}/${maxRetries})`)
 
-  await new Promise<void>((resolve) => setTimeout(resolve, delay))
+  await sleep(delay)
   if (isClosedFn()) return
 
   try {
