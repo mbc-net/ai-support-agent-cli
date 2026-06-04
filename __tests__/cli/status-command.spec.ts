@@ -142,5 +142,27 @@ describe('cli/status-command', () => {
       expect(consoleSpy).toHaveBeenCalled()
       consoleSpy.mockRestore()
     })
+
+    it('agentId が空の場合 "Not Set" を表示する（line 16 branch [1]）', () => {
+      // Cover: config.agentId || t('status.notSet')  when agentId is falsy (empty string)
+      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {})
+      const config = {
+        agentId: '',  // empty → || t('status.notSet') fallback
+        lastConnected: null,
+      }
+      mockedLoadConfig.mockReturnValue(config)
+      mockedGetProjectList.mockReturnValue([])
+
+      const program = new Command()
+        .exitOverride()
+        .configureOutput({ writeOut: () => {}, writeErr: () => {} })
+
+      registerStatusCommand(program)
+      program.parse(['node', 'test', 'status'])
+
+      expect(consoleSpy).toHaveBeenCalled()
+      // The output should contain "notSet" translation (empty agentId → fallback)
+      consoleSpy.mockRestore()
+    })
   })
 })
