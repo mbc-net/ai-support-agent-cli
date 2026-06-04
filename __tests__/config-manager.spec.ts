@@ -325,6 +325,18 @@ describe('config-manager', () => {
     })
   })
 
+  describe('branch coverage: setProjectDir with no projects (line 179)', () => {
+    it('projects が undefined の場合 ?? [] にフォールバック（line 179 branch [1]）', () => {
+      // config.projects is undefined → config?.projects = undefined → ?? [] fallback
+      saveConfig({})  // empty config, no projects array
+      // No addProject call → config.projects is undefined → ?? [] → []
+
+      const result = setProjectDir('any-project', '/some/path')
+      // projects = [] → find returns undefined → return false
+      expect(result).toBe(false)
+    })
+  })
+
   describe('setDefaultProjectDir', () => {
     it('should set defaultProjectDir in config', () => {
       saveConfig({})
