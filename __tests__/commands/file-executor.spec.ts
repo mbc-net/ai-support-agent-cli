@@ -191,6 +191,17 @@ describe('file-executor', () => {
       fs.unlinkSync(tmpFile)
     })
 
+    it('oldPath が access denied の場合 oldPathOrError を返す（line 86 branch [0]）', async () => {
+      // Cover: if (typeof oldPathOrError !== 'string') return oldPathOrError
+      // When oldPath itself fails validation (access denied) → returns error
+      const result = await fileRename({
+        oldPath: '/etc/blocked-source',  // access denied → not a string
+        newPath: '/tmp/target',
+      })
+      expectFailure(result)
+      expect(result.error).toContain('Access denied')
+    })
+
     it('should throw when source does not exist', async () => {
       await expect(
         fileRename({
