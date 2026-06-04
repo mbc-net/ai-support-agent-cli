@@ -215,24 +215,25 @@ describe('credentials tool', () => {
 
   describe('branch coverage: isSsoAuthRequired with null data (line 15)', () => {
     it('response.data が null の場合 false を返す（line 15 branch [0]）', async () => {
-      // Cover: if (!data) return false
-      // When response.data is null → !data = true → return false
-      const { default: axios } = await import('axios')
-      const axiosError = new axios.AxiosError('Request failed', 'ERR_BAD_RESPONSE', undefined, undefined, {
+      // Cover: if (!data) return false  in isSsoAuthRequired
+      // isSsoAuthRequired is called for type=aws errors (not db)
+      // When response.data is null → !data = true → return false (not SSO_AUTH_REQUIRED)
+      const axiosError = new AxiosError('Request failed', 'ERR_BAD_RESPONSE', undefined, undefined, {
         status: 401,
         statusText: 'Unauthorized',
-        data: null,  // null → !data = true → return false (not SSO_AUTH_REQUIRED)
+        data: null,  // null → !data = true → return false
         headers: {},
-        config: { headers: new axios.AxiosHeaders() },
+        config: { headers: new AxiosHeaders() },
       })
 
       setupTool({
-        getDbCredentials: jest.fn().mockRejectedValue(axiosError),
+        getAwsCredentials: jest.fn().mockRejectedValue(axiosError),
       })
 
-      const result = await toolCallback({ type: 'db', name: 'MAIN' }) as { content: Array<{ text: string }>; isError: boolean }
+      // Use type=aws to trigger isSsoAuthRequired (db path does not call it)
+      const result = await toolCallback({ type: 'aws', name: 'MAIN' }) as { content: Array<{ text: string }>; isError: boolean }
       expect(result.isError).toBe(true)
-      // Not SSO auth required (data is null → isSsoAuthRequired returns false)
+      // Not SSO auth required (data is null → isSsoAuthRequired returns false → error re-thrown)
       expect(result.content[0].text).not.toContain('SSO')
     })
   })

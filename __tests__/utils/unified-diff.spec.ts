@@ -105,4 +105,12 @@ describe('computeUnifiedDiff', () => {
     expect(result).toContain('---')
     expect(result).toContain('+++')
   })
+
+  it('同一ファイルの場合は空文字を返す（line 26/151 branch）', () => {
+    // Cover: if (hunks.length === 0) return ''  when files are identical
+    // Also covers: if (edits.length === 0) return []  in buildHunks
+    const identical = 'line1\nline2\nline3'
+    const result = computeUnifiedDiff(identical, identical, 'a.txt', 'b.txt')
+    expect(result).toBe('')
+  })
 })
