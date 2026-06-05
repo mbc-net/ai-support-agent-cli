@@ -157,6 +157,33 @@ describe('registerE2eTestStepTool', () => {
     )
   })
 
+  it('should handle non-Error thrown by browser screenshot gracefully', async () => {
+    process.env.AI_SUPPORT_E2E_EXECUTION_ID = 'exec-123'
+    process.env.AI_SUPPORT_AGENT_TENANT_CODE = 'mbc'
+    process.env.AI_SUPPORT_AGENT_PROJECT_CODE = 'MBC_01'
+
+    mockApiClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const mockBrowserSession = {
+      screenshot: jest.fn().mockRejectedValue('non-error-screenshot-failure'),
+    }
+
+    registerE2eTestStepTool(server as unknown as McpServer, mockApiClient as any, mockBrowserSession as any)
+
+    const handler = server.tool.mock.calls[0][3]
+    const result = await handler({
+      stepNumber: 1,
+      action: 'Click button',
+      status: 'passed',
+    }) as { content: Array<{ text: string }> }
+
+    // Should still report the step even when screenshot fails
+    expect(mockApiClient.reportE2eTestStep).toHaveBeenCalled()
+    const callArgs = mockApiClient.reportE2eTestStep.mock.calls[0][3]
+    expect(callArgs.screenshotBase64).toBeUndefined()
+    expect(result.content[0].text).toContain('Step 1: passed')
+  })
+
   it('should include error message in response for failed steps', async () => {
     process.env.AI_SUPPORT_E2E_EXECUTION_ID = 'exec-1'
     process.env.AI_SUPPORT_AGENT_TENANT_CODE = 'mbc'
@@ -176,5 +203,60 @@ describe('registerE2eTestStepTool', () => {
 
     expect(result.content[0].text).toContain('Step 2: failed')
     expect(result.content[0].text).toContain('Expected "Dashboard" but got "Login"')
+  })
+
+  it('should handle Error instance thrown by browser screenshot gracefully', async () => {
+    process.env.AI_SUPPORT_E2E_EXECUTION_ID = 'exec-123'
+    process.env.AI_SUPPORT_AGENT_TENANT_CODE = 'mbc'
+    process.env.AI_SUPPORT_AGENT_PROJECT_CODE = 'MBC_01'
+
+    mockApiClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const screenshotError = new Error('Page not loaded')
+    const mockBrowserSession = {
+      screenshot: jest.fn().mockRejectedValue(screenshotError),
+    }
+
+    registerE2eTestStepTool(server as unknown as McpServer, mockApiClient as any, mockBrowserSession as any)
+
+    const handler = server.tool.mock.calls[0][3]
+    const result = await handler({
+      stepNumber: 1,
+      action: 'Click button',
+      status: 'passed',
+    }) as { content: Array<{ text: string }> }
+
+    // Should still report the step even when screenshot fails with an Error instance
+    expect(mockApiClient.reportE2eTestStep).toHaveBeenCalled()
+    const callArgs = mockApiClient.reportE2eTestStep.mock.calls[0][3]
+    expect(callArgs.screenshotBase64).toBeUndefined()
+    expect(result.content[0].text).toContain('Step 1: passed')
+  })
+
+  it('should include testCaseId in report when AI_SUPPORT_E2E_TEST_CASE_ID is set', async () => {
+    process.env.AI_SUPPORT_E2E_EXECUTION_ID = 'exec-123'
+    process.env.AI_SUPPORT_AGENT_TENANT_CODE = 'mbc'
+    process.env.AI_SUPPORT_AGENT_PROJECT_CODE = 'MBC_01'
+    process.env.AI_SUPPORT_E2E_TEST_CASE_ID = 'tc-456'
+
+    mockApiClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    registerE2eTestStepTool(server as unknown as McpServer, mockApiClient as any)
+
+    const handler = server.tool.mock.calls[0][3]
+    await handler({
+      stepNumber: 1,
+      action: 'Navigate to dashboard',
+      status: 'passed',
+    })
+
+    expect(mockApiClient.reportE2eTestStep).toHaveBeenCalledWith(
+      'mbc',
+      'MBC_01',
+      'exec-123',
+      expect.objectContaining({
+        testCaseId: 'tc-456',
+      }),
+    )
   })
 })

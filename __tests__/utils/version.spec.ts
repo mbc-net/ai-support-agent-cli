@@ -51,6 +51,16 @@ describe('isNewerVersion', () => {
     expect(isNewerVersion('1', '2')).toBe(true)
     expect(isNewerVersion('1.0', '1.1')).toBe(true)
   })
+
+  it('should handle pre-release with different number of segments (cParts shorter)', () => {
+    // cParts = ['beta'], lParts = ['beta', '1'] — when i=1, cParts[1] ?? '' triggers
+    expect(isNewerVersion('1.0.0-beta', '1.0.0-beta.1')).toBe(true)
+  })
+
+  it('should handle pre-release with different number of segments (lParts shorter)', () => {
+    // cParts = ['beta', '2'], lParts = ['beta'] — when i=1, lParts[1] ?? '' triggers
+    expect(isNewerVersion('1.0.0-beta.2', '1.0.0-beta')).toBe(false)
+  })
 })
 
 describe('isValidVersion', () => {
@@ -76,5 +86,15 @@ describe('isValidVersion', () => {
     expect(isValidVersion('1.0.0<script>')).toBe(false)
     expect(isValidVersion('1.0.0 malicious')).toBe(false)
     expect(isValidVersion('1.0.0-')).toBe(false)
+  })
+})
+
+// ── branch coverage ──────────────────────────────────────────────────────────
+describe('isNewerVersion: malformed version → ?? 0 fallback (line 15)', () => {
+  it('バージョン文字列が不完全な場合 ?? 0 にフォールバックする', () => {
+    // Cover: parts[1] ?? 0, parts[2] ?? 0 when version has fewer than 3 parts
+    // '1.2' → parts = [1, 2] → parts[2] = undefined → ?? 0 fallback
+    expect(isNewerVersion('1.2', '1.2.1')).toBe(true)  // 1.2.0 < 1.2.1
+    expect(isNewerVersion('1.2.3', '1.2')).toBe(false)  // 1.2.3 > 1.2.0
   })
 })

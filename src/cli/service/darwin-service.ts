@@ -3,24 +3,39 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { loadConfig, getProjectList } from '../../config-manager'
+import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER } from '../../constants'
+import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
 import type { ProjectRegistration } from '../../types'
 import type { ProjectStatus } from './types'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { getErrorMessage } from '../../utils'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
 import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import { buildDockerRunWithLogRotate } from './service-template-helpers'
+import {
+  getDarwinLaunchAgentsDir,
+  getDarwinLogDir,
+  getProjectConfigHostDir,
+  getProjectLogDir,
+  getProjectServiceDir,
+  getServicesDir,
+  getUpdateScriptPath,
+  getWrapperScriptPath,
+  getAgentOutLog,
+  getAgentErrLog,
+  getWrapperOutLog,
+  getWrapperErrLog,
+} from '../../utils/path-utils'
 
 export { getCliEntryPoint, getNodePath }
 
 const SERVICE_LABEL = 'com.ai-support-agent.cli'
 
-function getLogDir(): string {
-  return path.join(os.homedir(), 'Library', 'Logs', 'ai-support-agent')
-}
+const getLogDir = getDarwinLogDir
 
 // ---------------------------------------------------------------------------
 // Per-project plist helpers
@@ -36,12 +51,12 @@ export function getProjectLabel(tenantCode: string, projectCode: string): string
 /** Returns the plist file path for a given project */
 export function getProjectPlistPath(tenantCode: string, projectCode: string): string {
   const label = getProjectLabel(tenantCode, projectCode)
-  return path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`)
+  return path.join(getDarwinLaunchAgentsDir(), `${label}.plist`)
 }
 
 /** Lists all per-project plist files under ~/Library/LaunchAgents */
 export function getAllProjectPlists(): Array<{ label: string; plistPath: string }> {
-  const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents')
+  const launchAgentsDir = getDarwinLaunchAgentsDir()
   const prefix = `${SERVICE_LABEL}.`
   const results: Array<{ label: string; plistPath: string }> = []
   try {
@@ -62,21 +77,7 @@ export function getAllProjectPlists(): Array<{ label: string; plistPath: string 
   return results
 }
 
-/** Returns the host-side per-project config dir (mirrors what docker-runner uses) */
-function getProjectConfigHostDir(tenantCode: string, projectCode: string): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'projects', tenantCode, projectCode, '.ai-support-agent')
-}
-
-/** Returns the services dir where wrapper scripts are stored */
-function getServicesDir(): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'services')
-}
+// getProjectConfigHostDir and getServicesDir are imported from ../../utils/path-utils
 
 // ---------------------------------------------------------------------------
 // plist generation
@@ -106,10 +107,10 @@ export function generatePlist(options: ServiceConfig): string {
   const { nodePath, entryPoint, logDir, verbose, docker } = options
   const args = [nodePath, entryPoint, 'start']
   if (!docker) {
-    args.push('--no-docker')
+    args.push(CLI_FLAG_NO_DOCKER)
   }
   if (verbose) {
-    args.push('--verbose')
+    args.push(CLI_FLAG_VERBOSE)
   }
 
   const programArgs = args
@@ -136,10 +137,10 @@ ${programArgs}
     <true/>
 
     <key>StandardOutPath</key>
-    <string>${escapeXml(path.join(logDir, 'agent.out.log'))}</string>
+    <string>${escapeXml(getAgentOutLog(logDir))}</string>
 
     <key>StandardErrorPath</key>
-    <string>${escapeXml(path.join(logDir, 'agent.err.log'))}</string>
+    <string>${escapeXml(getAgentErrLog(logDir))}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -190,10 +191,10 @@ export function generateProjectPlist(opts: {
       but stay tiny because only bootstrap noise lands there.
     -->
     <key>StandardOutPath</key>
-    <string>${escapeXml(path.join(opts.logDir, 'wrapper.out.log'))}</string>
+    <string>${escapeXml(getWrapperOutLog(opts.logDir))}</string>
 
     <key>StandardErrorPath</key>
-    <string>${escapeXml(path.join(opts.logDir, 'wrapper.err.log'))}</string>
+    <string>${escapeXml(getWrapperErrLog(opts.logDir))}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -267,33 +268,49 @@ export function generateWrapperScript(opts: {
   // (the legacy `"..."` mounts above use raw double-quotes for back-compat).
   mountLines.push(`  -v ${shellQuote(`${hostProjectDir}:${containerProjectDir}:rw`)} \\`)
 
+  // Shell-quote every interpolated value. The token / apiUrl / API keys can
+  // contain shell metacharacters (`$`, backtick, `;`, …); without quoting they
+  // would be interpreted by bash when the wrapper runs `docker run`, allowing
+  // command injection. This mirrors the Linux wrapper, which already quotes
+  // all of these.
   const envLines: string[] = [
     `  -e AI_SUPPORT_AGENT_IN_DOCKER=1 \\`,
     `  -e HOME=${containerHome} \\`,
     `  -e AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir} \\`,
-    `  -e AI_SUPPORT_AGENT_TOKEN=${opts.token} \\`,
-    `  -e AI_SUPPORT_AGENT_API_URL=${containerApiUrl} \\`,
-    // Shell-quote so neither projectCode nor containerProjectDir can be
-    // shell-interpreted (projectCode is validated to [A-Za-z0-9_-] at
-    // install time, but quoting is defense in depth).
+    `  -e AI_SUPPORT_AGENT_TOKEN=${shellQuote(opts.token)} \\`,
+    `  -e AI_SUPPORT_AGENT_API_URL=${shellQuote(containerApiUrl)} \\`,
+    // projectCode is validated to [A-Za-z0-9_-] at install time, but quoting
+    // is defense in depth.
     `  -e AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${shellQuote(`${opts.projectCode}=${containerProjectDir}`)} \\`,
   ]
   if (opts.anthropicApiKey) {
-    envLines.push(`  -e ANTHROPIC_API_KEY=${opts.anthropicApiKey} \\`)
+    envLines.push(`  -e ANTHROPIC_API_KEY=${shellQuote(opts.anthropicApiKey)} \\`)
   }
   if (opts.claudeCodeOauthToken) {
-    envLines.push(`  -e CLAUDE_CODE_OAUTH_TOKEN=${opts.claudeCodeOauthToken} \\`)
+    envLines.push(`  -e CLAUDE_CODE_OAUTH_TOKEN=${shellQuote(opts.claudeCodeOauthToken)} \\`)
   }
 
   const containerArgs = [
-    'ai-support-agent', 'start', '--no-docker',
+    'ai-support-agent', 'start', CLI_FLAG_NO_DOCKER,
     `--project ${opts.tenantCode}/${opts.projectCode}`,
   ]
-  if (opts.verbose) containerArgs.push('--verbose')
+  if (opts.verbose) containerArgs.push(CLI_FLAG_VERBOSE)
 
   // Sanitize tenant/project codes the same way buildContainerName does
   const sanitize = (s: string): string => s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
   const containerName = `ai-${sanitize(opts.tenantCode)}-${sanitize(opts.projectCode)}`
+
+  const dockerRunBlock = buildDockerRunWithLogRotate({
+    buildDockerRun: (outputRedirect) => [
+      `docker run --rm -i --name "${containerName}" \\`,
+      mountLines.join('\n'),
+      envLines.join('\n'),
+      `  "\$IMAGE_TAG" \\`,
+      `  ${containerArgs.join(' ')}${outputRedirect}`,
+    ].join('\n'),
+    logDir: opts.logDir,
+    supervisorLabel: 'launchd',
+  })
 
   return `#!/bin/bash
 set -uo pipefail
@@ -330,57 +347,7 @@ fi
 # Remove stale container if it exists (e.g. from a previous crash)
 docker rm -f "${containerName}" 2>/dev/null || true
 
-${opts.logDir ? `\
-# Pipe stdout and stderr through SEPARATE \`ai-support-agent log-rotate\`
-# subprocesses so the active log files are bounded (default 5MB × 5
-# generations) AND each stream lands in its own file (agent.out.log /
-# agent.err.log) — matching the pre-rotation layout that operators tail.
-#
-# Both rotators are invoked with \`--no-tee\` so they DO NOT echo back to
-# stdout/stderr. The launchd plist's StandardOutPath/ErrorPath is pointed
-# at separate wrapper.*.log files (NOT the agent.*.log paths owned by
-# the rotators), so we don't get a double-write race where launchd
-# silently keeps appending to a rotated generation.
-#
-# We use named FIFOs + background rotators (rather than process
-# substitution \`> >(cmd)\`) because macOS ships /bin/bash 3.2 where
-# bare \`wait\` does not reap proc-sub children — they would be SIGKILLed
-# on launchd unload, losing the last few KB of logs. Background jobs
-# started with \`&\` set \$! reliably on every supported bash.
-_ROT_DIR=$(mktemp -d -t ai-support-agent-rot)
-trap 'rm -rf "\$_ROT_DIR" 2>/dev/null || true' EXIT
-mkfifo "\$_ROT_DIR/out" "\$_ROT_DIR/err"
-ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.out.log`)} < "\$_ROT_DIR/out" &
-_ROT_OUT_PID=$!
-ai-support-agent log-rotate --no-tee ${shellQuote(`${opts.logDir}/agent.err.log`)} < "\$_ROT_DIR/err" >&2 &
-_ROT_ERR_PID=$!
-
-docker run --rm -i --name "${containerName}" \\
-${mountLines.join('\n')}
-${envLines.join('\n')}
-  "\$IMAGE_TAG" \\
-  ${containerArgs.join(' ')} \\
-   > "\$_ROT_DIR/out" 2> "\$_ROT_DIR/err"
-
-# Redirecting to a FIFO does not propagate the rotator's exit into \$?,
-# so EXIT_CODE is purely docker's exit status. The exit-42 update path
-# is preserved (the rotator can never mask it).
-EXIT_CODE=$?
-
-# Wait on the rotators explicitly so they drain their FIFO before the
-# wrapper exits (launchd will SIGKILL stragglers otherwise). docker
-# closed its write end on exit, so each rotator sees EOF on stdin and
-# exits naturally; the wait is bounded by pipe-buffer drain time.
-wait "\$_ROT_OUT_PID" "\$_ROT_ERR_PID" 2>/dev/null || true
-` : `\
-docker run --rm -i --name "${containerName}" \\
-${mountLines.join('\n')}
-${envLines.join('\n')}
-  "\$IMAGE_TAG" \\
-  ${containerArgs.join(' ')}
-
-EXIT_CODE=$?
-`}
+${dockerRunBlock}
 if [ "$EXIT_CODE" -eq 42 ]; then
   exec "${opts.updateScriptPath}"
 fi
@@ -391,10 +358,8 @@ exit "$EXIT_CODE"
 
 /** Generate the update-and-restart.sh script */
 export function generateUpdateScript(): string {
-  const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents')
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
+  const launchAgentsDir = getDarwinLaunchAgentsDir()
+  const configDir = getConfigDir()
 
   return `#!/bin/bash
 set -uo pipefail
@@ -509,12 +474,7 @@ exit 0
 // DarwinServiceStrategy
 // ---------------------------------------------------------------------------
 
-function getUpdateScriptPath(): string {
-  const configDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
-    ? path.resolve(process.env.AI_SUPPORT_AGENT_CONFIG_DIR)
-    : path.join(os.homedir(), '.ai-support-agent')
-  return path.join(configDir, 'update-and-restart.sh')
-}
+// getUpdateScriptPath is imported from ../../utils/path-utils
 
 /**
  * Write run.sh and plist for a single project. Does NOT launchctl load.
@@ -536,18 +496,18 @@ export function writeProjectServiceFiles(
   const projectKey = `${tenantCode}-${projectCode.toLowerCase()}`
 
   const logDir = getLogDir()
-  const projectLogDir = path.join(logDir, projectKey)
+  const projectLogDir = getProjectLogDir(logDir, projectKey)
   if (!fs.existsSync(projectLogDir)) {
     fs.mkdirSync(projectLogDir, { recursive: true, mode: 0o700 })
   }
 
-  const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents')
+  const launchAgentsDir = getDarwinLaunchAgentsDir()
   if (!fs.existsSync(launchAgentsDir)) {
     fs.mkdirSync(launchAgentsDir, { recursive: true })
   }
 
   const servicesDir = getServicesDir()
-  const projectServiceDir = path.join(servicesDir, projectKey)
+  const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
   if (!fs.existsSync(projectServiceDir)) {
     fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
   }
@@ -563,7 +523,7 @@ export function writeProjectServiceFiles(
   const validatedProjectDir = validateProjectDirForMount(project.projectDir)
 
   const updateScriptPath = getUpdateScriptPath()
-  const wrapperScriptPath = path.join(projectServiceDir, 'run.sh')
+  const wrapperScriptPath = getWrapperScriptPath(projectServiceDir)
   const wrapperScript = generateWrapperScript({
     imageName: IMAGE_NAME,
     tenantCode,
@@ -611,7 +571,7 @@ export function installAndStartProject(
   try {
     execSync(`launchctl load "${plistPath}"`, { stdio: 'pipe' })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = getErrorMessage(error)
     logger.warn(t('service.loadWarning', { label: `${label}: ${message}` }))
     return
   }
@@ -640,7 +600,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       fs.mkdirSync(logDir, { recursive: true })
     }
 
-    const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents')
+    const launchAgentsDir = getDarwinLaunchAgentsDir()
     if (!fs.existsSync(launchAgentsDir)) {
       fs.mkdirSync(launchAgentsDir, { recursive: true })
     }
@@ -693,7 +653,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
         logger.success(t('service.projectInstalled', { projectCode, path: plistPath }))
         installedCount += 1
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.projectInstallFailed', { projectCode, message }))
         failedCount += 1
       }
@@ -753,7 +713,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       try {
         execSync(`launchctl load "${plistPath}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.startFailed', { message }))
         failed = true
       }
@@ -776,7 +736,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       try {
         execSync(`launchctl remove "${label}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.stopFailed', { message }))
         failed = true
       }
@@ -804,7 +764,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
         }
         execSync(`launchctl load "${plistPath}"`, { stdio: 'pipe' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('service.restartFailed', { message }))
         failed = true
       }
@@ -823,7 +783,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     }
 
     const projects: ProjectStatus[] = []
-    let anyRunning = false
+    let isAnyRunning = false
     let firstPid: number | undefined
 
     for (const { label } of projectPlists) {
@@ -838,7 +798,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
         if (pidMatch) {
           running = true
           pid = parseInt(pidMatch[1], 10)
-          anyRunning = true
+          isAnyRunning = true
           if (!firstPid) firstPid = pid
         }
       } catch {
@@ -847,6 +807,6 @@ export class DarwinServiceStrategy implements ServiceStrategy {
       projects.push({ label, projectCode, running, pid })
     }
 
-    return { installed: true, running: anyRunning, pid: firstPid, logDir, projects }
+    return { installed: true, running: isAnyRunning, pid: firstPid, logDir, projects }
   }
 }

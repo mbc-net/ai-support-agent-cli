@@ -276,6 +276,68 @@ describe('file-transfer', () => {
       expect(existsSync).toHaveBeenCalledWith('/tmp/project/.chat-files/conv-1')
       expect(rmSync).toHaveBeenCalledWith('/tmp/project/.chat-files/conv-1', { recursive: true, force: true })
     })
+
+    it('should handle cleanup error gracefully when rmSync throws non-Error', async () => {
+      (mockClient.getDownloadUrl as jest.Mock).mockResolvedValue({
+        downloadUrl: 'https://s3.example.com/file',
+      })
+
+      const mockStream = new Readable({ read() { this.push(null) } })
+      mockedAxios.get.mockResolvedValue({ data: mockStream })
+      const mockWriter = {} as ReturnType<typeof createWriteStream>
+      mockedCreateWriteStream.mockReturnValue(mockWriter)
+      mockedPipeline.mockResolvedValue(undefined)
+
+      const { existsSync, rmSync } = require('fs')
+      ;(existsSync as jest.Mock).mockReturnValue(true)
+      ;(rmSync as jest.Mock).mockImplementation(() => { throw 'non-error-string' })
+
+      const result = await downloadChatFiles(mockClient, 'agent-1', files, '/tmp/project', 'conv-1')
+
+      // Should not throw even when rmSync throws a non-Error
+      expect(() => result.cleanup()).not.toThrow()
+    })
+
+    it('should handle cleanup error gracefully when rmSync throws Error', async () => {
+      (mockClient.getDownloadUrl as jest.Mock).mockResolvedValue({
+        downloadUrl: 'https://s3.example.com/file',
+      })
+
+      const mockStream = new Readable({ read() { this.push(null) } })
+      mockedAxios.get.mockResolvedValue({ data: mockStream })
+      const mockWriter = {} as ReturnType<typeof createWriteStream>
+      mockedCreateWriteStream.mockReturnValue(mockWriter)
+      mockedPipeline.mockResolvedValue(undefined)
+
+      const { existsSync, rmSync } = require('fs')
+      ;(existsSync as jest.Mock).mockReturnValue(true)
+      ;(rmSync as jest.Mock).mockImplementation(() => { throw new Error('EACCES: permission denied') })
+
+      const result = await downloadChatFiles(mockClient, 'agent-1', files, '/tmp/project', 'conv-1')
+
+      // Should not throw even when rmSync throws
+      expect(() => result.cleanup()).not.toThrow()
+    })
+
+    it('should skip rmSync when download directory does not exist', async () => {
+      (mockClient.getDownloadUrl as jest.Mock).mockResolvedValue({
+        downloadUrl: 'https://s3.example.com/file',
+      })
+
+      const mockStream = new Readable({ read() { this.push(null) } })
+      mockedAxios.get.mockResolvedValue({ data: mockStream })
+      const mockWriter = {} as ReturnType<typeof createWriteStream>
+      mockedCreateWriteStream.mockReturnValue(mockWriter)
+      mockedPipeline.mockResolvedValue(undefined)
+
+      const { existsSync, rmSync } = require('fs')
+      ;(existsSync as jest.Mock).mockReturnValue(false)
+
+      const result = await downloadChatFiles(mockClient, 'agent-1', files, '/tmp/project', 'conv-1')
+      result.cleanup()
+
+      expect(rmSync).not.toHaveBeenCalled()
+    })
   })
 
   describe('uploadFile', () => {

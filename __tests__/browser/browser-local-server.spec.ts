@@ -1,6 +1,6 @@
 import http from 'http'
 
-import { BrowserLocalServer } from '../../src/browser/browser-local-server'
+import { ActionLogNotification, BrowserLocalServer } from '../../src/browser/browser-local-server'
 import { BrowserSessionManager } from '../../src/mcp/tools/browser/browser-session-manager'
 
 jest.mock('../../src/logger')
@@ -357,6 +357,154 @@ describe('BrowserLocalServer', () => {
       const tempServer = new BrowserLocalServer(manager)
       // Should not throw when called on non-started server
       await tempServer.stop()
+    })
+  })
+
+  describe('onActionLog callback', () => {
+    it('should invoke onActionLog when set and navigate emits action', async () => {
+      const logs: ActionLogNotification[] = []
+      server.onActionLog = (n) => logs.push(n)
+      await httpRequest(port, 'POST', '/browser/sess-1/navigate', JSON.stringify({ url: 'https://example.com' }))
+      server.onActionLog = null
+      expect(logs.length).toBeGreaterThan(0)
+      expect(logs[0].sessionId).toBe('sess-1')
+      expect(logs[0].entry.action).toBe('navigate')
+    })
+
+    it('should invoke onActionLog progress callback in execute-script', async () => {
+      const logs: ActionLogNotification[] = []
+      server.onActionLog = (n) => logs.push(n)
+      await httpRequest(port, 'POST', '/browser/sess-1/execute-script', JSON.stringify({
+        script: "await page.goto('https://example.com', { waitUntil: 'domcontentloaded' });\nawait page.click('#btn');",
+      }))
+      server.onActionLog = null
+      // At least one progress notification should have been emitted
+      const progressLogs = logs.filter((n) => n.entry.action === 'script_progress')
+      expect(progressLogs.length).toBeGreaterThan(0)
+    })
+  })
+
+  describe('request with null url', () => {
+    it('should fallback to / when req.url is undefined', async () => {
+      // Directly call the private handleRequest method with a fake req whose url is undefined
+      const fakeReq = {
+        url: undefined,
+        on: jest.fn().mockImplementation(function (this: { listeners: Record<string, (() => void)[]> }, event: string, cb: (...args: unknown[]) => void) {
+          if (!this.listeners) this.listeners = {}
+          if (!this.listeners[event]) this.listeners[event] = []
+          this.listeners[event].push(cb as () => void)
+          return fakeReq
+        }),
+        emit: jest.fn(),
+      }
+      // Trigger the 'end' event so readBody resolves with empty string
+      const fakeRes = {
+        writeHead: jest.fn(),
+        end: jest.fn(),
+      }
+      // Call private handleRequest directly via type cast
+      const handleRequest = (server as unknown as { handleRequest: (req: unknown, res: unknown) => Promise<void> }).handleRequest.bind(server)
+
+      // Patch the req.on to immediately call the 'end' callback
+      ;(fakeReq.on as jest.Mock).mockImplementation((event: string, cb: (...args: unknown[]) => void) => {
+        if (event === 'end') setImmediate(() => cb())
+        return fakeReq
+      })
+
+      await handleRequest(fakeReq, fakeRes)
+      // Should have sent a 404 response (no matching route for '/')
+      expect(fakeRes.writeHead).toHaveBeenCalledWith(404, expect.any(Object))
+    })
+  })
+
+  describe('navigate with no reason in validation error', () => {
+    it('should use fallback error message when reason is not provided', async () => {
+      const { validateUrl } = require('../../src/mcp/tools/browser/browser-security')
+      ;(validateUrl as jest.Mock).mockReturnValueOnce({ valid: false })
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/navigate', JSON.stringify({ url: 'javascript:void(0)' }))
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('Invalid URL')
+    })
+  })
+
+  describe('get-text with large content', () => {
+    it('should truncate text exceeding 50KB', async () => {
+      const longText = 'a'.repeat(51 * 1024)
+      mockPage.locator.mockReturnValue({ innerText: jest.fn().mockResolvedValue(longText) })
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/get-text', JSON.stringify({}))
+      expect(res.status).toBe(200)
+      expect((res.body.text as string).endsWith('... (truncated)')).toBe(true)
+    })
+
+    it('should truncate preview longer than 100 characters', async () => {
+      const longPreview = 'b'.repeat(150)
+      mockPage.locator.mockReturnValue({ innerText: jest.fn().mockResolvedValue(longPreview) })
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/get-text', JSON.stringify({}))
+      expect(res.status).toBe(200)
+      expect(mockSession.actionLog.addEntry).toHaveBeenCalledWith(
+        expect.objectContaining({ details: expect.stringContaining('…') }),
+      )
+    })
+
+    it('should use selector from params for get-text', async () => {
+      mockPage.locator.mockReturnValue({ innerText: jest.fn().mockResolvedValue('content') })
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/get-text', JSON.stringify({ selector: '.main' }))
+      expect(res.status).toBe(200)
+      expect(mockPage.locator).toHaveBeenCalledWith('.main')
+    })
+  })
+
+  describe('extract with large content', () => {
+    it('should truncate extracted text exceeding 50KB', async () => {
+      const longText = 'c'.repeat(51 * 1024)
+      mockPage.locator.mockReturnValue({ innerText: jest.fn().mockResolvedValue(longText) })
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/extract', JSON.stringify({ selector: '.item', variableName: 'myVar' }))
+      expect(res.status).toBe(200)
+      expect((res.body.text as string).endsWith('... (truncated)')).toBe(true)
+    })
+
+    it('should truncate extract preview longer than 100 characters', async () => {
+      const longPreview = 'd'.repeat(150)
+      mockPage.locator.mockReturnValue({ innerText: jest.fn().mockResolvedValue(longPreview) })
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/extract', JSON.stringify({ selector: '.item', variableName: 'myVar' }))
+      expect(res.status).toBe(200)
+      expect(mockSession.actionLog.addEntry).toHaveBeenCalledWith(
+        expect.objectContaining({ details: expect.stringContaining('…') }),
+      )
+    })
+  })
+
+  describe('start error paths', () => {
+    it('should reject when server emits error event', async () => {
+      const errorServer = new BrowserLocalServer(manager)
+      // Create a fake server that immediately emits an error on listen
+      const fakeServer = new (require('events').EventEmitter)()
+      fakeServer.unref = jest.fn()
+      fakeServer.address = jest.fn().mockReturnValue(null)
+      fakeServer.close = jest.fn()
+      fakeServer.listen = jest.fn().mockImplementation(() => {
+        setImmediate(() => fakeServer.emit('error', new Error('EADDRINUSE')))
+        return fakeServer
+      })
+      const createServerSpy = jest.spyOn(http, 'createServer').mockReturnValueOnce(fakeServer as unknown as http.Server)
+      await expect(errorServer.start()).rejects.toThrow('EADDRINUSE')
+      createServerSpy.mockRestore()
+    })
+
+    it('should reject when server address returns null', async () => {
+      const nullAddrServer = new BrowserLocalServer(manager)
+      // Create a fake server that calls listen callback but returns null address
+      const fakeServer = new (require('events').EventEmitter)()
+      fakeServer.unref = jest.fn()
+      fakeServer.address = jest.fn().mockReturnValue(null)
+      fakeServer.close = jest.fn()
+      fakeServer.listen = jest.fn().mockImplementation((_port: number, _host: string, cb: () => void) => {
+        setImmediate(cb)
+        return fakeServer
+      })
+      const createServerSpy = jest.spyOn(http, 'createServer').mockReturnValueOnce(fakeServer as unknown as http.Server)
+      await expect(nullAddrServer.start()).rejects.toThrow('Failed to get server address')
+      createServerSpy.mockRestore()
     })
   })
 })

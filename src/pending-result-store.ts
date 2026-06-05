@@ -6,7 +6,7 @@ import { getConfigDir } from './config-manager'
 import { logger } from './logger'
 import { ApiClient } from './api-client'
 import type { CommandResult } from './types/command'
-import { getErrorMessage } from './utils'
+import { atomicWriteFile, getErrorMessage } from './utils'
 
 const PENDING_RESULTS_DIR = 'pending-results'
 const STALE_THRESHOLD_MS = 60 * 60 * 1000 // 1 hour
@@ -52,7 +52,7 @@ export function savePendingResult(
       tenantCode,
       savedAt: new Date().toISOString(),
     }
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2))
+    atomicWriteFile(filePath, JSON.stringify(data, null, 2))
   } catch (error) {
     logger.debug(`Failed to save pending result for ${commandId}: ${getErrorMessage(error)}`)
   }

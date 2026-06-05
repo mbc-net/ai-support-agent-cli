@@ -11,12 +11,23 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getProjectImageTag } from './dockerfile-path'
-import { DOCKER_UPDATE_EXIT_CODE, DOCKER_RESTART_EXIT_CODE } from '../constants'
+import {
+  CLI_FLAG_VERBOSE,
+  CLI_FLAG_NO_AUTO_UPDATE,
+  CLI_FLAG_NO_DOCKER,
+  DOCKER_MARKER_BUILT_HASH,
+  DOCKER_MARKER_CUSTOMIZATION_HASH,
+  DOCKER_MARKER_REBUILD_NEEDED,
+  DOCKER_MARKER_REGISTERED_AGENT_ID,
+  DOCKER_RESTART_EXIT_CODE,
+  DOCKER_UPDATE_EXIT_CODE,
+} from '../constants'
 import { t } from '../i18n'
 import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { removePidFile } from '../pid-manager'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
+import { atomicWriteFile, getErrorMessage } from '../utils'
 import type { DockerRunOptions } from './docker-runner'
 import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, resolveImageTag, getDockerPath } from './docker-utils'
 import { buildProjectVolumeMounts } from './volume-mount-builder'
@@ -27,6 +38,8 @@ import { installUpdateAndRestart } from './update-handler'
 
 /** Maximum total log size kept in memory per session (2 MB). */
 const MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024
+// API の SubmitLogChunkDto.text @MaxLength に合わせた上限（100,000 バイト）
+const MAX_LOG_CHUNK_BYTES = 100_000
 
 interface DockerContainerHandle {
   project: ProjectRegistration
@@ -98,7 +111,7 @@ export class DockerSupervisor {
         migrateProjectConfigDir(project)
         this.spawnProject(project)
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = getErrorMessage(error)
         logger.error(t('docker.projectSpawnFailed', { projectCode: project.projectCode, message }))
       }
     }
@@ -152,7 +165,7 @@ export class DockerSupervisor {
   }
 
   private async rebuildAndRestart(project: ProjectRegistration, projectConfigHostDir: string, forceIfDockerfileExists = false): Promise<void> {
-    const rebuildMarker = path.join(projectConfigHostDir, 'docker-rebuild-needed')
+    const rebuildMarker = path.join(projectConfigHostDir, DOCKER_MARKER_REBUILD_NEEDED)
     const projectDockerfile = path.join(projectConfigHostDir, 'Dockerfile')
     const hasMarker = fs.existsSync(rebuildMarker)
     const shouldBuild = hasMarker || (forceIfDockerfileExists && fs.existsSync(projectDockerfile))
@@ -161,7 +174,7 @@ export class DockerSupervisor {
 
       // Load the registered agentId before building so build logs are stored under
       // the correct agentId (the one shown in the Web UI), not the host agentId.
-      const registeredAgentIdPath = path.join(projectConfigHostDir, 'docker-registered-agent-id')
+      const registeredAgentIdPath = path.join(projectConfigHostDir, DOCKER_MARKER_REGISTERED_AGENT_ID)
       if (fs.existsSync(registeredAgentIdPath)) {
         const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
         if (registeredId && registeredId !== this.getProjectAgentId(project)) {
@@ -172,8 +185,8 @@ export class DockerSupervisor {
       if (fs.existsSync(projectDockerfile)) {
         try {
           await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, this.createProjectApiClient(project), this.getProjectAgentId(project))
-          const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
-          const dstHash = path.join(projectConfigHostDir, 'docker-built-hash')
+          const srcHash = path.join(projectConfigHostDir, DOCKER_MARKER_CUSTOMIZATION_HASH)
+          const dstHash = path.join(projectConfigHostDir, DOCKER_MARKER_BUILT_HASH)
           if (fs.existsSync(srcHash)) {
             fs.copyFileSync(srcHash, dstHash)
           }
@@ -182,20 +195,20 @@ export class DockerSupervisor {
           if (fs.existsSync(buildErrorPath)) {
             fs.unlinkSync(buildErrorPath)
           }
-        } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err)
+        } catch (err: unknown) {
+          const errorMsg = getErrorMessage(err)
           logger.error(`[docker] Image build failed: ${errorMsg}`)
           logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
           const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
           const truncatedError = errorMsg.length > 3000 ? errorMsg.substring(0, 3000) + '...(truncated)' : errorMsg
           /* istanbul ignore next */
           try {
-            fs.writeFileSync(buildErrorPath, truncatedError, 'utf-8')
+            atomicWriteFile(buildErrorPath, truncatedError)
           } catch (writeErr) {
-            logger.warn(`[docker] Failed to write build error file: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`)
+            logger.warn(`[docker] Failed to write build error file: ${getErrorMessage(writeErr)}`)
           }
-          const srcHash = path.join(projectConfigHostDir, 'docker-customization-hash')
-          const dstHash = path.join(projectConfigHostDir, 'docker-built-hash')
+          const srcHash = path.join(projectConfigHostDir, DOCKER_MARKER_CUSTOMIZATION_HASH)
+          const dstHash = path.join(projectConfigHostDir, DOCKER_MARKER_BUILT_HASH)
           if (fs.existsSync(srcHash)) {
             fs.copyFileSync(srcHash, dstHash)
           }
@@ -211,8 +224,8 @@ export class DockerSupervisor {
 
     // Pre-startup hash check: if docker-customization-hash !== docker-built-hash,
     // rebuild before starting the container
-    const customizationHashPath = path.join(projectConfigHostDir, 'docker-customization-hash')
-    const builtHashPath = path.join(projectConfigHostDir, 'docker-built-hash')
+    const customizationHashPath = path.join(projectConfigHostDir, DOCKER_MARKER_CUSTOMIZATION_HASH)
+    const builtHashPath = path.join(projectConfigHostDir, DOCKER_MARKER_BUILT_HASH)
     if (fs.existsSync(customizationHashPath) && fs.existsSync(builtHashPath)) {
       const customizationHash = fs.readFileSync(customizationHashPath, 'utf-8').trim()
       const builtHash = fs.readFileSync(builtHashPath, 'utf-8').trim()
@@ -224,7 +237,7 @@ export class DockerSupervisor {
     }
 
     // Load the server-assigned agentId written by the container after registration.
-    const registeredAgentIdPath = path.join(projectConfigHostDir, 'docker-registered-agent-id')
+    const registeredAgentIdPath = path.join(projectConfigHostDir, DOCKER_MARKER_REGISTERED_AGENT_ID)
     if (fs.existsSync(registeredAgentIdPath)) {
       const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
       if (registeredId && registeredId !== this.getProjectAgentId(project)) {
@@ -236,7 +249,7 @@ export class DockerSupervisor {
     const { mounts, envArgs } = buildProjectVolumeMounts(project, projectConfigHostDir)
 
     const containerArgs = [
-      'ai-support-agent', 'start', '--no-docker',
+      'ai-support-agent', 'start', CLI_FLAG_NO_DOCKER,
       '--project', key,
     ]
     if (this.opts.pollInterval !== undefined) {
@@ -246,10 +259,10 @@ export class DockerSupervisor {
       containerArgs.push('--heartbeat-interval', String(this.opts.heartbeatInterval))
     }
     if (this.opts.verbose) {
-      containerArgs.push('--verbose')
+      containerArgs.push(CLI_FLAG_VERBOSE)
     }
     if (this.opts.autoUpdate === false) {
-      containerArgs.push('--no-auto-update')
+      containerArgs.push(CLI_FLAG_NO_AUTO_UPDATE)
     }
     if (this.opts.updateChannel) {
       containerArgs.push('--update-channel', this.opts.updateChannel)
@@ -305,7 +318,7 @@ export class DockerSupervisor {
       let registeredIdWatcher: Pick<fs.FSWatcher, 'close'> = noopWatcher
       try {
         registeredIdWatcher = fs.watch(projectConfigHostDir, (eventType, filename) => {
-          if (filename === 'docker-registered-agent-id' && (eventType === 'rename' || eventType === 'change')) {
+          if (filename === DOCKER_MARKER_REGISTERED_AGENT_ID && (eventType === 'rename' || eventType === 'change')) {
             try {
               const newId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
               const currentId = supervisor.getProjectAgentId(project)
@@ -336,8 +349,12 @@ export class DockerSupervisor {
             logger.warn(`[docker] Container log for ${key} exceeded 2 MB limit; remaining output will not be saved to S3`)
           }
         }
-        await apiClient.submitLogChunk({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, seq: ++seq, text })
-          .catch((e: unknown) => logger.warn(`[docker] log chunk failed: ${e}`))
+        // 1 フラッシュのテキストが API 上限を超える場合は分割して送信
+        for (let offset = 0; offset < text.length; offset += MAX_LOG_CHUNK_BYTES) {
+          const slice = text.slice(offset, offset + MAX_LOG_CHUNK_BYTES)
+          await apiClient.submitLogChunk({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, seq: ++seq, text: slice })
+            .catch((e: unknown) => logger.warn(`[docker] log chunk failed: ${e}`))
+        }
       }
 
       const flushTimer = setInterval(() => { void flush() }, 1_000).unref()
@@ -350,20 +367,24 @@ export class DockerSupervisor {
       child.on('close', () => {
         registeredIdWatcher.close()
         clearInterval(flushTimer)
-        void flush().then(() => {
-          if (fullLog) {
-            void apiClient.saveSessionLog({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, content: fullLog })
-              .catch((e: unknown) => logger.warn(`[docker] S3 upload failed: ${e}`))
-              .finally(() => { handle.resolveClosed() })
-          } else {
+        void (async () => {
+          try {
+            await flush()
+            if (fullLog) {
+              await apiClient.saveSessionLog({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, content: fullLog })
+                .catch((e: unknown) => logger.warn(`[docker] S3 upload failed: ${e}`))
+            }
+          } catch /* istanbul ignore next */ {
+            // ignore flush / saveSessionLog errors — always resolve so shutdown can proceed
+          } finally {
             handle.resolveClosed()
           }
-        }).catch(/* istanbul ignore next */ () => { handle.resolveClosed() }).catch(/* istanbul ignore next */ () => { handle.resolveClosed() })
+        })()
       })
     }
 
     child.on('error', (err) => {
-      logger.error(`[docker] Container error for ${key}: ${err.message}`)
+      logger.error(`[docker] Container error for ${key}: ${getErrorMessage(err)}`)
     })
 
     child.on('close', (code) => {
@@ -378,7 +399,7 @@ export class DockerSupervisor {
         logger.info(`[docker] Container ${key} exited for update. Stopping all containers and rebuilding...`)
         this.stopAll()
         void installUpdateAndRestart(projectConfigHostDir).catch((err) => {
-          logger.error(`[docker] Update failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.error(`[docker] Update failed: ${getErrorMessage(err)}`)
           process.exit(1)
         })
         return
@@ -387,7 +408,7 @@ export class DockerSupervisor {
       if (code === DOCKER_RESTART_EXIT_CODE && !this.updating) {
         logger.info(`[docker] Container ${key} requested restart. Rebuilding image if needed...`)
         void this.rebuildAndRestart(project, projectConfigHostDir, true).catch((err) => {
-          logger.error(`[docker] Restart failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.error(`[docker] Restart failed: ${getErrorMessage(err)}`)
         })
         return
       }

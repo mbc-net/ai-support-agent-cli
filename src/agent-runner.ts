@@ -11,7 +11,7 @@ import { captureException, flushSentry, initSentry } from './sentry'
 import { getSystemInfo } from './system-info'
 import type { AgentChatMode, AutoUpdateConfig, ProjectRegistration, ReleaseChannel } from './types'
 import { detectChannelFromVersion } from './update-checker'
-import { validateApiUrl } from './utils'
+import { getErrorMessage, validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
 import { startConfigWatcher } from './config-watcher'
 import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
@@ -122,7 +122,7 @@ function initAutoUpdater(
     stopAllAgents,
     (error) => {
       void client.heartbeat(agentId, getSystemInfo(), error).catch((err) => {
-        logger.warn(`[auto-update] Failed to send error heartbeat: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`[auto-update] Failed to send error heartbeat: ${getErrorMessage(err)}`)
       })
     },
     isAnyAgentBusy,
@@ -214,8 +214,8 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     if (removed > 0) {
       logger.info(`Cleaned up ${removed} stale terminal-sandbox dir(s) in /tmp`)
     }
-  } catch (err) {
-    logger.warn(`Failed to clean up stale terminal-sandbox dirs: ${err instanceof Error ? err.message : String(err)}`)
+  } catch (err: unknown) {
+    logger.warn(`Failed to clean up stale terminal-sandbox dirs: ${getErrorMessage(err)}`)
   }
 
   const config = loadConfig()
@@ -327,7 +327,10 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
     processManager.onUpdateComplete = (project) => {
       logger.info(`[docker] Worker update complete (${project.tenantCode}/${project.projectCode}). Exiting container to rebuild image...`)
-      void processManager.stopAll().then(() => process.exit(DOCKER_UPDATE_EXIT_CODE))
+      void (async () => {
+        await processManager.stopAll()
+        process.exit(DOCKER_UPDATE_EXIT_CODE)
+      })()
     }
   }
 

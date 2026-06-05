@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { isErrnoException } from './utils'
 
 /**
  * Default rotation policy: rotate when the active file would exceed 5 MiB,
@@ -126,27 +127,27 @@ export class RotatingFileWriter {
     // Drop the oldest generation that would otherwise outlive maxFiles.
     if (this.maxFiles <= 0) {
       // No history requested — just remove the active file.
-      try { fs.unlinkSync(this.filePath) } catch (err) { rethrowUnlessENOENT(err) }
+      try { fs.unlinkSync(this.filePath) } catch (err: unknown) { rethrowUnlessENOENT(err) }
       this.currentSize = 0
       return
     }
     const oldest = `${this.filePath}.${this.maxFiles}`
-    try { fs.unlinkSync(oldest) } catch (err) { rethrowUnlessENOENT(err) }
+    try { fs.unlinkSync(oldest) } catch (err: unknown) { rethrowUnlessENOENT(err) }
     // Shift `<path>.(i-1)` → `<path>.i` for i = maxFiles..2.
     for (let i = this.maxFiles; i >= 2; i--) {
       const src = `${this.filePath}.${i - 1}`
       const dst = `${this.filePath}.${i}`
-      try { fs.renameSync(src, dst) } catch (err) { rethrowUnlessENOENT(err) }
+      try { fs.renameSync(src, dst) } catch (err: unknown) { rethrowUnlessENOENT(err) }
     }
     // Finally promote the active file to `.1`. ENOENT here is fine — the
     // active file may have been removed externally between the size check
     // and the rename; ensureOpen() will recreate it on the next write.
-    try { fs.renameSync(this.filePath, `${this.filePath}.1`) } catch (err) { rethrowUnlessENOENT(err) }
+    try { fs.renameSync(this.filePath, `${this.filePath}.1`) } catch (err: unknown) { rethrowUnlessENOENT(err) }
     this.currentSize = 0
   }
 }
 
 function rethrowUnlessENOENT(err: unknown): void {
-  if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') return
+  if (isErrnoException(err, 'ENOENT')) return
   throw err
 }

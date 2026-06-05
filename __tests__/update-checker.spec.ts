@@ -1,6 +1,7 @@
 import { execFile, execFileSync, spawn } from 'child_process'
 import { accessSync } from 'fs'
 
+import { NPM_COMMAND } from '../src/constants'
 import {
   detectChannelFromVersion,
   detectInstallMethod,
@@ -128,9 +129,8 @@ describe('getGlobalNpmPrefix', () => {
     const result = getGlobalNpmPrefix()
 
     expect(result).toBe('/usr/local')
-    const expectedCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
     expect(mockedExecFileSync).toHaveBeenCalledWith(
-      expectedCmd,
+      NPM_COMMAND,
       ['prefix', '-g'],
       { encoding: 'utf-8', timeout: 10_000 },
     )
@@ -336,9 +336,8 @@ describe('performUpdate', () => {
     const result = await performUpdate('1.2.3', 'global')
 
     expect(result).toEqual({ success: true })
-    const expectedCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
     expect(mockedExecFile).toHaveBeenCalledWith(
-      expectedCmd,
+      NPM_COMMAND,
       expect.arrayContaining(['install', '-g', '@ai-support-agent/cli@1.2.3']),
       expect.objectContaining({ timeout: 120000 }),
       expect.any(Function),
@@ -361,10 +360,9 @@ describe('performUpdate', () => {
 
     expect(result).toEqual({ success: true })
     if (process.platform !== 'win32') {
-      const expectedNpmCmd = 'npm'
       expect(mockedExecFile).toHaveBeenCalledWith(
         'sudo',
-        expect.arrayContaining([expectedNpmCmd, 'install', '-g', '@ai-support-agent/cli@1.2.3']),
+        expect.arrayContaining([NPM_COMMAND, 'install', '-g', '@ai-support-agent/cli@1.2.3']),
         expect.objectContaining({ timeout: 120000 }),
         expect.any(Function),
       )
@@ -386,9 +384,8 @@ describe('performUpdate', () => {
     const result = await performUpdate('1.2.3', 'global')
 
     expect(result).toEqual({ success: true })
-    const expectedCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
     expect(mockedExecFile).toHaveBeenCalledWith(
-      expectedCmd,
+      NPM_COMMAND,
       expect.arrayContaining(['install', '-g', '@ai-support-agent/cli@1.2.3']),
       expect.objectContaining({ timeout: 120000 }),
       expect.any(Function),
@@ -510,9 +507,11 @@ describe('performUpdate', () => {
     expect(result.error).toBe('Unknown error')
   })
 
-  it('should use npm.cmd on Windows', async () => {
-    Object.defineProperty(process, 'platform', { value: 'win32' })
-    mockedExecFileSync.mockReturnValue('C:\\Users\\test\\AppData\\Roaming\\npm\n')
+  it('should use NPM_COMMAND (platform-specific npm binary) for install', async () => {
+    // NPM_COMMAND is evaluated at module load time and reflects the current platform.
+    // The platform-specific selection (npm vs npm.cmd) is tested in constants.spec.ts.
+    mockedExecFileSync.mockReturnValue('/usr/local\n')
+    mockedAccessSync.mockImplementation(() => undefined)
     mockedExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, callback: (err: null) => void) => {
       callback(null)
     })
@@ -521,7 +520,7 @@ describe('performUpdate', () => {
 
     expect(result).toEqual({ success: true })
     expect(mockedExecFile).toHaveBeenCalledWith(
-      'npm.cmd',
+      NPM_COMMAND,
       expect.arrayContaining(['install', '-g', '@ai-support-agent/cli@1.2.3']),
       expect.objectContaining({ timeout: 120000 }),
       expect.any(Function),
@@ -735,6 +734,34 @@ describe('reExecProcess', () => {
     reExecProcess('global')
 
     expect(mockUnref).toHaveBeenCalled()
+    expect(exitSpy).toHaveBeenCalledWith(0)
+  })
+})
+
+describe('reExecProcess: method=undefined → detectInstallMethod()（line 216 branch [1]）', () => {
+  let exitSpy: jest.SpiedFunction<typeof process.exit>
+  const originalArgv = process.argv
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    resetGlobalPrefixCache()
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    mockedSpawn.mockReturnValue({ unref: jest.fn() })
+  })
+
+  afterEach(() => {
+    exitSpy.mockRestore()
+    process.argv = originalArgv
+  })
+
+  it('method が undefined の場合 detectInstallMethod() で自動検出する（line 216 branch [1]）', () => {
+    // Cover: const installMethod = method ?? detectInstallMethod()
+    // When method is not provided (undefined), detectInstallMethod() is called
+    process.argv = ['/usr/local/bin/node', '/usr/local/bin/ai-support-agent', 'start']
+
+    // Call without method argument → method=undefined → ?? detectInstallMethod()
+    reExecProcess()
+
     expect(exitSpy).toHaveBeenCalledWith(0)
   })
 })

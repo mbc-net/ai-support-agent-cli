@@ -309,6 +309,41 @@ describe('read-conversation-file tool', () => {
     })
   })
 
+  describe('filename extension ?? fallback branch', () => {
+    it('should handle filename where pop() returns undefined via mocked split', async () => {
+      // The ?? '' branch on line 30 only triggers when pop() returns undefined.
+      // Since String.prototype.split always produces a non-empty array, we must
+      // mock Array.prototype.pop for this one call to exercise the dead-code branch.
+      const mockClient = {
+        getDownloadUrl: jest.fn().mockResolvedValue({
+          downloadUrl: 'https://s3.example.com/noext',
+        }),
+      } as unknown as ApiClient
+
+      setupTool(mockClient)
+
+      mockedAxios.get.mockResolvedValue({ data: 'content' })
+
+      const originalPop = Array.prototype.pop
+      const popSpy = jest
+        .spyOn(Array.prototype, 'pop')
+        .mockReturnValueOnce(undefined as unknown as string)
+
+      try {
+        const result = await toolCallback({
+          fileId: 'file-nullext',
+          s3Key: 'uploads/file-nullext',
+          filename: 'noext',
+        }) as { content: Array<{ type: string }> }
+        expect(result.content).toBeDefined()
+      } finally {
+        popSpy.mockRestore()
+        // Sanity: original pop still works
+        expect(Array.prototype.pop).toBe(originalPop)
+      }
+    })
+  })
+
   describe('filename without extension', () => {
     it('should handle filename with no extension', async () => {
       const mockClient = {
@@ -329,6 +364,29 @@ describe('read-conversation-file tool', () => {
 
       expect(result.content[0].type).toBe('text')
       expect(result.content[0].text).toContain('README')
+    })
+
+    it('should handle empty filename gracefully (uses fallback empty extension)', async () => {
+      // An empty string filename: split('.') => [''], pop() => '' which is falsy — ?? '' covers this
+      const mockClient = {
+        getDownloadUrl: jest.fn().mockResolvedValue({
+          downloadUrl: 'https://s3.example.com/noname',
+        }),
+      } as unknown as ApiClient
+
+      setupTool(mockClient)
+
+      mockedAxios.get.mockResolvedValue({ data: 'Some content' })
+
+      // filename with only a dot — pop() returns '' (empty string), which ?? '' still covers
+      const result = await toolCallback({
+        fileId: 'file-dot',
+        s3Key: 'uploads/file-dot',
+        filename: '.',
+      }) as { content: Array<{ type: string; text: string }> }
+
+      // Should not throw; will be treated as binary/text/unknown depending on extension ''
+      expect(result.content).toBeDefined()
     })
   })
 

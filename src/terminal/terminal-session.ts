@@ -7,6 +7,7 @@ import { logger } from '../logger'
 import { buildSafeEnv } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
+import { getErrorMessage } from '../utils'
 import {
   SESSION_IDLE_TIMEOUT_MS,
   TERMINAL_DEFAULT_COLS,
@@ -56,8 +57,8 @@ let ptyLoadError: string | null = null
 try {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   pty = require('node-pty') as PtyModule
-} catch (e) /* istanbul ignore next -- only when native build fails */ {
-  ptyLoadError = e instanceof Error ? e.message : String(e)
+} catch (e: unknown) /* istanbul ignore next -- only when native build fails */ {
+  ptyLoadError = getErrorMessage(e)
   logger.debug(`[terminal] node-pty is not available: ${ptyLoadError}`)
 }
 
@@ -95,6 +96,15 @@ export interface TerminalSessionInfo {
 type DataCallback = (data: string) => void
 type ExitCallback = (code: number | null) => void
 
+/**
+ * SSH キーの環境変数名
+ *
+ * API サーバーが base64 エンコードされた PEM 秘密鍵をこの変数名で送ってくる。
+ * TerminalSession はこれを検出してファイルに書き出し、GIT_SSH_COMMAND を設定する。
+ * この変数自体は PTY には渡さない（ファイルパスが GIT_SSH_COMMAND 経由で参照される）。
+ */
+export const GIT_SSH_KEY_ENV_NAME = 'GIT_SSH_KEY_CONTENT_BASE64'
+
 export class TerminalSession {
   readonly sessionId: string
   readonly pid: number
@@ -105,6 +115,7 @@ export class TerminalSession {
   private lastActivity: number
   private readonly ptyProcess: IPty
   private sandboxTmpDir: string | null = null
+  private sshKeyFile: string | null = null
   private dataCallback: DataCallback | null = null
   private exitCallback: ExitCallback | null = null
   private exited = false
@@ -197,7 +208,28 @@ export class TerminalSession {
     // はずだが、agent 側でも filterEnvVarsOverride を通して PATH/ZDOTDIR 等の
     // sandbox 関連キーが上書きされないことを保証する。これにより api 側の
     // regression や別経路からの流入があっても sandbox を維持できる。
-    const filteredOverride = filterEnvVarsOverride(options.envVarsOverride, {
+    //
+    // GIT_SSH_KEY_CONTENT_BASE64 は特別扱い: フィルタに通す前に取り出し、
+    // ファイルに書き出して GIT_SSH_COMMAND として設定する。
+    const rawOverride = options.envVarsOverride ?? {}
+    const sshKeyBase64 = rawOverride[GIT_SSH_KEY_ENV_NAME]
+    const overrideWithoutSshKey: Record<string, string> = { ...rawOverride }
+    delete overrideWithoutSshKey[GIT_SSH_KEY_ENV_NAME]
+
+    if (sshKeyBase64) {
+      try {
+        const pemContent = Buffer.from(sshKeyBase64, 'base64').toString('utf-8')
+        const sshKeyPath = path.join(os.tmpdir(), `ssh-key-${sessionId}`)
+        fs.writeFileSync(sshKeyPath, pemContent, { mode: 0o600 })
+        this.sshKeyFile = sshKeyPath
+        env.GIT_SSH_COMMAND = `ssh -i ${sshKeyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`
+        logger.debug(`[terminal:${sessionId}] SSH key configured for git operations`)
+      } catch {
+        logger.warn(`[terminal:${sessionId}] Failed to set up SSH key for git; continuing without SSH key`)
+      }
+    }
+
+    const filteredOverride = filterEnvVarsOverride(overrideWithoutSshKey, {
       prefix: `[terminal:${sessionId}]`,
     })
     for (const [key, value] of Object.entries(filteredOverride)) {
@@ -283,6 +315,14 @@ export class TerminalSession {
         // ignore cleanup errors
       }
       this.sandboxTmpDir = null
+    }
+    if (this.sshKeyFile) {
+      try {
+        fs.rmSync(this.sshKeyFile, { force: true })
+      } catch {
+        // ignore cleanup errors
+      }
+      this.sshKeyFile = null
     }
   }
 

@@ -6,7 +6,7 @@
 
 import { execFileSync } from 'child_process'
 
-import { AGENT_VERSION } from '../constants'
+import { AGENT_VERSION, NPM_COMMAND } from '../constants'
 import { isValidVersion, isNewerVersion } from '../utils/version'
 import { imageExists, buildImage } from './docker-utils'
 import { t } from '../i18n'
@@ -26,8 +26,7 @@ let cachedInstalledVersion: string | null = null
 export function getInstalledVersion(): string {
   if (cachedInstalledVersion !== null) return cachedInstalledVersion
   try {
-    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-    const output = execFileSync(npmCmd, ['list', '-g', '--json', '--depth=0'], {
+    const output = execFileSync(NPM_COMMAND, ['list', '-g', '--json', '--depth=0'], {
       encoding: 'utf-8',
       timeout: 10_000,
     })

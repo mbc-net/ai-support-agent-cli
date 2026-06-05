@@ -63,6 +63,7 @@ jest.mock('../src/config-manager', () => ({
 jest.mock('fs', () => ({
   ...jest.requireActual('fs'),
   writeFileSync: jest.fn(),
+  renameSync: jest.fn(),
 }))
 
 const MockApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
@@ -1735,7 +1736,7 @@ describe('ProjectAgent', () => {
         expect(writeFileSync).toHaveBeenCalledWith(
           expect.stringContaining('update-version.json'),
           expect.stringContaining('0.0.2'),
-          'utf-8',
+          { mode: 0o600 },
         )
         expect(mockExit).toHaveBeenCalledWith(42)
       } finally {
@@ -1963,7 +1964,7 @@ describe('ProjectAgent', () => {
         await jest.advanceTimersByTimeAsync(1000)
 
         // Check that Dockerfile was written with package content
-        const dockerfileEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('Dockerfile'))
+        const dockerfileEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('Dockerfile.tmp'))
         expect(dockerfileEntry).toBeDefined()
         expect(dockerfileEntry?.[1]).toContain('curl')
         expect(dockerfileEntry?.[1]).toContain('typescript')
@@ -2155,6 +2156,84 @@ describe('ProjectAgent', () => {
 
       agent.stop()
     })
+
+    it('should invoke onReboot via commandContext when executeCommand calls opts.onReboot', async () => {
+      // This covers the arrow function `() => this.performReboot()` at line 405 of project-agent.ts
+      mockedExecuteCommand.mockImplementation(async (_type, _payload, opts) => {
+        if (opts?.onReboot) {
+          await opts.onReboot()
+        }
+        return { success: true, data: 'ok' }
+      })
+
+      mockClient.getCommand.mockResolvedValue({
+        commandId: 'cmd-reboot-cb',
+        type: 'reboot',
+        payload: {},
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      const performRebootSpy = jest.spyOn(agent as unknown as { performReboot: () => Promise<void> }, 'performReboot').mockResolvedValue(undefined)
+
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+      onMessage({
+        id: 'notif-reboot-cb',
+        table: 'commands',
+        pk: 'CMD#reboot',
+        sk: 'CMD#reboot',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-reboot-cb', type: 'reboot', tenantCode: 'test-tenant', projectCode: 'test-proj' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(performRebootSpy).toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('should invoke onUpdate via commandContext when executeCommand calls opts.onUpdate', async () => {
+      // This covers the arrow function `() => this.performUpdate()` at line 406 of project-agent.ts
+      mockedExecuteCommand.mockImplementation(async (_type, _payload, opts) => {
+        if (opts?.onUpdate) {
+          await opts.onUpdate()
+        }
+        return { success: true, data: 'ok' }
+      })
+
+      mockClient.getCommand.mockResolvedValue({
+        commandId: 'cmd-update-cb',
+        type: 'update',
+        payload: {},
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      const performUpdateSpy = jest.spyOn(agent as unknown as { performUpdate: () => Promise<void> }, 'performUpdate').mockResolvedValue(undefined)
+
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+      onMessage({
+        id: 'notif-update-cb',
+        table: 'commands',
+        pk: 'CMD#update',
+        sk: 'CMD#update',
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId: 'cmd-update-cb', type: 'update', tenantCode: 'test-tenant', projectCode: 'test-proj' },
+      })
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(performUpdateSpy).toHaveBeenCalled()
+
+      agent.stop()
+    })
   })
 
   describe('registerAndStart - wsUrl Docker URL resolution', () => {
@@ -2257,7 +2336,7 @@ describe('ProjectAgent', () => {
 
         await jest.advanceTimersByTimeAsync(100)
 
-        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id'))
+        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id.tmp'))
         expect(registeredIdEntry).toBeDefined()
         expect(registeredIdEntry![1]).toBe('server-assigned-uuid-1234')
 
@@ -2293,7 +2372,7 @@ describe('ProjectAgent', () => {
 
         await jest.advanceTimersByTimeAsync(100)
 
-        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id'))
+        const registeredIdEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-registered-agent-id.tmp'))
         expect(registeredIdEntry).toBeUndefined()
 
         agent.stop()
@@ -2310,7 +2389,7 @@ describe('ProjectAgent', () => {
 
       const mockFs = require('fs') as { writeFileSync: jest.Mock }
       const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation((...args: unknown[]) => {
-        if (String(args[0]).endsWith('docker-registered-agent-id')) {
+        if (String(args[0]).endsWith('docker-registered-agent-id.tmp')) {
           throw new Error('EACCES: permission denied')
         }
       })
@@ -2345,6 +2424,55 @@ describe('ProjectAgent', () => {
     })
   })
 
+  describe('CloudWatch Alert polling - clearInterval branch', () => {
+    it('should clear existing alertPollingTimer when registerAndStart runs a second time', async () => {
+      // This test covers line 443: `if (this.alertPollingTimer) { clearInterval(this.alertPollingTimer) }`
+      // The only way to hit this branch is to call the private registerAndStart method directly
+      // while alertPollingTimer is already set.
+      const syncProjectConfigMock = syncProjectConfig as jest.MockedFunction<typeof syncProjectConfig>
+      syncProjectConfigMock.mockResolvedValue({
+        config: {
+          configHash: 'cw-clear-hash',
+          project: { projectCode: 'test-proj', projectName: 'Test' },
+          agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+          cloudwatch: {
+            enabled: true,
+            pollingIntervalMs: 60000,
+            webhookUrl: 'https://api.example.com/webhooks/cloudwatch',
+          },
+        },
+        fromCache: false,
+      })
+
+      ;(mockClient as Record<string, jest.Mock>).getPendingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+      ;(mockClient as Record<string, jest.Mock>).getStaleProcessingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+      ;(mockClient as Record<string, jest.Mock>).getAlert = jest.fn().mockResolvedValue(null)
+      ;(mockClient as Record<string, jest.Mock>).updateAlertStatus = jest.fn().mockResolvedValue(undefined)
+      ;(mockClient as Record<string, jest.Mock>).findActiveIssueByAlarmName = jest.fn().mockResolvedValue(null)
+      ;(mockClient as Record<string, jest.Mock>).createIssueFromAlert = jest.fn().mockResolvedValue({ id: 'AI_SU000001' })
+
+      const agent = new ProjectAgent(project, 'cw-clear-agent', options)
+      agent.start()
+
+      // Let registration complete and alertPollingTimer be set
+      await jest.advanceTimersByTimeAsync(200)
+
+      // Verify alertPollingTimer is set
+      const agentInternal = agent as unknown as { alertPollingTimer: ReturnType<typeof setInterval> | null }
+      expect(agentInternal.alertPollingTimer).not.toBeNull()
+
+      // Now call registerAndStart again directly so the `if (this.alertPollingTimer)` branch is hit
+      const agentAny = agent as unknown as { registerAndStart: () => Promise<void> }
+      await agentAny.registerAndStart()
+
+      // alertPollingTimer should have been cleared and reset
+      expect(agentInternal.alertPollingTimer).not.toBeNull()
+
+      agent.stop()
+      syncProjectConfigMock.mockRestore()
+    })
+  })
+
   describe('CloudWatch Alert polling', () => {
     it('should start alert polling when cloudwatch is enabled in project config', async () => {
       const syncProjectConfigMock = syncProjectConfig as jest.MockedFunction<typeof syncProjectConfig>
@@ -2364,6 +2492,7 @@ describe('ProjectAgent', () => {
 
       // Mock getPendingAlerts for AlertProcessor
       ;(mockClient as Record<string, jest.Mock>).getPendingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+      ;(mockClient as Record<string, jest.Mock>).getStaleProcessingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
       ;(mockClient as Record<string, jest.Mock>).getAlert = jest.fn().mockResolvedValue(null)
       ;(mockClient as Record<string, jest.Mock>).updateAlertStatus = jest.fn().mockResolvedValue(undefined)
       ;(mockClient as Record<string, jest.Mock>).findActiveIssueByAlarmName = jest.fn().mockResolvedValue(null)
@@ -2380,8 +2509,20 @@ describe('ProjectAgent', () => {
       await jest.advanceTimersByTimeAsync(1100)
       expect((mockClient as Record<string, jest.Mock>).getPendingAlerts).toHaveBeenCalledTimes(2)
 
-      // stop でタイマークリアも確認
+      // スタック救済タイマーも設定されていることを確認
+      const agentInternal = agent as unknown as {
+        alertStaleRecoveryTimer: ReturnType<typeof setInterval> | null
+      }
+      expect(agentInternal.alertStaleRecoveryTimer).not.toBeNull()
+
+      // スタック救済タイマーのコールバックをトリガー（line 490: recoverStaleProcessingAlerts の実行をカバー）
+      // ALERT_STALE_RECOVERY_INTERVAL_MS = 1時間 (3600000ms) 経過をシミュレート
+      await jest.advanceTimersByTimeAsync(3_600_001)
+      expect((mockClient as Record<string, jest.Mock>).getStaleProcessingAlerts).toHaveBeenCalled()
+
+      // stop でタイマークリアも確認（pending/stale 両方）
       agent.stop()
+      expect(agentInternal.alertStaleRecoveryTimer).toBeNull()
 
       syncProjectConfigMock.mockRestore()
     })
@@ -2389,6 +2530,7 @@ describe('ProjectAgent', () => {
     it('should not start alert polling when cloudwatch is disabled', async () => {
       // Default mock does not include cloudwatch config
       ;(mockClient as Record<string, jest.Mock>).getPendingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+      ;(mockClient as Record<string, jest.Mock>).getStaleProcessingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
 
       const agent = new ProjectAgent(project, 'no-alert-agent', options)
       agent.start()
@@ -2397,6 +2539,359 @@ describe('ProjectAgent', () => {
       expect((mockClient as Record<string, jest.Mock>).getPendingAlerts).not.toHaveBeenCalled()
 
       agent.stop()
+    })
+
+    it('should clear existing alertPollingTimer when cloudwatch is re-enabled (prevents duplicate timers)', async () => {
+      // This test covers the `if (this.alertPollingTimer) { clearInterval(...) }` branch at line 443.
+      // We need to call registerAndStart twice with cloudwatch enabled so that alertPollingTimer
+      // is non-null on the second call.
+      const syncProjectConfigMock = syncProjectConfig as jest.MockedFunction<typeof syncProjectConfig>
+      syncProjectConfigMock.mockResolvedValue({
+        config: {
+          configHash: 'cw-hash',
+          project: { projectCode: 'test-proj', projectName: 'Test' },
+          agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true, externalAgentEnabled: true, allowedTools: [] },
+          cloudwatch: {
+            enabled: true,
+            pollingIntervalMs: 500,
+            webhookUrl: 'https://api.example.com/webhooks/cloudwatch/mbc/MBC_01',
+          },
+        },
+        fromCache: false,
+      })
+
+      ;(mockClient as Record<string, jest.Mock>).getPendingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+      ;(mockClient as Record<string, jest.Mock>).getStaleProcessingAlerts = jest.fn().mockResolvedValue({ items: [], total: 0 })
+      ;(mockClient as Record<string, jest.Mock>).getAlert = jest.fn().mockResolvedValue(null)
+      ;(mockClient as Record<string, jest.Mock>).updateAlertStatus = jest.fn().mockResolvedValue(undefined)
+      ;(mockClient as Record<string, jest.Mock>).findActiveIssueByAlarmName = jest.fn().mockResolvedValue(null)
+      ;(mockClient as Record<string, jest.Mock>).createIssueFromAlert = jest.fn().mockResolvedValue({ id: 'AI_SU000001' })
+
+      // First registration — sets up the alert polling timer
+      const agent = new ProjectAgent(project, 'cw-agent', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(200)
+
+      // Stop and re-start so registerAndStart runs again with alertPollingTimer already set
+      agent.stop()
+      await jest.advanceTimersByTimeAsync(100)
+
+      // Manually call performConfigSync to verify alertPollingTimer clearInterval path indirectly
+      // The easiest way is to call updateToken which calls stop() + start() via setImmediate
+      agent.updateToken('new-token-456')
+      await jest.advanceTimersByTimeAsync(200)
+
+      // Polling should still be active after re-registration
+      expect((mockClient as Record<string, jest.Mock>).getPendingAlerts).toHaveBeenCalled()
+
+      agent.stop()
+      syncProjectConfigMock.mockRestore()
+    })
+  })
+
+  describe('branch coverage: edge cases', () => {
+    it('should not set dockerCustomizationHash when docker-built-hash file exists but is empty', () => {
+      // Covers line 133: `if (builtHash)` — empty string is falsy
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs') as { readFileSync: jest.Mock }
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((...args: unknown[]) => {
+        if (String(args[0]).endsWith('docker-built-hash')) return '   ' // whitespace-only → trim() = ''
+        throw new Error('ENOENT')
+      })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        const state = (agent as unknown as { configSyncState: { dockerCustomizationHash: string | undefined } }).configSyncState
+        // Empty/whitespace builtHash → should remain undefined
+        expect(state.dockerCustomizationHash).toBeUndefined()
+      } finally {
+        mockReadFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should write empty string for docker-customization-hash when dockerCustomizationHash is undefined', async () => {
+      // Covers line 251: `this.configSyncState.dockerCustomizationHash ?? ''`
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs') as { mkdirSync: jest.Mock; writeFileSync: jest.Mock }
+      const mockMkdirSync = jest.spyOn(mockFs, 'mkdirSync').mockImplementation(() => undefined)
+      const writtenFiles: Record<string, string> = {}
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation((...args: unknown[]) => {
+        writtenFiles[String(args[0])] = String(args[1])
+      })
+
+      try {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        // Leave dockerCustomizationHash as undefined (not set in state)
+        await agent.performDockerRebuild()
+        await jest.advanceTimersByTimeAsync(1000)
+
+        // docker-customization-hash should be written with empty string
+        const hashEntry = Object.entries(writtenFiles).find(([k]) => k.endsWith('docker-customization-hash.tmp'))
+        expect(hashEntry).toBeDefined()
+        expect(hashEntry![1]).toBe('')
+      } finally {
+        mockExit.mockRestore()
+        mockMkdirSync.mockRestore()
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should throw "Update failed: Unknown error" when performUpdate result has no error message', async () => {
+      // Covers line 276: `result.error ?? 'Unknown error'` when error is undefined
+      mockedPerformUpdate.mockResolvedValueOnce({ success: false }) // no error field
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      await expect(agent.performUpdate()).rejects.toThrow('Update failed: Unknown error')
+
+      agent.stop()
+    })
+
+    it('should treat empty docker-build-error file as no error (line 349: || undefined)', async () => {
+      // Covers line 349: `fs.readFileSync(buildErrorPath, 'utf-8').trim() || undefined`
+      // when the file exists but is empty → trim() = '' → falsy → undefined → no heartbeat
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs') as { readFileSync: jest.Mock; writeFileSync: jest.Mock }
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((...args: unknown[]) => {
+        const filePath = String(args[0])
+        if (filePath.endsWith('docker-built-hash')) throw new Error('ENOENT')
+        if (filePath.endsWith('docker-build-error')) return '' // empty file
+        throw new Error('ENOENT')
+      })
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation(() => undefined)
+
+      // Count heartbeat calls before and after registration to ensure no extra call for build error
+      const heartbeatCallsWithBuildError: unknown[][] = []
+
+      try {
+        mockClient.register.mockResolvedValue({
+          agentId: 'server-agent-id',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+        mockClient.heartbeat.mockImplementation((...args: unknown[]) => {
+          heartbeatCallsWithBuildError.push(args)
+          return Promise.resolve({ success: true })
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(200)
+
+        // No heartbeat call should have a dockerBuildError argument (8th arg)
+        const buildErrorCalls = heartbeatCallsWithBuildError.filter(args => args[7] !== undefined)
+        expect(buildErrorCalls).toHaveLength(0)
+
+        agent.stop()
+      } finally {
+        mockReadFileSync.mockRestore()
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should handle wsEnabled=true with no wsUrl without throwing (covers the falsy wsUrl branch)', async () => {
+      // Covers line 457: `result.wsUrl ? resolveUrlForDocker(result.wsUrl) : result.wsUrl`
+      // when wsEnabled=true but wsUrl is absent → resolvedWsUrl = undefined
+      const agentTransport = require('../src/agent-transport')
+      const startTerminalWsSpy = jest.spyOn(agentTransport, 'startTerminalWebSocket').mockImplementation(() => {})
+      const startVsCodeSpy = jest.spyOn(agentTransport, 'startVsCodeTunnel').mockImplementation(() => {})
+
+      mockClient.register.mockResolvedValue({
+        agentId: 'test-id',
+        tenantCode: 'test-tenant',
+        appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+        appsyncApiKey: 'da2-testkey123',
+        transportMode: 'realtime',
+        wsEnabled: true,
+        wsUrl: undefined, // wsEnabled=true but no wsUrl → resolvedWsUrl = undefined
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      // Should not throw — wsUrl falsy → resolvedWsUrl = undefined → passed to startTerminalWebSocket
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      // Registration should proceed successfully
+      expect(mockClient.register).toHaveBeenCalled()
+      // heartbeat may not fire since startTerminalWebSocket is spied/replaced
+
+      startTerminalWsSpy.mockRestore()
+      startVsCodeSpy.mockRestore()
+      agent.stop()
+    })
+  })
+
+  describe('docker build error reporting (registerAndStart)', () => {
+    it('should report docker-build-error via heartbeat and delete the file on success', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs') as {
+        readFileSync: jest.Mock
+        writeFileSync: jest.Mock
+        unlinkSync: jest.Mock
+        existsSync: jest.Mock
+      }
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((...args: unknown[]) => {
+        const filePath = String(args[0])
+        if (filePath.endsWith('docker-built-hash')) throw new Error('ENOENT')
+        if (filePath.endsWith('docker-build-error')) return 'Build failed: npm install error'
+        throw new Error('ENOENT')
+      })
+      const mockUnlinkSync = jest.spyOn(mockFs, 'unlinkSync').mockImplementation(() => undefined)
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation(() => undefined)
+
+      try {
+        mockClient.register.mockResolvedValue({
+          agentId: 'server-agent-id',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+        mockClient.heartbeat.mockResolvedValue({ success: true })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(200)
+
+        // Heartbeat should have been called with the docker build error
+        expect(mockClient.heartbeat).toHaveBeenCalledWith(
+          'server-agent-id',
+          expect.any(Object),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'Build failed: npm install error',
+        )
+
+        // Error file should be deleted after successful report
+        expect(mockUnlinkSync).toHaveBeenCalledWith(
+          expect.stringContaining('docker-build-error'),
+        )
+
+        agent.stop()
+      } finally {
+        mockReadFileSync.mockRestore()
+        mockUnlinkSync.mockRestore()
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should warn and keep docker-build-error file when heartbeat fails during error reporting', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs') as { readFileSync: jest.Mock; writeFileSync: jest.Mock }
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((...args: unknown[]) => {
+        const filePath = String(args[0])
+        if (filePath.endsWith('docker-built-hash')) throw new Error('ENOENT')
+        if (filePath.endsWith('docker-build-error')) return 'Build failed: timeout'
+        throw new Error('ENOENT')
+      })
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation(() => undefined)
+
+      try {
+        mockClient.register.mockResolvedValue({
+          agentId: 'server-agent-id',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+        // Make heartbeat fail on the build-error report call but succeed normally
+        mockClient.heartbeat
+          .mockRejectedValueOnce(new Error('Heartbeat error during build error report'))
+          .mockResolvedValue({ success: true })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(200)
+
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to report docker build error'),
+        )
+
+        agent.stop()
+      } finally {
+        mockReadFileSync.mockRestore()
+        mockWriteFileSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
+    })
+
+    it('should warn and continue when deleting docker-build-error file fails after reporting', async () => {
+      const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const mockFs = require('fs') as { readFileSync: jest.Mock; writeFileSync: jest.Mock; unlinkSync: jest.Mock }
+      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((...args: unknown[]) => {
+        const filePath = String(args[0])
+        if (filePath.endsWith('docker-built-hash')) throw new Error('ENOENT')
+        if (filePath.endsWith('docker-build-error')) return 'Build error message'
+        throw new Error('ENOENT')
+      })
+      const mockWriteFileSync = jest.spyOn(mockFs, 'writeFileSync').mockImplementation(() => undefined)
+      const mockUnlinkSync = jest.spyOn(mockFs, 'unlinkSync').mockImplementation((...args: unknown[]) => {
+        // Fail the deletion of docker-build-error file
+        if (String(args[0]).endsWith('docker-build-error')) {
+          throw new Error('EACCES: permission denied')
+        }
+      })
+
+      try {
+        mockClient.register.mockResolvedValue({
+          agentId: 'server-agent-id',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+        })
+        mockClient.heartbeat.mockResolvedValue({ success: true })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        await jest.advanceTimersByTimeAsync(200)
+
+        // Should still proceed past the failed unlink without crashing
+        expect(mockClient.heartbeat).toHaveBeenCalled()
+        // Registration should still succeed (heartbeat called)
+        expect(mockClient.heartbeat).toHaveBeenCalled()
+
+        agent.stop()
+      } finally {
+        mockReadFileSync.mockRestore()
+        mockWriteFileSync.mockRestore()
+        mockUnlinkSync.mockRestore()
+        if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerEnv
+      }
     })
   })
 })

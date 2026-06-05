@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl, resolveUrlForDocker } from '../src/utils'
+import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -27,6 +27,62 @@ describe('getErrorMessage', () => {
 
   it('should handle TypeError', () => {
     expect(getErrorMessage(new TypeError('type error'))).toBe('type error')
+  })
+})
+
+describe('toErrorMessage', () => {
+  it('should return message from Error instance', () => {
+    expect(toErrorMessage(new Error('boom'))).toBe('boom')
+  })
+
+  it('should return message from Error subclasses', () => {
+    expect(toErrorMessage(new TypeError('type boom'))).toBe('type boom')
+  })
+
+  it('should stringify a non-Error string', () => {
+    expect(toErrorMessage('plain string')).toBe('plain string')
+  })
+
+  it('should stringify a number', () => {
+    expect(toErrorMessage(42)).toBe('42')
+  })
+
+  it('should stringify null', () => {
+    expect(toErrorMessage(null)).toBe('null')
+  })
+
+  it('should stringify undefined', () => {
+    expect(toErrorMessage(undefined)).toBe('undefined')
+  })
+})
+
+describe('toError', () => {
+  it('should return the same Error instance unchanged', () => {
+    const original = new Error('keep me')
+    expect(toError(original)).toBe(original)
+  })
+
+  it('should return Error subclass instances unchanged', () => {
+    const original = new TypeError('type error')
+    expect(toError(original)).toBe(original)
+  })
+
+  it('should wrap a non-Error string into an Error', () => {
+    const result = toError('wrap me')
+    expect(result).toBeInstanceOf(Error)
+    expect(result.message).toBe('wrap me')
+  })
+
+  it('should wrap a number into an Error', () => {
+    const result = toError(500)
+    expect(result).toBeInstanceOf(Error)
+    expect(result.message).toBe('500')
+  })
+
+  it('should wrap null into an Error', () => {
+    const result = toError(null)
+    expect(result).toBeInstanceOf(Error)
+    expect(result.message).toBe('null')
   })
 })
 
@@ -337,5 +393,142 @@ describe('resolveUrlForDocker', () => {
   it('should handle URL without port', () => {
     process.env[ENV_KEY] = '1'
     expect(resolveUrlForDocker('https://localhost')).toBe('https://host.docker.internal')
+  })
+})
+
+describe('isErrnoException', () => {
+  it('should return true for an Error with a code property', () => {
+    const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    expect(isErrnoException(err)).toBe(true)
+  })
+
+  it('should return true and narrow when code matches', () => {
+    const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    expect(isErrnoException(err, 'ENOENT')).toBe(true)
+  })
+
+  it('should return false when code does not match', () => {
+    const err = Object.assign(new Error('EPERM'), { code: 'EPERM' })
+    expect(isErrnoException(err, 'ENOENT')).toBe(false)
+  })
+
+  it('should return false for a plain Error without code', () => {
+    expect(isErrnoException(new Error('no code'))).toBe(false)
+  })
+
+  it('should return false for an object without a message property', () => {
+    expect(isErrnoException({ code: 'ENOENT' })).toBe(false)
+  })
+
+  it('should return true for an error-shaped plain object with message and code', () => {
+    // Covers Jest isolatedModules environments where instanceof Error may fail
+    expect(isErrnoException({ message: 'ENOENT: no such file', code: 'ENOENT' })).toBe(true)
+  })
+
+  it('should return false for null', () => {
+    expect(isErrnoException(null)).toBe(false)
+  })
+
+  it('should return false for a string', () => {
+    expect(isErrnoException('ENOENT')).toBe(false)
+  })
+
+  it('should return false for a number', () => {
+    expect(isErrnoException(42)).toBe(false)
+  })
+
+  it('should return true when code argument is undefined (no code filter)', () => {
+    const err = Object.assign(new Error('EPERM'), { code: 'EPERM' })
+    expect(isErrnoException(err, undefined)).toBe(true)
+  })
+})
+
+describe('sleep', () => {
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  it('should return a Promise', () => {
+    jest.useFakeTimers()
+    const result = sleep(1000)
+    expect(result).toBeInstanceOf(Promise)
+    jest.advanceTimersByTime(1000)
+    return result
+  })
+
+  it('should resolve after the specified delay', async () => {
+    jest.useFakeTimers()
+    let resolved = false
+    const promise = sleep(500).then(() => {
+      resolved = true
+    })
+
+    // Not yet elapsed
+    jest.advanceTimersByTime(499)
+    await Promise.resolve()
+    expect(resolved).toBe(false)
+
+    // Elapsed
+    jest.advanceTimersByTime(1)
+    await promise
+    expect(resolved).toBe(true)
+  })
+
+  it('should resolve with undefined', async () => {
+    jest.useFakeTimers()
+    const promise = sleep(0)
+    jest.advanceTimersByTime(0)
+    await expect(promise).resolves.toBeUndefined()
+  })
+
+  it('should actually wait with real timers', async () => {
+    const start = Date.now()
+    await sleep(20)
+    expect(Date.now() - start).toBeGreaterThanOrEqual(15)
+  })
+})
+
+describe('readJsonSync', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'read-json-sync-test-'))
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true })
+  })
+
+  it('should parse a valid JSON file and return its content', () => {
+    const filePath = path.join(tmpDir, 'data.json')
+    fs.writeFileSync(filePath, JSON.stringify({ key: 'value', count: 42 }))
+    const result = readJsonSync<{ key: string; count: number }>(filePath)
+    expect(result).toEqual({ key: 'value', count: 42 })
+  })
+
+  it('should parse a JSON array', () => {
+    const filePath = path.join(tmpDir, 'array.json')
+    fs.writeFileSync(filePath, JSON.stringify([1, 2, 3]))
+    const result = readJsonSync<number[]>(filePath)
+    expect(result).toEqual([1, 2, 3])
+  })
+
+  it('should parse nested JSON objects', () => {
+    const filePath = path.join(tmpDir, 'nested.json')
+    const data = { outer: { inner: 'value' }, list: ['a', 'b'] }
+    fs.writeFileSync(filePath, JSON.stringify(data))
+    const result = readJsonSync<typeof data>(filePath)
+    expect(result).toEqual(data)
+  })
+
+  it('should throw when the file does not exist', () => {
+    const filePath = path.join(tmpDir, 'nonexistent.json')
+    expect(() => readJsonSync(filePath)).toThrow()
+  })
+
+  it('should throw when the file contains invalid JSON', () => {
+    const filePath = path.join(tmpDir, 'invalid.json')
+    fs.writeFileSync(filePath, 'not valid json {{{')
+    expect(() => readJsonSync(filePath)).toThrow()
   })
 })

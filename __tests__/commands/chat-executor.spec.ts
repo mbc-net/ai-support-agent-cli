@@ -1941,6 +1941,105 @@ describe('chat-executor', () => {
       // Confirmed: retry happened (2 spawn calls)
       expect(spawn).toHaveBeenCalledTimes(2)
     }, 10000)
+
+    it('should NOT retry when error contains "cancel" (line 117 branch)', async () => {
+      // Cover: if (errorMsg.toLowerCase().includes('cancel')) return result
+      // When the error message contains 'cancel', the command exits immediately without retry
+      const { spawn } = require('child_process')
+      const mockProcess1 = createMockChildProcess()
+      spawn.mockReturnValueOnce(mockProcess1)
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-cancel-test',
+        client: mockClient,
+        agentId: 'agent-1',
+      })
+
+      // First attempt fails with a "cancelled" error message
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess1.emit('error', new Error('Operation was cancelled by the user'))
+
+      const result = await resultPromise
+      expect(result.success).toBe(false)
+      // Should only have spawned once (no retry because 'cancel' is in error message)
+      expect(spawn).toHaveBeenCalledTimes(1)
+    })
+
+  })
+
+  describe('branch coverage: logDetails conditional expressions (lines 240-242)', () => {
+    it('mcpConfigPath truthy → "MCP config" appears in log (line 240 branch [0])', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-mcp-cfg',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: '/tmp/mcp-config.json',  // non-null → 'MCP config' in logDetails
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+    })
+
+    it('e2eExecutionId truthy → included in policyContext (line 264 branch [1])', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const resultPromise = executeChatCommand({
+        payload: {
+          ...basePayload,
+          policyContext: {
+            e2eExecutionId: 'exec-123',
+            e2eTestCaseId: 'case-456',
+          },
+        },
+        commandId: 'cmd-e2e-ids',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+    })
+
+    it('usage.total_cost_usd undefined → "?" fallback in log (line 282 branch [1])', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      // Return a result where total_cost_usd is not present
+      const resultWithoutCost = JSON.stringify({ type: 'result', subtype: 'success', result: 'done', usage: { input_tokens: 10, output_tokens: 5 } })
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-no-cost',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(resultWithoutCost + '\n'))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+    })
   })
 
   describe('downloadAttachments: failedCount > 0 path', () => {

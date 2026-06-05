@@ -32,6 +32,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { logger } from '../logger'
+import { isErrnoException, getErrorMessage } from '../utils'
 
 /** ~/.claude.json のパスを返す */
 function getClaudeJsonPath(): string {
@@ -64,8 +65,7 @@ function acquireLock(lockPath: string): number | null {
     const fd = fs.openSync(lockPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600)
     return fd
   } catch (error) {
-    const err = error as NodeJS.ErrnoException
-    if (err.code === 'EEXIST') {
+    if (isErrnoException(error, 'EEXIST')) {
       // stale check
       try {
         const stat = fs.statSync(lockPath)
@@ -242,14 +242,13 @@ function atomicWriteJson(targetPath: string, data: unknown): void {
     fs.renameSync(tmpPath, targetPath)
     tmpWritten = false // rename 成功 → tmp は無くなった
   } catch (error) {
-    const err = error as NodeJS.ErrnoException
-    if (err.code === 'EBUSY' || err.code === 'EXDEV' || err.code === 'EPERM') {
+    if (isErrnoException(error) && (error.code === 'EBUSY' || error.code === 'EXDEV' || error.code === 'EPERM')) {
       // EBUSY: docker bind mount された file への rename (Linux の制約)
       // EXDEV: cross-device link (まず起きないが念のため)
       // EPERM: 一部 FS で rename 不可
       // → 直接 write にフォールバック
       logger.debug(
-        `[claude-json-sync] rename failed (${err.code}); falling back to direct write (bind-mount path)`,
+        `[claude-json-sync] rename failed (${error.code}); falling back to direct write (bind-mount path)`,
       )
       fs.writeFileSync(targetPath, json, { mode: 0o600 })
     } else {
@@ -322,9 +321,7 @@ export function ensureClaudeJsonOAuthAccount(
     }
   } catch (error) {
     logger.warn(
-      `${ctx.prefix} Failed to sync ~/.claude.json for OAuth login: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `${ctx.prefix} Failed to sync ~/.claude.json for OAuth login: ${getErrorMessage(error)}`,
     )
   }
 }

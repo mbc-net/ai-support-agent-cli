@@ -22,12 +22,14 @@ export const IMAGE_NAME = 'ai-support-agent'
  * non-interactive SSH session that does not load the user shell profile).
  */
 function resolveDockerPath(): string {
-  // Check well-known locations when docker is not on PATH
+  // Check well-known locations when docker is not on PATH.
+  // Covers Docker Desktop, Homebrew (incl. Colima's docker CLI), and Linux.
   const candidates = [
     '/usr/local/bin/docker',
     '/opt/homebrew/bin/docker',
     path.join(os.homedir(), '.docker', 'bin', 'docker'),
     '/Applications/Docker.app/Contents/Resources/bin/docker',
+    '/usr/bin/docker',
   ]
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
@@ -39,15 +41,42 @@ function resolveDockerPath(): string {
 }
 
 /**
- * Set DOCKER_HOST to the user's Docker Desktop socket when not already set,
+ * Candidate Docker socket paths, in priority order, for environments that do
+ * not have the default /var/run/docker.sock and where the user shell profile
+ * (which would set DOCKER_HOST / docker context) is not loaded — e.g. a launchd
+ * service or a non-interactive SSH session.
+ *
+ * Order: Docker Desktop (macOS) → Colima (default profile) → Linux native.
+ * This lets the agent talk to whichever runtime is installed without the user
+ * having to log in or export DOCKER_HOST manually.
+ */
+function dockerSocketCandidates(): string[] {
+  const home = os.homedir()
+  return [
+    // Docker Desktop on macOS
+    path.join(home, '.docker', 'run', 'docker.sock'),
+    // Colima (default profile)
+    path.join(home, '.colima', 'default', 'docker.sock'),
+    // Linux native / rootful daemon
+    '/var/run/docker.sock',
+    // Linux rootless daemon
+    path.join(home, '.docker', 'desktop', 'docker.sock'),
+  ]
+}
+
+/**
+ * Set DOCKER_HOST to the first available Docker socket when not already set,
  * so that docker commands work even in environments without the default
- * /var/run/docker.sock (e.g. Docker Desktop on macOS).
+ * /var/run/docker.sock and without a loaded shell profile (Docker Desktop on
+ * macOS, Colima, or a Linux daemon).
  */
 function ensureDockerHost(): void {
   if (process.env.DOCKER_HOST) return
-  const macSocket = path.join(os.homedir(), '.docker', 'run', 'docker.sock')
-  if (fs.existsSync(macSocket)) {
-    process.env.DOCKER_HOST = `unix://${macSocket}`
+  for (const socket of dockerSocketCandidates()) {
+    if (fs.existsSync(socket)) {
+      process.env.DOCKER_HOST = `unix://${socket}`
+      return
+    }
   }
 }
 

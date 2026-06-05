@@ -15,7 +15,7 @@ import {
   buildOpenFolderDisableKeybindings,
   isZshShell,
 } from '../terminal/sandbox-init-script'
-import { getErrorMessage } from '../utils'
+import { getErrorMessage, readJsonSync, sleep } from '../utils'
 
 import {
   VSCODE_DEFAULT_PORT,
@@ -135,7 +135,7 @@ export class VsCodeServer {
     const proc = this.process
     const spawnError = new Promise<never>((_, reject) => {
       proc.on('error', (err) => {
-        logger.error(`[vscode-server] Failed to spawn: ${err.message}`)
+        logger.error(`[vscode-server] Failed to spawn: ${getErrorMessage(err)}`)
         reject(new Error(
           `code-server is not installed or not in PATH. Install it with: npm install -g code-server`,
         ))
@@ -249,7 +249,7 @@ export class VsCodeServer {
         await this.checkHealth()
         return
       } catch {
-        await new Promise(resolve => setTimeout(resolve, 500))
+        await sleep(500)
       }
     }
     throw new Error(`code-server failed to start within ${STARTUP_TIMEOUT_MS}ms`)
@@ -363,7 +363,7 @@ export class VsCodeServer {
     // 既存 settings.json があればマージ（profiles キーは deep merge）
     let existing: Record<string, unknown> = {}
     try {
-      existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+      existing = readJsonSync<Record<string, unknown>>(settingsPath)
     } catch {
       // ignore — file doesn't exist or is malformed
     }

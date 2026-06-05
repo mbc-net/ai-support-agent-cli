@@ -1,10 +1,41 @@
 import * as fs from 'fs'
 import axios from 'axios'
 
+export function readJsonSync<T>(filePath: string): T {
+  const content = fs.readFileSync(filePath, 'utf-8')
+  return JSON.parse(content) as T
+}
+
+/**
+ * 指定したミリ秒だけ待機する Promise を返す。
+ * `await new Promise((resolve) => setTimeout(resolve, ms))` の重複イディオムを集約する。
+ */
+export function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms))
+}
+
 export function atomicWriteFile(filePath: string, content: string, mode = 0o600): void {
   const tmpPath = filePath + '.tmp'
   fs.writeFileSync(tmpPath, content, { mode })
   fs.renameSync(tmpPath, filePath)
+}
+
+/**
+ * unknown な catch 値からメッセージ文字列を取り出す。
+ * Error なら `.message`、それ以外は `String()` を返す。
+ * `err instanceof Error ? err.message : String(err)` の重複イディオムを集約する。
+ */
+export function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * unknown な catch 値を Error インスタンスに正規化する。
+ * Error ならそのまま、それ以外は `String()` をメッセージにした Error を生成する。
+ * `err instanceof Error ? err : new Error(String(err))` の重複イディオムを集約する。
+ */
+export function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error))
 }
 
 /**
@@ -27,7 +58,7 @@ export function getErrorMessage(error: unknown): string {
     return `HTTP ${status}: ${error.message}`
   }
 
-  return error instanceof Error ? error.message : String(error)
+  return toErrorMessage(error)
 }
 
 export function parseString(value: unknown): string | null {
@@ -81,4 +112,18 @@ export function resolveUrlForDocker(url: string): string {
     /^((?:https?|wss?):\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
     (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
   )
+}
+
+/**
+ * Type guard for NodeJS.ErrnoException.
+ * Narrows `unknown` catch values to ErrnoException and optionally checks the error code.
+ * Avoids `instanceof Error` to stay compatible with Jest's `isolatedModules` environment
+ * where filesystem errors may not pass the `instanceof` check.
+ */
+export function isErrnoException(err: unknown, code?: string): err is NodeJS.ErrnoException {
+  if (err === null || typeof err !== 'object') return false
+  const e = err as Record<string, unknown>
+  if (typeof e['message'] !== 'string') return false
+  if (!('code' in e)) return false
+  return code === undefined || e['code'] === code
 }

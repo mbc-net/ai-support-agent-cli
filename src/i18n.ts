@@ -3,6 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { CONFIG_DIR, CONFIG_FILE } from './constants'
+import { readJsonSync } from './utils'
 
 type TranslationMap = Record<string, string>
 
@@ -21,8 +22,8 @@ function detectLocale(): string {
     const configDir = path.join(os.homedir(), CONFIG_DIR)
     const configPath = path.join(configDir, CONFIG_FILE)
     if (fs.existsSync(configPath)) {
-      const data = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
-      if (data.language) {
+      const data = readJsonSync<Record<string, unknown>>(configPath)
+      if (typeof data.language === 'string') {
         return data.language
       }
     }
@@ -59,7 +60,7 @@ function loadLocale(lang: string): TranslationMap {
   const filePath = path.join(localesDir, `${lang}.json`)
   try {
     if (fs.existsSync(filePath)) {
-      return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as TranslationMap
+      return readJsonSync<TranslationMap>(filePath)
     }
   } catch {
     // ignore load errors

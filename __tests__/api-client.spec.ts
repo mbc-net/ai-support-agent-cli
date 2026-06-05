@@ -292,6 +292,26 @@ describe('ApiClient', () => {
       expect(callArgs).not.toHaveProperty('availableChatModes')
       expect(callArgs).not.toHaveProperty('activeChatMode')
     })
+
+    it('should include ipAddress, configHash, dockerBuildError when provided (line 134-136)', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat(
+        'test-id',
+        { platform: 'darwin', arch: 'arm64', cpuUsage: 50, memoryUsage: 60, uptime: 1000 },
+        undefined,       // updateError
+        undefined,       // availableChatModes
+        undefined,       // activeChatMode
+        '10.0.0.1',      // ipAddress — truthy branch line 134
+        'abc123',        // configHash — truthy branch line 135
+        'build failed',  // dockerBuildError — truthy branch line 136
+      )
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).toHaveProperty('ipAddress', '10.0.0.1')
+      expect(callArgs).toHaveProperty('configHash', 'abc123')
+      expect(callArgs).toHaveProperty('dockerBuildError', 'build failed')
+    })
   })
 
   describe('getPendingCommands', () => {
@@ -403,6 +423,29 @@ describe('ApiClient', () => {
       expect(mockInstance.get).toHaveBeenCalledWith(
         '/api/test_tenant/agent/repo-credentials/REPO_01',
         undefined,
+      )
+    })
+  })
+
+  describe('getBrowserCredentials', () => {
+    it('should fetch browser credentials by name', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          name: 'test-browser',
+          loginUrl: 'https://example.com/login',
+          username: 'user@example.com',
+          password: 'secret123',
+        },
+      })
+
+      const result = await client.getBrowserCredentials('test-browser')
+      expect(result.name).toBe('test-browser')
+      expect(result.loginUrl).toBe('https://example.com/login')
+      expect(result.username).toBe('user@example.com')
+      expect(result.password).toBe('secret123')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/browser-credentials',
+        { params: { name: 'test-browser' } },
       )
     })
   })
@@ -909,7 +952,7 @@ describe('ApiClient', () => {
     }
 
     describe('getPendingAlerts', () => {
-      it('should GET pending alerts with status=pending', async () => {
+      it('should GET pending alerts with status=pending only (no staleProcessingMinutes)', async () => {
         mockInstance.get.mockResolvedValue({ data: { items: [mockAlertItem], total: 1 } })
 
         const result = await client.getPendingAlerts('tenant1', 'MBC_01')
@@ -917,7 +960,25 @@ describe('ApiClient', () => {
         expect(result.items).toHaveLength(1)
         expect(mockInstance.get).toHaveBeenCalledWith(
           '/api/tenant1/projects/MBC_01/alerts',
-          expect.objectContaining({ params: { status: 'pending', limit: 20 } }),
+          expect.objectContaining({
+            params: { status: 'pending', limit: 20 },
+          }),
+        )
+      })
+    })
+
+    describe('getStaleProcessingAlerts', () => {
+      it('should GET stale processing alerts with the given staleProcessingMinutes', async () => {
+        mockInstance.get.mockResolvedValue({ data: { items: [mockAlertItem], total: 1 } })
+
+        const result = await client.getStaleProcessingAlerts('tenant1', 'MBC_01', 30)
+
+        expect(result.items).toHaveLength(1)
+        expect(mockInstance.get).toHaveBeenCalledWith(
+          '/api/tenant1/projects/MBC_01/alerts',
+          expect.objectContaining({
+            params: { status: 'pending', staleProcessingMinutes: 30, limit: 20 },
+          }),
         )
       })
     })
@@ -963,25 +1024,21 @@ describe('ApiClient', () => {
 
     describe('findActiveIssueByAlarmName', () => {
       it('should return issue id when active issue found', async () => {
-        mockInstance.get.mockResolvedValue({ data: { items: [{ id: 'AI_SU000001' }] } })
+        mockInstance.get.mockResolvedValue({ data: { id: 'AI_SU000001' } })
 
         const result = await client.findActiveIssueByAlarmName('tenant1', 'MBC_01', 'CPUHigh')
 
         expect(result).toEqual({ id: 'AI_SU000001' })
         expect(mockInstance.get).toHaveBeenCalledWith(
-          '/api/tenant1/projects/MBC_01/issues',
+          '/api/tenant1/projects/MBC_01/alerts/active-issue',
           expect.objectContaining({
-            params: expect.objectContaining({
-              source: 'alert',
-              alarmName: 'CPUHigh',
-              statuses: 'open,received,in_progress',
-            }),
+            params: expect.objectContaining({ alarmName: 'CPUHigh' }),
           }),
         )
       })
 
       it('should return null when no active issue found', async () => {
-        mockInstance.get.mockResolvedValue({ data: { items: [] } })
+        mockInstance.get.mockResolvedValue({ data: null })
 
         const result = await client.findActiveIssueByAlarmName('tenant1', 'MBC_01', 'CPUHigh')
 
@@ -999,6 +1056,20 @@ describe('ApiClient', () => {
         expect(mockInstance.post).toHaveBeenCalledWith(
           '/api/tenant1/projects/MBC_01/alerts/AL000001/create-issue',
           { priority: 'urgent' },
+          undefined,
+        )
+      })
+    })
+
+    describe('resolveIssueFromAlert', () => {
+      it('should POST to resolve-issue endpoint', async () => {
+        mockInstance.post.mockResolvedValue({})
+
+        await client.resolveIssueFromAlert('tenant1', 'MBC_01', 'AL000001', 'JCCI_000071')
+
+        expect(mockInstance.post).toHaveBeenCalledWith(
+          '/api/tenant1/projects/MBC_01/alerts/AL000001/resolve-issue',
+          { issueId: 'JCCI_000071' },
           undefined,
         )
       })

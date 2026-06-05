@@ -8,7 +8,7 @@ import type {
   ProjectConfigResponse,
 } from '../types'
 import { errorResult, successResult } from '../types/command'
-import { parseString } from '../utils'
+import { parseString, toErrorMessage } from '../utils'
 
 import { executeChatCommand } from './chat-executor'
 
@@ -185,9 +185,8 @@ async function executeAiMode(
       tenantCode,
       browserLocalPort: options.browserLocalPort,
     })
-  } catch (err) {
-    const errorMessage =
-      err instanceof Error ? err.message : String(err)
+  } catch (err: unknown) {
+    const errorMessage = toErrorMessage(err)
     logger.error(`[e2e_test] Chat execution failed: ${errorMessage}`)
 
     await reportExecutionStatus(
@@ -244,59 +243,35 @@ async function executeScriptMode(
   } = params
   const projectCode = params.projectConfig?.project?.projectCode
 
-  // ブラウザセッション取得
-  const sessionManager = browserSessionManager as {
-    getOrCreate: (id: string) => Promise<unknown>
-  } | undefined
-
-  if (!sessionManager) {
-    logger.warn('[e2e_test] No browser session manager available, falling back to AI mode')
-    return executeAiMode(params, {
-      executionId,
-      testCaseId,
-      scenario,
-      targetUrl: params.targetUrl,
-      credentialId: params.credentialId,
-      startTime,
-    })
+  const aiFallbackParams = {
+    executionId,
+    testCaseId,
+    scenario,
+    targetUrl: params.targetUrl,
+    credentialId: params.credentialId,
+    startTime,
   }
 
-  let session: unknown
-  try {
-    session = await sessionManager.getOrCreate(`e2e-${executionId}`)
-  } catch (err) {
-    logger.warn(`[e2e_test] Failed to create browser session: ${err instanceof Error ? err.message : String(err)}`)
-    return executeAiMode(params, {
-      executionId,
-      testCaseId,
-      scenario,
-      targetUrl: params.targetUrl,
-      credentialId: params.credentialId,
-      startTime,
-    })
+  // ブラウザセッション取得
+  const session = await acquireBrowserSession(browserSessionManager, executionId)
+  if (session === null) {
+    logger.warn('[e2e_test] No browser session manager available, falling back to AI mode')
+    return executeAiMode(params, aiFallbackParams)
+  }
+  if (session === undefined) {
+    // セッション作成失敗 — ログは acquireBrowserSession 内で記録済み
+    return executeAiMode(params, aiFallbackParams)
   }
 
   // ステップ完了コールバック
-  const onStepComplete = async (step: number, _total: number, line: string) => {
-    if (!tenantCode || !projectCode) return
-    try {
-      await client.reportE2eTestStep(tenantCode, projectCode, executionId, {
-        testCaseId,
-        stepNumber: step,
-        action: line,
-        status: 'passed',
-      })
-    } catch (err) {
-      logger.warn(`[e2e_test] Failed to report step ${step}: ${err instanceof Error ? err.message : String(err)}`)
-    }
-  }
+  const onStepComplete = buildStepCompleteCallback(client, tenantCode, projectCode, executionId, testCaseId)
 
   // スクリプト実行
   let scriptResult: ScriptExecutionResult
   try {
     scriptResult = await executePlaywrightScript(session, playwrightScript, onStepComplete)
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err)
+  } catch (err: unknown) {
+    const errorMessage = toErrorMessage(err)
     logger.error(`[e2e_test] Script execution error: ${errorMessage}`)
 
     await reportExecutionStatus(
@@ -309,33 +284,12 @@ async function executeScriptMode(
   // fallbackToChat の場合はAI実行にフォールバック
   if (scriptResult.fallbackToChat) {
     logger.info('[e2e_test] Script contains unparseable lines, falling back to AI mode')
-    return executeAiMode(params, {
-      executionId,
-      testCaseId,
-      scenario,
-      targetUrl: params.targetUrl,
-      credentialId: params.credentialId,
-      startTime,
-    })
+    return executeAiMode(params, aiFallbackParams)
   }
 
   // スクリプト成功
   if (scriptResult.success) {
-    const duration = Date.now() - startTime
-    await reportExecutionStatus(
-      client, tenantCode, projectCode, executionId,
-      'passed', duration, undefined, testCaseId,
-      { passedSteps: scriptResult.completedSteps, totalSteps: scriptResult.totalSteps },
-    )
-
-    logger.info(`[e2e_test] Script execution passed [${executionId}]: ${scriptResult.completedSteps}/${scriptResult.totalSteps} steps`)
-    return successResult({
-      executionId,
-      status: 'passed',
-      duration,
-      completedSteps: scriptResult.completedSteps,
-      totalSteps: scriptResult.totalSteps,
-    })
+    return reportScriptSuccess(client, tenantCode, projectCode, executionId, testCaseId, startTime, scriptResult)
   }
 
   // スクリプト失敗 → AIリカバリ
@@ -347,6 +301,86 @@ async function executeScriptMode(
     originalScript: playwrightScript,
     scriptResult,
     recoveryMode,
+  })
+}
+
+/**
+ * ブラウザセッションを取得する。
+ * - セッションマネージャーなし → null（AI fallback シグナル）
+ * - セッション作成失敗 → undefined（AI fallback シグナル）
+ * - 成功 → セッションオブジェクト
+ */
+async function acquireBrowserSession(
+  browserSessionManager: unknown,
+  executionId: string,
+): Promise<unknown | null | undefined> {
+  const sessionManager = browserSessionManager as {
+    getOrCreate: (id: string) => Promise<unknown>
+  } | undefined
+
+  if (!sessionManager) {
+    return null
+  }
+
+  try {
+    return await sessionManager.getOrCreate(`e2e-${executionId}`)
+  } catch (err: unknown) {
+    logger.warn(`[e2e_test] Failed to create browser session: ${toErrorMessage(err)}`)
+    return undefined
+  }
+}
+
+/**
+ * ステップ完了コールバックを生成する
+ */
+function buildStepCompleteCallback(
+  client: ApiClient,
+  tenantCode: string | undefined,
+  projectCode: string | undefined,
+  executionId: string,
+  testCaseId: string | undefined,
+): (step: number, _total: number, line: string) => Promise<void> {
+  return async (step: number, _total: number, line: string) => {
+    if (!tenantCode || !projectCode) return
+    try {
+      await client.reportE2eTestStep(tenantCode, projectCode, executionId, {
+        testCaseId,
+        stepNumber: step,
+        action: line,
+        status: 'passed',
+      })
+    } catch (err: unknown) {
+      logger.warn(`[e2e_test] Failed to report step ${step}: ${toErrorMessage(err)}`)
+    }
+  }
+}
+
+/**
+ * スクリプト成功時のステータス報告と結果返却
+ */
+async function reportScriptSuccess(
+  client: ApiClient,
+  tenantCode: string | undefined,
+  projectCode: string | undefined,
+  executionId: string,
+  testCaseId: string | undefined,
+  startTime: number,
+  scriptResult: ScriptExecutionResult,
+): Promise<CommandResult> {
+  const duration = Date.now() - startTime
+  await reportExecutionStatus(
+    client, tenantCode, projectCode, executionId,
+    'passed', duration, undefined, testCaseId,
+    { passedSteps: scriptResult.completedSteps, totalSteps: scriptResult.totalSteps },
+  )
+
+  logger.info(`[e2e_test] Script execution passed [${executionId}]: ${scriptResult.completedSteps}/${scriptResult.totalSteps} steps`)
+  return successResult({
+    executionId,
+    status: 'passed',
+    duration,
+    completedSteps: scriptResult.completedSteps,
+    totalSteps: scriptResult.totalSteps,
   })
 }
 
@@ -401,8 +435,8 @@ async function executeAiRecovery(
         tenantCode,
         browserLocalPort: params.browserLocalPort,
       })
-    } catch (err) {
-      logger.warn(`[e2e_test] Recovery chat failed: ${err instanceof Error ? err.message : String(err)}`)
+    } catch (err: unknown) {
+      logger.warn(`[e2e_test] Recovery chat failed: ${toErrorMessage(err)}`)
       continue
     }
 
@@ -422,8 +456,8 @@ async function executeAiRecovery(
     let retryResult: ScriptExecutionResult
     try {
       retryResult = await executePlaywrightScript(session, updatedScript)
-    } catch (err) {
-      logger.warn(`[e2e_test] Recovery script execution error: ${err instanceof Error ? err.message : String(err)}`)
+    } catch (err: unknown) {
+      logger.warn(`[e2e_test] Recovery script execution error: ${toErrorMessage(err)}`)
       continue
     }
 
@@ -438,8 +472,8 @@ async function executeAiRecovery(
             testCaseId,
             recoveryMode,
           })
-        } catch (err) {
-          logger.warn(`[e2e_test] Failed to save recovered script: ${err instanceof Error ? err.message : String(err)}`)
+        } catch (err: unknown) {
+          logger.warn(`[e2e_test] Failed to save recovered script: ${toErrorMessage(err)}`)
         }
       }
 
@@ -578,9 +612,9 @@ async function reportExecutionStatus(
         ...extra,
       },
     )
-  } catch (err) {
+  } catch (err: unknown) {
     logger.warn(
-      `[e2e_test] Failed to update execution status: ${err instanceof Error ? err.message : String(err)}`,
+      `[e2e_test] Failed to update execution status: ${toErrorMessage(err)}`,
     )
   }
 }

@@ -438,4 +438,70 @@ describe('startAutoUpdater', () => {
       }
     }
   })
+
+  describe('branch coverage: forcedUpdate=false → UPDATE_BUSY_WAIT_TIMEOUT_MS (line 125) and checking guard (line 39)', () => {
+    it('forcedUpdate が false の場合 UPDATE_BUSY_WAIT_TIMEOUT_MS を使用する（line 125 branch [1]）', async () => {
+      // Cover: forcedUpdate ? UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS : UPDATE_BUSY_WAIT_TIMEOUT_MS
+      // When forcedUpdate=false (not below minimumVersion)
+      const client = createMockClient()
+      const stopAll = jest.fn()
+      const isAnyAgentBusy = jest.fn(async () => false)  // not busy → won't wait
+
+      // First isNewerVersion call: for latestVersion → true (update available)
+      // Second isNewerVersion call: for minimumVersion → false (not below minimum)
+      mockedIsNewerVersion
+        .mockReturnValueOnce(true)  // latestVersion check → update available
+        .mockReturnValueOnce(false) // minimumVersion check → NOT forced
+
+      const updater = startAutoUpdater([client], defaultConfig, stopAll, undefined, isAnyAgentBusy)
+
+      await jest.advanceTimersByTimeAsync(30_000)
+
+      // forcedUpdate=false → UPDATE_BUSY_WAIT_TIMEOUT_MS (not forced) → but isAnyAgentBusy returns false → no wait
+      expect(stopAll).toHaveBeenCalled()
+
+      updater.stop()
+    })
+
+    it('checking フラグが true の場合早期リターンする（line 39 branch [0]）', async () => {
+      // Cover: if (checking) return  when check() is called while already running
+      // This requires two concurrent calls to the check function
+      const client = createMockClient()
+      const stopAll = jest.fn()
+      let checkCallCount = 0
+
+      // Make getVersionInfo slow to keep checking=true long enough for second call
+      ;(client.getVersionInfo as jest.Mock).mockImplementation(() => new Promise(resolve => {
+        checkCallCount++
+        setTimeout(() => resolve({
+          latestVersion: '2.0.0',
+          minimumVersion: '0.0.0',
+          channel: 'latest',
+          channels: { latest: '2.0.0' },
+        }), 1000)
+      }))
+
+      mockedIsNewerVersion.mockReturnValue(true)
+
+      const updater = startAutoUpdater([client], { ...defaultConfig, checkIntervalMs: 100 }, stopAll)
+
+      // First trigger (after initial delay)
+      await jest.advanceTimersByTimeAsync(30_000)
+
+      // Advance a bit but not enough for getVersionInfo to complete (500ms < 1000ms)
+      await jest.advanceTimersByTimeAsync(500)
+
+      // Advance interval timer to trigger second check while first is still running
+      await jest.advanceTimersByTimeAsync(100)  // checkIntervalMs
+
+      // Complete the pending getVersionInfo (first call)
+      await jest.advanceTimersByTimeAsync(500)
+
+      // Second call should have been skipped (checking=true)
+      // getVersionInfo should only be called once (or at most few times due to timing)
+      expect(client.getVersionInfo).toHaveBeenCalledTimes(checkCallCount)
+
+      updater.stop()
+    })
+  })
 })

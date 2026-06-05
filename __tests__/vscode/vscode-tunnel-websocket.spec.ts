@@ -282,6 +282,97 @@ describe('VsCodeTunnelWebSocket', () => {
 
       expect(VsCodeServer).toHaveBeenCalledWith({ projectDir: '/custom/dir' })
     })
+
+    it('should warn when envVarsProvider is set but returns falsy', async () => {
+      const { logger } = require('../../src/logger')
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+
+      VsCodeServer.mockImplementation(() => ({
+        start: jest.fn().mockResolvedValue(undefined),
+        getPort: jest.fn().mockReturnValue(8443),
+        isRunning: false,
+      }))
+      VsCodeWsProxy.mockImplementation(() => ({}))
+
+      // Create a tunnel with envVarsProvider that returns undefined (not ready yet)
+      const tunnelWithProvider = new (VsCodeTunnelWebSocket as unknown as new (
+        apiUrl: string,
+        token: string,
+        agentId: string,
+        projectDir: string,
+        envVarsProvider: () => Record<string, string> | undefined,
+      ) => { handleVsCodeOpen: (msg: unknown) => Promise<void> })(
+        'https://api.example.com',
+        'test-token',
+        'agent-123',
+        '/test/project',
+        () => undefined, // envVarsProvider returns undefined → triggers warning
+      )
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnelWithProvider as any).ws = mockWs
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnelWithProvider as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-env-warn', projectDir: '/test' })
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('before envVars are available'),
+      )
+    })
+
+    it('should restart running server when envVars signature changes', async () => {
+      const { logger } = require('../../src/logger')
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+
+      const mockStop = jest.fn().mockResolvedValue(undefined)
+      const mockStart = jest.fn().mockResolvedValue(undefined)
+      const mockGetPort = jest.fn().mockReturnValue(8444)
+
+      const runningServer = { isRunning: true, touch: jest.fn(), getPort: mockGetPort, stop: mockStop }
+      VsCodeServer.mockImplementation(() => ({
+        start: mockStart,
+        getPort: mockGetPort,
+        isRunning: false,
+      }))
+      VsCodeWsProxy.mockImplementation(() => ({}))
+
+      // Set an existing running server with a different env signature
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).vsCodeServer = runningServer
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).vsCodeServerEnvSignature = 'OLD_KEY=old_value'
+
+      // Create a tunnel with envVarsProvider returning new envVars (different signature)
+      const tunnelWithProvider = new (VsCodeTunnelWebSocket as unknown as new (
+        apiUrl: string,
+        token: string,
+        agentId: string,
+        projectDir: string,
+        envVarsProvider: () => Record<string, string>,
+      ) => object)(
+        'https://api.example.com',
+        'test-token',
+        'agent-123',
+        '/test/project',
+        () => ({ NEW_KEY: 'new_value' }),
+      )
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnelWithProvider as any).ws = mockWs
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnelWithProvider as any).vsCodeServer = runningServer
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnelWithProvider as any).vsCodeServerEnvSignature = 'OLD_KEY=old_value'
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnelWithProvider as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-restart', projectDir: '/test' })
+
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.stringContaining('envVars changed since last code-server start'),
+      )
+      expect(mockStop).toHaveBeenCalled()
+      expect(mockStart).toHaveBeenCalled()
+    })
   })
 
   describe('handleVsCodeClose', () => {
@@ -372,6 +463,89 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(sentMessages).toHaveLength(1)
       expect(sentMessages[0].type).toBe('error')
       expect(sentMessages[0].message).toContain('HTTP proxy error')
+    })
+  })
+
+  describe('sendHttpResponse', () => {
+    it('should send a single message when body is within chunk size', () => {
+      const msg = { requestId: 'req-s1', sessionId: 'sess-s1' }
+      const response = { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: 'small body' }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendHttpResponse(msg, response)
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({
+        type: 'http_response',
+        requestId: 'req-s1',
+        sessionId: 'sess-s1',
+        statusCode: 200,
+        headers: { 'content-type': 'text/plain' },
+        body: 'small body',
+      })
+    })
+
+    it('should delegate to sendChunkedHttpResponse when body exceeds chunk size', () => {
+      const largeBody = 'x'.repeat(600000)
+      const msg = { requestId: 'req-s2', sessionId: 'sess-s2' }
+      const response = { statusCode: 200, headers: { 'content-type': 'text/html' }, body: largeBody }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendHttpResponse(msg, response)
+      // Multiple chunks expected
+      expect(sentMessages.length).toBeGreaterThan(1)
+      expect(sentMessages[0].bodyChunkIndex).toBe(0)
+    })
+  })
+
+  describe('sendChunkedHttpResponse', () => {
+    it('should split response body into multiple chunks', () => {
+      const largeBody = 'a'.repeat(600000)
+      const msg = { requestId: 'req-c1', sessionId: 'sess-c1' }
+      const response = { statusCode: 200, headers: { 'x-custom': 'yes' }, body: largeBody }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendChunkedHttpResponse(msg, response)
+      expect(sentMessages.length).toBeGreaterThan(1)
+      // First chunk carries headers
+      expect(sentMessages[0].headers).toEqual({ 'x-custom': 'yes' })
+      // Subsequent chunks do not carry headers
+      for (let i = 1; i < sentMessages.length; i++) {
+        expect(sentMessages[i].headers).toBeUndefined()
+      }
+    })
+
+    it('should set bodyChunkIndex and bodyChunkTotal correctly', () => {
+      const body = 'b'.repeat(600000)
+      const msg = { requestId: 'req-c2', sessionId: 'sess-c2' }
+      const response = { statusCode: 200, headers: {}, body }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendChunkedHttpResponse(msg, response)
+      const total = sentMessages[0].bodyChunkTotal!
+      expect(total).toBeGreaterThan(1)
+      sentMessages.forEach((m, idx) => {
+        expect(m.bodyChunkIndex).toBe(idx)
+        expect(m.bodyChunkTotal).toBe(total)
+      })
+    })
+
+    it('should reconstruct original body from chunks', () => {
+      const body = 'c'.repeat(700000)
+      const msg = { requestId: 'req-c3', sessionId: 'sess-c3' }
+      const response = { statusCode: 200, headers: {}, body }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendChunkedHttpResponse(msg, response)
+      const reconstructed = sentMessages.map(m => m.body ?? '').join('')
+      expect(reconstructed).toBe(body)
+    })
+
+    it('should forward requestId and sessionId to every chunk', () => {
+      const body = 'd'.repeat(600000)
+      const msg = { requestId: 'req-c4', sessionId: 'sess-c4' }
+      const response = { statusCode: 302, headers: {}, body }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).sendChunkedHttpResponse(msg, response)
+      for (const m of sentMessages) {
+        expect(m.requestId).toBe('req-c4')
+        expect(m.sessionId).toBe('sess-c4')
+        expect(m.statusCode).toBe(302)
+      }
     })
   })
 

@@ -204,23 +204,25 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     // Start browser local server for inter-process communication
     if (!this.browserLocalServer) {
-      this.browserLocalServer = new BrowserLocalServer(this.browserSessionManager)
+      const localServer = new BrowserLocalServer(this.browserSessionManager)
+      this.browserLocalServer = localServer
       // Forward action log entries from chat-initiated operations to the Web UI
-      this.browserLocalServer.onActionLog = (notification) => {
+      localServer.onActionLog = (notification) => {
         this.send({
           type: 'browser_action_log',
           sessionId: notification.sessionId,
           entries: [notification.entry],
         })
       }
-      this.browserLocalServerStartPromise = this.browserLocalServer.start()
-        .then((port) => {
+      this.browserLocalServerStartPromise = (async () => {
+        try {
+          const port = await localServer.start()
           this.browserLocalPort = port
           logger.info(`[vscode-ws] Browser local server started on port ${port}`)
-        })
-        .catch((err) => {
+        } catch (err) {
           logger.error(`[vscode-ws] Failed to start browser local server: ${getErrorMessage(err)}`)
-        })
+        }
+      })()
     }
 
     resolve()
@@ -408,9 +410,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
 
     if (!targetPort) {
+      // vsCodeServer is guaranteed non-null here: the early-return guard above
+      // (line: `if (!targetPort && !this.vsCodeServer?.isRunning)`) ensures we only
+      // reach this point when vsCodeServer is running.
       this.vsCodeServer!.touch()
     }
 
+    // vsCodeServer is guaranteed non-null when targetPort is absent:
+    // the early-return guard above ensures vsCodeServer.isRunning when !targetPort.
     const port = targetPort ?? this.vsCodeServer!.getPort()
 
     try {
@@ -421,42 +428,64 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         body: msg.body,
       })
 
-      // レスポンスボディが大きい場合はチャンク分割
-      const bodyLength = response.body.length
-      if (bodyLength > HTTP_RESPONSE_CHUNK_SIZE) {
-        const totalChunks = Math.ceil(bodyLength / HTTP_RESPONSE_CHUNK_SIZE)
-        for (let i = 0; i < totalChunks; i++) {
-          const chunk = response.body.substring(
-            i * HTTP_RESPONSE_CHUNK_SIZE,
-            (i + 1) * HTTP_RESPONSE_CHUNK_SIZE,
-          )
-          this.send({
-            type: 'http_response',
-            requestId: msg.requestId,
-            sessionId: msg.sessionId,
-            statusCode: response.statusCode,
-            headers: i === 0 ? response.headers : undefined,
-            body: chunk,
-            bodyChunkIndex: i,
-            bodyChunkTotal: totalChunks,
-          })
-        }
-      } else {
-        this.send({
-          type: 'http_response',
-          requestId: msg.requestId,
-          sessionId: msg.sessionId,
-          statusCode: response.statusCode,
-          headers: response.headers,
-          body: response.body,
-        })
-      }
+      this.sendHttpResponse(msg, response)
     } catch (error) {
       this.send({
         type: 'error',
         requestId: msg.requestId,
         sessionId: msg.sessionId,
         message: `HTTP proxy error: ${getErrorMessage(error)}`,
+      })
+    }
+  }
+
+  /**
+   * レスポンスをチャンク分割して送信する。
+   * ボディが HTTP_RESPONSE_CHUNK_SIZE 以下の場合は単一メッセージで送信する。
+   */
+  private sendHttpResponse(
+    msg: VsCodeServerMessage,
+    response: { statusCode: number; headers: Record<string, string>; body: string },
+  ): void {
+    // レスポンスボディが大きい場合はチャンク分割
+    const bodyLength = response.body.length
+    if (bodyLength > HTTP_RESPONSE_CHUNK_SIZE) {
+      this.sendChunkedHttpResponse(msg, response)
+    } else {
+      this.send({
+        type: 'http_response',
+        requestId: msg.requestId,
+        sessionId: msg.sessionId,
+        statusCode: response.statusCode,
+        headers: response.headers,
+        body: response.body,
+      })
+    }
+  }
+
+  /**
+   * レスポンスボディを HTTP_RESPONSE_CHUNK_SIZE ごとに分割して複数メッセージで送信する。
+   */
+  private sendChunkedHttpResponse(
+    msg: VsCodeServerMessage,
+    response: { statusCode: number; headers: Record<string, string>; body: string },
+  ): void {
+    const bodyLength = response.body.length
+    const totalChunks = Math.ceil(bodyLength / HTTP_RESPONSE_CHUNK_SIZE)
+    for (let i = 0; i < totalChunks; i++) {
+      const chunk = response.body.substring(
+        i * HTTP_RESPONSE_CHUNK_SIZE,
+        (i + 1) * HTTP_RESPONSE_CHUNK_SIZE,
+      )
+      this.send({
+        type: 'http_response',
+        requestId: msg.requestId,
+        sessionId: msg.sessionId,
+        statusCode: response.statusCode,
+        headers: i === 0 ? response.headers : undefined,
+        body: chunk,
+        bodyChunkIndex: i,
+        bodyChunkTotal: totalChunks,
       })
     }
   }
@@ -472,6 +501,9 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     if (!proxy) return
 
     if (!pfSession) {
+      // vsCodeServer is guaranteed non-null here: the early-return guard above
+      // (`if (!pfSession && (!this.vsCodeServer?.isRunning || !this.wsProxy))`)
+      // ensures we only reach this point when vsCodeServer.isRunning is true.
       this.vsCodeServer!.touch()
     }
     const subSocketId = msg.subSocketId

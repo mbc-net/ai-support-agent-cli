@@ -3,6 +3,7 @@ dist/
 coverage/
 report/
 .vscode-server/
+.claude/
 *.js.map
 .env
 .local/

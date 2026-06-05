@@ -12,14 +12,18 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
+import { LOCALHOST_ADDRESS } from '../../constants'
 import { logger } from '../../logger'
+import { sleep } from '../../utils'
 import { BrowserProxySession } from './browser/browser-proxy-session'
 import { validateUrl } from './browser/browser-security'
 import { BrowserSession } from './browser/browser-session'
+import { BrowserSessionManager, getMaxBrowserSessionsFromEnv } from './browser/browser-session-manager'
 import {
-  BrowserSessionManager,
-  getMaxBrowserSessionsFromEnv,
-} from './browser/browser-session-manager'
+  BROWSER_TIMEOUT_REQUEST_MS,
+  SELECTOR_TIMEOUT_NAVIGATION_MS,
+  SELECTOR_TIMEOUT_SINGLE_MS,
+} from './browser/browser-types'
 import { isPlaywrightAvailable } from './browser/playwright-loader'
 import { tryClickSelectors, tryFillSelectors } from './browser/selector-utils'
 import { mcpErrorResponse, mcpTextImageResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
@@ -43,7 +47,7 @@ async function getActiveSession(sessionManager: BrowserSessionManager, fallbackS
     // If local port is set, use proxy session (child process context)
     if (localPort) {
       logger.debug(`[browser] Using proxy session: sessionId=${browserSessionId}, port=${localPort}`)
-      return new BrowserProxySession(`http://127.0.0.1:${localPort}`, browserSessionId)
+      return new BrowserProxySession(`http://${LOCALHOST_ADDRESS}:${localPort}`, browserSessionId)
     }
   }
 
@@ -52,7 +56,7 @@ async function getActiveSession(sessionManager: BrowserSessionManager, fallbackS
     const sessionId = resolvedProxySessionId ?? await resolveFirstSessionId(localPort)
     if (sessionId) {
       logger.debug(`[browser] Using resolved proxy session: sessionId=${sessionId}, port=${localPort}`)
-      return new BrowserProxySession(`http://127.0.0.1:${localPort}`, sessionId)
+      return new BrowserProxySession(`http://${LOCALHOST_ADDRESS}:${localPort}`, sessionId)
     }
   }
 
@@ -70,7 +74,7 @@ async function resolveFirstSessionId(localPort: string): Promise<string | null> 
 
   for (let i = 0; i < maxRetries; i++) {
     try {
-      const data = await httpGet(`http://127.0.0.1:${localPort}/sessions/first`)
+      const data = await httpGet(`http://${LOCALHOST_ADDRESS}:${localPort}/sessions/first`)
       const parsed = JSON.parse(data) as { sessionId?: string }
       if (parsed.sessionId) {
         resolvedProxySessionId = parsed.sessionId
@@ -81,7 +85,7 @@ async function resolveFirstSessionId(localPort: string): Promise<string | null> 
       logger.debug(`[browser] Failed to resolve first session (attempt ${i + 1}/${maxRetries}): ${String(error)}`)
     }
     if (i < maxRetries - 1) {
-      await new Promise(resolve => setTimeout(resolve, retryDelay))
+      await sleep(retryDelay)
     }
   }
   // Clear cache on failure so next call retries fresh
@@ -94,7 +98,7 @@ async function resolveFirstSessionId(localPort: string): Promise<string | null> 
  */
 function httpGet(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    http.get(url, { timeout: 3000 }, (res) => {
+    http.get(url, { timeout: BROWSER_TIMEOUT_REQUEST_MS }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', (chunk: Buffer) => chunks.push(chunk))
       res.on('end', () => resolve(Buffer.concat(chunks).toString()))
@@ -147,7 +151,7 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
     async ({ url, waitForSelector, waitForTimeout, fullPage, viewport }) => withMcpErrorHandling(async () => {
       const validation = validateUrl(url)
       if (!validation.valid) {
-        return mcpErrorResponse(validation.reason!)
+        return mcpErrorResponse(validation.reason ?? 'Invalid URL')
       }
 
       const session = await getActiveSession(manager, defaultSession)
@@ -166,10 +170,10 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
 
       const page = await session.getPage()
 
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
 
       if (waitForSelector) {
-        await page.waitForSelector(waitForSelector, { timeout: 10000 })
+        await page.waitForSelector(waitForSelector, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
       }
 
       if (waitForTimeout) {
@@ -319,7 +323,7 @@ function registerBrowserGetTextTool(server: McpServer, defaultSession: BrowserSe
       }
 
       const page = await session.getPage()
-      const text: string = await page.locator(target).innerText({ timeout: 10000 })
+      const text: string = await page.locator(target).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
 
       // Truncate to 50KB to avoid overwhelming the context
       const maxLength = 50 * 1024
@@ -353,7 +357,7 @@ function registerBrowserLoginTool(
 
       const validation = validateUrl(credentials.baseUrl)
       if (!validation.valid) {
-        return mcpErrorResponse(validation.reason!)
+        return mcpErrorResponse(validation.reason ?? 'Invalid URL')
       }
 
       let title: string
@@ -368,7 +372,7 @@ function registerBrowserLoginTool(
       } else {
         // Navigate to base URL
         const page = await session.getPage()
-        await page.goto(credentials.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+        await page.goto(credentials.baseUrl, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
 
         title = await page.title()
         currentUrl = page.url()
@@ -421,7 +425,7 @@ function registerBrowserExtractTool(server: McpServer, defaultSession: BrowserSe
       }
 
       const page = await session.getPage()
-      const text: string = await page.locator(selector).innerText({ timeout: 10000 })
+      const text: string = await page.locator(selector).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
 
       // Truncate to 50KB to avoid overwhelming the context
       const maxLength = 50 * 1024

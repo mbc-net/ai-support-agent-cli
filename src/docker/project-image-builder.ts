@@ -12,9 +12,12 @@ import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { ApiClient } from '../api-client'
 import { buildDockerEnv } from './dockerfile-generator'
 import { makeSessionId, getDockerPath } from './docker-utils'
+import { toError } from '../utils'
 
 /** Maximum total log size kept in memory per session (2 MB). Older content is discarded. */
 const MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024
+// API の SubmitLogChunkDto.text @MaxLength に合わせた上限（100,000 バイト）
+const MAX_LOG_CHUNK_BYTES = 100_000
 
 /**
  * Build a per-project Docker image using the given Dockerfile.
@@ -57,8 +60,11 @@ export async function buildProjectImage(
       }
     }
     if (apiClient) {
-      await apiClient.submitLogChunk({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, seq: ++seq, text })
-        .catch((e: unknown) => logger.warn(`[docker] Failed to send log chunk: ${e}`))
+      for (let offset = 0; offset < text.length; offset += MAX_LOG_CHUNK_BYTES) {
+        const slice = text.slice(offset, offset + MAX_LOG_CHUNK_BYTES)
+        await apiClient.submitLogChunk({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, seq: ++seq, text: slice })
+          .catch((e: unknown) => logger.warn(`[docker] Failed to send log chunk: ${e}`))
+      }
     }
   }
 
@@ -86,7 +92,7 @@ export async function buildProjectImage(
       if (code === 0) resolve()
       else reject(new Error(`docker build exited with code ${code}`))
     })
-  }).catch((e: unknown) => { buildError = e instanceof Error ? e : new Error(String(e)) })
+  }).catch((e: unknown) => { buildError = toError(e) })
 
   await flush()
 
