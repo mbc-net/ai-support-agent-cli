@@ -368,28 +368,28 @@ describe('generateWrapperScript', () => {
   it('should convert localhost to host.docker.internal in apiUrl', () => {
     const result = generateWrapperScript({ ...baseOpts, apiUrl: 'http://localhost:4030' })
 
-    expect(result).toContain('AI_SUPPORT_AGENT_API_URL=http://host.docker.internal:4030')
+    expect(result).toContain(`AI_SUPPORT_AGENT_API_URL='http://host.docker.internal:4030'`)
     expect(result).not.toContain('localhost')
   })
 
   it('should convert localhost without port to host.docker.internal', () => {
     const result = generateWrapperScript({ ...baseOpts, apiUrl: 'http://localhost' })
 
-    expect(result).toContain('AI_SUPPORT_AGENT_API_URL=http://host.docker.internal')
+    expect(result).toContain(`AI_SUPPORT_AGENT_API_URL='http://host.docker.internal'`)
     expect(result).not.toContain('localhost')
   })
 
   it('should convert 127.0.0.1 to host.docker.internal in apiUrl', () => {
     const result = generateWrapperScript({ ...baseOpts, apiUrl: 'http://127.0.0.1:4030' })
 
-    expect(result).toContain('AI_SUPPORT_AGENT_API_URL=http://host.docker.internal:4030')
+    expect(result).toContain(`AI_SUPPORT_AGENT_API_URL='http://host.docker.internal:4030'`)
     expect(result).not.toContain('127.0.0.1')
   })
 
   it('should not convert non-localhost URLs', () => {
     const result = generateWrapperScript({ ...baseOpts, apiUrl: 'https://api.example.com' })
 
-    expect(result).toContain('AI_SUPPORT_AGENT_API_URL=https://api.example.com')
+    expect(result).toContain(`AI_SUPPORT_AGENT_API_URL='https://api.example.com'`)
   })
 
   it('should handle exit 42 by delegating to update script', () => {
@@ -419,13 +419,13 @@ describe('generateWrapperScript', () => {
   it('should include ANTHROPIC_API_KEY when provided', () => {
     const result = generateWrapperScript({ ...baseOpts, anthropicApiKey: 'sk-ant-test' })
 
-    expect(result).toContain('-e ANTHROPIC_API_KEY=sk-ant-test')
+    expect(result).toContain(`-e ANTHROPIC_API_KEY='sk-ant-test'`)
   })
 
   it('should include CLAUDE_CODE_OAUTH_TOKEN when provided', () => {
     const result = generateWrapperScript({ ...baseOpts, claudeCodeOauthToken: 'oauth-token' })
 
-    expect(result).toContain('-e CLAUDE_CODE_OAUTH_TOKEN=oauth-token')
+    expect(result).toContain(`-e CLAUDE_CODE_OAUTH_TOKEN='oauth-token'`)
   })
 
   it('should not include optional env vars when not provided', () => {
@@ -514,6 +514,29 @@ describe('generateWrapperScript', () => {
   it('should NOT pipe through log-rotate when logDir is omitted', () => {
     const result = generateWrapperScript(baseOpts)
     expect(result).not.toContain('ai-support-agent log-rotate')
+  })
+
+  it('should shell-quote the token so metacharacters cannot be interpreted', () => {
+    const result = generateWrapperScript({ ...baseOpts, token: 'tok$(rm -rf ~)`id`' })
+    // The raw, unquoted command substitution must never appear bare in the script.
+    expect(result).not.toContain('AI_SUPPORT_AGENT_TOKEN=tok$(rm -rf ~)')
+    // It must be wrapped in single quotes (shellQuote output).
+    expect(result).toContain(`AI_SUPPORT_AGENT_TOKEN='tok$(rm -rf ~)\`id\`'`)
+  })
+
+  it('should shell-quote the API URL', () => {
+    const result = generateWrapperScript({ ...baseOpts, apiUrl: 'https://api.example.com/?a=1&b=2' })
+    expect(result).toContain(`AI_SUPPORT_AGENT_API_URL='https://api.example.com/?a=1&b=2'`)
+  })
+
+  it('should shell-quote ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN', () => {
+    const result = generateWrapperScript({
+      ...baseOpts,
+      anthropicApiKey: 'sk-ant-$(whoami)',
+      claudeCodeOauthToken: 'oauth-`id`-tok',
+    })
+    expect(result).toContain(`ANTHROPIC_API_KEY='sk-ant-$(whoami)'`)
+    expect(result).toContain(`CLAUDE_CODE_OAUTH_TOKEN='oauth-\`id\`-tok'`)
   })
 })
 

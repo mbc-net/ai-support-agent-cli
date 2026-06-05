@@ -40,6 +40,11 @@ export function getWrapperScriptPath(projectServiceDir: string): string {
   return path.join(projectServiceDir, 'run.sh')
 }
 
+/** Returns the run.cmd wrapper script path inside a project service directory (Windows). */
+export function getWin32WrapperScriptPath(projectServiceDir: string): string {
+  return path.join(projectServiceDir, 'run.cmd')
+}
+
 /** Returns the agent stdout log path. */
 export function getAgentOutLog(logDir: string): string {
   return path.join(logDir, 'agent.out.log')
@@ -86,4 +91,14 @@ export function getLinuxSystemdUserDir(): string {
 /** Returns the log directory for the agent on Linux. */
 export function getLinuxLogDir(): string {
   return path.join(os.homedir(), '.local', 'share', 'ai-support-agent', 'logs')
+}
+
+// ---------------------------------------------------------------------------
+// Windows (win32) specific path helpers
+// ---------------------------------------------------------------------------
+
+/** Returns the log directory for the agent on Windows (%LOCALAPPDATA%). */
+export function getWin32LogDir(): string {
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
+  return path.join(localAppData, 'ai-support-agent', 'logs')
 }
