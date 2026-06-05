@@ -26,7 +26,7 @@ import {
 } from './browser/browser-types'
 import { isPlaywrightAvailable } from './browser/playwright-loader'
 import { tryClickSelectors, tryFillSelectors } from './browser/selector-utils'
-import { mcpErrorResponse, mcpTextImageResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
+import { mcpErrorResponse, mcpTextImageResponse, mcpTextResponse, screenshotToBase64, withMcpErrorHandling } from './mcp-response'
 
 /** Cache the resolved session ID from BrowserLocalServer */
 let resolvedProxySessionId: string | null = null
@@ -160,7 +160,7 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
 
       if (session instanceof BrowserProxySession) {
         const result = await session.navigate(url, { waitForSelector, waitForTimeout, fullPage: fullPage ?? true })
-        const base64 = result.screenshot.toString('base64')
+        const base64 = screenshotToBase64(result.screenshot)
         return mcpTextImageResponse(`Page: ${result.title}\nURL: ${result.url}`, base64, 'image/png')
       }
 
@@ -184,7 +184,7 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
       const title: string = await page.title()
       const currentUrl: string = page.url()
       const screenshotBuffer = await session.screenshot(fullPage ?? true)
-      const base64 = screenshotBuffer.toString('base64')
+      const base64 = screenshotToBase64(screenshotBuffer)
 
       session.actionLog.add('chat', 'navigate', url)
 
@@ -234,7 +234,7 @@ function registerBrowserClickTool(server: McpServer, defaultSession: BrowserSess
         const result = await session.click(selector, { waitForNavigation: waitForNavigation ?? false, screenshot: screenshot ?? true })
         const statusText = `Clicked: ${selector}\nPage: ${result.title}\nURL: ${result.url}`
         if (result.screenshot) {
-          return mcpTextImageResponse(statusText, result.screenshot.toString('base64'), 'image/png')
+          return mcpTextImageResponse(statusText, screenshotToBase64(result.screenshot), 'image/png')
         }
         return mcpTextResponse(statusText)
       }
@@ -251,7 +251,7 @@ function registerBrowserClickTool(server: McpServer, defaultSession: BrowserSess
 
       if (screenshot) {
         const screenshotBuffer = await session.screenshot(true)
-        const base64 = screenshotBuffer.toString('base64')
+        const base64 = screenshotToBase64(screenshotBuffer)
         return mcpTextImageResponse(statusText, base64, 'image/png')
       }
 
@@ -280,7 +280,7 @@ function registerBrowserFillTool(server: McpServer, defaultSession: BrowserSessi
       if (session instanceof BrowserProxySession) {
         const screenshotBuf = await session.fill(selector, value, screenshot ?? false)
         if (screenshotBuf) {
-          return mcpTextImageResponse(`Filled: ${selector}`, screenshotBuf.toString('base64'), 'image/png')
+          return mcpTextImageResponse(`Filled: ${selector}`, screenshotToBase64(screenshotBuf), 'image/png')
         }
         return mcpTextResponse(`Filled: ${selector}`)
       }
@@ -292,7 +292,7 @@ function registerBrowserFillTool(server: McpServer, defaultSession: BrowserSessi
 
       if (screenshot) {
         const screenshotBuffer = await session.screenshot(true)
-        const base64 = screenshotBuffer.toString('base64')
+        const base64 = screenshotToBase64(screenshotBuffer)
         return mcpTextImageResponse(`Filled: ${matchedSelector}`, base64, 'image/png')
       }
 
@@ -368,7 +368,7 @@ function registerBrowserLoginTool(
         const result = await session.navigate(credentials.baseUrl)
         title = result.title
         currentUrl = result.url
-        base64 = result.screenshot.toString('base64')
+        base64 = screenshotToBase64(result.screenshot)
       } else {
         // Navigate to base URL
         const page = await session.getPage()
@@ -377,7 +377,7 @@ function registerBrowserLoginTool(
         title = await page.title()
         currentUrl = page.url()
         const screenshotBuffer = await session.screenshot(true)
-        base64 = screenshotBuffer.toString('base64')
+        base64 = screenshotToBase64(screenshotBuffer)
         session.actionLog.add('chat', 'login', credentialName)
       }
 
