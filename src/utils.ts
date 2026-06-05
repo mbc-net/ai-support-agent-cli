@@ -118,12 +118,21 @@ export function buildWsUrl(apiUrl: string, path: string): string {
 }
 
 /**
+ * Returns true when the agent is running inside a Docker container.
+ * Controlled by the AI_SUPPORT_AGENT_IN_DOCKER=1 environment variable,
+ * which is injected by volume-mount-builder and the service templates.
+ */
+export function isInDocker(): boolean {
+  return process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1'
+}
+
+/**
  * Docker コンテナ内から host の URL にアクセスするため
  * localhost / 127.0.0.1 を host.docker.internal に変換する。
  * `AI_SUPPORT_AGENT_IN_DOCKER` が `'1'` のときのみ変換する。
  */
 export function resolveUrlForDocker(url: string): string {
-  if (process.env.AI_SUPPORT_AGENT_IN_DOCKER !== '1') return url
+  if (!isInDocker()) return url
   return url.replace(
     /^((?:https?|wss?):\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
     (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,

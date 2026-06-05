@@ -18,6 +18,7 @@ export const CONFIG_DIR = (() => {
   const expanded = envDir.replace(/^~(?=$|\/)/, os.homedir())
   return resolve(expanded)
 })()
+
 export const CONFIG_FILE = 'config.json'
 export const DEFAULT_POLL_INTERVAL = 3000
 export const DEFAULT_HEARTBEAT_INTERVAL = 60000

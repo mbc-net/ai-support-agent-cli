@@ -7,7 +7,7 @@ import { getConfigDir } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AutoUpdateConfig } from './types'
-import { atomicWriteFile, getErrorMessage, sleep } from './utils'
+import { atomicWriteFile, getErrorMessage, isInDocker, sleep } from './utils'
 import { detectInstallMethod, isNewerVersion, isValidVersion, performUpdate, reExecProcess } from './update-checker'
 
 export interface AutoUpdaterHandle {
@@ -45,7 +45,7 @@ export function startAutoUpdater(
       // (it disappears on the next start) and races against the host-side
       // DockerSupervisor that owns the real upgrade flow. Only UI-initiated
       // `update` commands should run inside the container.
-      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+      if (isInDocker()) {
         logger.debug('Auto-update skipped (running inside Docker container)')
         return
       }
@@ -141,7 +141,7 @@ export function startAutoUpdater(
       // Inside a Docker container, exit with a dedicated code so the host-side
       // runInDocker() can distinguish an update restart from a clean stop (SIGINT)
       // and calls reExecProcess() to rebuild the Docker image for the new version.
-      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+      if (isInDocker()) {
         // Write the new version to a file so the host-side installUpdateAndRestart()
         // can read it and run npm install before rebuilding the Docker image.
         // The config directory is volume-mounted and accessible from both sides.

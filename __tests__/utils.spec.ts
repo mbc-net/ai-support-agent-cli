@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { exitWithError, getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
+import { exitWithError, getErrorMessage, isInDocker, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -448,6 +448,39 @@ describe('resolveUrlForDocker', () => {
   it('should handle URL without port', () => {
     process.env[ENV_KEY] = '1'
     expect(resolveUrlForDocker('https://localhost')).toBe('https://host.docker.internal')
+  })
+})
+
+describe('isInDocker', () => {
+  const ENV_KEY = 'AI_SUPPORT_AGENT_IN_DOCKER'
+
+  afterEach(() => {
+    delete process.env[ENV_KEY]
+  })
+
+  it('returns true when AI_SUPPORT_AGENT_IN_DOCKER is "1"', () => {
+    process.env[ENV_KEY] = '1'
+    expect(isInDocker()).toBe(true)
+  })
+
+  it('returns false when AI_SUPPORT_AGENT_IN_DOCKER is unset', () => {
+    delete process.env[ENV_KEY]
+    expect(isInDocker()).toBe(false)
+  })
+
+  it('returns false when AI_SUPPORT_AGENT_IN_DOCKER is "0"', () => {
+    process.env[ENV_KEY] = '0'
+    expect(isInDocker()).toBe(false)
+  })
+
+  it('returns false when AI_SUPPORT_AGENT_IN_DOCKER is "true"', () => {
+    process.env[ENV_KEY] = 'true'
+    expect(isInDocker()).toBe(false)
+  })
+
+  it('returns false when AI_SUPPORT_AGENT_IN_DOCKER is empty string', () => {
+    process.env[ENV_KEY] = ''
+    expect(isInDocker()).toBe(false)
   })
 })
 
