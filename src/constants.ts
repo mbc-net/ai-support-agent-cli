@@ -98,6 +98,10 @@ export const LOG_RESULT_LIMIT = 300
 export const LOG_DEBUG_LIMIT = 200
 export const CHUNK_LOG_LIMIT = 100
 
+// Browser proxy
+/** BrowserProxySession の HTTP リクエストタイムアウト（60秒） */
+export const BROWSER_PROXY_REQUEST_TIMEOUT_MS = 60_000
+
 // Error messages
 export const ERR_AGENT_ID_REQUIRED = 'agentId is required for chat command'
 export const ERR_MESSAGE_REQUIRED = 'message is required'

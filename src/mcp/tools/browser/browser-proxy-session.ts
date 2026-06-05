@@ -9,6 +9,7 @@
 
 import http from 'http'
 
+import { BROWSER_PROXY_REQUEST_TIMEOUT_MS } from '../../../constants'
 import { logger } from '../../../logger'
 import { BrowserActionLog } from './browser-action-log'
 
@@ -236,7 +237,7 @@ function httpRequest(baseUrl: string, method: string, path: string, body?: strin
     })
 
     req.on('error', reject)
-    req.setTimeout(60000, () => {
+    req.setTimeout(BROWSER_PROXY_REQUEST_TIMEOUT_MS, () => {
       req.destroy(new Error('Request timeout'))
     })
 
