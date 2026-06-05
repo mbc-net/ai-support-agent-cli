@@ -14,6 +14,7 @@ import { z } from 'zod'
 import { ApiClient } from '../../api-client'
 import { LOCALHOST_ADDRESS } from '../../constants'
 import { logger } from '../../logger'
+import { sleep } from '../../utils'
 import { BrowserProxySession } from './browser/browser-proxy-session'
 import { validateUrl } from './browser/browser-security'
 import { BrowserSession } from './browser/browser-session'
@@ -84,7 +85,7 @@ async function resolveFirstSessionId(localPort: string): Promise<string | null> 
       logger.debug(`[browser] Failed to resolve first session (attempt ${i + 1}/${maxRetries}): ${String(error)}`)
     }
     if (i < maxRetries - 1) {
-      await new Promise(resolve => setTimeout(resolve, retryDelay))
+      await sleep(retryDelay)
     }
   }
   // Clear cache on failure so next call retries fresh

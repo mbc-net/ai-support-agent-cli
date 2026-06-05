@@ -8,7 +8,7 @@ import type {
   ProjectConfigResponse,
 } from '../types'
 import { errorResult, successResult } from '../types/command'
-import { parseString } from '../utils'
+import { parseString, toErrorMessage } from '../utils'
 
 import { executeChatCommand } from './chat-executor'
 
@@ -186,8 +186,7 @@ async function executeAiMode(
       browserLocalPort: options.browserLocalPort,
     })
   } catch (err: unknown) {
-    const errorMessage =
-      err instanceof Error ? err.message : String(err)
+    const errorMessage = toErrorMessage(err)
     logger.error(`[e2e_test] Chat execution failed: ${errorMessage}`)
 
     await reportExecutionStatus(
@@ -272,7 +271,7 @@ async function executeScriptMode(
   try {
     scriptResult = await executePlaywrightScript(session, playwrightScript, onStepComplete)
   } catch (err: unknown) {
-    const errorMessage = err instanceof Error ? err.message : String(err)
+    const errorMessage = toErrorMessage(err)
     logger.error(`[e2e_test] Script execution error: ${errorMessage}`)
 
     await reportExecutionStatus(
@@ -326,7 +325,7 @@ async function acquireBrowserSession(
   try {
     return await sessionManager.getOrCreate(`e2e-${executionId}`)
   } catch (err: unknown) {
-    logger.warn(`[e2e_test] Failed to create browser session: ${err instanceof Error ? err.message : String(err)}`)
+    logger.warn(`[e2e_test] Failed to create browser session: ${toErrorMessage(err)}`)
     return undefined
   }
 }
@@ -351,7 +350,7 @@ function buildStepCompleteCallback(
         status: 'passed',
       })
     } catch (err: unknown) {
-      logger.warn(`[e2e_test] Failed to report step ${step}: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`[e2e_test] Failed to report step ${step}: ${toErrorMessage(err)}`)
     }
   }
 }
@@ -437,7 +436,7 @@ async function executeAiRecovery(
         browserLocalPort: params.browserLocalPort,
       })
     } catch (err: unknown) {
-      logger.warn(`[e2e_test] Recovery chat failed: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`[e2e_test] Recovery chat failed: ${toErrorMessage(err)}`)
       continue
     }
 
@@ -458,7 +457,7 @@ async function executeAiRecovery(
     try {
       retryResult = await executePlaywrightScript(session, updatedScript)
     } catch (err: unknown) {
-      logger.warn(`[e2e_test] Recovery script execution error: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`[e2e_test] Recovery script execution error: ${toErrorMessage(err)}`)
       continue
     }
 
@@ -474,7 +473,7 @@ async function executeAiRecovery(
             recoveryMode,
           })
         } catch (err: unknown) {
-          logger.warn(`[e2e_test] Failed to save recovered script: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`[e2e_test] Failed to save recovered script: ${toErrorMessage(err)}`)
         }
       }
 
@@ -615,7 +614,7 @@ async function reportExecutionStatus(
     )
   } catch (err: unknown) {
     logger.warn(
-      `[e2e_test] Failed to update execution status: ${err instanceof Error ? err.message : String(err)}`,
+      `[e2e_test] Failed to update execution status: ${toErrorMessage(err)}`,
     )
   }
 }

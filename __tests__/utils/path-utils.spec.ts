@@ -18,6 +18,8 @@ import {
   getProjectServiceDir,
   getServicesDir,
   getUpdateScriptPath,
+  getWin32LogDir,
+  getWin32WrapperScriptPath,
   getWrapperErrLog,
   getWrapperOutLog,
   getWrapperScriptPath,
@@ -96,6 +98,14 @@ describe('getWrapperScriptPath', () => {
   })
 })
 
+describe('getWin32WrapperScriptPath', () => {
+  it('should return run.cmd inside projectServiceDir', () => {
+    expect(getWin32WrapperScriptPath('/services/tenant-project')).toBe(
+      path.join('/services/tenant-project', 'run.cmd'),
+    )
+  })
+})
+
 describe('getAgentOutLog', () => {
   it('should return agent.out.log inside logDir', () => {
     expect(getAgentOutLog('/logs/project')).toBe('/logs/project/agent.out.log')
@@ -167,5 +177,32 @@ describe('getLinuxLogDir', () => {
 
   it('should be rooted at homedir', () => {
     expect(getLinuxLogDir().startsWith(HOME)).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Windows (win32) specific path helpers
+// ---------------------------------------------------------------------------
+
+describe('getWin32LogDir', () => {
+  const origLocalAppData = process.env.LOCALAPPDATA
+
+  afterEach(() => {
+    if (origLocalAppData === undefined) delete process.env.LOCALAPPDATA
+    else process.env.LOCALAPPDATA = origLocalAppData
+  })
+
+  it('uses %LOCALAPPDATA% when set', () => {
+    process.env.LOCALAPPDATA = path.join('C:', 'Users', 'test', 'AppData', 'Local')
+    expect(getWin32LogDir()).toBe(
+      path.join(process.env.LOCALAPPDATA, 'ai-support-agent', 'logs'),
+    )
+  })
+
+  it('falls back to ~/AppData/Local when LOCALAPPDATA is unset', () => {
+    delete process.env.LOCALAPPDATA
+    expect(getWin32LogDir()).toBe(
+      path.join(HOME, 'AppData', 'Local', 'ai-support-agent', 'logs'),
+    )
   })
 })

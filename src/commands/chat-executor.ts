@@ -4,7 +4,7 @@ import { CHAT_MAX_ATTEMPTS, CHAT_RETRY_DELAY_MS, ERR_AGENT_ID_REQUIRED, ERR_MESS
 import { buildGitCredentialEnv } from '../git-credential-setup'
 import { logger } from '../logger'
 import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatFileInfo, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
-import { getErrorMessage, parseString, truncateString } from '../utils'
+import { getErrorMessage, parseString, sleep, truncateString } from '../utils'
 
 import { getAutoAddDirs, getWorkspaceDir } from '../project-dir'
 import { ensureAllowedToolsInSettings } from '../utils/claude-settings'
@@ -103,7 +103,7 @@ async function executeClaudeCodeChat(
   for (let attempt = 1; attempt <= CHAT_MAX_ATTEMPTS; attempt++) {
     if (attempt > 1) {
       logger.info(`[chat] Retrying chat command [${commandId}] (attempt ${attempt}/${CHAT_MAX_ATTEMPTS})`)
-      await new Promise<void>((resolve) => setTimeout(resolve, CHAT_RETRY_DELAY_MS))
+      await sleep(CHAT_RETRY_DELAY_MS)
     }
 
     const result = await executeClaudeCodeChatOnce(

@@ -2515,6 +2515,11 @@ describe('ProjectAgent', () => {
       }
       expect(agentInternal.alertStaleRecoveryTimer).not.toBeNull()
 
+      // スタック救済タイマーのコールバックをトリガー（line 490: recoverStaleProcessingAlerts の実行をカバー）
+      // ALERT_STALE_RECOVERY_INTERVAL_MS = 1時間 (3600000ms) 経過をシミュレート
+      await jest.advanceTimersByTimeAsync(3_600_001)
+      expect((mockClient as Record<string, jest.Mock>).getStaleProcessingAlerts).toHaveBeenCalled()
+
       // stop でタイマークリアも確認（pending/stale 両方）
       agent.stop()
       expect(agentInternal.alertStaleRecoveryTimer).toBeNull()

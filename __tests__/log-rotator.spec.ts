@@ -204,3 +204,17 @@ describe('RotatingFileWriter', () => {
     expect(fs.readFileSync(`${active}.3`, 'utf-8')).toBe(before3)
   })
 })
+
+describe('RotatingFileWriter: maxBytes/maxFiles ?? default fallback (line 59-60)', () => {
+  it('maxBytes が undefined の場合 DEFAULT_MAX_BYTES にフォールバック（line 59 branch [1]）', () => {
+    // Cover: options.maxBytes ?? DEFAULT_MAX_BYTES  when maxBytes is undefined
+    const tmpFile = path.join(os.tmpdir(), `log-default-${Date.now()}.log`)
+    const w = new RotatingFileWriter({
+      filePath: tmpFile,
+      // maxBytes not provided → undefined → ?? DEFAULT_MAX_BYTES
+    })
+    expect((w as any).maxBytes).toBe(DEFAULT_MAX_BYTES)
+    w.close()
+    if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile)
+  })
+})

@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync } from '../src/utils'
+import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -27,6 +27,62 @@ describe('getErrorMessage', () => {
 
   it('should handle TypeError', () => {
     expect(getErrorMessage(new TypeError('type error'))).toBe('type error')
+  })
+})
+
+describe('toErrorMessage', () => {
+  it('should return message from Error instance', () => {
+    expect(toErrorMessage(new Error('boom'))).toBe('boom')
+  })
+
+  it('should return message from Error subclasses', () => {
+    expect(toErrorMessage(new TypeError('type boom'))).toBe('type boom')
+  })
+
+  it('should stringify a non-Error string', () => {
+    expect(toErrorMessage('plain string')).toBe('plain string')
+  })
+
+  it('should stringify a number', () => {
+    expect(toErrorMessage(42)).toBe('42')
+  })
+
+  it('should stringify null', () => {
+    expect(toErrorMessage(null)).toBe('null')
+  })
+
+  it('should stringify undefined', () => {
+    expect(toErrorMessage(undefined)).toBe('undefined')
+  })
+})
+
+describe('toError', () => {
+  it('should return the same Error instance unchanged', () => {
+    const original = new Error('keep me')
+    expect(toError(original)).toBe(original)
+  })
+
+  it('should return Error subclass instances unchanged', () => {
+    const original = new TypeError('type error')
+    expect(toError(original)).toBe(original)
+  })
+
+  it('should wrap a non-Error string into an Error', () => {
+    const result = toError('wrap me')
+    expect(result).toBeInstanceOf(Error)
+    expect(result.message).toBe('wrap me')
+  })
+
+  it('should wrap a number into an Error', () => {
+    const result = toError(500)
+    expect(result).toBeInstanceOf(Error)
+    expect(result.message).toBe('500')
+  })
+
+  it('should wrap null into an Error', () => {
+    const result = toError(null)
+    expect(result).toBeInstanceOf(Error)
+    expect(result.message).toBe('null')
   })
 })
 
@@ -384,6 +440,51 @@ describe('isErrnoException', () => {
   it('should return true when code argument is undefined (no code filter)', () => {
     const err = Object.assign(new Error('EPERM'), { code: 'EPERM' })
     expect(isErrnoException(err, undefined)).toBe(true)
+  })
+})
+
+describe('sleep', () => {
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  it('should return a Promise', () => {
+    jest.useFakeTimers()
+    const result = sleep(1000)
+    expect(result).toBeInstanceOf(Promise)
+    jest.advanceTimersByTime(1000)
+    return result
+  })
+
+  it('should resolve after the specified delay', async () => {
+    jest.useFakeTimers()
+    let resolved = false
+    const promise = sleep(500).then(() => {
+      resolved = true
+    })
+
+    // Not yet elapsed
+    jest.advanceTimersByTime(499)
+    await Promise.resolve()
+    expect(resolved).toBe(false)
+
+    // Elapsed
+    jest.advanceTimersByTime(1)
+    await promise
+    expect(resolved).toBe(true)
+  })
+
+  it('should resolve with undefined', async () => {
+    jest.useFakeTimers()
+    const promise = sleep(0)
+    jest.advanceTimersByTime(0)
+    await expect(promise).resolves.toBeUndefined()
+  })
+
+  it('should actually wait with real timers', async () => {
+    const start = Date.now()
+    await sleep(20)
+    expect(Date.now() - start).toBeGreaterThanOrEqual(15)
   })
 })
 

@@ -6,10 +6,36 @@ export function readJsonSync<T>(filePath: string): T {
   return JSON.parse(content) as T
 }
 
+/**
+ * 指定したミリ秒だけ待機する Promise を返す。
+ * `await new Promise((resolve) => setTimeout(resolve, ms))` の重複イディオムを集約する。
+ */
+export function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms))
+}
+
 export function atomicWriteFile(filePath: string, content: string, mode = 0o600): void {
   const tmpPath = filePath + '.tmp'
   fs.writeFileSync(tmpPath, content, { mode })
   fs.renameSync(tmpPath, filePath)
+}
+
+/**
+ * unknown な catch 値からメッセージ文字列を取り出す。
+ * Error なら `.message`、それ以外は `String()` を返す。
+ * `err instanceof Error ? err.message : String(err)` の重複イディオムを集約する。
+ */
+export function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * unknown な catch 値を Error インスタンスに正規化する。
+ * Error ならそのまま、それ以外は `String()` をメッセージにした Error を生成する。
+ * `err instanceof Error ? err : new Error(String(err))` の重複イディオムを集約する。
+ */
+export function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error))
 }
 
 /**
@@ -32,7 +58,7 @@ export function getErrorMessage(error: unknown): string {
     return `HTTP ${status}: ${error.message}`
   }
 
-  return error instanceof Error ? error.message : String(error)
+  return toErrorMessage(error)
 }
 
 export function parseString(value: unknown): string | null {

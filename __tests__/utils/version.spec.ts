@@ -88,3 +88,13 @@ describe('isValidVersion', () => {
     expect(isValidVersion('1.0.0-')).toBe(false)
   })
 })
+
+// ── branch coverage ──────────────────────────────────────────────────────────
+describe('isNewerVersion: malformed version → ?? 0 fallback (line 15)', () => {
+  it('バージョン文字列が不完全な場合 ?? 0 にフォールバックする', () => {
+    // Cover: parts[1] ?? 0, parts[2] ?? 0 when version has fewer than 3 parts
+    // '1.2' → parts = [1, 2] → parts[2] = undefined → ?? 0 fallback
+    expect(isNewerVersion('1.2', '1.2.1')).toBe(true)  // 1.2.0 < 1.2.1
+    expect(isNewerVersion('1.2.3', '1.2')).toBe(false)  // 1.2.3 > 1.2.0
+  })
+})

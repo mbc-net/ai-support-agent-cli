@@ -384,6 +384,46 @@ describe('aws-credential-builder', () => {
       expect(result.ssoAuthRequired).toEqual([])
     })
 
+    it('non-SSO error: data.message=undefined だが data.error がある場合は data.error を使用する（line 43 branch [1]）', async () => {
+      // Cover: data.message ?? data.error ?? 'Unknown error'
+      // When data.message is undefined → evaluates data.error → uses data.error
+      const apiError = new axios.AxiosError(
+        'Request failed', 'ERR_BAD_REQUEST', undefined, undefined,
+        {
+          status: 422, statusText: 'Unprocessable Entity',
+          data: { statusCode: 422, error: 'VALIDATION_FAILED' },  // no message, only error
+          headers: {}, config: {} as never,
+        },
+      )
+      const client = {
+        getAwsCredentials: jest.fn()
+          .mockRejectedValueOnce(apiError)
+          .mockResolvedValueOnce({ accessKeyId: 'AKIA_DEV', secretAccessKey: 'secret', region: 'us-east-1' }),
+      } as unknown as ApiClient
+      const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+      expect(result.errors[0]).toContain('VALIDATION_FAILED')
+    })
+
+    it('non-SSO error: data に message も error もない場合は "Unknown error" を使用する（line 43 branch [2]）', async () => {
+      // Cover: data.message ?? data.error ?? 'Unknown error'
+      // When both data.message and data.error are undefined → 'Unknown error'
+      const apiError = new axios.AxiosError(
+        'Request failed', 'ERR_BAD_REQUEST', undefined, undefined,
+        {
+          status: 422, statusText: 'Unprocessable Entity',
+          data: { statusCode: 422 },  // neither message nor error
+          headers: {}, config: {} as never,
+        },
+      )
+      const client = {
+        getAwsCredentials: jest.fn()
+          .mockRejectedValueOnce(apiError)
+          .mockResolvedValueOnce({ accessKeyId: 'AKIA_DEV', secretAccessKey: 'secret', region: 'us-east-1' }),
+      } as unknown as ApiClient
+      const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+      expect(result.errors[0]).toContain('Unknown error')
+    })
+
     it('should handle HTTP error with no response body', async () => {
       const httpError = new axios.AxiosError(
         'Request failed',

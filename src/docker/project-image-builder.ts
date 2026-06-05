@@ -12,6 +12,7 @@ import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { ApiClient } from '../api-client'
 import { buildDockerEnv } from './dockerfile-generator'
 import { makeSessionId, getDockerPath } from './docker-utils'
+import { toError } from '../utils'
 
 /** Maximum total log size kept in memory per session (2 MB). Older content is discarded. */
 const MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024
@@ -91,7 +92,7 @@ export async function buildProjectImage(
       if (code === 0) resolve()
       else reject(new Error(`docker build exited with code ${code}`))
     })
-  }).catch((e: unknown) => { buildError = e instanceof Error ? e : new Error(String(e)) })
+  }).catch((e: unknown) => { buildError = toError(e) })
 
   await flush()
 

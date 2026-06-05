@@ -1500,4 +1500,61 @@ describe('claude-code-runner', () => {
       expect(mockProcess.kill).not.toHaveBeenCalledWith('SIGKILL')
     })
   })
+
+  describe('branch coverage: args with spaces, pid=null, sigkillTimer on error', () => {
+    beforeEach(() => {
+      jest.clearAllMocks()
+      jest.useFakeTimers()
+    })
+    afterEach(() => {
+      jest.useRealTimers()
+    })
+
+    it('argument containing space → wrapped in quotes in debug log（line 121 branch [0]）', async () => {
+      // Cover: a.includes(' ') ? `"${a}"` : a  when argument contains space
+      // Pass a systemPrompt with spaces so it gets added to args (with quotes in debug log)
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      // Use systemPrompt with spaces
+      const handle = runClaudeCode({
+        message: 'hello',
+        sendChunk,
+        systemPrompt: 'You are an AI assistant',  // contains spaces → quotes in debug log
+      })
+
+      // Emit events synchronously to avoid timeout
+      mockProcess.emitStdout('data', Buffer.from('{"type":"result","subtype":"success","result":"done","session_id":"s1"}\n'))
+      mockProcess.emit('close', 0)
+      await handle.result
+
+      expect(spawn).toHaveBeenCalled()
+    })
+
+    it('error event with sigkillTimer set → clears sigkillTimer（line 186 branch [0]）', async () => {
+      // Cover: if (sigkillTimer) clearTimeout(sigkillTimer)  when sigkillTimer IS set
+      // We need to trigger SIGTERM (which sets sigkillTimer) then emit error before sigkill fires
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      // Advance past CHAT_TIMEOUT to trigger SIGTERM + sigkillTimer
+      jest.advanceTimersByTime(300_000)
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGTERM')
+
+      // Now emit an error event — this should clear sigkillTimer
+      mockProcess.emit('error', new Error('Process crashed'))
+
+      await expect(handle.result).rejects.toThrow()
+
+      // Advance past SIGKILL delay — SIGKILL should NOT have been called (timer cleared)
+      jest.advanceTimersByTime(5_000)
+      expect(mockProcess.kill).not.toHaveBeenCalledWith('SIGKILL')
+    })
+  })
 })
