@@ -1,12 +1,11 @@
 import os from 'os'
-import path from 'path'
 
 import { ApiClient } from './api-client'
 import { AGENT_VERSION, UPDATE_CHECK_INITIAL_DELAY, UPDATE_CHECK_INTERVAL, UPDATE_BUSY_WAIT_TIMEOUT_MS, UPDATE_BUSY_POLL_INTERVAL_MS, UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS, DOCKER_UPDATE_EXIT_CODE } from './constants'
-import { getConfigDir } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AutoUpdateConfig } from './types'
+import { getUpdateVersionFilePath } from './utils/path-utils'
 import { atomicWriteFile, getErrorMessage, isInDocker, sleep } from './utils'
 import { detectInstallMethod, isNewerVersion, isValidVersion, performUpdate, reExecProcess } from './update-checker'
 
@@ -146,8 +145,7 @@ export function startAutoUpdater(
         // can read it and run npm install before rebuilding the Docker image.
         // The config directory is volume-mounted and accessible from both sides.
         try {
-          const versionFile = path.join(getConfigDir(), 'update-version.json')
-          atomicWriteFile(versionFile, JSON.stringify({ version: targetVersion }))
+          atomicWriteFile(getUpdateVersionFilePath(), JSON.stringify({ version: targetVersion }))
         } catch (err: unknown) {
           logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
         }

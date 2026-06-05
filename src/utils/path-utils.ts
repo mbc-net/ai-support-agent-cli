@@ -4,6 +4,15 @@ import * as path from 'path'
 import { getConfigDir } from '../config-manager'
 
 // ---------------------------------------------------------------------------
+// Config-dir file helpers
+// ---------------------------------------------------------------------------
+
+/** Returns the path to the update-version.json file in the config dir. */
+export function getUpdateVersionFilePath(): string {
+  return path.join(getConfigDir(), 'update-version.json')
+}
+
+// ---------------------------------------------------------------------------
 // Shared service path helpers (used by both darwin-service and linux-service)
 // ---------------------------------------------------------------------------
 
