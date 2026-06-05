@@ -11,7 +11,7 @@ import { captureException, flushSentry, initSentry } from './sentry'
 import { getSystemInfo } from './system-info'
 import type { AgentChatMode, AutoUpdateConfig, ProjectRegistration, ReleaseChannel } from './types'
 import { detectChannelFromVersion } from './update-checker'
-import { getErrorMessage, validateApiUrl } from './utils'
+import { exitWithError, getErrorMessage, validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
 import { startConfigWatcher } from './config-watcher'
 import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
@@ -185,8 +185,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   // 二重起動防止チェック
   if (isAlreadyRunning()) {
     const entry = readPidFile()
-    logger.error(`Agent is already running (PID: ${entry?.pid ?? '?'}). Use "ai-support-agent stop" to stop it first.`)
-    process.exit(1)
+    exitWithError(`Agent is already running (PID: ${entry?.pid ?? '?'}). Use "ai-support-agent stop" to stop it first.`)
   }
 
   // グローバルエラーハンドラ（非同期エラーでの静かなクラッシュを防止）
@@ -228,8 +227,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   if (options.token && options.apiUrl) {
     const urlError = validateApiUrl(options.apiUrl)
     if (urlError) {
-      logger.error(urlError)
-      process.exit(1)
+      exitWithError(urlError)
     }
     logger.warn(t('runner.cliTokenWarning'))
     const agentId = extractTokenId(options.token) ?? config?.agentId ?? os.hostname()
@@ -251,8 +249,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     if (envToken && envApiUrl) {
       const envUrlError = validateApiUrl(envApiUrl)
       if (envUrlError) {
-        logger.error(envUrlError)
-        process.exit(1)
+        exitWithError(envUrlError)
       }
       logger.info(t('runner.envTokenWarning'))
 
@@ -278,22 +275,19 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
       return
     }
 
-    logger.error(t('runner.noToken'))
-    process.exit(1)
+    exitWithError(t('runner.noToken'))
   }
 
   let projects = getProjectList(config)
   if (projects.length === 0) {
-    logger.error(t('runner.noProjects'))
-    process.exit(1)
+    exitWithError(t('runner.noProjects'))
   }
 
   // Filter to a single project when --project flag is specified (e.g. "mbc/PROJ_A")
   if (options.project) {
     const slashIdx = options.project.indexOf('/')
     if (slashIdx < 0) {
-      logger.error(`[runner] --project must be in "tenantCode/projectCode" format: ${options.project}`)
-      process.exit(1)
+      exitWithError(`[runner] --project must be in "tenantCode/projectCode" format: ${options.project}`)
     }
     const tenantCode = options.project.substring(0, slashIdx)
     const projectCode = options.project.substring(slashIdx + 1)
@@ -301,8 +295,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
       (p) => p.tenantCode === tenantCode && p.projectCode === projectCode,
     )
     if (projects.length === 0) {
-      logger.error(`[runner] Project not found: ${options.project}`)
-      process.exit(1)
+      exitWithError(`[runner] Project not found: ${options.project}`)
     }
   }
 

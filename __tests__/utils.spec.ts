@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
+import { exitWithError, getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -585,5 +585,33 @@ describe('readJsonSync', () => {
     const filePath = path.join(tmpDir, 'invalid.json')
     fs.writeFileSync(filePath, 'not valid json {{{')
     expect(() => readJsonSync(filePath)).toThrow()
+  })
+})
+
+describe('exitWithError', () => {
+  let exitSpy: jest.SpyInstance
+  let errorSpy: jest.SpyInstance
+
+  beforeEach(() => {
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation((_code?: number | string) => {
+      throw new Error('process.exit called')
+    })
+    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined)
+  })
+
+  afterEach(() => {
+    exitSpy.mockRestore()
+    errorSpy.mockRestore()
+  })
+
+  it('should call process.exit(1) with the given message', () => {
+    expect(() => exitWithError('fatal error')).toThrow('process.exit called')
+    expect(exitSpy).toHaveBeenCalledWith(1)
+  })
+
+  it('should return never (TypeScript return type)', () => {
+    // Verify the function is typed as `never` by confirming it always throws
+    expect(() => exitWithError('another error')).toThrow()
+    expect(exitSpy).toHaveBeenCalledTimes(1)
   })
 })

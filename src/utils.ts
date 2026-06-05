@@ -1,6 +1,8 @@
 import * as fs from 'fs'
 import axios from 'axios'
 
+import { logger } from './logger'
+
 export function readJsonSync<T>(filePath: string): T {
   const content = fs.readFileSync(filePath, 'utf-8')
   return JSON.parse(content) as T
@@ -140,4 +142,15 @@ export function isErrnoException(err: unknown, code?: string): err is NodeJS.Err
   if (typeof e['message'] !== 'string') return false
   if (!('code' in e)) return false
   return code === undefined || e['code'] === code
+}
+
+/**
+ * エラーメッセージをログに出力してプロセスを終了する。
+ *
+ * `logger.error(msg)` + `process.exit(1)` のペアが agent-runner.ts / docker-runner.ts の
+ * 複数箇所で繰り返されていたため集約する。
+ */
+export function exitWithError(message: string): never {
+  logger.error(message)
+  process.exit(1)
 }
