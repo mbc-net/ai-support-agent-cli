@@ -1,6 +1,3 @@
-import * as os from 'os'
-import * as path from 'path'
-
 jest.mock('fs')
 jest.mock('child_process')
 jest.mock('../../../src/logger')
@@ -18,424 +15,427 @@ jest.mock('../../../src/i18n', () => ({
   },
 }))
 
+jest.mock('../../../src/config-manager', () => ({
+  loadConfig: jest.fn(),
+  getProjectList: jest.fn(),
+  getConfigDir: jest.fn(() =>
+    require('path').join(require('os').homedir(), '.ai-support-agent'),
+  ),
+}))
+
 import { execSync } from 'child_process'
 import * as fs from 'fs'
 import {
   Win32ServiceStrategy,
   generateTaskXml,
+  generateProjectTaskXml,
+  generateWin32WrapperScript,
+  getProjectTaskName,
+  getAllProjectTasks,
+  writeAndRegisterProjectTask,
+  getCliEntryPoint,
+  getNodePath,
 } from '../../../src/cli/service/win32-service'
 import { logger } from '../../../src/logger'
+import { loadConfig, getProjectList } from '../../../src/config-manager'
+import type { ProjectRegistration } from '../../../src/types'
 
 const mockedFs = jest.mocked(fs)
 const mockedExecSync = jest.mocked(execSync)
+const mockedLoadConfig = jest.mocked(loadConfig)
+const mockedGetProjectList = jest.mocked(getProjectList)
 
-describe('generateTaskXml', () => {
-  it('should generate valid Task Scheduler XML', () => {
-    const result = generateTaskXml({
-      nodePath: 'C:\\Program Files\\nodejs\\node.exe',
-      entryPoint: 'C:\\Users\\test\\AppData\\Roaming\\npm\\node_modules\\@ai-support-agent\\cli\\dist\\index.js',
-      logDir: 'C:\\Users\\test\\AppData\\Local\\ai-support-agent\\logs',
-    })
+const sampleProject: ProjectRegistration = {
+  tenantCode: 'mbc',
+  projectCode: 'MBC_01',
+  token: 'test-token',
+  apiUrl: 'https://api.example.com',
+} as ProjectRegistration
 
-    expect(result).toContain('<?xml version="1.0" encoding="UTF-16"?>')
-    expect(result).toContain('<Task version="1.2"')
-    expect(result).toContain('<LogonTrigger>')
-    expect(result).toContain('<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>')
-    expect(result).toContain('<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>')
-    expect(result).toContain('<RestartOnFailure>')
-    expect(result).toContain('<Command>C:\\Program Files\\nodejs\\node.exe</Command>')
-    expect(result).toContain('start --no-docker')
-    expect(result).not.toContain('--verbose')
-  })
+beforeEach(() => {
+  jest.clearAllMocks()
+  mockedLoadConfig.mockReturnValue({} as never)
+  mockedGetProjectList.mockReturnValue([sampleProject])
+})
 
-  it('should include --verbose flag when verbose is true', () => {
-    const result = generateTaskXml({
-      nodePath: 'C:\\node.exe',
-      entryPoint: 'C:\\index.js',
-      logDir: 'C:\\logs',
-      verbose: true,
-    })
-
-    expect(result).toContain('--verbose')
-  })
-
-  it('should not include --no-docker when docker is true', () => {
-    const result = generateTaskXml({
-      nodePath: 'C:\\node.exe',
-      entryPoint: 'C:\\index.js',
-      logDir: 'C:\\logs',
-      docker: true,
-    })
-
-    expect(result).not.toContain('--no-docker')
-  })
-
-  it('should escape XML special characters', () => {
-    const result = generateTaskXml({
-      nodePath: 'C:\\path with <special> & "chars"\\node.exe',
-      entryPoint: 'C:\\index.js',
-      logDir: 'C:\\logs',
-    })
-
-    expect(result).toContain('&lt;special&gt;')
-    expect(result).toContain('&amp;')
-    expect(result).toContain('&quot;chars&quot;')
+describe('re-exports', () => {
+  it('re-exports getCliEntryPoint and getNodePath as functions', () => {
+    expect(typeof getCliEntryPoint).toBe('function')
+    expect(typeof getNodePath).toBe('function')
   })
 })
 
+// ---------------------------------------------------------------------------
+// getProjectTaskName
+// ---------------------------------------------------------------------------
+describe('getProjectTaskName', () => {
+  it('builds a sanitized, lowercase task name', () => {
+    expect(getProjectTaskName('MBC', 'MBC_01')).toBe('AISupportAgent-mbc-mbc-01')
+  })
+
+  it('replaces non-alphanumeric characters (incl. backslash) with hyphens', () => {
+    expect(getProjectTaskName('my_tenant', 'MY\\PROJ')).toBe('AISupportAgent-my-tenant-my-proj')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// generateProjectTaskXml
+// ---------------------------------------------------------------------------
+describe('generateProjectTaskXml', () => {
+  it('runs cmd.exe on the wrapper script and sets a logon trigger', () => {
+    const xml = generateProjectTaskXml({ wrapperScriptPath: 'C:\\svc\\run.cmd' })
+    expect(xml).toContain('<?xml version="1.0" encoding="UTF-16"?>')
+    expect(xml).toContain('<LogonTrigger>')
+    expect(xml).toContain('<Command>cmd.exe</Command>')
+    expect(xml).toContain('/c &quot;C:\\svc\\run.cmd&quot;')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// generateWin32WrapperScript
+// ---------------------------------------------------------------------------
+describe('generateWin32WrapperScript', () => {
+  const baseOpts = {
+    imageName: 'ai-support-agent',
+    tenantCode: 'mbc',
+    projectCode: 'MBC_01',
+    projectConfigHostDir: 'C:\\Users\\test\\.ai-support-agent\\projects\\mbc\\MBC_01\\.ai-support-agent',
+    token: 'test-token',
+    apiUrl: 'https://api.example.com',
+  }
+
+  it('generates a batch wrapper with docker run and the resolved image tag', () => {
+    const result = generateWin32WrapperScript(baseOpts)
+    expect(result).toContain('@echo off')
+    expect(result).toContain('docker run --rm -i --name "ai-mbc-mbc-01"')
+    expect(result).toContain('set "IMAGE_TAG=ai-support-agent:%_INSTALLED_VERSION%"')
+    expect(result).toContain('"%IMAGE_TAG%"')
+    expect(result).toContain('ai-support-agent start --no-docker')
+    expect(result).toContain('--project mbc/MBC_01')
+  })
+
+  it('sets secrets via `set` and passes them by name (not on the command line)', () => {
+    const result = generateWin32WrapperScript(baseOpts)
+    expect(result).toContain('set "AI_SUPPORT_AGENT_TOKEN=test-token"')
+    expect(result).toContain('-e AI_SUPPORT_AGENT_TOKEN ^')
+    // The token value must not appear on the `-e` line itself.
+    expect(result).not.toContain('-e AI_SUPPORT_AGENT_TOKEN=test-token')
+  })
+
+  it('converts localhost API URL to host.docker.internal', () => {
+    const result = generateWin32WrapperScript({ ...baseOpts, apiUrl: 'http://localhost:4030' })
+    expect(result).toContain('set "AI_SUPPORT_AGENT_API_URL=http://host.docker.internal:4030"')
+    expect(result).not.toContain('localhost')
+  })
+
+  it('includes ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN when provided', () => {
+    const result = generateWin32WrapperScript({
+      ...baseOpts,
+      anthropicApiKey: 'sk-ant-test',
+      claudeCodeOauthToken: 'oauth-tok',
+    })
+    expect(result).toContain('set "ANTHROPIC_API_KEY=sk-ant-test"')
+    expect(result).toContain('set "CLAUDE_CODE_OAUTH_TOKEN=oauth-tok"')
+    expect(result).toContain('-e ANTHROPIC_API_KEY ^')
+    expect(result).toContain('-e CLAUDE_CODE_OAUTH_TOKEN ^')
+  })
+
+  it('adds --verbose when requested', () => {
+    const result = generateWin32WrapperScript({ ...baseOpts, verbose: true })
+    expect(result).toContain('--verbose')
+  })
+
+  it('rejects a token containing cmd metacharacters', () => {
+    expect(() => generateWin32WrapperScript({ ...baseOpts, token: 'tok%PATH%' })).toThrow(/invalidWin32Value/)
+    expect(() => generateWin32WrapperScript({ ...baseOpts, token: 'tok!x' })).toThrow(/invalidWin32Value/)
+    expect(() => generateWin32WrapperScript({ ...baseOpts, token: 'tok&calc' })).toThrow(/invalidWin32Value/)
+  })
+
+  it('rejects a token containing parentheses', () => {
+    expect(() => generateWin32WrapperScript({ ...baseOpts, token: 'tok(x)' })).toThrow(/invalidWin32Value/)
+  })
+
+  it('rejects a token with leading or trailing whitespace', () => {
+    expect(() => generateWin32WrapperScript({ ...baseOpts, token: ' tok' })).toThrow(/invalidWin32Value/)
+    expect(() => generateWin32WrapperScript({ ...baseOpts, token: 'tok ' })).toThrow(/invalidWin32Value/)
+  })
+
+  it('rejects an unsafe projectCode', () => {
+    expect(() => generateWin32WrapperScript({ ...baseOpts, projectCode: 'BAD;CODE' })).toThrow(/invalidProjectCode/)
+  })
+
+  it('uses for /f usebackq so inner quotes do not break parsing', () => {
+    const result = generateWin32WrapperScript(baseOpts)
+    expect(result).toContain('for /f "usebackq delims="')
+    // The version-resolution command keeps its double-quoted node -p argument.
+    expect(result).toContain('node -p "require(')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// getAllProjectTasks
+// ---------------------------------------------------------------------------
+describe('getAllProjectTasks', () => {
+  it('extracts project task names from schtasks CSV output', () => {
+    mockedExecSync.mockReturnValue(
+      Buffer.from(
+        '"\\AISupportAgent-mbc-mbc-01","Ready"\r\n' +
+        '"\\AISupportAgent-mbc-mbc-02","Running"\r\n' +
+        '"\\SomeOtherTask","Ready"\r\n',
+      ),
+    )
+    const tasks = getAllProjectTasks()
+    expect(tasks).toEqual([
+      { taskName: 'AISupportAgent-mbc-mbc-01' },
+      { taskName: 'AISupportAgent-mbc-mbc-02' },
+    ])
+  })
+
+  it('returns an empty list when schtasks fails', () => {
+    mockedExecSync.mockImplementation(() => { throw new Error('schtasks missing') })
+    expect(getAllProjectTasks()).toEqual([])
+  })
+
+  it('deduplicates repeated rows', () => {
+    mockedExecSync.mockReturnValue(
+      Buffer.from('"\\AISupportAgent-mbc-mbc-01","Ready"\r\n"\\AISupportAgent-mbc-mbc-01","Ready"\r\n'),
+    )
+    expect(getAllProjectTasks()).toEqual([{ taskName: 'AISupportAgent-mbc-mbc-01' }])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// writeAndRegisterProjectTask
+// ---------------------------------------------------------------------------
+describe('writeAndRegisterProjectTask', () => {
+  it('writes the wrapper, registers the task, and cleans up the tmp XML', () => {
+    mockedFs.existsSync.mockReturnValue(true)
+    mockedExecSync.mockReturnValue(Buffer.from(''))
+
+    writeAndRegisterProjectTask(sampleProject)
+
+    // run.cmd + (tmp xml is also written) → at least the wrapper write happened
+    const cmdWrite = mockedFs.writeFileSync.mock.calls.find(([p]) => String(p).endsWith('run.cmd'))
+    expect(cmdWrite).toBeDefined()
+    // The wrapper holds the token in plaintext → must be written owner-only.
+    expect(cmdWrite?.[2]).toMatchObject({ mode: 0o700 })
+
+    expect(mockedExecSync).toHaveBeenCalledWith(
+      expect.stringContaining('schtasks /Create /TN "AISupportAgent-mbc-mbc-01" /XML'),
+      { stdio: 'pipe' },
+    )
+    expect(mockedFs.unlinkSync).toHaveBeenCalledWith(
+      expect.stringContaining('AISupportAgent-mbc-mbc-01-task.xml'),
+    )
+  })
+
+  it('creates missing directories', () => {
+    mockedFs.existsSync.mockReturnValue(false)
+    mockedExecSync.mockReturnValue(Buffer.from(''))
+
+    writeAndRegisterProjectTask(sampleProject)
+
+    expect(mockedFs.mkdirSync).toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Win32ServiceStrategy
+// ---------------------------------------------------------------------------
 describe('Win32ServiceStrategy', () => {
   const strategy = new Win32ServiceStrategy()
 
-  beforeEach(() => {
-    jest.clearAllMocks()
-  })
-
   describe('install', () => {
-    it('should reject if entry point does not exist', () => {
-      mockedFs.existsSync.mockReturnValue(false)
-
+    it('errors when no projects are configured', () => {
+      mockedGetProjectList.mockReturnValue([])
       strategy.install({})
+      expect(logger.error).toHaveBeenCalledWith('service.noProjectsConfigured')
+    })
 
+    it('errors when the entry point does not exist', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+      strategy.install({})
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('service.entryPointNotFound'),
       )
     })
 
-    it('should create scheduled task via schtasks', () => {
-      mockedFs.existsSync
-        .mockReturnValueOnce(true)  // entry point
-        .mockReturnValueOnce(true)  // log dir
-        .mockReturnValueOnce(true)  // tmp xml cleanup check
-
+    it('registers a per-project task and reports success', () => {
+      mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       strategy.install({})
-
-      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1)
-      const [writtenPath] = mockedFs.writeFileSync.mock.calls[0] as [string, string, string]
-      expect(writtenPath).toContain('AISupportAgent-task.xml')
 
       expect(mockedExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('schtasks /Create /TN "AISupportAgent"'),
+        expect.stringContaining('schtasks /Create /TN "AISupportAgent-mbc-mbc-01" /XML'),
         { stdio: 'pipe' },
       )
-      expect(logger.success).toHaveBeenCalled()
+      expect(logger.success).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectInstalled'),
+      )
     })
 
-    it('should create log directory if it does not exist', () => {
-      mockedFs.existsSync
-        .mockReturnValueOnce(true)  // entry point
-        .mockReturnValueOnce(false) // log dir
-        .mockReturnValueOnce(true)  // tmp xml cleanup check
-
+    it('creates the log directory when it does not exist', () => {
+      // entry point exists (true), log dir missing (false), everything else true
+      mockedFs.existsSync.mockReturnValueOnce(true).mockReturnValueOnce(false).mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
       strategy.install({})
 
-      const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
+      const localAppData = process.env.LOCALAPPDATA || require('path').join(require('os').homedir(), 'AppData', 'Local')
       expect(mockedFs.mkdirSync).toHaveBeenCalledWith(
-        path.join(localAppData, 'ai-support-agent', 'logs'),
+        require('path').join(localAppData, 'ai-support-agent', 'logs'),
         { recursive: true },
       )
     })
 
-    it('should handle schtasks failure', () => {
-      mockedFs.existsSync
-        .mockReturnValueOnce(true)  // entry point
-        .mockReturnValueOnce(true)  // log dir
-        .mockReturnValueOnce(true)  // tmp xml cleanup check
-
-      mockedExecSync.mockImplementation(() => {
-        throw new Error('Access denied')
-      })
-
-      strategy.install({})
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.schtasksFailed'),
-      )
-      expect(logger.success).not.toHaveBeenCalled()
-    })
-
-    it('should handle non-Error throw from schtasks', () => {
-      mockedFs.existsSync
-        .mockReturnValueOnce(true) // entry point
-        .mockReturnValueOnce(true) // log dir
-        .mockReturnValueOnce(false) // tmp xml cleanup (does not exist)
-
-      mockedExecSync.mockImplementation(() => {
-        throw 'string error'
-      })
-
-      strategy.install({})
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.schtasksFailed'),
-      )
-    })
-
-    it('should skip tmp XML cleanup if file does not exist', () => {
-      mockedFs.existsSync
-        .mockReturnValueOnce(true) // entry point
-        .mockReturnValueOnce(true) // log dir
-        .mockReturnValueOnce(false) // tmp xml cleanup check
-
-      mockedExecSync.mockReturnValue(Buffer.from(''))
-
-      strategy.install({})
-
-      expect(mockedFs.unlinkSync).not.toHaveBeenCalled()
-    })
-
-    it('should clean up temporary XML file after install', () => {
-      mockedFs.existsSync
-        .mockReturnValueOnce(true) // entry point
-        .mockReturnValueOnce(true) // log dir
-        .mockReturnValueOnce(true) // tmp xml cleanup check
-
-      mockedExecSync.mockReturnValue(Buffer.from(''))
-
-      strategy.install({})
-
-      // unlinkSync should be called for tmp XML cleanup
-      expect(mockedFs.unlinkSync).toHaveBeenCalledWith(
-        expect.stringContaining('AISupportAgent-task.xml'),
-      )
-    })
-
-    it('should pass verbose option to XML generation', () => {
+    it('reports a collision and skips the colliding project', () => {
+      // MBC_01 and MBC-01 both sanitize to the same task name.
+      mockedGetProjectList.mockReturnValue([
+        sampleProject,
+        { ...sampleProject, projectCode: 'MBC-01' } as ProjectRegistration,
+      ])
       mockedFs.existsSync.mockReturnValue(true)
       mockedExecSync.mockReturnValue(Buffer.from(''))
 
-      strategy.install({ verbose: true })
+      strategy.install({})
 
-      const content = mockedFs.writeFileSync.mock.calls[0]?.[1] as string
-      expect(content).toContain('--verbose')
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectUnitNameCollision'),
+      )
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
+
+    it('continues past a per-project failure', () => {
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockImplementation(() => { throw new Error('schtasks denied') })
+
+      strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectInstallFailed'),
+      )
     })
   })
 
   describe('uninstall', () => {
-    it('should warn if task does not exist', () => {
-      mockedExecSync.mockImplementation(() => {
-        throw new Error('ERROR: The system cannot find the file specified.')
-      })
-
+    it('warns when no tasks are installed', () => {
+      mockedExecSync.mockReturnValue(Buffer.from('')) // query returns nothing matching
       strategy.uninstall()
-
       expect(logger.warn).toHaveBeenCalledWith('service.notInstalled.win32')
     })
 
-    it('should delete task when it exists', () => {
-      mockedExecSync.mockReturnValue(Buffer.from(''))
-
+    it('deletes every project task', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from('"\\AISupportAgent-mbc-mbc-01","Ready"\r\n')) // getAllProjectTasks
+        .mockReturnValue(Buffer.from('')) // delete
       strategy.uninstall()
-
       expect(mockedExecSync).toHaveBeenCalledWith(
-        'schtasks /Query /TN "AISupportAgent"',
+        'schtasks /Delete /TN "AISupportAgent-mbc-mbc-01" /F',
         { stdio: 'pipe' },
       )
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        'schtasks /Delete /TN "AISupportAgent" /F',
-        { stdio: 'pipe' },
-      )
-      expect(logger.success).toHaveBeenCalled()
+      expect(logger.success).toHaveBeenCalledWith('service.uninstalled.win32')
     })
 
-    it('should show unload hint before deleting task', () => {
-      mockedExecSync.mockReturnValue(Buffer.from(''))
-
-      strategy.uninstall()
-
-      expect(logger.info).toHaveBeenCalledWith(
-        expect.stringContaining('service.unloadHint.win32'),
-      )
-    })
-
-    it('should handle schtasks delete failure', () => {
+    it('logs an error when delete fails', () => {
       mockedExecSync
-        .mockReturnValueOnce(Buffer.from('')) // Query succeeds
-        .mockImplementationOnce(() => {
-          throw new Error('Access denied')
-        })
-
+        .mockReturnValueOnce(Buffer.from('"\\AISupportAgent-mbc-mbc-01","Ready"\r\n'))
+        .mockImplementationOnce(() => { throw new Error('denied') })
       strategy.uninstall()
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.schtasksFailed'),
-      )
-      expect(logger.success).not.toHaveBeenCalled()
-    })
-
-    it('should handle non-Error throw from schtasks delete', () => {
-      mockedExecSync
-        .mockReturnValueOnce(Buffer.from('')) // Query succeeds
-        .mockImplementationOnce(() => {
-          throw 'string delete error'
-        })
-
-      strategy.uninstall()
-
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('service.schtasksFailed'),
       )
     })
   })
 
-  describe('start', () => {
-    it('should error if task does not exist', () => {
-      mockedExecSync.mockImplementation(() => { throw new Error('not found') })
+  describe('start / stop / restart', () => {
+    const queryRow = Buffer.from('"\\AISupportAgent-mbc-mbc-01","Ready"\r\n')
 
+    it('start: errors when nothing is installed', () => {
+      mockedExecSync.mockReturnValue(Buffer.from(''))
       strategy.start()
-
       expect(logger.error).toHaveBeenCalledWith('service.notInstalled.win32')
     })
 
-    it('should run the task', () => {
-      mockedExecSync.mockReturnValue(Buffer.from(''))
-
+    it('start: runs each task', () => {
+      mockedExecSync.mockReturnValueOnce(queryRow).mockReturnValue(Buffer.from(''))
       strategy.start()
-
       expect(mockedExecSync).toHaveBeenCalledWith(
-        'schtasks /Run /TN "AISupportAgent"',
+        'schtasks /Run /TN "AISupportAgent-mbc-mbc-01"',
         { stdio: 'pipe' },
       )
       expect(logger.success).toHaveBeenCalledWith('service.started')
     })
 
-    it('should log error if Run fails', () => {
+    it('start: logs error when Run fails', () => {
       mockedExecSync
-        .mockReturnValueOnce(Buffer.from(''))  // Query
-        .mockImplementationOnce(() => { throw new Error('run failed') })  // Run
-
+        .mockReturnValueOnce(queryRow)
+        .mockImplementationOnce(() => { throw new Error('run failed') })
       strategy.start()
-
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('service.startFailed'),
       )
     })
 
-    it('should handle non-Error throw from start', () => {
-      mockedExecSync
-        .mockReturnValueOnce(Buffer.from(''))  // Query
-        .mockImplementationOnce(() => { throw 'string start error' })  // Run
-
-      strategy.start()
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.startFailed'),
-      )
-    })
-  })
-
-  describe('stop', () => {
-    it('should error if task does not exist', () => {
-      mockedExecSync.mockImplementation(() => { throw new Error('not found') })
-
+    it('stop: ends each task', () => {
+      mockedExecSync.mockReturnValueOnce(queryRow).mockReturnValue(Buffer.from(''))
       strategy.stop()
-
-      expect(logger.error).toHaveBeenCalledWith('service.notInstalled.win32')
-    })
-
-    it('should end the task', () => {
-      mockedExecSync.mockReturnValue(Buffer.from(''))
-
-      strategy.stop()
-
       expect(mockedExecSync).toHaveBeenCalledWith(
-        'schtasks /End /TN "AISupportAgent"',
+        'schtasks /End /TN "AISupportAgent-mbc-mbc-01"',
         { stdio: 'pipe' },
       )
       expect(logger.success).toHaveBeenCalledWith('service.stopped')
     })
 
-    it('should log error if End fails', () => {
-      mockedExecSync
-        .mockReturnValueOnce(Buffer.from(''))  // Query
-        .mockImplementationOnce(() => { throw new Error('end failed') })  // End
-
+    it('stop: errors when nothing is installed', () => {
+      mockedExecSync.mockReturnValue(Buffer.from(''))
       strategy.stop()
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.stopFailed'),
-      )
-    })
-
-    it('should handle non-Error throw from stop', () => {
-      mockedExecSync
-        .mockReturnValueOnce(Buffer.from(''))  // Query
-        .mockImplementationOnce(() => { throw 'string stop error' })  // End
-
-      strategy.stop()
-
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.stopFailed'),
-      )
-    })
-  })
-
-  describe('restart', () => {
-    it('should error if task does not exist', () => {
-      mockedExecSync.mockImplementation(() => {
-        throw new Error('not found')
-      })
-
-      strategy.restart()
-
       expect(logger.error).toHaveBeenCalledWith('service.notInstalled.win32')
     })
 
-    it('should end and run the task', () => {
-      mockedExecSync.mockReturnValue(Buffer.from(''))
-
-      strategy.restart()
-
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        'schtasks /Query /TN "AISupportAgent"',
-        { stdio: 'pipe' },
-      )
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        'schtasks /End /TN "AISupportAgent"',
-        { stdio: 'pipe' },
-      )
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        'schtasks /Run /TN "AISupportAgent"',
-        { stdio: 'pipe' },
-      )
-      expect(logger.success).toHaveBeenCalledWith('service.restarted')
-    })
-
-    it('should succeed even if End fails (task not running)', () => {
+    it('stop: logs error when End fails', () => {
       mockedExecSync
-        .mockReturnValueOnce(Buffer.from(''))  // Query
-        .mockImplementationOnce(() => { throw new Error('not running') })  // End
-        .mockReturnValueOnce(Buffer.from(''))  // Run
-
-      strategy.restart()
-
-      expect(logger.success).toHaveBeenCalledWith('service.restarted')
-    })
-
-    it('should log error if Run fails', () => {
-      mockedExecSync
-        .mockReturnValueOnce(Buffer.from(''))  // Query
-        .mockReturnValueOnce(Buffer.from(''))  // End
-        .mockImplementationOnce(() => { throw new Error('run failed') })  // Run
-
-      strategy.restart()
-
+        .mockReturnValueOnce(queryRow)
+        .mockImplementationOnce(() => { throw new Error('end failed') })
+      strategy.stop()
       expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('service.restartFailed'),
+        expect.stringContaining('service.stopFailed'),
       )
     })
 
-    it('should handle non-Error throw from Run', () => {
-      mockedExecSync
-        .mockReturnValueOnce(Buffer.from(''))  // Query
-        .mockReturnValueOnce(Buffer.from(''))  // End
-        .mockImplementationOnce(() => { throw 'string run error' })  // Run
-
+    it('restart: errors when nothing is installed', () => {
+      mockedExecSync.mockReturnValue(Buffer.from(''))
       strategy.restart()
+      expect(logger.error).toHaveBeenCalledWith('service.notInstalled.win32')
+    })
 
+    it('restart: ends then runs each task', () => {
+      mockedExecSync.mockReturnValueOnce(queryRow).mockReturnValue(Buffer.from(''))
+      strategy.restart()
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        'schtasks /Run /TN "AISupportAgent-mbc-mbc-01"',
+        { stdio: 'pipe' },
+      )
+      expect(logger.success).toHaveBeenCalledWith('service.restarted')
+    })
+
+    it('restart: tolerates End failing (task not running)', () => {
+      mockedExecSync
+        .mockReturnValueOnce(queryRow)
+        .mockImplementationOnce(() => { throw new Error('not running') }) // End
+        .mockReturnValue(Buffer.from('')) // Run
+      strategy.restart()
+      expect(logger.success).toHaveBeenCalledWith('service.restarted')
+    })
+
+    it('restart: logs error when Run fails', () => {
+      mockedExecSync
+        .mockReturnValueOnce(queryRow)
+        .mockReturnValueOnce(Buffer.from('')) // End
+        .mockImplementationOnce(() => { throw new Error('run failed') }) // Run
+      strategy.restart()
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('service.restartFailed'),
       )
@@ -443,31 +443,77 @@ describe('Win32ServiceStrategy', () => {
   })
 
   describe('status', () => {
-    it('should return not installed when task does not exist', () => {
-      mockedExecSync.mockImplementation(() => { throw new Error('not found') })
-
-      const result = strategy.status()
-
-      expect(result).toEqual({ installed: false, running: false })
+    it('returns not installed when there are no tasks', () => {
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+      expect(strategy.status()).toEqual({ installed: false, running: false })
     })
 
-    it('should return running when task is Running', () => {
-      mockedExecSync.mockReturnValue(Buffer.from('"AISupportAgent","Running"'))
-
+    it('returns running when a task is Running', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from('"\\AISupportAgent-mbc-mbc-01","Running"\r\n')) // getAllProjectTasks
+        .mockReturnValue(Buffer.from('"AISupportAgent-mbc-mbc-01","Running"')) // per-task query
       const result = strategy.status()
-
       expect(result.installed).toBe(true)
       expect(result.running).toBe(true)
-      expect(result.logDir).toBeTruthy()
+      expect(result.projects?.[0]).toMatchObject({ projectCode: 'MBC_01', running: true })
     })
 
-    it('should return not running when task is Ready', () => {
-      mockedExecSync.mockReturnValue(Buffer.from('"AISupportAgent","Ready"'))
-
+    it('marks a task not running when its query is Ready', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from('"\\AISupportAgent-mbc-mbc-01","Ready"\r\n'))
+        .mockReturnValue(Buffer.from('"AISupportAgent-mbc-mbc-01","Ready"'))
       const result = strategy.status()
+      expect(result.running).toBe(false)
+      expect(result.projects?.[0]).toMatchObject({ running: false })
+    })
 
+    it('treats a failing per-task query as not running', () => {
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from('"\\AISupportAgent-mbc-mbc-01","Ready"\r\n'))
+        .mockImplementationOnce(() => { throw new Error('query failed') })
+      const result = strategy.status()
       expect(result.installed).toBe(true)
       expect(result.running).toBe(false)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// generateTaskXml (legacy single-task form, kept for back-compat)
+// ---------------------------------------------------------------------------
+describe('generateTaskXml (legacy)', () => {
+  it('generates valid single-task XML', () => {
+    const result = generateTaskXml({
+      nodePath: 'C:\\Program Files\\nodejs\\node.exe',
+      entryPoint: 'C:\\cli\\dist\\index.js',
+      logDir: 'C:\\logs',
+    })
+    expect(result).toContain('<?xml version="1.0" encoding="UTF-16"?>')
+    expect(result).toContain('<Command>C:\\Program Files\\nodejs\\node.exe</Command>')
+    expect(result).toContain('start --no-docker')
+    expect(result).not.toContain('--verbose')
+  })
+
+  it('includes --verbose and omits --no-docker per options', () => {
+    const result = generateTaskXml({
+      nodePath: 'C:\\node.exe',
+      entryPoint: 'C:\\index.js',
+      logDir: 'C:\\logs',
+      verbose: true,
+      docker: true,
+    })
+    expect(result).toContain('--verbose')
+    expect(result).not.toContain('--no-docker')
+  })
+
+  it('escapes XML special characters', () => {
+    const result = generateTaskXml({
+      nodePath: 'C:\\p <a> & "b"\\node.exe',
+      entryPoint: 'C:\\index.js',
+      logDir: 'C:\\logs',
+    })
+    expect(result).toContain('&lt;a&gt;')
+    expect(result).toContain('&amp;')
+    expect(result).toContain('&quot;b&quot;')
   })
 })

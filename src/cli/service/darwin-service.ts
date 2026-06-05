@@ -268,22 +268,26 @@ export function generateWrapperScript(opts: {
   // (the legacy `"..."` mounts above use raw double-quotes for back-compat).
   mountLines.push(`  -v ${shellQuote(`${hostProjectDir}:${containerProjectDir}:rw`)} \\`)
 
+  // Shell-quote every interpolated value. The token / apiUrl / API keys can
+  // contain shell metacharacters (`$`, backtick, `;`, …); without quoting they
+  // would be interpreted by bash when the wrapper runs `docker run`, allowing
+  // command injection. This mirrors the Linux wrapper, which already quotes
+  // all of these.
   const envLines: string[] = [
     `  -e AI_SUPPORT_AGENT_IN_DOCKER=1 \\`,
     `  -e HOME=${containerHome} \\`,
     `  -e AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir} \\`,
-    `  -e AI_SUPPORT_AGENT_TOKEN=${opts.token} \\`,
-    `  -e AI_SUPPORT_AGENT_API_URL=${containerApiUrl} \\`,
-    // Shell-quote so neither projectCode nor containerProjectDir can be
-    // shell-interpreted (projectCode is validated to [A-Za-z0-9_-] at
-    // install time, but quoting is defense in depth).
+    `  -e AI_SUPPORT_AGENT_TOKEN=${shellQuote(opts.token)} \\`,
+    `  -e AI_SUPPORT_AGENT_API_URL=${shellQuote(containerApiUrl)} \\`,
+    // projectCode is validated to [A-Za-z0-9_-] at install time, but quoting
+    // is defense in depth.
     `  -e AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${shellQuote(`${opts.projectCode}=${containerProjectDir}`)} \\`,
   ]
   if (opts.anthropicApiKey) {
-    envLines.push(`  -e ANTHROPIC_API_KEY=${opts.anthropicApiKey} \\`)
+    envLines.push(`  -e ANTHROPIC_API_KEY=${shellQuote(opts.anthropicApiKey)} \\`)
   }
   if (opts.claudeCodeOauthToken) {
-    envLines.push(`  -e CLAUDE_CODE_OAUTH_TOKEN=${opts.claudeCodeOauthToken} \\`)
+    envLines.push(`  -e CLAUDE_CODE_OAUTH_TOKEN=${shellQuote(opts.claudeCodeOauthToken)} \\`)
   }
 
   const containerArgs = [

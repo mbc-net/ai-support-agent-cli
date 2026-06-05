@@ -90,6 +90,11 @@ describe('docker-utils', () => {
       expect(getDockerPath()).toBe('/opt/homebrew/bin/docker')
     })
 
+    it('returns /usr/bin/docker (Linux) when that is the only candidate', () => {
+      mockExistsSync.mockImplementation((p) => p === '/usr/bin/docker')
+      expect(getDockerPath()).toBe('/usr/bin/docker')
+    })
+
     it('caches the resolved path (calls fs.existsSync only on first call)', () => {
       mockExistsSync.mockReturnValue(false)
       getDockerPath()
@@ -126,12 +131,39 @@ describe('docker-utils', () => {
       expect(process.env.DOCKER_HOST).toBe(`unix://${macSocket}`)
     })
 
-    it('does not set DOCKER_HOST when mac socket does not exist', () => {
+    it('does not set DOCKER_HOST when no socket candidate exists', () => {
       delete process.env.DOCKER_HOST
-      // macSocket does not exist
+      // no socket candidate exists
       mockExistsSync.mockReturnValue(false)
       getDockerPath()
       expect(process.env.DOCKER_HOST).toBeUndefined()
+    })
+
+    it('falls back to the Colima socket when Docker Desktop socket is absent', () => {
+      delete process.env.DOCKER_HOST
+      const macSocket = path.join(os.homedir(), '.docker', 'run', 'docker.sock')
+      const colimaSocket = path.join(os.homedir(), '.colima', 'default', 'docker.sock')
+      // Docker Desktop socket missing, Colima socket present
+      mockExistsSync.mockImplementation((p) => p === colimaSocket && p !== macSocket)
+      getDockerPath()
+      expect(process.env.DOCKER_HOST).toBe(`unix://${colimaSocket}`)
+    })
+
+    it('prefers the Docker Desktop socket over Colima when both exist', () => {
+      delete process.env.DOCKER_HOST
+      const macSocket = path.join(os.homedir(), '.docker', 'run', 'docker.sock')
+      const colimaSocket = path.join(os.homedir(), '.colima', 'default', 'docker.sock')
+      mockExistsSync.mockImplementation((p) => p === macSocket || p === colimaSocket)
+      getDockerPath()
+      expect(process.env.DOCKER_HOST).toBe(`unix://${macSocket}`)
+    })
+
+    it('falls back to the Linux native socket when no user-level socket exists', () => {
+      delete process.env.DOCKER_HOST
+      const linuxSocket = '/var/run/docker.sock'
+      mockExistsSync.mockImplementation((p) => p === linuxSocket)
+      getDockerPath()
+      expect(process.env.DOCKER_HOST).toBe(`unix://${linuxSocket}`)
     })
   })
 

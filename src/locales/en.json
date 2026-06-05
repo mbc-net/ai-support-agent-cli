@@ -201,6 +201,7 @@
   "service.projectDirMissing": "Warning: configured projectDir does not exist: {{path}}. Falling back to the default per-project directory.",
   "service.projectDirBlocked": "Warning: configured projectDir is rejected ({{message}}): {{path}}. Falling back to the default per-project directory.",
   "service.invalidProjectCode": "Invalid projectCode: contains characters disallowed in AI_SUPPORT_AGENT_PROJECT_DIR_MAP ({{projectCode}}). Allowed characters: [A-Za-z0-9_-].",
+  "service.invalidWin32Value": "Invalid {{field}}: contains characters that cannot be safely used in a Windows batch wrapper (% ! \" ^ & < > | or newline). Fix the value and reinstall.",
   "service.projectInstallFailed": "Failed to install service for project {{projectCode}}: {{message}}. Continuing with the remaining projects.",
   "service.projectUnitNameCollision": "Cannot install service for project {{projectCode}}: its sanitized unit name '{{unitName}}' collides with another configured project ({{others}}). Rename one of the projectCodes so they sanitize to distinct unit names.",
   "service.projectDuplicateEntry": "Cannot install service for project {{projectCode}}: this <tenant>/<project> pair appears more than once in config (unit name '{{unitName}}'). Remove the duplicate entry.",

