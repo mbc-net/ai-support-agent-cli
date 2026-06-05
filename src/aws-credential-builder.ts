@@ -3,7 +3,7 @@ import axios from 'axios'
 import type { ApiClient } from './api-client'
 import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
-import { getErrorMessage } from './utils'
+import { getErrorMessage, isSsoAuthRequiredError } from './utils'
 
 export interface SsoAuthRequiredInfo {
   accountId: string
@@ -31,7 +31,7 @@ function extractAwsCredentialError(error: unknown, accountName: string): Credent
 
     if (data) {
       // SSO認証切れの場合は専用メッセージ + SSO情報
-      if (data.error === 'SSO_AUTH_REQUIRED' || data.errorCode === 'SSO_AUTH_REQUIRED') {
+      if (isSsoAuthRequiredError(error)) {
         const accountId = typeof data.accountId === 'string' ? data.accountId : ''
         return {
           errorMessage: `AWS SSO認証の有効期限が切れています（${accountName}）。管理画面からSSO再認証を実行してください。`,

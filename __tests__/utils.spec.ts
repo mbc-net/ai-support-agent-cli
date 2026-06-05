@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
+import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -335,6 +335,61 @@ describe('isAuthenticationError', () => {
   it('should return false for AxiosError without response', () => {
     const error = new AxiosError('Network Error', 'ERR_NETWORK')
     expect(isAuthenticationError(error)).toBe(false)
+  })
+})
+
+describe('isSsoAuthRequiredError', () => {
+  it('should return true when error field is SSO_AUTH_REQUIRED', () => {
+    const error = new AxiosError('Forbidden', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 403,
+      statusText: 'Forbidden',
+      data: { error: 'SSO_AUTH_REQUIRED' },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(isSsoAuthRequiredError(error)).toBe(true)
+  })
+
+  it('should return true when errorCode field is SSO_AUTH_REQUIRED', () => {
+    const error = new AxiosError('Forbidden', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 403,
+      statusText: 'Forbidden',
+      data: { errorCode: 'SSO_AUTH_REQUIRED' },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(isSsoAuthRequiredError(error)).toBe(true)
+  })
+
+  it('should return false when error field is a different value', () => {
+    const error = new AxiosError('Forbidden', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 403,
+      statusText: 'Forbidden',
+      data: { error: 'ACCESS_DENIED' },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(isSsoAuthRequiredError(error)).toBe(false)
+  })
+
+  it('should return false for AxiosError without response', () => {
+    const error = new AxiosError('Network Error', 'ERR_NETWORK')
+    expect(isSsoAuthRequiredError(error)).toBe(false)
+  })
+
+  it('should return false for AxiosError with null data', () => {
+    const error = new AxiosError('Forbidden', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 403,
+      statusText: 'Forbidden',
+      data: null,
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(isSsoAuthRequiredError(error)).toBe(false)
+  })
+
+  it('should return false for a non-Axios error', () => {
+    expect(isSsoAuthRequiredError(new Error('some error'))).toBe(false)
   })
 })
 

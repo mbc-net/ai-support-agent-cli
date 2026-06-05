@@ -94,6 +94,20 @@ export function isAuthenticationError(error: unknown): boolean {
   return status === 401 || status === 403
 }
 
+/**
+ * AxiosError のレスポンスデータが SSO_AUTH_REQUIRED エラーかどうかを判定する。
+ *
+ * AWS SSO 認証切れ時にサーバーが返す `error: 'SSO_AUTH_REQUIRED'` または
+ * `errorCode: 'SSO_AUTH_REQUIRED'` フィールドを検出する。
+ * 各モジュールで重複していた同一ロジックをここに集約する。
+ */
+export function isSsoAuthRequiredError(error: unknown): boolean {
+  if (!axios.isAxiosError(error) || !error.response) return false
+  const data = error.response.data as Record<string, unknown> | undefined
+  if (!data) return false
+  return data.error === 'SSO_AUTH_REQUIRED' || data.errorCode === 'SSO_AUTH_REQUIRED'
+}
+
 export function buildWsUrl(apiUrl: string, path: string): string {
   return apiUrl
     .replace(/^https:/, 'wss:')
