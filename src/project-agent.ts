@@ -35,6 +35,7 @@ import { submitPendingResults } from './pending-result-store'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
+import { getUpdateVersionFilePath } from './utils/path-utils'
 import { atomicWriteFile, getErrorMessage, isAuthenticationError, isInDocker, resolveUrlForDocker, sleep } from './utils'
 
 export interface ProjectAgentOptions {
@@ -294,8 +295,7 @@ export class ProjectAgent {
       // DockerSupervisor detects the update and calls installUpdateAndRestart().
       if (isInDocker()) {
         try {
-          const versionFile = path.join(getConfigDir(), 'update-version.json')
-          atomicWriteFile(versionFile, JSON.stringify({ version: targetVersion }))
+          atomicWriteFile(getUpdateVersionFilePath(), JSON.stringify({ version: targetVersion }))
         } catch (err: unknown) {
           logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
         }
