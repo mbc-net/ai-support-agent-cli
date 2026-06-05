@@ -1108,6 +1108,17 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
       const legacyPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.ai-support-agent.cli.plist')
       expect(mockedFs.unlinkSync).not.toHaveBeenCalledWith(legacyPath)
     })
+
+    it('skips unlink for plists that are already gone from disk', () => {
+      // plists are discovered (readdirSync) but the files no longer exist:
+      // the existsSync guard must skip unlink without erroring.
+      mockedFs.existsSync.mockReturnValue(false)
+
+      strategy.uninstall()
+
+      expect(mockedFs.unlinkSync).not.toHaveBeenCalled()
+      expect(logger.success).toHaveBeenCalledWith('service.uninstalled')
+    })
   })
 
   describe('start', () => {
@@ -1221,6 +1232,21 @@ describe('DarwinServiceStrategy — multi-project mode', () => {
       expect(result.installed).toBe(true)
       expect(result.running).toBe(true)
       expect(result.pid).toBe(12345)
+    })
+
+    it('keeps the first running PID as the aggregate pid when multiple projects run', () => {
+      // Both projects running: the aggregate `pid` must stay the FIRST one (111),
+      // not be overwritten by the second (222).
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from('"PID" = 111;')) // mbc-01 running
+        .mockReturnValueOnce(Buffer.from('"PID" = 222;')) // mbc-02 running
+
+      const result = strategy.status()
+
+      expect(result.running).toBe(true)
+      expect(result.pid).toBe(111)
+      expect(result.projects![0].pid).toBe(111)
+      expect(result.projects![1].pid).toBe(222)
     })
 
     it('should return per-project status in projects array', () => {

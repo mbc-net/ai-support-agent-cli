@@ -427,6 +427,46 @@ describe('service-command orchestrator', () => {
       spy.mockRestore()
     })
 
+    it('should show "?" for a running Darwin project that reports no pid', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' })
+      const { DarwinServiceStrategy } = require('../src/cli/service/darwin-service')
+      const spy = jest.spyOn(DarwinServiceStrategy.prototype, 'status').mockReturnValue({
+        installed: true,
+        running: true,
+        projects: [{ projectCode: 'MBC_01', running: true, pid: undefined }],
+        logDir: '/tmp/logs',
+      })
+
+      serviceStatus({})
+
+      // pid undefined -> rendered as '?'
+      expect(logger.success).toHaveBeenCalledWith(
+        expect.stringContaining('service.status.projectRunning'),
+      )
+      spy.mockRestore()
+    })
+
+    it('should show "?" for an aggregate running service with no pid and omit logDir when absent', () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' })
+      const { Win32ServiceStrategy } = require('../src/cli/service/win32-service')
+      const spy = jest.spyOn(Win32ServiceStrategy.prototype, 'status').mockReturnValue({
+        installed: true,
+        running: true,
+        pid: undefined,
+        // no logDir -> the logDir line must be skipped
+      })
+
+      serviceStatus({})
+
+      expect(logger.success).toHaveBeenCalledWith(
+        expect.stringContaining('service.status.running'),
+      )
+      expect(logger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('service.logDir'),
+      )
+      spy.mockRestore()
+    })
+
     it('should reject unsupported platforms', () => {
       Object.defineProperty(process, 'platform', { value: 'freebsd' })
 
