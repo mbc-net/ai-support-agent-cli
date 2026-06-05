@@ -1,5 +1,5 @@
 import type { ApiClient } from '../api-client'
-import { executePlaywrightScript, type ScriptExecutionResult } from '../browser/browser-script-executor'
+import { executePlaywrightScript, type BrowserSessionLike, type ScriptExecutionResult } from '../browser/browser-script-executor'
 import { logger } from '../logger'
 import type {
   AgentChatMode,
@@ -313,9 +313,9 @@ async function executeScriptMode(
 async function acquireBrowserSession(
   browserSessionManager: unknown,
   executionId: string,
-): Promise<unknown | null | undefined> {
+): Promise<BrowserSessionLike | null | undefined> {
   const sessionManager = browserSessionManager as {
-    getOrCreate: (id: string) => Promise<unknown>
+    getOrCreate: (id: string) => Promise<BrowserSessionLike>
   } | undefined
 
   if (!sessionManager) {
@@ -386,7 +386,7 @@ async function reportScriptSuccess(
 
 /** AIリカバリのパラメータ */
 interface RecoveryParams extends ScriptModeParams {
-  session: unknown
+  session: BrowserSessionLike
   originalScript: string
   scriptResult: ScriptExecutionResult
   recoveryMode: 'auto' | 'manual'
