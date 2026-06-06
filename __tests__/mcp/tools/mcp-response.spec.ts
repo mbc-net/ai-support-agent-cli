@@ -6,6 +6,7 @@ import {
   mcpImageResponse,
   mcpTextImageResponse,
   mcpTextResponse,
+  screenshotToBase64,
   withMcpErrorHandling,
 } from '../../../src/mcp/tools/mcp-response'
 
@@ -57,6 +58,23 @@ describe('mcp-response helpers', () => {
     it('should not include isError', () => {
       const result = mcpImageResponse('data', 'image/jpeg')
       expect(result).not.toHaveProperty('isError')
+    })
+  })
+
+  describe('screenshotToBase64', () => {
+    it('should encode a buffer as base64', () => {
+      const buf = Buffer.from('hello world')
+      expect(screenshotToBase64(buf)).toBe(buf.toString('base64'))
+    })
+
+    it('should round-trip back to the original bytes', () => {
+      const original = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])
+      const encoded = screenshotToBase64(original)
+      expect(Buffer.from(encoded, 'base64')).toEqual(original)
+    })
+
+    it('should return an empty string for an empty buffer', () => {
+      expect(screenshotToBase64(Buffer.alloc(0))).toBe('')
     })
   })
 
