@@ -34,6 +34,7 @@ jest.mock('../../../src/config-manager', () => ({
 import { execSync } from 'child_process'
 import * as fs from 'fs'
 import { IMAGE_NAME } from '../../../src/docker/docker-utils'
+import { ENV_VARS } from '../../../src/constants'
 import {
   DarwinServiceStrategy,
   generatePlist,
@@ -136,9 +137,9 @@ describe('generatePlist', () => {
   })
 
   it('should include CLAUDE_CODE_OAUTH_TOKEN when set in environment', () => {
-    const originalEnv = process.env.CLAUDE_CODE_OAUTH_TOKEN
+    const originalEnv = process.env[ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN]
     try {
-      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'test-oauth-token'
+      process.env[ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN] = 'test-oauth-token'
       const result = generatePlist({
         nodePath: '/usr/local/bin/node',
         entryPoint: '/path/to/index.js',
@@ -146,13 +147,13 @@ describe('generatePlist', () => {
         docker: true,
       })
 
-      expect(result).toContain('<key>CLAUDE_CODE_OAUTH_TOKEN</key>')
+      expect(result).toContain(`<key>${ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN}</key>`)
       expect(result).toContain('<string>test-oauth-token</string>')
     } finally {
       if (originalEnv === undefined) {
-        delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+        delete process.env[ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN]
       } else {
-        process.env.CLAUDE_CODE_OAUTH_TOKEN = originalEnv
+        process.env[ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN] = originalEnv
       }
     }
   })
@@ -425,14 +426,14 @@ describe('generateWrapperScript', () => {
   it('should include CLAUDE_CODE_OAUTH_TOKEN when provided', () => {
     const result = generateWrapperScript({ ...baseOpts, claudeCodeOauthToken: 'oauth-token' })
 
-    expect(result).toContain(`-e CLAUDE_CODE_OAUTH_TOKEN='oauth-token'`)
+    expect(result).toContain(`-e ${ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN}='oauth-token'`)
   })
 
   it('should not include optional env vars when not provided', () => {
     const result = generateWrapperScript(baseOpts)
 
     expect(result).not.toContain('ANTHROPIC_API_KEY')
-    expect(result).not.toContain('CLAUDE_CODE_OAUTH_TOKEN')
+    expect(result).not.toContain(ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN)
   })
 
   it('should include --verbose flag when verbose is true', () => {

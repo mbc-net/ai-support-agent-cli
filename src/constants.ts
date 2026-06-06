@@ -12,8 +12,23 @@ function getPackageVersion(): string {
   }
 }
 
+// Environment variable name constants.
+// Centralise the raw strings so a rename is a one-file change and typos are
+// caught by TypeScript rather than silently producing undefined at runtime.
+export const ENV_VARS = {
+  TOKEN: 'AI_SUPPORT_AGENT_TOKEN',
+  API_URL: 'AI_SUPPORT_AGENT_API_URL',
+  TENANT_CODE: 'AI_SUPPORT_AGENT_TENANT_CODE',
+  PROJECT_CODE: 'AI_SUPPORT_AGENT_PROJECT_CODE',
+  CONFIG_DIR: 'AI_SUPPORT_AGENT_CONFIG_DIR',
+  IN_DOCKER: 'AI_SUPPORT_AGENT_IN_DOCKER',
+  ALLOW_HTTP: 'AI_SUPPORT_AGENT_ALLOW_HTTP',
+  PROJECT_DIR_MAP: 'AI_SUPPORT_AGENT_PROJECT_DIR_MAP',
+  CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_CODE_OAUTH_TOKEN',
+} as const
+
 export const CONFIG_DIR = (() => {
-  const envDir = process.env.AI_SUPPORT_AGENT_CONFIG_DIR
+  const envDir = process.env[ENV_VARS.CONFIG_DIR]
   if (!envDir) return '.ai-support-agent'
   const expanded = envDir.replace(/^~(?=$|\/)/, os.homedir())
   return resolve(expanded)

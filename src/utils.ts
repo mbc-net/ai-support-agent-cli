@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import axios from 'axios'
 
+import { ENV_VARS } from './constants'
 import { logger } from './logger'
 
 export function readJsonSync<T>(filePath: string): T {
@@ -123,7 +124,7 @@ export function buildWsUrl(apiUrl: string, path: string): string {
  * which is injected by volume-mount-builder and the service templates.
  */
 export function isInDocker(): boolean {
-  return process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1'
+  return process.env[ENV_VARS.IN_DOCKER] === '1'
 }
 
 /**

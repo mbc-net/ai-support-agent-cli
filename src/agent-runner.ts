@@ -1,7 +1,7 @@
 import * as os from 'os'
 
 import { type AutoUpdaterHandle, startAutoUpdater } from './auto-updater'
-import { AGENT_VERSION, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJECT_CODE_CLI_DIRECT, PROJECT_CODE_ENV_DEFAULT, DOCKER_UPDATE_EXIT_CODE } from './constants'
+import { AGENT_VERSION, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJECT_CODE_CLI_DIRECT, PROJECT_CODE_ENV_DEFAULT, DOCKER_UPDATE_EXIT_CODE, ENV_VARS } from './constants'
 import { getProjectList, loadConfig, saveConfig } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
@@ -220,8 +220,8 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   const config = loadConfig()
 
   // Environment variable support (lowest priority)
-  const envToken = process.env.AI_SUPPORT_AGENT_TOKEN
-  const envApiUrl = process.env.AI_SUPPORT_AGENT_API_URL
+  const envToken = process.env[ENV_VARS.TOKEN]
+  const envApiUrl = process.env[ENV_VARS.API_URL]
 
   // CLI args > config > env vars
   if (options.token && options.apiUrl) {

@@ -1,6 +1,6 @@
 import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios'
 
-import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL } from './constants'
+import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL, ENV_VARS } from './constants'
 import { logger } from './logger'
 import { RetryStrategy } from './retry-strategy'
 import { extractTenantCodeFromToken } from './utils/token-utils'
@@ -35,11 +35,11 @@ export class ApiClient {
   constructor(apiUrl: string, token: string) {
     const parsed = new URL(apiUrl)
     if (parsed.protocol === 'http:' && parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost' && parsed.hostname !== 'host.docker.internal') {
-      if (process.env.AI_SUPPORT_AGENT_ALLOW_HTTP === 'true') {
+      if (process.env[ENV_VARS.ALLOW_HTTP] === 'true') {
         logger.warn('API URL uses HTTP (not HTTPS). Token may be transmitted in plain text.')
       } else {
         throw new Error(
-          'API URL uses HTTP (not HTTPS). Set AI_SUPPORT_AGENT_ALLOW_HTTP=true to allow insecure connections.',
+          `API URL uses HTTP (not HTTPS). Set ${ENV_VARS.ALLOW_HTTP}=true to allow insecure connections.`,
         )
       }
     }

@@ -1,6 +1,6 @@
 import os from 'os'
 
-import { ERR_CLAUDE_CLI_NOT_FOUND } from '../../src/constants'
+import { ERR_CLAUDE_CLI_NOT_FOUND, ENV_VARS } from '../../src/constants'
 import { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache, parseFileUploadResult, processStreamJsonLine, runClaudeCode } from '../../src/commands/claude-code-runner'
 import { createMockChildProcess } from '../helpers/mock-factory'
 
@@ -74,9 +74,9 @@ describe('claude-code-runner', () => {
     })
 
     it('should keep CLAUDE_CODE_OAUTH_TOKEN', () => {
-      process.env = { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-xxx', CLAUDE_CODE_SSE_PORT: '1234', PATH: '/usr/bin' }
+      process.env = { [ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN]: 'sk-ant-xxx', CLAUDE_CODE_SSE_PORT: '1234', PATH: '/usr/bin' }
       const result = buildCleanEnv()
-      expect(result).toHaveProperty('CLAUDE_CODE_OAUTH_TOKEN', 'sk-ant-xxx')
+      expect(result).toHaveProperty(ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-xxx')
       expect(result).not.toHaveProperty('CLAUDE_CODE_SSE_PORT')
       expect(result).toHaveProperty('PATH', '/usr/bin')
     })

@@ -3,6 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getConfigDir } from './config-manager'
+import { ENV_VARS } from './constants'
 import { logger } from './logger'
 import { t } from './i18n'
 import type { ProjectRegistration } from './types'
@@ -33,7 +34,7 @@ export function expandPath(template: string, projectCode: string, tenantCode?: s
  */
 function getContainerProjectDirMap(): Map<string, string> {
   const map = new Map<string, string>()
-  const envVal = process.env.AI_SUPPORT_AGENT_PROJECT_DIR_MAP
+  const envVal = process.env[ENV_VARS.PROJECT_DIR_MAP]
   if (!envVal) return map
   for (const entry of envVal.split(';')) {
     const eqIdx = entry.indexOf('=')
