@@ -48,6 +48,22 @@ describe('selector-utils', () => {
       expect(page.waitForNavigation).toHaveBeenCalled()
     })
 
+    it('should tolerate a navigation timeout for a single selector (navigation may not happen)', async () => {
+      const page = createMockPage()
+      page.waitForNavigation.mockRejectedValue(new Error('Timeout: navigation'))
+      const result = await tryClickSelectors(page, '#submit', { waitForNavigation: true })
+      expect(result).toBe('#submit')
+      expect(page.click).toHaveBeenCalledWith('#submit', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
+    })
+
+    it('should tolerate a navigation timeout for multiple selectors (navigation may not happen)', async () => {
+      const page = createMockPage(['.btn-ok'])
+      page.waitForNavigation.mockRejectedValue(new Error('Timeout: navigation'))
+      const result = await tryClickSelectors(page, '#nonexistent, .btn-ok', { waitForNavigation: true })
+      expect(result).toBe('.btn-ok')
+      expect(page.click).toHaveBeenCalledWith('.btn-ok', { timeout: SELECTOR_TIMEOUT_MULTIPLE_MS })
+    })
+
     it('should throw when no selector matches', async () => {
       const page = createMockPage()
       await expect(tryClickSelectors(page, '#a, #b, #c'))
