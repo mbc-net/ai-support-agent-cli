@@ -17,6 +17,7 @@ import {
   CLI_FLAG_NO_AUTO_UPDATE,
   CLI_FLAG_NO_DOCKER,
   DOCKER_UPDATE_EXIT_CODE,
+  ENV_VARS,
 } from '../constants'
 import { getProjectList, loadConfig } from '../config-manager'
 import { getSystemInfo } from '../system-info'
@@ -207,12 +208,12 @@ export function runInDocker(opts: DockerRunOptions): void {
       (p) => p.tenantCode === tenantCode && p.projectCode === projectCode,
     )
     if (projects.length === 0) {
-      if (opts.token || process.env.AI_SUPPORT_AGENT_TOKEN) {
+      if (opts.token || process.env[ENV_VARS.TOKEN]) {
         projects = [{
           tenantCode,
           projectCode,
-          token: opts.token ?? process.env.AI_SUPPORT_AGENT_TOKEN ?? '',
-          apiUrl: opts.apiUrl ?? process.env.AI_SUPPORT_AGENT_API_URL ?? '',
+          token: opts.token ?? process.env[ENV_VARS.TOKEN] ?? '',
+          apiUrl: opts.apiUrl ?? process.env[ENV_VARS.API_URL] ?? '',
         }]
       } else {
         exitWithError(`[docker] Project not found: ${opts.project}`)

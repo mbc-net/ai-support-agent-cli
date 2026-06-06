@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER } from '../../constants'
+import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS } from '../../constants'
 import { loadConfig, getProjectList } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
@@ -572,7 +572,7 @@ export function writeProjectServiceFiles(
     token: project.token,
     apiUrl: project.apiUrl,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-    claudeCodeOauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+    claudeCodeOauthToken: process.env[ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN],
     verbose: options.verbose,
     updateScriptPath,
     logDir: projectLogDir,

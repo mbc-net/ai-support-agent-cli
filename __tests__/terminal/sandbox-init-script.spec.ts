@@ -5,6 +5,7 @@ import {
   buildZshRcContent,
   buildOpenFolderDisableKeybindings,
 } from '../../src/terminal/sandbox-init-script'
+import { ENV_VARS } from '../../src/constants'
 
 describe('isZshShell', () => {
   it('should return true for /bin/zsh', () => {
@@ -228,7 +229,7 @@ describe('buildSandboxInitScript', () => {
     it('passes CLAUDE_CODE_OAUTH_TOKEN through --settings JSON', () => {
       const script = buildSandboxInitScript('/tmp/project')
       // printf で settings JSON を組み立てて --settings に渡す
-      expect(script).toContain('CLAUDE_CODE_OAUTH_TOKEN')
+      expect(script).toContain(ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN)
       expect(script).toContain('--settings')
       expect(script).toMatch(/printf .*\{"env":\{"CLAUDE_CODE_OAUTH_TOKEN":"%s"\}\}/)
     })

@@ -3,6 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
 import { exitWithError, getErrorMessage, isInDocker, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
+import { ENV_VARS } from '../src/constants'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -408,7 +409,7 @@ describe('buildWsUrl', () => {
 })
 
 describe('resolveUrlForDocker', () => {
-  const ENV_KEY = 'AI_SUPPORT_AGENT_IN_DOCKER'
+  const ENV_KEY = ENV_VARS.IN_DOCKER
 
   afterEach(() => {
     delete process.env[ENV_KEY]
@@ -452,7 +453,7 @@ describe('resolveUrlForDocker', () => {
 })
 
 describe('isInDocker', () => {
-  const ENV_KEY = 'AI_SUPPORT_AGENT_IN_DOCKER'
+  const ENV_KEY = ENV_VARS.IN_DOCKER
 
   afterEach(() => {
     delete process.env[ENV_KEY]
