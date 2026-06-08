@@ -14,6 +14,7 @@ import type { BrowserSession } from '../mcp/tools/browser/browser-session'
 import { BrowserSessionManager } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
 import { tryClickSelectors, tryFillSelectors } from '../mcp/tools/browser/selector-utils'
+import { screenshotToBase64 } from '../mcp/tools/mcp-response'
 import { executePlaywrightScript } from './browser-script-executor'
 
 /** Action log entry emitted to the caller */
@@ -213,7 +214,7 @@ export class BrowserLocalServer {
     const title: string = await page.title()
     const currentUrl: string = page.url()
     const screenshotBuffer = await session.screenshot((params.fullPage as boolean | undefined) ?? true)
-    const base64 = screenshotBuffer.toString('base64')
+    const base64 = screenshotToBase64(screenshotBuffer)
 
     this.emitActionLog(sessionId, session, 'navigate', url)
 
@@ -238,7 +239,7 @@ export class BrowserLocalServer {
 
     if (params.screenshot !== false) {
       const screenshotBuffer = await session.screenshot(true)
-      const base64 = screenshotBuffer.toString('base64')
+      const base64 = screenshotToBase64(screenshotBuffer)
       sendJson(res, 200, { title, url: currentUrl, screenshot: base64 })
     } else {
       sendJson(res, 200, { title, url: currentUrl })
@@ -260,7 +261,7 @@ export class BrowserLocalServer {
 
     if (params.screenshot) {
       const screenshotBuffer = await session.screenshot(true)
-      const base64 = screenshotBuffer.toString('base64')
+      const base64 = screenshotToBase64(screenshotBuffer)
       sendJson(res, 200, { screenshot: base64 })
     } else {
       sendJson(res, 200, { ok: true })
@@ -303,7 +304,7 @@ export class BrowserLocalServer {
 
   private async handleScreenshot(res: http.ServerResponse, session: BrowserSession, params: Record<string, unknown>): Promise<void> {
     const screenshotBuffer = await session.screenshot((params.fullPage as boolean | undefined) ?? true)
-    const base64 = screenshotBuffer.toString('base64')
+    const base64 = screenshotToBase64(screenshotBuffer)
     sendJson(res, 200, { screenshot: base64 })
   }
 

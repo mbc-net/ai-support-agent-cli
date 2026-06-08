@@ -81,6 +81,13 @@ describe('pending-result-store', () => {
     it('should not throw for non-existent file', () => {
       expect(() => removePendingResult('nonexistent')).not.toThrow()
     })
+
+    it('should swallow unlink failures (line 68 catch)', () => {
+      // Make the target path a directory so unlinkSync throws a real fs error
+      const pendingDir = path.join(tempDir, 'pending-results')
+      fs.mkdirSync(path.join(pendingDir, 'cmd-dir.json'), { recursive: true })
+      expect(() => removePendingResult('cmd-dir')).not.toThrow()
+    })
   })
 
   describe('loadPendingResults', () => {
@@ -125,6 +132,12 @@ describe('pending-result-store', () => {
 
     it('should return empty array when directory does not exist', () => {
       fs.rmSync(tempDir, { recursive: true })
+      expect(loadPendingResults()).toEqual([])
+    })
+
+    it('should swallow readdir failures and return empty (line 103 catch)', () => {
+      // Make the pending-results path a file so readdirSync throws ENOTDIR
+      fs.writeFileSync(path.join(tempDir, 'pending-results'), 'not a dir')
       expect(loadPendingResults()).toEqual([])
     })
   })

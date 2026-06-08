@@ -13,8 +13,29 @@ import {
   SELECTOR_TIMEOUT_SINGLE_MS,
 } from '../mcp/tools/browser/browser-types'
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type BrowserSession = any
+/**
+ * Structural interface describing the browser session capabilities used by this executor.
+ * Using a structural type instead of `any` lets callers pass any compatible object
+ * (BrowserSession, BrowserProxySession, or a mock in tests) without a hard import.
+ */
+export interface BrowserSessionLike {
+  getPage(): Promise<{
+    goto(url: string, opts?: Record<string, unknown>): Promise<unknown>
+    click(selector: string, opts?: Record<string, unknown>): Promise<void>
+    fill(selector: string, value: string, opts?: Record<string, unknown>): Promise<void>
+    locator(selector: string): { innerText(opts?: Record<string, unknown>): Promise<string> }
+    keyboard: {
+      type(text: string): Promise<void>
+      press(key: string): Promise<void>
+    }
+    mouse: {
+      wheel(deltaX: number, deltaY: number): Promise<void>
+    }
+    waitForTimeout(ms: number): Promise<void>
+  }>
+  variables: Map<string, string>
+  actionLog: { add(source: string, action: string, detail: string): void }
+}
 
 export interface ScriptStepResult {
   line: string
@@ -112,7 +133,7 @@ function parseLine(line: string): ParsedStep | null {
  * Execute a Playwright script against a browser session.
  */
 export async function executePlaywrightScript(
-  session: BrowserSession,
+  session: BrowserSessionLike,
   script: string,
   onStepComplete?: (step: number, total: number, line: string) => void,
 ): Promise<ScriptExecutionResult> {

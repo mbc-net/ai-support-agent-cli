@@ -53,7 +53,13 @@ import {
   isRunningViaTsNode,
   buildDevMounts,
   resolveImageTag,
+  checkDockerAvailable,
+  imageExists,
+  buildImage,
+  dockerLogin,
+  IMAGE_NAME,
 } from '../../src/docker/docker-utils'
+import { logger } from '../../src/logger'
 
 const mockExecFileSync = execFileSync as jest.MockedFunction<typeof execFileSync>
 
@@ -288,6 +294,85 @@ describe('docker-utils', () => {
       mockExecFileSync.mockImplementation(() => { throw new Error('No such image') })
       const result = resolveImageTag('ai-support-agent-mbc-proj:1.0.0', 'ai-support-agent:1.0.0')
       expect(result).toBe('ai-support-agent:1.0.0')
+    })
+  })
+
+  describe('checkDockerAvailable', () => {
+    it('returns true when `docker info` succeeds', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      expect(checkDockerAvailable()).toBe(true)
+      expect(mockExecFileSync).toHaveBeenCalledWith('docker', ['info'], {
+        stdio: 'ignore',
+      })
+    })
+
+    it('returns false when `docker info` throws (daemon down)', () => {
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error('Cannot connect to the Docker daemon')
+      })
+      expect(checkDockerAvailable()).toBe(false)
+    })
+  })
+
+  describe('imageExists', () => {
+    it('inspects the version-tagged image and returns true on success', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      expect(imageExists('1.2.3')).toBe(true)
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'docker',
+        ['image', 'inspect', `${IMAGE_NAME}:1.2.3`],
+        { stdio: 'ignore' },
+      )
+    })
+
+    it('returns false when the image is absent (inspect throws)', () => {
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error('No such image')
+      })
+      expect(imageExists('9.9.9')).toBe(false)
+    })
+  })
+
+  describe('buildImage', () => {
+    it('builds the version-tagged image with --pull=false and the AGENT_VERSION build-arg', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      buildImage('1.2.3')
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'docker',
+        [
+          'build',
+          '-t',
+          `${IMAGE_NAME}:1.2.3`,
+          '--pull=false',
+          '--build-arg',
+          'AGENT_VERSION=1.2.3',
+          '-f',
+          '/mock/docker/Dockerfile',
+          '/mock',
+        ],
+        { stdio: 'inherit' },
+      )
+      expect(logger.success).toHaveBeenCalled()
+    })
+
+    it('uses the provided custom Dockerfile path and logs that it is in use', () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''))
+      buildImage('2.0.0', '/custom/MyDockerfile')
+      const args = mockExecFileSync.mock.calls[0][1] as string[]
+      expect(args).toContain('-f')
+      expect(args).toContain('/custom/MyDockerfile')
+      expect(logger.info).toHaveBeenCalledWith('docker.usingCustomDockerfile')
+    })
+  })
+
+  describe('dockerLogin', () => {
+    it('prints the setup-token guidance steps', () => {
+      const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {})
+      dockerLogin()
+      expect(logger.info).toHaveBeenCalledWith('docker.loginStep1')
+      expect(logger.info).toHaveBeenCalledWith('docker.loginStep3')
+      expect(logSpy).toHaveBeenCalled()
+      logSpy.mockRestore()
     })
   })
 })

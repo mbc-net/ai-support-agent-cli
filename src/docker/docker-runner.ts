@@ -17,6 +17,7 @@ import {
   CLI_FLAG_NO_AUTO_UPDATE,
   CLI_FLAG_NO_DOCKER,
   DOCKER_UPDATE_EXIT_CODE,
+  ENV_VARS,
 } from '../constants'
 import { getProjectList, loadConfig } from '../config-manager'
 import { getSystemInfo } from '../system-info'
@@ -26,7 +27,7 @@ import { writePidFile, isAlreadyRunning, readPidFile } from '../pid-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
-import { getErrorMessage } from '../utils'
+import { exitWithError, getErrorMessage } from '../utils'
 import { IMAGE_NAME, checkDockerAvailable, getDockerPath } from './docker-utils'
 import { ensureImage } from './version-manager'
 import { syncDockerfileToConfigDir } from './dockerfile-sync'
@@ -169,15 +170,13 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   // 二重起動防止チェック
   if (isAlreadyRunning()) {
-    logger.error(`Agent is already running (PID: ${readPidFile()}). Use "ai-support-agent stop" to stop it first.`)
-    process.exit(1)
-    return
+    exitWithError(`Agent is already running (PID: ${readPidFile()}). Use "ai-support-agent stop" to stop it first.`)
+    return // unreachable in production; guards against mocked process.exit in tests
   }
 
   if (!checkDockerAvailable()) {
-    logger.error(t('docker.notAvailable'))
-    process.exit(1)
-    return
+    exitWithError(t('docker.notAvailable'))
+    return // unreachable in production; guards against mocked process.exit in tests
   }
 
   const config = loadConfig()
@@ -200,9 +199,8 @@ export function runInDocker(opts: DockerRunOptions): void {
   if (opts.project) {
     const slashIdx = opts.project.indexOf('/')
     if (slashIdx < 0) {
-      logger.error(`[docker] --project must be in "tenantCode/projectCode" format: ${opts.project}`)
-      process.exit(1)
-      return
+      exitWithError(`[docker] --project must be in "tenantCode/projectCode" format: ${opts.project}`)
+      return // unreachable in production; guards against mocked process.exit in tests
     }
     const tenantCode = opts.project.substring(0, slashIdx)
     const projectCode = opts.project.substring(slashIdx + 1)
@@ -210,17 +208,16 @@ export function runInDocker(opts: DockerRunOptions): void {
       (p) => p.tenantCode === tenantCode && p.projectCode === projectCode,
     )
     if (projects.length === 0) {
-      if (opts.token || process.env.AI_SUPPORT_AGENT_TOKEN) {
+      if (opts.token || process.env[ENV_VARS.TOKEN]) {
         projects = [{
           tenantCode,
           projectCode,
-          token: opts.token ?? process.env.AI_SUPPORT_AGENT_TOKEN ?? '',
-          apiUrl: opts.apiUrl ?? process.env.AI_SUPPORT_AGENT_API_URL ?? '',
+          token: opts.token ?? process.env[ENV_VARS.TOKEN] ?? '',
+          apiUrl: opts.apiUrl ?? process.env[ENV_VARS.API_URL] ?? '',
         }]
       } else {
-        logger.error(`[docker] Project not found: ${opts.project}`)
-        process.exit(1)
-        return
+        exitWithError(`[docker] Project not found: ${opts.project}`)
+        return // unreachable in production; guards against mocked process.exit in tests
       }
     }
   } else if (allProjects.length > 0) {
@@ -284,8 +281,7 @@ export function runInDocker(opts: DockerRunOptions): void {
   process.on('SIGTERM', () => forwardSignal('SIGTERM'))
 
   child.on('error', (err) => {
-    logger.error(t('docker.runFailed', { message: getErrorMessage(err) }))
-    process.exit(1)
+    exitWithError(t('docker.runFailed', { message: getErrorMessage(err) }))
   })
 
   let closeHandled = false

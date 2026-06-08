@@ -1,7 +1,7 @@
 import * as os from 'os'
 import * as path from 'path'
 
-import { ERR_NO_FILE_PATH_SPECIFIED } from '../src/constants'
+import { ERR_NO_FILE_PATH_SPECIFIED, ENV_VARS } from '../src/constants'
 import {
   ALLOWED_SIGNALS,
   BLOCKED_COMMAND_PATTERNS,
@@ -209,16 +209,16 @@ describe('security', () => {
 
   describe('buildSafeEnv', () => {
     it('should only include whitelisted env keys', () => {
-      const originalToken = process.env.AI_SUPPORT_AGENT_TOKEN
-      process.env.AI_SUPPORT_AGENT_TOKEN = 'secret'
+      const originalToken = process.env[ENV_VARS.TOKEN]
+      process.env[ENV_VARS.TOKEN] = 'secret'
 
       try {
         const env = buildSafeEnv()
-        expect(env.AI_SUPPORT_AGENT_TOKEN).toBeUndefined()
+        expect(env[ENV_VARS.TOKEN]).toBeUndefined()
         expect(env.PATH).toBeDefined()
       } finally {
-        if (originalToken === undefined) delete process.env.AI_SUPPORT_AGENT_TOKEN
-        else process.env.AI_SUPPORT_AGENT_TOKEN = originalToken
+        if (originalToken === undefined) delete process.env[ENV_VARS.TOKEN]
+        else process.env[ENV_VARS.TOKEN] = originalToken
       }
     })
 
@@ -408,7 +408,7 @@ describe('security regression tests', () => {
       'AWS_SECRET_ACCESS_KEY',
       'AWS_ACCESS_KEY_ID',
       'AWS_SESSION_TOKEN',
-      'AI_SUPPORT_AGENT_TOKEN',
+      ENV_VARS.TOKEN,
       'ANTHROPIC_API_KEY',
       'DATABASE_URL',
       'SECRET_KEY',
@@ -553,7 +553,7 @@ describe('env-vars-filter: comprehensive sensitive pattern tests', () => {
       const result = filterEnvVarsOverride({
         AI_SUPPORT_TENANT_CODE: 'spoofed-tenant',
         AI_SUPPORT_PROJECT_CODE: 'SPOOFED',
-        AI_SUPPORT_AGENT_TOKEN: 'fake-token',
+        [ENV_VARS.TOKEN]: 'fake-token',
         AI_SUPPORT_ROLE: 'admin',
       }, ctx)
       expect(result).toEqual({})
@@ -705,9 +705,9 @@ describe('env-vars-filter: comprehensive sensitive pattern tests', () => {
         CLAUDE_CODE_DISABLE_TELEMETRY: '1',
         CLAUDE_CODE_SKIP_BEDROCK: 'true',
         CLAUDE_CODE_INTERNAL_FLAG: 'anything',
-        CLAUDE_CODE_OAUTH_TOKEN: 'ok-token',  // this one must pass
+        [ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN]: 'ok-token',  // this one must pass
       }, ctx)
-      expect(Object.keys(result)).toEqual(['CLAUDE_CODE_OAUTH_TOKEN'])
+      expect(Object.keys(result)).toEqual([ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN])
     })
   })
 

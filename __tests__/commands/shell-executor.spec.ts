@@ -3,7 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { executeShellCommand } from '../../src/commands/shell-executor'
-import { ERR_NO_COMMAND_SPECIFIED, MAX_OUTPUT_SIZE } from '../../src/constants'
+import { ERR_NO_COMMAND_SPECIFIED, MAX_OUTPUT_SIZE, ENV_VARS } from '../../src/constants'
 import type { CommandResult } from '../../src/types'
 import { createFakeChildProcess, waitForSpawn } from '../helpers/mock-factory'
 
@@ -68,16 +68,16 @@ describe('shell-executor', () => {
   })
 
   it('should not pass sensitive env vars to child process', async () => {
-    const originalToken = process.env.AI_SUPPORT_AGENT_TOKEN
-    process.env.AI_SUPPORT_AGENT_TOKEN = 'secret-test-token'
+    const originalToken = process.env[ENV_VARS.TOKEN]
+    process.env[ENV_VARS.TOKEN] = 'secret-test-token'
 
     try {
       const result = await executeShellCommand({ command: 'env' })
       expect(result.success).toBe(true)
-      expect(result.data as string).not.toContain('AI_SUPPORT_AGENT_TOKEN')
+      expect(result.data as string).not.toContain(ENV_VARS.TOKEN)
     } finally {
-      if (originalToken === undefined) delete process.env.AI_SUPPORT_AGENT_TOKEN
-      else process.env.AI_SUPPORT_AGENT_TOKEN = originalToken
+      if (originalToken === undefined) delete process.env[ENV_VARS.TOKEN]
+      else process.env[ENV_VARS.TOKEN] = originalToken
     }
   })
 
