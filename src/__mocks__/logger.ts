@@ -7,6 +7,8 @@ export const logger = {
   setVerbose: jest.fn(),
 }
 
+export const setJsonMode = jest.fn()
+export const isJsonMode = jest.fn().mockReturnValue(false)
 export const getProjectColor = jest.fn().mockReturnValue('\x1b[36m')
 export const resetProjectColors = jest.fn()
 export const prefixLines = jest.fn().mockImplementation((text: string) => text)
