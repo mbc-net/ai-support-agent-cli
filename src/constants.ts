@@ -219,6 +219,16 @@ export const APPSYNC_MAX_RECONNECT_RETRIES = Number.POSITIVE_INFINITY
 export const APPSYNC_RECONNECT_BASE_DELAY_MS = 1000
 export const WS_RECONNECT_MAX_DELAY_MS = 60_000
 
+// WebSocket heartbeat (ping/pong)
+// Without an application-level ping, an idle WebSocket that is silently dropped by a
+// load balancer (e.g. ALB idle timeout) never fires a 'close' event on the client, so
+// the connection becomes a half-open "zombie" and the reconnect logic never runs.
+// We send a ping every WS_HEARTBEAT_INTERVAL_MS and terminate the socket if no pong is
+// received within WS_HEARTBEAT_TIMEOUT_MS, which fires 'close' and triggers reconnect.
+// The interval must be well below the ALB idle timeout (3600s in this deployment).
+export const WS_HEARTBEAT_INTERVAL_MS = 30_000
+export const WS_HEARTBEAT_TIMEOUT_MS = 10_000
+
 // Registration retry (persistent)
 // register() failures used to leave the process in a silent zombie state.
 // Retry forever with exponential backoff + jitter, capped at REGISTER_RETRY_MAX_DELAY_MS.
