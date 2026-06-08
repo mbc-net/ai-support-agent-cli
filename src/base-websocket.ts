@@ -1,5 +1,6 @@
 import WebSocket from 'ws'
 
+import { WS_HEARTBEAT_INTERVAL_MS, WS_HEARTBEAT_TIMEOUT_MS } from './constants'
 import { logger } from './logger'
 import { getErrorMessage } from './utils'
 import { attemptReconnect } from './ws-reconnect'
@@ -10,6 +11,10 @@ export interface BaseWebSocketOptions {
   /** 再接続バックオフの上限 (ms)。省略時は cap なし。 */
   reconnectMaxDelayMs?: number
   logPrefix: string
+  /** ping 送信間隔 (ms)。省略時は WS_HEARTBEAT_INTERVAL_MS。0 以下で無効化。 */
+  heartbeatIntervalMs?: number
+  /** pong 応答待ちのタイムアウト (ms)。省略時は WS_HEARTBEAT_TIMEOUT_MS。 */
+  heartbeatTimeoutMs?: number
 }
 
 /**
@@ -23,6 +28,8 @@ export abstract class BaseWebSocketConnection<TMessage> {
   protected closed = false
   protected readonly reconnectAttemptsRef = { current: 0 }
   protected readonly options: BaseWebSocketOptions
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  private pongTimeoutTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(options: BaseWebSocketOptions) {
     this.options = options
@@ -36,6 +43,7 @@ export abstract class BaseWebSocketConnection<TMessage> {
 
   disconnect(): void {
     this.closed = true
+    this.stopHeartbeat()
     this.onDisconnect()
     if (this.ws) {
       this.closeWebSocket(this.ws)
@@ -85,7 +93,16 @@ export abstract class BaseWebSocketConnection<TMessage> {
       const ws = this.createWebSocket()
 
       ws.on('open', () => {
+        this.startHeartbeat(ws)
         this.onOpen(ws, resolve)
+      })
+
+      ws.on('pong', () => {
+        // pong を受信したら生存確認タイマーを解除する（次の ping まで健全）
+        if (this.pongTimeoutTimer) {
+          clearTimeout(this.pongTimeoutTimer)
+          this.pongTimeoutTimer = null
+        }
       })
 
       ws.on('message', (data: WebSocket.Data) => {
@@ -107,6 +124,7 @@ export abstract class BaseWebSocketConnection<TMessage> {
       })
 
       ws.on('close', () => {
+        this.stopHeartbeat()
         this.onWebSocketClose()
         if (!this.closed) {
           logger.debug(`${this.options.logPrefix} Connection closed unexpectedly`)
@@ -116,6 +134,44 @@ export abstract class BaseWebSocketConnection<TMessage> {
 
       this.ws = ws
     })
+  }
+
+  /**
+   * ハートビート (ping/pong) を開始する。
+   * 一定間隔で ping を送り、次の間隔までに pong が返らなければ接続が
+   * 死んでいる（half-open / ロードバランサに切られた）とみなして terminate する。
+   * terminate は 'close' イベントを発火させ、既存の再接続ロジックを起動する。
+   */
+  private startHeartbeat(ws: WebSocket): void {
+    const intervalMs = this.options.heartbeatIntervalMs ?? WS_HEARTBEAT_INTERVAL_MS
+    if (intervalMs <= 0) return
+    const timeoutMs = this.options.heartbeatTimeoutMs ?? WS_HEARTBEAT_TIMEOUT_MS
+    this.stopHeartbeat()
+    this.heartbeatTimer = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return
+      // 前回の pong 待ちが残っていれば（=応答なし）ここには来ない（terminate 済み）
+      this.pongTimeoutTimer = setTimeout(() => {
+        logger.debug(`${this.options.logPrefix} Heartbeat timeout, terminating connection`)
+        ws.terminate()
+      }, timeoutMs)
+      try {
+        ws.ping()
+      } catch (error) {
+        logger.debug(`${this.options.logPrefix} Ping error: ${getErrorMessage(error)}`)
+      }
+    }, intervalMs)
+  }
+
+  /** ハートビートと pong 待ちタイマーを停止する。 */
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = null
+    }
+    if (this.pongTimeoutTimer) {
+      clearTimeout(this.pongTimeoutTimer)
+      this.pongTimeoutTimer = null
+    }
   }
 
   /** WebSocket close イベント時の追加処理（サブクラスでオーバーライド可能） */
