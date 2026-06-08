@@ -114,7 +114,7 @@ import { execFileSync, spawn } from 'child_process'
 import * as os from 'os'
 import { existsSync, realpathSync, readFileSync, unlinkSync, copyFileSync, mkdirSync, renameSync, watch as fsWatch } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
-import { NPM_COMMAND } from '../../src/constants'
+import { NPM_COMMAND, ENV_VARS } from '../../src/constants'
 import { logger } from '../../src/logger'
 import { reExecProcess, performUpdate } from '../../src/update-checker'
 import { resetDockerPathCache } from '../../src/docker/docker-utils'
@@ -414,13 +414,13 @@ describe('docker-runner', () => {
     })
 
     it('should pass through set environment variables', () => {
-      process.env.AI_SUPPORT_AGENT_TOKEN = 'test-token'
-      process.env.AI_SUPPORT_AGENT_API_URL = 'http://test.api'
+      process.env[ENV_VARS.TOKEN] = 'test-token'
+      process.env[ENV_VARS.API_URL] = 'http://test.api'
       process.env.ANTHROPIC_API_KEY = 'sk-test'
 
       const args = buildEnvArgs([])
-      expect(args).toContain('AI_SUPPORT_AGENT_TOKEN=test-token')
-      expect(args).toContain('AI_SUPPORT_AGENT_API_URL=http://test.api')
+      expect(args).toContain(`${ENV_VARS.TOKEN}=test-token`)
+      expect(args).toContain(`${ENV_VARS.API_URL}=http://test.api`)
       expect(args).toContain('ANTHROPIC_API_KEY=sk-test')
     })
 
@@ -459,8 +459,8 @@ describe('docker-runner', () => {
     })
 
     it('should skip unset environment variables', () => {
-      delete process.env.AI_SUPPORT_AGENT_TOKEN
-      delete process.env.AI_SUPPORT_AGENT_API_URL
+      delete process.env[ENV_VARS.TOKEN]
+      delete process.env[ENV_VARS.API_URL]
       delete process.env.ANTHROPIC_API_KEY
       delete process.env.AI_SUPPORT_AGENT_CONFIG_DIR
 
@@ -870,7 +870,7 @@ describe('docker-runner', () => {
       dockerLogin()
 
       const output = consoleSpy.mock.calls.map(c => c[0]).join('\n')
-      expect(output).toContain('CLAUDE_CODE_OAUTH_TOKEN')
+      expect(output).toContain(ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN)
       expect(output).toContain('ai-support-agent start')
     })
 
@@ -2828,7 +2828,7 @@ describe('buildProjectImage', () => {
 
     // Set secret env vars in process.env
     process.env.ANTHROPIC_API_KEY = 'sk-ant-secret-key'
-    process.env.AI_SUPPORT_AGENT_TOKEN = 'secret-token'
+    process.env[ENV_VARS.TOKEN] = 'secret-token'
     process.env.AWS_SECRET_ACCESS_KEY = 'aws-secret'
 
     const promise = buildProjectImage('mbc', 'PROJ_A', '1.0.0', '/path/to/Dockerfile')
@@ -2841,7 +2841,7 @@ describe('buildProjectImage', () => {
 
     // Secret vars should NOT be in the env passed to docker build
     expect(passedEnv['ANTHROPIC_API_KEY']).toBeUndefined()
-    expect(passedEnv['AI_SUPPORT_AGENT_TOKEN']).toBeUndefined()
+    expect(passedEnv[ENV_VARS.TOKEN]).toBeUndefined()
     expect(passedEnv['AWS_SECRET_ACCESS_KEY']).toBeUndefined()
     // BUILDKIT_PROGRESS should always be set
     expect(passedEnv['BUILDKIT_PROGRESS']).toBe('plain')

@@ -24,6 +24,14 @@ export function mcpImageResponse(base64Data: string, mimeType: string) {
   return { content: [{ type: 'image' as const, data: base64Data, mimeType }] }
 }
 
+/**
+ * スクリーンショット Buffer を PNG base64 文字列に変換する。
+ * browser.ts / browser-local-server.ts 内の `buf.toString('base64')` を統一する。
+ */
+export function screenshotToBase64(buf: Buffer): string {
+  return buf.toString('base64')
+}
+
 export function mcpTextImageResponse(text: string, base64Data: string, mimeType: string) {
   return {
     content: [

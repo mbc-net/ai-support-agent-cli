@@ -22,7 +22,9 @@ import {
   VSCODE_BIND_HOST,
   VSCODE_IDLE_TIMEOUT_MS,
   HEALTH_CHECK_INTERVAL_MS,
+  HEALTH_CHECK_REQUEST_TIMEOUT_MS,
   STARTUP_TIMEOUT_MS,
+  VSCODE_SIGKILL_DELAY_MS,
 } from './constants'
 
 export interface VsCodeServerOptions {
@@ -177,12 +179,12 @@ export class VsCodeServer {
 
     try {
       this.process.kill('SIGTERM')
-      // 5秒後に強制終了
+      // SIGKILL_DELAY_MS 後に強制終了
       setTimeout(() => {
         if (this.process && !this.process.killed) {
           this.process.kill('SIGKILL')
         }
-      }, 5000)
+      }, VSCODE_SIGKILL_DELAY_MS)
     } catch (error) {
       logger.debug(`[vscode-server] Stop error: ${getErrorMessage(error)}`)
     }
@@ -235,7 +237,7 @@ export class VsCodeServer {
         res.resume()
       })
       req.on('error', reject)
-      req.setTimeout(5000, () => {
+      req.setTimeout(HEALTH_CHECK_REQUEST_TIMEOUT_MS, () => {
         req.destroy()
         reject(new Error('Health check timeout'))
       })

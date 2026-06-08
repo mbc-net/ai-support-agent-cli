@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 import { ApiClient } from '../api-client'
+import { ENV_VARS } from '../constants'
 import { registerBrowserTools } from './tools/browser'
 import { registerE2eTestStepTool } from './tools/e2e-test-step'
 import { BrowserSessionManager } from './tools/browser/browser-session-manager'
@@ -37,16 +38,16 @@ export function createMcpServer(apiClient: ApiClient, projectCode: string, brows
  * MCP サーバーを stdio transport で起動する
  */
 export async function startMcpServer(): Promise<void> {
-  const apiUrl = process.env.AI_SUPPORT_AGENT_API_URL
-  const token = process.env.AI_SUPPORT_AGENT_TOKEN
-  const projectCode = process.env.AI_SUPPORT_AGENT_PROJECT_CODE
-  const tenantCode = process.env.AI_SUPPORT_AGENT_TENANT_CODE
+  const apiUrl = process.env[ENV_VARS.API_URL]
+  const token = process.env[ENV_VARS.TOKEN]
+  const projectCode = process.env[ENV_VARS.PROJECT_CODE]
+  const tenantCode = process.env[ENV_VARS.TENANT_CODE]
 
   if (!apiUrl || !token || !projectCode) {
     const missing = []
-    if (!apiUrl) missing.push('AI_SUPPORT_AGENT_API_URL')
-    if (!token) missing.push('AI_SUPPORT_AGENT_TOKEN')
-    if (!projectCode) missing.push('AI_SUPPORT_AGENT_PROJECT_CODE')
+    if (!apiUrl) missing.push(ENV_VARS.API_URL)
+    if (!token) missing.push(ENV_VARS.TOKEN)
+    if (!projectCode) missing.push(ENV_VARS.PROJECT_CODE)
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`)
   }
 

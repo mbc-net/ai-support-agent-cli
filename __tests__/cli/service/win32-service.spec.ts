@@ -128,6 +128,12 @@ describe('generateWin32WrapperScript', () => {
     expect(result).not.toContain('localhost')
   })
 
+  it('converts a localhost API URL without a port (no trailing port appended)', () => {
+    const result = generateWin32WrapperScript({ ...baseOpts, apiUrl: 'http://localhost' })
+    expect(result).toContain('set "AI_SUPPORT_AGENT_API_URL=http://host.docker.internal"')
+    expect(result).not.toContain('localhost')
+  })
+
   it('includes ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN when provided', () => {
     const result = generateWin32WrapperScript({
       ...baseOpts,
@@ -252,6 +258,12 @@ describe('Win32ServiceStrategy', () => {
       expect(logger.error).toHaveBeenCalledWith('service.noProjectsConfigured')
     })
 
+    it('errors when there is no config at all (loadConfig returns null)', () => {
+      mockedLoadConfig.mockReturnValue(null as never)
+      strategy.install({})
+      expect(logger.error).toHaveBeenCalledWith('service.noProjectsConfigured')
+    })
+
     it('errors when the entry point does not exist', () => {
       mockedFs.existsSync.mockReturnValue(false)
       strategy.install({})
@@ -305,6 +317,19 @@ describe('Win32ServiceStrategy', () => {
       )
       expect(logger.warn).toHaveBeenCalledWith(
         expect.stringContaining('service.partialInstallSummary'),
+      )
+    })
+
+    it('reports a duplicate entry (identical tenant/project) distinctly from a name collision', () => {
+      // Two identical registrations -> same fqn -> duplicate entry (not a sanitize collision).
+      mockedGetProjectList.mockReturnValue([sampleProject, { ...sampleProject }])
+      mockedFs.existsSync.mockReturnValue(true)
+      mockedExecSync.mockReturnValue(Buffer.from(''))
+
+      strategy.install({})
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('service.projectDuplicateEntry'),
       )
     })
 
@@ -475,6 +500,58 @@ describe('Win32ServiceStrategy', () => {
       expect(result.installed).toBe(true)
       expect(result.running).toBe(false)
     })
+
+    it('falls back to the prefix-stripped task name for orphaned tasks (no config)', () => {
+      // No config -> projectByTaskName is empty -> the task is "orphaned" and its
+      // projectCode is derived from the task name (brand prefix stripped).
+      mockedLoadConfig.mockReturnValue(null as never)
+      mockedExecSync
+        .mockReturnValueOnce(Buffer.from('"\\AISupportAgent-mbc-mbc-01","Ready"\r\n'))
+        .mockReturnValue(Buffer.from('"AISupportAgent-mbc-mbc-01","Ready"'))
+      const result = strategy.status()
+      expect(result.installed).toBe(true)
+      expect(result.projects?.[0]).toMatchObject({ projectCode: 'mbc-mbc-01' })
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// generateTaskXml (legacy single-task form, kept for back-compat)
+// ---------------------------------------------------------------------------
+describe('generateTaskXml (legacy)', () => {
+  it('generates valid single-task XML', () => {
+    const result = generateTaskXml({
+      nodePath: 'C:\\Program Files\\nodejs\\node.exe',
+      entryPoint: 'C:\\cli\\dist\\index.js',
+      logDir: 'C:\\logs',
+    })
+    expect(result).toContain('<?xml version="1.0" encoding="UTF-16"?>')
+    expect(result).toContain('<Command>C:\\Program Files\\nodejs\\node.exe</Command>')
+    expect(result).toContain('start --no-docker')
+    expect(result).not.toContain('--verbose')
+  })
+
+  it('includes --verbose and omits --no-docker per options', () => {
+    const result = generateTaskXml({
+      nodePath: 'C:\\node.exe',
+      entryPoint: 'C:\\index.js',
+      logDir: 'C:\\logs',
+      verbose: true,
+      docker: true,
+    })
+    expect(result).toContain('--verbose')
+    expect(result).not.toContain('--no-docker')
+  })
+
+  it('escapes XML special characters', () => {
+    const result = generateTaskXml({
+      nodePath: 'C:\\p <a> & "b"\\node.exe',
+      entryPoint: 'C:\\index.js',
+      logDir: 'C:\\logs',
+    })
+    expect(result).toContain('&lt;a&gt;')
+    expect(result).toContain('&amp;')
+    expect(result).toContain('&quot;b&quot;')
   })
 })
 

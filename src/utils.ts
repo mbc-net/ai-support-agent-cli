@@ -1,6 +1,9 @@
 import * as fs from 'fs'
 import axios from 'axios'
 
+import { ENV_VARS } from './constants'
+import { logger } from './logger'
+
 export function readJsonSync<T>(filePath: string): T {
   const content = fs.readFileSync(filePath, 'utf-8')
   return JSON.parse(content) as T
@@ -94,6 +97,20 @@ export function isAuthenticationError(error: unknown): boolean {
   return status === 401 || status === 403
 }
 
+/**
+ * AxiosError のレスポンスデータが SSO_AUTH_REQUIRED エラーかどうかを判定する。
+ *
+ * AWS SSO 認証切れ時にサーバーが返す `error: 'SSO_AUTH_REQUIRED'` または
+ * `errorCode: 'SSO_AUTH_REQUIRED'` フィールドを検出する。
+ * 各モジュールで重複していた同一ロジックをここに集約する。
+ */
+export function isSsoAuthRequiredError(error: unknown): boolean {
+  if (!axios.isAxiosError(error) || !error.response) return false
+  const data = error.response.data as Record<string, unknown> | undefined
+  if (!data) return false
+  return data.error === 'SSO_AUTH_REQUIRED' || data.errorCode === 'SSO_AUTH_REQUIRED'
+}
+
 export function buildWsUrl(apiUrl: string, path: string): string {
   return apiUrl
     .replace(/^https:/, 'wss:')
@@ -102,12 +119,21 @@ export function buildWsUrl(apiUrl: string, path: string): string {
 }
 
 /**
+ * Returns true when the agent is running inside a Docker container.
+ * Controlled by the AI_SUPPORT_AGENT_IN_DOCKER=1 environment variable,
+ * which is injected by volume-mount-builder and the service templates.
+ */
+export function isInDocker(): boolean {
+  return process.env[ENV_VARS.IN_DOCKER] === '1'
+}
+
+/**
  * Docker コンテナ内から host の URL にアクセスするため
  * localhost / 127.0.0.1 を host.docker.internal に変換する。
  * `AI_SUPPORT_AGENT_IN_DOCKER` が `'1'` のときのみ変換する。
  */
 export function resolveUrlForDocker(url: string): string {
-  if (process.env.AI_SUPPORT_AGENT_IN_DOCKER !== '1') return url
+  if (!isInDocker()) return url
   return url.replace(
     /^((?:https?|wss?):\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
     (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
@@ -126,4 +152,15 @@ export function isErrnoException(err: unknown, code?: string): err is NodeJS.Err
   if (typeof e['message'] !== 'string') return false
   if (!('code' in e)) return false
   return code === undefined || e['code'] === code
+}
+
+/**
+ * エラーメッセージをログに出力してプロセスを終了する。
+ *
+ * `logger.error(msg)` + `process.exit(1)` のペアが agent-runner.ts / docker-runner.ts の
+ * 複数箇所で繰り返されていたため集約する。
+ */
+export function exitWithError(message: string): never {
+  logger.error(message)
+  process.exit(1)
 }

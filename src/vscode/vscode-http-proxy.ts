@@ -3,7 +3,7 @@ import * as http from 'http'
 import { logger } from '../logger'
 import { getErrorMessage } from '../utils'
 
-import { VSCODE_BIND_HOST } from './constants'
+import { VSCODE_BIND_HOST, VSCODE_HTTP_PROXY_TIMEOUT_MS } from './constants'
 
 export interface ProxyRequest {
   method: string
@@ -65,7 +65,7 @@ export async function proxyHttpRequest(
       reject(error)
     })
 
-    req.setTimeout(30000, () => {
+    req.setTimeout(VSCODE_HTTP_PROXY_TIMEOUT_MS, () => {
       req.destroy()
       reject(new Error('Proxy request timeout'))
     })

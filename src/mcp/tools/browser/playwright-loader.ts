@@ -3,8 +3,17 @@
  * Playwright is an optional dependency — this module handles its absence gracefully.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type PlaywrightModule = any
+import type { BrowserType } from 'playwright'
+
+/**
+ * Minimal interface for the dynamically-loaded Playwright module.
+ * Using a structural interface instead of `any` provides type safety at call sites.
+ */
+export interface PlaywrightModule {
+  chromium: BrowserType
+  firefox: BrowserType
+  webkit: BrowserType
+}
 
 let cachedModule: PlaywrightModule | null = null
 let loadAttempted = false
@@ -31,8 +40,9 @@ export function loadPlaywright(): PlaywrightModule {
   loadAttempted = true
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    cachedModule = require('playwright')
-    return cachedModule
+    const mod = require('playwright') as PlaywrightModule
+    cachedModule = mod
+    return mod
   } catch {
     throw new Error(
       'Playwright is not installed. Install it with: npm install playwright && npx playwright install chromium',

@@ -22,57 +22,54 @@ function getStrategy(): ServiceStrategy | null {
   }
 }
 
-export async function installService(options: { verbose?: boolean; docker?: boolean }): Promise<void> {
+/**
+ * プラットフォームに対応する ServiceStrategy を取得する。
+ * 非対応プラットフォームの場合はエラーをログ出力して null を返す。
+ *
+ * getStrategy() + null チェック + logger.error の 3 行セットが全操作関数で
+ * 繰り返されていたため、共通ヘルパーに集約した。
+ */
+function requireStrategy(): ServiceStrategy | null {
   const strategy = getStrategy()
   if (!strategy) {
     logger.error(t('service.unsupportedPlatform', { platform: process.platform }))
-    return
   }
+  return strategy
+}
+
+export async function installService(options: { verbose?: boolean; docker?: boolean }): Promise<void> {
+  const strategy = requireStrategy()
+  if (!strategy) return
   await strategy.install(options)
 }
 
 export function uninstallService(): void {
-  const strategy = getStrategy()
-  if (!strategy) {
-    logger.error(t('service.unsupportedPlatform', { platform: process.platform }))
-    return
-  }
+  const strategy = requireStrategy()
+  if (!strategy) return
   strategy.uninstall()
 }
 
 export function startService(): void {
-  const strategy = getStrategy()
-  if (!strategy) {
-    logger.error(t('service.unsupportedPlatform', { platform: process.platform }))
-    return
-  }
+  const strategy = requireStrategy()
+  if (!strategy) return
   strategy.start()
 }
 
 export function stopService(): void {
-  const strategy = getStrategy()
-  if (!strategy) {
-    logger.error(t('service.unsupportedPlatform', { platform: process.platform }))
-    return
-  }
+  const strategy = requireStrategy()
+  if (!strategy) return
   strategy.stop()
 }
 
 export function restartService(): void {
-  const strategy = getStrategy()
-  if (!strategy) {
-    logger.error(t('service.unsupportedPlatform', { platform: process.platform }))
-    return
-  }
+  const strategy = requireStrategy()
+  if (!strategy) return
   strategy.restart()
 }
 
 export function serviceStatus(options: { verbose?: boolean }): void {
-  const strategy = getStrategy()
-  if (!strategy) {
-    logger.error(t('service.unsupportedPlatform', { platform: process.platform }))
-    return
-  }
+  const strategy = requireStrategy()
+  if (!strategy) return
   const status = strategy.status()
 
   if (!status.installed) {

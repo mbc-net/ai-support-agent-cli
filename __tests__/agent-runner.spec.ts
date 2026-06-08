@@ -9,7 +9,7 @@ import {
 } from '../src/agent-runner'
 import type { ProjectRegistration } from '../src/types'
 import { AppSyncSubscriber } from '../src/appsync-subscriber'
-import { AGENT_VERSION } from '../src/constants'
+import { AGENT_VERSION, ENV_VARS } from '../src/constants'
 import { getSystemInfo, getLocalIpAddress } from '../src/system-info'
 import { ApiClient } from '../src/api-client'
 import { executeCommand } from '../src/commands'
@@ -129,7 +129,7 @@ const mockedExecuteCommand = executeCommand as jest.MockedFunction<typeof execut
 const mockedCpus = os.cpus as jest.MockedFunction<typeof os.cpus>
 const mockedNetworkInterfaces = os.networkInterfaces as jest.MockedFunction<typeof os.networkInterfaces>
 
-const ENV_KEYS = ['AI_SUPPORT_AGENT_TOKEN', 'AI_SUPPORT_AGENT_API_URL'] as const
+const ENV_KEYS = [ENV_VARS.TOKEN, ENV_VARS.API_URL] as const
 
 function withEnvVars(
   vars: Partial<Record<(typeof ENV_KEYS)[number], string>>,
@@ -225,7 +225,7 @@ describe('agent-runner', () => {
   })
 
   it('should fall back to env vars when no config and no CLI args', withEnvVars(
-    { AI_SUPPORT_AGENT_TOKEN: 'env-token', AI_SUPPORT_AGENT_API_URL: 'http://env-api' },
+    { [ENV_VARS.TOKEN]: 'env-token', [ENV_VARS.API_URL]: 'http://env-api' },
     async () => {
       mockedLoadConfig.mockReturnValue(null)
 
@@ -238,7 +238,7 @@ describe('agent-runner', () => {
   ))
 
   it('should use tenantCode/projectCode from --project flag when falling back to env vars', withEnvVars(
-    { AI_SUPPORT_AGENT_TOKEN: 'env-token', AI_SUPPORT_AGENT_API_URL: 'http://env-api' },
+    { [ENV_VARS.TOKEN]: 'env-token', [ENV_VARS.API_URL]: 'http://env-api' },
     async () => {
       mockedLoadConfig.mockReturnValue(null)
 
@@ -318,7 +318,7 @@ describe('agent-runner', () => {
   })
 
   it('should call logger.setVerbose(true) when verbose option is true', withEnvVars(
-    { AI_SUPPORT_AGENT_TOKEN: 'test-token', AI_SUPPORT_AGENT_API_URL: 'http://test-api' },
+    { [ENV_VARS.TOKEN]: 'test-token', [ENV_VARS.API_URL]: 'http://test-api' },
     async () => {
       mockedLoadConfig.mockReturnValue(null)
 
@@ -341,7 +341,7 @@ describe('agent-runner', () => {
   })
 
   it('should call process.exit(1) when env apiUrl is invalid', withEnvVars(
-    { AI_SUPPORT_AGENT_TOKEN: 'env-token', AI_SUPPORT_AGENT_API_URL: 'not-a-url' },
+    { [ENV_VARS.TOKEN]: 'env-token', [ENV_VARS.API_URL]: 'not-a-url' },
     async () => {
       mockedLoadConfig.mockReturnValue(null)
 
@@ -548,8 +548,8 @@ describe('agent-runner', () => {
   })
 
   it('should set onUpdateComplete on processManager and exit with DOCKER_UPDATE_EXIT_CODE in Docker mode', async () => {
-    const originalEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
-    process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+    const originalEnv = process.env[ENV_VARS.IN_DOCKER]
+    process.env[ENV_VARS.IN_DOCKER] = '1'
     const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
 
     const mockConfig = {
@@ -598,9 +598,9 @@ describe('agent-runner', () => {
     } finally {
       mockExit.mockRestore()
       if (originalEnv === undefined) {
-        delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        delete process.env[ENV_VARS.IN_DOCKER]
       } else {
-        process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalEnv
+        process.env[ENV_VARS.IN_DOCKER] = originalEnv
       }
     }
   })
@@ -1312,10 +1312,10 @@ describe('startAgent tokenId-based agentId', () => {
   })
 
   it('should use tokenId from env token as agentId in register call', async () => {
-    const saved = process.env.AI_SUPPORT_AGENT_TOKEN
-    const savedUrl = process.env.AI_SUPPORT_AGENT_API_URL
-    process.env.AI_SUPPORT_AGENT_TOKEN = 'tenant:env-token-id:raw-secret'
-    process.env.AI_SUPPORT_AGENT_API_URL = 'http://env-api'
+    const saved = process.env[ENV_VARS.TOKEN]
+    const savedUrl = process.env[ENV_VARS.API_URL]
+    process.env[ENV_VARS.TOKEN] = 'tenant:env-token-id:raw-secret'
+    process.env[ENV_VARS.API_URL] = 'http://env-api'
     try {
       mockedLoadConfig.mockReturnValue(null)
 
@@ -1327,10 +1327,10 @@ describe('startAgent tokenId-based agentId', () => {
         expect.objectContaining({ agentId: 'env-token-id' }),
       )
     } finally {
-      if (saved === undefined) delete process.env.AI_SUPPORT_AGENT_TOKEN
-      else process.env.AI_SUPPORT_AGENT_TOKEN = saved
-      if (savedUrl === undefined) delete process.env.AI_SUPPORT_AGENT_API_URL
-      else process.env.AI_SUPPORT_AGENT_API_URL = savedUrl
+      if (saved === undefined) delete process.env[ENV_VARS.TOKEN]
+      else process.env[ENV_VARS.TOKEN] = saved
+      if (savedUrl === undefined) delete process.env[ENV_VARS.API_URL]
+      else process.env[ENV_VARS.API_URL] = savedUrl
     }
   })
 

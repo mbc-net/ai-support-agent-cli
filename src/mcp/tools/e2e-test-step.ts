@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
+import { ENV_VARS } from '../../constants'
 import { logger } from '../../logger'
 import { BrowserSession } from './browser/browser-session'
 import { mcpTextResponse, withMcpErrorHandling } from './mcp-response'
@@ -41,8 +42,8 @@ export function registerE2eTestStepTool(
           )
         }
 
-        const tenantCode = process.env.AI_SUPPORT_AGENT_TENANT_CODE
-        const projectCode = process.env.AI_SUPPORT_AGENT_PROJECT_CODE
+        const tenantCode = process.env[ENV_VARS.TENANT_CODE]
+        const projectCode = process.env[ENV_VARS.PROJECT_CODE]
         const testCaseId = process.env.AI_SUPPORT_E2E_TEST_CASE_ID
         if (!tenantCode || !projectCode) {
           return mcpTextResponse(

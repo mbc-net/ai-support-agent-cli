@@ -18,6 +18,7 @@ import {
   getProjectServiceDir,
   getServicesDir,
   getUpdateScriptPath,
+  getUpdateVersionFilePath,
   getWin32LogDir,
   getWin32WrapperScriptPath,
   getWrapperErrLog,
@@ -68,6 +69,17 @@ describe('getServicesDir', () => {
 describe('getUpdateScriptPath', () => {
   it('should return update-and-restart.sh under config dir', () => {
     expect(getUpdateScriptPath()).toBe(path.join(MOCK_CONFIG_DIR, 'update-and-restart.sh'))
+  })
+})
+
+describe('getUpdateVersionFilePath', () => {
+  it('should return update-version.json under config dir', () => {
+    expect(getUpdateVersionFilePath()).toBe(path.join(MOCK_CONFIG_DIR, 'update-version.json'))
+  })
+
+  it('should track a changed config dir', () => {
+    mockedGetConfigDir.mockReturnValue('/other/cfg')
+    expect(getUpdateVersionFilePath()).toBe(path.join('/other/cfg', 'update-version.json'))
   })
 })
 

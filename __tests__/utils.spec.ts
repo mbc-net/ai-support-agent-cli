@@ -2,7 +2,8 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { getErrorMessage, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
+import { exitWithError, getErrorMessage, isInDocker, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
+import { ENV_VARS } from '../src/constants'
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -338,6 +339,61 @@ describe('isAuthenticationError', () => {
   })
 })
 
+describe('isSsoAuthRequiredError', () => {
+  it('should return true when error field is SSO_AUTH_REQUIRED', () => {
+    const error = new AxiosError('Forbidden', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 403,
+      statusText: 'Forbidden',
+      data: { error: 'SSO_AUTH_REQUIRED' },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(isSsoAuthRequiredError(error)).toBe(true)
+  })
+
+  it('should return true when errorCode field is SSO_AUTH_REQUIRED', () => {
+    const error = new AxiosError('Forbidden', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 403,
+      statusText: 'Forbidden',
+      data: { errorCode: 'SSO_AUTH_REQUIRED' },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(isSsoAuthRequiredError(error)).toBe(true)
+  })
+
+  it('should return false when error field is a different value', () => {
+    const error = new AxiosError('Forbidden', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 403,
+      statusText: 'Forbidden',
+      data: { error: 'ACCESS_DENIED' },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(isSsoAuthRequiredError(error)).toBe(false)
+  })
+
+  it('should return false for AxiosError without response', () => {
+    const error = new AxiosError('Network Error', 'ERR_NETWORK')
+    expect(isSsoAuthRequiredError(error)).toBe(false)
+  })
+
+  it('should return false for AxiosError with null data', () => {
+    const error = new AxiosError('Forbidden', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 403,
+      statusText: 'Forbidden',
+      data: null,
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(isSsoAuthRequiredError(error)).toBe(false)
+  })
+
+  it('should return false for a non-Axios error', () => {
+    expect(isSsoAuthRequiredError(new Error('some error'))).toBe(false)
+  })
+})
+
 describe('buildWsUrl', () => {
   it('should convert https to wss', () => {
     expect(buildWsUrl('https://api.example.com', '/ws/terminal')).toBe('wss://api.example.com/ws/terminal')
@@ -353,7 +409,7 @@ describe('buildWsUrl', () => {
 })
 
 describe('resolveUrlForDocker', () => {
-  const ENV_KEY = 'AI_SUPPORT_AGENT_IN_DOCKER'
+  const ENV_KEY = ENV_VARS.IN_DOCKER
 
   afterEach(() => {
     delete process.env[ENV_KEY]
@@ -393,6 +449,39 @@ describe('resolveUrlForDocker', () => {
   it('should handle URL without port', () => {
     process.env[ENV_KEY] = '1'
     expect(resolveUrlForDocker('https://localhost')).toBe('https://host.docker.internal')
+  })
+})
+
+describe('isInDocker', () => {
+  const ENV_KEY = ENV_VARS.IN_DOCKER
+
+  afterEach(() => {
+    delete process.env[ENV_KEY]
+  })
+
+  it('returns true when AI_SUPPORT_AGENT_IN_DOCKER is "1"', () => {
+    process.env[ENV_KEY] = '1'
+    expect(isInDocker()).toBe(true)
+  })
+
+  it('returns false when AI_SUPPORT_AGENT_IN_DOCKER is unset', () => {
+    delete process.env[ENV_KEY]
+    expect(isInDocker()).toBe(false)
+  })
+
+  it('returns false when AI_SUPPORT_AGENT_IN_DOCKER is "0"', () => {
+    process.env[ENV_KEY] = '0'
+    expect(isInDocker()).toBe(false)
+  })
+
+  it('returns false when AI_SUPPORT_AGENT_IN_DOCKER is "true"', () => {
+    process.env[ENV_KEY] = 'true'
+    expect(isInDocker()).toBe(false)
+  })
+
+  it('returns false when AI_SUPPORT_AGENT_IN_DOCKER is empty string', () => {
+    process.env[ENV_KEY] = ''
+    expect(isInDocker()).toBe(false)
   })
 })
 
@@ -530,5 +619,33 @@ describe('readJsonSync', () => {
     const filePath = path.join(tmpDir, 'invalid.json')
     fs.writeFileSync(filePath, 'not valid json {{{')
     expect(() => readJsonSync(filePath)).toThrow()
+  })
+})
+
+describe('exitWithError', () => {
+  let exitSpy: jest.SpyInstance
+  let errorSpy: jest.SpyInstance
+
+  beforeEach(() => {
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation((_code?: number | string) => {
+      throw new Error('process.exit called')
+    })
+    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined)
+  })
+
+  afterEach(() => {
+    exitSpy.mockRestore()
+    errorSpy.mockRestore()
+  })
+
+  it('should call process.exit(1) with the given message', () => {
+    expect(() => exitWithError('fatal error')).toThrow('process.exit called')
+    expect(exitSpy).toHaveBeenCalledWith(1)
+  })
+
+  it('should return never (TypeScript return type)', () => {
+    // Verify the function is typed as `never` by confirming it always throws
+    expect(() => exitWithError('another error')).toThrow()
+    expect(exitSpy).toHaveBeenCalledTimes(1)
   })
 })

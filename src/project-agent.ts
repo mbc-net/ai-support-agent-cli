@@ -35,7 +35,8 @@ import { submitPendingResults } from './pending-result-store'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
-import { atomicWriteFile, getErrorMessage, isAuthenticationError, resolveUrlForDocker, sleep } from './utils'
+import { getUpdateVersionFilePath } from './utils/path-utils'
+import { atomicWriteFile, getErrorMessage, isAuthenticationError, isInDocker, resolveUrlForDocker, sleep } from './utils'
 
 export interface ProjectAgentOptions {
   pollInterval: number
@@ -111,7 +112,7 @@ export class ProjectAgent {
       token: this.token,
       projectCode: this.projectCode,
       localAgentChatMode,
-      onDockerRebuild: process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1'
+      onDockerRebuild: isInDocker()
         ? () => { void this.performDockerRebuild() }
         : undefined,
     }
@@ -133,7 +134,7 @@ export class ProjectAgent {
     // docker-built-hash file so we don't trigger a rebuild for already-built customizations.
     // AI_SUPPORT_AGENT_CONFIG_DIR is mounted to the per-project config dir directly,
     // so docker-built-hash lives at the root of getConfigDir().
-    if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+    if (isInDocker()) {
       const builtHashPath = path.join(getConfigDir(), DOCKER_MARKER_BUILT_HASH)
       try {
         const builtHash = fs.readFileSync(builtHashPath, 'utf-8').trim()
@@ -220,7 +221,7 @@ export class ProjectAgent {
     setTimeout(() => {
       // In Docker mode, exit with DOCKER_RESTART_EXIT_CODE so DockerSupervisor
       // restarts only this project's container.
-      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+      if (isInDocker()) {
         process.exit(DOCKER_RESTART_EXIT_CODE)
       } else if (process.send) {
         // Running as a child process (forked by ChildProcessManager) — exit cleanly.
@@ -292,10 +293,9 @@ export class ProjectAgent {
       // Inside a Docker container (spawned via `docker run`), process.send is
       // not available. Exit with DOCKER_UPDATE_EXIT_CODE so the host-side
       // DockerSupervisor detects the update and calls installUpdateAndRestart().
-      if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+      if (isInDocker()) {
         try {
-          const versionFile = path.join(getConfigDir(), 'update-version.json')
-          atomicWriteFile(versionFile, JSON.stringify({ version: targetVersion }))
+          atomicWriteFile(getUpdateVersionFilePath(), JSON.stringify({ version: targetVersion }))
         } catch (err: unknown) {
           logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
         }
@@ -374,7 +374,7 @@ export class ProjectAgent {
     logger.debug(`${this.prefix} Full register response keys: ${JSON.stringify(Object.keys(result))}`)
 
     // Report docker build error (if any) via heartbeat
-    if (process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1') {
+    if (isInDocker()) {
       // Write the server-assigned agentId so the host DockerSupervisor can use it for log storage
       try {
         atomicWriteFile(path.join(getConfigDir(), DOCKER_MARKER_REGISTERED_AGENT_ID), result.agentId)

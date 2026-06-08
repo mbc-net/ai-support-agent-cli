@@ -6,6 +6,7 @@
  */
 
 import { buildCleanEnv, _resetCleanEnvCache, buildClaudeArgs } from '../../src/commands/claude-code-args'
+import { ENV_VARS } from '../../src/constants'
 
 describe('claude-code-args', () => {
   describe('buildCleanEnv - undefined value branch', () => {
@@ -52,14 +53,14 @@ describe('claude-code-args', () => {
     it('should exclude CLAUDE_CODE_* vars but keep CLAUDE_CODE_OAUTH_TOKEN', () => {
       process.env = {
         CLAUDE_CODE_SSE_PORT: '1234',
-        CLAUDE_CODE_OAUTH_TOKEN: 'my-token',
+        [ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN]: 'my-token',
         HOME: '/home/user',
       }
 
       const result = buildCleanEnv()
 
       expect(result).not.toHaveProperty('CLAUDE_CODE_SSE_PORT')
-      expect(result).toHaveProperty('CLAUDE_CODE_OAUTH_TOKEN', 'my-token')
+      expect(result).toHaveProperty(ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN, 'my-token')
       expect(result).toHaveProperty('HOME', '/home/user')
     })
 

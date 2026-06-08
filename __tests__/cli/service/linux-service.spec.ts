@@ -34,6 +34,7 @@ jest.mock('../../../src/config-manager', () => ({
 import { execSync } from 'child_process'
 import * as fs from 'fs'
 import { IMAGE_NAME } from '../../../src/docker/docker-utils'
+import { ENV_VARS } from '../../../src/constants'
 import {
   LinuxServiceStrategy,
   generateServiceUnit,
@@ -345,14 +346,14 @@ describe('generateWrapperScript', () => {
   it('should include CLAUDE_CODE_OAUTH_TOKEN when provided', () => {
     const result = generateWrapperScript({ ...baseOpts, claudeCodeOauthToken: 'oauth-token' })
 
-    expect(result).toContain("-e CLAUDE_CODE_OAUTH_TOKEN='oauth-token'")
+    expect(result).toContain(`-e ${ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN}='oauth-token'`)
   })
 
   it('should not include optional env vars when not provided', () => {
     const result = generateWrapperScript(baseOpts)
 
     expect(result).not.toContain('ANTHROPIC_API_KEY')
-    expect(result).not.toContain('CLAUDE_CODE_OAUTH_TOKEN')
+    expect(result).not.toContain(ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN)
   })
 
   it('should include --verbose flag when verbose is true', () => {
