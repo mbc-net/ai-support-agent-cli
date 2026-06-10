@@ -223,11 +223,17 @@ export const WS_RECONNECT_MAX_DELAY_MS = 60_000
 // Without an application-level ping, an idle WebSocket that is silently dropped by a
 // load balancer (e.g. ALB idle timeout) never fires a 'close' event on the client, so
 // the connection becomes a half-open "zombie" and the reconnect logic never runs.
-// We send a ping every WS_HEARTBEAT_INTERVAL_MS and terminate the socket if no pong is
-// received within WS_HEARTBEAT_TIMEOUT_MS, which fires 'close' and triggers reconnect.
+//
+// Dead-detection uses the ws-standard "isAlive" single-interval method (the same one
+// used on the API gateway side): on each WS_HEARTBEAT_INTERVAL_MS tick, if no pong has
+// been received since the previous tick the missed counter is incremented; once it
+// reaches WS_PONG_MAX_MISSED consecutive misses the socket is terminated (which fires
+// 'close' and triggers reconnect). A single missed pong therefore does NOT terminate,
+// which removes the event-loop-stall false positive of the old per-ping setTimeout timer.
 // The interval must be well below the ALB idle timeout (3600s in this deployment).
 export const WS_HEARTBEAT_INTERVAL_MS = 30_000
-export const WS_HEARTBEAT_TIMEOUT_MS = 10_000
+// Number of consecutive missed pongs tolerated before the connection is considered dead.
+export const WS_PONG_MAX_MISSED = 3
 
 // Registration retry (persistent)
 // register() failures used to leave the process in a silent zombie state.

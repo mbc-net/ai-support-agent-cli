@@ -2,7 +2,7 @@ import { EventEmitter } from 'events'
 import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../src/base-websocket'
-import { WS_HEARTBEAT_INTERVAL_MS, WS_HEARTBEAT_TIMEOUT_MS } from '../src/constants'
+import { WS_HEARTBEAT_INTERVAL_MS, WS_PONG_MAX_MISSED } from '../src/constants'
 
 jest.mock('../src/logger')
 
@@ -222,16 +222,17 @@ describe('BaseWebSocketConnection default methods', () => {
 })
 
 /**
- * ハートビート (ping/pong) 設定をテストで制御するための具象クラス。
+ * Concrete subclass used to drive the heartbeat (ping/pong) logic in tests.
+ * Only the ping interval is configurable; dead-detection uses the shared
+ * isAlive / missed-pong-count method (no per-ping setTimeout pong timer).
  */
 class HeartbeatTestConnection extends BaseWebSocketConnection<TestMessage> {
-  constructor(heartbeatIntervalMs: number, heartbeatTimeoutMs: number) {
+  constructor(heartbeatIntervalMs: number) {
     super({
       maxReconnectRetries: 3,
       reconnectBaseDelayMs: 100,
       logPrefix: 'HB:',
       heartbeatIntervalMs,
-      heartbeatTimeoutMs,
     })
   }
 
@@ -250,7 +251,7 @@ class HeartbeatTestConnection extends BaseWebSocketConnection<TestMessage> {
   }
 }
 
-describe('BaseWebSocketConnection heartbeat', () => {
+describe('BaseWebSocketConnection heartbeat (isAlive / missed-pong method)', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     jest.useFakeTimers()
@@ -262,7 +263,7 @@ describe('BaseWebSocketConnection heartbeat', () => {
   })
 
   it('should send ping at the configured interval', async () => {
-    const conn = new HeartbeatTestConnection(1000, 500)
+    const conn = new HeartbeatTestConnection(1000)
     const connectPromise = conn.connect()
     mockWsInstance!.simulateOpen()
     await connectPromise
@@ -270,7 +271,7 @@ describe('BaseWebSocketConnection heartbeat', () => {
     expect(mockWsInstance!.ping).not.toHaveBeenCalled()
     jest.advanceTimersByTime(1000)
     expect(mockWsInstance!.ping).toHaveBeenCalledTimes(1)
-    // pong が返れば次の間隔でも terminate されない
+    // A pong before the next tick keeps the connection healthy.
     mockWsInstance!.simulatePong()
     jest.advanceTimersByTime(1000)
     expect(mockWsInstance!.ping).toHaveBeenCalledTimes(2)
@@ -279,24 +280,151 @@ describe('BaseWebSocketConnection heartbeat', () => {
     conn.disconnect()
   })
 
-  it('should terminate the socket when no pong is received within timeout', async () => {
-    const conn = new HeartbeatTestConnection(1000, 500)
+  it('should NOT terminate after a single missed pong', async () => {
+    const conn = new HeartbeatTestConnection(1000)
     const connectPromise = conn.connect()
     mockWsInstance!.simulateOpen()
     await connectPromise
 
-    jest.advanceTimersByTime(1000) // ping 送信、pong 待ち開始
+    // First tick: sends the initial ping (alive starts false, so missed -> 1,
+    // but 1 < WS_PONG_MAX_MISSED so it must not terminate).
+    jest.advanceTimersByTime(1000)
+    expect(mockWsInstance!.ping).toHaveBeenCalledTimes(1)
+    // Second tick with no pong in between: one more missed, still below the cap.
+    jest.advanceTimersByTime(1000)
+    expect(mockWsInstance!.terminate).not.toHaveBeenCalled()
+
+    conn.disconnect()
+  })
+
+  it('should terminate only after WS_PONG_MAX_MISSED consecutive missed pongs', async () => {
+    const conn = new HeartbeatTestConnection(1000)
+    const connectPromise = conn.connect()
+    mockWsInstance!.simulateOpen()
+    await connectPromise
+
+    // The first tick sends the initial ping without evaluating a miss (the peer
+    // had no prior opportunity to pong). From there, each subsequent silent tick
+    // is one real missed pong; termination happens on the WS_PONG_MAX_MISSED-th.
+    jest.advanceTimersByTime(1000) // tick 1: ping only
     expect(mockWsInstance!.ping).toHaveBeenCalledTimes(1)
     expect(mockWsInstance!.terminate).not.toHaveBeenCalled()
 
-    jest.advanceTimersByTime(500) // pong タイムアウト
+    for (let i = 1; i < WS_PONG_MAX_MISSED; i++) {
+      jest.advanceTimersByTime(1000)
+      expect(mockWsInstance!.terminate).not.toHaveBeenCalled()
+    }
+    // The WS_PONG_MAX_MISSED-th consecutive miss terminates the socket.
+    jest.advanceTimersByTime(1000)
     expect(mockWsInstance!.terminate).toHaveBeenCalledTimes(1)
 
     conn.disconnect()
   })
 
+  it('routes a heartbeat-induced terminate through onWebSocketClose (transient path)', async () => {
+    // A heartbeat false-positive terminate calls ws.terminate(), which (in the
+    // real ws library) fires the 'close' event -> onWebSocketClose(). This is
+    // the same hook a transient ALB/network drop uses, so a misdetected drop
+    // also lands in the grace path rather than the explicit-shutdown path.
+    let onCloseCalls = 0
+    let onDisconnectCalls = 0
+    class HookCapture extends BaseWebSocketConnection<TestMessage> {
+      constructor() {
+        super({ maxReconnectRetries: 0, reconnectBaseDelayMs: 100, logPrefix: 'HC:', heartbeatIntervalMs: 1000 })
+      }
+      protected createWebSocket(): WebSocket {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const WS = require('ws').default
+        return new WS() as WebSocket
+      }
+      protected onOpen(_ws: unknown, resolve: (value: void) => void): void {
+        resolve()
+      }
+      protected onParsedMessage(): void {
+        /* no-op */
+      }
+      protected onWebSocketClose(): void {
+        onCloseCalls++
+      }
+      protected onDisconnect(): void {
+        onDisconnectCalls++
+      }
+    }
+
+    // maxReconnectRetries: 0 makes the post-close reconnect give up; guard the
+    // process.exit it would call.
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+    const conn = new HookCapture()
+    const connectPromise = conn.connect()
+    mockWsInstance!.simulateOpen()
+    await connectPromise
+
+    // Drive the heartbeat to a terminate (no pongs): first tick pings, then
+    // WS_PONG_MAX_MISSED real misses -> terminate.
+    for (let i = 0; i <= WS_PONG_MAX_MISSED; i++) {
+      jest.advanceTimersByTime(1000)
+    }
+    expect(mockWsInstance!.terminate).toHaveBeenCalledTimes(1)
+
+    // The real library fires 'close' after terminate; simulate that step.
+    mockWsInstance!.simulateClose()
+
+    // The transient close hook fired; the explicit-disconnect hook did NOT.
+    expect(onCloseCalls).toBe(1)
+    expect(onDisconnectCalls).toBe(0)
+
+    conn.disconnect()
+    exitSpy.mockRestore()
+  })
+
+  it('should not count a phantom miss on the first tick (finding #6)', async () => {
+    const conn = new HeartbeatTestConnection(1000)
+    const connectPromise = conn.connect()
+    mockWsInstance!.simulateOpen()
+    await connectPromise
+
+    // The peer never pongs. The first tick only SENDS the initial ping (the peer
+    // had no prior chance to pong), so it must not count as a miss. Termination
+    // must therefore take (1 initial-ping tick + WS_PONG_MAX_MISSED real misses)
+    // ticks. RED before the fix: the phantom first-tick miss shortened this to
+    // WS_PONG_MAX_MISSED ticks, terminating one full interval too early.
+    let ticksUntilTerminate = 0
+    while (!mockWsInstance!.terminate.mock.calls.length) {
+      jest.advanceTimersByTime(1000)
+      ticksUntilTerminate++
+      if (ticksUntilTerminate > 10) break // safety against an infinite loop
+    }
+
+    expect(ticksUntilTerminate).toBe(WS_PONG_MAX_MISSED + 1)
+
+    conn.disconnect()
+  })
+
+  it('should reset the missed counter when a healthy pong arrives', async () => {
+    const conn = new HeartbeatTestConnection(1000)
+    const connectPromise = conn.connect()
+    mockWsInstance!.simulateOpen()
+    await connectPromise
+
+    // Accumulate misses just short of the cap.
+    for (let i = 0; i < WS_PONG_MAX_MISSED - 1; i++) {
+      jest.advanceTimersByTime(1000)
+    }
+    expect(mockWsInstance!.terminate).not.toHaveBeenCalled()
+
+    // A pong resets the counter; the connection must survive many more ticks.
+    mockWsInstance!.simulatePong()
+    for (let i = 0; i < WS_PONG_MAX_MISSED - 1; i++) {
+      jest.advanceTimersByTime(1000)
+    }
+    expect(mockWsInstance!.terminate).not.toHaveBeenCalled()
+
+    conn.disconnect()
+  })
+
   it('should not ping when readyState is not OPEN', async () => {
-    const conn = new HeartbeatTestConnection(1000, 500)
+    const conn = new HeartbeatTestConnection(1000)
     const connectPromise = conn.connect()
     mockWsInstance!.simulateOpen()
     await connectPromise
@@ -309,7 +437,7 @@ describe('BaseWebSocketConnection heartbeat', () => {
   })
 
   it('should catch ping errors', async () => {
-    const conn = new HeartbeatTestConnection(1000, 500)
+    const conn = new HeartbeatTestConnection(1000)
     const connectPromise = conn.connect()
     mockWsInstance!.simulateOpen()
     await connectPromise
@@ -321,23 +449,23 @@ describe('BaseWebSocketConnection heartbeat', () => {
   })
 
   it('should stop heartbeat after close (no ping after terminate)', async () => {
-    const conn = new HeartbeatTestConnection(1000, 500)
+    const conn = new HeartbeatTestConnection(1000)
     const connectPromise = conn.connect()
     mockWsInstance!.simulateOpen()
     await connectPromise
 
     const firstWs = mockWsInstance!
     firstWs.simulateClose()
-    // close でハートビート停止。reconnect 前に時間を進めても旧 ws に ping は飛ばない
+    // close stops the heartbeat: advancing time must not ping the stale socket.
     firstWs.ping.mockClear()
-    jest.advanceTimersByTime(2000)
+    jest.advanceTimersByTime(5000)
     expect(firstWs.ping).not.toHaveBeenCalled()
 
     conn.disconnect()
   })
 
   it('should be disabled when heartbeatIntervalMs <= 0', async () => {
-    const conn = new HeartbeatTestConnection(0, 500)
+    const conn = new HeartbeatTestConnection(0)
     const connectPromise = conn.connect()
     mockWsInstance!.simulateOpen()
     await connectPromise
@@ -348,23 +476,23 @@ describe('BaseWebSocketConnection heartbeat', () => {
     conn.disconnect()
   })
 
-  it('should ignore an unexpected pong with no pending timeout', async () => {
-    const conn = new HeartbeatTestConnection(1000, 500)
+  it('should accept a pong even before the first ping is sent', async () => {
+    const conn = new HeartbeatTestConnection(1000)
     const connectPromise = conn.connect()
     mockWsInstance!.simulateOpen()
     await connectPromise
 
-    // ping 前（pong 待ちタイマー未設定）の pong を受けても安全
+    // A pong before any ping is harmless and marks the connection alive.
     expect(() => mockWsInstance!.simulatePong()).not.toThrow()
-    // その後も正常に ping が動く
     jest.advanceTimersByTime(1000)
     expect(mockWsInstance!.ping).toHaveBeenCalledTimes(1)
+    expect(mockWsInstance!.terminate).not.toHaveBeenCalled()
 
     conn.disconnect()
   })
 
-  it('should use default heartbeat constants when options are omitted', async () => {
-    // heartbeatIntervalMs / heartbeatTimeoutMs を渡さない既定経路をカバー
+  it('should use the default ping interval when the option is omitted', async () => {
+    // Covers the default WS_HEARTBEAT_INTERVAL_MS path (no heartbeatIntervalMs option).
     const conn = new TestWebSocketConnection()
     const connectPromise = conn.connect()
     mockWsInstance!.simulateOpen()
@@ -372,8 +500,9 @@ describe('BaseWebSocketConnection heartbeat', () => {
 
     jest.advanceTimersByTime(WS_HEARTBEAT_INTERVAL_MS)
     expect(mockWsInstance!.ping).toHaveBeenCalledTimes(1)
-    jest.advanceTimersByTime(WS_HEARTBEAT_TIMEOUT_MS)
-    expect(mockWsInstance!.terminate).toHaveBeenCalled()
+    // A single missed pong must not terminate at the default cap (>1).
+    jest.advanceTimersByTime(WS_HEARTBEAT_INTERVAL_MS)
+    expect(mockWsInstance!.terminate).not.toHaveBeenCalled()
 
     conn.disconnect()
   })

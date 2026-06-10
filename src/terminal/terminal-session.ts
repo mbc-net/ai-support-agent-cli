@@ -118,6 +118,14 @@ export class TerminalSession {
   private sshKeyFile: string | null = null
   private dataCallback: DataCallback | null = null
   private exitCallback: ExitCallback | null = null
+  /**
+   * Internal exit callback owned by the session manager for its own cleanup
+   * (clear grace timer + remove from map). It is kept separate from the public
+   * `exitCallback` so that a later `onExit()` registration by the websocket
+   * handler (which sends the 'exit' frame) does NOT overwrite the manager's
+   * cleanup. Both fire on PTY exit.
+   */
+  private internalExitCallback: ExitCallback | null = null
   private exited = false
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private onIdleTimeout: (() => void) | null = null
@@ -266,6 +274,12 @@ export class TerminalSession {
       this.exited = true
       this.clearIdleTimer()
       this.cleanupTmpDir()
+      // Manager cleanup runs first and unconditionally, then the public
+      // (websocket) listener. The internal slot cannot be overwritten by a
+      // later onExit() call, so map/grace-timer cleanup always happens.
+      if (this.internalExitCallback) {
+        this.internalExitCallback(exitCode)
+      }
       if (this.exitCallback) {
         this.exitCallback(exitCode)
       }
@@ -280,6 +294,14 @@ export class TerminalSession {
 
   onExit(callback: ExitCallback): void {
     this.exitCallback = callback
+  }
+
+  /**
+   * Register the manager-owned exit cleanup. Separate from the public onExit so
+   * it survives the websocket handler re-registering onExit on open/resume.
+   */
+  setOnExitInternal(callback: () => void): void {
+    this.internalExitCallback = callback
   }
 
   setOnIdleTimeout(callback: () => void): void {
