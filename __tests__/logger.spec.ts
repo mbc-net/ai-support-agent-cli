@@ -1,4 +1,4 @@
-import { logger, maskSecrets, getProjectColor, resetProjectColors, prefixLines, makeLinePrefixer, stripCursorCodes } from '../src/logger'
+import { logger, maskSecrets, getProjectColor, resetProjectColors, prefixLines, makeLinePrefixer, stripCursorCodes, setJsonMode, isJsonMode } from '../src/logger'
 
 describe('logger', () => {
   let logSpy: jest.Spied<typeof console.log>
@@ -8,6 +8,7 @@ describe('logger', () => {
     logSpy = jest.spyOn(console, 'log').mockImplementation()
     errorSpy = jest.spyOn(console, 'error').mockImplementation()
     logger.setVerbose(false)
+    setJsonMode(false)
   })
 
   afterEach(() => {
@@ -439,6 +440,180 @@ describe('logger', () => {
 
     it('should strip multiple cursor codes in one string', () => {
       expect(stripCursorCodes('\x1b[?25l\x1b[2K\x1b[Gloading...\x1b[?25h')).toBe('loading...')
+    })
+  })
+
+  describe('setJsonMode / isJsonMode', () => {
+    it('should default to text mode (JSON disabled)', () => {
+      expect(isJsonMode()).toBe(false)
+    })
+
+    it('should enable JSON mode when set to true', () => {
+      setJsonMode(true)
+      expect(isJsonMode()).toBe(true)
+    })
+
+    it('should disable JSON mode when set back to false', () => {
+      setJsonMode(true)
+      setJsonMode(false)
+      expect(isJsonMode()).toBe(false)
+    })
+  })
+
+  describe('text mode context argument', () => {
+    it('should append context fields in a readable form for info', () => {
+      logger.info('processing', { tenantCode: 'mbc', projectCode: 'MBC_01' })
+      const output = logSpy.mock.calls[0][0] as string
+      expect(output).toContain('processing')
+      expect(output).toContain('tenantCode=mbc')
+      expect(output).toContain('projectCode=MBC_01')
+    })
+
+    it('should append context fields for warn', () => {
+      logger.warn('warned', { agentId: 'agent-1' })
+      const output = logSpy.mock.calls[0][0] as string
+      expect(output).toContain('warned')
+      expect(output).toContain('agentId=agent-1')
+    })
+
+    it('should append context fields for error', () => {
+      logger.error('failed', { tenantCode: 'jcci' })
+      const output = errorSpy.mock.calls[0][0] as string
+      expect(output).toContain('failed')
+      expect(output).toContain('tenantCode=jcci')
+    })
+
+    it('should append context fields for debug when verbose', () => {
+      logger.setVerbose(true)
+      logger.debug('dbg', { projectCode: 'MBC_02' })
+      const output = logSpy.mock.calls[0][0] as string
+      expect(output).toContain('dbg')
+      expect(output).toContain('projectCode=MBC_02')
+    })
+
+    it('should append context fields for success', () => {
+      logger.success('ok', { agentId: 'agent-9' })
+      const output = logSpy.mock.calls[0][0] as string
+      expect(output).toContain('ok')
+      expect(output).toContain('agentId=agent-9')
+    })
+
+    it('should not append anything when context is empty', () => {
+      logger.info('plain', {})
+      const output = logSpy.mock.calls[0][0] as string
+      expect(output).toContain('plain')
+      expect(output).not.toContain('{}')
+      expect(output).not.toContain('=')
+    })
+
+    it('should mask secret-keyed context values in text mode', () => {
+      logger.info('login', { token: 'super-secret-token' } as Record<string, unknown>)
+      const output = logSpy.mock.calls[0][0] as string
+      expect(output).not.toContain('super-secret-token')
+      expect(output).toContain('token=****')
+    })
+
+    it('should render non-string context values as JSON in text mode', () => {
+      logger.info('counts', { retries: 3, enabled: true } as Record<string, unknown>)
+      const output = logSpy.mock.calls[0][0] as string
+      expect(output).toContain('retries=3')
+      expect(output).toContain('enabled=true')
+    })
+  })
+
+  describe('JSON mode', () => {
+    beforeEach(() => {
+      setJsonMode(true)
+    })
+
+    function parse(call: unknown[]): Record<string, unknown> {
+      return JSON.parse(call[0] as string)
+    }
+
+    it('should emit a JSON object with level, message and timestamp for info', () => {
+      logger.info('hello json')
+      const obj = parse(logSpy.mock.calls[0])
+      expect(obj.level).toBe('info')
+      expect(obj.message).toBe('hello json')
+      expect(typeof obj.timestamp).toBe('string')
+    })
+
+    it('should emit level warn', () => {
+      logger.warn('w')
+      expect(parse(logSpy.mock.calls[0]).level).toBe('warn')
+    })
+
+    it('should emit level error to console.error', () => {
+      logger.error('e')
+      const obj = parse(errorSpy.mock.calls[0])
+      expect(obj.level).toBe('error')
+      expect(obj.message).toBe('e')
+    })
+
+    it('should emit level success', () => {
+      logger.success('s')
+      expect(parse(logSpy.mock.calls[0]).level).toBe('success')
+    })
+
+    it('should emit debug only when verbose is enabled', () => {
+      logger.debug('hidden')
+      expect(logSpy).not.toHaveBeenCalled()
+      logger.setVerbose(true)
+      logger.debug('shown')
+      const obj = parse(logSpy.mock.calls[0])
+      expect(obj.level).toBe('debug')
+      expect(obj.message).toBe('shown')
+    })
+
+    it('should place context fields at the top level', () => {
+      logger.info('ctx', { tenantCode: 'mbc', projectCode: 'MBC_01', agentId: 'a1' })
+      const obj = parse(logSpy.mock.calls[0])
+      expect(obj.tenantCode).toBe('mbc')
+      expect(obj.projectCode).toBe('MBC_01')
+      expect(obj.agentId).toBe('a1')
+      expect(obj.message).toBe('ctx')
+    })
+
+    it('should not let context override reserved fields', () => {
+      logger.info('reserved', { level: 'pwned', message: 'pwned', timestamp: 'pwned' } as Record<string, unknown>)
+      const obj = parse(logSpy.mock.calls[0])
+      expect(obj.level).toBe('info')
+      expect(obj.message).toBe('reserved')
+      expect(obj.timestamp).not.toBe('pwned')
+    })
+
+    it('should mask secrets in the message field', () => {
+      logger.info('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.token')
+      const obj = parse(logSpy.mock.calls[0])
+      expect(obj.message).not.toContain('eyJhbGciOiJIUzI1NiJ9.token')
+      expect(obj.message).toContain('****')
+    })
+
+    it('should mask secrets in string context values', () => {
+      logger.info('connect', { dsn: 'postgres://admin:s3cret@db/app' } as Record<string, unknown>)
+      const obj = parse(logSpy.mock.calls[0])
+      expect(obj.dsn).toBe('postgres://admin:****@db/app')
+    })
+
+    it('should fully redact secret-keyed context values', () => {
+      logger.info('auth', { password: 'p@ss', authorization: 'Bearer xyz' } as Record<string, unknown>)
+      const obj = parse(logSpy.mock.calls[0])
+      expect(obj.password).toBe('****')
+      expect(obj.authorization).toBe('****')
+    })
+
+    it('should leave non-string context values untouched', () => {
+      logger.info('counts', { retries: 3, enabled: true } as Record<string, unknown>)
+      const obj = parse(logSpy.mock.calls[0])
+      expect(obj.retries).toBe(3)
+      expect(obj.enabled).toBe(true)
+    })
+
+    it('should produce valid JSON without ANSI color codes', () => {
+      logger.info('no color')
+      const raw = logSpy.mock.calls[0][0] as string
+      // eslint-disable-next-line no-control-regex
+      expect(raw).not.toMatch(/\x1b\[/)
     })
   })
 })
