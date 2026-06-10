@@ -490,4 +490,43 @@ describe('BrowserSession', () => {
       expect(mockBrowser.close).toHaveBeenCalled()
     })
   })
+
+  describe('onClosed callback', () => {
+    it('should call onClosed when close() is called', async () => {
+      const onClosed = jest.fn()
+      const session = new BrowserSession(undefined, onClosed)
+      await session.getPage()
+      await session.close()
+
+      expect(onClosed).toHaveBeenCalledTimes(1)
+    })
+
+    it('should call onClosed only once even if close() is called multiple times', async () => {
+      const onClosed = jest.fn()
+      const session = new BrowserSession(undefined, onClosed)
+      await session.getPage()
+      await session.close()
+      await session.close()
+      await session.close()
+
+      expect(onClosed).toHaveBeenCalledTimes(1)
+    })
+
+    it('should call onClosed when idle timeout fires', async () => {
+      const onClosed = jest.fn()
+      const session = new BrowserSession(1000, onClosed)
+      await session.getPage()
+
+      jest.advanceTimersByTime(1000)
+      await Promise.resolve()
+
+      expect(onClosed).toHaveBeenCalledTimes(1)
+    })
+
+    it('should not throw when onClosed is not provided', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      await expect(session.close()).resolves.not.toThrow()
+    })
+  })
 })

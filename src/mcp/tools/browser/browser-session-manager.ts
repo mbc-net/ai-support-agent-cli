@@ -50,7 +50,10 @@ export class BrowserSessionManager {
       throw new Error(`Max browser sessions reached (${this.maxSessions})`)
     }
 
-    const session = new BrowserSession()
+    const session = new BrowserSession(undefined, () => {
+      this.removeSession(sessionId)
+      logger.debug(`[browser-manager] Session self-closed and removed: ${sessionId}`)
+    })
     this.sessions.set(sessionId, session)
     logger.debug(`[browser-manager] Session created: ${sessionId}`)
     return session
@@ -93,18 +96,18 @@ export class BrowserSessionManager {
   async close(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId)
     if (!session) return
-
     await session.close()
-    this.sessions.delete(sessionId)
+    // onClosed callback handles removal from sessions and conversationMap
+    logger.debug(`[browser-manager] Session closed: ${sessionId}`)
+  }
 
-    // Remove conversation mappings pointing to this session
+  private removeSession(sessionId: string): void {
+    this.sessions.delete(sessionId)
     for (const [convId, sid] of this.conversationMap) {
       if (sid === sessionId) {
         this.conversationMap.delete(convId)
       }
     }
-
-    logger.debug(`[browser-manager] Session closed: ${sessionId}`)
   }
 
   /**
