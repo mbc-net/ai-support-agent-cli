@@ -21,6 +21,8 @@ export class BrowserSession {
   private readonly idleTimeoutMs: number
   private liveViewInterval: ReturnType<typeof setInterval> | null = null
   private _currentDeviceId: string | null = null
+  private closed = false
+  private readonly onClosed?: () => void
 
   /**
    * Get the currently active device emulation ID, or null if none.
@@ -35,8 +37,9 @@ export class BrowserSession {
   /** Action log for recording browser operations */
   readonly actionLog = new BrowserActionLog()
 
-  constructor(idleTimeoutMs: number = BROWSER_IDLE_TIMEOUT_MS) {
+  constructor(idleTimeoutMs: number = BROWSER_IDLE_TIMEOUT_MS, onClosed?: () => void) {
     this.idleTimeoutMs = idleTimeoutMs
+    this.onClosed = onClosed
   }
 
   /**
@@ -73,6 +76,8 @@ export class BrowserSession {
    * Close the browser and clean up resources.
    */
   async close(): Promise<void> {
+    if (this.closed) return
+    this.closed = true
     this.stopLiveView()
     this.clearIdleTimer()
     if (this.browser) {
@@ -86,6 +91,7 @@ export class BrowserSession {
       this.context = null
       this.page = null
     }
+    this.onClosed?.()
   }
 
   /**
