@@ -1,6 +1,6 @@
 import WebSocket from 'ws'
 
-import { WS_HEARTBEAT_INTERVAL_MS, WS_HEARTBEAT_TIMEOUT_MS } from './constants'
+import { WS_HEARTBEAT_INTERVAL_MS, WS_PONG_MAX_MISSED } from './constants'
 import { logger } from './logger'
 import { getErrorMessage } from './utils'
 import { attemptReconnect } from './ws-reconnect'
@@ -13,8 +13,8 @@ export interface BaseWebSocketOptions {
   logPrefix: string
   /** ping 送信間隔 (ms)。省略時は WS_HEARTBEAT_INTERVAL_MS。0 以下で無効化。 */
   heartbeatIntervalMs?: number
-  /** pong 応答待ちのタイムアウト (ms)。省略時は WS_HEARTBEAT_TIMEOUT_MS。 */
-  heartbeatTimeoutMs?: number
+  /** 連続未応答 pong の許容回数。省略時は WS_PONG_MAX_MISSED。 */
+  pongMaxMissed?: number
 }
 
 /**
@@ -29,7 +29,16 @@ export abstract class BaseWebSocketConnection<TMessage> {
   protected readonly reconnectAttemptsRef = { current: 0 }
   protected readonly options: BaseWebSocketOptions
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
-  private pongTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * Liveness state for the isAlive / missed-pong heartbeat method.
+   * - alive: set true on every 'pong'. Reset to false right after each ping so
+   *   the next tick can tell whether a pong arrived in between.
+   * - missed: consecutive ticks without a pong. Reaching pongMaxMissed terminates.
+   * alive starts false (consistent with the API side): the very first ping tick
+   * counts as one missed unless a pong has already arrived.
+   */
+  private heartbeatAlive = false
+  private heartbeatMissed = 0
 
   constructor(options: BaseWebSocketOptions) {
     this.options = options
@@ -98,11 +107,9 @@ export abstract class BaseWebSocketConnection<TMessage> {
       })
 
       ws.on('pong', () => {
-        // pong を受信したら生存確認タイマーを解除する（次の ping まで健全）
-        if (this.pongTimeoutTimer) {
-          clearTimeout(this.pongTimeoutTimer)
-          this.pongTimeoutTimer = null
-        }
+        // A pong proves the peer is alive; the next heartbeat tick will reset
+        // the missed counter. Safe to receive even before the first ping.
+        this.heartbeatAlive = true
       })
 
       ws.on('message', (data: WebSocket.Data) => {
@@ -138,22 +145,52 @@ export abstract class BaseWebSocketConnection<TMessage> {
 
   /**
    * ハートビート (ping/pong) を開始する。
-   * 一定間隔で ping を送り、次の間隔までに pong が返らなければ接続が
-   * 死んでいる（half-open / ロードバランサに切られた）とみなして terminate する。
+   *
+   * ws 標準の「isAlive」単一インターバル方式を使う。各インターバルで:
+   *   1. 前回の tick 以降に pong を受信していなければ missed をインクリメントし、
+   *      missed が pongMaxMissed に達したら接続を死んでいる（half-open /
+   *      ロードバランサに切られた）とみなして terminate する。
+   *   2. pong を受信していれば missed を 0 にリセットする。
+   *   3. alive を false に戻し、次の ping を送信する。
+   *
+   * ただし最初の tick は ping を送るだけで miss 判定をしない（接続直後は相手に
+   * pong を返す機会がまだ無いため）。これにより健全な接続でも phantom miss を
+   * 数えず、pongMaxMissed 回の許容を接続直後からフルに使える（finding #6）。
+   *
    * terminate は 'close' イベントを発火させ、既存の再接続ロジックを起動する。
+   * 1 回の未応答では terminate しないため、イベントループ stall による誤検知を防ぐ。
    */
   private startHeartbeat(ws: WebSocket): void {
     const intervalMs = this.options.heartbeatIntervalMs ?? WS_HEARTBEAT_INTERVAL_MS
     if (intervalMs <= 0) return
-    const timeoutMs = this.options.heartbeatTimeoutMs ?? WS_HEARTBEAT_TIMEOUT_MS
+    const maxMissed = this.options.pongMaxMissed ?? WS_PONG_MAX_MISSED
     this.stopHeartbeat()
+    // Reset liveness state for this connection.
+    this.heartbeatAlive = false
+    this.heartbeatMissed = 0
+    // The first tick only sends a ping; miss evaluation starts on the next tick.
+    let firstTick = true
     this.heartbeatTimer = setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) return
-      // 前回の pong 待ちが残っていれば（=応答なし）ここには来ない（terminate 済み）
-      this.pongTimeoutTimer = setTimeout(() => {
-        logger.debug(`${this.options.logPrefix} Heartbeat timeout, terminating connection`)
-        ws.terminate()
-      }, timeoutMs)
+
+      if (firstTick) {
+        // No prior ping was sent, so a missing pong here is not a real miss.
+        firstTick = false
+      } else if (!this.heartbeatAlive) {
+        this.heartbeatMissed++
+        if (this.heartbeatMissed >= maxMissed) {
+          logger.debug(
+            `${this.options.logPrefix} No pong after ${this.heartbeatMissed} consecutive pings, terminating connection`,
+          )
+          ws.terminate()
+          return
+        }
+      } else {
+        this.heartbeatMissed = 0
+      }
+
+      // Expect a fresh pong before the next tick.
+      this.heartbeatAlive = false
       try {
         ws.ping()
       } catch (error) {
@@ -162,16 +199,14 @@ export abstract class BaseWebSocketConnection<TMessage> {
     }, intervalMs)
   }
 
-  /** ハートビートと pong 待ちタイマーを停止する。 */
+  /** ハートビートを停止し、生存確認状態をリセットする。 */
   private stopHeartbeat(): void {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer)
       this.heartbeatTimer = null
     }
-    if (this.pongTimeoutTimer) {
-      clearTimeout(this.pongTimeoutTimer)
-      this.pongTimeoutTimer = null
-    }
+    this.heartbeatAlive = false
+    this.heartbeatMissed = 0
   }
 
   /** WebSocket close イベント時の追加処理（サブクラスでオーバーライド可能） */
