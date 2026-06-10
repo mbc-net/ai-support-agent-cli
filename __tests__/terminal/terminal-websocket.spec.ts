@@ -681,6 +681,100 @@ describe('TerminalWebSocket', () => {
     void terminalWs.connect()
   })
 
+  // ─── grace / resume on a real transient 'close' event ────────────────────
+  // A transient WS drop (ALB idle drop / heartbeat false-positive terminate /
+  // network blip) fires the ws 'close' event, which routes through the base
+  // class onWebSocketClose() hook — NOT the explicit disconnect()/onDisconnect()
+  // path. The terminal connection must keep its PTYs alive (grace) so they can
+  // be resumed on reconnect. This test drives the REAL 'close' event (by closing
+  // the server-side socket) to verify the wiring, not a hand-called hook.
+  it('should keep PTYs alive on a real transient close event (grace preserved)', async () => {
+    // Disable reconnect so the transient close does not immediately spawn a new
+    // connection during the assertion window.
+    const origRetries = wsConstants.TERMINAL_WS_MAX_RECONNECT_RETRIES
+    Object.defineProperty(wsConstants, 'TERMINAL_WS_MAX_RECONNECT_RETRIES', { value: 0, writable: true })
+
+    let serverWs: WebSocket | null = null
+    const sessionId = await new Promise<string>((resolve) => {
+      server.on('connection', (ws) => {
+        serverWs = ws
+        ws.on('message', (data) => {
+          const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+          if (msg.type === 'ready') {
+            resolve(msg.sessionId)
+          }
+        })
+        ws.send(
+          JSON.stringify({ type: 'open', sessionId: 'grace-close-session', cols: 80, rows: 24 }),
+        )
+      })
+
+      terminalWs = createTerminalWs()
+      void terminalWs.connect()
+    })
+
+    const manager = terminalWs.getSessionManager()
+    expect(manager.getSession(sessionId)?.isAlive()).toBe(true)
+
+    // Spy so we can prove the real 'close' event actually routes to grace, not
+    // just that the PTY happens to still be alive (a no-op hook would also leave
+    // it alive). RED before the fix: closeAllGracefully is never called because
+    // grace was wired to onDisconnect()/disconnect(), not onWebSocketClose().
+    const graceSpy = jest.spyOn(manager, 'closeAllGracefully')
+    const killAllSpy = jest.spyOn(manager, 'closeAll')
+
+    // Fire a real transient close by closing the server-side socket. The client
+    // observes 'close' -> onWebSocketClose() -> manager.closeAllGracefully().
+    const closed = new Promise<void>((resolve) => {
+      ;(serverWs as unknown as WebSocket).on('close', () => resolve())
+    })
+    ;(serverWs as unknown as WebSocket).close()
+    await closed
+    // Give the client a tick to process its own 'close' event.
+    await new Promise((r) => setTimeout(r, 50))
+
+    // The transient close must arm grace and must NOT kill PTYs.
+    expect(graceSpy).toHaveBeenCalledTimes(1)
+    expect(killAllSpy).not.toHaveBeenCalled()
+    // The PTY must still be alive within the grace window.
+    expect(manager.size).toBe(1)
+    expect(manager.getSession(sessionId)?.isAlive()).toBe(true)
+
+    graceSpy.mockRestore()
+    killAllSpy.mockRestore()
+    Object.defineProperty(wsConstants, 'TERMINAL_WS_MAX_RECONNECT_RETRIES', { value: origRetries, writable: true })
+  })
+
+  // Explicit, user/agent-initiated shutdown must kill every PTY immediately
+  // (no grace) — this is a genuine teardown, distinct from a transient close.
+  it('should kill all PTYs immediately on explicit disconnect (no grace)', async () => {
+    const sessionId = await new Promise<string>((resolve) => {
+      server.on('connection', (ws) => {
+        ws.on('message', (data) => {
+          const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+          if (msg.type === 'ready') {
+            resolve(msg.sessionId)
+          }
+        })
+        ws.send(
+          JSON.stringify({ type: 'open', sessionId: 'explicit-disconnect-session', cols: 80, rows: 24 }),
+        )
+      })
+
+      terminalWs = createTerminalWs()
+      void terminalWs.connect()
+    })
+
+    const manager = terminalWs.getSessionManager()
+    expect(manager.getSession(sessionId)?.isAlive()).toBe(true)
+
+    // Explicit disconnect: genuine teardown.
+    terminalWs.disconnect()
+
+    expect(manager.size).toBe(0)
+    expect(manager.getSession(sessionId)).toBeUndefined()
+  })
+
   it('should warn when envVarsProvider exists but returns undefined', (done) => {
     server.on('connection', (ws) => {
       ws.on('message', (data) => {

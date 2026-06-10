@@ -165,8 +165,92 @@ export function maskSecrets(message: string): string {
   return masked
 }
 
-function formatLog(level: string, color: string, message: string): string {
-  return `${COLORS.gray}[${timestamp()}]${COLORS.reset} ${color}${level}${COLORS.reset} ${maskSecrets(message)}`
+/**
+ * Structured context fields attached to a log entry (e.g. tenantCode,
+ * projectCode, agentId). String values are masked for secrets; non-string
+ * values are passed through unchanged.
+ */
+export type LogContext = Record<string, unknown>
+
+/**
+ * Reserved top-level fields of a JSON log entry. Context keys colliding with
+ * these are ignored so callers cannot spoof the level/message/timestamp.
+ */
+const RESERVED_LOG_FIELDS = new Set(['level', 'message', 'timestamp'])
+
+/**
+ * Opt-in JSON structured output. Defaults to the human-readable text format.
+ * Initialized from the AI_AGENT_LOG_FORMAT env var (`json` enables it) so
+ * daemonized/service operation can request JSON without code changes, while
+ * interactive use keeps the colored text format.
+ */
+let jsonModeEnabled = process.env.AI_AGENT_LOG_FORMAT === 'json'
+
+/** Enable or disable JSON structured output at runtime. */
+export function setJsonMode(enabled: boolean): void {
+  jsonModeEnabled = enabled
+}
+
+/** Whether JSON structured output is currently enabled. */
+export function isJsonMode(): boolean {
+  return jsonModeEnabled
+}
+
+/**
+ * Context keys whose values are considered sensitive and fully redacted
+ * regardless of their content (mirrors the key-value SECRET_PATTERNS keys).
+ */
+const SECRET_CONTEXT_KEY_RE = /^(?:password|secret|token|api_?key|access_?key|secret_?key|session_?token|authorization)$/i
+
+/**
+ * Mask secrets in a context object:
+ *  - values under secret-like keys are fully redacted,
+ *  - other string values are run through maskSecrets,
+ *  - non-string values are passed through unchanged.
+ */
+function maskContext(context: LogContext): LogContext {
+  const masked: LogContext = {}
+  for (const [key, value] of Object.entries(context)) {
+    if (SECRET_CONTEXT_KEY_RE.test(key) && typeof value === 'string') {
+      masked[key] = '****'
+    } else {
+      masked[key] = typeof value === 'string' ? maskSecrets(value) : value
+    }
+  }
+  return masked
+}
+
+/** Render a context object as a readable ` key=value` suffix for text mode. */
+function formatTextContext(context: LogContext | undefined): string {
+  if (!context) return ''
+  const masked = maskContext(context)
+  const parts = Object.entries(masked).map(([key, value]) => {
+    const str = typeof value === 'string' ? value : JSON.stringify(value)
+    return `${key}=${str}`
+  })
+  return parts.length > 0 ? ` ${parts.join(' ')}` : ''
+}
+
+function formatLog(level: string, color: string, message: string, context?: LogContext): string {
+  return `${COLORS.gray}[${timestamp()}]${COLORS.reset} ${color}${level}${COLORS.reset} ${maskSecrets(message)}${formatTextContext(context)}`
+}
+
+/** Build a JSON log line with reserved fields plus masked context fields. */
+function formatJsonLog(level: string, message: string, context?: LogContext): string {
+  const entry: Record<string, unknown> = {
+    level,
+    message: maskSecrets(message),
+    timestamp: new Date().toISOString(),
+  }
+  if (context) {
+    for (const [key, value] of Object.entries(maskContext(context))) {
+      // Reserved fields cannot be overridden by caller-supplied context.
+      if (!RESERVED_LOG_FIELDS.has(key)) {
+        entry[key] = value
+      }
+    }
+  }
+  return JSON.stringify(entry)
 }
 
 export const logger = {
@@ -174,25 +258,45 @@ export const logger = {
     verboseEnabled = enabled
   },
 
-  info(message: string): void {
-    console.log(formatLog('INFO ', COLORS.green, message))
+  info(message: string, context?: LogContext): void {
+    console.log(
+      jsonModeEnabled
+        ? formatJsonLog('info', message, context)
+        : formatLog('INFO ', COLORS.green, message, context),
+    )
   },
 
-  warn(message: string): void {
-    console.log(formatLog('WARN ', COLORS.yellow, message))
+  warn(message: string, context?: LogContext): void {
+    console.log(
+      jsonModeEnabled
+        ? formatJsonLog('warn', message, context)
+        : formatLog('WARN ', COLORS.yellow, message, context),
+    )
   },
 
-  error(message: string): void {
-    console.error(formatLog('ERROR', COLORS.red, message))
+  error(message: string, context?: LogContext): void {
+    console.error(
+      jsonModeEnabled
+        ? formatJsonLog('error', message, context)
+        : formatLog('ERROR', COLORS.red, message, context),
+    )
   },
 
-  debug(message: string): void {
+  debug(message: string, context?: LogContext): void {
     if (verboseEnabled) {
-      console.log(formatLog('DEBUG', COLORS.blue, message))
+      console.log(
+        jsonModeEnabled
+          ? formatJsonLog('debug', message, context)
+          : formatLog('DEBUG', COLORS.blue, message, context),
+      )
     }
   },
 
-  success(message: string): void {
-    console.log(`${COLORS.green}✓${COLORS.reset} ${message}`)
+  success(message: string, context?: LogContext): void {
+    if (jsonModeEnabled) {
+      console.log(formatJsonLog('success', message, context))
+    } else {
+      console.log(`${COLORS.green}✓${COLORS.reset} ${message}${formatTextContext(context)}`)
+    }
   },
 }

@@ -126,7 +126,35 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     }
   }
 
-  protected onDisconnect(): void {
+  /**
+   * Transient WebSocket drop (ALB idle drop / heartbeat false-positive
+   * terminate / network blip). The base class fires this from the ws 'close'
+   * event, so this is where real transient disconnects land — NOT onDisconnect()
+   * (which is only invoked from the explicit disconnect() method).
+   *
+   * Keep every PTY alive within the grace window so a reconnect with the same
+   * sessionId can resume the user's live shell. If no reconnect arrives within
+   * SESSION_GRACE_TIMEOUT_MS the PTY is killed by the grace timer. A heartbeat
+   * false-positive terminate also fires 'close', so misdetected drops likewise
+   * preserve the PTY for resume.
+   */
+  protected onWebSocketClose(): void {
+    this.manager.closeAllGracefully()
+  }
+
+  /**
+   * Explicit, user/agent-initiated shutdown. Unlike a transient drop, this is a
+   * genuine teardown so every PTY is killed immediately rather than being kept
+   * alive for the grace window.
+   *
+   * The base disconnect() calls onDisconnect() (left as the no-op default here,
+   * so it does NOT arm grace), then closes the socket. We follow up with
+   * closeAll() to kill every PTY. Because onDisconnect() does not schedule grace
+   * timers, there is nothing for closeAll() to undo — the two paths no longer
+   * fight (transient = grace via onWebSocketClose; explicit = closeAll here).
+   */
+  disconnect(): void {
+    super.disconnect()
     this.manager.closeAll()
   }
 
