@@ -187,10 +187,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   protected createWebSocket(): WebSocket {
+    // Re-send ALB sticky cookies captured on the previous handshake so a
+    // reconnect lands on the same API task (scale-out safe).
+    const cookie = this.getStickyCookieHeader()
     return new WebSocket(this.wsUrl, {
       headers: {
         Authorization: `Bearer ${this.token}`,
         'X-Agent-Id': this.agentId,
+        ...(cookie ? { Cookie: cookie } : {}),
       },
     })
   }
