@@ -1,3 +1,5 @@
+import type { IncomingMessage } from 'http'
+
 import WebSocket from 'ws'
 
 import { WS_HEARTBEAT_INTERVAL_MS, WS_PONG_MAX_MISSED } from './constants'
@@ -39,6 +41,14 @@ export abstract class BaseWebSocketConnection<TMessage> {
    */
   private heartbeatAlive = false
   private heartbeatMissed = 0
+  /**
+   * ALB sticky-session cookies (AWSALB / AWSALBCORS etc.) captured from the
+   * WS handshake (upgrade) response's Set-Cookie headers, keyed by cookie
+   * name. Re-sent as a Cookie header on reconnect so the agent lands on the
+   * SAME API task when the API is scaled out behind an ALB. In-memory only —
+   * stickiness across agent restarts is not needed.
+   */
+  private readonly stickyCookies = new Map<string, string>()
 
   constructor(options: BaseWebSocketOptions) {
     this.options = options
@@ -97,9 +107,50 @@ export abstract class BaseWebSocketConnection<TMessage> {
     // default: no-op
   }
 
+  /**
+   * Cookie request header assembled from the sticky cookies captured on the
+   * previous handshake, or undefined when none were received. Subclasses that
+   * build their own handshake headers in createWebSocket() should include
+   * this so reconnects stick to the same ALB target.
+   */
+  protected getStickyCookieHeader(): string | undefined {
+    if (this.stickyCookies.size === 0) return undefined
+    return Array.from(this.stickyCookies.entries())
+      .map(([name, value]) => `${name}=${value}`)
+      .join('; ')
+  }
+
+  /**
+   * Capture Set-Cookie headers from the WS handshake (upgrade) response.
+   * Only the `name=value` pair is kept (attributes like Path/Expires are
+   * request-irrelevant); a later handshake overwrites cookies by name.
+   */
+  private captureStickyCookies(response: IncomingMessage): void {
+    const setCookies = response.headers['set-cookie']
+    if (!setCookies || setCookies.length === 0) return
+    for (const setCookie of setCookies) {
+      const pair = setCookie.split(';')[0]
+      const eq = pair.indexOf('=')
+      if (eq <= 0) continue
+      const name = pair.slice(0, eq).trim()
+      const value = pair.slice(eq + 1).trim()
+      if (!name) continue
+      this.stickyCookies.set(name, value)
+    }
+    logger.debug(
+      `${this.options.logPrefix} Captured ${this.stickyCookies.size} sticky cookie(s) from handshake`,
+    )
+  }
+
   protected doConnect(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const ws = this.createWebSocket()
+
+      ws.on('upgrade', (response: IncomingMessage) => {
+        // ALB sticky cookies (AWSALB / AWSALBCORS) arrive on the handshake
+        // response; keep them so the next reconnect targets the same task.
+        this.captureStickyCookies(response)
+      })
 
       ws.on('open', () => {
         this.startHeartbeat(ws)
