@@ -87,11 +87,25 @@ describe('i18n', () => {
     })
 
     it('should detect locale from Intl.DateTimeFormat when no other source', () => {
-      // No --lang, no env vars, no config.json — Intl.DateTimeFormat is used
-      const { initI18n, t } = require('../src/i18n')
-      initI18n()
-      // Intl returns 'en-US' etc on most systems, so English is expected
-      expect(t('cmd.start')).toBe('Start agent (all registered projects)')
+      // Mock Intl.DateTimeFormat to return English (avoids system-locale dependency)
+      const origDateTimeFormat = globalThis.Intl.DateTimeFormat
+      ;(globalThis.Intl as unknown as Record<string, unknown>).DateTimeFormat = () => ({
+        resolvedOptions: () => ({ locale: 'en-US' }),
+      })
+
+      // Mock os.homedir to a dir with no config.json so step 2 is skipped
+      jest.doMock('os', () => {
+        const actualOs = jest.requireActual<typeof import('os')>('os')
+        return { ...actualOs, homedir: () => actualOs.tmpdir() }
+      })
+
+      try {
+        const { initI18n, t } = require('../src/i18n')
+        initI18n()
+        expect(t('cmd.start')).toBe('Start agent (all registered projects)')
+      } finally {
+        ;(globalThis.Intl as unknown as Record<string, unknown>).DateTimeFormat = origDateTimeFormat
+      }
     })
   })
 
