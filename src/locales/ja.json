@@ -164,6 +164,8 @@
   "docker.loginStep3": "トークンは長期間有効です。毎回設定が必要な場合は .bashrc や .zshrc に export を追加してください。",
   "docker.usingCustomDockerfile": "カスタムDockerfileを使用: {{path}}",
   "docker.dockerfileSynced": "デフォルトDockerfileを書き出しました: {{path}}",
+  "docker.dockerfileUpdated": "バンドル版Dockerfileが変更されたため設定ファイルを更新しました: {{path}}",
+  "docker.dockerfileCustomized": "Dockerfileがカスタマイズされているため自動更新をスキップしました。最新版を手動で反映してください: {{path}}",
   "docker.dockerfileSyncFailed": "Dockerfileの書き出しに失敗しました: {{message}}",
   "docker.diffNoTarget": "比較対象のDockerfileがありません。パスを指定するか設定にdockerfilePathを設定してください。",
   "docker.diffTargetNotFound": "Dockerfileが見つかりません: {{path}}",

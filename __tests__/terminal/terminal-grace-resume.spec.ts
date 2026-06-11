@@ -7,15 +7,22 @@
  * `TerminalWebSocket.onDisconnect()`, which immediately kills every PTY. The
  * user's live shell is therefore destroyed and cannot be recovered on reconnect.
  *
- * Confirmed fix (NOT implemented yet — these tests must be RED):
- *   - grace = 300s: on WS disconnect, PTYs are NOT killed immediately. Within
- *     the grace window a reconnect with the same sessionId resumes (reuses) the
- *     still-alive PTY. Only after the grace window expires is the PTY killed.
+ * Confirmed fix:
+ *   - grace window (SESSION_GRACE_TIMEOUT_MS): on WS disconnect, PTYs are NOT
+ *     killed immediately. Within the grace window a reconnect with the same
+ *     sessionId resumes (reuses) the still-alive PTY. Only after the grace
+ *     window expires is the PTY killed.
  *
  * These tests assert the real, observable behaviour:
  *   1. onDisconnect does not kill PTYs immediately (session survives).
- *   2. A reconnect within grace (<300s) reuses the same PTY (resume), not a new one.
- *   3. After the grace window (>300s) the PTY is killed and removed.
+ *   2. A reconnect within grace reuses the same PTY (resume), not a new one.
+ *   3. After the grace window the PTY is killed and removed.
+ *
+ * Follow-up fix (terminal idle session loss, NOT implemented yet — RED):
+ *   the default grace is extended from 5 minutes to 60 minutes
+ *   (SESSION_GRACE_TIMEOUT_MS = 3_600_000) so an idle production terminal is
+ *   not lost. The duration-based tests below therefore derive all timings from
+ *   SESSION_GRACE_TIMEOUT_MS instead of hardcoding 300s.
  *
  * They reference APIs the fix is expected to introduce
  * (SESSION_GRACE_TIMEOUT_MS, TerminalSessionManager.closeAllGracefully) which do
@@ -87,11 +94,10 @@ describe('Terminal grace / resume on WebSocket disconnect (B-1 failing tests)', 
     jest.useRealTimers()
   })
 
-  it('defines a 300s grace timeout constant', () => {
-    // RED: SESSION_GRACE_TIMEOUT_MS does not exist on constants yet.
-    expect(
-      (constants as unknown as Record<string, number>).SESSION_GRACE_TIMEOUT_MS,
-    ).toBe(300 * 1000)
+  it('defines a 60-minute default grace timeout constant', () => {
+    // RED until the idle-session fix lands: the default grace must be
+    // extended from 5 minutes (300_000) to 60 minutes (3_600_000).
+    expect(constants.SESSION_GRACE_TIMEOUT_MS).toBe(3_600_000)
   })
 
   it('does NOT kill the PTY immediately on disconnect (grace, not closeAll)', () => {
@@ -110,7 +116,7 @@ describe('Terminal grace / resume on WebSocket disconnect (B-1 failing tests)', 
     expect(manager.getSession('grace-session')?.isAlive()).toBe(true)
   })
 
-  it('resumes the same PTY when reconnecting within the grace window (<300s)', () => {
+  it('resumes the same PTY when reconnecting within the grace window', () => {
     const original = manager.createSessionWithId('resume-session')
     expect(original).not.toBeNull()
     const originalPty = MockPty.instances[0]
@@ -118,8 +124,8 @@ describe('Terminal grace / resume on WebSocket disconnect (B-1 failing tests)', 
     // Disconnect — schedule grace, do not kill.
     ;(manager as unknown as { closeAllGracefully: () => void }).closeAllGracefully()
 
-    // Reconnect 100s later, well within the 300s grace window.
-    jest.advanceTimersByTime(100 * 1000)
+    // Reconnect a third of the way through the grace window, well within it.
+    jest.advanceTimersByTime(constants.SESSION_GRACE_TIMEOUT_MS / 3)
 
     // Re-open with the same sessionId. The fix must return the existing,
     // still-alive session (resume) instead of spawning a new PTY.
@@ -130,7 +136,7 @@ describe('Terminal grace / resume on WebSocket disconnect (B-1 failing tests)', 
     expect(originalPty.killed).toBe(false)
   })
 
-  it('kills the PTY once the grace window (>300s) has elapsed without reconnect', () => {
+  it('kills the PTY once the grace window has elapsed without reconnect', () => {
     const session = manager.createSessionWithId('expire-session')
     expect(session).not.toBeNull()
     const pty = MockPty.instances[0]
@@ -138,11 +144,11 @@ describe('Terminal grace / resume on WebSocket disconnect (B-1 failing tests)', 
     ;(manager as unknown as { closeAllGracefully: () => void }).closeAllGracefully()
 
     // Still alive just before the grace deadline.
-    jest.advanceTimersByTime(299 * 1000)
+    jest.advanceTimersByTime(constants.SESSION_GRACE_TIMEOUT_MS - 1000)
     expect(pty.killed).toBe(false)
     expect(manager.getSession('expire-session')).toBeDefined()
 
-    // Cross the 300s grace boundary — the PTY must now be killed and removed.
+    // Cross the grace boundary — the PTY must now be killed and removed.
     jest.advanceTimersByTime(2 * 1000)
     expect(pty.killed).toBe(true)
     expect(manager.getSession('expire-session')).toBeUndefined()
@@ -161,7 +167,9 @@ describe('Terminal grace / resume on WebSocket disconnect (B-1 failing tests)', 
 
     // When the grace timer eventually fires it must find no session and do
     // nothing — no double kill, no throw.
-    expect(() => jest.advanceTimersByTime(301 * 1000)).not.toThrow()
+    expect(() =>
+      jest.advanceTimersByTime(constants.SESSION_GRACE_TIMEOUT_MS + 1000),
+    ).not.toThrow()
     expect(manager.getSession('exited-during-grace')).toBeUndefined()
   })
 
@@ -171,17 +179,17 @@ describe('Terminal grace / resume on WebSocket disconnect (B-1 failing tests)', 
     const pty = MockPty.instances[0]
 
     ;(manager as unknown as { closeAllGracefully: () => void }).closeAllGracefully()
-    jest.advanceTimersByTime(200 * 1000)
+    jest.advanceTimersByTime((constants.SESSION_GRACE_TIMEOUT_MS * 2) / 3)
 
     // A second disconnect (e.g. reconnect then immediate re-drop) restarts the
-    // 300s window, so the session survives past the original deadline.
+    // grace window, so the session survives past the original deadline.
     ;(manager as unknown as { closeAllGracefully: () => void }).closeAllGracefully()
-    jest.advanceTimersByTime(200 * 1000)
+    jest.advanceTimersByTime((constants.SESSION_GRACE_TIMEOUT_MS * 2) / 3)
     expect(pty.killed).toBe(false)
     expect(manager.getSession('repeat-disconnect')).toBeDefined()
 
-    // It is finally killed 300s after the most recent disconnect.
-    jest.advanceTimersByTime(101 * 1000)
+    // It is finally killed one grace window after the most recent disconnect.
+    jest.advanceTimersByTime(constants.SESSION_GRACE_TIMEOUT_MS / 3 + 1000)
     expect(pty.killed).toBe(true)
     expect(manager.getSession('repeat-disconnect')).toBeUndefined()
   })
