@@ -46,12 +46,6 @@ export class TerminalSessionManager {
       this.sessions.delete(sessionId)
     })
 
-    session.setOnIdleTimeout(() => {
-      this.clearGraceTimer(sessionId)
-      session.kill()
-      this.sessions.delete(sessionId)
-    })
-
     this.sessions.set(sessionId, session)
     return session
   }

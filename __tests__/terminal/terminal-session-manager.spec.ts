@@ -141,21 +141,6 @@ describe('TerminalSessionManager', () => {
       })
     })
 
-    it('sets up idle timeout to auto-remove session', (done) => {
-      const origTimeout = constants.SESSION_IDLE_TIMEOUT_MS
-      Object.defineProperty(constants, 'SESSION_IDLE_TIMEOUT_MS', { value: 30, writable: true })
-
-      const session = manager.createSessionWithId('idle-test')
-      expect(session).not.toBeNull()
-
-      const check = setInterval(() => {
-        if (!manager.getSession('idle-test')) {
-          clearInterval(check)
-          Object.defineProperty(constants, 'SESSION_IDLE_TIMEOUT_MS', { value: origTimeout, writable: true })
-          done()
-        }
-      }, 10)
-    })
   })
 
   describe('getSession', () => {
