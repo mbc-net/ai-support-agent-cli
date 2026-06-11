@@ -45,6 +45,7 @@ jest.mock('../../src/docker/version-manager', () => ({
   resetInstalledVersionCache: jest.fn(),
 }))
 
+import * as crypto from 'crypto'
 import * as fs from 'fs'
 import { syncDockerfileToConfigDir } from '../../src/docker/dockerfile-sync'
 import { migrateProjectConfigDir } from '../../src/docker/project-config'
@@ -60,14 +61,30 @@ const mockedReExecProcess = jest.mocked(reExecProcess)
 const mockedIsValidVersion = jest.mocked(isValidVersion)
 const mockedResetInstalledVersionCache = jest.mocked(resetInstalledVersionCache)
 
+const BUNDLED_CONTENT = 'FROM node:24-slim\n# bundled v2'
+const BUNDLED_HASH = crypto.createHash('sha256').update(BUNDLED_CONTENT).digest('hex')
+
 describe('dockerfile-sync', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    mockedFs.mkdirSync.mockReturnValue(undefined)
+    mockedFs.copyFileSync.mockReturnValue(undefined)
+    mockedFs.writeFileSync.mockReturnValue(undefined)
   })
 
   describe('syncDockerfileToConfigDir', () => {
-    it('should skip if destination Dockerfile already exists', () => {
-      mockedFs.existsSync.mockReturnValue(true)
+    it('should skip if hash file exists and Dockerfile matches saved hash (not customised, up to date)', () => {
+      mockedFs.existsSync.mockImplementation((p: unknown) => {
+        const s = String(p)
+        return s === '/mock/config-dir/.dockerfile-sync-hash' || s === '/mock/config-dir/Dockerfile'
+      })
+      mockedFs.readFileSync.mockImplementation((p: unknown): string | Buffer => {
+        const s = String(p)
+        if (s === '/mock/docker/Dockerfile') return Buffer.from(BUNDLED_CONTENT)
+        if (s === '/mock/config-dir/Dockerfile') return Buffer.from(BUNDLED_CONTENT)
+        if (s === '/mock/config-dir/.dockerfile-sync-hash') return BUNDLED_HASH
+        throw new Error(`unexpected readFileSync: ${s}`)
+      })
 
       syncDockerfileToConfigDir()
 
@@ -75,14 +92,12 @@ describe('dockerfile-sync', () => {
       expect(logger.info).not.toHaveBeenCalled()
     })
 
-    it('should copy Dockerfile and log info when dest does not exist', () => {
-      mockedFs.existsSync.mockImplementation((p: unknown) => {
-        const s = p as string
-        // destDockerfile does not exist, srcEntrypoint does not exist either
-        return false
+    it('should copy Dockerfile and log info when hash file does not exist', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+      mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+        if (String(p) === '/mock/docker/Dockerfile') return Buffer.from(BUNDLED_CONTENT)
+        throw new Error(`unexpected readFileSync: ${String(p)}`)
       })
-      mockedFs.mkdirSync.mockReturnValue(undefined)
-      mockedFs.copyFileSync.mockReturnValue(undefined)
 
       syncDockerfileToConfigDir()
 
@@ -94,14 +109,15 @@ describe('dockerfile-sync', () => {
 
     it('should also copy entrypoint.sh when it exists alongside Dockerfile', () => {
       mockedFs.existsSync.mockImplementation((p: unknown) => {
-        const s = p as string
-        // dest Dockerfile does NOT exist (first check), but entrypoint src DOES exist
-        if (s === '/mock/config-dir/Dockerfile') return false
-        if (s.endsWith('entrypoint.sh')) return true
-        return false
+        const s = String(p)
+        return s === '/mock/docker/entrypoint.sh'
       })
-      mockedFs.mkdirSync.mockReturnValue(undefined)
-      mockedFs.copyFileSync.mockReturnValue(undefined)
+      mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+        if (String(p) === '/mock/docker/Dockerfile') return Buffer.from(BUNDLED_CONTENT)
+        // entrypoint.sh is part of the combined sync hash, so it is read too
+        if (String(p) === '/mock/docker/entrypoint.sh') return Buffer.from('#!/bin/sh\n# entrypoint')
+        throw new Error(`unexpected readFileSync: ${String(p)}`)
+      })
 
       syncDockerfileToConfigDir()
 
@@ -111,8 +127,11 @@ describe('dockerfile-sync', () => {
 
     it('should log a warning when copy throws a non-Error exception', () => {
       mockedFs.existsSync.mockReturnValue(false)
-      mockedFs.mkdirSync.mockReturnValue(undefined)
-      // Throw a string (non-Error) to cover the `String(err)` branch at line 42
+      mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+        if (String(p) === '/mock/docker/Dockerfile') return Buffer.from(BUNDLED_CONTENT)
+        throw new Error(`unexpected: ${String(p)}`)
+      })
+      // Throw a string (non-Error) to cover the `String(err)` branch
       mockedFs.copyFileSync.mockImplementation(() => { throw 'disk is full' })
 
       syncDockerfileToConfigDir()
@@ -124,7 +143,10 @@ describe('dockerfile-sync', () => {
 
     it('should log a warning when copy throws an Error instance', () => {
       mockedFs.existsSync.mockReturnValue(false)
-      mockedFs.mkdirSync.mockReturnValue(undefined)
+      mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+        if (String(p) === '/mock/docker/Dockerfile') return Buffer.from(BUNDLED_CONTENT)
+        throw new Error(`unexpected: ${String(p)}`)
+      })
       mockedFs.copyFileSync.mockImplementation(() => { throw new Error('permission denied') })
 
       syncDockerfileToConfigDir()
