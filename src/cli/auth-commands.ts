@@ -9,7 +9,7 @@ import {
 import { t } from '../i18n'
 import { logger } from '../logger'
 import type { ProjectRegistration } from '../types'
-import { getErrorMessage, validateApiUrl } from '../utils'
+import { exitWithError, getErrorMessage, validateApiUrl } from '../utils'
 import { installAndStartProject } from './service-command'
 
 function tryInstallAndStartProject(registration: ProjectRegistration): void {
@@ -28,16 +28,14 @@ async function performBrowserAuth(opts: {
   const port = opts.port ? (() => {
     const parsed = parseInt(opts.port, 10)
     if (isNaN(parsed) || parsed < 1 || parsed > 65535) {
-      logger.error(t('auth.invalidPort', { port: opts.port }))
-      process.exit(1)
+      exitWithError(t('auth.invalidPort', { port: opts.port }))
     }
     return parsed
   })() : undefined
 
   const urlError = validateApiUrl(opts.url)
   if (urlError) {
-    logger.error(t('auth.invalidProtocol'))
-    process.exit(1)
+    exitWithError(t('auth.invalidProtocol'))
   }
   const origin = new URL(opts.url).origin
   const { url: serverUrl, nonce, waitForCallback, stop } = await startAuthServer(port, origin)
@@ -58,13 +56,11 @@ async function performBrowserAuth(opts: {
 
   const apiUrl = opts.apiUrl ?? result.apiUrl
   if (!apiUrl) {
-    logger.error(t('auth.noApiUrl'))
-    process.exit(1)
+    exitWithError(t('auth.noApiUrl'))
   }
 
   if (!result.tenantCode) {
-    logger.error(t('auth.noTenantCode'))
-    process.exit(1)
+    exitWithError(t('auth.noTenantCode'))
   }
   const projectCode = result.projectCode ?? PROJECT_CODE_DEFAULT
   const registration: ProjectRegistration = { tenantCode: result.tenantCode, projectCode, token: result.token, apiUrl }
@@ -81,8 +77,7 @@ async function handleBrowserAuthCommand(
     const { projectCode } = await performBrowserAuth(opts)
     logger.success(t(successMessageKey, { projectCode }))
   } catch (error) {
-    logger.error(t('auth.failed', { message: getErrorMessage(error) }))
-    process.exit(1)
+    exitWithError(t('auth.failed', { message: getErrorMessage(error) }))
   }
 }
 
@@ -116,8 +111,7 @@ export function registerAuthCommands(program: Command): void {
     .action(async (opts: { token: string; apiUrl: string; projectCode?: string }) => {
       const apiUrlError = validateApiUrl(opts.apiUrl)
       if (apiUrlError) {
-        logger.error(apiUrlError)
-        process.exit(1)
+        exitWithError(apiUrlError)
       }
 
       let projectCode = opts.projectCode
@@ -133,13 +127,11 @@ export function registerAuthCommands(program: Command): void {
         tenantCode = config.project.tenantCode
         logger.info(t('config.resolvedProject', { projectCode }))
       } catch (error) {
-        logger.error(t('config.resolveProjectFailed', { message: getErrorMessage(error) }))
-        process.exit(1)
+        exitWithError(t('config.resolveProjectFailed', { message: getErrorMessage(error) }))
       }
 
       if (!tenantCode) {
-        logger.error(t('config.resolveProjectFailed', { message: 'tenantCode not returned from API' }))
-        process.exit(1)
+        exitWithError(t('config.resolveProjectFailed', { message: 'tenantCode not returned from API' }))
       }
 
       const registration: ProjectRegistration = {

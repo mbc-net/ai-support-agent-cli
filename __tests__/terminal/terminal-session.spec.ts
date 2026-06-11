@@ -181,18 +181,6 @@ describe('TerminalSession', () => {
     session.write('no_such_command_xyz 2>&1\n')
   })
 
-  it('should trigger idle timeout and kill session', (done) => {
-    const origTimeout = constants.SESSION_IDLE_TIMEOUT_MS
-    Object.defineProperty(constants, 'SESSION_IDLE_TIMEOUT_MS', { value: 50, writable: true })
-
-    session = new TerminalSession('test-idle')
-    session.onExit(() => {
-      Object.defineProperty(constants, 'SESSION_IDLE_TIMEOUT_MS', { value: origTimeout, writable: true })
-      done()
-    })
-    // Don't write anything — session should idle-timeout and kill itself
-  })
-
   describe('envVarsOverride', () => {
     it('passes envVarsOverride values to pty.spawn env', () => {
       const pty = require('node-pty')
@@ -589,23 +577,6 @@ describe('TerminalSessionManager', () => {
     expect(manager.size).toBe(2)
     manager.closeAll()
     expect(manager.size).toBe(0)
-  })
-
-  it('should remove session on idle timeout', (done) => {
-    const origTimeout = constants.SESSION_IDLE_TIMEOUT_MS
-    Object.defineProperty(constants, 'SESSION_IDLE_TIMEOUT_MS', { value: 50, writable: true })
-
-    const session = manager.createSession()
-    expect(session).not.toBeNull()
-    const sessionId = session!.sessionId
-
-    const check = setInterval(() => {
-      if (!manager.getSession(sessionId)) {
-        clearInterval(check)
-        Object.defineProperty(constants, 'SESSION_IDLE_TIMEOUT_MS', { value: origTimeout, writable: true })
-        done()
-      }
-    }, 20)
   })
 
   it('should remove session from map on exit', (done) => {

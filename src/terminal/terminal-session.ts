@@ -9,7 +9,7 @@ import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
 import { getErrorMessage } from '../utils'
 import {
-  SESSION_IDLE_TIMEOUT_MS,
+  SCROLLBACK_BUFFER_MAX_BYTES,
   TERMINAL_DEFAULT_COLS,
   TERMINAL_DEFAULT_ROWS,
 } from './constants'
@@ -69,6 +69,21 @@ export function isNodePtyAvailable(): boolean {
   return pty !== null
 }
 
+/**
+ * Resume-validation metadata recorded at PTY creation time.
+ *
+ * The API includes `meta` in the `open` message; the session stores it and a
+ * later resume `open` must present an EXACTLY matching meta to reattach to
+ * this PTY (see TerminalSessionManager.resumeSession). This prevents an
+ * API-restart resume from handing an existing PTY to a different tenant /
+ * project / user.
+ */
+export interface TerminalSessionMeta {
+  tenantCode: string
+  projectCode: string
+  userId: string
+}
+
 export interface TerminalSessionOptions {
   cols?: number
   rows?: number
@@ -81,6 +96,12 @@ export interface TerminalSessionOptions {
    * 含まれないキーは PTY が継承する process.env をそのまま残す。
    */
   envVarsOverride?: Record<string, string>
+  /**
+   * Resume 検証用メタ（tenantCode / projectCode / userId）。
+   * open メッセージの meta をそのまま記録し、resume open の meta と完全一致
+   * した場合のみ既存 PTY への再接続を許可する。
+   */
+  meta?: TerminalSessionMeta
 }
 
 export interface TerminalSessionInfo {
@@ -127,8 +148,15 @@ export class TerminalSession {
    */
   private internalExitCallback: ExitCallback | null = null
   private exited = false
-  private idleTimer: ReturnType<typeof setTimeout> | null = null
-  private onIdleTimeout: (() => void) | null = null
+  /** Resume-validation meta recorded at creation (null when the open had no meta). */
+  private readonly meta: TerminalSessionMeta | null
+  /**
+   * Scrollback ring buffer: PTY output chunks appended alongside the live
+   * stdout relay, capped at SCROLLBACK_BUFFER_MAX_BYTES by dropping the OLDEST
+   * bytes. Replayed to the client on a successful resume.
+   */
+  private readonly scrollbackChunks: Buffer[] = []
+  private scrollbackBytes = 0
 
   /**
    * 過去の terminal-sandbox-* ディレクトリを一括削除する。
@@ -177,6 +205,7 @@ export class TerminalSession {
     }
 
     this.sessionId = sessionId
+    this.meta = options.meta ?? null
     this.cols = options.cols ?? TERMINAL_DEFAULT_COLS
     this.rows = options.rows ?? TERMINAL_DEFAULT_ROWS
     this.cwd = options.cwd ?? process.cwd()
@@ -265,6 +294,9 @@ export class TerminalSession {
 
     this.ptyProcess.onData((data: string) => {
       this.touchActivity()
+      // Append to the scrollback ring buffer alongside the live relay so a
+      // later resume can replay output produced while the WS was down.
+      this.appendScrollback(data)
       if (this.dataCallback) {
         this.dataCallback(data)
       }
@@ -272,7 +304,6 @@ export class TerminalSession {
 
     this.ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
       this.exited = true
-      this.clearIdleTimer()
       this.cleanupTmpDir()
       // Manager cleanup runs first and unconditionally, then the public
       // (websocket) listener. The internal slot cannot be overwritten by a
@@ -284,12 +315,64 @@ export class TerminalSession {
         this.exitCallback(exitCode)
       }
     })
-
-    this.resetIdleTimer()
   }
 
+  /**
+   * Register the (single) live data relay callback. Registration REPLACES any
+   * previous callback — it does not add a listener — so re-registering on a
+   * resume cannot double-send stdout.
+   */
   onData(callback: DataCallback): void {
     this.dataCallback = callback
+  }
+
+  /** Resume-validation meta recorded at creation, or null if none was given. */
+  getMeta(): TerminalSessionMeta | null {
+    return this.meta
+  }
+
+  /**
+   * Snapshot of the scrollback ring buffer (oldest → newest), at most
+   * SCROLLBACK_BUFFER_MAX_BYTES bytes. Returns an empty Buffer when no output
+   * has been produced yet.
+   */
+  getScrollbackBuffer(): Buffer {
+    return Buffer.concat(this.scrollbackChunks)
+  }
+
+  /**
+   * Append PTY output to the ring buffer, evicting the OLDEST bytes once the
+   * total exceeds SCROLLBACK_BUFFER_MAX_BYTES. Eviction may slice a chunk in
+   * the middle; the cut is then advanced to the next UTF-8 character boundary
+   * (a buffer starting mid-sequence would replay as U+FFFD mojibake at the
+   * top of the restored scrollback), so the kept total may fall a few bytes
+   * under the cap.
+   */
+  private appendScrollback(data: string): void {
+    let chunk = Buffer.from(data, 'utf-8')
+    // A single chunk larger than the cap: keep only its newest tail.
+    if (chunk.byteLength > SCROLLBACK_BUFFER_MAX_BYTES) {
+      chunk = chunk.subarray(
+        alignToUtf8Boundary(chunk, chunk.byteLength - SCROLLBACK_BUFFER_MAX_BYTES),
+      )
+    }
+    this.scrollbackChunks.push(chunk)
+    this.scrollbackBytes += chunk.byteLength
+    while (this.scrollbackBytes > SCROLLBACK_BUFFER_MAX_BYTES) {
+      const oldest = this.scrollbackChunks[0]
+      const excess = this.scrollbackBytes - SCROLLBACK_BUFFER_MAX_BYTES
+      const cut =
+        excess >= oldest.byteLength ? oldest.byteLength : alignToUtf8Boundary(oldest, excess)
+      if (cut >= oldest.byteLength) {
+        // Drop the whole oldest chunk.
+        this.scrollbackChunks.shift()
+        this.scrollbackBytes -= oldest.byteLength
+      } else {
+        // Trim only the leading bytes of the oldest chunk.
+        this.scrollbackChunks[0] = oldest.subarray(cut)
+        this.scrollbackBytes -= cut
+      }
+    }
   }
 
   onExit(callback: ExitCallback): void {
@@ -302,10 +385,6 @@ export class TerminalSession {
    */
   setOnExitInternal(callback: () => void): void {
     this.internalExitCallback = callback
-  }
-
-  setOnIdleTimeout(callback: () => void): void {
-    this.onIdleTimeout = callback
   }
 
   write(data: string): void {
@@ -324,7 +403,6 @@ export class TerminalSession {
 
   kill(): void {
     if (this.exited) return
-    this.clearIdleTimer()
     this.ptyProcess.kill()
     this.cleanupTmpDir()
   }
@@ -364,26 +442,21 @@ export class TerminalSession {
     }
   }
 
+  // Diagnostics only — lastActivity is exposed via getInfo() for monitoring.
+  // It does NOT drive any eviction or timer; do not add idle-kill logic here.
   private touchActivity(): void {
     this.lastActivity = Date.now()
-    this.resetIdleTimer()
   }
+}
 
-  private resetIdleTimer(): void {
-    this.clearIdleTimer()
-    this.idleTimer = setTimeout(() => {
-      if (this.onIdleTimeout) {
-        this.onIdleTimeout()
-      } else {
-        this.kill()
-      }
-    }, SESSION_IDLE_TIMEOUT_MS)
+/**
+ * Advance `pos` past UTF-8 continuation bytes (0b10xxxxxx) so a leading cut
+ * lands on a character boundary. Cutting mid-sequence would leave orphaned
+ * continuation bytes that decode to U+FFFD on replay.
+ */
+function alignToUtf8Boundary(buf: Buffer, pos: number): number {
+  while (pos < buf.byteLength && (buf[pos] & 0xc0) === 0x80) {
+    pos++
   }
-
-  private clearIdleTimer(): void {
-    if (this.idleTimer) {
-      clearTimeout(this.idleTimer)
-      this.idleTimer = null
-    }
-  }
+  return pos
 }

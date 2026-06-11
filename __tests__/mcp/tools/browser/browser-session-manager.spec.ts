@@ -10,13 +10,21 @@ jest.mock('../../../../src/mcp/tools/browser/playwright-loader', () => ({
 
 jest.mock('../../../../src/logger')
 
-// Mock BrowserSession so we don't need Playwright
+// Capture the onClosed callback so tests can simulate self-close (idle timeout)
+let capturedOnClosed: (() => void) | undefined
+
 jest.mock('../../../../src/mcp/tools/browser/browser-session', () => {
   return {
-    BrowserSession: jest.fn().mockImplementation(() => ({
-      close: jest.fn().mockResolvedValue(undefined),
-      isActive: jest.fn().mockReturnValue(true),
-    })),
+    BrowserSession: jest.fn().mockImplementation((_idleTimeoutMs?: number, onClosed?: () => void) => {
+      capturedOnClosed = onClosed
+      return {
+        close: jest.fn().mockImplementation(() => {
+          onClosed?.()
+          return Promise.resolve()
+        }),
+        isActive: jest.fn().mockReturnValue(true),
+      }
+    }),
   }
 })
 
@@ -249,6 +257,59 @@ describe('BrowserSessionManager', () => {
       await manager.close('session-1')
 
       expect(manager.size).toBe(1)
+    })
+  })
+
+  describe('session leak regression', () => {
+    it('should decrease size when session self-closes via onClosed callback', async () => {
+      await manager.getOrCreate('session-1')
+      expect(manager.size).toBe(1)
+
+      // Simulate idle timeout: session calls onClosed on its own
+      expect(capturedOnClosed).toBeDefined()
+      capturedOnClosed!()
+
+      expect(manager.size).toBe(0)
+    })
+
+    it('should allow new session after self-close frees up the slot', async () => {
+      const smallManager = new BrowserSessionManager(2)
+      await smallManager.getOrCreate('session-1')
+      await smallManager.getOrCreate('session-2')
+
+      // Both slots full — new session must fail
+      await expect(smallManager.getOrCreate('session-3')).rejects.toThrow(
+        'Max browser sessions reached (2)',
+      )
+
+      // Simulate session-1 self-closing via idle timeout
+      capturedOnClosed!()
+
+      // Now one slot is free — new session must succeed
+      await expect(smallManager.getOrCreate('session-3')).resolves.toBeDefined()
+    })
+
+    it('should clean up conversation links when session self-closes', async () => {
+      await manager.getOrCreate('session-1')
+      manager.linkConversation('conv-1', 'session-1')
+
+      capturedOnClosed!()
+
+      expect(manager.getByConversationId('conv-1')).toBeUndefined()
+      expect(manager.getSessionIdByConversationId('conv-1')).toBeUndefined()
+    })
+
+    it('should not throw when onClosed fires after explicit manager.close()', async () => {
+      await manager.getOrCreate('session-1')
+      const onClosed = capturedOnClosed!
+
+      // Explicit close first
+      await manager.close('session-1')
+      expect(manager.size).toBe(0)
+
+      // onClosed fires again (e.g. idle timer already scheduled) — must be idempotent
+      expect(() => onClosed()).not.toThrow()
+      expect(manager.size).toBe(0)
     })
   })
 })
