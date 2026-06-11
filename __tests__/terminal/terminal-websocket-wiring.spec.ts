@@ -20,6 +20,7 @@
  * timers and a mocked node-pty.
  */
 
+import { SESSION_GRACE_TIMEOUT_MS } from '../../src/terminal/constants'
 import { TerminalWebSocket } from '../../src/terminal/terminal-websocket'
 import type { TerminalSessionManager } from '../../src/terminal/terminal-session-manager'
 
@@ -103,13 +104,15 @@ describe('TerminalWebSocket hook wiring (B-6 round 4)', () => {
 
     // Crucially, grace must be ARMED (a real timer), not merely a no-op that
     // leaves the PTY alive forever. RED before the fix: onWebSocketClose() was
-    // the no-op default, so the PTY survives 300s and this assertion fails.
-    jest.advanceTimersByTime(301 * 1000)
+    // the no-op default, so the PTY survives the grace window and this
+    // assertion fails. Timings derive from SESSION_GRACE_TIMEOUT_MS (60 min
+    // default, env-overridable) instead of hardcoding a duration.
+    jest.advanceTimersByTime(SESSION_GRACE_TIMEOUT_MS + 1000)
     expect(pty.killed).toBe(true)
     expect(manager.getSession('wire-close')).toBeUndefined()
   })
 
-  it('kills a grace-held PTY 300s after a transient close with no reconnect', () => {
+  it('kills a grace-held PTY one grace window after a transient close with no reconnect', () => {
     const { ws, manager } = makeTerminalWs()
     manager.createSessionWithId('wire-close-expire')
     const pty = MockPty.instances[0]
@@ -117,11 +120,11 @@ describe('TerminalWebSocket hook wiring (B-6 round 4)', () => {
     ;(ws as unknown as HookAccess).onWebSocketClose()
 
     // Just before the grace deadline: still alive.
-    jest.advanceTimersByTime(299 * 1000)
+    jest.advanceTimersByTime(SESSION_GRACE_TIMEOUT_MS - 1000)
     expect(pty.killed).toBe(false)
     expect(manager.getSession('wire-close-expire')).toBeDefined()
 
-    // Past 300s with no reconnect: killed and removed.
+    // Past the grace window with no reconnect: killed and removed.
     jest.advanceTimersByTime(2 * 1000)
     expect(pty.killed).toBe(true)
     expect(manager.getSession('wire-close-expire')).toBeUndefined()
@@ -132,16 +135,16 @@ describe('TerminalWebSocket hook wiring (B-6 round 4)', () => {
     const original = manager.createSessionWithId('wire-resume')!
 
     ;(ws as unknown as HookAccess).onWebSocketClose()
-    jest.advanceTimersByTime(100 * 1000) // within grace
+    jest.advanceTimersByTime(SESSION_GRACE_TIMEOUT_MS / 3) // within grace
 
     // Reconnect re-opens the same sessionId: must reuse the live PTY.
     const resumed = manager.createSessionWithId('wire-resume')
     expect(resumed).toBe(original)
     expect(MockPty.instances).toHaveLength(1)
 
-    // The orphan grace timer must have been cancelled: advancing past 300s must
-    // NOT kill the resumed live session.
-    jest.advanceTimersByTime(301 * 1000)
+    // The orphan grace timer must have been cancelled: advancing past the
+    // grace window must NOT kill the resumed live session.
+    jest.advanceTimersByTime(SESSION_GRACE_TIMEOUT_MS + 1000)
     expect(MockPty.instances[0].killed).toBe(false)
     expect(manager.getSession('wire-resume')).toBe(original)
   })
@@ -160,7 +163,7 @@ describe('TerminalWebSocket hook wiring (B-6 round 4)', () => {
     expect(manager.size).toBe(0)
 
     // No grace timer should remain that could fire later.
-    expect(() => jest.advanceTimersByTime(301 * 1000)).not.toThrow()
+    expect(() => jest.advanceTimersByTime(SESSION_GRACE_TIMEOUT_MS + 1000)).not.toThrow()
     expect(manager.size).toBe(0)
   })
 
@@ -171,7 +174,7 @@ describe('TerminalWebSocket hook wiring (B-6 round 4)', () => {
 
     ws.disconnect()
 
-    // Killed right away — not held for 300s.
+    // Killed right away — not held for the grace window.
     expect(pty.killed).toBe(true)
     expect(manager.getSession('wire-disconnect-grace')).toBeUndefined()
   })
