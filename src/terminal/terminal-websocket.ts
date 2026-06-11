@@ -7,10 +7,13 @@ import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import { logger } from '../logger'
 import { buildWsUrl, getErrorMessage } from '../utils'
 
+import type { EnvVarsProvider } from '../env-vars-filter'
 import {
   TERMINAL_WS_MAX_RECONNECT_RETRIES,
   TERMINAL_WS_RECONNECT_BASE_DELAY_MS,
 } from './constants'
+import type { TerminalSession } from './terminal-session'
+import { TerminalSessionManager } from './terminal-session-manager'
 
 const MIN_TERMINAL_SIZE = 1
 const MAX_TERMINAL_SIZE = 1000
@@ -18,7 +21,6 @@ const MAX_TERMINAL_SIZE = 1000
 function clampTerminalSize(value: number): number {
   return Math.min(Math.max(Math.floor(value), MIN_TERMINAL_SIZE), MAX_TERMINAL_SIZE)
 }
-import { TerminalSessionManager } from './terminal-session-manager'
 
 /**
  * Messages sent from API server to agent
@@ -38,23 +40,33 @@ export interface TerminalServerMessage {
    * GIT_SSH_COMMAND for the session (processed by TerminalSession).
    */
   envVarsOverride?: Record<string, string>
+  /**
+   * Resume-only open (3-repo protocol contract). When true the agent must
+   * NEVER spawn a new PTY: it either reattaches to the existing live PTY
+   * (meta exactly matching) or replies with `resume_failed`.
+   */
+  resume?: boolean
+  /**
+   * Resume-validation meta recorded at PTY creation and verified on resume.
+   */
+  meta?: { tenantCode: string; projectCode: string; userId: string }
 }
 
 /**
  * Messages sent from agent to API server
  */
 export interface TerminalAgentMessage {
-  type: 'ready' | 'stdout' | 'exit' | 'error'
+  type: 'ready' | 'stdout' | 'exit' | 'error' | 'replay' | 'resume_failed'
   sessionId: string
-  data?: string // Base64 encoded for stdout
+  data?: string // Base64 encoded for stdout / replay
   code?: number | null
   error?: string
   pid?: number
   cols?: number
   rows?: number
+  /** resume_failed reason: 'not_found' | 'meta_mismatch' | 'dead' */
+  reason?: string
 }
-
-import type { EnvVarsProvider } from '../env-vars-filter'
 
 // 既存の re-export（後方互換）
 export type { EnvVarsProvider } from '../env-vars-filter'
@@ -85,10 +97,14 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
   }
 
   protected createWebSocket(): WebSocket {
+    // Re-send ALB sticky cookies captured on the previous handshake so a
+    // reconnect lands on the same API task (scale-out safe).
+    const cookie = this.getStickyCookieHeader()
     return new WebSocket(this.wsUrl, {
       headers: {
         Authorization: `Bearer ${this.token}`,
         'X-Agent-Id': this.agentId,
+        ...(cookie ? { Cookie: cookie } : {}),
       },
     })
   }
@@ -170,6 +186,13 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       return
     }
 
+    // Resume-only open: reattach to the existing PTY or fail explicitly.
+    // Never falls back to spawning a new PTY (no-fallback rule).
+    if (msg.resume === true) {
+      this.handleResumeOpen(serverSessionId, msg)
+      return
+    }
+
     // Resolve cwd: if relative, resolve against projectDir
     let cwd = this.projectDir
     if (msg.cwd && this.projectDir) {
@@ -212,6 +235,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       rows: msg.rows,
       cwd,
       envVarsOverride,
+      meta: msg.meta,
     })
 
     if (!session) {
@@ -223,21 +247,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       return
     }
 
-    session.onData((data) => {
-      this.send({
-        type: 'stdout',
-        sessionId: serverSessionId,
-        data: Buffer.from(data).toString('base64'),
-      })
-    })
-
-    session.onExit((code) => {
-      this.send({
-        type: 'exit',
-        sessionId: serverSessionId,
-        code,
-      })
-    })
+    this.attachSessionRelay(session, serverSessionId)
 
     this.send({
       type: 'ready',
@@ -248,6 +258,81 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     })
 
     logger.debug(`[terminal-ws] Session opened: ${serverSessionId} (pid=${session.pid})`)
+  }
+
+  /**
+   * Resume-only open (`resume: true`). Reattaches to the existing live PTY
+   * when the presented meta exactly matches; otherwise replies `resume_failed`
+   * with the validation reason. A failed resume NEVER spawns a new PTY.
+   *
+   * Message order on success is fixed by spec (and tests):
+   *   ready → replay (skipped when the scrollback buffer is empty) → stdout…
+   * This whole method is synchronous, so no PTY data event can interleave
+   * between the relay re-registration and the ready/replay sends; any new
+   * output is delivered as `stdout` strictly after `replay`.
+   */
+  private handleResumeOpen(sessionId: string, msg: TerminalServerMessage): void {
+    const result = this.manager.resumeSession(sessionId, msg.meta)
+    if (!result.ok) {
+      logger.warn(`[terminal-ws] Resume failed (session=${sessionId}): ${result.reason}`)
+      this.send({
+        type: 'resume_failed',
+        sessionId,
+        reason: result.reason,
+      })
+      return
+    }
+
+    const session = result.session
+    if (typeof msg.cols === 'number' && typeof msg.rows === 'number') {
+      session.resize(clampTerminalSize(msg.cols), clampTerminalSize(msg.rows))
+    }
+
+    // Re-registering REPLACES the previous callbacks (single-slot setters in
+    // TerminalSession), so a resumed session cannot double-send stdout/exit.
+    this.attachSessionRelay(session, sessionId)
+
+    this.send({
+      type: 'ready',
+      sessionId,
+      pid: session.pid,
+      cols: session.cols,
+      rows: session.rows,
+    })
+
+    const scrollback = session.getScrollbackBuffer()
+    if (scrollback.byteLength > 0) {
+      this.send({
+        type: 'replay',
+        sessionId,
+        data: scrollback.toString('base64'),
+      })
+    }
+
+    logger.debug(`[terminal-ws] Session resumed: ${sessionId} (pid=${session.pid})`)
+  }
+
+  /**
+   * Wire the session's PTY output/exit to the WebSocket. TerminalSession holds
+   * a SINGLE callback per event (setter semantics), so calling this again on
+   * resume replaces — never stacks — the relay (no duplicate stdout frames).
+   */
+  private attachSessionRelay(session: TerminalSession, sessionId: string): void {
+    session.onData((data) => {
+      this.send({
+        type: 'stdout',
+        sessionId,
+        data: Buffer.from(data).toString('base64'),
+      })
+    })
+
+    session.onExit((code) => {
+      this.send({
+        type: 'exit',
+        sessionId,
+        code,
+      })
+    })
   }
 
   private handleStdin(msg: TerminalServerMessage): void {

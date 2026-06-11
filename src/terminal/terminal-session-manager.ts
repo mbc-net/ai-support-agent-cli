@@ -1,7 +1,20 @@
 import { TerminalSession, TerminalSessionOptions } from './terminal-session'
 import { MAX_CONCURRENT_SESSIONS, SESSION_GRACE_TIMEOUT_MS } from './constants'
 import { logger } from '../logger'
-import type { TerminalSessionInfo } from './terminal-session'
+import type { TerminalSessionInfo, TerminalSessionMeta } from './terminal-session'
+
+/**
+ * Why a resume-only open could not reattach to an existing PTY.
+ * Mirrors the `resume_failed.reason` protocol field (3-repo contract):
+ * - 'not_found'      — no session with this sessionId exists
+ * - 'dead'           — the session exists but its PTY already exited
+ * - 'meta_mismatch'  — the presented meta does not exactly match the recorded one
+ */
+export type ResumeFailureReason = 'not_found' | 'meta_mismatch' | 'dead'
+
+export type ResumeResult =
+  | { ok: true; session: TerminalSession }
+  | { ok: false; reason: ResumeFailureReason }
 
 export class TerminalSessionManager {
   private readonly sessions = new Map<string, TerminalSession>()
@@ -18,6 +31,37 @@ export class TerminalSessionManager {
     return this.createSessionWithId(sessionId, options)
   }
 
+  /**
+   * Resume-only lookup: NEVER spawns a new PTY (no-fallback rule). A resume
+   * open (`resume: true`) must route here — createSessionWithId() is the
+   * create-or-legacy-grace-resume path for non-resume opens.
+   *
+   * Succeeds only when the session exists, its PTY is alive, AND the presented
+   * meta exactly matches the meta recorded at creation. On success the pending
+   * grace timer (if any) is cancelled and the existing session is returned.
+   */
+  resumeSession(sessionId: string, meta?: TerminalSessionMeta): ResumeResult {
+    const session = this.sessions.get(sessionId)
+    if (!session) {
+      return { ok: false, reason: 'not_found' }
+    }
+    if (!session.isAlive()) {
+      return { ok: false, reason: 'dead' }
+    }
+    if (!metaMatches(session.getMeta(), meta)) {
+      return { ok: false, reason: 'meta_mismatch' }
+    }
+    this.clearGraceTimer(sessionId)
+    logger.debug(`[terminal] Resume validated; reattaching session: ${sessionId}`)
+    return { ok: true, session }
+  }
+
+  /**
+   * Create-or-legacy-grace-resume path for NON-resume opens. A reconnect that
+   * explicitly asks for a resume (`resume: true`) must use resumeSession()
+   * instead — this method spawns a new PTY when no live session exists, which
+   * a resume-only open must never do.
+   */
   createSessionWithId(sessionId: string, options: TerminalSessionOptions = {}): TerminalSession | null {
     // Any reconnect with this sessionId invalidates a pending grace timer: we
     // either resume the existing PTY or replace it with a new one. Clearing
@@ -125,4 +169,26 @@ export class TerminalSessionManager {
   get size(): number {
     return this.sessions.size
   }
+}
+
+/**
+ * Strict meta comparison for resume validation.
+ * - Either side absent → mismatch. A resume-capable API always attaches meta
+ *   to `resume: true` opens, and a legacy API never sends `resume: true` at
+ *   all (its reconnects go through the createSessionWithId grace-resume path),
+ *   so a meta-less resume is never a legitimate request. Refusing it closes
+ *   the takeover hole where a meta-less PTY could be claimed by anyone who
+ *   learned its sessionId.
+ * - Both present → every field must be strictly equal (no partial matching).
+ */
+function metaMatches(
+  recorded: TerminalSessionMeta | null,
+  presented: TerminalSessionMeta | undefined,
+): boolean {
+  if (!recorded || !presented) return false
+  return (
+    recorded.tenantCode === presented.tenantCode &&
+    recorded.projectCode === presented.projectCode &&
+    recorded.userId === presented.userId
+  )
 }

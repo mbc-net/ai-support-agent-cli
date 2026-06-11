@@ -740,6 +740,29 @@ describe('VsCodeTunnelWebSocket', () => {
       )
       expect(ws).toBeDefined()
     })
+
+    it('should include the ALB sticky cookie header when one was captured', () => {
+      // Simulate a previously captured handshake Set-Cookie via the same
+      // capture path the base class uses (avoids poking the private Map).
+      ;(
+        tunnel as unknown as {
+          captureStickyCookies(res: { headers: Record<string, string[] | undefined> }): void
+        }
+      ).captureStickyCookies({ headers: { 'set-cookie': ['AWSALB=vscode-sticky; Path=/'] } })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ws = (tunnel as any).createWebSocket()
+      expect(WebSocket).toHaveBeenCalledWith(
+        'wss://api.example.com/ws/agent-vscode',
+        expect.objectContaining({
+          headers: {
+            Authorization: 'Bearer test-token',
+            'X-Agent-Id': 'agent-123',
+            Cookie: 'AWSALB=vscode-sticky',
+          },
+        }),
+      )
+      expect(ws).toBeDefined()
+    })
   })
 
   describe('onOpen', () => {
