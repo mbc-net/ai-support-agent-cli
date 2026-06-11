@@ -9,7 +9,6 @@ import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
 import { getErrorMessage } from '../utils'
 import {
-  SESSION_IDLE_TIMEOUT_MS,
   TERMINAL_DEFAULT_COLS,
   TERMINAL_DEFAULT_ROWS,
 } from './constants'
@@ -127,8 +126,6 @@ export class TerminalSession {
    */
   private internalExitCallback: ExitCallback | null = null
   private exited = false
-  private idleTimer: ReturnType<typeof setTimeout> | null = null
-  private onIdleTimeout: (() => void) | null = null
 
   /**
    * 過去の terminal-sandbox-* ディレクトリを一括削除する。
@@ -272,7 +269,6 @@ export class TerminalSession {
 
     this.ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
       this.exited = true
-      this.clearIdleTimer()
       this.cleanupTmpDir()
       // Manager cleanup runs first and unconditionally, then the public
       // (websocket) listener. The internal slot cannot be overwritten by a
@@ -284,8 +280,6 @@ export class TerminalSession {
         this.exitCallback(exitCode)
       }
     })
-
-    this.resetIdleTimer()
   }
 
   onData(callback: DataCallback): void {
@@ -304,10 +298,6 @@ export class TerminalSession {
     this.internalExitCallback = callback
   }
 
-  setOnIdleTimeout(callback: () => void): void {
-    this.onIdleTimeout = callback
-  }
-
   write(data: string): void {
     if (this.exited) return
     this.touchActivity()
@@ -324,7 +314,6 @@ export class TerminalSession {
 
   kill(): void {
     if (this.exited) return
-    this.clearIdleTimer()
     this.ptyProcess.kill()
     this.cleanupTmpDir()
   }
@@ -364,26 +353,9 @@ export class TerminalSession {
     }
   }
 
+  // Diagnostics only — lastActivity is exposed via getInfo() for monitoring.
+  // It does NOT drive any eviction or timer; do not add idle-kill logic here.
   private touchActivity(): void {
     this.lastActivity = Date.now()
-    this.resetIdleTimer()
-  }
-
-  private resetIdleTimer(): void {
-    this.clearIdleTimer()
-    this.idleTimer = setTimeout(() => {
-      if (this.onIdleTimeout) {
-        this.onIdleTimeout()
-      } else {
-        this.kill()
-      }
-    }, SESSION_IDLE_TIMEOUT_MS)
-  }
-
-  private clearIdleTimer(): void {
-    if (this.idleTimer) {
-      clearTimeout(this.idleTimer)
-      this.idleTimer = null
-    }
   }
 }
