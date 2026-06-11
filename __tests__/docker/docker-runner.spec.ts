@@ -17,6 +17,7 @@ jest.mock('fs', () => ({
   realpathSync: jest.fn((p: string) => p),
   readFileSync: jest.fn(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }),
   unlinkSync: jest.fn(),
+  rmSync: jest.fn(),
   writeFileSync: jest.fn(),
   copyFileSync: jest.fn(),
   mkdirSync: jest.fn(),
@@ -111,6 +112,7 @@ jest.mock('../../src/pid-manager', () => ({
 }))
 
 import { execFileSync, spawn } from 'child_process'
+import * as crypto from 'crypto'
 import * as os from 'os'
 import { existsSync, realpathSync, readFileSync, unlinkSync, copyFileSync, mkdirSync, renameSync, watch as fsWatch } from 'fs'
 import { getConfigDir, loadConfig } from '../../src/config-manager'
@@ -154,6 +156,13 @@ const mockCopyFileSync = copyFileSync as jest.MockedFunction<typeof copyFileSync
 const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>
 const mockRenameSync = renameSync as jest.MockedFunction<typeof renameSync>
 const mockFsWatch = fsWatch as jest.MockedFunction<typeof fsWatch>
+
+/** Bundled Dockerfile fixture shared by the syncDockerfileToConfigDir tests. */
+const BUNDLED_DOCKERFILE_CONTENT = 'FROM node:24-slim\n# bundled'
+const BUNDLED_DOCKERFILE_HASH = crypto
+  .createHash('sha256')
+  .update(BUNDLED_DOCKERFILE_CONTENT)
+  .digest('hex')
 
 describe('docker-runner', () => {
   const originalEnv = process.env
@@ -809,8 +818,13 @@ describe('docker-runner', () => {
       mockGetConfigDir.mockReturnValue('/mock/config-dir')
     })
 
-    it('should copy bundled Dockerfile to config dir on first run', () => {
-      mockExistsSync.mockReturnValue(false) // destDockerfile does not exist
+    it('should copy bundled Dockerfile to config dir when hash file is absent', () => {
+      // hash file absent → overwrite unconditionally
+      mockExistsSync.mockReturnValue(false)
+      mockReadFileSync.mockImplementation((p: unknown): Buffer => {
+        if (String(p) === '/mock/docker/Dockerfile') return Buffer.from(BUNDLED_DOCKERFILE_CONTENT)
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
 
       syncDockerfileToConfigDir()
 
@@ -819,8 +833,18 @@ describe('docker-runner', () => {
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.dockerfileSynced'))
     })
 
-    it('should skip when Dockerfile already exists in config dir', () => {
-      mockExistsSync.mockImplementation((p) => p === '/mock/config-dir/Dockerfile')
+    it('should skip when Dockerfile is not customised and bundled version is identical', () => {
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = String(p)
+        return s === '/mock/config-dir/.dockerfile-sync-hash' || s === '/mock/config-dir/Dockerfile'
+      })
+      mockReadFileSync.mockImplementation((p: unknown): string | Buffer => {
+        const s = String(p)
+        if (s === '/mock/docker/Dockerfile') return Buffer.from(BUNDLED_DOCKERFILE_CONTENT)
+        if (s === '/mock/config-dir/Dockerfile') return Buffer.from(BUNDLED_DOCKERFILE_CONTENT)
+        if (s === '/mock/config-dir/.dockerfile-sync-hash') return BUNDLED_DOCKERFILE_HASH
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
 
       syncDockerfileToConfigDir()
 
@@ -829,7 +853,15 @@ describe('docker-runner', () => {
     })
 
     it('should also copy entrypoint.sh when it exists', () => {
-      mockExistsSync.mockImplementation((p) => p === '/mock/docker/entrypoint.sh')
+      mockExistsSync.mockImplementation((p: unknown) => {
+        return String(p) === '/mock/docker/entrypoint.sh'
+      })
+      mockReadFileSync.mockImplementation((p: unknown): Buffer => {
+        if (String(p) === '/mock/docker/Dockerfile') return Buffer.from(BUNDLED_DOCKERFILE_CONTENT)
+        // entrypoint.sh is part of the combined sync hash, so it is read too
+        if (String(p) === '/mock/docker/entrypoint.sh') return Buffer.from('#!/bin/sh\n# entrypoint')
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
 
       syncDockerfileToConfigDir()
 
@@ -841,6 +873,10 @@ describe('docker-runner', () => {
 
     it('should warn and not throw when copy fails', () => {
       mockExistsSync.mockReturnValue(false)
+      mockReadFileSync.mockImplementation((p: unknown): Buffer => {
+        if (String(p) === '/mock/docker/Dockerfile') return Buffer.from(BUNDLED_DOCKERFILE_CONTENT)
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
       mockCopyFileSync.mockImplementation(() => { throw new Error('permission denied') })
 
       expect(() => syncDockerfileToConfigDir()).not.toThrow()

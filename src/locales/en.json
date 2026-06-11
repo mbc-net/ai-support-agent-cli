@@ -164,6 +164,8 @@
   "docker.loginStep3": "The token is long-lived. Add the export to .bashrc or .zshrc to persist it.",
   "docker.usingCustomDockerfile": "Using custom Dockerfile: {{path}}",
   "docker.dockerfileSynced": "Default Dockerfile written to: {{path}}",
+  "docker.dockerfileUpdated": "Bundled Dockerfile changed — updated config: {{path}}",
+  "docker.dockerfileCustomized": "Skipped Dockerfile update (customised). To apply the latest bundled version manually: {{path}}",
   "docker.dockerfileSyncFailed": "Failed to write Dockerfile to config dir: {{message}}",
   "docker.diffNoTarget": "No Dockerfile to diff. Specify a path or set dockerfilePath in config.",
   "docker.diffTargetNotFound": "Dockerfile not found: {{path}}",
