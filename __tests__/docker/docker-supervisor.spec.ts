@@ -106,11 +106,14 @@ jest.mock('../../src/docker/project-image-builder', () => ({
   buildProjectImage: jest.fn().mockResolvedValue(undefined),
 }))
 
-jest.mock('../../src/docker/project-config', () => ({
+jest.mock('../../src/utils/path-utils', () => ({
   getProjectConfigHostDir: jest.fn(
-    (project: { tenantCode: string; projectCode: string }) =>
-      `/mock/config-dir/projects/${project.tenantCode}/${project.projectCode}/.ai-support-agent`,
+    (tenantCode: string, projectCode: string) =>
+      `/mock/config-dir/projects/${tenantCode}/${projectCode}/.ai-support-agent`,
   ),
+}))
+
+jest.mock('../../src/docker/project-config', () => ({
   migrateProjectConfigDir: jest.fn(),
 }))
 
