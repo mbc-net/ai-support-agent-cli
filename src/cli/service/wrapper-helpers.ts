@@ -21,6 +21,33 @@ export function shellQuote(value: string): string {
 }
 
 /**
+ * Sanitize one tenantCode / projectCode segment for use in generated names:
+ * lowercase, with every character outside `[a-z0-9-]` collapsed to `-`.
+ *
+ * Shared by all three platforms so naming cannot drift: systemd unit names
+ * and per-project log-dir keys (linux), docker container names (all
+ * platforms), and scheduled-task names (win32). `detectInstallCollisions`
+ * relies on its callers deriving names through this same mapping.
+ */
+export function sanitizeServiceNameSegment(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
+}
+
+/** Convert localhost/127.0.0.1 to host.docker.internal for container use */
+export function toContainerApiUrl(apiUrl: string): string {
+  // Unified on the boundary-lookahead form (originally in linux-service.ts).
+  // Do NOT revert to the old `(:\d+)?` capture form once used by darwin/win32 —
+  // it lacked the boundary check and broke hosts like `localhost.example.com`.
+  // The host portion must be terminated by `:`, `/`, or end-of-string;
+  // otherwise URLs like `http://localhost.example.com` would partially match
+  // and produce `http://host.docker.internal.example.com` (a different host).
+  return apiUrl.replace(
+    /^(https?:\/\/)(localhost|127\.0\.0\.1)(?=$|[:/])/,
+    (_, scheme: string) => `${scheme}host.docker.internal`,
+  )
+}
+
+/**
  * Validate a user-supplied `project.projectDir` for use as a bind mount.
  *
  * Returns the original value when the path is acceptable, or `undefined`
@@ -80,7 +107,7 @@ export interface CollisionDetectionResult {
 }
 
 /**
- * Detect sanitize() collisions across configured projects.
+ * Detect sanitizeServiceNameSegment() collisions across configured projects.
  *
  * `nameFn` derives the per-platform unit-name / plist-label from
  * (tenantCode, projectCode). Codes that fail `isProjectCodeSafe` are
