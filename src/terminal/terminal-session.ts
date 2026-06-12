@@ -71,10 +71,27 @@ export function isNodePtyAvailable(): boolean {
 }
 
 /**
- * tmux が PATH 上で利用可能かを確認する。
- * ENOENT や非 0 exit は false を返す（フォールバックトリガー）。
+ * tmux バイナリが実行可能かを確認する。
+ *
+ * `spawnSync('tmux', ['--version'])` ではなく `fs.accessSync` でバイナリパスを
+ * 直接チェックする。Docker コンテナ内の Node.js プロセスは shell init を経由せず
+ * 起動するため、process.env.PATH がインタラクティブシェルの PATH と異なり
+ * spawnSync がバイナリを見つけられないことがある。
+ * 標準インストールパスを確認した後、PATH ベースの lookup をフォールバックとする。
  */
 function isTmuxAvailable(): boolean {
+  // Debian/Ubuntu (apt-get install tmux) → /usr/bin/tmux
+  // Homebrew (macOS) / compiled → /usr/local/bin/tmux
+  const candidates = ['/usr/bin/tmux', '/usr/local/bin/tmux', '/bin/tmux']
+  for (const p of candidates) {
+    try {
+      fs.accessSync(p, fs.constants.X_OK)
+      return true
+    } catch {
+      // not at this path
+    }
+  }
+  // PATH ベースのフォールバック（非標準インストール先向け）
   try {
     const result = spawnSync('tmux', ['--version'], { encoding: 'utf-8' })
     return result.status === 0
