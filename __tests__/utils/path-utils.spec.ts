@@ -58,6 +58,17 @@ describe('getProjectConfigHostDir', () => {
       path.join(MOCK_CONFIG_DIR, 'projects', 'my-tenant', 'MY_PROJECT_01', '.ai-support-agent'),
     )
   })
+
+  // Canonical layout lock: this helper is the single source of truth for the
+  // host-side per-project config dir, consumed by both the docker supervisor
+  // (bind-mount source) and the darwin/linux/win32 service installers.
+  // Changing this layout breaks existing installations — keep the exact
+  // segment order pinned here.
+  it('should pin the canonical layout {configDir}/projects/{tenantCode}/{projectCode}/.ai-support-agent', () => {
+    expect(getProjectConfigHostDir('t', 'p')).toBe(
+      `${MOCK_CONFIG_DIR}${path.sep}projects${path.sep}t${path.sep}p${path.sep}.ai-support-agent`,
+    )
+  })
 })
 
 describe('getServicesDir', () => {

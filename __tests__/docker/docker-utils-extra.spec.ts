@@ -161,16 +161,8 @@ describe('dockerfile-sync', () => {
 describe('project-config', () => {
   const project = { tenantCode: 'mbc', projectCode: 'MBC_01', token: 'tok', apiUrl: 'http://api' }
 
-  describe('getProjectConfigHostDir', () => {
-    it('should return the per-project config directory path', () => {
-      const { getProjectConfigHostDir } = require('../../src/docker/project-config') as typeof import('../../src/docker/project-config')
-      const dir = getProjectConfigHostDir(project)
-      expect(dir).toContain('/mock/config-dir')
-      expect(dir).toContain('/mbc/')
-      expect(dir).toContain('/MBC_01/')
-      expect(dir).toContain('.ai-support-agent')
-    })
-  })
+  // NOTE: getProjectConfigHostDir moved to src/utils/path-utils
+  // (tested in __tests__/utils/path-utils.spec.ts)
 
   describe('migrateProjectConfigDir', () => {
 
