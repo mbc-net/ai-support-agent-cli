@@ -58,6 +58,13 @@ describe('parseSize', () => {
     expect(parseSize('5MB extra')).toBeNull() // trailing garbage
   })
 
+  it('returns null for a numeric string that overflows to Infinity', () => {
+    // A string of digits that parseFloat converts to Infinity — triggers
+    // the !Number.isFinite(num) branch on line 17
+    const hugeDigitStr = '9' + '9'.repeat(400)
+    expect(parseSize(hugeDigitStr)).toBeNull()
+  })
+
   it('explicit B suffix is treated as bytes', () => {
     expect(parseSize('512B')).toBe(512)
   })
@@ -314,6 +321,30 @@ describe('runLogRotate (via registerLogRotateCommand action)', () => {
     expect(signalHandlers.has('SIGHUP')).toBe(true)
 
     signalHandlers.get('SIGTERM')!()
+    expect(mockWriterClose).toHaveBeenCalled()
+    expect(exitSpy).toHaveBeenCalledWith(0)
+  })
+
+  it('SIGINT handler closes writer and exits', () => {
+    const program = new Command()
+    program.exitOverride()
+    registerLogRotateCommand(program, teeSink)
+
+    program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log'])
+
+    signalHandlers.get('SIGINT')!()
+    expect(mockWriterClose).toHaveBeenCalled()
+    expect(exitSpy).toHaveBeenCalledWith(0)
+  })
+
+  it('SIGHUP handler closes writer and exits', () => {
+    const program = new Command()
+    program.exitOverride()
+    registerLogRotateCommand(program, teeSink)
+
+    program.parse(['node', 'test', 'log-rotate', '/var/log/agent.log'])
+
+    signalHandlers.get('SIGHUP')!()
     expect(mockWriterClose).toHaveBeenCalled()
     expect(exitSpy).toHaveBeenCalledWith(0)
   })
