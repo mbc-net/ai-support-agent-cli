@@ -46,6 +46,8 @@ import {
   getAllProjectPlists,
   writeProjectServiceFiles,
   installAndStartProject,
+  getCliEntryPoint,
+  getNodePath,
 } from '../../../src/cli/service/darwin-service'
 import { logger } from '../../../src/logger'
 import { loadConfig, getProjectList } from '../../../src/config-manager'
@@ -1454,5 +1456,19 @@ describe('installAndStartProject', () => {
     installAndStartProject(project)
 
     expect(logger.warn).toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// re-exported path utilities
+// ---------------------------------------------------------------------------
+describe('re-exported path utilities', () => {
+  it('getNodePath returns the current Node.js executable', () => {
+    expect(getNodePath()).toBe(process.execPath)
+  })
+
+  it('getCliEntryPoint returns an absolute path ending with index.js', () => {
+    const result = getCliEntryPoint()
+    expect(result.endsWith('index.js')).toBe(true)
   })
 })
