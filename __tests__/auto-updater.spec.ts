@@ -4,6 +4,8 @@ import path from 'path'
 import { startAutoUpdater } from '../src/auto-updater'
 import { ApiClient } from '../src/api-client'
 import * as updateChecker from '../src/update-checker'
+import * as utils from '../src/utils'
+import * as pathUtils from '../src/utils/path-utils'
 
 jest.mock('../src/api-client')
 jest.mock('../src/logger')
@@ -439,67 +441,138 @@ describe('startAutoUpdater', () => {
     }
   })
 
-  describe('branch coverage: forcedUpdate=false → UPDATE_BUSY_WAIT_TIMEOUT_MS (line 125) and checking guard (line 39)', () => {
-    it('forcedUpdate が false の場合 UPDATE_BUSY_WAIT_TIMEOUT_MS を使用する（line 125 branch [1]）', async () => {
+  describe('branch coverage: remaining branches', () => {
+    it('uses UPDATE_BUSY_WAIT_TIMEOUT_MS when forcedUpdate=false (line 124 false branch)', async () => {
       // Cover: forcedUpdate ? UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS : UPDATE_BUSY_WAIT_TIMEOUT_MS
-      // When forcedUpdate=false (not below minimumVersion)
+      // Actual call order in source: isNewerVersion(minimumVersion) first, then isNewerVersion(latestVersion)
       const client = createMockClient()
       const stopAll = jest.fn()
-      const isAnyAgentBusy = jest.fn(async () => false)  // not busy → won't wait
+      const isAnyAgentBusy = jest.fn(async () => false) // not busy → exits wait immediately
 
-      // First isNewerVersion call: for latestVersion → true (update available)
-      // Second isNewerVersion call: for minimumVersion → false (not below minimum)
+      // Line 71: isNewerVersion(minimumVersion) → false (not forced)
+      // Line 73: isNewerVersion(latestVersion) → true (update available)
       mockedIsNewerVersion
-        .mockReturnValueOnce(true)  // latestVersion check → update available
         .mockReturnValueOnce(false) // minimumVersion check → NOT forced
+        .mockReturnValueOnce(true)  // latestVersion check → update available
 
       const updater = startAutoUpdater([client], defaultConfig, stopAll, undefined, isAnyAgentBusy)
 
       await jest.advanceTimersByTimeAsync(30_000)
 
-      // forcedUpdate=false → UPDATE_BUSY_WAIT_TIMEOUT_MS (not forced) → but isAnyAgentBusy returns false → no wait
+      // isAnyAgentBusy called (entered the wait loop with UPDATE_BUSY_WAIT_TIMEOUT_MS)
+      expect(isAnyAgentBusy).toHaveBeenCalled()
       expect(stopAll).toHaveBeenCalled()
 
       updater.stop()
     })
 
-    it('checking フラグが true の場合早期リターンする（line 39 branch [0]）', async () => {
-      // Cover: if (checking) return  when check() is called while already running
-      // This requires two concurrent calls to the check function
+    it('uses "Unknown error" fallback when result.error is undefined (line 108 nullish branch)', async () => {
       const client = createMockClient()
-      const stopAll = jest.fn()
-      let checkCallCount = 0
-
-      // Make getVersionInfo slow to keep checking=true long enough for second call
-      ;(client.getVersionInfo as jest.Mock).mockImplementation(() => new Promise(resolve => {
-        checkCallCount++
-        setTimeout(() => resolve({
-          latestVersion: '2.0.0',
-          minimumVersion: '0.0.0',
-          channel: 'latest',
-          channels: { latest: '2.0.0' },
-        }), 1000)
-      }))
-
       mockedIsNewerVersion.mockReturnValue(true)
+      // Return success: false without an error field to trigger the ?? 'Unknown error' branch
+      mockedPerformUpdate.mockResolvedValue({ success: false })
 
-      const updater = startAutoUpdater([client], { ...defaultConfig, checkIntervalMs: 100 }, stopAll)
+      const sendError = jest.fn()
+      const updater = startAutoUpdater([client], defaultConfig, jest.fn(), sendError)
 
-      // First trigger (after initial delay)
       await jest.advanceTimersByTimeAsync(30_000)
 
-      // Advance a bit but not enough for getVersionInfo to complete (500ms < 1000ms)
-      await jest.advanceTimersByTimeAsync(500)
+      expect(sendError).toHaveBeenCalledWith('Unknown error')
 
-      // Advance interval timer to trigger second check while first is still running
-      await jest.advanceTimersByTimeAsync(100)  // checkIntervalMs
+      updater.stop()
+    })
 
-      // Complete the pending getVersionInfo (first call)
-      await jest.advanceTimersByTimeAsync(500)
+    it('if (checking) returns early when check() is called while already running (line 38 true branch)', async () => {
+      // To hit the checking guard: first check starts but getVersionInfo is slow (longer than interval),
+      // then the interval fires (1h) while the first check is still pending.
+      const client = createMockClient()
+      const SLOW_RESOLVE_MS = 2 * 60 * 60 * 1000 // 2 hours (longer than 1h interval)
 
-      // Second call should have been skipped (checking=true)
-      // getVersionInfo should only be called once (or at most few times due to timing)
-      expect(client.getVersionInfo).toHaveBeenCalledTimes(checkCallCount)
+      ;(client.getVersionInfo as jest.Mock).mockImplementation(
+        () => new Promise((resolve) => {
+          setTimeout(() => resolve({
+            latestVersion: '2.0.0',
+            minimumVersion: '0.0.0',
+            channel: 'latest',
+            channels: { latest: '2.0.0' },
+          }), SLOW_RESOLVE_MS)
+        })
+      )
+
+      mockedIsNewerVersion.mockReturnValue(false)
+
+      const updater = startAutoUpdater([client], defaultConfig, jest.fn())
+
+      // Trigger initial check (30s delay) - getVersionInfo starts but won't resolve for 2h
+      await jest.advanceTimersByTimeAsync(30_000)
+      expect(client.getVersionInfo).toHaveBeenCalledTimes(1)
+
+      // Advance exactly 1h to fire the interval timer while first check is still running
+      await jest.advanceTimersByTimeAsync(60 * 60 * 1000)
+      // Second check should be skipped (checking=true), getVersionInfo still called only once
+      expect(client.getVersionInfo).toHaveBeenCalledTimes(1)
+
+      updater.stop()
+    })
+  })
+
+  describe('Docker container post-update exit (lines 143-153)', () => {
+    let isInDockerSpy: jest.SpyInstance
+    let atomicWriteFileSpy: jest.SpyInstance
+    let getUpdateVersionFilePathSpy: jest.SpyInstance
+    let exitSpy: jest.SpyInstance
+
+    beforeEach(() => {
+      // Mock isInDocker: first call (line 47 early-return guard) returns false,
+      // subsequent calls (line 143 post-update check) return true
+      isInDockerSpy = jest.spyOn(utils, 'isInDocker')
+        .mockReturnValueOnce(false)  // line 47: do not skip
+        .mockReturnValue(true)       // line 143: trigger Docker exit path
+
+      atomicWriteFileSpy = jest.spyOn(utils, 'atomicWriteFile').mockImplementation(() => {})
+      getUpdateVersionFilePathSpy = jest.spyOn(pathUtils, 'getUpdateVersionFilePath').mockReturnValue('/tmp/test-config/update-version.json')
+      exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+      mockedIsNewerVersion.mockReturnValue(true)
+      mockedPerformUpdate.mockResolvedValue({ success: true })
+    })
+
+    afterEach(() => {
+      isInDockerSpy.mockRestore()
+      atomicWriteFileSpy.mockRestore()
+      getUpdateVersionFilePathSpy.mockRestore()
+      exitSpy.mockRestore()
+    })
+
+    it('should write update-version.json and exit with DOCKER_UPDATE_EXIT_CODE after successful update', async () => {
+      const client = createMockClient()
+      const stopAll = jest.fn()
+
+      const updater = startAutoUpdater([client], defaultConfig, stopAll)
+
+      await jest.advanceTimersByTimeAsync(30_000)
+
+      expect(atomicWriteFileSpy).toHaveBeenCalledWith(
+        '/tmp/test-config/update-version.json',
+        JSON.stringify({ version: '2.0.0' }),
+      )
+      expect(exitSpy).toHaveBeenCalledWith(42) // DOCKER_UPDATE_EXIT_CODE
+
+      updater.stop()
+    })
+
+    it('should warn and still exit with DOCKER_UPDATE_EXIT_CODE when atomicWriteFile throws', async () => {
+      atomicWriteFileSpy.mockImplementation(() => { throw new Error('write error') })
+
+      const client = createMockClient()
+      const stopAll = jest.fn()
+
+      const updater = startAutoUpdater([client], defaultConfig, stopAll)
+
+      await jest.advanceTimersByTimeAsync(30_000)
+
+      // Even when atomicWriteFile throws, process.exit should still be called
+      expect(exitSpy).toHaveBeenCalledWith(42) // DOCKER_UPDATE_EXIT_CODE
 
       updater.stop()
     })

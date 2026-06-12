@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make g++ \
     # Network diagnostic tools (for server troubleshooting)
     iputils-ping net-tools dnsutils whois traceroute netcat-openbsd iproute2 \
+    # Terminal multiplexer (auto-attached for each agent console session)
+    tmux \
     # Python 3 + pip (for document processing tools and node-gyp)
     python3 python3-pip python3-venv \
     # Pandoc (universal document converter: docx/pdf/html/markdown/etc.)

@@ -877,6 +877,35 @@ describe('agent-runner', () => {
 
     expect(mockStopProject).toHaveBeenCalledWith(removedProject)
   })
+
+  it('invokes stopWithWatcher (lines 176-177) when shutdown signal fires after runSingleProject', async () => {
+    // runSingleProject registers stopWithWatcher as the shutdown callback.
+    // We need to fire the SIGINT handler that was registered by setupShutdownHandlers
+    // so that stopWithWatcher() runs, covering lines 176-177.
+    mockedLoadConfig.mockReturnValue(null)
+
+    // Non-throwing exit so the shutdown promise resolves normally
+    exitSpy.mockRestore()
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    // Fire the SIGINT handler — this calls shutdown() → stopWithWatcher() → lines 176-177
+    const sigintHandlers = processHandlers.get('SIGINT') ?? []
+    expect(sigintHandlers.length).toBeGreaterThan(0)
+    sigintHandlers.forEach((h) => void h())
+
+    // Allow the async shutdown to flush (fake timers are active — use microtask flush)
+    await jest.advanceTimersByTimeAsync(0)
+    await Promise.resolve()
+
+    expect(exitSpy).toHaveBeenCalledWith(0)
+  })
 })
 
 describe('getSystemInfo', () => {
