@@ -47,6 +47,8 @@ import {
   detectSystemSystemdUnits,
   writeProjectServiceFiles,
   installAndStartProject,
+  getCliEntryPoint,
+  getNodePath,
 } from '../../../src/cli/service/linux-service'
 import { logger } from '../../../src/logger'
 import { loadConfig, getProjectList } from '../../../src/config-manager'
@@ -1914,5 +1916,19 @@ describe('LinuxServiceStrategy.status — stray system unit warning', () => {
     strategy.status()
 
     expect(logger.warn).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// re-exported path utilities
+// ---------------------------------------------------------------------------
+describe('re-exported path utilities', () => {
+  it('getNodePath returns the current Node.js executable', () => {
+    expect(getNodePath()).toBe(process.execPath)
+  })
+
+  it('getCliEntryPoint returns an absolute path ending with index.js', () => {
+    const result = getCliEntryPoint()
+    expect(result.endsWith('index.js')).toBe(true)
   })
 })
