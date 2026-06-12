@@ -1,3 +1,11 @@
+// fs モック: accessSync だけを差し替え、既存テストを tmux 無効環境でテストする
+// (CI の Ubuntu 環境には /usr/bin/tmux が存在するため、モックしないと tmux が起動し
+//  shell 直接起動を前提とした既存テストが壊れる)
+jest.mock('fs', () => ({
+  ...jest.requireActual<typeof import('fs')>('fs'),
+  accessSync: jest.fn(),
+}))
+
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -66,6 +74,14 @@ describe('isNodePtyAvailable', () => {
   it('should return true when node-pty is installed', () => {
     expect(isNodePtyAvailable()).toBe(true)
   })
+})
+
+// tmux 検出を無効にする: 既存テストは shell 直接起動を前提としているため
+const ENOENT = Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+const mockAccessSync = fs.accessSync as jest.Mock
+
+beforeEach(() => {
+  mockAccessSync.mockImplementation(() => { throw ENOENT })
 })
 
 describe('TerminalSession', () => {
