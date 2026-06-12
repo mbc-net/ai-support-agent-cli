@@ -1,13 +1,21 @@
 /**
  * tmux 自動アタッチ機能のテスト。
  *
- * child_process をモックして tmux の有無をテスト間でコントロールする。
+ * isTmuxAvailable() は fs.accessSync でバイナリパスを直接確認するため、
+ * jest.mock('fs') で accessSync を差し替えてテスト間の tmux 有無を制御する。
+ * spawnSync は PATH ベースのフォールバック検査にのみ使用される。
  * node-pty はモックしてリアル PTY を生成しない。
  */
 import * as childProcess from 'child_process'
 import * as nodePty from 'node-pty'
 
-// child_process モック（spawnSync: tmux --version チェック, execFile: kill-session）
+// fs モック: accessSync だけを jest.fn() に差し替え、他は実装を保持する
+jest.mock('fs', () => ({
+  ...jest.requireActual<typeof import('fs')>('fs'),
+  accessSync: jest.fn(),
+}))
+
+// child_process モック（spawnSync: PATH フォールバック, execFile: kill-session）
 jest.mock('child_process', () => ({
   spawnSync: jest.fn(),
   execFile: jest.fn((_cmd: string, _args: string[], cb?: (err: unknown) => void) => {
@@ -35,10 +43,24 @@ jest.mock('node-pty', () => ({
 }))
 
 // モック後にインポート
+import * as fs from 'fs'
 import { TerminalSession } from '../../src/terminal/terminal-session'
 
-const TMUX_AVAILABLE = { status: 0, stdout: 'tmux 3.3a' }
-const TMUX_NOT_FOUND = { status: null, error: new Error('ENOENT') }
+const mockAccessSync = fs.accessSync as jest.Mock
+const ENOENT = Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+
+/** /usr/bin/tmux が実行可能なふりをする */
+function setupTmuxAtStandardPath(): void {
+  mockAccessSync.mockImplementation((p: fs.PathLike, mode?: number) => {
+    if (p === '/usr/bin/tmux' && mode === fs.constants.X_OK) return
+    throw ENOENT
+  })
+}
+
+/** すべての標準パスに tmux が存在しないふりをする */
+function setupTmuxNotFound(): void {
+  mockAccessSync.mockImplementation(() => { throw ENOENT })
+}
 
 describe('tmux auto-attach', () => {
   const spawnSyncMock = childProcess.spawnSync as jest.Mock
@@ -47,15 +69,13 @@ describe('tmux auto-attach', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
-    spawnSyncMock.mockReturnValue(TMUX_AVAILABLE)
+    // デフォルト: /usr/bin/tmux が存在する環境をシミュレート
+    setupTmuxAtStandardPath()
+    // PATH フォールバックは標準パス検出後は呼ばれないが念のため設定
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: 'tmux 3.3a' })
   })
 
-  afterEach(() => {
-    // モックの kill はイベントを発火しないため exited フラグが立たない。
-    // cleanupTmpDir の二重呼び出しは無害（null ガード済み）。
-  })
-
-  describe('tmux 利用可能時', () => {
+  describe('tmux 利用可能時（/usr/bin/tmux 存在）', () => {
     it('pty.spawn を tmux で呼び出す', () => {
       const session = new TerminalSession('test-session-001')
       expect(ptySpawnMock).toHaveBeenCalledWith(
@@ -117,7 +137,6 @@ describe('tmux auto-attach', () => {
     it('PTY onExit 時に tmux kill-session を呼び出す', () => {
       const sessionId = 'exit-test-xyz'
       const session = new TerminalSession(sessionId)
-      // onExit コールバックを手動で発火
       const onExitCall = mockPtyInstance.onExit.mock.calls[0]
       const onExitFn = onExitCall[0] as (e: { exitCode: number }) => void
       onExitFn({ exitCode: 0 })
@@ -126,13 +145,33 @@ describe('tmux auto-attach', () => {
         ['kill-session', '-t', `ais-${sessionId}`],
         expect.any(Function),
       )
-      // kill() 後は exited=true なので safe
+    })
+
+    it('isTmuxAvailable は /usr/bin/tmux の accessSync をチェックする', () => {
+      new TerminalSession('access-check-test').kill()
+      expect(mockAccessSync).toHaveBeenCalledWith('/usr/bin/tmux', fs.constants.X_OK)
+    })
+
+    it('/usr/bin/tmux が無くても /usr/local/bin/tmux で検出する', () => {
+      mockAccessSync.mockImplementation((p: fs.PathLike, mode?: number) => {
+        if (p === '/usr/local/bin/tmux' && mode === fs.constants.X_OK) return
+        throw ENOENT
+      })
+      const session = new TerminalSession('local-bin-test')
+      expect(ptySpawnMock).toHaveBeenCalledWith(
+        'tmux',
+        expect.arrayContaining(['new-session', '-A']),
+        expect.any(Object),
+      )
+      session.kill()
     })
   })
 
   describe('tmux 未インストール時（フォールバック）', () => {
     beforeEach(() => {
-      spawnSyncMock.mockReturnValue(TMUX_NOT_FOUND)
+      // 標準パスに tmux なし + PATH フォールバックも失敗
+      setupTmuxNotFound()
+      spawnSyncMock.mockReturnValue({ status: null, error: new Error('ENOENT') })
     })
 
     it('pty.spawn をシェルで呼び出す（tmux ではない）', () => {
@@ -150,6 +189,23 @@ describe('tmux auto-attach', () => {
         ([cmd, args]: [string, string[]]) => cmd === 'tmux' && args[0] === 'kill-session',
       )
       expect(killCalls).toHaveLength(0)
+    })
+
+    it('PATH フォールバック (spawnSync) も試みる', () => {
+      new TerminalSession('fallback-spawn-test').kill()
+      expect(spawnSyncMock).toHaveBeenCalledWith('tmux', ['--version'], { encoding: 'utf-8' })
+    })
+
+    it('PATH フォールバックで検出した場合は tmux を起動する', () => {
+      // 標準パスにはないが PATH には存在するケース（例: カスタムインストール）
+      spawnSyncMock.mockReturnValue({ status: 0, stdout: 'tmux 3.3a' })
+      const session = new TerminalSession('path-fallback-found-test')
+      expect(ptySpawnMock).toHaveBeenCalledWith(
+        'tmux',
+        expect.arrayContaining(['new-session', '-A']),
+        expect.any(Object),
+      )
+      session.kill()
     })
   })
 })
