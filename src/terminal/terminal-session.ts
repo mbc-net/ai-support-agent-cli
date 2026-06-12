@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { execFile, spawnSync } from 'child_process'
 
 import { filterEnvVarsOverride } from '../env-vars-filter'
 import { logger } from '../logger'
@@ -67,6 +68,36 @@ try {
  */
 export function isNodePtyAvailable(): boolean {
   return pty !== null
+}
+
+/**
+ * tmux バイナリが実行可能かを確認する。
+ *
+ * `spawnSync('tmux', ['--version'])` ではなく `fs.accessSync` でバイナリパスを
+ * 直接チェックする。Docker コンテナ内の Node.js プロセスは shell init を経由せず
+ * 起動するため、process.env.PATH がインタラクティブシェルの PATH と異なり
+ * spawnSync がバイナリを見つけられないことがある。
+ * 標準インストールパスを確認した後、PATH ベースの lookup をフォールバックとする。
+ */
+function isTmuxAvailable(): boolean {
+  // Debian/Ubuntu (apt-get install tmux) → /usr/bin/tmux
+  // Homebrew (macOS) / compiled → /usr/local/bin/tmux
+  const candidates = ['/usr/bin/tmux', '/usr/local/bin/tmux', '/bin/tmux']
+  for (const p of candidates) {
+    try {
+      fs.accessSync(p, fs.constants.X_OK)
+      return true
+    } catch {
+      // not at this path
+    }
+  }
+  // PATH ベースのフォールバック（非標準インストール先向け）
+  try {
+    const result = spawnSync('tmux', ['--version'], { encoding: 'utf-8' })
+    return result.status === 0
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -137,6 +168,7 @@ export class TerminalSession {
   private readonly ptyProcess: IPty
   private sandboxTmpDir: string | null = null
   private sshKeyFile: string | null = null
+  private tmuxSessionName: string | null = null
   private dataCallback: DataCallback | null = null
   private exitCallback: ExitCallback | null = null
   /**
@@ -282,7 +314,37 @@ export class TerminalSession {
       prefix: `[terminal:${sessionId}]`,
     })
 
-    this.ptyProcess = pty.spawn(shell, shellArgs, {
+    // tmux 自動アタッチ: tmux が利用可能ならターミナルを tmux セッション内で起動する。
+    // tmux が新規ウィンドウ/ペインを開く際に使うシェルを $SHELL で指定するため、
+    // sandbox 制限付きのラッパースクリプトを生成して $SHELL に設定する。
+    const shellQuoted = shell.replace(/'/g, "'\\''")
+    const argsQuoted = shellArgs.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')
+    const wrapperPath = path.join(tmpDir, 'shell-wrapper')
+    fs.writeFileSync(wrapperPath, `#!/bin/sh\nexec '${shellQuoted}' ${argsQuoted} "$@"\n`, {
+      mode: 0o700,
+    })
+
+    let spawnFile: string
+    let spawnArgs: string[]
+    if (isTmuxAvailable()) {
+      this.tmuxSessionName = `ais-${sessionId}`
+      spawnFile = 'tmux'
+      spawnArgs = [
+        'new-session',
+        '-A',
+        '-s', this.tmuxSessionName,
+        '-x', String(this.cols),
+        '-y', String(this.rows),
+      ]
+      env.SHELL = wrapperPath
+      logger.debug(`[terminal:${sessionId}] tmux session: ${this.tmuxSessionName}`)
+    } else {
+      logger.warn(`[terminal:${sessionId}] tmux not found; starting shell directly`)
+      spawnFile = shell
+      spawnArgs = shellArgs
+    }
+
+    this.ptyProcess = pty.spawn(spawnFile, spawnArgs, {
       name: 'xterm-256color',
       cols: this.cols,
       rows: this.rows,
@@ -305,6 +367,7 @@ export class TerminalSession {
     this.ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
       this.exited = true
       this.cleanupTmpDir()
+      this.killTmuxSession()
       // Manager cleanup runs first and unconditionally, then the public
       // (websocket) listener. The internal slot cannot be overwritten by a
       // later onExit() call, so map/grace-timer cleanup always happens.
@@ -405,6 +468,7 @@ export class TerminalSession {
     if (this.exited) return
     this.ptyProcess.kill()
     this.cleanupTmpDir()
+    this.killTmuxSession()
   }
 
   private cleanupTmpDir(): void {
@@ -424,6 +488,19 @@ export class TerminalSession {
       }
       this.sshKeyFile = null
     }
+  }
+
+  /**
+   * tmux セッションを kill する（fire-and-forget, エラーは無視）。
+   * tmuxSessionName を null にして二重実行を防ぐ。
+   */
+  private killTmuxSession(): void {
+    if (!this.tmuxSessionName) return
+    const name = this.tmuxSessionName
+    this.tmuxSessionName = null
+    execFile('tmux', ['kill-session', '-t', name], () => {
+      // セッションが既に消えていてもエラーを無視する
+    })
   }
 
   isAlive(): boolean {
