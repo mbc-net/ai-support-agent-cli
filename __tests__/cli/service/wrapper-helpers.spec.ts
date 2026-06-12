@@ -19,7 +19,9 @@ import {
   assertProjectCodeIsSafe,
   detectInstallCollisions,
   isProjectCodeSafe,
+  sanitizeServiceNameSegment,
   shellQuote,
+  toContainerApiUrl,
   validateProjectDirForMount,
 } from '../../../src/cli/service/wrapper-helpers'
 import { logger } from '../../../src/logger'
@@ -175,6 +177,62 @@ describe('validateProjectDirForMount', () => {
 
     expect(result).toBe('/home/user/work')
     expect(logger.warn).not.toHaveBeenCalled()
+  })
+})
+
+describe('toContainerApiUrl', () => {
+  it('converts http://localhost to host.docker.internal', () => {
+    expect(toContainerApiUrl('http://localhost')).toBe('http://host.docker.internal')
+  })
+
+  it('converts http://127.0.0.1 to host.docker.internal', () => {
+    expect(toContainerApiUrl('http://127.0.0.1')).toBe('http://host.docker.internal')
+  })
+
+  it('preserves the port when converting', () => {
+    expect(toContainerApiUrl('http://localhost:4030')).toBe('http://host.docker.internal:4030')
+    expect(toContainerApiUrl('http://127.0.0.1:4030/api')).toBe('http://host.docker.internal:4030/api')
+  })
+
+  it('preserves a path that follows the host directly (no port)', () => {
+    expect(toContainerApiUrl('http://localhost/api')).toBe('http://host.docker.internal/api')
+  })
+
+  it('does NOT replace localhost when it is a prefix of a longer hostname', () => {
+    // Without the boundary lookahead, `http://localhost.example.com` would
+    // partially match and become `http://host.docker.internal.example.com`
+    // — a different host.
+    expect(toContainerApiUrl('http://localhost.example.com/api')).toBe('http://localhost.example.com/api')
+    expect(toContainerApiUrl('http://127.0.0.1.example.com')).toBe('http://127.0.0.1.example.com')
+  })
+
+  it('converts https URLs too', () => {
+    expect(toContainerApiUrl('https://localhost:8443')).toBe('https://host.docker.internal:8443')
+  })
+
+  it('leaves non-localhost URLs unchanged', () => {
+    expect(toContainerApiUrl('https://api.example.com')).toBe('https://api.example.com')
+    expect(toContainerApiUrl('http://192.168.1.10:4030')).toBe('http://192.168.1.10:4030')
+  })
+})
+
+describe('sanitizeServiceNameSegment', () => {
+  it('lowercases the input', () => {
+    expect(sanitizeServiceNameSegment('MBC')).toBe('mbc')
+  })
+
+  it('collapses characters outside [a-z0-9-] to hyphens', () => {
+    expect(sanitizeServiceNameSegment('MBC_01')).toBe('mbc-01')
+    expect(sanitizeServiceNameSegment('MY.PROJECT')).toBe('my-project')
+    expect(sanitizeServiceNameSegment('a b;c=d/e\\f')).toBe('a-b-c-d-e-f')
+  })
+
+  it('keeps already-valid segments unchanged', () => {
+    expect(sanitizeServiceNameSegment('mbc-01')).toBe('mbc-01')
+  })
+
+  it('returns an empty string for an empty input', () => {
+    expect(sanitizeServiceNameSegment('')).toBe('')
   })
 })
 
