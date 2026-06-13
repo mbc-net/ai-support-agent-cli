@@ -30,6 +30,7 @@ describe('BrowserSession - Live View & Interaction', () => {
       goForward: jest.fn().mockResolvedValue(undefined),
       reload: jest.fn().mockResolvedValue(undefined),
       viewportSize: jest.fn().mockReturnValue({ width: 1280, height: 720 }),
+      on: jest.fn(),
       mouse: {
         click: jest.fn().mockResolvedValue(undefined),
         wheel: jest.fn().mockResolvedValue(undefined),
