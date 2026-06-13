@@ -11,7 +11,14 @@ import { logger } from '../../logger'
 import { getErrorMessage } from '../../utils'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
-import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import {
+  assertProjectCodeIsSafe,
+  detectInstallCollisions,
+  sanitizeServiceNameSegment,
+  shellQuote,
+  toContainerApiUrl,
+  validateProjectDirForMount,
+} from './wrapper-helpers'
 import { buildDockerRunWithLogRotate } from './service-template-helpers'
 import type {
   ProjectStatus,
@@ -47,10 +54,6 @@ const getLogDir = getLinuxLogDir
 // ---------------------------------------------------------------------------
 // Per-project unit helpers
 // ---------------------------------------------------------------------------
-
-function sanitize(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
-}
 
 /**
  * Write a file with content and enforce mode. `fs.writeFileSync({ mode })`
@@ -96,7 +99,7 @@ function systemdEscape(value: string): string {
 
 /** Returns the systemd unit name for a given project (without .service suffix) */
 export function getProjectUnitName(tenantCode: string, projectCode: string): string {
-  return `${SERVICE_PREFIX}-${sanitize(tenantCode)}-${sanitize(projectCode)}`
+  return `${SERVICE_PREFIX}-${sanitizeServiceNameSegment(tenantCode)}-${sanitizeServiceNameSegment(projectCode)}`
 }
 
 /** Returns the .service file path for a given project */
@@ -233,17 +236,6 @@ WantedBy=default.target
 `
 }
 
-/** Convert localhost/127.0.0.1 to host.docker.internal for container use */
-function toContainerApiUrl(apiUrl: string): string {
-  // The host portion must be terminated by `:`, `/`, or end-of-string;
-  // otherwise URLs like `http://localhost.example.com` would partially match
-  // and produce `http://host.docker.internal.example.com` (a different host).
-  return apiUrl.replace(
-    /^(https?:\/\/)(localhost|127\.0\.0\.1)(?=$|[:/])/,
-    (_, scheme: string) => `${scheme}host.docker.internal`,
-  )
-}
-
 /** Generate a bash wrapper script that runs docker for one project */
 export function generateWrapperScript(opts: {
   imageName: string
@@ -288,7 +280,7 @@ export function generateWrapperScript(opts: {
   const qUpdateScriptPath = shellQuote(opts.updateScriptPath)
   // tenant/project are sanitized to [a-z0-9-] for container name and the
   // --project value, so they're shell-safe; still quote for defense in depth.
-  const containerName = `ai-${sanitize(opts.tenantCode)}-${sanitize(opts.projectCode)}`
+  const containerName = `ai-${sanitizeServiceNameSegment(opts.tenantCode)}-${sanitizeServiceNameSegment(opts.projectCode)}`
   const qContainerName = shellQuote(containerName)
   const qProjectArg = shellQuote(`${opts.tenantCode}/${opts.projectCode}`)
 
@@ -527,7 +519,7 @@ export function writeProjectServiceFiles(
   // Reject codes that would break the PROJECT_DIR_MAP env format.
   assertProjectCodeIsSafe(projectCode)
   assertProjectCodeIsSafe(tenantCode)
-  const projectKey = `${sanitize(tenantCode)}-${sanitize(projectCode)}`
+  const projectKey = `${sanitizeServiceNameSegment(tenantCode)}-${sanitizeServiceNameSegment(projectCode)}`
 
   const logDir = getLogDir()
   const projectLogDir = getProjectLogDir(logDir, projectKey)
@@ -676,10 +668,10 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     const updateScript = generateUpdateScript()
     writeFileEnsuringMode(updateScriptPath, updateScript, 0o700)
 
-    // Detect sanitize() collisions where two distinct valid codes
+    // Detect sanitizeServiceNameSegment() collisions where two distinct valid codes
     // (e.g. `MBC_01` and `MBC-01`) map to the same unit name and would
     // silently overwrite each other. The helper also returns a `names` map
-    // (fqn → sanitized unit name) so we don't recompute via sanitize()
+    // (fqn → sanitized unit name) so we don't recompute via sanitizeServiceNameSegment()
     // multiple times per project — keeping the orphan-protection set and
     // the per-project loop in sync with a single source of truth.
     const { names: safeUnitNames, collisions } = detectInstallCollisions(projects, getProjectUnitName)
@@ -690,7 +682,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     //   - invalid projectCode (rejected by assertProjectCodeIsSafe)
     //   - filesystem error during write
     // For both, the previously-installed unit on disk should stay in place.
-    // We include INVALID codes too (via getProjectUnitName, which sanitize()
+    // We include INVALID codes too (via getProjectUnitName, which sanitizeServiceNameSegment()
     // tolerates) so a typo'd entry's prior unit is still protected.
     const expectedUnitNames = new Set<string>()
     for (const project of projects) {
@@ -772,7 +764,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     // SAFETY: when any project install failed this run, SKIP orphan cleanup
     // entirely. A failed validation could otherwise destructively deregister
     // a previously-running unit just because the user mistyped one entry in
-    // config — and worse, sanitize() collapses `;`/`_`/`.` all to `-`, so a
+    // config — and worse, sanitizeServiceNameSegment() collapses `;`/`_`/`.` all to `-`, so a
     // typo'd projectCode can collide with a different project's unit name
     // and remove THE WRONG unit.
     if (!anyInstallFailed) {
@@ -962,7 +954,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     }
 
     // Build a reverse map from unit name → original projectCode using the
-    // user's config. sanitize() collapses `_` and other chars to `-`, so
+    // user's config. sanitizeServiceNameSegment() collapses `_` and other chars to `-`, so
     // splitting the unit name on `-` is lossy when tenant/project codes
     // contain those characters; the config is the source of truth.
     const config = loadConfig()

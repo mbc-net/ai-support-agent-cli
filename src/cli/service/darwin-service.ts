@@ -14,7 +14,14 @@ import { getErrorMessage } from '../../utils'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
-import { assertProjectCodeIsSafe, detectInstallCollisions, shellQuote, validateProjectDirForMount } from './wrapper-helpers'
+import {
+  assertProjectCodeIsSafe,
+  detectInstallCollisions,
+  sanitizeServiceNameSegment,
+  shellQuote,
+  toContainerApiUrl,
+  validateProjectDirForMount,
+} from './wrapper-helpers'
 import { buildDockerRunWithLogRotate } from './service-template-helpers'
 import {
   getDarwinLaunchAgentsDir,
@@ -207,14 +214,6 @@ export function generateProjectPlist(opts: {
 </plist>`
 }
 
-/** Convert localhost/127.0.0.1 to host.docker.internal for container use */
-function toContainerApiUrl(apiUrl: string): string {
-  return apiUrl.replace(
-    /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
-    (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
-  )
-}
-
 /** Generate a bash wrapper script that runs docker for one project */
 export function generateWrapperScript(opts: {
   imageName: string
@@ -297,8 +296,7 @@ export function generateWrapperScript(opts: {
   if (opts.verbose) containerArgs.push(CLI_FLAG_VERBOSE)
 
   // Sanitize tenant/project codes the same way buildContainerName does
-  const sanitize = (s: string): string => s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
-  const containerName = `ai-${sanitize(opts.tenantCode)}-${sanitize(opts.projectCode)}`
+  const containerName = `ai-${sanitizeServiceNameSegment(opts.tenantCode)}-${sanitizeServiceNameSegment(opts.projectCode)}`
 
   const dockerRunBlock = buildDockerRunWithLogRotate({
     buildDockerRun: (outputRedirect) => [
@@ -609,7 +607,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     const updateScript = generateUpdateScript()
     fs.writeFileSync(updateScriptPath, updateScript, { mode: 0o700 })
 
-    // Detect sanitize() collisions where two valid projectCodes map to the
+    // Detect sanitizeServiceNameSegment() collisions where two valid projectCodes map to the
     // same plist label (e.g. `MBC_01` and `MBC-01` → `com.ai-support-agent.cli.<t>.mbc-01`).
     // Shared helper guarantees identical semantics with the Linux wrapper.
     const { collisions } = detectInstallCollisions(projects, getProjectLabel)

@@ -1,4 +1,5 @@
 import * as path from 'path'
+import { execFile } from 'child_process'
 
 import WebSocket from 'ws'
 
@@ -23,10 +24,26 @@ function clampTerminalSize(value: number): number {
 }
 
 /**
+ * Information about a single tmux session.
+ */
+export interface TmuxSessionInfo {
+  /** Session name (e.g. "ais-abc123") */
+  name: string
+  /** Number of windows in the session */
+  windows: number
+  /** Whether the session is currently attached */
+  attached: boolean
+  /** Session creation time as Unix timestamp (seconds since epoch) */
+  created: number
+  /** Last activity time as Unix timestamp (seconds since epoch) */
+  activity: number
+}
+
+/**
  * Messages sent from API server to agent
  */
 export interface TerminalServerMessage {
-  type: 'open' | 'stdin' | 'resize' | 'close' | 'auth_success' | 'error'
+  type: 'open' | 'stdin' | 'resize' | 'close' | 'auth_success' | 'error' | 'tmux_list_sessions' | 'tmux_kill_session'
   sessionId?: string
   data?: string // Base64 encoded for stdin
   cols?: number
@@ -50,14 +67,18 @@ export interface TerminalServerMessage {
    * Resume-validation meta recorded at PTY creation and verified on resume.
    */
   meta?: { tenantCode: string; projectCode: string; userId: string }
+  /** Request ID for tmux management messages */
+  requestId?: string
+  /** Session name for tmux_kill_session */
+  name?: string
 }
 
 /**
  * Messages sent from agent to API server
  */
 export interface TerminalAgentMessage {
-  type: 'ready' | 'stdout' | 'exit' | 'error' | 'replay' | 'resume_failed'
-  sessionId: string
+  type: 'ready' | 'stdout' | 'exit' | 'error' | 'replay' | 'resume_failed' | 'tmux_sessions' | 'tmux_session_killed'
+  sessionId?: string
   data?: string // Base64 encoded for stdout / replay
   code?: number | null
   error?: string
@@ -66,6 +87,14 @@ export interface TerminalAgentMessage {
   rows?: number
   /** resume_failed reason: 'not_found' | 'meta_mismatch' | 'dead' */
   reason?: string
+  /** Request ID for tmux management responses */
+  requestId?: string
+  /** List of tmux sessions (for tmux_sessions response) */
+  sessions?: TmuxSessionInfo[]
+  /** Session name (for tmux_session_killed response) */
+  name?: string
+  /** Whether the kill operation succeeded (for tmux_session_killed response) */
+  success?: boolean
 }
 
 // 既存の re-export（後方互換）
@@ -137,6 +166,12 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
         logger.warn(`[terminal-ws] Server error (session=${msg.sessionId ?? 'none'}): ${errMsg}`)
         break
       }
+      case 'tmux_list_sessions':
+        this.handleTmuxListSessions(msg)
+        break
+      case 'tmux_kill_session':
+        this.handleTmuxKillSession(msg)
+        break
       default:
         logger.debug(`[terminal-ws] Unknown message type: ${(msg as { type: string }).type}`)
     }
@@ -367,6 +402,65 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     if (!msg.sessionId) return
     this.manager.closeSession(msg.sessionId)
     logger.debug(`[terminal-ws] Session closed: ${msg.sessionId}`)
+  }
+
+  private handleTmuxListSessions(msg: TerminalServerMessage): void {
+    const requestId = msg.requestId ?? ''
+    execFile(
+      'tmux',
+      ['list-sessions', '-F', '#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_activity}'],
+      (err, stdout, stderr) => {
+        if (err) {
+          const isEnoent = (err as NodeJS.ErrnoException).code === 'ENOENT'
+          const isNoServer = stderr.includes('no server running') || stderr.includes('no sessions')
+          if (!isEnoent && !isNoServer) {
+            logger.warn(`[terminal-ws] tmux list-sessions unexpected error: ${(err as NodeJS.ErrnoException).code ?? 'unknown'} - ${err.message}`)
+          }
+          this.send({ type: 'tmux_sessions', requestId, sessions: [] })
+          return
+        }
+
+        const sessions: TmuxSessionInfo[] = stdout
+          .split('\n')
+          .filter((line) => line.trim().length > 0)
+          .map((line) => {
+            const [name, windows, attached, created, activity] = line.split('\t')
+            return {
+              name,
+              windows: parseInt(windows, 10),
+              attached: attached === '1',
+              created: parseInt(created, 10),
+              activity: parseInt(activity, 10),
+            }
+          })
+
+        this.send({ type: 'tmux_sessions', requestId, sessions })
+      },
+    )
+  }
+
+  private handleTmuxKillSession(msg: TerminalServerMessage): void {
+    const requestId = msg.requestId ?? ''
+    const name = msg.name ?? ''
+    if (!name) {
+      logger.warn('[terminal-ws] tmux_kill_session: missing session name')
+      this.send({ type: 'tmux_session_killed', requestId, name: '', success: false, error: 'missing session name' })
+      return
+    }
+    execFile('tmux', ['kill-session', '-t', name], (err) => {
+      if (err) {
+        const isEnoent = (err as NodeJS.ErrnoException).code === 'ENOENT'
+        this.send({
+          type: 'tmux_session_killed',
+          requestId,
+          name,
+          success: false,
+          error: isEnoent ? 'tmux not found' : err.message,
+        })
+        return
+      }
+      this.send({ type: 'tmux_session_killed', requestId, name, success: true })
+    })
   }
 
   private send(msg: TerminalAgentMessage): void {

@@ -21,18 +21,19 @@ import {
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ProjectStatus, ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
-import { assertProjectCodeIsSafe, detectInstallCollisions, validateProjectDirForMount } from './wrapper-helpers'
+import {
+  assertProjectCodeIsSafe,
+  detectInstallCollisions,
+  sanitizeServiceNameSegment,
+  toContainerApiUrl,
+  validateProjectDirForMount,
+} from './wrapper-helpers'
 
 export { getCliEntryPoint, getNodePath }
 
 const TASK_PREFIX = 'AISupportAgent'
 
 const getLogDir = getWin32LogDir
-
-/** Sanitize a code the same way buildContainerName does (lowercase, [a-z0-9-]). */
-function sanitize(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
-}
 
 // ---------------------------------------------------------------------------
 // Per-project task helpers
@@ -44,10 +45,10 @@ function sanitize(s: string): string {
  *
  * The Windows Task Scheduler accepts backslashes as folder separators in task
  * names, so any backslash in a code would silently create a nested task folder.
- * sanitize() already strips it (along with other non `[a-z0-9-]` chars).
+ * sanitizeServiceNameSegment() already strips it (along with other non `[a-z0-9-]` chars).
  */
 export function getProjectTaskName(tenantCode: string, projectCode: string): string {
-  return `${TASK_PREFIX}-${sanitize(tenantCode)}-${sanitize(projectCode)}`
+  return `${TASK_PREFIX}-${sanitizeServiceNameSegment(tenantCode)}-${sanitizeServiceNameSegment(projectCode)}`
 }
 
 /**
@@ -115,14 +116,6 @@ export function generateProjectTaskXml(opts: { wrapperScriptPath: string }): str
 </Task>`
 }
 
-/** Convert localhost/127.0.0.1 to host.docker.internal for container use */
-function toContainerApiUrl(apiUrl: string): string {
-  return apiUrl.replace(
-    /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
-    (_, scheme: string, _host: string, port?: string) => `${scheme}host.docker.internal${port ?? ''}`,
-  )
-}
-
 /**
  * Windows batch (cmd.exe) cannot reliably escape every metacharacter the way a
  * POSIX shell can with single quotes. Rather than risk a broken or injectable
@@ -184,7 +177,7 @@ export function generateWin32WrapperScript(opts: {
   // host path would emit `-v :/workspace/...:rw` which docker rejects.
   const hostProjectDir = opts.projectDir || path.dirname(opts.projectConfigHostDir)
 
-  const containerName = `ai-${sanitize(opts.tenantCode)}-${sanitize(opts.projectCode)}`
+  const containerName = `ai-${sanitizeServiceNameSegment(opts.tenantCode)}-${sanitizeServiceNameSegment(opts.projectCode)}`
 
   // docker run argument lines. Host paths are wrapped in double quotes so a
   // space in the Windows home dir (e.g. C:\Users\First Last) does not split the
@@ -373,7 +366,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
       fs.mkdirSync(logDir, { recursive: true })
     }
 
-    // Detect sanitize() collisions where two valid codes map to the same task
+    // Detect sanitizeServiceNameSegment() collisions where two valid codes map to the same task
     // name. Shared helper guarantees identical semantics with linux/darwin.
     const { collisions } = detectInstallCollisions(projects, getProjectTaskName)
     const reportedCollisionLabels = new Set<string>()
@@ -532,7 +525,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
     }
 
     // Build a reverse map from task name → original projectCode using config.
-    // sanitize() collapses `_` and other chars to `-`, so splitting the task
+    // sanitizeServiceNameSegment() collapses `_` and other chars to `-`, so splitting the task
     // name on `-` is lossy when tenant/project codes contain those characters
     // (and the tenant/project boundary is ambiguous) — config is the source of
     // truth. Mirrors the Linux strategy.

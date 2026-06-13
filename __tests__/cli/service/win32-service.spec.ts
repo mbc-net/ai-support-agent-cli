@@ -134,6 +134,15 @@ describe('generateWin32WrapperScript', () => {
     expect(result).not.toContain('localhost')
   })
 
+  it('does NOT replace localhost when it is a prefix of a longer hostname', () => {
+    // Without the regex boundary lookahead, `http://localhost.example.com`
+    // would partially match the `localhost` prefix and become
+    // `http://host.docker.internal.example.com` — a different host.
+    const result = generateWin32WrapperScript({ ...baseOpts, apiUrl: 'http://localhost.example.com/api' })
+    expect(result).toContain('set "AI_SUPPORT_AGENT_API_URL=http://localhost.example.com/api"')
+    expect(result).not.toContain('host.docker.internal')
+  })
+
   it('includes ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN when provided', () => {
     const result = generateWin32WrapperScript({
       ...baseOpts,

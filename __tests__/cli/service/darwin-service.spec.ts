@@ -395,6 +395,16 @@ describe('generateWrapperScript', () => {
     expect(result).toContain(`AI_SUPPORT_AGENT_API_URL='https://api.example.com'`)
   })
 
+  it('should NOT replace localhost when it is a prefix of a longer hostname', () => {
+    // Without the regex boundary lookahead, `http://localhost.example.com`
+    // would partially match the `localhost` prefix and become
+    // `http://host.docker.internal.example.com` — a different host.
+    const result = generateWrapperScript({ ...baseOpts, apiUrl: 'http://localhost.example.com/api' })
+
+    expect(result).toContain(`AI_SUPPORT_AGENT_API_URL='http://localhost.example.com/api'`)
+    expect(result).not.toContain('host.docker.internal')
+  })
+
   it('should handle exit 42 by delegating to update script', () => {
     const result = generateWrapperScript(baseOpts)
 
