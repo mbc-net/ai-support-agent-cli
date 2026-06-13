@@ -333,6 +333,11 @@ export class TerminalSession {
     let spawnFile: string
     let spawnArgs: string[]
     if (isTmuxAvailable()) {
+      // Normally the API always supplies tmuxSessionName in the form
+      // `ais-{userHash}-{sessionId}` (owner-partitioned). The `ais-${sessionId}`
+      // default here is only a safety net for standalone agent startup without
+      // the API; it has no owner partition and is intentionally excluded from
+      // the owner-filtered tmux list.
       this.tmuxSessionName = options.tmuxSessionName ?? `ais-${sessionId}`
       spawnFile = 'tmux'
       spawnArgs = [
@@ -467,6 +472,28 @@ export class TerminalSession {
     this.cols = cols
     this.rows = rows
     this.ptyProcess.resize(cols, rows)
+    // tmux new-session -A で既存セッションにアタッチした場合、起動時の -x/-y は
+    // 無視され古いウィンドウサイズが残る（周囲がドットで埋まる崩れの原因）。
+    // resize ごとに resize-window を明示的に呼んでウィンドウサイズを追従させる。
+    // （resize-window は window-size を manual にする副作用があるが、毎回呼ぶため問題ない）
+    if (this.tmuxSessionName) {
+      const name = this.tmuxSessionName
+      execFile(
+        'tmux',
+        ['resize-window', '-t', name, '-x', String(cols), '-y', String(rows)],
+        (err) => {
+          if (!err) return
+          // 「セッションが既に消えている」系は正常な競合なので無視する。
+          const message = getErrorMessage(err)
+          if (/can't find session|no such session|session not found/i.test(message)) {
+            return
+          }
+          // それ以外（tmux バイナリ不在 ENOENT・権限エラー等の恒常的失敗）は
+          // デバッグ困難になるため記録する。resize は高頻度なので debug レベルに留める。
+          logger.debug(`[terminal:${this.sessionId}] tmux resize-window failed: ${message}`)
+        },
+      )
+    }
     this.touchActivity()
   }
 

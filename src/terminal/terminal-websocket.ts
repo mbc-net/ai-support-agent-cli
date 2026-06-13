@@ -72,6 +72,14 @@ export interface TerminalServerMessage {
   /** Session name for tmux_kill_session */
   name?: string
   /**
+   * Owner (user) hash injected by the API for tmux management messages.
+   * Computed API-side as sha256(auth.userId).hex.slice(0, 12) — never sent by
+   * the web client. Used to filter tmux_list_sessions to the requester's own
+   * `ais-{userHash}-*` sessions. When absent the agent returns no sessions
+   * (fail-safe; no fallback to listing everything).
+   */
+  userHash?: string
+  /**
    * Attach target tmux session name (forwarded from web via API).
    * When set, the agent attaches to this existing tmux session instead of
    * creating a new one named ais-{sessionId}.
@@ -413,6 +421,18 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
 
   private handleTmuxListSessions(msg: TerminalServerMessage): void {
     const requestId = msg.requestId ?? ''
+    const userHash = msg.userHash
+
+    // Owner filter (defense-in-depth alongside the API server-side filter).
+    // No-fallback rule: without a userHash we must NOT leak any sessions, so
+    // return an empty list without even invoking tmux.
+    if (!userHash) {
+      logger.warn('[terminal-ws] tmux_list_sessions: missing userHash; returning no sessions')
+      this.send({ type: 'tmux_sessions', requestId, sessions: [] })
+      return
+    }
+    const ownerPrefix = `ais-${userHash}-`
+
     execFile(
       'tmux',
       ['list-sessions', '-F', '#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_activity}'],
@@ -440,6 +460,10 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
               activity: parseInt(activity, 10),
             }
           })
+          // Keep only the requester's own owner-partitioned sessions. Legacy
+          // unpartitioned names (ais-{sessionId}) lack the userHash segment and
+          // are naturally excluded (no-fallback rule).
+          .filter((s) => s.name.startsWith(ownerPrefix))
 
         this.send({ type: 'tmux_sessions', requestId, sessions })
       },
@@ -454,6 +478,26 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       this.send({ type: 'tmux_session_killed', requestId, name: '', success: false, error: 'missing session name' })
       return
     }
+
+    // Second-layer owner defense (defense-in-depth alongside the API server-side
+    // authorization). When the API forwards a userHash (USER role, self-kill),
+    // the target name MUST start with ais-{userHash}-; otherwise refuse without
+    // touching tmux. When userHash is absent the API has already authorized
+    // (admin/system_admin bypass), so we proceed as before.
+    if (msg.userHash && !name.startsWith(`ais-${msg.userHash}-`)) {
+      logger.warn(
+        `[terminal-ws] tmux_kill_session: owner mismatch (name=${name}); refusing`,
+      )
+      this.send({
+        type: 'tmux_session_killed',
+        requestId,
+        name,
+        success: false,
+        error: 'access denied',
+      })
+      return
+    }
+
     execFile('tmux', ['kill-session', '-t', name], (err) => {
       if (err) {
         const isEnoent = (err as NodeJS.ErrnoException).code === 'ENOENT'
