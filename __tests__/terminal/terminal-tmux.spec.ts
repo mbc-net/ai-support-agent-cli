@@ -152,6 +152,27 @@ describe('tmux auto-attach', () => {
       expect(mockAccessSync).toHaveBeenCalledWith('/usr/bin/tmux', fs.constants.X_OK)
     })
 
+    it('tmuxSessionName オプションを指定するとそのセッション名が使われる', () => {
+      const customName = 'ais-existing-session'
+      const session = new TerminalSession('new-session-id', { tmuxSessionName: customName })
+      const [, args] = ptySpawnMock.mock.calls[0]
+      const sIdx = (args as string[]).indexOf('-s')
+      expect(sIdx).toBeGreaterThan(-1)
+      expect((args as string[])[sIdx + 1]).toBe(customName)
+      session.kill()
+    })
+
+    it('tmuxSessionName オプション指定時の kill() は指定名で kill-session を呼ぶ', () => {
+      const customName = 'ais-existing-session'
+      const session = new TerminalSession('new-session-id', { tmuxSessionName: customName })
+      session.kill()
+      expect(execFileMock).toHaveBeenCalledWith(
+        'tmux',
+        ['kill-session', '-t', customName],
+        expect.any(Function),
+      )
+    })
+
     it('/usr/bin/tmux が無くても /usr/local/bin/tmux で検出する', () => {
       mockAccessSync.mockImplementation((p: fs.PathLike, mode?: number) => {
         if (p === '/usr/local/bin/tmux' && mode === fs.constants.X_OK) return

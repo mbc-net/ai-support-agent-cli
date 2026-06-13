@@ -133,6 +133,12 @@ export interface TerminalSessionOptions {
    * した場合のみ既存 PTY への再接続を許可する。
    */
   meta?: TerminalSessionMeta
+  /**
+   * アタッチ先の tmux セッション名。
+   * 指定された場合はこの名前で tmux new-session -A を実行し、既存セッションがあれば
+   * アタッチする。省略時は ais-{sessionId} を自動生成する。
+   */
+  tmuxSessionName?: string
 }
 
 export interface TerminalSessionInfo {
@@ -327,7 +333,7 @@ export class TerminalSession {
     let spawnFile: string
     let spawnArgs: string[]
     if (isTmuxAvailable()) {
-      this.tmuxSessionName = `ais-${sessionId}`
+      this.tmuxSessionName = options.tmuxSessionName ?? `ais-${sessionId}`
       spawnFile = 'tmux'
       spawnArgs = [
         'new-session',
