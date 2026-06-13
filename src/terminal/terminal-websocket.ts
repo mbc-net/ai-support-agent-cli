@@ -71,6 +71,12 @@ export interface TerminalServerMessage {
   requestId?: string
   /** Session name for tmux_kill_session */
   name?: string
+  /**
+   * Attach target tmux session name (forwarded from web via API).
+   * When set, the agent attaches to this existing tmux session instead of
+   * creating a new one named ais-{sessionId}.
+   */
+  tmuxSessionName?: string
 }
 
 /**
@@ -271,6 +277,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       cwd,
       envVarsOverride,
       meta: msg.meta,
+      tmuxSessionName: msg.tmuxSessionName,
     })
 
     if (!session) {
