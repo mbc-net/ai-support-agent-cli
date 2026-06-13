@@ -33,7 +33,8 @@ import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, re
 import { buildProjectVolumeMounts } from './volume-mount-builder'
 import { buildDevMounts } from './docker-utils'
 import { buildProjectImage } from './project-image-builder'
-import { getProjectConfigHostDir, migrateProjectConfigDir } from './project-config'
+import { getProjectConfigHostDir } from '../utils/path-utils'
+import { migrateProjectConfigDir } from './project-config'
 import { installUpdateAndRestart } from './update-handler'
 
 /** Maximum total log size kept in memory per session (2 MB). */
@@ -220,7 +221,7 @@ export class DockerSupervisor {
 
   private spawnProject(project: ProjectRegistration): void {
     const key = this.projectKey(project)
-    const projectConfigHostDir = getProjectConfigHostDir(project)
+    const projectConfigHostDir = getProjectConfigHostDir(project.tenantCode, project.projectCode)
 
     // Pre-startup hash check: if docker-customization-hash !== docker-built-hash,
     // rebuild before starting the container

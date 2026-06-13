@@ -12,13 +12,8 @@ import { logger } from '../logger'
 import type { ProjectRegistration } from '../types'
 import { getErrorMessage } from '../utils'
 
-/**
- * Get the host-side per-project config directory.
- * Located at: ~/.ai-support-agent/projects/{tenantCode}/{projectCode}/.ai-support-agent/
- */
-export function getProjectConfigHostDir(project: ProjectRegistration): string {
-  return path.join(getConfigDir(), 'projects', project.tenantCode, project.projectCode, '.ai-support-agent')
-}
+// NOTE: The host-side per-project config dir helper (getProjectConfigHostDir)
+// lives in ../utils/path-utils. Import it from there; do not redefine it here.
 
 /**
  * Migrate per-project config directory from the legacy layout to the current layout.
