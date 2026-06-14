@@ -17,7 +17,7 @@ import {
   getSensitiveHomePaths,
 } from '../security'
 import type { ProjectRegistration } from '../types'
-import { getErrorMessage } from '../utils'
+import { getErrorMessage, toContainerApiUrl } from '../utils'
 import { toPosixRelative } from './docker-utils'
 
 /** Container-internal base path for project directories */
@@ -211,11 +211,10 @@ export function buildProjectVolumeMounts(
     envArgs.push('-e', `AI_SUPPORT_AGENT_TOKEN=${project.token}`)
   }
   if (project.apiUrl) {
-    // Replace localhost/127.0.0.1 with host.docker.internal so the container can reach the host
-    const containerApiUrl = project.apiUrl.replace(
-      /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?/,
-      (_, scheme, _host, port) => `${scheme}host.docker.internal${port ?? ''}`,
-    )
+    // Replace localhost/127.0.0.1 with host.docker.internal so the container can reach the host.
+    // toContainerApiUrl uses a boundary lookahead to avoid false matches on
+    // hosts like `localhost.example.com`.
+    const containerApiUrl = toContainerApiUrl(project.apiUrl)
     envArgs.push('-e', `AI_SUPPORT_AGENT_API_URL=${containerApiUrl}`)
   }
 

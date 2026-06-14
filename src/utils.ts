@@ -128,6 +128,25 @@ export function isInDocker(): boolean {
 }
 
 /**
+ * Convert a localhost / 127.0.0.1 URL to host.docker.internal so that a
+ * container can reach the host machine.
+ *
+ * Uses a boundary lookahead (`(?=$|[:/])`) to avoid false-positive matches on
+ * hostnames like `localhost.example.com`.  Handles both http and https schemes
+ * and preserves any path / port that follows.
+ *
+ * Used by:
+ *   - docker/volume-mount-builder.ts  (build-time, host→container URL rewrite)
+ *   - cli/service/*-service.ts        (via wrapper-helpers re-export)
+ */
+export function toContainerApiUrl(apiUrl: string): string {
+  return apiUrl.replace(
+    /^(https?:\/\/)(localhost|127\.0\.0\.1)(?=$|[:/])/,
+    (_, scheme: string) => `${scheme}host.docker.internal`,
+  )
+}
+
+/**
  * Docker コンテナ内から host の URL にアクセスするため
  * localhost / 127.0.0.1 を host.docker.internal に変換する。
  * `AI_SUPPORT_AGENT_IN_DOCKER` が `'1'` のときのみ変換する。

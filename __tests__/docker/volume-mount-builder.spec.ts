@@ -129,6 +129,16 @@ describe('buildProjectVolumeMounts', () => {
     expect(envArgs).toContain('AI_SUPPORT_AGENT_API_URL=https://host.docker.internal')
   })
 
+  it('should NOT replace localhost when it is a prefix of a longer hostname (boundary regression)', () => {
+    // The old inline regex lacked a boundary check and would incorrectly
+    // rewrite `http://localhost.example.com` → `http://host.docker.internal.example.com`.
+    // toContainerApiUrl uses a lookahead so only bare localhost/127.0.0.1 match.
+    const project = makeProject({ apiUrl: 'http://localhost.example.com:4030' })
+    const { envArgs } = buildProjectVolumeMounts(project, '/host/config/dir')
+
+    expect(envArgs).toContain('AI_SUPPORT_AGENT_API_URL=http://localhost.example.com:4030')
+  })
+
   it('should NOT include AI_SUPPORT_AGENT_API_URL when project.apiUrl is empty', () => {
     const project = makeProject({ apiUrl: '' })
     const { envArgs } = buildProjectVolumeMounts(project, '/host/config/dir')
