@@ -13,7 +13,7 @@ jest.mock('../../src/docker/docker-security', () => ({
   validatePackageNames: jest.fn(),
 }))
 
-import { generateProjectDockerfile, buildDockerEnv } from '../../src/docker/dockerfile-generator'
+import { generateProjectDockerfile, buildDockerEnv, BUILD_ENV_PASSTHROUGH_KEYS } from '../../src/docker/dockerfile-generator'
 import { validatePackageNames } from '../../src/docker/docker-security'
 
 const mockValidatePackageNames = validatePackageNames as jest.Mock
@@ -200,6 +200,21 @@ describe('generateProjectDockerfile', () => {
   })
 })
 
+describe('BUILD_ENV_PASSTHROUGH_KEYS', () => {
+  it('is exported and contains expected system env var keys', () => {
+    expect(BUILD_ENV_PASSTHROUGH_KEYS).toContain('PATH')
+    expect(BUILD_ENV_PASSTHROUGH_KEYS).toContain('HOME')
+    expect(BUILD_ENV_PASSTHROUGH_KEYS).toContain('LANG')
+    expect(BUILD_ENV_PASSTHROUGH_KEYS).toContain('LC_ALL')
+  })
+
+  it('does not contain sensitive credential keys', () => {
+    expect(BUILD_ENV_PASSTHROUGH_KEYS).not.toContain('ANTHROPIC_API_KEY')
+    expect(BUILD_ENV_PASSTHROUGH_KEYS).not.toContain('CLAUDE_CODE_OAUTH_TOKEN')
+    expect(BUILD_ENV_PASSTHROUGH_KEYS).not.toContain('AI_SUPPORT_AGENT_TOKEN')
+  })
+})
+
 describe('buildDockerEnv', () => {
   const originalEnv = process.env
 
@@ -264,7 +279,7 @@ describe('buildDockerEnv', () => {
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined()
   })
 
-  it('excludes keys not in ALLOWED_KEYS list', () => {
+  it('excludes keys not in BUILD_ENV_PASSTHROUGH_KEYS list', () => {
     process.env.CUSTOM_VAR = 'custom'
     process.env.MY_SECRET = 'secret'
     const env = buildDockerEnv()
