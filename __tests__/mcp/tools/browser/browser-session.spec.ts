@@ -41,6 +41,7 @@ describe('BrowserSession', () => {
       addInitScript: jest.fn().mockResolvedValue(undefined),
       reload: jest.fn().mockResolvedValue(undefined),
       viewportSize: jest.fn().mockReturnValue({ width: 1280, height: 720 }),
+      on: jest.fn(),
       keyboard: {
         type: jest.fn().mockResolvedValue(undefined),
         press: jest.fn().mockResolvedValue(undefined),
