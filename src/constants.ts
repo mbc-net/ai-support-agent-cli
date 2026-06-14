@@ -54,6 +54,7 @@ export const MAX_CMD_TIMEOUT = 10 * 60 * 1000 // 10 minutes
 export const MAX_FILE_READ_SIZE = 10 * 1024 * 1024 // 10 MB
 export const MAX_FILE_WRITE_SIZE = 10 * 1024 * 1024 // 10 MB
 export const PROCESS_LIST_TIMEOUT = 10_000
+export const MAX_PROCESS_LIST_SIZE = 50_000 // 50 KB
 
 // Interval bounds
 export const MIN_INTERVAL = 1000
