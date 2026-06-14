@@ -8,6 +8,7 @@ import {
   ALLOWED_EXTENSIONS,
   downloadChatFiles,
   getContentType,
+  hasChatFileBaseFields,
   parseChatFiles,
   parseConversationFiles,
   uploadFile,
@@ -79,6 +80,61 @@ describe('file-transfer', () => {
       expect(ALLOWED_EXTENSIONS.has('.exe')).toBe(false)
       expect(ALLOWED_EXTENSIONS.has('.bat')).toBe(false)
       expect(ALLOWED_EXTENSIONS.has('.dll')).toBe(false)
+    })
+  })
+
+  describe('hasChatFileBaseFields', () => {
+    it('should return true for an object with all three required string fields', () => {
+      expect(hasChatFileBaseFields({ fileId: 'f1', s3Key: 'key1', filename: 'test.txt' })).toBe(true)
+    })
+
+    it('should return true even when extra fields are present', () => {
+      expect(hasChatFileBaseFields({
+        fileId: 'f1', s3Key: 'key1', filename: 'test.txt',
+        contentType: 'text/plain', fileSize: 100,
+      })).toBe(true)
+    })
+
+    it('should return false for null', () => {
+      expect(hasChatFileBaseFields(null)).toBe(false)
+    })
+
+    it('should return false for undefined', () => {
+      expect(hasChatFileBaseFields(undefined)).toBe(false)
+    })
+
+    it('should return false for non-object primitives', () => {
+      expect(hasChatFileBaseFields('string')).toBe(false)
+      expect(hasChatFileBaseFields(42)).toBe(false)
+      expect(hasChatFileBaseFields(true)).toBe(false)
+    })
+
+    it('should return false when fileId is missing', () => {
+      expect(hasChatFileBaseFields({ s3Key: 'key1', filename: 'test.txt' })).toBe(false)
+    })
+
+    it('should return false when s3Key is missing', () => {
+      expect(hasChatFileBaseFields({ fileId: 'f1', filename: 'test.txt' })).toBe(false)
+    })
+
+    it('should return false when filename is missing', () => {
+      expect(hasChatFileBaseFields({ fileId: 'f1', s3Key: 'key1' })).toBe(false)
+    })
+
+    it('should return false when fileId is not a string', () => {
+      expect(hasChatFileBaseFields({ fileId: 123, s3Key: 'key1', filename: 'test.txt' })).toBe(false)
+    })
+
+    it('should return false when s3Key is not a string', () => {
+      expect(hasChatFileBaseFields({ fileId: 'f1', s3Key: null, filename: 'test.txt' })).toBe(false)
+    })
+
+    it('should return false when filename is not a string', () => {
+      expect(hasChatFileBaseFields({ fileId: 'f1', s3Key: 'key1', filename: [] })).toBe(false)
+    })
+
+    it('should return false for an empty object', () => {
+      expect(hasChatFileBaseFields({})).toBe(false)
     })
   })
 
