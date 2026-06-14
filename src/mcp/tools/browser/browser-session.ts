@@ -4,7 +4,7 @@
  * Supports live view streaming (JPEG frames) and direct interaction.
  */
 
-import type { Browser, BrowserContext, Page } from 'playwright'
+import type { Browser, BrowserContext, FileChooser, Page } from 'playwright'
 
 import { logger } from '../../../logger'
 import { BrowserActionLog } from './browser-action-log'
@@ -23,6 +23,9 @@ export class BrowserSession {
   private _currentDeviceId: string | null = null
   private closed = false
   private readonly onClosed?: () => void
+  private pendingFileChooser: FileChooser | null = null
+  /** ファイルチューザーが開いたときに呼ばれるコールバック。accept(paths) でファイルを設定する */
+  onFileChooser: ((accept: (paths: string[]) => void) => void) | null = null
 
   /**
    * Get the currently active device emulation ID, or null if none.
@@ -62,6 +65,8 @@ export class BrowserSession {
     this.context = await this.browser!.newContext()
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     this.page = await this.context!.newPage()
+    this.attachPageListeners(this.page)
+
     return this.page
   }
 
@@ -78,6 +83,8 @@ export class BrowserSession {
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    this.pendingFileChooser = null
+    this.onFileChooser = null
     this.stopLiveView()
     this.clearIdleTimer()
     if (this.browser) {
@@ -92,6 +99,23 @@ export class BrowserSession {
       this.page = null
     }
     this.onClosed?.()
+  }
+
+  private attachPageListeners(page: Page): void {
+    page.on('filechooser', (fc: FileChooser) => {
+      this.pendingFileChooser = fc
+      if (this.onFileChooser) {
+        this.onFileChooser((paths: string[]) => {
+          this.pendingFileChooser?.setFiles(paths).catch((err: unknown) => {
+            logger.warn(`[browser] setFiles failed: ${String(err)}`)
+          })
+          this.pendingFileChooser = null
+        })
+      } else {
+        fc.setFiles([]).catch(() => {})
+        this.pendingFileChooser = null
+      }
+    })
   }
 
   /**
@@ -127,6 +151,7 @@ export class BrowserSession {
 
     this.context = await this.browser.newContext(contextOptions)
     this.page = await this.context.newPage()
+    this.attachPageListeners(this.page)
 
     // Navigate back to the previous URL
     if (currentUrl && currentUrl !== 'about:blank') {
