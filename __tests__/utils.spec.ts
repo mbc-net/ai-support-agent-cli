@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { exitWithError, getErrorMessage, isInDocker, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
+import { exitWithError, getErrorMessage, isInDocker, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('getErrorMessage', () => {
@@ -619,6 +619,45 @@ describe('readJsonSync', () => {
     const filePath = path.join(tmpDir, 'invalid.json')
     fs.writeFileSync(filePath, 'not valid json {{{')
     expect(() => readJsonSync(filePath)).toThrow()
+  })
+})
+
+describe('toContainerApiUrl', () => {
+  it('converts http://localhost to host.docker.internal', () => {
+    expect(toContainerApiUrl('http://localhost')).toBe('http://host.docker.internal')
+  })
+
+  it('converts http://127.0.0.1 to host.docker.internal', () => {
+    expect(toContainerApiUrl('http://127.0.0.1')).toBe('http://host.docker.internal')
+  })
+
+  it('preserves the port when converting localhost', () => {
+    expect(toContainerApiUrl('http://localhost:4030')).toBe('http://host.docker.internal:4030')
+  })
+
+  it('preserves the port when converting 127.0.0.1', () => {
+    expect(toContainerApiUrl('http://127.0.0.1:8080/api')).toBe('http://host.docker.internal:8080/api')
+  })
+
+  it('preserves a path that follows the host directly (no port)', () => {
+    expect(toContainerApiUrl('http://localhost/api')).toBe('http://host.docker.internal/api')
+  })
+
+  it('converts https URLs too', () => {
+    expect(toContainerApiUrl('https://localhost:8443')).toBe('https://host.docker.internal:8443')
+  })
+
+  it('does NOT replace localhost when it is a prefix of a longer hostname', () => {
+    // Without the boundary lookahead, `http://localhost.example.com` would
+    // partially match and become `http://host.docker.internal.example.com` —
+    // a different host.  This is the regression the old inline regex had.
+    expect(toContainerApiUrl('http://localhost.example.com/api')).toBe('http://localhost.example.com/api')
+    expect(toContainerApiUrl('http://127.0.0.1.example.com')).toBe('http://127.0.0.1.example.com')
+  })
+
+  it('leaves non-localhost URLs unchanged', () => {
+    expect(toContainerApiUrl('https://api.example.com')).toBe('https://api.example.com')
+    expect(toContainerApiUrl('http://192.168.1.10:4030')).toBe('http://192.168.1.10:4030')
   })
 })
 
