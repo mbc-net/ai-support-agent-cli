@@ -15,10 +15,14 @@ import {
   CLI_FLAG_VERBOSE,
   CLI_FLAG_NO_AUTO_UPDATE,
   CLI_FLAG_NO_DOCKER,
+  DOCKER_BUILD_ERROR_MAX_BYTES,
+  DOCKER_LOG_FLUSH_INTERVAL_MS,
   DOCKER_MARKER_BUILT_HASH,
   DOCKER_MARKER_CUSTOMIZATION_HASH,
   DOCKER_MARKER_REBUILD_NEEDED,
   DOCKER_MARKER_REGISTERED_AGENT_ID,
+  DOCKER_MAX_LOG_CHUNK_BYTES,
+  DOCKER_MAX_SESSION_LOG_BYTES,
   DOCKER_RESTART_EXIT_CODE,
   DOCKER_UPDATE_EXIT_CODE,
 } from '../constants'
@@ -36,11 +40,6 @@ import { buildProjectImage } from './project-image-builder'
 import { getProjectConfigHostDir } from '../utils/path-utils'
 import { migrateProjectConfigDir } from './project-config'
 import { installUpdateAndRestart } from './update-handler'
-
-/** Maximum total log size kept in memory per session (2 MB). */
-const MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024
-// API の SubmitLogChunkDto.text @MaxLength に合わせた上限（100,000 バイト）
-const MAX_LOG_CHUNK_BYTES = 100_000
 
 interface DockerContainerHandle {
   project: ProjectRegistration
@@ -201,7 +200,7 @@ export class DockerSupervisor {
           logger.error(`[docker] Image build failed: ${errorMsg}`)
           logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
           const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
-          const truncatedError = errorMsg.length > 3000 ? errorMsg.substring(0, 3000) + '...(truncated)' : errorMsg
+          const truncatedError = errorMsg.length > DOCKER_BUILD_ERROR_MAX_BYTES ? errorMsg.substring(0, DOCKER_BUILD_ERROR_MAX_BYTES) + '...(truncated)' : errorMsg
           /* istanbul ignore next */
           try {
             atomicWriteFile(buildErrorPath, truncatedError)
@@ -341,24 +340,24 @@ export class DockerSupervisor {
         const text = buf
         buf = ''
         if (!logTruncated) {
-          if (fullLog.length + text.length <= MAX_SESSION_LOG_BYTES) {
+          if (fullLog.length + text.length <= DOCKER_MAX_SESSION_LOG_BYTES) {
             fullLog += text
           } else {
-            const remaining = MAX_SESSION_LOG_BYTES - fullLog.length
+            const remaining = DOCKER_MAX_SESSION_LOG_BYTES - fullLog.length
             fullLog += remaining > 0 ? text.slice(0, remaining) : ''
             logTruncated = true
             logger.warn(`[docker] Container log for ${key} exceeded 2 MB limit; remaining output will not be saved to S3`)
           }
         }
         // 1 フラッシュのテキストが API 上限を超える場合は分割して送信
-        for (let offset = 0; offset < text.length; offset += MAX_LOG_CHUNK_BYTES) {
-          const slice = text.slice(offset, offset + MAX_LOG_CHUNK_BYTES)
+        for (let offset = 0; offset < text.length; offset += DOCKER_MAX_LOG_CHUNK_BYTES) {
+          const slice = text.slice(offset, offset + DOCKER_MAX_LOG_CHUNK_BYTES)
           await apiClient.submitLogChunk({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, seq: ++seq, text: slice })
             .catch((e: unknown) => logger.warn(`[docker] log chunk failed: ${e}`))
         }
       }
 
-      const flushTimer = setInterval(() => { void flush() }, 1_000).unref()
+      const flushTimer = setInterval(() => { void flush() }, DOCKER_LOG_FLUSH_INTERVAL_MS).unref()
 
       const writeStdout = makeLinePrefixer(logPrefix, (s) => process.stdout.write(s))
       const writeStderr = makeLinePrefixer(logPrefix, (s) => process.stderr.write(s))
