@@ -34,10 +34,41 @@ export const PASSTHROUGH_ENV_VARS = [
   'CLAUDE_CODE_OAUTH_TOKEN',
 ]
 
+/**
+ * Subset of PASSTHROUGH_ENV_VARS that carry Claude / Anthropic credentials.
+ * Used by per-project containers where the other agent-specific vars are
+ * handled explicitly (token, apiUrl, configDir) rather than via passthrough.
+ */
+export const CLAUDE_CREDENTIAL_ENV_VARS = [
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+] as const
+
 export interface ProjectDirMapping {
   hostDir: string
   containerDir: string
   projectCode: string
+}
+
+/** Mount the Claude Code config files (.claude dir and .claude.json) into the container */
+function mountClaudeConfig(mounts: string[], home: string): void {
+  const claudeDir = path.join(home, '.claude')
+  if (fs.existsSync(claudeDir)) {
+    mounts.push('-v', `${claudeDir}:${path.posix.join(CONTAINER_HOME, '.claude')}:rw`)
+  }
+  const claudeJson = path.join(home, '.claude.json')
+  if (fs.existsSync(claudeJson)) {
+    mounts.push('-v', `${claudeJson}:${path.posix.join(CONTAINER_HOME, '.claude.json')}:rw`)
+  }
+}
+
+/** Compute the container-internal path for the agent config dir */
+function getContainerConfigDir(hostConfigDir: string, home: string): string {
+  const relativeToHome = path.relative(home, hostConfigDir)
+  const isUnderHome = !relativeToHome.startsWith('..')
+  return isUnderHome
+    ? path.posix.join(CONTAINER_HOME, toPosixRelative(relativeToHome))
+    : '/workspace/.config/ai-support-agent'
 }
 
 /**
@@ -50,23 +81,12 @@ export function buildVolumeMounts(): { mounts: string[]; projectMappings: Projec
   const projectMappings: ProjectDirMapping[] = []
 
   // Claude Code OAuth tokens and config — mount to container home
-  const claudeDir = path.join(home, '.claude')
-  if (fs.existsSync(claudeDir)) {
-    mounts.push('-v', `${claudeDir}:${path.posix.join(CONTAINER_HOME, '.claude')}:rw`)
-  }
-  const claudeJson = path.join(home, '.claude.json')
-  if (fs.existsSync(claudeJson)) {
-    mounts.push('-v', `${claudeJson}:${path.posix.join(CONTAINER_HOME, '.claude.json')}:rw`)
-  }
+  mountClaudeConfig(mounts, home)
 
   // Agent config — mount to container home
   const agentConfigDir = getConfigDir()
   if (fs.existsSync(agentConfigDir)) {
-    const relativeToHome = path.relative(home, agentConfigDir)
-    const isUnderHome = !relativeToHome.startsWith('..')
-    const containerConfigDir = isUnderHome
-      ? path.posix.join(CONTAINER_HOME, toPosixRelative(relativeToHome))
-      : `/workspace/.config/ai-support-agent`
+    const containerConfigDir = getContainerConfigDir(agentConfigDir, home)
     mounts.push('-v', `${agentConfigDir}:${containerConfigDir}:rw`)
   }
 
@@ -128,11 +148,7 @@ export function buildEnvArgs(projectMappings: ProjectDirMapping[]): string[] {
   // Map config dir to container-internal path
   const hostConfigDir = getConfigDir()
   const home = os.homedir()
-  const relativeToHome = path.relative(home, hostConfigDir)
-  const isUnderHome = !relativeToHome.startsWith('..')
-  const containerConfigDir = isUnderHome
-    ? path.posix.join(CONTAINER_HOME, toPosixRelative(relativeToHome))
-    : `/workspace/.config/ai-support-agent`
+  const containerConfigDir = getContainerConfigDir(hostConfigDir, home)
 
   for (const key of PASSTHROUGH_ENV_VARS) {
     if (process.env[key]) {
@@ -178,14 +194,7 @@ export function buildProjectVolumeMounts(
   const envArgs: string[] = []
 
   // Claude Code OAuth tokens and config — mount to container home
-  const claudeDir = path.join(home, '.claude')
-  if (fs.existsSync(claudeDir)) {
-    mounts.push('-v', `${claudeDir}:${path.posix.join(CONTAINER_HOME, '.claude')}:rw`)
-  }
-  const claudeJson = path.join(home, '.claude.json')
-  if (fs.existsSync(claudeJson)) {
-    mounts.push('-v', `${claudeJson}:${path.posix.join(CONTAINER_HOME, '.claude.json')}:rw`)
-  }
+  mountClaudeConfig(mounts, home)
 
   // Per-project isolated config dir — mounts to /home/node/.ai-support-agent inside container
   const containerConfigDir = path.posix.join(CONTAINER_HOME, '.ai-support-agent')
@@ -210,8 +219,8 @@ export function buildProjectVolumeMounts(
     envArgs.push('-e', `AI_SUPPORT_AGENT_API_URL=${containerApiUrl}`)
   }
 
-  // Pass ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN if set
-  for (const key of ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'] as const) {
+  // Pass Claude / Anthropic credential env vars if set
+  for (const key of CLAUDE_CREDENTIAL_ENV_VARS) {
     if (process.env[key]) {
       envArgs.push('-e', `${key}=${process.env[key]}`)
     }
