@@ -6,6 +6,7 @@ import { getCacheDir } from './project-dir'
 import { logger } from './logger'
 import type { CachedProjectConfig, ProjectConfigResponse } from './types'
 import { atomicWriteFile } from './utils'
+import { safeJsonParse } from './utils/json-parse'
 
 const CACHE_FILE_NAME = 'project-config.json'
 
@@ -127,7 +128,7 @@ export function loadCachedConfig(
       return null
     }
     const data = fs.readFileSync(cachePath, 'utf-8')
-    return JSON.parse(data) as CachedProjectConfig
+    return safeJsonParse<CachedProjectConfig>(data) ?? null
   } catch {
     return null
   }
