@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { ApiClient } from '../../api-client'
 import { logger } from '../../logger'
 import { isSsoAuthRequiredError } from '../../utils'
-import { mcpErrorResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
+import { mcpErrorResponse, mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
 
 /**
  * get_credentials ツールを MCP サーバーに登録する
@@ -28,12 +28,12 @@ export function registerCredentialsTool(server: McpServer, apiClient: ApiClient)
       if (type === 'aws') {
         try {
           const credentials = await apiClient.getAwsCredentials(name)
-          return mcpTextResponse(JSON.stringify({
+          return mcpJsonResponse({
             accessKeyId: credentials.accessKeyId,
             secretAccessKey: credentials.secretAccessKey,
             sessionToken: credentials.sessionToken,
             region: credentials.region,
-          }, null, 2))
+          })
         } catch (error) {
           logger.debug(`[credentials] AWS credential error for ${name}: ${String(error)}`)
           if (isSsoAuthRequiredError(error)) {
@@ -49,7 +49,7 @@ export function registerCredentialsTool(server: McpServer, apiClient: ApiClient)
       if (type === 'db') {
         try {
           const credentials = await apiClient.getDbCredentials(name)
-          return mcpTextResponse(JSON.stringify(credentials, null, 2))
+          return mcpJsonResponse(credentials)
         } catch (error) {
           logger.debug(`[credentials] DB credential error for ${name}: ${String(error)}`)
           throw error
