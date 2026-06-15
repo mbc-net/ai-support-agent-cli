@@ -6,7 +6,7 @@ import { getConfigDir } from './config-manager'
 import { logger } from './logger'
 import { ApiClient } from './api-client'
 import type { CommandResult } from './types/command'
-import { atomicWriteFile, getErrorMessage } from './utils'
+import { atomicWriteFile, ensureDir, getErrorMessage } from './utils'
 import { safeJsonParse } from './utils/json-parse'
 
 const PENDING_RESULTS_DIR = 'pending-results'
@@ -27,10 +27,7 @@ function getPendingDir(): string {
 }
 
 function ensurePendingDir(): void {
-  const dir = getPendingDir()
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true })
-  }
+  ensureDir(getPendingDir())
 }
 
 export function savePendingResult(
