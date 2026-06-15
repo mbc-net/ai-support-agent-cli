@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { exitWithError, getErrorMessage, isInDocker, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment } from '../src/utils'
+import { exitWithError, getErrorMessage, isInDocker, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('sanitizeNameSegment', () => {
@@ -251,6 +251,55 @@ describe('atomicWriteFile', () => {
     const filePath = path.join(tmpDir, 'test.txt')
     atomicWriteFile(filePath, 'content')
     expect(fs.existsSync(filePath + '.tmp')).toBe(false)
+  })
+})
+
+describe('ensureDir', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ensure-dir-test-'))
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true })
+  })
+
+  it('should create a directory that does not exist', () => {
+    const dir = path.join(tmpDir, 'new-dir')
+    ensureDir(dir)
+    expect(fs.existsSync(dir)).toBe(true)
+    expect(fs.statSync(dir).isDirectory()).toBe(true)
+  })
+
+  it('should create nested directories recursively', () => {
+    const dir = path.join(tmpDir, 'a', 'b', 'c')
+    ensureDir(dir)
+    expect(fs.existsSync(dir)).toBe(true)
+  })
+
+  it('should be a no-op when the directory already exists', () => {
+    const dir = path.join(tmpDir, 'existing')
+    fs.mkdirSync(dir)
+    // Drop a file inside; ensureDir must not recreate/clear the directory.
+    const marker = path.join(dir, 'marker.txt')
+    fs.writeFileSync(marker, 'keep')
+    ensureDir(dir)
+    expect(fs.existsSync(marker)).toBe(true)
+  })
+
+  it('should apply the given mode to a newly created directory', () => {
+    const dir = path.join(tmpDir, 'secure')
+    ensureDir(dir, 0o700)
+    const stat = fs.statSync(dir)
+    expect(stat.mode & 0o777).toBe(0o700)
+  })
+
+  it('should create with default permissions when no mode is given', () => {
+    const dir = path.join(tmpDir, 'default-mode')
+    ensureDir(dir)
+    // Directory exists and is usable; exact mode is OS/umask dependent.
+    expect(fs.statSync(dir).isDirectory()).toBe(true)
   })
 })
 

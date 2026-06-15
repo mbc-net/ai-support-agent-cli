@@ -24,6 +24,21 @@ export function atomicWriteFile(filePath: string, content: string, mode = 0o600)
 }
 
 /**
+ * ディレクトリが存在しなければ再帰的に作成する。
+ * `if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })` の重複イディオムを集約する。
+ *
+ * `mode` を渡すと、新規作成されるディレクトリにそのパーミッションを適用する
+ * （秘匿ディレクトリ向けに 0o700 等）。既に存在する場合は何もしない。
+ *
+ * @param dir 作成するディレクトリパス
+ * @param mode 新規作成時に適用するパーミッション（省略時は OS デフォルト）
+ */
+export function ensureDir(dir: string, mode?: number): void {
+  if (fs.existsSync(dir)) return
+  fs.mkdirSync(dir, mode === undefined ? { recursive: true } : { recursive: true, mode })
+}
+
+/**
  * unknown な catch 値からメッセージ文字列を取り出す。
  * Error なら `.message`、それ以外は `String()` を返す。
  * `err instanceof Error ? err.message : String(err)` の重複イディオムを集約する。
