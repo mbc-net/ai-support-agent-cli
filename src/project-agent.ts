@@ -525,8 +525,12 @@ export class ProjectAgent {
         const isAuth = isAuthenticationError(error)
         const message = getErrorMessage(error)
         const baseDelayMs = isAuth ? REGISTER_AUTH_ERROR_DELAY_MS : REGISTER_RETRY_BASE_DELAY_MS
-        let delay = calculateBackoff({ baseDelayMs, attempt: this.registerAttempt, jitter: true })
-        delay = Math.min(delay, REGISTER_RETRY_MAX_DELAY_MS)
+        let delay = calculateBackoff({
+          baseDelayMs,
+          attempt: this.registerAttempt,
+          jitter: true,
+          maxDelayMs: REGISTER_RETRY_MAX_DELAY_MS,
+        })
         if (isAuth) {
           // Floor at REGISTER_AUTH_ERROR_DELAY_MS so we never hammer the auth path.
           delay = Math.max(delay, REGISTER_AUTH_ERROR_DELAY_MS)
