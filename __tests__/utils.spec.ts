@@ -2,8 +2,29 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { exitWithError, getErrorMessage, isInDocker, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl } from '../src/utils'
+import { exitWithError, getErrorMessage, isInDocker, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
+
+describe('sanitizeNameSegment', () => {
+  it('lowercases uppercase input', () => {
+    expect(sanitizeNameSegment('MBC')).toBe('mbc')
+  })
+
+  it('collapses characters outside [a-z0-9-] to hyphens', () => {
+    expect(sanitizeNameSegment('MBC_01')).toBe('mbc-01')
+    expect(sanitizeNameSegment('MY.PROJECT')).toBe('my-project')
+    expect(sanitizeNameSegment('a b;c=d/e\\f')).toBe('a-b-c-d-e-f')
+  })
+
+  it('leaves already-safe values unchanged', () => {
+    expect(sanitizeNameSegment('mbc-01')).toBe('mbc-01')
+    expect(sanitizeNameSegment('abc123')).toBe('abc123')
+  })
+
+  it('returns empty string for empty input', () => {
+    expect(sanitizeNameSegment('')).toBe('')
+  })
+})
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {

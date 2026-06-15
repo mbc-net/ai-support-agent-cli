@@ -7,7 +7,7 @@ import { CONFIG_DIR, CONFIG_FILE, PROJECT_CODE_DEFAULT } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AgentConfig, LegacyAgentConfig, ProjectRegistration } from './types'
-import { atomicWriteFile } from './utils'
+import { atomicWriteFile, sanitizeNameSegment } from './utils'
 import { safeJsonParse } from './utils/json-parse'
 
 export function getConfigDir(): string {
@@ -26,7 +26,7 @@ function writeConfigFile(configPath: string, data: AgentConfig): void {
 }
 
 function generateAgentId(): string {
-  const hostname = os.hostname().toLowerCase().replace(/[^a-z0-9-]/g, '-')
+  const hostname = sanitizeNameSegment(os.hostname())
   const randomHex = crypto.randomBytes(8).toString('hex')
   return `${hostname}-${randomHex}`
 }

@@ -79,6 +79,21 @@ export function truncateString(text: string, limit: number, suffix = '...'): str
   return text.substring(0, limit) + suffix
 }
 
+/**
+ * Sanitize a single name segment for use in generated identifiers:
+ * lowercase the input and collapse every character outside `[a-z0-9-]` to `-`.
+ *
+ * This is the single source of truth for the `toLowerCase().replace(/[^a-z0-9-]/g, '-')`
+ * idiom that was previously duplicated across the codebase (docker container
+ * names, systemd unit names, launchd plist labels, scheduled-task names, and
+ * the generated agentId). Keeping one implementation guarantees these
+ * identifiers stay consistent so collision detection and name-based lookups
+ * cannot drift between subsystems.
+ */
+export function sanitizeNameSegment(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
+}
+
 export function validateApiUrl(url: string): string | null {
   try {
     const parsed = new URL(url)
