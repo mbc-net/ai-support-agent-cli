@@ -84,6 +84,45 @@ describe('calculateBackoff', () => {
     expect(result).toBe(50)
     Math.random = originalRandom
   })
+
+  describe('maxDelayMs cap', () => {
+    it('caps the base delay before jitter when jitter=false', () => {
+      // base = 100 * 2^5 = 3200, capped to 500
+      const result = calculateBackoff({ baseDelayMs: 100, attempt: 5, jitter: false, maxDelayMs: 500 })
+      expect(result).toBe(500)
+    })
+
+    it('does not cap when base delay is below maxDelayMs (jitter=false)', () => {
+      // base = 100 * 2^1 = 200, below cap of 500
+      const result = calculateBackoff({ baseDelayMs: 100, attempt: 1, jitter: false, maxDelayMs: 500 })
+      expect(result).toBe(200)
+    })
+
+    it('applies cap before jitter, so jittered result stays within [0.5*cap, cap]', () => {
+      const originalRandom = Math.random
+      Math.random = () => 1
+      // base = 100 * 2^10 = 102400, capped to 1000; jitter = round(1000 * 1.0) = 1000
+      const result = calculateBackoff({ baseDelayMs: 100, attempt: 10, jitter: true, maxDelayMs: 1000 })
+      expect(result).toBe(1000)
+      Math.random = originalRandom
+    })
+
+    it('jittered floor is half the cap when Math.random returns 0', () => {
+      const originalRandom = Math.random
+      Math.random = () => 0
+      // base capped to 1000; jitter = round(1000 * 0.5) = 500
+      const result = calculateBackoff({ baseDelayMs: 100, attempt: 10, jitter: true, maxDelayMs: 1000 })
+      expect(result).toBe(500)
+      Math.random = originalRandom
+    })
+
+    it('prevents Infinity overflow for very large attempt counts', () => {
+      // base = 1000 * 2^2000 overflows to Infinity; cap keeps it finite
+      const result = calculateBackoff({ baseDelayMs: 1000, attempt: 2000, jitter: false, maxDelayMs: 60_000 })
+      expect(result).toBe(60_000)
+      expect(Number.isFinite(result)).toBe(true)
+    })
+  })
 })
 
 describe('RetryStrategy.shouldRetry', () => {

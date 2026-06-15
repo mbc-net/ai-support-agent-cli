@@ -7,11 +7,25 @@ export interface BackoffOptions {
   baseDelayMs: number
   attempt: number
   jitter?: boolean
+  /**
+   * Upper bound (ms) applied to the exponential base delay BEFORE jitter.
+   * Omit for an uncapped backoff.
+   *
+   * Capping before jitter (rather than after) keeps the result a true
+   * fraction of the intended ceiling and, crucially, prevents
+   * `baseDelayMs * 2 ** attempt` from overflowing to Infinity at high attempt
+   * counts — important for callers that retry forever (e.g. ws-reconnect with
+   * maxRetries = Infinity).
+   */
+  maxDelayMs?: number
 }
 
 export function calculateBackoff(options: BackoffOptions): number {
-  const { baseDelayMs, attempt, jitter = true } = options
-  const baseDelay = baseDelayMs * Math.pow(2, attempt)
+  const { baseDelayMs, attempt, jitter = true, maxDelayMs } = options
+  let baseDelay = baseDelayMs * Math.pow(2, attempt)
+  if (maxDelayMs !== undefined) {
+    baseDelay = Math.min(baseDelay, maxDelayMs)
+  }
   if (!jitter) {
     return baseDelay
   }

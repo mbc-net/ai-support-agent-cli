@@ -39,10 +39,12 @@ export async function attemptReconnect(
   }
 
   attemptsRef.current++
-  let delay = calculateBackoff({ baseDelayMs, attempt: attemptsRef.current - 1, jitter: true })
-  if (maxDelayMs !== undefined) {
-    delay = Math.min(delay, maxDelayMs)
-  }
+  const delay = calculateBackoff({
+    baseDelayMs,
+    attempt: attemptsRef.current - 1,
+    jitter: true,
+    maxDelayMs,
+  })
   logger.info(`${logPrefix} Reconnecting in ${delay}ms (attempt ${attemptsRef.current}/${maxRetries})`)
 
   await sleep(delay)
