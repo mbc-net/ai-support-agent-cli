@@ -1,5 +1,6 @@
 import {
   mcpTextResponse,
+  mcpJsonResponse,
   mcpErrorResponse,
   mcpImageResponse,
   mcpTextImageResponse,
@@ -16,6 +17,31 @@ describe('mcp-response', () => {
 
     it('should handle empty string', () => {
       expect(mcpTextResponse('')).toEqual({ content: [{ type: 'text', text: '' }] })
+    })
+  })
+
+  describe('mcpJsonResponse', () => {
+    it('should pretty-print an object as JSON text content', () => {
+      const result = mcpJsonResponse({ a: 1, b: 'two' })
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify({ a: 1, b: 'two' }, null, 2) }],
+      })
+    })
+
+    it('should serialize arrays with 2-space indentation', () => {
+      const value = [{ id: 1 }, { id: 2 }]
+      const result = mcpJsonResponse(value)
+      expect(result.content[0].text).toBe(JSON.stringify(value, null, 2))
+      expect(result.content[0].text).toContain('\n  ')
+    })
+
+    it('should handle primitive values', () => {
+      expect(mcpJsonResponse('hello')).toEqual({
+        content: [{ type: 'text', text: '"hello"' }],
+      })
+      expect(mcpJsonResponse(42)).toEqual({
+        content: [{ type: 'text', text: '42' }],
+      })
     })
   })
 

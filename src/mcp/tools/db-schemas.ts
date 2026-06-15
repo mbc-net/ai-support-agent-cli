@@ -3,7 +3,7 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import { executeQuery } from './db-query'
-import { mcpTextResponse, withMcpErrorHandling } from './mcp-response'
+import { mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
 
 const MYSQL_SCHEMA_QUERY = `
 SELECT
@@ -60,7 +60,7 @@ export function registerDbSchemasTool(server: McpServer, apiClient: ApiClient): 
 
       const rows = await executeQuery(credentials, query)
 
-      return mcpTextResponse(JSON.stringify(rows, null, 2))
+      return mcpJsonResponse(rows)
     }),
   )
 }

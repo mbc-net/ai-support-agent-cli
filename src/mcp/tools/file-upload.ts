@@ -3,7 +3,7 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import { ALLOWED_EXTENSIONS, getContentType, uploadFile } from '../../commands/file-transfer'
-import { mcpTextResponse, withMcpErrorHandling } from './mcp-response'
+import { mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
 
 /**
  * file_upload ツールを MCP サーバーに登録する
@@ -33,14 +33,14 @@ export function registerFileUploadTool(server: McpServer, apiClient: ApiClient):
         )
 
         const contentType = getContentType(filename)
-        return mcpTextResponse(JSON.stringify({
+        return mcpJsonResponse({
           success: true,
           fileId,
           s3Key,
           filename,
           contentType,
           fileSize,
-        }, null, 2))
+        })
       }),
   )
 }
