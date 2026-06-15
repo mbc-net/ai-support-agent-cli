@@ -4,6 +4,7 @@ import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { isProjectCodeSafe, validateBindMountPathSync } from '../../security'
 import type { ProjectRegistration } from '../../types'
+import { sanitizeNameSegment } from '../../utils'
 
 // Re-export the projectCode validators that now live in `src/security.ts` so
 // existing call sites (linux-service / darwin-service) can continue to import
@@ -35,9 +36,13 @@ export function shellQuote(value: string): string {
  * and per-project log-dir keys (linux), docker container names (all
  * platforms), and scheduled-task names (win32). `detectInstallCollisions`
  * relies on its callers deriving names through this same mapping.
+ *
+ * Thin service-layer alias for the canonical `sanitizeNameSegment` in
+ * `utils.ts`; the name is retained so the service-installer call sites read
+ * intentfully ("service name segment").
  */
 export function sanitizeServiceNameSegment(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
+  return sanitizeNameSegment(s)
 }
 
 /**
