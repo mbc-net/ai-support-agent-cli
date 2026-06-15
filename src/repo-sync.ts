@@ -19,6 +19,26 @@ function validateBranchName(branch: string): void {
   }
 }
 
+/**
+ * Run a `git` subcommand with the auth env merged on top of process.env.
+ *
+ * Collapses the `execFileAsync('git', args, { [cwd,] env: { ...process.env, ...env }, timeout })`
+ * idiom that was duplicated across clone/checkout/fetch/reset calls. Centralising
+ * it guarantees every git invocation gets the same env-merge and an explicit
+ * timeout, so a new call site cannot accidentally drop the auth env or run
+ * without a timeout.
+ */
+export async function runGit(
+  args: string[],
+  options: { env: Record<string, string>; timeout: number; cwd?: string },
+): Promise<void> {
+  await execFileAsync('git', args, {
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    env: { ...process.env, ...options.env },
+    timeout: options.timeout,
+  })
+}
+
 export interface RepoSyncResult {
   repositoryId: string
   repositoryCode: string
@@ -122,15 +142,14 @@ async function cloneRepository(
     validateBranchName(branch)
     const cloneUrl = buildCloneUrl(repositoryUrl, authMethod, authSecret)
     // 全ブランチを取得（サポート対象の環境に応じてブランチ切り替えが必要なため）
-    await execFileAsync(
-      'git',
-      ['clone', '--no-single-branch', cloneUrl, repoDir],
-      { env: { ...process.env, ...env }, timeout: GIT_CLONE_TIMEOUT },
-    )
+    await runGit(['clone', '--no-single-branch', cloneUrl, repoDir], {
+      env,
+      timeout: GIT_CLONE_TIMEOUT,
+    })
     // デフォルトブランチをチェックアウト
-    await execFileAsync('git', ['checkout', branch], {
+    await runGit(['checkout', branch], {
       cwd: repoDir,
-      env: { ...process.env, ...env },
+      env,
       timeout: GIT_CHECKOUT_TIMEOUT,
     })
   } finally {
@@ -149,30 +168,30 @@ async function pullRepository(
   try {
     validateBranchName(branch)
     // 全リモートブランチを取得
-    await execFileAsync('git', ['fetch', '--all'], {
+    await runGit(['fetch', '--all'], {
       cwd: repoDir,
-      env: { ...process.env, ...env },
+      env,
       timeout: GIT_FETCH_TIMEOUT,
     })
 
     try {
-      await execFileAsync('git', ['checkout', branch], {
+      await runGit(['checkout', branch], {
         cwd: repoDir,
-        env: { ...process.env, ...env },
+        env,
         timeout: GIT_CHECKOUT_TIMEOUT,
       })
     } catch {
       // Branch does not exist locally yet — create it tracking the remote branch
-      await execFileAsync('git', ['checkout', '-b', branch, `origin/${branch}`], {
+      await runGit(['checkout', '-b', branch, `origin/${branch}`], {
         cwd: repoDir,
-        env: { ...process.env, ...env },
+        env,
         timeout: GIT_CHECKOUT_TIMEOUT,
       })
     }
 
-    await execFileAsync('git', ['reset', '--hard', `origin/${branch}`], {
+    await runGit(['reset', '--hard', `origin/${branch}`], {
       cwd: repoDir,
-      env: { ...process.env, ...env },
+      env,
       timeout: GIT_CHECKOUT_TIMEOUT,
     })
   } finally {
