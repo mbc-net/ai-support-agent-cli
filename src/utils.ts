@@ -24,6 +24,21 @@ export function atomicWriteFile(filePath: string, content: string, mode = 0o600)
 }
 
 /**
+ * ディレクトリが存在しなければ再帰的に作成する。
+ * `if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })` の重複イディオムを集約する。
+ *
+ * `mode` を渡すと、新規作成されるディレクトリにそのパーミッションを適用する
+ * （秘匿ディレクトリ向けに 0o700 等）。既に存在する場合は何もしない。
+ *
+ * @param dir 作成するディレクトリパス
+ * @param mode 新規作成時に適用するパーミッション（省略時は OS デフォルト）
+ */
+export function ensureDir(dir: string, mode?: number): void {
+  if (fs.existsSync(dir)) return
+  fs.mkdirSync(dir, mode === undefined ? { recursive: true } : { recursive: true, mode })
+}
+
+/**
  * unknown な catch 値からメッセージ文字列を取り出す。
  * Error なら `.message`、それ以外は `String()` を返す。
  * `err instanceof Error ? err.message : String(err)` の重複イディオムを集約する。
@@ -79,6 +94,21 @@ export function truncateString(text: string, limit: number, suffix = '...'): str
   return text.substring(0, limit) + suffix
 }
 
+/**
+ * Sanitize a single name segment for use in generated identifiers:
+ * lowercase the input and collapse every character outside `[a-z0-9-]` to `-`.
+ *
+ * This is the single source of truth for the `toLowerCase().replace(/[^a-z0-9-]/g, '-')`
+ * idiom that was previously duplicated across the codebase (docker container
+ * names, systemd unit names, launchd plist labels, scheduled-task names, and
+ * the generated agentId). Keeping one implementation guarantees these
+ * identifiers stay consistent so collision detection and name-based lookups
+ * cannot drift between subsystems.
+ */
+export function sanitizeNameSegment(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
+}
+
 export function validateApiUrl(url: string): string | null {
   try {
     const parsed = new URL(url)
@@ -125,6 +155,25 @@ export function buildWsUrl(apiUrl: string, path: string): string {
  */
 export function isInDocker(): boolean {
   return process.env[ENV_VARS.IN_DOCKER] === '1'
+}
+
+/**
+ * Convert a localhost / 127.0.0.1 URL to host.docker.internal so that a
+ * container can reach the host machine.
+ *
+ * Uses a boundary lookahead (`(?=$|[:/])`) to avoid false-positive matches on
+ * hostnames like `localhost.example.com`.  Handles both http and https schemes
+ * and preserves any path / port that follows.
+ *
+ * Used by:
+ *   - docker/volume-mount-builder.ts  (build-time, host→container URL rewrite)
+ *   - cli/service/*-service.ts        (via wrapper-helpers re-export)
+ */
+export function toContainerApiUrl(apiUrl: string): string {
+  return apiUrl.replace(
+    /^(https?:\/\/)(localhost|127\.0\.0\.1)(?=$|[:/])/,
+    (_, scheme: string) => `${scheme}host.docker.internal`,
+  )
 }
 
 /**

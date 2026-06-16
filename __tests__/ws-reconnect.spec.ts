@@ -217,23 +217,55 @@ describe('attemptReconnect', () => {
   })
 
   it('should respect maxDelayMs cap', async () => {
-    const connectFn = jest.fn().mockResolvedValue(undefined)
-    // attempt=10 would normally back off 1024s, but the cap should clamp it to 60s.
-    const attemptsRef = { current: 10 }
+    // attempt=10 would normally back off 1024s; the cap clamps the base to 60s
+    // BEFORE jitter, so the actual delay lands in [30s, 60s]. Pin Math.random to
+    // its max so jitter resolves to the full 60s cap and the timing is deterministic.
+    const randomSpy = jest.spyOn(Math, 'random').mockReturnValue(1)
+    try {
+      const connectFn = jest.fn().mockResolvedValue(undefined)
+      const attemptsRef = { current: 10 }
 
-    const promise = attemptReconnect(attemptsRef, buildOptions({
-      connectFn,
-      baseDelayMs: 1000,
-      maxDelayMs: 60_000,
-      maxRetries: 20,
-    }))
+      const promise = attemptReconnect(attemptsRef, buildOptions({
+        connectFn,
+        baseDelayMs: 1000,
+        maxDelayMs: 60_000,
+        maxRetries: 20,
+      }))
 
-    await jest.advanceTimersByTimeAsync(59_000)
-    expect(connectFn).not.toHaveBeenCalled()
+      await jest.advanceTimersByTimeAsync(59_000)
+      expect(connectFn).not.toHaveBeenCalled()
 
-    await jest.advanceTimersByTimeAsync(1_000)
-    await promise
-    expect(connectFn).toHaveBeenCalledTimes(1)
+      await jest.advanceTimersByTimeAsync(1_000)
+      await promise
+      expect(connectFn).toHaveBeenCalledTimes(1)
+    } finally {
+      randomSpy.mockRestore()
+    }
+  })
+
+  it('applies jitter to the capped delay so reconnects do not all fire at the cap', async () => {
+    // With Math.random pinned to 0, jitter takes the floor: half the cap (30s).
+    const randomSpy = jest.spyOn(Math, 'random').mockReturnValue(0)
+    try {
+      const connectFn = jest.fn().mockResolvedValue(undefined)
+      const attemptsRef = { current: 10 }
+
+      const promise = attemptReconnect(attemptsRef, buildOptions({
+        connectFn,
+        baseDelayMs: 1000,
+        maxDelayMs: 60_000,
+        maxRetries: 20,
+      }))
+
+      await jest.advanceTimersByTimeAsync(29_000)
+      expect(connectFn).not.toHaveBeenCalled()
+
+      await jest.advanceTimersByTimeAsync(1_000)
+      await promise
+      expect(connectFn).toHaveBeenCalledTimes(1)
+    } finally {
+      randomSpy.mockRestore()
+    }
   })
 
   it('should retry indefinitely when maxRetries is Infinity', async () => {

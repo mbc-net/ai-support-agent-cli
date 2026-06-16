@@ -54,6 +54,7 @@ export const MAX_CMD_TIMEOUT = 10 * 60 * 1000 // 10 minutes
 export const MAX_FILE_READ_SIZE = 10 * 1024 * 1024 // 10 MB
 export const MAX_FILE_WRITE_SIZE = 10 * 1024 * 1024 // 10 MB
 export const PROCESS_LIST_TIMEOUT = 10_000
+export const MAX_PROCESS_LIST_SIZE = 50_000 // 50 KB
 
 // Interval bounds
 export const MIN_INTERVAL = 1000
@@ -244,6 +245,16 @@ export const WS_PONG_MAX_MISSED = 3
 export const REGISTER_RETRY_BASE_DELAY_MS = 1_000
 export const REGISTER_RETRY_MAX_DELAY_MS = 60_000
 export const REGISTER_AUTH_ERROR_DELAY_MS = 5 * 60 * 1000
+
+// Docker log streaming constants shared between DockerSupervisor and project-image-builder.
+// MAX_SESSION_LOG_BYTES caps total in-memory log kept for S3 upload per session.
+// MAX_LOG_CHUNK_BYTES must stay ≤ SubmitLogChunkDto.text @MaxLength (100,000 bytes).
+// DOCKER_LOG_FLUSH_INTERVAL_MS controls how often buffered output is sent to the API.
+// DOCKER_BUILD_ERROR_MAX_BYTES caps the build-error file written to the project config dir.
+export const DOCKER_MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024
+export const DOCKER_MAX_LOG_CHUNK_BYTES = 100_000
+export const DOCKER_LOG_FLUSH_INTERVAL_MS = 1_000
+export const DOCKER_BUILD_ERROR_MAX_BYTES = 3_000
 
 // Docker marker filenames written to the per-project config dir to coordinate
 // image build state between the in-container agent and the host DockerSupervisor.

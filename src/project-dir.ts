@@ -7,6 +7,7 @@ import { ENV_VARS } from './constants'
 import { logger } from './logger'
 import { t } from './i18n'
 import type { ProjectRegistration } from './types'
+import { ensureDir } from './utils'
 
 function getDefaultProjectDirTemplate(): string {
   return path.join(getConfigDir(), 'projects', '{tenantCode}', '{projectCode}')
@@ -73,9 +74,7 @@ export function resolveProjectDir(
  */
 export function ensureProjectDirs(projectDir: string): void {
   // Create project root
-  if (!fs.existsSync(projectDir)) {
-    fs.mkdirSync(projectDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(projectDir, 0o700)
 
   // Legacy directory migration
   migrateIfNeeded(projectDir, 'metadata', '.ai-support-agent')
@@ -85,29 +84,20 @@ export function ensureProjectDirs(projectDir: string): void {
 
   // Create subdirectories
   for (const subdir of PROJECT_SUBDIRS) {
-    const dirPath = path.join(projectDir, subdir)
-    if (!fs.existsSync(dirPath)) {
-      fs.mkdirSync(dirPath, { recursive: true })
-    }
+    ensureDir(path.join(projectDir, subdir))
   }
 
   // Create metadata directory
   const metadataDir = path.join(projectDir, METADATA_DIR)
-  if (!fs.existsSync(metadataDir)) {
-    fs.mkdirSync(metadataDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(metadataDir, 0o700)
 
   // Create cache directory
   const cacheDir = path.join(metadataDir, CACHE_DIR)
-  if (!fs.existsSync(cacheDir)) {
-    fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(cacheDir, 0o700)
 
   // Create aws directory
   const awsDir = path.join(metadataDir, AWS_DIR)
-  if (!fs.existsSync(awsDir)) {
-    fs.mkdirSync(awsDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(awsDir, 0o700)
 }
 
 /**

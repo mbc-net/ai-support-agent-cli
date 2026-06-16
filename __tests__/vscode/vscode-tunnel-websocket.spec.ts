@@ -160,6 +160,14 @@ describe('VsCodeTunnelWebSocket', () => {
       ;(tunnel as any).onParsedMessage({ type: 'error' })
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('unknown'))
     })
+
+    it('should dispatch browser_get_selection to handleBrowserGetSelection', () => {
+      const mockSession = { getSelectedText: jest.fn().mockResolvedValue('sel') }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_get_selection', sessionId: 'sess-route' })
+      expect(mockSession.getSelectedText).toHaveBeenCalled()
+    })
   })
 
   describe('handleVsCodeOpen', () => {
@@ -1175,6 +1183,46 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(sentMessages).toHaveLength(1)
       expect(sentMessages[0].type).toBe('error')
       expect(sentMessages[0].message).toContain('Screenshot failed')
+    })
+  })
+
+  describe('handleBrowserGetSelection', () => {
+    it('should do nothing if no sessionId', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserGetSelection({ type: 'browser_get_selection' })
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should send error if session not found', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserGetSelection({ type: 'browser_get_selection', sessionId: 'sess-sel1' })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({ type: 'error', sessionId: 'sess-sel1' })
+    })
+
+    it('should return selected text via browser_selection_result', async () => {
+      const mockSession = { getSelectedText: jest.fn().mockResolvedValue('hello world') }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserGetSelection({ type: 'browser_get_selection', sessionId: 'sess-sel2' })
+      expect(mockSession.getSelectedText).toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({
+        type: 'browser_selection_result',
+        sessionId: 'sess-sel2',
+        text: 'hello world',
+      })
+    })
+
+    it('should send error on getSelectedText failure', async () => {
+      const mockSession = { getSelectedText: jest.fn().mockRejectedValue(new Error('no page')) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserGetSelection({ type: 'browser_get_selection', sessionId: 'sess-sel3' })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+      expect(sentMessages[0].message).toContain('getSelection failed')
     })
   })
 

@@ -4,12 +4,20 @@ import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { isProjectCodeSafe, validateBindMountPathSync } from '../../security'
 import type { ProjectRegistration } from '../../types'
+import { sanitizeNameSegment } from '../../utils'
 
 // Re-export the projectCode validators that now live in `src/security.ts` so
 // existing call sites (linux-service / darwin-service) can continue to import
 // them from here. The actual implementations moved to avoid a layering
 // inversion (the docker supervisor also needs them).
 export { assertProjectCodeIsSafe, isProjectCodeSafe } from '../../security'
+
+// Re-export toContainerApiUrl from utils so that callers (darwin-service,
+// linux-service, win32-service) can continue to import it from here without
+// change.  The canonical implementation lives in utils.ts so that
+// volume-mount-builder.ts can share it without a cli/ → docker/ layering
+// inversion.
+export { toContainerApiUrl } from '../../utils'
 
 /**
  * POSIX shell single-quote a value so it can be safely interpolated into a
@@ -28,23 +36,13 @@ export function shellQuote(value: string): string {
  * and per-project log-dir keys (linux), docker container names (all
  * platforms), and scheduled-task names (win32). `detectInstallCollisions`
  * relies on its callers deriving names through this same mapping.
+ *
+ * Thin service-layer alias for the canonical `sanitizeNameSegment` in
+ * `utils.ts`; the name is retained so the service-installer call sites read
+ * intentfully ("service name segment").
  */
 export function sanitizeServiceNameSegment(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
-}
-
-/** Convert localhost/127.0.0.1 to host.docker.internal for container use */
-export function toContainerApiUrl(apiUrl: string): string {
-  // Unified on the boundary-lookahead form (originally in linux-service.ts).
-  // Do NOT revert to the old `(:\d+)?` capture form once used by darwin/win32 —
-  // it lacked the boundary check and broke hosts like `localhost.example.com`.
-  // The host portion must be terminated by `:`, `/`, or end-of-string;
-  // otherwise URLs like `http://localhost.example.com` would partially match
-  // and produce `http://host.docker.internal.example.com` (a different host).
-  return apiUrl.replace(
-    /^(https?:\/\/)(localhost|127\.0\.0\.1)(?=$|[:/])/,
-    (_, scheme: string) => `${scheme}host.docker.internal`,
-  )
+  return sanitizeNameSegment(s)
 }
 
 /**

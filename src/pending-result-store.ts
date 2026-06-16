@@ -6,7 +6,8 @@ import { getConfigDir } from './config-manager'
 import { logger } from './logger'
 import { ApiClient } from './api-client'
 import type { CommandResult } from './types/command'
-import { atomicWriteFile, getErrorMessage } from './utils'
+import { atomicWriteFile, ensureDir, getErrorMessage } from './utils'
+import { safeJsonParse } from './utils/json-parse'
 
 const PENDING_RESULTS_DIR = 'pending-results'
 const STALE_THRESHOLD_MS = 60 * 60 * 1000 // 1 hour
@@ -26,10 +27,7 @@ function getPendingDir(): string {
 }
 
 function ensurePendingDir(): void {
-  const dir = getPendingDir()
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true })
-  }
+  ensureDir(getPendingDir())
 }
 
 export function savePendingResult(
@@ -79,10 +77,16 @@ export function loadPendingResults(): PendingResult[] {
   try {
     const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'))
     for (const file of files) {
+      const filePath = path.join(dir, file)
       try {
-        const filePath = path.join(dir, file)
         const content = fs.readFileSync(filePath, 'utf-8')
-        const data = JSON.parse(content) as PendingResult
+        const data = safeJsonParse<PendingResult>(content)
+
+        if (data === undefined) {
+          // Skip corrupted files
+          try { fs.unlinkSync(filePath) } catch { /* ignore */ }
+          continue
+        }
 
         // Discard stale results (older than 1 hour)
         if (now - new Date(data.savedAt).getTime() > STALE_THRESHOLD_MS) {
@@ -93,10 +97,8 @@ export function loadPendingResults(): PendingResult[] {
 
         results.push(data)
       } catch {
-        // Skip corrupted files
-        try {
-          fs.unlinkSync(path.join(dir, file))
-        } catch { /* ignore */ }
+        // Skip files that cannot be read (e.g. permission errors)
+        try { fs.unlinkSync(filePath) } catch { /* ignore */ }
       }
     }
   } catch (error) {

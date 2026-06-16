@@ -50,8 +50,8 @@ const getLogDir = getDarwinLogDir
 
 /** Returns the LaunchAgent label for a given project */
 export function getProjectLabel(tenantCode: string, projectCode: string): string {
-  const safeTenant = tenantCode.toLowerCase().replace(/[^a-z0-9-]/g, '-')
-  const safeProject = projectCode.toLowerCase().replace(/[^a-z0-9-]/g, '-')
+  const safeTenant = sanitizeServiceNameSegment(tenantCode)
+  const safeProject = sanitizeServiceNameSegment(projectCode)
   return `${SERVICE_LABEL}.${safeTenant}.${safeProject}`
 }
 

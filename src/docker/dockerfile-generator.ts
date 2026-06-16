@@ -6,6 +6,25 @@ import { IMAGE_NAME } from './docker-utils'
 import { validatePackageNames } from './docker-security'
 
 /**
+ * Safe, non-sensitive system environment variables forwarded to `docker build`.
+ *
+ * These are OS-level vars that affect build tooling (locale, paths, temp dirs)
+ * but carry no secrets. Sensitive vars such as ANTHROPIC_API_KEY or
+ * AI_SUPPORT_AGENT_TOKEN must NOT appear here — they belong in PASSTHROUGH_ENV_VARS
+ * (volume-mount-builder.ts) and are injected only at `docker run` time.
+ */
+export const BUILD_ENV_PASSTHROUGH_KEYS = [
+  'PATH',
+  'HOME',
+  'USER',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'LANG',
+  'LC_ALL',
+] as const
+
+/**
  * Generate a per-project Dockerfile that extends the base agent image.
  */
 export function generateProjectDockerfile(
@@ -57,9 +76,8 @@ export function generateProjectDockerfile(
  * Excludes sensitive variables (API keys, tokens) that should not be available during build.
  */
 export function buildDockerEnv(): NodeJS.ProcessEnv {
-  const ALLOWED_KEYS = ['PATH', 'HOME', 'USER', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL']
   const env: NodeJS.ProcessEnv = {}
-  for (const key of ALLOWED_KEYS) {
+  for (const key of BUILD_ENV_PASSTHROUGH_KEYS) {
     if (process.env[key] !== undefined) {
       env[key] = process.env[key]
     }

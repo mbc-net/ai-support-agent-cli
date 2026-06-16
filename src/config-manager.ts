@@ -7,7 +7,8 @@ import { CONFIG_DIR, CONFIG_FILE, PROJECT_CODE_DEFAULT } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AgentConfig, LegacyAgentConfig, ProjectRegistration } from './types'
-import { atomicWriteFile } from './utils'
+import { atomicWriteFile, sanitizeNameSegment } from './utils'
+import { safeJsonParse } from './utils/json-parse'
 
 export function getConfigDir(): string {
   if (path.isAbsolute(CONFIG_DIR)) {
@@ -25,7 +26,7 @@ function writeConfigFile(configPath: string, data: AgentConfig): void {
 }
 
 function generateAgentId(): string {
-  const hostname = os.hostname().toLowerCase().replace(/[^a-z0-9-]/g, '-')
+  const hostname = sanitizeNameSegment(os.hostname())
   const randomHex = crypto.randomBytes(8).toString('hex')
   return `${hostname}-${randomHex}`
 }
@@ -64,7 +65,11 @@ export function loadConfig(): AgentConfig | null {
       return null
     }
     const data = fs.readFileSync(configPath, 'utf-8')
-    const raw = JSON.parse(data) as LegacyAgentConfig
+    const raw = safeJsonParse<LegacyAgentConfig>(data)
+    if (raw === undefined) {
+      logger.warn(t('config.readError', { error: 'Invalid JSON' }))
+      return null
+    }
     return migrateConfigIfNeeded(raw)
   } catch (error) {
     logger.warn(t('config.readError', { error: String(error) }))

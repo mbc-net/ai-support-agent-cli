@@ -10,14 +10,10 @@ import { getDockerContextDir } from './dockerfile-path'
 import { getProjectImageTag } from './dockerfile-path'
 import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { ApiClient } from '../api-client'
+import { DOCKER_MAX_SESSION_LOG_BYTES, DOCKER_MAX_LOG_CHUNK_BYTES } from '../constants'
 import { buildDockerEnv } from './dockerfile-generator'
 import { makeSessionId, getDockerPath } from './docker-utils'
 import { toError } from '../utils'
-
-/** Maximum total log size kept in memory per session (2 MB). Older content is discarded. */
-const MAX_SESSION_LOG_BYTES = 2 * 1024 * 1024
-// API の SubmitLogChunkDto.text @MaxLength に合わせた上限（100,000 バイト）
-const MAX_LOG_CHUNK_BYTES = 100_000
 
 /**
  * Build a per-project Docker image using the given Dockerfile.
@@ -50,18 +46,18 @@ export async function buildProjectImage(
     const text = buf
     buf = ''
     if (!logTruncated) {
-      if (fullLog.length + text.length <= MAX_SESSION_LOG_BYTES) {
+      if (fullLog.length + text.length <= DOCKER_MAX_SESSION_LOG_BYTES) {
         fullLog += text
       } else {
-        const remaining = MAX_SESSION_LOG_BYTES - fullLog.length
+        const remaining = DOCKER_MAX_SESSION_LOG_BYTES - fullLog.length
         fullLog += remaining > 0 ? text.slice(0, remaining) : ''
         logTruncated = true
         logger.warn('[docker] Build log exceeded 2 MB limit; remaining output will not be saved to S3')
       }
     }
     if (apiClient) {
-      for (let offset = 0; offset < text.length; offset += MAX_LOG_CHUNK_BYTES) {
-        const slice = text.slice(offset, offset + MAX_LOG_CHUNK_BYTES)
+      for (let offset = 0; offset < text.length; offset += DOCKER_MAX_LOG_CHUNK_BYTES) {
+        const slice = text.slice(offset, offset + DOCKER_MAX_LOG_CHUNK_BYTES)
         await apiClient.submitLogChunk({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, seq: ++seq, text: slice })
           .catch((e: unknown) => logger.warn(`[docker] Failed to send log chunk: ${e}`))
       }
