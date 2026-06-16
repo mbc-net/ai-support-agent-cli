@@ -50,6 +50,7 @@ export interface VsCodeServerMessage {
     | 'browser_viewport'
     | 'browser_execute_script'
     | 'browser_set_file'
+    | 'browser_get_selection'
   filePaths?: string[]
   sessionId?: string
   requestId?: string
@@ -98,6 +99,7 @@ export interface VsCodeAgentMessage {
     | 'browser_ready'
     | 'browser_frame'
     | 'browser_screenshot_result'
+    | 'browser_selection_result'
     | 'browser_action_log'
     | 'browser_stopped'
     | 'browser_script_result'
@@ -122,6 +124,7 @@ export interface VsCodeAgentMessage {
   conversationId?: string
   currentUrl?: string
   pageTitle?: string
+  text?: string
   timestamp?: number
   reason?: string
   entries?: Array<{ timestamp: number; source: string; action: string; details: string }>
@@ -316,6 +319,9 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         break
       case 'browser_set_file':
         this.handleBrowserSetFile(msg)
+        break
+      case 'browser_get_selection':
+        void this.handleBrowserGetSelection(msg)
         break
       default:
         logger.debug(`[vscode-ws] Unknown message type: ${(msg as { type: string }).type}`)
@@ -814,6 +820,25 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       })
     } catch (error) {
       this.send({ type: 'error', sessionId, message: `Screenshot failed: ${getErrorMessage(error)}` })
+    }
+  }
+
+  private async handleBrowserGetSelection(msg: VsCodeServerMessage): Promise<void> {
+    const sessionId = msg.sessionId
+    if (!sessionId) return
+
+    const session = this.browserSessionManager.get(sessionId)
+    if (!session) {
+      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      return
+    }
+
+    try {
+      const text = await session.getSelectedText()
+      this.send({ type: 'browser_selection_result', sessionId, text })
+    } catch (error) {
+      logger.warn(`[vscode-ws] getSelection failed (session=${sessionId}): ${getErrorMessage(error)}`)
+      this.send({ type: 'error', sessionId, message: `getSelection failed: ${getErrorMessage(error)}` })
     }
   }
 

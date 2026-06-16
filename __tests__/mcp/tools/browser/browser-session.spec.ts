@@ -24,12 +24,15 @@ describe('BrowserSession', () => {
   let mockContext: Record<string, jest.Mock>
   let mockBrowser: Record<string, jest.Mock>
   let mockPlaywright: { chromium: { launch: jest.Mock } }
+  let mockCdpSession: { send: jest.Mock }
 
   beforeEach(() => {
     jest.useFakeTimers()
 
     // Default: no focused element
     mockGetFocusedElementInfo.mockResolvedValue(null)
+
+    mockCdpSession = { send: jest.fn().mockResolvedValue(undefined) }
 
     mockPage = {
       goto: jest.fn().mockResolvedValue(undefined),
@@ -40,8 +43,11 @@ describe('BrowserSession', () => {
       setExtraHTTPHeaders: jest.fn().mockResolvedValue(undefined),
       addInitScript: jest.fn().mockResolvedValue(undefined),
       reload: jest.fn().mockResolvedValue(undefined),
+      evaluate: jest.fn().mockResolvedValue(''),
       viewportSize: jest.fn().mockReturnValue({ width: 1280, height: 720 }),
       on: jest.fn(),
+      // page.context() returns the owning context (used for CDP focus emulation)
+      context: jest.fn(() => mockContext),
       keyboard: {
         type: jest.fn().mockResolvedValue(undefined),
         press: jest.fn().mockResolvedValue(undefined),
@@ -51,6 +57,7 @@ describe('BrowserSession', () => {
     mockContext = {
       newPage: jest.fn().mockResolvedValue(mockPage),
       close: jest.fn().mockResolvedValue(undefined),
+      newCDPSession: jest.fn().mockResolvedValue(mockCdpSession),
     }
 
     mockBrowser = {
@@ -452,6 +459,77 @@ describe('BrowserSession', () => {
       const session = new BrowserSession()
       // Don't call getPage() — no active page
       await expect(session.executeKeyboardType('text')).rejects.toThrow('No active browser page')
+    })
+  })
+
+  describe('getSelectedText', () => {
+    it('should return the selected text from page.evaluate', async () => {
+      mockPage.evaluate.mockResolvedValue('selected snippet')
+      const session = new BrowserSession()
+      await session.getPage()
+
+      const text = await session.getSelectedText()
+
+      expect(mockPage.evaluate).toHaveBeenCalled()
+      expect(text).toBe('selected snippet')
+    })
+
+    it('should throw when no active page', async () => {
+      const session = new BrowserSession()
+      await expect(session.getSelectedText()).rejects.toThrow('No active browser page')
+    })
+
+    it('should return empty string when page.evaluate returns null', async () => {
+      mockPage.evaluate.mockResolvedValue(null)
+      const session = new BrowserSession()
+      await session.getPage()
+
+      const text = await session.getSelectedText()
+
+      expect(text).toBe('')
+    })
+
+    it('should return empty string when page.evaluate returns a non-string value', async () => {
+      mockPage.evaluate.mockResolvedValue(42)
+      const session = new BrowserSession()
+      await session.getPage()
+
+      const text = await session.getSelectedText()
+
+      expect(text).toBe('')
+    })
+  })
+
+  describe('focus emulation', () => {
+    it('should enable focus emulation after launching the page', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+
+      expect(mockContext.newCDPSession).toHaveBeenCalledWith(mockPage)
+      expect(mockCdpSession.send).toHaveBeenCalledWith('Emulation.setFocusEmulationEnabled', { enabled: true })
+    })
+
+    it('should re-enable focus emulation after device emulation recreates the page', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      mockCdpSession.send.mockClear()
+      mockContext.newCDPSession.mockClear()
+
+      await session.setDeviceEmulation({
+        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+        isMobile: true,
+        hasTouch: true,
+        deviceScaleFactor: 3,
+      })
+
+      expect(mockCdpSession.send).toHaveBeenCalledWith('Emulation.setFocusEmulationEnabled', { enabled: true })
+    })
+
+    it('should not throw when CDP focus emulation is unavailable (non-Chromium)', async () => {
+      mockContext.newCDPSession.mockRejectedValue(new Error('CDP not supported'))
+      const session = new BrowserSession()
+
+      await expect(session.getPage()).resolves.toBe(mockPage)
     })
   })
 
