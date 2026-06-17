@@ -1,6 +1,6 @@
 import os from 'os'
 
-import { CLI_FLAG_VERBOSE, DEFAULT_CLAUDE_MODEL } from '../constants'
+import { CLI_FLAG_VERBOSE } from '../constants'
 
 /** CLAUDECODE / CLAUDE_CODE_* 環境変数を除外した env を構築
  *  ただし CLAUDE_CODE_OAUTH_TOKEN は認証に必要なため保持する
@@ -36,10 +36,14 @@ export function buildClaudeArgs(
   },
 ): string[] {
   const args = ['-p', '--output-format', 'stream-json', CLI_FLAG_VERBOSE]
-  // モデルは常に明示指定する。未指定だと claude CLI デフォルト（Fable 5）に
-  // フォールバックして unavailable で exit 1 になるため。
-  const model = options?.model ?? DEFAULT_CLAUDE_MODEL
-  args.push('--model', model)
+  // モデルは呼び出し側（runClaudeCode）で「JSON設定 > env > デフォルト」の
+  // 優先順位に基づき解決済みの値を渡す。ここでは渡された値があれば付与し、
+  // 未指定（undefined / 空文字）なら付けない（CLI に ANTHROPIC_MODEL env を
+  // 尊重させるため）。
+  const model = options?.model?.trim()
+  if (model) {
+    args.push('--model', model)
+  }
   if (options?.allowedTools?.length) {
     for (const tool of options.allowedTools) {
       args.push('--allowedTools', tool)

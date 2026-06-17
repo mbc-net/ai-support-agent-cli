@@ -235,6 +235,7 @@ async function executeClaudeCodeChatOnce(
     const logDetails = [
       allowedTools?.length ? `allowedTools: ${allowedTools.join(', ')}` : '(no allowedTools)',
       addDirs?.length ? `addDirs: ${addDirs.join(', ')}` : null,
+      model ? `model=${model}` : null,
       locale ? `locale=${locale}` : null,
       awsEnv ? 'AWS credentials' : null,
       gitEnv && Object.keys(gitEnv).length > 0 ? 'Git credentials' : null,

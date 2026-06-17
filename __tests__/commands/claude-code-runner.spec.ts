@@ -125,7 +125,9 @@ describe('claude-code-runner', () => {
   })
 
   describe('buildClaudeArgs', () => {
-    const BASE_ARGS = ['-p', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-4-6']
+    // buildClaudeArgs no longer injects a default --model; the caller (runClaudeCode)
+    // resolves the model value based on options.model / env / default.
+    const BASE_ARGS = ['-p', '--output-format', 'stream-json', '--verbose']
 
     it('should return base args + message for basic message', () => {
       const result = buildClaudeArgs('hello')
@@ -895,13 +897,22 @@ describe('claude-code-runner', () => {
   })
 
   describe('runClaudeCode', () => {
+    let savedEnv: NodeJS.ProcessEnv
+
     beforeEach(() => {
       jest.clearAllMocks()
       jest.useFakeTimers()
+      // 周辺テストの ANTHROPIC_MODEL 汚染や buildCleanEnv キャッシュの影響を遮断する
+      savedEnv = process.env
+      process.env = { ...savedEnv }
+      delete process.env.ANTHROPIC_MODEL
+      _resetCleanEnvCache()
     })
 
     afterEach(() => {
       jest.useRealTimers()
+      process.env = savedEnv
+      _resetCleanEnvCache()
     })
 
     it('should resolve with text from result event on success', async () => {
@@ -1257,23 +1268,224 @@ describe('claude-code-runner', () => {
       expect(args[modelIdx + 1]).toBe('claude-opus-4-8')
     })
 
-    it('should default --model to claude-sonnet-4-6 in spawn args when model is not provided', async () => {
+    it('should log model resolution via config when options.model is set', async () => {
+      const { spawn } = require('child_process')
+      const { logger } = require('../../src/logger')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const originalEnv = process.env
+      process.env = { ...originalEnv }
+      delete process.env.ANTHROPIC_MODEL
+      _resetCleanEnvCache()
+      try {
+        const handle = runClaudeCode({ message: 'hello', sendChunk, model: 'claude-opus-4-8' })
+        mockProcess.emit('close', 0)
+        await handle.result
+
+        const logged = (logger.debug as jest.Mock).mock.calls
+          .concat((logger.info as jest.Mock).mock.calls)
+          .map((c: unknown[]) => String(c[0]))
+        expect(logged.some((m) => m.includes('model resolved: claude-opus-4-8') && m.includes('source=config'))).toBe(true)
+      } finally {
+        process.env = originalEnv
+        _resetCleanEnvCache()
+      }
+    })
+
+    it('should log model resolution via ANTHROPIC_MODEL env when options.model is unset', async () => {
+      const { spawn } = require('child_process')
+      const { logger } = require('../../src/logger')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const originalEnv = process.env
+      process.env = { ...originalEnv, ANTHROPIC_MODEL: 'claude-3-5-haiku-latest' }
+      _resetCleanEnvCache()
+      try {
+        const handle = runClaudeCode({ message: 'hello', sendChunk })
+        mockProcess.emit('close', 0)
+        await handle.result
+
+        const logged = (logger.debug as jest.Mock).mock.calls
+          .concat((logger.info as jest.Mock).mock.calls)
+          .map((c: unknown[]) => String(c[0]))
+        expect(logged.some((m) =>
+          m.includes('model resolved: claude-3-5-haiku-latest') &&
+          m.includes('ANTHROPIC_MODEL') &&
+          m.includes('source=env') &&
+          m.includes('--model omitted'),
+        )).toBe(true)
+      } finally {
+        process.env = originalEnv
+        _resetCleanEnvCache()
+      }
+    })
+
+    it('should log model resolution via default when neither model nor env is set', async () => {
+      const { spawn } = require('child_process')
+      const { logger } = require('../../src/logger')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const originalEnv = process.env
+      process.env = { ...originalEnv }
+      delete process.env.ANTHROPIC_MODEL
+      _resetCleanEnvCache()
+      try {
+        const handle = runClaudeCode({ message: 'hello', sendChunk })
+        mockProcess.emit('close', 0)
+        await handle.result
+
+        const logged = (logger.debug as jest.Mock).mock.calls
+          .concat((logger.info as jest.Mock).mock.calls)
+          .map((c: unknown[]) => String(c[0]))
+        expect(logged.some((m) => m.includes('model resolved: claude-sonnet-4-6') && m.includes('source=default'))).toBe(true)
+      } finally {
+        process.env = originalEnv
+        _resetCleanEnvCache()
+      }
+    })
+
+    it('should default --model to claude-sonnet-4-6 in spawn args when neither model nor ANTHROPIC_MODEL env is set', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const handle = runClaudeCode({ message: 'hello', sendChunk })
+      const originalEnv = process.env
+      process.env = { ...originalEnv }
+      delete process.env.ANTHROPIC_MODEL
+      _resetCleanEnvCache()
+      try {
+        const handle = runClaudeCode({ message: 'hello', sendChunk })
 
-      mockProcess.emit('close', 0)
+        mockProcess.emit('close', 0)
 
-      await handle.result
+        await handle.result
 
-      const args = spawn.mock.calls[0][1] as string[]
-      const modelIdx = args.indexOf('--model')
-      expect(modelIdx).toBeGreaterThan(-1)
-      expect(args[modelIdx + 1]).toBe('claude-sonnet-4-6')
+        const args = spawn.mock.calls[0][1] as string[]
+        const modelIdx = args.indexOf('--model')
+        expect(modelIdx).toBeGreaterThan(-1)
+        expect(args[modelIdx + 1]).toBe('claude-sonnet-4-6')
+      } finally {
+        process.env = originalEnv
+        _resetCleanEnvCache()
+      }
+    })
+
+    it('should NOT pass --model when model is not set but ANTHROPIC_MODEL env is present (let CLI honor env)', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const originalEnv = process.env
+      process.env = { ...originalEnv, ANTHROPIC_MODEL: 'claude-3-5-haiku-latest' }
+      _resetCleanEnvCache()
+      try {
+        const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+        mockProcess.emit('close', 0)
+
+        await handle.result
+
+        const args = spawn.mock.calls[0][1] as string[]
+        expect(args).not.toContain('--model')
+      } finally {
+        process.env = originalEnv
+        _resetCleanEnvCache()
+      }
+    })
+
+    it('should let options.model win over ANTHROPIC_MODEL env (JSON config > env)', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const originalEnv = process.env
+      process.env = { ...originalEnv, ANTHROPIC_MODEL: 'claude-3-5-haiku-latest' }
+      _resetCleanEnvCache()
+      try {
+        const handle = runClaudeCode({ message: 'hello', sendChunk, model: 'claude-opus-4-8' })
+
+        mockProcess.emit('close', 0)
+
+        await handle.result
+
+        const args = spawn.mock.calls[0][1] as string[]
+        const modelIdx = args.indexOf('--model')
+        expect(modelIdx).toBeGreaterThan(-1)
+        expect(args[modelIdx + 1]).toBe('claude-opus-4-8')
+      } finally {
+        process.env = originalEnv
+        _resetCleanEnvCache()
+      }
+    })
+
+    it('should treat empty/whitespace model as unset and fall back to default when no env', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const originalEnv = process.env
+      process.env = { ...originalEnv }
+      delete process.env.ANTHROPIC_MODEL
+      _resetCleanEnvCache()
+      try {
+        const handle = runClaudeCode({ message: 'hello', sendChunk, model: '   ' })
+
+        mockProcess.emit('close', 0)
+
+        await handle.result
+
+        const args = spawn.mock.calls[0][1] as string[]
+        const modelIdx = args.indexOf('--model')
+        expect(modelIdx).toBeGreaterThan(-1)
+        expect(args[modelIdx + 1]).toBe('claude-sonnet-4-6')
+      } finally {
+        process.env = originalEnv
+        _resetCleanEnvCache()
+      }
+    })
+
+    it('should treat whitespace-only ANTHROPIC_MODEL env as unset and fall back to default', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const originalEnv = process.env
+      process.env = { ...originalEnv, ANTHROPIC_MODEL: '   ' }
+      _resetCleanEnvCache()
+      try {
+        const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+        mockProcess.emit('close', 0)
+
+        await handle.result
+
+        const args = spawn.mock.calls[0][1] as string[]
+        const modelIdx = args.indexOf('--model')
+        expect(modelIdx).toBeGreaterThan(-1)
+        expect(args[modelIdx + 1]).toBe('claude-sonnet-4-6')
+      } finally {
+        process.env = originalEnv
+        _resetCleanEnvCache()
+      }
     })
 
     it('should handle NDJSON lines split across multiple data events', async () => {

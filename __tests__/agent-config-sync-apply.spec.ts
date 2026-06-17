@@ -175,6 +175,37 @@ describe('applyProjectConfig - error handling branches', () => {
     expect(state.projectConfig?.envVars).toBeUndefined()
   })
 
+  it('should propagate claudeCodeConfig.model to serverConfig', async () => {
+    const deps = makeDeps()
+    const state = makeState()
+    const config = makeBaseConfig({
+      agent: {
+        agentEnabled: true,
+        builtinAgentEnabled: true,
+        builtinFallbackEnabled: true,
+        externalAgentEnabled: true,
+        allowedTools: [],
+        claudeCodeConfig: {
+          model: 'claude-opus-4-8',
+        },
+      },
+    })
+
+    await applyProjectConfig(deps, state, config)
+
+    expect(state.serverConfig?.claudeCodeConfig?.model).toBe('claude-opus-4-8')
+  })
+
+  it('should leave serverConfig model undefined when claudeCodeConfig.model is not set', async () => {
+    const deps = makeDeps()
+    const state = makeState()
+    const config = makeBaseConfig()
+
+    await applyProjectConfig(deps, state, config)
+
+    expect(state.serverConfig?.claudeCodeConfig?.model).toBeUndefined()
+  })
+
   it('preserves previous envVars when applying cache fallback config', async () => {
     const deps = makeDeps()
     const state = makeState({
