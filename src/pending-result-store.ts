@@ -6,7 +6,7 @@ import { getConfigDir } from './config-manager'
 import { logger } from './logger'
 import { ApiClient } from './api-client'
 import type { CommandResult } from './types/command'
-import { atomicWriteFile, ensureDir, getErrorMessage } from './utils'
+import { atomicWriteFile, ensureDir, getErrorMessage, nowIso } from './utils'
 import { safeJsonParse } from './utils/json-parse'
 
 const PENDING_RESULTS_DIR = 'pending-results'
@@ -48,7 +48,7 @@ export function savePendingResult(
       apiUrl,
       token,
       tenantCode,
-      savedAt: new Date().toISOString(),
+      savedAt: nowIso(),
     }
     atomicWriteFile(filePath, JSON.stringify(data, null, 2))
   } catch (error) {
