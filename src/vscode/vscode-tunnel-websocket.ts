@@ -11,6 +11,7 @@ import {
   getMaxBrowserSessionsFromEnv,
 } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
+import type { FileChooserPayload } from '../mcp/tools/browser/browser-session'
 import { executePlaywrightScript } from '../browser/browser-script-executor'
 
 import {
@@ -43,6 +44,9 @@ export interface VsCodeServerMessage {
     | 'browser_go_forward'
     | 'browser_reload'
     | 'browser_mouse_click'
+    | 'browser_mouse_move'
+    | 'browser_mouse_down'
+    | 'browser_mouse_up'
     | 'browser_mouse_wheel'
     | 'browser_keyboard_type'
     | 'browser_keyboard_press'
@@ -52,6 +56,7 @@ export interface VsCodeServerMessage {
     | 'browser_set_file'
     | 'browser_get_selection'
   filePaths?: string[]
+  files?: Array<{ name: string; mimeType: string; dataBase64: string }>
   sessionId?: string
   requestId?: string
   subSocketId?: string
@@ -144,6 +149,12 @@ export interface VsCodeAgentMessage {
 const LIVE_VIEW_INTERVAL_MS = 200
 
 /**
+ * Authoritative maximum total size (decoded bytes) for a browser file upload.
+ * Guards against unbounded base64 payloads consuming agent memory.
+ */
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 // 10MB
+
+/**
  * VS Code トンネル WebSocket
  *
  * TerminalWebSocket と同じパターンで BaseWebSocketConnection を継承し、
@@ -164,7 +175,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   readonly browserSessionManager = new BrowserSessionManager(getMaxBrowserSessionsFromEnv())
   private browserLocalServer: BrowserLocalServer | null = null
   private browserLocalPort = 0
-  private readonly pendingFileChoosers = new Map<string, (paths: string[]) => void>()
+  private readonly pendingFileChoosers = new Map<string, (files: FileChooserPayload) => Promise<void>>()
 
   constructor(
     apiUrl: string,
@@ -299,6 +310,15 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       case 'browser_mouse_click':
         this.handleBrowserMouseClick(msg)
         break
+      case 'browser_mouse_move':
+        void this.handleBrowserMouseMove(msg)
+        break
+      case 'browser_mouse_down':
+        void this.handleBrowserMouseDown(msg)
+        break
+      case 'browser_mouse_up':
+        void this.handleBrowserMouseUp(msg)
+        break
       case 'browser_mouse_wheel':
         this.handleBrowserMouseWheel(msg)
         break
@@ -318,7 +338,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         this.handleBrowserExecuteScript(msg)
         break
       case 'browser_set_file':
-        this.handleBrowserSetFile(msg)
+        void this.handleBrowserSetFile(msg)
         break
       case 'browser_get_selection':
         void this.handleBrowserGetSelection(msg)
@@ -337,7 +357,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private async handleVsCodeOpen(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId) {
-      this.send({ type: 'error', message: 'Missing sessionId' })
+      this.sendMissingSessionIdError()
       return
     }
 
@@ -566,7 +586,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private handlePortForwardOpen(msg: VsCodeServerMessage): void {
     const sessionId = msg.sessionId
     if (!sessionId) {
-      this.send({ type: 'error', message: 'Missing sessionId' })
+      this.sendMissingSessionIdError()
       return
     }
 
@@ -607,7 +627,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private async handleBrowserOpen(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId) {
-      this.send({ type: 'error', message: 'Missing sessionId' })
+      this.sendMissingSessionIdError()
       return
     }
 
@@ -700,7 +720,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -763,6 +783,42 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
   }
 
+  private async handleBrowserMouseMove(msg: VsCodeServerMessage): Promise<void> {
+    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    if (!session || msg.x === undefined || msg.y === undefined) return
+    try {
+      await session.executeMouseMove(msg.x, msg.y)
+    } catch (error) {
+      // mouse_move is high-frequency and best-effort: a failed move (e.g. mid-drag
+      // navigation) is intentionally logged but NOT surfaced as an `error` message
+      // to the web client, to avoid error spam during drag-selection. Unlike
+      // mouse_down / mouse_up, a dropped move does not leave the page in a broken state.
+      logger.warn(`[vscode-ws] mouseMove failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
+    }
+  }
+
+  private async handleBrowserMouseDown(msg: VsCodeServerMessage): Promise<void> {
+    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    if (!session || msg.x === undefined || msg.y === undefined) return
+    try {
+      await session.executeMouseDown(msg.x, msg.y, msg.button)
+    } catch (error) {
+      logger.warn(`[vscode-ws] mouseDown failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
+      this.send({ type: 'error', sessionId: msg.sessionId, message: `mouseDown failed: ${getErrorMessage(error)}` })
+    }
+  }
+
+  private async handleBrowserMouseUp(msg: VsCodeServerMessage): Promise<void> {
+    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    if (!session || msg.x === undefined || msg.y === undefined) return
+    try {
+      await session.executeMouseUp(msg.x, msg.y, msg.button)
+    } catch (error) {
+      logger.warn(`[vscode-ws] mouseUp failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
+      this.send({ type: 'error', sessionId: msg.sessionId, message: `mouseUp failed: ${getErrorMessage(error)}` })
+    }
+  }
+
   private async handleBrowserMouseWheel(msg: VsCodeServerMessage): Promise<void> {
     const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
     if (!session || msg.deltaX === undefined || msg.deltaY === undefined) return
@@ -801,7 +857,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -829,7 +885,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -851,7 +907,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -891,7 +947,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
   }
 
-  private handleBrowserSetFile(msg: VsCodeServerMessage): void {
+  private async handleBrowserSetFile(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId) return
 
@@ -900,8 +956,57 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       this.send({ type: 'error', sessionId, message: 'No pending file chooser for this session' })
       return
     }
+    // Consume the pending chooser up-front so it is not left dangling on any path.
     this.pendingFileChoosers.delete(sessionId)
-    accept(msg.filePaths ?? [])
+
+    const files = msg.files ?? []
+
+    // Validate every entry has a string dataBase64 before decoding so we never
+    // pass undefined / non-string into Buffer.from.
+    if (files.some((f) => typeof f.dataBase64 !== 'string')) {
+      this.send({ type: 'error', sessionId, message: 'Invalid file payload: dataBase64 must be a string' })
+      // Cancel the remote input so it is not left pending/half-filled.
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
+
+    // Estimate decoded size from base64 length and enforce the authoritative limit
+    // before allocating buffers.
+    const totalBytes = files.reduce((sum, f) => sum + Math.floor((f.dataBase64.length * 3) / 4), 0)
+    if (totalBytes > MAX_UPLOAD_BYTES) {
+      this.send({ type: 'error', sessionId, message: 'File too large (max 10MB)' })
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
+
+    const payload: FileChooserPayload = files.map((f) => ({
+      name: f.name,
+      mimeType: f.mimeType,
+      buffer: Buffer.from(f.dataBase64, 'base64'),
+    }))
+
+    try {
+      await accept(payload)
+    } catch (error) {
+      this.send({ type: 'error', sessionId, message: `File upload failed: ${getErrorMessage(error)}` })
+    }
+  }
+
+  /**
+   * Cancel a pending file chooser by applying an empty file list so the remote
+   * `<input type=file>` is cleared rather than left pending. Failures are
+   * swallowed (best-effort) since the user has already been told why the upload
+   * was rejected.
+   */
+  private async cancelFileChooser(
+    accept: (files: FileChooserPayload) => Promise<void>,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      await accept([])
+    } catch (error) {
+      logger.warn(`[vscode-ws] cancel file chooser failed (session=${sessionId}): ${getErrorMessage(error)}`)
+    }
   }
 
   private cleanup(): void {
@@ -930,6 +1035,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       this.vsCodeServer.stop()
       this.vsCodeServer = null
     }
+  }
+
+  private sendMissingSessionIdError(): void {
+    this.send({ type: 'error', message: 'Missing sessionId' })
+  }
+
+  private sendBrowserSessionNotFoundError(sessionId: string): void {
+    this.send({ type: 'error', sessionId, message: 'Browser session not found' })
   }
 
   private send(msg: VsCodeAgentMessage): void {

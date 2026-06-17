@@ -33,6 +33,13 @@ const GET_SELECTED_TEXT_SCRIPT = `() => {
   return sel ? sel.toString() : '';
 }`
 
+/**
+ * Payload passed to Playwright's `FileChooser.setFiles`. Each entry carries the
+ * file content as an in-memory buffer (uploaded from the web client as base64),
+ * rather than a remote path on the agent host.
+ */
+export type FileChooserPayload = Array<{ name: string; mimeType: string; buffer: Buffer }>
+
 export class BrowserSession {
   private browser: Browser | null = null
   private context: BrowserContext | null = null
@@ -40,12 +47,19 @@ export class BrowserSession {
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private readonly idleTimeoutMs: number
   private liveViewInterval: ReturnType<typeof setInterval> | null = null
+  private _debouncedCapture: (() => void) | null = null
+  private _debounceTimer: ReturnType<typeof setTimeout> | null = null
+  private _liveViewOnFrame: ((base64: string) => void) | null = null
   private _currentDeviceId: string | null = null
   private closed = false
   private readonly onClosed?: () => void
   private pendingFileChooser: FileChooser | null = null
-  /** ファイルチューザーが開いたときに呼ばれるコールバック。accept(paths) でファイルを設定する */
-  onFileChooser: ((accept: (paths: string[]) => void) => void) | null = null
+  /**
+   * ファイルチューザーが開いたときに呼ばれるコールバック。
+   * accept(files) でファイル内容を設定する。accept は `setFiles` の結果を
+   * 反映した Promise を返すため、呼び出し側で失敗を検知できる。
+   */
+  onFileChooser: ((accept: (files: FileChooserPayload) => Promise<void>) => void) | null = null
 
   /**
    * Get the currently active device emulation ID, or null if none.
@@ -83,6 +97,7 @@ export class BrowserSession {
     })
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     this.context = await this.browser!.newContext()
+    this.attachContextListeners(this.context)
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     this.page = await this.context!.newPage()
     this.attachPageListeners(this.page)
@@ -102,7 +117,7 @@ export class BrowserSession {
       const client = await page.context().newCDPSession(page)
       await client.send('Emulation.setFocusEmulationEnabled', { enabled: true })
     } catch (error) {
-      logger.debug(`[browser] Focus emulation not enabled: ${String(error)}`)
+      logger.warn(`[browser] Focus emulation not enabled: ${String(error)}`)
     }
   }
 
@@ -137,15 +152,27 @@ export class BrowserSession {
     this.onClosed?.()
   }
 
+  /**
+   * Attach context-level listeners. Registers a 'page' handler so file inputs
+   * that open in a popup / new tab still surface the filechooser event.
+   * Called both when the initial context is created and whenever the context is
+   * recreated (e.g. by setDeviceEmulation), to avoid losing the listener.
+   */
+  private attachContextListeners(context: BrowserContext): void {
+    context.on('page', (p: Page) => this.attachPageListeners(p))
+  }
+
   private attachPageListeners(page: Page): void {
     page.on('filechooser', (fc: FileChooser) => {
       this.pendingFileChooser = fc
       if (this.onFileChooser) {
-        this.onFileChooser((paths: string[]) => {
-          this.pendingFileChooser?.setFiles(paths).catch((err: unknown) => {
-            logger.warn(`[browser] setFiles failed: ${String(err)}`)
-          })
+        // accept returns a Promise so the caller (web client relay) can detect
+        // and surface setFiles failures instead of silently swallowing them.
+        this.onFileChooser((files: FileChooserPayload): Promise<void> => {
+          const chooser = this.pendingFileChooser
           this.pendingFileChooser = null
+          if (!chooser) return Promise.resolve()
+          return chooser.setFiles(files)
         })
       } else {
         fc.setFiles([]).catch(() => {})
@@ -186,6 +213,7 @@ export class BrowserSession {
     contextOptions.viewport = currentViewport
 
     this.context = await this.browser.newContext(contextOptions)
+    this.attachContextListeners(this.context)
     this.page = await this.context.newPage()
     this.attachPageListeners(this.page)
     await this.enableFocusEmulation(this.page)
@@ -250,6 +278,7 @@ export class BrowserSession {
   startLiveView(intervalMs: number, onFrame: (base64: string) => void): void {
     this.stopLiveView()
     this.clearIdleTimer() // Disable idle timeout during live view
+    this._liveViewOnFrame = onFrame
 
     let capturing = false
     this.liveViewInterval = setInterval(() => {
@@ -258,7 +287,7 @@ export class BrowserSession {
       void (async () => {
         try {
           // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: 50 }) as Buffer
+          const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: 70 }) as Buffer
           onFrame(buffer.toString('base64'))
         } catch (error) {
           logger.debug(`[browser] Live view screenshot error: ${String(error)}`)
@@ -267,6 +296,24 @@ export class BrowserSession {
         }
       })()
     }, intervalMs)
+
+    // Initialize debounced capture for event-triggered screenshots (e.g. after keyboard input)
+    this._debouncedCapture = () => {
+      if (this._debounceTimer) clearTimeout(this._debounceTimer)
+      this._debounceTimer = setTimeout(() => {
+        this._debounceTimer = null
+        if (!this.page || !this._liveViewOnFrame) return
+        void (async () => {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+            const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: 70 }) as Buffer
+            this._liveViewOnFrame?.(buffer.toString('base64'))
+          } catch (error) {
+            logger.debug(`[browser] Debounced capture error: ${String(error)}`)
+          }
+        })()
+      }, 50)
+    }
 
     logger.debug(`[browser] Live view started (interval=${intervalMs}ms)`)
   }
@@ -280,6 +327,12 @@ export class BrowserSession {
       this.liveViewInterval = null
       logger.debug('[browser] Live view stopped')
     }
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer)
+      this._debounceTimer = null
+    }
+    this._debouncedCapture = null
+    this._liveViewOnFrame = null
     // Re-enable idle timeout
     if (this.isActive()) {
       this.resetIdleTimer()
@@ -328,6 +381,38 @@ export class BrowserSession {
   }
 
   /**
+   * Move the mouse to the given coordinates without pressing any button.
+   * Used for drag-to-select text on the live view canvas.
+   */
+  async executeMouseMove(x: number, y: number): Promise<void> {
+    if (!this.page) throw new Error('No active browser page')
+    this.resetIdleTimer()
+    await this.page.mouse.move(x, y)
+  }
+
+  /**
+   * Move to (x, y) and press a mouse button without releasing it.
+   * Pair with executeMouseMove / executeMouseUp to perform drag-selection.
+   */
+  async executeMouseDown(x: number, y: number, button?: string): Promise<void> {
+    if (!this.page) throw new Error('No active browser page')
+    this.resetIdleTimer()
+    await this.page.mouse.move(x, y)
+    await this.page.mouse.down({ button: (button as 'left' | 'right' | 'middle' | undefined) ?? 'left' })
+  }
+
+  /**
+   * Move to (x, y) and release a mouse button.
+   * Completes a drag-selection started by executeMouseDown.
+   */
+  async executeMouseUp(x: number, y: number, button?: string): Promise<void> {
+    if (!this.page) throw new Error('No active browser page')
+    this.resetIdleTimer()
+    await this.page.mouse.move(x, y)
+    await this.page.mouse.up({ button: (button as 'left' | 'right' | 'middle' | undefined) ?? 'left' })
+  }
+
+  /**
    * Type text into the focused element.
    */
   async executeKeyboardType(text: string): Promise<void> {
@@ -345,6 +430,8 @@ export class BrowserSession {
     } else {
       this.actionLog.add('direct', 'type', text)
     }
+
+    this._debouncedCapture?.()
   }
 
   /**
@@ -363,6 +450,8 @@ export class BrowserSession {
 
     const keyStr = modifiers?.length ? `${modifiers.join('+')}+${key}` : key
     this.actionLog.add('direct', 'press', keyStr)
+
+    this._debouncedCapture?.()
   }
 
   /**

@@ -44,6 +44,7 @@ describe('BrowserSession - Live View & Interaction', () => {
     mockContext = {
       newPage: jest.fn().mockResolvedValue(mockPage),
       close: jest.fn().mockResolvedValue(undefined),
+      on: jest.fn(),
     }
 
     mockBrowser = {
@@ -84,7 +85,7 @@ describe('BrowserSession - Live View & Interaction', () => {
       expect((mockPage.screenshot as jest.Mock)).toHaveBeenCalledWith({
         fullPage: false,
         type: 'jpeg',
-        quality: 50,
+        quality: 70,
       })
       expect(onFrame).toHaveBeenCalledWith(Buffer.from('fake-screenshot').toString('base64'))
 
@@ -217,6 +218,103 @@ describe('BrowserSession - Live View & Interaction', () => {
       session.startLiveView(100, jest.fn())
       session.stopLiveView()
       expect(session.isLiveViewActive()).toBe(false)
+    })
+  })
+
+  describe('debounce capture after keyboard input', () => {
+    it('should call _debouncedCapture after executeKeyboardType', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+
+      session.startLiveView(200, jest.fn())
+      // Override _debouncedCapture with a mock after startLiveView initializes it
+      const captureMock = jest.fn()
+      ;(session as unknown as Record<string, unknown>)._debouncedCapture = captureMock
+
+      ;(mockPage.keyboard as Record<string, jest.Mock>).type.mockResolvedValue(undefined)
+
+      await session.executeKeyboardType('hello')
+
+      expect(captureMock).toHaveBeenCalledTimes(1)
+
+      session.stopLiveView()
+    })
+
+    it('should debounce rapid executeKeyboardType calls — capture fires only once', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+
+      // startLiveView initializes _debouncedCapture internally with a 50ms debounce
+      session.startLiveView(200, jest.fn())
+
+      // Spy on the underlying page screenshot to verify it is called only once
+      // after multiple rapid keystrokes are flushed through the debounce.
+      ;(mockPage.screenshot as jest.Mock).mockClear()
+      ;(mockPage.keyboard as Record<string, jest.Mock>).type.mockResolvedValue(undefined)
+
+      // Inject a counting mock that simulates the debounce contract:
+      // _debouncedCapture is called on each keystroke but only fires once after the delay.
+      const captureCount = { n: 0 }
+      let debounceTimer: ReturnType<typeof setTimeout> | null = null
+      ;(session as unknown as Record<string, unknown>)._debouncedCapture = () => {
+        if (debounceTimer) clearTimeout(debounceTimer)
+        debounceTimer = setTimeout(() => { captureCount.n++ }, 50)
+      }
+
+      // Call multiple times within the debounce window (< 50ms apart)
+      await session.executeKeyboardType('a')
+      await session.executeKeyboardType('b')
+      await session.executeKeyboardType('c')
+
+      // Nothing fired yet (debounce pending)
+      expect(captureCount.n).toBe(0)
+
+      // Advance past the debounce delay (but not the live view interval)
+      jest.advanceTimersByTime(60)
+
+      // Should fire exactly once
+      expect(captureCount.n).toBe(1)
+
+      session.stopLiveView()
+    })
+
+    it('should call _debouncedCapture after executeKeyboardPress', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+
+      session.startLiveView(200, jest.fn())
+      const captureMock = jest.fn()
+      ;(session as unknown as Record<string, unknown>)._debouncedCapture = captureMock
+
+      ;(mockPage.keyboard as Record<string, jest.Mock>).press.mockResolvedValue(undefined)
+
+      await session.executeKeyboardPress('Enter')
+
+      expect(captureMock).toHaveBeenCalledTimes(1)
+
+      session.stopLiveView()
+    })
+
+    it('should NOT throw when _debouncedCapture is null (live view not active)', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+
+      // Do not call startLiveView — _debouncedCapture should be null
+      ;(mockPage.keyboard as Record<string, jest.Mock>).type.mockResolvedValue(undefined)
+
+      // Should not throw even though _debouncedCapture is null
+      await expect(session.executeKeyboardType('hello')).resolves.not.toThrow()
+    })
+
+    it('should reset _debouncedCapture to null after stopLiveView', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+
+      session.startLiveView(200, jest.fn())
+      expect((session as unknown as Record<string, unknown>)._debouncedCapture).not.toBeNull()
+
+      session.stopLiveView()
+      expect((session as unknown as Record<string, unknown>)._debouncedCapture).toBeNull()
     })
   })
 

@@ -1,4 +1,4 @@
-import { BrowserSession } from '../../../../src/mcp/tools/browser/browser-session'
+import { BrowserSession, FileChooserPayload } from '../../../../src/mcp/tools/browser/browser-session'
 
 // Mock playwright-loader
 jest.mock('../../../../src/mcp/tools/browser/playwright-loader', () => ({
@@ -52,12 +52,20 @@ describe('BrowserSession', () => {
         type: jest.fn().mockResolvedValue(undefined),
         press: jest.fn().mockResolvedValue(undefined),
       },
+      mouse: {
+        click: jest.fn().mockResolvedValue(undefined),
+        wheel: jest.fn().mockResolvedValue(undefined),
+        move: jest.fn().mockResolvedValue(undefined),
+        down: jest.fn().mockResolvedValue(undefined),
+        up: jest.fn().mockResolvedValue(undefined),
+      },
     }
 
     mockContext = {
       newPage: jest.fn().mockResolvedValue(mockPage),
       close: jest.fn().mockResolvedValue(undefined),
       newCDPSession: jest.fn().mockResolvedValue(mockCdpSession),
+      on: jest.fn(),
     }
 
     mockBrowser = {
@@ -606,6 +614,207 @@ describe('BrowserSession', () => {
       const session = new BrowserSession()
       await session.getPage()
       await expect(session.close()).resolves.not.toThrow()
+    })
+  })
+
+  describe('executeMouseMove', () => {
+    it('should call page.mouse.move with correct coordinates', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      await session.executeMouseMove(100, 200)
+      expect(mockPage.mouse.move).toHaveBeenCalledWith(100, 200)
+    })
+
+    it('should throw when no active page', async () => {
+      const session = new BrowserSession()
+      await expect(session.executeMouseMove(100, 200)).rejects.toThrow('No active browser page')
+    })
+  })
+
+  describe('executeMouseDown', () => {
+    it('should move to position then press left button by default', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      await session.executeMouseDown(50, 80)
+      expect(mockPage.mouse.move).toHaveBeenCalledWith(50, 80)
+      expect(mockPage.mouse.down).toHaveBeenCalledWith({ button: 'left' })
+    })
+
+    it('should pass specified button', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      await session.executeMouseDown(50, 80, 'right')
+      expect(mockPage.mouse.down).toHaveBeenCalledWith({ button: 'right' })
+    })
+
+    it('should throw when no active page', async () => {
+      const session = new BrowserSession()
+      await expect(session.executeMouseDown(50, 80)).rejects.toThrow('No active browser page')
+    })
+  })
+
+  describe('executeMouseUp', () => {
+    it('should move to position then release left button by default', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      await session.executeMouseUp(150, 250)
+      expect(mockPage.mouse.move).toHaveBeenCalledWith(150, 250)
+      expect(mockPage.mouse.up).toHaveBeenCalledWith({ button: 'left' })
+    })
+
+    it('should pass specified button', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      await session.executeMouseUp(150, 250, 'right')
+      expect(mockPage.mouse.up).toHaveBeenCalledWith({ button: 'right' })
+    })
+
+    it('should throw when no active page', async () => {
+      const session = new BrowserSession()
+      await expect(session.executeMouseUp(150, 250)).rejects.toThrow('No active browser page')
+    })
+  })
+
+  describe('file chooser', () => {
+    // Helper: retrieve the 'filechooser' handler registered on a page mock.
+    const getFileChooserHandler = (
+      pageMock: Record<string, jest.Mock>,
+    ): ((fc: { setFiles: jest.Mock }) => void) => {
+      const call = pageMock.on.mock.calls.find((c: [string, unknown]) => c[0] === 'filechooser')
+      expect(call).toBeDefined()
+      return call![1] as (fc: { setFiles: jest.Mock }) => void
+    }
+
+    it('should invoke onFileChooser and forward payload to setFiles when callback is set', async () => {
+      const session = new BrowserSession()
+      const payload = [{ name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('hi') }]
+      session.onFileChooser = (accept) => accept(payload)
+
+      await session.getPage()
+
+      const handler = getFileChooserHandler(mockPage)
+      const fc = { setFiles: jest.fn().mockResolvedValue(undefined) }
+      handler(fc)
+
+      expect(fc.setFiles).toHaveBeenCalledWith(payload)
+    })
+
+    it('should call setFiles([]) when onFileChooser is null (cancel)', async () => {
+      const session = new BrowserSession()
+      session.onFileChooser = null
+
+      await session.getPage()
+
+      const handler = getFileChooserHandler(mockPage)
+      const fc = { setFiles: jest.fn().mockResolvedValue(undefined) }
+      handler(fc)
+
+      expect(fc.setFiles).toHaveBeenCalledWith([])
+    })
+
+    it('should propagate setFiles rejection through the accept callback when accepting files', async () => {
+      const session = new BrowserSession()
+      let captured: ((files: FileChooserPayload) => Promise<void>) | null = null
+      session.onFileChooser = (accept) => {
+        captured = accept
+      }
+
+      await session.getPage()
+
+      const handler = getFileChooserHandler(mockPage)
+      const fc = { setFiles: jest.fn().mockRejectedValue(new Error('boom')) }
+      // The synchronous handler must not throw; the rejection surfaces via accept().
+      expect(() => handler(fc)).not.toThrow()
+      await expect(
+        captured!([{ name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('hi') }]),
+      ).rejects.toThrow('boom')
+    })
+
+    it('should register a context page handler that attaches filechooser listeners to popups', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+
+      // The context should register a 'page' handler for popups/new tabs.
+      const pageHandlerCall = mockContext.on.mock.calls.find((c: [string, unknown]) => c[0] === 'page')
+      expect(pageHandlerCall).toBeDefined()
+      const pageHandler = pageHandlerCall![1] as (p: Record<string, jest.Mock>) => void
+
+      // Simulate a popup page being created.
+      const mockPage2: Record<string, jest.Mock> = { on: jest.fn() }
+      pageHandler(mockPage2)
+
+      expect(mockPage2.on).toHaveBeenCalledWith('filechooser', expect.any(Function))
+    })
+
+    it('should re-register the context page handler on the NEW context after setDeviceEmulation (HIGH-1)', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+
+      // Build a distinct second context that the browser returns on the next newContext() call.
+      const mockContext2: Record<string, jest.Mock> = {
+        newPage: jest.fn().mockResolvedValue(mockPage),
+        close: jest.fn().mockResolvedValue(undefined),
+        newCDPSession: jest.fn().mockResolvedValue(mockCdpSession),
+        on: jest.fn(),
+      }
+      mockBrowser.newContext.mockResolvedValueOnce(mockContext2)
+
+      await session.setDeviceEmulation({
+        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+        isMobile: true,
+        hasTouch: true,
+        deviceScaleFactor: 3,
+      })
+
+      // The newly-created context must have a 'page' listener so popups opened
+      // after a device switch still surface the filechooser event.
+      expect(mockContext2.on).toHaveBeenCalledWith('page', expect.any(Function))
+
+      // The page handler on the new context attaches filechooser listeners to popups.
+      const pageHandlerCall = mockContext2.on.mock.calls.find((c: [string, unknown]) => c[0] === 'page')
+      expect(pageHandlerCall).toBeDefined()
+      const pageHandler = pageHandlerCall![1] as (p: Record<string, jest.Mock>) => void
+      const popupPage: Record<string, jest.Mock> = { on: jest.fn() }
+      pageHandler(popupPage)
+      expect(popupPage.on).toHaveBeenCalledWith('filechooser', expect.any(Function))
+    })
+
+    it('should reject from accept callback when setFiles rejects (HIGH-2)', async () => {
+      const session = new BrowserSession()
+      let captured: ((files: FileChooserPayload) => Promise<void>) | null = null
+      session.onFileChooser = (accept) => {
+        captured = accept
+      }
+
+      await session.getPage()
+
+      const handler = getFileChooserHandler(mockPage)
+      const fc = { setFiles: jest.fn().mockRejectedValue(new Error('boom')) }
+      handler(fc)
+
+      expect(captured).not.toBeNull()
+      // The accept callback resolves to a promise that propagates the setFiles rejection.
+      await expect(
+        captured!([{ name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('hi') }]),
+      ).rejects.toThrow('boom')
+    })
+
+    it('should resolve from accept callback when setFiles succeeds (HIGH-2)', async () => {
+      const session = new BrowserSession()
+      let captured: ((files: FileChooserPayload) => Promise<void>) | null = null
+      session.onFileChooser = (accept) => {
+        captured = accept
+      }
+
+      await session.getPage()
+
+      const handler = getFileChooserHandler(mockPage)
+      const fc = { setFiles: jest.fn().mockResolvedValue(undefined) }
+      handler(fc)
+
+      const payload = [{ name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('hi') }]
+      await expect(captured!(payload)).resolves.toBeUndefined()
+      expect(fc.setFiles).toHaveBeenCalledWith(payload)
     })
   })
 })
