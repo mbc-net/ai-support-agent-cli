@@ -476,6 +476,7 @@ describe('refreshChatMode', () => {
         claudeCodeConfig: {
           allowedTools: ['WebFetch', 'WebSearch'],
           addDirs: ['/tmp/project'],
+          model: 'claude-opus-4-8',
         },
       } as AgentServerConfig),
     } as unknown as ApiClient
@@ -489,6 +490,12 @@ describe('refreshChatMode', () => {
     await refreshChatMode(deps, state, true)
 
     expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('claudeCodeConfig'))
+    // serverConfig が /config 由来で上書きされる際に model も観測できること
+    const claudeCodeCall = debugSpy.mock.calls.find((c: unknown[]) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('claudeCodeConfig'),
+    )
+    expect(claudeCodeCall).toBeDefined()
+    expect(claudeCodeCall![0] as string).toContain('model=claude-opus-4-8')
     debugSpy.mockRestore()
   })
 

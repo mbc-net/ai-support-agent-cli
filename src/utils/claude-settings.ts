@@ -3,7 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 
 import { logger } from '../logger'
-import { getErrorMessage, readJsonSync } from '../utils'
+import { ensureDir, getErrorMessage, readJsonSync } from '../utils'
 
 /**
  * Update ~/.claude/settings.json to allow the specified tools.
@@ -23,9 +23,7 @@ export function ensureAllowedToolsInSettings(allowedTools: string[]): void {
     const settingsPath = path.join(claudeDir, 'settings.json')
 
     // Ensure .claude directory exists
-    if (!fs.existsSync(claudeDir)) {
-      fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 })
-    }
+    ensureDir(claudeDir, 0o700)
 
     // Read existing settings
     let settings: Record<string, unknown> = {}

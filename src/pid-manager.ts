@@ -15,7 +15,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getConfigDir } from './config-manager'
-import { isErrnoException } from './utils'
+import { ensureDir, isErrnoException } from './utils'
 
 const PID_FILE_NAME = 'agent.pid'
 
@@ -40,10 +40,7 @@ export function isAlreadyRunning(): boolean {
 /** 現在のプロセス PID を pidファイルに書き込む */
 export function writePidFile(): void {
   const pidPath = getPidFilePath()
-  const dir = path.dirname(pidPath)
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true })
-  }
+  ensureDir(path.dirname(pidPath))
   fs.writeFileSync(pidPath, `${os.hostname()}:${process.pid}`, 'utf-8')
 }
 

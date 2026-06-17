@@ -2,8 +2,29 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { exitWithError, getErrorMessage, isInDocker, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError } from '../src/utils'
+import { exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
+
+describe('sanitizeNameSegment', () => {
+  it('lowercases uppercase input', () => {
+    expect(sanitizeNameSegment('MBC')).toBe('mbc')
+  })
+
+  it('collapses characters outside [a-z0-9-] to hyphens', () => {
+    expect(sanitizeNameSegment('MBC_01')).toBe('mbc-01')
+    expect(sanitizeNameSegment('MY.PROJECT')).toBe('my-project')
+    expect(sanitizeNameSegment('a b;c=d/e\\f')).toBe('a-b-c-d-e-f')
+  })
+
+  it('leaves already-safe values unchanged', () => {
+    expect(sanitizeNameSegment('mbc-01')).toBe('mbc-01')
+    expect(sanitizeNameSegment('abc123')).toBe('abc123')
+  })
+
+  it('returns empty string for empty input', () => {
+    expect(sanitizeNameSegment('')).toBe('')
+  })
+})
 
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
@@ -230,6 +251,55 @@ describe('atomicWriteFile', () => {
     const filePath = path.join(tmpDir, 'test.txt')
     atomicWriteFile(filePath, 'content')
     expect(fs.existsSync(filePath + '.tmp')).toBe(false)
+  })
+})
+
+describe('ensureDir', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ensure-dir-test-'))
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true })
+  })
+
+  it('should create a directory that does not exist', () => {
+    const dir = path.join(tmpDir, 'new-dir')
+    ensureDir(dir)
+    expect(fs.existsSync(dir)).toBe(true)
+    expect(fs.statSync(dir).isDirectory()).toBe(true)
+  })
+
+  it('should create nested directories recursively', () => {
+    const dir = path.join(tmpDir, 'a', 'b', 'c')
+    ensureDir(dir)
+    expect(fs.existsSync(dir)).toBe(true)
+  })
+
+  it('should be a no-op when the directory already exists', () => {
+    const dir = path.join(tmpDir, 'existing')
+    fs.mkdirSync(dir)
+    // Drop a file inside; ensureDir must not recreate/clear the directory.
+    const marker = path.join(dir, 'marker.txt')
+    fs.writeFileSync(marker, 'keep')
+    ensureDir(dir)
+    expect(fs.existsSync(marker)).toBe(true)
+  })
+
+  it('should apply the given mode to a newly created directory', () => {
+    const dir = path.join(tmpDir, 'secure')
+    ensureDir(dir, 0o700)
+    const stat = fs.statSync(dir)
+    expect(stat.mode & 0o777).toBe(0o700)
+  })
+
+  it('should create with default permissions when no mode is given', () => {
+    const dir = path.join(tmpDir, 'default-mode')
+    ensureDir(dir)
+    // Directory exists and is usable; exact mode is OS/umask dependent.
+    expect(fs.statSync(dir).isDirectory()).toBe(true)
   })
 })
 
@@ -619,6 +689,61 @@ describe('readJsonSync', () => {
     const filePath = path.join(tmpDir, 'invalid.json')
     fs.writeFileSync(filePath, 'not valid json {{{')
     expect(() => readJsonSync(filePath)).toThrow()
+  })
+})
+
+describe('toContainerApiUrl', () => {
+  it('converts http://localhost to host.docker.internal', () => {
+    expect(toContainerApiUrl('http://localhost')).toBe('http://host.docker.internal')
+  })
+
+  it('converts http://127.0.0.1 to host.docker.internal', () => {
+    expect(toContainerApiUrl('http://127.0.0.1')).toBe('http://host.docker.internal')
+  })
+
+  it('preserves the port when converting localhost', () => {
+    expect(toContainerApiUrl('http://localhost:4030')).toBe('http://host.docker.internal:4030')
+  })
+
+  it('preserves the port when converting 127.0.0.1', () => {
+    expect(toContainerApiUrl('http://127.0.0.1:8080/api')).toBe('http://host.docker.internal:8080/api')
+  })
+
+  it('preserves a path that follows the host directly (no port)', () => {
+    expect(toContainerApiUrl('http://localhost/api')).toBe('http://host.docker.internal/api')
+  })
+
+  it('converts https URLs too', () => {
+    expect(toContainerApiUrl('https://localhost:8443')).toBe('https://host.docker.internal:8443')
+  })
+
+  it('does NOT replace localhost when it is a prefix of a longer hostname', () => {
+    // Without the boundary lookahead, `http://localhost.example.com` would
+    // partially match and become `http://host.docker.internal.example.com` —
+    // a different host.  This is the regression the old inline regex had.
+    expect(toContainerApiUrl('http://localhost.example.com/api')).toBe('http://localhost.example.com/api')
+    expect(toContainerApiUrl('http://127.0.0.1.example.com')).toBe('http://127.0.0.1.example.com')
+  })
+
+  it('leaves non-localhost URLs unchanged', () => {
+    expect(toContainerApiUrl('https://api.example.com')).toBe('https://api.example.com')
+    expect(toContainerApiUrl('http://192.168.1.10:4030')).toBe('http://192.168.1.10:4030')
+  })
+})
+
+describe('nowIso', () => {
+  it('returns a valid ISO 8601 string', () => {
+    const result = nowIso()
+    expect(result).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+  })
+
+  it('is close to the current time', () => {
+    const before = Date.now()
+    const result = nowIso()
+    const after = Date.now()
+    const ts = new Date(result).getTime()
+    expect(ts).toBeGreaterThanOrEqual(before)
+    expect(ts).toBeLessThanOrEqual(after)
   })
 })
 

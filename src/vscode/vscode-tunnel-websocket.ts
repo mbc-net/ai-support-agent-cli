@@ -49,6 +49,9 @@ export interface VsCodeServerMessage {
     | 'browser_screenshot'
     | 'browser_viewport'
     | 'browser_execute_script'
+    | 'browser_set_file'
+    | 'browser_get_selection'
+  filePaths?: string[]
   sessionId?: string
   requestId?: string
   subSocketId?: string
@@ -96,10 +99,12 @@ export interface VsCodeAgentMessage {
     | 'browser_ready'
     | 'browser_frame'
     | 'browser_screenshot_result'
+    | 'browser_selection_result'
     | 'browser_action_log'
     | 'browser_stopped'
     | 'browser_script_result'
     | 'browser_script_progress'
+    | 'browser_file_chooser_opened'
   sessionId?: string
   targetPort?: number
   requestId?: string
@@ -119,6 +124,7 @@ export interface VsCodeAgentMessage {
   conversationId?: string
   currentUrl?: string
   pageTitle?: string
+  text?: string
   timestamp?: number
   reason?: string
   entries?: Array<{ timestamp: number; source: string; action: string; details: string }>
@@ -158,6 +164,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   readonly browserSessionManager = new BrowserSessionManager(getMaxBrowserSessionsFromEnv())
   private browserLocalServer: BrowserLocalServer | null = null
   private browserLocalPort = 0
+  private readonly pendingFileChoosers = new Map<string, (paths: string[]) => void>()
 
   constructor(
     apiUrl: string,
@@ -309,6 +316,12 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         break
       case 'browser_execute_script':
         this.handleBrowserExecuteScript(msg)
+        break
+      case 'browser_set_file':
+        this.handleBrowserSetFile(msg)
+        break
+      case 'browser_get_selection':
+        void this.handleBrowserGetSelection(msg)
         break
       default:
         logger.debug(`[vscode-ws] Unknown message type: ${(msg as { type: string }).type}`)
@@ -610,6 +623,12 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         })
       }
 
+      // Wire up file chooser notifications to relay to Web UI
+      session.onFileChooser = (accept) => {
+        this.pendingFileChoosers.set(sessionId, accept)
+        this.send({ type: 'browser_file_chooser_opened', sessionId })
+      }
+
       if (msg.conversationId) {
         this.browserSessionManager.linkConversation(msg.conversationId, sessionId)
       }
@@ -670,6 +689,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       await this.browserSessionManager.close(sessionId)
     }
 
+    this.pendingFileChoosers.delete(sessionId)
     this.send({ type: 'browser_stopped', sessionId, reason: 'closed' })
     logger.info(`[vscode-ws] Browser session closed: ${sessionId}`)
   }
@@ -803,6 +823,25 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
   }
 
+  private async handleBrowserGetSelection(msg: VsCodeServerMessage): Promise<void> {
+    const sessionId = msg.sessionId
+    if (!sessionId) return
+
+    const session = this.browserSessionManager.get(sessionId)
+    if (!session) {
+      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      return
+    }
+
+    try {
+      const text = await session.getSelectedText()
+      this.send({ type: 'browser_selection_result', sessionId, text })
+    } catch (error) {
+      logger.warn(`[vscode-ws] getSelection failed (session=${sessionId}): ${getErrorMessage(error)}`)
+      this.send({ type: 'error', sessionId, message: `getSelection failed: ${getErrorMessage(error)}` })
+    }
+  }
+
   private async handleBrowserExecuteScript(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId || !msg.script) {
@@ -852,9 +891,23 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
   }
 
+  private handleBrowserSetFile(msg: VsCodeServerMessage): void {
+    const sessionId = msg.sessionId
+    if (!sessionId) return
+
+    const accept = this.pendingFileChoosers.get(sessionId)
+    if (!accept) {
+      this.send({ type: 'error', sessionId, message: 'No pending file chooser for this session' })
+      return
+    }
+    this.pendingFileChoosers.delete(sessionId)
+    accept(msg.filePaths ?? [])
+  }
+
   private cleanup(): void {
     // ブラウザセッションのクリーンアップ
     void this.browserSessionManager.closeAll()
+    this.pendingFileChoosers.clear()
 
     // ブラウザローカルサーバーのクリーンアップ
     if (this.browserLocalServer) {

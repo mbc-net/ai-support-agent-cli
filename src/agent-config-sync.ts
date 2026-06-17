@@ -156,6 +156,7 @@ export async function applyProjectConfig(
       allowedTools: effectiveConfig.agent.allowedTools,
       addDirs: effectiveConfig.agent.claudeCodeConfig?.additionalDirs,
       systemPrompt: effectiveConfig.agent.claudeCodeConfig?.appendSystemPrompt,
+      model: effectiveConfig.agent.claudeCodeConfig?.model,
     },
   }
 
@@ -328,7 +329,7 @@ export async function refreshChatMode(
     if (verbose) {
       logger.info(`${deps.prefix} Server config loaded: chatMode=${state.serverConfig.chatMode}`)
       if (state.serverConfig.claudeCodeConfig) {
-        logger.debug(`${deps.prefix} claudeCodeConfig: allowedTools=[${state.serverConfig.claudeCodeConfig.allowedTools?.join(', ') ?? ''}], addDirs=[${state.serverConfig.claudeCodeConfig.addDirs?.join(', ') ?? ''}]`)
+        logger.debug(`${deps.prefix} claudeCodeConfig: allowedTools=[${state.serverConfig.claudeCodeConfig.allowedTools?.join(', ') ?? ''}], addDirs=[${state.serverConfig.claudeCodeConfig.addDirs?.join(', ') ?? ''}], model=${state.serverConfig.claudeCodeConfig.model ?? ''}`)
       }
     }
   } catch (error) {

@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 import { ApiClient } from '../../api-client'
-import { mcpTextResponse, withMcpErrorHandling } from './mcp-response'
+import { mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
 
 /** get_project_info ツールを MCP サーバーに登録する */
 export function registerProjectInfoTool(
@@ -63,7 +63,7 @@ export function registerProjectInfoTool(
 
       info.projectCode = projectCode
 
-      return mcpTextResponse(JSON.stringify(info, null, 2))
+      return mcpJsonResponse(info)
     }),
   )
 }

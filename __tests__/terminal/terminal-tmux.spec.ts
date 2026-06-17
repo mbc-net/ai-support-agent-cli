@@ -45,6 +45,7 @@ jest.mock('node-pty', () => ({
 // モック後にインポート
 import * as fs from 'fs'
 import { TerminalSession } from '../../src/terminal/terminal-session'
+import { logger } from '../../src/logger'
 
 const mockAccessSync = fs.accessSync as jest.Mock
 const ENOENT = Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
@@ -152,6 +153,96 @@ describe('tmux auto-attach', () => {
       expect(mockAccessSync).toHaveBeenCalledWith('/usr/bin/tmux', fs.constants.X_OK)
     })
 
+    it('tmuxSessionName オプションを指定するとそのセッション名が使われる', () => {
+      const customName = 'ais-existing-session'
+      const session = new TerminalSession('new-session-id', { tmuxSessionName: customName })
+      const [, args] = ptySpawnMock.mock.calls[0]
+      const sIdx = (args as string[]).indexOf('-s')
+      expect(sIdx).toBeGreaterThan(-1)
+      expect((args as string[])[sIdx + 1]).toBe(customName)
+      session.kill()
+    })
+
+    it('tmuxSessionName オプション指定時の kill() は指定名で kill-session を呼ぶ', () => {
+      const customName = 'ais-existing-session'
+      const session = new TerminalSession('new-session-id', { tmuxSessionName: customName })
+      session.kill()
+      expect(execFileMock).toHaveBeenCalledWith(
+        'tmux',
+        ['kill-session', '-t', customName],
+        expect.any(Function),
+      )
+    })
+
+    it('resize() 時に tmux resize-window を明示的に呼ぶ', () => {
+      const sessionId = 'resize-test-abc'
+      const session = new TerminalSession(sessionId, { cols: 80, rows: 24 })
+      execFileMock.mockClear()
+      session.resize(120, 40)
+      expect(execFileMock).toHaveBeenCalledWith(
+        'tmux',
+        ['resize-window', '-t', `ais-${sessionId}`, '-x', '120', '-y', '40'],
+        expect.any(Function),
+      )
+      session.kill()
+    })
+
+    it('resize() 時の resize-window は tmuxSessionName オプション指定名を使う', () => {
+      const customName = 'ais-existing-session'
+      const session = new TerminalSession('new-session-id', { tmuxSessionName: customName })
+      execFileMock.mockClear()
+      session.resize(100, 30)
+      expect(execFileMock).toHaveBeenCalledWith(
+        'tmux',
+        ['resize-window', '-t', customName, '-x', '100', '-y', '30'],
+        expect.any(Function),
+      )
+      session.kill()
+    })
+
+    it('resize-window が ENOENT 系エラーを返した場合は logger.debug で記録する（握り潰さない）', () => {
+      const debugSpy = jest.spyOn(logger, 'debug').mockImplementation(() => undefined)
+      // resize-window の execFile callback に ENOENT エラーを渡す
+      execFileMock.mockImplementation(
+        (_cmd: string, args: string[], cb?: (err: unknown) => void) => {
+          if (args[0] === 'resize-window') {
+            cb?.(Object.assign(new Error('spawn tmux ENOENT'), { code: 'ENOENT' }))
+          } else {
+            cb?.(null)
+          }
+          return {}
+        },
+      )
+      const session = new TerminalSession('resize-enoent-test', { cols: 80, rows: 24 })
+      session.resize(120, 40)
+      expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('resize-window'))
+      session.kill()
+      debugSpy.mockRestore()
+    })
+
+    it('resize-window が "no such session" 系エラーを返した場合は無視する（debug にも出さない）', () => {
+      const debugSpy = jest.spyOn(logger, 'debug').mockImplementation(() => undefined)
+      execFileMock.mockImplementation(
+        (_cmd: string, args: string[], cb?: (err: unknown) => void) => {
+          if (args[0] === 'resize-window') {
+            cb?.(new Error("can't find session: ais-foo"))
+          } else {
+            cb?.(null)
+          }
+          return {}
+        },
+      )
+      const session = new TerminalSession('resize-nosession-test', { cols: 80, rows: 24 })
+      session.resize(120, 40)
+      // resize-window の callback 由来の debug は呼ばれないこと
+      const resizeDebugCalls = debugSpy.mock.calls.filter(([m]) =>
+        String(m).includes('resize-window'),
+      )
+      expect(resizeDebugCalls).toHaveLength(0)
+      session.kill()
+      debugSpy.mockRestore()
+    })
+
     it('/usr/bin/tmux が無くても /usr/local/bin/tmux で検出する', () => {
       mockAccessSync.mockImplementation((p: fs.PathLike, mode?: number) => {
         if (p === '/usr/local/bin/tmux' && mode === fs.constants.X_OK) return
@@ -189,6 +280,17 @@ describe('tmux auto-attach', () => {
         ([cmd, args]: [string, string[]]) => cmd === 'tmux' && args[0] === 'kill-session',
       )
       expect(killCalls).toHaveLength(0)
+    })
+
+    it('resize() 時に tmux resize-window を呼ばない', () => {
+      const session = new TerminalSession('no-tmux-resize-test')
+      execFileMock.mockClear()
+      session.resize(120, 40)
+      const resizeCalls = execFileMock.mock.calls.filter(
+        ([cmd, args]: [string, string[]]) => cmd === 'tmux' && args[0] === 'resize-window',
+      )
+      expect(resizeCalls).toHaveLength(0)
+      session.kill()
     })
 
     it('PATH フォールバック (spawnSync) も試みる', () => {

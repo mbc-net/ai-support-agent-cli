@@ -3,7 +3,7 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import type { DbCredentials } from '../../types'
-import { mcpErrorResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
+import { mcpErrorResponse, mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
 
 /** コメントインジェクション検出パターン */
 const COMMENT_PATTERNS = ['--', '/*', '*/', '#']
@@ -253,7 +253,7 @@ export function registerDbQueryTool(server: McpServer, apiClient: ApiClient): vo
       const rows = await executeQuery(credentials, sql)
 
       // Format result
-      return mcpTextResponse(JSON.stringify(rows, null, 2))
+      return mcpJsonResponse(rows)
     }),
   )
 }

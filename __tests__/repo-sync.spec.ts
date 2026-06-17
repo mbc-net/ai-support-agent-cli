@@ -2,7 +2,7 @@ import * as child_process from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 
-import { buildAuthEnv, buildCloneUrl, normalizePemKey, syncRepositories, syncRepositoryByCode } from '../src/repo-sync'
+import { buildAuthEnv, buildCloneUrl, normalizePemKey, runGit, syncRepositories, syncRepositoryByCode } from '../src/repo-sync'
 import type { ApiClient } from '../src/api-client'
 import type { ProjectConfigResponse } from '../src/types'
 
@@ -71,6 +71,55 @@ describe('repo-sync', () => {
       expect(lines[1]).toHaveLength(64)
       expect(lines[2]).toHaveLength(6)
       expect(lines[3]).toBe(footer)
+    })
+  })
+
+  describe('runGit', () => {
+    beforeEach(() => {
+      jest.clearAllMocks()
+      ;(child_process.execFile as unknown as jest.Mock).mockImplementation(
+        (...args: unknown[]) => {
+          const callback = args[args.length - 1]
+          if (typeof callback === 'function') {
+            callback(null, { stdout: '', stderr: '' })
+          }
+          return { on: jest.fn(), kill: jest.fn() }
+        },
+      )
+    })
+
+    it('should run git with merged env and timeout, omitting cwd when not provided', async () => {
+      await runGit(['status'], { env: { FOO: 'bar' }, timeout: 1234 })
+
+      const call = (child_process.execFile as unknown as jest.Mock).mock.calls[0]
+      expect(call[0]).toBe('git')
+      expect(call[1]).toEqual(['status'])
+      const opts = call[2] as { env: Record<string, string>; timeout: number; cwd?: string }
+      expect(opts.timeout).toBe(1234)
+      expect(opts.env.FOO).toBe('bar')
+      // process.env is merged in
+      expect(opts.env.PATH).toBe(process.env.PATH)
+      // cwd not provided -> not present
+      expect(opts).not.toHaveProperty('cwd')
+    })
+
+    it('should pass cwd when provided', async () => {
+      await runGit(['fetch'], { env: {}, timeout: 10, cwd: '/repo' })
+
+      const call = (child_process.execFile as unknown as jest.Mock).mock.calls[0]
+      const opts = call[2] as { cwd?: string }
+      expect(opts.cwd).toBe('/repo')
+    })
+
+    it('should let env override process.env values', async () => {
+      const originalPath = process.env.PATH
+      await runGit(['log'], { env: { PATH: '/custom/path' }, timeout: 5 })
+
+      const call = (child_process.execFile as unknown as jest.Mock).mock.calls[0]
+      const opts = call[2] as { env: Record<string, string> }
+      expect(opts.env.PATH).toBe('/custom/path')
+      // process.env not mutated
+      expect(process.env.PATH).toBe(originalPath)
     })
   })
 

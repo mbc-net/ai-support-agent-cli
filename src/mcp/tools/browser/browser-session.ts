@@ -4,7 +4,7 @@
  * Supports live view streaming (JPEG frames) and direct interaction.
  */
 
-import type { Browser, BrowserContext, Page } from 'playwright'
+import type { Browser, BrowserContext, FileChooser, Page } from 'playwright'
 
 import { logger } from '../../../logger'
 import { BrowserActionLog } from './browser-action-log'
@@ -12,6 +12,26 @@ import { BROWSER_IDLE_TIMEOUT_MS } from './browser-types'
 import { DeviceEmulation, DEVICE_PRESETS } from './device-presets'
 import { getElementAtPoint, getFocusedElementInfo } from './element-info'
 import { loadPlaywright } from './playwright-loader'
+
+/**
+ * Browser-context script that reads the current selection.
+ * Prefers the selection range of a focused input/textarea, falling back to
+ * the document selection. Returns an empty string when nothing is selected.
+ */
+const GET_SELECTED_TEXT_SCRIPT = `() => {
+  const active = document.activeElement;
+  if (
+    active &&
+    (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA') &&
+    active.selectionStart != null &&
+    active.selectionEnd != null &&
+    active.selectionStart !== active.selectionEnd
+  ) {
+    return active.value.substring(active.selectionStart, active.selectionEnd);
+  }
+  const sel = window.getSelection();
+  return sel ? sel.toString() : '';
+}`
 
 export class BrowserSession {
   private browser: Browser | null = null
@@ -23,6 +43,9 @@ export class BrowserSession {
   private _currentDeviceId: string | null = null
   private closed = false
   private readonly onClosed?: () => void
+  private pendingFileChooser: FileChooser | null = null
+  /** ファイルチューザーが開いたときに呼ばれるコールバック。accept(paths) でファイルを設定する */
+  onFileChooser: ((accept: (paths: string[]) => void) => void) | null = null
 
   /**
    * Get the currently active device emulation ID, or null if none.
@@ -62,7 +85,25 @@ export class BrowserSession {
     this.context = await this.browser!.newContext()
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     this.page = await this.context!.newPage()
+    this.attachPageListeners(this.page)
+    await this.enableFocusEmulation(this.page)
+
     return this.page
+  }
+
+  /**
+   * Enable focus emulation so the page renders as if always focused.
+   * This keeps the text caret (cursor) visible in input fields even though
+   * the headless browser window itself never has OS-level focus.
+   * Safe no-op on non-Chromium engines (CDP unavailable).
+   */
+  private async enableFocusEmulation(page: Page): Promise<void> {
+    try {
+      const client = await page.context().newCDPSession(page)
+      await client.send('Emulation.setFocusEmulationEnabled', { enabled: true })
+    } catch (error) {
+      logger.debug(`[browser] Focus emulation not enabled: ${String(error)}`)
+    }
   }
 
   /**
@@ -78,6 +119,8 @@ export class BrowserSession {
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    this.pendingFileChooser = null
+    this.onFileChooser = null
     this.stopLiveView()
     this.clearIdleTimer()
     if (this.browser) {
@@ -92,6 +135,23 @@ export class BrowserSession {
       this.page = null
     }
     this.onClosed?.()
+  }
+
+  private attachPageListeners(page: Page): void {
+    page.on('filechooser', (fc: FileChooser) => {
+      this.pendingFileChooser = fc
+      if (this.onFileChooser) {
+        this.onFileChooser((paths: string[]) => {
+          this.pendingFileChooser?.setFiles(paths).catch((err: unknown) => {
+            logger.warn(`[browser] setFiles failed: ${String(err)}`)
+          })
+          this.pendingFileChooser = null
+        })
+      } else {
+        fc.setFiles([]).catch(() => {})
+        this.pendingFileChooser = null
+      }
+    })
   }
 
   /**
@@ -127,6 +187,8 @@ export class BrowserSession {
 
     this.context = await this.browser.newContext(contextOptions)
     this.page = await this.context.newPage()
+    this.attachPageListeners(this.page)
+    await this.enableFocusEmulation(this.page)
 
     // Navigate back to the previous URL
     if (currentUrl && currentUrl !== 'about:blank') {
@@ -301,6 +363,22 @@ export class BrowserSession {
 
     const keyStr = modifiers?.length ? `${modifiers.join('+')}+${key}` : key
     this.actionLog.add('direct', 'press', keyStr)
+  }
+
+  /**
+   * Get the currently selected text on the page.
+   * Reads the selection from a focused input/textarea, falling back to the
+   * document selection for normal page content. Returns an empty string when
+   * nothing is selected.
+   */
+  async getSelectedText(): Promise<string> {
+    if (!this.page) throw new Error('No active browser page')
+    this.resetIdleTimer()
+
+    // page.evaluate のコールバックはブラウザコンテキストで実行されるため、
+    // Node 側で DOM 型を解決できるよう文字列スクリプトとして渡す（element-info と同じ方針）。
+    const result = await this.page.evaluate(GET_SELECTED_TEXT_SCRIPT)
+    return typeof result === 'string' ? result : ''
   }
 
   /**

@@ -52,10 +52,11 @@ describe('TerminalWebSocket — tmux session management', () => {
 
   describe('tmux_list_sessions', () => {
     it('sends tmux_sessions with parsed session list when tmux has sessions', (done) => {
-      // Simulate tmux list-sessions output
+      // Simulate tmux list-sessions output (new owner-partitioned name format)
+      const USER_HASH = 'abc123def456'
       const tmuxOutput = [
-        'ais-abc123\t2\t1\t1700000000\t1700000100',
-        'ais-def456\t1\t0\t1700001000\t1700001200',
+        `ais-${USER_HASH}-abc123\t2\t1\t1700000000\t1700000100`,
+        `ais-${USER_HASH}-def456\t1\t0\t1700001000\t1700001200`,
       ].join('\n')
 
       execFileMock.mockImplementation(
@@ -73,14 +74,14 @@ describe('TerminalWebSocket — tmux session management', () => {
             expect(msg.sessions).toHaveLength(2)
 
             const first = msg.sessions![0]
-            expect(first.name).toBe('ais-abc123')
+            expect(first.name).toBe(`ais-${USER_HASH}-abc123`)
             expect(first.windows).toBe(2)
             expect(first.attached).toBe(true)
             expect(first.created).toBe(1700000000)
             expect(first.activity).toBe(1700000100)
 
             const second = msg.sessions![1]
-            expect(second.name).toBe('ais-def456')
+            expect(second.name).toBe(`ais-${USER_HASH}-def456`)
             expect(second.windows).toBe(1)
             expect(second.attached).toBe(false)
             expect(second.created).toBe(1700001000)
@@ -93,6 +94,7 @@ describe('TerminalWebSocket — tmux session management', () => {
         const listMsg: TerminalServerMessage = {
           type: 'tmux_list_sessions',
           requestId: 'req-001',
+          userHash: USER_HASH,
         }
         ws.send(JSON.stringify(listMsg))
       })
@@ -125,6 +127,7 @@ describe('TerminalWebSocket — tmux session management', () => {
         const listMsg: TerminalServerMessage = {
           type: 'tmux_list_sessions',
           requestId: 'req-002',
+          userHash: 'abc123def456',
         }
         ws.send(JSON.stringify(listMsg))
       })
@@ -152,7 +155,109 @@ describe('TerminalWebSocket — tmux session management', () => {
           }
         })
 
-        ws.send(JSON.stringify({ type: 'tmux_list_sessions', requestId: 'req-enoent' }))
+        ws.send(JSON.stringify({ type: 'tmux_list_sessions', requestId: 'req-enoent', userHash: 'abc123def456' }))
+      })
+
+      terminalWs = createTerminalWs()
+      void terminalWs.connect()
+    })
+  })
+
+  describe('tmux_list_sessions — userHash owner filter', () => {
+    const OWNER_HASH = 'abc123def456'
+    const OTHER_HASH = '0123456789ab'
+
+    // Mixed ownership: owner sessions, another user's sessions, and a legacy
+    // unpartitioned name (ais-{sessionId}) that must be excluded.
+    const mixedOutput = [
+      `ais-${OWNER_HASH}-sess1\t2\t1\t1700000000\t1700000100`,
+      `ais-${OWNER_HASH}-sess2\t1\t0\t1700001000\t1700001200`,
+      `ais-${OTHER_HASH}-sess3\t1\t0\t1700002000\t1700002200`,
+      `ais-legacysession\t1\t0\t1700003000\t1700003200`,
+    ].join('\n')
+
+    it('returns only the requester-owned ais-{userHash}-* sessions', (done) => {
+      execFileMock.mockImplementation(
+        (_cmd: string, _args: string[], callback: (err: null, stdout: string, stderr: string) => void) => {
+          callback(null, mixedOutput, '')
+        },
+      )
+
+      server.on('connection', (ws) => {
+        ws.on('message', (data) => {
+          const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+          if (msg.type === 'tmux_sessions') {
+            expect(msg.requestId).toBe('req-owner')
+            const names = (msg.sessions ?? []).map((s) => s.name)
+            expect(names).toEqual([`ais-${OWNER_HASH}-sess1`, `ais-${OWNER_HASH}-sess2`])
+            // other user's and legacy names excluded
+            expect(names).not.toContain(`ais-${OTHER_HASH}-sess3`)
+            expect(names).not.toContain('ais-legacysession')
+            done()
+          }
+        })
+
+        const listMsg: TerminalServerMessage = {
+          type: 'tmux_list_sessions',
+          requestId: 'req-owner',
+          userHash: OWNER_HASH,
+        }
+        ws.send(JSON.stringify(listMsg))
+      })
+
+      terminalWs = createTerminalWs()
+      void terminalWs.connect()
+    })
+
+    it('returns an empty array when userHash is missing (no-fallback / fail-safe)', (done) => {
+      execFileMock.mockImplementation(
+        (_cmd: string, _args: string[], callback: (err: null, stdout: string, stderr: string) => void) => {
+          callback(null, mixedOutput, '')
+        },
+      )
+
+      server.on('connection', (ws) => {
+        ws.on('message', (data) => {
+          const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+          if (msg.type === 'tmux_sessions') {
+            expect(msg.requestId).toBe('req-no-hash')
+            expect(msg.sessions).toHaveLength(0)
+            done()
+          }
+        })
+
+        // No userHash supplied — must not leak any sessions.
+        ws.send(JSON.stringify({ type: 'tmux_list_sessions', requestId: 'req-no-hash' }))
+      })
+
+      terminalWs = createTerminalWs()
+      void terminalWs.connect()
+    })
+
+    it('returns an empty array when no session matches the userHash', (done) => {
+      execFileMock.mockImplementation(
+        (_cmd: string, _args: string[], callback: (err: null, stdout: string, stderr: string) => void) => {
+          callback(null, mixedOutput, '')
+        },
+      )
+
+      server.on('connection', (ws) => {
+        ws.on('message', (data) => {
+          const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+          if (msg.type === 'tmux_sessions') {
+            expect(msg.requestId).toBe('req-nomatch')
+            expect(msg.sessions).toHaveLength(0)
+            done()
+          }
+        })
+
+        ws.send(
+          JSON.stringify({
+            type: 'tmux_list_sessions',
+            requestId: 'req-nomatch',
+            userHash: 'ffffffffffff',
+          }),
+        )
       })
 
       terminalWs = createTerminalWs()
@@ -222,6 +327,115 @@ describe('TerminalWebSocket — tmux session management', () => {
           name: 'ais-nonexistent',
         }
         ws.send(JSON.stringify(killMsg))
+      })
+
+      terminalWs = createTerminalWs()
+      void terminalWs.connect()
+    })
+
+    it('rejects kill with access denied when userHash is set but name prefix mismatches (no execFile)', (done) => {
+      // C3: second-layer defense. When the API forwards a userHash (USER role,
+      // self-kill path) but the target name does not start with ais-{userHash}-,
+      // the agent must refuse and NEVER invoke tmux kill-session.
+      execFileMock.mockImplementation(
+        (_cmd: string, _args: string[], callback: (err: null) => void) => {
+          callback(null)
+        },
+      )
+
+      server.on('connection', (ws) => {
+        ws.on('message', (data) => {
+          const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+          if (msg.type === 'tmux_session_killed') {
+            expect(msg.requestId).toBe('req-kill-denied')
+            expect(msg.name).toBe('ais-ffffffffffff-victim')
+            expect(msg.success).toBe(false)
+            expect(msg.error).toBe('access denied')
+            // tmux kill-session must NOT have been invoked
+            const killCalls = execFileMock.mock.calls.filter(
+              (c) => Array.isArray(c[1]) && c[1].includes('kill-session'),
+            )
+            expect(killCalls).toHaveLength(0)
+            done()
+          }
+        })
+
+        ws.send(JSON.stringify({
+          type: 'tmux_kill_session',
+          requestId: 'req-kill-denied',
+          name: 'ais-ffffffffffff-victim',
+          userHash: 'abc123def456',
+        }))
+      })
+
+      terminalWs = createTerminalWs()
+      void terminalWs.connect()
+    })
+
+    it('executes kill when userHash matches the name prefix', (done) => {
+      const USER_HASH = 'abc123def456'
+      execFileMock.mockImplementation(
+        (_cmd: string, _args: string[], callback: (err: null, stdout: string, stderr: string) => void) => {
+          callback(null, '', '')
+        },
+      )
+
+      server.on('connection', (ws) => {
+        ws.on('message', (data) => {
+          const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+          if (msg.type === 'tmux_session_killed') {
+            expect(msg.requestId).toBe('req-kill-match')
+            expect(msg.name).toBe(`ais-${USER_HASH}-mine`)
+            expect(msg.success).toBe(true)
+            const killCalls = execFileMock.mock.calls.filter(
+              (c) => Array.isArray(c[1]) && c[1].includes('kill-session'),
+            )
+            expect(killCalls).toHaveLength(1)
+            done()
+          }
+        })
+
+        ws.send(JSON.stringify({
+          type: 'tmux_kill_session',
+          requestId: 'req-kill-match',
+          name: `ais-${USER_HASH}-mine`,
+          userHash: USER_HASH,
+        }))
+      })
+
+      terminalWs = createTerminalWs()
+      void terminalWs.connect()
+    })
+
+    it('executes kill when userHash is absent (admin bypass / legacy path)', (done) => {
+      // When the API omits userHash (admin/system_admin bypass), the agent runs
+      // the kill as before (API has already authorized).
+      execFileMock.mockImplementation(
+        (_cmd: string, _args: string[], callback: (err: null, stdout: string, stderr: string) => void) => {
+          callback(null, '', '')
+        },
+      )
+
+      server.on('connection', (ws) => {
+        ws.on('message', (data) => {
+          const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+          if (msg.type === 'tmux_session_killed') {
+            expect(msg.requestId).toBe('req-kill-nohash')
+            expect(msg.name).toBe('ais-ffffffffffff-victim')
+            expect(msg.success).toBe(true)
+            const killCalls = execFileMock.mock.calls.filter(
+              (c) => Array.isArray(c[1]) && c[1].includes('kill-session'),
+            )
+            expect(killCalls).toHaveLength(1)
+            done()
+          }
+        })
+
+        ws.send(JSON.stringify({
+          type: 'tmux_kill_session',
+          requestId: 'req-kill-nohash',
+          name: 'ais-ffffffffffff-victim',
+        }))
       })
 
       terminalWs = createTerminalWs()

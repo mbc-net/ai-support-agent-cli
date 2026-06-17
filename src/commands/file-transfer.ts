@@ -136,19 +136,32 @@ export async function uploadFile(
 }
 
 /**
+ * Returns true when the value is a non-null object with the three required string
+ * fields that both parseChatFiles and parseConversationFiles need to validate.
+ * Extracted to eliminate the duplicated field-presence check between the two parsers.
+ */
+export function hasChatFileBaseFields(
+  item: unknown,
+): item is { fileId: string; s3Key: string; filename: string } {
+  return (
+    item != null &&
+    typeof item === 'object' &&
+    typeof (item as Record<string, unknown>).fileId === 'string' &&
+    typeof (item as Record<string, unknown>).s3Key === 'string' &&
+    typeof (item as Record<string, unknown>).filename === 'string'
+  )
+}
+
+/**
  * ChatPayload の files フィールドをパースして ChatFileInfo[] を返す
  */
 export function parseChatFiles(files: unknown): ChatFileInfo[] {
   if (!Array.isArray(files)) return []
   return files.filter(
     (item): item is ChatFileInfo =>
-      typeof item === 'object' &&
-      item !== null &&
-      typeof item.fileId === 'string' &&
-      typeof item.s3Key === 'string' &&
-      typeof item.filename === 'string' &&
-      typeof item.contentType === 'string' &&
-      typeof item.fileSize === 'number',
+      hasChatFileBaseFields(item) &&
+      typeof (item as Record<string, unknown>).contentType === 'string' &&
+      typeof (item as Record<string, unknown>).fileSize === 'number',
   )
 }
 
@@ -158,12 +171,5 @@ export function parseChatFiles(files: unknown): ChatFileInfo[] {
  */
 export function parseConversationFiles(files: unknown): ChatFileInfo[] {
   if (!Array.isArray(files)) return []
-  return files.filter(
-    (f): f is ChatFileInfo =>
-      f != null &&
-      typeof f === 'object' &&
-      typeof (f as Record<string, unknown>).fileId === 'string' &&
-      typeof (f as Record<string, unknown>).s3Key === 'string' &&
-      typeof (f as Record<string, unknown>).filename === 'string',
-  )
+  return files.filter((f): f is ChatFileInfo => hasChatFileBaseFields(f))
 }

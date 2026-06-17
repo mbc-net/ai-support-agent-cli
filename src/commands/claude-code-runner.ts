@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 
-import { CHAT_SIGKILL_DELAY, CHAT_TIMEOUT, CHAT_TOOL_EXECUTION_TIMEOUT, ERR_CLAUDE_CLI_NOT_FOUND, LOG_DEBUG_LIMIT } from '../constants'
+import { CHAT_SIGKILL_DELAY, CHAT_TIMEOUT, CHAT_TOOL_EXECUTION_TIMEOUT, DEFAULT_CLAUDE_MODEL, ERR_CLAUDE_CLI_NOT_FOUND, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import type { ChatChunkType } from '../types'
 import { createActivityTimeout } from '../utils/activity-timeout'
@@ -57,6 +57,11 @@ export interface RunClaudeCodeOptions {
   mcpConfigPath?: string
   cwd?: string
   systemPrompt?: string
+  /** claude CLI に渡すモデル。
+   *  省略時は env（ANTHROPIC_MODEL / envVarsOverride）が有効値なら CLI に委譲し、
+   *  env も未設定の場合に DEFAULT_CLAUDE_MODEL が使われる。
+   */
+  model?: string
   policyContext?: PolicyContext
   /**
    * Web 設定（CLAUDE_CODE# / ENV#）由来の環境変数オーバーレイ。
@@ -72,7 +77,7 @@ export interface RunClaudeCodeOptions {
  * ClaudeCodeHandle を返す: result Promise と kill 関数
  */
 export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
-  const { message, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt, policyContext, envVarsOverride } = options
+  const { message, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt, model, policyContext, envVarsOverride } = options
 
   let killFn: () => void = () => { /* noop until child is spawned */ }
 
@@ -104,7 +109,26 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
         env[key] = value
       }
     }
-    const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt })
+    // --model に渡す値を「JSON設定 > env > デフォルト」の優先順位で解決する。
+    // claude CLI は --model フラグ > ANTHROPIC_MODEL env の順で評価するため、
+    // env が指定されている場合は --model を付けず CLI に env を尊重させる。
+    // env は envVarsOverride まで反映済みの最終値を参照する。
+    const explicitModel = model?.trim()
+    const envModel = env.ANTHROPIC_MODEL?.trim()
+    const resolvedModel = explicitModel
+      ? explicitModel
+      : (envModel ? undefined : DEFAULT_CLAUDE_MODEL)
+    const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt, model: resolvedModel })
+
+    // どの経路でモデルが決まったかをログ出力し、「--model が付かなかった理由
+    // （env 尊重 vs バグ）」をログだけで判別できるようにする。
+    if (explicitModel) {
+      logger.debug(`[chat] model resolved: ${explicitModel} (source=config)`)
+    } else if (envModel) {
+      logger.debug(`[chat] model resolved: ${envModel} via ANTHROPIC_MODEL (source=env, --model omitted)`)
+    } else {
+      logger.debug(`[chat] model resolved: ${DEFAULT_CLAUDE_MODEL} (source=default)`)
+    }
 
     ensureClaudeJsonIntegrity()
     // Web 経由で OAuth Token が設定されているなら ~/.claude.json の

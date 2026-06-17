@@ -16,6 +16,14 @@ export function mcpTextResponse(text: string) {
   return { content: [{ type: 'text' as const, text }] }
 }
 
+/**
+ * 任意の値を pretty-print した JSON テキストとして MCP レスポンスに変換する。
+ * `mcpTextResponse(JSON.stringify(value, null, 2))` の定型を統一する。
+ */
+export function mcpJsonResponse(value: unknown) {
+  return mcpTextResponse(JSON.stringify(value, null, 2))
+}
+
 export function mcpErrorResponse(message: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true as const }
 }

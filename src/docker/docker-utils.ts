@@ -13,6 +13,7 @@ import { resolveDockerfile } from './dockerfile-path'
 import { AGENT_VERSION } from '../constants'
 import { t } from '../i18n'
 import { logger } from '../logger'
+import { sanitizeNameSegment } from '../utils'
 
 export const IMAGE_NAME = 'ai-support-agent'
 
@@ -134,9 +135,8 @@ export function buildImage(version: string, customDockerfile?: string): void {
  * All components are lowercased and non-alphanumeric chars (except hyphens) are replaced with hyphens.
  */
 export function buildContainerName(tenantCode: string, projectCode: string, agentId?: string): string {
-  const sanitize = (s: string): string => s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
-  const parts = ['ai', sanitize(tenantCode), sanitize(projectCode)]
-  if (agentId) parts.push(sanitize(agentId))
+  const parts = ['ai', sanitizeNameSegment(tenantCode), sanitizeNameSegment(projectCode)]
+  if (agentId) parts.push(sanitizeNameSegment(agentId))
   return parts.join('-')
 }
 

@@ -1,13 +1,11 @@
 import * as os from 'os'
 
-import { ERR_INVALID_PID, PROCESS_LIST_TIMEOUT } from '../constants'
+import { ERR_INVALID_PID, MAX_PROCESS_LIST_SIZE, PROCESS_LIST_TIMEOUT } from '../constants'
 import { ALLOWED_SIGNALS } from '../security'
 import { type CommandResult, errorResult, type ProcessKillPayload, successResult } from '../types'
 import { getErrorMessage, parseNumber, parseString } from '../utils'
 
 import { executeShellCommand } from './shell-executor'
-
-const MAX_PROCESS_LIST_SIZE = 50000 // 50KB
 
 export async function processList(): Promise<CommandResult> {
   const command = os.platform() === 'win32'

@@ -186,6 +186,7 @@ async function executeClaudeCodeChatOnce(
   try {
     const allowedTools = serverConfig?.claudeCodeConfig?.allowedTools
     const systemPrompt = serverConfig?.claudeCodeConfig?.systemPrompt
+    const model = serverConfig?.claudeCodeConfig?.model
     const serverAddDirs = serverConfig?.claudeCodeConfig?.addDirs ?? []
     // Merge project directory auto-add dirs with server-configured dirs
     let addDirs: string[] | undefined
@@ -234,6 +235,7 @@ async function executeClaudeCodeChatOnce(
     const logDetails = [
       allowedTools?.length ? `allowedTools: ${allowedTools.join(', ')}` : '(no allowedTools)',
       addDirs?.length ? `addDirs: ${addDirs.join(', ')}` : null,
+      model ? `model=${model}` : null,
       locale ? `locale=${locale}` : null,
       awsEnv ? 'AWS credentials' : null,
       gitEnv && Object.keys(gitEnv).length > 0 ? 'Git credentials' : null,
@@ -255,6 +257,7 @@ async function executeClaudeCodeChatOnce(
       mcpConfigPath,
       cwd: projectDir ? getWorkspaceDir(projectDir) : undefined,
       systemPrompt,
+      model,
       policyContext: {
         tenantCode,
         projectCode,
