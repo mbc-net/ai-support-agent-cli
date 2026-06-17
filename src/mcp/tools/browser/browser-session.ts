@@ -47,6 +47,9 @@ export class BrowserSession {
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private readonly idleTimeoutMs: number
   private liveViewInterval: ReturnType<typeof setInterval> | null = null
+  private _debouncedCapture: (() => void) | null = null
+  private _debounceTimer: ReturnType<typeof setTimeout> | null = null
+  private _liveViewOnFrame: ((base64: string) => void) | null = null
   private _currentDeviceId: string | null = null
   private closed = false
   private readonly onClosed?: () => void
@@ -114,7 +117,7 @@ export class BrowserSession {
       const client = await page.context().newCDPSession(page)
       await client.send('Emulation.setFocusEmulationEnabled', { enabled: true })
     } catch (error) {
-      logger.debug(`[browser] Focus emulation not enabled: ${String(error)}`)
+      logger.warn(`[browser] Focus emulation not enabled: ${String(error)}`)
     }
   }
 
@@ -275,6 +278,7 @@ export class BrowserSession {
   startLiveView(intervalMs: number, onFrame: (base64: string) => void): void {
     this.stopLiveView()
     this.clearIdleTimer() // Disable idle timeout during live view
+    this._liveViewOnFrame = onFrame
 
     let capturing = false
     this.liveViewInterval = setInterval(() => {
@@ -283,7 +287,7 @@ export class BrowserSession {
       void (async () => {
         try {
           // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: 50 }) as Buffer
+          const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: 70 }) as Buffer
           onFrame(buffer.toString('base64'))
         } catch (error) {
           logger.debug(`[browser] Live view screenshot error: ${String(error)}`)
@@ -292,6 +296,24 @@ export class BrowserSession {
         }
       })()
     }, intervalMs)
+
+    // Initialize debounced capture for event-triggered screenshots (e.g. after keyboard input)
+    this._debouncedCapture = () => {
+      if (this._debounceTimer) clearTimeout(this._debounceTimer)
+      this._debounceTimer = setTimeout(() => {
+        this._debounceTimer = null
+        if (!this.page || !this._liveViewOnFrame) return
+        void (async () => {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+            const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: 70 }) as Buffer
+            this._liveViewOnFrame?.(buffer.toString('base64'))
+          } catch (error) {
+            logger.debug(`[browser] Debounced capture error: ${String(error)}`)
+          }
+        })()
+      }, 50)
+    }
 
     logger.debug(`[browser] Live view started (interval=${intervalMs}ms)`)
   }
@@ -305,6 +327,12 @@ export class BrowserSession {
       this.liveViewInterval = null
       logger.debug('[browser] Live view stopped')
     }
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer)
+      this._debounceTimer = null
+    }
+    this._debouncedCapture = null
+    this._liveViewOnFrame = null
     // Re-enable idle timeout
     if (this.isActive()) {
       this.resetIdleTimer()
@@ -402,6 +430,8 @@ export class BrowserSession {
     } else {
       this.actionLog.add('direct', 'type', text)
     }
+
+    this._debouncedCapture?.()
   }
 
   /**
@@ -420,6 +450,8 @@ export class BrowserSession {
 
     const keyStr = modifiers?.length ? `${modifiers.join('+')}+${key}` : key
     this.actionLog.add('direct', 'press', keyStr)
+
+    this._debouncedCapture?.()
   }
 
   /**
