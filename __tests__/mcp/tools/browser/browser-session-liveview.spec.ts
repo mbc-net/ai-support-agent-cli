@@ -44,6 +44,7 @@ describe('BrowserSession - Live View & Interaction', () => {
     mockContext = {
       newPage: jest.fn().mockResolvedValue(mockPage),
       close: jest.fn().mockResolvedValue(undefined),
+      on: jest.fn(),
     }
 
     mockBrowser = {
