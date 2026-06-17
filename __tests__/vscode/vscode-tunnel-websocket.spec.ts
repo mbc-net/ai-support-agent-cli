@@ -1407,6 +1407,30 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(sentMessages).toHaveLength(0)
     })
 
+    it('should dispatch browser_mouse_move', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_mouse_move', sessionId: 'sess-z', x: 10, y: 20 })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should dispatch browser_mouse_down', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_mouse_down', sessionId: 'sess-z', x: 10, y: 20 })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should dispatch browser_mouse_up', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_mouse_up', sessionId: 'sess-z', x: 10, y: 20 })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
     it('should dispatch browser_mouse_wheel', async () => {
       tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2104,6 +2128,201 @@ describe('VsCodeTunnelWebSocket', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (tunnel as any).handleBrowserViewport({ type: 'browser_viewport', width: 800, height: 600 })
       expect(sentMessages).toHaveLength(0)
+    })
+
+    it('handleBrowserMouseMove - should do nothing when no sessionId', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', x: 10, y: 20 })
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('handleBrowserMouseDown - should do nothing when no sessionId', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseDown({ type: 'browser_mouse_down', x: 10, y: 20 })
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('handleBrowserMouseUp - should do nothing when no sessionId', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseUp({ type: 'browser_mouse_up', x: 10, y: 20 })
+      expect(sentMessages).toHaveLength(0)
+    })
+  })
+
+  describe('handleBrowserMouseMove', () => {
+    it('should do nothing if missing coordinates', async () => {
+      const mockSession = { executeMouseMove: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mv1' })
+      expect(mockSession.executeMouseMove).not.toHaveBeenCalled()
+    })
+
+    it('should call executeMouseMove with coordinates', async () => {
+      const mockSession = { executeMouseMove: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mv2', x: 30, y: 40 })
+      expect(mockSession.executeMouseMove).toHaveBeenCalledWith(30, 40)
+    })
+  })
+
+  describe('handleBrowserMouseDown', () => {
+    it('should do nothing if missing coordinates', async () => {
+      const mockSession = { executeMouseDown: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseDown({ type: 'browser_mouse_down', sessionId: 'sess-md1' })
+      expect(mockSession.executeMouseDown).not.toHaveBeenCalled()
+    })
+
+    it('should call executeMouseDown with coordinates and button', async () => {
+      const mockSession = { executeMouseDown: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseDown({ type: 'browser_mouse_down', sessionId: 'sess-md2', x: 50, y: 60, button: 'left' })
+      expect(mockSession.executeMouseDown).toHaveBeenCalledWith(50, 60, 'left')
+    })
+  })
+
+  describe('handleBrowserMouseUp', () => {
+    it('should do nothing if missing coordinates', async () => {
+      const mockSession = { executeMouseUp: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseUp({ type: 'browser_mouse_up', sessionId: 'sess-mu1' })
+      expect(mockSession.executeMouseUp).not.toHaveBeenCalled()
+    })
+
+    it('should call executeMouseUp with coordinates and button', async () => {
+      const mockSession = { executeMouseUp: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseUp({ type: 'browser_mouse_up', sessionId: 'sess-mu2', x: 70, y: 80, button: 'left' })
+      expect(mockSession.executeMouseUp).toHaveBeenCalledWith(70, 80, 'left')
+    })
+  })
+
+  describe('handleBrowserSetFile', () => {
+    it('should do nothing when sessionId is missing', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await expect((tunnel as any).handleBrowserSetFile({ type: 'browser_set_file' })).resolves.toBeUndefined()
+    })
+
+    it('should no-op (no throw) when there is no pending chooser for the session', async () => {
+      await expect(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (tunnel as any).handleBrowserSetFile({ type: 'browser_set_file', sessionId: 'no-such-sess', files: [] }),
+      ).resolves.toBeUndefined()
+      expect(sentMessages.some((m) => m.type === 'error')).toBe(true)
+    })
+
+    it('should convert files to {name, mimeType, buffer} and call the stored accept callback', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-f1', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-f1',
+        files: [{ name: 'a.txt', mimeType: 'text/plain', dataBase64: Buffer.from('hi').toString('base64') }],
+      })
+
+      expect(accept).toHaveBeenCalledWith([
+        { name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('hi') },
+      ])
+      // accept should be removed after use
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((tunnel as any).pendingFileChoosers.has('sess-f1')).toBe(false)
+    })
+
+    it('should call accept with [] when files is an empty array (cancel)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-f2', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({ type: 'browser_set_file', sessionId: 'sess-f2', files: [] })
+
+      expect(accept).toHaveBeenCalledWith([])
+      expect(sentMessages.some((m) => m.type === 'error')).toBe(false)
+    })
+
+    it('should call accept with [] when files is undefined (cancel)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-f3', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({ type: 'browser_set_file', sessionId: 'sess-f3' })
+
+      expect(accept).toHaveBeenCalledWith([])
+    })
+
+    it('should send an error when accept (setFiles) rejects (HIGH-2)', async () => {
+      const accept = jest.fn().mockRejectedValue(new Error('chooser invalidated'))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-fail', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-fail',
+        files: [{ name: 'a.txt', mimeType: 'text/plain', dataBase64: Buffer.from('hi').toString('base64') }],
+      })
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-fail')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('File upload failed')
+      expect(err!.message).toContain('chooser invalidated')
+    })
+
+    it('should reject oversized uploads, cancel the chooser, and not apply files (HIGH-3)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-big', accept)
+
+      // 11MB base64 string → decoded ~8.25MB; use two files to exceed 10MB total.
+      const sixMbBase64 = 'A'.repeat(8 * 1024 * 1024) // ~6MB decoded each
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-big',
+        files: [
+          { name: 'big1.bin', mimeType: 'application/octet-stream', dataBase64: sixMbBase64 },
+          { name: 'big2.bin', mimeType: 'application/octet-stream', dataBase64: sixMbBase64 },
+        ],
+      })
+
+      // Files must NOT be applied; chooser cancelled with [].
+      expect(accept).toHaveBeenCalledTimes(1)
+      expect(accept).toHaveBeenCalledWith([])
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-big')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('File too large')
+      // pending chooser consumed
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((tunnel as any).pendingFileChoosers.has('sess-big')).toBe(false)
+    })
+
+    it('should error on a non-string dataBase64 entry without crashing (HIGH-3)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-bad', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-bad',
+        // dataBase64 deliberately not a string
+        files: [{ name: 'x.bin', mimeType: 'application/octet-stream', dataBase64: 12345 as unknown as string }],
+      })
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-bad')
+      expect(err).toBeDefined()
+      // Files must not be applied; chooser cancelled.
+      expect(accept).toHaveBeenCalledWith([])
     })
   })
 })

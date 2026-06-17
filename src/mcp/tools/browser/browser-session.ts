@@ -33,6 +33,13 @@ const GET_SELECTED_TEXT_SCRIPT = `() => {
   return sel ? sel.toString() : '';
 }`
 
+/**
+ * Payload passed to Playwright's `FileChooser.setFiles`. Each entry carries the
+ * file content as an in-memory buffer (uploaded from the web client as base64),
+ * rather than a remote path on the agent host.
+ */
+export type FileChooserPayload = Array<{ name: string; mimeType: string; buffer: Buffer }>
+
 export class BrowserSession {
   private browser: Browser | null = null
   private context: BrowserContext | null = null
@@ -44,8 +51,12 @@ export class BrowserSession {
   private closed = false
   private readonly onClosed?: () => void
   private pendingFileChooser: FileChooser | null = null
-  /** ファイルチューザーが開いたときに呼ばれるコールバック。accept(paths) でファイルを設定する */
-  onFileChooser: ((accept: (paths: string[]) => void) => void) | null = null
+  /**
+   * ファイルチューザーが開いたときに呼ばれるコールバック。
+   * accept(files) でファイル内容を設定する。accept は `setFiles` の結果を
+   * 反映した Promise を返すため、呼び出し側で失敗を検知できる。
+   */
+  onFileChooser: ((accept: (files: FileChooserPayload) => Promise<void>) => void) | null = null
 
   /**
    * Get the currently active device emulation ID, or null if none.
@@ -83,6 +94,7 @@ export class BrowserSession {
     })
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     this.context = await this.browser!.newContext()
+    this.attachContextListeners(this.context)
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     this.page = await this.context!.newPage()
     this.attachPageListeners(this.page)
@@ -137,15 +149,27 @@ export class BrowserSession {
     this.onClosed?.()
   }
 
+  /**
+   * Attach context-level listeners. Registers a 'page' handler so file inputs
+   * that open in a popup / new tab still surface the filechooser event.
+   * Called both when the initial context is created and whenever the context is
+   * recreated (e.g. by setDeviceEmulation), to avoid losing the listener.
+   */
+  private attachContextListeners(context: BrowserContext): void {
+    context.on('page', (p: Page) => this.attachPageListeners(p))
+  }
+
   private attachPageListeners(page: Page): void {
     page.on('filechooser', (fc: FileChooser) => {
       this.pendingFileChooser = fc
       if (this.onFileChooser) {
-        this.onFileChooser((paths: string[]) => {
-          this.pendingFileChooser?.setFiles(paths).catch((err: unknown) => {
-            logger.warn(`[browser] setFiles failed: ${String(err)}`)
-          })
+        // accept returns a Promise so the caller (web client relay) can detect
+        // and surface setFiles failures instead of silently swallowing them.
+        this.onFileChooser((files: FileChooserPayload): Promise<void> => {
+          const chooser = this.pendingFileChooser
           this.pendingFileChooser = null
+          if (!chooser) return Promise.resolve()
+          return chooser.setFiles(files)
         })
       } else {
         fc.setFiles([]).catch(() => {})
@@ -186,6 +210,7 @@ export class BrowserSession {
     contextOptions.viewport = currentViewport
 
     this.context = await this.browser.newContext(contextOptions)
+    this.attachContextListeners(this.context)
     this.page = await this.context.newPage()
     this.attachPageListeners(this.page)
     await this.enableFocusEmulation(this.page)
@@ -325,6 +350,38 @@ export class BrowserSession {
     this.resetIdleTimer()
     await this.page.mouse.wheel(deltaX, deltaY)
     this.actionLog.add('direct', 'scroll', `deltaX=${deltaX} deltaY=${deltaY}`)
+  }
+
+  /**
+   * Move the mouse to the given coordinates without pressing any button.
+   * Used for drag-to-select text on the live view canvas.
+   */
+  async executeMouseMove(x: number, y: number): Promise<void> {
+    if (!this.page) throw new Error('No active browser page')
+    this.resetIdleTimer()
+    await this.page.mouse.move(x, y)
+  }
+
+  /**
+   * Move to (x, y) and press a mouse button without releasing it.
+   * Pair with executeMouseMove / executeMouseUp to perform drag-selection.
+   */
+  async executeMouseDown(x: number, y: number, button?: string): Promise<void> {
+    if (!this.page) throw new Error('No active browser page')
+    this.resetIdleTimer()
+    await this.page.mouse.move(x, y)
+    await this.page.mouse.down({ button: (button as 'left' | 'right' | 'middle' | undefined) ?? 'left' })
+  }
+
+  /**
+   * Move to (x, y) and release a mouse button.
+   * Completes a drag-selection started by executeMouseDown.
+   */
+  async executeMouseUp(x: number, y: number, button?: string): Promise<void> {
+    if (!this.page) throw new Error('No active browser page')
+    this.resetIdleTimer()
+    await this.page.mouse.move(x, y)
+    await this.page.mouse.up({ button: (button as 'left' | 'right' | 'middle' | undefined) ?? 'left' })
   }
 
   /**
