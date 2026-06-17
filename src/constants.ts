@@ -96,6 +96,9 @@ export const NPM_COMMAND = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 
 // Anthropic API
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6-20250514'
+// claude CLI 起動時のデフォルトモデル。未指定だと CLI デフォルト（Fable 5）に
+// フォールバックして unavailable で落ちるため、常に明示指定する。
+export const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-6'
 export const ANTHROPIC_API_VERSION = '2023-06-01'
 export const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
 export const DEFAULT_MAX_TOKENS = 4096

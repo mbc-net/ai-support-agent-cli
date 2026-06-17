@@ -7,7 +7,7 @@ import { CONFIG_DIR, CONFIG_FILE, PROJECT_CODE_DEFAULT } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AgentConfig, LegacyAgentConfig, ProjectRegistration } from './types'
-import { atomicWriteFile, sanitizeNameSegment } from './utils'
+import { atomicWriteFile, nowIso, sanitizeNameSegment } from './utils'
 import { safeJsonParse } from './utils/json-parse'
 
 export function getConfigDir(): string {
@@ -88,7 +88,7 @@ export function saveConfig(config: Partial<AgentConfig>): void {
   const existing = loadConfig()
   const merged: AgentConfig = {
     agentId: config.agentId ?? existing?.agentId ?? generateAgentId(),
-    createdAt: existing?.createdAt ?? new Date().toISOString(),
+    createdAt: existing?.createdAt ?? nowIso(),
     lastConnected: config.lastConnected ?? existing?.lastConnected,
     language: config.language ?? existing?.language,
     projects: config.projects ?? existing?.projects,

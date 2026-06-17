@@ -1,3 +1,5 @@
+import { nowIso } from './utils'
+
 const COLORS = {
   reset: '\x1b[0m',
   red: '\x1b[31m',
@@ -240,7 +242,7 @@ function formatJsonLog(level: string, message: string, context?: LogContext): st
   const entry: Record<string, unknown> = {
     level,
     message: maskSecrets(message),
-    timestamp: new Date().toISOString(),
+    timestamp: nowIso(),
   }
   if (context) {
     for (const [key, value] of Object.entries(maskContext(context))) {

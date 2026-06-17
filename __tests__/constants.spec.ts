@@ -91,6 +91,7 @@ describe('constants', () => {
 
     // Anthropic API
     expect(constants.DEFAULT_ANTHROPIC_MODEL).toBe('claude-sonnet-4-6-20250514')
+    expect(constants.DEFAULT_CLAUDE_MODEL).toBe('claude-sonnet-4-6')
     expect(constants.ANTHROPIC_API_VERSION).toBe('2023-06-01')
     expect(constants.ANTHROPIC_API_URL).toBe('https://api.anthropic.com/v1/messages')
     expect(constants.DEFAULT_MAX_TOKENS).toBe(4096)

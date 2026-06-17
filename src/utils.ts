@@ -213,3 +213,11 @@ export function exitWithError(message: string): never {
   logger.error(message)
   process.exit(1)
 }
+
+/**
+ * Returns the current timestamp as an ISO 8601 string.
+ * Centralizes `new Date().toISOString()` calls across the codebase.
+ */
+export function nowIso(): string {
+  return new Date().toISOString()
+}

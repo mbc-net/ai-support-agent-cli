@@ -15,6 +15,7 @@ export interface ProjectConfigResponse {
     claudeCodeConfig?: {
       additionalDirs?: string[]
       appendSystemPrompt?: string
+      model?: string
     }
     gitPullStrategy?: 'merge' | 'rebase'
     dockerCustomization?: {
