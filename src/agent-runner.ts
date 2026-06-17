@@ -11,7 +11,7 @@ import { captureException, flushSentry, initSentry } from './sentry'
 import { getSystemInfo } from './system-info'
 import type { AgentChatMode, AutoUpdateConfig, ProjectRegistration, ReleaseChannel } from './types'
 import { detectChannelFromVersion } from './update-checker'
-import { exitWithError, getErrorMessage, isInDocker, validateApiUrl } from './utils'
+import { exitWithError, getErrorMessage, isInDocker, nowIso, validateApiUrl } from './utils'
 import { ApiClient } from './api-client'
 import { startConfigWatcher } from './config-watcher'
 import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
@@ -239,7 +239,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     }
 
     runSingleProject(project, agentId, options, config?.agentChatMode, config?.defaultProjectDir)
-    saveConfig({ lastConnected: new Date().toISOString() })
+    saveConfig({ lastConnected: nowIso() })
     return
   }
 
@@ -331,7 +331,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     processManager.forkProject(project, agentId, forkOptions)
   }
 
-  saveConfig({ lastConnected: new Date().toISOString() })
+  saveConfig({ lastConnected: nowIso() })
 
   const client = new ApiClient(projects[0].apiUrl, projects[0].token)
   const updater = initAutoUpdater(options, config, client, agentId, () => processManager.stopAll(), () => processManager.isAnyBusy())

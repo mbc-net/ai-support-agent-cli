@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { exitWithError, getErrorMessage, isInDocker, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment } from '../src/utils'
+import { exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('sanitizeNameSegment', () => {
@@ -728,6 +728,22 @@ describe('toContainerApiUrl', () => {
   it('leaves non-localhost URLs unchanged', () => {
     expect(toContainerApiUrl('https://api.example.com')).toBe('https://api.example.com')
     expect(toContainerApiUrl('http://192.168.1.10:4030')).toBe('http://192.168.1.10:4030')
+  })
+})
+
+describe('nowIso', () => {
+  it('returns a valid ISO 8601 string', () => {
+    const result = nowIso()
+    expect(result).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+  })
+
+  it('is close to the current time', () => {
+    const before = Date.now()
+    const result = nowIso()
+    const after = Date.now()
+    const ts = new Date(result).getTime()
+    expect(ts).toBeGreaterThanOrEqual(before)
+    expect(ts).toBeLessThanOrEqual(after)
   })
 })
 
