@@ -32,9 +32,18 @@ export function buildClaudeArgs(
     locale?: string
     mcpConfigPath?: string
     systemPrompt?: string
+    model?: string
   },
 ): string[] {
   const args = ['-p', '--output-format', 'stream-json', CLI_FLAG_VERBOSE]
+  // モデルは呼び出し側（runClaudeCode）で「JSON設定 > env > デフォルト」の
+  // 優先順位に基づき解決済みの値を渡す。ここでは渡された値があれば付与し、
+  // 未指定（undefined / 空文字）なら付けない（CLI に ANTHROPIC_MODEL env を
+  // 尊重させるため）。
+  const model = options?.model?.trim()
+  if (model) {
+    args.push('--model', model)
+  }
   if (options?.allowedTools?.length) {
     for (const tool of options.allowedTools) {
       args.push('--allowedTools', tool)
