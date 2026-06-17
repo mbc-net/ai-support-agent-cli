@@ -6,7 +6,7 @@
  */
 
 import { buildCleanEnv, _resetCleanEnvCache, buildClaudeArgs } from '../../src/commands/claude-code-args'
-import { ENV_VARS } from '../../src/constants'
+import { ENV_VARS, DEFAULT_CLAUDE_MODEL } from '../../src/constants'
 
 describe('claude-code-args', () => {
   describe('buildCleanEnv - undefined value branch', () => {
@@ -94,7 +94,22 @@ describe('claude-code-args', () => {
   describe('buildClaudeArgs - comprehensive', () => {
     it('should return base args with message at end', () => {
       const result = buildClaudeArgs('my message')
-      expect(result).toEqual(['-p', '--output-format', 'stream-json', '--verbose', 'my message'])
+      expect(result).toEqual(['-p', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-4-6', 'my message'])
+    })
+
+    it('should default --model to claude-sonnet-4-6 when model is not provided', () => {
+      const result = buildClaudeArgs('msg')
+      expect(result).toContain('--model')
+      const modelIdx = result.indexOf('--model')
+      expect(result[modelIdx + 1]).toBe('claude-sonnet-4-6')
+      expect(result[modelIdx + 1]).toBe(DEFAULT_CLAUDE_MODEL)
+    })
+
+    it('should use the provided model for --model when specified', () => {
+      const result = buildClaudeArgs('msg', { model: 'claude-opus-4-8' })
+      expect(result).toContain('--model')
+      const modelIdx = result.indexOf('--model')
+      expect(result[modelIdx + 1]).toBe('claude-opus-4-8')
     })
 
     it('should add --allowedTools flag for each tool in the list', () => {

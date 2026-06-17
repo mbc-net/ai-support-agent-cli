@@ -57,6 +57,8 @@ export interface RunClaudeCodeOptions {
   mcpConfigPath?: string
   cwd?: string
   systemPrompt?: string
+  /** claude CLI に渡すモデル。未指定時は DEFAULT_CLAUDE_MODEL が使われる。 */
+  model?: string
   policyContext?: PolicyContext
   /**
    * Web 設定（CLAUDE_CODE# / ENV#）由来の環境変数オーバーレイ。
@@ -72,7 +74,7 @@ export interface RunClaudeCodeOptions {
  * ClaudeCodeHandle を返す: result Promise と kill 関数
  */
 export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
-  const { message, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt, policyContext, envVarsOverride } = options
+  const { message, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt, model, policyContext, envVarsOverride } = options
 
   let killFn: () => void = () => { /* noop until child is spawned */ }
 
@@ -104,7 +106,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
         env[key] = value
       }
     }
-    const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt })
+    const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt, model })
 
     ensureClaudeJsonIntegrity()
     // Web 経由で OAuth Token が設定されているなら ~/.claude.json の

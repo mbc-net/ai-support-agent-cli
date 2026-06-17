@@ -125,7 +125,7 @@ describe('claude-code-runner', () => {
   })
 
   describe('buildClaudeArgs', () => {
-    const BASE_ARGS = ['-p', '--output-format', 'stream-json', '--verbose']
+    const BASE_ARGS = ['-p', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-4-6']
 
     it('should return base args + message for basic message', () => {
       const result = buildClaudeArgs('hello')
@@ -1236,6 +1236,44 @@ describe('claude-code-runner', () => {
       expect(args).toContain('--output-format')
       expect(args).toContain('stream-json')
       expect(args).toContain('--verbose')
+    })
+
+    it('should pass the provided model to spawn args via --model', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk, model: 'claude-opus-4-8' })
+
+      mockProcess.emit('close', 0)
+
+      await handle.result
+
+      const args = spawn.mock.calls[0][1] as string[]
+      const modelIdx = args.indexOf('--model')
+      expect(modelIdx).toBeGreaterThan(-1)
+      expect(args[modelIdx + 1]).toBe('claude-opus-4-8')
+    })
+
+    it('should default --model to claude-sonnet-4-6 in spawn args when model is not provided', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      mockProcess.emit('close', 0)
+
+      await handle.result
+
+      const args = spawn.mock.calls[0][1] as string[]
+      const modelIdx = args.indexOf('--model')
+      expect(modelIdx).toBeGreaterThan(-1)
+      expect(args[modelIdx + 1]).toBe('claude-sonnet-4-6')
     })
 
     it('should handle NDJSON lines split across multiple data events', async () => {

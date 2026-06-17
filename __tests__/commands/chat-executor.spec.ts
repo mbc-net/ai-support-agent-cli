@@ -134,7 +134,7 @@ describe('chat-executor', () => {
 
       const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-1', client: mockClient, agentId: 'agent-1' })
       expect(result.success).toBe(true)
-      expect(spawn).toHaveBeenCalledWith('claude', ['-p', '--output-format', 'stream-json', '--verbose', 'Hello, world!'], expect.any(Object))
+      expect(spawn).toHaveBeenCalledWith('claude', ['-p', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-4-6', 'Hello, world!'], expect.any(Object))
     })
 
     it('should use claude_code mode when activeChatMode is claude_code', async () => {
@@ -569,9 +569,69 @@ describe('chat-executor', () => {
 
       expect(spawn).toHaveBeenCalledWith(
         'claude',
-        ['-p', '--output-format', 'stream-json', '--verbose', '--allowedTools', 'WebFetch', '--allowedTools', 'WebSearch', 'Hello, world!'],
+        ['-p', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-4-6', '--allowedTools', 'WebFetch', '--allowedTools', 'WebSearch', 'Hello, world!'],
         expect.any(Object),
       )
+    })
+
+    it('should pass model from serverConfig.claudeCodeConfig to CLI args', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const serverConfig: AgentServerConfig = {
+        agentEnabled: true,
+        builtinAgentEnabled: true,
+        builtinFallbackEnabled: true,
+        externalAgentEnabled: true,
+        chatMode: 'agent',
+        claudeCodeConfig: {
+          model: 'claude-opus-4-8',
+        },
+      }
+
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-model', client: mockClient, serverConfig, activeChatMode: 'claude_code', agentId: 'agent-1' })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const args = spawnCall[1] as string[]
+      const modelIdx = args.indexOf('--model')
+      expect(modelIdx).toBeGreaterThan(-1)
+      expect(args[modelIdx + 1]).toBe('claude-opus-4-8')
+    })
+
+    it('should default --model to claude-sonnet-4-6 when serverConfig has no model', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const serverConfig: AgentServerConfig = {
+        agentEnabled: true,
+        builtinAgentEnabled: true,
+        builtinFallbackEnabled: true,
+        externalAgentEnabled: true,
+        chatMode: 'agent',
+        claudeCodeConfig: {},
+      }
+
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-model-default', client: mockClient, serverConfig, activeChatMode: 'claude_code', agentId: 'agent-1' })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const args = spawnCall[1] as string[]
+      const modelIdx = args.indexOf('--model')
+      expect(modelIdx).toBeGreaterThan(-1)
+      expect(args[modelIdx + 1]).toBe('claude-sonnet-4-6')
     })
 
     it('should not pass allowedTools when serverConfig has no claudeCodeConfig', async () => {
@@ -597,7 +657,7 @@ describe('chat-executor', () => {
 
       expect(spawn).toHaveBeenCalledWith(
         'claude',
-        ['-p', '--output-format', 'stream-json', '--verbose', 'Hello, world!'],
+        ['-p', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-4-6', 'Hello, world!'],
         expect.any(Object),
       )
     })
@@ -628,7 +688,7 @@ describe('chat-executor', () => {
 
       expect(spawn).toHaveBeenCalledWith(
         'claude',
-        ['-p', '--output-format', 'stream-json', '--verbose', 'Hello, world!'],
+        ['-p', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-4-6', 'Hello, world!'],
         expect.any(Object),
       )
     })
@@ -692,7 +752,7 @@ describe('chat-executor', () => {
 
       expect(spawn).toHaveBeenCalledWith(
         'claude',
-        ['-p', '--output-format', 'stream-json', '--verbose', 'Hello, world!'],
+        ['-p', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-4-6', 'Hello, world!'],
         expect.any(Object),
       )
     })
@@ -756,7 +816,7 @@ describe('chat-executor', () => {
 
       expect(spawn).toHaveBeenCalledWith(
         'claude',
-        ['-p', '--output-format', 'stream-json', '--verbose', 'Hello, world!'],
+        ['-p', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-4-6', 'Hello, world!'],
         expect.any(Object),
       )
     })
