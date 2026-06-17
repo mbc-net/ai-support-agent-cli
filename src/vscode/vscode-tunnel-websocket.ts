@@ -337,7 +337,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private async handleVsCodeOpen(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId) {
-      this.send({ type: 'error', message: 'Missing sessionId' })
+      this.sendMissingSessionIdError()
       return
     }
 
@@ -566,7 +566,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private handlePortForwardOpen(msg: VsCodeServerMessage): void {
     const sessionId = msg.sessionId
     if (!sessionId) {
-      this.send({ type: 'error', message: 'Missing sessionId' })
+      this.sendMissingSessionIdError()
       return
     }
 
@@ -607,7 +607,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private async handleBrowserOpen(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId) {
-      this.send({ type: 'error', message: 'Missing sessionId' })
+      this.sendMissingSessionIdError()
       return
     }
 
@@ -700,7 +700,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -801,7 +801,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -829,7 +829,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -851,7 +851,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -930,6 +930,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       this.vsCodeServer.stop()
       this.vsCodeServer = null
     }
+  }
+
+  private sendMissingSessionIdError(): void {
+    this.send({ type: 'error', message: 'Missing sessionId' })
+  }
+
+  private sendBrowserSessionNotFoundError(sessionId: string): void {
+    this.send({ type: 'error', sessionId, message: 'Browser session not found' })
   }
 
   private send(msg: VsCodeAgentMessage): void {
