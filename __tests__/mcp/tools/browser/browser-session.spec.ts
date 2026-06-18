@@ -687,7 +687,7 @@ describe('BrowserSession', () => {
 
     it('should invoke onFileChooser and forward payload to setFiles when callback is set', async () => {
       const session = new BrowserSession()
-      const payload = [{ name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('hi') }]
+      const payload: FileChooserPayload = ['/tmp/browser-upload-x/0-a.txt']
       session.onFileChooser = (accept) => accept(payload)
 
       await session.getPage()
@@ -725,9 +725,7 @@ describe('BrowserSession', () => {
       const fc = { setFiles: jest.fn().mockRejectedValue(new Error('boom')) }
       // The synchronous handler must not throw; the rejection surfaces via accept().
       expect(() => handler(fc)).not.toThrow()
-      await expect(
-        captured!([{ name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('hi') }]),
-      ).rejects.toThrow('boom')
+      await expect(captured!(['/tmp/browser-upload-x/0-a.txt'])).rejects.toThrow('boom')
     })
 
     it('should register a context page handler that attaches filechooser listeners to popups', async () => {
@@ -794,9 +792,7 @@ describe('BrowserSession', () => {
 
       expect(captured).not.toBeNull()
       // The accept callback resolves to a promise that propagates the setFiles rejection.
-      await expect(
-        captured!([{ name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('hi') }]),
-      ).rejects.toThrow('boom')
+      await expect(captured!(['/tmp/browser-upload-x/0-a.txt'])).rejects.toThrow('boom')
     })
 
     it('should resolve from accept callback when setFiles succeeds (HIGH-2)', async () => {
@@ -812,7 +808,7 @@ describe('BrowserSession', () => {
       const fc = { setFiles: jest.fn().mockResolvedValue(undefined) }
       handler(fc)
 
-      const payload = [{ name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('hi') }]
+      const payload: FileChooserPayload = ['/tmp/browser-upload-x/0-a.txt']
       await expect(captured!(payload)).resolves.toBeUndefined()
       expect(fc.setFiles).toHaveBeenCalledWith(payload)
     })
