@@ -2057,6 +2057,146 @@ describe('VsCodeTunnelWebSocket', () => {
     })
   })
 
+  describe('handleBrowserSetFile', () => {
+    it('should error when no pending file chooser', async () => {
+      // pendingFileChoosers が空のとき、errorメッセージを送信
+      await (tunnel as any).handleBrowserSetFile({ type: 'browser_set_file', sessionId: 'no-pending-sess' })
+      expect(sentMessages).toContainEqual(expect.objectContaining({
+        type: 'error',
+        sessionId: 'no-pending-sess',
+        message: expect.stringContaining('No pending file chooser'),
+      }))
+    })
+
+    it('should handle filePaths and accept them', async () => {
+      // pendingFileChoosers にエントリがある場合、filePaths を accept に渡す
+      const acceptMock = jest.fn()
+      ;(tunnel as any).pendingFileChoosers.set('sess-paths', acceptMock)
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-paths',
+        filePaths: ['/workspace/test.txt'],
+      })
+      expect(acceptMock).toHaveBeenCalledWith(['/workspace/test.txt'])
+      expect((tunnel as any).pendingFileChoosers.has('sess-paths')).toBe(false)
+    })
+
+    it('should handle base64 files by writing to temp and calling accept with paths', async () => {
+      // filesが base64 で送られた場合、一時ファイルに書き込んでから accept に渡す
+      // fs.promises と setTimeout をモックして実際の I/O と待機をスキップする
+      const fsModule = require('fs') as typeof import('fs')
+      const writeFileSpy = jest.spyOn(fsModule.promises, 'writeFile').mockResolvedValue(undefined)
+      const unlinkSpy = jest.spyOn(fsModule.promises, 'unlink').mockResolvedValue(undefined)
+      // setTimeout をすぐに解決するモックに差し替える
+      const origSetTimeout = global.setTimeout
+      global.setTimeout = ((fn: () => void) => { fn(); return 0 as unknown as NodeJS.Timeout }) as unknown as typeof setTimeout
+
+      try {
+        const acceptMock = jest.fn()
+        ;(tunnel as any).pendingFileChoosers.set('sess-b64', acceptMock)
+        await (tunnel as any).handleBrowserSetFile({
+          type: 'browser_set_file',
+          sessionId: 'sess-b64',
+          files: [
+            { name: 'test.txt', mimeType: 'text/plain', dataBase64: Buffer.from('hello').toString('base64') },
+          ],
+        })
+        expect(acceptMock).toHaveBeenCalledTimes(1)
+        const calledPaths: string[] = acceptMock.mock.calls[0][0]
+        expect(calledPaths).toHaveLength(1)
+        expect(calledPaths[0]).toMatch(/test\.txt$/)
+        expect(writeFileSpy).toHaveBeenCalledTimes(1)
+        // unlink は finally ブロックで呼ばれる
+        expect(unlinkSpy).toHaveBeenCalledTimes(1)
+        // 一時ファイルが書き込まれたことを確認（ファイルが存在するかまたは既にクリーンアップ済み）
+        expect((tunnel as any).pendingFileChoosers.has('sess-b64')).toBe(false)
+      } finally {
+        global.setTimeout = origSetTimeout
+        writeFileSpy.mockRestore()
+        unlinkSpy.mockRestore()
+      }
+    })
+
+    it('should call accept with empty array when files is empty', async () => {
+      const acceptMock = jest.fn()
+      ;(tunnel as any).pendingFileChoosers.set('sess-empty', acceptMock)
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-empty',
+        files: [],
+      })
+      expect(acceptMock).toHaveBeenCalledWith([])
+    })
+
+    it('should generate distinct tmpPaths when multiple files have the same name (HIGH-1)', async () => {
+      // 同名ファイルを複数選択した場合、index が含まれるため衝突しない
+      const fsModule = require('fs') as typeof import('fs')
+      const writtenPaths: string[] = []
+      const writeFileSpy = jest.spyOn(fsModule.promises, 'writeFile').mockImplementation(async (filePath) => {
+        writtenPaths.push(String(filePath))
+      })
+      const unlinkSpy = jest.spyOn(fsModule.promises, 'unlink').mockResolvedValue(undefined)
+      const origSetTimeout = global.setTimeout
+      global.setTimeout = ((fn: () => void) => { fn(); return 0 as unknown as NodeJS.Timeout }) as unknown as typeof setTimeout
+
+      try {
+        const acceptMock = jest.fn()
+        ;(tunnel as any).pendingFileChoosers.set('sess-dup', acceptMock)
+        await (tunnel as any).handleBrowserSetFile({
+          type: 'browser_set_file',
+          sessionId: 'sess-dup',
+          files: [
+            { name: 'photo.jpg', mimeType: 'image/jpeg', dataBase64: Buffer.from('data1').toString('base64') },
+            { name: 'photo.jpg', mimeType: 'image/jpeg', dataBase64: Buffer.from('data2').toString('base64') },
+          ],
+        })
+        expect(acceptMock).toHaveBeenCalledTimes(1)
+        const calledPaths: string[] = acceptMock.mock.calls[0][0]
+        expect(calledPaths).toHaveLength(2)
+        // パスが互いに異なることを確認（インデックスで区別される）
+        expect(calledPaths[0]).not.toBe(calledPaths[1])
+        // 両方のパスに index が含まれていることを確認
+        expect(calledPaths[0]).toMatch(/-0-photo\.jpg$/)
+        expect(calledPaths[1]).toMatch(/-1-photo\.jpg$/)
+        expect(writeFileSpy).toHaveBeenCalledTimes(2)
+      } finally {
+        global.setTimeout = origSetTimeout
+        writeFileSpy.mockRestore()
+        unlinkSpy.mockRestore()
+      }
+    })
+
+    it('should call accept([]) and send error when writeFile fails (HIGH-2)', async () => {
+      // writeFile が例外を投げた場合、accept([]) が呼ばれ、エラーメッセージが送信される
+      const fsModule = require('fs') as typeof import('fs')
+      const writeFileSpy = jest.spyOn(fsModule.promises, 'writeFile').mockRejectedValue(new Error('ENOSPC: no space left on device'))
+      const unlinkSpy = jest.spyOn(fsModule.promises, 'unlink').mockResolvedValue(undefined)
+
+      try {
+        const acceptMock = jest.fn()
+        ;(tunnel as any).pendingFileChoosers.set('sess-writefail', acceptMock)
+        await (tunnel as any).handleBrowserSetFile({
+          type: 'browser_set_file',
+          sessionId: 'sess-writefail',
+          files: [
+            { name: 'test.txt', mimeType: 'text/plain', dataBase64: Buffer.from('hello').toString('base64') },
+          ],
+        })
+        // accept([]) が呼ばれ、fileChooser がハングしないことを確認
+        expect(acceptMock).toHaveBeenCalledWith([])
+        // エラーメッセージが送信されることを確認
+        const errMsg = sentMessages.find(m => m.type === 'error')
+        expect(errMsg).toBeDefined()
+        expect(errMsg!.sessionId).toBe('sess-writefail')
+        expect(errMsg!.message).toContain('File upload failed')
+        expect(errMsg!.message).toContain('ENOSPC')
+      } finally {
+        writeFileSpy.mockRestore()
+        unlinkSpy.mockRestore()
+      }
+    })
+  })
+
   describe('browser handlers - no sessionId (ternary false branch)', () => {
     it('handleBrowserGoBack - should do nothing when no sessionId', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

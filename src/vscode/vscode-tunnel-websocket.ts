@@ -1,3 +1,8 @@
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
+import { randomUUID } from 'crypto'
+
 import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../base-websocket'
@@ -52,6 +57,7 @@ export interface VsCodeServerMessage {
     | 'browser_set_file'
     | 'browser_get_selection'
   filePaths?: string[]
+  files?: Array<{ name: string; mimeType: string; dataBase64: string }>
   sessionId?: string
   requestId?: string
   subSocketId?: string
@@ -318,7 +324,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         this.handleBrowserExecuteScript(msg)
         break
       case 'browser_set_file':
-        this.handleBrowserSetFile(msg)
+        void this.handleBrowserSetFile(msg)
         break
       case 'browser_get_selection':
         void this.handleBrowserGetSelection(msg)
@@ -891,7 +897,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
   }
 
-  private handleBrowserSetFile(msg: VsCodeServerMessage): void {
+  private async handleBrowserSetFile(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId) return
 
@@ -901,7 +907,48 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       return
     }
     this.pendingFileChoosers.delete(sessionId)
-    accept(msg.filePaths ?? [])
+
+    // filePaths が指定されていれば直接使用（Agent Docker内モード）
+    if (msg.filePaths && msg.filePaths.length > 0) {
+      accept(msg.filePaths)
+      return
+    }
+
+    // files（base64）が指定されていれば一時ファイルに書き込み（ローカルPCモード）
+    const files = msg.files
+    if (!files || files.length === 0) {
+      accept([])
+      return
+    }
+
+    const uploadId = randomUUID()
+    const tempPaths: string[] = []
+    try {
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index]
+        const safeName = path.basename(file.name).replace(/[^a-zA-Z0-9._-]/g, '_') || 'file'
+        const tmpPath = path.join(os.tmpdir(), `ai-support-upload-${uploadId}-${index}-${safeName}`)
+        await fs.promises.writeFile(tmpPath, Buffer.from(file.dataBase64, 'base64'))
+        tempPaths.push(tmpPath)
+      }
+      accept(tempPaths)
+      // setFiles() の完了を待つための待機時間（Playwright が同期的にファイルを読むが、
+      // コールバック経由のため直接 await できない）
+      const FILE_CHOOSER_SETTLE_MS = 2000
+      await new Promise<void>((resolve) => setTimeout(resolve, FILE_CHOOSER_SETTLE_MS))
+    } catch (err) {
+      logger.error(`[vscode-ws] Failed to write temporary file for upload: ${err}`)
+      accept([])
+      this.send({
+        type: 'error',
+        sessionId: msg.sessionId,
+        message: `File upload failed: ${err instanceof Error ? err.message : String(err)}`,
+      })
+    } finally {
+      for (const p of tempPaths) {
+        await fs.promises.unlink(p).catch(() => {})
+      }
+    }
   }
 
   private cleanup(): void {
