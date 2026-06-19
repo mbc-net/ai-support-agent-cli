@@ -1,5 +1,7 @@
+import path from 'path'
+
 import type { ApiClient } from '../api-client'
-import { executePlaywrightScript, type BrowserSessionLike, type ScriptExecutionResult } from '../browser/browser-script-executor'
+import { runPlaywrightScript, type PlaywrightRunnerResult } from '../browser/playwright-test-runner'
 import { logger } from '../logger'
 import type {
   AgentChatMode,
@@ -25,16 +27,12 @@ export interface ExecuteE2eTestOptions {
   mcpConfigPath?: string
   tenantCode?: string
   browserLocalPort?: number
-  browserSessionManager?: unknown
 }
-
-/** Maximum number of recovery attempts */
-const MAX_RECOVERY_ATTEMPTS = 3
 
 /**
  * E2E テストを実行する
  *
- * playwrightScript がある場合はスクリプト直接実行（高速）、
+ * playwrightScript がある場合は @playwright/test サブプロセスで直接実行（高速）、
  * ない場合は従来のAI実行フローを使用する。
  */
 export async function executeE2eTest(
@@ -49,7 +47,6 @@ export async function executeE2eTest(
   const credentialId = parseString(payload.credentialId)
   const executionMethod = parseString(payload.executionMethod) ?? 'ai'
   const playwrightScript = parseString(payload.playwrightScript)
-  const recoveryMode = (parseString(payload.recoveryMode) ?? 'auto') as 'auto' | 'manual'
   const steps = payload.steps as unknown[] | undefined
 
   if (!executionId) {
@@ -87,8 +84,6 @@ export async function executeE2eTest(
       scenario,
       targetUrl: targetUrl ?? undefined,
       credentialId: credentialId ?? undefined,
-      recoveryMode,
-      steps,
       startTime,
     })
   }
@@ -224,52 +219,27 @@ interface ScriptModeParams extends ExecuteE2eTestOptions {
   scenario: string
   targetUrl?: string
   credentialId?: string
-  recoveryMode: 'auto' | 'manual'
-  steps?: unknown[]
   startTime: number
 }
 
 /**
  * スクリプト直接実行モード
  *
- * Playwrightスクリプトを直接実行し、失敗時はAIリカバリを試みる。
+ * @playwright/test をサブプロセスで実行してテスト結果を返す。
  */
 async function executeScriptMode(
   params: ScriptModeParams,
 ): Promise<CommandResult> {
   const {
-    client, tenantCode, executionId, testCaseId, playwrightScript,
-    scenario, recoveryMode, startTime, browserSessionManager,
+    client, tenantCode, executionId, testCaseId, playwrightScript, startTime,
   } = params
   const projectCode = params.projectConfig?.project?.projectCode
 
-  const aiFallbackParams = {
-    executionId,
-    testCaseId,
-    scenario,
-    targetUrl: params.targetUrl,
-    credentialId: params.credentialId,
-    startTime,
-  }
+  const agentRootDir = params.projectDir ?? path.resolve(__dirname, '../../')
 
-  // ブラウザセッション取得
-  const session = await acquireBrowserSession(browserSessionManager, executionId)
-  if (session === null) {
-    logger.warn('[e2e_test] No browser session manager available, falling back to AI mode')
-    return executeAiMode(params, aiFallbackParams)
-  }
-  if (session === undefined) {
-    // セッション作成失敗 — ログは acquireBrowserSession 内で記録済み
-    return executeAiMode(params, aiFallbackParams)
-  }
-
-  // ステップ完了コールバック
-  const onStepComplete = buildStepCompleteCallback(client, tenantCode, projectCode, executionId, testCaseId)
-
-  // スクリプト実行
-  let scriptResult: ScriptExecutionResult
+  let scriptResult: PlaywrightRunnerResult
   try {
-    scriptResult = await executePlaywrightScript(session, playwrightScript, onStepComplete)
+    scriptResult = await runPlaywrightScript(playwrightScript, executionId, agentRootDir)
   } catch (err: unknown) {
     const errorMessage = toErrorMessage(err)
     logger.error(`[e2e_test] Script execution error: ${errorMessage}`)
@@ -281,303 +251,33 @@ async function executeScriptMode(
     return errorResult(`Script execution error: ${errorMessage}`)
   }
 
-  // fallbackToChat の場合はAI実行にフォールバック
-  if (scriptResult.fallbackToChat) {
-    logger.info('[e2e_test] Script contains unparseable lines, falling back to AI mode')
-    return executeAiMode(params, aiFallbackParams)
-  }
-
-  // スクリプト成功
-  if (scriptResult.success) {
-    return reportScriptSuccess(client, tenantCode, projectCode, executionId, testCaseId, startTime, scriptResult)
-  }
-
-  // スクリプト失敗 → AIリカバリ
-  logger.info(`[e2e_test] Script failed at: ${scriptResult.failedLine}, attempting AI recovery`)
-
-  return executeAiRecovery({
-    ...params,
-    session,
-    originalScript: playwrightScript,
-    scriptResult,
-    recoveryMode,
-  })
-}
-
-/**
- * ブラウザセッションを取得する。
- * - セッションマネージャーなし → null（AI fallback シグナル）
- * - セッション作成失敗 → undefined（AI fallback シグナル）
- * - 成功 → セッションオブジェクト
- */
-async function acquireBrowserSession(
-  browserSessionManager: unknown,
-  executionId: string,
-): Promise<BrowserSessionLike | null | undefined> {
-  const sessionManager = browserSessionManager as {
-    getOrCreate: (id: string) => Promise<BrowserSessionLike>
-  } | undefined
-
-  if (!sessionManager) {
-    return null
-  }
-
-  try {
-    return await sessionManager.getOrCreate(`e2e-${executionId}`)
-  } catch (err: unknown) {
-    logger.warn(`[e2e_test] Failed to create browser session: ${toErrorMessage(err)}`)
-    return undefined
-  }
-}
-
-/**
- * ステップ完了コールバックを生成する
- */
-function buildStepCompleteCallback(
-  client: ApiClient,
-  tenantCode: string | undefined,
-  projectCode: string | undefined,
-  executionId: string,
-  testCaseId: string | undefined,
-): (step: number, _total: number, line: string) => Promise<void> {
-  return async (step: number, _total: number, line: string) => {
-    if (!tenantCode || !projectCode) return
-    try {
-      await client.reportE2eTestStep(tenantCode, projectCode, executionId, {
-        testCaseId,
-        stepNumber: step,
-        action: line,
-        status: 'passed',
-      })
-    } catch (err: unknown) {
-      logger.warn(`[e2e_test] Failed to report step ${step}: ${toErrorMessage(err)}`)
-    }
-  }
-}
-
-/**
- * スクリプト成功時のステータス報告と結果返却
- */
-async function reportScriptSuccess(
-  client: ApiClient,
-  tenantCode: string | undefined,
-  projectCode: string | undefined,
-  executionId: string,
-  testCaseId: string | undefined,
-  startTime: number,
-  scriptResult: ScriptExecutionResult,
-): Promise<CommandResult> {
   const duration = Date.now() - startTime
-  await reportExecutionStatus(
-    client, tenantCode, projectCode, executionId,
-    'passed', duration, undefined, testCaseId,
-    { passedSteps: scriptResult.completedSteps, totalSteps: scriptResult.totalSteps },
-  )
-
-  logger.info(`[e2e_test] Script execution passed [${executionId}]: ${scriptResult.completedSteps}/${scriptResult.totalSteps} steps`)
-  return successResult({
-    executionId,
-    status: 'passed',
-    duration,
-    completedSteps: scriptResult.completedSteps,
-    totalSteps: scriptResult.totalSteps,
-  })
-}
-
-/** AIリカバリのパラメータ */
-interface RecoveryParams extends ScriptModeParams {
-  session: BrowserSessionLike
-  originalScript: string
-  scriptResult: ScriptExecutionResult
-  recoveryMode: 'auto' | 'manual'
-}
-
-/**
- * AIリカバリ実行
- *
- * スクリプト失敗時にAIに修正スクリプトを生成させ、再実行する。
- */
-async function executeAiRecovery(
-  params: RecoveryParams,
-): Promise<CommandResult> {
-  const {
-    client, commandId, tenantCode, executionId, testCaseId,
-    scenario, originalScript, scriptResult, session, startTime, recoveryMode,
-  } = params
-  const projectCode = params.projectConfig?.project?.projectCode
-
-  for (let attempt = 1; attempt <= MAX_RECOVERY_ATTEMPTS; attempt++) {
-    logger.info(`[e2e_test] Recovery attempt ${attempt}/${MAX_RECOVERY_ATTEMPTS}`)
-
-    // AIにスクリプト修正を依頼
-    const recoveryPrompt = buildRecoveryPrompt(originalScript, scriptResult, scenario, attempt)
-
-    let chatResult: CommandResult
-    try {
-      chatResult = await executeChatCommand({
-        payload: {
-          message: recoveryPrompt,
-          policyContext: {
-            tenantCode,
-            projectCode,
-            e2eExecutionId: executionId,
-            e2eTestCaseId: testCaseId,
-          },
-        },
-        commandId: `${commandId}-recovery-${attempt}`,
-        client,
-        serverConfig: params.serverConfig,
-        activeChatMode: params.activeChatMode,
-        agentId: params.agentId,
-        projectDir: params.projectDir,
-        projectConfig: params.projectConfig,
-        mcpConfigPath: params.mcpConfigPath,
-        tenantCode,
-        browserLocalPort: params.browserLocalPort,
-      })
-    } catch (err: unknown) {
-      logger.warn(`[e2e_test] Recovery chat failed: ${toErrorMessage(err)}`)
-      continue
-    }
-
-    if (!chatResult.success) {
-      logger.warn(`[e2e_test] Recovery chat returned failure: ${chatResult.error}`)
-      continue
-    }
-
-    // チャット結果からスクリプトを抽出
-    const updatedScript = extractScriptFromChatResult(chatResult)
-    if (!updatedScript) {
-      logger.warn('[e2e_test] Could not extract script from recovery chat result')
-      continue
-    }
-
-    // 修正スクリプトで再実行
-    let retryResult: ScriptExecutionResult
-    try {
-      retryResult = await executePlaywrightScript(session, updatedScript)
-    } catch (err: unknown) {
-      logger.warn(`[e2e_test] Recovery script execution error: ${toErrorMessage(err)}`)
-      continue
-    }
-
-    if (retryResult.success) {
-      logger.info(`[e2e_test] Recovery succeeded on attempt ${attempt}`)
-
-      // 修正スクリプトを保存
-      if (tenantCode && projectCode && testCaseId) {
-        try {
-          await client.updateE2eTestScript(tenantCode, projectCode, executionId, {
-            playwrightScript: updatedScript,
-            testCaseId,
-            recoveryMode,
-          })
-        } catch (err: unknown) {
-          logger.warn(`[e2e_test] Failed to save recovered script: ${toErrorMessage(err)}`)
-        }
-      }
-
-      const duration = Date.now() - startTime
-      await reportExecutionStatus(
-        client, tenantCode, projectCode, executionId,
-        'passed', duration, undefined, testCaseId,
-        {
-          passedSteps: retryResult.completedSteps,
-          totalSteps: retryResult.totalSteps,
-          recoveryAttempts: attempt,
-        },
-      )
-
-      return successResult({
-        executionId,
-        status: 'passed',
-        duration,
-        recoveredOnAttempt: attempt,
-      })
-    }
-  }
-
-  // 全リトライ失敗
-  const duration = Date.now() - startTime
-  const errorMessage = `Script recovery failed after ${MAX_RECOVERY_ATTEMPTS} attempts. Last failure: ${scriptResult.failedLine}`
+  const status = scriptResult.success ? 'passed' : 'failed'
 
   await reportExecutionStatus(
     client, tenantCode, projectCode, executionId,
-    'failed', duration, errorMessage, testCaseId,
+    status, duration,
+    scriptResult.success ? undefined : (scriptResult.errorOutput ?? `${scriptResult.failed} test(s) failed`),
+    testCaseId,
     {
-      passedSteps: scriptResult.completedSteps,
-      failedSteps: 1,
+      passedSteps: scriptResult.passed,
+      failedSteps: scriptResult.failed,
       totalSteps: scriptResult.totalSteps,
-      recoveryAttempts: MAX_RECOVERY_ATTEMPTS,
     },
   )
 
+  logger.info(
+    `[e2e_test] Script execution ${status} [${executionId}]: passed=${scriptResult.passed} failed=${scriptResult.failed} duration=${duration}ms`,
+  )
+
   return successResult({
     executionId,
-    status: 'failed',
+    status,
     duration,
-    error: errorMessage,
+    passed: scriptResult.passed,
+    failed: scriptResult.failed,
+    totalSteps: scriptResult.totalSteps,
   })
-}
-
-/** リカバリ用プロンプトを構築 */
-function buildRecoveryPrompt(
-  originalScript: string,
-  scriptResult: ScriptExecutionResult,
-  scenario: string,
-  attempt: number,
-): string {
-  const completedLines = scriptResult.results
-    .filter(r => r.success)
-    .map(r => r.line)
-    .join('\n')
-
-  const failedInfo = scriptResult.results
-    .filter(r => !r.success)
-    .map(r => `Line: ${r.line}\nError: ${r.error ?? 'unknown'}`)
-    .join('\n')
-
-  return [
-    '# E2E テストスクリプト修正依頼',
-    '',
-    `リカバリ試行: ${attempt}/${MAX_RECOVERY_ATTEMPTS}`,
-    '',
-    '## 元のテストシナリオ',
-    scenario,
-    '',
-    '## 元のスクリプト',
-    '```',
-    originalScript,
-    '```',
-    '',
-    '## 成功したステップ',
-    completedLines || '(なし)',
-    '',
-    '## 失敗情報',
-    failedInfo,
-    '',
-    '## 修正指示',
-    '上記の失敗を修正した新しいPlaywrightスクリプトを生成してください。',
-    '対応コマンド: page.goto, page.click, page.fill, page.keyboard.type/press, page.mouse.wheel, page.waitForTimeout, page.locator().innerText()',
-    '',
-    'スクリプトのみを出力してください（```で囲まないでください）。',
-  ].join('\n')
-}
-
-/** チャット結果からスクリプトを抽出 */
-function extractScriptFromChatResult(result: CommandResult): string | null {
-  if (!result.success) return null
-
-  const data = result.data
-  if (typeof data === 'string') {
-    // コードブロックから抽出
-    const codeBlockMatch = data.match(/```(?:typescript|javascript|playwright)?\n([\s\S]*?)```/)
-    if (codeBlockMatch) return codeBlockMatch[1].trim()
-    // await page. で始まる行があればスクリプトとして扱う
-    if (data.includes('await page.')) return data.trim()
-  }
-
-  return null
 }
 
 /**
