@@ -1,3 +1,7 @@
+import { promises as fs } from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+
 import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../base-websocket'
@@ -5,6 +9,7 @@ import { BrowserLocalServer } from '../browser/browser-local-server'
 import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import type { EnvVarsProvider } from '../env-vars-filter'
 import { logger } from '../logger'
+import { getWorkspaceDir } from '../project-dir'
 import { getErrorMessage, buildWsUrl } from '../utils'
 import {
   BrowserSessionManager,
@@ -153,6 +158,28 @@ const LIVE_VIEW_INTERVAL_MS = 200
  * Guards against unbounded base64 payloads consuming agent memory.
  */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 // 10MB
+
+/**
+ * Sanitize a client-supplied upload file name into a safe basename so it can be
+ * joined to a temp directory without escaping it (path-traversal defense).
+ *
+ * Strips any directory components (`path.basename`), then rejects path-relative
+ * tokens (`.`/`..`) and any remaining separator characters by replacing unsafe
+ * characters with `_`. Always returns a non-empty basename, falling back to
+ * `upload` when nothing safe remains.
+ */
+function sanitizeUploadFileName(name: unknown): string {
+  const raw = typeof name === 'string' ? name : ''
+  // Drop any directory portion the client may have included.
+  let base = path.basename(raw)
+  // Replace path separators and traversal-relevant characters; collapse control
+  // chars and leading dots that could hide the file or break paths.
+  base = base.replace(/[/\\]/g, '_').replace(/\0/g, '')
+  if (base === '' || base === '.' || base === '..') {
+    return 'upload'
+  }
+  return base
+}
 
 /**
  * VS Code トンネル WebSocket
@@ -959,37 +986,211 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     // Consume the pending chooser up-front so it is not left dangling on any path.
     this.pendingFileChoosers.delete(sessionId)
 
-    const files = msg.files ?? []
+    // Outermost guard: any unexpected error (malformed payload, FS failure, a
+    // throwing `accept`) MUST surface as an `error` notification AND cancel the
+    // chooser, never escape as an unhandled rejection that leaves the remote
+    // `<input type=file>` stuck waiting. Each branch below already cancels on
+    // its own validation failures; this catch is the final backstop so a
+    // non-string filePath element, a non-array `files`, etc. cannot wedge the
+    // chooser.
+    try {
+      if (msg.files === undefined && msg.filePaths !== undefined) {
+        await this.handleBrowserSetFileByPaths(sessionId, accept, msg.filePaths)
+        return
+      }
+      await this.handleBrowserSetFileByContent(sessionId, accept, msg.files)
+    } catch (error) {
+      this.send({ type: 'error', sessionId, message: `File upload failed: ${getErrorMessage(error)}` })
+      await this.cancelFileChooser(accept, sessionId)
+    }
+  }
+
+  /**
+   * Branch 1: Agent FS paths chosen directly by the user via the workspace file
+   * explorer. These arrive as workspace-relative paths (e.g. `repos/app.ts`) —
+   * Playwright's setFiles requires absolute paths, so each is resolved against
+   * the workspace root before being forwarded. Already absolute paths are
+   * accepted as-is for backward compatibility, but every resolved path must
+   * stay inside the workspace root (traversal + symlink-escape guard).
+   */
+  private async handleBrowserSetFileByPaths(
+    sessionId: string,
+    accept: (files: FileChooserPayload) => Promise<void>,
+    filePaths: unknown,
+  ): Promise<void> {
+    // Explicit input validation (do not rely on a thrown TypeError): the payload
+    // must be an array of strings. Anything else is rejected + chooser cancelled.
+    if (!Array.isArray(filePaths) || filePaths.some((p) => typeof p !== 'string')) {
+      this.send({
+        type: 'error',
+        sessionId,
+        message: 'Invalid file payload: filePaths must be an array of strings',
+      })
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
+
+    const resolved = await this.resolveWorkspaceFilePaths(filePaths as string[])
+    if (typeof resolved === 'string') {
+      // Resolution rejected the upload (escape attempt / missing workspace /
+      // symlink pointing outside). Surface the reason and cancel the chooser so
+      // the remote input is not left pending.
+      this.send({ type: 'error', sessionId, message: resolved })
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
+    try {
+      await accept(resolved)
+    } catch (error) {
+      // Symmetry with the base64 branch: when setFiles rejects, surface the
+      // error AND cancel the chooser so the remote input is not left pending.
+      this.send({ type: 'error', sessionId, message: `File upload failed: ${getErrorMessage(error)}` })
+      await this.cancelFileChooser(accept, sessionId)
+    }
+  }
+
+  /**
+   * Branch 2: base64 file contents uploaded from the web client. Decode each
+   * into a temporary file on the agent host, hand the temp paths to setFiles,
+   * then always remove the temp files afterwards.
+   */
+  private async handleBrowserSetFileByContent(
+    sessionId: string,
+    accept: (files: FileChooserPayload) => Promise<void>,
+    rawFiles: unknown,
+  ): Promise<void> {
+    // Explicit input validation (do not rely on a thrown TypeError): `files`
+    // must be an array, and every entry must carry a string `dataBase64`.
+    if (rawFiles !== undefined && !Array.isArray(rawFiles)) {
+      this.send({ type: 'error', sessionId, message: 'Invalid file payload: files must be an array' })
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
+    const files = (rawFiles ?? []) as Array<{ name?: unknown; dataBase64?: unknown }>
 
     // Validate every entry has a string dataBase64 before decoding so we never
     // pass undefined / non-string into Buffer.from.
-    if (files.some((f) => typeof f.dataBase64 !== 'string')) {
+    if (files.some((f) => typeof f?.dataBase64 !== 'string')) {
       this.send({ type: 'error', sessionId, message: 'Invalid file payload: dataBase64 must be a string' })
       // Cancel the remote input so it is not left pending/half-filled.
       await this.cancelFileChooser(accept, sessionId)
       return
     }
+    const safeFiles = files as Array<{ name?: unknown; dataBase64: string }>
 
     // Estimate decoded size from base64 length and enforce the authoritative limit
     // before allocating buffers.
-    const totalBytes = files.reduce((sum, f) => sum + Math.floor((f.dataBase64.length * 3) / 4), 0)
+    const totalBytes = safeFiles.reduce((sum, f) => sum + Math.floor((f.dataBase64.length * 3) / 4), 0)
     if (totalBytes > MAX_UPLOAD_BYTES) {
       this.send({ type: 'error', sessionId, message: 'File too large (max 10MB)' })
       await this.cancelFileChooser(accept, sessionId)
       return
     }
 
-    const payload: FileChooserPayload = files.map((f) => ({
-      name: f.name,
-      mimeType: f.mimeType,
-      buffer: Buffer.from(f.dataBase64, 'base64'),
-    }))
+    // Create a unique temp directory for this upload so concurrent uploads and
+    // duplicate file names never collide.
+    let tmpDir: string
+    try {
+      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'browser-upload-'))
+    } catch (error) {
+      this.send({ type: 'error', sessionId, message: `File upload failed: ${getErrorMessage(error)}` })
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
 
     try {
+      const tmpPaths: string[] = []
+      for (let i = 0; i < safeFiles.length; i++) {
+        const file = safeFiles[i]
+        // Prefix with the index so distinct uploads sharing a sanitized name
+        // never overwrite one another within the temp dir.
+        const safeName = `${i}-${sanitizeUploadFileName(file.name)}`
+        const tmpPath = path.join(tmpDir, safeName)
+        await fs.writeFile(tmpPath, Buffer.from(file.dataBase64, 'base64'))
+        tmpPaths.push(tmpPath)
+      }
+
+      const payload: FileChooserPayload = tmpPaths
       await accept(payload)
     } catch (error) {
       this.send({ type: 'error', sessionId, message: `File upload failed: ${getErrorMessage(error)}` })
+      await this.cancelFileChooser(accept, sessionId)
+    } finally {
+      // Always remove the temp files/dir once setFiles has resolved or rejected.
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch((error) => {
+        logger.warn(`[vscode-ws] failed to remove temp upload dir ${tmpDir}: ${getErrorMessage(error)}`)
+      })
     }
+  }
+
+  /**
+   * Resolve user-chosen file-explorer paths into absolute paths suitable for
+   * Playwright's `setFiles`, enforcing that every resolved path stays inside
+   * the agent workspace root.
+   *
+   * Resolution rules per path:
+   *  - Absolute paths are kept as-is (backward compatibility for callers that
+   *    already send absolute agent-FS paths).
+   *  - Relative paths (e.g. `repos/app.ts`) are resolved against the workspace
+   *    directory (`getWorkspaceDir(projectDir)`).
+   *
+   * Traversal guard (lexical): after resolution, the absolute path must be the
+   * workspace root itself or a descendant of it. `path.relative(workspaceDir,
+   * resolved)` starting with `..` (or being absolute) means the path escaped the
+   * workspace and is rejected. This rejects both relative escapes
+   * (`../../etc/passwd`) and absolute paths pointing outside the workspace.
+   *
+   * Symlink-escape guard (physical): a path that is lexically inside the
+   * workspace may still resolve, through a symlink, to a target OUTSIDE it
+   * (e.g. a `link` inside the workspace pointing at `../../.ssh/id_rsa`). After
+   * the lexical check, each existing path's real (canonical) location is
+   * resolved via `fs.realpath` and re-checked against the workspace root. Paths
+   * whose real location escapes the workspace are rejected. Non-existent paths
+   * cannot be canonicalized; they are left as-is (Playwright's setFiles will
+   * fail on them) rather than rejected here, preserving the lexical guarantee.
+   *
+   * Returns the resolved absolute paths on success, or an error message string
+   * describing why the upload was rejected (never silently dropped).
+   */
+  private async resolveWorkspaceFilePaths(filePaths: string[]): Promise<string[] | string> {
+    // A workspace root is required to both resolve relative paths and to bound
+    // absolute ones. Without a project directory we cannot safely accept any
+    // file-explorer path.
+    if (!this.projectDir) {
+      return 'Cannot resolve file paths: no project directory configured for this agent'
+    }
+    const workspaceDir = path.resolve(getWorkspaceDir(this.projectDir))
+    // Canonicalize the workspace root too, so a symlinked workspace dir does not
+    // produce false positives when comparing against realpath'd children.
+    const realWorkspaceDir = await fs.realpath(workspaceDir).catch(() => workspaceDir)
+
+    const isInside = (root: string, target: string): boolean => {
+      const rel = path.relative(root, target)
+      // Inside when the relative path stays under root: not climbing out (`..`)
+      // and not forced absolute (different root/drive). An empty `rel` means the
+      // path IS the root, which is allowed.
+      return !rel.startsWith('..') && !path.isAbsolute(rel)
+    }
+
+    const resolved: string[] = []
+    for (const filePath of filePaths) {
+      const absolute = path.isAbsolute(filePath)
+        ? path.resolve(filePath)
+        : path.resolve(workspaceDir, filePath)
+      // Lexical guard first (cheap, also covers non-existent paths).
+      if (!isInside(workspaceDir, absolute)) {
+        return `Access denied: file path is outside the workspace: ${filePath}`
+      }
+      // Physical guard: resolve symlinks and re-check. Missing paths cannot be
+      // canonicalized — keep the lexically-validated absolute path (setFiles
+      // will surface the non-existence downstream).
+      const real = await fs.realpath(absolute).catch(() => null)
+      if (real !== null && !isInside(realWorkspaceDir, real)) {
+        return `Access denied: file path is outside the workspace: ${filePath}`
+      }
+      resolved.push(absolute)
+    }
+    return resolved
   }
 
   /**
