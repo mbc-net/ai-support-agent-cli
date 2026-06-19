@@ -1,5 +1,6 @@
 import type { ApiClient } from '../api-client'
 import { executePlaywrightScript, type BrowserSessionLike, type ScriptExecutionResult } from '../browser/browser-script-executor'
+import { runPlaywrightSubprocess } from '../browser/playwright-subprocess-executor'
 import { logger } from '../logger'
 import type {
   AgentChatMode,
@@ -78,6 +79,17 @@ export async function executeE2eTest(
   )
 
   // スクリプト実行モード判定
+  if (playwrightScript && executionMethod === 'playwright') {
+    return executePlaywrightSubprocessMode({
+      ...options,
+      executionId,
+      testCaseId,
+      playwrightScript,
+      scenario,
+      startTime,
+    })
+  }
+
   if (playwrightScript && executionMethod !== 'ai') {
     return executeScriptMode({
       ...options,
@@ -101,6 +113,92 @@ export async function executeE2eTest(
     targetUrl: targetUrl ?? undefined,
     credentialId: credentialId ?? undefined,
     startTime,
+  })
+}
+
+/** Playwright subprocess モードのパラメータ */
+interface PlaywrightSubprocessModeParams extends ExecuteE2eTestOptions {
+  executionId: string
+  testCaseId?: string
+  playwrightScript: string
+  scenario: string
+  startTime: number
+}
+
+/**
+ * Playwright subprocess モード
+ *
+ * エージェントの共有ブラウザを使わず、独立した Playwright 子プロセスで E2E テストを実行する。
+ */
+async function executePlaywrightSubprocessMode(
+  params: PlaywrightSubprocessModeParams,
+): Promise<CommandResult> {
+  const { client, tenantCode, executionId, testCaseId, playwrightScript, startTime } = params
+  const projectCode = params.projectConfig?.project?.projectCode
+
+  let subprocessResult
+  try {
+    subprocessResult = await runPlaywrightSubprocess({
+      script: playwrightScript,
+      executionId,
+      baseUrl: undefined,
+      timeoutMs: undefined,
+    })
+  } catch (err: unknown) {
+    const errorMessage = toErrorMessage(err)
+    logger.error(`[e2e_test] Playwright subprocess error: ${errorMessage}`)
+    await reportExecutionStatus(
+      client, tenantCode, projectCode, executionId,
+      'error', Date.now() - startTime, errorMessage, testCaseId,
+    )
+    return errorResult(`Playwright subprocess error: ${errorMessage}`)
+  }
+
+  // Report each step
+  for (let i = 0; i < subprocessResult.steps.length; i++) {
+    const step = subprocessResult.steps[i]
+    if (!tenantCode || !projectCode) break
+    try {
+      await client.reportE2eTestStep(tenantCode, projectCode, executionId, {
+        testCaseId,
+        stepNumber: i + 1,
+        action: step.title,
+        status: step.status,
+        ...(step.error && { error: step.error }),
+        // screenshotPath is a local filesystem path that the API cannot access;
+        // do not send it as screenshotUrl — omit it from the API payload entirely.
+      })
+    } catch (err: unknown) {
+      logger.warn(`[e2e_test] Failed to report playwright step ${i + 1}: ${toErrorMessage(err)}`)
+    }
+  }
+
+  const duration = Date.now() - startTime
+  const finalStatus = subprocessResult.success ? 'passed' : 'failed'
+
+  await reportExecutionStatus(
+    client, tenantCode, projectCode, executionId,
+    finalStatus, duration,
+    subprocessResult.success ? undefined : (subprocessResult.errorOutput ?? `${subprocessResult.failedTests} test(s) failed`),
+    testCaseId,
+    {
+      passedTests: subprocessResult.passedTests,
+      failedTests: subprocessResult.failedTests,
+      totalTests: subprocessResult.totalTests,
+    },
+  )
+
+  logger.info(
+    `[e2e_test] Playwright subprocess completed [${executionId}]: status=${finalStatus}, duration=${duration}ms`,
+  )
+
+  return successResult({
+    executionId,
+    status: finalStatus,
+    duration,
+    passedTests: subprocessResult.passedTests,
+    failedTests: subprocessResult.failedTests,
+    totalTests: subprocessResult.totalTests,
   })
 }
 
