@@ -1,6 +1,7 @@
 import { executeE2eTest, type ExecuteE2eTestOptions } from '../../src/commands/e2e-test-executor'
 import * as chatExecutor from '../../src/commands/chat-executor'
 import * as browserScriptExecutor from '../../src/browser/browser-script-executor'
+import * as playwrightSubprocessExecutor from '../../src/browser/playwright-subprocess-executor'
 
 // Mock the chat executor
 jest.mock('../../src/commands/chat-executor', () => ({
@@ -10,6 +11,11 @@ jest.mock('../../src/commands/chat-executor', () => ({
 // Mock the browser script executor
 jest.mock('../../src/browser/browser-script-executor', () => ({
   executePlaywrightScript: jest.fn(),
+}))
+
+// Mock the playwright subprocess executor
+jest.mock('../../src/browser/playwright-subprocess-executor', () => ({
+  runPlaywrightSubprocess: jest.fn(),
 }))
 
 const mockClient = {
@@ -1292,5 +1298,275 @@ describe('e2e-test-executor', () => {
         recoveryAttempts: 3,
       }),
     )
+  })
+
+  // --- Playwright subprocess mode tests ---
+
+  it('should use playwright subprocess mode when executionMethod is playwright', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 2,
+      passedTests: 2,
+      failedTests: 0,
+      steps: [
+        { title: 'Login', status: 'passed', duration: 100 },
+        { title: 'Checkout', status: 'passed', duration: 200 },
+      ],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalled()
+    expect(browserScriptExecutor.executePlaywrightScript).not.toHaveBeenCalled()
+    expect(chatExecutor.executeChatCommand).not.toHaveBeenCalled()
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toEqual(
+        expect.objectContaining({
+          executionId: 'exec-1',
+          status: 'passed',
+          passedTests: 2,
+          totalTests: 2,
+        }),
+      )
+    }
+  })
+
+  it('should report steps for playwright subprocess mode', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [{ title: 'Login step', status: 'passed', duration: 150 }],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(mockClient.reportE2eTestStep).toHaveBeenCalledWith(
+      'mbc',
+      'MBC_01',
+      'exec-1',
+      expect.objectContaining({
+        testCaseId: 'tc-1',
+        stepNumber: 1,
+        action: 'Login step',
+        status: 'passed',
+      }),
+    )
+  })
+
+  it('should NOT send screenshotPath as screenshotUrl to API (local path cannot be accessed by server)', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      totalTests: 1,
+      passedTests: 0,
+      failedTests: 1,
+      steps: [
+        {
+          title: 'Failing step',
+          status: 'failed',
+          error: 'Assertion failed',
+          screenshotPath: '/tmp/screenshot.png',
+        },
+      ],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    // The local filesystem screenshotPath must not be forwarded to the API —
+    // the server/browser cannot access local /tmp paths.
+    const stepCall = mockClient.reportE2eTestStep.mock.calls[0][3] as Record<string, unknown>
+    expect(stepCall).not.toHaveProperty('screenshotUrl')
+    expect(stepCall).toEqual(
+      expect.objectContaining({
+        error: 'Assertion failed',
+        status: 'failed',
+        action: 'Failing step',
+      }),
+    )
+  })
+
+  it('should report failed status when playwright subprocess has failures', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      totalTests: 2,
+      passedTests: 1,
+      failedTests: 1,
+      steps: [
+        { title: 'Step 1', status: 'passed', duration: 100 },
+        { title: 'Step 2', status: 'failed', error: 'Element not found' },
+      ],
+      errorOutput: 'Test failed: Element not found',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    const failedCall = mockClient.updateE2eExecutionStatus.mock.calls.find(
+      (call: unknown[]) => (call[3] as Record<string, unknown>).status === 'failed',
+    )
+    expect(failedCall).toBeDefined()
+
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toEqual(
+        expect.objectContaining({ status: 'failed' }),
+      )
+    }
+  })
+
+  it('should handle playwright subprocess throwing an error', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockRejectedValue(
+      new Error('Playwright timed out'),
+    )
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('Playwright timed out')
+    }
+
+    expect(mockClient.updateE2eExecutionStatus).toHaveBeenCalledWith(
+      'mbc',
+      'MBC_01',
+      'exec-1',
+      expect.objectContaining({ status: 'error' }),
+    )
+  })
+
+  it('should handle step report failure gracefully in playwright mode', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [{ title: 'Step 1', status: 'passed' }],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockRejectedValue(new Error('API Error'))
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    const result = await executeE2eTest(options)
+    expect(result.success).toBe(true)
+  })
+
+  it('should skip step reporting when tenantCode is missing in playwright mode', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [{ title: 'Step 1', status: 'passed' }],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      tenantCode: undefined,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    const result = await executeE2eTest(options)
+    expect(result.success).toBe(true)
+    expect(mockClient.reportE2eTestStep).not.toHaveBeenCalled()
+  })
+
+  it('should use fallback error message when errorOutput is absent in failed playwright run', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      totalTests: 1,
+      passedTests: 0,
+      failedTests: 1,
+      steps: [{ title: 'Step', status: 'failed', error: 'fail' }],
+      // no errorOutput
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    const failedCall = mockClient.updateE2eExecutionStatus.mock.calls.find(
+      (call: unknown[]) => (call[3] as Record<string, unknown>).status === 'failed',
+    )
+    expect(failedCall![3]).toEqual(
+      expect.objectContaining({ errorMessage: '1 test(s) failed' }),
+    )
+    expect(result.success).toBe(true)
   })
 })
