@@ -115,6 +115,7 @@ export interface VsCodeAgentMessage {
     | 'browser_script_result'
     | 'browser_script_progress'
     | 'browser_file_chooser_opened'
+    | 'browser_cursor_update'
   sessionId?: string
   targetPort?: number
   requestId?: string
@@ -148,6 +149,8 @@ export interface VsCodeAgentMessage {
   step?: number
   line?: string
   script?: string
+  /** CSS cursor value at the last mouse-move point (browser_cursor_update) */
+  cursor?: string
 }
 
 /** Live view frame interval in milliseconds (5 FPS) */
@@ -203,6 +206,11 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private browserLocalServer: BrowserLocalServer | null = null
   private browserLocalPort = 0
   private readonly pendingFileChoosers = new Map<string, (files: FileChooserPayload) => Promise<void>>()
+  /**
+   * Last CSS cursor value sent per browser session. Used to suppress redundant
+   * browser_cursor_update messages: only send when the cursor shape changes.
+   */
+  private readonly lastSentCursor = new Map<string, string>()
 
   constructor(
     apiUrl: string,
@@ -658,6 +666,15 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       return
     }
 
+    // Reset any stale cursor state for this sessionId on (re)open. The idle-timeout
+    // auto-close path closes a session via BrowserSessionManager WITHOUT routing
+    // through handleBrowserClose/cleanup, so lastSentCursor can survive a closed
+    // session. If the same sessionId is later re-opened, a stale entry would make
+    // the first mouse-move's cursor look "unchanged" and suppress the initial
+    // browser_cursor_update, freezing the client cursor at the previous session's
+    // last shape. Deleting here guarantees the first move after (re)open is sent.
+    this.lastSentCursor.delete(sessionId)
+
     try {
       const session = await this.browserSessionManager.getOrCreate(sessionId)
 
@@ -737,6 +754,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
 
     this.pendingFileChoosers.delete(sessionId)
+    this.lastSentCursor.delete(sessionId)
     this.send({ type: 'browser_stopped', sessionId, reason: 'closed' })
     logger.info(`[vscode-ws] Browser session closed: ${sessionId}`)
   }
@@ -811,8 +829,9 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserMouseMove(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
-    if (!session || msg.x === undefined || msg.y === undefined) return
+    const sessionId = msg.sessionId
+    const session = sessionId ? this.browserSessionManager.get(sessionId) : undefined
+    if (!session || !sessionId || msg.x === undefined || msg.y === undefined) return
     try {
       await session.executeMouseMove(msg.x, msg.y)
     } catch (error) {
@@ -820,7 +839,24 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       // navigation) is intentionally logged but NOT surfaced as an `error` message
       // to the web client, to avoid error spam during drag-selection. Unlike
       // mouse_down / mouse_up, a dropped move does not leave the page in a broken state.
-      logger.warn(`[vscode-ws] mouseMove failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
+      logger.warn(`[vscode-ws] mouseMove failed (session=${sessionId}): ${getErrorMessage(error)}`)
+      return
+    }
+
+    // Best-effort cursor-shape mirroring: read the CSS cursor at the point and,
+    // only when it differs from the last value sent for this session, forward a
+    // browser_cursor_update. A failed read is logged (not silently swallowed)
+    // and skips the update for this frame rather than spamming an error message.
+    let cursor: string
+    try {
+      cursor = await session.getCursorAt(msg.x, msg.y)
+    } catch (error) {
+      logger.warn(`[vscode-ws] getCursorAt failed (session=${sessionId}): ${getErrorMessage(error)}`)
+      return
+    }
+    if (this.lastSentCursor.get(sessionId) !== cursor) {
+      this.lastSentCursor.set(sessionId, cursor)
+      this.send({ type: 'browser_cursor_update', sessionId, cursor })
     }
   }
 
@@ -1214,6 +1250,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     // ブラウザセッションのクリーンアップ
     void this.browserSessionManager.closeAll()
     this.pendingFileChoosers.clear()
+    this.lastSentCursor.clear()
 
     // ブラウザローカルサーバーのクリーンアップ
     if (this.browserLocalServer) {

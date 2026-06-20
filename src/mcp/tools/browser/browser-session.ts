@@ -10,7 +10,7 @@ import { logger } from '../../../logger'
 import { BrowserActionLog } from './browser-action-log'
 import { BROWSER_IDLE_TIMEOUT_MS } from './browser-types'
 import { DeviceEmulation, DEVICE_PRESETS } from './device-presets'
-import { getElementAtPoint, getFocusedElementInfo } from './element-info'
+import { getCursorAt, getElementAtPoint, getFocusedElementInfo } from './element-info'
 import { loadPlaywright } from './playwright-loader'
 
 /**
@@ -391,6 +391,18 @@ export class BrowserSession {
     if (!this.page) throw new Error('No active browser page')
     this.resetIdleTimer()
     await this.page.mouse.move(x, y)
+  }
+
+  /**
+   * Read the CSS `cursor` value of the element at the given coordinates.
+   * Used by the live view to mirror the page's cursor shape on the web canvas.
+   * Throws when no page is active; propagates page.evaluate errors so the
+   * caller can skip the update for that frame.
+   */
+  async getCursorAt(x: number, y: number): Promise<string> {
+    if (!this.page) throw new Error('No active browser page')
+    this.resetIdleTimer()
+    return getCursorAt(this.page, x, y)
   }
 
   /**
