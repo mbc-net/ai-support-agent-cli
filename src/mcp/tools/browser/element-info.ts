@@ -132,6 +132,18 @@ const ELEMENT_AT_POINT_SCRIPT = `(point) => {
 }`
 
 /**
+ * JavaScript to read the CSS `cursor` value of the element at a point.
+ * Mirrors ELEMENT_AT_POINT_SCRIPT's string-script convention so the browser
+ * context (not Node) resolves DOM types. Returns 'default' when no element is
+ * found or the computed cursor is empty.
+ */
+const CURSOR_AT_POINT_SCRIPT = `(point) => {
+  const el = document.elementFromPoint(point.x, point.y);
+  if (!el) return 'default';
+  return getComputedStyle(el).cursor || 'default';
+}`
+
+/**
  * JavaScript to extract info about the currently focused element.
  */
 const FOCUSED_ELEMENT_SCRIPT = `() => {
@@ -212,6 +224,19 @@ export async function getFocusedElementInfo(page: Page): Promise<ElementInfo | n
   } catch {
     return null
   }
+}
+
+/**
+ * Get the CSS `cursor` value of the element at the given coordinates.
+ *
+ * Returns 'default' when no element is at the point or the computed cursor is
+ * empty/non-string. Unlike getElementAtPoint, this does NOT swallow evaluate
+ * errors: it re-throws so the caller (mouse-move handler) can skip sending a
+ * cursor update for that frame instead of reporting a misleading 'default'.
+ */
+export async function getCursorAt(page: Page, x: number, y: number): Promise<string> {
+  const result = await page.evaluate(CURSOR_AT_POINT_SCRIPT, { x, y })
+  return typeof result === 'string' ? result : 'default'
 }
 
 /**
