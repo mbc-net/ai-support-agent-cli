@@ -332,6 +332,51 @@ describe('BrowserSession', () => {
 
       expect(mockBrowser.newContext).toHaveBeenCalled()
     })
+
+    it('should re-report focus AFTER the goto so an autofocused field shows its caret', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      const reportSpy = jest.spyOn(session, 'reportFocusNow')
+
+      await session.setDeviceEmulation({
+        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+        isMobile: true,
+        hasTouch: true,
+        deviceScaleFactor: 3,
+      })
+
+      // The initial focus report must run after navigating back to the previous
+      // URL so a page that autofocuses an input surfaces its overlay caret.
+      expect(reportSpy).toHaveBeenCalled()
+      const gotoOrder = mockPage.goto.mock.invocationCallOrder[0]
+      // reportFocusNow forwards to page.evaluate(FOCUS_REPORTING_SCRIPT); use the
+      // last evaluate call as its invocation marker.
+      const focusEvaluateCalls = mockPage.evaluate.mock.calls
+        .map((c, i) => ({ c, order: mockPage.evaluate.mock.invocationCallOrder[i] }))
+        .filter(({ c }) => typeof c[0] === 'string' && c[0].includes('__browserFocusReportingInstalled'))
+      const lastFocusEvaluateOrder = focusEvaluateCalls[focusEvaluateCalls.length - 1].order
+      expect(gotoOrder).toBeLessThan(lastFocusEvaluateOrder)
+    })
+
+    it('should NOT re-report focus when the previous URL was about:blank (no goto)', async () => {
+      mockPage.url.mockReturnValue('about:blank')
+      const session = new BrowserSession()
+      await session.getPage()
+      mockPage.goto.mockClear()
+      const reportSpy = jest.spyOn(session, 'reportFocusNow')
+
+      await session.setDeviceEmulation({
+        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+        isMobile: true,
+        hasTouch: true,
+        deviceScaleFactor: 3,
+      })
+
+      // No goto happened (about:blank), so there is nothing newly loaded to
+      // report focus for.
+      expect(mockPage.goto).not.toHaveBeenCalled()
+      expect(reportSpy).not.toHaveBeenCalled()
+    })
   })
 
   describe('currentDeviceId', () => {
@@ -1195,8 +1240,16 @@ describe('BrowserSession', () => {
 
     // Install the focus reporting script into a fake page environment and return
     // helpers to drive its registered event listeners and inspect emitted payloads.
-    function install(onFocus: jest.Mock, opts?: { throwOnFocus?: boolean }) {
-      let activeElement: FakeReportEl | null = null
+    //
+    // `initialActive` sets document.activeElement BEFORE the script runs, so the
+    // script's initial-report step (which inspects activeElement at injection time)
+    // can be exercised — this mirrors injecting the script into a page that already
+    // has an autofocused input.
+    function install(
+      onFocus: jest.Mock,
+      opts?: { throwOnFocus?: boolean; initialActive?: FakeReportEl | null },
+    ) {
+      let activeElement: FakeReportEl | null = opts?.initialActive ?? null
       const listeners: Record<string, Array<() => void>> = {}
       const consoleWarn = jest.fn()
       const win: Record<string, unknown> = {
@@ -1244,6 +1297,51 @@ describe('BrowserSession', () => {
           activeElement = el
         },
         fire,
+      }
+    }
+
+    // Build a sandbox whose window AND document persist across multiple script
+    // evaluations (mirroring a real page's stable global document across
+    // re-evaluations in the same execution context). `run()` recompiles and
+    // invokes the script against the SAME window/document; `setActive` changes
+    // the focused element between runs.
+    function makeReInstallable(onFocus: jest.Mock) {
+      let activeElement: FakeReportEl | null = null
+      const addEventListener = jest.fn()
+      const win: Record<string, unknown> = {
+        __onBrowserFocus: onFocus,
+        console: { warn: jest.fn() },
+      }
+      const doc = {
+        get activeElement() {
+          return activeElement
+        },
+        addEventListener,
+      }
+      const getComputedStyle = (): Record<string, string> => ({
+        fontSize: '16px',
+        lineHeight: '20px',
+        paddingTop: '2px',
+        paddingLeft: '4px',
+        textAlign: 'left',
+      })
+      return {
+        win,
+        addEventListener,
+        setActive: (el: FakeReportEl | null) => {
+          activeElement = el
+        },
+        run: () => {
+          // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+          const fn = new Function(
+            'window',
+            'document',
+            'getComputedStyle',
+            'console',
+            `return (${FOCUS_REPORTING_SCRIPT})`,
+          )(win, doc, getComputedStyle, { warn: jest.fn() }) as () => void
+          fn()
+        },
       }
     }
 
@@ -1354,6 +1452,92 @@ describe('BrowserSession', () => {
       fn()
 
       expect(doc.addEventListener).not.toHaveBeenCalled()
+    })
+
+    it('should emit an initial focused:true report when an autofocused target is already active at injection', () => {
+      // Regression for the missing-caret defect: when the script is (re)evaluated
+      // into a document whose activeElement is already a reporting target (e.g. an
+      // autofocus login field), focusin never fires for it. The script must report
+      // the currently-focused element once at injection time so the overlay/caret
+      // appears without any subsequent focus change.
+      const onFocus = jest.fn()
+      install(onFocus, { initialActive: makeReportEl('INPUT', { type: 'text' }) })
+
+      expect(onFocus).toHaveBeenCalledTimes(1)
+      const payload = onFocus.mock.calls[0][0] as FocusChangePayload
+      expect(payload.focused).toBe(true)
+      expect(payload.value).toBe('abc')
+      expect(payload.rect).toEqual({ x: 1, y: 2, width: 3, height: 4 })
+    })
+
+    it('should NOT emit focused:true on injection when the active element is not a reporting target', () => {
+      // body / a non-target element must not produce a spurious focused:true, and
+      // since nothing was previously focused there is no true->false transition to
+      // forward either.
+      const onFocus = jest.fn()
+      install(onFocus, { initialActive: makeReportEl('DIV') })
+
+      expect(onFocus).not.toHaveBeenCalled()
+    })
+
+    it('should NOT emit any initial report when there is no active element at injection', () => {
+      const onFocus = jest.fn()
+      install(onFocus, { initialActive: null })
+
+      expect(onFocus).not.toHaveBeenCalled()
+    })
+
+    it('should still run the initial report on a re-evaluation in the same context even though listeners are not re-registered', () => {
+      // Re-evaluating the script in the SAME execution context (as reportFocusNow
+      // does via page.evaluate on the current page) must skip re-registering
+      // listeners (guarded by __browserFocusReportingInstalled) but still perform
+      // the initial report so a now-focused target is surfaced. We reuse the same
+      // window/document (real-browser semantics: re-evaluation shares the page's
+      // global document) and only change which element is active.
+      const onFocus = jest.fn()
+      const reInstaller = makeReInstallable(onFocus)
+      reInstaller.run() // first evaluation: nothing focused
+      expect(onFocus).not.toHaveBeenCalled()
+      expect(reInstaller.addEventListener).toHaveBeenCalled()
+      reInstaller.addEventListener.mockClear()
+
+      // Focus a target, then re-evaluate the script in the same context.
+      reInstaller.setActive(makeReportEl('INPUT', { type: 'text' }))
+      reInstaller.run()
+
+      // Listeners are NOT re-registered (idempotency guard) ...
+      expect(reInstaller.addEventListener).not.toHaveBeenCalled()
+      // ... but the initial report still runs for the now-focused target.
+      expect(onFocus).toHaveBeenCalledTimes(1)
+      expect((onFocus.mock.calls[0][0] as FocusChangePayload).focused).toBe(true)
+    })
+  })
+
+  describe('reportFocusNow', () => {
+    it('should re-evaluate the focus reporting script on the current page', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      mockPage.evaluate.mockClear()
+
+      await session.reportFocusNow()
+
+      expect(mockPage.evaluate).toHaveBeenCalledWith(
+        expect.stringContaining('__browserFocusReportingInstalled'),
+      )
+    })
+
+    it('should be a no-op when no page is active', async () => {
+      const session = new BrowserSession()
+      await expect(session.reportFocusNow()).resolves.toBeUndefined()
+      expect(mockPage.evaluate).not.toHaveBeenCalled()
+    })
+
+    it('should swallow evaluate errors (best-effort)', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      mockPage.evaluate.mockRejectedValueOnce(new Error('evaluate boom'))
+
+      await expect(session.reportFocusNow()).resolves.toBeUndefined()
     })
   })
 })

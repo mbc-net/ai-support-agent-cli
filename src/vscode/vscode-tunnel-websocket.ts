@@ -732,6 +732,10 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         if (validation.valid) {
           const page = await session.getPage()
           await page.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+          // Re-report focus on the freshly loaded document so an autofocused
+          // field (e.g. a login form) surfaces its overlay caret without a
+          // subsequent focus change. focusin only fires on focus CHANGES.
+          await session.reportFocusNow()
         }
       } else {
         // Ensure page is initialized
@@ -807,7 +811,13 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     try {
       const page = await session.getPage()
       await page.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      // Record the navigation BEFORE the focus re-report so the action-log entry
+      // never depends on reportFocusNow succeeding (it already swallows its own
+      // errors, but keeping the log independent guards against future changes).
       session.actionLog.add('direct', 'navigate', msg.url)
+      // Re-report focus on the freshly loaded document so an autofocused field
+      // surfaces its overlay caret (focusin only fires on focus CHANGES).
+      await session.reportFocusNow()
     } catch (error) {
       this.send({ type: 'error', sessionId, message: `Navigation failed: ${getErrorMessage(error)}` })
     }
