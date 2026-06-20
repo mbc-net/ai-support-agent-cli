@@ -60,6 +60,7 @@ export interface VsCodeServerMessage {
     | 'browser_execute_script'
     | 'browser_set_file'
     | 'browser_get_selection'
+    | 'browser_set_input_value'
   filePaths?: string[]
   files?: Array<{ name: string; mimeType: string; dataBase64: string }>
   sessionId?: string
@@ -91,6 +92,10 @@ export interface VsCodeServerMessage {
   height?: number
   deviceId?: string
   script?: string
+  // browser_set_input_value fields (overlay-edited value → focused element)
+  value?: string
+  selectionStart?: number
+  selectionEnd?: number
 }
 
 /**
@@ -116,6 +121,7 @@ export interface VsCodeAgentMessage {
     | 'browser_script_progress'
     | 'browser_file_chooser_opened'
     | 'browser_cursor_update'
+    | 'browser_focus_changed'
   sessionId?: string
   targetPort?: number
   requestId?: string
@@ -151,6 +157,20 @@ export interface VsCodeAgentMessage {
   script?: string
   /** CSS cursor value at the last mouse-move point (browser_cursor_update) */
   cursor?: string
+  // browser_focus_changed fields (focused input/textarea state → Web overlay)
+  focused?: boolean
+  rect?: { x: number; y: number; width: number; height: number }
+  value?: string
+  selectionStart?: number
+  selectionEnd?: number
+  multiline?: boolean
+  inputType?: string
+  maxLength?: number
+  fontSize?: number
+  lineHeight?: number
+  textAlign?: string
+  paddingTop?: number
+  paddingLeft?: number
 }
 
 /** Live view frame interval in milliseconds (5 FPS) */
@@ -377,6 +397,9 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         break
       case 'browser_get_selection':
         void this.handleBrowserGetSelection(msg)
+        break
+      case 'browser_set_input_value':
+        void this.handleBrowserSetInputValue(msg)
         break
       default:
         logger.debug(`[vscode-ws] Unknown message type: ${(msg as { type: string }).type}`)
@@ -693,6 +716,12 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         this.send({ type: 'browser_file_chooser_opened', sessionId })
       }
 
+      // Wire up focus-change notifications so the Web client can overlay a real
+      // input/textarea on the focused element (native caret + IME).
+      session.onFocusChange = (payload) => {
+        this.send({ type: 'browser_focus_changed', sessionId, ...payload })
+      }
+
       if (msg.conversationId) {
         this.browserSessionManager.linkConversation(msg.conversationId, sessionId)
       }
@@ -958,6 +987,19 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     } catch (error) {
       logger.warn(`[vscode-ws] getSelection failed (session=${sessionId}): ${getErrorMessage(error)}`)
       this.send({ type: 'error', sessionId, message: `getSelection failed: ${getErrorMessage(error)}` })
+    }
+  }
+
+  private async handleBrowserSetInputValue(msg: VsCodeServerMessage): Promise<void> {
+    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    if (!session) return
+    // The contract requires `value` to be a string; ignore malformed payloads.
+    if (typeof msg.value !== 'string') return
+    try {
+      await session.setFocusedInputValue(msg.value, msg.selectionStart, msg.selectionEnd)
+    } catch (error) {
+      logger.warn(`[vscode-ws] setInputValue failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
+      this.send({ type: 'error', sessionId: msg.sessionId, message: `setInputValue failed: ${getErrorMessage(error)}` })
     }
   }
 

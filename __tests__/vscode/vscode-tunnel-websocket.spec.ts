@@ -2960,4 +2960,108 @@ describe('VsCodeTunnelWebSocket', () => {
       }
     })
   })
+
+  describe('handleBrowserSetInputValue', () => {
+    it('should route browser_set_input_value through onParsedMessage', () => {
+      const mockSession = { setFocusedInputValue: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_set_input_value', sessionId: 'sess-iv0', value: 'x' })
+      expect(mockSession.setFocusedInputValue).toHaveBeenCalledWith('x', undefined, undefined)
+    })
+
+    it('should call setFocusedInputValue with value and selection', async () => {
+      const mockSession = { setFocusedInputValue: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetInputValue({
+        type: 'browser_set_input_value',
+        sessionId: 'sess-iv1',
+        value: 'hello',
+        selectionStart: 1,
+        selectionEnd: 3,
+      })
+      expect(mockSession.setFocusedInputValue).toHaveBeenCalledWith('hello', 1, 3)
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should do nothing if session is not found', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetInputValue({
+        type: 'browser_set_input_value',
+        sessionId: 'no-such',
+        value: 'x',
+      })
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should ignore payloads with a non-string value', async () => {
+      const mockSession = { setFocusedInputValue: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetInputValue({
+        type: 'browser_set_input_value',
+        sessionId: 'sess-iv2',
+      })
+      expect(mockSession.setFocusedInputValue).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should send error when setFocusedInputValue rejects', async () => {
+      const mockSession = {
+        setFocusedInputValue: jest.fn().mockRejectedValue(new Error('boom')),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetInputValue({
+        type: 'browser_set_input_value',
+        sessionId: 'sess-iv3',
+        value: 'x',
+      })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+      expect(sentMessages[0].sessionId).toBe('sess-iv3')
+      expect(sentMessages[0].message).toContain('setInputValue failed')
+    })
+  })
+
+  describe('handleBrowserOpen - focus change wiring', () => {
+    it('should relay session focus changes as browser_focus_changed', async () => {
+      const mockPage = {
+        url: jest.fn().mockReturnValue('about:blank'),
+        title: jest.fn().mockResolvedValue(''),
+        screenshot: jest.fn().mockResolvedValue(Buffer.from('fake')),
+      }
+      const mockSession: Record<string, unknown> = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
+        getPageTitle: jest.fn().mockResolvedValue(''),
+        actionLog: { onChange: null },
+        onFileChooser: null,
+        onFocusChange: null,
+      }
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({ type: 'browser_open', sessionId: 'sess-fc1' })
+
+      // The handler must have wired a focus-change callback onto the session.
+      const onFocusChange = mockSession.onFocusChange as ((p: unknown) => void) | null
+      expect(typeof onFocusChange).toBe('function')
+
+      sentMessages.length = 0
+      onFocusChange!({ focused: true, value: 'abc', rect: { x: 1, y: 2, width: 3, height: 4 } })
+
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({
+        type: 'browser_focus_changed',
+        sessionId: 'sess-fc1',
+        focused: true,
+        value: 'abc',
+        rect: { x: 1, y: 2, width: 3, height: 4 },
+      })
+    })
+  })
 })
