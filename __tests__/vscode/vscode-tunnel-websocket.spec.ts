@@ -877,6 +877,38 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(mockPage.goto).toHaveBeenCalledWith('https://example.com', expect.any(Object))
     })
 
+    it('should re-report focus after goto so an autofocused field shows its caret', async () => {
+      const mockPage = {
+        goto: jest.fn().mockResolvedValue(undefined),
+        url: jest.fn().mockReturnValue('https://example.com'),
+        title: jest.fn().mockResolvedValue('Example'),
+        screenshot: jest.fn().mockResolvedValue(Buffer.from('fake')),
+      }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('https://example.com'),
+        getPageTitle: jest.fn().mockResolvedValue('Example'),
+        actionLog: { onChange: null },
+        reportFocusNow: jest.fn().mockResolvedValue(undefined),
+      }
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-b2f',
+        url: 'https://example.com',
+      })
+
+      // The initial focus report must run after the navigation so a page that
+      // autofocuses an input surfaces browser_focus_changed without user action.
+      expect(mockSession.reportFocusNow).toHaveBeenCalled()
+      const gotoOrder = mockPage.goto.mock.invocationCallOrder[0]
+      const reportOrder = mockSession.reportFocusNow.mock.invocationCallOrder[0]
+      expect(gotoOrder).toBeLessThan(reportOrder)
+    })
+
     it('should link conversation if conversationId provided', async () => {
       const mockPage = {
         url: jest.fn().mockReturnValue('about:blank'),
@@ -990,6 +1022,56 @@ describe('VsCodeTunnelWebSocket', () => {
       })
 
       expect(mockPage.goto).toHaveBeenCalledWith('https://example.com', expect.any(Object))
+    })
+
+    it('should re-report focus after navigate so an autofocused field shows its caret', async () => {
+      const mockPage = { goto: jest.fn().mockResolvedValue(undefined) }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        actionLog: { add: jest.fn() },
+        reportFocusNow: jest.fn().mockResolvedValue(undefined),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserNavigate({
+        type: 'browser_navigate',
+        sessionId: 'sess-b8f',
+        url: 'https://example.com',
+      })
+
+      expect(mockSession.reportFocusNow).toHaveBeenCalled()
+      const gotoOrder = mockPage.goto.mock.invocationCallOrder[0]
+      const reportOrder = mockSession.reportFocusNow.mock.invocationCallOrder[0]
+      expect(gotoOrder).toBeLessThan(reportOrder)
+      // The navigation must be recorded BEFORE the focus re-report so the
+      // action-log entry never depends on reportFocusNow.
+      expect(mockSession.actionLog.add).toHaveBeenCalledWith('direct', 'navigate', 'https://example.com')
+      const addOrder = mockSession.actionLog.add.mock.invocationCallOrder[0]
+      expect(addOrder).toBeLessThan(reportOrder)
+    })
+
+    it('should record the navigate action even if reportFocusNow throws', async () => {
+      const mockPage = { goto: jest.fn().mockResolvedValue(undefined) }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        actionLog: { add: jest.fn() },
+        // reportFocusNow normally swallows its own errors, but assert that even a
+        // (hypothetical) throw cannot drop the navigation record because the log
+        // entry is added first.
+        reportFocusNow: jest.fn().mockRejectedValue(new Error('focus boom')),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserNavigate({
+        type: 'browser_navigate',
+        sessionId: 'sess-b8fe',
+        url: 'https://example.com',
+      })
+
+      // The navigate entry is recorded despite the focus re-report rejecting.
+      expect(mockSession.actionLog.add).toHaveBeenCalledWith('direct', 'navigate', 'https://example.com')
     })
 
     it('should send error on navigation failure', async () => {
@@ -2206,6 +2288,7 @@ describe('VsCodeTunnelWebSocket', () => {
       const mockSession = {
         getPage: jest.fn().mockResolvedValue(mockPage),
         actionLog: { add: jest.fn() },
+        reportFocusNow: jest.fn().mockResolvedValue(undefined),
       }
       tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
 

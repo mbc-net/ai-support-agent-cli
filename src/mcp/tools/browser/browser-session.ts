@@ -91,86 +91,106 @@ export interface FocusChangePayload {
  * for reporting targets (textarea, or input whose type is one of the simple
  * text-like types), builds and sends the focus payload. focusout / non-target
  * elements send `{ focused: false }`.
+ *
+ * Listener registration is guarded by `window.__browserFocusReportingInstalled`
+ * so re-evaluating the script (e.g. after a navigation, or via reportFocusNow)
+ * does not double-register handlers. The INITIAL report, however, runs on EVERY
+ * evaluation (outside the guard): `focusin` only fires on focus CHANGES after
+ * registration, so an element that is already focused at injection time (e.g. an
+ * autofocused login field) would otherwise never be reported and its overlay
+ * caret would never appear. Reporting the current activeElement at the end of
+ * each evaluation surfaces such elements for both addInitScript (new document)
+ * and evaluate (existing/re-evaluated document) injection paths.
  */
 export const FOCUS_REPORTING_SCRIPT = `() => {
-  if (window.__browserFocusReportingInstalled) return;
-  window.__browserFocusReportingInstalled = true;
+  // The per-document focus reporting state (listeners + lastReportedFocused) is
+  // installed once. Hang the report() helper off window so a re-evaluation that
+  // skips re-registration can still invoke the initial report below.
+  if (!window.__browserFocusReportingInstalled) {
+    window.__browserFocusReportingInstalled = true;
 
-  // Last focused state reported to the agent. Used to suppress repeated
-  // { focused: false } notifications: selectionchange fires for the whole
-  // document (including unrelated page text selections), so without this guard
-  // every such selection would emit a redundant focused:false. We only forward
-  // a false when transitioning from a previously-focused (true) state.
-  var lastReportedFocused = false;
+    // Last focused state reported to the agent. Used to suppress repeated
+    // { focused: false } notifications: selectionchange fires for the whole
+    // document (including unrelated page text selections), so without this guard
+    // every such selection would emit a redundant focused:false. We only forward
+    // a false when transitioning from a previously-focused (true) state.
+    var lastReportedFocused = false;
 
-  // Forward a payload through the exposed binding, recording the new focused
-  // state and logging the first failure once (high-frequency events would
-  // otherwise flood the browser console).
-  function emit(payload) {
-    lastReportedFocused = payload.focused;
-    try {
-      window.__onBrowserFocus(payload);
-    } catch (e) {
-      if (!window.__focusReportErrorLogged) {
-        window.__focusReportErrorLogged = true;
-        try { console.warn('[focus-reporting] report failed', e && e.message ? e.message : e); } catch (_) {}
+    // Forward a payload through the exposed binding, recording the new focused
+    // state and logging the first failure once (high-frequency events would
+    // otherwise flood the browser console).
+    function emit(payload) {
+      lastReportedFocused = payload.focused;
+      try {
+        window.__onBrowserFocus(payload);
+      } catch (e) {
+        if (!window.__focusReportErrorLogged) {
+          window.__focusReportErrorLogged = true;
+          try { console.warn('[focus-reporting] report failed', e && e.message ? e.message : e); } catch (_) {}
+        }
       }
     }
-  }
 
-  function isReportingTarget(el) {
-    if (!el) return false;
-    const tag = el.tagName;
-    if (tag === 'TEXTAREA') return true;
-    if (tag !== 'INPUT') return false;
-    const type = (el.getAttribute('type') || '').toLowerCase();
-    return type === '' || type === 'text' || type === 'search' || type === 'email' ||
-      type === 'url' || type === 'tel' || type === 'password' || type === 'number';
-  }
-
-  function buildPayload(el) {
-    const rect = el.getBoundingClientRect();
-    const cs = getComputedStyle(el);
-    const fontSize = parseFloat(cs.fontSize);
-    const lineHeight = parseFloat(cs.lineHeight);
-    const paddingTop = parseFloat(cs.paddingTop);
-    const paddingLeft = parseFloat(cs.paddingLeft);
-    const multiline = el.tagName === 'TEXTAREA';
-    const payload = {
-      focused: true,
-      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-      value: el.value,
-      selectionStart: el.selectionStart == null ? undefined : el.selectionStart,
-      selectionEnd: el.selectionEnd == null ? undefined : el.selectionEnd,
-      multiline: multiline,
-      inputType: multiline ? 'textarea' : ((el.getAttribute('type') || 'text').toLowerCase()),
-      textAlign: cs.textAlign,
-    };
-    if (typeof el.maxLength === 'number' && el.maxLength >= 0) payload.maxLength = el.maxLength;
-    if (!Number.isNaN(fontSize)) payload.fontSize = fontSize;
-    if (!Number.isNaN(lineHeight)) payload.lineHeight = lineHeight;
-    if (!Number.isNaN(paddingTop)) payload.paddingTop = paddingTop;
-    if (!Number.isNaN(paddingLeft)) payload.paddingLeft = paddingLeft;
-    return payload;
-  }
-
-  // Report focused:true (with current value/selection) whenever a reporting
-  // target is active; report focused:false only on the true->false transition.
-  function report() {
-    const el = document.activeElement;
-    if (isReportingTarget(el)) {
-      emit(buildPayload(el));
-    } else if (lastReportedFocused) {
-      emit({ focused: false });
+    function isReportingTarget(el) {
+      if (!el) return false;
+      const tag = el.tagName;
+      if (tag === 'TEXTAREA') return true;
+      if (tag !== 'INPUT') return false;
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      return type === '' || type === 'text' || type === 'search' || type === 'email' ||
+        type === 'url' || type === 'tel' || type === 'password' || type === 'number';
     }
+
+    function buildPayload(el) {
+      const rect = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      const fontSize = parseFloat(cs.fontSize);
+      const lineHeight = parseFloat(cs.lineHeight);
+      const paddingTop = parseFloat(cs.paddingTop);
+      const paddingLeft = parseFloat(cs.paddingLeft);
+      const multiline = el.tagName === 'TEXTAREA';
+      const payload = {
+        focused: true,
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        value: el.value,
+        selectionStart: el.selectionStart == null ? undefined : el.selectionStart,
+        selectionEnd: el.selectionEnd == null ? undefined : el.selectionEnd,
+        multiline: multiline,
+        inputType: multiline ? 'textarea' : ((el.getAttribute('type') || 'text').toLowerCase()),
+        textAlign: cs.textAlign,
+      };
+      if (typeof el.maxLength === 'number' && el.maxLength >= 0) payload.maxLength = el.maxLength;
+      if (!Number.isNaN(fontSize)) payload.fontSize = fontSize;
+      if (!Number.isNaN(lineHeight)) payload.lineHeight = lineHeight;
+      if (!Number.isNaN(paddingTop)) payload.paddingTop = paddingTop;
+      if (!Number.isNaN(paddingLeft)) payload.paddingLeft = paddingLeft;
+      return payload;
+    }
+
+    // Report focused:true (with current value/selection) whenever a reporting
+    // target is active; report focused:false only on the true->false transition.
+    // Exposed on window so a guarded re-evaluation can still trigger the initial
+    // report without re-registering listeners.
+    window.__browserFocusReport = function () {
+      const el = document.activeElement;
+      if (isReportingTarget(el)) {
+        emit(buildPayload(el));
+      } else if (lastReportedFocused) {
+        emit({ focused: false });
+      }
+    };
+
+    document.addEventListener('focusin', window.__browserFocusReport, true);
+    document.addEventListener('focusout', function () {
+      if (lastReportedFocused) emit({ focused: false });
+    }, true);
+    document.addEventListener('input', window.__browserFocusReport, true);
+    document.addEventListener('selectionchange', window.__browserFocusReport, true);
   }
 
-  document.addEventListener('focusin', report, true);
-  document.addEventListener('focusout', function () {
-    if (lastReportedFocused) emit({ focused: false });
-  }, true);
-  document.addEventListener('input', report, true);
-  document.addEventListener('selectionchange', report, true);
+  // Initial report on EVERY evaluation: surfaces an element that is already
+  // focused at injection time (autofocus) for which focusin will never fire.
+  if (typeof window.__browserFocusReport === 'function') window.__browserFocusReport();
 }`
 
 /**
@@ -347,6 +367,29 @@ export class BrowserSession {
   }
 
   /**
+   * Re-evaluate FOCUS_REPORTING_SCRIPT against the CURRENT document to force an
+   * immediate focus report.
+   *
+   * Needed after a navigation/goto: the document is replaced, so an element that
+   * the page autofocuses (e.g. a login field) is already focused by the time the
+   * agent regains control. `focusin` only fires on focus CHANGES, so without an
+   * explicit re-evaluation that element would never be reported and the overlay
+   * caret would never appear. The script's listener registration is idempotent
+   * (guarded), so this only triggers the initial report; the `__onBrowserFocus`
+   * binding is intentionally NOT re-exposed here (it is session-scoped and would
+   * throw on a duplicate name). No-op when no page is active; failures are warned
+   * and swallowed, mirroring enableFocusReporting's best-effort policy.
+   */
+  async reportFocusNow(): Promise<void> {
+    if (!this.page) return
+    try {
+      await this.page.evaluate(FOCUS_REPORTING_SCRIPT)
+    } catch (error) {
+      logger.warn(`[browser] Focus re-report failed: ${String(error)}`)
+    }
+  }
+
+  /**
    * Reflect a value into the currently-focused reporting-target input/textarea.
    *
    * Uses the native value setter + InputEvent('input') dispatch so controlled
@@ -472,6 +515,12 @@ export class BrowserSession {
     if (currentUrl && currentUrl !== 'about:blank') {
       try {
         await this.page.goto(currentUrl, { waitUntil: 'domcontentloaded' })
+        // Re-report focus on the freshly reloaded document: enableFocusReporting
+        // above re-wired the binding + listeners, but focusin only fires on focus
+        // CHANGES, so an element the page autofocuses (e.g. a login field) after
+        // this goto would otherwise never surface its overlay caret. Skip when no
+        // goto happened (about:blank path) — there is nothing newly loaded.
+        await this.reportFocusNow()
       } catch (error) {
         logger.debug(`[browser] Navigate after device change failed: ${String(error)}`)
       }
