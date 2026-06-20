@@ -10,7 +10,7 @@ import { logger } from '../../../logger'
 import { BrowserActionLog } from './browser-action-log'
 import { BROWSER_IDLE_TIMEOUT_MS } from './browser-types'
 import { DeviceEmulation, DEVICE_PRESETS } from './device-presets'
-import { getElementAtPoint, getFocusedElementInfo } from './element-info'
+import { getCursorAt, getElementAtPoint, getFocusedElementInfo } from './element-info'
 import { loadPlaywright } from './playwright-loader'
 
 /**
@@ -43,6 +43,174 @@ const GET_SELECTED_TEXT_SCRIPT = `() => {
  */
 export type FileChooserPayload = string[]
 
+/**
+ * Payload emitted to the Web client when the focused input/textarea changes,
+ * its value/selection changes, or focus leaves a reporting target.
+ *
+ * Mirrors the `browser_focus_changed` wire contract (rect and below). When
+ * `focused` is false, the overlay is hidden and the remaining fields are
+ * omitted. Coordinates in `rect` are getBoundingClientRect raw values
+ * (CSS px, viewport-relative).
+ */
+export interface FocusChangePayload {
+  /** Whether a reporting-target input/textarea is focused. false hides overlay. */
+  focused: boolean
+  /** getBoundingClientRect of the focused element (CSS px, viewport-relative). */
+  rect?: { x: number; y: number; width: number; height: number }
+  /** Current value of the element. */
+  value?: string
+  selectionStart?: number
+  selectionEnd?: number
+  /** True when the element is a <textarea>. */
+  multiline?: boolean
+  /** input `type` attribute ('text'|'password'|... / 'textarea' for textarea). */
+  inputType?: string
+  /** maxLength attribute (omitted when -1/unset). */
+  maxLength?: number
+  /** Computed font-size in px. */
+  fontSize?: number
+  /** Computed line-height in px (omitted when 'normal'/non-numeric). */
+  lineHeight?: number
+  /** Computed text-align. */
+  textAlign?: string
+  /** Computed padding-top in px. */
+  paddingTop?: number
+  /** Computed padding-left in px. */
+  paddingLeft?: number
+}
+
+/**
+ * Browser-context script installed (idempotently) into the page to report
+ * focus/value/selection changes of simple input/textarea elements back to the
+ * agent via the `window.__onBrowserFocus` binding exposed by Playwright.
+ *
+ * Runs in the browser, so it is a string passed to addInitScript / evaluate to
+ * avoid Node resolving DOM types (same convention as element-info scripts).
+ *
+ * Listens in the capture phase for focusin/focusout/input/selectionchange and,
+ * for reporting targets (textarea, or input whose type is one of the simple
+ * text-like types), builds and sends the focus payload. focusout / non-target
+ * elements send `{ focused: false }`.
+ */
+export const FOCUS_REPORTING_SCRIPT = `() => {
+  if (window.__browserFocusReportingInstalled) return;
+  window.__browserFocusReportingInstalled = true;
+
+  // Last focused state reported to the agent. Used to suppress repeated
+  // { focused: false } notifications: selectionchange fires for the whole
+  // document (including unrelated page text selections), so without this guard
+  // every such selection would emit a redundant focused:false. We only forward
+  // a false when transitioning from a previously-focused (true) state.
+  var lastReportedFocused = false;
+
+  // Forward a payload through the exposed binding, recording the new focused
+  // state and logging the first failure once (high-frequency events would
+  // otherwise flood the browser console).
+  function emit(payload) {
+    lastReportedFocused = payload.focused;
+    try {
+      window.__onBrowserFocus(payload);
+    } catch (e) {
+      if (!window.__focusReportErrorLogged) {
+        window.__focusReportErrorLogged = true;
+        try { console.warn('[focus-reporting] report failed', e && e.message ? e.message : e); } catch (_) {}
+      }
+    }
+  }
+
+  function isReportingTarget(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    if (tag === 'TEXTAREA') return true;
+    if (tag !== 'INPUT') return false;
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    return type === '' || type === 'text' || type === 'search' || type === 'email' ||
+      type === 'url' || type === 'tel' || type === 'password' || type === 'number';
+  }
+
+  function buildPayload(el) {
+    const rect = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    const fontSize = parseFloat(cs.fontSize);
+    const lineHeight = parseFloat(cs.lineHeight);
+    const paddingTop = parseFloat(cs.paddingTop);
+    const paddingLeft = parseFloat(cs.paddingLeft);
+    const multiline = el.tagName === 'TEXTAREA';
+    const payload = {
+      focused: true,
+      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      value: el.value,
+      selectionStart: el.selectionStart == null ? undefined : el.selectionStart,
+      selectionEnd: el.selectionEnd == null ? undefined : el.selectionEnd,
+      multiline: multiline,
+      inputType: multiline ? 'textarea' : ((el.getAttribute('type') || 'text').toLowerCase()),
+      textAlign: cs.textAlign,
+    };
+    if (typeof el.maxLength === 'number' && el.maxLength >= 0) payload.maxLength = el.maxLength;
+    if (!Number.isNaN(fontSize)) payload.fontSize = fontSize;
+    if (!Number.isNaN(lineHeight)) payload.lineHeight = lineHeight;
+    if (!Number.isNaN(paddingTop)) payload.paddingTop = paddingTop;
+    if (!Number.isNaN(paddingLeft)) payload.paddingLeft = paddingLeft;
+    return payload;
+  }
+
+  // Report focused:true (with current value/selection) whenever a reporting
+  // target is active; report focused:false only on the true->false transition.
+  function report() {
+    const el = document.activeElement;
+    if (isReportingTarget(el)) {
+      emit(buildPayload(el));
+    } else if (lastReportedFocused) {
+      emit({ focused: false });
+    }
+  }
+
+  document.addEventListener('focusin', report, true);
+  document.addEventListener('focusout', function () {
+    if (lastReportedFocused) emit({ focused: false });
+  }, true);
+  document.addEventListener('input', report, true);
+  document.addEventListener('selectionchange', report, true);
+}`
+
+/**
+ * Browser-context script that reflects a value into the currently-focused
+ * reporting-target input/textarea using the native value setter +
+ * InputEvent('input') dispatch, so React-style controlled components do not
+ * roll the value back. Optionally applies a selection range.
+ *
+ * No-op when the active element is not a reporting target. String script for
+ * the same reason as the others (DOM types resolved in the browser).
+ */
+export const SET_FOCUSED_INPUT_VALUE_SCRIPT = `(args) => {
+  const el = document.activeElement;
+  if (!el) return;
+  const tag = el.tagName;
+  let proto;
+  if (tag === 'TEXTAREA') {
+    proto = window.HTMLTextAreaElement.prototype;
+  } else if (tag === 'INPUT') {
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    const ok = type === '' || type === 'text' || type === 'search' || type === 'email' ||
+      type === 'url' || type === 'tel' || type === 'password' || type === 'number';
+    if (!ok) return;
+    proto = window.HTMLInputElement.prototype;
+  } else {
+    return;
+  }
+  // The native value setter may be absent on exotic/polyfilled prototypes;
+  // treat that as a no-op (same as a non-reporting target) rather than letting
+  // a TypeError escape from reading .set of undefined.
+  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+  const setter = desc && desc.set;
+  if (!setter) return;
+  setter.call(el, args.value);
+  el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+  if (args.selectionStart != null && args.selectionEnd != null) {
+    try { el.setSelectionRange(args.selectionStart, args.selectionEnd); } catch (e) {}
+  }
+}`
+
 export class BrowserSession {
   private browser: Browser | null = null
   private context: BrowserContext | null = null
@@ -63,6 +231,18 @@ export class BrowserSession {
    * 反映した Promise を返すため、呼び出し側で失敗を検知できる。
    */
   onFileChooser: ((accept: (files: FileChooserPayload) => Promise<void>) => void) | null = null
+
+  /**
+   * フォーカスされた報告対象 input/textarea の変化を Web 側へ通知するコールバック。
+   * `enableFocusReporting` が exposeBinding 経由でブラウザからのイベントを受けてこれを呼ぶ。
+   */
+  onFocusChange: ((payload: FocusChangePayload) => void) | null = null
+
+  /**
+   * `page.exposeBinding('__onBrowserFocus', ...)` を一度だけ呼ぶためのガード。
+   * 同じ名前の binding を二重登録すると Playwright が例外を投げるため。
+   */
+  private focusReportingExposed = false
 
   /**
    * Get the currently active device emulation ID, or null if none.
@@ -105,6 +285,7 @@ export class BrowserSession {
     this.page = await this.context!.newPage()
     this.attachPageListeners(this.page)
     await this.enableFocusEmulation(this.page)
+    await this.enableFocusReporting(this.page)
 
     return this.page
   }
@@ -125,6 +306,65 @@ export class BrowserSession {
   }
 
   /**
+   * Install focus/value/selection reporting for simple input/textarea elements.
+   *
+   * Exposes the `__onBrowserFocus` binding once per session (guarded by
+   * `focusReportingExposed`; re-exposing the same name throws in Playwright),
+   * then injects FOCUS_REPORTING_SCRIPT both as an init script (for future
+   * navigations) and into the current document (for the already-loaded page).
+   * The script is idempotent via `window.__browserFocusReportingInstalled`.
+   *
+   * Binding exposure and script injection are wrapped in SEPARATE try/catch
+   * blocks so a partial failure stays isolated: a failed binding expose must
+   * not prevent the script from being injected, and a failed script injection
+   * must not flip `focusReportingExposed` back (which would later trigger a
+   * duplicate-name re-expose that throws). The `focusReportingExposed` guard is
+   * only set true after the expose actually succeeds, and only the expose path
+   * is gated by it — script injection is attempted on every page so it is not
+   * coupled to whether the binding was (re-)exposed this call.
+   *
+   * Mirrors enableFocusEmulation's policy: failures are logged via warn and
+   * never propagated — focus reporting is best-effort and not critical.
+   */
+  private async enableFocusReporting(page: Page): Promise<void> {
+    if (!this.focusReportingExposed) {
+      try {
+        await page.exposeBinding(
+          '__onBrowserFocus',
+          (_src, payload: FocusChangePayload) => this.onFocusChange?.(payload),
+        )
+        this.focusReportingExposed = true
+      } catch (error) {
+        logger.warn(`[browser] Focus reporting binding not exposed: ${String(error)}`)
+      }
+    }
+    try {
+      await page.addInitScript(FOCUS_REPORTING_SCRIPT)
+      await page.evaluate(FOCUS_REPORTING_SCRIPT)
+    } catch (error) {
+      logger.warn(`[browser] Focus reporting script not injected: ${String(error)}`)
+    }
+  }
+
+  /**
+   * Reflect a value into the currently-focused reporting-target input/textarea.
+   *
+   * Uses the native value setter + InputEvent('input') dispatch so controlled
+   * React components do not roll the value back, and applies the selection range
+   * when both bounds are provided. No-op when the active element is not a
+   * reporting target. Throws when no page is active.
+   */
+  async setFocusedInputValue(
+    value: string,
+    selectionStart?: number,
+    selectionEnd?: number,
+  ): Promise<void> {
+    if (!this.page) throw new Error('No active browser page')
+    this.resetIdleTimer()
+    await this.page.evaluate(SET_FOCUSED_INPUT_VALUE_SCRIPT, { value, selectionStart, selectionEnd })
+  }
+
+  /**
    * Check if a browser session is currently active.
    */
   isActive(): boolean {
@@ -139,6 +379,9 @@ export class BrowserSession {
     this.closed = true
     this.pendingFileChooser = null
     this.onFileChooser = null
+    // Symmetric with onFileChooser: drop the focus-change callback so a closed
+    // session cannot keep the Web-side WebSocket alive via this reference.
+    this.onFocusChange = null
     this.stopLiveView()
     this.clearIdleTimer()
     if (this.browser) {
@@ -204,6 +447,9 @@ export class BrowserSession {
         // ignore close errors
       }
     }
+    // The exposeBinding lives on the (now-closed) page; the fresh page below
+    // needs its own binding, so allow enableFocusReporting to re-expose it.
+    this.focusReportingExposed = false
 
     // Create new context with the desired userAgent
     const contextOptions: Record<string, unknown> = {}
@@ -220,6 +466,7 @@ export class BrowserSession {
     this.page = await this.context.newPage()
     this.attachPageListeners(this.page)
     await this.enableFocusEmulation(this.page)
+    await this.enableFocusReporting(this.page)
 
     // Navigate back to the previous URL
     if (currentUrl && currentUrl !== 'about:blank') {
@@ -391,6 +638,18 @@ export class BrowserSession {
     if (!this.page) throw new Error('No active browser page')
     this.resetIdleTimer()
     await this.page.mouse.move(x, y)
+  }
+
+  /**
+   * Read the CSS `cursor` value of the element at the given coordinates.
+   * Used by the live view to mirror the page's cursor shape on the web canvas.
+   * Throws when no page is active; propagates page.evaluate errors so the
+   * caller can skip the update for that frame.
+   */
+  async getCursorAt(x: number, y: number): Promise<string> {
+    if (!this.page) throw new Error('No active browser page')
+    this.resetIdleTimer()
+    return getCursorAt(this.page, x, y)
   }
 
   /**

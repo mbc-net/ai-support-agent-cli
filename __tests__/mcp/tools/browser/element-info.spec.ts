@@ -1,4 +1,4 @@
-import { formatElementInfo, getElementAtPoint, getFocusedElementInfo, type ElementInfo } from '../../../../src/mcp/tools/browser/element-info'
+import { formatElementInfo, getCursorAt, getElementAtPoint, getFocusedElementInfo, type ElementInfo } from '../../../../src/mcp/tools/browser/element-info'
 
 describe('element-info', () => {
   describe('formatElementInfo', () => {
@@ -115,6 +115,32 @@ describe('element-info', () => {
       }
       const result = await getFocusedElementInfo(mockPage)
       expect(result).toBeNull()
+    })
+  })
+
+  describe('getCursorAt', () => {
+    it('should return the computed cursor value at the point', async () => {
+      const mockPage = {
+        evaluate: jest.fn().mockResolvedValue('pointer'),
+      }
+      const result = await getCursorAt(mockPage, 100, 200)
+      expect(result).toBe('pointer')
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(String), { x: 100, y: 200 })
+    })
+
+    it('should return "default" when evaluate resolves a non-string value', async () => {
+      const mockPage = {
+        evaluate: jest.fn().mockResolvedValue(undefined),
+      }
+      const result = await getCursorAt(mockPage, 0, 0)
+      expect(result).toBe('default')
+    })
+
+    it('should re-throw when page.evaluate rejects', async () => {
+      const mockPage = {
+        evaluate: jest.fn().mockRejectedValue(new Error('eval error')),
+      }
+      await expect(getCursorAt(mockPage, 10, 20)).rejects.toThrow('eval error')
     })
   })
 })
