@@ -1072,6 +1072,140 @@ describe('VsCodeTunnelWebSocket', () => {
     })
   })
 
+  describe('handleBrowserMouseMove - cursor update', () => {
+    it('should do nothing if missing coordinates', async () => {
+      const mockSession = { executeMouseMove: jest.fn(), getCursorAt: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm0' })
+      expect(mockSession.executeMouseMove).not.toHaveBeenCalled()
+      expect(mockSession.getCursorAt).not.toHaveBeenCalled()
+    })
+
+    it('should move then send browser_cursor_update on first move', async () => {
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockResolvedValue('pointer'),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm1', x: 30, y: 40 })
+      expect(mockSession.executeMouseMove).toHaveBeenCalledWith(30, 40)
+      expect(mockSession.getCursorAt).toHaveBeenCalledWith(30, 40)
+      expect(sentMessages).toEqual([{ type: 'browser_cursor_update', sessionId: 'sess-mm1', cursor: 'pointer' }])
+    })
+
+    it('should not resend when cursor is unchanged between moves', async () => {
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockResolvedValue('text'),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm2', x: 1, y: 1 })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm2', x: 2, y: 2 })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({ type: 'browser_cursor_update', sessionId: 'sess-mm2', cursor: 'text' })
+    })
+
+    it('should resend when cursor changes between moves', async () => {
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockResolvedValueOnce('default').mockResolvedValueOnce('pointer'),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm3', x: 1, y: 1 })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm3', x: 2, y: 2 })
+      expect(sentMessages).toEqual([
+        { type: 'browser_cursor_update', sessionId: 'sess-mm3', cursor: 'default' },
+        { type: 'browser_cursor_update', sessionId: 'sess-mm3', cursor: 'pointer' },
+      ])
+    })
+
+    it('should warn and skip cursor update when executeMouseMove fails (no error send)', async () => {
+      const { logger } = require('../../src/logger')
+      const mockSession = {
+        executeMouseMove: jest.fn().mockRejectedValue(new Error('mid-drag nav')),
+        getCursorAt: jest.fn(),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm4', x: 5, y: 5 })
+      expect(mockSession.getCursorAt).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(0)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('mouseMove failed'))
+    })
+
+    it('should warn and skip update when getCursorAt rejects (no error send)', async () => {
+      const { logger } = require('../../src/logger')
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockRejectedValue(new Error('eval failed')),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm5', x: 5, y: 5 })
+      expect(mockSession.executeMouseMove).toHaveBeenCalledWith(5, 5)
+      expect(sentMessages).toHaveLength(0)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('getCursorAt failed'))
+    })
+
+    it('should clear lastSentCursor on browser close so the next move resends', async () => {
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockResolvedValue('pointer'),
+        stopLiveView: jest.fn(),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      tunnel.browserSessionManager.close = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm6', x: 1, y: 1 })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserClose({ type: 'browser_close', sessionId: 'sess-mm6' })
+      sentMessages.length = 0
+      // After close, lastSentCursor was cleared, so the same cursor value is resent.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm6', x: 1, y: 1 })
+      expect(sentMessages).toEqual([{ type: 'browser_cursor_update', sessionId: 'sess-mm6', cursor: 'pointer' }])
+    })
+
+    it('should clear stale lastSentCursor on re-open so the next move resends after an idle auto-close', async () => {
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockResolvedValue('pointer'),
+        getPage: jest.fn().mockResolvedValue(undefined),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
+        getPageTitle: jest.fn().mockResolvedValue(''),
+        actionLog: { onChange: null },
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // First move records the cursor for this sessionId.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm7', x: 1, y: 1 })
+
+      // Simulate an idle-timeout auto-close that bypasses handleBrowserClose/cleanup:
+      // lastSentCursor retains the previous session's value (no delete happens here).
+
+      // Re-opening the same sessionId must clear the stale cursor entry.
+      sentMessages.length = 0
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({ type: 'browser_open', sessionId: 'sess-mm7' })
+
+      // The first move after re-open must resend even though the cursor value is
+      // identical to the previous session's last value.
+      sentMessages.length = 0
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm7', x: 1, y: 1 })
+      expect(sentMessages).toEqual([{ type: 'browser_cursor_update', sessionId: 'sess-mm7', cursor: 'pointer' }])
+    })
+  })
+
   describe('handleBrowserMouseWheel', () => {
     it('should do nothing if missing delta', async () => {
       const mockSession = { executeMouseWheel: jest.fn() }

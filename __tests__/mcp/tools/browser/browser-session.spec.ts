@@ -10,12 +10,14 @@ jest.mock('../../../../src/logger')
 jest.mock('../../../../src/mcp/tools/browser/element-info', () => ({
   getElementAtPoint: jest.fn(),
   getFocusedElementInfo: jest.fn(),
+  getCursorAt: jest.fn(),
 }))
 
 import { loadPlaywright } from '../../../../src/mcp/tools/browser/playwright-loader'
-import { getFocusedElementInfo } from '../../../../src/mcp/tools/browser/element-info'
+import { getCursorAt, getFocusedElementInfo } from '../../../../src/mcp/tools/browser/element-info'
 
 const mockGetFocusedElementInfo = getFocusedElementInfo as jest.MockedFunction<typeof getFocusedElementInfo>
+const mockGetCursorAt = getCursorAt as jest.MockedFunction<typeof getCursorAt>
 
 const mockLoadPlaywright = loadPlaywright as jest.MockedFunction<typeof loadPlaywright>
 
@@ -31,6 +33,7 @@ describe('BrowserSession', () => {
 
     // Default: no focused element
     mockGetFocusedElementInfo.mockResolvedValue(null)
+    mockGetCursorAt.mockResolvedValue('default')
 
     mockCdpSession = { send: jest.fn().mockResolvedValue(undefined) }
 
@@ -628,6 +631,24 @@ describe('BrowserSession', () => {
     it('should throw when no active page', async () => {
       const session = new BrowserSession()
       await expect(session.executeMouseMove(100, 200)).rejects.toThrow('No active browser page')
+    })
+  })
+
+  describe('getCursorAt', () => {
+    it('should delegate to element-info getCursorAt when page is active', async () => {
+      mockGetCursorAt.mockResolvedValue('pointer')
+      const session = new BrowserSession()
+      await session.getPage()
+      const cursor = await session.getCursorAt(120, 240)
+      expect(cursor).toBe('pointer')
+      expect(mockGetCursorAt).toHaveBeenCalledWith(mockPage, 120, 240)
+    })
+
+    it('should throw when no active page', async () => {
+      mockGetCursorAt.mockClear()
+      const session = new BrowserSession()
+      await expect(session.getCursorAt(10, 20)).rejects.toThrow('No active browser page')
+      expect(mockGetCursorAt).not.toHaveBeenCalled()
     })
   })
 
