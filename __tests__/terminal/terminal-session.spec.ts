@@ -11,11 +11,9 @@ import * as os from 'os'
 import * as path from 'path'
 import { EventEmitter } from 'events'
 
-import * as constants from '../../src/terminal/constants'
 import { TerminalSession, isNodePtyAvailable } from '../../src/terminal/terminal-session'
 import { TerminalSessionManager } from '../../src/terminal/terminal-session-manager'
 
-const { MAX_CONCURRENT_SESSIONS } = constants
 
 // Mock node-pty to avoid spawning real pty processes that linger after tests
 // (real pty processes on Linux/GitHub Actions cause Jest to hang at shutdown)
@@ -577,14 +575,12 @@ describe('TerminalSessionManager', () => {
     expect(manager.closeSession('nonexistent')).toBe(false)
   })
 
-  it('should enforce max concurrent sessions', () => {
-    for (let i = 0; i < MAX_CONCURRENT_SESSIONS; i++) {
+  it('上限なし: 何件でもセッションを作成できる', () => {
+    for (let i = 0; i < 10; i++) {
       const s = manager.createSession()
       expect(s).not.toBeNull()
     }
-    const extra = manager.createSession()
-    expect(extra).toBeNull()
-    expect(manager.size).toBe(MAX_CONCURRENT_SESSIONS)
+    expect(manager.size).toBe(10)
   })
 
   it('should close all sessions', () => {

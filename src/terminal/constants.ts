@@ -46,8 +46,6 @@ export const SESSION_GRACE_TIMEOUT_MS = (() => {
   )
   return DEFAULT_MS
 })()
-export const MAX_CONCURRENT_SESSIONS = 5
-
 /**
  * Upper bound (in bytes) of the per-session scrollback ring buffer kept by
  * TerminalSession. PTY output is appended to the buffer alongside the live
