@@ -241,6 +241,7 @@ export class BrowserSession {
   private _debouncedCapture: (() => void) | null = null
   private _debounceTimer: ReturnType<typeof setTimeout> | null = null
   private _liveViewOnFrame: ((base64: string) => void) | null = null
+  private _lastFrameData: string | null = null
   private _currentDeviceId: string | null = null
   private closed = false
   private readonly onClosed?: () => void
@@ -587,7 +588,10 @@ export class BrowserSession {
         try {
           // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
           const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: 70 }) as Buffer
-          onFrame(buffer.toString('base64'))
+          const base64 = buffer.toString('base64')
+          if (base64 === this._lastFrameData) return
+          this._lastFrameData = base64
+          onFrame(base64)
         } catch (error) {
           logger.debug(`[browser] Live view screenshot error: ${String(error)}`)
         } finally {
@@ -606,7 +610,10 @@ export class BrowserSession {
           try {
             // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
             const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: 70 }) as Buffer
-            this._liveViewOnFrame?.(buffer.toString('base64'))
+            const base64 = buffer.toString('base64')
+            if (base64 === this._lastFrameData) return
+            this._lastFrameData = base64
+            this._liveViewOnFrame?.(base64)
           } catch (error) {
             logger.debug(`[browser] Debounced capture error: ${String(error)}`)
           }
@@ -632,6 +639,7 @@ export class BrowserSession {
     }
     this._debouncedCapture = null
     this._liveViewOnFrame = null
+    this._lastFrameData = null
     // Re-enable idle timeout
     if (this.isActive()) {
       this.resetIdleTimer()
