@@ -18,7 +18,7 @@ import { sleep } from '../../utils'
 import { BrowserProxySession } from './browser/browser-proxy-session'
 import { validateUrl } from './browser/browser-security'
 import { BrowserSession } from './browser/browser-session'
-import { BrowserSessionManager, getMaxBrowserSessionsFromEnv } from './browser/browser-session-manager'
+import { BrowserSessionManager } from './browser/browser-session-manager'
 import {
   BROWSER_TIMEOUT_REQUEST_MS,
   SELECTOR_TIMEOUT_NAVIGATION_MS,
@@ -118,7 +118,7 @@ export function registerBrowserTools(server: McpServer, apiClient: ApiClient, se
   }
 
   const defaultSession = new BrowserSession()
-  const manager = sessionManager ?? new BrowserSessionManager(getMaxBrowserSessionsFromEnv())
+  const manager = sessionManager ?? new BrowserSessionManager()
 
   registerBrowserNavigateTool(server, defaultSession, manager)
   registerBrowserCloseTool(server, defaultSession, manager)
