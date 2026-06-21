@@ -132,6 +132,76 @@ describe('BrowserSession - Live View & Interaction', () => {
       session.stopLiveView()
     })
 
+    it('should NOT call onFrame when consecutive frames are identical', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      // Always return the same buffer
+      ;(mockPage.screenshot as jest.Mock).mockResolvedValue(Buffer.from('same-frame'))
+
+      const onFrame = jest.fn()
+      session.startLiveView(100, onFrame)
+
+      // First tick → new frame, should send
+      jest.advanceTimersByTime(100)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(onFrame).toHaveBeenCalledTimes(1)
+
+      // Second tick → identical frame, should skip
+      jest.advanceTimersByTime(100)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(onFrame).toHaveBeenCalledTimes(1)
+
+      session.stopLiveView()
+    })
+
+    it('should call onFrame when frame data changes between ticks', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      ;(mockPage.screenshot as jest.Mock)
+        .mockResolvedValueOnce(Buffer.from('frame-1'))
+        .mockResolvedValueOnce(Buffer.from('frame-2'))
+
+      const onFrame = jest.fn()
+      session.startLiveView(100, onFrame)
+
+      jest.advanceTimersByTime(100)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(onFrame).toHaveBeenCalledTimes(1)
+
+      jest.advanceTimersByTime(100)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(onFrame).toHaveBeenCalledTimes(2)
+
+      session.stopLiveView()
+    })
+
+    it('should reset lastFrameData on stopLiveView so first frame of next session is always sent', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      ;(mockPage.screenshot as jest.Mock).mockResolvedValue(Buffer.from('same-frame'))
+
+      const onFrame = jest.fn()
+      session.startLiveView(100, onFrame)
+      jest.advanceTimersByTime(100)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(onFrame).toHaveBeenCalledTimes(1)
+
+      // Stop and restart — same data but should send again
+      session.stopLiveView()
+      session.startLiveView(100, onFrame)
+      jest.advanceTimersByTime(100)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(onFrame).toHaveBeenCalledTimes(2)
+
+      session.stopLiveView()
+    })
+
     it('should stop previous live view when starting a new one', async () => {
       const session = new BrowserSession()
       await session.getPage()
