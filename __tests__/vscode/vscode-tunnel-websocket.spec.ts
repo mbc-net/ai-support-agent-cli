@@ -946,6 +946,167 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(sentMessages[0].sessionId).toBe('sess-b4')
       expect(sentMessages[0].reason).toContain('max reached')
     })
+
+    // --- resume branch ---
+
+    it('should reuse an existing live session on resume and re-send ready/frame without navigating', async () => {
+      const mockPage = {
+        goto: jest.fn().mockResolvedValue(undefined),
+        url: jest.fn().mockReturnValue('https://example.com/page'),
+        title: jest.fn().mockResolvedValue('Existing'),
+      }
+      const mockSession = {
+        isAlive: true,
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('https://example.com/page'),
+        getPageTitle: jest.fn().mockResolvedValue('Existing'),
+        reportFocusNow: jest.fn().mockResolvedValue(undefined),
+        actionLog: { onChange: null },
+      }
+      // get() returns the existing live session; getOrCreate() must also return it
+      // (resume reuses — never creates).
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-resume',
+        resume: true,
+        // A URL is present but must be ignored on resume (state is preserved).
+        url: 'https://example.com/other',
+      })
+
+      // Existing session reused via getOrCreate.
+      expect(tunnel.browserSessionManager.getOrCreate).toHaveBeenCalledWith('sess-resume')
+      // No navigation on resume — current page state is preserved.
+      expect(mockPage.goto).not.toHaveBeenCalled()
+      // Live view re-started (re-stream current frame) and ready re-sent.
+      expect(mockSession.startLiveView).toHaveBeenCalled()
+      expect(mockSession.reportFocusNow).toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({
+        type: 'browser_ready',
+        sessionId: 'sess-resume',
+        currentUrl: 'https://example.com/page',
+      })
+      // resume_failed must NOT be sent on a successful resume.
+      expect(sentMessages.some((m) => m.type === 'resume_failed')).toBe(false)
+    })
+
+    it('should send resume_failed (not_found) when resume requested but no session exists', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      tunnel.browserSessionManager.getOrCreate = jest.fn()
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-missing',
+        resume: true,
+      })
+
+      // A failed resume must NEVER create a new session.
+      expect(tunnel.browserSessionManager.getOrCreate).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({
+        type: 'resume_failed',
+        sessionId: 'sess-missing',
+        reason: 'not_found',
+      })
+    })
+
+    it('should send resume_failed (dead) when the existing session is no longer alive', async () => {
+      const deadSession = { isAlive: false }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(deadSession)
+      tunnel.browserSessionManager.getOrCreate = jest.fn()
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-dead',
+        resume: true,
+      })
+
+      expect(tunnel.browserSessionManager.getOrCreate).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({
+        type: 'resume_failed',
+        sessionId: 'sess-dead',
+        reason: 'dead',
+      })
+    })
+
+    it('should send resume_failed (dead) and not launch a new browser when the session dies during the getOrCreate await (TOCTOU race)', async () => {
+      // Simulate the idle-timeout close() completing in the await microtask
+      // window between the live pre-check (get) and getOrCreate resolving:
+      // get() observes a live session, but by the time getOrCreate resolves the
+      // session has been closed (isAlive flipped to false) while still lingering
+      // in the manager's Map. Without a post-await re-check, getPage() would
+      // launch a fresh browser and we'd falsely report browser_ready.
+      const racedSession = {
+        isAlive: true,
+        getPage: jest.fn().mockResolvedValue({}),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('https://example.com'),
+        getPageTitle: jest.fn().mockResolvedValue('Existing'),
+        reportFocusNow: jest.fn().mockResolvedValue(undefined),
+        actionLog: { onChange: null },
+      }
+      // Live at pre-check time.
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(racedSession)
+      // getOrCreate resolves the same session, but the idle-close has by now
+      // flipped isAlive to false (the race we must detect).
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockImplementation(async () => {
+        racedSession.isAlive = false
+        return racedSession
+      })
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-raced',
+        resume: true,
+      })
+
+      // The race must be detected: resume_failed(dead) and NO new browser.
+      expect(racedSession.getPage).not.toHaveBeenCalled()
+      expect(racedSession.startLiveView).not.toHaveBeenCalled()
+      expect(sentMessages.some((m) => m.type === 'browser_ready')).toBe(false)
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({
+        type: 'resume_failed',
+        sessionId: 'sess-raced',
+        reason: 'dead',
+      })
+    })
+
+    it('should fall through to a normal new-session open when resume is absent (backward compatible)', async () => {
+      const mockPage = {
+        url: jest.fn().mockReturnValue('about:blank'),
+        title: jest.fn().mockResolvedValue(''),
+      }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
+        getPageTitle: jest.fn().mockResolvedValue(''),
+        actionLog: { onChange: null },
+      }
+      const getSpy = jest.fn()
+      tunnel.browserSessionManager.get = getSpy
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({ type: 'browser_open', sessionId: 'sess-new' })
+
+      // Without resume, the liveness pre-check (get) is never consulted.
+      expect(getSpy).not.toHaveBeenCalled()
+      expect(tunnel.browserSessionManager.getOrCreate).toHaveBeenCalledWith('sess-new')
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('browser_ready')
+      expect(sentMessages.some((m) => m.type === 'resume_failed')).toBe(false)
+    })
   })
 
   describe('handleBrowserClose', () => {

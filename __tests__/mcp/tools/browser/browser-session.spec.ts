@@ -141,6 +141,28 @@ describe('BrowserSession', () => {
     })
   })
 
+  describe('isAlive', () => {
+    it('should return true for a brand-new (not yet launched) session', () => {
+      // A session is "alive" until explicitly closed — the resume path uses this
+      // to decide reuse vs. resume_failed, independent of whether a page exists.
+      const session = new BrowserSession()
+      expect(session.isAlive).toBe(true)
+    })
+
+    it('should return true after the browser is launched', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      expect(session.isAlive).toBe(true)
+    })
+
+    it('should return false after close', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      await session.close()
+      expect(session.isAlive).toBe(false)
+    })
+  })
+
   describe('close', () => {
     it('should close browser and clean up', async () => {
       const session = new BrowserSession()

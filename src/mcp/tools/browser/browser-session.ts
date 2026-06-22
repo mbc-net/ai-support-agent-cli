@@ -828,6 +828,15 @@ export class BrowserSession {
   }
 
   /**
+   * Whether this session is still usable (not closed). Used by the resume path
+   * to decide between reusing an existing live session and replying
+   * `resume_failed` so the Web client can fall back to a fresh open.
+   */
+  get isAlive(): boolean {
+    return !this.closed
+  }
+
+  /**
    * Get current page title.
    */
   async getPageTitle(): Promise<string> {

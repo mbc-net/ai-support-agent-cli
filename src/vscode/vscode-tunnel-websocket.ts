@@ -78,6 +78,15 @@ export interface VsCodeServerMessage {
   // Browser-specific fields
   conversationId?: string
   url?: string
+  /**
+   * Browser resume request. When `true` on a `browser_open`, the agent reuses an
+   * existing live browser session for this `sessionId` and immediately re-sends
+   * the current frame/URL/ready state instead of creating a fresh session. If no
+   * live session exists, the agent replies `resume_failed` so the Web client can
+   * fall back to a normal (non-resume) open. Absent/false → current new-session
+   * behavior (backward compatible).
+   */
+  resume?: boolean
   x?: number
   y?: number
   button?: string
@@ -96,6 +105,14 @@ export interface VsCodeServerMessage {
   selectionStart?: number
   selectionEnd?: number
 }
+
+/**
+ * `resume_failed` メッセージの `reason` が取り得る値。
+ * - `'not_found'`: 対象 sessionId のセッションが Map に存在しない
+ * - `'dead'`: セッションは存在するが live ではない（事前チェック時、または
+ *   getOrCreate 後の TOCTOU 再確認でアイドルクローズ完了を検知した場合）
+ */
+export type ResumeFailureReason = 'not_found' | 'dead'
 
 /**
  * Agent → API Server メッセージ
@@ -121,6 +138,7 @@ export interface VsCodeAgentMessage {
     | 'browser_file_chooser_opened'
     | 'browser_cursor_update'
     | 'browser_focus_changed'
+    | 'resume_failed'
   sessionId?: string
   targetPort?: number
   requestId?: string
@@ -142,6 +160,11 @@ export interface VsCodeAgentMessage {
   pageTitle?: string
   text?: string
   timestamp?: number
+  /**
+   * 失敗・停止理由。`resume_failed` の場合は {@link ResumeFailureReason}
+   * （`'not_found' | 'dead'`）に限定される。`browser_stopped` 等では
+   * 任意のエラーメッセージ文字列が入るため型は `string` のまま。
+   */
   reason?: string
   entries?: Array<{ timestamp: number; source: string; action: string; details: string }>
   // Script execution fields
@@ -697,8 +720,36 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     // last shape. Deleting here guarantees the first move after (re)open is sent.
     this.lastSentCursor.delete(sessionId)
 
+    // Resume request: reuse an existing LIVE session for this sessionId and
+    // immediately re-stream its current state. If no live session exists, reply
+    // resume_failed so the Web client can fall back to a normal open. A failed
+    // resume NEVER creates a new session (mirrors the Terminal resume contract).
+    if (msg.resume === true) {
+      const existing = this.browserSessionManager.get(sessionId)
+      if (!existing || !existing.isAlive) {
+        const reason: ResumeFailureReason = existing ? 'dead' : 'not_found'
+        logger.warn(`[vscode-ws] Browser resume failed (session=${sessionId}): ${reason}`)
+        this.send({ type: 'resume_failed', sessionId, reason })
+        return
+      }
+    }
+
     try {
       const session = await this.browserSessionManager.getOrCreate(sessionId)
+
+      // TOCTOU guard for resume: the live pre-check above (get + isAlive) and the
+      // getOrCreate below straddle an await microtask boundary. An idle-timeout
+      // close() that completes within that window leaves the now-closed session
+      // lingering in the manager's Map, so getOrCreate can resolve a dead session.
+      // Without this re-check, getPage() would launch a fresh browser and we'd
+      // falsely report browser_ready (resume becoming a silent new-session open).
+      // Re-confirm liveness and fail the resume instead of resurrecting it.
+      if (msg.resume === true && !session.isAlive) {
+        const reason: ResumeFailureReason = 'dead'
+        logger.warn(`[vscode-ws] Browser resume failed (session=${sessionId}): ${reason}`)
+        this.send({ type: 'resume_failed', sessionId, reason })
+        return
+      }
 
       // Wire up action log notifications so in-process operations are relayed to Web UI
       session.actionLog.onChange = (entry) => {
@@ -725,8 +776,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         this.browserSessionManager.linkConversation(msg.conversationId, sessionId)
       }
 
-      // Navigate to URL if provided
-      if (msg.url) {
+      if (msg.resume === true) {
+        // Resume: the existing page already holds the user's state. Never
+        // navigate (that would discard it) — just ensure the page is live and
+        // re-surface any focused field, then fall through to re-stream + ready.
+        await session.getPage()
+        await session.reportFocusNow()
+      } else if (msg.url) {
+        // Navigate to URL if provided
         const validation = validateUrl(msg.url)
         if (validation.valid) {
           const page = await session.getPage()
