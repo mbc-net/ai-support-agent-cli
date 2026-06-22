@@ -6,11 +6,8 @@
  * Complements the integration-style tests in terminal-session.spec.ts.
  */
 
-import * as constants from '../../src/terminal/constants'
 import { TerminalSessionManager } from '../../src/terminal/terminal-session-manager'
 import type { TerminalSession } from '../../src/terminal/terminal-session'
-
-const { MAX_CONCURRENT_SESSIONS } = constants
 
 // Mock node-pty to avoid spawning real pty processes
 type DataHandler = (data: string) => void
@@ -85,24 +82,22 @@ describe('TerminalSessionManager', () => {
       expect(session!.rows).toBe(24)
     })
 
-    it('returns null when MAX_CONCURRENT_SESSIONS is reached', () => {
-      for (let i = 0; i < MAX_CONCURRENT_SESSIONS; i++) {
+    it('上限なしで何件でもセッションを作成できる', () => {
+      for (let i = 0; i < 10; i++) {
         const s = manager.createSession()
         expect(s).not.toBeNull()
       }
-      const extra = manager.createSession()
-      expect(extra).toBeNull()
     })
 
     it('allows creating a new session after one is closed', () => {
-      for (let i = 0; i < MAX_CONCURRENT_SESSIONS; i++) {
+      for (let i = 0; i < 5; i++) {
         manager.createSession()
       }
       // Close one session
       const sessions = manager.listSessions()
       manager.closeSession(sessions[0].sessionId)
 
-      // Now one slot is free
+      // After close, new session still succeeds
       const newSession = manager.createSession()
       expect(newSession).not.toBeNull()
     })
@@ -115,12 +110,11 @@ describe('TerminalSessionManager', () => {
       expect(session!.sessionId).toBe('my-session-id')
     })
 
-    it('returns null when at max capacity', () => {
-      for (let i = 0; i < MAX_CONCURRENT_SESSIONS; i++) {
-        manager.createSessionWithId(`session-${i}`)
+    it('上限なしで何件でも createSessionWithId できる', () => {
+      for (let i = 0; i < 10; i++) {
+        const s = manager.createSessionWithId(`session-${i}`)
+        expect(s).not.toBeNull()
       }
-      const extra = manager.createSessionWithId('overflow-session')
-      expect(extra).toBeNull()
     })
 
     it('sets up onExit callback to auto-remove session', (done) => {
@@ -269,12 +263,11 @@ describe('TerminalSessionManager', () => {
       expect(manager.size).toBe(0)
     })
 
-    it('stays at MAX_CONCURRENT_SESSIONS when limit is reached', () => {
-      for (let i = 0; i < MAX_CONCURRENT_SESSIONS; i++) {
+    it('セッション数に応じて size が増加する', () => {
+      for (let i = 0; i < 10; i++) {
         manager.createSession()
       }
-      manager.createSession() // returns null, size unchanged
-      expect(manager.size).toBe(MAX_CONCURRENT_SESSIONS)
+      expect(manager.size).toBe(10)
     })
   })
 

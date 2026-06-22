@@ -5,39 +5,9 @@
 import { logger } from '../../../logger'
 import { BrowserSession } from './browser-session'
 
-/**
- * Default upper bound on concurrent browser sessions per agent.
- * The web UI exposes up to 5 instances in the Browser tab; this default
- * matches that to avoid surprises. Can be overridden via the
- * BROWSER_MAX_SESSIONS environment variable.
- */
-export const DEFAULT_MAX_BROWSER_SESSIONS = 5
-
-/**
- * Read BROWSER_MAX_SESSIONS from the environment and return a sane value.
- * Falls back to DEFAULT_MAX_BROWSER_SESSIONS on missing / invalid / non-positive
- * values so misconfiguration cannot disable the feature entirely.
- */
-export function getMaxBrowserSessionsFromEnv(
-  env: NodeJS.ProcessEnv = process.env,
-): number {
-  const raw = env.BROWSER_MAX_SESSIONS
-  if (raw === undefined || raw === '') return DEFAULT_MAX_BROWSER_SESSIONS
-  const parsed = Number.parseInt(raw, 10)
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return DEFAULT_MAX_BROWSER_SESSIONS
-  }
-  return parsed
-}
-
 export class BrowserSessionManager {
   private sessions = new Map<string, BrowserSession>()
   private conversationMap = new Map<string, string>() // conversationId → sessionId
-  private readonly maxSessions: number
-
-  constructor(maxSessions: number = DEFAULT_MAX_BROWSER_SESSIONS) {
-    this.maxSessions = maxSessions
-  }
 
   /**
    * Get an existing session or create a new one.
@@ -45,10 +15,6 @@ export class BrowserSessionManager {
   async getOrCreate(sessionId: string): Promise<BrowserSession> {
     const existing = this.sessions.get(sessionId)
     if (existing) return existing
-
-    if (this.sessions.size >= this.maxSessions) {
-      throw new Error(`Max browser sessions reached (${this.maxSessions})`)
-    }
 
     const session = new BrowserSession(undefined, () => {
       this.removeSession(sessionId)

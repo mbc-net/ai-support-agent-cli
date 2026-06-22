@@ -13,7 +13,6 @@ import { getWorkspaceDir } from '../project-dir'
 import { getErrorMessage, buildWsUrl } from '../utils'
 import {
   BrowserSessionManager,
-  getMaxBrowserSessionsFromEnv,
 } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
 import type { FileChooserPayload } from '../mcp/tools/browser/browser-session'
@@ -222,7 +221,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private vsCodeServerEnvSignature: string = ''
   private wsProxy: VsCodeWsProxy | null = null
   private readonly portForwardSessions = new Map<string, { targetPort: number; wsProxy: VsCodeWsProxy }>()
-  readonly browserSessionManager = new BrowserSessionManager(getMaxBrowserSessionsFromEnv())
+  readonly browserSessionManager = new BrowserSessionManager()
   private browserLocalServer: BrowserLocalServer | null = null
   private browserLocalPort = 0
   private readonly pendingFileChoosers = new Map<string, (files: FileChooserPayload) => Promise<void>>()
