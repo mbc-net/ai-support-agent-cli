@@ -213,7 +213,11 @@ export function buildCloneUrl(
     parsed.username = 'x-access-token'
     parsed.password = authSecret
     return parsed.toString()
-  } catch {
+  } catch (error) {
+    // Do NOT log the url or the secret — only the failure fact + error message.
+    logger.warn('Failed to embed credentials into repo URL', {
+      error: getErrorMessage(error),
+    })
     return url
   }
 }

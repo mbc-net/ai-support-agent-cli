@@ -150,6 +150,36 @@ describe('repo-sync', () => {
       )
       expect(result).toBe('not-a-valid-url')
     })
+
+    it('should log a warning when credential embedding fails (without leaking url or secret)', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { logger: loggerMock } = require('../src/logger') as {
+        logger: { warn: jest.Mock }
+      }
+      loggerMock.warn.mockClear()
+
+      const result = buildCloneUrl(
+        'not-a-valid-url',
+        'api_key',
+        'super-secret-token',
+      )
+
+      // Behaviour preserved: original url is returned unchanged
+      expect(result).toBe('not-a-valid-url')
+
+      // A warning is emitted with the failure fact + error message only
+      expect(loggerMock.warn).toHaveBeenCalledWith(
+        'Failed to embed credentials into repo URL',
+        expect.objectContaining({ error: expect.any(String) }),
+      )
+
+      // The url and the secret must never be passed to the logger
+      for (const call of loggerMock.warn.mock.calls) {
+        const serialized = JSON.stringify(call)
+        expect(serialized).not.toContain('not-a-valid-url')
+        expect(serialized).not.toContain('super-secret-token')
+      }
+    })
   })
 
   describe('buildAuthEnv', () => {
