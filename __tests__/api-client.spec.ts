@@ -1003,6 +1003,26 @@ describe('ApiClient', () => {
 
         expect(result).toBeNull()
       })
+
+      it('should log a warning and return null when the request fails', async () => {
+        mockedLogger.warn.mockClear()
+        mockInstance.get.mockRejectedValue(new Error('boom'))
+
+        const result = await client.getAlert('tenant1', 'MBC_01', 'AL000002')
+
+        // Behaviour preserved: null is still returned
+        expect(result).toBeNull()
+        // Observability added: a warning identifies the failed alert
+        expect(mockedLogger.warn).toHaveBeenCalledWith(
+          'Failed to fetch alert',
+          expect.objectContaining({
+            tenantCode: 'tenant1',
+            projectCode: 'MBC_01',
+            alertNumber: 'AL000002',
+            error: 'boom',
+          }),
+        )
+      })
     })
 
     describe('updateAlertStatus', () => {
