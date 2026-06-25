@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
+import { DB_CONNECT_TIMEOUT_MS } from '../../constants'
 import type { DbCredentials } from '../../types'
 import { mcpErrorResponse, mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
 
@@ -188,7 +189,7 @@ export async function executeQuery(
       user: credentials.user,
       password: credentials.password,
       database: credentials.database,
-      connectTimeout: 10000,
+      connectTimeout: DB_CONNECT_TIMEOUT_MS,
     }
     if (sslConfig) {
       connectionOptions.ssl = sslConfig
@@ -211,7 +212,7 @@ export async function executeQuery(
       user: credentials.user,
       password: credentials.password,
       database: credentials.database,
-      connectionTimeoutMillis: 10000,
+      connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
       ssl: sslConfig,
     })
     try {

@@ -48,6 +48,9 @@ export const API_MAX_RETRIES = 3
 export const API_BASE_DELAY_MS = 1000
 export const API_REQUEST_TIMEOUT = 10_000
 
+// DB query connection timeout (MySQL connectTimeout / PostgreSQL connectionTimeoutMillis)
+export const DB_CONNECT_TIMEOUT_MS = 10_000
+
 // Command executor constants
 export const CMD_DEFAULT_TIMEOUT = 60_000
 export const MAX_CMD_TIMEOUT = 10 * 60 * 1000 // 10 minutes

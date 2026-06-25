@@ -12,6 +12,10 @@ import { LOCALHOST_ADDRESS } from '../constants'
 import { logger } from '../logger'
 import type { BrowserSession } from '../mcp/tools/browser/browser-session'
 import { BrowserSessionManager } from '../mcp/tools/browser/browser-session-manager'
+import {
+  SELECTOR_TIMEOUT_NAVIGATION_MS,
+  SELECTOR_TIMEOUT_SINGLE_MS,
+} from '../mcp/tools/browser/browser-types'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
 import { tryClickSelectors, tryFillSelectors } from '../mcp/tools/browser/selector-utils'
 import { screenshotToBase64 } from '../mcp/tools/mcp-response'
@@ -201,10 +205,10 @@ export class BrowserLocalServer {
     }
 
     const page = await session.getPage()
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
 
     if (params.waitForSelector) {
-      await page.waitForSelector(params.waitForSelector as string, { timeout: 10000 })
+      await page.waitForSelector(params.waitForSelector as string, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     }
     if (params.waitForTimeout) {
       const clampedTimeout = Math.min(params.waitForTimeout as number, 10000)
@@ -271,7 +275,7 @@ export class BrowserLocalServer {
   private async handleGetText(res: http.ServerResponse, sessionId: string, session: BrowserSession, params: Record<string, unknown>): Promise<void> {
     const page = await session.getPage()
     const target = (params.selector as string) ?? 'body'
-    const text: string = await page.locator(target).innerText({ timeout: 10000 })
+    const text: string = await page.locator(target).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     const maxLength = 50 * 1024
     const truncated = text.length > maxLength ? text.substring(0, maxLength) + '\n... (truncated)' : text
     const preview = text.replace(/\s+/g, ' ').trim()
@@ -289,7 +293,7 @@ export class BrowserLocalServer {
     }
 
     const page = await session.getPage()
-    const text: string = await page.locator(selector).innerText({ timeout: 10000 })
+    const text: string = await page.locator(selector).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     const maxLength = 50 * 1024
     const truncated = text.length > maxLength ? text.substring(0, maxLength) + '\n... (truncated)' : text
 
