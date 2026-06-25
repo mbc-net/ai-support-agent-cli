@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment } from '../src/utils'
+import { exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('sanitizeNameSegment', () => {
@@ -406,6 +406,46 @@ describe('isAuthenticationError', () => {
   it('should return false for AxiosError without response', () => {
     const error = new AxiosError('Network Error', 'ERR_NETWORK')
     expect(isAuthenticationError(error)).toBe(false)
+  })
+})
+
+describe('isNonAuthClientError', () => {
+  const axiosErrorWithStatus = (status: number): AxiosError =>
+    new AxiosError('error', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status,
+      statusText: 'error',
+      data: {},
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+
+  it('should return true for 400 AxiosError', () => {
+    expect(isNonAuthClientError(axiosErrorWithStatus(400))).toBe(true)
+  })
+
+  it('should return true for 404 AxiosError', () => {
+    expect(isNonAuthClientError(axiosErrorWithStatus(404))).toBe(true)
+  })
+
+  it('should return false for 401 AxiosError', () => {
+    expect(isNonAuthClientError(axiosErrorWithStatus(401))).toBe(false)
+  })
+
+  it('should return false for 403 AxiosError', () => {
+    expect(isNonAuthClientError(axiosErrorWithStatus(403))).toBe(false)
+  })
+
+  it('should return false for 500 AxiosError (5xx is out of range)', () => {
+    expect(isNonAuthClientError(axiosErrorWithStatus(500))).toBe(false)
+  })
+
+  it('should return false for non-Axios error', () => {
+    expect(isNonAuthClientError(new Error('some error'))).toBe(false)
+  })
+
+  it('should return false for AxiosError without response', () => {
+    const error = new AxiosError('Network Error', 'ERR_NETWORK')
+    expect(isNonAuthClientError(error)).toBe(false)
   })
 })
 
