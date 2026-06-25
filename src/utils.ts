@@ -109,6 +109,17 @@ export function sanitizeNameSegment(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
 }
 
+/**
+ * Remove a single trailing slash from a path/prefix.
+ *
+ * Single source of truth for the `replace(/\/$/, '')` idiom used in
+ * path-prefix containment checks (security path guards and Docker volume
+ * mount builders), so the normalization stays identical across them.
+ */
+export function stripTrailingSlash(path: string): string {
+  return path.replace(/\/$/, '')
+}
+
 export function validateApiUrl(url: string): string | null {
   try {
     const parsed = new URL(url)

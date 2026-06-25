@@ -17,7 +17,7 @@ import {
   getSensitiveHomePaths,
 } from '../security'
 import type { ProjectRegistration } from '../types'
-import { getErrorMessage, toContainerApiUrl } from '../utils'
+import { getErrorMessage, toContainerApiUrl, stripTrailingSlash } from '../utils'
 import { toPosixRelative } from './docker-utils'
 
 /** Container-internal base path for project directories */
@@ -111,7 +111,7 @@ export function buildVolumeMounts(): { mounts: string[]; projectMappings: Projec
           continue
         }
         const isBlocked = blockedPrefixes.some((prefix) => {
-          const prefixWithoutSlash = prefix.replace(/\/$/, '')
+          const prefixWithoutSlash = stripTrailingSlash(prefix)
           return resolved === prefixWithoutSlash || resolved.startsWith(prefix)
         })
         if (isBlocked) {
@@ -248,7 +248,7 @@ export function buildProjectVolumeMounts(
     try {
       const resolved = fs.realpathSync(project.projectDir)
       const isBlocked = blockedPrefixes.some((prefix) => {
-        const prefixWithoutSlash = prefix.replace(/\/$/, '')
+        const prefixWithoutSlash = stripTrailingSlash(prefix)
         return resolved === prefixWithoutSlash || resolved.startsWith(prefix)
       })
       if (!isBlocked) {

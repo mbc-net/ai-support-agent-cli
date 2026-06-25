@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment } from '../src/utils'
+import { exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('sanitizeNameSegment', () => {
@@ -23,6 +23,26 @@ describe('sanitizeNameSegment', () => {
 
   it('returns empty string for empty input', () => {
     expect(sanitizeNameSegment('')).toBe('')
+  })
+})
+
+describe('stripTrailingSlash', () => {
+  it('removes a single trailing slash', () => {
+    expect(stripTrailingSlash('/etc/')).toBe('/etc')
+    expect(stripTrailingSlash('/usr/local/')).toBe('/usr/local')
+  })
+
+  it('leaves paths without a trailing slash unchanged', () => {
+    expect(stripTrailingSlash('/etc')).toBe('/etc')
+    expect(stripTrailingSlash('')).toBe('')
+  })
+
+  it('removes only one trailing slash', () => {
+    expect(stripTrailingSlash('/etc//')).toBe('/etc/')
+  })
+
+  it('does not touch leading or internal slashes', () => {
+    expect(stripTrailingSlash('/a/b/c')).toBe('/a/b/c')
   })
 })
 
