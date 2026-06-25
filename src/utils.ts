@@ -128,6 +128,19 @@ export function isAuthenticationError(error: unknown): boolean {
 }
 
 /**
+ * 認証エラー(401/403)を除く 4xx クライアントエラーかどうかを判定する。
+ *
+ * 401/403 は再ログインで解消し得るため除外する。それ以外の 4xx は
+ * 「コマンドが存在しない／無効」を意味し、再試行しても無駄なので判別に使う。
+ */
+export function isNonAuthClientError(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) return false
+  const status = error.response?.status
+  if (status === undefined) return false
+  return status >= 400 && status < 500 && status !== 401 && status !== 403
+}
+
+/**
  * AxiosError のレスポンスデータが SSO_AUTH_REQUIRED エラーかどうかを判定する。
  *
  * AWS SSO 認証切れ時にサーバーが返す `error: 'SSO_AUTH_REQUIRED'` または
