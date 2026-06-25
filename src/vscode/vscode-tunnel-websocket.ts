@@ -15,6 +15,7 @@ import {
   BrowserSessionManager,
 } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
+import { SELECTOR_TIMEOUT_NAVIGATION_MS } from '../mcp/tools/browser/browser-types'
 import type { FileChooserPayload } from '../mcp/tools/browser/browser-session'
 import { executePlaywrightScript } from '../browser/browser-script-executor'
 
@@ -787,7 +788,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         const validation = validateUrl(msg.url)
         if (validation.valid) {
           const page = await session.getPage()
-          await page.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+          await page.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
           // Re-report focus on the freshly loaded document so an autofocused
           // field (e.g. a login form) surfaces its overlay caret without a
           // subsequent focus change. focusin only fires on focus CHANGES.
@@ -866,7 +867,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     try {
       const page = await session.getPage()
-      await page.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      await page.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
       // Record the navigation BEFORE the focus re-report so the action-log entry
       // never depends on reportFocusNow succeeding (it already swallows its own
       // errors, but keeping the log independent guards against future changes).

@@ -22,6 +22,9 @@ export const HEALTH_CHECK_INTERVAL_MS = 30 * 1000
 /** code-server 起動タイムアウト（30秒） */
 export const STARTUP_TIMEOUT_MS = 30 * 1000
 
+/** 起動完了待ちのヘルスチェックポーリング間隔（500ミリ秒） */
+export const STARTUP_HEALTH_POLL_MS = 500
+
 /** SIGTERM 送信後に SIGKILL を発行するまでの猶予時間（5秒） */
 export const VSCODE_SIGKILL_DELAY_MS = 5_000
 

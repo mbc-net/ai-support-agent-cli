@@ -76,6 +76,7 @@ describe('constants', () => {
     expect(constants.API_MAX_RETRIES).toBe(3)
     expect(constants.API_BASE_DELAY_MS).toBe(1000)
     expect(constants.API_REQUEST_TIMEOUT).toBe(10_000)
+    expect(constants.DB_CONNECT_TIMEOUT_MS).toBe(10_000)
     expect(constants.CMD_DEFAULT_TIMEOUT).toBe(60_000)
     expect(constants.MAX_CMD_TIMEOUT).toBe(10 * 60 * 1000)
     expect(constants.MAX_FILE_READ_SIZE).toBe(10 * 1024 * 1024)

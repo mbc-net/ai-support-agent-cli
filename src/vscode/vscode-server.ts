@@ -24,6 +24,7 @@ import {
   HEALTH_CHECK_INTERVAL_MS,
   HEALTH_CHECK_REQUEST_TIMEOUT_MS,
   STARTUP_TIMEOUT_MS,
+  STARTUP_HEALTH_POLL_MS,
   VSCODE_SIGKILL_DELAY_MS,
 } from './constants'
 
@@ -251,7 +252,7 @@ export class VsCodeServer {
         await this.checkHealth()
         return
       } catch {
-        await sleep(500)
+        await sleep(STARTUP_HEALTH_POLL_MS)
       }
     }
     throw new Error(`code-server failed to start within ${STARTUP_TIMEOUT_MS}ms`)
