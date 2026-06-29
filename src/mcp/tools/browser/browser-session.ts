@@ -34,14 +34,15 @@ const GET_SELECTED_TEXT_SCRIPT = `() => {
 }`
 
 /**
- * Payload passed to Playwright's `FileChooser.setFiles`: an array of absolute
- * file paths on the agent host. These are either:
- *  - Agent FS paths chosen directly by the user (`filePaths`), or
- *  - Temporary files written from base64 content uploaded by the web client
- *    (`files`); the caller is responsible for deleting those temp files once
- *    `setFiles` has resolved/rejected.
+ * Payload passed to Playwright's `FileChooser.setFiles`.
+ *  - `string[]`: absolute paths on the agent FS (workspace files chosen by the user).
+ *  - `Array<{name,mimeType,buffer}>`: in-memory file content uploaded from the web client
+ *    as base64. Playwright forwards the buffer directly to the browser via CDP, so no
+ *    temp files are needed and there is no race between file deletion and browser read.
  */
-export type FileChooserPayload = string[]
+export type FileChooserPayload =
+  | string[]
+  | Array<{ name: string; mimeType: string; buffer: Buffer }>
 
 /**
  * Payload emitted to the Web client when the focused input/textarea changes,

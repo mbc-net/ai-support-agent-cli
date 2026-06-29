@@ -1,5 +1,4 @@
 import { promises as fs } from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
 
 import WebSocket from 'ws'
@@ -1195,9 +1194,18 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   /**
-   * Branch 2: base64 file contents uploaded from the web client. Decode each
-   * into a temporary file on the agent host, hand the temp paths to setFiles,
-   * then always remove the temp files afterwards.
+   * Branch 2: base64 file contents uploaded from the web client.
+   *
+   * Decodes each file into an in-memory Buffer and passes the buffer objects
+   * directly to Playwright's FileChooser.setFiles(). Playwright supports the
+   * {name, mimeType, buffer} payload form and sends file content to the browser
+   * via CDP without writing anything to the agent file system.
+   *
+   * This avoids the race condition that exists when temp files are used:
+   * setFiles() resolves as soon as the CDP command is acknowledged, but the
+   * browser reads the file from disk *after* that point. Deleting temp files in
+   * a finally block immediately after accept() resolves therefore causes the
+   * browser to see a "file not found" error when it tries to read the file.
    */
   private async handleBrowserSetFileByContent(
     sessionId: string,
@@ -1211,7 +1219,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       await this.cancelFileChooser(accept, sessionId)
       return
     }
-    const files = (rawFiles ?? []) as Array<{ name?: unknown; dataBase64?: unknown }>
+    const files = (rawFiles ?? []) as Array<{ name?: unknown; mimeType?: unknown; dataBase64?: unknown }>
 
     // Validate every entry has a string dataBase64 before decoding so we never
     // pass undefined / non-string into Buffer.from.
@@ -1221,7 +1229,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       await this.cancelFileChooser(accept, sessionId)
       return
     }
-    const safeFiles = files as Array<{ name?: unknown; dataBase64: string }>
+    const safeFiles = files as Array<{ name?: unknown; mimeType?: unknown; dataBase64: string }>
 
     // Estimate decoded size from base64 length and enforce the authoritative limit
     // before allocating buffers.
@@ -1232,39 +1240,16 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       return
     }
 
-    // Create a unique temp directory for this upload so concurrent uploads and
-    // duplicate file names never collide.
-    let tmpDir: string
     try {
-      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'browser-upload-'))
-    } catch (error) {
-      this.send({ type: 'error', sessionId, message: `File upload failed: ${getErrorMessage(error)}` })
-      await this.cancelFileChooser(accept, sessionId)
-      return
-    }
-
-    try {
-      const tmpPaths: string[] = []
-      for (let i = 0; i < safeFiles.length; i++) {
-        const file = safeFiles[i]
-        // Prefix with the index so distinct uploads sharing a sanitized name
-        // never overwrite one another within the temp dir.
-        const safeName = `${i}-${sanitizeUploadFileName(file.name)}`
-        const tmpPath = path.join(tmpDir, safeName)
-        await fs.writeFile(tmpPath, Buffer.from(file.dataBase64, 'base64'))
-        tmpPaths.push(tmpPath)
-      }
-
-      const payload: FileChooserPayload = tmpPaths
+      const payload: Array<{ name: string; mimeType: string; buffer: Buffer }> = safeFiles.map((file) => ({
+        name: sanitizeUploadFileName(file.name),
+        mimeType: typeof file.mimeType === 'string' ? file.mimeType : 'application/octet-stream',
+        buffer: Buffer.from(file.dataBase64, 'base64'),
+      }))
       await accept(payload)
     } catch (error) {
       this.send({ type: 'error', sessionId, message: `File upload failed: ${getErrorMessage(error)}` })
       await this.cancelFileChooser(accept, sessionId)
-    } finally {
-      // Always remove the temp files/dir once setFiles has resolved or rejected.
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch((error) => {
-        logger.warn(`[vscode-ws] failed to remove temp upload dir ${tmpDir}: ${getErrorMessage(error)}`)
-      })
     }
   }
 
