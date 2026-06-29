@@ -43,7 +43,7 @@ export interface TmuxSessionInfo {
  * Messages sent from API server to agent
  */
 export interface TerminalServerMessage {
-  type: 'open' | 'stdin' | 'resize' | 'close' | 'auth_success' | 'error' | 'tmux_list_sessions' | 'tmux_kill_session'
+  type: 'open' | 'stdin' | 'resize' | 'close' | 'auth_success' | 'error' | 'tmux_list_sessions' | 'tmux_kill_session' | 'split_pane'
   sessionId?: string
   data?: string // Base64 encoded for stdin
   cols?: number
@@ -85,13 +85,22 @@ export interface TerminalServerMessage {
    * creating a new one named ais-{sessionId}.
    */
   tmuxSessionName?: string
+  /**
+   * Pane split direction for split_pane messages.
+   * 'horizontal' (default) splits left/right; 'vertical' splits top/bottom.
+   */
+  direction?: 'horizontal' | 'vertical'
+  /**
+   * Target tmux session name for split_pane messages.
+   */
+  sessionName?: string
 }
 
 /**
  * Messages sent from agent to API server
  */
 export interface TerminalAgentMessage {
-  type: 'ready' | 'stdout' | 'exit' | 'error' | 'replay' | 'resume_failed' | 'tmux_sessions' | 'tmux_session_killed'
+  type: 'ready' | 'stdout' | 'exit' | 'error' | 'replay' | 'resume_failed' | 'tmux_sessions' | 'tmux_session_killed' | 'tmux_pane_split'
   sessionId?: string
   data?: string // Base64 encoded for stdout / replay
   code?: number | null
@@ -109,6 +118,8 @@ export interface TerminalAgentMessage {
   name?: string
   /** Whether the kill operation succeeded (for tmux_session_killed response) */
   success?: boolean
+  /** Session name (for tmux_pane_split response) */
+  sessionName?: string
 }
 
 // 既存の re-export（後方互換）
@@ -185,6 +196,11 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
         break
       case 'tmux_kill_session':
         this.handleTmuxKillSession(msg)
+        break
+      case 'split_pane':
+        this.handleSplitPane(msg).catch((err: Error) => {
+          logger.error(`[terminal-ws] handleSplitPane error: ${err.message}`)
+        })
         break
       default:
         logger.debug(`[terminal-ws] Unknown message type: ${(msg as { type: string }).type}`)
@@ -511,6 +527,51 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
         return
       }
       this.send({ type: 'tmux_session_killed', requestId, name, success: true })
+    })
+  }
+
+  /**
+   * Split a pane in an existing tmux session.
+   *
+   * Security: validates sessionName against an allowlist of safe characters
+   * (alphanumeric, hyphen, underscore, colon, period) to prevent command
+   * injection, as a second layer of defense alongside API-side validation.
+   */
+  private async handleSplitPane(msg: TerminalServerMessage): Promise<void> {
+    const { requestId, sessionName, direction } = msg
+
+    // Input validation (security: command injection prevention)
+    if (!sessionName || !/^[a-zA-Z0-9_\-:.]+$/.test(sessionName)) {
+      this.send({
+        type: 'tmux_pane_split',
+        requestId,
+        sessionName: sessionName ?? '',
+        success: false,
+        error: 'Invalid session name',
+      })
+      return
+    }
+
+    // -h splits left/right (horizontal, default); -v splits top/bottom (vertical)
+    const flag = direction === 'vertical' ? '-v' : '-h'
+
+    await new Promise<void>((resolve) => {
+      execFile('tmux', ['split-window', flag, '-t', sessionName], (err) => {
+        if (err) {
+          const isEnoent = (err as NodeJS.ErrnoException).code === 'ENOENT'
+          this.send({
+            type: 'tmux_pane_split',
+            requestId,
+            sessionName,
+            success: false,
+            error: isEnoent ? 'tmux not found' : err.message,
+          })
+          resolve()
+          return
+        }
+        this.send({ type: 'tmux_pane_split', requestId, sessionName, success: true })
+        resolve()
+      })
     })
   }
 

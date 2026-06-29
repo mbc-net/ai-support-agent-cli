@@ -7,6 +7,7 @@ import type { RepoSyncResult } from '../repo-sync'
 import { getErrorMessage } from '../utils'
 
 import { executeChatCommand } from './chat-executor'
+import { executeE2eScriptFix } from './e2e-script-fix-executor'
 import { executeE2eTest } from './e2e-test-executor'
 import { cancelProcess } from './process-manager'
 import { fileDelete, fileList, fileMkdir, fileRead, fileRename, fileWrite } from './file-executor'
@@ -183,6 +184,26 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       projectConfig: opts.projectConfig,
       mcpConfigPath: opts.mcpConfigPath,
       tenantCode: opts.tenantCode,
+      browserLocalPort: opts.browserLocalPort,
+    })
+  },
+
+  e2e_script_fix: async ({ p, opts }) => {
+    if (!opts.client) {
+      return errorResult(ERR_E2E_TEST_REQUIRES_CLIENT)
+    }
+    return executeE2eScriptFix({
+      payload: p as { testCaseId?: unknown; message?: unknown; currentScript?: unknown },
+      client: opts.client,
+      tenantCode: opts.tenantCode,
+      projectCode: opts.projectConfig?.project?.projectCode,
+      agentId: opts.agentId,
+      commandId: opts.commandId,
+      serverConfig: opts.serverConfig,
+      activeChatMode: opts.activeChatMode,
+      projectDir: opts.projectDir,
+      projectConfig: opts.projectConfig,
+      mcpConfigPath: opts.mcpConfigPath,
       browserLocalPort: opts.browserLocalPort,
     })
   },

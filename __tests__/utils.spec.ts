@@ -46,6 +46,7 @@ describe('stripTrailingSlash', () => {
   })
 })
 
+
 describe('getErrorMessage', () => {
   it('should return message from Error instance', () => {
     expect(getErrorMessage(new Error('test error'))).toBe('test error')

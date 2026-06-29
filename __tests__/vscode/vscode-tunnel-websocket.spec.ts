@@ -2464,6 +2464,7 @@ describe('VsCodeTunnelWebSocket', () => {
     })
   })
 
+
   describe('browser handlers - no sessionId (ternary false branch)', () => {
     it('handleBrowserGoBack - should do nothing when no sessionId', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

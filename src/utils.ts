@@ -120,6 +120,7 @@ export function stripTrailingSlash(path: string): string {
   return path.replace(/\/$/, '')
 }
 
+
 export function validateApiUrl(url: string): string | null {
   try {
     const parsed = new URL(url)
