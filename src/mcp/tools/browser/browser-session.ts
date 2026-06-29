@@ -403,9 +403,9 @@ export class BrowserSession {
     selectionStart?: number,
     selectionEnd?: number,
   ): Promise<void> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
-    await this.page.evaluate(SET_FOCUSED_INPUT_VALUE_SCRIPT, { value, selectionStart, selectionEnd })
+    await page.evaluate(SET_FOCUSED_INPUT_VALUE_SCRIPT, { value, selectionStart, selectionEnd })
   }
 
   /**
@@ -659,13 +659,13 @@ export class BrowserSession {
    * Click at the specified coordinates.
    */
   async executeMouseClick(x: number, y: number, button?: string, clickCount?: number): Promise<void> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
 
     // Get element info BEFORE click (element might change after click)
-    const elementInfo = await getElementAtPoint(this.page, x, y)
+    const elementInfo = await getElementAtPoint(page, x, y)
 
-    await this.page.mouse.click(x, y, {
+    await page.mouse.click(x, y, {
       button: (button as 'left' | 'right' | 'middle' | undefined) ?? 'left',
       clickCount: clickCount || 1,
     })
@@ -681,9 +681,9 @@ export class BrowserSession {
    * Scroll the page.
    */
   async executeMouseWheel(deltaX: number, deltaY: number): Promise<void> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
-    await this.page.mouse.wheel(deltaX, deltaY)
+    await page.mouse.wheel(deltaX, deltaY)
     this.actionLog.add('direct', 'scroll', `deltaX=${deltaX} deltaY=${deltaY}`)
   }
 
@@ -692,9 +692,9 @@ export class BrowserSession {
    * Used for drag-to-select text on the live view canvas.
    */
   async executeMouseMove(x: number, y: number): Promise<void> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
-    await this.page.mouse.move(x, y)
+    await page.mouse.move(x, y)
   }
 
   /**
@@ -704,9 +704,9 @@ export class BrowserSession {
    * caller can skip the update for that frame.
    */
   async getCursorAt(x: number, y: number): Promise<string> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
-    return getCursorAt(this.page, x, y)
+    return getCursorAt(page, x, y)
   }
 
   /**
@@ -714,10 +714,10 @@ export class BrowserSession {
    * Pair with executeMouseMove / executeMouseUp to perform drag-selection.
    */
   async executeMouseDown(x: number, y: number, button?: string): Promise<void> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
-    await this.page.mouse.move(x, y)
-    await this.page.mouse.down({ button: (button as 'left' | 'right' | 'middle' | undefined) ?? 'left' })
+    await page.mouse.move(x, y)
+    await page.mouse.down({ button: (button as 'left' | 'right' | 'middle' | undefined) ?? 'left' })
   }
 
   /**
@@ -725,23 +725,23 @@ export class BrowserSession {
    * Completes a drag-selection started by executeMouseDown.
    */
   async executeMouseUp(x: number, y: number, button?: string): Promise<void> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
-    await this.page.mouse.move(x, y)
-    await this.page.mouse.up({ button: (button as 'left' | 'right' | 'middle' | undefined) ?? 'left' })
+    await page.mouse.move(x, y)
+    await page.mouse.up({ button: (button as 'left' | 'right' | 'middle' | undefined) ?? 'left' })
   }
 
   /**
    * Type text into the focused element.
    */
   async executeKeyboardType(text: string): Promise<void> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
 
     // Get focused element info for Playwright context
-    const focusedInfo = await getFocusedElementInfo(this.page)
+    const focusedInfo = await getFocusedElementInfo(page)
 
-    await this.page.keyboard.type(text)
+    await page.keyboard.type(text)
 
     // Use selector for fill action if focused element is fillable, otherwise type
     if (focusedInfo && (focusedInfo.tagName === 'input' || focusedInfo.tagName === 'textarea' || focusedInfo.tagName === 'select')) {
@@ -757,14 +757,14 @@ export class BrowserSession {
    * Press a key combination.
    */
   async executeKeyboardPress(key: string, modifiers?: string[]): Promise<void> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
 
     if (modifiers && modifiers.length > 0) {
       const combo = [...modifiers, key].join('+')
-      await this.page.keyboard.press(combo)
+      await page.keyboard.press(combo)
     } else {
-      await this.page.keyboard.press(key)
+      await page.keyboard.press(key)
     }
 
     const keyStr = modifiers?.length ? `${modifiers.join('+')}+${key}` : key
@@ -780,12 +780,12 @@ export class BrowserSession {
    * nothing is selected.
    */
   async getSelectedText(): Promise<string> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
 
     // page.evaluate のコールバックはブラウザコンテキストで実行されるため、
     // Node 側で DOM 型を解決できるよう文字列スクリプトとして渡す（element-info と同じ方針）。
-    const result = await this.page.evaluate(GET_SELECTED_TEXT_SCRIPT)
+    const result = await page.evaluate(GET_SELECTED_TEXT_SCRIPT)
     return typeof result === 'string' ? result : ''
   }
 
@@ -793,9 +793,9 @@ export class BrowserSession {
    * Navigate back.
    */
   async goBack(): Promise<void> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
-    await this.page.goBack()
+    await page.goBack()
     this.actionLog.add('direct', 'go_back', this.getCurrentUrl())
   }
 
@@ -803,9 +803,9 @@ export class BrowserSession {
    * Navigate forward.
    */
   async goForward(): Promise<void> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
-    await this.page.goForward()
+    await page.goForward()
     this.actionLog.add('direct', 'go_forward', this.getCurrentUrl())
   }
 
@@ -813,9 +813,9 @@ export class BrowserSession {
    * Reload the page.
    */
   async reload(): Promise<void> {
-    if (!this.page) throw new Error('No active browser page')
+    const page = this.assertPageActive()
     this.resetIdleTimer()
-    await this.page.reload()
+    await page.reload()
     this.actionLog.add('direct', 'reload', this.getCurrentUrl())
   }
 
@@ -825,6 +825,15 @@ export class BrowserSession {
   getCurrentUrl(): string {
     if (!this.page) return ''
     return this.page.url() as string
+  }
+
+  /**
+   * Whether this session is still usable (not closed). Used by the resume path
+   * to decide between reusing an existing live session and replying
+   * `resume_failed` so the Web client can fall back to a fresh open.
+   */
+  get isAlive(): boolean {
+    return !this.closed
   }
 
   /**
@@ -850,5 +859,10 @@ export class BrowserSession {
       clearTimeout(this.idleTimer)
       this.idleTimer = null
     }
+  }
+
+  private assertPageActive(): Page {
+    if (!this.page) throw new Error('No active browser page')
+    return this.page
   }
 }
