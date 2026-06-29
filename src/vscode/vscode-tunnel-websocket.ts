@@ -1,7 +1,6 @@
-import * as fs from 'fs'
-import * as os from 'os'
-import * as path from 'path'
-import { randomUUID } from 'crypto'
+import { promises as fs } from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 
 import WebSocket from 'ws'
 
@@ -10,12 +9,14 @@ import { BrowserLocalServer } from '../browser/browser-local-server'
 import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import type { EnvVarsProvider } from '../env-vars-filter'
 import { logger } from '../logger'
+import { getWorkspaceDir } from '../project-dir'
 import { getErrorMessage, buildWsUrl } from '../utils'
 import {
   BrowserSessionManager,
-  getMaxBrowserSessionsFromEnv,
 } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
+import { SELECTOR_TIMEOUT_NAVIGATION_MS } from '../mcp/tools/browser/browser-types'
+import type { FileChooserPayload } from '../mcp/tools/browser/browser-session'
 import { executePlaywrightScript } from '../browser/browser-script-executor'
 
 import {
@@ -48,6 +49,9 @@ export interface VsCodeServerMessage {
     | 'browser_go_forward'
     | 'browser_reload'
     | 'browser_mouse_click'
+    | 'browser_mouse_move'
+    | 'browser_mouse_down'
+    | 'browser_mouse_up'
     | 'browser_mouse_wheel'
     | 'browser_keyboard_type'
     | 'browser_keyboard_press'
@@ -56,6 +60,7 @@ export interface VsCodeServerMessage {
     | 'browser_execute_script'
     | 'browser_set_file'
     | 'browser_get_selection'
+    | 'browser_set_input_value'
   filePaths?: string[]
   files?: Array<{ name: string; mimeType: string; dataBase64: string }>
   sessionId?: string
@@ -74,6 +79,15 @@ export interface VsCodeServerMessage {
   // Browser-specific fields
   conversationId?: string
   url?: string
+  /**
+   * Browser resume request. When `true` on a `browser_open`, the agent reuses an
+   * existing live browser session for this `sessionId` and immediately re-sends
+   * the current frame/URL/ready state instead of creating a fresh session. If no
+   * live session exists, the agent replies `resume_failed` so the Web client can
+   * fall back to a normal (non-resume) open. Absent/false → current new-session
+   * behavior (backward compatible).
+   */
+  resume?: boolean
   x?: number
   y?: number
   button?: string
@@ -87,7 +101,19 @@ export interface VsCodeServerMessage {
   height?: number
   deviceId?: string
   script?: string
+  // browser_set_input_value fields (overlay-edited value → focused element)
+  value?: string
+  selectionStart?: number
+  selectionEnd?: number
 }
+
+/**
+ * `resume_failed` メッセージの `reason` が取り得る値。
+ * - `'not_found'`: 対象 sessionId のセッションが Map に存在しない
+ * - `'dead'`: セッションは存在するが live ではない（事前チェック時、または
+ *   getOrCreate 後の TOCTOU 再確認でアイドルクローズ完了を検知した場合）
+ */
+export type ResumeFailureReason = 'not_found' | 'dead'
 
 /**
  * Agent → API Server メッセージ
@@ -111,6 +137,9 @@ export interface VsCodeAgentMessage {
     | 'browser_script_result'
     | 'browser_script_progress'
     | 'browser_file_chooser_opened'
+    | 'browser_cursor_update'
+    | 'browser_focus_changed'
+    | 'resume_failed'
   sessionId?: string
   targetPort?: number
   requestId?: string
@@ -132,6 +161,11 @@ export interface VsCodeAgentMessage {
   pageTitle?: string
   text?: string
   timestamp?: number
+  /**
+   * 失敗・停止理由。`resume_failed` の場合は {@link ResumeFailureReason}
+   * （`'not_found' | 'dead'`）に限定される。`browser_stopped` 等では
+   * 任意のエラーメッセージ文字列が入るため型は `string` のまま。
+   */
   reason?: string
   entries?: Array<{ timestamp: number; source: string; action: string; details: string }>
   // Script execution fields
@@ -144,10 +178,54 @@ export interface VsCodeAgentMessage {
   step?: number
   line?: string
   script?: string
+  /** CSS cursor value at the last mouse-move point (browser_cursor_update) */
+  cursor?: string
+  // browser_focus_changed fields (focused input/textarea state → Web overlay)
+  focused?: boolean
+  rect?: { x: number; y: number; width: number; height: number }
+  value?: string
+  selectionStart?: number
+  selectionEnd?: number
+  multiline?: boolean
+  inputType?: string
+  maxLength?: number
+  fontSize?: number
+  lineHeight?: number
+  textAlign?: string
+  paddingTop?: number
+  paddingLeft?: number
 }
 
 /** Live view frame interval in milliseconds (5 FPS) */
 const LIVE_VIEW_INTERVAL_MS = 200
+
+/**
+ * Authoritative maximum total size (decoded bytes) for a browser file upload.
+ * Guards against unbounded base64 payloads consuming agent memory.
+ */
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 // 10MB
+
+/**
+ * Sanitize a client-supplied upload file name into a safe basename so it can be
+ * joined to a temp directory without escaping it (path-traversal defense).
+ *
+ * Strips any directory components (`path.basename`), then rejects path-relative
+ * tokens (`.`/`..`) and any remaining separator characters by replacing unsafe
+ * characters with `_`. Always returns a non-empty basename, falling back to
+ * `upload` when nothing safe remains.
+ */
+function sanitizeUploadFileName(name: unknown): string {
+  const raw = typeof name === 'string' ? name : ''
+  // Drop any directory portion the client may have included.
+  let base = path.basename(raw)
+  // Replace path separators and traversal-relevant characters; collapse control
+  // chars and leading dots that could hide the file or break paths.
+  base = base.replace(/[/\\]/g, '_').replace(/\0/g, '')
+  if (base === '' || base === '.' || base === '..') {
+    return 'upload'
+  }
+  return base
+}
 
 /**
  * VS Code トンネル WebSocket
@@ -167,10 +245,15 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private vsCodeServerEnvSignature: string = ''
   private wsProxy: VsCodeWsProxy | null = null
   private readonly portForwardSessions = new Map<string, { targetPort: number; wsProxy: VsCodeWsProxy }>()
-  readonly browserSessionManager = new BrowserSessionManager(getMaxBrowserSessionsFromEnv())
+  readonly browserSessionManager = new BrowserSessionManager()
   private browserLocalServer: BrowserLocalServer | null = null
   private browserLocalPort = 0
-  private readonly pendingFileChoosers = new Map<string, (paths: string[]) => void>()
+  private readonly pendingFileChoosers = new Map<string, (files: FileChooserPayload) => Promise<void>>()
+  /**
+   * Last CSS cursor value sent per browser session. Used to suppress redundant
+   * browser_cursor_update messages: only send when the cursor shape changes.
+   */
+  private readonly lastSentCursor = new Map<string, string>()
 
   constructor(
     apiUrl: string,
@@ -305,6 +388,15 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       case 'browser_mouse_click':
         this.handleBrowserMouseClick(msg)
         break
+      case 'browser_mouse_move':
+        void this.handleBrowserMouseMove(msg)
+        break
+      case 'browser_mouse_down':
+        void this.handleBrowserMouseDown(msg)
+        break
+      case 'browser_mouse_up':
+        void this.handleBrowserMouseUp(msg)
+        break
       case 'browser_mouse_wheel':
         this.handleBrowserMouseWheel(msg)
         break
@@ -329,6 +421,9 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       case 'browser_get_selection':
         void this.handleBrowserGetSelection(msg)
         break
+      case 'browser_set_input_value':
+        void this.handleBrowserSetInputValue(msg)
+        break
       default:
         logger.debug(`[vscode-ws] Unknown message type: ${(msg as { type: string }).type}`)
     }
@@ -343,7 +438,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private async handleVsCodeOpen(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId) {
-      this.send({ type: 'error', message: 'Missing sessionId' })
+      this.sendMissingSessionIdError()
       return
     }
 
@@ -572,7 +667,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private handlePortForwardOpen(msg: VsCodeServerMessage): void {
     const sessionId = msg.sessionId
     if (!sessionId) {
-      this.send({ type: 'error', message: 'Missing sessionId' })
+      this.sendMissingSessionIdError()
       return
     }
 
@@ -613,12 +708,49 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   private async handleBrowserOpen(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId) {
-      this.send({ type: 'error', message: 'Missing sessionId' })
+      this.sendMissingSessionIdError()
       return
+    }
+
+    // Reset any stale cursor state for this sessionId on (re)open. The idle-timeout
+    // auto-close path closes a session via BrowserSessionManager WITHOUT routing
+    // through handleBrowserClose/cleanup, so lastSentCursor can survive a closed
+    // session. If the same sessionId is later re-opened, a stale entry would make
+    // the first mouse-move's cursor look "unchanged" and suppress the initial
+    // browser_cursor_update, freezing the client cursor at the previous session's
+    // last shape. Deleting here guarantees the first move after (re)open is sent.
+    this.lastSentCursor.delete(sessionId)
+
+    // Resume request: reuse an existing LIVE session for this sessionId and
+    // immediately re-stream its current state. If no live session exists, reply
+    // resume_failed so the Web client can fall back to a normal open. A failed
+    // resume NEVER creates a new session (mirrors the Terminal resume contract).
+    if (msg.resume === true) {
+      const existing = this.browserSessionManager.get(sessionId)
+      if (!existing || !existing.isAlive) {
+        const reason: ResumeFailureReason = existing ? 'dead' : 'not_found'
+        logger.warn(`[vscode-ws] Browser resume failed (session=${sessionId}): ${reason}`)
+        this.send({ type: 'resume_failed', sessionId, reason })
+        return
+      }
     }
 
     try {
       const session = await this.browserSessionManager.getOrCreate(sessionId)
+
+      // TOCTOU guard for resume: the live pre-check above (get + isAlive) and the
+      // getOrCreate below straddle an await microtask boundary. An idle-timeout
+      // close() that completes within that window leaves the now-closed session
+      // lingering in the manager's Map, so getOrCreate can resolve a dead session.
+      // Without this re-check, getPage() would launch a fresh browser and we'd
+      // falsely report browser_ready (resume becoming a silent new-session open).
+      // Re-confirm liveness and fail the resume instead of resurrecting it.
+      if (msg.resume === true && !session.isAlive) {
+        const reason: ResumeFailureReason = 'dead'
+        logger.warn(`[vscode-ws] Browser resume failed (session=${sessionId}): ${reason}`)
+        this.send({ type: 'resume_failed', sessionId, reason })
+        return
+      }
 
       // Wire up action log notifications so in-process operations are relayed to Web UI
       session.actionLog.onChange = (entry) => {
@@ -635,16 +767,32 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         this.send({ type: 'browser_file_chooser_opened', sessionId })
       }
 
+      // Wire up focus-change notifications so the Web client can overlay a real
+      // input/textarea on the focused element (native caret + IME).
+      session.onFocusChange = (payload) => {
+        this.send({ type: 'browser_focus_changed', sessionId, ...payload })
+      }
+
       if (msg.conversationId) {
         this.browserSessionManager.linkConversation(msg.conversationId, sessionId)
       }
 
-      // Navigate to URL if provided
-      if (msg.url) {
+      if (msg.resume === true) {
+        // Resume: the existing page already holds the user's state. Never
+        // navigate (that would discard it) — just ensure the page is live and
+        // re-surface any focused field, then fall through to re-stream + ready.
+        await session.getPage()
+        await session.reportFocusNow()
+      } else if (msg.url) {
+        // Navigate to URL if provided
         const validation = validateUrl(msg.url)
         if (validation.valid) {
           const page = await session.getPage()
-          await page.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+          await page.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
+          // Re-report focus on the freshly loaded document so an autofocused
+          // field (e.g. a login form) surfaces its overlay caret without a
+          // subsequent focus change. focusin only fires on focus CHANGES.
+          await session.reportFocusNow()
         }
       } else {
         // Ensure page is initialized
@@ -696,6 +844,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
 
     this.pendingFileChoosers.delete(sessionId)
+    this.lastSentCursor.delete(sessionId)
     this.send({ type: 'browser_stopped', sessionId, reason: 'closed' })
     logger.info(`[vscode-ws] Browser session closed: ${sessionId}`)
   }
@@ -706,7 +855,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -718,8 +867,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     try {
       const page = await session.getPage()
-      await page.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      await page.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
+      // Record the navigation BEFORE the focus re-report so the action-log entry
+      // never depends on reportFocusNow succeeding (it already swallows its own
+      // errors, but keeping the log independent guards against future changes).
       session.actionLog.add('direct', 'navigate', msg.url)
+      // Re-report focus on the freshly loaded document so an autofocused field
+      // surfaces its overlay caret (focusin only fires on focus CHANGES).
+      await session.reportFocusNow()
     } catch (error) {
       this.send({ type: 'error', sessionId, message: `Navigation failed: ${getErrorMessage(error)}` })
     }
@@ -769,6 +924,60 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
   }
 
+  private async handleBrowserMouseMove(msg: VsCodeServerMessage): Promise<void> {
+    const sessionId = msg.sessionId
+    const session = sessionId ? this.browserSessionManager.get(sessionId) : undefined
+    if (!session || !sessionId || msg.x === undefined || msg.y === undefined) return
+    try {
+      await session.executeMouseMove(msg.x, msg.y)
+    } catch (error) {
+      // mouse_move is high-frequency and best-effort: a failed move (e.g. mid-drag
+      // navigation) is intentionally logged but NOT surfaced as an `error` message
+      // to the web client, to avoid error spam during drag-selection. Unlike
+      // mouse_down / mouse_up, a dropped move does not leave the page in a broken state.
+      logger.warn(`[vscode-ws] mouseMove failed (session=${sessionId}): ${getErrorMessage(error)}`)
+      return
+    }
+
+    // Best-effort cursor-shape mirroring: read the CSS cursor at the point and,
+    // only when it differs from the last value sent for this session, forward a
+    // browser_cursor_update. A failed read is logged (not silently swallowed)
+    // and skips the update for this frame rather than spamming an error message.
+    let cursor: string
+    try {
+      cursor = await session.getCursorAt(msg.x, msg.y)
+    } catch (error) {
+      logger.warn(`[vscode-ws] getCursorAt failed (session=${sessionId}): ${getErrorMessage(error)}`)
+      return
+    }
+    if (this.lastSentCursor.get(sessionId) !== cursor) {
+      this.lastSentCursor.set(sessionId, cursor)
+      this.send({ type: 'browser_cursor_update', sessionId, cursor })
+    }
+  }
+
+  private async handleBrowserMouseDown(msg: VsCodeServerMessage): Promise<void> {
+    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    if (!session || msg.x === undefined || msg.y === undefined) return
+    try {
+      await session.executeMouseDown(msg.x, msg.y, msg.button)
+    } catch (error) {
+      logger.warn(`[vscode-ws] mouseDown failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
+      this.send({ type: 'error', sessionId: msg.sessionId, message: `mouseDown failed: ${getErrorMessage(error)}` })
+    }
+  }
+
+  private async handleBrowserMouseUp(msg: VsCodeServerMessage): Promise<void> {
+    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    if (!session || msg.x === undefined || msg.y === undefined) return
+    try {
+      await session.executeMouseUp(msg.x, msg.y, msg.button)
+    } catch (error) {
+      logger.warn(`[vscode-ws] mouseUp failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
+      this.send({ type: 'error', sessionId: msg.sessionId, message: `mouseUp failed: ${getErrorMessage(error)}` })
+    }
+  }
+
   private async handleBrowserMouseWheel(msg: VsCodeServerMessage): Promise<void> {
     const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
     if (!session || msg.deltaX === undefined || msg.deltaY === undefined) return
@@ -807,7 +1016,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -835,7 +1044,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -848,6 +1057,19 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
   }
 
+  private async handleBrowserSetInputValue(msg: VsCodeServerMessage): Promise<void> {
+    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    if (!session) return
+    // The contract requires `value` to be a string; ignore malformed payloads.
+    if (typeof msg.value !== 'string') return
+    try {
+      await session.setFocusedInputValue(msg.value, msg.selectionStart, msg.selectionEnd)
+    } catch (error) {
+      logger.warn(`[vscode-ws] setInputValue failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
+      this.send({ type: 'error', sessionId: msg.sessionId, message: `setInputValue failed: ${getErrorMessage(error)}` })
+    }
+  }
+
   private async handleBrowserExecuteScript(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId || !msg.script) {
@@ -857,7 +1079,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     const session = this.browserSessionManager.get(sessionId)
     if (!session) {
-      this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+      this.sendBrowserSessionNotFoundError(sessionId)
       return
     }
 
@@ -906,48 +1128,230 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       this.send({ type: 'error', sessionId, message: 'No pending file chooser for this session' })
       return
     }
+    // Consume the pending chooser up-front so it is not left dangling on any path.
     this.pendingFileChoosers.delete(sessionId)
 
-    // filePaths が指定されていれば直接使用（Agent Docker内モード）
-    if (msg.filePaths && msg.filePaths.length > 0) {
-      accept(msg.filePaths)
-      return
-    }
-
-    // files（base64）が指定されていれば一時ファイルに書き込み（ローカルPCモード）
-    const files = msg.files
-    if (!files || files.length === 0) {
-      accept([])
-      return
-    }
-
-    const uploadId = randomUUID()
-    const tempPaths: string[] = []
+    // Outermost guard: any unexpected error (malformed payload, FS failure, a
+    // throwing `accept`) MUST surface as an `error` notification AND cancel the
+    // chooser, never escape as an unhandled rejection that leaves the remote
+    // `<input type=file>` stuck waiting. Each branch below already cancels on
+    // its own validation failures; this catch is the final backstop so a
+    // non-string filePath element, a non-array `files`, etc. cannot wedge the
+    // chooser.
     try {
-      for (let index = 0; index < files.length; index++) {
-        const file = files[index]
-        const safeName = path.basename(file.name).replace(/[^a-zA-Z0-9._-]/g, '_') || 'file'
-        const tmpPath = path.join(os.tmpdir(), `ai-support-upload-${uploadId}-${index}-${safeName}`)
-        await fs.promises.writeFile(tmpPath, Buffer.from(file.dataBase64, 'base64'))
-        tempPaths.push(tmpPath)
+      if (msg.files === undefined && msg.filePaths !== undefined) {
+        await this.handleBrowserSetFileByPaths(sessionId, accept, msg.filePaths)
+        return
       }
-      accept(tempPaths)
-      // setFiles() の完了を待つための待機時間（Playwright が同期的にファイルを読むが、
-      // コールバック経由のため直接 await できない）
-      const FILE_CHOOSER_SETTLE_MS = 2000
-      await new Promise<void>((resolve) => setTimeout(resolve, FILE_CHOOSER_SETTLE_MS))
-    } catch (err) {
-      logger.error(`[vscode-ws] Failed to write temporary file for upload: ${err}`)
-      accept([])
+      await this.handleBrowserSetFileByContent(sessionId, accept, msg.files)
+    } catch (error) {
+      this.send({ type: 'error', sessionId, message: `File upload failed: ${getErrorMessage(error)}` })
+      await this.cancelFileChooser(accept, sessionId)
+    }
+  }
+
+  /**
+   * Branch 1: Agent FS paths chosen directly by the user via the workspace file
+   * explorer. These arrive as workspace-relative paths (e.g. `repos/app.ts`) —
+   * Playwright's setFiles requires absolute paths, so each is resolved against
+   * the workspace root before being forwarded. Already absolute paths are
+   * accepted as-is for backward compatibility, but every resolved path must
+   * stay inside the workspace root (traversal + symlink-escape guard).
+   */
+  private async handleBrowserSetFileByPaths(
+    sessionId: string,
+    accept: (files: FileChooserPayload) => Promise<void>,
+    filePaths: unknown,
+  ): Promise<void> {
+    // Explicit input validation (do not rely on a thrown TypeError): the payload
+    // must be an array of strings. Anything else is rejected + chooser cancelled.
+    if (!Array.isArray(filePaths) || filePaths.some((p) => typeof p !== 'string')) {
       this.send({
         type: 'error',
-        sessionId: msg.sessionId,
-        message: `File upload failed: ${err instanceof Error ? err.message : String(err)}`,
+        sessionId,
+        message: 'Invalid file payload: filePaths must be an array of strings',
       })
-    } finally {
-      for (const p of tempPaths) {
-        await fs.promises.unlink(p).catch(() => {})
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
+
+    const resolved = await this.resolveWorkspaceFilePaths(filePaths as string[])
+    if (typeof resolved === 'string') {
+      // Resolution rejected the upload (escape attempt / missing workspace /
+      // symlink pointing outside). Surface the reason and cancel the chooser so
+      // the remote input is not left pending.
+      this.send({ type: 'error', sessionId, message: resolved })
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
+    try {
+      await accept(resolved)
+    } catch (error) {
+      // Symmetry with the base64 branch: when setFiles rejects, surface the
+      // error AND cancel the chooser so the remote input is not left pending.
+      this.send({ type: 'error', sessionId, message: `File upload failed: ${getErrorMessage(error)}` })
+      await this.cancelFileChooser(accept, sessionId)
+    }
+  }
+
+  /**
+   * Branch 2: base64 file contents uploaded from the web client. Decode each
+   * into a temporary file on the agent host, hand the temp paths to setFiles,
+   * then always remove the temp files afterwards.
+   */
+  private async handleBrowserSetFileByContent(
+    sessionId: string,
+    accept: (files: FileChooserPayload) => Promise<void>,
+    rawFiles: unknown,
+  ): Promise<void> {
+    // Explicit input validation (do not rely on a thrown TypeError): `files`
+    // must be an array, and every entry must carry a string `dataBase64`.
+    if (rawFiles !== undefined && !Array.isArray(rawFiles)) {
+      this.send({ type: 'error', sessionId, message: 'Invalid file payload: files must be an array' })
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
+    const files = (rawFiles ?? []) as Array<{ name?: unknown; dataBase64?: unknown }>
+
+    // Validate every entry has a string dataBase64 before decoding so we never
+    // pass undefined / non-string into Buffer.from.
+    if (files.some((f) => typeof f?.dataBase64 !== 'string')) {
+      this.send({ type: 'error', sessionId, message: 'Invalid file payload: dataBase64 must be a string' })
+      // Cancel the remote input so it is not left pending/half-filled.
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
+    const safeFiles = files as Array<{ name?: unknown; dataBase64: string }>
+
+    // Estimate decoded size from base64 length and enforce the authoritative limit
+    // before allocating buffers.
+    const totalBytes = safeFiles.reduce((sum, f) => sum + Math.floor((f.dataBase64.length * 3) / 4), 0)
+    if (totalBytes > MAX_UPLOAD_BYTES) {
+      this.send({ type: 'error', sessionId, message: 'File too large (max 10MB)' })
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
+
+    // Create a unique temp directory for this upload so concurrent uploads and
+    // duplicate file names never collide.
+    let tmpDir: string
+    try {
+      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'browser-upload-'))
+    } catch (error) {
+      this.send({ type: 'error', sessionId, message: `File upload failed: ${getErrorMessage(error)}` })
+      await this.cancelFileChooser(accept, sessionId)
+      return
+    }
+
+    try {
+      const tmpPaths: string[] = []
+      for (let i = 0; i < safeFiles.length; i++) {
+        const file = safeFiles[i]
+        // Prefix with the index so distinct uploads sharing a sanitized name
+        // never overwrite one another within the temp dir.
+        const safeName = `${i}-${sanitizeUploadFileName(file.name)}`
+        const tmpPath = path.join(tmpDir, safeName)
+        await fs.writeFile(tmpPath, Buffer.from(file.dataBase64, 'base64'))
+        tmpPaths.push(tmpPath)
       }
+
+      const payload: FileChooserPayload = tmpPaths
+      await accept(payload)
+    } catch (error) {
+      this.send({ type: 'error', sessionId, message: `File upload failed: ${getErrorMessage(error)}` })
+      await this.cancelFileChooser(accept, sessionId)
+    } finally {
+      // Always remove the temp files/dir once setFiles has resolved or rejected.
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch((error) => {
+        logger.warn(`[vscode-ws] failed to remove temp upload dir ${tmpDir}: ${getErrorMessage(error)}`)
+      })
+    }
+  }
+
+  /**
+   * Resolve user-chosen file-explorer paths into absolute paths suitable for
+   * Playwright's `setFiles`, enforcing that every resolved path stays inside
+   * the agent workspace root.
+   *
+   * Resolution rules per path:
+   *  - Absolute paths are kept as-is (backward compatibility for callers that
+   *    already send absolute agent-FS paths).
+   *  - Relative paths (e.g. `repos/app.ts`) are resolved against the workspace
+   *    directory (`getWorkspaceDir(projectDir)`).
+   *
+   * Traversal guard (lexical): after resolution, the absolute path must be the
+   * workspace root itself or a descendant of it. `path.relative(workspaceDir,
+   * resolved)` starting with `..` (or being absolute) means the path escaped the
+   * workspace and is rejected. This rejects both relative escapes
+   * (`../../etc/passwd`) and absolute paths pointing outside the workspace.
+   *
+   * Symlink-escape guard (physical): a path that is lexically inside the
+   * workspace may still resolve, through a symlink, to a target OUTSIDE it
+   * (e.g. a `link` inside the workspace pointing at `../../.ssh/id_rsa`). After
+   * the lexical check, each existing path's real (canonical) location is
+   * resolved via `fs.realpath` and re-checked against the workspace root. Paths
+   * whose real location escapes the workspace are rejected. Non-existent paths
+   * cannot be canonicalized; they are left as-is (Playwright's setFiles will
+   * fail on them) rather than rejected here, preserving the lexical guarantee.
+   *
+   * Returns the resolved absolute paths on success, or an error message string
+   * describing why the upload was rejected (never silently dropped).
+   */
+  private async resolveWorkspaceFilePaths(filePaths: string[]): Promise<string[] | string> {
+    // A workspace root is required to both resolve relative paths and to bound
+    // absolute ones. Without a project directory we cannot safely accept any
+    // file-explorer path.
+    if (!this.projectDir) {
+      return 'Cannot resolve file paths: no project directory configured for this agent'
+    }
+    const workspaceDir = path.resolve(getWorkspaceDir(this.projectDir))
+    // Canonicalize the workspace root too, so a symlinked workspace dir does not
+    // produce false positives when comparing against realpath'd children.
+    const realWorkspaceDir = await fs.realpath(workspaceDir).catch(() => workspaceDir)
+
+    const isInside = (root: string, target: string): boolean => {
+      const rel = path.relative(root, target)
+      // Inside when the relative path stays under root: not climbing out (`..`)
+      // and not forced absolute (different root/drive). An empty `rel` means the
+      // path IS the root, which is allowed.
+      return !rel.startsWith('..') && !path.isAbsolute(rel)
+    }
+
+    const resolved: string[] = []
+    for (const filePath of filePaths) {
+      const absolute = path.isAbsolute(filePath)
+        ? path.resolve(filePath)
+        : path.resolve(workspaceDir, filePath)
+      // Lexical guard first (cheap, also covers non-existent paths).
+      if (!isInside(workspaceDir, absolute)) {
+        return `Access denied: file path is outside the workspace: ${filePath}`
+      }
+      // Physical guard: resolve symlinks and re-check. Missing paths cannot be
+      // canonicalized — keep the lexically-validated absolute path (setFiles
+      // will surface the non-existence downstream).
+      const real = await fs.realpath(absolute).catch(() => null)
+      if (real !== null && !isInside(realWorkspaceDir, real)) {
+        return `Access denied: file path is outside the workspace: ${filePath}`
+      }
+      resolved.push(absolute)
+    }
+    return resolved
+  }
+
+  /**
+   * Cancel a pending file chooser by applying an empty file list so the remote
+   * `<input type=file>` is cleared rather than left pending. Failures are
+   * swallowed (best-effort) since the user has already been told why the upload
+   * was rejected.
+   */
+  private async cancelFileChooser(
+    accept: (files: FileChooserPayload) => Promise<void>,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      await accept([])
+    } catch (error) {
+      logger.warn(`[vscode-ws] cancel file chooser failed (session=${sessionId}): ${getErrorMessage(error)}`)
     }
   }
 
@@ -955,6 +1359,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     // ブラウザセッションのクリーンアップ
     void this.browserSessionManager.closeAll()
     this.pendingFileChoosers.clear()
+    this.lastSentCursor.clear()
 
     // ブラウザローカルサーバーのクリーンアップ
     if (this.browserLocalServer) {
@@ -977,6 +1382,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       this.vsCodeServer.stop()
       this.vsCodeServer = null
     }
+  }
+
+  private sendMissingSessionIdError(): void {
+    this.send({ type: 'error', message: 'Missing sessionId' })
+  }
+
+  private sendBrowserSessionNotFoundError(sessionId: string): void {
+    this.send({ type: 'error', sessionId, message: 'Browser session not found' })
   }
 
   private send(msg: VsCodeAgentMessage): void {

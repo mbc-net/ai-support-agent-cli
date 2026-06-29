@@ -15,3 +15,6 @@ export const SELECTOR_TIMEOUT_MULTIPLE_MS = 5_000 // multi-candidate fallback cl
 
 // HTTP request timeouts
 export const BROWSER_TIMEOUT_REQUEST_MS = 3_000 // HTTP GET probe
+
+// Delay between retries while resolving the first active browser session
+export const BROWSER_SESSION_RETRY_DELAY_MS = 500

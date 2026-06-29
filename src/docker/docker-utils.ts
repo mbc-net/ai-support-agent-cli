@@ -168,7 +168,7 @@ export function dockerLogin(): void {
 
 /** Convert a path.relative() result to POSIX format for container use */
 export function toPosixRelative(relativePath: string): string {
-  return relativePath.split(require('path').sep).join('/')
+  return relativePath.split(path.sep).join('/')
 }
 
 /**
@@ -189,7 +189,6 @@ export function isRunningViaTsNode(): boolean {
 export function buildDevMounts(): string[] {
   if (!isRunningViaTsNode()) return []
   // __dirname is agent/src/docker — walk up two levels to get agent/
-  const path = require('path')
   const agentRoot = path.resolve(__dirname, '..', '..')
   const distDir = path.join(agentRoot, 'dist')
   const localesDir = path.join(agentRoot, 'src', 'locales')

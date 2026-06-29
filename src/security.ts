@@ -5,7 +5,7 @@ import * as path from 'path'
 import { ERR_NO_FILE_PATH_SPECIFIED } from './constants'
 import { t } from './i18n'
 import type { CommandResult } from './types'
-import { parseString } from './utils'
+import { parseString, stripTrailingSlash } from './utils'
 
 export const BLOCKED_COMMAND_PATTERNS = [
   /\brm\s+-rf\s+\/(?!\w)/,
@@ -124,7 +124,7 @@ export function validateBindMountPathSync(hostPath: string): string | null {
   }
   const allBlocked = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
   for (const prefix of allBlocked) {
-    const prefixWithoutSlash = prefix.replace(/\/$/, '')
+    const prefixWithoutSlash = stripTrailingSlash(prefix)
     if (resolved === prefixWithoutSlash || resolved.startsWith(prefix)) {
       return `Access denied: ${prefix} paths are blocked`
     }
@@ -150,7 +150,7 @@ export async function validateFilePath(filePath: string, baseDir?: string): Prom
   }
   const allBlocked = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
   for (const prefix of allBlocked) {
-    const prefixWithoutSlash = prefix.replace(/\/$/, '')
+    const prefixWithoutSlash = stripTrailingSlash(prefix)
     if (resolved === prefixWithoutSlash || resolved.startsWith(prefix)) {
       return `Access denied: ${prefix} paths are blocked`
     }

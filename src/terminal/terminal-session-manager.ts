@@ -1,5 +1,5 @@
 import { TerminalSession, TerminalSessionOptions } from './terminal-session'
-import { MAX_CONCURRENT_SESSIONS, SESSION_GRACE_TIMEOUT_MS } from './constants'
+import { SESSION_GRACE_TIMEOUT_MS } from './constants'
 import { logger } from '../logger'
 import type { TerminalSessionInfo, TerminalSessionMeta } from './terminal-session'
 
@@ -75,10 +75,6 @@ export class TerminalSessionManager {
     if (existing && existing.isAlive()) {
       logger.debug(`[terminal] Resuming session within grace window: ${sessionId}`)
       return existing
-    }
-
-    if (this.sessions.size >= MAX_CONCURRENT_SESSIONS) {
-      return null
     }
 
     const session = new TerminalSession(sessionId, options)

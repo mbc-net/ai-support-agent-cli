@@ -1,3 +1,8 @@
+import { existsSync } from 'node:fs'
+import { promises as fsPromises } from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+
 import WebSocket from 'ws'
 
 import { VsCodeTunnelWebSocket, VsCodeAgentMessage } from '../../src/vscode/vscode-tunnel-websocket'
@@ -872,6 +877,38 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(mockPage.goto).toHaveBeenCalledWith('https://example.com', expect.any(Object))
     })
 
+    it('should re-report focus after goto so an autofocused field shows its caret', async () => {
+      const mockPage = {
+        goto: jest.fn().mockResolvedValue(undefined),
+        url: jest.fn().mockReturnValue('https://example.com'),
+        title: jest.fn().mockResolvedValue('Example'),
+        screenshot: jest.fn().mockResolvedValue(Buffer.from('fake')),
+      }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('https://example.com'),
+        getPageTitle: jest.fn().mockResolvedValue('Example'),
+        actionLog: { onChange: null },
+        reportFocusNow: jest.fn().mockResolvedValue(undefined),
+      }
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-b2f',
+        url: 'https://example.com',
+      })
+
+      // The initial focus report must run after the navigation so a page that
+      // autofocuses an input surfaces browser_focus_changed without user action.
+      expect(mockSession.reportFocusNow).toHaveBeenCalled()
+      const gotoOrder = mockPage.goto.mock.invocationCallOrder[0]
+      const reportOrder = mockSession.reportFocusNow.mock.invocationCallOrder[0]
+      expect(gotoOrder).toBeLessThan(reportOrder)
+    })
+
     it('should link conversation if conversationId provided', async () => {
       const mockPage = {
         url: jest.fn().mockReturnValue('about:blank'),
@@ -908,6 +945,167 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(sentMessages[0].type).toBe('browser_stopped')
       expect(sentMessages[0].sessionId).toBe('sess-b4')
       expect(sentMessages[0].reason).toContain('max reached')
+    })
+
+    // --- resume branch ---
+
+    it('should reuse an existing live session on resume and re-send ready/frame without navigating', async () => {
+      const mockPage = {
+        goto: jest.fn().mockResolvedValue(undefined),
+        url: jest.fn().mockReturnValue('https://example.com/page'),
+        title: jest.fn().mockResolvedValue('Existing'),
+      }
+      const mockSession = {
+        isAlive: true,
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('https://example.com/page'),
+        getPageTitle: jest.fn().mockResolvedValue('Existing'),
+        reportFocusNow: jest.fn().mockResolvedValue(undefined),
+        actionLog: { onChange: null },
+      }
+      // get() returns the existing live session; getOrCreate() must also return it
+      // (resume reuses — never creates).
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-resume',
+        resume: true,
+        // A URL is present but must be ignored on resume (state is preserved).
+        url: 'https://example.com/other',
+      })
+
+      // Existing session reused via getOrCreate.
+      expect(tunnel.browserSessionManager.getOrCreate).toHaveBeenCalledWith('sess-resume')
+      // No navigation on resume — current page state is preserved.
+      expect(mockPage.goto).not.toHaveBeenCalled()
+      // Live view re-started (re-stream current frame) and ready re-sent.
+      expect(mockSession.startLiveView).toHaveBeenCalled()
+      expect(mockSession.reportFocusNow).toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toMatchObject({
+        type: 'browser_ready',
+        sessionId: 'sess-resume',
+        currentUrl: 'https://example.com/page',
+      })
+      // resume_failed must NOT be sent on a successful resume.
+      expect(sentMessages.some((m) => m.type === 'resume_failed')).toBe(false)
+    })
+
+    it('should send resume_failed (not_found) when resume requested but no session exists', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      tunnel.browserSessionManager.getOrCreate = jest.fn()
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-missing',
+        resume: true,
+      })
+
+      // A failed resume must NEVER create a new session.
+      expect(tunnel.browserSessionManager.getOrCreate).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({
+        type: 'resume_failed',
+        sessionId: 'sess-missing',
+        reason: 'not_found',
+      })
+    })
+
+    it('should send resume_failed (dead) when the existing session is no longer alive', async () => {
+      const deadSession = { isAlive: false }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(deadSession)
+      tunnel.browserSessionManager.getOrCreate = jest.fn()
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-dead',
+        resume: true,
+      })
+
+      expect(tunnel.browserSessionManager.getOrCreate).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({
+        type: 'resume_failed',
+        sessionId: 'sess-dead',
+        reason: 'dead',
+      })
+    })
+
+    it('should send resume_failed (dead) and not launch a new browser when the session dies during the getOrCreate await (TOCTOU race)', async () => {
+      // Simulate the idle-timeout close() completing in the await microtask
+      // window between the live pre-check (get) and getOrCreate resolving:
+      // get() observes a live session, but by the time getOrCreate resolves the
+      // session has been closed (isAlive flipped to false) while still lingering
+      // in the manager's Map. Without a post-await re-check, getPage() would
+      // launch a fresh browser and we'd falsely report browser_ready.
+      const racedSession = {
+        isAlive: true,
+        getPage: jest.fn().mockResolvedValue({}),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('https://example.com'),
+        getPageTitle: jest.fn().mockResolvedValue('Existing'),
+        reportFocusNow: jest.fn().mockResolvedValue(undefined),
+        actionLog: { onChange: null },
+      }
+      // Live at pre-check time.
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(racedSession)
+      // getOrCreate resolves the same session, but the idle-close has by now
+      // flipped isAlive to false (the race we must detect).
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockImplementation(async () => {
+        racedSession.isAlive = false
+        return racedSession
+      })
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({
+        type: 'browser_open',
+        sessionId: 'sess-raced',
+        resume: true,
+      })
+
+      // The race must be detected: resume_failed(dead) and NO new browser.
+      expect(racedSession.getPage).not.toHaveBeenCalled()
+      expect(racedSession.startLiveView).not.toHaveBeenCalled()
+      expect(sentMessages.some((m) => m.type === 'browser_ready')).toBe(false)
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({
+        type: 'resume_failed',
+        sessionId: 'sess-raced',
+        reason: 'dead',
+      })
+    })
+
+    it('should fall through to a normal new-session open when resume is absent (backward compatible)', async () => {
+      const mockPage = {
+        url: jest.fn().mockReturnValue('about:blank'),
+        title: jest.fn().mockResolvedValue(''),
+      }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
+        getPageTitle: jest.fn().mockResolvedValue(''),
+        actionLog: { onChange: null },
+      }
+      const getSpy = jest.fn()
+      tunnel.browserSessionManager.get = getSpy
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({ type: 'browser_open', sessionId: 'sess-new' })
+
+      // Without resume, the liveness pre-check (get) is never consulted.
+      expect(getSpy).not.toHaveBeenCalled()
+      expect(tunnel.browserSessionManager.getOrCreate).toHaveBeenCalledWith('sess-new')
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('browser_ready')
+      expect(sentMessages.some((m) => m.type === 'resume_failed')).toBe(false)
     })
   })
 
@@ -987,6 +1185,56 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(mockPage.goto).toHaveBeenCalledWith('https://example.com', expect.any(Object))
     })
 
+    it('should re-report focus after navigate so an autofocused field shows its caret', async () => {
+      const mockPage = { goto: jest.fn().mockResolvedValue(undefined) }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        actionLog: { add: jest.fn() },
+        reportFocusNow: jest.fn().mockResolvedValue(undefined),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserNavigate({
+        type: 'browser_navigate',
+        sessionId: 'sess-b8f',
+        url: 'https://example.com',
+      })
+
+      expect(mockSession.reportFocusNow).toHaveBeenCalled()
+      const gotoOrder = mockPage.goto.mock.invocationCallOrder[0]
+      const reportOrder = mockSession.reportFocusNow.mock.invocationCallOrder[0]
+      expect(gotoOrder).toBeLessThan(reportOrder)
+      // The navigation must be recorded BEFORE the focus re-report so the
+      // action-log entry never depends on reportFocusNow.
+      expect(mockSession.actionLog.add).toHaveBeenCalledWith('direct', 'navigate', 'https://example.com')
+      const addOrder = mockSession.actionLog.add.mock.invocationCallOrder[0]
+      expect(addOrder).toBeLessThan(reportOrder)
+    })
+
+    it('should record the navigate action even if reportFocusNow throws', async () => {
+      const mockPage = { goto: jest.fn().mockResolvedValue(undefined) }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        actionLog: { add: jest.fn() },
+        // reportFocusNow normally swallows its own errors, but assert that even a
+        // (hypothetical) throw cannot drop the navigation record because the log
+        // entry is added first.
+        reportFocusNow: jest.fn().mockRejectedValue(new Error('focus boom')),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserNavigate({
+        type: 'browser_navigate',
+        sessionId: 'sess-b8fe',
+        url: 'https://example.com',
+      })
+
+      // The navigate entry is recorded despite the focus re-report rejecting.
+      expect(mockSession.actionLog.add).toHaveBeenCalledWith('direct', 'navigate', 'https://example.com')
+    })
+
     it('should send error on navigation failure', async () => {
       const mockPage = { goto: jest.fn().mockRejectedValue(new Error('timeout')) }
       const mockSession = { getPage: jest.fn().mockResolvedValue(mockPage) }
@@ -1064,6 +1312,140 @@ describe('VsCodeTunnelWebSocket', () => {
         clickCount: 2,
       })
       expect(mockSession.executeMouseClick).toHaveBeenCalledWith(100, 200, 'left', 2)
+    })
+  })
+
+  describe('handleBrowserMouseMove - cursor update', () => {
+    it('should do nothing if missing coordinates', async () => {
+      const mockSession = { executeMouseMove: jest.fn(), getCursorAt: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm0' })
+      expect(mockSession.executeMouseMove).not.toHaveBeenCalled()
+      expect(mockSession.getCursorAt).not.toHaveBeenCalled()
+    })
+
+    it('should move then send browser_cursor_update on first move', async () => {
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockResolvedValue('pointer'),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm1', x: 30, y: 40 })
+      expect(mockSession.executeMouseMove).toHaveBeenCalledWith(30, 40)
+      expect(mockSession.getCursorAt).toHaveBeenCalledWith(30, 40)
+      expect(sentMessages).toEqual([{ type: 'browser_cursor_update', sessionId: 'sess-mm1', cursor: 'pointer' }])
+    })
+
+    it('should not resend when cursor is unchanged between moves', async () => {
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockResolvedValue('text'),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm2', x: 1, y: 1 })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm2', x: 2, y: 2 })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({ type: 'browser_cursor_update', sessionId: 'sess-mm2', cursor: 'text' })
+    })
+
+    it('should resend when cursor changes between moves', async () => {
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockResolvedValueOnce('default').mockResolvedValueOnce('pointer'),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm3', x: 1, y: 1 })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm3', x: 2, y: 2 })
+      expect(sentMessages).toEqual([
+        { type: 'browser_cursor_update', sessionId: 'sess-mm3', cursor: 'default' },
+        { type: 'browser_cursor_update', sessionId: 'sess-mm3', cursor: 'pointer' },
+      ])
+    })
+
+    it('should warn and skip cursor update when executeMouseMove fails (no error send)', async () => {
+      const { logger } = require('../../src/logger')
+      const mockSession = {
+        executeMouseMove: jest.fn().mockRejectedValue(new Error('mid-drag nav')),
+        getCursorAt: jest.fn(),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm4', x: 5, y: 5 })
+      expect(mockSession.getCursorAt).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(0)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('mouseMove failed'))
+    })
+
+    it('should warn and skip update when getCursorAt rejects (no error send)', async () => {
+      const { logger } = require('../../src/logger')
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockRejectedValue(new Error('eval failed')),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm5', x: 5, y: 5 })
+      expect(mockSession.executeMouseMove).toHaveBeenCalledWith(5, 5)
+      expect(sentMessages).toHaveLength(0)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('getCursorAt failed'))
+    })
+
+    it('should clear lastSentCursor on browser close so the next move resends', async () => {
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockResolvedValue('pointer'),
+        stopLiveView: jest.fn(),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      tunnel.browserSessionManager.close = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm6', x: 1, y: 1 })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserClose({ type: 'browser_close', sessionId: 'sess-mm6' })
+      sentMessages.length = 0
+      // After close, lastSentCursor was cleared, so the same cursor value is resent.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm6', x: 1, y: 1 })
+      expect(sentMessages).toEqual([{ type: 'browser_cursor_update', sessionId: 'sess-mm6', cursor: 'pointer' }])
+    })
+
+    it('should clear stale lastSentCursor on re-open so the next move resends after an idle auto-close', async () => {
+      const mockSession = {
+        executeMouseMove: jest.fn().mockResolvedValue(undefined),
+        getCursorAt: jest.fn().mockResolvedValue('pointer'),
+        getPage: jest.fn().mockResolvedValue(undefined),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
+        getPageTitle: jest.fn().mockResolvedValue(''),
+        actionLog: { onChange: null },
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // First move records the cursor for this sessionId.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm7', x: 1, y: 1 })
+
+      // Simulate an idle-timeout auto-close that bypasses handleBrowserClose/cleanup:
+      // lastSentCursor retains the previous session's value (no delete happens here).
+
+      // Re-opening the same sessionId must clear the stale cursor entry.
+      sentMessages.length = 0
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({ type: 'browser_open', sessionId: 'sess-mm7' })
+
+      // The first move after re-open must resend even though the cursor value is
+      // identical to the previous session's last value.
+      sentMessages.length = 0
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mm7', x: 1, y: 1 })
+      expect(sentMessages).toEqual([{ type: 'browser_cursor_update', sessionId: 'sess-mm7', cursor: 'pointer' }])
     })
   })
 
@@ -1403,6 +1785,30 @@ describe('VsCodeTunnelWebSocket', () => {
       tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(tunnel as any).onParsedMessage({ type: 'browser_mouse_click', sessionId: 'sess-z', x: 10, y: 20 })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should dispatch browser_mouse_move', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_mouse_move', sessionId: 'sess-z', x: 10, y: 20 })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should dispatch browser_mouse_down', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_mouse_down', sessionId: 'sess-z', x: 10, y: 20 })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should dispatch browser_mouse_up', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_mouse_up', sessionId: 'sess-z', x: 10, y: 20 })
       await new Promise(resolve => setTimeout(resolve, 10))
       expect(sentMessages).toHaveLength(0)
     })
@@ -2043,6 +2449,7 @@ describe('VsCodeTunnelWebSocket', () => {
       const mockSession = {
         getPage: jest.fn().mockResolvedValue(mockPage),
         actionLog: { add: jest.fn() },
+        reportFocusNow: jest.fn().mockResolvedValue(undefined),
       }
       tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
 
@@ -2057,145 +2464,6 @@ describe('VsCodeTunnelWebSocket', () => {
     })
   })
 
-  describe('handleBrowserSetFile', () => {
-    it('should error when no pending file chooser', async () => {
-      // pendingFileChoosers が空のとき、errorメッセージを送信
-      await (tunnel as any).handleBrowserSetFile({ type: 'browser_set_file', sessionId: 'no-pending-sess' })
-      expect(sentMessages).toContainEqual(expect.objectContaining({
-        type: 'error',
-        sessionId: 'no-pending-sess',
-        message: expect.stringContaining('No pending file chooser'),
-      }))
-    })
-
-    it('should handle filePaths and accept them', async () => {
-      // pendingFileChoosers にエントリがある場合、filePaths を accept に渡す
-      const acceptMock = jest.fn()
-      ;(tunnel as any).pendingFileChoosers.set('sess-paths', acceptMock)
-      await (tunnel as any).handleBrowserSetFile({
-        type: 'browser_set_file',
-        sessionId: 'sess-paths',
-        filePaths: ['/workspace/test.txt'],
-      })
-      expect(acceptMock).toHaveBeenCalledWith(['/workspace/test.txt'])
-      expect((tunnel as any).pendingFileChoosers.has('sess-paths')).toBe(false)
-    })
-
-    it('should handle base64 files by writing to temp and calling accept with paths', async () => {
-      // filesが base64 で送られた場合、一時ファイルに書き込んでから accept に渡す
-      // fs.promises と setTimeout をモックして実際の I/O と待機をスキップする
-      const fsModule = require('fs') as typeof import('fs')
-      const writeFileSpy = jest.spyOn(fsModule.promises, 'writeFile').mockResolvedValue(undefined)
-      const unlinkSpy = jest.spyOn(fsModule.promises, 'unlink').mockResolvedValue(undefined)
-      // setTimeout をすぐに解決するモックに差し替える
-      const origSetTimeout = global.setTimeout
-      global.setTimeout = ((fn: () => void) => { fn(); return 0 as unknown as NodeJS.Timeout }) as unknown as typeof setTimeout
-
-      try {
-        const acceptMock = jest.fn()
-        ;(tunnel as any).pendingFileChoosers.set('sess-b64', acceptMock)
-        await (tunnel as any).handleBrowserSetFile({
-          type: 'browser_set_file',
-          sessionId: 'sess-b64',
-          files: [
-            { name: 'test.txt', mimeType: 'text/plain', dataBase64: Buffer.from('hello').toString('base64') },
-          ],
-        })
-        expect(acceptMock).toHaveBeenCalledTimes(1)
-        const calledPaths: string[] = acceptMock.mock.calls[0][0]
-        expect(calledPaths).toHaveLength(1)
-        expect(calledPaths[0]).toMatch(/test\.txt$/)
-        expect(writeFileSpy).toHaveBeenCalledTimes(1)
-        // unlink は finally ブロックで呼ばれる
-        expect(unlinkSpy).toHaveBeenCalledTimes(1)
-        // 一時ファイルが書き込まれたことを確認（ファイルが存在するかまたは既にクリーンアップ済み）
-        expect((tunnel as any).pendingFileChoosers.has('sess-b64')).toBe(false)
-      } finally {
-        global.setTimeout = origSetTimeout
-        writeFileSpy.mockRestore()
-        unlinkSpy.mockRestore()
-      }
-    })
-
-    it('should call accept with empty array when files is empty', async () => {
-      const acceptMock = jest.fn()
-      ;(tunnel as any).pendingFileChoosers.set('sess-empty', acceptMock)
-      await (tunnel as any).handleBrowserSetFile({
-        type: 'browser_set_file',
-        sessionId: 'sess-empty',
-        files: [],
-      })
-      expect(acceptMock).toHaveBeenCalledWith([])
-    })
-
-    it('should generate distinct tmpPaths when multiple files have the same name (HIGH-1)', async () => {
-      // 同名ファイルを複数選択した場合、index が含まれるため衝突しない
-      const fsModule = require('fs') as typeof import('fs')
-      const writtenPaths: string[] = []
-      const writeFileSpy = jest.spyOn(fsModule.promises, 'writeFile').mockImplementation(async (filePath) => {
-        writtenPaths.push(String(filePath))
-      })
-      const unlinkSpy = jest.spyOn(fsModule.promises, 'unlink').mockResolvedValue(undefined)
-      const origSetTimeout = global.setTimeout
-      global.setTimeout = ((fn: () => void) => { fn(); return 0 as unknown as NodeJS.Timeout }) as unknown as typeof setTimeout
-
-      try {
-        const acceptMock = jest.fn()
-        ;(tunnel as any).pendingFileChoosers.set('sess-dup', acceptMock)
-        await (tunnel as any).handleBrowserSetFile({
-          type: 'browser_set_file',
-          sessionId: 'sess-dup',
-          files: [
-            { name: 'photo.jpg', mimeType: 'image/jpeg', dataBase64: Buffer.from('data1').toString('base64') },
-            { name: 'photo.jpg', mimeType: 'image/jpeg', dataBase64: Buffer.from('data2').toString('base64') },
-          ],
-        })
-        expect(acceptMock).toHaveBeenCalledTimes(1)
-        const calledPaths: string[] = acceptMock.mock.calls[0][0]
-        expect(calledPaths).toHaveLength(2)
-        // パスが互いに異なることを確認（インデックスで区別される）
-        expect(calledPaths[0]).not.toBe(calledPaths[1])
-        // 両方のパスに index が含まれていることを確認
-        expect(calledPaths[0]).toMatch(/-0-photo\.jpg$/)
-        expect(calledPaths[1]).toMatch(/-1-photo\.jpg$/)
-        expect(writeFileSpy).toHaveBeenCalledTimes(2)
-      } finally {
-        global.setTimeout = origSetTimeout
-        writeFileSpy.mockRestore()
-        unlinkSpy.mockRestore()
-      }
-    })
-
-    it('should call accept([]) and send error when writeFile fails (HIGH-2)', async () => {
-      // writeFile が例外を投げた場合、accept([]) が呼ばれ、エラーメッセージが送信される
-      const fsModule = require('fs') as typeof import('fs')
-      const writeFileSpy = jest.spyOn(fsModule.promises, 'writeFile').mockRejectedValue(new Error('ENOSPC: no space left on device'))
-      const unlinkSpy = jest.spyOn(fsModule.promises, 'unlink').mockResolvedValue(undefined)
-
-      try {
-        const acceptMock = jest.fn()
-        ;(tunnel as any).pendingFileChoosers.set('sess-writefail', acceptMock)
-        await (tunnel as any).handleBrowserSetFile({
-          type: 'browser_set_file',
-          sessionId: 'sess-writefail',
-          files: [
-            { name: 'test.txt', mimeType: 'text/plain', dataBase64: Buffer.from('hello').toString('base64') },
-          ],
-        })
-        // accept([]) が呼ばれ、fileChooser がハングしないことを確認
-        expect(acceptMock).toHaveBeenCalledWith([])
-        // エラーメッセージが送信されることを確認
-        const errMsg = sentMessages.find(m => m.type === 'error')
-        expect(errMsg).toBeDefined()
-        expect(errMsg!.sessionId).toBe('sess-writefail')
-        expect(errMsg!.message).toContain('File upload failed')
-        expect(errMsg!.message).toContain('ENOSPC')
-      } finally {
-        writeFileSpy.mockRestore()
-        unlinkSpy.mockRestore()
-      }
-    })
-  })
 
   describe('browser handlers - no sessionId (ternary false branch)', () => {
     it('handleBrowserGoBack - should do nothing when no sessionId', async () => {
@@ -2244,6 +2512,801 @@ describe('VsCodeTunnelWebSocket', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (tunnel as any).handleBrowserViewport({ type: 'browser_viewport', width: 800, height: 600 })
       expect(sentMessages).toHaveLength(0)
+    })
+
+    it('handleBrowserMouseMove - should do nothing when no sessionId', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', x: 10, y: 20 })
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('handleBrowserMouseDown - should do nothing when no sessionId', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseDown({ type: 'browser_mouse_down', x: 10, y: 20 })
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('handleBrowserMouseUp - should do nothing when no sessionId', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseUp({ type: 'browser_mouse_up', x: 10, y: 20 })
+      expect(sentMessages).toHaveLength(0)
+    })
+  })
+
+  describe('handleBrowserMouseMove', () => {
+    it('should do nothing if missing coordinates', async () => {
+      const mockSession = { executeMouseMove: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mv1' })
+      expect(mockSession.executeMouseMove).not.toHaveBeenCalled()
+    })
+
+    it('should call executeMouseMove with coordinates', async () => {
+      const mockSession = { executeMouseMove: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseMove({ type: 'browser_mouse_move', sessionId: 'sess-mv2', x: 30, y: 40 })
+      expect(mockSession.executeMouseMove).toHaveBeenCalledWith(30, 40)
+    })
+  })
+
+  describe('handleBrowserMouseDown', () => {
+    it('should do nothing if missing coordinates', async () => {
+      const mockSession = { executeMouseDown: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseDown({ type: 'browser_mouse_down', sessionId: 'sess-md1' })
+      expect(mockSession.executeMouseDown).not.toHaveBeenCalled()
+    })
+
+    it('should call executeMouseDown with coordinates and button', async () => {
+      const mockSession = { executeMouseDown: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseDown({ type: 'browser_mouse_down', sessionId: 'sess-md2', x: 50, y: 60, button: 'left' })
+      expect(mockSession.executeMouseDown).toHaveBeenCalledWith(50, 60, 'left')
+    })
+  })
+
+  describe('handleBrowserMouseUp', () => {
+    it('should do nothing if missing coordinates', async () => {
+      const mockSession = { executeMouseUp: jest.fn() }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseUp({ type: 'browser_mouse_up', sessionId: 'sess-mu1' })
+      expect(mockSession.executeMouseUp).not.toHaveBeenCalled()
+    })
+
+    it('should call executeMouseUp with coordinates and button', async () => {
+      const mockSession = { executeMouseUp: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseUp({ type: 'browser_mouse_up', sessionId: 'sess-mu2', x: 70, y: 80, button: 'left' })
+      expect(mockSession.executeMouseUp).toHaveBeenCalledWith(70, 80, 'left')
+    })
+  })
+
+  describe('handleBrowserSetFile', () => {
+    it('should do nothing when sessionId is missing', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await expect((tunnel as any).handleBrowserSetFile({ type: 'browser_set_file' })).resolves.toBeUndefined()
+    })
+
+    it('should no-op (no throw) when there is no pending chooser for the session', async () => {
+      await expect(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (tunnel as any).handleBrowserSetFile({ type: 'browser_set_file', sessionId: 'no-such-sess', files: [] }),
+      ).resolves.toBeUndefined()
+      expect(sentMessages.some((m) => m.type === 'error')).toBe(true)
+    })
+
+    it('should write base64 files to temp paths, call accept with those paths, then clean them up', async () => {
+      // Capture the paths and their on-disk content/existence at the moment
+      // setFiles is invoked, so we can assert they were written then removed.
+      let pathsAtCall: string[] = []
+      let contentsAtCall: string[] = []
+      const fsModule = await import('node:fs/promises')
+      const accept = jest.fn().mockImplementation(async (paths: string[]) => {
+        pathsAtCall = paths
+        contentsAtCall = await Promise.all(paths.map((p) => fsModule.readFile(p, 'utf8')))
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-f1', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-f1',
+        files: [
+          { name: 'a.txt', mimeType: 'text/plain', dataBase64: Buffer.from('hi').toString('base64') },
+          { name: 'b.bin', mimeType: 'application/octet-stream', dataBase64: Buffer.from('world').toString('base64') },
+        ],
+      })
+
+      expect(accept).toHaveBeenCalledTimes(1)
+      expect(pathsAtCall).toHaveLength(2)
+      // Each path lives under the OS temp dir, in a per-upload subdir.
+      for (const p of pathsAtCall) {
+        expect(p.startsWith(os.tmpdir())).toBe(true)
+      }
+      // Content written correctly before setFiles is invoked.
+      expect(contentsAtCall).toEqual(['hi', 'world'])
+      // Temp files (and their dir) removed after accept resolves.
+      for (const p of pathsAtCall) {
+        expect(existsSync(p)).toBe(false)
+      }
+      expect(existsSync(path.dirname(pathsAtCall[0]))).toBe(false)
+      // accept should be removed after use
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((tunnel as any).pendingFileChoosers.has('sess-f1')).toBe(false)
+    })
+
+    // The tunnel is constructed with projectDir '/test/project', so the
+    // workspace root is '/test/project/workspace'.
+    const workspaceDir = path.join('/test/project', 'workspace')
+
+    it('should resolve relative filePaths against the workspace root before setFiles', async () => {
+      let pathsAtCall: string[] = []
+      const accept = jest.fn().mockImplementation((paths: string[]) => {
+        pathsAtCall = paths
+        return Promise.resolve()
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-rel', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-rel',
+        filePaths: ['repos/app.ts', 'docs/readme.md'],
+      })
+
+      // Each workspace-relative path is resolved to an absolute path under the
+      // workspace root before being handed to Playwright's setFiles.
+      expect(accept).toHaveBeenCalledTimes(1)
+      expect(pathsAtCall).toEqual([
+        path.join(workspaceDir, 'repos/app.ts'),
+        path.join(workspaceDir, 'docs/readme.md'),
+      ])
+      expect(sentMessages.some((m) => m.type === 'error')).toBe(false)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((tunnel as any).pendingFileChoosers.has('sess-rel')).toBe(false)
+    })
+
+    it('should resolve a "." workspace-relative path to the workspace root', async () => {
+      let pathsAtCall: string[] = []
+      const accept = jest.fn().mockImplementation((paths: string[]) => {
+        pathsAtCall = paths
+        return Promise.resolve()
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-dot', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-dot',
+        filePaths: ['./repos/nested/x.txt'],
+      })
+
+      expect(pathsAtCall).toEqual([path.join(workspaceDir, 'repos/nested/x.txt')])
+      expect(sentMessages.some((m) => m.type === 'error')).toBe(false)
+    })
+
+    it('should forward absolute filePaths inside the workspace untouched (backward compat)', async () => {
+      let pathsAtCall: string[] = []
+      const accept = jest.fn().mockImplementation((paths: string[]) => {
+        pathsAtCall = paths
+        return Promise.resolve()
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-fp', accept)
+
+      const abs1 = path.join(workspaceDir, 'repos/report.pdf')
+      const abs2 = path.join(workspaceDir, 'docs/img.png')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-fp',
+        filePaths: [abs1, abs2],
+      })
+
+      expect(accept).toHaveBeenCalledWith([abs1, abs2])
+      // Paths passed through untouched (not relocated into the temp dir).
+      expect(pathsAtCall).toEqual([abs1, abs2])
+      expect(sentMessages.some((m) => m.type === 'error')).toBe(false)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((tunnel as any).pendingFileChoosers.has('sess-fp')).toBe(false)
+    })
+
+    it('should reject relative filePaths that escape the workspace and cancel the chooser', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-escape', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-escape',
+        filePaths: ['../../etc/passwd'],
+      })
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-escape')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('outside the workspace')
+      // The escaping path must NOT be applied; chooser cancelled with [].
+      expect(accept).toHaveBeenCalledWith([])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((tunnel as any).pendingFileChoosers.has('sess-escape')).toBe(false)
+    })
+
+    it('should reject absolute filePaths outside the workspace and cancel the chooser', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-abs-out', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-abs-out',
+        filePaths: ['/etc/passwd'],
+      })
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-abs-out')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('outside the workspace')
+      expect(accept).toHaveBeenCalledWith([])
+    })
+
+    it('should reject filePaths when the agent has no project directory configured', async () => {
+      const noDirTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-x')
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(noDirTunnel as any).ws = mockWs
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(noDirTunnel as any).pendingFileChoosers.set('sess-nodir', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (noDirTunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-nodir',
+        filePaths: ['repos/app.ts'],
+      })
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-nodir')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('no project directory')
+      expect(accept).toHaveBeenCalledWith([])
+    })
+
+    it('should send an error when accept rejects on a (valid) filePaths upload', async () => {
+      const accept = jest.fn().mockRejectedValue(new Error('chooser gone'))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-fp-fail', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-fp-fail',
+        filePaths: ['repos/x.txt'],
+      })
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-fp-fail')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('File upload failed')
+      expect(err!.message).toContain('chooser gone')
+    })
+
+    it('should sanitize traversal file names so temp files stay inside the temp dir', async () => {
+      let pathsAtCall: string[] = []
+      const accept = jest.fn().mockImplementation((paths: string[]) => {
+        pathsAtCall = paths
+        return Promise.resolve()
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-trav', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-trav',
+        files: [
+          { name: '../../../etc/passwd', mimeType: 'text/plain', dataBase64: Buffer.from('x').toString('base64') },
+          { name: 'a/b/c.txt', mimeType: 'text/plain', dataBase64: Buffer.from('y').toString('base64') },
+        ],
+      })
+
+      expect(pathsAtCall).toHaveLength(2)
+      for (const p of pathsAtCall) {
+        const tmpRoot = path.dirname(p)
+        // The resolved path must be a direct child of the per-upload temp dir.
+        expect(path.dirname(path.resolve(p))).toBe(path.resolve(tmpRoot))
+        expect(tmpRoot.startsWith(os.tmpdir())).toBe(true)
+        // Basename must not retain any traversal/separator structure.
+        const base = path.basename(p)
+        expect(base.includes('/')).toBe(false)
+        expect(base.includes('\\')).toBe(false)
+        expect(base).not.toBe('..')
+      }
+    })
+
+    it('should error and cancel the chooser when the temp directory cannot be created', async () => {
+      // The handler uses `import { promises as fs } from 'node:fs'`, so spy on
+      // that same promises object.
+      const nodeFs = await import('node:fs')
+      const spy = jest
+        .spyOn(nodeFs.promises, 'mkdtemp')
+        .mockRejectedValue(new Error('EACCES: tmp not writable') as never)
+      try {
+        const accept = jest.fn().mockResolvedValue(undefined)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(tunnel as any).pendingFileChoosers.set('sess-mkdir', accept)
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (tunnel as any).handleBrowserSetFile({
+          type: 'browser_set_file',
+          sessionId: 'sess-mkdir',
+          files: [{ name: 'a.txt', mimeType: 'text/plain', dataBase64: Buffer.from('hi').toString('base64') }],
+        })
+
+        const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-mkdir')
+        expect(err).toBeDefined()
+        expect(err!.message).toContain('File upload failed')
+        // Chooser cancelled with [] so the remote input is not left pending.
+        expect(accept).toHaveBeenCalledWith([])
+      } finally {
+        spy.mockRestore()
+      }
+    })
+
+    it('should call accept with [] when files is an empty array (cancel)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-f2', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({ type: 'browser_set_file', sessionId: 'sess-f2', files: [] })
+
+      expect(accept).toHaveBeenCalledWith([])
+      expect(sentMessages.some((m) => m.type === 'error')).toBe(false)
+    })
+
+    it('should call accept with [] when neither files nor filePaths is provided (cancel)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-f3', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({ type: 'browser_set_file', sessionId: 'sess-f3' })
+
+      expect(accept).toHaveBeenCalledWith([])
+    })
+
+    it('should send an error and clean up temp files when accept (setFiles) rejects (HIGH-2)', async () => {
+      let pathDuringCall = ''
+      const accept = jest.fn().mockImplementation((paths: string[]) => {
+        pathDuringCall = paths[0]
+        return Promise.reject(new Error('chooser invalidated'))
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-fail', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-fail',
+        files: [{ name: 'a.txt', mimeType: 'text/plain', dataBase64: Buffer.from('hi').toString('base64') }],
+      })
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-fail')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('File upload failed')
+      expect(err!.message).toContain('chooser invalidated')
+      // Temp file removed even though setFiles rejected.
+      expect(existsSync(pathDuringCall)).toBe(false)
+    })
+
+    it('should reject oversized uploads, cancel the chooser, and not apply files (HIGH-3)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-big', accept)
+
+      // 11MB base64 string → decoded ~8.25MB; use two files to exceed 10MB total.
+      const sixMbBase64 = 'A'.repeat(8 * 1024 * 1024) // ~6MB decoded each
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-big',
+        files: [
+          { name: 'big1.bin', mimeType: 'application/octet-stream', dataBase64: sixMbBase64 },
+          { name: 'big2.bin', mimeType: 'application/octet-stream', dataBase64: sixMbBase64 },
+        ],
+      })
+
+      // Files must NOT be applied; chooser cancelled with [].
+      expect(accept).toHaveBeenCalledTimes(1)
+      expect(accept).toHaveBeenCalledWith([])
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-big')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('File too large')
+      // pending chooser consumed
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((tunnel as any).pendingFileChoosers.has('sess-big')).toBe(false)
+    })
+
+    it('should error on a non-string dataBase64 entry without crashing (HIGH-3)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-bad', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-bad',
+        // dataBase64 deliberately not a string
+        files: [{ name: 'x.bin', mimeType: 'application/octet-stream', dataBase64: 12345 as unknown as string }],
+      })
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-bad')
+      expect(err).toBeDefined()
+      // Files must not be applied; chooser cancelled.
+      expect(accept).toHaveBeenCalledWith([])
+    })
+
+    // --- HIGH-1: malformed payloads must not throw / wedge the chooser ---
+
+    it('should error and cancel the chooser when a filePaths element is not a string (HIGH-1)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-nonstr', accept)
+
+      await expect(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (tunnel as any).handleBrowserSetFile({
+          type: 'browser_set_file',
+          sessionId: 'sess-nonstr',
+          // A non-string element (123) would previously throw inside path.isAbsolute.
+          filePaths: [123 as unknown as string],
+        }),
+      ).resolves.toBeUndefined()
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-nonstr')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('filePaths must be an array of strings')
+      // Chooser cancelled with [] so the remote input is not left stuck.
+      expect(accept).toHaveBeenCalledWith([])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((tunnel as any).pendingFileChoosers.has('sess-nonstr')).toBe(false)
+    })
+
+    it('should error and cancel the chooser when filePaths is not an array (HIGH-1)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-fp-nonarr', accept)
+
+      await expect(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (tunnel as any).handleBrowserSetFile({
+          type: 'browser_set_file',
+          sessionId: 'sess-fp-nonarr',
+          filePaths: 'repos/app.ts' as unknown as string[],
+        }),
+      ).resolves.toBeUndefined()
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-fp-nonarr')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('filePaths must be an array of strings')
+      expect(accept).toHaveBeenCalledWith([])
+    })
+
+    it('should error and cancel the chooser when files is not an array (HIGH-1)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-files-nonarr', accept)
+
+      await expect(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (tunnel as any).handleBrowserSetFile({
+          type: 'browser_set_file',
+          sessionId: 'sess-files-nonarr',
+          // A non-array `files` would previously throw inside files.some.
+          files: { name: 'x' } as unknown as [],
+        }),
+      ).resolves.toBeUndefined()
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-files-nonarr')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('files must be an array')
+      expect(accept).toHaveBeenCalledWith([])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((tunnel as any).pendingFileChoosers.has('sess-files-nonarr')).toBe(false)
+    })
+
+    it('should error and cancel the chooser when an entry in files is null (HIGH-1)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-null-entry', accept)
+
+      await expect(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (tunnel as any).handleBrowserSetFile({
+          type: 'browser_set_file',
+          sessionId: 'sess-null-entry',
+          // A null entry would previously throw when reading f.dataBase64.
+          files: [null as unknown as { name: string; mimeType: string; dataBase64: string }],
+        }),
+      ).resolves.toBeUndefined()
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-null-entry')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('dataBase64 must be a string')
+      expect(accept).toHaveBeenCalledWith([])
+    })
+
+    // --- HIGH-2: filePaths branch must cancel the chooser when accept throws ---
+
+    it('should cancel the chooser (symmetry) when accept rejects on a filePaths upload (HIGH-2)', async () => {
+      const accept = jest.fn().mockRejectedValue(new Error('chooser gone'))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-fp-cancel', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-fp-cancel',
+        filePaths: ['repos/x.txt'],
+      })
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-fp-cancel')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('File upload failed')
+      // First call applies the resolved path; second call cancels with [].
+      expect(accept).toHaveBeenCalledWith([path.join(workspaceDir, 'repos/x.txt')])
+      expect(accept).toHaveBeenLastCalledWith([])
+    })
+
+    it('should fall back to the outer catch when an inner handler throws unexpectedly (HIGH-1 backstop)', async () => {
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-backstop', accept)
+      // Force an unexpected failure inside the resolve helper so the only thing
+      // that protects the chooser is the outermost try/catch in handleBrowserSetFile.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).resolveWorkspaceFilePaths = jest
+        .fn()
+        .mockRejectedValue(new Error('unexpected internal failure'))
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-backstop',
+        filePaths: ['repos/app.ts'],
+      })
+
+      const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-backstop')
+      expect(err).toBeDefined()
+      expect(err!.message).toContain('File upload failed')
+      expect(err!.message).toContain('unexpected internal failure')
+      // Backstop must still cancel the chooser so it is not left stuck.
+      expect(accept).toHaveBeenCalledWith([])
+    })
+
+    // --- MEDIUM: symlink-escape guard via fs.realpath ---
+
+    it('should reject a workspace symlink that points outside the workspace (MEDIUM)', async () => {
+      // Build a real on-disk workspace with a symlink escaping it.
+      const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sym-escape-'))
+      const projectDir = path.join(root, 'project')
+      const realWorkspaceDir = path.join(projectDir, 'workspace')
+      await fsPromises.mkdir(realWorkspaceDir, { recursive: true })
+      // A secret file OUTSIDE the workspace.
+      const secret = path.join(root, 'secret.txt')
+      await fsPromises.writeFile(secret, 'top secret')
+      // A symlink inside the workspace pointing at the external secret.
+      const link = path.join(realWorkspaceDir, 'leak')
+      await fsPromises.symlink(secret, link)
+
+      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-sym', projectDir)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(symTunnel as any).ws = mockWs
+      const accept = jest.fn().mockResolvedValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(symTunnel as any).pendingFileChoosers.set('sess-sym', accept)
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (symTunnel as any).handleBrowserSetFile({
+          type: 'browser_set_file',
+          sessionId: 'sess-sym',
+          filePaths: ['leak'],
+        })
+
+        const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-sym')
+        expect(err).toBeDefined()
+        expect(err!.message).toContain('outside the workspace')
+        // Escaping symlink not applied; chooser cancelled.
+        expect(accept).toHaveBeenCalledWith([])
+      } finally {
+        await fsPromises.rm(root, { recursive: true, force: true })
+      }
+    })
+
+    it('should accept a workspace symlink whose target is inside the workspace (MEDIUM)', async () => {
+      const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sym-inside-'))
+      const projectDir = path.join(root, 'project')
+      const realWorkspaceDir = path.join(projectDir, 'workspace')
+      await fsPromises.mkdir(path.join(realWorkspaceDir, 'repos'), { recursive: true })
+      // A real file inside the workspace.
+      const target = path.join(realWorkspaceDir, 'repos', 'real.txt')
+      await fsPromises.writeFile(target, 'inside')
+      // A symlink, also inside the workspace, pointing at the in-workspace file.
+      const link = path.join(realWorkspaceDir, 'alias.txt')
+      await fsPromises.symlink(target, link)
+
+      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-sym2', projectDir)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(symTunnel as any).ws = mockWs
+      let pathsAtCall: string[] = []
+      const accept = jest.fn().mockImplementation((paths: string[]) => {
+        pathsAtCall = paths
+        return Promise.resolve()
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(symTunnel as any).pendingFileChoosers.set('sess-sym-ok', accept)
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (symTunnel as any).handleBrowserSetFile({
+          type: 'browser_set_file',
+          sessionId: 'sess-sym-ok',
+          filePaths: ['alias.txt'],
+        })
+
+        expect(sentMessages.some((m) => m.type === 'error')).toBe(false)
+        // The lexically-validated absolute path is forwarded (not the resolved target).
+        expect(pathsAtCall).toEqual([path.join(realWorkspaceDir, 'alias.txt')])
+      } finally {
+        await fsPromises.rm(root, { recursive: true, force: true })
+      }
+    })
+
+    it('should accept a real (non-symlink) file inside the workspace (MEDIUM)', async () => {
+      const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sym-real-'))
+      const projectDir = path.join(root, 'project')
+      const realWorkspaceDir = path.join(projectDir, 'workspace', 'docs')
+      await fsPromises.mkdir(realWorkspaceDir, { recursive: true })
+      const file = path.join(realWorkspaceDir, 'readme.md')
+      await fsPromises.writeFile(file, 'hello')
+
+      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-real', projectDir)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(symTunnel as any).ws = mockWs
+      let pathsAtCall: string[] = []
+      const accept = jest.fn().mockImplementation((paths: string[]) => {
+        pathsAtCall = paths
+        return Promise.resolve()
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(symTunnel as any).pendingFileChoosers.set('sess-real', accept)
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (symTunnel as any).handleBrowserSetFile({
+          type: 'browser_set_file',
+          sessionId: 'sess-real',
+          filePaths: ['docs/readme.md'],
+        })
+
+        expect(sentMessages.some((m) => m.type === 'error')).toBe(false)
+        expect(pathsAtCall).toEqual([path.join(projectDir, 'workspace', 'docs', 'readme.md')])
+      } finally {
+        await fsPromises.rm(root, { recursive: true, force: true })
+      }
+    })
+  })
+
+  describe('handleBrowserSetInputValue', () => {
+    it('should route browser_set_input_value through onParsedMessage', () => {
+      const mockSession = { setFocusedInputValue: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onParsedMessage({ type: 'browser_set_input_value', sessionId: 'sess-iv0', value: 'x' })
+      expect(mockSession.setFocusedInputValue).toHaveBeenCalledWith('x', undefined, undefined)
+    })
+
+    it('should call setFocusedInputValue with value and selection', async () => {
+      const mockSession = { setFocusedInputValue: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetInputValue({
+        type: 'browser_set_input_value',
+        sessionId: 'sess-iv1',
+        value: 'hello',
+        selectionStart: 1,
+        selectionEnd: 3,
+      })
+      expect(mockSession.setFocusedInputValue).toHaveBeenCalledWith('hello', 1, 3)
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should do nothing if session is not found', async () => {
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(undefined)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetInputValue({
+        type: 'browser_set_input_value',
+        sessionId: 'no-such',
+        value: 'x',
+      })
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should ignore payloads with a non-string value', async () => {
+      const mockSession = { setFocusedInputValue: jest.fn().mockResolvedValue(undefined) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetInputValue({
+        type: 'browser_set_input_value',
+        sessionId: 'sess-iv2',
+      })
+      expect(mockSession.setFocusedInputValue).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(0)
+    })
+
+    it('should send error when setFocusedInputValue rejects', async () => {
+      const mockSession = {
+        setFocusedInputValue: jest.fn().mockRejectedValue(new Error('boom')),
+      }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetInputValue({
+        type: 'browser_set_input_value',
+        sessionId: 'sess-iv3',
+        value: 'x',
+      })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+      expect(sentMessages[0].sessionId).toBe('sess-iv3')
+      expect(sentMessages[0].message).toContain('setInputValue failed')
+    })
+  })
+
+  describe('handleBrowserOpen - focus change wiring', () => {
+    it('should relay session focus changes as browser_focus_changed', async () => {
+      const mockPage = {
+        url: jest.fn().mockReturnValue('about:blank'),
+        title: jest.fn().mockResolvedValue(''),
+        screenshot: jest.fn().mockResolvedValue(Buffer.from('fake')),
+      }
+      const mockSession: Record<string, unknown> = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
+        getPageTitle: jest.fn().mockResolvedValue(''),
+        actionLog: { onChange: null },
+        onFileChooser: null,
+        onFocusChange: null,
+      }
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserOpen({ type: 'browser_open', sessionId: 'sess-fc1' })
+
+      // The handler must have wired a focus-change callback onto the session.
+      const onFocusChange = mockSession.onFocusChange as ((p: unknown) => void) | null
+      expect(typeof onFocusChange).toBe('function')
+
+      sentMessages.length = 0
+      onFocusChange!({ focused: true, value: 'abc', rect: { x: 1, y: 2, width: 3, height: 4 } })
+
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({
+        type: 'browser_focus_changed',
+        sessionId: 'sess-fc1',
+        focused: true,
+        value: 'abc',
+        rect: { x: 1, y: 2, width: 3, height: 4 },
+      })
     })
   })
 })

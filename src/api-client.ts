@@ -356,7 +356,13 @@ export class ApiClient {
       return await this.get<PendingAlert>(
         API_ENDPOINTS.ALERT(tenantCode, projectCode, alertNumber),
       )
-    } catch {
+    } catch (error) {
+      logger.warn('Failed to fetch alert', {
+        tenantCode,
+        projectCode,
+        alertNumber,
+        error: error instanceof Error ? error.message : String(error),
+      })
       return null
     }
   }

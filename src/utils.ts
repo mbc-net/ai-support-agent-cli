@@ -109,6 +109,18 @@ export function sanitizeNameSegment(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9-]/g, '-')
 }
 
+/**
+ * Remove a single trailing slash from a path/prefix.
+ *
+ * Single source of truth for the `replace(/\/$/, '')` idiom used in
+ * path-prefix containment checks (security path guards and Docker volume
+ * mount builders), so the normalization stays identical across them.
+ */
+export function stripTrailingSlash(path: string): string {
+  return path.replace(/\/$/, '')
+}
+
+
 export function validateApiUrl(url: string): string | null {
   try {
     const parsed = new URL(url)
@@ -125,6 +137,19 @@ export function isAuthenticationError(error: unknown): boolean {
   if (!axios.isAxiosError(error)) return false
   const status = error.response?.status
   return status === 401 || status === 403
+}
+
+/**
+ * 認証エラー(401/403)を除く 4xx クライアントエラーかどうかを判定する。
+ *
+ * 401/403 は再ログインで解消し得るため除外する。それ以外の 4xx は
+ * 「コマンドが存在しない／無効」を意味し、再試行しても無駄なので判別に使う。
+ */
+export function isNonAuthClientError(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) return false
+  const status = error.response?.status
+  if (status === undefined) return false
+  return status >= 400 && status < 500 && status !== 401 && status !== 403
 }
 
 /**
