@@ -232,7 +232,8 @@ describe('startVsCodeTunnel', () => {
       'https://api.example.com',
       'test-token',
       'agent-1',
-      '/test/project/workspace/repos',
+      '/test/project/workspace/repos', // projectDir = reposDir (VS Code launch dir)
+      '/test/project/workspace', // workspaceDir = file-upload resolution root
       undefined, // envVarsProvider (configSyncState 未指定時)
     )
     expect(state.vsCodeWs).not.toBeNull()
@@ -256,7 +257,8 @@ describe('startVsCodeTunnel', () => {
       'wss://ws.example.com',
       'test-token',
       'agent-1',
-      '/test/project/workspace/repos',
+      '/test/project/workspace/repos', // projectDir = reposDir (VS Code launch dir)
+      '/test/project/workspace', // workspaceDir = file-upload resolution root
       undefined,
     )
   })
@@ -288,7 +290,8 @@ describe('startVsCodeTunnel', () => {
 
     startVsCodeTunnel(deps, state, undefined, configSyncState as any)
 
-    const provider = VsCodeTunnelWebSocket.mock.calls[0][4] as () => Record<string, string> | undefined
+    // envVarsProvider is now the 6th constructor arg (index 5) after workspaceDir was added.
+    const provider = VsCodeTunnelWebSocket.mock.calls[0][5] as () => Record<string, string> | undefined
     expect(provider).toBeDefined()
     expect(provider()).toEqual({ ANTHROPIC_MODEL: 'claude-sonnet-4-6' })
   })
@@ -311,6 +314,37 @@ describe('startVsCodeTunnel', () => {
     await new Promise(resolve => process.nextTick(resolve))
 
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('ws failed'))
+  })
+
+  // REGRESSION (browser file upload from Agent Docker workspace): the VS Code
+  // launch dir (reposDir = <projectDir>/workspace/repos) and the file-upload
+  // resolution root (workspaceDir = <projectDir>/workspace) are DIFFERENT
+  // directories. Previously only reposDir was passed and resolveWorkspaceFilePaths
+  // derived the root via getWorkspaceDir(reposDir) = reposDir/workspace (which does
+  // not exist), so every workspace file selection resolved to a missing path and
+  // setFiles silently rejected it ("nothing happens"). startVsCodeTunnel must pass
+  // workspaceDir explicitly so file resolution uses the correct root.
+  it('passes workspaceDir (getWorkspaceDir, not repos/workspace) for file-upload resolution', () => {
+    const { VsCodeTunnelWebSocket } = require('../src/vscode')
+
+    const mockConnect = jest.fn().mockResolvedValue(undefined)
+    VsCodeTunnelWebSocket.mockImplementation(() => ({
+      connect: mockConnect,
+    }))
+
+    const deps = createMockDeps()
+    const state = createMockState()
+
+    startVsCodeTunnel(deps, state)
+
+    expect(VsCodeTunnelWebSocket).toHaveBeenCalledWith(
+      'https://api.example.com',
+      'test-token',
+      'agent-1',
+      '/test/project/workspace/repos', // projectDir = reposDir (VS Code launch dir)
+      '/test/project/workspace', // workspaceDir = file-upload resolution root
+      undefined, // envVarsProvider (configSyncState 未指定時)
+    )
   })
 })
 
@@ -1403,7 +1437,7 @@ describe('startVsCodeTunnel: no projectDir', () => {
     jest.clearAllMocks()
   })
 
-  it('should pass undefined reposDir when projectDir is not set', () => {
+  it('should pass undefined reposDir and workspaceDir when projectDir is not set', () => {
     const { VsCodeTunnelWebSocket } = require('../src/vscode')
 
     const mockConnect = jest.fn().mockResolvedValue(undefined)
@@ -1418,8 +1452,9 @@ describe('startVsCodeTunnel: no projectDir', () => {
       deps.apiUrl,
       deps.token,
       deps.agentId,
-      undefined,
-      undefined,
+      undefined, // reposDir (projectDir 未設定)
+      undefined, // workspaceDir (projectDir 未設定)
+      undefined, // envVarsProvider
     )
   })
 })

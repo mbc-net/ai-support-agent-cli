@@ -59,6 +59,7 @@ describe('VsCodeTunnelWebSocket', () => {
       'test-token',
       'agent-123',
       '/test/project',
+      '/test/project/workspace',
     )
 
     // Access internal ws and set up message handler
@@ -314,12 +315,14 @@ describe('VsCodeTunnelWebSocket', () => {
         token: string,
         agentId: string,
         projectDir: string,
+        workspaceDir: string,
         envVarsProvider: () => Record<string, string> | undefined,
       ) => { handleVsCodeOpen: (msg: unknown) => Promise<void> })(
         'https://api.example.com',
         'test-token',
         'agent-123',
         '/test/project',
+        '/test/project/workspace',
         () => undefined, // envVarsProvider returns undefined → triggers warning
       )
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -362,12 +365,14 @@ describe('VsCodeTunnelWebSocket', () => {
         token: string,
         agentId: string,
         projectDir: string,
+        workspaceDir: string,
         envVarsProvider: () => Record<string, string>,
       ) => object)(
         'https://api.example.com',
         'test-token',
         'agent-123',
         '/test/project',
+        '/test/project/workspace',
         () => ({ NEW_KEY: 'new_value' }),
       )
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2681,6 +2686,45 @@ describe('VsCodeTunnelWebSocket', () => {
       expect((tunnel as any).pendingFileChoosers.has('sess-rel')).toBe(false)
     })
 
+    // REGRESSION (browser file upload from Agent Docker workspace): in production
+    // the constructor receives projectDir = reposDir (= <ws>/repos, the VS Code
+    // launch dir) which is a DIFFERENT directory from the workspace root (<ws>).
+    // filePaths from the workspace file picker are relative to <ws>, so they MUST
+    // resolve against workspaceDir, not getWorkspaceDir(reposDir) = <ws>/repos/workspace
+    // (which does not exist). The previous code used getWorkspaceDir(this.projectDir)
+    // and therefore resolved every selection to a missing path, which setFiles
+    // silently rejected ("nothing happens").
+    it('resolves filePaths against workspaceDir even when the (repos) projectDir launch dir differs', async () => {
+      // Mirror production wiring: 4th arg = reposDir, 5th arg = workspaceDir.
+      const t = new VsCodeTunnelWebSocket(
+        'https://api.example.com',
+        'token',
+        'agent-wsroot',
+        '/proj/workspace/repos', // projectDir = reposDir (VS Code launch dir)
+        '/proj/workspace', // workspaceDir = file-upload resolution root
+      )
+      let pathsAtCall: string[] = []
+      const accept = jest.fn().mockImplementation((paths: string[]) => {
+        pathsAtCall = paths
+        return Promise.resolve()
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(t as any).pendingFileChoosers.set('sess-wsroot', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (t as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-wsroot',
+        filePaths: ['repos/app.ts'],
+      })
+
+      // Must resolve under workspaceDir (/proj/workspace), NOT
+      // getWorkspaceDir(reposDir) = /proj/workspace/repos/workspace.
+      expect(accept).toHaveBeenCalledTimes(1)
+      expect(pathsAtCall).toEqual([path.join('/proj/workspace', 'repos/app.ts')])
+      expect(sentMessages.some((m) => m.type === 'error')).toBe(false)
+    })
+
     it('should resolve a "." workspace-relative path to the workspace root', async () => {
       let pathsAtCall: string[] = []
       const accept = jest.fn().mockImplementation((paths: string[]) => {
@@ -2766,7 +2810,7 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(accept).toHaveBeenCalledWith([])
     })
 
-    it('should reject filePaths when the agent has no project directory configured', async () => {
+    it('should reject filePaths when the agent has no workspace directory configured', async () => {
       const noDirTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-x')
       const accept = jest.fn().mockResolvedValue(undefined)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2783,7 +2827,7 @@ describe('VsCodeTunnelWebSocket', () => {
 
       const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-nodir')
       expect(err).toBeDefined()
-      expect(err!.message).toContain('no project directory')
+      expect(err!.message).toContain('no workspace directory')
       expect(accept).toHaveBeenCalledWith([])
     })
 
@@ -3106,7 +3150,7 @@ describe('VsCodeTunnelWebSocket', () => {
       const link = path.join(realWorkspaceDir, 'leak')
       await fsPromises.symlink(secret, link)
 
-      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-sym', projectDir)
+      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-sym', projectDir, path.join(projectDir, 'workspace'))
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(symTunnel as any).ws = mockWs
       const accept = jest.fn().mockResolvedValue(undefined)
@@ -3143,7 +3187,7 @@ describe('VsCodeTunnelWebSocket', () => {
       const link = path.join(realWorkspaceDir, 'alias.txt')
       await fsPromises.symlink(target, link)
 
-      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-sym2', projectDir)
+      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-sym2', projectDir, path.join(projectDir, 'workspace'))
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(symTunnel as any).ws = mockWs
       let pathsAtCall: string[] = []
@@ -3178,7 +3222,7 @@ describe('VsCodeTunnelWebSocket', () => {
       const file = path.join(realWorkspaceDir, 'readme.md')
       await fsPromises.writeFile(file, 'hello')
 
-      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-real', projectDir)
+      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-real', projectDir, path.join(projectDir, 'workspace'))
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(symTunnel as any).ws = mockWs
       let pathsAtCall: string[] = []
