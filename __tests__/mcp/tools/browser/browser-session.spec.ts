@@ -2,8 +2,6 @@ import {
   BrowserSession,
   FileChooserPayload,
   FocusChangePayload,
-  FOCUS_REPORTING_SCRIPT,
-  SET_FOCUSED_INPUT_VALUE_SCRIPT,
 } from '../../../../src/mcp/tools/browser/browser-session'
 
 // Mock playwright-loader
@@ -21,9 +19,11 @@ jest.mock('../../../../src/mcp/tools/browser/element-info', () => ({
 
 import { loadPlaywright } from '../../../../src/mcp/tools/browser/playwright-loader'
 import { getCursorAt, getFocusedElementInfo } from '../../../../src/mcp/tools/browser/element-info'
+import { logger } from '../../../../src/logger'
 
 const mockGetFocusedElementInfo = getFocusedElementInfo as jest.MockedFunction<typeof getFocusedElementInfo>
 const mockGetCursorAt = getCursorAt as jest.MockedFunction<typeof getCursorAt>
+const mockLogger = logger as jest.Mocked<typeof logger>
 
 const mockLoadPlaywright = loadPlaywright as jest.MockedFunction<typeof loadPlaywright>
 
@@ -374,10 +374,11 @@ describe('BrowserSession', () => {
       expect(reportSpy).toHaveBeenCalled()
       const gotoOrder = mockPage.goto.mock.invocationCallOrder[0]
       // reportFocusNow forwards to page.evaluate(FOCUS_REPORTING_SCRIPT); use the
-      // last evaluate call as its invocation marker.
+      // last evaluate call as its invocation marker. The script is now passed as
+      // a real FUNCTION, so match against its serialized source.
       const focusEvaluateCalls = mockPage.evaluate.mock.calls
         .map((c, i) => ({ c, order: mockPage.evaluate.mock.invocationCallOrder[i] }))
-        .filter(({ c }) => typeof c[0] === 'string' && c[0].includes('__browserFocusReportingInstalled'))
+        .filter(({ c }) => typeof c[0] === 'function' && String(c[0]).includes('__browserFocusReportingInstalled'))
       const lastFocusEvaluateOrder = focusEvaluateCalls[focusEvaluateCalls.length - 1].order
       expect(gotoOrder).toBeLessThan(lastFocusEvaluateOrder)
     })
@@ -931,8 +932,13 @@ describe('BrowserSession', () => {
       await session.getPage()
 
       expect(mockPage.exposeBinding).toHaveBeenCalledWith('__onBrowserFocus', expect.any(Function))
-      expect(mockPage.addInitScript).toHaveBeenCalledWith(expect.stringContaining('__browserFocusReportingInstalled'))
-      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.stringContaining('__browserFocusReportingInstalled'))
+      // The script must be passed to Playwright as a real FUNCTION (a string
+      // pageFunction is treated as an expression and never invoked). We still
+      // assert it is THE focus-reporting script via its serialized source.
+      expect(mockPage.addInitScript).toHaveBeenCalledWith(expect.any(Function))
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function))
+      expect(String(mockPage.addInitScript.mock.calls[0][0])).toContain('__browserFocusReportingInstalled')
+      expect(String(mockPage.evaluate.mock.calls[0][0])).toContain('__browserFocusReportingInstalled')
     })
 
     it('should forward the exposed binding payload to onFocusChange', async () => {
@@ -961,6 +967,26 @@ describe('BrowserSession', () => {
       const binding = call![1] as (src: unknown, payload: FocusChangePayload) => void
       // Must not throw even though no listener is attached.
       expect(() => binding({}, { focused: false })).not.toThrow()
+    })
+
+    it('should log to the Node logger (once) when the binding callback throws', async () => {
+      const session = new BrowserSession()
+      session.onFocusChange = () => {
+        throw new Error('subscriber boom')
+      }
+      await session.getPage()
+
+      const call = mockPage.exposeBinding.mock.calls.find((c: [string, unknown]) => c[0] === '__onBrowserFocus')
+      const binding = call![1] as (src: unknown, payload: FocusChangePayload) => void
+
+      // A failing subscriber must not throw back into Playwright, and the first
+      // failure must reach the Node logger (browser-side console.warn never does).
+      expect(() => binding({}, { focused: true })).not.toThrow()
+      expect(() => binding({}, { focused: true })).not.toThrow()
+      const focusWarns = mockLogger.warn.mock.calls.filter(
+        (c: [string]) => typeof c[0] === 'string' && c[0].includes('binding callback failed'),
+      )
+      expect(focusWarns).toHaveLength(1)
     })
 
     it('should expose the binding only once across multiple getPage calls', async () => {
@@ -1013,12 +1039,11 @@ describe('BrowserSession', () => {
 
       // A failed binding expose must not block script injection — the script is
       // injected on every page regardless of whether the binding was exposed.
-      expect(mockPage.addInitScript).toHaveBeenCalledWith(
-        expect.stringContaining('__browserFocusReportingInstalled'),
-      )
-      expect(mockPage.evaluate).toHaveBeenCalledWith(
-        expect.stringContaining('__browserFocusReportingInstalled'),
-      )
+      // Passed as a real FUNCTION; verified to be the focus-reporting script.
+      expect(mockPage.addInitScript).toHaveBeenCalledWith(expect.any(Function))
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function))
+      expect(String(mockPage.addInitScript.mock.calls[0][0])).toContain('__browserFocusReportingInstalled')
+      expect(String(mockPage.evaluate.mock.calls[0][0])).toContain('__browserFocusReportingInstalled')
     })
 
     it('should retry exposeBinding on the next getPage when the first expose fails', async () => {
@@ -1059,10 +1084,13 @@ describe('BrowserSession', () => {
 
       await session.setFocusedInputValue('hello', 1, 3)
 
+      // Passed as a real FUNCTION (not a string) so Playwright actually invokes
+      // it with the arg; the source confirms it is the value-setting script.
       expect(mockPage.evaluate).toHaveBeenCalledWith(
-        expect.stringContaining('dispatchEvent'),
+        expect.any(Function),
         { value: 'hello', selectionStart: 1, selectionEnd: 3 },
       )
+      expect(String(mockPage.evaluate.mock.calls[0][0])).toContain('dispatchEvent')
     })
 
     it('should pass undefined selection bounds when omitted', async () => {
@@ -1073,7 +1101,7 @@ describe('BrowserSession', () => {
       await session.setFocusedInputValue('world')
 
       expect(mockPage.evaluate).toHaveBeenCalledWith(
-        expect.any(String),
+        expect.any(Function),
         { value: 'world', selectionStart: undefined, selectionEnd: undefined },
       )
     })
@@ -1081,459 +1109,6 @@ describe('BrowserSession', () => {
     it('should throw when no active page', async () => {
       const session = new BrowserSession()
       await expect(session.setFocusedInputValue('x')).rejects.toThrow('No active browser page')
-    })
-  })
-
-  // ---------------------------------------------------------------------------
-  // In-browser script behavior. FOCUS_REPORTING_SCRIPT and
-  // SET_FOCUSED_INPUT_VALUE_SCRIPT run inside the page (passed to Playwright as
-  // strings). We exercise their logic directly in Node by compiling the arrow
-  // function and feeding it a hand-built fake window/document so the branches
-  // (false-suppression, missing native setter) are covered without a real DOM.
-  // ---------------------------------------------------------------------------
-  describe('SET_FOCUSED_INPUT_VALUE_SCRIPT (in-browser)', () => {
-    interface FakeEl {
-      tagName: string
-      attrs: Record<string, string>
-      getAttribute: (n: string) => string | null
-      dispatchEvent: jest.Mock
-      setSelectionRange?: jest.Mock
-      value?: string
-    }
-
-    function makeEl(tagName: string, attrs: Record<string, string> = {}): FakeEl {
-      return {
-        tagName,
-        attrs,
-        getAttribute: (n: string) => (n in attrs ? attrs[n] : null),
-        dispatchEvent: jest.fn(),
-        setSelectionRange: jest.fn(),
-        value: '',
-      }
-    }
-
-    // Build a fake window with INPUT/TEXTAREA prototypes whose `value` property
-    // descriptor optionally exposes a setter, plus a recording InputEvent.
-    function makeEnv(opts: { inputHasSetter: boolean; textareaHasSetter: boolean }) {
-      const inputSetter = jest.fn(function (this: FakeEl, v: string) {
-        this.value = v
-      })
-      const textareaSetter = jest.fn(function (this: FakeEl, v: string) {
-        this.value = v
-      })
-      const inputProto = {}
-      Object.defineProperty(inputProto, 'value', {
-        configurable: true,
-        get() {
-          return ''
-        },
-        ...(opts.inputHasSetter ? { set: inputSetter } : {}),
-      })
-      const textareaProto = {}
-      Object.defineProperty(textareaProto, 'value', {
-        configurable: true,
-        get() {
-          return ''
-        },
-        ...(opts.textareaHasSetter ? { set: textareaSetter } : {}),
-      })
-      const win = {
-        HTMLInputElement: { prototype: inputProto },
-        HTMLTextAreaElement: { prototype: textareaProto },
-      }
-      const inputEvents: Array<{ type: string }> = []
-      class FakeInputEvent {
-        type: string
-        constructor(type: string) {
-          this.type = type
-          inputEvents.push(this)
-        }
-      }
-      return { win, inputSetter, textareaSetter, inputEvents, FakeInputEvent }
-    }
-
-    function run(
-      script: string,
-      activeElement: FakeEl | null,
-      win: Record<string, unknown>,
-      InputEventCtor: unknown,
-      args: unknown,
-    ): void {
-      const doc = { activeElement }
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
-      const fn = new Function(
-        'window',
-        'document',
-        'InputEvent',
-        `return (${script})`,
-      )(win, doc, InputEventCtor) as (a: unknown) => void
-      fn(args)
-    }
-
-    it('should set the value via the native setter and dispatch input for an input', () => {
-      const env = makeEnv({ inputHasSetter: true, textareaHasSetter: true })
-      const el = makeEl('INPUT', { type: 'text' })
-
-      run(SET_FOCUSED_INPUT_VALUE_SCRIPT, el, env.win, env.FakeInputEvent, {
-        value: 'hello',
-        selectionStart: 1,
-        selectionEnd: 3,
-      })
-
-      expect(env.inputSetter).toHaveBeenCalledWith('hello')
-      expect(el.dispatchEvent).toHaveBeenCalledTimes(1)
-      expect(env.inputEvents).toEqual([{ type: 'input' }])
-      expect(el.setSelectionRange).toHaveBeenCalledWith(1, 3)
-    })
-
-    it('should be a no-op (no crash) when the native value setter is missing', () => {
-      const env = makeEnv({ inputHasSetter: false, textareaHasSetter: true })
-      const el = makeEl('INPUT', { type: 'text' })
-
-      // Must not throw a TypeError reading .set of undefined; nothing dispatched.
-      expect(() =>
-        run(SET_FOCUSED_INPUT_VALUE_SCRIPT, el, env.win, env.FakeInputEvent, { value: 'x' }),
-      ).not.toThrow()
-      expect(el.dispatchEvent).not.toHaveBeenCalled()
-      expect(env.inputEvents).toEqual([])
-    })
-
-    it('should no-op when there is no active element', () => {
-      const env = makeEnv({ inputHasSetter: true, textareaHasSetter: true })
-      expect(() =>
-        run(SET_FOCUSED_INPUT_VALUE_SCRIPT, null, env.win, env.FakeInputEvent, { value: 'x' }),
-      ).not.toThrow()
-      expect(env.inputSetter).not.toHaveBeenCalled()
-    })
-
-    it('should no-op for a non-reporting input type', () => {
-      const env = makeEnv({ inputHasSetter: true, textareaHasSetter: true })
-      const el = makeEl('INPUT', { type: 'checkbox' })
-      run(SET_FOCUSED_INPUT_VALUE_SCRIPT, el, env.win, env.FakeInputEvent, { value: 'x' })
-      expect(env.inputSetter).not.toHaveBeenCalled()
-    })
-
-    it('should no-op for a non-input/textarea element', () => {
-      const env = makeEnv({ inputHasSetter: true, textareaHasSetter: true })
-      const el = makeEl('DIV')
-      run(SET_FOCUSED_INPUT_VALUE_SCRIPT, el, env.win, env.FakeInputEvent, { value: 'x' })
-      expect(env.inputSetter).not.toHaveBeenCalled()
-      expect(env.textareaSetter).not.toHaveBeenCalled()
-    })
-
-    it('should set value on a textarea via its native setter', () => {
-      const env = makeEnv({ inputHasSetter: true, textareaHasSetter: true })
-      const el = makeEl('TEXTAREA')
-      run(SET_FOCUSED_INPUT_VALUE_SCRIPT, el, env.win, env.FakeInputEvent, { value: 'multi' })
-      expect(env.textareaSetter).toHaveBeenCalledWith('multi')
-      expect(el.dispatchEvent).toHaveBeenCalledTimes(1)
-    })
-
-    it('should skip setSelectionRange when bounds are omitted', () => {
-      const env = makeEnv({ inputHasSetter: true, textareaHasSetter: true })
-      const el = makeEl('INPUT', { type: 'text' })
-      run(SET_FOCUSED_INPUT_VALUE_SCRIPT, el, env.win, env.FakeInputEvent, { value: 'x' })
-      expect(el.setSelectionRange).not.toHaveBeenCalled()
-    })
-  })
-
-  describe('FOCUS_REPORTING_SCRIPT (in-browser)', () => {
-    interface FakeReportEl {
-      tagName: string
-      attrs: Record<string, string>
-      getAttribute: (n: string) => string | null
-      value: string
-      selectionStart: number | null
-      selectionEnd: number | null
-      maxLength: number
-      getBoundingClientRect: () => { x: number; y: number; width: number; height: number }
-    }
-
-    function makeReportEl(tagName: string, attrs: Record<string, string> = {}): FakeReportEl {
-      return {
-        tagName,
-        attrs,
-        getAttribute: (n: string) => (n in attrs ? attrs[n] : null),
-        value: 'abc',
-        selectionStart: 0,
-        selectionEnd: 0,
-        maxLength: -1,
-        getBoundingClientRect: () => ({ x: 1, y: 2, width: 3, height: 4 }),
-      }
-    }
-
-    // Install the focus reporting script into a fake page environment and return
-    // helpers to drive its registered event listeners and inspect emitted payloads.
-    //
-    // `initialActive` sets document.activeElement BEFORE the script runs, so the
-    // script's initial-report step (which inspects activeElement at injection time)
-    // can be exercised — this mirrors injecting the script into a page that already
-    // has an autofocused input.
-    function install(
-      onFocus: jest.Mock,
-      opts?: { throwOnFocus?: boolean; initialActive?: FakeReportEl | null },
-    ) {
-      let activeElement: FakeReportEl | null = opts?.initialActive ?? null
-      const listeners: Record<string, Array<() => void>> = {}
-      const consoleWarn = jest.fn()
-      const win: Record<string, unknown> = {
-        __onBrowserFocus: opts?.throwOnFocus
-          ? () => {
-              throw new Error('binding gone')
-            }
-          : onFocus,
-        console: { warn: consoleWarn },
-      }
-      const doc = {
-        get activeElement() {
-          return activeElement
-        },
-        addEventListener: (type: string, cb: () => void) => {
-          ;(listeners[type] ||= []).push(cb)
-        },
-      }
-      const getComputedStyle = (): Record<string, string> => ({
-        fontSize: '16px',
-        lineHeight: '20px',
-        paddingTop: '2px',
-        paddingLeft: '4px',
-        textAlign: 'left',
-      })
-      // Inject `console` explicitly: the script's `console.warn` resolves to the
-      // global in a real browser, but in this Function sandbox we route it to a
-      // spy so the one-shot warning can be asserted.
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
-      const fn = new Function(
-        'window',
-        'document',
-        'getComputedStyle',
-        'console',
-        `return (${FOCUS_REPORTING_SCRIPT})`,
-      )(win, doc, getComputedStyle, { warn: consoleWarn }) as () => void
-      fn()
-      const fire = (type: string): void => {
-        for (const cb of listeners[type] ?? []) cb()
-      }
-      return {
-        win,
-        consoleWarn,
-        setActive: (el: FakeReportEl | null) => {
-          activeElement = el
-        },
-        fire,
-      }
-    }
-
-    // Build a sandbox whose window AND document persist across multiple script
-    // evaluations (mirroring a real page's stable global document across
-    // re-evaluations in the same execution context). `run()` recompiles and
-    // invokes the script against the SAME window/document; `setActive` changes
-    // the focused element between runs.
-    function makeReInstallable(onFocus: jest.Mock) {
-      let activeElement: FakeReportEl | null = null
-      const addEventListener = jest.fn()
-      const win: Record<string, unknown> = {
-        __onBrowserFocus: onFocus,
-        console: { warn: jest.fn() },
-      }
-      const doc = {
-        get activeElement() {
-          return activeElement
-        },
-        addEventListener,
-      }
-      const getComputedStyle = (): Record<string, string> => ({
-        fontSize: '16px',
-        lineHeight: '20px',
-        paddingTop: '2px',
-        paddingLeft: '4px',
-        textAlign: 'left',
-      })
-      return {
-        win,
-        addEventListener,
-        setActive: (el: FakeReportEl | null) => {
-          activeElement = el
-        },
-        run: () => {
-          // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
-          const fn = new Function(
-            'window',
-            'document',
-            'getComputedStyle',
-            'console',
-            `return (${FOCUS_REPORTING_SCRIPT})`,
-          )(win, doc, getComputedStyle, { warn: jest.fn() }) as () => void
-          fn()
-        },
-      }
-    }
-
-    it('should emit focused:true with payload when a reporting target is focused', () => {
-      const onFocus = jest.fn()
-      const env = install(onFocus)
-      env.setActive(makeReportEl('INPUT', { type: 'text' }))
-
-      env.fire('focusin')
-
-      expect(onFocus).toHaveBeenCalledTimes(1)
-      const payload = onFocus.mock.calls[0][0] as FocusChangePayload
-      expect(payload.focused).toBe(true)
-      expect(payload.rect).toEqual({ x: 1, y: 2, width: 3, height: 4 })
-      expect(payload.value).toBe('abc')
-      expect(payload.fontSize).toBe(16)
-    })
-
-    it('should NOT emit focused:false from selectionchange while nothing was focused (false-suppression)', () => {
-      const onFocus = jest.fn()
-      const env = install(onFocus)
-      env.setActive(null)
-
-      // Unrelated document text selections fire selectionchange repeatedly; with
-      // nothing reporting-focused these must NOT spam focused:false.
-      env.fire('selectionchange')
-      env.fire('selectionchange')
-      env.fire('selectionchange')
-
-      expect(onFocus).not.toHaveBeenCalled()
-    })
-
-    it('should emit focused:false exactly once on the true->false transition', () => {
-      const onFocus = jest.fn()
-      const env = install(onFocus)
-
-      // Focus a target (true), then defocus (false), then keep firing while
-      // unfocused — only the first transition should emit false.
-      env.setActive(makeReportEl('INPUT', { type: 'text' }))
-      env.fire('focusin')
-      onFocus.mockClear()
-
-      env.setActive(null)
-      env.fire('focusout')
-      env.fire('selectionchange')
-      env.fire('input')
-
-      expect(onFocus).toHaveBeenCalledTimes(1)
-      expect((onFocus.mock.calls[0][0] as FocusChangePayload).focused).toBe(false)
-    })
-
-    it('should keep emitting focused:true updates while a target stays focused', () => {
-      const onFocus = jest.fn()
-      const env = install(onFocus)
-      env.setActive(makeReportEl('TEXTAREA'))
-
-      env.fire('focusin')
-      env.fire('input')
-      env.fire('selectionchange')
-
-      // Every update while focused is forwarded so value/selection stay in sync.
-      expect(onFocus).toHaveBeenCalledTimes(3)
-      for (const call of onFocus.mock.calls) {
-        expect((call[0] as FocusChangePayload).focused).toBe(true)
-      }
-      // textarea reports multiline + inputType 'textarea'
-      const p = onFocus.mock.calls[0][0] as FocusChangePayload
-      expect(p.multiline).toBe(true)
-      expect(p.inputType).toBe('textarea')
-    })
-
-    it('should log a one-shot console warning when the binding throws', () => {
-      const onFocus = jest.fn()
-      const env = install(onFocus, { throwOnFocus: true })
-      env.setActive(makeReportEl('INPUT', { type: 'text' }))
-
-      // First failing report logs once; subsequent failures stay silent.
-      env.fire('focusin')
-      env.fire('input')
-
-      expect(env.consoleWarn).toHaveBeenCalledTimes(1)
-      expect(env.consoleWarn.mock.calls[0][0]).toContain('[focus-reporting] report failed')
-      expect(env.win.__focusReportErrorLogged).toBe(true)
-    })
-
-    it('should be idempotent: a second install is a no-op', () => {
-      const onFocus = jest.fn()
-      const env = install(onFocus)
-      // Re-running the script in the same window must early-return without
-      // re-registering listeners (guarded by __browserFocusReportingInstalled).
-      expect(env.win.__browserFocusReportingInstalled).toBe(true)
-
-      const getComputedStyle = (): Record<string, string> => ({})
-      const doc = {
-        get activeElement() {
-          return null
-        },
-        addEventListener: jest.fn(),
-      }
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
-      const fn = new Function(
-        'window',
-        'document',
-        'getComputedStyle',
-        'console',
-        `return (${FOCUS_REPORTING_SCRIPT})`,
-      )(env.win, doc, getComputedStyle, { warn: jest.fn() }) as () => void
-      fn()
-
-      expect(doc.addEventListener).not.toHaveBeenCalled()
-    })
-
-    it('should emit an initial focused:true report when an autofocused target is already active at injection', () => {
-      // Regression for the missing-caret defect: when the script is (re)evaluated
-      // into a document whose activeElement is already a reporting target (e.g. an
-      // autofocus login field), focusin never fires for it. The script must report
-      // the currently-focused element once at injection time so the overlay/caret
-      // appears without any subsequent focus change.
-      const onFocus = jest.fn()
-      install(onFocus, { initialActive: makeReportEl('INPUT', { type: 'text' }) })
-
-      expect(onFocus).toHaveBeenCalledTimes(1)
-      const payload = onFocus.mock.calls[0][0] as FocusChangePayload
-      expect(payload.focused).toBe(true)
-      expect(payload.value).toBe('abc')
-      expect(payload.rect).toEqual({ x: 1, y: 2, width: 3, height: 4 })
-    })
-
-    it('should NOT emit focused:true on injection when the active element is not a reporting target', () => {
-      // body / a non-target element must not produce a spurious focused:true, and
-      // since nothing was previously focused there is no true->false transition to
-      // forward either.
-      const onFocus = jest.fn()
-      install(onFocus, { initialActive: makeReportEl('DIV') })
-
-      expect(onFocus).not.toHaveBeenCalled()
-    })
-
-    it('should NOT emit any initial report when there is no active element at injection', () => {
-      const onFocus = jest.fn()
-      install(onFocus, { initialActive: null })
-
-      expect(onFocus).not.toHaveBeenCalled()
-    })
-
-    it('should still run the initial report on a re-evaluation in the same context even though listeners are not re-registered', () => {
-      // Re-evaluating the script in the SAME execution context (as reportFocusNow
-      // does via page.evaluate on the current page) must skip re-registering
-      // listeners (guarded by __browserFocusReportingInstalled) but still perform
-      // the initial report so a now-focused target is surfaced. We reuse the same
-      // window/document (real-browser semantics: re-evaluation shares the page's
-      // global document) and only change which element is active.
-      const onFocus = jest.fn()
-      const reInstaller = makeReInstallable(onFocus)
-      reInstaller.run() // first evaluation: nothing focused
-      expect(onFocus).not.toHaveBeenCalled()
-      expect(reInstaller.addEventListener).toHaveBeenCalled()
-      reInstaller.addEventListener.mockClear()
-
-      // Focus a target, then re-evaluate the script in the same context.
-      reInstaller.setActive(makeReportEl('INPUT', { type: 'text' }))
-      reInstaller.run()
-
-      // Listeners are NOT re-registered (idempotency guard) ...
-      expect(reInstaller.addEventListener).not.toHaveBeenCalled()
-      // ... but the initial report still runs for the now-focused target.
-      expect(onFocus).toHaveBeenCalledTimes(1)
-      expect((onFocus.mock.calls[0][0] as FocusChangePayload).focused).toBe(true)
     })
   })
 
@@ -1545,9 +1120,9 @@ describe('BrowserSession', () => {
 
       await session.reportFocusNow()
 
-      expect(mockPage.evaluate).toHaveBeenCalledWith(
-        expect.stringContaining('__browserFocusReportingInstalled'),
-      )
+      // Passed as a real FUNCTION; verified to be the focus-reporting script.
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function))
+      expect(String(mockPage.evaluate.mock.calls[0][0])).toContain('__browserFocusReportingInstalled')
     })
 
     it('should be a no-op when no page is active', async () => {
