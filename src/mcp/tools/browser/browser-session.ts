@@ -11,27 +11,17 @@ import { BrowserActionLog } from './browser-action-log'
 import { BROWSER_IDLE_TIMEOUT_MS } from './browser-types'
 import { DeviceEmulation, DEVICE_PRESETS } from './device-presets'
 import { getCursorAt, getElementAtPoint, getFocusedElementInfo } from './element-info'
+import {
+  FOCUS_REPORTING_SCRIPT,
+  GET_SELECTED_TEXT_SCRIPT,
+  SET_FOCUSED_INPUT_VALUE_SCRIPT,
+} from './page-scripts'
 import { loadPlaywright } from './playwright-loader'
 
-/**
- * Browser-context script that reads the current selection.
- * Prefers the selection range of a focused input/textarea, falling back to
- * the document selection. Returns an empty string when nothing is selected.
- */
-const GET_SELECTED_TEXT_SCRIPT = `() => {
-  const active = document.activeElement;
-  if (
-    active &&
-    (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA') &&
-    active.selectionStart != null &&
-    active.selectionEnd != null &&
-    active.selectionStart !== active.selectionEnd
-  ) {
-    return active.value.substring(active.selectionStart, active.selectionEnd);
-  }
-  const sel = window.getSelection();
-  return sel ? sel.toString() : '';
-}`
+// Re-exported so existing importers (and tests) continue to resolve these
+// browser-context scripts from browser-session. The scripts themselves live in
+// page-scripts.ts (DOM-typed, passed as real functions to Playwright).
+export { FOCUS_REPORTING_SCRIPT, SET_FOCUSED_INPUT_VALUE_SCRIPT } from './page-scripts'
 
 /**
  * Payload passed to Playwright's `FileChooser.setFiles`.
@@ -78,159 +68,9 @@ export interface FocusChangePayload {
   paddingTop?: number
   /** Computed padding-left in px. */
   paddingLeft?: number
+  /** Resolved caret color (caret-color, falling back to text color when 'auto'). */
+  caretColor?: string
 }
-
-/**
- * Browser-context script installed (idempotently) into the page to report
- * focus/value/selection changes of simple input/textarea elements back to the
- * agent via the `window.__onBrowserFocus` binding exposed by Playwright.
- *
- * Runs in the browser, so it is a string passed to addInitScript / evaluate to
- * avoid Node resolving DOM types (same convention as element-info scripts).
- *
- * Listens in the capture phase for focusin/focusout/input/selectionchange and,
- * for reporting targets (textarea, or input whose type is one of the simple
- * text-like types), builds and sends the focus payload. focusout / non-target
- * elements send `{ focused: false }`.
- *
- * Listener registration is guarded by `window.__browserFocusReportingInstalled`
- * so re-evaluating the script (e.g. after a navigation, or via reportFocusNow)
- * does not double-register handlers. The INITIAL report, however, runs on EVERY
- * evaluation (outside the guard): `focusin` only fires on focus CHANGES after
- * registration, so an element that is already focused at injection time (e.g. an
- * autofocused login field) would otherwise never be reported and its overlay
- * caret would never appear. Reporting the current activeElement at the end of
- * each evaluation surfaces such elements for both addInitScript (new document)
- * and evaluate (existing/re-evaluated document) injection paths.
- */
-export const FOCUS_REPORTING_SCRIPT = `() => {
-  // The per-document focus reporting state (listeners + lastReportedFocused) is
-  // installed once. Hang the report() helper off window so a re-evaluation that
-  // skips re-registration can still invoke the initial report below.
-  if (!window.__browserFocusReportingInstalled) {
-    window.__browserFocusReportingInstalled = true;
-
-    // Last focused state reported to the agent. Used to suppress repeated
-    // { focused: false } notifications: selectionchange fires for the whole
-    // document (including unrelated page text selections), so without this guard
-    // every such selection would emit a redundant focused:false. We only forward
-    // a false when transitioning from a previously-focused (true) state.
-    var lastReportedFocused = false;
-
-    // Forward a payload through the exposed binding, recording the new focused
-    // state and logging the first failure once (high-frequency events would
-    // otherwise flood the browser console).
-    function emit(payload) {
-      lastReportedFocused = payload.focused;
-      try {
-        window.__onBrowserFocus(payload);
-      } catch (e) {
-        if (!window.__focusReportErrorLogged) {
-          window.__focusReportErrorLogged = true;
-          try { console.warn('[focus-reporting] report failed', e && e.message ? e.message : e); } catch (_) {}
-        }
-      }
-    }
-
-    function isReportingTarget(el) {
-      if (!el) return false;
-      const tag = el.tagName;
-      if (tag === 'TEXTAREA') return true;
-      if (tag !== 'INPUT') return false;
-      const type = (el.getAttribute('type') || '').toLowerCase();
-      return type === '' || type === 'text' || type === 'search' || type === 'email' ||
-        type === 'url' || type === 'tel' || type === 'password' || type === 'number';
-    }
-
-    function buildPayload(el) {
-      const rect = el.getBoundingClientRect();
-      const cs = getComputedStyle(el);
-      const fontSize = parseFloat(cs.fontSize);
-      const lineHeight = parseFloat(cs.lineHeight);
-      const paddingTop = parseFloat(cs.paddingTop);
-      const paddingLeft = parseFloat(cs.paddingLeft);
-      const multiline = el.tagName === 'TEXTAREA';
-      const payload = {
-        focused: true,
-        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-        value: el.value,
-        selectionStart: el.selectionStart == null ? undefined : el.selectionStart,
-        selectionEnd: el.selectionEnd == null ? undefined : el.selectionEnd,
-        multiline: multiline,
-        inputType: multiline ? 'textarea' : ((el.getAttribute('type') || 'text').toLowerCase()),
-        textAlign: cs.textAlign,
-      };
-      if (typeof el.maxLength === 'number' && el.maxLength >= 0) payload.maxLength = el.maxLength;
-      if (!Number.isNaN(fontSize)) payload.fontSize = fontSize;
-      if (!Number.isNaN(lineHeight)) payload.lineHeight = lineHeight;
-      if (!Number.isNaN(paddingTop)) payload.paddingTop = paddingTop;
-      if (!Number.isNaN(paddingLeft)) payload.paddingLeft = paddingLeft;
-      return payload;
-    }
-
-    // Report focused:true (with current value/selection) whenever a reporting
-    // target is active; report focused:false only on the true->false transition.
-    // Exposed on window so a guarded re-evaluation can still trigger the initial
-    // report without re-registering listeners.
-    window.__browserFocusReport = function () {
-      const el = document.activeElement;
-      if (isReportingTarget(el)) {
-        emit(buildPayload(el));
-      } else if (lastReportedFocused) {
-        emit({ focused: false });
-      }
-    };
-
-    document.addEventListener('focusin', window.__browserFocusReport, true);
-    document.addEventListener('focusout', function () {
-      if (lastReportedFocused) emit({ focused: false });
-    }, true);
-    document.addEventListener('input', window.__browserFocusReport, true);
-    document.addEventListener('selectionchange', window.__browserFocusReport, true);
-  }
-
-  // Initial report on EVERY evaluation: surfaces an element that is already
-  // focused at injection time (autofocus) for which focusin will never fire.
-  if (typeof window.__browserFocusReport === 'function') window.__browserFocusReport();
-}`
-
-/**
- * Browser-context script that reflects a value into the currently-focused
- * reporting-target input/textarea using the native value setter +
- * InputEvent('input') dispatch, so React-style controlled components do not
- * roll the value back. Optionally applies a selection range.
- *
- * No-op when the active element is not a reporting target. String script for
- * the same reason as the others (DOM types resolved in the browser).
- */
-export const SET_FOCUSED_INPUT_VALUE_SCRIPT = `(args) => {
-  const el = document.activeElement;
-  if (!el) return;
-  const tag = el.tagName;
-  let proto;
-  if (tag === 'TEXTAREA') {
-    proto = window.HTMLTextAreaElement.prototype;
-  } else if (tag === 'INPUT') {
-    const type = (el.getAttribute('type') || '').toLowerCase();
-    const ok = type === '' || type === 'text' || type === 'search' || type === 'email' ||
-      type === 'url' || type === 'tel' || type === 'password' || type === 'number';
-    if (!ok) return;
-    proto = window.HTMLInputElement.prototype;
-  } else {
-    return;
-  }
-  // The native value setter may be absent on exotic/polyfilled prototypes;
-  // treat that as a no-op (same as a non-reporting target) rather than letting
-  // a TypeError escape from reading .set of undefined.
-  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-  const setter = desc && desc.set;
-  if (!setter) return;
-  setter.call(el, args.value);
-  el.dispatchEvent(new InputEvent('input', { bubbles: true }));
-  if (args.selectionStart != null && args.selectionEnd != null) {
-    try { el.setSelectionRange(args.selectionStart, args.selectionEnd); } catch (e) {}
-  }
-}`
 
 export class BrowserSession {
   private browser: Browser | null = null
@@ -265,6 +105,14 @@ export class BrowserSession {
    * 同じ名前の binding を二重登録すると Playwright が例外を投げるため。
    */
   private focusReportingExposed = false
+
+  /**
+   * One-shot guard so a failing `__onBrowserFocus` binding callback is logged to
+   * the Node logger at most once. The browser-side script already rate-limits
+   * its own console.warn, but nothing subscribes to page console, so without
+   * this the caret overlay could die with zero server-side trace.
+   */
+  private focusBindingErrorLogged = false
 
   /**
    * Get the currently active device emulation ID, or null if none.
@@ -353,7 +201,19 @@ export class BrowserSession {
       try {
         await page.exposeBinding(
           '__onBrowserFocus',
-          (_src, payload: FocusChangePayload) => this.onFocusChange?.(payload),
+          (_src, payload: FocusChangePayload) => {
+            // Surface binding callback failures to the Node logger (once) so a
+            // permanently-broken focus channel is observable server-side; the
+            // browser-side console.warn alone never reaches the agent.
+            try {
+              this.onFocusChange?.(payload)
+            } catch (error) {
+              if (!this.focusBindingErrorLogged) {
+                this.focusBindingErrorLogged = true
+                logger.warn(`[browser] Focus reporting binding callback failed: ${String(error)}`)
+              }
+            }
+          },
         )
         this.focusReportingExposed = true
       } catch (error) {
@@ -784,8 +644,8 @@ export class BrowserSession {
     const page = this.assertPageActive()
     this.resetIdleTimer()
 
-    // page.evaluate のコールバックはブラウザコンテキストで実行されるため、
-    // Node 側で DOM 型を解決できるよう文字列スクリプトとして渡す（element-info と同じ方針）。
+    // page.evaluate のコールバックはブラウザコンテキストで実行される。実関数として
+    // 渡し、DOM 型は page-scripts.ts 内で解決する（element-info と同じ方針）。
     const result = await page.evaluate(GET_SELECTED_TEXT_SCRIPT)
     return typeof result === 'string' ? result : ''
   }
