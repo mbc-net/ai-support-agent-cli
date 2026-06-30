@@ -39,6 +39,16 @@ module.exports = {
           isolatedModules: true,
         },
       },
+      // page-scripts.ts holds browser-context functions serialized to Chromium
+      // via page.evaluate/addInitScript. Under --coverage the babel provider
+      // would instrument them, injecting a module-scoped `cov_*` counter that is
+      // undefined inside the browser, so the serialized function throws a
+      // ReferenceError. Skip instrumenting it here; the unit project covers it
+      // by invoking the functions directly in Node (page-scripts.spec.ts).
+      coveragePathIgnorePatterns: [
+        '/node_modules/',
+        '<rootDir>/src/mcp/tools/browser/page-scripts.ts',
+      ],
       testTimeout: 30000,
       reporters: [
         'default',
