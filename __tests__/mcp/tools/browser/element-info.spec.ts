@@ -1,6 +1,15 @@
 import { formatElementInfo, getCursorAt, getElementAtPoint, getFocusedElementInfo, type ElementInfo } from '../../../../src/mcp/tools/browser/element-info'
+import { logger } from '../../../../src/logger'
+
+jest.mock('../../../../src/logger')
+
+const mockLoggerDebug = logger.debug as jest.MockedFunction<typeof logger.debug>
 
 describe('element-info', () => {
+  beforeEach(() => {
+    mockLoggerDebug.mockClear()
+  })
+
   describe('formatElementInfo', () => {
     it('should format a button element', () => {
       const info: ElementInfo = {
@@ -58,6 +67,8 @@ describe('element-info', () => {
       }
       const result = await getElementAtPoint(mockPage, 100, 200)
       expect(result).toBeNull()
+      // The now-executing script's eval errors must be logged, not swallowed.
+      expect(mockLoggerDebug).toHaveBeenCalledWith(expect.stringContaining('eval error'))
     })
 
     it('should call page.evaluate with coordinates', async () => {
@@ -72,7 +83,10 @@ describe('element-info', () => {
       }
       const result = await getElementAtPoint(mockPage, 100, 200)
       expect(result).toEqual(mockInfo)
-      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(String), { x: 100, y: 200 })
+      // The page-script must be passed to Playwright as a real FUNCTION (not a
+      // string): a string pageFunction is treated as an expression and never
+      // invoked, so the arg would be ignored and the call would return undefined.
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function), { x: 100, y: 200 })
     })
 
     it('should return null when evaluate returns null', async () => {
@@ -91,6 +105,7 @@ describe('element-info', () => {
       }
       const result = await getFocusedElementInfo(mockPage)
       expect(result).toBeNull()
+      expect(mockLoggerDebug).toHaveBeenCalledWith(expect.stringContaining('eval error'))
     })
 
     it('should call page.evaluate', async () => {
@@ -106,7 +121,8 @@ describe('element-info', () => {
       }
       const result = await getFocusedElementInfo(mockPage)
       expect(result).toEqual(mockInfo)
-      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(String))
+      // Passed as a real FUNCTION (see getElementAtPoint note above).
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function))
     })
 
     it('should return null when no element is focused', async () => {
@@ -125,7 +141,8 @@ describe('element-info', () => {
       }
       const result = await getCursorAt(mockPage, 100, 200)
       expect(result).toBe('pointer')
-      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(String), { x: 100, y: 200 })
+      // Passed as a real FUNCTION (see getElementAtPoint note above).
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function), { x: 100, y: 200 })
     })
 
     it('should return "default" when evaluate resolves a non-string value', async () => {

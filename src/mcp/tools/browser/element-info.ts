@@ -7,6 +7,13 @@
 
 import type { Page } from 'playwright'
 
+import { logger } from '../../../logger'
+import {
+  CURSOR_AT_POINT_SCRIPT,
+  ELEMENT_AT_POINT_SCRIPT,
+  FOCUSED_ELEMENT_SCRIPT,
+} from './page-scripts'
+
 /** Structured information about a DOM element */
 export interface ElementInfo {
   /** Best CSS selector for Playwright (e.g., '#submit-btn', 'button:has-text("Login")') */
@@ -26,190 +33,17 @@ export interface ElementInfo {
 }
 
 /**
- * JavaScript to run in the browser via page.evaluate() to extract element info.
- * Returns ElementInfo-compatible object or null.
- */
-const ELEMENT_AT_POINT_SCRIPT = `(point) => {
-  const el = document.elementFromPoint(point.x, point.y);
-  if (!el) return null;
-  return extractInfo(el);
-
-  function extractInfo(el) {
-    const tag = el.tagName.toLowerCase();
-    const id = el.id;
-    const name = el.getAttribute('name');
-    const type = el.getAttribute('type');
-    const role = el.getAttribute('role') || implicitRole(tag, type);
-    const ariaLabel = el.getAttribute('aria-label');
-    const placeholder = el.getAttribute('placeholder');
-    const title = el.getAttribute('title');
-    const href = el.getAttribute('href');
-    const text = getVisibleText(el);
-    const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id');
-
-    const selector = buildSelector(el, tag, id, name, testId, text, role, ariaLabel, placeholder, type);
-    const label = ariaLabel || placeholder || name || title || undefined;
-
-    return {
-      selector,
-      tagName: tag,
-      type: type || undefined,
-      text: text || undefined,
-      role: role || undefined,
-      label: label || undefined,
-      href: href || undefined,
-    };
-  }
-
-  function buildSelector(el, tag, id, name, testId, text, role, ariaLabel, placeholder, type) {
-    // Priority 1: data-testid (most stable)
-    if (testId) return '[data-testid="' + testId + '"]';
-
-    // Priority 2: id (unique)
-    if (id) return '#' + CSS.escape(id);
-
-    // Priority 3: role + name (accessible selectors)
-    if (role && ariaLabel) return tag + '[role="' + role + '"][aria-label="' + ariaLabel + '"]';
-
-    // Priority 4: name attribute (forms)
-    if (name && (tag === 'input' || tag === 'select' || tag === 'textarea')) {
-      return tag + '[name="' + name + '"]';
-    }
-
-    // Priority 5: Playwright text selector for buttons/links
-    if (text && text.length <= 50 && (tag === 'button' || tag === 'a' || role === 'button' || role === 'link')) {
-      return tag + ':has-text("' + text.replace(/"/g, '\\\\"') + '")';
-    }
-
-    // Priority 6: placeholder for inputs
-    if (placeholder && tag === 'input') {
-      return 'input[placeholder="' + placeholder + '"]';
-    }
-
-    // Priority 7: type for inputs
-    if (type && tag === 'input') {
-      // Check if unique enough by adding parent context
-      const parent = el.parentElement;
-      if (parent && parent.id) {
-        return '#' + CSS.escape(parent.id) + ' > input[type="' + type + '"]';
-      }
-      return 'input[type="' + type + '"]';
-    }
-
-    // Priority 8: nth-of-type with class
-    const classes = Array.from(el.classList).filter(c => !c.match(/^(js-|is-|has-)/)).slice(0, 2);
-    if (classes.length > 0) {
-      const classSelector = tag + '.' + classes.map(c => CSS.escape(c)).join('.');
-      const siblings = document.querySelectorAll(classSelector);
-      if (siblings.length === 1) return classSelector;
-      const index = Array.from(siblings).indexOf(el);
-      if (index >= 0) return classSelector + ':nth-of-type(' + (index + 1) + ')';
-    }
-
-    // Fallback: tag with index
-    return tag;
-  }
-
-  function getVisibleText(el) {
-    const text = (el.textContent || '').trim();
-    return text.length > 80 ? text.substring(0, 77) + '...' : text;
-  }
-
-  function implicitRole(tag, type) {
-    if (tag === 'button') return 'button';
-    if (tag === 'a') return 'link';
-    if (tag === 'input') {
-      if (type === 'checkbox') return 'checkbox';
-      if (type === 'radio') return 'radio';
-      if (type === 'submit') return 'button';
-      if (!type || type === 'text' || type === 'email' || type === 'password' || type === 'search' || type === 'tel' || type === 'url' || type === 'number') return 'textbox';
-    }
-    if (tag === 'textarea') return 'textbox';
-    if (tag === 'select') return 'combobox';
-    if (tag === 'img') return 'img';
-    return '';
-  }
-}`
-
-/**
- * JavaScript to read the CSS `cursor` value of the element at a point.
- * Mirrors ELEMENT_AT_POINT_SCRIPT's string-script convention so the browser
- * context (not Node) resolves DOM types. Returns 'default' when no element is
- * found or the computed cursor is empty.
- */
-const CURSOR_AT_POINT_SCRIPT = `(point) => {
-  const el = document.elementFromPoint(point.x, point.y);
-  if (!el) return 'default';
-  return getComputedStyle(el).cursor || 'default';
-}`
-
-/**
- * JavaScript to extract info about the currently focused element.
- */
-const FOCUSED_ELEMENT_SCRIPT = `() => {
-  const el = document.activeElement;
-  if (!el || el === document.body) return null;
-
-  const tag = el.tagName.toLowerCase();
-  const id = el.id;
-  const name = el.getAttribute('name');
-  const type = el.getAttribute('type');
-  const role = el.getAttribute('role') || implicitRole(tag, type);
-  const ariaLabel = el.getAttribute('aria-label');
-  const placeholder = el.getAttribute('placeholder');
-  const title = el.getAttribute('title');
-  const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id');
-
-  const selector = buildSelector(el, tag, id, name, testId, '', role, ariaLabel, placeholder, type);
-  const label = ariaLabel || placeholder || name || title || undefined;
-
-  return {
-    selector,
-    tagName: tag,
-    type: type || undefined,
-    role: role || undefined,
-    label: label || undefined,
-  };
-
-  function buildSelector(el, tag, id, name, testId, text, role, ariaLabel, placeholder, type) {
-    if (testId) return '[data-testid="' + testId + '"]';
-    if (id) return '#' + CSS.escape(id);
-    if (role && ariaLabel) return tag + '[role="' + role + '"][aria-label="' + ariaLabel + '"]';
-    if (name && (tag === 'input' || tag === 'select' || tag === 'textarea')) {
-      return tag + '[name="' + name + '"]';
-    }
-    if (placeholder && tag === 'input') {
-      return 'input[placeholder="' + placeholder + '"]';
-    }
-    if (type && tag === 'input') return 'input[type="' + type + '"]';
-    const classes = Array.from(el.classList).filter(c => !c.match(/^(js-|is-|has-)/)).slice(0, 2);
-    if (classes.length > 0) return tag + '.' + classes.map(c => CSS.escape(c)).join('.');
-    return tag;
-  }
-
-  function implicitRole(tag, type) {
-    if (tag === 'button') return 'button';
-    if (tag === 'a') return 'link';
-    if (tag === 'input') {
-      if (type === 'checkbox') return 'checkbox';
-      if (type === 'radio') return 'radio';
-      if (type === 'submit') return 'button';
-      if (!type || type === 'text' || type === 'email' || type === 'password' || type === 'search' || type === 'tel' || type === 'url' || type === 'number') return 'textbox';
-    }
-    if (tag === 'textarea') return 'textbox';
-    if (tag === 'select') return 'combobox';
-    return '';
-  }
-}`
-
-/**
  * Get element info at the given coordinates via page.evaluate().
  * Returns null if no element found or on error.
  */
 export async function getElementAtPoint(page: Page, x: number, y: number): Promise<ElementInfo | null> {
   try {
     return await page.evaluate(ELEMENT_AT_POINT_SCRIPT, { x, y }) as ElementInfo | null
-  } catch {
+  } catch (error) {
+    // The script now actually executes in the page, so real eval errors reach
+    // here; log them (debug — this is best-effort enrichment) instead of
+    // silently dropping them.
+    logger.debug(`[browser] getElementAtPoint evaluate failed: ${String(error)}`)
     return null
   }
 }
@@ -221,7 +55,8 @@ export async function getElementAtPoint(page: Page, x: number, y: number): Promi
 export async function getFocusedElementInfo(page: Page): Promise<ElementInfo | null> {
   try {
     return await page.evaluate(FOCUSED_ELEMENT_SCRIPT) as ElementInfo | null
-  } catch {
+  } catch (error) {
+    logger.debug(`[browser] getFocusedElementInfo evaluate failed: ${String(error)}`)
     return null
   }
 }
