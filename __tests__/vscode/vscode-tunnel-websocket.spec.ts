@@ -59,6 +59,7 @@ describe('VsCodeTunnelWebSocket', () => {
       'test-token',
       'agent-123',
       '/test/project',
+      '/test/project/workspace',
     )
 
     // Access internal ws and set up message handler
@@ -314,12 +315,14 @@ describe('VsCodeTunnelWebSocket', () => {
         token: string,
         agentId: string,
         projectDir: string,
+        workspaceDir: string,
         envVarsProvider: () => Record<string, string> | undefined,
       ) => { handleVsCodeOpen: (msg: unknown) => Promise<void> })(
         'https://api.example.com',
         'test-token',
         'agent-123',
         '/test/project',
+        '/test/project/workspace',
         () => undefined, // envVarsProvider returns undefined → triggers warning
       )
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -362,12 +365,14 @@ describe('VsCodeTunnelWebSocket', () => {
         token: string,
         agentId: string,
         projectDir: string,
+        workspaceDir: string,
         envVarsProvider: () => Record<string, string>,
       ) => object)(
         'https://api.example.com',
         'test-token',
         'agent-123',
         '/test/project',
+        '/test/project/workspace',
         () => ({ NEW_KEY: 'new_value' }),
       )
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2464,6 +2469,7 @@ describe('VsCodeTunnelWebSocket', () => {
     })
   })
 
+
   describe('browser handlers - no sessionId (ternary false branch)', () => {
     it('handleBrowserGoBack - should do nothing when no sessionId', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2600,15 +2606,16 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(sentMessages.some((m) => m.type === 'error')).toBe(true)
     })
 
-    it('should write base64 files to temp paths, call accept with those paths, then clean them up', async () => {
-      // Capture the paths and their on-disk content/existence at the moment
-      // setFiles is invoked, so we can assert they were written then removed.
-      let pathsAtCall: string[] = []
-      let contentsAtCall: string[] = []
-      const fsModule = await import('node:fs/promises')
-      const accept = jest.fn().mockImplementation(async (paths: string[]) => {
-        pathsAtCall = paths
-        contentsAtCall = await Promise.all(paths.map((p) => fsModule.readFile(p, 'utf8')))
+    it('passes buffer objects (not temp file paths) to accept so content is available after accept resolves', async () => {
+      // REGRESSION TEST: Playwright's setFiles registers a path with the browser, but the
+      // browser reads the file *after* setFiles resolves. If temp files are deleted in the
+      // finally block immediately after accept(), those files are gone before the browser
+      // reads them, causing "A requested file or directory could not be found" errors.
+      // Fix: pass {name, mimeType, buffer} objects directly to setFiles — no temp files needed.
+      let capturedPayload: unknown
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const accept = jest.fn().mockImplementation(async (payload: any) => {
+        capturedPayload = payload
       })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(tunnel as any).pendingFileChoosers.set('sess-f1', accept)
@@ -2624,18 +2631,24 @@ describe('VsCodeTunnelWebSocket', () => {
       })
 
       expect(accept).toHaveBeenCalledTimes(1)
-      expect(pathsAtCall).toHaveLength(2)
-      // Each path lives under the OS temp dir, in a per-upload subdir.
-      for (const p of pathsAtCall) {
-        expect(p.startsWith(os.tmpdir())).toBe(true)
-      }
-      // Content written correctly before setFiles is invoked.
-      expect(contentsAtCall).toEqual(['hi', 'world'])
-      // Temp files (and their dir) removed after accept resolves.
-      for (const p of pathsAtCall) {
-        expect(existsSync(p)).toBe(false)
-      }
-      expect(existsSync(path.dirname(pathsAtCall[0]))).toBe(false)
+      const payload = capturedPayload as Array<{ name: string; mimeType: string; buffer: Buffer }>
+      expect(payload).toHaveLength(2)
+
+      // Must be buffer objects, NOT string paths. String paths would point to temp files
+      // that are deleted before the browser reads them.
+      expect(typeof payload[0]).not.toBe('string')
+      expect(typeof payload[1]).not.toBe('string')
+
+      // Buffer objects carry the original file name and MIME type.
+      expect(payload[0]).toMatchObject({ name: 'a.txt', mimeType: 'text/plain' })
+      expect(payload[1]).toMatchObject({ name: 'b.bin', mimeType: 'application/octet-stream' })
+
+      // Buffer content matches the decoded base64.
+      expect(Buffer.isBuffer(payload[0].buffer)).toBe(true)
+      expect(Buffer.isBuffer(payload[1].buffer)).toBe(true)
+      expect(payload[0].buffer.toString('utf8')).toBe('hi')
+      expect(payload[1].buffer.toString('utf8')).toBe('world')
+
       // accept should be removed after use
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((tunnel as any).pendingFileChoosers.has('sess-f1')).toBe(false)
@@ -2671,6 +2684,45 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(sentMessages.some((m) => m.type === 'error')).toBe(false)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((tunnel as any).pendingFileChoosers.has('sess-rel')).toBe(false)
+    })
+
+    // REGRESSION (browser file upload from Agent Docker workspace): in production
+    // the constructor receives projectDir = reposDir (= <ws>/repos, the VS Code
+    // launch dir) which is a DIFFERENT directory from the workspace root (<ws>).
+    // filePaths from the workspace file picker are relative to <ws>, so they MUST
+    // resolve against workspaceDir, not getWorkspaceDir(reposDir) = <ws>/repos/workspace
+    // (which does not exist). The previous code used getWorkspaceDir(this.projectDir)
+    // and therefore resolved every selection to a missing path, which setFiles
+    // silently rejected ("nothing happens").
+    it('resolves filePaths against workspaceDir even when the (repos) projectDir launch dir differs', async () => {
+      // Mirror production wiring: 4th arg = reposDir, 5th arg = workspaceDir.
+      const t = new VsCodeTunnelWebSocket(
+        'https://api.example.com',
+        'token',
+        'agent-wsroot',
+        '/proj/workspace/repos', // projectDir = reposDir (VS Code launch dir)
+        '/proj/workspace', // workspaceDir = file-upload resolution root
+      )
+      let pathsAtCall: string[] = []
+      const accept = jest.fn().mockImplementation((paths: string[]) => {
+        pathsAtCall = paths
+        return Promise.resolve()
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(t as any).pendingFileChoosers.set('sess-wsroot', accept)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (t as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-wsroot',
+        filePaths: ['repos/app.ts'],
+      })
+
+      // Must resolve under workspaceDir (/proj/workspace), NOT
+      // getWorkspaceDir(reposDir) = /proj/workspace/repos/workspace.
+      expect(accept).toHaveBeenCalledTimes(1)
+      expect(pathsAtCall).toEqual([path.join('/proj/workspace', 'repos/app.ts')])
+      expect(sentMessages.some((m) => m.type === 'error')).toBe(false)
     })
 
     it('should resolve a "." workspace-relative path to the workspace root', async () => {
@@ -2758,7 +2810,7 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(accept).toHaveBeenCalledWith([])
     })
 
-    it('should reject filePaths when the agent has no project directory configured', async () => {
+    it('should reject filePaths when the agent has no workspace directory configured', async () => {
       const noDirTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-x')
       const accept = jest.fn().mockResolvedValue(undefined)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2775,7 +2827,7 @@ describe('VsCodeTunnelWebSocket', () => {
 
       const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-nodir')
       expect(err).toBeDefined()
-      expect(err!.message).toContain('no project directory')
+      expect(err!.message).toContain('no workspace directory')
       expect(accept).toHaveBeenCalledWith([])
     })
 
@@ -2797,10 +2849,12 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(err!.message).toContain('chooser gone')
     })
 
-    it('should sanitize traversal file names so temp files stay inside the temp dir', async () => {
-      let pathsAtCall: string[] = []
-      const accept = jest.fn().mockImplementation((paths: string[]) => {
-        pathsAtCall = paths
+    it('should sanitize traversal file names in buffer objects so names contain no path separators', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let capturedPayload: Array<{ name: string; mimeType: string; buffer: Buffer }> = []
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const accept = jest.fn().mockImplementation((payload: any) => {
+        capturedPayload = payload
         return Promise.resolve()
       })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2816,47 +2870,40 @@ describe('VsCodeTunnelWebSocket', () => {
         ],
       })
 
-      expect(pathsAtCall).toHaveLength(2)
-      for (const p of pathsAtCall) {
-        const tmpRoot = path.dirname(p)
-        // The resolved path must be a direct child of the per-upload temp dir.
-        expect(path.dirname(path.resolve(p))).toBe(path.resolve(tmpRoot))
-        expect(tmpRoot.startsWith(os.tmpdir())).toBe(true)
-        // Basename must not retain any traversal/separator structure.
-        const base = path.basename(p)
-        expect(base.includes('/')).toBe(false)
-        expect(base.includes('\\')).toBe(false)
-        expect(base).not.toBe('..')
+      expect(capturedPayload).toHaveLength(2)
+      for (const entry of capturedPayload) {
+        // Buffer name must not retain any traversal/separator structure.
+        expect(entry.name.includes('/')).toBe(false)
+        expect(entry.name.includes('\\')).toBe(false)
+        expect(entry.name).not.toBe('..')
       }
     })
 
-    it('should error and cancel the chooser when the temp directory cannot be created', async () => {
-      // The handler uses `import { promises as fs } from 'node:fs'`, so spy on
-      // that same promises object.
-      const nodeFs = await import('node:fs')
-      const spy = jest
-        .spyOn(nodeFs.promises, 'mkdtemp')
-        .mockRejectedValue(new Error('EACCES: tmp not writable') as never)
-      try {
-        const accept = jest.fn().mockResolvedValue(undefined)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(tunnel as any).pendingFileChoosers.set('sess-mkdir', accept)
+    it('should fall back to application/octet-stream when mimeType is missing or not a string', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let capturedPayload: Array<{ name: string; mimeType: string; buffer: Buffer }> = []
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const accept = jest.fn().mockImplementation((payload: any) => {
+        capturedPayload = payload
+        return Promise.resolve()
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).pendingFileChoosers.set('sess-mime', accept)
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await (tunnel as any).handleBrowserSetFile({
-          type: 'browser_set_file',
-          sessionId: 'sess-mkdir',
-          files: [{ name: 'a.txt', mimeType: 'text/plain', dataBase64: Buffer.from('hi').toString('base64') }],
-        })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserSetFile({
+        type: 'browser_set_file',
+        sessionId: 'sess-mime',
+        files: [
+          { name: 'no-mime.bin', dataBase64: Buffer.from('data').toString('base64') }, // mimeType missing
+          { name: 'num-mime.bin', mimeType: 42 as unknown as string, dataBase64: Buffer.from('data').toString('base64') }, // mimeType not a string
+        ],
+      })
 
-        const err = sentMessages.find((m) => m.type === 'error' && m.sessionId === 'sess-mkdir')
-        expect(err).toBeDefined()
-        expect(err!.message).toContain('File upload failed')
-        // Chooser cancelled with [] so the remote input is not left pending.
-        expect(accept).toHaveBeenCalledWith([])
-      } finally {
-        spy.mockRestore()
-      }
+      expect(accept).toHaveBeenCalledTimes(1)
+      expect(capturedPayload).toHaveLength(2)
+      expect(capturedPayload[0].mimeType).toBe('application/octet-stream')
+      expect(capturedPayload[1].mimeType).toBe('application/octet-stream')
     })
 
     it('should call accept with [] when files is an empty array (cancel)', async () => {
@@ -2882,12 +2929,8 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(accept).toHaveBeenCalledWith([])
     })
 
-    it('should send an error and clean up temp files when accept (setFiles) rejects (HIGH-2)', async () => {
-      let pathDuringCall = ''
-      const accept = jest.fn().mockImplementation((paths: string[]) => {
-        pathDuringCall = paths[0]
-        return Promise.reject(new Error('chooser invalidated'))
-      })
+    it('should send an error and cancel the chooser when accept (setFiles) rejects (HIGH-2)', async () => {
+      const accept = jest.fn().mockRejectedValue(new Error('chooser invalidated'))
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(tunnel as any).pendingFileChoosers.set('sess-fail', accept)
 
@@ -2902,8 +2945,9 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(err).toBeDefined()
       expect(err!.message).toContain('File upload failed')
       expect(err!.message).toContain('chooser invalidated')
-      // Temp file removed even though setFiles rejected.
-      expect(existsSync(pathDuringCall)).toBe(false)
+      // Chooser consumed — no dangling pending entry.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((tunnel as any).pendingFileChoosers.has('sess-fail')).toBe(false)
     })
 
     it('should reject oversized uploads, cancel the chooser, and not apply files (HIGH-3)', async () => {
@@ -3106,7 +3150,7 @@ describe('VsCodeTunnelWebSocket', () => {
       const link = path.join(realWorkspaceDir, 'leak')
       await fsPromises.symlink(secret, link)
 
-      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-sym', projectDir)
+      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-sym', projectDir, path.join(projectDir, 'workspace'))
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(symTunnel as any).ws = mockWs
       const accept = jest.fn().mockResolvedValue(undefined)
@@ -3143,7 +3187,7 @@ describe('VsCodeTunnelWebSocket', () => {
       const link = path.join(realWorkspaceDir, 'alias.txt')
       await fsPromises.symlink(target, link)
 
-      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-sym2', projectDir)
+      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-sym2', projectDir, path.join(projectDir, 'workspace'))
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(symTunnel as any).ws = mockWs
       let pathsAtCall: string[] = []
@@ -3178,7 +3222,7 @@ describe('VsCodeTunnelWebSocket', () => {
       const file = path.join(realWorkspaceDir, 'readme.md')
       await fsPromises.writeFile(file, 'hello')
 
-      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-real', projectDir)
+      const symTunnel = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-real', projectDir, path.join(projectDir, 'workspace'))
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(symTunnel as any).ws = mockWs
       let pathsAtCall: string[] = []

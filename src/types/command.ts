@@ -17,6 +17,7 @@ export type AgentCommandType =
   | 'reboot'
   | 'update'
   | 'e2e_test'
+  | 'e2e_script_fix'
   | 'sync_repository'
 
 export type AgentCommandStatus =
@@ -112,6 +113,12 @@ export interface E2eTestPayload {
   recoveryMode?: unknown
 }
 
+export interface E2eScriptFixPayload {
+  testCaseId?: unknown
+  message?: unknown
+  currentScript?: unknown
+}
+
 export interface SyncRepositoryPayload {
   repositoryCode?: unknown
   branch?: unknown
@@ -135,4 +142,5 @@ export type CommandDispatch =
   | { type: 'reboot'; payload: Record<string, never> }
   | { type: 'update'; payload: Record<string, never> }
   | { type: 'e2e_test'; payload: E2eTestPayload }
+  | { type: 'e2e_script_fix'; payload: E2eScriptFixPayload }
   | { type: 'sync_repository'; payload: SyncRepositoryPayload }

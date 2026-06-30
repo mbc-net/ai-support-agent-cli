@@ -43,6 +43,8 @@ describe('BrowserSession', () => {
 
     mockCdpSession = { send: jest.fn().mockResolvedValue(undefined) }
 
+    mockCdpSession = { send: jest.fn().mockResolvedValue(undefined) }
+
     mockPage = {
       goto: jest.fn().mockResolvedValue(undefined),
       title: jest.fn().mockResolvedValue('Test Page'),
