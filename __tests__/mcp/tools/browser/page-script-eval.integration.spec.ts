@@ -1,3 +1,5 @@
+import { existsSync } from 'fs'
+
 import { chromium, type Browser, type Page } from 'playwright'
 
 import {
@@ -6,6 +8,30 @@ import {
   getFocusedElementInfo,
 } from '../../../../src/mcp/tools/browser/element-info'
 import { FOCUS_REPORTING_SCRIPT } from '../../../../src/mcp/tools/browser/browser-session'
+
+/**
+ * This suite launches a REAL Chromium, so it can only run where Playwright's
+ * browser binaries are installed (local dev, browser-equipped CI). The default
+ * CI unit job runs `npm test` WITHOUT `npx playwright install`, so the binary is
+ * absent there — skip cleanly instead of failing. The string→function regression
+ * itself is still guarded in every environment by the unit tests that assert the
+ * scripts are passed as Functions (element-info.spec / browser-session.spec) and
+ * by page-scripts.spec (direct invocation), which need no browser.
+ */
+const hasChromium = ((): boolean => {
+  try {
+    return existsSync(chromium.executablePath())
+  } catch {
+    return false
+  }
+})()
+const describeWithBrowser = hasChromium ? describe : describe.skip
+if (!hasChromium) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[page-script-eval] Skipping real-Chromium regression suite: Playwright browser not installed (run `npx playwright install chromium`).',
+  )
+}
 
 /**
  * Regression test for the page-script execution bug.
@@ -22,7 +48,7 @@ import { FOCUS_REPORTING_SCRIPT } from '../../../../src/mcp/tools/browser/browse
  * (red) on the broken string-based code and pass (green) once the scripts are
  * passed as real functions.
  */
-describe('browser page-script execution (real Chromium)', () => {
+describeWithBrowser('browser page-script execution (real Chromium)', () => {
   let browser: Browser
   let page: Page
 
