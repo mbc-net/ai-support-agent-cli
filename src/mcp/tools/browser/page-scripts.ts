@@ -34,6 +34,7 @@ interface FocusReportPayload {
   paddingTop?: number
   paddingLeft?: number
   textAlign?: string
+  caretColor?: string
 }
 
 /** Minimal DOM element shape used by the page-scripts. */
@@ -65,6 +66,8 @@ interface PageComputedStyle {
   paddingTop: string
   paddingLeft: string
   textAlign: string
+  caretColor: string
+  color: string
 }
 
 /** Subset of window the scripts use, including custom focus-reporting globals. */
@@ -386,7 +389,35 @@ export const FOCUS_REPORTING_SCRIPT = () => {
       if (!Number.isNaN(lineHeight)) payload.lineHeight = lineHeight
       if (!Number.isNaN(paddingTop)) payload.paddingTop = paddingTop
       if (!Number.isNaN(paddingLeft)) payload.paddingLeft = paddingLeft
+      // Native caret defaults to `caret-color`, which itself falls back to the
+      // element's `color` when `auto`. Resolving it here makes the overlay caret
+      // match the real page caret instead of the console theme token. A fully
+      // transparent caret-color (e.g. editors like Ace hide the native caret on a
+      // hidden textarea and draw their own) is resolved away so the overlay does
+      // NOT re-introduce the invisible-caret bug: fall back to `color`, and if
+      // that is also transparent/empty, omit the field so the web overlay uses
+      // its visible `caret-foreground` theme class.
+      let caretColor = cs.caretColor
+      if (!caretColor || caretColor === 'auto' || isTransparentColor(caretColor)) caretColor = cs.color
+      if (caretColor && !isTransparentColor(caretColor)) payload.caretColor = caretColor
       return payload
+    }
+
+    // Whether a CSS color string is fully transparent: the `transparent` keyword
+    // or an alpha-0 functional form (`rgba(…, 0)` / `hsla(…, 0)`). Chromium
+    // computes `caret-color: transparent` to `rgba(0, 0, 0, 0)`. Self-contained
+    // so it survives serialization into the browser context. Empty → treated as
+    // transparent (nothing usable to render).
+    function isTransparentColor(c: string): boolean {
+      if (!c) return true
+      if (c === 'transparent') return true
+      const m = c.match(/^(?:rgba?|hsla?)\(([^)]+)\)$/i)
+      if (m) {
+        const parts = m[1].split(/[,/]/).map((s) => s.trim()).filter(Boolean)
+        const alpha = parts.length >= 4 ? parseFloat(parts[3]) : 1
+        return alpha === 0
+      }
+      return false
     }
 
     // Report focused:true (with current value/selection) whenever a reporting
