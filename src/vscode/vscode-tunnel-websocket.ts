@@ -8,7 +8,6 @@ import { BrowserLocalServer } from '../browser/browser-local-server'
 import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import type { EnvVarsProvider } from '../env-vars-filter'
 import { logger } from '../logger'
-import { getWorkspaceDir } from '../project-dir'
 import { getErrorMessage, buildWsUrl } from '../utils'
 import {
   BrowserSessionManager,
@@ -258,7 +257,17 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     apiUrl: string,
     private readonly token: string,
     private readonly agentId: string,
+    /**
+     * code-server の起動ディレクトリ（= reposDir = `<projectDir>/workspace/repos`）。
+     * VS Code はリポジトリ群のあるディレクトリで開く。
+     */
     private readonly projectDir?: string,
+    /**
+     * ブラウザのファイルチューザーで選択されたワークスペース相対パスを解決する
+     * ルート（= `<projectDir>/workspace`）。`projectDir`（reposDir）とは異なる
+     * ディレクトリで、ファイルピッカーが一覧する基点と一致させる必要がある。
+     */
+    private readonly workspaceDir?: string,
     /**
      * code-server セッション起動時に最新の envVars を取り出す関数。
      * Web 設定が agent プロセス起動後に到着するため関数渡しで遅延評価する。
@@ -1262,7 +1271,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
    *  - Absolute paths are kept as-is (backward compatibility for callers that
    *    already send absolute agent-FS paths).
    *  - Relative paths (e.g. `repos/app.ts`) are resolved against the workspace
-   *    directory (`getWorkspaceDir(projectDir)`).
+   *    directory (`this.workspaceDir` = `<projectDir>/workspace`).
    *
    * Traversal guard (lexical): after resolution, the absolute path must be the
    * workspace root itself or a descendant of it. `path.relative(workspaceDir,
@@ -1284,12 +1293,17 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
    */
   private async resolveWorkspaceFilePaths(filePaths: string[]): Promise<string[] | string> {
     // A workspace root is required to both resolve relative paths and to bound
-    // absolute ones. Without a project directory we cannot safely accept any
-    // file-explorer path.
-    if (!this.projectDir) {
-      return 'Cannot resolve file paths: no project directory configured for this agent'
+    // absolute ones. Without it we cannot safely accept any file-explorer path.
+    // NOTE: use `this.workspaceDir` (= <projectDir>/workspace) directly — it is
+    // the same root the file picker lists against. Deriving it from
+    // `this.projectDir` (which holds reposDir = <projectDir>/workspace/repos) via
+    // getWorkspaceDir() would yield <projectDir>/workspace/repos/workspace, a
+    // non-existent path, so every selection would resolve to a missing file and
+    // setFiles would silently reject it ("nothing happens").
+    if (!this.workspaceDir) {
+      return 'Cannot resolve file paths: no workspace directory configured for this agent'
     }
-    const workspaceDir = path.resolve(getWorkspaceDir(this.projectDir))
+    const workspaceDir = path.resolve(this.workspaceDir)
     // Canonicalize the workspace root too, so a symlinked workspace dir does not
     // produce false positives when comparing against realpath'd children.
     const realWorkspaceDir = await fs.realpath(workspaceDir).catch(() => workspaceDir)

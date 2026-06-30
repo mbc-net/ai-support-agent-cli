@@ -177,12 +177,18 @@ export function startVsCodeTunnel(
   configSyncState?: ConfigSyncState,
 ): void {
   const baseUrl = wsUrl ?? deps.apiUrl
+  // reposDir = VS Code の起動ディレクトリ（リポジトリ群のある場所）。
+  // workspaceDir = ブラウザのファイルチューザーがファイル相対パスを解決する基点。
+  // 両者は異なるディレクトリのため、別々に渡す（混同すると相対パスが不存在パスに
+  // 解決され、選択しても「何も起こらない」不具合になる）。
   const reposDir = deps.projectDir ? getReposDir(deps.projectDir) : undefined
+  const workspaceDir = deps.projectDir ? getWorkspaceDir(deps.projectDir) : undefined
   state.vsCodeWs = new VsCodeTunnelWebSocket(
     baseUrl,
     deps.token,
     deps.agentId,
     reposDir,
+    workspaceDir,
     configSyncState ? () => configSyncState.projectConfig?.envVars : undefined,
   )
 
