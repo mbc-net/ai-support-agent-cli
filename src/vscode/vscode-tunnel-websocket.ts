@@ -192,6 +192,7 @@ export interface VsCodeAgentMessage {
   textAlign?: string
   paddingTop?: number
   paddingLeft?: number
+  caretColor?: string
 }
 
 /** Live view frame interval in milliseconds (5 FPS) */

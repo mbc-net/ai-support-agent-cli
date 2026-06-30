@@ -98,6 +98,8 @@ function installDom(dom: {
       paddingTop: '2px',
       paddingLeft: '4px',
       textAlign: 'left',
+      caretColor: 'rgb(0, 0, 0)',
+      color: 'rgb(0, 0, 0)',
     }
   const listeners: Record<string, Array<() => void>> = {}
   g.document = {
@@ -395,6 +397,106 @@ describe('FOCUS_REPORTING_SCRIPT', () => {
     // firing input emits again
     env.fire('input')
     expect(onFocus).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports the focused element caret-color so the overlay caret matches the page', () => {
+    const onFocus = jest.fn()
+    installDom({
+      activeElement: makeReportEl('INPUT', { type: 'text' }),
+      computedStyle: {
+        fontSize: '16px',
+        lineHeight: '20px',
+        paddingTop: '2px',
+        paddingLeft: '4px',
+        textAlign: 'left',
+        caretColor: 'rgb(0, 0, 0)',
+        color: 'rgb(10, 20, 30)',
+      },
+      windowExtras: { __onBrowserFocus: onFocus },
+    })
+    FOCUS_REPORTING_SCRIPT()
+    const payload = onFocus.mock.calls[0][0]
+    expect(payload.caretColor).toBe('rgb(0, 0, 0)')
+  })
+
+  it('falls back to the text color when caret-color is "auto"', () => {
+    const onFocus = jest.fn()
+    installDom({
+      activeElement: makeReportEl('INPUT', { type: 'text' }),
+      computedStyle: {
+        fontSize: '16px',
+        lineHeight: '20px',
+        paddingTop: '2px',
+        paddingLeft: '4px',
+        textAlign: 'left',
+        caretColor: 'auto',
+        color: 'rgb(10, 20, 30)',
+      },
+      windowExtras: { __onBrowserFocus: onFocus },
+    })
+    FOCUS_REPORTING_SCRIPT()
+    const payload = onFocus.mock.calls[0][0]
+    expect(payload.caretColor).toBe('rgb(10, 20, 30)')
+  })
+
+  it('falls back to the text color when caret-color is the "transparent" keyword', () => {
+    const onFocus = jest.fn()
+    installDom({
+      activeElement: makeReportEl('INPUT', { type: 'text' }),
+      computedStyle: {
+        fontSize: '16px',
+        lineHeight: '20px',
+        paddingTop: '2px',
+        paddingLeft: '4px',
+        textAlign: 'left',
+        caretColor: 'transparent',
+        color: 'rgb(10, 20, 30)',
+      },
+      windowExtras: { __onBrowserFocus: onFocus },
+    })
+    FOCUS_REPORTING_SCRIPT()
+    const payload = onFocus.mock.calls[0][0]
+    expect(payload.caretColor).toBe('rgb(10, 20, 30)')
+  })
+
+  it('falls back to the text color when caret-color computes to alpha-0 rgba', () => {
+    const onFocus = jest.fn()
+    installDom({
+      activeElement: makeReportEl('INPUT', { type: 'text' }),
+      computedStyle: {
+        fontSize: '16px',
+        lineHeight: '20px',
+        paddingTop: '2px',
+        paddingLeft: '4px',
+        textAlign: 'left',
+        caretColor: 'rgba(0, 0, 0, 0)',
+        color: 'rgb(10, 20, 30)',
+      },
+      windowExtras: { __onBrowserFocus: onFocus },
+    })
+    FOCUS_REPORTING_SCRIPT()
+    const payload = onFocus.mock.calls[0][0]
+    expect(payload.caretColor).toBe('rgb(10, 20, 30)')
+  })
+
+  it('omits caretColor when both caret-color and text color are transparent', () => {
+    const onFocus = jest.fn()
+    installDom({
+      activeElement: makeReportEl('INPUT', { type: 'text' }),
+      computedStyle: {
+        fontSize: '16px',
+        lineHeight: '20px',
+        paddingTop: '2px',
+        paddingLeft: '4px',
+        textAlign: 'left',
+        caretColor: 'rgba(0, 0, 0, 0)',
+        color: 'rgba(0, 0, 0, 0)',
+      },
+      windowExtras: { __onBrowserFocus: onFocus },
+    })
+    FOCUS_REPORTING_SCRIPT()
+    const payload = onFocus.mock.calls[0][0]
+    expect(payload.caretColor).toBeUndefined()
   })
 
   it('reports a textarea as multiline', () => {
