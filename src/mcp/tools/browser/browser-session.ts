@@ -68,6 +68,8 @@ export interface FocusChangePayload {
   paddingTop?: number
   /** Computed padding-left in px. */
   paddingLeft?: number
+  /** Resolved caret color (caret-color, falling back to text color when 'auto'). */
+  caretColor?: string
 }
 
 export class BrowserSession {
