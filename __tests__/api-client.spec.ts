@@ -1066,21 +1066,6 @@ describe('ApiClient', () => {
       })
     })
 
-    describe('createIssueFromAlert', () => {
-      it('should POST to alert create-issue endpoint with priority only', async () => {
-        mockInstance.post.mockResolvedValue({ data: { id: 'AI_SU000001' } })
-
-        const result = await client.createIssueFromAlert('tenant1', 'MBC_01', 'AL000001', 'urgent')
-
-        expect(result).toEqual({ id: 'AI_SU000001' })
-        expect(mockInstance.post).toHaveBeenCalledWith(
-          '/api/tenant1/projects/MBC_01/alerts/AL000001/create-issue',
-          { priority: 'urgent' },
-          undefined,
-        )
-      })
-    })
-
     describe('resolveIssueFromAlert', () => {
       it('should POST to resolve-issue endpoint', async () => {
         mockInstance.post.mockResolvedValue({})
