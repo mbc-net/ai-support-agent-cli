@@ -14,10 +14,14 @@
 # abandoned). If python3 is unavailable, do nothing (fail open).
 set -u
 
+# Always drain stdin (Stop hook JSON) first, even on early-exit paths below,
+# so the calling process's pipe write never races an already-exited reader
+# and triggers EPIPE.
+input=$(cat)
+
 [ -n "${AI_SUPPORT_CONVERSATION_ID:-}" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-input=$(cat)
 export AI_SUPPORT_AGENT_HOOK_STDIN="$input"
 
 python3 - "$AI_SUPPORT_CONVERSATION_ID" <<'PYEOF' 2>/dev/null
