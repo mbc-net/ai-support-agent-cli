@@ -15,6 +15,12 @@ import { ndjsonAssistant, ndjsonResult } from '../helpers/ndjson-builders'
 
 jest.mock('../../src/logger')
 
+// Bundled plugin resolution is exercised by claude-code-runner.spec.ts and
+// plugin-dir.spec.ts; mock it here so it defaults to no-op (resolveValidPluginDir
+// returns undefined) and the exact spawn-args assertions below don't need to
+// account for --plugin-dir.
+jest.mock('../../src/commands/plugin-dir')
+
 // Mock project-dir
 jest.mock('../../src/project-dir', () => ({
   getAutoAddDirs: jest.fn().mockReturnValue(['/mock/repos', '/mock/docs']),

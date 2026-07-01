@@ -33,9 +33,13 @@ export function buildClaudeArgs(
     mcpConfigPath?: string
     systemPrompt?: string
     model?: string
+    pluginDir?: string
   },
 ): string[] {
   const args = ['-p', '--output-format', 'stream-json', CLI_FLAG_VERBOSE]
+  if (options?.pluginDir) {
+    args.push('--plugin-dir', options.pluginDir)
+  }
   // モデルは呼び出し側（runClaudeCode）で「JSON設定 > env > デフォルト」の
   // 優先順位に基づき解決済みの値を渡す。ここでは渡された値があれば付与し、
   // 未指定（undefined / 空文字）なら付けない（CLI に ANTHROPIC_MODEL env を
