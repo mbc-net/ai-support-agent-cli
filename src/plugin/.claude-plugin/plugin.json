@@ -1,0 +1,9 @@
+{
+  "name": "ai-support-agent",
+  "description": "A collection of Claude Code agents, commands, skills, and safety hooks for AI-assisted software development, bundled by default with ai-support-agent-cli.",
+  "version": "1.0.0",
+  "author": { "name": "AI Support Agent Contributors" },
+  "homepage": "https://github.com/mbc-net/ai-support-agent-cli",
+  "repository": "https://github.com/mbc-net/ai-support-agent-cli",
+  "license": "MIT"
+}

@@ -199,4 +199,35 @@ describe('claude-code-args', () => {
       expect(result[result.length - 1]).toBe('final-message')
     })
   })
+
+  describe('buildClaudeArgs - pluginDir', () => {
+    it('should add --plugin-dir when pluginDir is provided', () => {
+      const result = buildClaudeArgs('msg', { pluginDir: '/opt/app/dist/plugin' })
+      expect(result).toContain('--plugin-dir')
+      const idx = result.indexOf('--plugin-dir')
+      expect(result[idx + 1]).toBe('/opt/app/dist/plugin')
+    })
+
+    it('should not include --plugin-dir when pluginDir is not provided', () => {
+      const result = buildClaudeArgs('msg')
+      expect(result).not.toContain('--plugin-dir')
+    })
+
+    it('should not include --plugin-dir when pluginDir is undefined', () => {
+      const result = buildClaudeArgs('msg', { pluginDir: undefined })
+      expect(result).not.toContain('--plugin-dir')
+    })
+
+    it('should place --plugin-dir before --model and keep message last', () => {
+      const result = buildClaudeArgs('final-message', {
+        pluginDir: '/opt/app/dist/plugin',
+        model: 'claude-opus-4-8',
+      })
+      const pluginDirIdx = result.indexOf('--plugin-dir')
+      const modelIdx = result.indexOf('--model')
+      expect(pluginDirIdx).toBeGreaterThan(-1)
+      expect(modelIdx).toBeGreaterThan(pluginDirIdx)
+      expect(result[result.length - 1]).toBe('final-message')
+    })
+  })
 })

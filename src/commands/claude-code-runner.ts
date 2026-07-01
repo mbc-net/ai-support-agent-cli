@@ -10,6 +10,7 @@ import { StreamLineParser } from '../utils/stream-parser'
 
 import { buildClaudeArgs, buildCleanEnv } from './claude-code-args'
 import { processStreamJsonLine, type StreamJsonUsage } from './claude-code-stream'
+import { resolveValidPluginDir } from './plugin-dir'
 import { isErrnoException } from '../utils'
 
 // Re-export for backward compatibility
@@ -118,7 +119,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     const resolvedModel = explicitModel
       ? explicitModel
       : (envModel ? undefined : DEFAULT_CLAUDE_MODEL)
-    const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt, model: resolvedModel })
+    const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt, model: resolvedModel, pluginDir: resolveValidPluginDir() ?? undefined })
 
     // どの経路でモデルが決まったかをログ出力し、「--model が付かなかった理由
     // （env 尊重 vs バグ）」をログだけで判別できるようにする。

@@ -30,7 +30,7 @@
   ],
   "scripts": {
     "dev": "node --env-file-if-exists=.env --require ts-node/register src/index.ts",
-    "build": "tsc && cp -r src/locales dist/locales",
+    "build": "tsc && cp -r src/locales dist/locales && cp -r src/plugin dist/plugin && chmod +x dist/plugin/hooks/scripts/*.sh",
     "prepublishOnly": "npm run build && npm test",
     "test": "jest",
     "test:cov": "jest --coverage",
