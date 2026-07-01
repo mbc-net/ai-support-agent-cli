@@ -10,6 +10,8 @@ jest.mock('child_process', () => ({
   spawn: jest.fn(),
 }))
 
+jest.mock('../../src/commands/plugin-dir')
+
 /** NDJSON行を作るヘルパー */
 function makeAssistantLine(text: string): string {
   return JSON.stringify({
@@ -1805,6 +1807,49 @@ describe('claude-code-runner', () => {
       // Advance past SIGKILL delay — SIGKILL should NOT have been called (timer cleared)
       jest.advanceTimersByTime(5_000)
       expect(mockProcess.kill).not.toHaveBeenCalledWith('SIGKILL')
+    })
+
+    describe('bundled plugin auto-attachment', () => {
+      afterEach(() => {
+        const { resolveValidPluginDir } = require('../../src/commands/plugin-dir')
+        ;(resolveValidPluginDir as jest.Mock).mockReset()
+      })
+
+      it('should always call resolveValidPluginDir and add --plugin-dir when a path is returned', async () => {
+        const { spawn } = require('child_process')
+        const { resolveValidPluginDir } = require('../../src/commands/plugin-dir')
+        ;(resolveValidPluginDir as jest.Mock).mockReturnValue('/opt/app/dist/plugin')
+        const mockProcess = createMockChildProcess()
+        spawn.mockReturnValue(mockProcess)
+        const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+        const handle = runClaudeCode({ message: 'hello', sendChunk })
+        mockProcess.emit('close', 0)
+        await handle.result
+
+        expect(resolveValidPluginDir).toHaveBeenCalledTimes(1)
+        const args = spawn.mock.calls[0][1] as string[]
+        const idx = args.indexOf('--plugin-dir')
+        expect(idx).toBeGreaterThan(-1)
+        expect(args[idx + 1]).toBe('/opt/app/dist/plugin')
+      })
+
+      it('should omit --plugin-dir when resolveValidPluginDir returns null (bundled plugin missing)', async () => {
+        const { spawn } = require('child_process')
+        const { resolveValidPluginDir } = require('../../src/commands/plugin-dir')
+        ;(resolveValidPluginDir as jest.Mock).mockReturnValue(null)
+        const mockProcess = createMockChildProcess()
+        spawn.mockReturnValue(mockProcess)
+        const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+        const handle = runClaudeCode({ message: 'hello', sendChunk })
+        mockProcess.emit('close', 0)
+        await handle.result
+
+        expect(resolveValidPluginDir).toHaveBeenCalledTimes(1)
+        const args = spawn.mock.calls[0][1] as string[]
+        expect(args).not.toContain('--plugin-dir')
+      })
     })
   })
 })
