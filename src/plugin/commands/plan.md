@@ -1,6 +1,7 @@
 ---
 description: Create an implementation plan grounded in the codebase's existing patterns before writing any code, and don't start implementing until it's approved
 argument-hint: "[free-form request | path to a requirements markdown file | leave empty]"
+resumable: true
 ---
 
 # /plan - Create an implementation plan
@@ -171,6 +172,34 @@ Handle the user's response as follows:
 - **Requested changes** ("change this part," "drop Phase 2," etc.): revise the affected part of the plan, re-present it, and ask for approval again. Re-run the Step 5 self-review (all three checks) before re-presenting.
 - **Request for an alternative** ("try a different approach," etc.): draft a plan with a different approach and re-present it, optionally with a comparison table against the original.
 - **Rejection/abandonment**: discard the plan and don't implement anything.
+
+## Completion Marker Convention
+
+This command runs under `claude -p` (non-interactive), which restarts as a fresh process every turn — past turn 1, this command body is not guaranteed to be re-expanded, so gate discipline can silently erode across turns. To compensate, a hooks-based mechanism re-injects a digest of this command's must-obey constraints on the next turn whenever the flow is left incomplete.
+
+If this command's flow is **not yet complete** (e.g. stopped at Step 7's approval gate, waiting on clarifying questions, etc.), your response **MUST end** with a line that is an exact match of:
+
+`<!-- ai-support-agent:resume name="plan" -->`
+
+If the flow **is complete** (final user approval was obtained, or the plan was rejected/discarded), do **not** output this marker.
+
+Never output this marker inside a code block or as an illustrative example — only emit it as the actual last line of real output when the flow is genuinely incomplete.
+
+<!-- RESUME_DIGEST_START -->
+When resuming this command on turn 2+ without the full command body re-expanded, obey these constraints:
+
+- **Approval gate (Step 7)**: don't write a single line of code — no creating/editing files, no committing, no "just a small preview" — until the user explicitly approves the presented plan. Silence or a vague "sounds good" is not approval; ask "Should I go ahead and start implementing this plan?" and wait for an explicit yes.
+- Handle the user's response per Step 7: approval → start implementing; requested changes → revise only the affected part, re-present, and ask for approval again; request for an alternative → draft and present a different approach; rejection/abandonment → discard the plan and implement nothing.
+- Never self-interpret "roughly agreed to," silence, or an unrelated follow-up question as approval.
+- If clarifying questions (Step 2) are still outstanding for a small/standard-or-larger change, wait for the user's answers before drafting or re-drafting the plan.
+- Before presenting (or re-presenting) any plan, re-run the Step 5 self-review's three checks:
+  1. Requirement coverage — every requirement has a corresponding step.
+  2. Placeholder scan — no "TBD," "TODO," "add appropriate error handling," "same as Phase N," or forward references to undefined types/functions.
+  3. Name consistency — function/type/constant names match across steps; re-run checks 1 and 2 after any renaming.
+- **No placeholders allowed**: every step must be concrete enough to execute as written. A step with a code change but no code sample, or a vague instruction without specifics, is a failed plan.
+- Every claim in the plan (patterns, existing code) must be backed by a real file path — never fabricate a pattern that doesn't exist; say "no matching existing pattern was found" if that's the truth.
+- Once the user approves, implementation may begin; until then, remain at the gate and keep emitting the resume marker on every incomplete turn.
+<!-- RESUME_DIGEST_END -->
 
 ## After implementation is done
 

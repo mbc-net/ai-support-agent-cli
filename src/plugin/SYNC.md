@@ -66,6 +66,27 @@ reviewed and ported deliberately rather than through a fully automated sync.
 | `hooks/scripts/protect-sensitive-files.sh` | `hooks/scripts/protect-sensitive-files.sh` | translated | Logic, conditions, and fail-open behavior preserved; comments/messages translated to English |
 | `hooks/scripts/auto-format.sh` | `hooks/scripts/auto-format.sh` | translated | Logic, conditions, and fail-open behavior preserved; comments/messages translated to English |
 
+## ai-support-agent-specific additions (not from upstream)
+
+The following were authored directly in this plugin and have no counterpart in
+`mbc-net/mbc-claude-code`. They compensate for a gap specific to how this
+plugin is invoked here: `claude -p` (non-interactive) restarts as a fresh
+process every turn, so from turn 2 onward a command's `.md` body is not
+guaranteed to be re-expanded, which threatens the approval/commit gate
+discipline that `/plan`, `/add-feature`, and `/fix-defect` rely on across
+multiple turns.
+
+| File | What it adds |
+| --- | --- |
+| `commands/plan.md`, `commands/add-feature.md`, `commands/fix-defect.md` | `resumable: true` frontmatter field; a "Completion Marker Convention" section describing the `<!-- ai-support-agent:resume name="<command>" -->` end-of-response marker; a `<!-- RESUME_DIGEST_START -->` / `<!-- RESUME_DIGEST_END -->` block distilling that command's must-obey constraints (gates, test-first, verification-evidence requirements) for reinjection on later turns |
+| `hooks/scripts/on-command-stop.sh` | New `Stop` hook. Reads the transcript, detects the completion marker in the last assistant message (excluding matches inside fenced code blocks), and writes/increments/deletes a per-conversation state file under `~/.ai-support-agent/plugin-resume/`. Also opportunistically prunes state files older than 24h |
+| `hooks/scripts/on-command-resume.sh` | New `UserPromptSubmit` hook. If a state file exists for the current conversation and is within the turn-count safety valve, extracts the originating command's Resume Digest and emits it as `hookSpecificOutput.additionalContext` so the model sees it again without the full command body being re-expanded |
+| `hooks/hooks.json` | New `UserPromptSubmit` and `Stop` top-level entries registering the two scripts above. The existing `PreToolUse`/`PostToolUse` entries are unmodified upstream ports (see the mapping table) |
+
+These additions are maintained independently of the upstream sync process
+described below — they are not expected to have an upstream equivalent to
+diff against.
+
 ## Keeping this port up to date
 
 There is no fully automated sync script by design -- changes to

@@ -1,6 +1,7 @@
 ---
 description: Implement a new feature through a disciplined, gated pipeline of plan approval and test-first development
 argument-hint: "[feature description / requirements / issue number]"
+resumable: true
 ---
 
 # Add-feature pipeline
@@ -29,6 +30,32 @@ This pipeline has two gates that must never be crossed early.
 2. Commit gate: never commit without the user's confirmation, under any circumstances.
 
 Even when it's tempting to push forward autonomously, always stop at the gate and get confirmation.
+
+## Completion Marker Convention
+
+This command runs under `claude -p` (non-interactive), which restarts as a fresh process every turn — past turn 1, this command body is not guaranteed to be re-expanded, so gate discipline (the two gates above) can silently erode across turns. To compensate, a hooks-based mechanism re-injects a digest of this command's must-obey constraints on the next turn whenever the pipeline is left incomplete.
+
+If this command's flow is **not yet complete** (e.g. stopped at the plan-approval gate, mid-implementation, awaiting review fixes, or stopped at the commit gate), your response **MUST end** with a line that is an exact match of:
+
+`<!-- ai-support-agent:resume name="add-feature" -->`
+
+If the flow **is complete** (implementation finished, committed with user confirmation, and the post-commit options were handled), do **not** output this marker.
+
+Never output this marker inside a code block or as an illustrative example — only emit it as the actual last line of real output when the flow is genuinely incomplete.
+
+<!-- RESUME_DIGEST_START -->
+When resuming this command on turn 2+ without the full command body re-expanded, obey these constraints:
+
+- **Two gates, never crossed early**:
+  1. Plan-approval gate: no implementation or test code changes until the user has explicitly approved the plan. Reads/investigation are fine before approval.
+  2. Commit gate: never commit without the user's explicit confirmation, under any circumstances.
+- Never self-interpret "roughly agreed to," silence, or an unrelated follow-up as approval or as commit confirmation.
+- **Test-first is non-negotiable**: for every task, write the test before the implementation, run it, and confirm it fails (red) before writing any implementation code. Then implement the minimal code to go green, then refactor while staying green.
+- **Do all work inside the dedicated worktree** created in Step 2 — never edit the main working tree directly.
+- **Step 9 verification requires evidence, not speculation**: never claim "tests pass" / "build passes" / "should work" without having actually run the command in this conversation and read its output. A stale or previous run's result does not count as evidence.
+- **Review gate (Step 8)**: every CRITICAL / HIGH finding from the code-reviewer / silent-failure-hunter review must be resolved, followed by a green re-run of the test suite, before moving on.
+- Follow the Step 10 commit-gate flow exactly: present the diff + proposed commit message, wait for confirmation, commit only after confirmation, then present the four post-commit options and execute the chosen one in the correct order (never remove a worktree before merge/PR is settled).
+<!-- RESUME_DIGEST_END -->
 
 ## Procedure
 
