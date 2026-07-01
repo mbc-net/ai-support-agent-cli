@@ -1,6 +1,7 @@
 ---
 description: Fix a bug through a gated pipeline that's reproduction-test-first, proving the fix with a red-to-green transition
 argument-hint: "[bug description / repro steps / issue number]"
+resumable: true
 ---
 
 # Fix-defect pipeline
@@ -33,6 +34,33 @@ This pipeline has two gates that must never be crossed early.
 2. Commit gate: never commit without the user's confirmation, under any circumstances.
 
 Even when it's tempting to push forward autonomously, always stop at the gate and get confirmation.
+
+## Completion Marker Convention
+
+This command runs under `claude -p` (non-interactive), which restarts as a fresh process every turn — past turn 1, this command body is not guaranteed to be re-expanded, so gate discipline (the two gates above) can silently erode across turns. To compensate, a hooks-based mechanism re-injects a digest of this command's must-obey constraints on the next turn whenever the pipeline is left incomplete.
+
+If this command's flow is **not yet complete** (e.g. mid root-cause investigation, stopped at the plan-approval gate, awaiting the regression test's red confirmation, mid-fix, awaiting review fixes, or stopped at the commit gate), your response **MUST end** with a line that is an exact match of:
+
+`<!-- ai-support-agent:resume name="fix-defect" -->`
+
+If the flow **is complete** (fix finished, committed with user confirmation, and the post-commit options were handled), do **not** output this marker.
+
+Never output this marker inside a code block or as an illustrative example — only emit it as the actual last line of real output when the flow is genuinely incomplete.
+
+<!-- RESUME_DIGEST_START -->
+When resuming this command on turn 2+ without the full command body re-expanded, obey these constraints:
+
+- **Two gates, never crossed early**:
+  1. Plan-approval gate (standard-or-larger changes): no fix code until the user has approved the fix plan.
+  2. Commit gate: never commit without the user's explicit confirmation, under any circumstances.
+- **Root cause before any fix code**: never write fix code on a hunch of "probably here." State the hypothesis as "X is the cause, because Y," verify it with the smallest possible change, and don't layer a new fix on top of a failed hypothesis — start over.
+- **Regression test must go red before green**: write a test that reproduces the bug and confirm it fails (red) before touching fix code. If you accidentally wrote fix code first, discard it (`git restore`) and start over from the test. After fixing, confirm that same test goes green.
+- Never self-interpret "roughly agreed to," silence, or an unrelated follow-up as plan approval or as commit confirmation.
+- **Don't hide the symptom**: no swallowed exceptions, no special-casing around the failing scenario, no loosened test expectations just to go green.
+- **Step 8 verification requires evidence, not speculation**: never claim "tests pass" / "build passes" / "the bug is fixed" without having actually run the command in this conversation and read its output. A stale or previous run's result does not count as evidence.
+- **Review gate (Step 7)**: every CRITICAL / HIGH finding from the code-reviewer / silent-failure-hunter review must be resolved, followed by a re-run of Step 6's checks (regression test green, no regressions), before moving on.
+- Follow the Step 9 commit-gate flow exactly: present the diff + proposed commit message, wait for confirmation, commit only after confirmation, then present the four post-commit options and execute the chosen one in the correct order (never remove a worktree before merge/PR is settled).
+<!-- RESUME_DIGEST_END -->
 
 ## Procedure
 

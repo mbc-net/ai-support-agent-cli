@@ -70,7 +70,11 @@ const EXPECTED_HOOK_SCRIPTS = [
   'check-secrets-before-commit.sh',
   'protect-sensitive-files.sh',
   'auto-format.sh',
+  'on-command-stop.sh',
+  'on-command-resume.sh',
 ]
+
+const RESUMABLE_COMMANDS = ['plan', 'add-feature', 'fix-defect']
 
 /** Parses a leading `---\n...\n---` YAML-ish frontmatter block into a flat key/value map. */
 function parseFrontmatter(content: string): Record<string, string> | null {
@@ -168,6 +172,33 @@ describe('bundled plugin structure (src/plugin)', () => {
       expect(fs.existsSync(scriptPath)).toBe(true)
       // eslint-disable-next-line no-bitwise
       expect(() => fs.accessSync(scriptPath, fs.constants.X_OK)).not.toThrow()
+    })
+
+    it('registers on-command-resume.sh under UserPromptSubmit and on-command-stop.sh under Stop', () => {
+      const hooks = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf-8'))
+      expect(hooks.hooks.UserPromptSubmit).toBeDefined()
+      expect(hooks.hooks.Stop).toBeDefined()
+
+      const userPromptSubmitRaw = JSON.stringify(hooks.hooks.UserPromptSubmit)
+      const stopRaw = JSON.stringify(hooks.hooks.Stop)
+      expect(userPromptSubmitRaw).toContain('on-command-resume.sh')
+      expect(stopRaw).toContain('on-command-stop.sh')
+    })
+  })
+
+  describe('resumable commands (plan.md / add-feature.md / fix-defect.md)', () => {
+    it.each(RESUMABLE_COMMANDS)('%s.md declares resumable: true in frontmatter', (commandName) => {
+      const filePath = path.join(PLUGIN_ROOT, 'commands', `${commandName}.md`)
+      const frontmatter = parseFrontmatter(fs.readFileSync(filePath, 'utf-8'))
+      expect(frontmatter).not.toBeNull()
+      expect(frontmatter?.resumable).toBe('true')
+    })
+
+    it.each(RESUMABLE_COMMANDS)('%s.md contains a paired RESUME_DIGEST_START/RESUME_DIGEST_END block', (commandName) => {
+      const filePath = path.join(PLUGIN_ROOT, 'commands', `${commandName}.md`)
+      const content = fs.readFileSync(filePath, 'utf-8')
+      expect(content).toContain('RESUME_DIGEST_START')
+      expect(content).toContain('RESUME_DIGEST_END')
     })
   })
 
