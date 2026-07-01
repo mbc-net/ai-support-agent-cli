@@ -2449,7 +2449,6 @@ describe('ProjectAgent', () => {
       ;(mockClient as Record<string, jest.Mock>).getAlert = jest.fn().mockResolvedValue(null)
       ;(mockClient as Record<string, jest.Mock>).updateAlertStatus = jest.fn().mockResolvedValue(undefined)
       ;(mockClient as Record<string, jest.Mock>).findActiveIssueByAlarmName = jest.fn().mockResolvedValue(null)
-      ;(mockClient as Record<string, jest.Mock>).createIssueFromAlert = jest.fn().mockResolvedValue({ id: 'AI_SU000001' })
 
       const agent = new ProjectAgent(project, 'cw-clear-agent', options)
       agent.start()
@@ -2496,7 +2495,6 @@ describe('ProjectAgent', () => {
       ;(mockClient as Record<string, jest.Mock>).getAlert = jest.fn().mockResolvedValue(null)
       ;(mockClient as Record<string, jest.Mock>).updateAlertStatus = jest.fn().mockResolvedValue(undefined)
       ;(mockClient as Record<string, jest.Mock>).findActiveIssueByAlarmName = jest.fn().mockResolvedValue(null)
-      ;(mockClient as Record<string, jest.Mock>).createIssueFromAlert = jest.fn().mockResolvedValue({ id: 'AI_SU000001' })
 
       const agent = new ProjectAgent(project, 'alert-test-agent', options)
       agent.start()
@@ -2565,7 +2563,6 @@ describe('ProjectAgent', () => {
       ;(mockClient as Record<string, jest.Mock>).getAlert = jest.fn().mockResolvedValue(null)
       ;(mockClient as Record<string, jest.Mock>).updateAlertStatus = jest.fn().mockResolvedValue(undefined)
       ;(mockClient as Record<string, jest.Mock>).findActiveIssueByAlarmName = jest.fn().mockResolvedValue(null)
-      ;(mockClient as Record<string, jest.Mock>).createIssueFromAlert = jest.fn().mockResolvedValue({ id: 'AI_SU000001' })
 
       // First registration — sets up the alert polling timer
       const agent = new ProjectAgent(project, 'cw-agent', options)
