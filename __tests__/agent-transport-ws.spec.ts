@@ -617,7 +617,6 @@ describe('handleNotification: agent-log and unknown actions', () => {
       getAlert: jest.fn().mockResolvedValue(null),
       updateAlertStatus: jest.fn().mockResolvedValue(undefined),
       findActiveIssueByAlarmName: jest.fn().mockResolvedValue(null),
-      createIssueFromAlert: jest.fn().mockResolvedValue({ id: 'AI_SU000001' }),
     } as unknown as TransportDeps['client'])
 
     it('should process alert for matching projectCode', async () => {

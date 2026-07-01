@@ -391,19 +391,6 @@ export class ApiClient {
     )
   }
 
-  /** Alert 専用 Issue 作成エンドポイント経由で Issue を作成する（alarmName を attributes に保存するため専用） */
-  async createIssueFromAlert(
-    tenantCode: string,
-    projectCode: string,
-    alertNumber: string,
-    priority: string,
-  ): Promise<{ id: string }> {
-    return this.post<{ id: string }>(
-      API_ENDPOINTS.ALERT_CREATE_ISSUE(tenantCode, projectCode, alertNumber),
-      { priority },
-    )
-  }
-
   /** OK 通知（アラーム解除）時に既存 Issue を resolved に更新する */
   async resolveIssueFromAlert(
     tenantCode: string,

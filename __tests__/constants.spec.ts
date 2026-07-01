@@ -157,7 +157,6 @@ describe('constants', () => {
     expect(constants.API_ENDPOINTS.ALERTS('tenant1', 'PROJ_01')).toBe('/api/tenant1/projects/PROJ_01/alerts')
     expect(constants.API_ENDPOINTS.ALERT('tenant1', 'PROJ_01', '42')).toBe('/api/tenant1/projects/PROJ_01/alerts/42')
     expect(constants.API_ENDPOINTS.ALERT_STATUS('tenant1', 'PROJ_01', '42')).toBe('/api/tenant1/projects/PROJ_01/alerts/42/status')
-    expect(constants.API_ENDPOINTS.ALERT_CREATE_ISSUE('tenant1', 'PROJ_01', '42')).toBe('/api/tenant1/projects/PROJ_01/alerts/42/create-issue')
     expect(constants.API_ENDPOINTS.ISSUES('tenant1', 'PROJ_01')).toBe('/api/tenant1/projects/PROJ_01/issues')
   })
 })
