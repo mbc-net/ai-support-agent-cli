@@ -10,6 +10,7 @@ import { spawn } from 'child_process'
 import { promises as fs } from 'fs'
 import * as path from 'path'
 
+import { filterEnvVarsOverride } from '../env-vars-filter'
 import { logger } from '../logger'
 
 export interface PlaywrightSubprocessOptions {
@@ -17,6 +18,7 @@ export interface PlaywrightSubprocessOptions {
   executionId: string
   baseUrl?: string
   timeoutMs?: number
+  envVars?: Record<string, string>
 }
 
 export interface PlaywrightSubprocessStepResult {
@@ -38,6 +40,42 @@ export interface PlaywrightSubprocessResult {
 
 /** Default timeout for subprocess execution (120 seconds) */
 const DEFAULT_TIMEOUT_MS = 120_000
+
+/**
+ * Env keys this module sets internally for the subprocess. `envVars` may not
+ * override these — doing so could redirect JSON output or hijack the target URL.
+ *
+ * This is a module-specific layer on top of `filterEnvVarsOverride`: these
+ * keys are not dangerous in general (they're not in the shared denylist),
+ * they're only reserved because this module itself assigns them below.
+ */
+const RESERVED_ENV_KEYS = new Set(['E2E_JSON_OUTPUT', 'E2E_BASE_URL'])
+
+/**
+ * Merge user-supplied environment variables into the subprocess env in place.
+ *
+ * All entries are first passed through the shared `filterEnvVarsOverride`
+ * denylist (blocks `NODE_OPTIONS`, `LD_PRELOAD`, `PLAYWRIGHT_BROWSERS_PATH`,
+ * `PATH`, etc. — see `src/env-vars-filter.ts`), then this module's own
+ * reserved keys (`E2E_JSON_OUTPUT`/`E2E_BASE_URL`, which this function itself
+ * sets below) are stripped as a second layer.
+ */
+function mergeEnvVars(
+  env: NodeJS.ProcessEnv,
+  envVars: Record<string, string> | undefined,
+  executionId: string,
+): void {
+  if (!envVars) return
+  const prefix = `[playwright-subprocess:${executionId}]`
+  const filtered = filterEnvVarsOverride(envVars, { prefix })
+  for (const [key, value] of Object.entries(filtered)) {
+    if (RESERVED_ENV_KEYS.has(key)) {
+      logger.warn(`${prefix} Ignoring reserved environment variable key: "${key}"`)
+      continue
+    }
+    env[key] = value
+  }
+}
 
 /**
  * Parse Playwright JSON reporter output into a structured result.
@@ -141,7 +179,7 @@ function parsePlaywrightJsonOutput(jsonContent: string): PlaywrightSubprocessRes
 export async function runPlaywrightSubprocess(
   options: PlaywrightSubprocessOptions,
 ): Promise<PlaywrightSubprocessResult> {
-  const { script, executionId, baseUrl, timeoutMs = DEFAULT_TIMEOUT_MS } = options
+  const { script, executionId, baseUrl, timeoutMs = DEFAULT_TIMEOUT_MS, envVars } = options
 
   // Sanitize executionId to prevent path traversal
   if (!/^[a-zA-Z0-9_-]+$/.test(executionId)) {
@@ -161,7 +199,9 @@ export async function runPlaywrightSubprocess(
     await fs.writeFile(tmpSpecFile, script, 'utf-8')
 
     // Run Playwright subprocess
-    const errorOutput = await spawnPlaywright(tmpSpecFile, tmpResultFile, baseUrl, timeoutMs)
+    const errorOutput = await spawnPlaywright(
+      tmpSpecFile, tmpResultFile, baseUrl, timeoutMs, envVars, executionId,
+    )
 
     // Read and parse the JSON output
     let jsonContent: string
@@ -200,6 +240,8 @@ function spawnPlaywright(
   resultFile: string,
   baseUrl: string | undefined,
   timeoutMs: number,
+  envVars: Record<string, string> | undefined,
+  executionId: string,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     // Find the config file relative to the spec file's project root
@@ -212,6 +254,7 @@ function spawnPlaywright(
     if (baseUrl) {
       env.E2E_BASE_URL = baseUrl
     }
+    mergeEnvVars(env, envVars, executionId)
 
     const args = [
       'test',
