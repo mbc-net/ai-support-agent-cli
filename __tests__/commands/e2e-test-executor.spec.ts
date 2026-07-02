@@ -29,6 +29,7 @@ jest.mock('../../src/browser/browser-script-executor', () => ({
 const mockClient = {
   updateE2eExecutionStatus: jest.fn(),
   reportE2eTestStep: jest.fn(),
+  getE2eEnvironmentVariables: jest.fn(),
 } as any
 
 describe('e2e-test-executor', () => {
@@ -933,7 +934,7 @@ describe('e2e-test-executor', () => {
     )
   })
 
-  it('should forward environmentVariables from the payload to runPlaywrightSubprocess as envVars', async () => {
+  it('should pull environment variables by environmentId and forward them to runPlaywrightSubprocess as envVars', async () => {
     ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
       success: true,
       totalTests: 1,
@@ -942,6 +943,7 @@ describe('e2e-test-executor', () => {
       steps: [],
     })
     mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.getE2eEnvironmentVariables.mockResolvedValue({ API_KEY: 'abc123', STAGE: 'staging' })
 
     const options: ExecuteE2eTestOptions = {
       ...baseOptions,
@@ -949,18 +951,19 @@ describe('e2e-test-executor', () => {
         ...baseOptions.payload,
         playwrightScript: "await page.goto('/')",
         executionMethod: 'playwright',
-        environmentVariables: { API_KEY: 'abc123', STAGE: 'staging' },
+        environmentId: 'env-1',
       },
     }
 
     await executeE2eTest(options)
 
+    expect(mockClient.getE2eEnvironmentVariables).toHaveBeenCalledWith('env-1')
     expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
       expect.objectContaining({ envVars: { API_KEY: 'abc123', STAGE: 'staging' } }),
     )
   })
 
-  it('should pass undefined envVars to runPlaywrightSubprocess when environmentVariables is not provided', async () => {
+  it('should not pull and pass undefined envVars to runPlaywrightSubprocess when environmentId is not provided', async () => {
     ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
       success: true,
       totalTests: 1,
@@ -981,20 +984,16 @@ describe('e2e-test-executor', () => {
 
     await executeE2eTest(options)
 
+    expect(mockClient.getE2eEnvironmentVariables).not.toHaveBeenCalled()
     expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
       expect.objectContaining({ envVars: undefined }),
     )
   })
 
-  it('should drop non-string values from environmentVariables before forwarding', async () => {
-    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
-      success: true,
-      totalTests: 1,
-      passedTests: 1,
-      failedTests: 0,
-      steps: [],
-    })
+  it('should end the execution with error status when pulling environment variables fails (no silent fallback)', async () => {
     mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.getE2eEnvironmentVariables.mockRejectedValue(new Error('KMS throttled'))
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
 
     const options: ExecuteE2eTestOptions = {
       ...baseOptions,
@@ -1002,125 +1001,33 @@ describe('e2e-test-executor', () => {
         ...baseOptions.payload,
         playwrightScript: "await page.goto('/')",
         executionMethod: 'playwright',
-        environmentVariables: { VALID: 'ok', BAD_NUMBER: 42, BAD_NULL: null },
+        environmentId: 'env-1',
       },
     }
 
-    await executeE2eTest(options)
+    const result = await executeE2eTest(options)
 
-    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
-      expect.objectContaining({ envVars: { VALID: 'ok' } }),
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('KMS throttled')
+    }
+    // The Playwright subprocess must not run when env variable pull fails.
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).not.toHaveBeenCalled()
+    // The failure must be reported as an error status, not swallowed.
+    expect(mockClient.updateE2eExecutionStatus).toHaveBeenCalledWith(
+      'mbc',
+      'MBC_01',
+      'exec-1',
+      expect.objectContaining({ status: 'error' }),
     )
-  })
-
-  it('should ignore environmentVariables when it is not a plain object', async () => {
-    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
-      success: true,
-      totalTests: 1,
-      passedTests: 1,
-      failedTests: 0,
-      steps: [],
-    })
-    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
-
-    const options: ExecuteE2eTestOptions = {
-      ...baseOptions,
-      payload: {
-        ...baseOptions.payload,
-        playwrightScript: "await page.goto('/')",
-        executionMethod: 'playwright',
-        environmentVariables: ['not', 'an', 'object'],
-      },
-    }
-
-    await executeE2eTest(options)
-
-    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
-      expect.objectContaining({ envVars: undefined }),
-    )
-  })
-
-  it('should log a warning when environmentVariables is not a plain object', async () => {
-    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
-      success: true,
-      totalTests: 1,
-      passedTests: 1,
-      failedTests: 0,
-      steps: [],
-    })
-    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
-    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
-
-    const options: ExecuteE2eTestOptions = {
-      ...baseOptions,
-      payload: {
-        ...baseOptions.payload,
-        playwrightScript: "await page.goto('/')",
-        executionMethod: 'playwright',
-        environmentVariables: ['not', 'an', 'object'],
-      },
-    }
-
-    await executeE2eTest(options)
-
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('environmentVariables'),
-    )
-    warnSpy.mockRestore()
-  })
-
-  it('should log a warning for each non-string value dropped from environmentVariables', async () => {
-    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
-      success: true,
-      totalTests: 1,
-      passedTests: 1,
-      failedTests: 0,
-      steps: [],
-    })
-    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
-    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
-
-    const options: ExecuteE2eTestOptions = {
-      ...baseOptions,
-      payload: {
-        ...baseOptions.payload,
-        playwrightScript: "await page.goto('/')",
-        executionMethod: 'playwright',
-        environmentVariables: { VALID: 'ok', BAD_NUMBER: 42, BAD_NULL: null },
-      },
-    }
-
-    await executeE2eTest(options)
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('BAD_NUMBER'))
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('BAD_NULL'))
-    warnSpy.mockRestore()
-  })
-
-  it('should not warn when environmentVariables is entirely absent', async () => {
-    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
-      success: true,
-      totalTests: 1,
-      passedTests: 1,
-      failedTests: 0,
-      steps: [],
-    })
-    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
-    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
-
-    const options: ExecuteE2eTestOptions = {
-      ...baseOptions,
-      payload: {
-        ...baseOptions.payload,
-        playwrightScript: "await page.goto('/')",
-        executionMethod: 'playwright',
-      },
-    }
-
-    await executeE2eTest(options)
-
-    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('environmentVariables'))
-    warnSpy.mockRestore()
+    // The pull-failure log must carry executionId and environmentId for triage.
+    const pullFailureLog = errorSpy.mock.calls
+      .map((call) => String(call[0]))
+      .find((msg) => msg.includes('Failed to fetch E2E environment variables'))
+    expect(pullFailureLog).toBeDefined()
+    expect(pullFailureLog).toContain('[exec-1]')
+    expect(pullFailureLog).toContain('environmentId=env-1')
+    errorSpy.mockRestore()
   })
 
   it('should handle step report failure gracefully in playwright mode', async () => {
@@ -1204,9 +1111,9 @@ describe('e2e-test-executor', () => {
     expect(result.success).toBe(true)
   })
 
-  // --- environmentVariables ignored outside executionMethod='playwright' ---
+  // --- environmentId ignored outside executionMethod='playwright' ---
 
-  it('should warn (not silently drop) when environmentVariables is provided in default AI mode', async () => {
+  it('should warn (not silently drop) when environmentId is provided in default AI mode', async () => {
     ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
       success: true,
       data: 'Done',
@@ -1219,20 +1126,21 @@ describe('e2e-test-executor', () => {
       payload: {
         ...baseOptions.payload,
         executionMethod: 'ai',
-        environmentVariables: { API_KEY: 'abc123' },
+        environmentId: 'env-1',
       },
     }
 
     const result = await executeE2eTest(options)
 
     expect(result.success).toBe(true)
+    expect(mockClient.getE2eEnvironmentVariables).not.toHaveBeenCalled()
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("environmentVariables is only supported for executionMethod='playwright'"),
+      expect.stringContaining("environmentId is only supported for executionMethod='playwright'"),
     )
     warnSpy.mockRestore()
   })
 
-  it('should warn (not silently drop) when environmentVariables is provided in AI mode with a playwrightScript', async () => {
+  it('should warn (not silently drop) when environmentId is provided in AI mode with a playwrightScript', async () => {
     ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
       success: true,
       data: 'Done',
@@ -1246,19 +1154,19 @@ describe('e2e-test-executor', () => {
         ...baseOptions.payload,
         playwrightScript: "const { test } = require('@playwright/test'); test('t', async ({ page }) => {})",
         executionMethod: 'ai',
-        environmentVariables: { API_KEY: 'abc123' },
+        environmentId: 'env-1',
       },
     }
 
     await executeE2eTest(options)
 
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("environmentVariables is only supported for executionMethod='playwright'"),
+      expect.stringContaining("environmentId is only supported for executionMethod='playwright'"),
     )
     warnSpy.mockRestore()
   })
 
-  it('should warn (not silently drop) when environmentVariables is provided in script mode', async () => {
+  it('should warn (not silently drop) when environmentId is provided in script mode', async () => {
     const mockResult: PlaywrightRunnerResult = {
       success: true,
       passed: 1,
@@ -1277,20 +1185,20 @@ describe('e2e-test-executor', () => {
         ...baseOptions.payload,
         playwrightScript: "const { test } = require('@playwright/test'); test('t', async ({ page }) => { await page.goto('/') })",
         executionMethod: 'script',
-        environmentVariables: { API_KEY: 'abc123', STAGE: 'staging' },
+        environmentId: 'env-1',
       },
     }
 
     await executeE2eTest(options)
 
+    expect(mockClient.getE2eEnvironmentVariables).not.toHaveBeenCalled()
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("environmentVariables is only supported for executionMethod='playwright'"),
+      expect.stringContaining("environmentId is only supported for executionMethod='playwright'"),
     )
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('2 variable'))
     warnSpy.mockRestore()
   })
 
-  it('should not warn about environmentVariables scoping in AI mode when environmentVariables is absent', async () => {
+  it('should not warn about environmentId scoping in AI mode when environmentId is absent', async () => {
     ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
       success: true,
       data: 'Done',
@@ -1306,7 +1214,7 @@ describe('e2e-test-executor', () => {
     warnSpy.mockRestore()
   })
 
-  it('should not warn about environmentVariables scoping in script mode when environmentVariables is absent', async () => {
+  it('should not warn about environmentId scoping in script mode when environmentId is absent', async () => {
     const mockResult: PlaywrightRunnerResult = {
       success: true,
       passed: 1,
@@ -1336,7 +1244,68 @@ describe('e2e-test-executor', () => {
     warnSpy.mockRestore()
   })
 
-  it('should not warn about environmentVariables scoping when using playwright subprocess mode', async () => {
+  it('should not warn about environmentId scoping when using playwright subprocess mode', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.getE2eEnvironmentVariables.mockResolvedValue({ API_KEY: 'abc123' })
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+        environmentId: 'env-1',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('only supported for executionMethod'),
+    )
+    warnSpy.mockRestore()
+  })
+
+  // --- legacy environmentVariables field guard ---
+
+  it('should warn when the legacy environmentVariables field is present in the payload (AI mode)', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+      success: true,
+      data: 'Done',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        executionMethod: 'ai',
+        environmentVariables: { SECRET_KEY: 'topsecret-value' },
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('legacy environmentVariables field is no longer supported'),
+    )
+    // The secret value must never appear in the log.
+    for (const call of warnSpy.mock.calls) {
+      expect(String(call[0])).not.toContain('topsecret-value')
+    }
+    warnSpy.mockRestore()
+  })
+
+  it('should warn when the legacy environmentVariables field is present in playwright subprocess mode', async () => {
     ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
       success: true,
       totalTests: 1,
@@ -1353,14 +1322,30 @@ describe('e2e-test-executor', () => {
         ...baseOptions.payload,
         playwrightScript: "await page.goto('/')",
         executionMethod: 'playwright',
-        environmentVariables: { API_KEY: 'abc123' },
+        environmentVariables: 'some-legacy-string',
       },
     }
 
     await executeE2eTest(options)
 
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('legacy environmentVariables field is no longer supported'),
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('should not warn about the legacy environmentVariables field when it is absent', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+      success: true,
+      data: 'Done',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    await executeE2eTest(baseOptions)
+
     expect(warnSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining('only supported for executionMethod'),
+      expect.stringContaining('legacy environmentVariables field is no longer supported'),
     )
     warnSpy.mockRestore()
   })

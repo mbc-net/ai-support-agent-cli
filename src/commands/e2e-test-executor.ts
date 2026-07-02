@@ -15,36 +15,6 @@ import { parseString, toErrorMessage } from '../utils'
 
 import { executeChatCommand } from './chat-executor'
 
-/**
- * ペイロードの environmentVariables を Record<string, string> に正規化する。
- * プレーンオブジェクトでない場合や、値が文字列でないキーは無視する
- * （キー形式・予約キーの検証は runPlaywrightSubprocess 側の責務）。
- * 型不一致で除外した場合は理由をログに残す（無言破棄を避ける）。
- */
-function parseEnvironmentVariables(value: unknown): Record<string, string> | undefined {
-  if (value === undefined) return undefined
-
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    const actualType = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
-    logger.warn(
-      `[e2e_test] Ignoring environmentVariables: expected a plain object, got ${actualType}`,
-    )
-    return undefined
-  }
-
-  const result: Record<string, string> = {}
-  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof val === 'string') {
-      result[key] = val
-    } else {
-      logger.warn(
-        `[e2e_test] Ignoring environmentVariables.${key}: expected a string value, got ${typeof val}`,
-      )
-    }
-  }
-  return Object.keys(result).length > 0 ? result : undefined
-}
-
 /** Options for E2E test execution */
 export interface ExecuteE2eTestOptions {
   payload: Record<string, unknown>
@@ -76,6 +46,7 @@ export async function executeE2eTest(
   const scenario = parseString(payload.scenario)
   const targetUrl = parseString(payload.targetUrl)
   const credentialId = parseString(payload.credentialId)
+  const environmentId = parseString(payload.environmentId)
   const executionMethod = parseString(payload.executionMethod) ?? 'ai'
   const playwrightScript = parseString(payload.playwrightScript)
   const steps = payload.steps as unknown[] | undefined
@@ -93,6 +64,8 @@ export async function executeE2eTest(
   logger.info(
     `[e2e_test] Starting E2E test execution [${executionId}]: method=${executionMethod}`,
   )
+
+  warnIfLegacyEnvironmentVariablesPresent(payload)
 
   const startTime = Date.now()
 
@@ -114,15 +87,14 @@ export async function executeE2eTest(
       playwrightScript,
       scenario,
       targetUrl: targetUrl ?? undefined,
-      environmentVariables: parseEnvironmentVariables(payload.environmentVariables),
+      environmentId: environmentId ?? undefined,
       startTime,
     })
   }
 
-  // environmentVariables を Playwright サブプロセスに注入する機能は
-  // executionMethod='playwright' 専用。他モードでは配線先が無いため、
-  // 無言破棄を避けて明示的に警告する。
-  warnIfEnvironmentVariablesIgnored(payload.environmentVariables)
+  // 環境変数の注入は executionMethod='playwright' 専用。他モードでは
+  // 配線先が無いため、environmentId 指定を無言破棄せず明示的に警告する。
+  warnIfEnvironmentIdIgnored(environmentId ?? undefined)
 
   if (playwrightScript && executionMethod !== 'ai') {
     return executeScriptMode({
@@ -149,17 +121,30 @@ export async function executeE2eTest(
 }
 
 /**
- * environmentVariables が指定されているが、この実行モードでは
- * 配線されていない（Playwright サブプロセスに渡す仕組みが無い）場合に
- * 警告ログを出す。無言破棄を避けるための最小限のガード。
+ * environmentId が指定されているが、この実行モードでは環境変数を
+ * 注入する仕組みが無い（Playwright サブプロセス専用）場合に警告ログを出す。
+ * 無言破棄を避けるための最小限のガード。
  */
-function warnIfEnvironmentVariablesIgnored(value: unknown): void {
-  const parsed = parseEnvironmentVariables(value)
-  if (!parsed) return
+function warnIfEnvironmentIdIgnored(environmentId: string | undefined): void {
+  if (!environmentId) return
 
-  const count = Object.keys(parsed).length
   logger.warn(
-    `[e2e_test] environmentVariables is only supported for executionMethod='playwright'; ignoring ${count} variable(s) for this execution`,
+    `[e2e_test] environmentId is only supported for executionMethod='playwright'; ignoring the selected environment for this execution`,
+  )
+}
+
+/**
+ * 旧仕様の environmentVariables フィールドはプル方式へ移行済みで参照されない。
+ * デプロイ順序の窓（API が旧方式、agent が新方式）で無言破棄されるのを避けるため、
+ * フィールドが存在する場合のみ警告する。値の中身はログに出さない（機密情報保護）。
+ */
+function warnIfLegacyEnvironmentVariablesPresent(
+  payload: Record<string, unknown>,
+): void {
+  if (payload.environmentVariables === undefined) return
+
+  logger.warn(
+    `[e2e_test] legacy environmentVariables field is no longer supported; use environmentId instead`,
   )
 }
 
@@ -170,7 +155,7 @@ interface PlaywrightSubprocessModeParams extends ExecuteE2eTestOptions {
   playwrightScript: string
   scenario: string
   targetUrl?: string
-  environmentVariables?: Record<string, string>
+  environmentId?: string
   startTime: number
 }
 
@@ -183,9 +168,25 @@ async function executePlaywrightSubprocessMode(
   params: PlaywrightSubprocessModeParams,
 ): Promise<CommandResult> {
   const {
-    client, tenantCode, executionId, testCaseId, playwrightScript, targetUrl, environmentVariables, startTime,
+    client, tenantCode, executionId, testCaseId, playwrightScript, targetUrl, environmentId, startTime,
   } = params
   const projectCode = params.projectConfig?.project?.projectCode
+
+  let environmentVariables: Record<string, string> | undefined
+  if (environmentId) {
+    try {
+      environmentVariables = await client.getE2eEnvironmentVariables(environmentId)
+    } catch (err: unknown) {
+      const errorMessage = toErrorMessage(err)
+      logger.error(`[e2e_test] Failed to fetch E2E environment variables [${executionId}] environmentId=${environmentId}: ${errorMessage}`)
+      await reportExecutionStatus(
+        client, tenantCode, projectCode, executionId,
+        'error', Date.now() - startTime,
+        `Failed to fetch E2E environment variables: ${errorMessage}`, testCaseId,
+      )
+      return errorResult(`Failed to fetch E2E environment variables: ${errorMessage}`)
+    }
+  }
 
   let subprocessResult
   try {
