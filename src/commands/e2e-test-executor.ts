@@ -28,6 +28,17 @@ export interface ExecuteE2eTestOptions {
   mcpConfigPath?: string
   tenantCode?: string
   browserLocalPort?: number
+  /**
+   * E2E 専用のブラウザーセッションを子プロセス実行前にメインプロセスへ
+   * 事前登録するコールバック。未指定（VS Code トンネル未接続等）の場合は
+   * セッション事前登録をスキップする。
+   */
+  getOrCreateBrowserSession?: (sessionId: string) => Promise<void>
+  /**
+   * E2E 専用のブラウザーセッションを実行後にクローズするコールバック。
+   * close失敗はE2E結果報告を妨げないよう呼び出し側でwarn握り潰しする。
+   */
+  closeBrowserSession?: (sessionId: string) => Promise<void>
 }
 
 /**
@@ -310,8 +321,15 @@ async function executeAiMode(
     `AI_SUPPORT_E2E_EXECUTION_ID=${executionId}`,
   )
 
+  // E2E 実行専用の一意なブラウザーセッションID。
+  // コンソールでユーザーが開いているブラウザープレビュー（メインプロセスの
+  // BrowserSessionManager に登録された既存セッション）を子プロセスが誤って
+  // 乗っ取らないよう、実行ごとに独立したセッションを明示的に割り当てる。
+  const browserSessionId = `e2e-${executionId}`
+
   const chatPayload = {
     message: systemPromptParts.join('\n'),
+    browserSessionId,
     policyContext: {
       tenantCode: tenantCode,
       projectCode: options.projectConfig?.project?.projectCode,
@@ -323,6 +341,10 @@ async function executeAiMode(
   let result: CommandResult
 
   try {
+    if (options.getOrCreateBrowserSession) {
+      await options.getOrCreateBrowserSession(browserSessionId)
+    }
+
     result = await executeChatCommand({
       payload: chatPayload,
       commandId,
@@ -346,6 +368,14 @@ async function executeAiMode(
     )
 
     return errorResult(`E2E test execution failed: ${errorMessage}`)
+  } finally {
+    if (options.closeBrowserSession) {
+      try {
+        await options.closeBrowserSession(browserSessionId)
+      } catch (closeErr: unknown) {
+        logger.warn(`[e2e_test] Failed to close E2E browser session [${browserSessionId}]: ${toErrorMessage(closeErr)}`)
+      }
+    }
   }
 
   const duration = Date.now() - startTime
