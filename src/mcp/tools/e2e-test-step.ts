@@ -4,7 +4,9 @@ import { z } from 'zod'
 import { ApiClient } from '../../api-client'
 import { ENV_VARS } from '../../constants'
 import { logger } from '../../logger'
+import { getActiveSession } from './browser'
 import { BrowserSession } from './browser/browser-session'
+import { BrowserSessionManager } from './browser/browser-session-manager'
 import { mcpTextResponse, withMcpErrorHandling } from './mcp-response'
 import { toErrorMessage } from '../../utils'
 
@@ -19,6 +21,7 @@ export function registerE2eTestStepTool(
   server: McpServer,
   apiClient: ApiClient,
   browserSession?: BrowserSession,
+  browserSessionManager?: BrowserSessionManager,
 ): void {
   server.tool(
     'report_test_step',
@@ -55,13 +58,31 @@ export function registerE2eTestStepTool(
           `[e2e_test] Reporting step ${args.stepNumber}: ${args.action} -> ${args.status}`,
         )
 
-        // browser_navigate等と共有しているBrowserSessionから直接スクリーンショットを撮影
+        // browser_navigate等と共有しているBrowserSessionからスクリーンショットを撮影する。
+        // browser_navigate/browser_click等はgetActiveSession()で毎回アクティブなセッション
+        // （プロキシ経由の場合は実際にナビゲートされた別インスタンス）を解決しているため、
+        // ここでも同じ解決を行わないと、一度もナビゲートされていない静的な browserSession
+        // （about:blank のまま）を撮影してしまい、常に白紙のスクリーンショットになる。
         let screenshotBase64: string | undefined
         if (browserSession) {
           try {
-            const buffer = await browserSession.screenshot(true)
-            screenshotBase64 = buffer.toString('base64')
-            logger.debug(`[e2e_test] Screenshot captured for step ${args.stepNumber} (${(buffer.length / 1024).toFixed(1)}KB)`)
+            const activeSession = browserSessionManager
+              ? await getActiveSession(browserSessionManager, browserSession)
+              : browserSession
+            // isActive()がfalseの場合、resolved先が一度もnavigateされていない
+            // （ブラウザ自体が未起動の）静的セッションであることを意味する。
+            // このままscreenshot()を呼ぶと新規Chromiumがabout:blankで起動され、
+            // 例外を投げずに白紙PNGを「撮影成功」として返してしまうため、
+            // 事前にガードしてスキップする（browser_click等の他ツールと同じガード）。
+            if (!activeSession.isActive()) {
+              logger.warn(
+                `[e2e_test] No active browser session for step ${args.stepNumber} (execution ${executionId}); skipping screenshot`,
+              )
+            } else {
+              const buffer = await activeSession.screenshot(true)
+              screenshotBase64 = buffer.toString('base64')
+              logger.debug(`[e2e_test] Screenshot captured for step ${args.stepNumber} (${(buffer.length / 1024).toFixed(1)}KB)`)
+            }
           } catch (err: unknown) {
             logger.warn(
               `[e2e_test] Failed to capture screenshot for step ${args.stepNumber}: ${toErrorMessage(err)}`,
