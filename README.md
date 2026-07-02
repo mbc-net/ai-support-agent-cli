@@ -136,6 +136,7 @@ ai-support-agent <command> [options]
 
 Commands:
   start              Start the agent daemon
+  stop               Stop the running agent
   login              Authenticate via browser OAuth
   add-project        Add a project (browser OAuth)
   remove-project     Remove a project by code
@@ -145,6 +146,10 @@ Commands:
   set-auto-update    Configure auto-update (--enable | --disable | --channel)
   set-project-dir    Set project working directory
   docker-login       Login and start in Docker
+  docker-build       Build the Docker image for this version (--dockerfile <path>)
+  docker-diff-dockerfile  Show diff between a Dockerfile and the bundled default
+  log-rotate         Read stdin and write to a size-rotating log file
+                     (used by the per-project wrapper script)
   service            Manage agent background service
 
 Global options:
@@ -170,12 +175,16 @@ Options (install):
 ### `start` Options
 
 ```
+--token <token>            Auth token (overrides config file)
+--api-url <url>            API URL (overrides config file)
 --verbose                  Enable debug logging
 --heartbeat-interval <ms>  Heartbeat interval (default: 60000)
 --no-auto-update           Disable auto-update for this session
 --update-channel <channel> Release channel: latest | beta | alpha
 --no-docker                Force native mode (skip Docker)
---docker                   Run inside a Docker container
+--dockerfile <path>        Custom Dockerfile path (overrides config and bundled default)
+--no-dockerfile-sync       Skip writing the default Dockerfile to config dir
+--project <tenantCode/projectCode>  Start only the matching project
 ```
 
 ### `set-project-dir` Options
@@ -220,7 +229,14 @@ Stored at `~/.ai-support-agent/config.json` (mode `0600`):
 | `AI_SUPPORT_AGENT_TOKEN` | Override auth token (lowest priority) |
 | `AI_SUPPORT_AGENT_API_URL` | Override API URL (lowest priority) |
 | `AI_SUPPORT_AGENT_CONFIG_DIR` | Override config directory path |
+| `AI_SUPPORT_AGENT_TERMINAL_GRACE_MS` | PTY grace window after WebSocket disconnect, in milliseconds (positive integer only; default 3,600,000 = 60 min). Keep in sync with the API-side `TERMINAL_SESSION_GRACE_MS` |
+| `AI_SUPPORT_AGENT_ALLOW_HTTP` | Set to `true` to allow a non-HTTPS API URL (development only) |
 | `ANTHROPIC_API_KEY` | Required for `api` chat mode |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code OAuth token; passed through to the Docker container if set on the host (normally delivered by the server) |
+| `AI_SUPPORT_AGENT_IN_DOCKER` | Set automatically to `1` inside the Docker container |
+| `AI_SUPPORT_AGENT_PROJECT_DIR_MAP` | Host-to-container project directory mapping (set automatically in Docker mode) |
+| `AI_SUPPORT_AGENT_TENANT_CODE` | Tenant code for MCP server processes (set automatically) |
+| `AI_SUPPORT_AGENT_PROJECT_CODE` | Project code for MCP server processes (set automatically) |
 | `AI_SUPPORT_E2E_EXECUTION_ID` | E2E test execution ID (set automatically during `e2e_test` runs) |
 | `AI_SUPPORT_E2E_TEST_CASE_ID` | E2E test case ID (set automatically during `e2e_test` runs) |
 

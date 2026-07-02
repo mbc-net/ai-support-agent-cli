@@ -552,6 +552,123 @@ describe('processCommand processing flag', () => {
   })
 })
 
+describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring', () => {
+  function createMockCtx(state: TransportState): CommandContext {
+    return {
+      configSyncState: {
+        currentConfigHash: undefined,
+        projectConfig: undefined,
+        serverConfig: null,
+        availableChatModes: [],
+        activeChatMode: undefined,
+        mcpConfigPath: undefined,
+        dockerCustomizationHash: undefined,
+      },
+      configSyncDeps: {} as any,
+      transportState: state,
+      onSetup: jest.fn(),
+      onConfigSync: jest.fn(),
+      onReboot: jest.fn(),
+      onUpdate: jest.fn(),
+      onSyncRepository: jest.fn(),
+    }
+  }
+
+  function createMockVsCodeWs() {
+    return {
+      getBrowserLocalPort: jest.fn().mockReturnValue(12345),
+      browserSessionManager: {
+        getOrCreate: jest.fn().mockResolvedValue(undefined),
+        close: jest.fn().mockResolvedValue(undefined),
+      },
+    }
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('should call browserSessionManager.getOrCreate/close with the session id when vsCodeWs is connected', async () => {
+    const { executeCommand } = require('../src/commands')
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands: jest.fn().mockResolvedValue([]),
+        getCommand: jest.fn().mockResolvedValue({ type: 'e2e_test', payload: {} }),
+        submitResult: jest.fn().mockResolvedValue(undefined),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    const mockVsCodeWs = createMockVsCodeWs()
+    state.vsCodeWs = mockVsCodeWs as any
+    const ctx = createMockCtx(state)
+
+    let capturedOptions: any
+    executeCommand.mockImplementation(async (_type: unknown, _payload: unknown, options: any) => {
+      capturedOptions = options
+      // Exercise the callbacks exactly as e2e-test-executor.ts would.
+      await options.getOrCreateBrowserSession?.('e2e-exec-1')
+      await options.closeBrowserSession?.('e2e-exec-1')
+      return { success: true, data: 'ok' }
+    })
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n3', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
+      content: {
+        commandId: 'cmd-3',
+        agentId: 'agent-1',
+        tenantCode: 'test',
+        projectCode: 'TEST_PROJ',
+        type: 'e2e_test',
+      },
+    })
+
+    expect(capturedOptions.getOrCreateBrowserSession).toBeInstanceOf(Function)
+    expect(capturedOptions.closeBrowserSession).toBeInstanceOf(Function)
+    expect(mockVsCodeWs.browserSessionManager.getOrCreate).toHaveBeenCalledTimes(1)
+    expect(mockVsCodeWs.browserSessionManager.getOrCreate).toHaveBeenCalledWith('e2e-exec-1')
+    expect(mockVsCodeWs.browserSessionManager.close).toHaveBeenCalledTimes(1)
+    expect(mockVsCodeWs.browserSessionManager.close).toHaveBeenCalledWith('e2e-exec-1')
+  })
+
+  it('should pass undefined getOrCreateBrowserSession/closeBrowserSession when vsCodeWs is not connected', async () => {
+    const { executeCommand } = require('../src/commands')
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands: jest.fn().mockResolvedValue([]),
+        getCommand: jest.fn().mockResolvedValue({ type: 'e2e_test', payload: {} }),
+        submitResult: jest.fn().mockResolvedValue(undefined),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    state.vsCodeWs = null
+    const ctx = createMockCtx(state)
+
+    let capturedOptions: any
+    executeCommand.mockImplementation(async (_type: unknown, _payload: unknown, options: any) => {
+      capturedOptions = options
+      return { success: true, data: 'ok' }
+    })
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n4', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
+      content: {
+        commandId: 'cmd-4',
+        agentId: 'agent-1',
+        tenantCode: 'test',
+        projectCode: 'TEST_PROJ',
+        type: 'e2e_test',
+      },
+    })
+
+    expect(capturedOptions.getOrCreateBrowserSession).toBeUndefined()
+    expect(capturedOptions.closeBrowserSession).toBeUndefined()
+  })
+})
+
 describe('handleNotification: agent-log and unknown actions', () => {
   const { logger } = require('../src/logger')
 
@@ -617,7 +734,6 @@ describe('handleNotification: agent-log and unknown actions', () => {
       getAlert: jest.fn().mockResolvedValue(null),
       updateAlertStatus: jest.fn().mockResolvedValue(undefined),
       findActiveIssueByAlarmName: jest.fn().mockResolvedValue(null),
-      createIssueFromAlert: jest.fn().mockResolvedValue({ id: 'AI_SU000001' }),
     } as unknown as TransportDeps['client'])
 
     it('should process alert for matching projectCode', async () => {

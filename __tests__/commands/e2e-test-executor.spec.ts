@@ -4,6 +4,7 @@ import * as playwrightTestRunner from '../../src/browser/playwright-test-runner'
 import type { PlaywrightRunnerResult } from '../../src/browser/playwright-test-runner'
 import * as browserScriptExecutor from '../../src/browser/browser-script-executor'
 import * as playwrightSubprocessExecutor from '../../src/browser/playwright-subprocess-executor'
+import { logger } from '../../src/logger'
 
 // Mock the chat executor
 jest.mock('../../src/commands/chat-executor', () => ({
@@ -28,6 +29,7 @@ jest.mock('../../src/browser/browser-script-executor', () => ({
 const mockClient = {
   updateE2eExecutionStatus: jest.fn(),
   reportE2eTestStep: jest.fn(),
+  getE2eEnvironmentVariables: jest.fn(),
 } as any
 
 describe('e2e-test-executor', () => {
@@ -878,6 +880,156 @@ describe('e2e-test-executor', () => {
     )
   })
 
+  it('should pass the resolved targetUrl as baseUrl to runPlaywrightSubprocess', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        targetUrl: 'https://staging.example.com',
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: 'https://staging.example.com' }),
+    )
+  })
+
+  it('should pass undefined baseUrl to runPlaywrightSubprocess when targetUrl is not provided', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        targetUrl: undefined,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: undefined }),
+    )
+  })
+
+  it('should pull environment variables by environmentId and forward them to runPlaywrightSubprocess as envVars', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.getE2eEnvironmentVariables.mockResolvedValue({ API_KEY: 'abc123', STAGE: 'staging' })
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+        environmentId: 'env-1',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(mockClient.getE2eEnvironmentVariables).toHaveBeenCalledWith('env-1')
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
+      expect.objectContaining({ envVars: { API_KEY: 'abc123', STAGE: 'staging' } }),
+    )
+  })
+
+  it('should not pull and pass undefined envVars to runPlaywrightSubprocess when environmentId is not provided', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(mockClient.getE2eEnvironmentVariables).not.toHaveBeenCalled()
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
+      expect.objectContaining({ envVars: undefined }),
+    )
+  })
+
+  it('should end the execution with error status when pulling environment variables fails (no silent fallback)', async () => {
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.getE2eEnvironmentVariables.mockRejectedValue(new Error('KMS throttled'))
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+        environmentId: 'env-1',
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('KMS throttled')
+    }
+    // The Playwright subprocess must not run when env variable pull fails.
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).not.toHaveBeenCalled()
+    // The failure must be reported as an error status, not swallowed.
+    expect(mockClient.updateE2eExecutionStatus).toHaveBeenCalledWith(
+      'mbc',
+      'MBC_01',
+      'exec-1',
+      expect.objectContaining({ status: 'error' }),
+    )
+    // The pull-failure log must carry executionId and environmentId for triage.
+    const pullFailureLog = errorSpy.mock.calls
+      .map((call) => String(call[0]))
+      .find((msg) => msg.includes('Failed to fetch E2E environment variables'))
+    expect(pullFailureLog).toBeDefined()
+    expect(pullFailureLog).toContain('[exec-1]')
+    expect(pullFailureLog).toContain('environmentId=env-1')
+    errorSpy.mockRestore()
+  })
+
   it('should handle step report failure gracefully in playwright mode', async () => {
     ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
       success: true,
@@ -957,5 +1109,454 @@ describe('e2e-test-executor', () => {
       expect.objectContaining({ errorMessage: '1 test(s) failed' }),
     )
     expect(result.success).toBe(true)
+  })
+
+  // --- environmentId ignored outside executionMethod='playwright' ---
+
+  it('should warn (not silently drop) when environmentId is provided in default AI mode', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+      success: true,
+      data: 'Done',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        executionMethod: 'ai',
+        environmentId: 'env-1',
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    expect(result.success).toBe(true)
+    expect(mockClient.getE2eEnvironmentVariables).not.toHaveBeenCalled()
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("environmentId is only supported for executionMethod='playwright'"),
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('should warn (not silently drop) when environmentId is provided in AI mode with a playwrightScript', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+      success: true,
+      data: 'Done',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "const { test } = require('@playwright/test'); test('t', async ({ page }) => {})",
+        executionMethod: 'ai',
+        environmentId: 'env-1',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("environmentId is only supported for executionMethod='playwright'"),
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('should warn (not silently drop) when environmentId is provided in script mode', async () => {
+    const mockResult: PlaywrightRunnerResult = {
+      success: true,
+      passed: 1,
+      failed: 0,
+      skipped: 0,
+      totalSteps: 1,
+      results: [],
+    }
+    ;(playwrightTestRunner.runPlaywrightScript as jest.Mock).mockResolvedValue(mockResult)
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "const { test } = require('@playwright/test'); test('t', async ({ page }) => { await page.goto('/') })",
+        executionMethod: 'script',
+        environmentId: 'env-1',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(mockClient.getE2eEnvironmentVariables).not.toHaveBeenCalled()
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("environmentId is only supported for executionMethod='playwright'"),
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('should not warn about environmentId scoping in AI mode when environmentId is absent', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+      success: true,
+      data: 'Done',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    await executeE2eTest(baseOptions)
+
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('only supported for executionMethod'),
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('should not warn about environmentId scoping in script mode when environmentId is absent', async () => {
+    const mockResult: PlaywrightRunnerResult = {
+      success: true,
+      passed: 1,
+      failed: 0,
+      skipped: 0,
+      totalSteps: 1,
+      results: [],
+    }
+    ;(playwrightTestRunner.runPlaywrightScript as jest.Mock).mockResolvedValue(mockResult)
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "const { test } = require('@playwright/test'); test('t', async ({ page }) => { await page.goto('/') })",
+        executionMethod: 'script',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('only supported for executionMethod'),
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('should not warn about environmentId scoping when using playwright subprocess mode', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.getE2eEnvironmentVariables.mockResolvedValue({ API_KEY: 'abc123' })
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+        environmentId: 'env-1',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('only supported for executionMethod'),
+    )
+    warnSpy.mockRestore()
+  })
+
+  // --- legacy environmentVariables field guard ---
+
+  it('should warn when the legacy environmentVariables field is present in the payload (AI mode)', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+      success: true,
+      data: 'Done',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        executionMethod: 'ai',
+        environmentVariables: { SECRET_KEY: 'topsecret-value' },
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('legacy environmentVariables field is no longer supported'),
+    )
+    // The secret value must never appear in the log.
+    for (const call of warnSpy.mock.calls) {
+      expect(String(call[0])).not.toContain('topsecret-value')
+    }
+    warnSpy.mockRestore()
+  })
+
+  it('should warn when the legacy environmentVariables field is present in playwright subprocess mode', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+        environmentVariables: 'some-legacy-string',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('legacy environmentVariables field is no longer supported'),
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('should not warn about the legacy environmentVariables field when it is absent', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+      success: true,
+      data: 'Done',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    await executeE2eTest(baseOptions)
+
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('legacy environmentVariables field is no longer supported'),
+    )
+    warnSpy.mockRestore()
+  })
+
+  // --- browser session isolation (AI mode) ---
+  //
+  // E2E テストが AI モードで実行されると、コンソールでユーザーが見ている
+  // ブラウザープレビュー（メインプロセスの BrowserSessionManager に登録された
+  // 「最初のセッション」）を子プロセスが誤って乗っ取ってしまうバグの回帰テスト。
+  // E2E 専用の一意な browserSessionId を chatPayload に含め、実行前後に
+  // getOrCreateBrowserSession / closeBrowserSession で明示的にライフサイクル管理する。
+
+  describe('browser session isolation (AI mode)', () => {
+    it('should include a unique e2e browserSessionId at the top level of the chat payload', async () => {
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+        success: true,
+        data: 'Done',
+      })
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      await executeE2eTest(baseOptions)
+
+      const chatCall = (chatExecutor.executeChatCommand as jest.Mock).mock.calls[0][0]
+      expect(chatCall.payload.browserSessionId).toBe('e2e-exec-1')
+    })
+
+    it('should call getOrCreateBrowserSession with the e2e session id before executeChatCommand', async () => {
+      const callOrder: string[] = []
+      const getOrCreateBrowserSession = jest.fn(async (sessionId: string) => {
+        callOrder.push(`getOrCreate:${sessionId}`)
+      })
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockImplementation(async () => {
+        callOrder.push('executeChatCommand')
+        return { success: true, data: 'Done' }
+      })
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        getOrCreateBrowserSession,
+      }
+
+      await executeE2eTest(options)
+
+      expect(getOrCreateBrowserSession).toHaveBeenCalledTimes(1)
+      expect(getOrCreateBrowserSession).toHaveBeenCalledWith('e2e-exec-1')
+      expect(callOrder).toEqual(['getOrCreate:e2e-exec-1', 'executeChatCommand'])
+    })
+
+    it('should report error status and closeBrowserSession when getOrCreateBrowserSession rejects', async () => {
+      // getOrCreateBrowserSession が失敗した場合でも、他の全失敗パス
+      // (executeChatCommand の catch 等) と対称的に 'error' ステータスが
+      // 報告され、E2E 実行が 'running' のまま取り残されないことを保証する。
+      const getOrCreateBrowserSession = jest.fn().mockRejectedValue(
+        new Error('session pre-registration failed'),
+      )
+      const closeBrowserSession = jest.fn().mockResolvedValue(undefined)
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        getOrCreateBrowserSession,
+        closeBrowserSession,
+      }
+
+      const result = await executeE2eTest(options)
+
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toContain('session pre-registration failed')
+      }
+
+      // executeChatCommand must never run if session pre-registration failed.
+      expect(chatExecutor.executeChatCommand).not.toHaveBeenCalled()
+
+      // The 'error' status must be reported, not left as 'running' forever.
+      expect(mockClient.updateE2eExecutionStatus).toHaveBeenCalledWith(
+        'mbc',
+        'MBC_01',
+        'exec-1',
+        expect.objectContaining({
+          status: 'error',
+          errorMessage: expect.stringContaining('session pre-registration failed'),
+        }),
+      )
+
+      // closeBrowserSession should still be attempted (finally-block cleanup).
+      expect(closeBrowserSession).toHaveBeenCalledTimes(1)
+      expect(closeBrowserSession).toHaveBeenCalledWith('e2e-exec-1')
+    })
+
+    it('should call closeBrowserSession with the e2e session id after executeChatCommand succeeds', async () => {
+      const callOrder: string[] = []
+      const closeBrowserSession = jest.fn(async (sessionId: string) => {
+        callOrder.push(`close:${sessionId}`)
+      })
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockImplementation(async () => {
+        callOrder.push('executeChatCommand')
+        return { success: true, data: 'Done' }
+      })
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        closeBrowserSession,
+      }
+
+      const result = await executeE2eTest(options)
+
+      expect(result.success).toBe(true)
+      expect(closeBrowserSession).toHaveBeenCalledTimes(1)
+      expect(closeBrowserSession).toHaveBeenCalledWith('e2e-exec-1')
+      // executeChatCommand must complete before the session is torn down.
+      expect(callOrder).toEqual(['executeChatCommand', 'close:e2e-exec-1'])
+    })
+
+    it('should call closeBrowserSession even when executeChatCommand rejects (no leak)', async () => {
+      const closeBrowserSession = jest.fn().mockResolvedValue(undefined)
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockRejectedValue(
+        new Error('Unexpected error'),
+      )
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        closeBrowserSession,
+      }
+
+      const result = await executeE2eTest(options)
+
+      expect(result.success).toBe(false)
+      expect(closeBrowserSession).toHaveBeenCalledTimes(1)
+      expect(closeBrowserSession).toHaveBeenCalledWith('e2e-exec-1')
+    })
+
+    it('should not let a rejecting closeBrowserSession break the reported final result (success case)', async () => {
+      const closeBrowserSession = jest.fn().mockRejectedValue(new Error('close failed'))
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+        success: true,
+        data: 'Done',
+      })
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        closeBrowserSession,
+      }
+
+      const result = await executeE2eTest(options)
+
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data).toEqual(
+          expect.objectContaining({ executionId: 'exec-1', status: 'passed' }),
+        )
+      }
+      // The passed status must still be reported to the API despite the close failure.
+      expect(mockClient.updateE2eExecutionStatus).toHaveBeenCalledWith(
+        'mbc',
+        'MBC_01',
+        'exec-1',
+        expect.objectContaining({ status: 'passed' }),
+      )
+      warnSpy.mockRestore()
+    })
+
+    it('should not let a rejecting closeBrowserSession break the error path when executeChatCommand throws', async () => {
+      const closeBrowserSession = jest.fn().mockRejectedValue(new Error('close failed'))
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockRejectedValue(
+        new Error('Unexpected error'),
+      )
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        closeBrowserSession,
+      }
+
+      const result = await executeE2eTest(options)
+
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toContain('Unexpected error')
+      }
+      expect(mockClient.updateE2eExecutionStatus).toHaveBeenCalledWith(
+        'mbc',
+        'MBC_01',
+        'exec-1',
+        expect.objectContaining({ status: 'error', errorMessage: 'Unexpected error' }),
+      )
+      warnSpy.mockRestore()
+    })
+
+    it('should work without getOrCreateBrowserSession/closeBrowserSession (backward compatibility)', async () => {
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+        success: true,
+        data: 'Done',
+      })
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      // baseOptions does not set getOrCreateBrowserSession/closeBrowserSession
+      const result = await executeE2eTest(baseOptions)
+
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data).toEqual(
+          expect.objectContaining({ executionId: 'exec-1', status: 'passed' }),
+        )
+      }
+    })
   })
 })

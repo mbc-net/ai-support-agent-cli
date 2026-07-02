@@ -12,6 +12,7 @@ import type {
   ChatChunk,
   CommandResult,
   DbCredentials,
+  E2eEnvironmentVariablesResponse,
   HeartbeatResponse,
   PendingAlert,
   PendingCommand,
@@ -214,6 +215,15 @@ export class ApiClient {
     return this.get<BrowserCredentials>(API_ENDPOINTS.BROWSER_CREDENTIALS(this.tenantCode), { params: { name } })
   }
 
+  async getE2eEnvironmentVariables(environmentId: string): Promise<Record<string, string>> {
+    logger.debug(`Fetching E2E environment variables for: ${environmentId}`)
+    const response = await this.get<E2eEnvironmentVariablesResponse>(
+      API_ENDPOINTS.E2E_ENV_VARIABLES(this.tenantCode),
+      { params: { environmentId } },
+    )
+    return response.variables
+  }
+
   async getRepoCredentials(repositoryId: string): Promise<RepoCredentials> {
     logger.debug(`Fetching repo credentials for: ${repositoryId}`)
     return this.get<RepoCredentials>(API_ENDPOINTS.REPO_CREDENTIALS(this.tenantCode, repositoryId))
@@ -388,19 +398,6 @@ export class ApiClient {
     return this.get<{ id: string } | null>(
       API_ENDPOINTS.ALERT_ACTIVE_ISSUE(tenantCode, projectCode),
       { params: { alarmName } },
-    )
-  }
-
-  /** Alert 専用 Issue 作成エンドポイント経由で Issue を作成する（alarmName を attributes に保存するため専用） */
-  async createIssueFromAlert(
-    tenantCode: string,
-    projectCode: string,
-    alertNumber: string,
-    priority: string,
-  ): Promise<{ id: string }> {
-    return this.post<{ id: string }>(
-      API_ENDPOINTS.ALERT_CREATE_ISSUE(tenantCode, projectCode, alertNumber),
-      { priority },
     )
   }
 

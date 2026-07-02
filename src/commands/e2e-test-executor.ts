@@ -28,6 +28,17 @@ export interface ExecuteE2eTestOptions {
   mcpConfigPath?: string
   tenantCode?: string
   browserLocalPort?: number
+  /**
+   * E2E 専用のブラウザーセッションを子プロセス実行前にメインプロセスへ
+   * 事前登録するコールバック。未指定（VS Code トンネル未接続等）の場合は
+   * セッション事前登録をスキップする。
+   */
+  getOrCreateBrowserSession?: (sessionId: string) => Promise<void>
+  /**
+   * E2E 専用のブラウザーセッションを実行後にクローズするコールバック。
+   * close失敗はE2E結果報告を妨げないよう呼び出し側でwarn握り潰しする。
+   */
+  closeBrowserSession?: (sessionId: string) => Promise<void>
 }
 
 /**
@@ -46,6 +57,7 @@ export async function executeE2eTest(
   const scenario = parseString(payload.scenario)
   const targetUrl = parseString(payload.targetUrl)
   const credentialId = parseString(payload.credentialId)
+  const environmentId = parseString(payload.environmentId)
   const executionMethod = parseString(payload.executionMethod) ?? 'ai'
   const playwrightScript = parseString(payload.playwrightScript)
   const steps = payload.steps as unknown[] | undefined
@@ -63,6 +75,8 @@ export async function executeE2eTest(
   logger.info(
     `[e2e_test] Starting E2E test execution [${executionId}]: method=${executionMethod}`,
   )
+
+  warnIfLegacyEnvironmentVariablesPresent(payload)
 
   const startTime = Date.now()
 
@@ -83,9 +97,15 @@ export async function executeE2eTest(
       testCaseId,
       playwrightScript,
       scenario,
+      targetUrl: targetUrl ?? undefined,
+      environmentId: environmentId ?? undefined,
       startTime,
     })
   }
+
+  // 環境変数の注入は executionMethod='playwright' 専用。他モードでは
+  // 配線先が無いため、environmentId 指定を無言破棄せず明示的に警告する。
+  warnIfEnvironmentIdIgnored(environmentId ?? undefined)
 
   if (playwrightScript && executionMethod !== 'ai') {
     return executeScriptMode({
@@ -111,12 +131,42 @@ export async function executeE2eTest(
   })
 }
 
+/**
+ * environmentId が指定されているが、この実行モードでは環境変数を
+ * 注入する仕組みが無い（Playwright サブプロセス専用）場合に警告ログを出す。
+ * 無言破棄を避けるための最小限のガード。
+ */
+function warnIfEnvironmentIdIgnored(environmentId: string | undefined): void {
+  if (!environmentId) return
+
+  logger.warn(
+    `[e2e_test] environmentId is only supported for executionMethod='playwright'; ignoring the selected environment for this execution`,
+  )
+}
+
+/**
+ * 旧仕様の environmentVariables フィールドはプル方式へ移行済みで参照されない。
+ * デプロイ順序の窓（API が旧方式、agent が新方式）で無言破棄されるのを避けるため、
+ * フィールドが存在する場合のみ警告する。値の中身はログに出さない（機密情報保護）。
+ */
+function warnIfLegacyEnvironmentVariablesPresent(
+  payload: Record<string, unknown>,
+): void {
+  if (payload.environmentVariables === undefined) return
+
+  logger.warn(
+    `[e2e_test] legacy environmentVariables field is no longer supported; use environmentId instead`,
+  )
+}
+
 /** Playwright subprocess モードのパラメータ */
 interface PlaywrightSubprocessModeParams extends ExecuteE2eTestOptions {
   executionId: string
   testCaseId?: string
   playwrightScript: string
   scenario: string
+  targetUrl?: string
+  environmentId?: string
   startTime: number
 }
 
@@ -128,15 +178,34 @@ interface PlaywrightSubprocessModeParams extends ExecuteE2eTestOptions {
 async function executePlaywrightSubprocessMode(
   params: PlaywrightSubprocessModeParams,
 ): Promise<CommandResult> {
-  const { client, tenantCode, executionId, testCaseId, playwrightScript, startTime } = params
+  const {
+    client, tenantCode, executionId, testCaseId, playwrightScript, targetUrl, environmentId, startTime,
+  } = params
   const projectCode = params.projectConfig?.project?.projectCode
+
+  let environmentVariables: Record<string, string> | undefined
+  if (environmentId) {
+    try {
+      environmentVariables = await client.getE2eEnvironmentVariables(environmentId)
+    } catch (err: unknown) {
+      const errorMessage = toErrorMessage(err)
+      logger.error(`[e2e_test] Failed to fetch E2E environment variables [${executionId}] environmentId=${environmentId}: ${errorMessage}`)
+      await reportExecutionStatus(
+        client, tenantCode, projectCode, executionId,
+        'error', Date.now() - startTime,
+        `Failed to fetch E2E environment variables: ${errorMessage}`, testCaseId,
+      )
+      return errorResult(`Failed to fetch E2E environment variables: ${errorMessage}`)
+    }
+  }
 
   let subprocessResult
   try {
     subprocessResult = await runPlaywrightSubprocess({
       script: playwrightScript,
       executionId,
-      baseUrl: undefined,
+      baseUrl: targetUrl,
+      envVars: environmentVariables,
       timeoutMs: undefined,
     })
   } catch (err: unknown) {
@@ -252,8 +321,15 @@ async function executeAiMode(
     `AI_SUPPORT_E2E_EXECUTION_ID=${executionId}`,
   )
 
+  // E2E 実行専用の一意なブラウザーセッションID。
+  // コンソールでユーザーが開いているブラウザープレビュー（メインプロセスの
+  // BrowserSessionManager に登録された既存セッション）を子プロセスが誤って
+  // 乗っ取らないよう、実行ごとに独立したセッションを明示的に割り当てる。
+  const browserSessionId = `e2e-${executionId}`
+
   const chatPayload = {
     message: systemPromptParts.join('\n'),
+    browserSessionId,
     policyContext: {
       tenantCode: tenantCode,
       projectCode: options.projectConfig?.project?.projectCode,
@@ -265,6 +341,10 @@ async function executeAiMode(
   let result: CommandResult
 
   try {
+    if (options.getOrCreateBrowserSession) {
+      await options.getOrCreateBrowserSession(browserSessionId)
+    }
+
     result = await executeChatCommand({
       payload: chatPayload,
       commandId,
@@ -288,6 +368,14 @@ async function executeAiMode(
     )
 
     return errorResult(`E2E test execution failed: ${errorMessage}`)
+  } finally {
+    if (options.closeBrowserSession) {
+      try {
+        await options.closeBrowserSession(browserSessionId)
+      } catch (closeErr: unknown) {
+        logger.warn(`[e2e_test] Failed to close E2E browser session [${browserSessionId}]: ${toErrorMessage(closeErr)}`)
+      }
+    }
   }
 
   const duration = Date.now() - startTime
