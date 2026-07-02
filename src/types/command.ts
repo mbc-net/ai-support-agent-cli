@@ -111,6 +111,8 @@ export interface E2eTestPayload {
   playwrightScript?: unknown
   steps?: unknown
   recoveryMode?: unknown
+  /** 選択された E2E 環境の ID。agent 側が API からプルして Playwright サブプロセスへ注入する */
+  environmentId?: unknown
 }
 
 export interface E2eScriptFixPayload {

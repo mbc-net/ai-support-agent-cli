@@ -43,6 +43,9 @@ const DENYLIST_EXACT = new Set<string>([
   'PERL5LIB', 'PERL5OPT', 'PERL5DB',
   'RUBYOPT', 'RUBYLIB',
   'LUA_PATH', 'LUA_CPATH',
+  // Playwright のブラウザ実行ファイル探索パス差し替え（e2e-test-executor 経由の
+  // Playwright サブプロセス実行で任意バイナリを実行させられるのを防ぐ）
+  'PLAYWRIGHT_BROWSERS_PATH',
   // agent sandbox anchors
   // ZDOTDIR: PTY の zsh sandbox 用 .zshrc を指す
   // XDG_DATA_HOME / XDG_CONFIG_HOME: code-server (VS Code) の settings.json を指す

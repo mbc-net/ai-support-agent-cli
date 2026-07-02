@@ -148,6 +148,7 @@
   "cmd.start.noDocker": "Run directly on host instead of Docker container",
   "cmd.start.dockerfile": "Path to a custom Dockerfile (overrides config and bundled default)",
   "cmd.start.noDockerfileSync": "Skip writing the default Dockerfile to config dir",
+  "cmd.start.project": "Start only the matching project (format: tenantCode/projectCode)",
   "cmd.dockerLogin": "Log in to Claude Code inside a Docker container",
   "cmd.dockerBuild": "Build the Docker image for this version",
   "cmd.dockerBuild.dockerfile": "Path to a custom Dockerfile",
