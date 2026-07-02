@@ -28,8 +28,12 @@ export function createMcpServer(apiClient: ApiClient, projectCode: string, brows
   registerFileUploadTool(server, apiClient)
   registerProjectInfoTool(server, apiClient, projectCode)
   registerReadConversationFileTool(server, apiClient)
-  const browserSession = registerBrowserTools(server, apiClient, browserSessionManager)
-  registerE2eTestStepTool(server, apiClient, browserSession)
+  // browser_navigate/browser_click等とreport_test_stepが同じBrowserSessionManagerを
+  // 参照するように、ここで一つだけ生成して両方に渡す（渡さないと、report_test_step が
+  // アクティブなセッションを解決できず、常に白紙のスクリーンショットを撮ってしまう）。
+  const manager = browserSessionManager ?? new BrowserSessionManager()
+  const browserSession = registerBrowserTools(server, apiClient, manager)
+  registerE2eTestStepTool(server, apiClient, browserSession, manager)
 
   return server
 }

@@ -4,6 +4,7 @@ import { EventEmitter } from 'events'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 import { ApiClient } from '../../../src/api-client'
+import { logger } from '../../../src/logger'
 import { registerBrowserTools } from '../../../src/mcp/tools/browser'
 import {
   SELECTOR_TIMEOUT_SINGLE_MS,
@@ -957,6 +958,12 @@ describe('browser tools', () => {
 
       // Falls back to default session after all retries
       expect(result).toBeDefined()
+      // A proxy session was expected (localPort was set) but could not be
+      // resolved — this must be logged so a screenshot taken against the
+      // (possibly never-navigated) fallback session is diagnosable later.
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Could not resolve active session'),
+      )
     })
 
     it('should create a proxy session when resolveFirstSessionId returns a valid session ID', async () => {

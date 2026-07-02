@@ -35,8 +35,12 @@ let resolvedProxySessionId: string | null = null
 /**
  * Get the current browser session, using the environment variable or the manager's first session.
  * When running in a child process (MCP server), uses the local HTTP proxy if available.
+ *
+ * Exported so other tools sharing the same MCP server (e.g. report_test_step)
+ * can screenshot the session that navigate/click actually operated on, instead
+ * of a static fallback session that may never have been navigated.
  */
-async function getActiveSession(sessionManager: BrowserSessionManager, fallbackSession: BrowserSession): Promise<BrowserSession | BrowserProxySession> {
+export async function getActiveSession(sessionManager: BrowserSessionManager, fallbackSession: BrowserSession): Promise<BrowserSession | BrowserProxySession> {
   const browserSessionId = process.env.AI_SUPPORT_BROWSER_SESSION_ID
   const localPort = process.env.AI_SUPPORT_BROWSER_LOCAL_PORT
 
@@ -61,7 +65,17 @@ async function getActiveSession(sessionManager: BrowserSessionManager, fallbackS
     }
   }
 
-  // Fall back to the default singleton session
+  // Fall back to the default singleton session.
+  // Warn only when a proxy/in-process session was actually expected
+  // (browserSessionId or localPort was set) but could not be resolved —
+  // callers that screenshot the fallback here may get a blank about:blank
+  // page if it was never navigated. No warning when neither env var is set,
+  // since that is the normal non-proxied browsing path.
+  if (browserSessionId || localPort) {
+    logger.warn(
+      `[browser] Could not resolve active session (browserSessionId=${browserSessionId ?? 'unset'}, localPort=${localPort ?? 'unset'}); falling back to static session`,
+    )
+  }
   return fallbackSession
 }
 
