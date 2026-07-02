@@ -450,6 +450,33 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getE2eEnvironmentVariables', () => {
+    it('should fetch E2E environment variables by environmentId and return the variables map', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          environmentId: 'env-1',
+          variables: { API_TOKEN: 'tok-123', DB_PASSWORD: 's3cr3t' },
+        },
+      })
+
+      const result = await client.getE2eEnvironmentVariables('env-1')
+      expect(result).toEqual({ API_TOKEN: 'tok-123', DB_PASSWORD: 's3cr3t' })
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/e2e-env-variables',
+        { params: { environmentId: 'env-1' } },
+      )
+    })
+
+    it('should return an empty object when no variables are registered', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: { environmentId: 'env-2', variables: {} },
+      })
+
+      const result = await client.getE2eEnvironmentVariables('env-2')
+      expect(result).toEqual({})
+    })
+  })
+
   describe('submitResult', () => {
     it('should submit command result', async () => {
       mockInstance.post.mockResolvedValue({ data: { success: true } })

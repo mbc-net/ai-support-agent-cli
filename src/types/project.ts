@@ -146,6 +146,11 @@ export interface BrowserCredentials {
   customFields?: Record<string, string>
 }
 
+export interface E2eEnvironmentVariablesResponse {
+  environmentId: string
+  variables: Record<string, string>
+}
+
 export interface CloudwatchConfig {
   enabled: boolean
   /** サーバーが分 × 60000 に変換済みの ms 値 */

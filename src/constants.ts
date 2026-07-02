@@ -161,6 +161,7 @@ export const API_ENDPOINTS = {
   PROJECT_CONFIG: (tenantCode: string) => `/api/${tenantCode}/agent/project-config`,
   SSH_CREDENTIALS: (tenantCode: string, hostId: string) => `/api/${tenantCode}/agent/ssh-credentials/${hostId}`,
   BROWSER_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/browser-credentials`,
+  E2E_ENV_VARIABLES: (tenantCode: string) => `/api/${tenantCode}/agent/e2e-env-variables`,
   FILES_UPLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/upload-url`,
   FILES_DOWNLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/download-url`,
   E2E_EXECUTION_STATUS: (tenantCode: string, _projectCode: string, executionId: string) =>

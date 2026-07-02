@@ -12,6 +12,7 @@ import type {
   ChatChunk,
   CommandResult,
   DbCredentials,
+  E2eEnvironmentVariablesResponse,
   HeartbeatResponse,
   PendingAlert,
   PendingCommand,
@@ -212,6 +213,15 @@ export class ApiClient {
   async getBrowserCredentials(name: string): Promise<BrowserCredentials> {
     logger.debug(`Fetching browser credentials for: ${name}`)
     return this.get<BrowserCredentials>(API_ENDPOINTS.BROWSER_CREDENTIALS(this.tenantCode), { params: { name } })
+  }
+
+  async getE2eEnvironmentVariables(environmentId: string): Promise<Record<string, string>> {
+    logger.debug(`Fetching E2E environment variables for: ${environmentId}`)
+    const response = await this.get<E2eEnvironmentVariablesResponse>(
+      API_ENDPOINTS.E2E_ENV_VARIABLES(this.tenantCode),
+      { params: { environmentId } },
+    )
+    return response.variables
   }
 
   async getRepoCredentials(repositoryId: string): Promise<RepoCredentials> {
