@@ -1349,4 +1349,214 @@ describe('e2e-test-executor', () => {
     )
     warnSpy.mockRestore()
   })
+
+  // --- browser session isolation (AI mode) ---
+  //
+  // E2E テストが AI モードで実行されると、コンソールでユーザーが見ている
+  // ブラウザープレビュー（メインプロセスの BrowserSessionManager に登録された
+  // 「最初のセッション」）を子プロセスが誤って乗っ取ってしまうバグの回帰テスト。
+  // E2E 専用の一意な browserSessionId を chatPayload に含め、実行前後に
+  // getOrCreateBrowserSession / closeBrowserSession で明示的にライフサイクル管理する。
+
+  describe('browser session isolation (AI mode)', () => {
+    it('should include a unique e2e browserSessionId at the top level of the chat payload', async () => {
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+        success: true,
+        data: 'Done',
+      })
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      await executeE2eTest(baseOptions)
+
+      const chatCall = (chatExecutor.executeChatCommand as jest.Mock).mock.calls[0][0]
+      expect(chatCall.payload.browserSessionId).toBe('e2e-exec-1')
+    })
+
+    it('should call getOrCreateBrowserSession with the e2e session id before executeChatCommand', async () => {
+      const callOrder: string[] = []
+      const getOrCreateBrowserSession = jest.fn(async (sessionId: string) => {
+        callOrder.push(`getOrCreate:${sessionId}`)
+      })
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockImplementation(async () => {
+        callOrder.push('executeChatCommand')
+        return { success: true, data: 'Done' }
+      })
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        getOrCreateBrowserSession,
+      }
+
+      await executeE2eTest(options)
+
+      expect(getOrCreateBrowserSession).toHaveBeenCalledTimes(1)
+      expect(getOrCreateBrowserSession).toHaveBeenCalledWith('e2e-exec-1')
+      expect(callOrder).toEqual(['getOrCreate:e2e-exec-1', 'executeChatCommand'])
+    })
+
+    it('should report error status and closeBrowserSession when getOrCreateBrowserSession rejects', async () => {
+      // getOrCreateBrowserSession が失敗した場合でも、他の全失敗パス
+      // (executeChatCommand の catch 等) と対称的に 'error' ステータスが
+      // 報告され、E2E 実行が 'running' のまま取り残されないことを保証する。
+      const getOrCreateBrowserSession = jest.fn().mockRejectedValue(
+        new Error('session pre-registration failed'),
+      )
+      const closeBrowserSession = jest.fn().mockResolvedValue(undefined)
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        getOrCreateBrowserSession,
+        closeBrowserSession,
+      }
+
+      const result = await executeE2eTest(options)
+
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toContain('session pre-registration failed')
+      }
+
+      // executeChatCommand must never run if session pre-registration failed.
+      expect(chatExecutor.executeChatCommand).not.toHaveBeenCalled()
+
+      // The 'error' status must be reported, not left as 'running' forever.
+      expect(mockClient.updateE2eExecutionStatus).toHaveBeenCalledWith(
+        'mbc',
+        'MBC_01',
+        'exec-1',
+        expect.objectContaining({
+          status: 'error',
+          errorMessage: expect.stringContaining('session pre-registration failed'),
+        }),
+      )
+
+      // closeBrowserSession should still be attempted (finally-block cleanup).
+      expect(closeBrowserSession).toHaveBeenCalledTimes(1)
+      expect(closeBrowserSession).toHaveBeenCalledWith('e2e-exec-1')
+    })
+
+    it('should call closeBrowserSession with the e2e session id after executeChatCommand succeeds', async () => {
+      const callOrder: string[] = []
+      const closeBrowserSession = jest.fn(async (sessionId: string) => {
+        callOrder.push(`close:${sessionId}`)
+      })
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockImplementation(async () => {
+        callOrder.push('executeChatCommand')
+        return { success: true, data: 'Done' }
+      })
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        closeBrowserSession,
+      }
+
+      const result = await executeE2eTest(options)
+
+      expect(result.success).toBe(true)
+      expect(closeBrowserSession).toHaveBeenCalledTimes(1)
+      expect(closeBrowserSession).toHaveBeenCalledWith('e2e-exec-1')
+      // executeChatCommand must complete before the session is torn down.
+      expect(callOrder).toEqual(['executeChatCommand', 'close:e2e-exec-1'])
+    })
+
+    it('should call closeBrowserSession even when executeChatCommand rejects (no leak)', async () => {
+      const closeBrowserSession = jest.fn().mockResolvedValue(undefined)
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockRejectedValue(
+        new Error('Unexpected error'),
+      )
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        closeBrowserSession,
+      }
+
+      const result = await executeE2eTest(options)
+
+      expect(result.success).toBe(false)
+      expect(closeBrowserSession).toHaveBeenCalledTimes(1)
+      expect(closeBrowserSession).toHaveBeenCalledWith('e2e-exec-1')
+    })
+
+    it('should not let a rejecting closeBrowserSession break the reported final result (success case)', async () => {
+      const closeBrowserSession = jest.fn().mockRejectedValue(new Error('close failed'))
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+        success: true,
+        data: 'Done',
+      })
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        closeBrowserSession,
+      }
+
+      const result = await executeE2eTest(options)
+
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data).toEqual(
+          expect.objectContaining({ executionId: 'exec-1', status: 'passed' }),
+        )
+      }
+      // The passed status must still be reported to the API despite the close failure.
+      expect(mockClient.updateE2eExecutionStatus).toHaveBeenCalledWith(
+        'mbc',
+        'MBC_01',
+        'exec-1',
+        expect.objectContaining({ status: 'passed' }),
+      )
+      warnSpy.mockRestore()
+    })
+
+    it('should not let a rejecting closeBrowserSession break the error path when executeChatCommand throws', async () => {
+      const closeBrowserSession = jest.fn().mockRejectedValue(new Error('close failed'))
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockRejectedValue(
+        new Error('Unexpected error'),
+      )
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+      const options: ExecuteE2eTestOptions = {
+        ...baseOptions,
+        closeBrowserSession,
+      }
+
+      const result = await executeE2eTest(options)
+
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error).toContain('Unexpected error')
+      }
+      expect(mockClient.updateE2eExecutionStatus).toHaveBeenCalledWith(
+        'mbc',
+        'MBC_01',
+        'exec-1',
+        expect.objectContaining({ status: 'error', errorMessage: 'Unexpected error' }),
+      )
+      warnSpy.mockRestore()
+    })
+
+    it('should work without getOrCreateBrowserSession/closeBrowserSession (backward compatibility)', async () => {
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+        success: true,
+        data: 'Done',
+      })
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+      // baseOptions does not set getOrCreateBrowserSession/closeBrowserSession
+      const result = await executeE2eTest(baseOptions)
+
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data).toEqual(
+          expect.objectContaining({ executionId: 'exec-1', status: 'passed' }),
+        )
+      }
+    })
+  })
 })

@@ -31,6 +31,13 @@ export interface ExecuteCommandOptions {
   onReboot?: () => Promise<void>
   onUpdate?: () => Promise<void>
   onSyncRepository?: (repositoryCode: string, branch?: string) => Promise<RepoSyncResult>
+  /**
+   * E2E 専用のブラウザーセッションを子プロセス実行前にメインプロセスへ
+   * 事前登録するコールバック。e2e_test ハンドラにのみ渡す。
+   */
+  getOrCreateBrowserSession?: (sessionId: string) => Promise<void>
+  /** E2E 専用のブラウザーセッションを実行後にクローズするコールバック。 */
+  closeBrowserSession?: (sessionId: string) => Promise<void>
 }
 
 /** Execution context passed to each handler */
@@ -185,6 +192,8 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       mcpConfigPath: opts.mcpConfigPath,
       tenantCode: opts.tenantCode,
       browserLocalPort: opts.browserLocalPort,
+      getOrCreateBrowserSession: opts.getOrCreateBrowserSession,
+      closeBrowserSession: opts.closeBrowserSession,
     })
   },
 

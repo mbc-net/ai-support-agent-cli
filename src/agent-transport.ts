@@ -330,6 +330,20 @@ async function processCommand(
       onReboot: ctx.onReboot,
       onUpdate: ctx.onUpdate,
       onSyncRepository: ctx.onSyncRepository,
+      // E2E テスト実行専用のブラウザーセッションをメインプロセスの
+      // BrowserSessionManager 上で明示的にライフサイクル管理する。
+      // vsCodeWs 未接続時（VS Code トンネル未確立）はコールバック自体を渡さず、
+      // e2e-test-executor 側で事前登録・クローズをスキップさせる。
+      getOrCreateBrowserSession: ctx.transportState.vsCodeWs
+        ? async (sessionId: string) => {
+            await ctx.transportState.vsCodeWs?.browserSessionManager.getOrCreate(sessionId)
+          }
+        : undefined,
+      closeBrowserSession: ctx.transportState.vsCodeWs
+        ? async (sessionId: string) => {
+            await ctx.transportState.vsCodeWs?.browserSessionManager.close(sessionId)
+          }
+        : undefined,
     })
     logger.debug(`${deps.prefix} Command result [${commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, LOG_RESULT_LIMIT)}`)
     savePendingResult(commandId, deps.agentId, result, deps.apiUrl, deps.token, deps.tenantCode)
