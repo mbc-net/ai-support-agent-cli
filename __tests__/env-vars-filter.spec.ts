@@ -91,6 +91,7 @@ describe('filterEnvVarsOverride', () => {
       'PERL5LIB', 'PERL5OPT', 'PERL5DB',
       'RUBYOPT', 'RUBYLIB',
       'LUA_PATH', 'LUA_CPATH',
+      'PLAYWRIGHT_BROWSERS_PATH',
       'ZDOTDIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME',
       'CLAUDECODE',
     ]

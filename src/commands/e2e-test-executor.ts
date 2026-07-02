@@ -15,6 +15,36 @@ import { parseString, toErrorMessage } from '../utils'
 
 import { executeChatCommand } from './chat-executor'
 
+/**
+ * ペイロードの environmentVariables を Record<string, string> に正規化する。
+ * プレーンオブジェクトでない場合や、値が文字列でないキーは無視する
+ * （キー形式・予約キーの検証は runPlaywrightSubprocess 側の責務）。
+ * 型不一致で除外した場合は理由をログに残す（無言破棄を避ける）。
+ */
+function parseEnvironmentVariables(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) return undefined
+
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    const actualType = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
+    logger.warn(
+      `[e2e_test] Ignoring environmentVariables: expected a plain object, got ${actualType}`,
+    )
+    return undefined
+  }
+
+  const result: Record<string, string> = {}
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof val === 'string') {
+      result[key] = val
+    } else {
+      logger.warn(
+        `[e2e_test] Ignoring environmentVariables.${key}: expected a string value, got ${typeof val}`,
+      )
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined
+}
+
 /** Options for E2E test execution */
 export interface ExecuteE2eTestOptions {
   payload: Record<string, unknown>
@@ -83,9 +113,16 @@ export async function executeE2eTest(
       testCaseId,
       playwrightScript,
       scenario,
+      targetUrl: targetUrl ?? undefined,
+      environmentVariables: parseEnvironmentVariables(payload.environmentVariables),
       startTime,
     })
   }
+
+  // environmentVariables を Playwright サブプロセスに注入する機能は
+  // executionMethod='playwright' 専用。他モードでは配線先が無いため、
+  // 無言破棄を避けて明示的に警告する。
+  warnIfEnvironmentVariablesIgnored(payload.environmentVariables)
 
   if (playwrightScript && executionMethod !== 'ai') {
     return executeScriptMode({
@@ -111,12 +148,29 @@ export async function executeE2eTest(
   })
 }
 
+/**
+ * environmentVariables が指定されているが、この実行モードでは
+ * 配線されていない（Playwright サブプロセスに渡す仕組みが無い）場合に
+ * 警告ログを出す。無言破棄を避けるための最小限のガード。
+ */
+function warnIfEnvironmentVariablesIgnored(value: unknown): void {
+  const parsed = parseEnvironmentVariables(value)
+  if (!parsed) return
+
+  const count = Object.keys(parsed).length
+  logger.warn(
+    `[e2e_test] environmentVariables is only supported for executionMethod='playwright'; ignoring ${count} variable(s) for this execution`,
+  )
+}
+
 /** Playwright subprocess モードのパラメータ */
 interface PlaywrightSubprocessModeParams extends ExecuteE2eTestOptions {
   executionId: string
   testCaseId?: string
   playwrightScript: string
   scenario: string
+  targetUrl?: string
+  environmentVariables?: Record<string, string>
   startTime: number
 }
 
@@ -128,7 +182,9 @@ interface PlaywrightSubprocessModeParams extends ExecuteE2eTestOptions {
 async function executePlaywrightSubprocessMode(
   params: PlaywrightSubprocessModeParams,
 ): Promise<CommandResult> {
-  const { client, tenantCode, executionId, testCaseId, playwrightScript, startTime } = params
+  const {
+    client, tenantCode, executionId, testCaseId, playwrightScript, targetUrl, environmentVariables, startTime,
+  } = params
   const projectCode = params.projectConfig?.project?.projectCode
 
   let subprocessResult
@@ -136,7 +192,8 @@ async function executePlaywrightSubprocessMode(
     subprocessResult = await runPlaywrightSubprocess({
       script: playwrightScript,
       executionId,
-      baseUrl: undefined,
+      baseUrl: targetUrl,
+      envVars: environmentVariables,
       timeoutMs: undefined,
     })
   } catch (err: unknown) {
