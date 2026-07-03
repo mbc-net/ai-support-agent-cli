@@ -14,7 +14,7 @@ import {
 } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
 import { SELECTOR_TIMEOUT_NAVIGATION_MS } from '../mcp/tools/browser/browser-types'
-import type { FileChooserPayload } from '../mcp/tools/browser/browser-session'
+import type { BrowserSession, FileChooserPayload } from '../mcp/tools/browser/browser-session'
 import { executePlaywrightScript } from '../browser/browser-script-executor'
 
 import {
@@ -714,6 +714,70 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
   // --- Browser handlers ---
 
+  /**
+   * Wire up browser session event listeners (action log, file chooser, focus
+   * change) that relay in-process browser operations to the Web UI. Shared by
+   * handleBrowserOpen (interactive browser_open) and openLiveViewSession
+   * (E2E-dedicated session).
+   */
+  private wireBrowserSessionListeners(sessionId: string, session: BrowserSession): void {
+    // Wire up action log notifications so in-process operations are relayed to Web UI
+    session.actionLog.onChange = (entry) => {
+      this.send({
+        type: 'browser_action_log',
+        sessionId,
+        entries: [entry],
+      })
+    }
+
+    // Wire up file chooser notifications to relay to Web UI
+    session.onFileChooser = (accept) => {
+      this.pendingFileChoosers.set(sessionId, accept)
+      this.send({ type: 'browser_file_chooser_opened', sessionId })
+    }
+
+    // Wire up focus-change notifications so the Web client can overlay a real
+    // input/textarea on the focused element (native caret + IME).
+    session.onFocusChange = (payload) => {
+      this.send({ type: 'browser_focus_changed', sessionId, ...payload })
+    }
+  }
+
+  /**
+   * Start live-view frame streaming for a session and notify the API that it
+   * is ready to receive browser_frame messages. Shared by handleBrowserOpen
+   * (interactive browser_open) and openLiveViewSession (E2E-dedicated
+   * session). This is what makes the Web live-view preview start receiving
+   * frames — without it, the preview stays stuck on "starting" forever even
+   * though a browser session exists.
+   */
+  private async startLiveViewAndNotifyReady(
+    sessionId: string,
+    session: BrowserSession,
+    conversationId?: string,
+  ): Promise<void> {
+    session.startLiveView(LIVE_VIEW_INTERVAL_MS, (base64) => {
+      this.send({
+        type: 'browser_frame',
+        sessionId,
+        body: base64,
+        timestamp: Date.now(),
+        currentUrl: session.getCurrentUrl(),
+      })
+    })
+
+    const currentUrl = session.getCurrentUrl()
+    const pageTitle = await session.getPageTitle()
+
+    this.send({
+      type: 'browser_ready',
+      sessionId,
+      conversationId,
+      currentUrl,
+      pageTitle,
+    })
+  }
+
   private async handleBrowserOpen(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId) {
@@ -761,26 +825,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         return
       }
 
-      // Wire up action log notifications so in-process operations are relayed to Web UI
-      session.actionLog.onChange = (entry) => {
-        this.send({
-          type: 'browser_action_log',
-          sessionId,
-          entries: [entry],
-        })
-      }
-
-      // Wire up file chooser notifications to relay to Web UI
-      session.onFileChooser = (accept) => {
-        this.pendingFileChoosers.set(sessionId, accept)
-        this.send({ type: 'browser_file_chooser_opened', sessionId })
-      }
-
-      // Wire up focus-change notifications so the Web client can overlay a real
-      // input/textarea on the focused element (native caret + IME).
-      session.onFocusChange = (payload) => {
-        this.send({ type: 'browser_focus_changed', sessionId, ...payload })
-      }
+      this.wireBrowserSessionListeners(sessionId, session)
 
       if (msg.conversationId) {
         this.browserSessionManager.linkConversation(msg.conversationId, sessionId)
@@ -808,27 +853,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         await session.getPage()
       }
 
-      // Start live view streaming
-      session.startLiveView(LIVE_VIEW_INTERVAL_MS, (base64) => {
-        this.send({
-          type: 'browser_frame',
-          sessionId,
-          body: base64,
-          timestamp: Date.now(),
-          currentUrl: session.getCurrentUrl(),
-        })
-      })
-
-      const currentUrl = session.getCurrentUrl()
-      const pageTitle = await session.getPageTitle()
-
-      this.send({
-        type: 'browser_ready',
-        sessionId,
-        conversationId: msg.conversationId,
-        currentUrl,
-        pageTitle,
-      })
+      await this.startLiveViewAndNotifyReady(sessionId, session, msg.conversationId)
 
       logger.info(`[vscode-ws] Browser session opened: ${sessionId}`)
     } catch (error) {
@@ -839,6 +864,56 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         reason: `Failed to open browser: ${getErrorMessage(error)}`,
         message: `Failed to open browser: ${getErrorMessage(error)}`,
       })
+    }
+  }
+
+  /**
+   * Start live-view streaming for a browser session without navigating
+   * anywhere, wiring the same listeners and sending the same `browser_ready`
+   * notification as an interactive `browser_open` (see handleBrowserOpen).
+   *
+   * Used by E2E test execution to make its dedicated browser session (created
+   * via `browserSessionManager.getOrCreate` — see agent-transport.ts) start
+   * relaying `browser_frame`/`browser_ready` to the Web live-view preview.
+   * Without this, the E2E-dedicated session is only ever inserted into
+   * BrowserSessionManager's Map and the Web preview stays stuck on "starting"
+   * forever, since nothing ever calls session.startLiveView(...) or sends
+   * browser_ready for it.
+   *
+   * Resume and conversationId linking are intentionally not handled here:
+   * E2E execution always uses a fresh, dedicated session
+   * (`e2e-${executionId}`) that is never resumed, and is not tied to a chat
+   * conversation.
+   *
+   * On failure, a `browser_stopped` message is still sent (useful signal for
+   * the Web UI), but the error is always re-thrown so callers (ultimately
+   * agent-transport.ts's getOrCreateBrowserSession, then
+   * e2e-test-executor.ts) see the rejection and can report it as a failed
+   * execution instead of silently proceeding as if live view had started.
+   */
+  async openLiveViewSession(sessionId: string): Promise<void> {
+    try {
+      const session = await this.browserSessionManager.getOrCreate(sessionId)
+
+      this.wireBrowserSessionListeners(sessionId, session)
+
+      // Ensure page is initialized (no navigation — E2E steps navigate
+      // explicitly via browser_navigate/script execution once frames start
+      // streaming).
+      await session.getPage()
+
+      await this.startLiveViewAndNotifyReady(sessionId, session)
+
+      logger.info(`[vscode-ws] Live view session started: ${sessionId}`)
+    } catch (error) {
+      logger.error(`[vscode-ws] Failed to start live view session ${sessionId}: ${getErrorMessage(error)}`)
+      this.send({
+        type: 'browser_stopped',
+        sessionId,
+        reason: `Failed to start live view: ${getErrorMessage(error)}`,
+        message: `Failed to start live view: ${getErrorMessage(error)}`,
+      })
+      throw error
     }
   }
 

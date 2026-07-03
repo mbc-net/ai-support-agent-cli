@@ -581,6 +581,15 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
         getOrCreate: jest.fn().mockResolvedValue(undefined),
         close: jest.fn().mockResolvedValue(undefined),
       },
+      // Public API (design: VsCodeTunnelWebSocket#openLiveViewSession) that wires
+      // up live-view streaming and sends `browser_ready` for a session, mirroring
+      // what handleBrowserOpen does for interactive browser_open. The E2E-dedicated
+      // session path must call this, or the Web live-view preview never receives
+      // `browser_frame`s. Its own start-live-view/browser_ready behavior is
+      // verified directly against VsCodeTunnelWebSocket in
+      // __tests__/vscode/vscode-tunnel-websocket.spec.ts; here we only verify the
+      // wiring: that agent-transport calls it with the right sessionId.
+      openLiveViewSession: jest.fn().mockResolvedValue(undefined),
     }
   }
 
@@ -588,7 +597,7 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
     jest.clearAllMocks()
   })
 
-  it('should call browserSessionManager.getOrCreate/close with the session id when vsCodeWs is connected', async () => {
+  it('should call vsCodeWs.openLiveViewSession / browserSessionManager.close with the session id when vsCodeWs is connected', async () => {
     const { executeCommand } = require('../src/commands')
     const deps = createMockDeps({
       client: {
@@ -626,8 +635,12 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
 
     expect(capturedOptions.getOrCreateBrowserSession).toBeInstanceOf(Function)
     expect(capturedOptions.closeBrowserSession).toBeInstanceOf(Function)
-    expect(mockVsCodeWs.browserSessionManager.getOrCreate).toHaveBeenCalledTimes(1)
-    expect(mockVsCodeWs.browserSessionManager.getOrCreate).toHaveBeenCalledWith('e2e-exec-1')
+    // getOrCreateBrowserSession now delegates to openLiveViewSession (instead of
+    // calling browserSessionManager.getOrCreate directly), so that the E2E
+    // session also starts live-view frame streaming and sends browser_ready --
+    // see the dedicated regression test below for that behavior's contract.
+    expect(mockVsCodeWs.openLiveViewSession).toHaveBeenCalledTimes(1)
+    expect(mockVsCodeWs.openLiveViewSession).toHaveBeenCalledWith('e2e-exec-1')
     expect(mockVsCodeWs.browserSessionManager.close).toHaveBeenCalledTimes(1)
     expect(mockVsCodeWs.browserSessionManager.close).toHaveBeenCalledWith('e2e-exec-1')
   })
@@ -666,6 +679,112 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
 
     expect(capturedOptions.getOrCreateBrowserSession).toBeUndefined()
     expect(capturedOptions.closeBrowserSession).toBeUndefined()
+  })
+
+  // Regression test for the E2E live-view "stuck on starting" bug: an
+  // interactive `browser_open` (handleBrowserOpen in vscode-tunnel-websocket.ts)
+  // wires up listeners, calls session.startLiveView(...), and sends a
+  // `browser_ready` message over the WebSocket -- this is what makes the API
+  // start expecting/relaying `browser_frame`s to the Web live-view. The E2E
+  // executor's dedicated browser session (created via getOrCreateBrowserSession)
+  // must trigger the same effect via the public
+  // VsCodeTunnelWebSocket#openLiveViewSession(sessionId) API (design decision;
+  // not yet implemented). Today getOrCreateBrowserSession only calls
+  // BrowserSessionManager.getOrCreate(sessionId) directly, which merely inserts
+  // an entry into a local Map (see browser-session-manager.ts) and never calls
+  // openLiveViewSession -- so this must currently fail.
+  //
+  // This test only checks the wiring (agent-transport passes the sessionId
+  // through to vsCodeWs.openLiveViewSession). The behavior of
+  // openLiveViewSession itself -- that it actually starts live-view frame
+  // streaming, not just sends browser_ready -- is verified separately in
+  // __tests__/vscode/vscode-tunnel-websocket.spec.ts.
+  it('should call vsCodeWs.openLiveViewSession with the session id when the E2E browser session is created', async () => {
+    const { executeCommand } = require('../src/commands')
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands: jest.fn().mockResolvedValue([]),
+        getCommand: jest.fn().mockResolvedValue({ type: 'e2e_test', payload: {} }),
+        submitResult: jest.fn().mockResolvedValue(undefined),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    const mockVsCodeWs = createMockVsCodeWs()
+    state.vsCodeWs = mockVsCodeWs as any
+    const ctx = createMockCtx(state)
+
+    executeCommand.mockImplementation(async (_type: unknown, _payload: unknown, options: any) => {
+      // Exercise the callback exactly as e2e-test-executor.ts does: create the
+      // dedicated `e2e-${executionId}` browser session before running steps.
+      await options.getOrCreateBrowserSession?.('e2e-exec-5')
+      return { success: true, data: 'ok' }
+    })
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n5', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
+      content: {
+        commandId: 'cmd-5',
+        agentId: 'agent-1',
+        tenantCode: 'test',
+        projectCode: 'TEST_PROJ',
+        type: 'e2e_test',
+      },
+    })
+
+    expect(mockVsCodeWs.openLiveViewSession).toHaveBeenCalledWith('e2e-exec-5')
+  })
+
+  // Regression test for silently-lost E2E error reporting: openLiveViewSession
+  // (vscode-tunnel-websocket.ts) sends a browser_stopped notification AND
+  // re-throws when it fails, specifically so callers see the rejection.
+  // getOrCreateBrowserSession here must be a thin pass-through -- it must NOT
+  // swallow that rejection -- otherwise e2e-test-executor.ts's tested
+  // "getOrCreateBrowserSession rejects -> report 'error' status" path
+  // (see __tests__/commands/e2e-test-executor.spec.ts, 'should report error
+  // status and closeBrowserSession when getOrCreateBrowserSession rejects')
+  // would never actually be reachable in production.
+  it('should propagate an openLiveViewSession rejection out of getOrCreateBrowserSession instead of swallowing it', async () => {
+    const { executeCommand } = require('../src/commands')
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands: jest.fn().mockResolvedValue([]),
+        getCommand: jest.fn().mockResolvedValue({ type: 'e2e_test', payload: {} }),
+        submitResult: jest.fn().mockResolvedValue(undefined),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    const mockVsCodeWs = createMockVsCodeWs()
+    mockVsCodeWs.openLiveViewSession = jest.fn().mockRejectedValue(new Error('live view failed to start'))
+    state.vsCodeWs = mockVsCodeWs as any
+    const ctx = createMockCtx(state)
+
+    let caughtError: unknown
+    executeCommand.mockImplementation(async (_type: unknown, _payload: unknown, options: any) => {
+      try {
+        await options.getOrCreateBrowserSession?.('e2e-exec-6')
+      } catch (error) {
+        caughtError = error
+      }
+      return { success: true, data: 'ok' }
+    })
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n6', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
+      content: {
+        commandId: 'cmd-6',
+        agentId: 'agent-1',
+        tenantCode: 'test',
+        projectCode: 'TEST_PROJ',
+        type: 'e2e_test',
+      },
+    })
+
+    expect(caughtError).toBeInstanceOf(Error)
+    expect((caughtError as Error).message).toBe('live view failed to start')
   })
 })
 
