@@ -2263,6 +2263,26 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(sentMessages[0].message).toContain('mouseClick failed')
     })
 
+    it('handleBrowserMouseDown - should send error on failure', async () => {
+      const mockSession = { executeMouseDown: jest.fn().mockRejectedValue(new Error('down failed')) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseDown({ type: 'browser_mouse_down', sessionId: 'sess-md3', x: 1, y: 2 })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+      expect(sentMessages[0].message).toContain('mouseDown failed')
+    })
+
+    it('handleBrowserMouseUp - should send error on failure', async () => {
+      const mockSession = { executeMouseUp: jest.fn().mockRejectedValue(new Error('up failed')) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseUp({ type: 'browser_mouse_up', sessionId: 'sess-mu3', x: 1, y: 2 })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+      expect(sentMessages[0].message).toContain('mouseUp failed')
+    })
+
     it('handleBrowserMouseWheel - should warn on failure (no error send)', async () => {
       const { logger } = require('../../src/logger')
       const mockSession = { executeMouseWheel: jest.fn().mockRejectedValue(new Error('scroll failed')) }

@@ -970,8 +970,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     try {
       await session.goBack()
     } catch (error) {
-      logger.warn(`[vscode-ws] goBack failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `goBack failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'goBack', error)
     }
   }
 
@@ -981,8 +980,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     try {
       await session.goForward()
     } catch (error) {
-      logger.warn(`[vscode-ws] goForward failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `goForward failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'goForward', error)
     }
   }
 
@@ -992,8 +990,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     try {
       await session.reload()
     } catch (error) {
-      logger.warn(`[vscode-ws] reload failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `reload failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'reload', error)
     }
   }
 
@@ -1003,8 +1000,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     try {
       await session.executeMouseClick(msg.x, msg.y, msg.button, msg.clickCount)
     } catch (error) {
-      logger.warn(`[vscode-ws] mouseClick failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `mouseClick failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'mouseClick', error)
     }
   }
 
@@ -1046,8 +1042,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     try {
       await session.executeMouseDown(msg.x, msg.y, msg.button)
     } catch (error) {
-      logger.warn(`[vscode-ws] mouseDown failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `mouseDown failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'mouseDown', error)
     }
   }
 
@@ -1057,8 +1052,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     try {
       await session.executeMouseUp(msg.x, msg.y, msg.button)
     } catch (error) {
-      logger.warn(`[vscode-ws] mouseUp failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `mouseUp failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'mouseUp', error)
     }
   }
 
@@ -1078,8 +1072,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     try {
       await session.executeKeyboardType(msg.text)
     } catch (error) {
-      logger.warn(`[vscode-ws] keyboardType failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `keyboardType failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'keyboardType', error)
     }
   }
 
@@ -1089,8 +1082,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     try {
       await session.executeKeyboardPress(msg.key, msg.modifiers)
     } catch (error) {
-      logger.warn(`[vscode-ws] keyboardPress failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `keyboardPress failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'keyboardPress', error)
     }
   }
 
@@ -1136,8 +1128,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       const text = await session.getSelectedText()
       this.send({ type: 'browser_selection_result', sessionId, text })
     } catch (error) {
-      logger.warn(`[vscode-ws] getSelection failed (session=${sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId, message: `getSelection failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(sessionId, 'getSelection', error)
     }
   }
 
@@ -1149,8 +1140,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     try {
       await session.setFocusedInputValue(msg.value, msg.selectionStart, msg.selectionEnd)
     } catch (error) {
-      logger.warn(`[vscode-ws] setInputValue failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `setInputValue failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'setInputValue', error)
     }
   }
 
@@ -1498,6 +1488,19 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
   private sendBrowserSessionNotFoundError(sessionId: string): void {
     this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+  }
+
+  /**
+   * Shared failure path for the best-effort browser action handlers
+   * (goBack/mouseClick/keyboard/etc.): log a warning and forward an `error`
+   * message to the web client using a consistent `"<action> failed: <detail>"`
+   * shape. Not used by handlers that intentionally suppress the client-facing
+   * error (e.g. mouseMove, mouseWheel) — those log directly.
+   */
+  private reportActionFailure(sessionId: string | undefined, action: string, error: unknown): void {
+    const detail = getErrorMessage(error)
+    logger.warn(`[vscode-ws] ${action} failed (session=${sessionId}): ${detail}`)
+    this.send({ type: 'error', sessionId, message: `${action} failed: ${detail}` })
   }
 
   private send(msg: VsCodeAgentMessage): void {
