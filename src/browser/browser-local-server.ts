@@ -13,12 +13,17 @@ import { logger } from '../logger'
 import type { BrowserSession } from '../mcp/tools/browser/browser-session'
 import { BrowserSessionManager } from '../mcp/tools/browser/browser-session-manager'
 import {
-  MAX_WAIT_TIMEOUT_MS,
   SELECTOR_TIMEOUT_NAVIGATION_MS,
   SELECTOR_TIMEOUT_SINGLE_MS,
 } from '../mcp/tools/browser/browser-types'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
-import { tryClickSelectors, tryFillSelectors } from '../mcp/tools/browser/selector-utils'
+import {
+  actionLogPreview,
+  applyPostNavigateWait,
+  truncateForContext,
+  tryClickSelectors,
+  tryFillSelectors,
+} from '../mcp/tools/browser/selector-utils'
 import { screenshotToBase64 } from '../mcp/tools/mcp-response'
 import { executePlaywrightScript } from './browser-script-executor'
 
@@ -208,13 +213,7 @@ export class BrowserLocalServer {
     const page = await session.getPage()
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
 
-    if (params.waitForSelector) {
-      await page.waitForSelector(params.waitForSelector as string, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
-    }
-    if (params.waitForTimeout) {
-      const clampedTimeout = Math.min(params.waitForTimeout as number, MAX_WAIT_TIMEOUT_MS)
-      await page.waitForTimeout(clampedTimeout)
-    }
+    await applyPostNavigateWait(page, params.waitForSelector as string | undefined, params.waitForTimeout as number | undefined)
 
     const title: string = await page.title()
     const currentUrl: string = page.url()
@@ -277,11 +276,8 @@ export class BrowserLocalServer {
     const page = await session.getPage()
     const target = (params.selector as string) ?? 'body'
     const text: string = await page.locator(target).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
-    const maxLength = 50 * 1024
-    const truncated = text.length > maxLength ? text.substring(0, maxLength) + '\n... (truncated)' : text
-    const preview = text.replace(/\s+/g, ' ').trim()
-    const previewText = preview.length > 100 ? preview.substring(0, 100) + '…' : preview
-    this.emitActionLog(sessionId, session, 'get_text', `${target} → "${previewText}"`)
+    const truncated = truncateForContext(text)
+    this.emitActionLog(sessionId, session, 'get_text', `${target} → "${actionLogPreview(text)}"`)
     sendJson(res, 200, { text: truncated })
   }
 
@@ -295,14 +291,11 @@ export class BrowserLocalServer {
 
     const page = await session.getPage()
     const text: string = await page.locator(selector).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
-    const maxLength = 50 * 1024
-    const truncated = text.length > maxLength ? text.substring(0, maxLength) + '\n... (truncated)' : text
+    const truncated = truncateForContext(text)
 
     session.variables.set(variableName, truncated)
 
-    const preview = text.replace(/\s+/g, ' ').trim()
-    const previewText = preview.length > 100 ? preview.substring(0, 100) + '…' : preview
-    this.emitActionLog(sessionId, session, 'extract', `${variableName} "${selector}" → "${previewText}"`)
+    this.emitActionLog(sessionId, session, 'extract', `${variableName} "${selector}" → "${actionLogPreview(text)}"`)
 
     sendJson(res, 200, { text: truncated })
   }
