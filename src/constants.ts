@@ -185,6 +185,11 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/projects/${projectCode}/alerts/${alertNumber}/resolve-issue`,
   ISSUES: (tenantCode: string, projectCode: string) =>
     `/api/${tenantCode}/projects/${projectCode}/issues`,
+  // Agent tool 関連エンドポイント（タスク実行画面のエージェントが呼び出す）
+  AGENT_TOOL_SEND_SLACK_MESSAGE: (tenantCode: string) =>
+    `/api/${tenantCode}/agent/tools/send-slack-message`,
+  AGENT_TOOL_TRIGGER_ALARM: (tenantCode: string) =>
+    `/api/${tenantCode}/agent/tools/trigger-alarm`,
 } as const
 
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000
