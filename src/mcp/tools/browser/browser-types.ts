@@ -18,3 +18,7 @@ export const BROWSER_TIMEOUT_REQUEST_MS = 3_000 // HTTP GET probe
 
 // Delay between retries while resolving the first active browser session
 export const BROWSER_SESSION_RETRY_DELAY_MS = 500
+
+// Live view (browser preview streaming) tuning
+export const LIVE_VIEW_JPEG_QUALITY = 70 // screenshot() quality passed for both the interval and debounced capture
+export const LIVE_VIEW_DEBOUNCE_MS = 50 // delay before an event-triggered capture (e.g. after keyboard input) fires

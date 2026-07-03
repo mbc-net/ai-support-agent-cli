@@ -1,9 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
-import { mcpErrorResponse, mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
+import { mcpErrorResponse, mcpJsonResponse, newIdempotencyKey, withMcpErrorHandling } from './mcp-response'
 
 /** trigger_alarm ツールを MCP サーバーに登録する */
 export function registerTriggerAlarmTool(server: McpServer, apiClient: ApiClient): void {
@@ -18,8 +17,7 @@ export function registerTriggerAlarmTool(server: McpServer, apiClient: ApiClient
       priority: z.enum(['urgent', 'high', 'medium', 'low']).optional().describe('Priority (default: urgent)'),
     },
     async (args) => withMcpErrorHandling(async () => {
-      // Generated once per logical invocation so HTTP retries of the same call reuse it (idempotency key)
-      const callId = randomUUID()
+      const callId = newIdempotencyKey()
       const result = await apiClient.triggerAlarm(args.title, args.reason, args.priority, callId)
       if (!result.success) {
         return mcpErrorResponse(result.error?.message ?? 'Failed to trigger alarm')

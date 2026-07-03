@@ -524,7 +524,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
   private async handleHttpRequest(msg: VsCodeServerMessage): Promise<void> {
     // ポートフォワードセッションの場合はそちらのポートを使用
-    const pfSession = msg.sessionId ? this.portForwardSessions.get(msg.sessionId) : undefined
+    const pfSession = this.getPortForwardSessionForMsg(msg)
     const targetPort = pfSession?.targetPort
 
     if (!targetPort && !this.vsCodeServer?.isRunning) {
@@ -619,7 +619,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
   private handleWsFrame(msg: VsCodeServerMessage): void {
     // ポートフォワードセッションの場合は専用wsProxyを使用
-    const pfSession = msg.sessionId ? this.portForwardSessions.get(msg.sessionId) : undefined
+    const pfSession = this.getPortForwardSessionForMsg(msg)
     const proxy = pfSession?.wsProxy ?? this.wsProxy
 
     if (!pfSession && (!this.vsCodeServer?.isRunning || !this.wsProxy)) {
@@ -965,7 +965,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserGoBack(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session) return
     try {
       await session.goBack()
@@ -976,7 +976,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserGoForward(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session) return
     try {
       await session.goForward()
@@ -987,7 +987,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserReload(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session) return
     try {
       await session.reload()
@@ -998,7 +998,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserMouseClick(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || msg.x === undefined || msg.y === undefined) return
     try {
       await session.executeMouseClick(msg.x, msg.y, msg.button, msg.clickCount)
@@ -1010,7 +1010,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
   private async handleBrowserMouseMove(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
-    const session = sessionId ? this.browserSessionManager.get(sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || !sessionId || msg.x === undefined || msg.y === undefined) return
     try {
       await session.executeMouseMove(msg.x, msg.y)
@@ -1041,7 +1041,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserMouseDown(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || msg.x === undefined || msg.y === undefined) return
     try {
       await session.executeMouseDown(msg.x, msg.y, msg.button)
@@ -1052,7 +1052,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserMouseUp(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || msg.x === undefined || msg.y === undefined) return
     try {
       await session.executeMouseUp(msg.x, msg.y, msg.button)
@@ -1063,7 +1063,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserMouseWheel(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || msg.deltaX === undefined || msg.deltaY === undefined) return
     try {
       await session.executeMouseWheel(msg.deltaX, msg.deltaY)
@@ -1073,7 +1073,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserKeyboardType(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || !msg.text) return
     try {
       await session.executeKeyboardType(msg.text)
@@ -1084,7 +1084,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserKeyboardPress(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || !msg.key) return
     try {
       await session.executeKeyboardPress(msg.key, msg.modifiers)
@@ -1142,7 +1142,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserSetInputValue(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session) return
     // The contract requires `value` to be a string; ignore malformed payloads.
     if (typeof msg.value !== 'string') return
@@ -1194,7 +1194,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserViewport(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || !msg.width || !msg.height) return
     try {
       await session.setViewport(msg.width, msg.height, msg.deviceId)
@@ -1457,6 +1457,39 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       this.vsCodeServer.stop()
       this.vsCodeServer = null
     }
+  }
+
+  /**
+   * Resolve a value from a sessionId-keyed lookup using a message's
+   * sessionId, or undefined when sessionId is absent or unregistered.
+   * Shared by `getSessionForMsg` (browserSessionManager) and the
+   * port-forward session lookups (portForwardSessions) below.
+   */
+  private resolveForMsg<T>(
+    msg: { sessionId?: string },
+    resolve: (sessionId: string) => T | undefined,
+  ): T | undefined {
+    return msg.sessionId ? resolve(msg.sessionId) : undefined
+  }
+
+  /**
+   * Resolve the BrowserSession for a message's sessionId, or undefined when
+   * sessionId is absent or no session is registered for it. Shared by the
+   * best-effort browser action handlers (goBack/mouseClick/keyboard/etc.)
+   * that silently no-op rather than replying with a "session not found" error.
+   */
+  private getSessionForMsg(msg: { sessionId?: string }): BrowserSession | undefined {
+    return this.resolveForMsg(msg, (sessionId) => this.browserSessionManager.get(sessionId))
+  }
+
+  /**
+   * Resolve the port-forward session for a message's sessionId, or undefined
+   * when sessionId is absent or no port-forward session is registered for it.
+   */
+  private getPortForwardSessionForMsg(
+    msg: { sessionId?: string },
+  ): { targetPort: number; wsProxy: VsCodeWsProxy } | undefined {
+    return this.resolveForMsg(msg, (sessionId) => this.portForwardSessions.get(sessionId))
   }
 
   private sendMissingSessionIdError(): void {

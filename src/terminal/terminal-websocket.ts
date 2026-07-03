@@ -1,12 +1,12 @@
 import * as path from 'path'
-import { execFile } from 'child_process'
+import { execFile, type ExecFileException } from 'child_process'
 
 import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../base-websocket'
 import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import { logger } from '../logger'
-import { buildWsUrl, getErrorMessage } from '../utils'
+import { buildWsUrl, getErrorMessage, isErrnoException } from '../utils'
 
 import type { EnvVarsProvider } from '../env-vars-filter'
 import {
@@ -21,6 +21,17 @@ const MAX_TERMINAL_SIZE = 1000
 
 function clampTerminalSize(value: number): number {
   return Math.min(Math.max(Math.floor(value), MIN_TERMINAL_SIZE), MAX_TERMINAL_SIZE)
+}
+
+/**
+ * Turn a tmux `execFile` error into a user-facing message, collapsing the
+ * common "tmux binary is not installed" case (ENOENT) into a stable string
+ * instead of the raw (platform-dependent) Node error message. Uses the
+ * shared `isErrnoException` type guard (see src/utils.ts) rather than an
+ * unchecked `as NodeJS.ErrnoException` cast.
+ */
+function describeTmuxExecError(err: ExecFileException): string {
+  return isErrnoException(err, 'ENOENT') ? 'tmux not found' : err.message
 }
 
 /**
@@ -454,7 +465,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       ['list-sessions', '-F', '#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_activity}'],
       (err, stdout, stderr) => {
         if (err) {
-          const isEnoent = (err as NodeJS.ErrnoException).code === 'ENOENT'
+          const isEnoent = isErrnoException(err, 'ENOENT')
           const isNoServer = stderr.includes('no server running') || stderr.includes('no sessions')
           if (!isEnoent && !isNoServer) {
             logger.warn(`[terminal-ws] tmux list-sessions unexpected error: ${(err as NodeJS.ErrnoException).code ?? 'unknown'} - ${err.message}`)
@@ -516,13 +527,12 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
 
     execFile('tmux', ['kill-session', '-t', name], (err) => {
       if (err) {
-        const isEnoent = (err as NodeJS.ErrnoException).code === 'ENOENT'
         this.send({
           type: 'tmux_session_killed',
           requestId,
           name,
           success: false,
-          error: isEnoent ? 'tmux not found' : err.message,
+          error: describeTmuxExecError(err),
         })
         return
       }
@@ -558,13 +568,12 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     await new Promise<void>((resolve) => {
       execFile('tmux', ['split-window', flag, '-t', sessionName], (err) => {
         if (err) {
-          const isEnoent = (err as NodeJS.ErrnoException).code === 'ENOENT'
           this.send({
             type: 'tmux_pane_split',
             requestId,
             sessionName,
             success: false,
-            error: isEnoent ? 'tmux not found' : err.message,
+            error: describeTmuxExecError(err),
           })
           resolve()
           return
