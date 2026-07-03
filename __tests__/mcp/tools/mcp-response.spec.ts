@@ -6,6 +6,7 @@ import {
   mcpImageResponse,
   mcpTextImageResponse,
   mcpTextResponse,
+  newIdempotencyKey,
   screenshotToBase64,
   withMcpErrorHandling,
 } from '../../../src/mcp/tools/mcp-response'
@@ -188,6 +189,17 @@ describe('mcp-response helpers', () => {
         config: { headers: new AxiosHeaders() },
       })
       expect(getErrorMessage(error)).toBe('[400] Detailed message')
+    })
+  })
+
+  describe('newIdempotencyKey', () => {
+    it('should return a v4 UUID string', () => {
+      const key = newIdempotencyKey()
+      expect(key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+    })
+
+    it('should return a different value on each call', () => {
+      expect(newIdempotencyKey()).not.toBe(newIdempotencyKey())
     })
   })
 
