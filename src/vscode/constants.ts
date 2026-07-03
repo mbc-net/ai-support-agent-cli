@@ -1,3 +1,5 @@
+import { DEFAULT_WS_RECONNECT_BASE_DELAY_MS, INFINITE_RECONNECT_RETRIES } from '../constants'
+
 /** code-server アイドルタイムアウト（10分） */
 export const VSCODE_IDLE_TIMEOUT_MS = 10 * 60 * 1000
 
@@ -8,10 +10,10 @@ export const VSCODE_DEFAULT_PORT = 8443
 export const VSCODE_BIND_HOST = '127.0.0.1'
 
 /** WebSocket 再接続ベース遅延 */
-export const VSCODE_WS_RECONNECT_BASE_DELAY_MS = 1000
+export const VSCODE_WS_RECONNECT_BASE_DELAY_MS = DEFAULT_WS_RECONNECT_BASE_DELAY_MS
 
 /** WebSocket 最大再接続リトライ */
-export const VSCODE_WS_MAX_RECONNECT_RETRIES = Number.POSITIVE_INFINITY
+export const VSCODE_WS_MAX_RECONNECT_RETRIES = INFINITE_RECONNECT_RETRIES
 
 /** HTTP レスポンスボディのチャンクサイズ（512KB） */
 export const HTTP_RESPONSE_CHUNK_SIZE = 512 * 1024

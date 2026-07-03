@@ -16,12 +16,22 @@ import {
 } from './browser-types'
 
 /**
+ * Split a comma-separated selector string into trimmed, non-empty candidates.
+ * Shared by tryClickSelectors/tryFillSelectors so both stay in sync on how
+ * candidates are parsed (trimming, dropping empty segments from things like
+ * a trailing comma).
+ */
+function parseSelectorCandidates(selectors: string): string[] {
+  return selectors.split(',').map(s => s.trim()).filter(Boolean)
+}
+
+/**
  * Try multiple comma-separated CSS selectors for a click action.
  * Returns the selector that actually matched.
  * If the selector contains no commas, it is used as-is.
  */
 export async function tryClickSelectors(page: Page, selectors: string, options?: { waitForNavigation?: boolean }): Promise<string> {
-  const candidates = selectors.split(',').map(s => s.trim()).filter(Boolean)
+  const candidates = parseSelectorCandidates(selectors)
 
   if (candidates.length <= 1) {
     const sel = selectors.trim()
@@ -68,7 +78,7 @@ export async function tryClickSelectors(page: Page, selectors: string, options?:
  * If the selector contains no commas, it is used as-is.
  */
 export async function tryFillSelectors(page: Page, selectors: string, value: string): Promise<string> {
-  const candidates = selectors.split(',').map(s => s.trim()).filter(Boolean)
+  const candidates = parseSelectorCandidates(selectors)
 
   if (candidates.length <= 1) {
     const sel = selectors.trim()

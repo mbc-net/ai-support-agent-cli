@@ -13,6 +13,10 @@ export const SELECTOR_TIMEOUT_NAVIGATION_MS = 30_000 // page.goto / waitForNavig
 export const SELECTOR_TIMEOUT_SINGLE_MS = 10_000 // single-candidate click / fill / innerText / waitForSelector
 export const SELECTOR_TIMEOUT_MULTIPLE_MS = 5_000 // multi-candidate fallback click / fill
 
+// Upper bound applied to the caller-supplied `waitForTimeout` / wait-step duration so a
+// misbehaving script/tool call cannot block a browser session indefinitely.
+export const MAX_WAIT_TIMEOUT_MS = 10_000
+
 // HTTP request timeouts
 export const BROWSER_TIMEOUT_REQUEST_MS = 3_000 // HTTP GET probe
 

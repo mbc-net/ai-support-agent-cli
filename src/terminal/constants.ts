@@ -1,4 +1,4 @@
-import { ENV_VARS } from '../constants'
+import { DEFAULT_WS_RECONNECT_BASE_DELAY_MS, ENV_VARS, INFINITE_RECONNECT_RETRIES } from '../constants'
 
 /**
  * Grace window kept after a transient WebSocket disconnect before the PTY is
@@ -57,5 +57,5 @@ export const SESSION_GRACE_TIMEOUT_MS = (() => {
 export const SCROLLBACK_BUFFER_MAX_BYTES = 256 * 1024 // 256KB per session
 export const TERMINAL_DEFAULT_COLS = 80
 export const TERMINAL_DEFAULT_ROWS = 24
-export const TERMINAL_WS_RECONNECT_BASE_DELAY_MS = 1000
-export const TERMINAL_WS_MAX_RECONNECT_RETRIES = Number.POSITIVE_INFINITY
+export const TERMINAL_WS_RECONNECT_BASE_DELAY_MS = DEFAULT_WS_RECONNECT_BASE_DELAY_MS
+export const TERMINAL_WS_MAX_RECONNECT_RETRIES = INFINITE_RECONNECT_RETRIES
