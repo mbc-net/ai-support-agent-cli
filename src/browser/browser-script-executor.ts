@@ -9,6 +9,7 @@
 import { logger } from '../logger'
 import { getErrorMessage } from '../utils'
 import {
+  MAX_WAIT_TIMEOUT_MS,
   SELECTOR_TIMEOUT_NAVIGATION_MS,
   SELECTOR_TIMEOUT_SINGLE_MS,
 } from '../mcp/tools/browser/browser-types'
@@ -215,7 +216,7 @@ export async function executePlaywrightScript(
           session.actionLog.add('chat', 'set_variable', `${step.args.name} "${step.args.value}"`)
           break
         case 'wait': {
-          const ms = Math.min(parseInt(step.args.ms, 10), 10000)
+          const ms = Math.min(parseInt(step.args.ms, 10), MAX_WAIT_TIMEOUT_MS)
           await page.waitForTimeout(ms)
           break
         }

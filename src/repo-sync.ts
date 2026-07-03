@@ -4,12 +4,12 @@ import * as path from 'path'
 import { promisify } from 'util'
 
 import type { ApiClient } from './api-client'
-import { GIT_CHECKOUT_TIMEOUT, GIT_CLONE_TIMEOUT, GIT_FETCH_TIMEOUT } from './constants'
+import { GIT_CHECKOUT_TIMEOUT, GIT_CLONE_TIMEOUT, GIT_FETCH_TIMEOUT, SSH_NO_HOST_CHECK_FLAGS } from './constants'
 import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
 import { getErrorMessage } from './utils'
 import { normalizePemKey } from './utils/pem-key'
-import { createSecureTempFile } from './utils/temp-file'
+import { createSecureTempFile, safeUnlink } from './utils/temp-file'
 
 const execFileAsync = promisify(execFile)
 
@@ -257,14 +257,10 @@ export function buildAuthEnv(
 
   return {
     env: {
-      GIT_SSH_COMMAND: `ssh -i "${tmpKeyPath}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`,
+      GIT_SSH_COMMAND: `ssh -i "${tmpKeyPath}" ${SSH_NO_HOST_CHECK_FLAGS}`,
     },
     cleanup: () => {
-      try {
-        fs.unlinkSync(tmpKeyPath)
-      } catch {
-        logger.warn(`Failed to delete temporary SSH key file: ${tmpKeyPath}`)
-      }
+      safeUnlink(tmpKeyPath, `Failed to delete temporary SSH key file: ${tmpKeyPath}`)
     },
   }
 }

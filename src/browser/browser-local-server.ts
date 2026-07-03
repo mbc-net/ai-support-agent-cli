@@ -13,6 +13,7 @@ import { logger } from '../logger'
 import type { BrowserSession } from '../mcp/tools/browser/browser-session'
 import { BrowserSessionManager } from '../mcp/tools/browser/browser-session-manager'
 import {
+  MAX_WAIT_TIMEOUT_MS,
   SELECTOR_TIMEOUT_NAVIGATION_MS,
   SELECTOR_TIMEOUT_SINGLE_MS,
 } from '../mcp/tools/browser/browser-types'
@@ -211,7 +212,7 @@ export class BrowserLocalServer {
       await page.waitForSelector(params.waitForSelector as string, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     }
     if (params.waitForTimeout) {
-      const clampedTimeout = Math.min(params.waitForTimeout as number, 10000)
+      const clampedTimeout = Math.min(params.waitForTimeout as number, MAX_WAIT_TIMEOUT_MS)
       await page.waitForTimeout(clampedTimeout)
     }
 

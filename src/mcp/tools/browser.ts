@@ -22,6 +22,7 @@ import { BrowserSessionManager } from './browser/browser-session-manager'
 import {
   BROWSER_SESSION_RETRY_DELAY_MS,
   BROWSER_TIMEOUT_REQUEST_MS,
+  MAX_WAIT_TIMEOUT_MS,
   SELECTOR_TIMEOUT_NAVIGATION_MS,
   SELECTOR_TIMEOUT_SINGLE_MS,
 } from './browser/browser-types'
@@ -192,7 +193,7 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
       }
 
       if (waitForTimeout) {
-        const clampedTimeout = Math.min(waitForTimeout, 10000)
+        const clampedTimeout = Math.min(waitForTimeout, MAX_WAIT_TIMEOUT_MS)
         await page.waitForTimeout(clampedTimeout)
       }
 

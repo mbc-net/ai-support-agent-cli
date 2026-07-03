@@ -92,6 +92,13 @@ describe('selector-utils', () => {
       expect(result).toBe('#submit')
       expect(page.click).toHaveBeenCalledWith('#submit', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     })
+
+    it('should drop empty segments produced by a trailing comma (multi-candidate path)', async () => {
+      const page = createMockPage(['.btn-ok'])
+      const result = await tryClickSelectors(page, '.fallback, .btn-ok, ')
+      expect(result).toBe('.btn-ok')
+      expect(page.locator).not.toHaveBeenCalledWith('')
+    })
   })
 
   describe('tryFillSelectors', () => {
@@ -120,6 +127,13 @@ describe('selector-utils', () => {
       page.fill.mockRejectedValueOnce(new Error('fill failed'))
       const result = await tryFillSelectors(page, '.first, .second', 'value')
       expect(result).toBe('.second')
+    })
+
+    it('should drop empty segments produced by a trailing comma (multi-candidate path)', async () => {
+      const page = createMockPage(['input[name="email"]'])
+      const result = await tryFillSelectors(page, '#fallback, input[name="email"], ', 'test@test.com')
+      expect(result).toBe('input[name="email"]')
+      expect(page.locator).not.toHaveBeenCalledWith('')
     })
   })
 })
