@@ -12,6 +12,8 @@ import { registerDbSchemasTool } from './tools/db-schemas'
 import { registerFileUploadTool } from './tools/file-upload'
 import { registerProjectInfoTool } from './tools/project-info'
 import { registerReadConversationFileTool } from './tools/read-conversation-file'
+import { registerSendSlackMessageTool } from './tools/send-slack-message'
+import { registerTriggerAlarmTool } from './tools/trigger-alarm'
 
 /**
  * MCP サーバーを作成する
@@ -28,6 +30,8 @@ export function createMcpServer(apiClient: ApiClient, projectCode: string, brows
   registerFileUploadTool(server, apiClient)
   registerProjectInfoTool(server, apiClient, projectCode)
   registerReadConversationFileTool(server, apiClient)
+  registerSendSlackMessageTool(server, apiClient)
+  registerTriggerAlarmTool(server, apiClient)
   // browser_navigate/browser_click等とreport_test_stepが同じBrowserSessionManagerを
   // 参照するように、ここで一つだけ生成して両方に渡す（渡さないと、report_test_step が
   // アクティブなセッションを解決できず、常に白紙のスクリーンショットを撮ってしまう）。
