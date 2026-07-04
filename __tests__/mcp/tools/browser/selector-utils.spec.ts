@@ -1,15 +1,24 @@
 import {
+  MAX_WAIT_TIMEOUT_MS,
   SELECTOR_TIMEOUT_MULTIPLE_MS,
   SELECTOR_TIMEOUT_NAVIGATION_MS,
   SELECTOR_TIMEOUT_SINGLE_MS,
 } from '../../../../src/mcp/tools/browser/browser-types'
-import { tryClickSelectors, tryFillSelectors } from '../../../../src/mcp/tools/browser/selector-utils'
+import {
+  actionLogPreview,
+  applyPostNavigateWait,
+  truncateForContext,
+  tryClickSelectors,
+  tryFillSelectors,
+} from '../../../../src/mcp/tools/browser/selector-utils'
 
 function createMockPage(matchingSelectors: string[] = []) {
   const page = {
     click: jest.fn().mockResolvedValue(undefined),
     fill: jest.fn().mockResolvedValue(undefined),
     waitForNavigation: jest.fn().mockResolvedValue(undefined),
+    waitForSelector: jest.fn().mockResolvedValue(undefined),
+    waitForTimeout: jest.fn().mockResolvedValue(undefined),
     locator: jest.fn().mockImplementation((selector: string) => ({
       count: jest.fn().mockResolvedValue(matchingSelectors.includes(selector) ? 1 : 0),
     })),
@@ -92,6 +101,13 @@ describe('selector-utils', () => {
       expect(result).toBe('#submit')
       expect(page.click).toHaveBeenCalledWith('#submit', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
     })
+
+    it('should drop empty segments produced by a trailing comma (multi-candidate path)', async () => {
+      const page = createMockPage(['.btn-ok'])
+      const result = await tryClickSelectors(page, '.fallback, .btn-ok, ')
+      expect(result).toBe('.btn-ok')
+      expect(page.locator).not.toHaveBeenCalledWith('')
+    })
   })
 
   describe('tryFillSelectors', () => {
@@ -120,6 +136,73 @@ describe('selector-utils', () => {
       page.fill.mockRejectedValueOnce(new Error('fill failed'))
       const result = await tryFillSelectors(page, '.first, .second', 'value')
       expect(result).toBe('.second')
+    })
+
+    it('should drop empty segments produced by a trailing comma (multi-candidate path)', async () => {
+      const page = createMockPage(['input[name="email"]'])
+      const result = await tryFillSelectors(page, '#fallback, input[name="email"], ', 'test@test.com')
+      expect(result).toBe('input[name="email"]')
+      expect(page.locator).not.toHaveBeenCalledWith('')
+    })
+  })
+
+  describe('applyPostNavigateWait', () => {
+    it('should do nothing when neither option is provided', async () => {
+      const page = createMockPage()
+      await applyPostNavigateWait(page, undefined, undefined)
+      expect(page.waitForSelector).not.toHaveBeenCalled()
+      expect(page.waitForTimeout).not.toHaveBeenCalled()
+    })
+
+    it('should wait for the selector when provided', async () => {
+      const page = createMockPage()
+      await applyPostNavigateWait(page, '#ready', undefined)
+      expect(page.waitForSelector).toHaveBeenCalledWith('#ready', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
+      expect(page.waitForTimeout).not.toHaveBeenCalled()
+    })
+
+    it('should wait for the given timeout when under the max', async () => {
+      const page = createMockPage()
+      await applyPostNavigateWait(page, undefined, 500)
+      expect(page.waitForTimeout).toHaveBeenCalledWith(500)
+    })
+
+    it('should clamp the timeout to MAX_WAIT_TIMEOUT_MS', async () => {
+      const page = createMockPage()
+      await applyPostNavigateWait(page, undefined, MAX_WAIT_TIMEOUT_MS + 5_000)
+      expect(page.waitForTimeout).toHaveBeenCalledWith(MAX_WAIT_TIMEOUT_MS)
+    })
+
+    it('should apply both options together', async () => {
+      const page = createMockPage()
+      await applyPostNavigateWait(page, '#ready', 200)
+      expect(page.waitForSelector).toHaveBeenCalledWith('#ready', { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
+      expect(page.waitForTimeout).toHaveBeenCalledWith(200)
+    })
+  })
+
+  describe('truncateForContext', () => {
+    it('should return short text unchanged', () => {
+      expect(truncateForContext('hello', 10)).toBe('hello')
+    })
+
+    it('should truncate and append the truncation suffix past the limit', () => {
+      expect(truncateForContext('0123456789', 5)).toBe('01234\n... (truncated)')
+    })
+  })
+
+  describe('actionLogPreview', () => {
+    it('should collapse internal whitespace and trim', () => {
+      expect(actionLogPreview('  hello   world  \n\t next  ')).toBe('hello world next')
+    })
+
+    it('should truncate long text with an ellipsis at the given max length', () => {
+      const long = 'a'.repeat(20)
+      expect(actionLogPreview(long, 10)).toBe(`${'a'.repeat(10)}…`)
+    })
+
+    it('should leave short text untouched', () => {
+      expect(actionLogPreview('short text')).toBe('short text')
     })
   })
 })

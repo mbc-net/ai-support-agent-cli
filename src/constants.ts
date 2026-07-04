@@ -126,6 +126,12 @@ export const CHUNK_LOG_LIMIT = 100
 /** BrowserProxySession の HTTP リクエストタイムアウト（60秒） */
 export const BROWSER_PROXY_REQUEST_TIMEOUT_MS = 60_000
 
+// read_conversation_file MCP tool: presigned S3 download timeouts
+/** Text/image file download timeout (30 seconds) */
+export const CONVERSATION_FILE_DOWNLOAD_TIMEOUT_MS = 30_000
+/** Binary file (xlsx/pdf/docx/etc.) download timeout — larger files, longer budget (60 seconds) */
+export const CONVERSATION_BINARY_DOWNLOAD_TIMEOUT_MS = 60_000
+
 // Error messages
 export const ERR_AGENT_ID_REQUIRED = 'agentId is required for chat command'
 export const ERR_MESSAGE_REQUIRED = 'message is required'
@@ -185,6 +191,11 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/projects/${projectCode}/alerts/${alertNumber}/resolve-issue`,
   ISSUES: (tenantCode: string, projectCode: string) =>
     `/api/${tenantCode}/projects/${projectCode}/issues`,
+  // Agent tool 関連エンドポイント（タスク実行画面のエージェントが呼び出す）
+  AGENT_TOOL_SEND_SLACK_MESSAGE: (tenantCode: string) =>
+    `/api/${tenantCode}/agent/tools/send-slack-message`,
+  AGENT_TOOL_TRIGGER_ALARM: (tenantCode: string) =>
+    `/api/${tenantCode}/agent/tools/trigger-alarm`,
 } as const
 
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000
@@ -211,6 +222,12 @@ export const GIT_CLONE_TIMEOUT = 120_000
 export const GIT_FETCH_TIMEOUT = 60_000
 export const GIT_CHECKOUT_TIMEOUT = 30_000
 
+// SSH options shared by every place that shells out to `ssh` for git operations
+// (GIT_SSH_COMMAND env value, generated SSH wrapper scripts). The agent manages
+// its own per-repository key material, so known_hosts verification is skipped
+// intentionally rather than left to the ambient environment.
+export const SSH_NO_HOST_CHECK_FLAGS = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
 // Child process management
 export const CHILD_PROCESS_MAX_RESTARTS = 5
 export const CHILD_PROCESS_RESTART_DELAY_MS = 5000
@@ -220,10 +237,16 @@ export const CHILD_PROCESS_STOP_TIMEOUT_MS = 10000
 export const TOKEN_WATCH_INTERVAL_MS = 5000
 
 // WebSocket reconnect
+// Shared defaults reused by every reconnecting WebSocket client (AppSync, terminal,
+// vscode tunnel) so the three per-feature constants files stay in lockstep instead of
+// each restating the same literals.
 // Infinity: the agent should never give up reconnecting from a transient network outage.
 // Combine with WS_RECONNECT_MAX_DELAY_MS to cap the exponential backoff.
-export const APPSYNC_MAX_RECONNECT_RETRIES = Number.POSITIVE_INFINITY
-export const APPSYNC_RECONNECT_BASE_DELAY_MS = 1000
+export const INFINITE_RECONNECT_RETRIES = Number.POSITIVE_INFINITY
+export const DEFAULT_WS_RECONNECT_BASE_DELAY_MS = 1000
+
+export const APPSYNC_MAX_RECONNECT_RETRIES = INFINITE_RECONNECT_RETRIES
+export const APPSYNC_RECONNECT_BASE_DELAY_MS = DEFAULT_WS_RECONNECT_BASE_DELAY_MS
 export const WS_RECONNECT_MAX_DELAY_MS = 60_000
 
 // WebSocket heartbeat (ping/pong)

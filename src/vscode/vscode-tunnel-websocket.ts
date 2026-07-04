@@ -14,7 +14,7 @@ import {
 } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
 import { SELECTOR_TIMEOUT_NAVIGATION_MS } from '../mcp/tools/browser/browser-types'
-import type { FileChooserPayload } from '../mcp/tools/browser/browser-session'
+import type { BrowserSession, FileChooserPayload } from '../mcp/tools/browser/browser-session'
 import { executePlaywrightScript } from '../browser/browser-script-executor'
 
 import {
@@ -524,7 +524,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
   private async handleHttpRequest(msg: VsCodeServerMessage): Promise<void> {
     // ポートフォワードセッションの場合はそちらのポートを使用
-    const pfSession = msg.sessionId ? this.portForwardSessions.get(msg.sessionId) : undefined
+    const pfSession = this.getPortForwardSessionForMsg(msg)
     const targetPort = pfSession?.targetPort
 
     if (!targetPort && !this.vsCodeServer?.isRunning) {
@@ -619,7 +619,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
   private handleWsFrame(msg: VsCodeServerMessage): void {
     // ポートフォワードセッションの場合は専用wsProxyを使用
-    const pfSession = msg.sessionId ? this.portForwardSessions.get(msg.sessionId) : undefined
+    const pfSession = this.getPortForwardSessionForMsg(msg)
     const proxy = pfSession?.wsProxy ?? this.wsProxy
 
     if (!pfSession && (!this.vsCodeServer?.isRunning || !this.wsProxy)) {
@@ -714,6 +714,70 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
   // --- Browser handlers ---
 
+  /**
+   * Wire up browser session event listeners (action log, file chooser, focus
+   * change) that relay in-process browser operations to the Web UI. Shared by
+   * handleBrowserOpen (interactive browser_open) and openLiveViewSession
+   * (E2E-dedicated session).
+   */
+  private wireBrowserSessionListeners(sessionId: string, session: BrowserSession): void {
+    // Wire up action log notifications so in-process operations are relayed to Web UI
+    session.actionLog.onChange = (entry) => {
+      this.send({
+        type: 'browser_action_log',
+        sessionId,
+        entries: [entry],
+      })
+    }
+
+    // Wire up file chooser notifications to relay to Web UI
+    session.onFileChooser = (accept) => {
+      this.pendingFileChoosers.set(sessionId, accept)
+      this.send({ type: 'browser_file_chooser_opened', sessionId })
+    }
+
+    // Wire up focus-change notifications so the Web client can overlay a real
+    // input/textarea on the focused element (native caret + IME).
+    session.onFocusChange = (payload) => {
+      this.send({ type: 'browser_focus_changed', sessionId, ...payload })
+    }
+  }
+
+  /**
+   * Start live-view frame streaming for a session and notify the API that it
+   * is ready to receive browser_frame messages. Shared by handleBrowserOpen
+   * (interactive browser_open) and openLiveViewSession (E2E-dedicated
+   * session). This is what makes the Web live-view preview start receiving
+   * frames — without it, the preview stays stuck on "starting" forever even
+   * though a browser session exists.
+   */
+  private async startLiveViewAndNotifyReady(
+    sessionId: string,
+    session: BrowserSession,
+    conversationId?: string,
+  ): Promise<void> {
+    session.startLiveView(LIVE_VIEW_INTERVAL_MS, (base64) => {
+      this.send({
+        type: 'browser_frame',
+        sessionId,
+        body: base64,
+        timestamp: Date.now(),
+        currentUrl: session.getCurrentUrl(),
+      })
+    })
+
+    const currentUrl = session.getCurrentUrl()
+    const pageTitle = await session.getPageTitle()
+
+    this.send({
+      type: 'browser_ready',
+      sessionId,
+      conversationId,
+      currentUrl,
+      pageTitle,
+    })
+  }
+
   private async handleBrowserOpen(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
     if (!sessionId) {
@@ -761,26 +825,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         return
       }
 
-      // Wire up action log notifications so in-process operations are relayed to Web UI
-      session.actionLog.onChange = (entry) => {
-        this.send({
-          type: 'browser_action_log',
-          sessionId,
-          entries: [entry],
-        })
-      }
-
-      // Wire up file chooser notifications to relay to Web UI
-      session.onFileChooser = (accept) => {
-        this.pendingFileChoosers.set(sessionId, accept)
-        this.send({ type: 'browser_file_chooser_opened', sessionId })
-      }
-
-      // Wire up focus-change notifications so the Web client can overlay a real
-      // input/textarea on the focused element (native caret + IME).
-      session.onFocusChange = (payload) => {
-        this.send({ type: 'browser_focus_changed', sessionId, ...payload })
-      }
+      this.wireBrowserSessionListeners(sessionId, session)
 
       if (msg.conversationId) {
         this.browserSessionManager.linkConversation(msg.conversationId, sessionId)
@@ -808,27 +853,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         await session.getPage()
       }
 
-      // Start live view streaming
-      session.startLiveView(LIVE_VIEW_INTERVAL_MS, (base64) => {
-        this.send({
-          type: 'browser_frame',
-          sessionId,
-          body: base64,
-          timestamp: Date.now(),
-          currentUrl: session.getCurrentUrl(),
-        })
-      })
-
-      const currentUrl = session.getCurrentUrl()
-      const pageTitle = await session.getPageTitle()
-
-      this.send({
-        type: 'browser_ready',
-        sessionId,
-        conversationId: msg.conversationId,
-        currentUrl,
-        pageTitle,
-      })
+      await this.startLiveViewAndNotifyReady(sessionId, session, msg.conversationId)
 
       logger.info(`[vscode-ws] Browser session opened: ${sessionId}`)
     } catch (error) {
@@ -839,6 +864,56 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
         reason: `Failed to open browser: ${getErrorMessage(error)}`,
         message: `Failed to open browser: ${getErrorMessage(error)}`,
       })
+    }
+  }
+
+  /**
+   * Start live-view streaming for a browser session without navigating
+   * anywhere, wiring the same listeners and sending the same `browser_ready`
+   * notification as an interactive `browser_open` (see handleBrowserOpen).
+   *
+   * Used by E2E test execution to make its dedicated browser session (created
+   * via `browserSessionManager.getOrCreate` — see agent-transport.ts) start
+   * relaying `browser_frame`/`browser_ready` to the Web live-view preview.
+   * Without this, the E2E-dedicated session is only ever inserted into
+   * BrowserSessionManager's Map and the Web preview stays stuck on "starting"
+   * forever, since nothing ever calls session.startLiveView(...) or sends
+   * browser_ready for it.
+   *
+   * Resume and conversationId linking are intentionally not handled here:
+   * E2E execution always uses a fresh, dedicated session
+   * (`e2e-${executionId}`) that is never resumed, and is not tied to a chat
+   * conversation.
+   *
+   * On failure, a `browser_stopped` message is still sent (useful signal for
+   * the Web UI), but the error is always re-thrown so callers (ultimately
+   * agent-transport.ts's getOrCreateBrowserSession, then
+   * e2e-test-executor.ts) see the rejection and can report it as a failed
+   * execution instead of silently proceeding as if live view had started.
+   */
+  async openLiveViewSession(sessionId: string): Promise<void> {
+    try {
+      const session = await this.browserSessionManager.getOrCreate(sessionId)
+
+      this.wireBrowserSessionListeners(sessionId, session)
+
+      // Ensure page is initialized (no navigation — E2E steps navigate
+      // explicitly via browser_navigate/script execution once frames start
+      // streaming).
+      await session.getPage()
+
+      await this.startLiveViewAndNotifyReady(sessionId, session)
+
+      logger.info(`[vscode-ws] Live view session started: ${sessionId}`)
+    } catch (error) {
+      logger.error(`[vscode-ws] Failed to start live view session ${sessionId}: ${getErrorMessage(error)}`)
+      this.send({
+        type: 'browser_stopped',
+        sessionId,
+        reason: `Failed to start live view: ${getErrorMessage(error)}`,
+        message: `Failed to start live view: ${getErrorMessage(error)}`,
+      })
+      throw error
     }
   }
 
@@ -890,52 +965,48 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserGoBack(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session) return
     try {
       await session.goBack()
     } catch (error) {
-      logger.warn(`[vscode-ws] goBack failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `goBack failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'goBack', error)
     }
   }
 
   private async handleBrowserGoForward(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session) return
     try {
       await session.goForward()
     } catch (error) {
-      logger.warn(`[vscode-ws] goForward failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `goForward failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'goForward', error)
     }
   }
 
   private async handleBrowserReload(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session) return
     try {
       await session.reload()
     } catch (error) {
-      logger.warn(`[vscode-ws] reload failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `reload failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'reload', error)
     }
   }
 
   private async handleBrowserMouseClick(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || msg.x === undefined || msg.y === undefined) return
     try {
       await session.executeMouseClick(msg.x, msg.y, msg.button, msg.clickCount)
     } catch (error) {
-      logger.warn(`[vscode-ws] mouseClick failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `mouseClick failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'mouseClick', error)
     }
   }
 
   private async handleBrowserMouseMove(msg: VsCodeServerMessage): Promise<void> {
     const sessionId = msg.sessionId
-    const session = sessionId ? this.browserSessionManager.get(sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || !sessionId || msg.x === undefined || msg.y === undefined) return
     try {
       await session.executeMouseMove(msg.x, msg.y)
@@ -966,29 +1037,27 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserMouseDown(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || msg.x === undefined || msg.y === undefined) return
     try {
       await session.executeMouseDown(msg.x, msg.y, msg.button)
     } catch (error) {
-      logger.warn(`[vscode-ws] mouseDown failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `mouseDown failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'mouseDown', error)
     }
   }
 
   private async handleBrowserMouseUp(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || msg.x === undefined || msg.y === undefined) return
     try {
       await session.executeMouseUp(msg.x, msg.y, msg.button)
     } catch (error) {
-      logger.warn(`[vscode-ws] mouseUp failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `mouseUp failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'mouseUp', error)
     }
   }
 
   private async handleBrowserMouseWheel(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || msg.deltaX === undefined || msg.deltaY === undefined) return
     try {
       await session.executeMouseWheel(msg.deltaX, msg.deltaY)
@@ -998,24 +1067,22 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserKeyboardType(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || !msg.text) return
     try {
       await session.executeKeyboardType(msg.text)
     } catch (error) {
-      logger.warn(`[vscode-ws] keyboardType failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `keyboardType failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'keyboardType', error)
     }
   }
 
   private async handleBrowserKeyboardPress(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || !msg.key) return
     try {
       await session.executeKeyboardPress(msg.key, msg.modifiers)
     } catch (error) {
-      logger.warn(`[vscode-ws] keyboardPress failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `keyboardPress failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'keyboardPress', error)
     }
   }
 
@@ -1061,21 +1128,19 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       const text = await session.getSelectedText()
       this.send({ type: 'browser_selection_result', sessionId, text })
     } catch (error) {
-      logger.warn(`[vscode-ws] getSelection failed (session=${sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId, message: `getSelection failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(sessionId, 'getSelection', error)
     }
   }
 
   private async handleBrowserSetInputValue(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session) return
     // The contract requires `value` to be a string; ignore malformed payloads.
     if (typeof msg.value !== 'string') return
     try {
       await session.setFocusedInputValue(msg.value, msg.selectionStart, msg.selectionEnd)
     } catch (error) {
-      logger.warn(`[vscode-ws] setInputValue failed (session=${msg.sessionId}): ${getErrorMessage(error)}`)
-      this.send({ type: 'error', sessionId: msg.sessionId, message: `setInputValue failed: ${getErrorMessage(error)}` })
+      this.reportActionFailure(msg.sessionId, 'setInputValue', error)
     }
   }
 
@@ -1119,7 +1184,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   private async handleBrowserViewport(msg: VsCodeServerMessage): Promise<void> {
-    const session = msg.sessionId ? this.browserSessionManager.get(msg.sessionId) : undefined
+    const session = this.getSessionForMsg(msg)
     if (!session || !msg.width || !msg.height) return
     try {
       await session.setViewport(msg.width, msg.height, msg.deviceId)
@@ -1384,12 +1449,58 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     }
   }
 
+  /**
+   * Resolve a value from a sessionId-keyed lookup using a message's
+   * sessionId, or undefined when sessionId is absent or unregistered.
+   * Shared by `getSessionForMsg` (browserSessionManager) and the
+   * port-forward session lookups (portForwardSessions) below.
+   */
+  private resolveForMsg<T>(
+    msg: { sessionId?: string },
+    resolve: (sessionId: string) => T | undefined,
+  ): T | undefined {
+    return msg.sessionId ? resolve(msg.sessionId) : undefined
+  }
+
+  /**
+   * Resolve the BrowserSession for a message's sessionId, or undefined when
+   * sessionId is absent or no session is registered for it. Shared by the
+   * best-effort browser action handlers (goBack/mouseClick/keyboard/etc.)
+   * that silently no-op rather than replying with a "session not found" error.
+   */
+  private getSessionForMsg(msg: { sessionId?: string }): BrowserSession | undefined {
+    return this.resolveForMsg(msg, (sessionId) => this.browserSessionManager.get(sessionId))
+  }
+
+  /**
+   * Resolve the port-forward session for a message's sessionId, or undefined
+   * when sessionId is absent or no port-forward session is registered for it.
+   */
+  private getPortForwardSessionForMsg(
+    msg: { sessionId?: string },
+  ): { targetPort: number; wsProxy: VsCodeWsProxy } | undefined {
+    return this.resolveForMsg(msg, (sessionId) => this.portForwardSessions.get(sessionId))
+  }
+
   private sendMissingSessionIdError(): void {
     this.send({ type: 'error', message: 'Missing sessionId' })
   }
 
   private sendBrowserSessionNotFoundError(sessionId: string): void {
     this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+  }
+
+  /**
+   * Shared failure path for the best-effort browser action handlers
+   * (goBack/mouseClick/keyboard/etc.): log a warning and forward an `error`
+   * message to the web client using a consistent `"<action> failed: <detail>"`
+   * shape. Not used by handlers that intentionally suppress the client-facing
+   * error (e.g. mouseMove, mouseWheel) — those log directly.
+   */
+  private reportActionFailure(sessionId: string | undefined, action: string, error: unknown): void {
+    const detail = getErrorMessage(error)
+    logger.warn(`[vscode-ws] ${action} failed (session=${sessionId}): ${detail}`)
+    this.send({ type: 'error', sessionId, message: `${action} failed: ${detail}` })
   }
 
   private send(msg: VsCodeAgentMessage): void {

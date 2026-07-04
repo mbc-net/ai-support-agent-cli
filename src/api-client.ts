@@ -21,8 +21,10 @@ import type {
   RegisterRequest,
   RegisterResponse,
   RepoCredentials,
+  SendSlackMessageResult,
   SshCredentials,
   SystemInfo,
+  TriggerAlarmResult,
   VersionInfo,
 } from './types'
 
@@ -411,6 +413,31 @@ export class ApiClient {
     await this.postVoid(
       API_ENDPOINTS.ALERT_RESOLVE_ISSUE(tenantCode, projectCode, alertNumber),
       { issueId },
+    )
+  }
+
+  // === Agent tools (Slack / alarm trigger) ===
+
+  // callId identifies one logical tool invocation; the caller generates it once so that
+  // retries of this same post() call (see RetryStrategy.withRetry) resend an identical value.
+  async sendSlackMessage(channel: string, message: string, threadTs?: string, callId?: string): Promise<SendSlackMessageResult> {
+    logger.debug(`Sending Slack message to channel: ${channel}`)
+    return this.post<SendSlackMessageResult>(
+      API_ENDPOINTS.AGENT_TOOL_SEND_SLACK_MESSAGE(this.tenantCode),
+      { channel, message, threadTs, callId },
+    )
+  }
+
+  async triggerAlarm(
+    title: string,
+    reason: string,
+    priority?: 'urgent' | 'high' | 'medium' | 'low',
+    callId?: string,
+  ): Promise<TriggerAlarmResult> {
+    logger.debug(`Triggering alarm: ${title}`)
+    return this.post<TriggerAlarmResult>(
+      API_ENDPOINTS.AGENT_TOOL_TRIGGER_ALARM(this.tenantCode),
+      { title, reason, priority, callId },
     )
   }
 }

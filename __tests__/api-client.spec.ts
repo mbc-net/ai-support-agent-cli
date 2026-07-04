@@ -1107,4 +1107,165 @@ describe('ApiClient', () => {
       })
     })
   })
+
+  describe('sendSlackMessage', () => {
+    it('should POST to send-slack-message endpoint and return the result', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: true, data: { messageTs: '1234567890.123456', permalink: 'https://slack.example.com/p1' } },
+      })
+
+      const result = await client.sendSlackMessage('#general', 'hello world')
+
+      expect(result).toEqual({
+        success: true,
+        data: { messageTs: '1234567890.123456', permalink: 'https://slack.example.com/p1' },
+      })
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/send-slack-message',
+        { channel: '#general', message: 'hello world', threadTs: undefined },
+        undefined,
+      )
+    })
+
+    it('should pass threadTs when provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true, data: { messageTs: 'ts-1' } } })
+
+      await client.sendSlackMessage('#general', 'reply', '111.222')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/send-slack-message',
+        { channel: '#general', message: 'reply', threadTs: '111.222' },
+        undefined,
+      )
+    })
+
+    it('should include callId in the POST body when provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true, data: { messageTs: 'ts-1' } } })
+
+      await client.sendSlackMessage('#general', 'hello world', undefined, 'call-id-1')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/send-slack-message',
+        { channel: '#general', message: 'hello world', threadTs: undefined, callId: 'call-id-1' },
+        undefined,
+      )
+    })
+
+    it('should return failure result when API reports an error', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: false, error: { code: 'SLACK_ERROR', message: 'channel_not_found' } },
+      })
+
+      const result = await client.sendSlackMessage('#missing', 'hello')
+
+      expect(result).toEqual({
+        success: false,
+        error: { code: 'SLACK_ERROR', message: 'channel_not_found' },
+      })
+    })
+  })
+
+  describe('triggerAlarm', () => {
+    it('should POST to trigger-alarm endpoint and return the result', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: true, data: { alertNumber: 'AL000123', status: 'created' } },
+      })
+
+      const result = await client.triggerAlarm('DB down', 'Connection refused on primary DB', 'urgent')
+
+      expect(result).toEqual({
+        success: true,
+        data: { alertNumber: 'AL000123', status: 'created' },
+      })
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/trigger-alarm',
+        { title: 'DB down', reason: 'Connection refused on primary DB', priority: 'urgent' },
+        undefined,
+      )
+    })
+
+    it('should work without an explicit priority', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true, data: { status: 'created' } } })
+
+      await client.triggerAlarm('DB down', 'Connection refused')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/trigger-alarm',
+        { title: 'DB down', reason: 'Connection refused', priority: undefined },
+        undefined,
+      )
+    })
+
+    it('should return failure result when API reports an error', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: false, error: { code: 'ALARM_ERROR', message: 'rate limited' } },
+      })
+
+      const result = await client.triggerAlarm('DB down', 'Connection refused')
+
+      expect(result).toEqual({
+        success: false,
+        error: { code: 'ALARM_ERROR', message: 'rate limited' },
+      })
+    })
+
+    it('should include callId in the POST body when provided', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: true, data: { alertNumber: 'AL000123', status: 'created' } },
+      })
+
+      await client.triggerAlarm('DB down', 'Connection refused', 'urgent', 'call-id-1')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/trigger-alarm',
+        { title: 'DB down', reason: 'Connection refused', priority: 'urgent', callId: 'call-id-1' },
+        undefined,
+      )
+    })
+  })
+
+  describe('idempotency: callId stays identical across HTTP retries', () => {
+    beforeEach(() => {
+      jest.useFakeTimers()
+      mockedAxios.isAxiosError.mockImplementation(
+        (err: unknown) => (err as Record<string, unknown>)?.isAxiosError === true,
+      )
+    })
+
+    afterEach(() => {
+      jest.useRealTimers()
+    })
+
+    it('sends the same callId on every retry attempt for triggerAlarm', async () => {
+      mockInstance.post
+        .mockRejectedValueOnce(new Error('Network Error'))
+        .mockResolvedValueOnce({ data: { success: true, data: { status: 'created' } } })
+
+      const promise = client.triggerAlarm('DB down', 'Connection refused', 'urgent', 'fixed-call-id')
+      await jest.advanceTimersByTimeAsync(1000)
+      await promise
+
+      expect(mockInstance.post).toHaveBeenCalledTimes(2)
+      const firstBody = mockInstance.post.mock.calls[0][1]
+      const secondBody = mockInstance.post.mock.calls[1][1]
+      expect(firstBody).toEqual(secondBody)
+      expect(firstBody.callId).toBe('fixed-call-id')
+    })
+
+    it('sends the same callId on every retry attempt for sendSlackMessage', async () => {
+      mockInstance.post
+        .mockRejectedValueOnce(new Error('Network Error'))
+        .mockResolvedValueOnce({ data: { success: true, data: { messageTs: 'ts-1' } } })
+
+      const promise = client.sendSlackMessage('#general', 'hello world', undefined, 'fixed-call-id-2')
+      await jest.advanceTimersByTimeAsync(1000)
+      await promise
+
+      expect(mockInstance.post).toHaveBeenCalledTimes(2)
+      const firstBody = mockInstance.post.mock.calls[0][1]
+      const secondBody = mockInstance.post.mock.calls[1][1]
+      expect(firstBody).toEqual(secondBody)
+      expect(firstBody.callId).toBe('fixed-call-id-2')
+    })
+  })
 })

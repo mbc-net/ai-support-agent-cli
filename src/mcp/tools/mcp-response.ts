@@ -1,6 +1,19 @@
+import { randomUUID } from 'node:crypto'
+
 import { getErrorMessage } from '../../utils'
 
 export { getErrorMessage }
+
+/**
+ * Generate an idempotency key for a single logical tool invocation.
+ * Callers generate it once per call (not per HTTP attempt) so that retries
+ * of the same underlying request (see `RetryStrategy.withRetry`) resend an
+ * identical value, letting the API de-duplicate repeated side effects
+ * (e.g. Slack messages, alarm triggers).
+ */
+export function newIdempotencyKey(): string {
+  return randomUUID()
+}
 
 type McpContentItem =
   | { type: 'text'; text: string }

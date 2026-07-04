@@ -1,14 +1,14 @@
 import * as crypto from 'crypto'
-import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
 import type { ApiClient } from './api-client'
+import { SSH_NO_HOST_CHECK_FLAGS } from './constants'
 import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
 import { atomicWriteFile, getErrorMessage } from './utils'
 import { normalizePemKey } from './utils/pem-key'
-import { createSecureTempFile } from './utils/temp-file'
+import { createSecureTempFile, safeUnlink } from './utils/temp-file'
 
 export interface GitCredentialResult {
   env: Record<string, string>
@@ -63,7 +63,7 @@ export function extractPathFromUrl(url: string): string {
  */
 export function buildSshWrapperScript(entries: { host: string; keyPath: string }[]): string {
   const cases = entries.map((entry) =>
-    `  ${entry.host})\n    exec ssh -i "${entry.keyPath}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"\n    ;;`,
+    `  ${entry.host})\n    exec ssh -i "${entry.keyPath}" ${SSH_NO_HOST_CHECK_FLAGS} "$@"\n    ;;`,
   ).join('\n')
 
   return `#!/bin/sh
@@ -91,7 +91,7 @@ done
 case "$HOST" in
 ${cases}
   *)
-    exec ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"
+    exec ssh ${SSH_NO_HOST_CHECK_FLAGS} "$@"
     ;;
 esac
 `
@@ -196,11 +196,7 @@ export async function buildGitCredentialEnv(
 
   const cleanup = () => {
     for (const filePath of tempFiles) {
-      try {
-        fs.unlinkSync(filePath)
-      } catch {
-        logger.warn(`[git-cred] Failed to delete temporary file: ${filePath}`)
-      }
+      safeUnlink(filePath, `[git-cred] Failed to delete temporary file: ${filePath}`)
     }
   }
 
