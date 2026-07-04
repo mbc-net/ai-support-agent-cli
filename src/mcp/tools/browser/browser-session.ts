@@ -8,7 +8,7 @@ import type { Browser, BrowserContext, FileChooser, Page } from 'playwright'
 
 import { logger } from '../../../logger'
 import { BrowserActionLog } from './browser-action-log'
-import { BROWSER_IDLE_TIMEOUT_MS } from './browser-types'
+import { BROWSER_IDLE_TIMEOUT_MS, LIVE_VIEW_DEBOUNCE_MS, LIVE_VIEW_JPEG_QUALITY } from './browser-types'
 import { DeviceEmulation, DEVICE_PRESETS } from './device-presets'
 import { getCursorAt, getElementAtPoint, getFocusedElementInfo } from './element-info'
 import {
@@ -445,20 +445,13 @@ export class BrowserSession {
     this.liveViewInterval = setInterval(() => {
       if (capturing || !this.page) return
       capturing = true
-      void (async () => {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: 70 }) as Buffer
-          const base64 = buffer.toString('base64')
-          if (base64 === this._lastFrameData) return
-          this._lastFrameData = base64
-          onFrame(base64)
-        } catch (error) {
-          logger.debug(`[browser] Live view screenshot error: ${String(error)}`)
-        } finally {
-          capturing = false
-        }
-      })()
+      // Resolve the callback via a fixed closure (the `onFrame` param), not
+      // `this._liveViewOnFrame` — matches the pre-extraction behavior where
+      // the interval tick always used its own captured `onFrame` regardless
+      // of what stopLiveView() may do to the instance field mid-flight.
+      void this.captureLiveViewFrame(() => onFrame, 'Live view screenshot').finally(() => {
+        capturing = false
+      })
     }, intervalMs)
 
     // Initialize debounced capture for event-triggered screenshots (e.g. after keyboard input)
@@ -467,22 +460,50 @@ export class BrowserSession {
       this._debounceTimer = setTimeout(() => {
         this._debounceTimer = null
         if (!this.page || !this._liveViewOnFrame) return
-        void (async () => {
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-            const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: 70 }) as Buffer
-            const base64 = buffer.toString('base64')
-            if (base64 === this._lastFrameData) return
-            this._lastFrameData = base64
-            this._liveViewOnFrame?.(base64)
-          } catch (error) {
-            logger.debug(`[browser] Debounced capture error: ${String(error)}`)
-          }
-        })()
-      }, 50)
+        // Resolve via a thunk (re-reads `this._liveViewOnFrame` after the
+        // screenshot's await) so a stopLiveView() racing with an in-flight
+        // debounced capture correctly suppresses delivery, same as before
+        // this logic was extracted into captureLiveViewFrame.
+        void this.captureLiveViewFrame(() => this._liveViewOnFrame, 'Debounced capture')
+      }, LIVE_VIEW_DEBOUNCE_MS)
     }
 
     logger.debug(`[browser] Live view started (interval=${intervalMs}ms)`)
+  }
+
+  /**
+   * Take a single live-view JPEG screenshot and forward it to the callback
+   * returned by `getOnFrame()`, skipping the call when the frame is
+   * byte-identical to the last one sent or when `getOnFrame()` resolves to
+   * null (e.g. live view was stopped while the screenshot was in flight).
+   *
+   * `getOnFrame` is a thunk rather than a plain callback because the
+   * debounced call site needs it: it passes `() => this._liveViewOnFrame`
+   * so the mutable field is re-read AFTER this method's `await`, letting a
+   * `stopLiveView()` that races the in-flight screenshot correctly suppress
+   * a stale delivery. The interval call site has no such race (it closes
+   * over the fixed `onFrame` parameter, which never changes for the life of
+   * the interval) and passes `() => onFrame` purely to share this method's
+   * signature — see the two call sites in `startLiveView`. Shared by the
+   * interval-driven and debounced (event-triggered) capture paths. Errors
+   * are logged (never thrown) — a failed capture just means this tick's
+   * frame is skipped.
+   */
+  private async captureLiveViewFrame(
+    getOnFrame: () => ((base64: string) => void) | null,
+    errorLabel: string,
+  ): Promise<void> {
+    if (!this.page) return
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: LIVE_VIEW_JPEG_QUALITY }) as Buffer
+      const base64 = buffer.toString('base64')
+      if (base64 === this._lastFrameData) return
+      this._lastFrameData = base64
+      getOnFrame()?.(base64)
+    } catch (error) {
+      logger.debug(`[browser] ${errorLabel} error: ${String(error)}`)
+    }
   }
 
   /**

@@ -1,8 +1,14 @@
+import * as crypto from 'crypto'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
+
 import axios from 'axios'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
+import { CONVERSATION_BINARY_DOWNLOAD_TIMEOUT_MS, CONVERSATION_FILE_DOWNLOAD_TIMEOUT_MS } from '../../constants'
 import { guessContentType, isImageMime, isTextExtension, isTextMime } from '../../utils/content-type'
 import { mcpImageResponse, mcpTextResponse, withMcpErrorHandling } from './mcp-response'
 
@@ -34,7 +40,7 @@ export function registerReadConversationFileTool(
           // For images, download as buffer and return base64
           const response = await axios.get(downloadUrl, {
             responseType: 'arraybuffer',
-            timeout: 30000,
+            timeout: CONVERSATION_FILE_DOWNLOAD_TIMEOUT_MS,
           })
           const base64 = Buffer.from(response.data as ArrayBuffer).toString(
             'base64',
@@ -46,7 +52,7 @@ export function registerReadConversationFileTool(
           // For text files, download as UTF-8 string
           const response = await axios.get(downloadUrl, {
             responseType: 'text',
-            timeout: 30000,
+            timeout: CONVERSATION_FILE_DOWNLOAD_TIMEOUT_MS,
           })
           return mcpTextResponse(`File: ${filename}\n\n${response.data}`)
         }
@@ -55,12 +61,8 @@ export function registerReadConversationFileTool(
         // and return the local path so Claude Code can process it with Bash tools
         const response = await axios.get(downloadUrl, {
           responseType: 'arraybuffer',
-          timeout: 60000,
+          timeout: CONVERSATION_BINARY_DOWNLOAD_TIMEOUT_MS,
         })
-        const fs = await import('fs')
-        const path = await import('path')
-        const os = await import('os')
-        const crypto = await import('crypto')
         const tmpDir = path.join(os.tmpdir(), 'ai-support-agent-files')
         fs.mkdirSync(tmpDir, { recursive: true })
         const safeFilename = path.basename(filename)

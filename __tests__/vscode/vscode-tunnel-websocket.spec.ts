@@ -2127,6 +2127,101 @@ describe('VsCodeTunnelWebSocket', () => {
     })
   })
 
+  describe('openLiveViewSession', () => {
+    // Design decision (not yet implemented): VsCodeTunnelWebSocket gets a new
+    // public method `openLiveViewSession(sessionId: string): Promise<void>`
+    // that reuses handleBrowserOpen's "get/create session -> wire listeners ->
+    // session.startLiveView(...) -> send browser_ready" behavior without a URL
+    // navigation, so that E2E's dedicated browser session (which today is only
+    // inserted into BrowserSessionManager's Map via getOrCreate, see
+    // agent-transport.ts) can also start streaming browser_frames to the Web
+    // live-view.
+    //
+    // This intentionally checks BOTH that live-view streaming is actually
+    // enabled (startLiveView called, and its frame callback really relays a
+    // browser_frame) AND that browser_ready is sent -- a shortcut fix that only
+    // sends browser_ready without starting live view must NOT make this test
+    // pass, since that would reproduce the exact "stuck on starting, no
+    // browser_frame" bug this feature is meant to fix.
+    //
+    // openLiveViewSession does not exist yet, so this test must fail today.
+    it('should start live view streaming (relaying browser_frame) and send browser_ready for the given session', async () => {
+      const mockPage = {
+        url: jest.fn().mockReturnValue('about:blank'),
+        title: jest.fn().mockResolvedValue(''),
+      }
+      let capturedLiveViewCb: ((base64: string) => void) | null = null
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn((_, cb: (base64: string) => void) => { capturedLiveViewCb = cb }),
+        getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
+        getPageTitle: jest.fn().mockResolvedValue(''),
+        actionLog: { onChange: null },
+      }
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).openLiveViewSession('sess-e2e-1')
+
+      // 1. Live-view frame streaming must actually be enabled for the session...
+      expect(mockSession.startLiveView).toHaveBeenCalled()
+      expect(capturedLiveViewCb).not.toBeNull()
+
+      // ...and a frame produced by it must actually be relayed as browser_frame
+      // (this is what the Web live-view preview is waiting for).
+      capturedLiveViewCb!('base64framedata')
+      const frameMsg = sentMessages.find(m => m.type === 'browser_frame')
+      expect(frameMsg).toBeDefined()
+      expect(frameMsg!.sessionId).toBe('sess-e2e-1')
+      expect(frameMsg!.body).toBe('base64framedata')
+
+      // 2. The API must also be told the session is ready, mirroring
+      // handleBrowserOpen's browser_ready notification.
+      const readyMsg = sentMessages.find(m => m.type === 'browser_ready')
+      expect(readyMsg).toBeDefined()
+      expect(readyMsg).toMatchObject({ type: 'browser_ready', sessionId: 'sess-e2e-1' })
+    })
+
+    it('should reuse (get-or-create) the session for the given sessionId rather than requiring a separate open', async () => {
+      const mockPage = {
+        url: jest.fn().mockReturnValue('about:blank'),
+        title: jest.fn().mockResolvedValue(''),
+      }
+      const mockSession = {
+        getPage: jest.fn().mockResolvedValue(mockPage),
+        startLiveView: jest.fn(),
+        getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
+        getPageTitle: jest.fn().mockResolvedValue(''),
+        actionLog: { onChange: null },
+      }
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).openLiveViewSession('sess-e2e-2')
+
+      expect(tunnel.browserSessionManager.getOrCreate).toHaveBeenCalledWith('sess-e2e-2')
+    })
+
+    // Regression test for silently-lost E2E error reporting: openLiveViewSession
+    // must send browser_stopped (useful signal for the Web UI) AND re-throw the
+    // original error, so agent-transport.ts's getOrCreateBrowserSession wrapper
+    // rejects and e2e-test-executor.ts's tested "report 'error' status on
+    // getOrCreateBrowserSession rejection" path actually gets reached. A version
+    // that only sends browser_stopped and resolves successfully would make E2E
+    // failures during browser startup invisible to the execution status.
+    it('should send browser_stopped and re-throw when session setup fails', async () => {
+      const setupError = new Error('max reached')
+      tunnel.browserSessionManager.getOrCreate = jest.fn().mockRejectedValue(setupError)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await expect((tunnel as any).openLiveViewSession('sess-e2e-3')).rejects.toThrow('max reached')
+
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('browser_stopped')
+      expect(sentMessages[0].sessionId).toBe('sess-e2e-3')
+    })
+  })
+
   describe('error paths for browser handlers', () => {
     it('handleBrowserGoBack - should send error on failure', async () => {
       const mockSession = { goBack: jest.fn().mockRejectedValue(new Error('history empty')) }
@@ -2166,6 +2261,26 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(sentMessages).toHaveLength(1)
       expect(sentMessages[0].type).toBe('error')
       expect(sentMessages[0].message).toContain('mouseClick failed')
+    })
+
+    it('handleBrowserMouseDown - should send error on failure', async () => {
+      const mockSession = { executeMouseDown: jest.fn().mockRejectedValue(new Error('down failed')) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseDown({ type: 'browser_mouse_down', sessionId: 'sess-md3', x: 1, y: 2 })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+      expect(sentMessages[0].message).toContain('mouseDown failed')
+    })
+
+    it('handleBrowserMouseUp - should send error on failure', async () => {
+      const mockSession = { executeMouseUp: jest.fn().mockRejectedValue(new Error('up failed')) }
+      tunnel.browserSessionManager.get = jest.fn().mockReturnValue(mockSession)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleBrowserMouseUp({ type: 'browser_mouse_up', sessionId: 'sess-mu3', x: 1, y: 2 })
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0].type).toBe('error')
+      expect(sentMessages[0].message).toContain('mouseUp failed')
     })
 
     it('handleBrowserMouseWheel - should warn on failure (no error send)', async () => {

@@ -26,7 +26,13 @@ import {
   SELECTOR_TIMEOUT_SINGLE_MS,
 } from './browser/browser-types'
 import { isPlaywrightAvailable } from './browser/playwright-loader'
-import { tryClickSelectors, tryFillSelectors } from './browser/selector-utils'
+import {
+  actionLogPreview,
+  applyPostNavigateWait,
+  truncateForContext,
+  tryClickSelectors,
+  tryFillSelectors,
+} from './browser/selector-utils'
 import { mcpErrorResponse, mcpTextImageResponse, mcpTextResponse, screenshotToBase64, withMcpErrorHandling } from './mcp-response'
 
 /** Cache the resolved session ID from BrowserLocalServer */
@@ -187,14 +193,7 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
 
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
 
-      if (waitForSelector) {
-        await page.waitForSelector(waitForSelector, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
-      }
-
-      if (waitForTimeout) {
-        const clampedTimeout = Math.min(waitForTimeout, 10000)
-        await page.waitForTimeout(clampedTimeout)
-      }
+      await applyPostNavigateWait(page, waitForSelector, waitForTimeout)
 
       const title: string = await page.title()
       const currentUrl: string = page.url()
@@ -340,11 +339,9 @@ function registerBrowserGetTextTool(server: McpServer, defaultSession: BrowserSe
       const page = await session.getPage()
       const text: string = await page.locator(target).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
 
-      // Truncate to 50KB to avoid overwhelming the context
-      const maxLength = 50 * 1024
-      const truncated = text.length > maxLength ? text.substring(0, maxLength) + '\n... (truncated)' : text
+      const truncated = truncateForContext(text)
 
-      session.actionLog.add('chat', 'get_text', `${target} → "${textPreview(text)}"`)
+      session.actionLog.add('chat', 'get_text', `${target} → "${actionLogPreview(text)}"`)
       return mcpTextResponse(truncated)
     }),
   )
@@ -442,12 +439,10 @@ function registerBrowserExtractTool(server: McpServer, defaultSession: BrowserSe
       const page = await session.getPage()
       const text: string = await page.locator(selector).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
 
-      // Truncate to 50KB to avoid overwhelming the context
-      const maxLength = 50 * 1024
-      const truncated = text.length > maxLength ? text.substring(0, maxLength) + '\n... (truncated)' : text
+      const truncated = truncateForContext(text)
 
       session.variables.set(variableName, truncated)
-      session.actionLog.add('chat', 'extract', `${variableName} "${selector}" → "${textPreview(text)}"`)
+      session.actionLog.add('chat', 'extract', `${variableName} "${selector}" → "${actionLogPreview(text)}"`)
       return mcpTextResponse(truncated)
     }),
   )
@@ -525,10 +520,4 @@ function registerBrowserListVariablesTool(server: McpServer, defaultSession: Bro
       return mcpTextResponse(text)
     }),
   )
-}
-
-/** Truncate text for action log display (max 100 chars, single line). */
-function textPreview(text: string): string {
-  const single = text.replace(/\s+/g, ' ').trim()
-  return single.length > 100 ? single.substring(0, 100) + '…' : single
 }

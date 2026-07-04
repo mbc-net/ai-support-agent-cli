@@ -3,6 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { execFile, spawnSync } from 'child_process'
 
+import { SSH_NO_HOST_CHECK_FLAGS } from '../constants'
 import { filterEnvVarsOverride } from '../env-vars-filter'
 import { logger } from '../logger'
 import { buildSafeEnv } from '../security'
@@ -297,7 +298,7 @@ export class TerminalSession {
         const sshKeyPath = path.join(os.tmpdir(), `ssh-key-${sessionId}`)
         fs.writeFileSync(sshKeyPath, pemContent, { mode: 0o600 })
         this.sshKeyFile = sshKeyPath
-        env.GIT_SSH_COMMAND = `ssh -i ${sshKeyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`
+        env.GIT_SSH_COMMAND = `ssh -i ${sshKeyPath} ${SSH_NO_HOST_CHECK_FLAGS}`
         logger.debug(`[terminal:${sessionId}] SSH key configured for git operations`)
       } catch {
         logger.warn(`[terminal:${sessionId}] Failed to set up SSH key for git; continuing without SSH key`)

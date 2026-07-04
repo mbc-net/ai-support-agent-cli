@@ -1,9 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
-import { mcpErrorResponse, mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
+import { mcpErrorResponse, mcpJsonResponse, newIdempotencyKey, withMcpErrorHandling } from './mcp-response'
 
 /** send_slack_message ツールを MCP サーバーに登録する */
 export function registerSendSlackMessageTool(server: McpServer, apiClient: ApiClient): void {
@@ -16,8 +15,7 @@ export function registerSendSlackMessageTool(server: McpServer, apiClient: ApiCl
       threadTs: z.string().optional().describe('Thread timestamp to reply in a thread'),
     },
     async (args) => withMcpErrorHandling(async () => {
-      // Generated once per logical invocation so HTTP retries of the same call reuse it (idempotency key)
-      const callId = randomUUID()
+      const callId = newIdempotencyKey()
       const result = await apiClient.sendSlackMessage(args.channel, args.message, args.threadTs, callId)
       if (!result.success) {
         return mcpErrorResponse(result.error?.message ?? 'Failed to send Slack message')

@@ -334,11 +334,18 @@ async function processCommand(
       // BrowserSessionManager 上で明示的にライフサイクル管理する。
       // vsCodeWs 未接続時（VS Code トンネル未確立）はコールバック自体を渡さず、
       // e2e-test-executor 側で事前登録・クローズをスキップさせる。
+      // openLiveViewSession はセッション確保に加え、対話的な browser_open と同じ
+      // ライブビュー配信開始（session.startLiveView）と browser_ready 送信まで行う。
+      // browserSessionManager.getOrCreate を直接呼ぶだけでは、Web側のライブ
+      // プレビューが browser_frame を一切受信できず「起動中」のまま止まる。
       getOrCreateBrowserSession: ctx.transportState.vsCodeWs
         ? async (sessionId: string) => {
-            await ctx.transportState.vsCodeWs?.browserSessionManager.getOrCreate(sessionId)
+            await ctx.transportState.vsCodeWs?.openLiveViewSession(sessionId)
           }
         : undefined,
+      // BrowserSessionManager.close() は内部で session.close() → stopLiveView()
+      // を呼ぶため、ライブビュー配信の停止・ブラウザリソースの解放は直接呼び出しで
+      // 完結している（openLiveViewSession 側と対称的な専用クローズAPIは不要）。
       closeBrowserSession: ctx.transportState.vsCodeWs
         ? async (sessionId: string) => {
             await ctx.transportState.vsCodeWs?.browserSessionManager.close(sessionId)

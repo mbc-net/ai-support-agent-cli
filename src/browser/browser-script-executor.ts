@@ -9,9 +9,11 @@
 import { logger } from '../logger'
 import { getErrorMessage } from '../utils'
 import {
+  MAX_WAIT_TIMEOUT_MS,
   SELECTOR_TIMEOUT_NAVIGATION_MS,
   SELECTOR_TIMEOUT_SINGLE_MS,
 } from '../mcp/tools/browser/browser-types'
+import { actionLogPreview } from '../mcp/tools/browser/selector-utils'
 
 /**
  * Structural interface describing the browser session capabilities used by this executor.
@@ -193,9 +195,7 @@ export async function executePlaywrightScript(
         case 'innerText': {
           const text: string = await page.locator(step.args.selector).innerText({ timeout: SELECTOR_TIMEOUT_SINGLE_MS })
           session.variables.set(step.args.variableName, text)
-          const preview = text.replace(/\s+/g, ' ').trim()
-          const previewText = preview.length > 100 ? preview.substring(0, 100) + '…' : preview
-          session.actionLog.add('chat', 'extract', `${step.args.variableName} "${step.args.selector}" → "${previewText}"`)
+          session.actionLog.add('chat', 'extract', `${step.args.variableName} "${step.args.selector}" → "${actionLogPreview(text)}"`)
           break
         }
         case 'type':
@@ -215,7 +215,7 @@ export async function executePlaywrightScript(
           session.actionLog.add('chat', 'set_variable', `${step.args.name} "${step.args.value}"`)
           break
         case 'wait': {
-          const ms = Math.min(parseInt(step.args.ms, 10), 10000)
+          const ms = Math.min(parseInt(step.args.ms, 10), MAX_WAIT_TIMEOUT_MS)
           await page.waitForTimeout(ms)
           break
         }
