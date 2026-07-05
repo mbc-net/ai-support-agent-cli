@@ -197,6 +197,19 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     })
   },
 
+  ecs_launch: async ({ p }) => {
+    // Loaded lazily so resident agents that never launch ECS tasks do not
+    // pay the AWS SDK import cost. Payload may contain the oneshot token —
+    // never log it here.
+    const { ecsLaunch } = await import('../ecs/ecs-launcher')
+    return ecsLaunch(p)
+  },
+
+  ecs_stop: async ({ p }) => {
+    const { ecsStop } = await import('../ecs/ecs-launcher')
+    return ecsStop(p)
+  },
+
   e2e_script_fix: async ({ p, opts }) => {
     if (!opts.client) {
       return errorResult(ERR_E2E_TEST_REQUIRES_CLIENT)

@@ -80,6 +80,9 @@ jest.mock('../src/project-config-sync', () => ({
 jest.mock('../src/aws-profile', () => ({
   writeAwsConfig: jest.fn(),
 }))
+jest.mock('../src/ecs/launcher-capability', () => ({
+  detectEcsLauncherCapability: jest.fn().mockResolvedValue(false),
+}))
 jest.mock('../src/pending-result-store', () => ({
   savePendingResult: jest.fn(),
   removePendingResult: jest.fn(),
