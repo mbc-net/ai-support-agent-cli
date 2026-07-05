@@ -21,6 +21,12 @@ export interface ProjectRegistration {
   token: string
   apiUrl: string
   projectDir?: string
+  /**
+   * ECS execution agent ids published from this machine, keyed by ECR
+   * repository URI. Used by `ecs publish` to reuse the same agentId on
+   * re-publish (image update) instead of registering a new agent.
+   */
+  ecsAgents?: Record<string, string>
 }
 
 /**

@@ -33,6 +33,10 @@ jest.mock('../src/project-dir', () => ({
 jest.mock('../src/aws-profile', () => ({
   writeAwsConfig: jest.fn(),
 }))
+const mockDetectEcsLauncherCapability = jest.fn()
+jest.mock('../src/ecs/launcher-capability', () => ({
+  detectEcsLauncherCapability: (...args: unknown[]) => mockDetectEcsLauncherCapability(...args),
+}))
 jest.mock('../src/repo-sync', () => ({
   syncRepositories: jest.fn().mockResolvedValue([]),
 }))
@@ -105,6 +109,7 @@ describe('ProjectAgent', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    mockDetectEcsLauncherCapability.mockResolvedValue(true)
     mockClient = {
       register: jest.fn().mockResolvedValue({ agentId: 'test-id', tenantCode: 'test-tenant', appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql', appsyncApiKey: 'da2-testkey123', transportMode: 'realtime' }),
       heartbeat: jest.fn().mockResolvedValue({ success: true }),
@@ -149,6 +154,40 @@ describe('ProjectAgent', () => {
 
       // Heartbeat should have fired
       expect(mockClient.heartbeat).toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('should advertise the ecs_launch capability when AWS credentials are resolvable', async () => {
+      // The API-side automatic launcher selection for ECS execution agents
+      // matches on the 'ecs_launch' capability. It is advertised only when
+      // the agent can actually RunTask (resolvable AWS credentials).
+      mockDetectEcsLauncherCapability.mockResolvedValue(true)
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
+      expect(payload.capabilities).toEqual([
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'ecs_launch',
+      ])
+
+      agent.stop()
+    })
+
+    it('should not advertise ecs_launch when AWS credentials are not resolvable', async () => {
+      mockDetectEcsLauncherCapability.mockResolvedValue(false)
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
+      expect(payload.capabilities).toEqual([
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode',
+      ])
+      expect(payload.capabilities).not.toContain('ecs_launch')
 
       agent.stop()
     })

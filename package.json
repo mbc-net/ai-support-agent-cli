@@ -39,6 +39,10 @@
     "test:security": "jest --selectProjects unit --testPathPatterns security"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.1079.0",
+    "@aws-sdk/client-ecr": "^3.1079.0",
+    "@aws-sdk/client-ecs": "^3.1079.0",
+    "@aws-sdk/credential-providers": "^3.1079.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@sentry/node": "^10.40.0",
     "axios": "^1.13.0",
@@ -59,6 +63,7 @@
     "@types/node": "^22.0.0",
     "@types/pg": "^8.18.0",
     "@types/ws": "^8.18.1",
+    "aws-sdk-client-mock": "^4.1.0",
     "jest": "^30.0.0",
     "jest-junit": "^17.0.0",
     "ts-jest": "^29.0.0",
