@@ -490,6 +490,40 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('registerEcsAgent', () => {
+    it('should POST the registration to the ecs-agents endpoint', async () => {
+      mockInstance.post.mockResolvedValue({ data: {} })
+
+      const registration = {
+        agentId: 'ecs-uuid-1',
+        displayName: 'My ECS Agent',
+        capabilities: [],
+        ecsConfig: {
+          imageUri: '123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/repo@sha256:abc',
+          imageTag: 'v1',
+          imageDigest: 'sha256:abc',
+          cpu: 1024,
+          memory: 2048,
+          taskDefinitionArn: 'arn:aws:ecs:ap-northeast-1:123456789012:task-definition/fam:1',
+          taskDefinitionFamily: 'fam',
+          clusterArn: 'arn:aws:ecs:ap-northeast-1:123456789012:cluster/c',
+          subnetIds: ['subnet-1'],
+          securityGroupIds: ['sg-1'],
+          logGroupName: '/ai-support-agent/ecs-agent',
+          registeredBy: 'publisher-agent',
+          registeredAt: '2026-01-01T00:00:00.000Z',
+        },
+      }
+      await client.registerEcsAgent(registration)
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/ecs-agents',
+        registration,
+        undefined,
+      )
+    })
+  })
+
   describe('getCommand', () => {
     it('should fetch a specific command by ID', async () => {
       mockInstance.get.mockResolvedValue({

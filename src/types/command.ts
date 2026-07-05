@@ -1,4 +1,5 @@
 import type { ChatPayload } from './chat'
+import type { EcsLaunchPayload, EcsStopPayload } from './ecs'
 
 export type AgentCommandType =
   | 'execute_command'
@@ -19,6 +20,8 @@ export type AgentCommandType =
   | 'e2e_test'
   | 'e2e_script_fix'
   | 'sync_repository'
+  | 'ecs_launch'
+  | 'ecs_stop'
 
 export type AgentCommandStatus =
   | 'PENDING'
@@ -146,3 +149,5 @@ export type CommandDispatch =
   | { type: 'e2e_test'; payload: E2eTestPayload }
   | { type: 'e2e_script_fix'; payload: E2eScriptFixPayload }
   | { type: 'sync_repository'; payload: SyncRepositoryPayload }
+  | { type: 'ecs_launch'; payload: EcsLaunchPayload }
+  | { type: 'ecs_stop'; payload: EcsStopPayload }

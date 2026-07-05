@@ -13,6 +13,7 @@ import type {
   CommandResult,
   DbCredentials,
   E2eEnvironmentVariablesResponse,
+  EcsAgentRegistration,
   HeartbeatResponse,
   PendingAlert,
   PendingCommand,
@@ -414,6 +415,17 @@ export class ApiClient {
       API_ENDPOINTS.ALERT_RESOLVE_ISSUE(tenantCode, projectCode, alertNumber),
       { issueId },
     )
+  }
+
+  // === ECS execution agent ===
+
+  /**
+   * Register (or overwrite on re-publish) an ECS execution agent.
+   * The API only validates and persists the AGENT record; it never calls AWS.
+   */
+  async registerEcsAgent(registration: EcsAgentRegistration): Promise<void> {
+    logger.debug(`Registering ECS agent: ${registration.agentId}`)
+    await this.postVoid(API_ENDPOINTS.ECS_AGENTS(this.tenantCode), registration)
   }
 
   // === Agent tools (Slack / alarm trigger) ===

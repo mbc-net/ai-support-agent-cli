@@ -25,6 +25,9 @@ export const ENV_VARS = {
   ALLOW_HTTP: 'AI_SUPPORT_AGENT_ALLOW_HTTP',
   PROJECT_DIR_MAP: 'AI_SUPPORT_AGENT_PROJECT_DIR_MAP',
   TERMINAL_GRACE_MS: 'AI_SUPPORT_AGENT_TERMINAL_GRACE_MS',
+  // 'true' force-enables the ecs_launch capability (skips AWS credential
+  // detection), 'false' force-disables it. Unset = auto-detect.
+  ECS_LAUNCHER: 'AI_SUPPORT_AGENT_ECS_LAUNCHER',
   CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_CODE_OAUTH_TOKEN',
 } as const
 
@@ -196,7 +199,47 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/tools/send-slack-message`,
   AGENT_TOOL_TRIGGER_ALARM: (tenantCode: string) =>
     `/api/${tenantCode}/agent/tools/trigger-alarm`,
+  // ECS execution agent registration (ecs publish)
+  ECS_AGENTS: (tenantCode: string) => `/api/${tenantCode}/agent/ecs-agents`,
 } as const
+
+// === ECS execution agent (launcher-agent architecture) ===
+// Environment variables injected into the oneshot container at RunTask time.
+export const ONESHOT_ENV_VARS = {
+  AGENT_MODE: 'AGENT_MODE',
+  COMMAND_ID: 'COMMAND_ID',
+  AGENT_ID: 'AGENT_ID',
+  TENANT_CODE: 'TENANT_CODE',
+  PROJECT_CODE: 'PROJECT_CODE',
+  API_BASE_URL: 'API_BASE_URL',
+  AGENT_ONESHOT_TOKEN: 'AGENT_ONESHOT_TOKEN',
+} as const
+
+/** Value of AGENT_MODE that switches the CLI into oneshot (ECS container) mode */
+export const AGENT_MODE_ONESHOT = 'oneshot'
+
+/** Fixed container name used in the registered ECS task definition */
+export const ECS_AGENT_CONTAINER_NAME = 'app'
+
+/** Task definition family prefix: ai-support-ecs-agent-{tenantCode}-{agentId} */
+export const ECS_TASK_FAMILY_PREFIX = 'ai-support-ecs-agent'
+
+/** Default ECS task size (Fargate: 1 vCPU / 2 GB) */
+export const DEFAULT_ECS_CPU = 1024
+export const DEFAULT_ECS_MEMORY = 2048
+
+/** Default awslogs log group for ECS execution agents */
+export const DEFAULT_ECS_LOG_GROUP = '/ai-support-agent/ecs-agent'
+
+/** ECS agent id prefix (agentId = `ecs-{uuid}`) */
+export const ECS_AGENT_ID_PREFIX = 'ecs'
+
+/**
+ * Budget for resolving AWS credentials when deciding whether to advertise
+ * the ecs_launch capability at registration time. Kept short so registration
+ * is not delayed on hosts without any credential source (IMDS probing etc.).
+ */
+export const ECS_LAUNCHER_DETECT_TIMEOUT_MS = 3000
 
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000
 export const INITIAL_CONFIG_SYNC_MAX_RETRIES = 3
