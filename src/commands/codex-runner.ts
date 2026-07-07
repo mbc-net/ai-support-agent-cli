@@ -209,7 +209,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
       activityTimeout.clear()
       if (sigkillTimer) clearTimeout(sigkillTimer)
       const durationMs = Date.now() - startTime
-      const metadataArgs = args.slice(0, -1)
+      const metadataArgs = redactCodexArgs(args.slice(0, -1))
       const finalText = readOutputLastMessage(outputLastMessagePath)
       if (finalText && finalText !== resultText) {
         updateText(finalText)
@@ -277,6 +277,7 @@ export function buildCodexMcpConfigOverrides(mcpConfigPath: string): string[] {
 
       const prefix = `mcp_servers.${name}`
       args.push('-c', `${prefix}.command=${toTomlString(server.command)}`)
+      args.push('-c', `${prefix}.default_tools_approval_mode="approve"`)
 
       if (Array.isArray(server.args)) {
         const stringArgs = server.args.filter((value): value is string => typeof value === 'string')
@@ -295,6 +296,30 @@ export function buildCodexMcpConfigOverrides(mcpConfigPath: string): string[] {
     logger.warn(`[chat] Failed to load Codex MCP config: ${error instanceof Error ? error.message : String(error)}`)
     return []
   }
+}
+
+export function redactCodexArgs(args: string[]): string[] {
+  return args.map((arg) => {
+    if (!arg.startsWith('mcp_servers.')) return arg
+    if (!isSensitiveCodexConfigOverride(arg)) return arg
+    const separatorIndex = arg.indexOf('=')
+    if (separatorIndex === -1) return arg
+    return `${arg.slice(0, separatorIndex + 1)}"****"`
+  })
+}
+
+function isSensitiveCodexConfigOverride(arg: string): boolean {
+  const key = arg.slice(0, Math.max(0, arg.indexOf('='))).toUpperCase()
+  return (
+    key.includes('.ENV.') &&
+    (
+      key.includes('TOKEN') ||
+      key.includes('API_KEY') ||
+      key.includes('SECRET') ||
+      key.includes('PASSWORD') ||
+      key.includes('CREDENTIAL')
+    )
+  )
 }
 
 function toTomlString(value: string): string {
