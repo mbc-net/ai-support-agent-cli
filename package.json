@@ -44,6 +44,7 @@
     "@aws-sdk/client-ecs": "^3.1079.0",
     "@aws-sdk/credential-providers": "^3.1079.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "@openai/codex": "^0.142.5",
     "@sentry/node": "^10.40.0",
     "axios": "^1.13.0",
     "commander": "^14.0.0",

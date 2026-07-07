@@ -9,7 +9,9 @@ import { getErrorMessage, parseString, sleep, truncateString } from '../utils'
 import { getAutoAddDirs, getWorkspaceDir } from '../project-dir'
 import { ensureAllowedToolsInSettings } from '../utils/claude-settings'
 import { executeApiChatCommand } from './api-chat-executor'
+import type { StreamJsonUsage } from './claude-code-stream'
 import { runClaudeCode } from './claude-code-runner'
+import { runCodex } from './codex-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { getProcessManager } from './process-manager'
 import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
@@ -19,6 +21,17 @@ export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-co
 
 /** 実行中のチャットプロセスを commandId で管理 */
 const processManager = getProcessManager()
+
+interface CliChatResult {
+  text: string
+  usage?: StreamJsonUsage
+  metadata: {
+    args: string[]
+    exitCode: number | null
+    hasStderr: boolean
+    durationMs: number
+  }
+}
 
 /** Options for executeChatCommand */
 export interface ExecuteChatCommandOptions {
@@ -38,6 +51,7 @@ export interface ExecuteChatCommandOptions {
 /**
  * エージェントチャットモードに応じてチャットメッセージを処理する
  * - claude_code: Claude Code CLI を使用（デフォルト）
+ * - codex: Codex CLI を使用
  * - api: Anthropic API 直接呼び出し
  *
  * activeChatMode はサーバーの chatMode ではなく、エージェント内部の実行方式を指す
@@ -69,24 +83,27 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
     const keys = Object.keys(projectConfig.envVars).sort().join(', ')
     logger.warn(
       `[chat] API mode is selected but Web-configured envVars (${keys}) are not applied in API mode. ` +
-        `These overrides are only effective in claude_code mode.`,
+        `These overrides are only effective in CLI modes.`,
     )
   }
 
   switch (mode) {
     case 'api':
       return executeApiChatCommand(payload, commandId, client, serverConfig, agentId)
+    case 'codex':
+      return executeCliChat('codex', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort)
     case 'claude_code':
     default:
-      return executeClaudeCodeChat(payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort)
+      return executeCliChat('claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort)
   }
 }
 
 /**
- * Claude Code CLI を使用してチャットメッセージを処理する
+ * Agent CLI を使用してチャットメッセージを処理する
  * 失敗した場合に最大 CHAT_MAX_ATTEMPTS 回試行する（キャンセル時を除く）
  */
-async function executeClaudeCodeChat(
+async function executeCliChat(
+  mode: 'claude_code' | 'codex',
   payload: ChatPayload,
   commandId: string,
   client: ApiClient,
@@ -106,8 +123,8 @@ async function executeClaudeCodeChat(
       await sleep(CHAT_RETRY_DELAY_MS)
     }
 
-    const result = await executeClaudeCodeChatOnce(
-      payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort,
+    const result = await executeCliChatOnce(
+      mode, payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort,
     )
 
     if (result.success) return result
@@ -127,11 +144,12 @@ async function executeClaudeCodeChat(
 }
 
 /**
- * Claude Code CLI を使用してチャットメッセージを1回試行する
+ * Agent CLI を使用してチャットメッセージを1回試行する
  * サブプロセスとして起動し、stdout をストリーミングで読み取り、
  * チャンクとしてAPIに送信する
  */
-async function executeClaudeCodeChatOnce(
+async function executeCliChatOnce(
+  mode: 'claude_code' | 'codex',
   payload: ChatPayload,
   commandId: string,
   client: ApiClient,
@@ -184,10 +202,16 @@ async function executeClaudeCodeChatOnce(
   let cleanupGitCredentials: (() => void) | undefined
 
   try {
-    const allowedTools = serverConfig?.claudeCodeConfig?.allowedTools
-    const systemPrompt = serverConfig?.claudeCodeConfig?.systemPrompt
-    const model = serverConfig?.claudeCodeConfig?.model
-    const serverAddDirs = serverConfig?.claudeCodeConfig?.addDirs ?? []
+    const allowedTools = mode === 'claude_code' ? serverConfig?.claudeCodeConfig?.allowedTools : undefined
+    const systemPrompt = mode === 'codex'
+      ? (serverConfig?.codexConfig?.systemPrompt ?? serverConfig?.claudeCodeConfig?.systemPrompt)
+      : serverConfig?.claudeCodeConfig?.systemPrompt
+    const model = mode === 'codex'
+      ? (serverConfig?.codexConfig?.model ?? serverConfig?.claudeCodeConfig?.model)
+      : serverConfig?.claudeCodeConfig?.model
+    const serverAddDirs = mode === 'codex'
+      ? (serverConfig?.codexConfig?.addDirs ?? serverConfig?.claudeCodeConfig?.addDirs ?? [])
+      : (serverConfig?.claudeCodeConfig?.addDirs ?? [])
     // Merge project directory auto-add dirs with server-configured dirs
     let addDirs: string[] | undefined
     if (projectDir) {
@@ -219,7 +243,7 @@ async function executeClaudeCodeChatOnce(
       logger.info(`[chat] ${conversationFiles.length} conversation file references embedded for command [${commandId}]`)
     }
 
-    // 会話履歴をメッセージに埋め込む（Claude Code CLI用）
+    // 会話履歴をメッセージに埋め込む（CLI用）
     const history = parseHistory(payload.history)
 
     // file_upload ツールに必要なメタデータをメッセージに付加
@@ -228,7 +252,7 @@ async function executeClaudeCodeChatOnce(
     const messageWithHistory = formatHistoryForClaudeCode(history, message + filePathsNotice + conversationFileNotice + metadataNotice)
 
     // Ensure allowedTools are registered in Claude Code settings.json
-    if (allowedTools?.length) {
+    if (mode === 'claude_code' && allowedTools?.length) {
       ensureAllowedToolsInSettings(allowedTools)
     }
 
@@ -244,17 +268,16 @@ async function executeClaudeCodeChatOnce(
       payload.files ? `${Array.isArray(payload.files) ? payload.files.length : 0} attached files` : null,
       conversationFiles.length > 0 ? `${conversationFiles.length} conversation files` : null,
     ].filter(Boolean).join(', ')
-    logger.debug(`[chat] Spawning claude CLI for command [${commandId}]: ${logDetails}`)
+    const cliLogName = mode === 'claude_code' ? 'claude' : 'codex'
+    logger.debug(`[chat] Spawning ${cliLogName} CLI for command [${commandId}]: ${logDetails}`)
     logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
     const conversationIdStr = conversationId ?? undefined
-    const handle = runClaudeCode({
+    const runnerOptions = {
       message: messageWithHistory,
       sendChunk,
-      allowedTools,
       addDirs,
       locale,
       awsEnv: { ...awsEnv, ...gitEnv },
-      mcpConfigPath,
       cwd: projectDir ? getWorkspaceDir(projectDir) : undefined,
       systemPrompt,
       model,
@@ -272,10 +295,17 @@ async function executeClaudeCodeChatOnce(
         }),
       },
       envVarsOverride: projectConfig?.envVars,
-    })
+    }
+    const handle = mode === 'codex'
+      ? runCodex(runnerOptions)
+      : runClaudeCode({
+          ...runnerOptions,
+          allowedTools,
+          mcpConfigPath,
+        })
     // プロセスを管理 Map に登録
     processManager.register(commandId, handle)
-    let result
+    let result: CliChatResult
     try {
       result = await handle.result
     } finally {

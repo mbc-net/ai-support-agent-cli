@@ -17,6 +17,11 @@ export interface ProjectConfigResponse {
       appendSystemPrompt?: string
       model?: string
     }
+    codexConfig?: {
+      additionalDirs?: string[]
+      appendSystemPrompt?: string
+      model?: string
+    }
     gitPullStrategy?: 'merge' | 'rebase'
     dockerCustomization?: {
       aptPackages?: string[]

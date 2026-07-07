@@ -32,9 +32,10 @@ export interface ProjectRegistration {
 /**
  * エージェントチャットモード（エージェント内部の実行方式）
  * - claude_code: Claude Code CLI を使用
+ * - codex: Codex CLI を使用
  * - api: Anthropic API 直接呼び出し
  */
-export type AgentChatMode = 'claude_code' | 'api'
+export type AgentChatMode = 'claude_code' | 'codex' | 'api'
 
 export interface AgentConfig {
   agentId: string
