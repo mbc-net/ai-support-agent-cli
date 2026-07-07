@@ -152,6 +152,7 @@ export async function applyProjectConfig(
     builtinFallbackEnabled: effectiveConfig.agent.builtinFallbackEnabled,
     externalAgentEnabled: effectiveConfig.agent.externalAgentEnabled,
     chatMode: 'agent',
+    agentChatModeOverrides: effectiveConfig.agent.agentChatModeOverrides,
     claudeCodeConfig: {
       allowedTools: effectiveConfig.agent.allowedTools,
       addDirs: effectiveConfig.agent.claudeCodeConfig?.additionalDirs,
