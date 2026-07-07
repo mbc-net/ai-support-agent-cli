@@ -7,6 +7,7 @@ import {
   buildConversationFileNotice,
   buildMetadataNotice,
 } from '../../src/commands/chat-executor'
+import { ERR_CODEX_AUTH_INVALID } from '../../src/commands/codex-runner'
 import { cancelProcess as cancelChatProcess, _getRunningProcesses } from '../../src/commands/process-manager'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED } from '../../src/constants'
 import type { AgentServerConfig, ChatPayload, ProjectConfigResponse } from '../../src/types'
@@ -194,6 +195,30 @@ describe('chat-executor', () => {
       expect(result.success).toBe(true)
       expect(result.data).toBe('Codex response')
       expect(spawn).toHaveBeenCalledWith('codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
+    })
+
+    it('should not retry when Codex auth is invalid', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 126,
+      }
+      spawn.mockReturnValue(mockProcess)
+      mockProcess.stdout.on.mockImplementation(() => {})
+      mockProcess.stderr.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from('Failed to refresh token: 401 Unauthorized: Your session has ended. Please log in again.'))
+      })
+      mockProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(1)
+      })
+
+      const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-codex-auth', client: mockClient, activeChatMode: 'codex', agentId: 'agent-1' })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toBe(ERR_CODEX_AUTH_INVALID)
+      expect(spawn).toHaveBeenCalledTimes(1)
     })
 
     it('should use api mode when activeChatMode is api', async () => {

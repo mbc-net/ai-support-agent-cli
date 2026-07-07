@@ -14,6 +14,12 @@ import { buildCleanEnv } from './claude-code-args'
 import { resolveCodexInvocation } from './codex-command'
 import type { PolicyContext } from './claude-code-runner'
 
+export const ERR_CODEX_AUTH_INVALID = [
+  'Codex の認証セッションが無効です。',
+  'ホストで codex login を再実行してから、Docker エージェントを再起動してください。',
+  'APIキーで実行する場合は CODEX_API_KEY を設定してください。',
+].join(' ')
+
 export interface CodexResult {
   text: string
   metadata: {
@@ -137,6 +143,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
     let resultText = ''
     let sentTextLength = 0
     let hasStderr = false
+    let stderrText = ''
     let sigkillTimer: NodeJS.Timeout | undefined
     const streamParser = new StreamLineParser()
     const activityTimeout = createActivityTimeout(CHAT_TIMEOUT, () => {
@@ -182,7 +189,9 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
 
     child.stderr.on('data', (data: Buffer) => {
       hasStderr = true
-      logger.debug(`[chat] codex CLI stderr: ${data.toString().substring(0, LOG_DEBUG_LIMIT)}`)
+      const text = data.toString()
+      stderrText = (stderrText + text).slice(-20_000)
+      logger.debug(`[chat] codex CLI stderr: ${text.substring(0, LOG_DEBUG_LIMIT)}`)
     })
 
     child.on('error', (error) => {
@@ -200,7 +209,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
       activityTimeout.clear()
       if (sigkillTimer) clearTimeout(sigkillTimer)
       const durationMs = Date.now() - startTime
-      const metadataArgs = args.slice(0, -1)
+      const metadataArgs = redactCodexArgs(args.slice(0, -1))
       const finalText = readOutputLastMessage(outputLastMessagePath)
       if (finalText && finalText !== resultText) {
         updateText(finalText)
@@ -218,12 +227,27 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
           },
         })
       } else {
-        reject(new Error(`codex CLI がコード ${code} で終了しました`))
+        reject(new Error(formatCodexExitError(code, stderrText)))
       }
     })
   })
 
   return { result, cancel: () => killFn() }
+}
+
+export function formatCodexExitError(code: number | null, stderrText: string): string {
+  if (isCodexAuthError(stderrText)) return ERR_CODEX_AUTH_INVALID
+  return `codex CLI がコード ${code} で終了しました`
+}
+
+export function isCodexAuthError(stderrText: string): boolean {
+  const text = stderrText.toLowerCase()
+  return (
+    text.includes('your authentication token has been invalidated') ||
+    text.includes('your session has ended') ||
+    text.includes('failed to refresh token') ||
+    (text.includes('401 unauthorized') && (text.includes('chatgpt.com/backend-api/codex') || text.includes('codex')))
+  )
 }
 
 interface ClaudeMcpServerConfig {
@@ -253,6 +277,7 @@ export function buildCodexMcpConfigOverrides(mcpConfigPath: string): string[] {
 
       const prefix = `mcp_servers.${name}`
       args.push('-c', `${prefix}.command=${toTomlString(server.command)}`)
+      args.push('-c', `${prefix}.default_tools_approval_mode="approve"`)
 
       if (Array.isArray(server.args)) {
         const stringArgs = server.args.filter((value): value is string => typeof value === 'string')
@@ -271,6 +296,30 @@ export function buildCodexMcpConfigOverrides(mcpConfigPath: string): string[] {
     logger.warn(`[chat] Failed to load Codex MCP config: ${error instanceof Error ? error.message : String(error)}`)
     return []
   }
+}
+
+export function redactCodexArgs(args: string[]): string[] {
+  return args.map((arg) => {
+    if (!arg.startsWith('mcp_servers.')) return arg
+    if (!isSensitiveCodexConfigOverride(arg)) return arg
+    const separatorIndex = arg.indexOf('=')
+    if (separatorIndex === -1) return arg
+    return `${arg.slice(0, separatorIndex + 1)}"****"`
+  })
+}
+
+function isSensitiveCodexConfigOverride(arg: string): boolean {
+  const key = arg.slice(0, Math.max(0, arg.indexOf('='))).toUpperCase()
+  return (
+    key.includes('.ENV.') &&
+    (
+      key.includes('TOKEN') ||
+      key.includes('API_KEY') ||
+      key.includes('SECRET') ||
+      key.includes('PASSWORD') ||
+      key.includes('CREDENTIAL')
+    )
+  )
 }
 
 function toTomlString(value: string): string {
