@@ -32,6 +32,8 @@ export const PASSTHROUGH_ENV_VARS = [
   'AI_SUPPORT_AGENT_CONFIG_DIR',
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
+  'CODEX_API_KEY',
+  'CODEX_ACCESS_TOKEN',
 ]
 
 /**
@@ -42,6 +44,16 @@ export const PASSTHROUGH_ENV_VARS = [
 export const CLAUDE_CREDENTIAL_ENV_VARS = [
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
+] as const
+
+/**
+ * Codex credentials/config. Codex stores config, auth, logs, sessions, and
+ * app-server state under CODEX_HOME; mount it when available and always point
+ * CODEX_HOME at the writable container home path.
+ */
+export const CODEX_CREDENTIAL_ENV_VARS = [
+  'CODEX_API_KEY',
+  'CODEX_ACCESS_TOKEN',
 ] as const
 
 export interface ProjectDirMapping {
@@ -59,6 +71,13 @@ function mountClaudeConfig(mounts: string[], home: string): void {
   const claudeJson = path.join(home, '.claude.json')
   if (fs.existsSync(claudeJson)) {
     mounts.push('-v', `${claudeJson}:${path.posix.join(CONTAINER_HOME, '.claude.json')}:rw`)
+  }
+}
+
+function mountCodexConfig(mounts: string[], home: string): void {
+  const codexDir = path.join(home, '.codex')
+  if (fs.existsSync(codexDir)) {
+    mounts.push('-v', `${codexDir}:${path.posix.join(CONTAINER_HOME, '.codex')}:rw`)
   }
 }
 
@@ -82,6 +101,7 @@ export function buildVolumeMounts(): { mounts: string[]; projectMappings: Projec
 
   // Claude Code OAuth tokens and config — mount to container home
   mountClaudeConfig(mounts, home)
+  mountCodexConfig(mounts, home)
 
   // Agent config — mount to container home
   const agentConfigDir = getConfigDir()
@@ -144,6 +164,7 @@ export function buildEnvArgs(projectMappings: ProjectDirMapping[]): string[] {
 
   // Set HOME to container-internal path (not host path)
   args.push('-e', `HOME=${CONTAINER_HOME}`)
+  args.push('-e', `CODEX_HOME=${path.posix.join(CONTAINER_HOME, '.codex')}`)
 
   // Map config dir to container-internal path
   const hostConfigDir = getConfigDir()
@@ -195,6 +216,7 @@ export function buildProjectVolumeMounts(
 
   // Claude Code OAuth tokens and config — mount to container home
   mountClaudeConfig(mounts, home)
+  mountCodexConfig(mounts, home)
 
   // Per-project isolated config dir — mounts to /home/node/.ai-support-agent inside container
   const containerConfigDir = path.posix.join(CONTAINER_HOME, '.ai-support-agent')
@@ -204,6 +226,7 @@ export function buildProjectVolumeMounts(
   // Standard env vars for per-project container
   envArgs.push('-e', 'AI_SUPPORT_AGENT_IN_DOCKER=1')
   envArgs.push('-e', `HOME=${CONTAINER_HOME}`)
+  envArgs.push('-e', `CODEX_HOME=${path.posix.join(CONTAINER_HOME, '.codex')}`)
   envArgs.push('-e', `AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir}`)
 
   // Pass token and apiUrl per-project
@@ -220,6 +243,11 @@ export function buildProjectVolumeMounts(
 
   // Pass Claude / Anthropic credential env vars if set
   for (const key of CLAUDE_CREDENTIAL_ENV_VARS) {
+    if (process.env[key]) {
+      envArgs.push('-e', `${key}=${process.env[key]}`)
+    }
+  }
+  for (const key of CODEX_CREDENTIAL_ENV_VARS) {
     if (process.env[key]) {
       envArgs.push('-e', `${key}=${process.env[key]}`)
     }

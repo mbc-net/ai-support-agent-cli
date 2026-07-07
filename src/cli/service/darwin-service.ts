@@ -93,6 +93,9 @@ export function getAllProjectPlists(): Array<{ label: string; plistPath: string 
 const PASSTHROUGH_ENV_VARS = [
   ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN,
   'ANTHROPIC_API_KEY',
+  'CODEX_API_KEY',
+  'CODEX_ACCESS_TOKEN',
+  'CODEX_HOME',
   ENV_VARS.TOKEN,
   ENV_VARS.API_URL,
 ]
@@ -225,6 +228,8 @@ export function generateWrapperScript(opts: {
   apiUrl: string
   anthropicApiKey?: string
   claudeCodeOauthToken?: string
+  codexApiKey?: string
+  codexAccessToken?: string
   verbose?: boolean
   updateScriptPath: string
   /**
@@ -258,6 +263,7 @@ export function generateWrapperScript(opts: {
 
   const mountLines: string[] = [
     `  -v "${homeDir}/.claude:${containerHome}/.claude:rw" \\`,
+    `  -v "${homeDir}/.codex:${containerHome}/.codex:rw" \\`,
     `  -v "${opts.projectConfigHostDir}:${containerConfigDir}:rw" \\`,
   ]
   // Mount .claude.json only if it's a regular file (not a directory)
@@ -275,6 +281,7 @@ export function generateWrapperScript(opts: {
   const envLines: string[] = [
     `  -e AI_SUPPORT_AGENT_IN_DOCKER=1 \\`,
     `  -e HOME=${containerHome} \\`,
+    `  -e CODEX_HOME=${containerHome}/.codex \\`,
     `  -e AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir} \\`,
     `  -e AI_SUPPORT_AGENT_TOKEN=${shellQuote(opts.token)} \\`,
     `  -e AI_SUPPORT_AGENT_API_URL=${shellQuote(containerApiUrl)} \\`,
@@ -287,6 +294,12 @@ export function generateWrapperScript(opts: {
   }
   if (opts.claudeCodeOauthToken) {
     envLines.push(`  -e CLAUDE_CODE_OAUTH_TOKEN=${shellQuote(opts.claudeCodeOauthToken)} \\`)
+  }
+  if (opts.codexApiKey) {
+    envLines.push(`  -e CODEX_API_KEY=${shellQuote(opts.codexApiKey)} \\`)
+  }
+  if (opts.codexAccessToken) {
+    envLines.push(`  -e CODEX_ACCESS_TOKEN=${shellQuote(opts.codexAccessToken)} \\`)
   }
 
   const containerArgs = [
@@ -532,6 +545,8 @@ export function writeProjectServiceFiles(
     apiUrl: project.apiUrl,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     claudeCodeOauthToken: process.env[ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN],
+    codexApiKey: process.env.CODEX_API_KEY,
+    codexAccessToken: process.env.CODEX_ACCESS_TOKEN,
     verbose: options.verbose,
     updateScriptPath,
     logDir: projectLogDir,
