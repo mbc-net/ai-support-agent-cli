@@ -117,6 +117,22 @@ describe('bundled plugin structure (src/plugin)', () => {
     })
   })
 
+  describe('.codex-plugin/plugin.json', () => {
+    const pluginJsonPath = path.join(PLUGIN_ROOT, '.codex-plugin', 'plugin.json')
+
+    it('exists and is valid JSON', () => {
+      expect(fs.existsSync(pluginJsonPath)).toBe(true)
+      expect(() => JSON.parse(fs.readFileSync(pluginJsonPath, 'utf-8'))).not.toThrow()
+    })
+
+    it('declares name "ai-support-agent", skills, and an MIT license', () => {
+      const json = JSON.parse(fs.readFileSync(pluginJsonPath, 'utf-8'))
+      expect(json.name).toBe('ai-support-agent')
+      expect(json.skills).toBe('./skills/')
+      expect(json.license).toBe('MIT')
+    })
+  })
+
   describe('agents/', () => {
     it.each(EXPECTED_AGENTS)('%s.md exists with name + description frontmatter', (agentName) => {
       const filePath = path.join(PLUGIN_ROOT, 'agents', `${agentName}.md`)

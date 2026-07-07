@@ -31,8 +31,11 @@ describe('codex-runner', () => {
         model: 'gpt-5-codex',
         addDirs: ['~/shared', '/tmp/other'],
         outputLastMessagePath: '/tmp/last-message.txt',
+        profile: 'ai-support-agent-bundled',
       })
 
+      expect(args).toContain('--profile')
+      expect(args[args.indexOf('--profile') + 1]).toBe('ai-support-agent-bundled')
       expect(args).toContain('--cd')
       expect(args[args.indexOf('--cd') + 1]).toBe('/tmp/project')
       expect(args).toContain('--model')
