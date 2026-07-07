@@ -158,6 +158,13 @@ export async function applyProjectConfig(
       systemPrompt: effectiveConfig.agent.claudeCodeConfig?.appendSystemPrompt,
       model: effectiveConfig.agent.claudeCodeConfig?.model,
     },
+    codexConfig: effectiveConfig.agent.codexConfig
+      ? {
+          addDirs: effectiveConfig.agent.codexConfig.additionalDirs,
+          systemPrompt: effectiveConfig.agent.codexConfig.appendSystemPrompt,
+          model: effectiveConfig.agent.codexConfig.model,
+        }
+      : undefined,
   }
 
   // Write AWS config file if project directory and AWS accounts are configured
@@ -215,7 +222,7 @@ export async function applyProjectConfig(
 
   // envVars override（CLAUDE_CODE# / ENV# from Web 設定）— spawn 時に注入
   // 注: API モード (executeApiChatCommand) はこの envVars を参照しない。
-  //     `claude_code` モードでのみ spawn 時に env として注入される。
+  //     CLI モード (claude_code / codex) でのみ spawn 時に env として注入される。
   // ログ方針: キー集合だけでなく値のハッシュも比較し、value rotation も検知する。
   // 全消去 (non-empty → empty) も明示的にログに残す。
   const previousSignature = computeEnvVarsSignature(previousEnvVars)

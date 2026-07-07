@@ -2,18 +2,41 @@ import { execFile } from 'child_process'
 import { EventEmitter } from 'events'
 
 import { detectAvailableChatModes, resolveActiveChatMode } from '../src/chat-mode-detector'
+import { resolveCodexInvocation } from '../src/commands/codex-command'
 
 jest.mock('child_process', () => ({
   execFile: jest.fn(),
 }))
+jest.mock('../src/commands/codex-command', () => ({
+  resolveCodexInvocation: jest.fn(() => ({
+    command: 'codex',
+    argsPrefix: [],
+    displayCommand: 'codex',
+  })),
+}))
 
 const mockExecFile = execFile as unknown as jest.Mock
+const mockResolveCodexInvocation = resolveCodexInvocation as unknown as jest.Mock
+
+function mockCommandAvailability(availability: Record<string, boolean>): void {
+  mockExecFile.mockImplementation(
+    (cmd: string, _args: string[], _opts: unknown, callback: (err: Error | null) => void) => {
+      callback(availability[cmd] ? null : new Error('ENOENT'))
+      return { on: jest.fn() }
+    },
+  )
+}
 
 describe('detectAvailableChatModes', () => {
   const originalEnv = process.env
 
   beforeEach(() => {
     jest.resetAllMocks()
+    mockResolveCodexInvocation.mockReturnValue({
+      command: 'codex',
+      argsPrefix: [],
+      displayCommand: 'codex',
+    })
     process.env = { ...originalEnv }
     delete process.env.ANTHROPIC_API_KEY
   })
@@ -23,38 +46,32 @@ describe('detectAvailableChatModes', () => {
   })
 
   it('should detect claude_code when CLI is available', async () => {
-    mockExecFile.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, callback: (err: Error | null) => void) => {
-        callback(null)
-        return { on: jest.fn() }
-      },
-    )
+    mockCommandAvailability({ claude: true, codex: false })
 
     const modes = await detectAvailableChatModes()
 
     expect(modes).toContain('claude_code')
+    expect(modes).not.toContain('codex')
   })
 
   it('should not detect claude_code when CLI is unavailable', async () => {
-    mockExecFile.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, callback: (err: Error | null) => void) => {
-        callback(new Error('ENOENT'))
-        return { on: jest.fn() }
-      },
-    )
+    mockCommandAvailability({ claude: false, codex: false })
 
     const modes = await detectAvailableChatModes()
 
     expect(modes).not.toContain('claude_code')
   })
 
+  it('should detect codex when CLI is available', async () => {
+    mockCommandAvailability({ claude: false, codex: true })
+
+    const modes = await detectAvailableChatModes()
+
+    expect(modes).toEqual(['codex'])
+  })
+
   it('should detect api when ANTHROPIC_API_KEY is set', async () => {
-    mockExecFile.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, callback: (err: Error | null) => void) => {
-        callback(new Error('ENOENT'))
-        return { on: jest.fn() }
-      },
-    )
+    mockCommandAvailability({ claude: false, codex: false })
     process.env.ANTHROPIC_API_KEY = 'sk-test'
 
     const modes = await detectAvailableChatModes()
@@ -63,12 +80,7 @@ describe('detectAvailableChatModes', () => {
   })
 
   it('should not detect api when ANTHROPIC_API_KEY is not set', async () => {
-    mockExecFile.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, callback: (err: Error | null) => void) => {
-        callback(null)
-        return { on: jest.fn() }
-      },
-    )
+    mockCommandAvailability({ claude: true, codex: true })
 
     const modes = await detectAvailableChatModes()
 
@@ -90,18 +102,13 @@ describe('detectAvailableChatModes', () => {
     expect(modes).not.toContain('claude_code')
   })
 
-  it('should detect both modes when both are available', async () => {
-    mockExecFile.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, callback: (err: Error | null) => void) => {
-        callback(null)
-        return { on: jest.fn() }
-      },
-    )
+  it('should detect all modes when all are available', async () => {
+    mockCommandAvailability({ claude: true, codex: true })
     process.env.ANTHROPIC_API_KEY = 'sk-test'
 
     const modes = await detectAvailableChatModes()
 
-    expect(modes).toEqual(['claude_code', 'api'])
+    expect(modes).toEqual(['claude_code', 'codex', 'api'])
   })
 })
 
@@ -119,9 +126,15 @@ describe('resolveActiveChatMode', () => {
   })
 
   it('should auto-detect claude_code first', () => {
-    const result = resolveActiveChatMode(['claude_code', 'api'])
+    const result = resolveActiveChatMode(['claude_code', 'codex', 'api'])
 
     expect(result).toBe('claude_code')
+  })
+
+  it('should auto-detect codex before api when claude_code is unavailable', () => {
+    const result = resolveActiveChatMode(['codex', 'api'])
+
+    expect(result).toBe('codex')
   })
 
   it('should fallback when local override is unavailable', () => {

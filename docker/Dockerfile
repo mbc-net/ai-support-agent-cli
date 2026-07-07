@@ -136,7 +136,7 @@ RUN npx --yes playwright install-deps chromium
 # ARG placed here so layers above remain cached when AGENT_VERSION changes.
 # =============================================================================
 ARG AGENT_VERSION=latest
-RUN npm install -g @anthropic-ai/claude-code @ai-support-agent/cli@${AGENT_VERSION} backlog-mcp-server \
+RUN npm install -g @anthropic-ai/claude-code @openai/codex @ai-support-agent/cli@${AGENT_VERSION} backlog-mcp-server \
     && npm cache clean --force
 
 # Install playwright npm package as peer of @ai-support-agent/cli, then download
