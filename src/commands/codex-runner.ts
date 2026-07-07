@@ -38,6 +38,7 @@ export interface RunCodexOptions {
   cwd?: string
   systemPrompt?: string
   model?: string
+  mcpConfigPath?: string
   policyContext?: PolicyContext
   envVarsOverride?: Record<string, string>
 }
@@ -51,6 +52,7 @@ export function buildCodexArgs(
     systemPrompt?: string
     model?: string
     outputLastMessagePath?: string
+    mcpConfigPath?: string
   },
 ): string[] {
   const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
@@ -61,6 +63,9 @@ export function buildCodexArgs(
     for (const dir of options.addDirs) {
       args.push('--add-dir', dir.replace(/^~/, os.homedir()))
     }
+  }
+  if (options?.mcpConfigPath) {
+    args.push(...buildCodexMcpConfigOverrides(options.mcpConfigPath))
   }
   args.push(buildCodexPrompt(message, options?.locale, options?.systemPrompt))
   return args
@@ -79,7 +84,7 @@ function buildCodexPrompt(message: string, locale?: string, systemPrompt?: strin
 }
 
 export function runCodex(options: RunCodexOptions): CodexHandle {
-  const { message, sendChunk, addDirs, locale, awsEnv, cwd, systemPrompt, model, policyContext, envVarsOverride } = options
+  const { message, sendChunk, addDirs, locale, awsEnv, cwd, systemPrompt, model, mcpConfigPath, policyContext, envVarsOverride } = options
   let killFn: () => void = () => { /* noop until child is spawned */ }
 
   const result = new Promise<CodexResult>((resolve, reject) => {
@@ -107,7 +112,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
     const resolvedModel = model?.trim() || env.OPENAI_MODEL?.trim() || undefined
     const outputLastMessagePath = createOutputLastMessagePath()
     const codexInvocation = resolveCodexInvocation()
-    const codexArgs = buildCodexArgs(message, { addDirs, locale, cwd, systemPrompt, model: resolvedModel, outputLastMessagePath })
+    const codexArgs = buildCodexArgs(message, { addDirs, locale, cwd, systemPrompt, model: resolvedModel, outputLastMessagePath, mcpConfigPath })
     const args = [...codexInvocation.argsPrefix, ...codexArgs]
     logger.debug(`[chat] Spawning codex CLI: codex ${args.slice(0, -1).join(' ')}`)
 
@@ -219,6 +224,61 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
   })
 
   return { result, cancel: () => killFn() }
+}
+
+interface ClaudeMcpServerConfig {
+  command?: unknown
+  args?: unknown
+  env?: unknown
+}
+
+interface ClaudeMcpConfig {
+  mcpServers?: Record<string, ClaudeMcpServerConfig>
+}
+
+export function buildCodexMcpConfigOverrides(mcpConfigPath: string): string[] {
+  try {
+    const raw = fs.readFileSync(mcpConfigPath, 'utf-8')
+    const config = JSON.parse(raw) as ClaudeMcpConfig
+    const servers = config.mcpServers
+    if (!servers || typeof servers !== 'object') return []
+
+    const args: string[] = []
+    for (const [name, server] of Object.entries(servers)) {
+      if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+        logger.warn(`[chat] Skipping Codex MCP server with unsupported name: ${name}`)
+        continue
+      }
+      if (!server || typeof server !== 'object' || typeof server.command !== 'string' || !server.command) continue
+
+      const prefix = `mcp_servers.${name}`
+      args.push('-c', `${prefix}.command=${toTomlString(server.command)}`)
+
+      if (Array.isArray(server.args)) {
+        const stringArgs = server.args.filter((value): value is string => typeof value === 'string')
+        args.push('-c', `${prefix}.args=${toTomlStringArray(stringArgs)}`)
+      }
+
+      if (server.env && typeof server.env === 'object' && !Array.isArray(server.env)) {
+        for (const [envName, envValue] of Object.entries(server.env as Record<string, unknown>)) {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envName) || typeof envValue !== 'string') continue
+          args.push('-c', `${prefix}.env.${envName}=${toTomlString(envValue)}`)
+        }
+      }
+    }
+    return args
+  } catch (error) {
+    logger.warn(`[chat] Failed to load Codex MCP config: ${error instanceof Error ? error.message : String(error)}`)
+    return []
+  }
+}
+
+function toTomlString(value: string): string {
+  return JSON.stringify(value)
+}
+
+function toTomlStringArray(values: string[]): string {
+  return `[${values.map(toTomlString).join(', ')}]`
 }
 
 function createOutputLastMessagePath(): string {

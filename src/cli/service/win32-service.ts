@@ -156,6 +156,8 @@ export function generateWin32WrapperScript(opts: {
   apiUrl: string
   anthropicApiKey?: string
   claudeCodeOauthToken?: string
+  codexApiKey?: string
+  codexAccessToken?: string
   verbose?: boolean
 }): string {
   const containerHome = '/home/node'
@@ -171,6 +173,8 @@ export function generateWin32WrapperScript(opts: {
   assertCmdSafe(containerApiUrl, 'apiUrl')
   if (opts.anthropicApiKey) assertCmdSafe(opts.anthropicApiKey, 'anthropicApiKey')
   if (opts.claudeCodeOauthToken) assertCmdSafe(opts.claudeCodeOauthToken, 'claudeCodeOauthToken')
+  if (opts.codexApiKey) assertCmdSafe(opts.codexApiKey, 'codexApiKey')
+  if (opts.codexAccessToken) assertCmdSafe(opts.codexAccessToken, 'codexAccessToken')
 
   const containerProjectDir = `/workspace/projects/${opts.projectCode}`
   // `||` (not `??`) so an empty projectDir falls back to the default; an empty
@@ -184,6 +188,7 @@ export function generateWin32WrapperScript(opts: {
   // -v argument. The values were validated above to contain no `"`.
   const mountLines: string[] = [
     `  -v "${homeDir}\\.claude:${containerHome}/.claude:rw" ^`,
+    `  -v "${homeDir}\\.codex:${containerHome}/.codex:rw" ^`,
     `  -v "${opts.projectConfigHostDir}:${containerConfigDir}:rw" ^`,
     `  -v "${homeDir}\\.claude.json:${containerHome}/.claude.json:rw" ^`,
     `  -v "${hostProjectDir}:${containerProjectDir}:rw" ^`,
@@ -192,6 +197,7 @@ export function generateWin32WrapperScript(opts: {
   const envLines: string[] = [
     `  -e AI_SUPPORT_AGENT_IN_DOCKER=1 ^`,
     `  -e HOME=${containerHome} ^`,
+    `  -e CODEX_HOME=${containerHome}/.codex ^`,
     `  -e AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir} ^`,
     // `-e NAME` (no value) tells docker to inherit the value from the wrapper's
     // own environment, which we set via `set` below. This keeps secrets off the
@@ -202,6 +208,8 @@ export function generateWin32WrapperScript(opts: {
   ]
   if (opts.anthropicApiKey) envLines.push(`  -e ANTHROPIC_API_KEY ^`)
   if (opts.claudeCodeOauthToken) envLines.push(`  -e CLAUDE_CODE_OAUTH_TOKEN ^`)
+  if (opts.codexApiKey) envLines.push(`  -e CODEX_API_KEY ^`)
+  if (opts.codexAccessToken) envLines.push(`  -e CODEX_ACCESS_TOKEN ^`)
 
   const containerArgs = [
     'ai-support-agent', 'start', CLI_FLAG_NO_DOCKER,
@@ -216,6 +224,8 @@ export function generateWin32WrapperScript(opts: {
   ]
   if (opts.anthropicApiKey) setLines.push(`set "ANTHROPIC_API_KEY=${opts.anthropicApiKey}"`)
   if (opts.claudeCodeOauthToken) setLines.push(`set "CLAUDE_CODE_OAUTH_TOKEN=${opts.claudeCodeOauthToken}"`)
+  if (opts.codexApiKey) setLines.push(`set "CODEX_API_KEY=${opts.codexApiKey}"`)
+  if (opts.codexAccessToken) setLines.push(`set "CODEX_ACCESS_TOKEN=${opts.codexAccessToken}"`)
 
   const dockerRun = [
     `docker run --rm -i --name "${containerName}" ^`,
@@ -326,6 +336,8 @@ export function writeAndRegisterProjectTask(
     apiUrl: project.apiUrl,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     claudeCodeOauthToken: process.env[ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN],
+    codexApiKey: process.env.CODEX_API_KEY,
+    codexAccessToken: process.env.CODEX_ACCESS_TOKEN,
     verbose: options.verbose,
   })
   // The wrapper holds the token in plaintext — write it owner-only.
