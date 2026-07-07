@@ -1,4 +1,8 @@
 import { nowIso } from './utils'
+import {
+  maskSecretKeyValue,
+  SECRET_KEY_VALUE_PATTERN,
+} from './secret-string-masker'
 
 const COLORS = {
   reset: '\x1b[0m',
@@ -154,8 +158,8 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string | ((...args:
   { pattern: /((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|rediss):\/\/[^:]+:)[^@]+(@)/gi, replacement: '$1****$2' },
   // Key-value pairs with secret-like keys (last to avoid masking well-formatted tokens above)
   {
-    pattern: /((?:password|secret|token|api_key|apikey|access_key|secret_key|session_token|authorization)\s*[:=]\s*)((?:\\["']|["'])?)([^\s"',}\\]+)((?:\\["']|["'])?)/gi,
-    replacement: (_match, prefix, openingQuote, _secret, closingQuote) => `${prefix}${openingQuote}****${closingQuote}`,
+    pattern: SECRET_KEY_VALUE_PATTERN,
+    replacement: maskSecretKeyValue,
   },
 ]
 
