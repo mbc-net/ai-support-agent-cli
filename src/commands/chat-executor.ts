@@ -281,6 +281,7 @@ async function executeCliChatOnce(
       cwd: projectDir ? getWorkspaceDir(projectDir) : undefined,
       systemPrompt,
       model,
+      mcpConfigPath,
       policyContext: {
         tenantCode,
         projectCode,

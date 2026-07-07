@@ -244,6 +244,7 @@ describe('docker-runner', () => {
       mockExistsSync.mockImplementation((p: unknown) => {
         const existing = [
           `${home}/.claude`,
+          `${home}/.codex`,
           `${home}/.claude.json`,
           `${home}/.ai-support-agent`,
           `${home}/.aws`,
@@ -254,6 +255,7 @@ describe('docker-runner', () => {
 
       const { mounts } = buildVolumeMounts()
       expect(mounts).toContain(`${home}/.claude:/home/node/.claude:rw`)
+      expect(mounts).toContain(`${home}/.codex:/home/node/.codex:rw`)
       expect(mounts).toContain(`${home}/.claude.json:/home/node/.claude.json:rw`)
       expect(mounts).toContain(`${home}/.ai-support-agent:/home/node/.ai-support-agent:rw`)
       expect(mounts).toContain(`${home}/.aws:/home/node/.aws:ro`)
@@ -373,6 +375,7 @@ describe('docker-runner', () => {
       mockExistsSync.mockImplementation((p: unknown) => {
         const existing = [
           `${home}/.claude`,
+          `${home}/.codex`,
           `${home}/.claude.json`,
           `${home}/.ai-support-agent`,
           `${home}/.aws`,
@@ -1581,7 +1584,7 @@ describe('docker-runner', () => {
       expect(hasTenantMount).toBe(true)
     })
 
-    it('should mount .claude and .claude.json when they exist in per-project mode', () => {
+    it('should mount .claude, .codex, and .claude.json when they exist in per-project mode', () => {
       const home = os.homedir()
       mockExecFileSync.mockReturnValue(Buffer.from(''))
       const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
@@ -1595,7 +1598,7 @@ describe('docker-runner', () => {
       })
       mockExistsSync.mockImplementation((p: unknown) => {
         const s = p as string
-        return s === `${home}/.claude` || s === `${home}/.claude.json`
+        return s === `${home}/.claude` || s === `${home}/.codex` || s === `${home}/.claude.json`
       })
 
       runInDocker({})
@@ -1608,6 +1611,7 @@ describe('docker-runner', () => {
         }
       }
       expect(vArgs.some((v) => v.includes('.claude:'))).toBe(true)
+      expect(vArgs.some((v) => v.includes('.codex:'))).toBe(true)
       expect(vArgs.some((v) => v.includes('.claude.json:'))).toBe(true)
     })
 
@@ -1800,9 +1804,11 @@ describe('docker-runner', () => {
       expect(eArgs.some((e) => e.startsWith('AI_SUPPORT_AGENT_PROJECT_DIR_MAP='))).toBe(true)
     })
 
-    it('should pass ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN when set', () => {
+    it('should pass Claude and Codex credential env vars when set', () => {
       process.env.ANTHROPIC_API_KEY = 'test-anthropic-key'
       process.env.CLAUDE_CODE_OAUTH_TOKEN = 'test-oauth-token'
+      process.env.CODEX_API_KEY = 'test-codex-key'
+      process.env.CODEX_ACCESS_TOKEN = 'test-codex-token'
 
       mockExecFileSync.mockReturnValue(Buffer.from(''))
       const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
@@ -1827,9 +1833,13 @@ describe('docker-runner', () => {
       }
       expect(eArgs).toContain('ANTHROPIC_API_KEY=test-anthropic-key')
       expect(eArgs).toContain('CLAUDE_CODE_OAUTH_TOKEN=test-oauth-token')
+      expect(eArgs).toContain('CODEX_API_KEY=test-codex-key')
+      expect(eArgs).toContain('CODEX_ACCESS_TOKEN=test-codex-token')
 
       delete process.env.ANTHROPIC_API_KEY
       delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+      delete process.env.CODEX_API_KEY
+      delete process.env.CODEX_ACCESS_TOKEN
     })
 
     it('should handle error from project container spawn', () => {

@@ -160,8 +160,8 @@ RUN cd /usr/local/lib/node_modules/@ai-support-agent/cli \
 RUN chmod -R 777 /usr/local/lib/node_modules \
     && chmod -R 777 /usr/local/bin \
     && rm -rf /home/node/.npm \
-    && mkdir -p /home/node/.npm \
-    && chmod 777 /home/node/.npm
+    && mkdir -p /home/node/.npm /home/node/.codex \
+    && chmod 777 /home/node /home/node/.npm /home/node/.codex
 
 WORKDIR /workspace
 RUN chmod 777 /workspace
