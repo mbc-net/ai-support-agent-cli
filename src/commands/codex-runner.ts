@@ -12,6 +12,7 @@ import { isErrnoException } from '../utils'
 
 import { buildCleanEnv } from './claude-code-args'
 import { resolveCodexInvocation } from './codex-command'
+import { prepareBundledCodexPluginProfile } from './plugin-dir'
 import type { PolicyContext } from './claude-code-runner'
 
 export const ERR_CODEX_AUTH_INVALID = [
@@ -59,9 +60,11 @@ export function buildCodexArgs(
     model?: string
     outputLastMessagePath?: string
     mcpConfigPath?: string
+    profile?: string
   },
 ): string[] {
   const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
+  if (options?.profile) args.push('--profile', options.profile)
   if (options?.cwd) args.push('--cd', options.cwd)
   if (options?.model?.trim()) args.push('--model', options.model.trim())
   if (options?.outputLastMessagePath) args.push('--output-last-message', options.outputLastMessagePath)
@@ -118,7 +121,17 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
     const resolvedModel = model?.trim() || env.OPENAI_MODEL?.trim() || undefined
     const outputLastMessagePath = createOutputLastMessagePath()
     const codexInvocation = resolveCodexInvocation()
-    const codexArgs = buildCodexArgs(message, { addDirs, locale, cwd, systemPrompt, model: resolvedModel, outputLastMessagePath, mcpConfigPath })
+    const bundledPluginProfile = prepareBundledCodexPluginProfile()
+    const codexArgs = buildCodexArgs(message, {
+      addDirs,
+      locale,
+      cwd,
+      systemPrompt,
+      model: resolvedModel,
+      outputLastMessagePath,
+      mcpConfigPath,
+      profile: bundledPluginProfile?.profileName,
+    })
     const args = [...codexInvocation.argsPrefix, ...codexArgs]
     logger.debug(`[chat] Spawning codex CLI: codex ${args.slice(0, -1).join(' ')}`)
 

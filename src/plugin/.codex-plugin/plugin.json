@@ -1,0 +1,36 @@
+{
+  "name": "ai-support-agent",
+  "version": "1.0.0",
+  "description": "A collection of agents, commands, skills, and safety guidance for AI-assisted software development, bundled by default with ai-support-agent-cli.",
+  "author": {
+    "name": "AI Support Agent Contributors"
+  },
+  "homepage": "https://github.com/mbc-net/ai-support-agent-cli",
+  "repository": "https://github.com/mbc-net/ai-support-agent-cli",
+  "license": "MIT",
+  "keywords": [
+    "agent",
+    "coding",
+    "software-development",
+    "skills"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "AI Support Agent",
+    "shortDescription": "Use bundled development skills and workflows in Codex.",
+    "longDescription": "AI Support Agent provides reusable software development skills and workflow prompts for planning, implementation, review, testing, and documentation work.",
+    "developerName": "AI Support Agent Contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Skills",
+      "Commands",
+      "Agents"
+    ],
+    "defaultPrompt": [
+      "Use the add-feature workflow for this request.",
+      "Review this change with the bundled reviewers.",
+      "Plan this implementation before editing code."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

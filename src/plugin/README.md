@@ -1,6 +1,6 @@
-# ai-support-agent (Claude Code plugin)
+# ai-support-agent (Claude Code / Codex plugin)
 
-A general-purpose toolkit of Claude Code agents, commands, skills, and safety
+A general-purpose toolkit of agents, commands, skills, and safety
 hooks for AI-assisted software development. It is not tied to any specific
 company or proprietary stack.
 
@@ -69,9 +69,14 @@ Based on and translated/generalized from
 
 ## How it's loaded
 
-This plugin is automatically bundled by `ai-support-agent-cli` via
-`--plugin-dir` whenever it launches `claude`. There is no separate
-installation step required for users of the CLI.
+This plugin is automatically bundled by `ai-support-agent-cli`.
+
+- Claude Code: the CLI passes this directory via `--plugin-dir` whenever it
+  launches `claude`.
+- Codex: the CLI materializes this directory as a local Codex marketplace under
+  `CODEX_HOME` and launches `codex exec` with a bundled profile that enables it.
+
+There is no separate installation step required for users of the CLI.
 
 ## What was intentionally excluded
 
