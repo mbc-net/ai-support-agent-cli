@@ -2,7 +2,7 @@ import os from 'os'
 import fs from 'fs'
 import path from 'path'
 
-import { buildCodexArgs, buildCodexMcpConfigOverrides } from '../../src/commands/codex-runner'
+import { ERR_CODEX_AUTH_INVALID, buildCodexArgs, buildCodexMcpConfigOverrides, formatCodexExitError, isCodexAuthError, redactCodexArgs } from '../../src/commands/codex-runner'
 
 describe('codex-runner', () => {
   describe('buildCodexArgs', () => {
@@ -31,8 +31,11 @@ describe('codex-runner', () => {
         model: 'gpt-5-codex',
         addDirs: ['~/shared', '/tmp/other'],
         outputLastMessagePath: '/tmp/last-message.txt',
+        profile: 'ai-support-agent-bundled',
       })
 
+      expect(args).toContain('--profile')
+      expect(args[args.indexOf('--profile') + 1]).toBe('ai-support-agent-bundled')
       expect(args).toContain('--cd')
       expect(args[args.indexOf('--cd') + 1]).toBe('/tmp/project')
       expect(args).toContain('--model')
@@ -77,6 +80,7 @@ describe('codex-runner', () => {
 
       expect(args).toContain('-c')
       expect(args).toContain('mcp_servers.ai-support-agent.command="node"')
+      expect(args).toContain('mcp_servers.ai-support-agent.default_tools_approval_mode="approve"')
       expect(args).toContain('mcp_servers.ai-support-agent.args=["/tmp/server.js"]')
       expect(args).toContain('mcp_servers.ai-support-agent.env.AI_SUPPORT_AGENT_TOKEN="token"')
       expect(args).toContain('mcp_servers.ai-support-agent.env.AI_SUPPORT_AGENT_PROJECT_CODE="TEST_01"')
@@ -88,6 +92,35 @@ describe('codex-runner', () => {
   describe('buildCodexMcpConfigOverrides', () => {
     it('returns an empty list when config file is missing', () => {
       expect(buildCodexMcpConfigOverrides('/tmp/missing-mcp-config.json')).toEqual([])
+    })
+  })
+
+  describe('redactCodexArgs', () => {
+    it('redacts sensitive MCP env config values in metadata args', () => {
+      expect(redactCodexArgs([
+        'exec',
+        'mcp_servers.ai-support-agent.env.AI_SUPPORT_AGENT_TOKEN="secret-token"',
+        'mcp_servers.backlog.env.BACKLOG_API_KEY="secret-key"',
+        'mcp_servers.ai-support-agent.env.AI_SUPPORT_AGENT_PROJECT_CODE="AI_SUPPORT_AGENT"',
+      ])).toEqual([
+        'exec',
+        'mcp_servers.ai-support-agent.env.AI_SUPPORT_AGENT_TOKEN="****"',
+        'mcp_servers.backlog.env.BACKLOG_API_KEY="****"',
+        'mcp_servers.ai-support-agent.env.AI_SUPPORT_AGENT_PROJECT_CODE="AI_SUPPORT_AGENT"',
+      ])
+    })
+  })
+
+  describe('Codex auth error handling', () => {
+    it('detects invalidated Codex auth token from stderr', () => {
+      expect(isCodexAuthError('unexpected status 401 Unauthorized: Your authentication token has been invalidated. Please try sign in again')).toBe(true)
+      expect(isCodexAuthError('Failed to refresh token: 401 Unauthorized: Your session has ended. Please log in again.')).toBe(true)
+      expect(isCodexAuthError('failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://chatgpt.com/backend-api/codex/responses')).toBe(true)
+    })
+
+    it('formats auth failures as actionable messages', () => {
+      expect(formatCodexExitError(1, 'Your session has ended. Please log in again.')).toBe(ERR_CODEX_AUTH_INVALID)
+      expect(formatCodexExitError(1, 'some other failure')).toBe('codex CLI がコード 1 で終了しました')
     })
   })
 })

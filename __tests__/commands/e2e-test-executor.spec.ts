@@ -530,6 +530,7 @@ describe('e2e-test-executor', () => {
         ...baseOptions.payload,
         playwrightScript: "const { test } = require('@playwright/test'); test('t', async ({ page }) => {})",
         executionMethod: 'ai',
+        steps: [{ action: 'Open login page', expected: 'Login page is visible' }],
       },
     }
 
@@ -538,6 +539,40 @@ describe('e2e-test-executor', () => {
     expect(chatExecutor.executeChatCommand).toHaveBeenCalled()
     expect(playwrightTestRunner.runPlaywrightScript).not.toHaveBeenCalled()
     expect(result.success).toBe(true)
+  })
+
+  it('should reject AI mode with a Playwright script when no step definitions are provided', async () => {
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "const { test } = require('@playwright/test'); test('t', async ({ page }) => {})",
+        executionMethod: 'ai',
+        steps: undefined,
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toBe(
+        'AI execution mode cannot verify a script-only E2E test without step definitions',
+      )
+    }
+    expect(chatExecutor.executeChatCommand).not.toHaveBeenCalled()
+    expect(playwrightTestRunner.runPlaywrightScript).not.toHaveBeenCalled()
+    expect(mockClient.updateE2eExecutionStatus).toHaveBeenCalledWith(
+      'mbc',
+      'MBC_01',
+      'exec-1',
+      expect.objectContaining({
+        status: 'error',
+        errorMessage: 'AI execution mode cannot verify a script-only E2E test without step definitions',
+      }),
+    )
   })
 
   it('should handle script execution throwing an error', async () => {
@@ -1155,6 +1190,7 @@ describe('e2e-test-executor', () => {
         playwrightScript: "const { test } = require('@playwright/test'); test('t', async ({ page }) => {})",
         executionMethod: 'ai',
         environmentId: 'env-1',
+        steps: [{ action: 'Open login page', expected: 'Login page is visible' }],
       },
     }
 

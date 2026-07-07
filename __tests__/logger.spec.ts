@@ -119,6 +119,19 @@ describe('logger', () => {
       expect(maskSecrets('token=abc123')).toBe('token=****')
     })
 
+    it('should preserve escaped JSON quotes when masking token values', () => {
+      const input = 'mcp_servers.ai-support-agent.env.AI_SUPPORT_AGENT_TOKEN=\\"00000001:agent-id:raw-token\\"'
+
+      expect(maskSecrets(input)).toBe(
+        'mcp_servers.ai-support-agent.env.AI_SUPPORT_AGENT_TOKEN=\\"****\\"',
+      )
+    })
+
+    it('should mask JSON string values with quoted secret keys', () => {
+      expect(maskSecrets('{"token":"abc def"}')).toBe('{"token":"****"}')
+      expect(maskSecrets('{"password":"sec ret"}')).toBe('{"password":"****"}')
+    })
+
     it('should mask secret values', () => {
       expect(maskSecrets('secret: supersecret')).toBe('secret: ****')
     })
