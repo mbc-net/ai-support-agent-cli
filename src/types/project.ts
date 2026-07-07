@@ -1,3 +1,5 @@
+import type { AgentChatModeOverrides } from './config'
+
 export interface ProjectConfigResponse {
   configHash: string
   project: {
@@ -22,6 +24,7 @@ export interface ProjectConfigResponse {
       appendSystemPrompt?: string
       model?: string
     }
+    agentChatModeOverrides?: AgentChatModeOverrides
     gitPullStrategy?: 'merge' | 'rebase'
     dockerCustomization?: {
       aptPackages?: string[]
