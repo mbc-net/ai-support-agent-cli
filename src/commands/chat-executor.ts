@@ -11,7 +11,7 @@ import { ensureAllowedToolsInSettings } from '../utils/claude-settings'
 import { executeApiChatCommand } from './api-chat-executor'
 import type { StreamJsonUsage } from './claude-code-stream'
 import { runClaudeCode } from './claude-code-runner'
-import { runCodex } from './codex-runner'
+import { ERR_CODEX_AUTH_INVALID, runCodex } from './codex-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { getProcessManager } from './process-manager'
 import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
@@ -138,6 +138,7 @@ async function executeCliChat(
     // キャンセルされた場合はリトライしない
     const errorMsg = typeof result.error === 'string' ? result.error : ''
     if (errorMsg.toLowerCase().includes('cancel')) return result
+    if (errorMsg.includes(ERR_CODEX_AUTH_INVALID)) return result
 
     lastResult = result
 

@@ -14,6 +14,12 @@ import { buildCleanEnv } from './claude-code-args'
 import { resolveCodexInvocation } from './codex-command'
 import type { PolicyContext } from './claude-code-runner'
 
+export const ERR_CODEX_AUTH_INVALID = [
+  'Codex の認証セッションが無効です。',
+  'ホストで codex login を再実行してから、Docker エージェントを再起動してください。',
+  'APIキーで実行する場合は CODEX_API_KEY を設定してください。',
+].join(' ')
+
 export interface CodexResult {
   text: string
   metadata: {
@@ -137,6 +143,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
     let resultText = ''
     let sentTextLength = 0
     let hasStderr = false
+    let stderrText = ''
     let sigkillTimer: NodeJS.Timeout | undefined
     const streamParser = new StreamLineParser()
     const activityTimeout = createActivityTimeout(CHAT_TIMEOUT, () => {
@@ -182,7 +189,9 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
 
     child.stderr.on('data', (data: Buffer) => {
       hasStderr = true
-      logger.debug(`[chat] codex CLI stderr: ${data.toString().substring(0, LOG_DEBUG_LIMIT)}`)
+      const text = data.toString()
+      stderrText = (stderrText + text).slice(-20_000)
+      logger.debug(`[chat] codex CLI stderr: ${text.substring(0, LOG_DEBUG_LIMIT)}`)
     })
 
     child.on('error', (error) => {
@@ -218,12 +227,27 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
           },
         })
       } else {
-        reject(new Error(`codex CLI がコード ${code} で終了しました`))
+        reject(new Error(formatCodexExitError(code, stderrText)))
       }
     })
   })
 
   return { result, cancel: () => killFn() }
+}
+
+export function formatCodexExitError(code: number | null, stderrText: string): string {
+  if (isCodexAuthError(stderrText)) return ERR_CODEX_AUTH_INVALID
+  return `codex CLI がコード ${code} で終了しました`
+}
+
+export function isCodexAuthError(stderrText: string): boolean {
+  const text = stderrText.toLowerCase()
+  return (
+    text.includes('your authentication token has been invalidated') ||
+    text.includes('your session has ended') ||
+    text.includes('failed to refresh token') ||
+    (text.includes('401 unauthorized') && (text.includes('chatgpt.com/backend-api/codex') || text.includes('codex')))
+  )
 }
 
 interface ClaudeMcpServerConfig {

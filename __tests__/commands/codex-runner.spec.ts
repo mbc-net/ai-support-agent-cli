@@ -2,7 +2,7 @@ import os from 'os'
 import fs from 'fs'
 import path from 'path'
 
-import { buildCodexArgs, buildCodexMcpConfigOverrides } from '../../src/commands/codex-runner'
+import { ERR_CODEX_AUTH_INVALID, buildCodexArgs, buildCodexMcpConfigOverrides, formatCodexExitError, isCodexAuthError } from '../../src/commands/codex-runner'
 
 describe('codex-runner', () => {
   describe('buildCodexArgs', () => {
@@ -88,6 +88,19 @@ describe('codex-runner', () => {
   describe('buildCodexMcpConfigOverrides', () => {
     it('returns an empty list when config file is missing', () => {
       expect(buildCodexMcpConfigOverrides('/tmp/missing-mcp-config.json')).toEqual([])
+    })
+  })
+
+  describe('Codex auth error handling', () => {
+    it('detects invalidated Codex auth token from stderr', () => {
+      expect(isCodexAuthError('unexpected status 401 Unauthorized: Your authentication token has been invalidated. Please try sign in again')).toBe(true)
+      expect(isCodexAuthError('Failed to refresh token: 401 Unauthorized: Your session has ended. Please log in again.')).toBe(true)
+      expect(isCodexAuthError('failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://chatgpt.com/backend-api/codex/responses')).toBe(true)
+    })
+
+    it('formats auth failures as actionable messages', () => {
+      expect(formatCodexExitError(1, 'Your session has ended. Please log in again.')).toBe(ERR_CODEX_AUTH_INVALID)
+      expect(formatCodexExitError(1, 'some other failure')).toBe('codex CLI がコード 1 で終了しました')
     })
   })
 })
