@@ -33,6 +33,12 @@ interface CliChatResult {
   }
 }
 
+function parseAgentChatModeOverride(value: unknown): AgentChatMode | undefined {
+  return value === 'claude_code' || value === 'codex' || value === 'api'
+    ? value
+    : undefined
+}
+
 /** Options for executeChatCommand */
 export interface ExecuteChatCommandOptions {
   payload: ChatPayload
@@ -75,7 +81,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
     return errorResult(ERR_AGENT_ID_REQUIRED)
   }
 
-  const mode = activeChatMode ?? 'claude_code'
+  const mode = parseAgentChatModeOverride(payload.agentChatMode) ?? activeChatMode ?? 'claude_code'
 
   // API モードでは projectConfig.envVars が反映されないため、Web で
   // 設定されている envVars がある場合に warn を出す（ユーザーへの hint）。

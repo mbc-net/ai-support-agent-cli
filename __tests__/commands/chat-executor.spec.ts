@@ -214,6 +214,57 @@ describe('chat-executor', () => {
       )
     })
 
+    it('should let payload.agentChatMode override the activeChatMode for a single chat command', async () => {
+      const { executeApiChatCommand } = require('../../src/commands/api-chat-executor')
+      executeApiChatCommand.mockClear()
+
+      const payload = { ...basePayload, agentChatMode: 'api' } as ChatPayload
+      const result = await executeChatCommand({
+        payload,
+        commandId: 'cmd-payload-api',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+      })
+
+      expect(result.success).toBe(true)
+      expect(executeApiChatCommand).toHaveBeenCalledWith(
+        payload, 'cmd-payload-api', mockClient, undefined, 'agent-1',
+      )
+    })
+
+    it('should ignore payload.agentChatMode=auto and keep the activeChatMode', async () => {
+      const { executeApiChatCommand } = require('../../src/commands/api-chat-executor')
+      executeApiChatCommand.mockClear()
+      const { spawn } = require('child_process')
+      const mockProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 126,
+      }
+      spawn.mockReturnValue(mockProcess)
+      mockProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from(JSON.stringify({ type: 'agent_message', message: 'Codex response' }) + '\n'))
+      })
+      mockProcess.stderr.on.mockImplementation(() => {})
+      mockProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const result = await executeChatCommand({
+        payload: { ...basePayload, agentChatMode: 'auto' } as ChatPayload,
+        commandId: 'cmd-auto',
+        client: mockClient,
+        activeChatMode: 'codex',
+        agentId: 'agent-1',
+      })
+
+      expect(result.success).toBe(true)
+      expect(executeApiChatCommand).not.toHaveBeenCalled()
+      expect(spawn).toHaveBeenCalledWith('codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
+    })
+
     it('warns when api mode is selected with Web-configured envVars', async () => {
       const { logger } = require('../../src/logger')
       const warnSpy = jest.spyOn(logger, 'warn')
