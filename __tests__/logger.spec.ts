@@ -127,6 +127,11 @@ describe('logger', () => {
       )
     })
 
+    it('should mask JSON string values with quoted secret keys', () => {
+      expect(maskSecrets('{"token":"abc def"}')).toBe('{"token":"****"}')
+      expect(maskSecrets('{"password":"sec ret"}')).toBe('{"password":"****"}')
+    })
+
     it('should mask secret values', () => {
       expect(maskSecrets('secret: supersecret')).toBe('secret: ****')
     })

@@ -5,7 +5,7 @@ type SecretKeyValueMatch = [
 ]
 
 export const SECRET_KEY_VALUE_PATTERN =
-  /((?:password|secret|token|api_key|apikey|access_key|secret_key|session_token|authorization)\s*[:=]\s*)((?:\\["'])(?:[^\\]|\\(?!["']))*(?:\\["'])|"[^"]*"|'[^']*'|[^\s"',}\\]+)/gi
+  /((?:password|secret|token|api_key|apikey|access_key|secret_key|session_token|authorization)["']?\s*[:=]\s*)((?:\\["'])(?:[^\\]|\\(?!["']))*(?:\\["'])|"[^"]*"|'[^']*'|[^\s"',}\\]+)/gi
 
 export function maskSecretKeyValue(
   _match: string,
