@@ -64,6 +64,11 @@ export interface AgentServerConfig {
     allowedTools?: string[]
     addDirs?: string[]
   }
+  codexConfig?: {
+    model?: string
+    systemPrompt?: string
+    addDirs?: string[]
+  }
 }
 
 export interface AwsCredentials {

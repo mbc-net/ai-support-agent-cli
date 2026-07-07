@@ -20,6 +20,13 @@ jest.mock('../../src/logger')
 // returns undefined) and the exact spawn-args assertions below don't need to
 // account for --plugin-dir.
 jest.mock('../../src/commands/plugin-dir')
+jest.mock('../../src/commands/codex-command', () => ({
+  resolveCodexInvocation: jest.fn(() => ({
+    command: 'codex',
+    argsPrefix: [],
+    displayCommand: 'codex',
+  })),
+}))
 
 // Mock project-dir
 jest.mock('../../src/project-dir', () => ({
@@ -163,6 +170,30 @@ describe('chat-executor', () => {
       const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-2', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
       expect(result.success).toBe(true)
       expect(spawn).toHaveBeenCalled()
+    })
+
+    it('should use codex mode when activeChatMode is codex', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 125,
+      }
+      spawn.mockReturnValue(mockProcess)
+      mockProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from(JSON.stringify({ type: 'agent_message', message: 'Codex response' }) + '\n'))
+      })
+      mockProcess.stderr.on.mockImplementation(() => {})
+      mockProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-codex', client: mockClient, activeChatMode: 'codex', agentId: 'agent-1' })
+
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Codex response')
+      expect(spawn).toHaveBeenCalledWith('codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
     })
 
     it('should use api mode when activeChatMode is api', async () => {
