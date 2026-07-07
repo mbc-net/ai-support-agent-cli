@@ -1,4 +1,4 @@
-import type { AgentChatMode } from './config'
+import type { AgentChatMode, AgentChatModeOverrides } from './config'
 
 export interface RegisterRequest {
   agentId: string
@@ -57,6 +57,7 @@ export interface AgentServerConfig {
   externalAgentEnabled: boolean
   chatMode: ChatMode
   defaultAgentChatMode?: AgentChatMode
+  agentChatModeOverrides?: AgentChatModeOverrides
   claudeCodeConfig?: {
     model?: string
     maxTokens?: number

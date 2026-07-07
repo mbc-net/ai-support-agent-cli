@@ -116,12 +116,14 @@ export interface E2eTestPayload {
   recoveryMode?: unknown
   /** 選択された E2E 環境の ID。agent 側が API からプルして Playwright サブプロセスへ注入する */
   environmentId?: unknown
+  agentChatMode?: unknown
 }
 
 export interface E2eScriptFixPayload {
   testCaseId?: unknown
   message?: unknown
   currentScript?: unknown
+  agentChatMode?: unknown
 }
 
 export interface SyncRepositoryPayload {

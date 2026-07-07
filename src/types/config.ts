@@ -36,6 +36,14 @@ export interface ProjectRegistration {
  * - api: Anthropic API 直接呼び出し
  */
 export type AgentChatMode = 'claude_code' | 'codex' | 'api'
+export type AgentChatModeSelection = AgentChatMode | 'auto'
+
+export interface AgentChatModeOverrides {
+  chat?: AgentChatMode
+  task?: AgentChatMode
+  e2eTest?: AgentChatMode
+  e2eScriptFix?: AgentChatMode
+}
 
 export interface AgentConfig {
   agentId: string
