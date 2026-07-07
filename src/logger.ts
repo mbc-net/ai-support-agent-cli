@@ -138,7 +138,7 @@ function timestamp(): string {
   return `${y}-${mo}-${d} ${h}:${mi}:${s}`
 }
 
-const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
+const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string | ((...args: string[]) => string) }> = [
   // PEM private key blocks (must be first to avoid partial masking by other patterns)
   { pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, replacement: '[PRIVATE KEY REDACTED]' },
   // AWS Access Key IDs
@@ -153,7 +153,10 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   // Database connection strings (postgres://user:pass@host, mysql://user:pass@host, etc.)
   { pattern: /((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|rediss):\/\/[^:]+:)[^@]+(@)/gi, replacement: '$1****$2' },
   // Key-value pairs with secret-like keys (last to avoid masking well-formatted tokens above)
-  { pattern: /((?:password|secret|token|api_key|apikey|access_key|secret_key|session_token|authorization)\s*[:=]\s*["']?)([^\s"',}{]+)/gi, replacement: '$1****' },
+  {
+    pattern: /((?:password|secret|token|api_key|apikey|access_key|secret_key|session_token|authorization)\s*[:=]\s*)((?:\\["']|["'])?)([^\s"',}\\]+)((?:\\["']|["'])?)/gi,
+    replacement: (_match, prefix, openingQuote, _secret, closingQuote) => `${prefix}${openingQuote}****${closingQuote}`,
+  },
 ]
 
 /** Mask secrets in log messages */
@@ -162,7 +165,9 @@ export function maskSecrets(message: string): string {
   for (const { pattern, replacement } of SECRET_PATTERNS) {
     // Reset lastIndex for global regexps
     pattern.lastIndex = 0
-    masked = masked.replace(pattern, replacement)
+    masked = typeof replacement === 'function'
+      ? masked.replace(pattern, replacement)
+      : masked.replace(pattern, replacement)
   }
   return masked
 }
