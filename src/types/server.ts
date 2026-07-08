@@ -57,6 +57,7 @@ export interface AgentServerConfig {
   externalAgentEnabled: boolean
   chatMode: ChatMode
   defaultAgentChatMode?: AgentChatMode
+  agentChatModeFallbackOrder?: AgentChatMode[]
   agentChatModeOverrides?: AgentChatModeOverrides
   claudeCodeConfig?: {
     model?: string

@@ -59,6 +59,7 @@ export class ProjectAgent {
     serverConfig: null,
     availableChatModes: [],
     activeChatMode: undefined,
+    activeChatModeExplicit: false,
     mcpConfigPath: undefined,
     dockerCustomizationHash: undefined, // will be initialized in constructor from docker-built-hash
   }
