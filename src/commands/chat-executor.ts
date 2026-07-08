@@ -10,8 +10,8 @@ import { getAutoAddDirs, getWorkspaceDir } from '../project-dir'
 import { ensureAllowedToolsInSettings } from '../utils/claude-settings'
 import { executeApiChatCommand } from './api-chat-executor'
 import type { StreamJsonUsage } from './claude-code-stream'
-import { ERR_CLAUDE_USAGE_LIMIT_REACHED, runClaudeCode } from './claude-code-runner'
-import { ERR_CODEX_AUTH_INVALID, runCodex } from './codex-runner'
+import { ERR_CLAUDE_EXIT_CODE_1, ERR_CLAUDE_USAGE_LIMIT_REACHED, runClaudeCode } from './claude-code-runner'
+import { ERR_CODEX_AUTH_INVALID, ERR_CODEX_EXIT_CODE_1, runCodex } from './codex-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { getProcessManager } from './process-manager'
 import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
@@ -167,12 +167,16 @@ function resolveDefaultChatMode(availableChatModes: AgentChatMode[] | undefined)
 function isClaudeCodeUnavailable(result: CommandResult): boolean {
   return !result.success && typeof result.error === 'string' && (
     result.error.includes(ERR_CLAUDE_CLI_NOT_FOUND) ||
-    result.error.includes(ERR_CLAUDE_USAGE_LIMIT_REACHED)
+    result.error.includes(ERR_CLAUDE_USAGE_LIMIT_REACHED) ||
+    result.error.includes(ERR_CLAUDE_EXIT_CODE_1)
   )
 }
 
 function isCodexUnavailable(result: CommandResult): boolean {
-  return !result.success && typeof result.error === 'string' && result.error.includes(ERR_CODEX_CLI_NOT_FOUND)
+  return !result.success && typeof result.error === 'string' && (
+    result.error.includes(ERR_CODEX_CLI_NOT_FOUND) ||
+    result.error.includes(ERR_CODEX_EXIT_CODE_1)
+  )
 }
 
 function isRuntimeUnavailable(mode: 'claude_code' | 'codex', result: CommandResult): boolean {
@@ -436,8 +440,8 @@ async function executeCliChatOnce(
 
 function isRuntimeUnavailableErrorMessage(mode: 'claude_code' | 'codex', message: string): boolean {
   return mode === 'claude_code'
-    ? message.includes(ERR_CLAUDE_CLI_NOT_FOUND) || message.includes(ERR_CLAUDE_USAGE_LIMIT_REACHED)
-    : message.includes(ERR_CODEX_CLI_NOT_FOUND)
+    ? message.includes(ERR_CLAUDE_CLI_NOT_FOUND) || message.includes(ERR_CLAUDE_USAGE_LIMIT_REACHED) || message.includes(ERR_CLAUDE_EXIT_CODE_1)
+    : message.includes(ERR_CODEX_CLI_NOT_FOUND) || message.includes(ERR_CODEX_EXIT_CODE_1)
 }
 
 /**

@@ -23,6 +23,7 @@ export const ERR_CODEX_AUTH_INVALID = [
   'ホストで codex login を再実行してから、Docker エージェントを再起動してください。',
   'APIキーで実行する場合は CODEX_API_KEY を設定してください。',
 ].join(' ')
+export const ERR_CODEX_EXIT_CODE_1 = 'codex CLI がコード 1 で終了しました'
 
 export interface CodexResult {
   text: string
@@ -265,6 +266,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
 
 export function formatCodexExitError(code: number | null, stderrText: string): string {
   if (isCodexAuthError(stderrText)) return ERR_CODEX_AUTH_INVALID
+  if (code === 1) return ERR_CODEX_EXIT_CODE_1
   return `codex CLI がコード ${code} で終了しました`
 }
 
