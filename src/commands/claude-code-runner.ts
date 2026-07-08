@@ -19,6 +19,7 @@ export { processStreamJsonLine, parseFileUploadResult } from './claude-code-stre
 export type { StreamJsonContentBlock, StreamJsonLine, StreamJsonMcpServer } from './claude-code-stream'
 
 export const ERR_CLAUDE_USAGE_LIMIT_REACHED = 'claude CLI の利用上限に達しています。Claude Code の Monthly Limit または rate limit を確認してください。'
+export const ERR_CLAUDE_EXIT_CODE_1 = 'claude CLI がコード 1 で終了しました'
 
 /** Claude Code CLI の実行結果 */
 export interface ClaudeCodeResult {
@@ -251,6 +252,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
 
 export function formatClaudeExitError(code: number | null, stderrText: string): string {
   if (isClaudeUsageLimitError(stderrText)) return ERR_CLAUDE_USAGE_LIMIT_REACHED
+  if (code === 1) return ERR_CLAUDE_EXIT_CODE_1
   return `claude CLI がコード ${code} で終了しました`
 }
 
@@ -267,13 +269,15 @@ export function isClaudeUsageLimitError(stderrText: string): boolean {
     compactText.includes('レート制限')
   return (
     text.includes('monthly limit') ||
+    text.includes('monthly spend limit') ||
     (hasJapaneseUsageContext && (
       compactText.includes('達') ||
       compactText.includes('超過') ||
       compactText.includes('超え')
     )) ||
     (text.includes('usage limit') && (text.includes('reached') || text.includes('exceeded'))) ||
+    (text.includes('spend limit') && (text.includes('hit') || text.includes('reached') || text.includes('exceeded'))) ||
     (text.includes('rate limit') && (text.includes('reached') || text.includes('exceeded'))) ||
-    ((text.includes('usage') || text.includes('rate')) && text.includes('limit') && text.includes('exceeded'))
+    ((text.includes('usage') || text.includes('spend') || text.includes('rate')) && text.includes('limit') && text.includes('exceeded'))
   )
 }
