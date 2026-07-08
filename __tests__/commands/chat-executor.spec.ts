@@ -9,7 +9,7 @@ import {
 } from '../../src/commands/chat-executor'
 import { ERR_CODEX_AUTH_INVALID } from '../../src/commands/codex-runner'
 import { cancelProcess as cancelChatProcess, _getRunningProcesses } from '../../src/commands/process-manager'
-import { ERR_AGENT_ID_REQUIRED, ERR_CLAUDE_CLI_NOT_FOUND, ERR_MESSAGE_REQUIRED } from '../../src/constants'
+import { ERR_AGENT_ID_REQUIRED, ERR_CLAUDE_CLI_NOT_FOUND, ERR_CODEX_CLI_NOT_FOUND, ERR_MESSAGE_REQUIRED } from '../../src/constants'
 import type { AgentServerConfig, ChatPayload, ProjectConfigResponse } from '../../src/types'
 import { createMockChildProcess } from '../helpers/mock-factory'
 import { ndjsonAssistant, ndjsonResult } from '../helpers/ndjson-builders'
@@ -232,6 +232,196 @@ describe('chat-executor', () => {
         expect.objectContaining({ type: 'error', content: ERR_CLAUDE_CLI_NOT_FOUND }),
         'agent-1',
       )
+    })
+
+    it('should use the default fallback order from Claude Code to Codex', async () => {
+      const { spawn } = require('child_process')
+      const claudeProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 123,
+      }
+      const codexProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 124,
+      }
+      spawn
+        .mockReturnValueOnce(claudeProcess)
+        .mockReturnValueOnce(codexProcess)
+
+      claudeProcess.stdout.on.mockImplementation(() => {})
+      claudeProcess.stderr.on.mockImplementation(() => {})
+      claudeProcess.on.mockImplementation((event: string, cb: (arg: unknown) => void) => {
+        if (event === 'error') cb(Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' }))
+      })
+
+      codexProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from(JSON.stringify({ type: 'agent_message', message: 'Codex default fallback response' }) + '\n'))
+      })
+      codexProcess.stderr.on.mockImplementation(() => {})
+      codexProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const result = await executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-default-fallback-order',
+        client: mockClient,
+        availableChatModes: ['claude_code', 'codex'],
+        agentId: 'agent-1',
+      })
+
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Codex default fallback response')
+      expect(spawn).toHaveBeenNthCalledWith(1, 'claude', expect.any(Array), expect.any(Object))
+      expect(spawn).toHaveBeenNthCalledWith(2, 'codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
+    })
+
+    it('should use project fallback order from Codex to Claude Code when Codex CLI is unavailable', async () => {
+      const { spawn } = require('child_process')
+      const codexProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 123,
+      }
+      const claudeProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 124,
+      }
+      spawn
+        .mockReturnValueOnce(codexProcess)
+        .mockReturnValueOnce(claudeProcess)
+
+      codexProcess.stdout.on.mockImplementation(() => {})
+      codexProcess.stderr.on.mockImplementation(() => {})
+      codexProcess.on.mockImplementation((event: string, cb: (arg: unknown) => void) => {
+        if (event === 'error') cb(Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' }))
+      })
+
+      claudeProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from(ndjsonResult('Claude fallback response')))
+      })
+      claudeProcess.stderr.on.mockImplementation(() => {})
+      claudeProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const projectConfig: ProjectConfigResponse = {
+        configHash: 'h1',
+        project: { projectCode: 'MBC_01', projectName: 'MBC' },
+        agent: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          allowedTools: [],
+          agentChatModeFallbackOrder: ['codex', 'claude_code'],
+        },
+      }
+
+      const result = await executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-project-fallback-order',
+        client: mockClient,
+        availableChatModes: ['claude_code', 'codex'],
+        projectConfig,
+        agentId: 'agent-1',
+      })
+
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Claude fallback response')
+      expect(spawn).toHaveBeenNthCalledWith(1, 'codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
+      expect(spawn).toHaveBeenNthCalledWith(2, 'claude', expect.any(Array), expect.any(Object))
+      expect(mockClient.submitChatChunk).not.toHaveBeenCalledWith(
+        'cmd-project-fallback-order',
+        expect.objectContaining({ type: 'error', content: ERR_CODEX_CLI_NOT_FOUND }),
+        'agent-1',
+      )
+    })
+
+    it('should not fall back to Claude Code when Codex is explicitly requested', async () => {
+      const { spawn } = require('child_process')
+      const codexProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 123,
+      }
+      spawn.mockReturnValue(codexProcess)
+      codexProcess.stdout.on.mockImplementation(() => {})
+      codexProcess.stderr.on.mockImplementation(() => {})
+      codexProcess.on.mockImplementation((event: string, cb: (arg: unknown) => void) => {
+        if (event === 'error') cb(Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' }))
+      })
+
+      const result = await executeChatCommand({
+        payload: { ...basePayload, agentChatMode: 'codex' } as ChatPayload,
+        commandId: 'cmd-explicit-codex',
+        client: mockClient,
+        availableChatModes: ['claude_code', 'codex'],
+        projectConfig: {
+          configHash: 'h1',
+          project: { projectCode: 'MBC_01', projectName: 'MBC' },
+          agent: {
+            agentEnabled: true,
+            builtinAgentEnabled: true,
+            builtinFallbackEnabled: true,
+            externalAgentEnabled: true,
+            allowedTools: [],
+            agentChatModeFallbackOrder: ['codex', 'claude_code'],
+          },
+        },
+        agentId: 'agent-1',
+      })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toBe(ERR_CODEX_CLI_NOT_FOUND)
+      expect(spawn).toHaveBeenCalledTimes(1)
+    })
+
+    it('should filter fallback candidates by availableChatModes while preserving order', async () => {
+      const { spawn } = require('child_process')
+      const claudeProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 124,
+      }
+      spawn.mockReturnValue(claudeProcess)
+      claudeProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from(ndjsonResult('Filtered Claude response')))
+      })
+      claudeProcess.stderr.on.mockImplementation(() => {})
+      claudeProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const result = await executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-filtered-fallback-order',
+        client: mockClient,
+        serverConfig: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          chatMode: 'agent',
+          agentChatModeFallbackOrder: ['codex', 'claude_code'],
+        },
+        availableChatModes: ['claude_code'],
+        agentId: 'agent-1',
+      })
+
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Filtered Claude response')
+      expect(spawn).toHaveBeenCalledTimes(1)
+      expect(spawn).toHaveBeenCalledWith('claude', expect.any(Array), expect.any(Object))
     })
 
     it('should not fall back to codex when Claude Code is explicitly requested', async () => {
@@ -543,7 +733,7 @@ describe('chat-executor', () => {
       const mockProcess1 = createMockChildProcess()
       spawn.mockReturnValueOnce(mockProcess1)
 
-      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-enoent', client: mockClient, agentId: 'agent-1' })
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-enoent', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
 
       // ENOENT means the CLI is unavailable, so it is not retried.
       await new Promise((r) => setTimeout(r, 10))

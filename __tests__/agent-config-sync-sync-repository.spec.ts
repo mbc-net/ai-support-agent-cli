@@ -54,6 +54,7 @@ function makeState(overrides?: Partial<ConfigSyncState>): ConfigSyncState {
     serverConfig: null,
     availableChatModes: [],
     activeChatMode: undefined,
+    activeChatModeExplicit: false,
     mcpConfigPath: undefined,
     dockerCustomizationHash: undefined,
     ...overrides,
