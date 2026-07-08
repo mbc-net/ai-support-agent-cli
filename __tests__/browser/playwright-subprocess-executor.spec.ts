@@ -920,5 +920,6 @@ describe('runPlaywrightSubprocess', () => {
     expect(spawnArgs[0]).toBe('test')
     expect(spawnArgs[1]).toContain('ai-support-e2e-exec-args.spec.ts')
     expect(spawnArgs).toContain('--config')
+    expect(spawnArgs[spawnArgs.indexOf('--config') + 1]).toContain('playwright.subprocess.config.js')
   })
 })

@@ -245,7 +245,7 @@ function spawnPlaywright(
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     // Find the config file relative to the spec file's project root
-    const configFile = path.join(__dirname, '..', '..', 'playwright.subprocess.config.ts')
+    const configFile = path.join(__dirname, '..', '..', 'playwright.subprocess.config.js')
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
