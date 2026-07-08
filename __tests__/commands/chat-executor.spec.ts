@@ -424,6 +424,45 @@ describe('chat-executor', () => {
       expect(spawn).toHaveBeenCalledWith('claude', expect.any(Array), expect.any(Object))
     })
 
+    it('should de-duplicate fallback candidates while preserving order', async () => {
+      const { spawn } = require('child_process')
+      const codexProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 124,
+      }
+      spawn.mockReturnValue(codexProcess)
+      codexProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from(JSON.stringify({ type: 'agent_message', message: 'Unique Codex response' }) + '\n'))
+      })
+      codexProcess.stderr.on.mockImplementation(() => {})
+      codexProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const result = await executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-unique-fallback-order',
+        client: mockClient,
+        serverConfig: {
+          agentEnabled: true,
+          builtinAgentEnabled: true,
+          builtinFallbackEnabled: true,
+          externalAgentEnabled: true,
+          chatMode: 'agent',
+          agentChatModeFallbackOrder: ['codex', 'codex', 'claude_code'],
+        },
+        availableChatModes: ['codex'],
+        agentId: 'agent-1',
+      })
+
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Unique Codex response')
+      expect(spawn).toHaveBeenCalledTimes(1)
+      expect(spawn).toHaveBeenCalledWith('codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
+    })
+
     it('should not fall back to codex when Claude Code is explicitly requested', async () => {
       const { spawn } = require('child_process')
       const claudeProcess = {

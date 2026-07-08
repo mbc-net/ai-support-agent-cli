@@ -86,6 +86,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
   const payloadMode = parseAgentChatModeOverride(payload.agentChatMode)
   const modes = resolveChatModeCandidates(payloadMode, activeChatMode, availableChatModes, serverConfig, projectConfig)
   const mode = modes[0] ?? 'claude_code'
+  logger.debug(`[chat] Agent chat mode candidates: ${modes.join(' -> ')} (selected=${mode})`)
 
   // API モードでは projectConfig.envVars が反映されないため、Web で
   // 設定されている envVars がある場合に warn を出す（ユーザーへの hint）。
@@ -148,8 +149,9 @@ function filterAvailableChatModes(
   modes: AgentChatMode[],
   availableChatModes: AgentChatMode[] | undefined,
 ): AgentChatMode[] {
-  if (!availableChatModes) return modes
-  return modes.filter((mode) => availableChatModes.includes(mode))
+  const uniqueModes = Array.from(new Set(modes))
+  if (!availableChatModes) return uniqueModes
+  return uniqueModes.filter((mode) => availableChatModes.includes(mode))
 }
 
 function resolveDefaultChatMode(availableChatModes: AgentChatMode[] | undefined): AgentChatMode {

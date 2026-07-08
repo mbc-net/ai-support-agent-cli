@@ -195,6 +195,23 @@ describe('e2e-test-executor', () => {
     expect(chatCall.payload.message).toContain('browser_navigate')
   })
 
+  it('should pass availableChatModes through to executeChatCommand', async () => {
+    const availableChatModes = ['claude_code', 'codex'] as any
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+      success: true,
+      data: 'Done',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    await executeE2eTest({
+      ...baseOptions,
+      availableChatModes,
+    })
+
+    const chatCall = (chatExecutor.executeChatCommand as jest.Mock).mock.calls[0][0]
+    expect(chatCall.availableChatModes).toBe(availableChatModes)
+  })
+
   it('should include credentialId in system prompt when provided', async () => {
     const options = {
       ...baseOptions,

@@ -22,6 +22,7 @@ export interface ExecuteE2eTestOptions {
   client: ApiClient
   serverConfig?: AgentServerConfig
   activeChatMode?: AgentChatMode
+  availableChatModes?: AgentChatMode[]
   agentId?: string
   projectDir?: string
   projectConfig?: ProjectConfigResponse
@@ -370,6 +371,7 @@ async function executeAiMode(
       client: options.client,
       serverConfig: options.serverConfig,
       activeChatMode: options.activeChatMode,
+      availableChatModes: options.availableChatModes,
       agentId,
       projectDir: options.projectDir,
       projectConfig: options.projectConfig,
