@@ -891,7 +891,7 @@ describe('runPlaywrightSubprocess', () => {
     warnSpy.mockRestore()
   })
 
-  it('should not set any extra env vars when envVars is not provided', async () => {
+  it('should set only internal env vars when envVars is not provided', async () => {
     const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
     mockFs.readFile.mockResolvedValue(jsonOutput as any)
     mockSpawn.mockReturnValue(createMockChild(0) as any)
@@ -904,6 +904,23 @@ describe('runPlaywrightSubprocess', () => {
     const spawnCall = mockSpawn.mock.calls[0]
     const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
     expect(spawnEnv.E2E_JSON_OUTPUT).toBe('/tmp/ai-support-e2e-exec-envvars-none-result.json')
+  })
+
+  it('should set NODE_PATH to bundled node_modules so /tmp specs can import @playwright/test', async () => {
+    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
+    mockFs.readFile.mockResolvedValue(jsonOutput as any)
+    mockSpawn.mockReturnValue(createMockChild(0) as any)
+
+    await runPlaywrightSubprocess({
+      script: "import { test } from '@playwright/test'; test('t', async () => {})",
+      executionId: 'exec-node-path',
+      envVars: { NODE_PATH: '/tmp/evil-node-path' },
+    })
+
+    const spawnCall = mockSpawn.mock.calls[0]
+    const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
+    expect(spawnEnv.NODE_PATH).toContain('node_modules')
+    expect(spawnEnv.NODE_PATH).not.toBe('/tmp/evil-node-path')
   })
 
   it('should pass spec file and config file as playwright arguments', async () => {
