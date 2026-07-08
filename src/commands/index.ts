@@ -81,6 +81,16 @@ function resolveCommandChatMode(
   const selectedMode = payloadMode
     ?? overrideMode
     ?? (opts.activeChatModeExplicit === false ? undefined : opts.activeChatMode)
+  const source = payloadMode !== undefined
+    ? 'payload'
+    : overrideMode !== undefined
+      ? `${overrideKey} override`
+      : opts.activeChatModeExplicit === false
+        ? 'fallback order'
+        : opts.activeChatMode !== undefined
+          ? 'activeChatMode'
+          : 'fallback order'
+  logger.debug(`[${commandType}] Agent chat mode source: ${source}${selectedMode ? ` (${selectedMode})` : ''}`)
 
   if (!selectedMode) return undefined
 
