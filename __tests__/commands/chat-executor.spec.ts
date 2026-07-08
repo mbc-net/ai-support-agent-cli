@@ -280,6 +280,74 @@ describe('chat-executor', () => {
       expect(spawn).toHaveBeenNthCalledWith(2, 'codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
     })
 
+    it('should fall back to codex when Claude Code exits due to Monthly Limit', async () => {
+      const { spawn } = require('child_process')
+      const claudeProcess = createMockChildProcess()
+      const codexProcess = createMockChildProcess()
+      spawn
+        .mockReturnValueOnce(claudeProcess)
+        .mockReturnValueOnce(codexProcess)
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-claude-monthly-limit-fallback',
+        client: mockClient,
+        availableChatModes: ['claude_code', 'codex'],
+        agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      claudeProcess.emitStderr('data', Buffer.from('Claude AI usage limit reached|Monthly limit reached\n'))
+      claudeProcess.emit('close', 1)
+
+      await new Promise((r) => setTimeout(r, 10))
+      codexProcess.emitStdout('data', Buffer.from(JSON.stringify({ type: 'agent_message', message: 'Codex handled monthly limit fallback' }) + '\n'))
+      codexProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Codex handled monthly limit fallback')
+      expect(spawn).toHaveBeenNthCalledWith(1, 'claude', expect.any(Array), expect.any(Object))
+      expect(spawn).toHaveBeenNthCalledWith(2, 'codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
+      expect(mockClient.submitChatChunk).not.toHaveBeenCalledWith(
+        'cmd-claude-monthly-limit-fallback',
+        expect.objectContaining({ type: 'error', content: expect.stringContaining('Monthly limit') }),
+        'agent-1',
+      )
+    })
+
+    it('should fall back to codex on Monthly Limit even when activeChatMode is Claude Code', async () => {
+      const { spawn } = require('child_process')
+      const claudeProcess = createMockChildProcess()
+      const codexProcess = createMockChildProcess()
+      spawn
+        .mockReturnValueOnce(claudeProcess)
+        .mockReturnValueOnce(codexProcess)
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-active-claude-monthly-limit-fallback',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        availableChatModes: ['claude_code', 'codex'],
+        agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      claudeProcess.emitStderr('data', Buffer.from('Claude AI usage limit reached|Monthly limit reached\n'))
+      claudeProcess.emit('close', 1)
+
+      await new Promise((r) => setTimeout(r, 10))
+      codexProcess.emitStdout('data', Buffer.from(JSON.stringify({ type: 'agent_message', message: 'Codex handled active fallback' }) + '\n'))
+      codexProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Codex handled active fallback')
+      expect(spawn).toHaveBeenNthCalledWith(1, 'claude', expect.any(Array), expect.any(Object))
+      expect(spawn).toHaveBeenNthCalledWith(2, 'codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
+    })
+
     it('should use project fallback order from Codex to Claude Code when Codex CLI is unavailable', async () => {
       const { spawn } = require('child_process')
       const codexProcess = {
@@ -772,7 +840,13 @@ describe('chat-executor', () => {
       const mockProcess1 = createMockChildProcess()
       spawn.mockReturnValueOnce(mockProcess1)
 
-      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-enoent', client: mockClient, activeChatMode: 'claude_code', agentId: 'agent-1' })
+      const resultPromise = executeChatCommand({
+        payload: { ...basePayload, agentChatMode: 'claude_code' } as ChatPayload,
+        commandId: 'cmd-enoent',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+      })
 
       // ENOENT means the CLI is unavailable, so it is not retried.
       await new Promise((r) => setTimeout(r, 10))
