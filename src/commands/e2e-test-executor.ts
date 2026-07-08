@@ -54,19 +54,27 @@ export async function executeE2eTest(
   const projectCode = options.projectConfig?.project?.projectCode
 
   const executionId = parseString(payload.executionId)
-  const scenario = parseString(payload.scenario)
+  const scenario = parseString(payload.scenario) ?? ''
   const targetUrl = parseString(payload.targetUrl)
   const credentialId = parseString(payload.credentialId)
   const environmentId = parseString(payload.environmentId)
   const executionMethod = parseString(payload.executionMethod) ?? 'ai'
   const playwrightScript = parseString(payload.playwrightScript)
-  const steps = payload.steps as unknown[] | undefined
+  const steps = Array.isArray(payload.steps) ? payload.steps : undefined
 
   if (!executionId) {
     return errorResult('executionId is required for e2e_test')
   }
-  if (!scenario) {
+  if (!scenario && (!playwrightScript || executionMethod === 'ai')) {
     return errorResult('scenario is required for e2e_test')
+  }
+  if (playwrightScript && executionMethod === 'ai' && !steps?.length) {
+    const message = 'AI execution mode cannot verify a script-only E2E test without step definitions'
+    await reportExecutionStatus(
+      client, tenantCode, projectCode, executionId, 'error',
+      undefined, message, parseString(payload.testCaseId) ?? undefined,
+    )
+    return errorResult(message)
   }
   if (!agentId) {
     return errorResult('agentId is required for e2e_test')
@@ -317,6 +325,17 @@ async function executeAiMode(
     '## テストシナリオ',
     scenario,
     '',
+  )
+
+  if (Array.isArray(options.payload.steps) && options.payload.steps.length > 0) {
+    systemPromptParts.push(
+      '## ステップ定義',
+      JSON.stringify(options.payload.steps, null, 2),
+      '',
+    )
+  }
+
+  systemPromptParts.push(
     `## 環境変数`,
     `AI_SUPPORT_E2E_EXECUTION_ID=${executionId}`,
   )

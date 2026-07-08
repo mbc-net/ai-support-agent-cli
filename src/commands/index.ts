@@ -20,6 +20,7 @@ export interface ExecuteCommandOptions {
   client?: ApiClient
   serverConfig?: AgentServerConfig
   activeChatMode?: AgentChatMode
+  availableChatModes?: AgentChatMode[]
   agentId?: string
   projectDir?: string
   projectConfig?: ProjectConfigResponse
@@ -48,6 +49,46 @@ interface CommandContext {
 }
 
 type CommandHandler = (ctx: CommandContext) => Promise<CommandResult>
+
+const AGENT_CHAT_MODES: AgentChatMode[] = ['claude_code', 'codex', 'api']
+
+function isAgentChatMode(value: unknown): value is AgentChatMode {
+  return typeof value === 'string' && AGENT_CHAT_MODES.includes(value as AgentChatMode)
+}
+
+function resolveCommandChatMode(
+  commandType: 'chat' | 'e2e_test' | 'e2e_script_fix',
+  payload: Record<string, unknown>,
+  opts: ExecuteCommandOptions,
+): CommandResult | AgentChatMode | undefined {
+  const rawPayloadMode = payload.agentChatMode
+  const payloadMode =
+    rawPayloadMode === 'auto' || rawPayloadMode === undefined
+      ? undefined
+      : rawPayloadMode
+  if (payloadMode !== undefined && !isAgentChatMode(payloadMode)) {
+    return errorResult(`Unsupported agentChatMode: ${String(payloadMode)}`)
+  }
+
+  const overrideKey =
+    commandType === 'e2e_test'
+      ? 'e2eTest'
+      : commandType === 'e2e_script_fix'
+        ? 'e2eScriptFix'
+        : 'chat'
+  const overrideMode = opts.serverConfig?.agentChatModeOverrides?.[overrideKey]
+  const selectedMode = payloadMode ?? overrideMode ?? opts.activeChatMode
+
+  if (!selectedMode) return undefined
+
+  const availableModes = opts.availableChatModes ?? []
+  const isExplicit = payloadMode !== undefined || overrideMode !== undefined
+  if (isExplicit && availableModes.length > 0 && !availableModes.includes(selectedMode)) {
+    return errorResult(`agentChatMode ${selectedMode} is not available on this agent`)
+  }
+
+  return selectedMode
+}
 
 const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
   execute_command: async ({ p }) => {
@@ -105,12 +146,14 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     if (!opts.commandId || !opts.client) {
       return errorResult(ERR_CHAT_REQUIRES_CLIENT)
     }
+    const activeChatMode = resolveCommandChatMode('chat', p, opts)
+    if (typeof activeChatMode === 'object') return activeChatMode
     return executeChatCommand({
       payload: p,
       commandId: opts.commandId,
       client: opts.client,
       serverConfig: opts.serverConfig,
-      activeChatMode: opts.activeChatMode,
+      activeChatMode,
       agentId: opts.agentId,
       projectDir: opts.projectDir,
       projectConfig: opts.projectConfig,
@@ -180,12 +223,14 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     if (!opts.commandId || !opts.client) {
       return errorResult(ERR_E2E_TEST_REQUIRES_CLIENT)
     }
+    const activeChatMode = resolveCommandChatMode('e2e_test', p, opts)
+    if (typeof activeChatMode === 'object') return activeChatMode
     return executeE2eTest({
       payload: p,
       commandId: opts.commandId,
       client: opts.client,
       serverConfig: opts.serverConfig,
-      activeChatMode: opts.activeChatMode,
+      activeChatMode,
       agentId: opts.agentId,
       projectDir: opts.projectDir,
       projectConfig: opts.projectConfig,
@@ -197,10 +242,25 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     })
   },
 
+  ecs_launch: async ({ p }) => {
+    // Loaded lazily so resident agents that never launch ECS tasks do not
+    // pay the AWS SDK import cost. Payload may contain the oneshot token —
+    // never log it here.
+    const { ecsLaunch } = await import('../ecs/ecs-launcher')
+    return ecsLaunch(p)
+  },
+
+  ecs_stop: async ({ p }) => {
+    const { ecsStop } = await import('../ecs/ecs-launcher')
+    return ecsStop(p)
+  },
+
   e2e_script_fix: async ({ p, opts }) => {
     if (!opts.client) {
       return errorResult(ERR_E2E_TEST_REQUIRES_CLIENT)
     }
+    const activeChatMode = resolveCommandChatMode('e2e_script_fix', p, opts)
+    if (typeof activeChatMode === 'object') return activeChatMode
     return executeE2eScriptFix({
       payload: p as { testCaseId?: unknown; message?: unknown; currentScript?: unknown },
       client: opts.client,
@@ -209,7 +269,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       agentId: opts.agentId,
       commandId: opts.commandId,
       serverConfig: opts.serverConfig,
-      activeChatMode: opts.activeChatMode,
+      activeChatMode,
       projectDir: opts.projectDir,
       projectConfig: opts.projectConfig,
       mcpConfigPath: opts.mcpConfigPath,

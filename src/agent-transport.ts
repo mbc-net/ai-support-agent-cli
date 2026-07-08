@@ -319,6 +319,7 @@ async function processCommand(
       client: deps.client,
       serverConfig: ctx.configSyncState.serverConfig ?? undefined,
       activeChatMode: ctx.configSyncState.activeChatMode,
+      availableChatModes: ctx.configSyncState.availableChatModes,
       agentId: deps.agentId,
       projectDir: deps.projectDir,
       projectConfig: ctx.configSyncState.projectConfig,

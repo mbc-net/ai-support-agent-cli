@@ -21,14 +21,29 @@ export interface ProjectRegistration {
   token: string
   apiUrl: string
   projectDir?: string
+  /**
+   * ECS execution agent ids published from this machine, keyed by ECR
+   * repository URI. Used by `ecs publish` to reuse the same agentId on
+   * re-publish (image update) instead of registering a new agent.
+   */
+  ecsAgents?: Record<string, string>
 }
 
 /**
  * エージェントチャットモード（エージェント内部の実行方式）
  * - claude_code: Claude Code CLI を使用
+ * - codex: Codex CLI を使用
  * - api: Anthropic API 直接呼び出し
  */
-export type AgentChatMode = 'claude_code' | 'api'
+export type AgentChatMode = 'claude_code' | 'codex' | 'api'
+export type AgentChatModeSelection = AgentChatMode | 'auto'
+
+export interface AgentChatModeOverrides {
+  chat?: AgentChatMode
+  task?: AgentChatMode
+  e2eTest?: AgentChatMode
+  e2eScriptFix?: AgentChatMode
+}
 
 export interface AgentConfig {
   agentId: string

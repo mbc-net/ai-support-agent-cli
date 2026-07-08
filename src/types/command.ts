@@ -1,4 +1,5 @@
 import type { ChatPayload } from './chat'
+import type { EcsLaunchPayload, EcsStopPayload } from './ecs'
 
 export type AgentCommandType =
   | 'execute_command'
@@ -19,6 +20,8 @@ export type AgentCommandType =
   | 'e2e_test'
   | 'e2e_script_fix'
   | 'sync_repository'
+  | 'ecs_launch'
+  | 'ecs_stop'
 
 export type AgentCommandStatus =
   | 'PENDING'
@@ -113,12 +116,14 @@ export interface E2eTestPayload {
   recoveryMode?: unknown
   /** 選択された E2E 環境の ID。agent 側が API からプルして Playwright サブプロセスへ注入する */
   environmentId?: unknown
+  agentChatMode?: unknown
 }
 
 export interface E2eScriptFixPayload {
   testCaseId?: unknown
   message?: unknown
   currentScript?: unknown
+  agentChatMode?: unknown
 }
 
 export interface SyncRepositoryPayload {
@@ -146,3 +151,5 @@ export type CommandDispatch =
   | { type: 'e2e_test'; payload: E2eTestPayload }
   | { type: 'e2e_script_fix'; payload: E2eScriptFixPayload }
   | { type: 'sync_repository'; payload: SyncRepositoryPayload }
+  | { type: 'ecs_launch'; payload: EcsLaunchPayload }
+  | { type: 'ecs_stop'; payload: EcsStopPayload }

@@ -3,7 +3,7 @@
  *
  * Covers buildProjectVolumeMounts branches not exercised by docker-runner.spec.ts,
  * specifically: project.token, project.apiUrl (with localhost replacement), and
- * the ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN passthrough.
+ * credential passthrough.
  */
 
 jest.mock('fs', () => ({
@@ -82,6 +82,7 @@ describe('buildProjectVolumeMounts', () => {
 
     expect(envArgs).toContain('AI_SUPPORT_AGENT_IN_DOCKER=1')
     expect(envArgs).toContain(`HOME=${CONTAINER_HOME}`)
+    expect(envArgs).toContain(`CODEX_HOME=${CONTAINER_HOME}/.codex`)
     expect(envArgs).toContain(`AI_SUPPORT_AGENT_CONFIG_DIR=${CONTAINER_HOME}/.ai-support-agent`)
   })
 
@@ -223,6 +224,31 @@ describe('buildProjectVolumeMounts', () => {
     const claudeJsonMount = mounts.find((m) => m.includes('.claude.json:'))
     expect(claudeJsonMount).toBeDefined()
     expect(claudeJsonMount).toContain(`.claude.json:${CONTAINER_HOME}/.claude.json:rw`)
+  })
+
+  it('should mount .codex dir when it exists on the host', () => {
+    mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
+      const strPath = p.toString()
+      return strPath === `${home}/.codex`
+    })
+
+    const project = makeProject()
+    const { mounts } = buildProjectVolumeMounts(project, '/host/config/dir')
+
+    const codexMount = mounts.find((m) => m.includes('/.codex:'))
+    expect(codexMount).toBeDefined()
+    expect(codexMount).toContain(`${home}/.codex:${CONTAINER_HOME}/.codex:rw`)
+  })
+
+  it('should pass Codex credential env vars when set', () => {
+    process.env.CODEX_API_KEY = 'codex-api-key'
+    process.env.CODEX_ACCESS_TOKEN = 'codex-access-token'
+
+    const project = makeProject()
+    const { envArgs } = buildProjectVolumeMounts(project, '/host/config/dir')
+
+    expect(envArgs).toContain('CODEX_API_KEY=codex-api-key')
+    expect(envArgs).toContain('CODEX_ACCESS_TOKEN=codex-access-token')
   })
 
   it('should mount projectConfigHostDir to container config dir', () => {

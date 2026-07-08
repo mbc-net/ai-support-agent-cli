@@ -25,6 +25,9 @@ export const ENV_VARS = {
   ALLOW_HTTP: 'AI_SUPPORT_AGENT_ALLOW_HTTP',
   PROJECT_DIR_MAP: 'AI_SUPPORT_AGENT_PROJECT_DIR_MAP',
   TERMINAL_GRACE_MS: 'AI_SUPPORT_AGENT_TERMINAL_GRACE_MS',
+  // 'true' force-enables the ecs_launch capability (skips AWS credential
+  // detection), 'false' force-disables it. Unset = auto-detect.
+  ECS_LAUNCHER: 'AI_SUPPORT_AGENT_ECS_LAUNCHER',
   CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_CODE_OAUTH_TOKEN',
 } as const
 
@@ -67,7 +70,7 @@ export const MAX_INTERVAL = 300_000 // 5 minutes
 export const MAX_DIR_ENTRIES = 1000
 
 // Hidden entries to exclude from file listings
-export const HIDDEN_ENTRIES = ['.claude']
+export const HIDDEN_ENTRIES = ['.claude', '.codex']
 
 // Loopback address used when binding local HTTP servers and building local URLs
 export const LOCALHOST_ADDRESS = '127.0.0.1'
@@ -111,6 +114,7 @@ export const CHAT_TIMEOUT = 300_000
 export const CHAT_TOOL_EXECUTION_TIMEOUT = 1_800_000
 export const CHAT_SIGKILL_DELAY = 5_000
 export const CLAUDE_DETECT_TIMEOUT_MS = 5_000
+export const CODEX_DETECT_TIMEOUT_MS = 5_000
 export const DEFAULT_APPSYNC_TIMEOUT_MS = 300_000
 export const CHAT_RETRY_DELAY_MS = 3000
 export const CHAT_MAX_ATTEMPTS = 2
@@ -142,6 +146,7 @@ export const ERR_INVALID_PID = 'Invalid PID: must be a positive integer'
 export const ERR_ANTHROPIC_API_KEY_NOT_SET = 'ANTHROPIC_API_KEY is not set. API chat mode requires an Anthropic API key.'
 export const ERR_AUTH_SERVER_START_FAILED = 'Failed to start auth server'
 export const ERR_CLAUDE_CLI_NOT_FOUND = 'claude CLI が見つかりません。Claude Code がインストールされていることを確認してください。'
+export const ERR_CODEX_CLI_NOT_FOUND = 'codex CLI が見つかりません。Codex CLI がインストールされていることを確認してください。'
 export const ERR_CHAT_REQUIRES_CLIENT = 'chat command requires commandId and client'
 export const ERR_E2E_TEST_REQUIRES_CLIENT = 'e2e_test command requires commandId and client'
 export const ERR_SETUP_REQUIRES_CALLBACK = 'setup command requires onSetup callback'
@@ -196,7 +201,47 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/tools/send-slack-message`,
   AGENT_TOOL_TRIGGER_ALARM: (tenantCode: string) =>
     `/api/${tenantCode}/agent/tools/trigger-alarm`,
+  // ECS execution agent registration (ecs publish)
+  ECS_AGENTS: (tenantCode: string) => `/api/${tenantCode}/agent/ecs-agents`,
 } as const
+
+// === ECS execution agent (launcher-agent architecture) ===
+// Environment variables injected into the oneshot container at RunTask time.
+export const ONESHOT_ENV_VARS = {
+  AGENT_MODE: 'AGENT_MODE',
+  COMMAND_ID: 'COMMAND_ID',
+  AGENT_ID: 'AGENT_ID',
+  TENANT_CODE: 'TENANT_CODE',
+  PROJECT_CODE: 'PROJECT_CODE',
+  API_BASE_URL: 'API_BASE_URL',
+  AGENT_ONESHOT_TOKEN: 'AGENT_ONESHOT_TOKEN',
+} as const
+
+/** Value of AGENT_MODE that switches the CLI into oneshot (ECS container) mode */
+export const AGENT_MODE_ONESHOT = 'oneshot'
+
+/** Fixed container name used in the registered ECS task definition */
+export const ECS_AGENT_CONTAINER_NAME = 'app'
+
+/** Task definition family prefix: ai-support-ecs-agent-{tenantCode}-{agentId} */
+export const ECS_TASK_FAMILY_PREFIX = 'ai-support-ecs-agent'
+
+/** Default ECS task size (Fargate: 1 vCPU / 2 GB) */
+export const DEFAULT_ECS_CPU = 1024
+export const DEFAULT_ECS_MEMORY = 2048
+
+/** Default awslogs log group for ECS execution agents */
+export const DEFAULT_ECS_LOG_GROUP = '/ai-support-agent/ecs-agent'
+
+/** ECS agent id prefix (agentId = `ecs-{uuid}`) */
+export const ECS_AGENT_ID_PREFIX = 'ecs'
+
+/**
+ * Budget for resolving AWS credentials when deciding whether to advertise
+ * the ecs_launch capability at registration time. Kept short so registration
+ * is not delayed on hosts without any credential source (IMDS probing etc.).
+ */
+export const ECS_LAUNCHER_DETECT_TIMEOUT_MS = 3000
 
 export const CONFIG_SYNC_DEBOUNCE_MS = 2000
 export const INITIAL_CONFIG_SYNC_MAX_RETRIES = 3

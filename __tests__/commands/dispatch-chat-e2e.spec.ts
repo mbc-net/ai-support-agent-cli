@@ -112,6 +112,47 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
       expect(mockExecuteChatCommand).toHaveBeenCalled()
       expect((result as CommandResult).success).toBe(true)
     })
+
+    it('should prefer per-message agentChatMode over activeChatMode for chat', async () => {
+      const mockClient = {} as ApiClient
+
+      const result = await executeCommand(
+        'chat' as Parameters<typeof executeCommand>[0],
+        { message: 'use codex', agentChatMode: 'codex' },
+        {
+          commandId: 'cmd-runtime',
+          client: mockClient,
+          activeChatMode: 'claude_code',
+          availableChatModes: ['claude_code', 'codex'],
+        } as never,
+      )
+
+      expect(mockExecuteChatCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          activeChatMode: 'codex',
+        }),
+      )
+      expect((result as CommandResult).success).toBe(true)
+    })
+
+    it('should fail when an explicit per-message agentChatMode is unavailable', async () => {
+      const mockClient = {} as ApiClient
+
+      const result = await executeCommand(
+        'chat' as Parameters<typeof executeCommand>[0],
+        { message: 'use codex', agentChatMode: 'codex' },
+        {
+          commandId: 'cmd-runtime-unavailable',
+          client: mockClient,
+          activeChatMode: 'claude_code',
+          availableChatModes: ['claude_code'],
+        } as never,
+      ) as CommandResult
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('codex')
+      expect(mockExecuteChatCommand).not.toHaveBeenCalled()
+    })
   })
 
   describe('e2e_test command happy path', () => {
@@ -208,6 +249,30 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
 
       expect(mockExecuteE2eTest).toHaveBeenCalled()
       expect((result as CommandResult).success).toBe(true)
+    })
+
+    it('should use e2eTest runtime override from serverConfig', async () => {
+      const mockClient = {} as ApiClient
+
+      await executeCommand(
+        'e2e_test' as Parameters<typeof executeCommand>[0],
+        { script: 'test' },
+        {
+          commandId: 'e2e-runtime',
+          client: mockClient,
+          activeChatMode: 'claude_code',
+          availableChatModes: ['claude_code', 'codex'],
+          serverConfig: {
+            agentChatModeOverrides: { e2eTest: 'codex' },
+          },
+        } as never,
+      )
+
+      expect(mockExecuteE2eTest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          activeChatMode: 'codex',
+        }),
+      )
     })
   })
 })

@@ -27,6 +27,7 @@ import {
 } from './constants'
 import { calculateBackoff } from './retry-strategy'
 import { getConfigDir } from './config-manager'
+import { detectEcsLauncherCapability } from './ecs/launcher-capability'
 import { t } from './i18n'
 import { logger } from './logger'
 import { initProjectDir } from './project-dir'
@@ -345,13 +346,24 @@ export class ProjectAgent {
    * Throws on failure so the caller's retry loop can apply exponential backoff.
    */
   private async performRegistration(): Promise<RegisterResponse> {
+    // 'ecs_launch' advertises that this resident agent can act as the
+    // launcher for ECS execution agents (RunTask/StopTask via its local AWS
+    // credentials); the API's automatic launcher selection matches on it.
+    // Declared only when AWS credentials are resolvable (or force-enabled
+    // via AI_SUPPORT_AGENT_ECS_LAUNCHER) — see ecs/launcher-capability.ts.
+    // The detection is cached for the process lifetime, so register retries
+    // do not re-probe the credential chain.
+    const ecsLauncher = await detectEcsLauncherCapability()
     const result = await this.client.register({
       agentId: this.agentId,
       hostname: os.hostname(),
       os: os.platform(),
       arch: os.arch(),
       ipAddress: getLocalIpAddress(),
-      capabilities: ['shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode'],
+      capabilities: [
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode',
+        ...(ecsLauncher ? ['ecs_launch'] : []),
+      ],
       availableChatModes: this.configSyncState.availableChatModes,
       activeChatMode: this.configSyncState.activeChatMode,
     })

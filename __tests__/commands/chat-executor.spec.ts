@@ -7,6 +7,7 @@ import {
   buildConversationFileNotice,
   buildMetadataNotice,
 } from '../../src/commands/chat-executor'
+import { ERR_CODEX_AUTH_INVALID } from '../../src/commands/codex-runner'
 import { cancelProcess as cancelChatProcess, _getRunningProcesses } from '../../src/commands/process-manager'
 import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED } from '../../src/constants'
 import type { AgentServerConfig, ChatPayload, ProjectConfigResponse } from '../../src/types'
@@ -20,6 +21,13 @@ jest.mock('../../src/logger')
 // returns undefined) and the exact spawn-args assertions below don't need to
 // account for --plugin-dir.
 jest.mock('../../src/commands/plugin-dir')
+jest.mock('../../src/commands/codex-command', () => ({
+  resolveCodexInvocation: jest.fn(() => ({
+    command: 'codex',
+    argsPrefix: [],
+    displayCommand: 'codex',
+  })),
+}))
 
 // Mock project-dir
 jest.mock('../../src/project-dir', () => ({
@@ -165,6 +173,54 @@ describe('chat-executor', () => {
       expect(spawn).toHaveBeenCalled()
     })
 
+    it('should use codex mode when activeChatMode is codex', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 125,
+      }
+      spawn.mockReturnValue(mockProcess)
+      mockProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from(JSON.stringify({ type: 'agent_message', message: 'Codex response' }) + '\n'))
+      })
+      mockProcess.stderr.on.mockImplementation(() => {})
+      mockProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-codex', client: mockClient, activeChatMode: 'codex', agentId: 'agent-1' })
+
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Codex response')
+      expect(spawn).toHaveBeenCalledWith('codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
+    })
+
+    it('should not retry when Codex auth is invalid', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 126,
+      }
+      spawn.mockReturnValue(mockProcess)
+      mockProcess.stdout.on.mockImplementation(() => {})
+      mockProcess.stderr.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from('Failed to refresh token: 401 Unauthorized: Your session has ended. Please log in again.'))
+      })
+      mockProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(1)
+      })
+
+      const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-codex-auth', client: mockClient, activeChatMode: 'codex', agentId: 'agent-1' })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toBe(ERR_CODEX_AUTH_INVALID)
+      expect(spawn).toHaveBeenCalledTimes(1)
+    })
+
     it('should use api mode when activeChatMode is api', async () => {
       const { executeApiChatCommand } = require('../../src/commands/api-chat-executor')
 
@@ -181,6 +237,57 @@ describe('chat-executor', () => {
       expect(executeApiChatCommand).toHaveBeenCalledWith(
         basePayload, 'cmd-3', mockClient, serverConfig, 'agent-1',
       )
+    })
+
+    it('should let payload.agentChatMode override the activeChatMode for a single chat command', async () => {
+      const { executeApiChatCommand } = require('../../src/commands/api-chat-executor')
+      executeApiChatCommand.mockClear()
+
+      const payload = { ...basePayload, agentChatMode: 'api' } as ChatPayload
+      const result = await executeChatCommand({
+        payload,
+        commandId: 'cmd-payload-api',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+      })
+
+      expect(result.success).toBe(true)
+      expect(executeApiChatCommand).toHaveBeenCalledWith(
+        payload, 'cmd-payload-api', mockClient, undefined, 'agent-1',
+      )
+    })
+
+    it('should ignore payload.agentChatMode=auto and keep the activeChatMode', async () => {
+      const { executeApiChatCommand } = require('../../src/commands/api-chat-executor')
+      executeApiChatCommand.mockClear()
+      const { spawn } = require('child_process')
+      const mockProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 126,
+      }
+      spawn.mockReturnValue(mockProcess)
+      mockProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from(JSON.stringify({ type: 'agent_message', message: 'Codex response' }) + '\n'))
+      })
+      mockProcess.stderr.on.mockImplementation(() => {})
+      mockProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const result = await executeChatCommand({
+        payload: { ...basePayload, agentChatMode: 'auto' } as ChatPayload,
+        commandId: 'cmd-auto',
+        client: mockClient,
+        activeChatMode: 'codex',
+        agentId: 'agent-1',
+      })
+
+      expect(result.success).toBe(true)
+      expect(executeApiChatCommand).not.toHaveBeenCalled()
+      expect(spawn).toHaveBeenCalledWith('codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
     })
 
     it('warns when api mode is selected with Web-configured envVars', async () => {

@@ -4,6 +4,7 @@ import { Command } from 'commander'
 
 import { startAgent } from './agent-runner'
 import { registerAuthCommands } from './cli/auth-commands'
+import { registerEcsCommands } from './cli/ecs-publish-command'
 import { registerLogRotateCommand } from './cli/log-rotate-command'
 import { registerServiceCommands } from './cli/service-command'
 import { registerStatusCommand } from './cli/status-command'
@@ -12,11 +13,13 @@ import { registerDockerCommands } from './commands/docker-commands'
 import { resolveProjectDir, getMetadataDir } from './project-dir'
 import { parseIntervalOrExit, validateUpdateChannel } from './cli/validators'
 import {
+  AGENT_MODE_ONESHOT,
   AGENT_VERSION,
   CLI_FLAG_VERBOSE,
   CLI_FLAG_NO_AUTO_UPDATE,
   CLI_FLAG_NO_DOCKER,
   CLI_FLAG_NO_DOCKERFILE_SYNC,
+  ONESHOT_ENV_VARS,
 } from './constants'
 import type { ReleaseChannel } from './types'
 import * as fs from 'fs'
@@ -204,5 +207,20 @@ registerStatusCommand(program)
 registerServiceCommands(program)
 registerSetProjectDirCommand(program)
 registerLogRotateCommand(program)
+registerEcsCommands(program)
 
-program.parse()
+// ECS container mode: AGENT_MODE=oneshot (injected via RunTask
+// containerOverrides) bypasses the CLI entirely and runs exactly one command
+// (getCommand -> execute -> submitResult -> exit). See src/oneshot-runner.ts.
+if (process.env[ONESHOT_ENV_VARS.AGENT_MODE] === AGENT_MODE_ONESHOT) {
+  // A rejection escaping here (e.g. the dynamic import itself failing) would
+  // otherwise leave the ECS container hanging with no exit — always exit 1.
+  import('./oneshot-runner')
+    .then(({ runOneshotFromEnv }) => runOneshotFromEnv())
+    .catch((error: unknown) => {
+      logger.error(`[oneshot] Fatal startup error: ${error instanceof Error ? error.message : String(error)}`)
+      process.exit(1)
+    })
+} else {
+  program.parse()
+}
