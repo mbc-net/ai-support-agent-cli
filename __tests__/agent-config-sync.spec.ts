@@ -81,6 +81,7 @@ function makeState(overrides?: Partial<ConfigSyncState>): ConfigSyncState {
     serverConfig: null,
     availableChatModes: [],
     activeChatMode: undefined,
+    activeChatModeExplicit: false,
     mcpConfigPath: undefined,
     dockerCustomizationHash: undefined,
     ...overrides,
@@ -438,6 +439,50 @@ describe('refreshChatMode', () => {
     expect(state.availableChatModes).toEqual(['agent', 'api'])
     expect(state.serverConfig).toBeDefined()
     expect(state.activeChatMode).toBe('agent')
+    expect(state.activeChatModeExplicit).toBe(false)
+  })
+
+  it('should mark active chat mode explicit when localAgentChatMode is available', async () => {
+    mockDetectAvailableChatModes.mockResolvedValueOnce(['claude_code', 'codex'])
+    mockResolveActiveChatMode.mockReturnValueOnce('codex')
+    const mockClient = {
+      getConfig: jest.fn().mockResolvedValue({
+        agentEnabled: true,
+        builtinAgentEnabled: false,
+        builtinFallbackEnabled: false,
+        externalAgentEnabled: true,
+        chatMode: 'agent',
+      } as AgentServerConfig),
+    } as unknown as ApiClient
+
+    const deps = makeDeps({ client: mockClient, localAgentChatMode: 'codex' })
+    const state = makeState()
+
+    await refreshChatMode(deps, state, false)
+
+    expect(state.activeChatModeExplicit).toBe(true)
+  })
+
+  it('should mark active chat mode explicit when defaultAgentChatMode is available', async () => {
+    mockDetectAvailableChatModes.mockResolvedValueOnce(['claude_code', 'codex'])
+    mockResolveActiveChatMode.mockReturnValueOnce('codex')
+    const mockClient = {
+      getConfig: jest.fn().mockResolvedValue({
+        agentEnabled: true,
+        builtinAgentEnabled: false,
+        builtinFallbackEnabled: false,
+        externalAgentEnabled: true,
+        chatMode: 'agent',
+        defaultAgentChatMode: 'codex',
+      } as AgentServerConfig),
+    } as unknown as ApiClient
+
+    const deps = makeDeps({ client: mockClient })
+    const state = makeState()
+
+    await refreshChatMode(deps, state, false)
+
+    expect(state.activeChatModeExplicit).toBe(true)
   })
 
   it('should log chat mode info when verbose is true', async () => {

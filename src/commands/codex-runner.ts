@@ -15,6 +15,9 @@ import { resolveCodexInvocation } from './codex-command'
 import { prepareBundledCodexPluginProfile } from './plugin-dir'
 import type { PolicyContext } from './claude-code-runner'
 
+const CODEX_SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const
+type CodexSandboxMode = typeof CODEX_SANDBOX_MODES[number]
+
 export const ERR_CODEX_AUTH_INVALID = [
   'Codex の認証セッションが無効です。',
   'ホストで codex login を再実行してから、Docker エージェントを再起動してください。',
@@ -61,9 +64,10 @@ export function buildCodexArgs(
     outputLastMessagePath?: string
     mcpConfigPath?: string
     profile?: string
+    sandboxMode?: string
   },
 ): string[] {
-  const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
+  const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', resolveCodexSandboxMode(options?.sandboxMode)]
   if (options?.profile) args.push('--profile', options.profile)
   if (options?.cwd) args.push('--cd', options.cwd)
   if (options?.model?.trim()) args.push('--model', options.model.trim())
@@ -78,6 +82,16 @@ export function buildCodexArgs(
   }
   args.push(buildCodexPrompt(message, options?.locale, options?.systemPrompt))
   return args
+}
+
+function resolveCodexSandboxMode(value?: string): CodexSandboxMode {
+  const configured = value?.trim() || process.env.CODEX_SANDBOX_MODE?.trim()
+  if (configured && isCodexSandboxMode(configured)) return configured
+  return process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1' ? 'danger-full-access' : 'workspace-write'
+}
+
+function isCodexSandboxMode(value: string): value is CodexSandboxMode {
+  return CODEX_SANDBOX_MODES.includes(value as CodexSandboxMode)
 }
 
 function buildCodexPrompt(message: string, locale?: string, systemPrompt?: string): string {
@@ -131,6 +145,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
       outputLastMessagePath,
       mcpConfigPath,
       profile: bundledPluginProfile?.profileName,
+      sandboxMode: env.CODEX_SANDBOX_MODE,
     })
     const args = [...codexInvocation.argsPrefix, ...codexArgs]
     logger.debug(`[chat] Spawning codex CLI: codex ${args.slice(0, -1).join(' ')}`)

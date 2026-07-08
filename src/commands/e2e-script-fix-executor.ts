@@ -28,6 +28,7 @@ export interface ExecuteE2eScriptFixOptions {
   commandId?: string
   serverConfig?: AgentServerConfig
   activeChatMode?: AgentChatMode
+  availableChatModes?: AgentChatMode[]
   projectDir?: string
   projectConfig?: ProjectConfigResponse
   mcpConfigPath?: string
@@ -119,6 +120,7 @@ export async function executeE2eScriptFix(
       client,
       serverConfig: options.serverConfig,
       activeChatMode: options.activeChatMode,
+      availableChatModes: options.availableChatModes,
       agentId,
       projectDir: options.projectDir,
       projectConfig: options.projectConfig,

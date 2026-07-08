@@ -281,15 +281,18 @@ describe('executeE2eScriptFix', () => {
 
     const serverConfig = { apiUrl: 'https://api.example.com' } as any
     const activeChatMode = 'api' as any
+    const availableChatModes = ['claude_code', 'api'] as any
 
     await executeE2eScriptFix({
       ...baseOptions,
       serverConfig,
       activeChatMode,
+      availableChatModes,
     })
 
     const chatCall = (chatExecutor.executeChatCommand as jest.Mock).mock.calls[0][0]
     expect(chatCall.serverConfig).toBe(serverConfig)
     expect(chatCall.activeChatMode).toBe(activeChatMode)
+    expect(chatCall.availableChatModes).toBe(availableChatModes)
   })
 })

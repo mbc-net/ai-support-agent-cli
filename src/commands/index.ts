@@ -20,6 +20,7 @@ export interface ExecuteCommandOptions {
   client?: ApiClient
   serverConfig?: AgentServerConfig
   activeChatMode?: AgentChatMode
+  activeChatModeExplicit?: boolean
   availableChatModes?: AgentChatMode[]
   agentId?: string
   projectDir?: string
@@ -77,7 +78,19 @@ function resolveCommandChatMode(
         ? 'e2eScriptFix'
         : 'chat'
   const overrideMode = opts.serverConfig?.agentChatModeOverrides?.[overrideKey]
-  const selectedMode = payloadMode ?? overrideMode ?? opts.activeChatMode
+  const selectedMode = payloadMode
+    ?? overrideMode
+    ?? (opts.activeChatModeExplicit === false ? undefined : opts.activeChatMode)
+  const source = payloadMode !== undefined
+    ? 'payload'
+    : overrideMode !== undefined
+      ? `${overrideKey} override`
+      : opts.activeChatModeExplicit === false
+        ? 'fallback order'
+        : opts.activeChatMode !== undefined
+          ? 'activeChatMode'
+          : 'fallback order'
+  logger.debug(`[${commandType}] Agent chat mode source: ${source}${selectedMode ? ` (${selectedMode})` : ''}`)
 
   if (!selectedMode) return undefined
 
@@ -154,6 +167,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       client: opts.client,
       serverConfig: opts.serverConfig,
       activeChatMode,
+      availableChatModes: opts.availableChatModes,
       agentId: opts.agentId,
       projectDir: opts.projectDir,
       projectConfig: opts.projectConfig,
@@ -231,6 +245,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       client: opts.client,
       serverConfig: opts.serverConfig,
       activeChatMode,
+      availableChatModes: opts.availableChatModes,
       agentId: opts.agentId,
       projectDir: opts.projectDir,
       projectConfig: opts.projectConfig,
@@ -270,6 +285,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       commandId: opts.commandId,
       serverConfig: opts.serverConfig,
       activeChatMode,
+      availableChatModes: opts.availableChatModes,
       projectDir: opts.projectDir,
       projectConfig: opts.projectConfig,
       mcpConfigPath: opts.mcpConfigPath,

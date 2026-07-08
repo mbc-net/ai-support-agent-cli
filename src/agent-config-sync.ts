@@ -22,6 +22,7 @@ export interface ConfigSyncState {
   serverConfig: AgentServerConfig | null
   availableChatModes: AgentChatMode[]
   activeChatMode: AgentChatMode | undefined
+  activeChatModeExplicit: boolean
   mcpConfigPath: string | undefined
   dockerCustomizationHash: string | undefined
 }
@@ -351,9 +352,25 @@ export async function refreshChatMode(
     deps.localAgentChatMode,
     state.serverConfig?.defaultAgentChatMode,
   )
+  state.activeChatModeExplicit = isExplicitChatModeSelection(
+    state.availableChatModes,
+    deps.localAgentChatMode,
+    state.serverConfig?.defaultAgentChatMode,
+  )
   if (verbose) {
     logger.info(`${deps.prefix} Active chat mode: ${state.activeChatMode ?? 'none'}`)
   }
+}
+
+function isExplicitChatModeSelection(
+  availableChatModes: AgentChatMode[],
+  localAgentChatMode: AgentChatMode | undefined,
+  defaultAgentChatMode: AgentChatMode | undefined,
+): boolean {
+  return (
+    (localAgentChatMode !== undefined && availableChatModes.includes(localAgentChatMode)) ||
+    (defaultAgentChatMode !== undefined && availableChatModes.includes(defaultAgentChatMode))
+  )
 }
 
 /**

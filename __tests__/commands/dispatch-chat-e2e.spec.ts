@@ -89,6 +89,7 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
           client: mockClient,
           serverConfig,
           agentId: 'agent-2',
+          availableChatModes: undefined,
           projectDir: '/some/dir',
           projectConfig,
           mcpConfigPath: '/path/to/mcp.json',
@@ -130,9 +131,50 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
       expect(mockExecuteChatCommand).toHaveBeenCalledWith(
         expect.objectContaining({
           activeChatMode: 'codex',
+          availableChatModes: ['claude_code', 'codex'],
         }),
       )
       expect((result as CommandResult).success).toBe(true)
+    })
+
+    it('should omit auto-selected activeChatMode so executor can apply fallback order', async () => {
+      const mockClient = {} as ApiClient
+
+      await executeCommand(
+        'chat' as Parameters<typeof executeCommand>[0],
+        { message: 'use configured fallback order' },
+        {
+          commandId: 'cmd-auto-runtime',
+          client: mockClient,
+          activeChatMode: 'claude_code',
+          activeChatModeExplicit: false,
+          availableChatModes: ['claude_code', 'codex'],
+          projectConfig: {
+            configHash: 'hash-1',
+            project: { projectCode: 'TEST', projectName: 'Test' },
+            agent: {
+              agentEnabled: true,
+              builtinAgentEnabled: true,
+              builtinFallbackEnabled: true,
+              externalAgentEnabled: true,
+              allowedTools: [],
+              agentChatModeFallbackOrder: ['codex', 'claude_code'],
+            },
+          },
+        } as never,
+      )
+
+      expect(mockExecuteChatCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          activeChatMode: undefined,
+          availableChatModes: ['claude_code', 'codex'],
+          projectConfig: expect.objectContaining({
+            agent: expect.objectContaining({
+              agentChatModeFallbackOrder: ['codex', 'claude_code'],
+            }),
+          }),
+        }),
+      )
     })
 
     it('should fail when an explicit per-message agentChatMode is unavailable', async () => {
@@ -214,6 +256,7 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
           commandId: 'e2e-cmd-2',
           client: mockClient,
           serverConfig,
+          availableChatModes: ['claude_code', 'codex'],
           agentId: 'agent-3',
           projectDir: '/project/dir',
           mcpConfigPath: '/mcp.json',
@@ -227,6 +270,7 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
           commandId: 'e2e-cmd-2',
           client: mockClient,
           serverConfig,
+          availableChatModes: ['claude_code', 'codex'],
           agentId: 'agent-3',
           projectDir: '/project/dir',
           mcpConfigPath: '/mcp.json',
@@ -271,6 +315,7 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
       expect(mockExecuteE2eTest).toHaveBeenCalledWith(
         expect.objectContaining({
           activeChatMode: 'codex',
+          availableChatModes: ['claude_code', 'codex'],
         }),
       )
     })
