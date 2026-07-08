@@ -24,7 +24,7 @@
   "files": [
     "dist",
     "docker",
-    "playwright.subprocess.config.ts",
+    "playwright.subprocess.config.js",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"
