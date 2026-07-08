@@ -245,11 +245,14 @@ function spawnPlaywright(
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     // Find the config file relative to the spec file's project root
-    const configFile = path.join(__dirname, '..', '..', 'playwright.subprocess.config.js')
+    const agentRootDir = path.join(__dirname, '..', '..')
+    const configFile = path.join(agentRootDir, 'playwright.subprocess.config.js')
+    const nodeModulesDir = path.join(agentRootDir, 'node_modules')
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       E2E_JSON_OUTPUT: resultFile,
+      NODE_PATH: nodeModulesDir,
     }
     if (baseUrl) {
       env.E2E_BASE_URL = baseUrl
@@ -263,9 +266,7 @@ function spawnPlaywright(
       configFile,
     ]
 
-    const playwrightBin = path.join(
-      __dirname, '..', '..', 'node_modules', '.bin', 'playwright',
-    )
+    const playwrightBin = path.join(nodeModulesDir, '.bin', 'playwright')
 
     logger.info(
       `[playwright-subprocess] Spawning: ${playwrightBin} ${args.join(' ')}`,

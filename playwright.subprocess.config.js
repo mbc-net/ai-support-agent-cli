@@ -1,6 +1,7 @@
 const { defineConfig } = require('@playwright/test')
 
 module.exports = defineConfig({
+  testDir: '/tmp',
   timeout: 120_000,
   use: {
     headless: true,
