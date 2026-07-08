@@ -18,6 +18,8 @@ export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-co
 export { processStreamJsonLine, parseFileUploadResult } from './claude-code-stream'
 export type { StreamJsonContentBlock, StreamJsonLine, StreamJsonMcpServer } from './claude-code-stream'
 
+export const ERR_CLAUDE_USAGE_LIMIT_REACHED = 'claude CLI の利用上限に達しています。Claude Code の Monthly Limit または rate limit を確認してください。'
+
 /** Claude Code CLI の実行結果 */
 export interface ClaudeCodeResult {
   text: string
@@ -163,6 +165,8 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     const streamParser = new StreamLineParser()
     // テキストチャンクの重複送信を防ぐため、前回送信済みテキスト長を追跡
     let sentTextLength = 0
+    let stderrText = ''
+    let hasStderr = false
     // file_upload ツールの tool_use_id を追跡して tool_result から file_attachment を生成
     const pendingFileUploadIds = new Set<string>()
     // tool_use_id → ツール名のマッピング（tool_result で toolName を復元するため）
@@ -203,6 +207,8 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     child.stderr.on('data', (data: Buffer) => {
       // --verbose モードでは stderr にも NDJSON が出力されるので、デバッグログのみ
       const text = data.toString()
+      hasStderr = true
+      stderrText += text
       logger.debug(`[chat] claude CLI stderr: ${text.substring(0, LOG_DEBUG_LIMIT)}`)
     })
 
@@ -230,19 +236,44 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
           metadata: {
             args: metadataArgs,
             exitCode: code,
-            hasStderr: false,
+            hasStderr,
             durationMs,
           },
         })
       } else {
-        reject(
-          new Error(
-            `claude CLI がコード ${code} で終了しました`,
-          ),
-        )
+        reject(new Error(formatClaudeExitError(code, stderrText)))
       }
     })
   })
 
   return { result, cancel: () => killFn() }
+}
+
+export function formatClaudeExitError(code: number | null, stderrText: string): string {
+  if (isClaudeUsageLimitError(stderrText)) return ERR_CLAUDE_USAGE_LIMIT_REACHED
+  return `claude CLI がコード ${code} で終了しました`
+}
+
+export function isClaudeUsageLimitError(stderrText: string): boolean {
+  const text = stderrText.toLowerCase()
+  const compactText = text.replace(/\s+/g, '')
+  const hasJapaneseUsageContext =
+    compactText.includes('月間制限') ||
+    compactText.includes('月次制限') ||
+    compactText.includes('利用上限') ||
+    compactText.includes('使用上限') ||
+    compactText.includes('利用制限') ||
+    compactText.includes('使用制限') ||
+    compactText.includes('レート制限')
+  return (
+    text.includes('monthly limit') ||
+    (hasJapaneseUsageContext && (
+      compactText.includes('達') ||
+      compactText.includes('超過') ||
+      compactText.includes('超え')
+    )) ||
+    (text.includes('usage limit') && (text.includes('reached') || text.includes('exceeded'))) ||
+    (text.includes('rate limit') && (text.includes('reached') || text.includes('exceeded'))) ||
+    ((text.includes('usage') || text.includes('rate')) && text.includes('limit') && text.includes('exceeded'))
+  )
 }
