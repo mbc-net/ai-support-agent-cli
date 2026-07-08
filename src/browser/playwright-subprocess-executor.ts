@@ -100,12 +100,9 @@ function parsePlaywrightJsonOutput(jsonContent: string): PlaywrightSubprocessRes
   let passedTests = 0
   let failedTests = 0
 
-  const suites = report.suites as Array<Record<string, unknown>> | undefined
-  if (Array.isArray(suites)) {
-    for (const suite of suites) {
-      const specs = suite.specs as Array<Record<string, unknown>> | undefined
-      if (!Array.isArray(specs)) continue
-
+  const collectSpecs = (suite: Record<string, unknown>): void => {
+    const specs = suite.specs as Array<Record<string, unknown>> | undefined
+    if (Array.isArray(specs)) {
       for (const spec of specs) {
         const tests = spec.tests as Array<Record<string, unknown>> | undefined
         if (!Array.isArray(tests)) continue
@@ -156,6 +153,20 @@ function parsePlaywrightJsonOutput(jsonContent: string): PlaywrightSubprocessRes
           }
         }
       }
+    }
+
+    const nestedSuites = suite.suites as Array<Record<string, unknown>> | undefined
+    if (Array.isArray(nestedSuites)) {
+      for (const nestedSuite of nestedSuites) {
+        collectSpecs(nestedSuite)
+      }
+    }
+  }
+
+  const suites = report.suites as Array<Record<string, unknown>> | undefined
+  if (Array.isArray(suites)) {
+    for (const suite of suites) {
+      collectSpecs(suite)
     }
   }
 
