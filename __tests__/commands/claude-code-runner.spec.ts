@@ -1,7 +1,7 @@
 import os from 'os'
 
 import { ERR_CLAUDE_CLI_NOT_FOUND, ENV_VARS } from '../../src/constants'
-import { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache, parseFileUploadResult, processStreamJsonLine, runClaudeCode } from '../../src/commands/claude-code-runner'
+import { ERR_CLAUDE_USAGE_LIMIT_REACHED, buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache, formatClaudeExitError, isClaudeUsageLimitError, parseFileUploadResult, processStreamJsonLine, runClaudeCode } from '../../src/commands/claude-code-runner'
 import { createMockChildProcess } from '../helpers/mock-factory'
 
 jest.mock('../../src/logger')
@@ -989,6 +989,21 @@ describe('claude-code-runner', () => {
       await expect(handle.result).rejects.toThrow('コード 1')
     })
 
+    it('should reject with a usage limit error when Claude Code reaches Monthly Limit', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      mockProcess.emitStderr('data', Buffer.from('Claude AI usage limit reached|Monthly limit reached\n'))
+      mockProcess.emit('close', 1)
+
+      await expect(handle.result).rejects.toThrow(ERR_CLAUDE_USAGE_LIMIT_REACHED)
+    })
+
     it('should reject with ENOENT error when claude CLI is not found', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockChildProcess()
@@ -1017,6 +1032,19 @@ describe('claude-code-runner', () => {
       mockProcess.emit('error', new Error('Permission denied'))
 
       await expect(handle.result).rejects.toThrow('Permission denied')
+    })
+
+    it('should classify Claude Code usage limit stderr in multiple languages', () => {
+      expect(isClaudeUsageLimitError('Claude AI usage limit reached|Monthly limit reached')).toBe(true)
+      expect(isClaudeUsageLimitError('Usage limit exceeded. Please try again later.')).toBe(true)
+      expect(isClaudeUsageLimitError('Rate limit reached. Please try again later.')).toBe(true)
+      expect(isClaudeUsageLimitError('Claude Code の月間制限に達しました。')).toBe(true)
+      expect(isClaudeUsageLimitError('利用上限に達しました。しばらくしてから再試行してください。')).toBe(true)
+      expect(isClaudeUsageLimitError('月次制限を超過しました。')).toBe(true)
+      expect(isClaudeUsageLimitError('レート制限を超えました。')).toBe(true)
+      expect(isClaudeUsageLimitError('ファイルサイズ制限に達しました。')).toBe(false)
+      expect(formatClaudeExitError(1, 'Monthly limit reached')).toBe(ERR_CLAUDE_USAGE_LIMIT_REACHED)
+      expect(formatClaudeExitError(1, 'some other failure')).toBe('claude CLI がコード 1 で終了しました')
     })
 
     it('should pass awsEnv to spawn environment', async () => {

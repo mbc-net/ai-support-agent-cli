@@ -10,7 +10,7 @@ import { getAutoAddDirs, getWorkspaceDir } from '../project-dir'
 import { ensureAllowedToolsInSettings } from '../utils/claude-settings'
 import { executeApiChatCommand } from './api-chat-executor'
 import type { StreamJsonUsage } from './claude-code-stream'
-import { runClaudeCode } from './claude-code-runner'
+import { ERR_CLAUDE_USAGE_LIMIT_REACHED, runClaudeCode } from './claude-code-runner'
 import { ERR_CODEX_AUTH_INVALID, runCodex } from './codex-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { getProcessManager } from './process-manager'
@@ -136,11 +136,15 @@ function resolveChatModeCandidates(
   projectConfig: ProjectConfigResponse | undefined,
 ): AgentChatMode[] {
   if (payloadMode) return [payloadMode]
-  if (activeChatMode) return [activeChatMode]
 
   const fallbackOrder = serverConfig?.agentChatModeFallbackOrder
     ?? projectConfig?.agent.agentChatModeFallbackOrder
     ?? ['claude_code', 'codex']
+  if (activeChatMode) {
+    const candidates = filterAvailableChatModes([activeChatMode, ...fallbackOrder], availableChatModes)
+    return candidates.length > 0 ? candidates : [resolveDefaultChatMode(availableChatModes)]
+  }
+
   const candidates = filterAvailableChatModes(fallbackOrder, availableChatModes)
   return candidates.length > 0 ? candidates : [resolveDefaultChatMode(availableChatModes)]
 }
@@ -161,7 +165,10 @@ function resolveDefaultChatMode(availableChatModes: AgentChatMode[] | undefined)
 }
 
 function isClaudeCodeUnavailable(result: CommandResult): boolean {
-  return !result.success && typeof result.error === 'string' && result.error.includes(ERR_CLAUDE_CLI_NOT_FOUND)
+  return !result.success && typeof result.error === 'string' && (
+    result.error.includes(ERR_CLAUDE_CLI_NOT_FOUND) ||
+    result.error.includes(ERR_CLAUDE_USAGE_LIMIT_REACHED)
+  )
 }
 
 function isCodexUnavailable(result: CommandResult): boolean {
@@ -429,7 +436,7 @@ async function executeCliChatOnce(
 
 function isRuntimeUnavailableErrorMessage(mode: 'claude_code' | 'codex', message: string): boolean {
   return mode === 'claude_code'
-    ? message.includes(ERR_CLAUDE_CLI_NOT_FOUND)
+    ? message.includes(ERR_CLAUDE_CLI_NOT_FOUND) || message.includes(ERR_CLAUDE_USAGE_LIMIT_REACHED)
     : message.includes(ERR_CODEX_CLI_NOT_FOUND)
 }
 
