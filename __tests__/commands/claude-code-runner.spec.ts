@@ -1036,6 +1036,8 @@ describe('claude-code-runner', () => {
 
     it('should classify Claude Code usage limit stderr in multiple languages', () => {
       expect(isClaudeUsageLimitError('Claude AI usage limit reached|Monthly limit reached')).toBe(true)
+      expect(isClaudeUsageLimitError("You've hit your monthly spend limit · raise it at claude.ai/settings/usage")).toBe(true)
+      expect(isClaudeUsageLimitError('Spend limit reached. Please raise it in settings.')).toBe(true)
       expect(isClaudeUsageLimitError('Usage limit exceeded. Please try again later.')).toBe(true)
       expect(isClaudeUsageLimitError('Rate limit reached. Please try again later.')).toBe(true)
       expect(isClaudeUsageLimitError('Claude Code の月間制限に達しました。')).toBe(true)

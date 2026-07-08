@@ -348,6 +348,38 @@ describe('chat-executor', () => {
       expect(spawn).toHaveBeenNthCalledWith(2, 'codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
     })
 
+    it('should fall back to codex when Claude Code exits with code 1 even without recognized limit stderr', async () => {
+      const { spawn } = require('child_process')
+      const claudeProcess = createMockChildProcess()
+      const codexProcess = createMockChildProcess()
+      spawn
+        .mockReturnValueOnce(claudeProcess)
+        .mockReturnValueOnce(codexProcess)
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-claude-code-1-fallback',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        availableChatModes: ['claude_code', 'codex'],
+        agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      claudeProcess.emitStderr('data', Buffer.from('unclassified claude failure\n'))
+      claudeProcess.emit('close', 1)
+
+      await new Promise((r) => setTimeout(r, 10))
+      codexProcess.emitStdout('data', Buffer.from(JSON.stringify({ type: 'agent_message', message: 'Codex handled code 1 fallback' }) + '\n'))
+      codexProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Codex handled code 1 fallback')
+      expect(spawn).toHaveBeenNthCalledWith(1, 'claude', expect.any(Array), expect.any(Object))
+      expect(spawn).toHaveBeenNthCalledWith(2, 'codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
+    })
+
     it('should use project fallback order from Codex to Claude Code when Codex CLI is unavailable', async () => {
       const { spawn } = require('child_process')
       const codexProcess = {
@@ -411,6 +443,38 @@ describe('chat-executor', () => {
         expect.objectContaining({ type: 'error', content: ERR_CODEX_CLI_NOT_FOUND }),
         'agent-1',
       )
+    })
+
+    it('should fall back to Claude Code when Codex exits with code 1', async () => {
+      const { spawn } = require('child_process')
+      const codexProcess = createMockChildProcess()
+      const claudeProcess = createMockChildProcess()
+      spawn
+        .mockReturnValueOnce(codexProcess)
+        .mockReturnValueOnce(claudeProcess)
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-codex-code-1-fallback',
+        client: mockClient,
+        activeChatMode: 'codex',
+        availableChatModes: ['claude_code', 'codex'],
+        agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      codexProcess.emitStderr('data', Buffer.from('unclassified codex failure\n'))
+      codexProcess.emit('close', 1)
+
+      await new Promise((r) => setTimeout(r, 10))
+      claudeProcess.emitStdout('data', Buffer.from(ndjsonResult('Claude handled Codex code 1 fallback')))
+      claudeProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Claude handled Codex code 1 fallback')
+      expect(spawn).toHaveBeenNthCalledWith(1, 'codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
+      expect(spawn).toHaveBeenNthCalledWith(2, 'claude', expect.any(Array), expect.any(Object))
     })
 
     it('should not fall back to Claude Code when Codex is explicitly requested', async () => {
@@ -787,7 +851,7 @@ describe('chat-executor', () => {
   })
 
   describe('Claude Code CLI error handling', () => {
-    it('should return error when CLI exits with non-zero code', async () => {
+    it('should return error when CLI exits with non-retryable non-zero code', async () => {
       const { spawn } = require('child_process')
       const mockProcess1 = createMockChildProcess()
       const mockProcess2 = createMockChildProcess()
@@ -797,16 +861,16 @@ describe('chat-executor', () => {
 
       // First attempt fails
       await new Promise((r) => setTimeout(r, 10))
-      mockProcess1.emit('close', 1)
+      mockProcess1.emit('close', 2)
 
       // Wait for retry delay then trigger second attempt
       await new Promise((r) => setTimeout(r, 3100))
-      mockProcess2.emit('close', 1)
+      mockProcess2.emit('close', 2)
 
       const result = await resultPromise
       expect(result.success).toBe(false)
       if (!result.success) {
-        expect(result.error).toContain('コード 1')
+        expect(result.error).toContain('コード 2')
       }
     }, 10000)
 
@@ -895,11 +959,11 @@ describe('chat-executor', () => {
 
       // First attempt fails
       await new Promise((r) => setTimeout(r, 10))
-      mockProcess1.emit('close', 1)
+      mockProcess1.emit('close', 2)
 
       // Wait for retry delay then trigger second attempt
       await new Promise((r) => setTimeout(r, 3100))
-      mockProcess2.emit('close', 1)
+      mockProcess2.emit('close', 2)
 
       await resultPromise
 
@@ -2325,11 +2389,11 @@ describe('chat-executor', () => {
 
       // First attempt fails
       await new Promise((r) => setTimeout(r, 10))
-      mockProcess1.emit('close', 1)
+      mockProcess1.emit('close', 2)
 
       // Wait for retry delay then trigger second attempt
       await new Promise((r) => setTimeout(r, 3100))
-      mockProcess2.emit('close', 1)
+      mockProcess2.emit('close', 2)
 
       await resultPromise
 
@@ -2544,7 +2608,7 @@ describe('chat-executor', () => {
 
       // First attempt fails
       await new Promise((r) => setTimeout(r, 10))
-      mockProcess1.emit('close', 1)
+      mockProcess1.emit('close', 2)
 
       // Wait for retry delay then let second attempt succeed
       await new Promise((r) => setTimeout(r, 3100))
@@ -2566,11 +2630,11 @@ describe('chat-executor', () => {
 
       // First attempt fails
       await new Promise((r) => setTimeout(r, 10))
-      mockProcess1.emit('close', 1)
+      mockProcess1.emit('close', 2)
 
       // Wait for retry delay then second attempt also fails
       await new Promise((r) => setTimeout(r, 3100))
-      mockProcess2.emit('close', 1)
+      mockProcess2.emit('close', 2)
 
       const result = await resultPromise
       expect(result.success).toBe(false)
@@ -2588,7 +2652,7 @@ describe('chat-executor', () => {
 
       // First attempt fails (non-cancel)
       await new Promise((r) => setTimeout(r, 10))
-      mockProcess1.emit('close', 1)
+      mockProcess1.emit('close', 2)
 
       // After retry delay, second attempt runs
       await new Promise((r) => setTimeout(r, 3100))
