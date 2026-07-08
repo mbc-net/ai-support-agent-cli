@@ -6,6 +6,21 @@ import { ERR_CODEX_AUTH_INVALID, buildCodexArgs, buildCodexMcpConfigOverrides, f
 
 describe('codex-runner', () => {
   describe('buildCodexArgs', () => {
+    const originalDockerValue = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+    const originalSandboxValue = process.env.CODEX_SANDBOX_MODE
+
+    beforeEach(() => {
+      delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      delete process.env.CODEX_SANDBOX_MODE
+    })
+
+    afterEach(() => {
+      if (originalDockerValue === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerValue
+      if (originalSandboxValue === undefined) delete process.env.CODEX_SANDBOX_MODE
+      else process.env.CODEX_SANDBOX_MODE = originalSandboxValue
+    })
+
     it('builds non-interactive JSONL args', () => {
       const args = buildCodexArgs('hello')
 
@@ -17,6 +32,23 @@ describe('codex-runner', () => {
         'workspace-write',
       ])
       expect(args.at(-1)).toBe('hello')
+    })
+
+    it('uses danger-full-access sandbox when running inside Docker', () => {
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      const args = buildCodexArgs('hello')
+
+      expect(args[args.indexOf('--sandbox') + 1]).toBe('danger-full-access')
+    })
+
+    it('allows CODEX_SANDBOX_MODE to override the Docker default', () => {
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+      process.env.CODEX_SANDBOX_MODE = 'workspace-write'
+
+      const args = buildCodexArgs('hello')
+
+      expect(args[args.indexOf('--sandbox') + 1]).toBe('workspace-write')
     })
 
     it('does not pass unsupported approval flags to codex exec', () => {
