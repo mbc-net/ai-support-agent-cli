@@ -132,6 +132,62 @@ describe('parsePlaywrightJsonOutput', () => {
     expect(result.totalTests).toBe(1)
   })
 
+  it('should parse specs from nested suites', () => {
+    const json = JSON.stringify({
+      suites: [
+        {
+          title: 'tmp spec file',
+          suites: [
+            {
+              title: 'ログイン画面',
+              specs: [
+                {
+                  title: 'ログインページが正しく表示される',
+                  tests: [
+                    {
+                      results: [{ status: 'passed', duration: 123, attachments: [] }],
+                    },
+                  ],
+                },
+              ],
+            },
+            {
+              title: '認証リダイレクト',
+              specs: [
+                {
+                  title: '認証済みユーザーはプロジェクト一覧にアクセスできる',
+                  tests: [
+                    {
+                      results: [
+                        {
+                          status: 'failed',
+                          duration: 5000,
+                          error: { message: 'Expected not /login/' },
+                          attachments: [],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.success).toBe(false)
+    expect(result.totalTests).toBe(2)
+    expect(result.passedTests).toBe(1)
+    expect(result.failedTests).toBe(1)
+    expect(result.steps.map((step) => step.title)).toEqual([
+      'ログインページが正しく表示される',
+      '認証済みユーザーはプロジェクト一覧にアクセスできる',
+    ])
+  })
+
   it('should include screenshotPath when present in attachments', () => {
     const json = makePlaywrightJson([
       {

@@ -409,6 +409,12 @@ function extractCodexText(event: Record<string, unknown>): { kind: 'delta' | 'fu
     if (msgText && isAssistantTextEvent(msg as Record<string, unknown>)) return msgText
   }
 
+  const response = event.response
+  if (response && typeof response === 'object') {
+    const responseText = pickText(response as Record<string, unknown>)
+    if (responseText && isAssistantTextEvent(event)) return responseText
+  }
+
   return undefined
 }
 
@@ -418,8 +424,37 @@ function pickText(value: Record<string, unknown>): { kind: 'delta' | 'full'; tex
   for (const key of ['message', 'content', 'text']) {
     const candidate = value[key]
     if (typeof candidate === 'string') return { kind: 'full', text: candidate }
+    if (Array.isArray(candidate)) {
+      const text = extractTextFromContentArray(candidate)
+      if (text) return { kind: 'full', text }
+    }
+  }
+  const output = value.output
+  if (Array.isArray(output)) {
+    const text = extractTextFromContentArray(output)
+    if (text) return { kind: 'full', text }
   }
   return undefined
+}
+
+function extractTextFromContentArray(items: unknown[]): string {
+  let text = ''
+  for (const item of items) {
+    if (typeof item === 'string') {
+      text += item
+      continue
+    }
+    if (!item || typeof item !== 'object') continue
+    const block = item as Record<string, unknown>
+    if (typeof block.text === 'string') {
+      text += block.text
+      continue
+    }
+    if (Array.isArray(block.content)) {
+      text += extractTextFromContentArray(block.content)
+    }
+  }
+  return text
 }
 
 function isAssistantTextEvent(event: Record<string, unknown>): boolean {

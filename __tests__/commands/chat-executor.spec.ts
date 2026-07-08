@@ -670,6 +670,40 @@ describe('chat-executor', () => {
       expect(spawn).toHaveBeenCalledWith('codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
     })
 
+    it('should extract Codex text from nested response content arrays', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 125,
+      }
+      spawn.mockReturnValue(mockProcess)
+      mockProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') {
+          cb(Buffer.from(JSON.stringify({
+            type: 'response.output_item.done',
+            item: {
+              type: 'message',
+              role: 'assistant',
+              content: [
+                { type: 'output_text', text: 'Nested Codex response' },
+              ],
+            },
+          }) + '\n'))
+        }
+      })
+      mockProcess.stderr.on.mockImplementation(() => {})
+      mockProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-codex-nested', client: mockClient, activeChatMode: 'codex', agentId: 'agent-1' })
+
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Nested Codex response')
+    })
+
     it('should not retry when Codex auth is invalid', async () => {
       const { spawn } = require('child_process')
       const mockProcess = {
