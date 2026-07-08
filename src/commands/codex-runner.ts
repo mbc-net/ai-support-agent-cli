@@ -63,7 +63,7 @@ export function buildCodexArgs(
     profile?: string
   },
 ): string[] {
-  const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
+  const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'danger-full-access']
   if (options?.profile) args.push('--profile', options.profile)
   if (options?.cwd) args.push('--cd', options.cwd)
   if (options?.model?.trim()) args.push('--model', options.model.trim())

@@ -14,7 +14,7 @@ describe('codex-runner', () => {
         '--json',
         '--skip-git-repo-check',
         '--sandbox',
-        'workspace-write',
+        'danger-full-access',
       ])
       expect(args.at(-1)).toBe('hello')
     })
