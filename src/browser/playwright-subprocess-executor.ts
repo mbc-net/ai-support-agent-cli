@@ -100,12 +100,9 @@ function parsePlaywrightJsonOutput(jsonContent: string): PlaywrightSubprocessRes
   let passedTests = 0
   let failedTests = 0
 
-  const suites = report.suites as Array<Record<string, unknown>> | undefined
-  if (Array.isArray(suites)) {
-    for (const suite of suites) {
-      const specs = suite.specs as Array<Record<string, unknown>> | undefined
-      if (!Array.isArray(specs)) continue
-
+  const collectSpecs = (suite: Record<string, unknown>): void => {
+    const specs = suite.specs as Array<Record<string, unknown>> | undefined
+    if (Array.isArray(specs)) {
       for (const spec of specs) {
         const tests = spec.tests as Array<Record<string, unknown>> | undefined
         if (!Array.isArray(tests)) continue
@@ -156,6 +153,20 @@ function parsePlaywrightJsonOutput(jsonContent: string): PlaywrightSubprocessRes
           }
         }
       }
+    }
+
+    const nestedSuites = suite.suites as Array<Record<string, unknown>> | undefined
+    if (Array.isArray(nestedSuites)) {
+      for (const nestedSuite of nestedSuites) {
+        collectSpecs(nestedSuite)
+      }
+    }
+  }
+
+  const suites = report.suites as Array<Record<string, unknown>> | undefined
+  if (Array.isArray(suites)) {
+    for (const suite of suites) {
+      collectSpecs(suite)
     }
   }
 
@@ -245,11 +256,14 @@ function spawnPlaywright(
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     // Find the config file relative to the spec file's project root
-    const configFile = path.join(__dirname, '..', '..', 'playwright.subprocess.config.ts')
+    const agentRootDir = path.join(__dirname, '..', '..')
+    const configFile = path.join(agentRootDir, 'playwright.subprocess.config.js')
+    const nodeModulesDir = path.join(agentRootDir, 'node_modules')
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       E2E_JSON_OUTPUT: resultFile,
+      NODE_PATH: nodeModulesDir,
     }
     if (baseUrl) {
       env.E2E_BASE_URL = baseUrl
@@ -263,9 +277,7 @@ function spawnPlaywright(
       configFile,
     ]
 
-    const playwrightBin = path.join(
-      __dirname, '..', '..', 'node_modules', '.bin', 'playwright',
-    )
+    const playwrightBin = path.join(nodeModulesDir, '.bin', 'playwright')
 
     logger.info(
       `[playwright-subprocess] Spawning: ${playwrightBin} ${args.join(' ')}`,

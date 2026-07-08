@@ -1,6 +1,7 @@
-import { defineConfig } from '@playwright/test';
+const { defineConfig } = require('@playwright/test')
 
-export default defineConfig({
+module.exports = defineConfig({
+  testDir: '/tmp',
   timeout: 120_000,
   use: {
     headless: true,
@@ -10,4 +11,4 @@ export default defineConfig({
   },
   reporter: [['json', { outputFile: process.env.E2E_JSON_OUTPUT ?? '/tmp/e2e-result.json' }]],
   workers: 1,
-});
+})

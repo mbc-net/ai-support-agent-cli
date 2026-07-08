@@ -132,6 +132,62 @@ describe('parsePlaywrightJsonOutput', () => {
     expect(result.totalTests).toBe(1)
   })
 
+  it('should parse specs from nested suites', () => {
+    const json = JSON.stringify({
+      suites: [
+        {
+          title: 'tmp spec file',
+          suites: [
+            {
+              title: 'ログイン画面',
+              specs: [
+                {
+                  title: 'ログインページが正しく表示される',
+                  tests: [
+                    {
+                      results: [{ status: 'passed', duration: 123, attachments: [] }],
+                    },
+                  ],
+                },
+              ],
+            },
+            {
+              title: '認証リダイレクト',
+              specs: [
+                {
+                  title: '認証済みユーザーはプロジェクト一覧にアクセスできる',
+                  tests: [
+                    {
+                      results: [
+                        {
+                          status: 'failed',
+                          duration: 5000,
+                          error: { message: 'Expected not /login/' },
+                          attachments: [],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.success).toBe(false)
+    expect(result.totalTests).toBe(2)
+    expect(result.passedTests).toBe(1)
+    expect(result.failedTests).toBe(1)
+    expect(result.steps.map((step) => step.title)).toEqual([
+      'ログインページが正しく表示される',
+      '認証済みユーザーはプロジェクト一覧にアクセスできる',
+    ])
+  })
+
   it('should include screenshotPath when present in attachments', () => {
     const json = makePlaywrightJson([
       {
@@ -891,7 +947,7 @@ describe('runPlaywrightSubprocess', () => {
     warnSpy.mockRestore()
   })
 
-  it('should not set any extra env vars when envVars is not provided', async () => {
+  it('should set only internal env vars when envVars is not provided', async () => {
     const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
     mockFs.readFile.mockResolvedValue(jsonOutput as any)
     mockSpawn.mockReturnValue(createMockChild(0) as any)
@@ -904,6 +960,23 @@ describe('runPlaywrightSubprocess', () => {
     const spawnCall = mockSpawn.mock.calls[0]
     const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
     expect(spawnEnv.E2E_JSON_OUTPUT).toBe('/tmp/ai-support-e2e-exec-envvars-none-result.json')
+  })
+
+  it('should set NODE_PATH to bundled node_modules so /tmp specs can import @playwright/test', async () => {
+    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
+    mockFs.readFile.mockResolvedValue(jsonOutput as any)
+    mockSpawn.mockReturnValue(createMockChild(0) as any)
+
+    await runPlaywrightSubprocess({
+      script: "import { test } from '@playwright/test'; test('t', async () => {})",
+      executionId: 'exec-node-path',
+      envVars: { NODE_PATH: '/tmp/evil-node-path' },
+    })
+
+    const spawnCall = mockSpawn.mock.calls[0]
+    const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
+    expect(spawnEnv.NODE_PATH).toContain('node_modules')
+    expect(spawnEnv.NODE_PATH).not.toBe('/tmp/evil-node-path')
   })
 
   it('should pass spec file and config file as playwright arguments', async () => {
@@ -920,5 +993,6 @@ describe('runPlaywrightSubprocess', () => {
     expect(spawnArgs[0]).toBe('test')
     expect(spawnArgs[1]).toContain('ai-support-e2e-exec-args.spec.ts')
     expect(spawnArgs).toContain('--config')
+    expect(spawnArgs[spawnArgs.indexOf('--config') + 1]).toContain('playwright.subprocess.config.js')
   })
 })
