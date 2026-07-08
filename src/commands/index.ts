@@ -154,6 +154,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       client: opts.client,
       serverConfig: opts.serverConfig,
       activeChatMode,
+      availableChatModes: opts.availableChatModes,
       agentId: opts.agentId,
       projectDir: opts.projectDir,
       projectConfig: opts.projectConfig,
