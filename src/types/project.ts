@@ -1,4 +1,4 @@
-import type { AgentChatModeOverrides } from './config'
+import type { AgentChatMode, AgentChatModeOverrides } from './config'
 
 export interface ProjectConfigResponse {
   configHash: string
@@ -14,6 +14,7 @@ export interface ProjectConfigResponse {
     builtinFallbackEnabled: boolean
     externalAgentEnabled: boolean
     allowedTools: string[]
+    agentChatModeFallbackOrder?: AgentChatMode[]
     claudeCodeConfig?: {
       additionalDirs?: string[]
       appendSystemPrompt?: string

@@ -20,6 +20,7 @@ export interface ExecuteCommandOptions {
   client?: ApiClient
   serverConfig?: AgentServerConfig
   activeChatMode?: AgentChatMode
+  activeChatModeExplicit?: boolean
   availableChatModes?: AgentChatMode[]
   agentId?: string
   projectDir?: string
@@ -77,7 +78,9 @@ function resolveCommandChatMode(
         ? 'e2eScriptFix'
         : 'chat'
   const overrideMode = opts.serverConfig?.agentChatModeOverrides?.[overrideKey]
-  const selectedMode = payloadMode ?? overrideMode ?? opts.activeChatMode
+  const selectedMode = payloadMode
+    ?? overrideMode
+    ?? (opts.activeChatModeExplicit === false ? undefined : opts.activeChatMode)
 
   if (!selectedMode) return undefined
 

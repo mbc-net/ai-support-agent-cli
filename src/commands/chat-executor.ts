@@ -1,6 +1,6 @@
 import { ApiClient } from '../api-client'
 import { type AwsCredentialResult, buildAwsProfileCredentials, buildSingleAccountAwsEnv } from '../aws-credential-builder'
-import { CHAT_MAX_ATTEMPTS, CHAT_RETRY_DELAY_MS, ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, ERR_CLAUDE_CLI_NOT_FOUND, LOG_MESSAGE_LIMIT } from '../constants'
+import { CHAT_MAX_ATTEMPTS, CHAT_RETRY_DELAY_MS, ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, ERR_CLAUDE_CLI_NOT_FOUND, ERR_CODEX_CLI_NOT_FOUND, LOG_MESSAGE_LIMIT } from '../constants'
 import { buildGitCredentialEnv } from '../git-credential-setup'
 import { logger } from '../logger'
 import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatFileInfo, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
@@ -84,7 +84,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
   }
 
   const payloadMode = parseAgentChatModeOverride(payload.agentChatMode)
-  const modes = resolveChatModeCandidates(payloadMode, activeChatMode, availableChatModes)
+  const modes = resolveChatModeCandidates(payloadMode, activeChatMode, availableChatModes, serverConfig, projectConfig)
   const mode = modes[0] ?? 'claude_code'
 
   // API モードでは projectConfig.envVars が反映されないため、Web で
@@ -98,19 +98,28 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
   }
 
   let lastResult: CommandResult | undefined
-  for (const candidate of modes) {
+  for (let i = 0; i < modes.length; i++) {
+    const candidate = modes[i]
+    const hasFallbackCandidate = i < modes.length - 1
     switch (candidate) {
       case 'api':
         return executeApiChatCommand(payload, commandId, client, serverConfig, agentId)
-      case 'codex':
-        return executeCliChat('codex', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort)
+      case 'codex': {
+        const result = await executeCliChat('codex', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, hasFallbackCandidate)
+        if (result.success || !isRuntimeUnavailable('codex', result) || !hasFallbackCandidate) return result
+        const fallbackError = String(result.error ?? '')
+        logger.warn(`[chat] codex unavailable, falling back to ${modes[i + 1]}: ${fallbackError}`)
+        lastResult = result
+        break
+      }
       case 'claude_code':
       default: {
-        const result = await executeCliChat('claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, modes.length > 1)
-        if (result.success || !isClaudeCodeUnavailable(result) || !modes.includes('codex')) return result
-        const fallbackError = result.success ? '' : String(result.error ?? '')
-        logger.warn(`[chat] claude_code unavailable, falling back to codex: ${fallbackError}`)
+        const result = await executeCliChat('claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, hasFallbackCandidate)
+        if (result.success || !isRuntimeUnavailable('claude_code', result) || !hasFallbackCandidate) return result
+        const fallbackError = String(result.error ?? '')
+        logger.warn(`[chat] claude_code unavailable, falling back to ${modes[i + 1]}: ${fallbackError}`)
         lastResult = result
+        break
       }
     }
   }
@@ -122,13 +131,25 @@ function resolveChatModeCandidates(
   payloadMode: AgentChatMode | undefined,
   activeChatMode: AgentChatMode | undefined,
   availableChatModes: AgentChatMode[] | undefined,
+  serverConfig: AgentServerConfig | undefined,
+  projectConfig: ProjectConfigResponse | undefined,
 ): AgentChatMode[] {
   if (payloadMode) return [payloadMode]
-  const selectedMode = activeChatMode ?? resolveDefaultChatMode(availableChatModes)
-  if (selectedMode !== 'claude_code') return [selectedMode]
+  if (activeChatMode) return [activeChatMode]
 
-  const codexAvailable = availableChatModes?.includes('codex') === true
-  return codexAvailable ? ['claude_code', 'codex'] : ['claude_code']
+  const fallbackOrder = serverConfig?.agentChatModeFallbackOrder
+    ?? projectConfig?.agent.agentChatModeFallbackOrder
+    ?? ['claude_code', 'codex']
+  const candidates = filterAvailableChatModes(fallbackOrder, availableChatModes)
+  return candidates.length > 0 ? candidates : [resolveDefaultChatMode(availableChatModes)]
+}
+
+function filterAvailableChatModes(
+  modes: AgentChatMode[],
+  availableChatModes: AgentChatMode[] | undefined,
+): AgentChatMode[] {
+  if (!availableChatModes) return modes
+  return modes.filter((mode) => availableChatModes.includes(mode))
 }
 
 function resolveDefaultChatMode(availableChatModes: AgentChatMode[] | undefined): AgentChatMode {
@@ -139,6 +160,14 @@ function resolveDefaultChatMode(availableChatModes: AgentChatMode[] | undefined)
 
 function isClaudeCodeUnavailable(result: CommandResult): boolean {
   return !result.success && typeof result.error === 'string' && result.error.includes(ERR_CLAUDE_CLI_NOT_FOUND)
+}
+
+function isCodexUnavailable(result: CommandResult): boolean {
+  return !result.success && typeof result.error === 'string' && result.error.includes(ERR_CODEX_CLI_NOT_FOUND)
+}
+
+function isRuntimeUnavailable(mode: 'claude_code' | 'codex', result: CommandResult): boolean {
+  return mode === 'claude_code' ? isClaudeCodeUnavailable(result) : isCodexUnavailable(result)
 }
 
 /**
@@ -157,7 +186,7 @@ async function executeCliChat(
   mcpConfigPath?: string,
   tenantCode?: string,
   browserLocalPort?: number,
-  suppressClaudeUnavailableError = false,
+  suppressRuntimeUnavailableError = false,
 ): Promise<CommandResult> {
   let lastResult: CommandResult = { success: false, error: 'Chat command failed after all retry attempts' }
 
@@ -168,7 +197,7 @@ async function executeCliChat(
     }
 
     const result = await executeCliChatOnce(
-      mode, payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, suppressClaudeUnavailableError,
+      mode, payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, suppressRuntimeUnavailableError,
     )
 
     if (result.success) return result
@@ -177,7 +206,7 @@ async function executeCliChat(
     const errorMsg = typeof result.error === 'string' ? result.error : ''
     if (errorMsg.toLowerCase().includes('cancel')) return result
     if (errorMsg.includes(ERR_CODEX_AUTH_INVALID)) return result
-    if (mode === 'claude_code' && isClaudeCodeUnavailable(result)) return result
+    if (isRuntimeUnavailable(mode, result)) return result
 
     lastResult = result
 
@@ -206,7 +235,7 @@ async function executeCliChatOnce(
   mcpConfigPath?: string,
   tenantCode?: string,
   browserLocalPort?: number,
-  suppressClaudeUnavailableError = false,
+  suppressRuntimeUnavailableError = false,
 ): Promise<CommandResult> {
   const message = parseString(payload.message)
   if (!message) {
@@ -389,11 +418,17 @@ async function executeCliChatOnce(
   } catch (error) {
     cleanupDownloads?.()
     cleanupGitCredentials?.()
-    if (suppressClaudeUnavailableError && mode === 'claude_code' && getErrorMessage(error).includes(ERR_CLAUDE_CLI_NOT_FOUND)) {
+    if (suppressRuntimeUnavailableError && isRuntimeUnavailableErrorMessage(mode, getErrorMessage(error))) {
       return errorResult(getErrorMessage(error))
     }
     return handleChatError(error, commandId, 'chat', sendChunk)
   }
+}
+
+function isRuntimeUnavailableErrorMessage(mode: 'claude_code' | 'codex', message: string): boolean {
+  return mode === 'claude_code'
+    ? message.includes(ERR_CLAUDE_CLI_NOT_FOUND)
+    : message.includes(ERR_CODEX_CLI_NOT_FOUND)
 }
 
 /**
