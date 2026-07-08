@@ -89,6 +89,7 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
           client: mockClient,
           serverConfig,
           agentId: 'agent-2',
+          availableChatModes: undefined,
           projectDir: '/some/dir',
           projectConfig,
           mcpConfigPath: '/path/to/mcp.json',
@@ -130,6 +131,7 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
       expect(mockExecuteChatCommand).toHaveBeenCalledWith(
         expect.objectContaining({
           activeChatMode: 'codex',
+          availableChatModes: ['claude_code', 'codex'],
         }),
       )
       expect((result as CommandResult).success).toBe(true)
