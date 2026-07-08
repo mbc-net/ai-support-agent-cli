@@ -149,8 +149,9 @@ function filterAvailableChatModes(
   modes: AgentChatMode[],
   availableChatModes: AgentChatMode[] | undefined,
 ): AgentChatMode[] {
-  if (!availableChatModes) return modes
-  return modes.filter((mode) => availableChatModes.includes(mode))
+  const uniqueModes = Array.from(new Set(modes))
+  if (!availableChatModes) return uniqueModes
+  return uniqueModes.filter((mode) => availableChatModes.includes(mode))
 }
 
 function resolveDefaultChatMode(availableChatModes: AgentChatMode[] | undefined): AgentChatMode {

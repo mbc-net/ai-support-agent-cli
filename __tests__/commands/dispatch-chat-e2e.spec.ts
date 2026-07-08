@@ -256,6 +256,7 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
           commandId: 'e2e-cmd-2',
           client: mockClient,
           serverConfig,
+          availableChatModes: ['claude_code', 'codex'],
           agentId: 'agent-3',
           projectDir: '/project/dir',
           mcpConfigPath: '/mcp.json',
@@ -269,6 +270,7 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
           commandId: 'e2e-cmd-2',
           client: mockClient,
           serverConfig,
+          availableChatModes: ['claude_code', 'codex'],
           agentId: 'agent-3',
           projectDir: '/project/dir',
           mcpConfigPath: '/mcp.json',
@@ -313,6 +315,7 @@ describe('commands/dispatch — chat and e2e_test happy paths', () => {
       expect(mockExecuteE2eTest).toHaveBeenCalledWith(
         expect.objectContaining({
           activeChatMode: 'codex',
+          availableChatModes: ['claude_code', 'codex'],
         }),
       )
     })
