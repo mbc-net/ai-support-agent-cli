@@ -558,14 +558,19 @@ describe('e2e-test-executor', () => {
     expect(result.success).toBe(true)
   })
 
-  it('should reject AI mode with a Playwright script when no step definitions are provided', async () => {
+  it('should use AI mode with a Playwright script even when no step definitions are provided', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+      success: true,
+      data: 'Done',
+    })
     mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
 
+    const playwrightScript = "const { test } = require('@playwright/test'); test('t', async ({ page }) => {})"
     const options: ExecuteE2eTestOptions = {
       ...baseOptions,
       payload: {
         ...baseOptions.payload,
-        playwrightScript: "const { test } = require('@playwright/test'); test('t', async ({ page }) => {})",
+        playwrightScript,
         executionMethod: 'ai',
         steps: undefined,
       },
@@ -573,23 +578,15 @@ describe('e2e-test-executor', () => {
 
     const result = await executeE2eTest(options)
 
-    expect(result.success).toBe(false)
-    if (!result.success) {
-      expect(result.error).toBe(
-        'AI execution mode cannot verify a script-only E2E test without step definitions',
-      )
-    }
-    expect(chatExecutor.executeChatCommand).not.toHaveBeenCalled()
-    expect(playwrightTestRunner.runPlaywrightScript).not.toHaveBeenCalled()
-    expect(mockClient.updateE2eExecutionStatus).toHaveBeenCalledWith(
-      'mbc',
-      'MBC_01',
-      'exec-1',
+    expect(result.success).toBe(true)
+    expect(chatExecutor.executeChatCommand).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: 'error',
-        errorMessage: 'AI execution mode cannot verify a script-only E2E test without step definitions',
+        payload: expect.objectContaining({
+          message: expect.stringContaining(playwrightScript),
+        }),
       }),
     )
+    expect(playwrightTestRunner.runPlaywrightScript).not.toHaveBeenCalled()
   })
 
   it('should handle script execution throwing an error', async () => {

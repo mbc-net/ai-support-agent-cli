@@ -66,16 +66,8 @@ export async function executeE2eTest(
   if (!executionId) {
     return errorResult('executionId is required for e2e_test')
   }
-  if (!scenario && (!playwrightScript || executionMethod === 'ai')) {
+  if (!scenario && !playwrightScript) {
     return errorResult('scenario is required for e2e_test')
-  }
-  if (playwrightScript && executionMethod === 'ai' && !steps?.length) {
-    const message = 'AI execution mode cannot verify a script-only E2E test without step definitions'
-    await reportExecutionStatus(
-      client, tenantCode, projectCode, executionId, 'error',
-      undefined, message, parseString(payload.testCaseId) ?? undefined,
-    )
-    return errorResult(message)
   }
   if (!agentId) {
     return errorResult('agentId is required for e2e_test')
@@ -137,6 +129,7 @@ export async function executeE2eTest(
     targetUrl: targetUrl ?? undefined,
     credentialId: credentialId ?? undefined,
     startTime,
+    playwrightScript: playwrightScript ?? undefined,
   })
 }
 
@@ -284,12 +277,13 @@ async function executeAiMode(
     scenario: string
     targetUrl?: string
     credentialId?: string
+    playwrightScript?: string
     startTime: number
   },
 ): Promise<CommandResult> {
   const { client, commandId, agentId, tenantCode } = options
   const projectCode = options.projectConfig?.project?.projectCode
-  const { executionId, testCaseId, scenario, targetUrl, credentialId, startTime } = params
+  const { executionId, testCaseId, scenario, targetUrl, credentialId, playwrightScript, startTime } = params
 
   // テスト用システムプロンプトを構築
   const systemPromptParts: string[] = [
@@ -322,16 +316,30 @@ async function executeAiMode(
     )
   }
 
-  systemPromptParts.push(
-    '## テストシナリオ',
-    scenario,
-    '',
-  )
+  if (scenario) {
+    systemPromptParts.push(
+      '## テストシナリオ',
+      scenario,
+      '',
+    )
+  }
 
   if (Array.isArray(options.payload.steps) && options.payload.steps.length > 0) {
     systemPromptParts.push(
       '## ステップ定義',
       JSON.stringify(options.payload.steps, null, 2),
+      '',
+    )
+  }
+
+  if (playwrightScript) {
+    systemPromptParts.push(
+      '## Playwright スクリプト参照',
+      '以下のPlaywrightスクリプトと同等の操作・検証を、ブラウザ操作ツールで実行してください。',
+      'スクリプトを直接実行せず、各主要操作または検証の後に report_test_step ツールで結果を報告してください。',
+      '```typescript',
+      playwrightScript,
+      '```',
       '',
     )
   }
