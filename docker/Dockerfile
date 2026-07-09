@@ -5,7 +5,12 @@ FROM node:24-slim
 # =============================================================================
 # Bust cache when Debian GPG signatures expire (bump this date to force full rebuild)
 ARG APT_CACHE_BUST=2026-05-21
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# `apt-get update` is retried (3 attempts, 5s/15s backoff) at every occurrence in
+# this file to absorb transient DNS/network failures reaching deb.debian.org
+# (e.g. Docker daemon DNS hiccups on Ubuntu 24.04+ hosts) that would otherwise
+# abort the whole build on the first hit.
+RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
+    && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip git openssh-client vim jq \
     default-mysql-client postgresql-client \
     gnupg apt-transport-https \
@@ -75,7 +80,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
       curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /usr/share/keyrings/microsoft.gpg \
       && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
           > /etc/apt/sources.list.d/mssql-release.list \
-      && apt-get update \
+      && (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
       && ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18 unixodbc-dev \
       && rm -rf /var/lib/apt/lists/*; \
     fi
@@ -85,14 +90,16 @@ ENV PATH="$PATH:/opt/mssql-tools18/bin"
 # Re-install debian-archive-keyring to refresh GPG keys before apt-get update.
 # This prevents "invalid signature" errors when this layer runs on a cached
 # base where the Debian signing keys have been rotated since the cache was built.
-RUN apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false \
-        -o Acquire::Check-Date=false || true \
+RUN (apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false \
+        || (sleep 5 && apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false) \
+        || (sleep 15 && apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false) \
+        || true) \
     && apt-get install -y --allow-unauthenticated debian-archive-keyring \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update \
+    && (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/* \
     && ARCH=$(dpkg --print-architecture) \
