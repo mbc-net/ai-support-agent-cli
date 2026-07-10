@@ -12,6 +12,7 @@ jest.mock('../src/aws-profile', () => ({
 }))
 jest.mock('../src/mcp/config-writer', () => ({
   writeMcpConfig: jest.fn().mockReturnValue('/tmp/mcp.json'),
+  cleanupStaleCommandMcpConfigs: jest.fn().mockReturnValue(0),
 }))
 jest.mock('../src/ssh-config-setup', () => ({
   setupSshConfig: jest.fn(),

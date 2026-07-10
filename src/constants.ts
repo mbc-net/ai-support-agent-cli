@@ -201,6 +201,8 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/tools/send-slack-message`,
   AGENT_TOOL_TRIGGER_ALARM: (tenantCode: string) =>
     `/api/${tenantCode}/agent/tools/trigger-alarm`,
+  AGENT_TOOL_READ_SLACK_THREAD: (tenantCode: string) =>
+    `/api/${tenantCode}/agent/tools/read-slack-thread`,
   // ECS execution agent registration (ecs publish)
   ECS_AGENTS: (tenantCode: string) => `/api/${tenantCode}/agent/ecs-agents`,
 } as const
