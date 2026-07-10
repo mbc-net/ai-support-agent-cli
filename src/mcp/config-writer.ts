@@ -1,5 +1,9 @@
-import { mkdirSync, writeFileSync } from 'fs'
+import { randomUUID } from 'crypto'
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
+
+import { logger } from '../logger'
+import { getErrorMessage } from '../utils'
 
 export interface BacklogMcpConfig {
   domain: string
@@ -44,6 +48,26 @@ export function buildMcpConfig(
  * ブラウザローカルポートの環境変数名
  */
 export const BROWSER_LOCAL_PORT_ENV = 'AI_SUPPORT_BROWSER_LOCAL_PORT'
+
+/**
+ * 実際のSlackチャット会話ID（conversationId）の環境変数名。
+ *
+ * read_slack_thread MCPツールが子プロセス（Claude Code CLI がさらに spawn する
+ * MCP サーバー）側で `process.env[CONVERSATION_ID_ENV]` として読み取り、現在処理中の
+ * Slackスレッドを逆引きするために使用する。
+ *
+ * 注意: `@modelcontextprotocol/sdk` の `StdioClientTransport` は MCP サーバー子プロセスへ
+ * `{ ...getDefaultEnvironment(), ...serverParams.env }` のみを渡す実装になっており、
+ * `getDefaultEnvironment()` は HOME/LOGNAME/PATH/SHELL/TERM/USER（Windows: APPDATA 等）
+ * のみを継承する。つまり呼び出し元プロセス（claude/codex CLI）が任意に持つ
+ * `process.env.AI_SUPPORT_CONVERSATION_ID` は MCP サーバー子プロセスへは自動継承されず、
+ * MCP 設定ファイルの `env` に明示的に含まれている場合のみ子プロセスに渡る
+ * （`node_modules/@modelcontextprotocol/sdk/dist/cjs/client/stdio.js` で確認済み）。
+ * このため conversationId は `writeMcpConfig` が書くプロジェクト単位の静的ファイルではなく、
+ * チャットコマンド単位で `writeCommandMcpConfig` が書く per-command ファイルの `env` に
+ * 明示的に埋め込む必要がある。
+ */
+export const CONVERSATION_ID_ENV = 'AI_SUPPORT_CONVERSATION_ID'
 
 /**
  * MCP 設定ファイルを書き出す
@@ -109,5 +133,130 @@ export function writeMcpConfig(
   })
 
   return configPath
+}
+
+interface McpServerEntry {
+  command?: unknown
+  args?: unknown
+  env?: Record<string, unknown>
+}
+
+interface McpConfigFile {
+  mcpServers?: Record<string, McpServerEntry>
+}
+
+/**
+ * commandId をファイル名に安全に埋め込めるよう、英数字・アンダースコア・ハイフン
+ * 以外の文字を `_` に置換する（パストラバーサル対策）。
+ */
+function sanitizeCommandIdForFilename(commandId: string): string {
+  return commandId.replace(/[^A-Za-z0-9_-]/g, '_')
+}
+
+/**
+ * チャットコマンド（Slackメッセージ）単位の MCP 設定ファイルを書き出す。
+ *
+ * `writeMcpConfig` が書く `.ai-support-agent/mcp/config.json` はプロジェクト単位の
+ * 静的ファイルで、config sync 時にのみ再生成され、複数のチャットコマンド（複数の
+ * Slack会話が並行/連続実行される場合を含む）から共有される。conversationId は
+ * コマンド単位で変わる値であり、この静的ファイルに書き込むと「別会話の
+ * conversationId が残ったまま次のコマンドに使われる」「並行実行時に競合する」
+ * リスクがある（`agent-transport.ts` の `void handleNotification(...)` により、
+ * 同一エージェントが複数コマンドを並行処理しうるため）。
+ *
+ * そのため、`ai-support-agent` サーバーの `env` に conversationId を埋め込んだ
+ * コマンド専用の設定ファイルを都度書き出す。呼び出し元はコマンド完了後に
+ * このファイルを削除すること。
+ *
+ * ファイル名には commandId（サニタイズ済み、デバッグ用）に加えて `randomUUID()` を
+ * 必ず含める。commandId は外部API由来で形式保証がなく、サニタイズ後に別の commandId
+ * と衝突しうる（例: `cmd/a` と `cmd_a` はいずれも `cmd_a` に正規化される）。UUID を
+ * 含めないと、並行実行中の別コマンドの設定ファイルを誤って参照・削除してしまい、
+ * conversationId の混線やMCPサーバー起動失敗を招く。書き込みは排他生成（`wx` フラグ）
+ * で行い、万一の衝突は例外として検知する（呼び出し元は失敗時に共有静的設定へ
+ * フォールバックする設計になっている）。
+ *
+ * `read_slack_thread` ツールが子プロセス側で `process.env[CONVERSATION_ID_ENV]` として
+ * 読み取れるのは、MCP サーバー子プロセスへは `StdioClientTransport` 経由で
+ * 設定ファイルの `env` に明示されたキーのみが渡され、呼び出し元プロセス
+ * （claude/codex CLI）の任意の環境変数は自動継承されないため（`CONVERSATION_ID_ENV`
+ * の定義コメント参照）。
+ */
+export function writeCommandMcpConfig(
+  baseConfigPath: string,
+  commandId: string,
+  conversationId: string,
+): string {
+  const raw = readFileSync(baseConfigPath, 'utf-8')
+  const config = JSON.parse(raw) as McpConfigFile
+
+  const server = config.mcpServers?.['ai-support-agent']
+  if (server) {
+    server.env = {
+      ...(server.env ?? {}),
+      [CONVERSATION_ID_ENV]: conversationId,
+    }
+  }
+
+  const dir = dirname(baseConfigPath)
+  const commandConfigPath = join(
+    dir,
+    `config-${sanitizeCommandIdForFilename(commandId)}-${randomUUID()}.json`,
+  )
+
+  writeFileSync(commandConfigPath, JSON.stringify(config, null, 2), {
+    mode: 0o600,
+    encoding: 'utf-8',
+    // 排他生成: 同名ファイルが既に存在する場合は例外を投げる（UUID衝突の理論上の
+    // 可能性・命名ロジックのバグを検知するための多層防御）。
+    flag: 'wx',
+  })
+
+  return commandConfigPath
+}
+
+/**
+ * 孤立した per-command MCP 設定ファイル（`config-*.json`）を一括削除する。
+ *
+ * 通常はコマンド完了時（chat-executor.ts の cleanupCommandMcpConfig）に削除されるが、
+ * エージェント process が SIGKILL / OOM 等で異常終了した場合、平文トークンと
+ * conversationId を含む孤立ファイルが `.ai-support-agent/mcp/` に残り続ける。
+ * `TerminalSession.cleanupStaleSandboxes` と同じパターンで、一定時間以上前のものを
+ * 掃除する。共有静的ファイル（`config.json` 自体、`baseConfigPath` の basename）や
+ * 無関係なファイルには触れない。
+ *
+ * @param baseConfigPath `getMcpConfigPath(projectDir)` が返す静的設定ファイルのパス
+ * @param maxAgeMs 削除対象とする経過時間 (ms)。デフォルト 24 時間。0 で全削除
+ * @returns 削除した件数
+ */
+export function cleanupStaleCommandMcpConfigs(
+  baseConfigPath: string,
+  maxAgeMs: number = 24 * 60 * 60 * 1000,
+): number {
+  const dir = dirname(baseConfigPath)
+  let entries: string[]
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return 0
+  }
+
+  const now = Date.now()
+  let removed = 0
+  for (const name of entries) {
+    if (!name.startsWith('config-') || !name.endsWith('.json')) continue
+    const fullPath = join(dir, name)
+    try {
+      const stat = statSync(fullPath)
+      if (maxAgeMs > 0 && now - stat.mtimeMs < maxAgeMs) continue
+      rmSync(fullPath, { force: true })
+      removed++
+    } catch (error) {
+      // 個々のファイル失敗で掃除全体を止めないが、無音のまま握り潰さず記録する
+      // （どのファイルが掃除されなかったか運用上追跡できるようにする）。
+      logger.warn(`[mcp-config] Failed to clean up stale per-command MCP config ${name}: ${getErrorMessage(error)}`)
+    }
+  }
+  return removed
 }
 

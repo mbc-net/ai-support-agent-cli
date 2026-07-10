@@ -7,7 +7,7 @@ import { detectAvailableChatModes, resolveActiveChatMode } from './chat-mode-det
 import { CONFIG_SYNC_DEBOUNCE_MS } from './constants'
 import { logger } from './logger'
 import { writeAwsConfig } from './aws-profile'
-import { writeMcpConfig } from './mcp/config-writer'
+import { cleanupStaleCommandMcpConfigs, writeMcpConfig } from './mcp/config-writer'
 import { getReposDir, getSshDir } from './project-dir'
 import { syncProjectConfig } from './project-config-sync'
 import { syncRepositories, syncRepositoryByCode } from './repo-sync'
@@ -207,6 +207,20 @@ export async function applyProjectConfig(
         deps.browserLocalPort,
       )
       logger.info(`${deps.prefix} MCP config written: ${state.mcpConfigPath}`)
+
+      // 孤立した per-command MCP 設定ファイル（config-*.json）を掃除する。
+      // 通常は chat-executor.ts がコマンド完了時に削除するが、agent process が
+      // SIGKILL / OOM で異常終了すると平文トークン・conversationId を含むファイルが
+      // 残り続ける。config sync のたびに実行することで自己修復する
+      // （TerminalSession.cleanupStaleSandboxes と同じ設計）。
+      try {
+        const removedCount = cleanupStaleCommandMcpConfigs(state.mcpConfigPath)
+        if (removedCount > 0) {
+          logger.info(`${deps.prefix} Cleaned up ${removedCount} stale per-command MCP config file(s)`)
+        }
+      } catch (error) {
+        logger.warn(`${deps.prefix} Failed to clean up stale per-command MCP config files: ${getErrorMessage(error)}`)
+      }
     } catch (error) {
       logger.warn(`${deps.prefix} Failed to write MCP config: ${getErrorMessage(error)}`)
     }

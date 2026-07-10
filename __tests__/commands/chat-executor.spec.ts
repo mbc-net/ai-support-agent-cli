@@ -1,3 +1,7 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+
 import type { ApiClient } from '../../src/api-client'
 import {
   executeChatCommand,
@@ -10,6 +14,8 @@ import {
 import { ERR_CODEX_AUTH_INVALID } from '../../src/commands/codex-runner'
 import { cancelProcess as cancelChatProcess, _getRunningProcesses } from '../../src/commands/process-manager'
 import { ERR_AGENT_ID_REQUIRED, ERR_CLAUDE_CLI_NOT_FOUND, ERR_CODEX_CLI_NOT_FOUND, ERR_MESSAGE_REQUIRED } from '../../src/constants'
+import { logger } from '../../src/logger'
+import { writeMcpConfig } from '../../src/mcp/config-writer'
 import type { AgentServerConfig, ChatPayload, ProjectConfigResponse } from '../../src/types'
 import { createMockChildProcess } from '../helpers/mock-factory'
 import { ndjsonAssistant, ndjsonResult } from '../helpers/ndjson-builders'
@@ -2161,6 +2167,295 @@ describe('chat-executor', () => {
       expect(env).not.toHaveProperty('AI_SUPPORT_TENANT_CODE')
       expect(env).not.toHaveProperty('AI_SUPPORT_PROJECT_CODE')
       expect(env).not.toHaveProperty('AI_SUPPORT_CONVERSATION_ID')
+    })
+  })
+
+  describe('per-command MCP config (AI_SUPPORT_CONVERSATION_ID propagation to the MCP server subprocess)', () => {
+    // `@modelcontextprotocol/sdk`'s StdioClientTransport only passes
+    // `{ ...getDefaultEnvironment(), ...serverParams.env }` to the MCP server child
+    // process it spawns (HOME/LOGNAME/PATH/SHELL/TERM/USER + whatever is explicitly
+    // in the mcp-config.json `env`). It does NOT inherit arbitrary env vars from the
+    // calling claude/codex CLI process. So AI_SUPPORT_CONVERSATION_ID must be baked
+    // into the actual `--mcp-config` file used for this specific invocation, not
+    // merely set on the claude/codex CLI process's own env.
+    let tmpDir: string
+
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'chat-executor-mcp-'))
+    })
+
+    afterEach(() => {
+      rmSync(tmpDir, { recursive: true, force: true })
+    })
+
+    function captureMcpConfigArg(spawnMock: jest.Mock): { getPath: () => string | undefined } {
+      let capturedPath: string | undefined
+      spawnMock.mockImplementation((_cmd: string, args: string[]) => {
+        const idx = args.indexOf('--mcp-config')
+        capturedPath = idx >= 0 ? args[idx + 1] : undefined
+        return createMockChildProcess()
+      })
+      return { getPath: () => capturedPath }
+    }
+
+    it('should write a per-command MCP config embedding AI_SUPPORT_CONVERSATION_ID and pass its path via --mcp-config', async () => {
+      const { spawn } = require('child_process')
+      const baseConfigPath = writeMcpConfig(tmpDir, 'http://localhost:3030', 'tenant:tok:raw', 'TEST_01', '/path/to/server.js')
+
+      let capturedPath: string | undefined
+      let capturedConversationId: string | undefined
+      const mockProcess = createMockChildProcess()
+      spawn.mockImplementation((_cmd: string, args: string[]) => {
+        const idx = args.indexOf('--mcp-config')
+        capturedPath = idx >= 0 ? args[idx + 1] : undefined
+        if (capturedPath) {
+          const content = JSON.parse(readFileSync(capturedPath, 'utf-8'))
+          capturedConversationId = content.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID
+        }
+        return mockProcess
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: { message: 'hello', conversationId: 'conv-999' },
+        commandId: 'cmd-mcp-conv-99',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: baseConfigPath,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+
+      expect(result.success).toBe(true)
+      expect(capturedPath).toBeDefined()
+      expect(capturedPath).not.toBe(baseConfigPath)
+      expect(capturedConversationId).toBe('conv-999')
+      // The base (shared, per-project) config must remain untouched.
+      const baseContent = JSON.parse(readFileSync(baseConfigPath, 'utf-8'))
+      expect(baseContent.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBeUndefined()
+      // The per-command file is cleaned up once the command completes.
+      expect(existsSync(capturedPath!)).toBe(false)
+    })
+
+    it('should clean up the per-command MCP config even when the command fails', async () => {
+      // Uses a "cancel" error message so the outer retry loop (CHAT_MAX_ATTEMPTS,
+      // CHAT_RETRY_DELAY_MS=3000ms) short-circuits after a single attempt — see
+      // the existing 'should NOT retry when error contains "cancel"' test above.
+      const { spawn } = require('child_process')
+      const baseConfigPath = writeMcpConfig(tmpDir, 'http://localhost:3030', 'tenant:tok:raw', 'TEST_01', '/path/to/server.js')
+      const { getPath } = captureMcpConfigArg(spawn)
+
+      const resultPromise = executeChatCommand({
+        payload: { message: 'hello', conversationId: 'conv-err' },
+        commandId: 'cmd-mcp-conv-err',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: baseConfigPath,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      const mockProcess = spawn.mock.results[0].value
+      mockProcess.emit('error', new Error('Operation was cancelled by the user'))
+
+      const result = await resultPromise
+
+      expect(result.success).toBe(false)
+      expect(spawn).toHaveBeenCalledTimes(1)
+      const capturedPath = getPath()
+      expect(capturedPath).toBeDefined()
+      expect(existsSync(capturedPath!)).toBe(false)
+    })
+
+    it('should log a warning (but still succeed) when removing the per-command MCP config fails during cleanup', async () => {
+      const { spawn } = require('child_process')
+      const baseConfigPath = writeMcpConfig(tmpDir, 'http://localhost:3030', 'tenant:tok:raw', 'TEST_01', '/path/to/server.js')
+      const { getPath } = captureMcpConfigArg(spawn)
+
+      const rmSpy = jest.spyOn(require('fs'), 'rmSync').mockImplementationOnce(() => {
+        throw new Error('EBUSY: resource busy')
+      })
+
+      try {
+        const resultPromise = executeChatCommand({
+          payload: { message: 'hello', conversationId: 'conv-cleanup-fail' },
+          commandId: 'cmd-mcp-cleanup-fail',
+          client: mockClient,
+          activeChatMode: 'claude_code',
+          agentId: 'agent-1',
+          mcpConfigPath: baseConfigPath,
+        })
+
+        await new Promise((r) => setTimeout(r, 10))
+        const spawnedProcess = spawn.mock.results[spawn.mock.results.length - 1].value
+        spawnedProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+        spawnedProcess.emit('close', 0)
+
+        const result = await resultPromise
+
+        // rmSync failure during cleanup must not fail the chat command itself.
+        expect(result.success).toBe(true)
+        const capturedPath = getPath()
+        expect(capturedPath).toBeDefined()
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to remove per-command MCP config'))
+      } finally {
+        rmSpy.mockRestore()
+        // The mocked rmSync threw instead of actually deleting the file — clean it up
+        // for real so it doesn't leak into other tests in this file.
+        const capturedPath = getPath()
+        if (capturedPath) rmSync(capturedPath, { force: true })
+      }
+    })
+
+    it('should not create a per-command MCP config when conversationId is absent (reuses the shared static config)', async () => {
+      const { spawn } = require('child_process')
+      const baseConfigPath = writeMcpConfig(tmpDir, 'http://localhost:3030', 'tenant:tok:raw', 'TEST_01', '/path/to/server.js')
+      const { getPath } = captureMcpConfigArg(spawn)
+
+      const resultPromise = executeChatCommand({
+        payload: { message: 'hello' }, // no conversationId
+        commandId: 'cmd-mcp-no-conv',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: baseConfigPath,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      const spawnedProcess = spawn.mock.results[spawn.mock.results.length - 1].value
+      spawnedProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      spawnedProcess.emit('close', 0)
+
+      const result = await resultPromise
+
+      expect(result.success).toBe(true)
+      expect(getPath()).toBe(baseConfigPath)
+    })
+
+    it('should isolate concurrent commands sharing the same base MCP config (no cross-conversation collision)', async () => {
+      const { spawn } = require('child_process')
+      const baseConfigPath = writeMcpConfig(tmpDir, 'http://localhost:3030', 'tenant:tok:raw', 'TEST_01', '/path/to/server.js')
+
+      const processA = createMockChildProcess()
+      const processB = createMockChildProcess()
+      const capturedPaths: string[] = []
+      const capturedConversationIds: string[] = []
+      let call = 0
+      spawn.mockImplementation((_cmd: string, args: string[]) => {
+        const idx = args.indexOf('--mcp-config')
+        const path = idx >= 0 ? args[idx + 1] : undefined
+        if (path) {
+          capturedPaths.push(path)
+          const content = JSON.parse(readFileSync(path, 'utf-8'))
+          capturedConversationIds.push(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID)
+        }
+        call += 1
+        return call === 1 ? processA : processB
+      })
+
+      const resultPromiseA = executeChatCommand({
+        payload: { message: 'hello A', conversationId: 'conv-a' },
+        commandId: 'cmd-concurrent-a',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: baseConfigPath,
+      })
+      const resultPromiseB = executeChatCommand({
+        payload: { message: 'hello B', conversationId: 'conv-b' },
+        commandId: 'cmd-concurrent-b',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: baseConfigPath,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      processA.emitStdout('data', Buffer.from(ndjsonResult('response A')))
+      processA.emit('close', 0)
+      processB.emitStdout('data', Buffer.from(ndjsonResult('response B')))
+      processB.emit('close', 0)
+
+      const [resultA, resultB] = await Promise.all([resultPromiseA, resultPromiseB])
+
+      expect(resultA.success).toBe(true)
+      expect(resultB.success).toBe(true)
+      expect(capturedPaths[0]).not.toBe(capturedPaths[1])
+      expect(capturedConversationIds).toContain('conv-a')
+      expect(capturedConversationIds).toContain('conv-b')
+    })
+
+    it('should fall back to the shared static MCP config and log a warning when writing the per-command config fails', async () => {
+      const { spawn } = require('child_process')
+      const nonExistentBaseConfigPath = join(tmpDir, 'does-not-exist.json')
+      const { getPath } = captureMcpConfigArg(spawn)
+
+      const resultPromise = executeChatCommand({
+        payload: { message: 'hello', conversationId: 'conv-fallback' },
+        commandId: 'cmd-mcp-fallback',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: nonExistentBaseConfigPath,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      const spawnedProcess = spawn.mock.results[spawn.mock.results.length - 1].value
+      spawnedProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      spawnedProcess.emit('close', 0)
+
+      const result = await resultPromise
+
+      expect(result.success).toBe(true)
+      expect(getPath()).toBe(nonExistentBaseConfigPath)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('per-command MCP config'))
+    })
+
+    it('should propagate AI_SUPPORT_CONVERSATION_ID to the Codex CLI via a mcp_servers.<name>.env TOML -c override (codex mode reads the mcp config through buildCodexMcpConfigOverrides, a different path from claude_code\'s --mcp-config flag)', async () => {
+      const { spawn } = require('child_process')
+      const baseConfigPath = writeMcpConfig(tmpDir, 'http://localhost:3030', 'tenant:tok:raw', 'TEST_01', '/path/to/server.js')
+
+      let capturedArgs: string[] = []
+      const mockProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 999,
+      }
+      spawn.mockImplementation((_cmd: string, args: string[]) => {
+        capturedArgs = args
+        return mockProcess
+      })
+      mockProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from(JSON.stringify({ type: 'agent_message', message: 'ok' }) + '\n'))
+      })
+      mockProcess.stderr.on.mockImplementation(() => {})
+      mockProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const result = await executeChatCommand({
+        payload: { message: 'hello', conversationId: 'conv-codex-999' },
+        commandId: 'cmd-codex-mcp-conv',
+        client: mockClient,
+        activeChatMode: 'codex',
+        agentId: 'agent-1',
+        mcpConfigPath: baseConfigPath,
+      })
+
+      expect(result.success).toBe(true)
+      const overrideArg = capturedArgs.find(
+        (a) => a.startsWith('mcp_servers.ai-support-agent.env.AI_SUPPORT_CONVERSATION_ID='),
+      )
+      expect(overrideArg).toBe('mcp_servers.ai-support-agent.env.AI_SUPPORT_CONVERSATION_ID="conv-codex-999"')
+
+      // The static shared config on disk must remain untouched (same guarantee as claude_code mode).
+      const baseContent = JSON.parse(readFileSync(baseConfigPath, 'utf-8'))
+      expect(baseContent.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBeUndefined()
     })
   })
 

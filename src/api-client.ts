@@ -18,6 +18,7 @@ import type {
   PendingAlert,
   PendingCommand,
   ProjectConfigResponse,
+  ReadSlackThreadResult,
   ReleaseChannel,
   RegisterRequest,
   RegisterResponse,
@@ -437,6 +438,21 @@ export class ApiClient {
     return this.post<SendSlackMessageResult>(
       API_ENDPOINTS.AGENT_TOOL_SEND_SLACK_MESSAGE(this.tenantCode),
       { channel, message, threadTs, callId },
+    )
+  }
+
+  /**
+   * 現在処理中のSlackスレッドの全文を読み取る（自ボットの過去投稿を含む）。
+   *
+   * `chatConversationId` は `send_slack_message`/`trigger_alarm` の `callId`
+   * （呼び出し単位の冪等キー）とは別物で、実際のSlackチャット会話ID
+   * （`SlackThreadMapping.conversationId`）そのものを渡す。
+   */
+  async readSlackThread(chatConversationId: string): Promise<ReadSlackThreadResult> {
+    logger.debug(`Reading Slack thread for conversation: ${chatConversationId}`)
+    return this.post<ReadSlackThreadResult>(
+      API_ENDPOINTS.AGENT_TOOL_READ_SLACK_THREAD(this.tenantCode),
+      { chatConversationId },
     )
   }
 
