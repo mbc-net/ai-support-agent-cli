@@ -37,7 +37,7 @@ import { safeJsonParse } from '../utils/json-parse'
 import { StreamLineParser } from '../utils/stream-parser'
 
 import { cancelProcess, getProcessManager, _getRunningProcesses } from './process-manager'
-import { createChunkSender, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
+import { createChunkSender, handleChatError, parseHistory, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
 
 /** 実行中の API チャットを commandId で管理（chat-executor と共有シングルトン） */
 const processManager = getProcessManager()
@@ -94,7 +94,7 @@ export async function executeApiChatCommand(
     `[api-chat] Starting API chat command [${commandId}]: message="${truncateString(message, LOG_MESSAGE_LIMIT)}"`,
   )
 
-  const { sendChunk, getChunkIndex } = createChunkSender(commandId, client, agentId, 'api-chat')
+  const { sendChunk, getChunkIndex, flush } = createChunkSender(commandId, client, agentId, 'api-chat', { batch: resolveChunkBatchConfig() })
 
   try {
     const model = config?.claudeCodeConfig?.model ?? DEFAULT_ANTHROPIC_MODEL
@@ -122,6 +122,8 @@ export async function executeApiChatCommand(
       processManager.remove(commandId)
     }
 
+    // バッファ中の delta を確定送信してから完了ログを出す（chunk 数を正確に集計するため）。
+    await flush()
     logger.info(
       `[api-chat] API chat command completed [${commandId}]: output=${result.text.length} chars, ${getChunkIndex()} chunks sent, tokens: in=${result.usage.inputTokens} out=${result.usage.outputTokens}`,
     )

@@ -154,16 +154,13 @@ describe('api-chat-executor', () => {
       }),
     )
 
-    // Verify chunks were sent
+    // Verify chunks were sent. Delta chunks are coalesced by the batching layer
+    // (enabled by default), so the two text deltas arrive as a single delta POST
+    // whose content is their concatenation, flushed before the done chunk.
     expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-3', {
       index: 0,
       type: 'delta',
-      content: 'Hello',
-    }, 'agent-1')
-    expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-3', {
-      index: 1,
-      type: 'delta',
-      content: ' there',
+      content: 'Hello there',
     }, 'agent-1')
     // done chunk (now includes usage JSON)
     const doneCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
