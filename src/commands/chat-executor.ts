@@ -17,7 +17,7 @@ import { ERR_CLAUDE_EXIT_CODE_1, ERR_CLAUDE_USAGE_LIMIT_REACHED, runClaudeCode }
 import { ERR_CODEX_AUTH_INVALID, ERR_CODEX_EXIT_CODE_1, runCodex } from './codex-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { getProcessManager } from './process-manager'
-import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
+import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
@@ -260,7 +260,7 @@ async function executeCliChatOnce(
 
   logger.info(`[chat] Starting chat command [${commandId}]: message="${truncateString(message, LOG_MESSAGE_LIMIT)}"`)
 
-  const { sendChunk: rawSendChunk, getChunkIndex } = createChunkSender(commandId, client, agentId, 'chat', { debugLog: true })
+  const { sendChunk: rawSendChunk, getChunkIndex, flush } = createChunkSender(commandId, client, agentId, 'chat', { debugLog: true, batch: resolveChunkBatchConfig() })
 
   // tool_call チャンクを蓄積して done チャンクに含める（RDS 永続化用）
   const collectedToolCalls: Record<string, unknown>[] = []
@@ -440,6 +440,8 @@ async function executeCliChatOnce(
     } finally {
       processManager.remove(commandId)
     }
+    // バッファ中の delta を確定送信してから完了ログを出す（chunk 数を正確に集計するため）。
+    await flush()
     const usageLog = result.usage
       ? ` in=${result.usage.input_tokens} out=${result.usage.output_tokens} cost=$${result.usage.total_cost_usd?.toFixed(6) ?? '?'}`
       : ''

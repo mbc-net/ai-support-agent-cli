@@ -1,5 +1,5 @@
 import type { ApiClient } from '../../src/api-client'
-import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, sendFileAttachmentChunk } from '../../src/commands/shared-chat-utils'
+import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, resolveChunkBatchConfig, sendFileAttachmentChunk } from '../../src/commands/shared-chat-utils'
 import type { ChatFileInfo } from '../../src/types'
 
 jest.mock('../../src/logger')
@@ -235,6 +235,210 @@ describe('shared-chat-utils', () => {
         contentType: 'text/plain',
         fileSize: 1024,
       }))
+    })
+  })
+
+  describe('createChunkSender (batching)', () => {
+    const BATCH = { enabled: true, windowMs: 80, maxBytes: 8192 }
+
+    beforeEach(() => {
+      jest.useFakeTimers()
+    })
+
+    afterEach(() => {
+      jest.clearAllTimers()
+      jest.useRealTimers()
+    })
+
+    it('coalesces consecutive delta chunks into a single POST when the time window elapses', async () => {
+      const { sendChunk, getChunkIndex } = createChunkSender(
+        'cmd-1', mockClient, 'agent-1', 'test', { batch: BATCH },
+      )
+
+      await sendChunk('delta', 'Hello')
+      await sendChunk('delta', ' world')
+      await sendChunk('delta', '!')
+
+      // Nothing sent yet: still buffered inside the window.
+      expect(mockClient.submitChatChunk).not.toHaveBeenCalled()
+
+      await jest.advanceTimersByTimeAsync(BATCH.windowMs)
+
+      expect(mockClient.submitChatChunk).toHaveBeenCalledTimes(1)
+      expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-1', {
+        index: 0, type: 'delta', content: 'Hello world!',
+      }, 'agent-1')
+      expect(getChunkIndex()).toBe(1)
+    })
+
+    it('flushes immediately when the buffered byte threshold is reached', async () => {
+      const { sendChunk } = createChunkSender(
+        'cmd-1', mockClient, 'agent-1', 'test',
+        { batch: { enabled: true, windowMs: 80, maxBytes: 10 } },
+      )
+
+      await sendChunk('delta', 'abcde')      // 5 bytes, buffered
+      expect(mockClient.submitChatChunk).not.toHaveBeenCalled()
+      await sendChunk('delta', 'fghijk')     // 6 more -> 11 >= 10, flush now
+
+      expect(mockClient.submitChatChunk).toHaveBeenCalledTimes(1)
+      expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-1', {
+        index: 0, type: 'delta', content: 'abcdefghijk',
+      }, 'agent-1')
+    })
+
+    it('flushes pending deltas before a non-delta chunk, preserving order', async () => {
+      const { sendChunk } = createChunkSender(
+        'cmd-1', mockClient, 'agent-1', 'test', { batch: BATCH },
+      )
+
+      await sendChunk('delta', 'before tool')
+      await sendChunk('tool_call', '{"name":"read"}')
+
+      expect(mockClient.submitChatChunk).toHaveBeenCalledTimes(2)
+      // delta must be sent first (index 0), then the tool_call (index 1).
+      expect(mockClient.submitChatChunk).toHaveBeenNthCalledWith(1, 'cmd-1', {
+        index: 0, type: 'delta', content: 'before tool',
+      }, 'agent-1')
+      expect(mockClient.submitChatChunk).toHaveBeenNthCalledWith(2, 'cmd-1', {
+        index: 1, type: 'tool_call', content: '{"name":"read"}',
+      }, 'agent-1')
+    })
+
+    it('flush() sends any remaining buffered deltas', async () => {
+      const { sendChunk, flush } = createChunkSender(
+        'cmd-1', mockClient, 'agent-1', 'test', { batch: BATCH },
+      )
+
+      await sendChunk('delta', 'tail text')
+      expect(mockClient.submitChatChunk).not.toHaveBeenCalled()
+
+      await flush()
+
+      expect(mockClient.submitChatChunk).toHaveBeenCalledTimes(1)
+      expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-1', {
+        index: 0, type: 'delta', content: 'tail text',
+      }, 'agent-1')
+    })
+
+    it('flush() is a no-op when there is nothing buffered', async () => {
+      const { flush } = createChunkSender(
+        'cmd-1', mockClient, 'agent-1', 'test', { batch: BATCH },
+      )
+      await flush()
+      expect(mockClient.submitChatChunk).not.toHaveBeenCalled()
+    })
+
+    it('a done chunk auto-flushes pending deltas before being sent', async () => {
+      const { sendChunk } = createChunkSender(
+        'cmd-1', mockClient, 'agent-1', 'test', { batch: BATCH },
+      )
+
+      await sendChunk('delta', 'partial ')
+      await sendChunk('delta', 'answer')
+      await sendChunk('done', '{"text":"partial answer"}')
+
+      expect(mockClient.submitChatChunk).toHaveBeenCalledTimes(2)
+      expect(mockClient.submitChatChunk).toHaveBeenNthCalledWith(1, 'cmd-1', {
+        index: 0, type: 'delta', content: 'partial answer',
+      }, 'agent-1')
+      expect(mockClient.submitChatChunk).toHaveBeenNthCalledWith(2, 'cmd-1', {
+        index: 1, type: 'done', content: '{"text":"partial answer"}',
+      }, 'agent-1')
+    })
+
+    it('behaves as a 1:1 pass-through when batching is disabled', async () => {
+      const { sendChunk, getChunkIndex, flush } = createChunkSender(
+        'cmd-1', mockClient, 'agent-1', 'test',
+        { batch: { enabled: false, windowMs: 80, maxBytes: 8192 } },
+      )
+
+      await sendChunk('delta', 'a')
+      await sendChunk('delta', 'b')
+
+      // No timer needed: each delta is sent immediately.
+      expect(mockClient.submitChatChunk).toHaveBeenCalledTimes(2)
+      expect(getChunkIndex()).toBe(2)
+
+      // flush() is a harmless no-op when batching is disabled (nothing buffered).
+      await expect(flush()).resolves.toBeUndefined()
+      expect(mockClient.submitChatChunk).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not double-send when the byte threshold and the timer both fire', async () => {
+      const { sendChunk, getChunkIndex } = createChunkSender(
+        'cmd-1', mockClient, 'agent-1', 'test',
+        { batch: { enabled: true, windowMs: 80, maxBytes: 6 } },
+      )
+
+      await sendChunk('delta', 'abcdef')     // 6 bytes -> threshold flush
+      // Advancing the timer must not resend the already-flushed buffer.
+      await jest.advanceTimersByTimeAsync(BATCH.windowMs)
+
+      expect(mockClient.submitChatChunk).toHaveBeenCalledTimes(1)
+      expect(getChunkIndex()).toBe(1)
+    })
+
+    it('does not throw when a batched submit fails (logs a warning)', async () => {
+      const failClient = {
+        submitChatChunk: jest.fn().mockRejectedValue(new Error('Network error')),
+      } as unknown as ApiClient
+
+      const { sendChunk, flush } = createChunkSender(
+        'cmd-1', failClient, 'agent-1', 'test', { batch: BATCH },
+      )
+
+      await sendChunk('delta', 'boom')
+      await expect(flush()).resolves.toBeUndefined()
+    })
+  })
+
+  describe('resolveChunkBatchConfig', () => {
+    const KEY_ENABLED = 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_ENABLED'
+    const KEY_WINDOW = 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_WINDOW_MS'
+    const KEY_BYTES = 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_MAX_BYTES'
+    const saved: Record<string, string | undefined> = {}
+
+    beforeEach(() => {
+      for (const k of [KEY_ENABLED, KEY_WINDOW, KEY_BYTES]) {
+        saved[k] = process.env[k]
+        delete process.env[k]
+      }
+    })
+
+    afterEach(() => {
+      for (const k of [KEY_ENABLED, KEY_WINDOW, KEY_BYTES]) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+    })
+
+    it('defaults to enabled with the standard window and byte limits', () => {
+      const cfg = resolveChunkBatchConfig()
+      expect(cfg.enabled).toBe(true)
+      expect(cfg.windowMs).toBe(80)
+      expect(cfg.maxBytes).toBe(8192)
+    })
+
+    it('disables batching when the env var is exactly "false"', () => {
+      process.env[KEY_ENABLED] = 'false'
+      expect(resolveChunkBatchConfig().enabled).toBe(false)
+    })
+
+    it('overrides window and byte limits from valid env values', () => {
+      process.env[KEY_WINDOW] = '150'
+      process.env[KEY_BYTES] = '4096'
+      const cfg = resolveChunkBatchConfig()
+      expect(cfg.windowMs).toBe(150)
+      expect(cfg.maxBytes).toBe(4096)
+    })
+
+    it('falls back to defaults for invalid (non-positive / NaN) env values', () => {
+      process.env[KEY_WINDOW] = '0'
+      process.env[KEY_BYTES] = 'not-a-number'
+      const cfg = resolveChunkBatchConfig()
+      expect(cfg.windowMs).toBe(80)
+      expect(cfg.maxBytes).toBe(8192)
     })
   })
 })

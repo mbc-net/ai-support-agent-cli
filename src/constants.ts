@@ -29,6 +29,11 @@ export const ENV_VARS = {
   // detection), 'false' force-disables it. Unset = auto-detect.
   ECS_LAUNCHER: 'AI_SUPPORT_AGENT_ECS_LAUNCHER',
   CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_CODE_OAUTH_TOKEN',
+  // Chat chunk batching (coalesce streaming delta chunks into fewer POSTs).
+  // Unset = enabled. Set to 'false' to fall back to 1:1 immediate sending.
+  CHAT_CHUNK_BATCH_ENABLED: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_ENABLED',
+  CHAT_CHUNK_BATCH_WINDOW_MS: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_WINDOW_MS',
+  CHAT_CHUNK_BATCH_MAX_BYTES: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_MAX_BYTES',
 } as const
 
 export const CONFIG_DIR = (() => {
@@ -50,6 +55,12 @@ export const MAX_AUTH_BODY_SIZE = 64 * 1024 // 64 KB
 export const API_MAX_RETRIES = 3
 export const API_BASE_DELAY_MS = 1000
 export const API_REQUEST_TIMEOUT = 10_000
+
+// Chat chunk batching defaults.
+// Streaming `delta` chunks are coalesced within a short time window (or until a
+// byte threshold) so a single response produces far fewer HTTP POSTs.
+export const CHAT_CHUNK_BATCH_WINDOW_MS = 80
+export const CHAT_CHUNK_BATCH_MAX_BYTES = 8 * 1024 // 8 KB
 
 // DB query connection timeout (MySQL connectTimeout / PostgreSQL connectionTimeoutMillis)
 export const DB_CONNECT_TIMEOUT_MS = 10_000
