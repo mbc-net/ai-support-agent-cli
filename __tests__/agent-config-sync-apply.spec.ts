@@ -11,8 +11,10 @@ jest.mock('../src/aws-profile', () => ({
   writeAwsConfig: jest.fn(),
 }))
 const mockWriteMcpConfig = jest.fn().mockReturnValue('/tmp/mcp.json')
+const mockCleanupStaleCommandMcpConfigs = jest.fn().mockReturnValue(0)
 jest.mock('../src/mcp/config-writer', () => ({
   writeMcpConfig: mockWriteMcpConfig,
+  cleanupStaleCommandMcpConfigs: mockCleanupStaleCommandMcpConfigs,
 }))
 const mockSetupSshConfig = jest.fn()
 jest.mock('../src/ssh-config-setup', () => ({
@@ -77,6 +79,7 @@ describe('applyProjectConfig - error handling branches', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockWriteMcpConfig.mockReturnValue('/tmp/mcp.json')
+    mockCleanupStaleCommandMcpConfigs.mockReturnValue(0)
     mockSetupSshConfig.mockResolvedValue(undefined)
   })
 
@@ -112,6 +115,41 @@ describe('applyProjectConfig - error handling branches', () => {
 
   it('should log warn when writeMcpConfig throws', async () => {
     mockWriteMcpConfig.mockImplementation(() => { throw new Error('mcp config error') })
+    const deps = makeDeps()
+    const state = makeState()
+    const config = makeBaseConfig()
+
+    await expect(applyProjectConfig(deps, state, config)).resolves.not.toThrow()
+  })
+
+  it('should sweep stale per-command MCP config files after writing the MCP config', async () => {
+    // Orphaned config-*.json files (plaintext token + conversationId) can accumulate if
+    // the agent process is SIGKILLed/OOM-killed before chat-executor.ts's own cleanup
+    // runs. Config sync is the natural recurring hook to self-heal this (mirrors
+    // TerminalSession.cleanupStaleSandboxes being swept at agent startup).
+    mockWriteMcpConfig.mockReturnValue('/tmp/project/.ai-support-agent/mcp/config.json')
+    const deps = makeDeps()
+    const state = makeState()
+    const config = makeBaseConfig()
+
+    await applyProjectConfig(deps, state, config)
+
+    expect(mockCleanupStaleCommandMcpConfigs).toHaveBeenCalledWith('/tmp/project/.ai-support-agent/mcp/config.json')
+  })
+
+  it('should not sweep stale per-command MCP configs when writeMcpConfig throws', async () => {
+    mockWriteMcpConfig.mockImplementation(() => { throw new Error('mcp config error') })
+    const deps = makeDeps()
+    const state = makeState()
+    const config = makeBaseConfig()
+
+    await applyProjectConfig(deps, state, config)
+
+    expect(mockCleanupStaleCommandMcpConfigs).not.toHaveBeenCalled()
+  })
+
+  it('should log warn (but not throw) when cleanupStaleCommandMcpConfigs throws', async () => {
+    mockCleanupStaleCommandMcpConfigs.mockImplementation(() => { throw new Error('cleanup error') })
     const deps = makeDeps()
     const state = makeState()
     const config = makeBaseConfig()

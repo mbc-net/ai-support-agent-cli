@@ -1,8 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
-import { buildMcpConfig, getMcpConfigPath, writeMcpConfig } from '../../src/mcp/config-writer'
+jest.mock('../../src/logger')
+
+import { logger } from '../../src/logger'
+import { buildMcpConfig, cleanupStaleCommandMcpConfigs, getMcpConfigPath, writeCommandMcpConfig, writeMcpConfig } from '../../src/mcp/config-writer'
 
 describe('config-writer', () => {
   const testDir = join(tmpdir(), 'ai-support-agent-test-mcp-' + Date.now())
@@ -185,6 +188,21 @@ describe('config-writer', () => {
       expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_BROWSER_LOCAL_PORT).toBeUndefined()
     })
 
+    it('should not include a conversationId env var (writeMcpConfig has no conversationId parameter)', () => {
+      // conversationId は per-command で変わる値であり、config sync 時にのみ再生成される
+      // このプロジェクト単位の静的ファイルには書き込まない設計（writeCommandMcpConfig を使う）。
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBeUndefined()
+    })
+
     it('should use first backlog config when multiple provided', () => {
       const configPath = writeMcpConfig(
         testDir,
@@ -201,6 +219,260 @@ describe('config-writer', () => {
       const content = JSON.parse(readFileSync(configPath, 'utf-8'))
       expect(content.mcpServers.backlog.env.BACKLOG_DOMAIN).toBe('first.backlog.jp')
       expect(content.mcpServers.backlog.env.BACKLOG_API_KEY).toBe('key-1')
+    })
+  })
+
+  describe('writeCommandMcpConfig', () => {
+    it('should write a command-scoped config file embedding AI_SUPPORT_CONVERSATION_ID', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test_tenant:tokenId:rawToken',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(baseConfigPath, 'cmd-1', 'conv-123')
+
+      expect(commandConfigPath).not.toBe(baseConfigPath)
+      expect(existsSync(commandConfigPath)).toBe(true)
+
+      const content = JSON.parse(readFileSync(commandConfigPath, 'utf-8'))
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBe('conv-123')
+      // Preserves the fields already present in the base config
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_API_URL).toBe('http://localhost:3030')
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_TOKEN).toBe('test_tenant:tokenId:rawToken')
+    })
+
+    it('should not mutate the base config file', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      writeCommandMcpConfig(baseConfigPath, 'cmd-2', 'conv-456')
+
+      const baseContent = JSON.parse(readFileSync(baseConfigPath, 'utf-8'))
+      expect(baseContent.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBeUndefined()
+    })
+
+    it('should set file permission to 0600', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(baseConfigPath, 'cmd-3', 'conv-789')
+
+      const stat = statSync(commandConfigPath)
+      const mode = stat.mode & 0o777
+      expect(mode).toBe(0o600)
+    })
+
+    it('should preserve the backlog MCP server entry unchanged', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+        [{ domain: 'myspace.backlog.jp', apiKey: 'backlog-api-key-123' }],
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(baseConfigPath, 'cmd-4', 'conv-abc')
+
+      const content = JSON.parse(readFileSync(commandConfigPath, 'utf-8'))
+      expect(content.mcpServers.backlog.env.BACKLOG_DOMAIN).toBe('myspace.backlog.jp')
+      // conversationId must not leak into unrelated MCP servers
+      expect(content.mcpServers.backlog.env.AI_SUPPORT_CONVERSATION_ID).toBeUndefined()
+    })
+
+    it('should produce distinct files for distinct commandIds sharing the same base config (no cross-conversation collision)', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const pathA = writeCommandMcpConfig(baseConfigPath, 'cmd-concurrent-a', 'conv-a')
+      const pathB = writeCommandMcpConfig(baseConfigPath, 'cmd-concurrent-b', 'conv-b')
+
+      expect(pathA).not.toBe(pathB)
+
+      const contentA = JSON.parse(readFileSync(pathA, 'utf-8'))
+      const contentB = JSON.parse(readFileSync(pathB, 'utf-8'))
+      expect(contentA.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBe('conv-a')
+      expect(contentB.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBe('conv-b')
+    })
+
+    it('should produce distinct files for commandIds that collide after sanitization (e.g. "cmd/a" and "cmd_a")', () => {
+      // Both `cmd/a` and `cmd_a` sanitize to the same "cmd_a" string. A filename derived
+      // only from the sanitized commandId (no randomness/hash) would collide, letting one
+      // command's cleanup delete the other's still-in-use per-command MCP config file —
+      // or letting one conversationId leak into a concurrently-running unrelated command.
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const pathSlash = writeCommandMcpConfig(baseConfigPath, 'cmd/a', 'conv-slash')
+      const pathUnderscore = writeCommandMcpConfig(baseConfigPath, 'cmd_a', 'conv-underscore')
+
+      expect(pathSlash).not.toBe(pathUnderscore)
+      expect(existsSync(pathSlash)).toBe(true)
+      expect(existsSync(pathUnderscore)).toBe(true)
+
+      const contentSlash = JSON.parse(readFileSync(pathSlash, 'utf-8'))
+      const contentUnderscore = JSON.parse(readFileSync(pathUnderscore, 'utf-8'))
+      expect(contentSlash.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBe('conv-slash')
+      expect(contentUnderscore.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBe('conv-underscore')
+    })
+
+    it('should sanitize path-traversal characters in commandId', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(baseConfigPath, '../../etc/evil', 'conv-evil')
+
+      expect(commandConfigPath.startsWith(testDir)).toBe(true)
+      expect(commandConfigPath).not.toContain('..')
+      expect(existsSync(commandConfigPath)).toBe(true)
+    })
+
+    it('should throw when the base config file does not exist', () => {
+      expect(() => writeCommandMcpConfig(join(testDir, 'does-not-exist.json'), 'cmd-5', 'conv-x'))
+        .toThrow()
+    })
+
+    it('should not throw when the base config is missing the ai-support-agent server entry', () => {
+      const malformedConfigPath = join(testDir, 'malformed-config.json')
+      writeFileSync(malformedConfigPath, JSON.stringify({ mcpServers: {} }))
+
+      const commandConfigPath = writeCommandMcpConfig(malformedConfigPath, 'cmd-6', 'conv-y')
+
+      const content = JSON.parse(readFileSync(commandConfigPath, 'utf-8'))
+      expect(content.mcpServers).toEqual({})
+    })
+  })
+
+  describe('cleanupStaleCommandMcpConfigs', () => {
+    // Mirrors TerminalSession.cleanupStaleSandboxes: orphaned per-command MCP config
+    // files (plaintext token + conversationId) can be left behind if the agent process
+    // is SIGKILLed/OOM-killed before chat-executor.ts's cleanup runs. Sweep old ones on
+    // config sync so they don't accumulate indefinitely.
+    let cleanupTestDir: string
+
+    beforeEach(() => {
+      cleanupTestDir = join(tmpdir(), 'ai-support-agent-cleanup-test-' + Date.now() + '-' + Math.random().toString(36).slice(2))
+      mkdirSync(cleanupTestDir, { recursive: true })
+    })
+
+    afterEach(() => {
+      rmSync(cleanupTestDir, { recursive: true, force: true })
+    })
+
+    function makeCommandConfigFile(dir: string, name: string, mtimeMs: number): string {
+      const fullPath = join(dir, name)
+      writeFileSync(fullPath, '{}')
+      const t = new Date(mtimeMs)
+      utimesSync(fullPath, t, t)
+      return fullPath
+    }
+
+    it('should remove per-command config files older than maxAgeMs', () => {
+      const baseConfigPath = join(cleanupTestDir, 'config.json')
+      writeFileSync(baseConfigPath, '{}')
+      const stalePath = makeCommandConfigFile(cleanupTestDir, 'config-cmd-old-uuid1.json', Date.now() - 25 * 60 * 60 * 1000)
+
+      const removed = cleanupStaleCommandMcpConfigs(baseConfigPath)
+
+      expect(removed).toBe(1)
+      expect(existsSync(stalePath)).toBe(false)
+    })
+
+    it('should not remove per-command config files newer than maxAgeMs', () => {
+      const baseConfigPath = join(cleanupTestDir, 'config.json')
+      writeFileSync(baseConfigPath, '{}')
+      const freshPath = makeCommandConfigFile(cleanupTestDir, 'config-cmd-fresh-uuid2.json', Date.now() - 1000)
+
+      const removed = cleanupStaleCommandMcpConfigs(baseConfigPath)
+
+      expect(removed).toBe(0)
+      expect(existsSync(freshPath)).toBe(true)
+    })
+
+    it('should not remove the shared static config.json itself', () => {
+      const baseConfigPath = join(cleanupTestDir, 'config.json')
+      writeFileSync(baseConfigPath, '{}')
+      const t = new Date(Date.now() - 25 * 60 * 60 * 1000)
+      utimesSync(baseConfigPath, t, t)
+
+      cleanupStaleCommandMcpConfigs(baseConfigPath)
+
+      expect(existsSync(baseConfigPath)).toBe(true)
+    })
+
+    it('should not remove unrelated files in the same directory', () => {
+      const baseConfigPath = join(cleanupTestDir, 'config.json')
+      writeFileSync(baseConfigPath, '{}')
+      const unrelatedPath = makeCommandConfigFile(cleanupTestDir, 'unrelated-file.json', Date.now() - 25 * 60 * 60 * 1000)
+
+      cleanupStaleCommandMcpConfigs(baseConfigPath)
+
+      expect(existsSync(unrelatedPath)).toBe(true)
+    })
+
+    it('should remove all matching files when maxAgeMs=0', () => {
+      const baseConfigPath = join(cleanupTestDir, 'config.json')
+      writeFileSync(baseConfigPath, '{}')
+      const freshPath = makeCommandConfigFile(cleanupTestDir, 'config-cmd-fresh-uuid3.json', Date.now() - 1000)
+
+      const removed = cleanupStaleCommandMcpConfigs(baseConfigPath, 0)
+
+      expect(removed).toBe(1)
+      expect(existsSync(freshPath)).toBe(false)
+    })
+
+    it('should return 0 when the directory cannot be read', () => {
+      const removed = cleanupStaleCommandMcpConfigs(join(cleanupTestDir, 'does-not-exist', 'config.json'))
+      expect(removed).toBe(0)
+    })
+
+    it('should ignore individual file removal failures, log a warning, and continue', () => {
+      const baseConfigPath = join(cleanupTestDir, 'config.json')
+      writeFileSync(baseConfigPath, '{}')
+      const stalePath = makeCommandConfigFile(cleanupTestDir, 'config-cmd-old-uuid4.json', Date.now() - 25 * 60 * 60 * 1000)
+
+      const rmSpy = jest.spyOn(require('fs'), 'rmSync').mockImplementationOnce(() => {
+        throw new Error('EBUSY: resource busy')
+      })
+      try {
+        const removed = cleanupStaleCommandMcpConfigs(baseConfigPath)
+        expect(removed).toBe(0)
+        expect(existsSync(stalePath)).toBe(true)
+        // Previously this failure was swallowed with zero observability. It must now
+        // be logged (with the offending file name) so operators can diagnose why a
+        // stale per-command config didn't get swept.
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('config-cmd-old-uuid4.json'))
+      } finally {
+        rmSpy.mockRestore()
+      }
     })
   })
 })
