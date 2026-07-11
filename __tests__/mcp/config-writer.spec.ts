@@ -244,6 +244,37 @@ describe('config-writer', () => {
       expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_TOKEN).toBe('test_tenant:tokenId:rawToken')
     })
 
+    it('should embed AI_SUPPORT_TASK_ID when taskId is provided (task detail E2E tab reverse lookup)', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test_tenant:tokenId:rawToken',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(baseConfigPath, 'cmd-task-1', 'conv-123', 'task-abc-123')
+
+      const content = JSON.parse(readFileSync(commandConfigPath, 'utf-8'))
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_TASK_ID).toBe('task-abc-123')
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBe('conv-123')
+    })
+
+    it('should not include AI_SUPPORT_TASK_ID when taskId is not provided', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test_tenant:tokenId:rawToken',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(baseConfigPath, 'cmd-task-2', 'conv-123')
+
+      const content = JSON.parse(readFileSync(commandConfigPath, 'utf-8'))
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_TASK_ID).toBeUndefined()
+    })
+
     it('should not mutate the base config file', () => {
       const baseConfigPath = writeMcpConfig(
         testDir,

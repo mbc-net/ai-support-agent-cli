@@ -2168,6 +2168,83 @@ describe('chat-executor', () => {
       expect(env).not.toHaveProperty('AI_SUPPORT_PROJECT_CODE')
       expect(env).not.toHaveProperty('AI_SUPPORT_CONVERSATION_ID')
     })
+
+    it('should set AI_SUPPORT_TASK_ID when payload.taskId is provided (task detail E2E tab reverse lookup)', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const payload: ChatPayload = {
+        message: 'Run the E2E test',
+        projectCode: 'MBC_01',
+        conversationId: 'conv-456',
+        taskId: 'task-abc-123',
+      }
+
+      const resultPromise = executeChatCommand({
+        payload, commandId: 'cmd-task-id', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const env = spawnCall[2].env
+      expect(env).toHaveProperty('AI_SUPPORT_TASK_ID', 'task-abc-123')
+    })
+
+    it('should not set AI_SUPPORT_TASK_ID when payload.taskId is not provided', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-no-task-id', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const env = spawnCall[2].env
+      expect(env).not.toHaveProperty('AI_SUPPORT_TASK_ID')
+    })
+
+    it('should set AI_SUPPORT_TASK_ID for the codex runtime too', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const payload: ChatPayload = {
+        message: 'Run the E2E test',
+        projectCode: 'MBC_01',
+        conversationId: 'conv-456',
+        taskId: 'task-abc-123',
+      }
+
+      const resultPromise = executeChatCommand({
+        payload, commandId: 'cmd-task-id-codex', client: mockClient,
+        activeChatMode: 'codex', agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const spawnCall = spawn.mock.calls[spawn.mock.calls.length - 1]
+      const env = spawnCall[2].env
+      expect(env).toHaveProperty('AI_SUPPORT_TASK_ID', 'task-abc-123')
+    })
   })
 
   describe('per-command MCP config (AI_SUPPORT_CONVERSATION_ID propagation to the MCP server subprocess)', () => {
@@ -2239,6 +2316,77 @@ describe('chat-executor', () => {
       expect(baseContent.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBeUndefined()
       // The per-command file is cleaned up once the command completes.
       expect(existsSync(capturedPath!)).toBe(false)
+    })
+
+    it('should write a per-command MCP config embedding AI_SUPPORT_TASK_ID when payload.taskId is provided (task detail E2E tab reverse lookup)', async () => {
+      const { spawn } = require('child_process')
+      const baseConfigPath = writeMcpConfig(tmpDir, 'http://localhost:3030', 'tenant:tok:raw', 'TEST_01', '/path/to/server.js')
+
+      let capturedPath: string | undefined
+      let capturedTaskId: string | undefined
+      const mockProcess = createMockChildProcess()
+      spawn.mockImplementation((_cmd: string, args: string[]) => {
+        const idx = args.indexOf('--mcp-config')
+        capturedPath = idx >= 0 ? args[idx + 1] : undefined
+        if (capturedPath) {
+          const content = JSON.parse(readFileSync(capturedPath, 'utf-8'))
+          capturedTaskId = content.mcpServers['ai-support-agent'].env.AI_SUPPORT_TASK_ID
+        }
+        return mockProcess
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: { message: 'Run the E2E test', conversationId: 'conv-999', taskId: 'task-abc-123' },
+        commandId: 'cmd-mcp-task-99',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: baseConfigPath,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+
+      expect(result.success).toBe(true)
+      expect(capturedTaskId).toBe('task-abc-123')
+    })
+
+    it('should not embed AI_SUPPORT_TASK_ID in the per-command MCP config when payload.taskId is not provided', async () => {
+      const { spawn } = require('child_process')
+      const baseConfigPath = writeMcpConfig(tmpDir, 'http://localhost:3030', 'tenant:tok:raw', 'TEST_01', '/path/to/server.js')
+
+      let capturedPath: string | undefined
+      let capturedContent: Record<string, unknown> | undefined
+      const mockProcess = createMockChildProcess()
+      spawn.mockImplementation((_cmd: string, args: string[]) => {
+        const idx = args.indexOf('--mcp-config')
+        capturedPath = idx >= 0 ? args[idx + 1] : undefined
+        if (capturedPath) {
+          capturedContent = JSON.parse(readFileSync(capturedPath, 'utf-8'))
+        }
+        return mockProcess
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: { message: 'hello', conversationId: 'conv-999' },
+        commandId: 'cmd-mcp-no-task-99',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: baseConfigPath,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const env = (capturedContent as { mcpServers: { 'ai-support-agent': { env: Record<string, unknown> } } }).mcpServers['ai-support-agent'].env
+      expect(env).not.toHaveProperty('AI_SUPPORT_TASK_ID')
     })
 
     it('should clean up the per-command MCP config even when the command fails', async () => {
