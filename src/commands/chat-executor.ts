@@ -324,6 +324,7 @@ async function executeCliChatOnce(
 
     // 添付ファイルのダウンロード
     const conversationId = parseString(payload.conversationId)
+    const taskIdStr = parseString(payload.taskId) ?? undefined
 
     // per-command MCP 設定ファイル（AI_SUPPORT_CONVERSATION_ID を埋め込む）
     //
@@ -346,7 +347,7 @@ async function executeCliChatOnce(
     let commandMcpConfigPath: string | undefined
     if (mcpConfigPath && conversationId) {
       try {
-        commandMcpConfigPath = writeCommandMcpConfig(mcpConfigPath, commandId, conversationId)
+        commandMcpConfigPath = writeCommandMcpConfig(mcpConfigPath, commandId, conversationId, taskIdStr)
         cleanupCommandMcpConfig = (): void => {
           try {
             rmSync(commandMcpConfigPath as string, { force: true })
@@ -417,6 +418,7 @@ async function executeCliChatOnce(
         conversationId: conversationIdStr,
         browserSessionId: parseString(payload.browserSessionId) ?? undefined,
         browserLocalPort,
+        taskId: taskIdStr,
         ...(payload.policyContext?.e2eExecutionId && {
           e2eExecutionId: payload.policyContext.e2eExecutionId,
         }),
