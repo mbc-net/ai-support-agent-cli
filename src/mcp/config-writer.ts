@@ -70,6 +70,18 @@ export const BROWSER_LOCAL_PORT_ENV = 'AI_SUPPORT_BROWSER_LOCAL_PORT'
 export const CONVERSATION_ID_ENV = 'AI_SUPPORT_CONVERSATION_ID'
 
 /**
+ * 実行中タスクのIDの環境変数名。
+ *
+ * `trigger_e2e_test` MCPツールが子プロセス側で `process.env[TASK_ID_ENV]` として
+ * 読み取り、起動したE2E実行をこのタスクに紐付ける（タスク詳細画面のE2Eテストタブ
+ * からの逆引き用）。`CONVERSATION_ID_ENV` と同じ理由（`StdioClientTransport` が
+ * 呼び出し元プロセスの任意の環境変数をMCPサーバー子プロセスへ自動継承しない）により、
+ * `writeCommandMcpConfig` が書く per-command ファイルの `env` に明示的に埋め込む
+ * 必要がある。
+ */
+export const TASK_ID_ENV = 'AI_SUPPORT_TASK_ID'
+
+/**
  * MCP 設定ファイルを書き出す
  *
  * 0o600 権限で作成し、token は環境変数参照にする。
@@ -186,6 +198,7 @@ export function writeCommandMcpConfig(
   baseConfigPath: string,
   commandId: string,
   conversationId: string,
+  taskId?: string,
 ): string {
   const raw = readFileSync(baseConfigPath, 'utf-8')
   const config = JSON.parse(raw) as McpConfigFile
@@ -195,6 +208,7 @@ export function writeCommandMcpConfig(
     server.env = {
       ...(server.env ?? {}),
       [CONVERSATION_ID_ENV]: conversationId,
+      ...(taskId && { [TASK_ID_ENV]: taskId }),
     }
   }
 

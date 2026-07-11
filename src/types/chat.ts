@@ -14,6 +14,8 @@ export interface ChatPayload {
   conversationFiles?: unknown
   browserSessionId?: unknown
   agentChatMode?: unknown
+  /** タスク実行中のタスクID（タスク詳細のE2Eテストタブ逆引き用。trigger_e2e_testツールがE2E実行に紐付ける） */
+  taskId?: unknown
   policyContext?: {
     e2eExecutionId?: string
     e2eTestCaseId?: string

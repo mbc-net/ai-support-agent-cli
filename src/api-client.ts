@@ -27,6 +27,7 @@ import type {
   SshCredentials,
   SystemInfo,
   TriggerAlarmResult,
+  TriggerE2eTestResult,
   VersionInfo,
 } from './types'
 
@@ -466,6 +467,26 @@ export class ApiClient {
     return this.post<TriggerAlarmResult>(
       API_ENDPOINTS.AGENT_TOOL_TRIGGER_ALARM(this.tenantCode),
       { title, reason, priority, callId },
+    )
+  }
+
+  /**
+   * タスク実行中の CLI エージェントが E2E テストを起動する。
+   *
+   * `taskId` を渡すことで、起動した E2E 実行がそのタスクに紐付き、
+   * タスク詳細画面の E2E テストタブから逆引きできるようになる。
+   */
+  async triggerE2eTest(
+    testCaseId: string,
+    taskId: string,
+    executionMethod?: 'ai' | 'script' | 'hybrid' | 'playwright',
+    environmentId?: string,
+    callId?: string,
+  ): Promise<TriggerE2eTestResult> {
+    logger.debug(`Triggering E2E test: testCaseId=${testCaseId} taskId=${taskId}`)
+    return this.post<TriggerE2eTestResult>(
+      API_ENDPOINTS.AGENT_TOOL_TRIGGER_E2E_TEST(this.tenantCode),
+      { testCaseId, taskId, executionMethod, environmentId, callId },
     )
   }
 }

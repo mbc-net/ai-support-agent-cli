@@ -124,6 +124,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
       if (policyContext.browserLocalPort) env.AI_SUPPORT_BROWSER_LOCAL_PORT = String(policyContext.browserLocalPort)
       if (policyContext.e2eExecutionId) env.AI_SUPPORT_E2E_EXECUTION_ID = policyContext.e2eExecutionId
       if (policyContext.e2eTestCaseId) env.AI_SUPPORT_E2E_TEST_CASE_ID = policyContext.e2eTestCaseId
+      if (policyContext.taskId) env.AI_SUPPORT_TASK_ID = policyContext.taskId
     }
 
     if (envVarsOverride) {

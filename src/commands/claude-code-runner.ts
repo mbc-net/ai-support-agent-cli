@@ -48,6 +48,7 @@ export interface PolicyContext {
   browserLocalPort?: number
   e2eExecutionId?: string
   e2eTestCaseId?: string
+  taskId?: string
 }
 
 /** runClaudeCode のオプション */
@@ -102,6 +103,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
       if (policyContext.browserLocalPort) env.AI_SUPPORT_BROWSER_LOCAL_PORT = String(policyContext.browserLocalPort)
       if (policyContext.e2eExecutionId) env.AI_SUPPORT_E2E_EXECUTION_ID = policyContext.e2eExecutionId
       if (policyContext.e2eTestCaseId) env.AI_SUPPORT_E2E_TEST_CASE_ID = policyContext.e2eTestCaseId
+      if (policyContext.taskId) env.AI_SUPPORT_TASK_ID = policyContext.taskId
     }
 
     // Web 設定（CLAUDE_CODE# / ENV#）の env 上書き — 最後にマージして cleanEnv より優先
