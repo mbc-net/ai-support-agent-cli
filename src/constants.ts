@@ -86,8 +86,11 @@ export const HIDDEN_ENTRIES = ['.claude', '.codex']
 // Loopback address used when binding local HTTP servers and building local URLs
 export const LOCALHOST_ADDRESS = '127.0.0.1'
 
-// Default login URL (production)
-export const DEFAULT_LOGIN_URL = 'https://ai-support-agent.com'
+// Default login URL (production). Must point at the app subdomain that actually hosts
+// /agent-callback (web/) — the root domain serves the public marketing site
+// (public-site/) and has no such route. Keep in sync with frontBaseUrl in
+// api/infra/config/prod/index.ts.
+export const DEFAULT_LOGIN_URL = 'https://app.ai-support-agent.com'
 
 // Default API URL (production)
 export const DEFAULT_API_URL = 'https://api.ai-support-agent.com'
