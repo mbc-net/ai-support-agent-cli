@@ -41,6 +41,16 @@ export const SAFE_ENV_KEYS: readonly string[] = [
   'TERM', 'TMPDIR', 'TMP', 'TEMP', 'NODE_ENV',
   // Windows
   'SystemRoot', 'USERPROFILE', 'APPDATA', 'PATHEXT', 'COMSPEC',
+  // ECS oneshot: the API injects inbound-webhook context via containerEnv so an
+  // `execute_command` shell can read it. WEBHOOK_TRIGGERED=true marks a webhook
+  // start (even with no body), WEBHOOK_BODY carries the serialized request body
+  // (size-capped), and WEBHOOK_BODY_TRUNCATED=true signals the body was trimmed.
+  // These are only ever set inside the oneshot container; absent for resident
+  // agents, so exposing them here is safe (untrusted external data — the executed
+  // command decides how to use it).
+  'WEBHOOK_TRIGGERED',
+  'WEBHOOK_BODY',
+  'WEBHOOK_BODY_TRUNCATED',
 ]
 
 export function getSensitiveHomePaths(): string[] {
