@@ -13,6 +13,7 @@ import { registerFileUploadTool } from './tools/file-upload'
 import { registerProjectInfoTool } from './tools/project-info'
 import { registerReadConversationFileTool } from './tools/read-conversation-file'
 import { registerReadSlackThreadTool } from './tools/read-slack-thread'
+import { registerSendSlackFileTool } from './tools/send-slack-file'
 import { registerSendSlackMessageTool } from './tools/send-slack-message'
 import { registerTriggerAlarmTool } from './tools/trigger-alarm'
 import { registerTriggerE2eTestTool } from './tools/trigger-e2e-test'
@@ -33,6 +34,7 @@ export function createMcpServer(apiClient: ApiClient, projectCode: string, brows
   registerProjectInfoTool(server, apiClient, projectCode)
   registerReadConversationFileTool(server, apiClient)
   registerSendSlackMessageTool(server, apiClient)
+  registerSendSlackFileTool(server, apiClient)
   registerTriggerAlarmTool(server, apiClient)
   registerReadSlackThreadTool(server, apiClient)
   registerTriggerE2eTestTool(server, apiClient)
