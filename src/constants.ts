@@ -213,6 +213,8 @@ export const API_ENDPOINTS = {
   // Agent tool 関連エンドポイント（タスク実行画面のエージェントが呼び出す）
   AGENT_TOOL_SEND_SLACK_MESSAGE: (tenantCode: string) =>
     `/api/${tenantCode}/agent/tools/send-slack-message`,
+  AGENT_TOOL_SEND_SLACK_FILE: (tenantCode: string) =>
+    `/api/${tenantCode}/agent/tools/send-slack-file`,
   AGENT_TOOL_TRIGGER_ALARM: (tenantCode: string) =>
     `/api/${tenantCode}/agent/tools/trigger-alarm`,
   AGENT_TOOL_READ_SLACK_THREAD: (tenantCode: string) =>

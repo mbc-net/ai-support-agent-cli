@@ -23,6 +23,7 @@ import type {
   RegisterRequest,
   RegisterResponse,
   RepoCredentials,
+  SendSlackFileResult,
   SendSlackMessageResult,
   SshCredentials,
   SystemInfo,
@@ -439,6 +440,18 @@ export class ApiClient {
     return this.post<SendSlackMessageResult>(
       API_ENDPOINTS.AGENT_TOOL_SEND_SLACK_MESSAGE(this.tenantCode),
       { channel, message, threadTs, callId },
+    )
+  }
+
+  // ファイル内容を含むボディは最大10MB（api側 src/main.ts の express.json 上限）かつ
+  // Slack files.uploadV2 は複数回のAPI往復を伴うため、既定の10秒タイムアウトでは
+  // 大きめのファイルで打ち切られやすい。saveSessionLog と同様に専用タイムアウトを設定する。
+  async sendSlackFile(channel: string, fileName: string, content: string, threadTs?: string, callId?: string): Promise<SendSlackFileResult> {
+    logger.debug(`Sending Slack file to channel: ${channel}`)
+    return this.post<SendSlackFileResult>(
+      API_ENDPOINTS.AGENT_TOOL_SEND_SLACK_FILE(this.tenantCode),
+      { channel, fileName, content, threadTs, callId },
+      { timeout: 60_000 },
     )
   }
 

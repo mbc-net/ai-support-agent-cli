@@ -13,6 +13,12 @@ export interface SendSlackMessageResult {
   error?: ToolOutputError
 }
 
+export interface SendSlackFileResult {
+  success: boolean
+  data?: { messageTs?: string; permalink?: string; fileId?: string }
+  error?: ToolOutputError
+}
+
 export interface TriggerAlarmResult {
   success: boolean
   data?: { alertNumber?: string; status?: 'created' | 'duplicate' | 'failed' }
