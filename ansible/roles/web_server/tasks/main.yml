@@ -1,0 +1,47 @@
+---
+# web_server role: installs and starts Nginx or Apache, selected by the
+# `web_server_type` variable ('nginx' | 'apache', default 'nginx').
+#
+# `web_server_type` is validated as an enum by
+# `ALLOWED_STEP_PARAMS`/`STEP_PARAM_ENUM_VALUES` in
+# src/server-setup/server-setup-runner.ts before this playbook ever runs;
+# the `assert` below is a second, independent safety net (see the same
+# rationale in ansible/roles/database/tasks/main.yml) against a value that
+# matches none of the `when` conditions below, silently skipping every task
+# while `ansible-playbook` still exits 0.
+
+- name: "web_server : Validate web_server_type is supported"
+  ansible.builtin.assert:
+    that:
+      - web_server_type in ['nginx', 'apache']
+    fail_msg: >-
+      web_server_type must be one of 'nginx' or 'apache': got {{ web_server_type | to_json }}
+  when: web_server_type is defined
+
+- name: "web_server : Install Nginx"
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+  when: (web_server_type | default('nginx')) == 'nginx'
+
+- name: "web_server : Install Apache"
+  ansible.builtin.apt:
+    name: apache2
+    state: present
+    update_cache: true
+  when: (web_server_type | default('nginx')) == 'apache'
+
+- name: "web_server : Enable and start Nginx"
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+  when: (web_server_type | default('nginx')) == 'nginx'
+
+- name: "web_server : Enable and start Apache"
+  ansible.builtin.service:
+    name: apache2
+    state: started
+    enabled: true
+  when: (web_server_type | default('nginx')) == 'apache'

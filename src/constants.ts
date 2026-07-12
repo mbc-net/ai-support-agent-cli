@@ -185,6 +185,11 @@ export const API_ENDPOINTS = {
   REPO_CREDENTIALS: (tenantCode: string, repositoryId: string) => `/api/${tenantCode}/agent/repo-credentials/${repositoryId}`,
   PROJECT_CONFIG: (tenantCode: string) => `/api/${tenantCode}/agent/project-config`,
   SSH_CREDENTIALS: (tenantCode: string, hostId: string) => `/api/${tenantCode}/agent/ssh-credentials/${hostId}`,
+  // JIT SSH credential lookup scoped to a single server_setup_exec command (see server-setup.md
+  // "秘密鍵の受け渡し設計"). The target host is resolved server-side from the command's payload —
+  // callers never pass a hostId directly, so a oneshot token cannot fetch an arbitrary host's key.
+  SERVER_SETUP_SSH_CREDENTIAL: (tenantCode: string, commandId: string) =>
+    `/api/${tenantCode}/agent/commands/${commandId}/server-setup-ssh-credential`,
   BROWSER_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/browser-credentials`,
   E2E_ENV_VARIABLES: (tenantCode: string) => `/api/${tenantCode}/agent/e2e-env-variables`,
   FILES_UPLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/upload-url`,

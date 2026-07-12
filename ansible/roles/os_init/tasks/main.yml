@@ -1,0 +1,61 @@
+---
+# os_init role: user creation, OS package upgrade, and ufw firewall.
+#
+# IMPORTANT: the "allow OpenSSH" rule is applied BEFORE the default-deny
+# incoming policy and BEFORE `ufw --force enable`. Reversing this order can
+# drop the very SSH session used to run this playbook.
+
+- name: "os_init : Update apt cache"
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: "os_init : Upgrade all packages"
+  ansible.builtin.apt:
+    upgrade: dist
+
+- name: "os_init : Create setup user"
+  ansible.builtin.user:
+    name: "{{ os_init_user | default('appuser') }}"
+    shell: /bin/bash
+    create_home: true
+    groups: sudo
+    append: true
+
+- name: "os_init : Install ufw"
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+
+- name: "os_init : Check ufw status"
+  ansible.builtin.command:
+    cmd: ufw status
+  register: os_init_ufw_status
+  changed_when: false
+
+# --- Ordering guard: OpenSSH must be allowed before anything below enables
+# --- the firewall or sets a default-deny incoming policy.
+- name: "os_init : Allow OpenSSH through ufw"
+  ansible.builtin.command:
+    cmd: ufw allow OpenSSH
+  register: os_init_ufw_allow_ssh
+  changed_when: "'Skipping' not in os_init_ufw_allow_ssh.stdout"
+
+- name: "os_init : Set ufw default incoming policy to deny"
+  ansible.builtin.command:
+    cmd: ufw default deny incoming
+  register: os_init_ufw_default_incoming
+  changed_when: "'Default incoming policy changed' in os_init_ufw_default_incoming.stdout"
+
+- name: "os_init : Set ufw default outgoing policy to allow"
+  ansible.builtin.command:
+    cmd: ufw default allow outgoing
+  register: os_init_ufw_default_outgoing
+  changed_when: "'Default outgoing policy changed' in os_init_ufw_default_outgoing.stdout"
+
+- name: "os_init : Enable ufw"
+  ansible.builtin.command:
+    cmd: ufw --force enable
+  when: "'inactive' in os_init_ufw_status.stdout"
+  register: os_init_ufw_enable
+  changed_when: "'Firewall is active' in os_init_ufw_enable.stdout"

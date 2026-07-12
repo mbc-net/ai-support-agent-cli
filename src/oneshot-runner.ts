@@ -18,8 +18,10 @@ import { type AgentCommand, type AgentCommandType, type CommandResult, errorResu
 import { getErrorMessage } from './utils'
 
 /**
- * Command types the ECS oneshot runner is allowed to execute (Phase 1).
- * The API only dispatches `execute_command` to ECS execution agents, but the
+ * Command types the ECS oneshot runner is allowed to execute (Phase 1:
+ * `execute_command`; Phase 3: `server_setup_exec` for the ECS dispatch mode
+ * of the server setup feature — see admin-docs `docs/features/server-setup.md`).
+ * The API only dispatches these types to ECS execution agents, but the
  * runner enforces the same allowlist defensively: a mis-dispatched `chat` /
  * `e2e_test` / `file_*` would otherwise run with a near-empty execution
  * context (no projectDir/mcpConfigPath/serverConfig/browser callbacks) and
@@ -27,6 +29,7 @@ import { getErrorMessage } from './utils'
  */
 const ONESHOT_SUPPORTED_COMMAND_TYPES: ReadonlySet<AgentCommandType> = new Set<AgentCommandType>([
   'execute_command',
+  'server_setup_exec',
 ])
 
 /**

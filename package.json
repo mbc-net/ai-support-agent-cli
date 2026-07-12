@@ -24,6 +24,7 @@
   "files": [
     "dist",
     "docker",
+    "ansible",
     "playwright.subprocess.config.js",
     "LICENSE",
     "README.md",

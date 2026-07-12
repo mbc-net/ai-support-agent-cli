@@ -8,6 +8,10 @@ report/
 *.js.map
 .env
 .local/
+
+# Python bytecode cache (ansible/callback_plugins/ ships a .py plugin + tests)
+__pycache__/
+*.pyc
 ### VisualStudioCode template
 .vscode/*
 !.vscode/settings.json

@@ -1,0 +1,51 @@
+---
+# docker role: Docker Engine + docker compose plugin, installed from Docker's
+# official apt repository. `ansible.builtin.apt` is naturally idempotent, so
+# re-running this role when Docker is already installed is a no-op.
+
+- name: "docker : Install prerequisite packages"
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+    update_cache: true
+
+- name: "docker : Create apt keyrings directory"
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: "docker : Add Docker GPG key"
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+
+- name: "docker : Add Docker apt repository"
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}
+      signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu
+      {{ ansible_distribution_release }} stable
+    state: present
+    filename: docker
+
+- name: "docker : Install Docker Engine and compose plugin"
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+
+- name: "docker : Enable and start the docker service"
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true

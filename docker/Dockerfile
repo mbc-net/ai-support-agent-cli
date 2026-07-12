@@ -53,7 +53,36 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     # HTML/XML parsing (for document content extraction)
     beautifulsoup4==4.* lxml==5.* \
     # Character encoding detection (for legacy files)
-    chardet==5.*
+    chardet==5.* \
+    # Server setup execution: runs agent/ansible/playbook.yml against target hosts.
+    # Pinned to a range validated against ansible/callback_plugins/json.py and
+    # ansible/roles/database (CallbackBase's v2_runner_on_*/v2_playbook_on_stats
+    # hooks and module result shapes are internal APIs, not covered by ansible-core's
+    # semver-ish compatibility promise) rather than the previous unbounded `2.*`,
+    # which could silently pick up a future major ansible-core release with
+    # changed callback internals.
+    'ansible-core>=2.16,<2.18'
+
+# Ansible collections used by ansible/roles/database/tasks/main.yml to set the
+# MySQL root / PostgreSQL postgres admin password via a proper module
+# parameter (ansible.mysql.mysql_user / community.postgresql.postgresql_user)
+# instead of interpolating the password into a raw SQL string, which would be
+# vulnerable to SQL injection via a password containing a single quote.
+# `ansible.mysql` is used rather than the now-deprecated
+# `community.mysql.mysql_user` (removal planned for community.mysql 6.0.0).
+# Version ranges pinned for the same reproducibility reason as ansible-core
+# above — an unbounded install could silently pick up a future major release
+# with a changed module interface (e.g. mysql_user/postgresql_user parameter
+# shape) that ansible/roles/database/tasks/main.yml wasn't validated against.
+# Installed to /usr/share/ansible/collections — one of ansible-core's default
+# collection search paths regardless of the runtime user's $HOME — so the
+# collections are found no matter which UID the container ultimately runs as
+# (see docker/entrypoint.sh's dynamic passwd-entry handling for --user).
+RUN ansible-galaxy collection install \
+    'ansible.mysql:>=5.0.0,<6.0.0' \
+    'community.postgresql:>=4.0.0,<5.0.0' \
+    -p /usr/share/ansible/collections \
+    && chmod -R a+rX /usr/share/ansible/collections
 
 # =============================================================================
 # Layer 3: System CLIs — external binary downloads (stable, rarely changes)
