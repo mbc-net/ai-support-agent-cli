@@ -85,6 +85,39 @@ jobs:
           exit $EXIT_CODE
         timeout-minutes: 6
 
+  ansible_callback_tests:
+    name: Ansible Callback Plugin Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Pinned to the same range as docker/Dockerfile's `ansible-core` install,
+      # since CallbackBase's v2_runner_on_*/v2_playbook_on_stats hooks (used by
+      # ansible/callback_plugins/json.py) are internal APIs, not covered by
+      # ansible-core's semver-ish compatibility promise.
+      - name: Install ansible-core
+        run: pip install 'ansible-core>=2.16,<2.18'
+
+      # Collections used by ansible/roles/database/tasks/main.yml. Not
+      # exercised by test_json_callback.py itself (it only loads json.py
+      # directly and never runs the database role), but installed here to
+      # mirror docker/Dockerfile's runtime environment as closely as possible.
+      - name: Install Ansible collections (ansible.mysql, community.postgresql)
+        run: ansible-galaxy collection install ansible.mysql community.postgresql
+
+      # Regression test for the json stdout callback's no_log censorship —
+      # see ansible/callback_plugins/tests/test_json_callback.py's module
+      # docstring. This is the only thing standing between a broken
+      # censorship change and db_root_password leaking into command output,
+      # so it must run in CI rather than rely on manual execution.
+      - name: Run json callback no_log censorship tests
+        run: python3 ansible/callback_plugins/tests/test_json_callback.py -v
+
   publish:
     name: Publish
     needs: unit_tests

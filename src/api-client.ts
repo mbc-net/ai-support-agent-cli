@@ -72,6 +72,16 @@ export class ApiClient {
     this.tenantCode = code
   }
 
+  /**
+   * Read-only accessor for the tenant code derived from the current token
+   * (or overridden via `setTenantCode`). Used by `server-setup-runner.ts` to
+   * namespace the persistent per-host known_hosts file so distinct tenants
+   * never share (or overwrite) each other's recorded SSH host keys.
+   */
+  getTenantCode(): string {
+    return this.tenantCode
+  }
+
   setProjectCode(code: string): void {
     this.projectCode = code
   }
@@ -214,6 +224,21 @@ export class ApiClient {
   async getSshCredentials(hostId: string): Promise<SshCredentials> {
     logger.debug(`Fetching SSH credentials for host: ${hostId}`)
     return this.get<SshCredentials>(API_ENDPOINTS.SSH_CREDENTIALS(this.tenantCode, hostId))
+  }
+
+  /**
+   * JIT SSH credential lookup for a `server_setup_exec` command. The target
+   * host is resolved server-side from the command's payload (never from a
+   * client-supplied hostId), so this can safely be called with either an
+   * ECS oneshot token or a resident agent's normal token.
+   */
+  async getServerSetupSshCredential(commandId: string, agentId: string): Promise<SshCredentials> {
+    this.validateCommandId(commandId)
+    logger.debug(`Fetching server setup SSH credential for command: ${commandId}`)
+    return this.get<SshCredentials>(
+      API_ENDPOINTS.SERVER_SETUP_SSH_CREDENTIAL(this.tenantCode, commandId),
+      { params: { agentId } },
+    )
   }
 
   async getBrowserCredentials(name: string): Promise<BrowserCredentials> {

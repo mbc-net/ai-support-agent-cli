@@ -38,6 +38,17 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getTenantCode', () => {
+    it('returns the tenant code extracted from the token by default', () => {
+      expect(client.getTenantCode()).toBe('test_tenant')
+    })
+
+    it('reflects a later setTenantCode override', () => {
+      client.setTenantCode('other_tenant')
+      expect(client.getTenantCode()).toBe('other_tenant')
+    })
+  })
+
   describe('setProjectCode', () => {
     it('should update the project code used in file API paths', async () => {
       mockInstance.post.mockResolvedValue({
