@@ -226,6 +226,25 @@ describe('security', () => {
       const env = buildSafeEnv()
       expect(env.PATH).toBe(process.env.PATH)
     })
+
+    it('should pass through webhook context vars so ECS execute_command can read them', () => {
+      const keys = ['WEBHOOK_TRIGGERED', 'WEBHOOK_BODY', 'WEBHOOK_BODY_TRUNCATED']
+      const originals = keys.map((k) => process.env[k])
+      process.env.WEBHOOK_TRIGGERED = 'true'
+      process.env.WEBHOOK_BODY = '{"alert":"db down"}'
+      process.env.WEBHOOK_BODY_TRUNCATED = 'true'
+      try {
+        const env = buildSafeEnv()
+        expect(env.WEBHOOK_TRIGGERED).toBe('true')
+        expect(env.WEBHOOK_BODY).toBe('{"alert":"db down"}')
+        expect(env.WEBHOOK_BODY_TRUNCATED).toBe('true')
+      } finally {
+        keys.forEach((k, i) => {
+          if (originals[i] === undefined) delete process.env[k]
+          else process.env[k] = originals[i]
+        })
+      }
+    })
   })
 
   describe('constants', () => {

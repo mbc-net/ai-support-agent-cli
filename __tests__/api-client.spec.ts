@@ -1258,6 +1258,98 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('triggerE2eTest', () => {
+    it('should POST to trigger-e2e-test endpoint and return the result', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: true, data: { executionId: 'exec-1', dispatched: true } },
+      })
+
+      const result = await client.triggerE2eTest('case-456', 'task-abc-123')
+
+      expect(result).toEqual({
+        success: true,
+        data: { executionId: 'exec-1', dispatched: true },
+      })
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/trigger-e2e-test',
+        {
+          testCaseId: 'case-456',
+          taskId: 'task-abc-123',
+          executionMethod: undefined,
+          environmentId: undefined,
+          callId: undefined,
+        },
+        undefined,
+      )
+    })
+
+    it('should include executionMethod, environmentId, and callId when provided', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: true, data: { executionId: 'exec-1', dispatched: true } },
+      })
+
+      await client.triggerE2eTest('case-456', 'task-abc-123', 'playwright', 'env-1', 'call-id-1')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/trigger-e2e-test',
+        {
+          testCaseId: 'case-456',
+          taskId: 'task-abc-123',
+          executionMethod: 'playwright',
+          environmentId: 'env-1',
+          callId: 'call-id-1',
+        },
+        undefined,
+      )
+    })
+
+    it('should return failure result when API reports an error', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: false, error: { code: 'INVALID_INPUT', message: 'testCaseId は必須です' } },
+      })
+
+      const result = await client.triggerE2eTest('case-456', 'task-abc-123')
+
+      expect(result).toEqual({
+        success: false,
+        error: { code: 'INVALID_INPUT', message: 'testCaseId は必須です' },
+      })
+    })
+  })
+
+  describe('readSlackThread', () => {
+    it('should POST to read-slack-thread endpoint with the chatConversationId and return the result', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: true, data: { text: '[2026/01/01 12:00] U012: hello' } },
+      })
+
+      const result = await client.readSlackThread('conv-123')
+
+      expect(result).toEqual({
+        success: true,
+        data: { text: '[2026/01/01 12:00] U012: hello' },
+      })
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/read-slack-thread',
+        { chatConversationId: 'conv-123' },
+        undefined,
+      )
+    })
+
+    it('should return failure result when API reports an error', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: false, error: { code: 'NOT_FOUND', message: 'このスレッドはSlack会話に紐づいていません' } },
+      })
+
+      const result = await client.readSlackThread('conv-not-slack')
+
+      expect(result).toEqual({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'このスレッドはSlack会話に紐づいていません' },
+      })
+    })
+  })
+
   describe('idempotency: callId stays identical across HTTP retries', () => {
     beforeEach(() => {
       jest.useFakeTimers()

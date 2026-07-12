@@ -1,8 +1,11 @@
+import { rmSync } from 'fs'
+
 import { ApiClient } from '../api-client'
 import { type AwsCredentialResult, buildAwsProfileCredentials, buildSingleAccountAwsEnv } from '../aws-credential-builder'
 import { CHAT_MAX_ATTEMPTS, CHAT_RETRY_DELAY_MS, ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, ERR_CLAUDE_CLI_NOT_FOUND, ERR_CODEX_CLI_NOT_FOUND, LOG_MESSAGE_LIMIT } from '../constants'
 import { buildGitCredentialEnv } from '../git-credential-setup'
 import { logger } from '../logger'
+import { writeCommandMcpConfig } from '../mcp/config-writer'
 import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatFileInfo, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
 import { getErrorMessage, parseString, sleep, truncateString } from '../utils'
 
@@ -14,7 +17,7 @@ import { ERR_CLAUDE_EXIT_CODE_1, ERR_CLAUDE_USAGE_LIMIT_REACHED, runClaudeCode }
 import { ERR_CODEX_AUTH_INVALID, ERR_CODEX_EXIT_CODE_1, runCodex } from './codex-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { getProcessManager } from './process-manager'
-import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, sendDoneChunk } from './shared-chat-utils'
+import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
@@ -257,7 +260,7 @@ async function executeCliChatOnce(
 
   logger.info(`[chat] Starting chat command [${commandId}]: message="${truncateString(message, LOG_MESSAGE_LIMIT)}"`)
 
-  const { sendChunk: rawSendChunk, getChunkIndex } = createChunkSender(commandId, client, agentId, 'chat', { debugLog: true })
+  const { sendChunk: rawSendChunk, getChunkIndex, flush } = createChunkSender(commandId, client, agentId, 'chat', { debugLog: true, batch: resolveChunkBatchConfig() })
 
   // tool_call チャンクを蓄積して done チャンクに含める（RDS 永続化用）
   const collectedToolCalls: Record<string, unknown>[] = []
@@ -289,6 +292,7 @@ async function executeCliChatOnce(
 
   let cleanupDownloads: (() => void) | undefined
   let cleanupGitCredentials: (() => void) | undefined
+  let cleanupCommandMcpConfig: (() => void) | undefined
 
   try {
     const allowedTools = mode === 'claude_code' ? serverConfig?.claudeCodeConfig?.allowedTools : undefined
@@ -320,6 +324,43 @@ async function executeCliChatOnce(
 
     // 添付ファイルのダウンロード
     const conversationId = parseString(payload.conversationId)
+    const taskIdStr = parseString(payload.taskId) ?? undefined
+
+    // per-command MCP 設定ファイル（AI_SUPPORT_CONVERSATION_ID を埋め込む）
+    //
+    // `.ai-support-agent/mcp/config.json`（mcpConfigPath）はプロジェクト単位の静的ファイルで
+    // config sync 時にのみ再生成され、複数のチャットコマンド（並行実行されうる複数のSlack会話を
+    // 含む。`agent-transport.ts` の `void handleNotification(...)` により同一エージェントが
+    // 複数コマンドを並行処理しうる）から共有される。conversationId はコマンド単位で変わる値で
+    // あり、この静的ファイルに書き込むと「別会話のconversationIdが残ったまま次のコマンドに
+    // 使われる」「並行実行時に競合する」リスクがある。
+    //
+    // また `@modelcontextprotocol/sdk` の `StdioClientTransport`（claude/codex CLI が MCP
+    // サーバーを子プロセスとして起動する際に使用）は `{ ...getDefaultEnvironment(), ...
+    // serverParams.env }` のみを子プロセスに渡す実装であり、`getDefaultEnvironment()` は
+    // HOME/LOGNAME/PATH/SHELL/TERM/USER 等の最小セットのみを継承する。つまり呼び出し元プロセス
+    // （claude/codex CLI 自身）が持つ任意の環境変数（policyContext 経由で設定した
+    // AI_SUPPORT_CONVERSATION_ID を含む）は MCP サーバー子プロセスへ自動継承されず、MCP 設定
+    // ファイルの `env` に明示されている場合のみ届く。そのため、コマンドごとに conversationId を
+    // 埋め込んだ専用の設定ファイルを都度書き出し、これを `--mcp-config` に使う
+    // （`config-writer.ts` の `CONVERSATION_ID_ENV` 定義コメントも参照）。
+    let commandMcpConfigPath: string | undefined
+    if (mcpConfigPath && conversationId) {
+      try {
+        commandMcpConfigPath = writeCommandMcpConfig(mcpConfigPath, commandId, conversationId, taskIdStr)
+        cleanupCommandMcpConfig = (): void => {
+          try {
+            rmSync(commandMcpConfigPath as string, { force: true })
+          } catch (cleanupError) {
+            logger.warn(`[chat] Failed to remove per-command MCP config for [${commandId}]: ${getErrorMessage(cleanupError)}`)
+          }
+        }
+      } catch (error) {
+        logger.warn(`[chat] Failed to write per-command MCP config for [${commandId}], falling back to the shared static MCP config (AI_SUPPORT_CONVERSATION_ID will be unavailable to MCP tools such as read_slack_thread): ${getErrorMessage(error)}`)
+      }
+    }
+    const effectiveMcpConfigPath = commandMcpConfigPath ?? mcpConfigPath
+
     const { filePathsNotice, cleanup: dlCleanup } = await downloadAttachments(
       payload, client, agentId, projectDir, conversationId, commandId, sendChunk,
     )
@@ -336,7 +377,7 @@ async function executeCliChatOnce(
     const history = parseHistory(payload.history)
 
     // file_upload ツールに必要なメタデータをメッセージに付加
-    const metadataNotice = buildMetadataNotice(conversationId, commandId, projectCode, mcpConfigPath)
+    const metadataNotice = buildMetadataNotice(conversationId, commandId, projectCode, effectiveMcpConfigPath)
 
     const messageWithHistory = formatHistoryForClaudeCode(history, message + filePathsNotice + conversationFileNotice + metadataNotice)
 
@@ -352,7 +393,7 @@ async function executeCliChatOnce(
       locale ? `locale=${locale}` : null,
       awsEnv ? 'AWS credentials' : null,
       gitEnv && Object.keys(gitEnv).length > 0 ? 'Git credentials' : null,
-      mcpConfigPath ? 'MCP config' : null,
+      effectiveMcpConfigPath ? 'MCP config' : null,
       history.length > 0 ? `${history.length} history messages` : null,
       payload.files ? `${Array.isArray(payload.files) ? payload.files.length : 0} attached files` : null,
       conversationFiles.length > 0 ? `${conversationFiles.length} conversation files` : null,
@@ -370,13 +411,14 @@ async function executeCliChatOnce(
       cwd: projectDir ? getWorkspaceDir(projectDir) : undefined,
       systemPrompt,
       model,
-      mcpConfigPath,
+      mcpConfigPath: effectiveMcpConfigPath,
       policyContext: {
         tenantCode,
         projectCode,
         conversationId: conversationIdStr,
         browserSessionId: parseString(payload.browserSessionId) ?? undefined,
         browserLocalPort,
+        taskId: taskIdStr,
         ...(payload.policyContext?.e2eExecutionId && {
           e2eExecutionId: payload.policyContext.e2eExecutionId,
         }),
@@ -391,7 +433,6 @@ async function executeCliChatOnce(
       : runClaudeCode({
           ...runnerOptions,
           allowedTools,
-          mcpConfigPath,
         })
     // プロセスを管理 Map に登録
     processManager.register(commandId, handle)
@@ -401,6 +442,8 @@ async function executeCliChatOnce(
     } finally {
       processManager.remove(commandId)
     }
+    // バッファ中の delta を確定送信してから完了ログを出す（chunk 数を正確に集計するため）。
+    await flush()
     const usageLog = result.usage
       ? ` in=${result.usage.input_tokens} out=${result.usage.output_tokens} cost=$${result.usage.total_cost_usd?.toFixed(6) ?? '?'}`
       : ''
@@ -426,11 +469,13 @@ async function executeCliChatOnce(
     // 一時ファイルをクリーンアップ
     cleanupDownloads?.()
     cleanupGitCredentials?.()
+    cleanupCommandMcpConfig?.()
 
     return successResult(result.text)
   } catch (error) {
     cleanupDownloads?.()
     cleanupGitCredentials?.()
+    cleanupCommandMcpConfig?.()
     if (suppressRuntimeUnavailableError && isRuntimeUnavailableErrorMessage(mode, getErrorMessage(error))) {
       return errorResult(getErrorMessage(error))
     }

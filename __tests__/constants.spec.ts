@@ -63,6 +63,16 @@ describe('constants', () => {
     expect(constants.NPM_COMMAND).toBe(expected)
   })
 
+  it('should point DEFAULT_LOGIN_URL at the app subdomain that actually serves /agent-callback', () => {
+    // The public-site domain restructure moved the AI Support Agent app (web/) from the
+    // root domain to the app.* subdomain; the root domain now serves the public marketing
+    // site, which has no /agent-callback route. `ai-support-agent login` (with --url
+    // omitted) opens `${DEFAULT_LOGIN_URL}/agent-callback`, so this must track wherever
+    // /agent-callback is actually hosted (see api/infra/config/prod/index.ts frontBaseUrl).
+    const constants = require('../src/constants')
+    expect(constants.DEFAULT_LOGIN_URL).toBe('https://app.ai-support-agent.com')
+  })
+
   it('should export all expected constant values', () => {
     const constants = require('../src/constants')
 

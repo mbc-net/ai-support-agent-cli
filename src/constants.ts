@@ -29,6 +29,11 @@ export const ENV_VARS = {
   // detection), 'false' force-disables it. Unset = auto-detect.
   ECS_LAUNCHER: 'AI_SUPPORT_AGENT_ECS_LAUNCHER',
   CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_CODE_OAUTH_TOKEN',
+  // Chat chunk batching (coalesce streaming delta chunks into fewer POSTs).
+  // Unset = enabled. Set to 'false' to fall back to 1:1 immediate sending.
+  CHAT_CHUNK_BATCH_ENABLED: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_ENABLED',
+  CHAT_CHUNK_BATCH_WINDOW_MS: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_WINDOW_MS',
+  CHAT_CHUNK_BATCH_MAX_BYTES: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_MAX_BYTES',
 } as const
 
 export const CONFIG_DIR = (() => {
@@ -50,6 +55,12 @@ export const MAX_AUTH_BODY_SIZE = 64 * 1024 // 64 KB
 export const API_MAX_RETRIES = 3
 export const API_BASE_DELAY_MS = 1000
 export const API_REQUEST_TIMEOUT = 10_000
+
+// Chat chunk batching defaults.
+// Streaming `delta` chunks are coalesced within a short time window (or until a
+// byte threshold) so a single response produces far fewer HTTP POSTs.
+export const CHAT_CHUNK_BATCH_WINDOW_MS = 80
+export const CHAT_CHUNK_BATCH_MAX_BYTES = 8 * 1024 // 8 KB
 
 // DB query connection timeout (MySQL connectTimeout / PostgreSQL connectionTimeoutMillis)
 export const DB_CONNECT_TIMEOUT_MS = 10_000
@@ -75,8 +86,11 @@ export const HIDDEN_ENTRIES = ['.claude', '.codex']
 // Loopback address used when binding local HTTP servers and building local URLs
 export const LOCALHOST_ADDRESS = '127.0.0.1'
 
-// Default login URL (production)
-export const DEFAULT_LOGIN_URL = 'https://ai-support-agent.com'
+// Default login URL (production). Must point at the app subdomain that actually hosts
+// /agent-callback (web/) — the root domain serves the public marketing site
+// (public-site/) and has no such route. Keep in sync with frontBaseUrl in
+// api/infra/config/prod/index.ts.
+export const DEFAULT_LOGIN_URL = 'https://app.ai-support-agent.com'
 
 // Default API URL (production)
 export const DEFAULT_API_URL = 'https://api.ai-support-agent.com'
@@ -201,6 +215,10 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/tools/send-slack-message`,
   AGENT_TOOL_TRIGGER_ALARM: (tenantCode: string) =>
     `/api/${tenantCode}/agent/tools/trigger-alarm`,
+  AGENT_TOOL_READ_SLACK_THREAD: (tenantCode: string) =>
+    `/api/${tenantCode}/agent/tools/read-slack-thread`,
+  AGENT_TOOL_TRIGGER_E2E_TEST: (tenantCode: string) =>
+    `/api/${tenantCode}/agent/tools/trigger-e2e-test`,
   // ECS execution agent registration (ecs publish)
   ECS_AGENTS: (tenantCode: string) => `/api/${tenantCode}/agent/ecs-agents`,
 } as const

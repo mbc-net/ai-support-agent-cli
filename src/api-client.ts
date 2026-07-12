@@ -18,6 +18,7 @@ import type {
   PendingAlert,
   PendingCommand,
   ProjectConfigResponse,
+  ReadSlackThreadResult,
   ReleaseChannel,
   RegisterRequest,
   RegisterResponse,
@@ -26,6 +27,7 @@ import type {
   SshCredentials,
   SystemInfo,
   TriggerAlarmResult,
+  TriggerE2eTestResult,
   VersionInfo,
 } from './types'
 
@@ -440,6 +442,21 @@ export class ApiClient {
     )
   }
 
+  /**
+   * 現在処理中のSlackスレッドの全文を読み取る（自ボットの過去投稿を含む）。
+   *
+   * `chatConversationId` は `send_slack_message`/`trigger_alarm` の `callId`
+   * （呼び出し単位の冪等キー）とは別物で、実際のSlackチャット会話ID
+   * （`SlackThreadMapping.conversationId`）そのものを渡す。
+   */
+  async readSlackThread(chatConversationId: string): Promise<ReadSlackThreadResult> {
+    logger.debug(`Reading Slack thread for conversation: ${chatConversationId}`)
+    return this.post<ReadSlackThreadResult>(
+      API_ENDPOINTS.AGENT_TOOL_READ_SLACK_THREAD(this.tenantCode),
+      { chatConversationId },
+    )
+  }
+
   async triggerAlarm(
     title: string,
     reason: string,
@@ -450,6 +467,26 @@ export class ApiClient {
     return this.post<TriggerAlarmResult>(
       API_ENDPOINTS.AGENT_TOOL_TRIGGER_ALARM(this.tenantCode),
       { title, reason, priority, callId },
+    )
+  }
+
+  /**
+   * タスク実行中の CLI エージェントが E2E テストを起動する。
+   *
+   * `taskId` を渡すことで、起動した E2E 実行がそのタスクに紐付き、
+   * タスク詳細画面の E2E テストタブから逆引きできるようになる。
+   */
+  async triggerE2eTest(
+    testCaseId: string,
+    taskId: string,
+    executionMethod?: 'ai' | 'script' | 'hybrid' | 'playwright',
+    environmentId?: string,
+    callId?: string,
+  ): Promise<TriggerE2eTestResult> {
+    logger.debug(`Triggering E2E test: testCaseId=${testCaseId} taskId=${taskId}`)
+    return this.post<TriggerE2eTestResult>(
+      API_ENDPOINTS.AGENT_TOOL_TRIGGER_E2E_TEST(this.tenantCode),
+      { testCaseId, taskId, executionMethod, environmentId, callId },
     )
   }
 }

@@ -54,12 +54,14 @@ describe('MCP Server', () => {
       const mockClient = {} as ApiClient
       const server = createMcpServer(mockClient, 'TEST_01')
       expect(server).toBeDefined()
-      // 19 tools: db_query, get_db_schemas, get_credentials, file_upload, get_project_info, read_conversation_file,
-      // send_slack_message, trigger_alarm,
+      // 21 tools: db_query, get_db_schemas, get_credentials, file_upload, get_project_info, read_conversation_file,
+      // send_slack_message, trigger_alarm, read_slack_thread, trigger_e2e_test,
       // browser_navigate, browser_close, browser_click, browser_fill, browser_get_text, browser_login,
       // browser_extract, browser_set_variable, browser_get_variable, browser_list_variables,
       // report_test_step
-      expect(server.tool).toHaveBeenCalledTimes(19)
+      expect(server.tool).toHaveBeenCalledTimes(21)
+      expect((server.tool as jest.Mock).mock.calls.map((call) => call[0])).toContain('read_slack_thread')
+      expect((server.tool as jest.Mock).mock.calls.map((call) => call[0])).toContain('trigger_e2e_test')
     })
   })
 
