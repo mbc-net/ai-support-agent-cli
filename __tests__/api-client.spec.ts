@@ -1199,6 +1199,63 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('sendSlackFile', () => {
+    it('should POST to send-slack-file endpoint and return the result', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: true, data: { fileId: 'F123456', permalink: 'https://slack.example.com/files/F123456' } },
+      })
+
+      const result = await client.sendSlackFile('#general', 'cost.csv', 'a,b\n1,2')
+
+      expect(result).toEqual({
+        success: true,
+        data: { fileId: 'F123456', permalink: 'https://slack.example.com/files/F123456' },
+      })
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/send-slack-file',
+        { channel: '#general', fileName: 'cost.csv', content: 'a,b\n1,2', threadTs: undefined },
+        { timeout: 60_000 },
+      )
+    })
+
+    it('should pass threadTs when provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true, data: { fileId: 'F1' } } })
+
+      await client.sendSlackFile('#general', 'cost.csv', 'data', '111.222')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/send-slack-file',
+        { channel: '#general', fileName: 'cost.csv', content: 'data', threadTs: '111.222' },
+        { timeout: 60_000 },
+      )
+    })
+
+    it('should include callId in the POST body when provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true, data: { fileId: 'F1' } } })
+
+      await client.sendSlackFile('#general', 'cost.csv', 'data', undefined, 'call-id-1')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/send-slack-file',
+        { channel: '#general', fileName: 'cost.csv', content: 'data', threadTs: undefined, callId: 'call-id-1' },
+        { timeout: 60_000 },
+      )
+    })
+
+    it('should return failure result when API reports an error', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: false, error: { code: 'NOT_FOUND', message: "チャンネル 'x' が見つかりません" } },
+      })
+
+      const result = await client.sendSlackFile('#missing', 'cost.csv', 'data')
+
+      expect(result).toEqual({
+        success: false,
+        error: { code: 'NOT_FOUND', message: "チャンネル 'x' が見つかりません" },
+      })
+    })
+  })
+
   describe('triggerAlarm', () => {
     it('should POST to trigger-alarm endpoint and return the result', async () => {
       mockInstance.post.mockResolvedValue({
