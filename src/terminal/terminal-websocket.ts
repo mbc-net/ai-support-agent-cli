@@ -4,7 +4,7 @@ import { execFile, type ExecFileException } from 'child_process'
 import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../base-websocket'
-import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
+import { WS_CLOSE_CODE_AUTH_REJECTED, WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import { logger } from '../logger'
 import { buildWsUrl, getErrorMessage, isErrnoException } from '../utils'
 
@@ -146,12 +146,14 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     private readonly agentId: string,
     private readonly projectDir?: string,
     private readonly envVarsProvider?: EnvVarsProvider,
+    private readonly onAuthRejected?: () => void,
   ) {
     super({
       maxReconnectRetries: TERMINAL_WS_MAX_RECONNECT_RETRIES,
       reconnectBaseDelayMs: TERMINAL_WS_RECONNECT_BASE_DELAY_MS,
       reconnectMaxDelayMs: WS_RECONNECT_MAX_DELAY_MS,
       logPrefix: '[terminal-ws]',
+      authRejectedCloseCode: WS_CLOSE_CODE_AUTH_REJECTED,
     })
     this.manager = new TerminalSessionManager()
     this.wsUrl = buildWsUrl(apiUrl, '/ws/agent-terminal')
@@ -232,6 +234,19 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
    */
   protected onWebSocketClose(): void {
     this.manager.closeAllGracefully()
+  }
+
+  /**
+   * Server-side permanent authentication rejection (invalid token, or Agent ID
+   * token-binding mismatch). The base class calls this instead of
+   * onWebSocketClose() in that case, since reconnecting to resume is not
+   * possible — the connection will never be re-established with the same
+   * credentials. Kill every PTY immediately rather than arming the grace
+   * window, matching the explicit-shutdown behavior in disconnect().
+   */
+  protected onPermanentClose(): void {
+    this.manager.closeAll()
+    this.onAuthRejected?.()
   }
 
   /**

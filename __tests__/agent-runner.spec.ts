@@ -298,6 +298,61 @@ describe('agent-runner', () => {
     expect(mockedSaveConfig).toHaveBeenCalled()
   })
 
+  it('should derive a distinct agentId per project from its own token, not a shared one (regression: Agent ID does not match the token binding)', async () => {
+    const mockConfig = {
+      agentId: 'fallback-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'mbc:token-id-a:raw-secret-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'jcci', projectCode: 'proj-b', token: 'jcci:token-id-b:raw-secret-b', apiUrl: 'http://api-b' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(mockForkProject).toHaveBeenCalledTimes(2)
+    // Each project must authenticate its own WebSocket connections (terminal-ws/vscode-ws)
+    // with the agentId bound to ITS OWN token's tokenId, not another project's.
+    expect(mockForkProject).toHaveBeenCalledWith(
+      mockConfig.projects[0],
+      'token-id-a',
+      expect.any(Object),
+    )
+    expect(mockForkProject).toHaveBeenCalledWith(
+      mockConfig.projects[1],
+      'token-id-b',
+      expect.any(Object),
+    )
+  })
+
+  it('should warn when a project token has no extractable tokenId, since projects sharing the fallback agentId can hit the same binding mismatch', async () => {
+    const mockConfig = {
+      agentId: 'fallback-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-without-colons-a', apiUrl: 'http://api-a' },
+        { tenantCode: 'jcci', projectCode: 'proj-b', token: 'token-without-colons-b', apiUrl: 'http://api-b' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    // Both projects fall back to the same config.agentId, and each should be warned about individually.
+    expect(mockForkProject).toHaveBeenCalledWith(mockConfig.projects[0], 'fallback-agent', expect.any(Object))
+    expect(mockForkProject).toHaveBeenCalledWith(mockConfig.projects[1], 'fallback-agent', expect.any(Object))
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('mbc/proj-a'))
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('jcci/proj-b'))
+    expect(jest.mocked(logger.warn).mock.calls.filter(([msg]) => typeof msg === 'string' && msg.includes('falling back to a shared agentId')).length).toBe(2)
+  })
+
   it('should use ChildProcessManager even for single project from config (hot-add support)', async () => {
     const { ChildProcessManager } = require('../src/child-process-manager')
     const mockConfig = {
@@ -662,6 +717,32 @@ describe('agent-runner', () => {
     expect(mockForkProject).toHaveBeenCalledWith(
       newProject,
       'multi-agent',
+      expect.objectContaining({ pollInterval: expect.any(Number), heartbeatInterval: expect.any(Number) }),
+    )
+  })
+
+  it('should hot-add project with its own token-derived agentId, not the initial project agentId (regression: Agent ID does not match the token binding)', async () => {
+    const mockConfig = {
+      agentId: 'fallback-agent',
+      createdAt: '2024-01-01',
+      projects: [
+        { tenantCode: 'mbc', projectCode: 'proj-a', token: 'mbc:token-id-a:raw-secret-a', apiUrl: 'http://api-a' },
+      ],
+    }
+    mockedLoadConfig.mockReturnValue(mockConfig)
+    mockedGetProjectList.mockReturnValue(mockConfig.projects)
+
+    const promise = startAgent({})
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    // Simulate a second project hot-added via config watcher, with its own distinct tokenId
+    const newProject = { tenantCode: 'jcci', projectCode: 'proj-b', token: 'jcci:token-id-b:raw-secret-b', apiUrl: 'http://api-b' }
+    capturedConfigCallbacks.onProjectAdded!(newProject)
+
+    expect(mockForkProject).toHaveBeenCalledWith(
+      newProject,
+      'token-id-b',
       expect.objectContaining({ pollInterval: expect.any(Number), heartbeatInterval: expect.any(Number) }),
     )
   })
