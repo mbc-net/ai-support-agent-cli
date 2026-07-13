@@ -2389,6 +2389,82 @@ describe('chat-executor', () => {
       expect(env).not.toHaveProperty('AI_SUPPORT_TASK_ID')
     })
 
+    it('should write AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID and AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID into the per-command MCP config using the actual commandId/agentId (update_system_knowledge tool env; server looks up the real knowledgeCanPublish/knowledgeRequesterUserId via commandId, not client-supplied hints)', async () => {
+      const { spawn } = require('child_process')
+      const baseConfigPath = writeMcpConfig(tmpDir, 'http://localhost:3030', 'tenant:tok:raw', 'TEST_01', '/path/to/server.js')
+
+      let capturedContent: Record<string, unknown> | undefined
+      const mockProcess = createMockChildProcess()
+      spawn.mockImplementation((_cmd: string, args: string[]) => {
+        const idx = args.indexOf('--mcp-config')
+        const capturedPath = idx >= 0 ? args[idx + 1] : undefined
+        if (capturedPath) {
+          capturedContent = JSON.parse(readFileSync(capturedPath, 'utf-8'))
+        }
+        return mockProcess
+      })
+
+      const payload: ChatPayload = {
+        message: 'このやりとりをナレッジに登録して',
+        conversationId: 'conv-999',
+      }
+
+      const resultPromise = executeChatCommand({
+        payload,
+        commandId: 'cmd-mcp-knowledge-1',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: baseConfigPath,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+
+      expect(result.success).toBe(true)
+      const env = (capturedContent as { mcpServers: { 'ai-support-agent': { env: Record<string, unknown> } } }).mcpServers['ai-support-agent'].env
+      expect(env).toHaveProperty('AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID', 'cmd-mcp-knowledge-1')
+      expect(env).toHaveProperty('AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID', 'agent-1')
+    })
+
+    it('should embed AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID/AGENT_ID even when the payload carries no knowledge-specific fields (values always come from the commandId/agentId already known to chat-executor, never from the payload)', async () => {
+      const { spawn } = require('child_process')
+      const baseConfigPath = writeMcpConfig(tmpDir, 'http://localhost:3030', 'tenant:tok:raw', 'TEST_01', '/path/to/server.js')
+
+      let capturedContent: Record<string, unknown> | undefined
+      const mockProcess = createMockChildProcess()
+      spawn.mockImplementation((_cmd: string, args: string[]) => {
+        const idx = args.indexOf('--mcp-config')
+        const capturedPath = idx >= 0 ? args[idx + 1] : undefined
+        if (capturedPath) {
+          capturedContent = JSON.parse(readFileSync(capturedPath, 'utf-8'))
+        }
+        return mockProcess
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: { message: 'hello', conversationId: 'conv-999' },
+        commandId: 'cmd-mcp-knowledge-3',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: baseConfigPath,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      await resultPromise
+
+      const env = (capturedContent as { mcpServers: { 'ai-support-agent': { env: Record<string, unknown> } } }).mcpServers['ai-support-agent'].env
+      expect(env).toHaveProperty('AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID', 'cmd-mcp-knowledge-3')
+      expect(env).toHaveProperty('AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID', 'agent-1')
+    })
+
     it('should clean up the per-command MCP config even when the command fails', async () => {
       // Uses a "cancel" error message so the outer retry loop (CHAT_MAX_ATTEMPTS,
       // CHAT_RETRY_DELAY_MS=3000ms) short-circuits after a single attempt — see

@@ -221,6 +221,8 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/tools/read-slack-thread`,
   AGENT_TOOL_TRIGGER_E2E_TEST: (tenantCode: string) =>
     `/api/${tenantCode}/agent/tools/trigger-e2e-test`,
+  // ドラフト→承認ワークフロー: システムのナレッジベースへ登録・改訂する（update_system_knowledge ツール）
+  AGENT_KNOWLEDGE: (tenantCode: string) => `/api/${tenantCode}/agent/knowledge`,
   // ECS execution agent registration (ecs publish)
   ECS_AGENTS: (tenantCode: string) => `/api/${tenantCode}/agent/ecs-agents`,
 } as const
