@@ -3,6 +3,7 @@ import { AlertProcessor } from './alert-processor'
 import { type AppSyncSubscriber, type AppSyncNotification } from './appsync-subscriber'
 import { LOG_PAYLOAD_LIMIT, LOG_RESULT_LIMIT, NOTIFICATION_ACTION } from './constants'
 import { t } from './i18n'
+import type { TransportKind } from './ipc-types'
 import { logger } from './logger'
 import { getWorkspaceDir, getReposDir } from './project-dir'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
@@ -21,6 +22,13 @@ export interface TransportState {
   vsCodeWs: VsCodeTunnelWebSocket | null
   processing: boolean
   configSyncDebounceTimer: ReturnType<typeof setTimeout> | null
+  /**
+   * サーバーによる恒久的な認証拒否で停止したトランスポート（'terminal'/'vscode'）。
+   * heartbeat でバックエンドに報告し、管理画面でプロジェクト単位の機能停止を可視化する。
+   * agentId はプロセス起動時に確定するため、設定修正後は必ず再起動が必要で、
+   * 再起動でこの集合は空に戻る（→ サーバー側で属性が削除される）。
+   */
+  authRejectedTransports: Set<TransportKind>
 }
 
 export interface TransportDeps {
@@ -35,6 +43,12 @@ export interface TransportDeps {
   /** @deprecated pollInterval is no longer used. Kept for backward compatibility with CLI options. */
   pollInterval: number
   heartbeatInterval: number
+  /**
+   * サーバーによる恒久的な認証拒否（Agent ID トークンバインディング不一致等）で
+   * terminal-ws / vscode-ws の接続が停止した際に呼ばれる。子プロセスから親プロセスへ
+   * 通知するために使う（ログに埋もれさせないため）。transport は拒否された接続の種別。
+   */
+  onAuthRejected?: (transport: TransportKind) => void
 }
 
 export interface CommandContext {
@@ -87,6 +101,20 @@ export async function startSubscriptionMode(
 /**
  * Start heartbeat interval.
  */
+/**
+ * terminal-ws / vscode-ws がサーバーによる恒久的な認証拒否で停止した際に呼ばれる。
+ * ローカルで再起動が必要な状態を記録し、次回 heartbeat でバックエンドに報告する
+ * （管理画面での可視化）とともに、既存の外部通知（子→親 IPC 等）にも中継する。
+ */
+export function onTransportAuthRejected(
+  deps: TransportDeps,
+  state: TransportState,
+  transport: TransportKind,
+): void {
+  state.authRejectedTransports.add(transport)
+  deps.onAuthRejected?.(transport)
+}
+
 export function startHeartbeat(
   deps: TransportDeps,
   state: TransportState,
@@ -105,6 +133,8 @@ export function startHeartbeat(
         configSyncState.activeChatMode,
         getLocalIpAddress(),
         configSyncState.currentConfigHash,
+        undefined,
+        Array.from(state.authRejectedTransports),
       )
 
       // Check configHash from heartbeat response (polling fallback)
@@ -158,6 +188,7 @@ export function startTerminalWebSocket(
     deps.agentId,
     terminalDir,
     configSyncState ? () => configSyncState.projectConfig?.envVars : undefined,
+    () => onTransportAuthRejected(deps, state, 'terminal'),
   )
 
   state.terminalWs.connect().catch((error) => {
@@ -190,6 +221,7 @@ export function startVsCodeTunnel(
     reposDir,
     workspaceDir,
     configSyncState ? () => configSyncState.projectConfig?.envVars : undefined,
+    () => onTransportAuthRejected(deps, state, 'vscode'),
   )
 
   state.vsCodeWs.connect().catch((error) => {

@@ -317,6 +317,29 @@ describe('ChildProcessManager', () => {
     })
   })
 
+  describe('auth_rejected message', () => {
+    it('should log an error surfacing the permanent auth rejection to the parent process (regression: child-only WARN/error was invisible to the runner)', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { logger } = require('../src/logger')
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+
+      child._emit('message', { type: 'auth_rejected', tenantCode: 'mbc', projectCode: 'proj-a', transport: 'terminal' })
+
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('terminal'))
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('proj-a'))
+    })
+
+    it('should not throw when the auth_rejected project is no longer managed', () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value as any
+
+      expect(() => {
+        child._emit('message', { type: 'auth_rejected', tenantCode: 'mbc', projectCode: 'proj-a', transport: 'vscode' })
+      }).not.toThrow()
+    })
+  })
+
   describe('stopAll', () => {
     it('should send shutdown to all children and wait for exit', async () => {
       manager.forkProject(project, 'agent-1', options)

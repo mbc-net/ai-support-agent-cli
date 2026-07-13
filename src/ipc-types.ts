@@ -1,5 +1,11 @@
 import type { AgentChatMode, ProjectRegistration } from './types'
 
+/**
+ * サーバーによる恒久的な認証拒否が起こりうる WebSocket トランスポートの種別。
+ * 新しいトランスポートを追加する際はここに追記する（タイポを型で弾くため）。
+ */
+export type TransportKind = 'terminal' | 'vscode'
+
 // ─── Parent → Child ─────────────────────────────────────────────
 
 export interface IpcStartMessage {
@@ -73,12 +79,28 @@ export interface IpcUpdateCompleteMessage {
   projectCode: string
 }
 
+/**
+ * 子プロセス内の WebSocket 接続が、サーバーによる恒久的な認証拒否
+ * （無効なトークン、Agent ID トークンバインディング不一致）で切断され、
+ * 再接続を停止したことを親プロセスに通知する。子プロセス自体は他の
+ * トランスポート（AppSync 等）のために生存し続けるため子プロセスの exit
+ * では検知できず、この通知がないと親も監視基盤も気づけない。
+ */
+export interface IpcAuthRejectedMessage {
+  type: 'auth_rejected'
+  tenantCode: string
+  projectCode: string
+  /** 拒否されたトランスポート */
+  transport: TransportKind
+}
+
 export type ChildToParentMessage =
   | IpcStartedMessage
   | IpcErrorMessage
   | IpcStoppedMessage
   | IpcBusyResponseMessage
   | IpcUpdateCompleteMessage
+  | IpcAuthRejectedMessage
 
 // ─── Type Guards ─────────────────────────────────────────────────
 
@@ -114,6 +136,13 @@ export function isChildToParentMessage(msg: unknown): msg is ChildToParentMessag
   }
   if (type === 'busy_response') {
     return typeof msg.tenantCode === 'string' && typeof msg.projectCode === 'string' && typeof msg.busy === 'boolean'
+  }
+  if (type === 'auth_rejected') {
+    return (
+      typeof msg.tenantCode === 'string' &&
+      typeof msg.projectCode === 'string' &&
+      (msg.transport === 'terminal' || msg.transport === 'vscode')
+    )
   }
   return false
 }

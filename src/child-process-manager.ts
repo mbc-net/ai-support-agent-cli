@@ -107,6 +107,12 @@ export class ChildProcessManager {
         logger.info(`Project ${key} update complete, notifying runner`)
         if (managed) this.onUpdateComplete?.(managed.project)
         break
+      case 'auth_rejected':
+        logger.error(
+          `Project ${key} ${msg.transport} connection permanently rejected by the server (authentication). ` +
+            `That feature is now offline for this project — check its token and Agent ID configuration.`,
+        )
+        break
     }
   }
 

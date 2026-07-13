@@ -323,6 +323,40 @@ describe('ApiClient', () => {
       expect(callArgs).toHaveProperty('configHash', 'abc123')
       expect(callArgs).toHaveProperty('dockerBuildError', 'build failed')
     })
+
+    it('should include authRejectedTransports when provided (even an empty array, to clear a stale flag)', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat(
+        'test-id',
+        { platform: 'darwin', arch: 'arm64', cpuUsage: 50, memoryUsage: 60, uptime: 1000 },
+        undefined, // updateError
+        undefined, // availableChatModes
+        undefined, // activeChatMode
+        undefined, // ipAddress
+        undefined, // configHash
+        undefined, // dockerBuildError
+        ['terminal', 'vscode'], // authRejectedTransports
+      )
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).toHaveProperty('authRejectedTransports', ['terminal', 'vscode'])
+    })
+
+    it('should not include authRejectedTransports when not provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat('test-id', {
+        platform: 'darwin',
+        arch: 'arm64',
+        cpuUsage: 50,
+        memoryUsage: 60,
+        uptime: 1000,
+      })
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).not.toHaveProperty('authRejectedTransports')
+    })
   })
 
   describe('getPendingCommands', () => {

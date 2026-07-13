@@ -141,6 +141,7 @@ export class ApiClient {
     ipAddress?: string,
     configHash?: string,
     dockerBuildError?: string,
+    authRejectedTransports?: string[],
   ): Promise<HeartbeatResponse | void> {
     logger.debug('Sending heartbeat')
     return this.post<HeartbeatResponse>(API_ENDPOINTS.HEARTBEAT(this.tenantCode), {
@@ -154,6 +155,7 @@ export class ApiClient {
       ...(ipAddress && { ipAddress }),
       ...(configHash && { configHash }),
       ...(dockerBuildError !== undefined && { dockerBuildError }),
+      ...(authRejectedTransports !== undefined && { authRejectedTransports }),
     })
   }
 

@@ -5,7 +5,7 @@ import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../base-websocket'
 import { BrowserLocalServer } from '../browser/browser-local-server'
-import { WS_RECONNECT_MAX_DELAY_MS } from '../constants'
+import { WS_CLOSE_CODE_AUTH_REJECTED, WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import type { EnvVarsProvider } from '../env-vars-filter'
 import { logger } from '../logger'
 import { getErrorMessage, buildWsUrl } from '../utils'
@@ -274,12 +274,14 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
      * Web 設定が agent プロセス起動後に到着するため関数渡しで遅延評価する。
      */
     private readonly envVarsProvider?: EnvVarsProvider,
+    private readonly onAuthRejected?: () => void,
   ) {
     super({
       maxReconnectRetries: VSCODE_WS_MAX_RECONNECT_RETRIES,
       reconnectBaseDelayMs: VSCODE_WS_RECONNECT_BASE_DELAY_MS,
       reconnectMaxDelayMs: WS_RECONNECT_MAX_DELAY_MS,
       logPrefix: '[vscode-ws]',
+      authRejectedCloseCode: WS_CLOSE_CODE_AUTH_REJECTED,
     })
     this.wsUrl = buildWsUrl(apiUrl, '/ws/agent-vscode')
   }
@@ -440,6 +442,19 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
   protected onDisconnect(): void {
     this.cleanup()
+  }
+
+  /**
+   * Server-side permanent authentication rejection (invalid token, or Agent ID
+   * token-binding mismatch). Reconnecting to resume is not possible — the
+   * connection will never be re-established with the same credentials — so
+   * this is a genuine teardown just like an explicit disconnect: release
+   * code-server, port-forward proxies, and browser sessions rather than
+   * leaving them running indefinitely.
+   */
+  protected onPermanentClose(): void {
+    this.cleanup()
+    this.onAuthRejected?.()
   }
 
   // --- VS Code handlers ---

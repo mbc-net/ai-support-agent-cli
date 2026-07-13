@@ -30,6 +30,14 @@ async function handleStart(msg: IpcStartMessage): Promise<void> {
     options,
     options.agentChatMode,
     options.defaultProjectDir,
+    (transport) => {
+      sendToParent({
+        type: 'auth_rejected',
+        tenantCode: project.tenantCode,
+        projectCode: project.projectCode,
+        transport,
+      })
+    },
   )
 
   agent.start()

@@ -328,6 +328,15 @@ export const APPSYNC_MAX_RECONNECT_RETRIES = INFINITE_RECONNECT_RETRIES
 export const APPSYNC_RECONNECT_BASE_DELAY_MS = DEFAULT_WS_RECONNECT_BASE_DELAY_MS
 export const WS_RECONNECT_MAX_DELAY_MS = 60_000
 
+// Close code the API gateway uses (api/src/agent/common/base-web.gateway.ts:
+// WS_CLOSE_CODE_AUTH_REJECTED) when it closes a connection due to a permanent
+// authentication rejection (invalid/expired token, or Agent ID token-binding
+// mismatch) rather than a transient drop. Infinite reconnect retries above exist
+// specifically for transient network outages; retrying with the SAME rejected
+// credentials would just repeat the same rejection forever, so this code must be
+// kept in sync with the server-side value.
+export const WS_CLOSE_CODE_AUTH_REJECTED = 4001
+
 // WebSocket heartbeat (ping/pong)
 // Without an application-level ping, an idle WebSocket that is silently dropped by a
 // load balancer (e.g. ALB idle timeout) never fires a 'close' event on the client, so
