@@ -29,6 +29,8 @@ import type {
   SystemInfo,
   TriggerAlarmResult,
   TriggerE2eTestResult,
+  UpdateSystemKnowledgeRequest,
+  UpdateSystemKnowledgeResult,
   VersionInfo,
 } from './types'
 
@@ -525,6 +527,25 @@ export class ApiClient {
     return this.post<TriggerE2eTestResult>(
       API_ENDPOINTS.AGENT_TOOL_TRIGGER_E2E_TEST(this.tenantCode),
       { testCaseId, taskId, executionMethod, environmentId, callId },
+    )
+  }
+
+  /**
+   * システムのナレッジベースへ登録・改訂する（`update_system_knowledge` MCPツール専用）。
+   *
+   * `id` を指定すると改訂、未指定なら新規作成として扱われる。他の `agent/tools/*`
+   * エンドポイントと異なり `{success, data, error}` ではなく、成功時（201）はナレッジ詳細
+   * オブジェクトを直接返す。失敗時（4xx/5xx・ネットワークエラー）は例外を投げる
+   * （呼び出し元は `withMcpErrorHandling` でエラーレスポンスに変換し、ローカルファイルへの
+   * フォールバックは行わない）。
+   */
+  async updateSystemKnowledge(
+    request: UpdateSystemKnowledgeRequest,
+  ): Promise<UpdateSystemKnowledgeResult> {
+    logger.debug(`Updating system knowledge: title="${request.title}"${request.id ? ` (revision of ${request.id})` : ''}`)
+    return this.post<UpdateSystemKnowledgeResult>(
+      API_ENDPOINTS.AGENT_KNOWLEDGE(this.tenantCode),
+      request,
     )
   }
 }

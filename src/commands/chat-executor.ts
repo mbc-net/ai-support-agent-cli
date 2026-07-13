@@ -347,7 +347,7 @@ async function executeCliChatOnce(
     let commandMcpConfigPath: string | undefined
     if (mcpConfigPath && conversationId) {
       try {
-        commandMcpConfigPath = writeCommandMcpConfig(mcpConfigPath, commandId, conversationId, taskIdStr)
+        commandMcpConfigPath = writeCommandMcpConfig(mcpConfigPath, commandId, conversationId, taskIdStr, agentId)
         cleanupCommandMcpConfig = (): void => {
           try {
             rmSync(commandMcpConfigPath as string, { force: true })
