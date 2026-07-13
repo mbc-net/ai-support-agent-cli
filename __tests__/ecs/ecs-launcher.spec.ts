@@ -190,6 +190,67 @@ describe('ecsLaunch', () => {
       expect(result.error).toContain('Could not determine region')
     }
   })
+
+  describe('sidecarEnv (Tailscale authkey injection)', () => {
+    const SIDECAR_AUTHKEY = 'tskey-auth-secret-value'
+
+    it('adds a second containerOverrides entry scoped to the tailscale sidecar when sidecarEnv is present', async () => {
+      ecsMock.on(RunTaskCommand).resolves({ tasks: [{ taskArn: TASK_ARN }], failures: [] })
+
+      await ecsLaunch(launchPayload({ sidecarEnv: { TS_AUTHKEY: SIDECAR_AUTHKEY, TS_HOSTNAME: 'oneshot-abc' } }))
+
+      const input = ecsMock.commandCalls(RunTaskCommand)[0].args[0].input
+      const overrides = input.overrides?.containerOverrides ?? []
+      expect(overrides).toHaveLength(2)
+
+      const mainOverride = overrides.find((o) => o.name === 'app')
+      expect(mainOverride?.environment).toEqual(expect.arrayContaining([
+        { name: 'AGENT_MODE', value: 'oneshot' },
+      ]))
+
+      const sidecarOverride = overrides.find((o) => o.name === 'tailscale')
+      expect(sidecarOverride).toBeDefined()
+      expect(sidecarOverride?.environment).toEqual(expect.arrayContaining([
+        { name: 'TS_AUTHKEY', value: SIDECAR_AUTHKEY },
+        { name: 'TS_HOSTNAME', value: 'oneshot-abc' },
+      ]))
+    })
+
+    it('does not add a sidecar containerOverrides entry when sidecarEnv is absent (back-compat)', async () => {
+      ecsMock.on(RunTaskCommand).resolves({ tasks: [{ taskArn: TASK_ARN }], failures: [] })
+
+      await ecsLaunch(launchPayload())
+
+      const input = ecsMock.commandCalls(RunTaskCommand)[0].args[0].input
+      expect(input.overrides?.containerOverrides).toHaveLength(1)
+    })
+
+    it('rejects a sidecarEnv with a non-string value', async () => {
+      const result = await ecsLaunch(launchPayload({ sidecarEnv: { TS_AUTHKEY: 42 } }))
+      expect(result).toEqual({ success: false, error: 'sidecarEnv.TS_AUTHKEY must be a string' })
+      expect(ecsMock.commandCalls(RunTaskCommand)).toHaveLength(0)
+    })
+
+    it('rejects an array sidecarEnv', async () => {
+      const result = await ecsLaunch(launchPayload({ sidecarEnv: ['x'] }))
+      expect(result).toEqual({ success: false, error: 'sidecarEnv (object) must not be an array' })
+      expect(ecsMock.commandCalls(RunTaskCommand)).toHaveLength(0)
+    })
+
+    it('rejects a non-object, non-array sidecarEnv (e.g. a string)', async () => {
+      const result = await ecsLaunch(launchPayload({ sidecarEnv: 'not-an-object' }))
+      expect(result).toEqual({ success: false, error: 'sidecarEnv (object) is required for ecs_launch' })
+      expect(ecsMock.commandCalls(RunTaskCommand)).toHaveLength(0)
+    })
+
+    it('never logs the sidecar authkey value', async () => {
+      ecsMock.on(RunTaskCommand).resolves({ tasks: [{ taskArn: TASK_ARN }], failures: [] })
+
+      await ecsLaunch(launchPayload({ sidecarEnv: { TS_AUTHKEY: SIDECAR_AUTHKEY } }))
+
+      expect(allLoggedText()).not.toContain(SIDECAR_AUTHKEY)
+    })
+  })
 })
 
 describe('ecsStop', () => {

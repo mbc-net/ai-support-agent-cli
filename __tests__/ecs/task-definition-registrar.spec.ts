@@ -164,4 +164,66 @@ describe('registerTaskDefinition', () => {
     await expect(registerTaskDefinition(baseOptions())).rejects.toThrow('denied')
     expect(ecsMock.commandCalls(RegisterTaskDefinitionCommand)).toHaveLength(0)
   })
+
+  describe('enableTailscale', () => {
+    it('registers only the single main container when enableTailscale is omitted (back-compat)', async () => {
+      logsMock.on(CreateLogGroupCommand).resolves({})
+      ecsMock.on(RegisterTaskDefinitionCommand).resolves({
+        taskDefinition: { taskDefinitionArn: TASK_DEF_ARN, family: 'ai-support-ecs-agent-mbc-ecs-x', revision: 5 },
+      })
+
+      await registerTaskDefinition(baseOptions())
+
+      const input = ecsMock.commandCalls(RegisterTaskDefinitionCommand)[0].args[0].input
+      expect(input.containerDefinitions).toHaveLength(1)
+      expect(input.containerDefinitions?.[0].name).toBe('app')
+      expect(input.containerDefinitions?.[0].dependsOn).toBeUndefined()
+    })
+
+    it('registers only the single main container when enableTailscale is false (back-compat)', async () => {
+      logsMock.on(CreateLogGroupCommand).resolves({})
+      ecsMock.on(RegisterTaskDefinitionCommand).resolves({
+        taskDefinition: { taskDefinitionArn: TASK_DEF_ARN, family: 'ai-support-ecs-agent-mbc-ecs-x', revision: 5 },
+      })
+
+      await registerTaskDefinition({ ...baseOptions(), enableTailscale: false })
+
+      const input = ecsMock.commandCalls(RegisterTaskDefinitionCommand)[0].args[0].input
+      expect(input.containerDefinitions).toHaveLength(1)
+    })
+
+    it('adds a tailscale sidecar container and a HEALTHY dependsOn on the main container when enableTailscale is true', async () => {
+      logsMock.on(CreateLogGroupCommand).resolves({})
+      ecsMock.on(RegisterTaskDefinitionCommand).resolves({
+        taskDefinition: { taskDefinitionArn: TASK_DEF_ARN, family: 'ai-support-ecs-agent-mbc-ecs-x', revision: 5 },
+      })
+
+      await registerTaskDefinition({ ...baseOptions(), enableTailscale: true })
+
+      const input = ecsMock.commandCalls(RegisterTaskDefinitionCommand)[0].args[0].input
+      expect(input.containerDefinitions).toHaveLength(2)
+
+      const mainContainer = input.containerDefinitions?.find((c) => c.name === 'app')
+      expect(mainContainer).toBeDefined()
+      expect(mainContainer?.dependsOn).toEqual([
+        { containerName: 'tailscale', condition: 'HEALTHY' },
+      ])
+
+      const sidecar = input.containerDefinitions?.find((c) => c.name === 'tailscale')
+      expect(sidecar).toBeDefined()
+      expect(sidecar?.image).toBe('tailscale/tailscale')
+      expect(sidecar?.command).toEqual([
+        'tailscaled',
+        '--tun=userspace-networking',
+        '--socks5-server=localhost:1055',
+      ])
+      expect(sidecar?.healthCheck?.command).toEqual(['CMD-SHELL', 'tailscale status || exit 1'])
+      expect(sidecar?.healthCheck?.retries).toBeGreaterThan(0)
+      // Never carries the authkey (or any environment variables) statically —
+      // it is injected per-run via containerOverrides (ecs-launcher.ts), same
+      // rationale as the main container's own environment omission above.
+      expect(sidecar?.environment).toBeUndefined()
+      expect(sidecar?.secrets).toBeUndefined()
+    })
+  })
 })

@@ -13,8 +13,14 @@ import {
   CreateLogGroupCommand,
 } from '@aws-sdk/client-cloudwatch-logs'
 import { ECSClient, RegisterTaskDefinitionCommand } from '@aws-sdk/client-ecs'
+import type { ContainerDefinition } from '@aws-sdk/client-ecs'
 
-import { ECS_AGENT_CONTAINER_NAME } from '../constants'
+import {
+  ECS_AGENT_CONTAINER_NAME,
+  TAILSCALE_SIDECAR_CONTAINER_NAME,
+  TAILSCALE_SIDECAR_IMAGE,
+  TAILSCALE_SOCKS_PORT,
+} from '../constants'
 import { logger } from '../logger'
 
 export interface RegisterEcsTaskDefinitionOptions {
@@ -30,6 +36,53 @@ export interface RegisterEcsTaskDefinitionOptions {
   executionRoleArn?: string
   /** Task role assumed by the container itself */
   taskRoleArn?: string
+  /**
+   * When true, adds a `tailscale` sidecar container (see admin-docs
+   * docs/specifications/ssh-tailscale-support.md, section 2) that the main
+   * (`ECS_AGENT_CONTAINER_NAME`) container depends on being `HEALTHY` before
+   * it starts. Required for ECS execution agents that may run
+   * `ssh_exec`/`server_setup_exec` against a `connectionType: 'tailscale'`
+   * host. Defaults to `false` — omitting it (or passing `false`) registers
+   * the exact same single-container task definition as before, unchanged.
+   */
+  enableTailscale?: boolean
+}
+
+/**
+ * Build the `tailscale` sidecar container definition. The sidecar only runs
+ * `tailscaled` itself (no static `command`-embedded authkey or hostname —
+ * those are injected per-run via RunTask `containerOverrides`, see
+ * `ecs-launcher.ts`'s `sidecarEnv` handling and
+ * `TAILSCALE_AUTHKEY_ENV_VAR`). The health check gates the main container's
+ * startup (via its `dependsOn: HEALTHY`) on `tailscale status` succeeding,
+ * i.e. the sidecar having already authenticated to the tailnet.
+ */
+function buildTailscaleSidecarContainer(options: RegisterEcsTaskDefinitionOptions): ContainerDefinition {
+  return {
+    name: TAILSCALE_SIDECAR_CONTAINER_NAME,
+    image: TAILSCALE_SIDECAR_IMAGE,
+    essential: true,
+    command: [
+      'tailscaled',
+      '--tun=userspace-networking',
+      `--socks5-server=localhost:${TAILSCALE_SOCKS_PORT}`,
+    ],
+    healthCheck: {
+      command: ['CMD-SHELL', 'tailscale status || exit 1'],
+      interval: 10,
+      timeout: 5,
+      retries: 6,
+      startPeriod: 20,
+    },
+    logConfiguration: {
+      logDriver: 'awslogs',
+      options: {
+        'awslogs-group': options.logGroupName,
+        'awslogs-region': options.region,
+        'awslogs-stream-prefix': 'tailscale',
+      },
+    },
+  }
 }
 
 export interface RegisteredTaskDefinition {
@@ -69,6 +122,30 @@ export async function registerTaskDefinition(
   await ensureLogGroup(logsClient, options.logGroupName)
 
   const ecsClient = new ECSClient({ region: options.region })
+
+  const mainContainer: ContainerDefinition = {
+    name: ECS_AGENT_CONTAINER_NAME,
+    image: options.imageUri,
+    essential: true,
+    // No environment variables here: they are injected at RunTask time
+    // via containerOverrides so secrets never persist in the definition.
+    logConfiguration: {
+      logDriver: 'awslogs',
+      options: {
+        'awslogs-group': options.logGroupName,
+        'awslogs-region': options.region,
+        'awslogs-stream-prefix': 'ecs-agent',
+      },
+    },
+    ...(options.enableTailscale && {
+      dependsOn: [{ containerName: TAILSCALE_SIDECAR_CONTAINER_NAME, condition: 'HEALTHY' }],
+    }),
+  }
+
+  const containerDefinitions: ContainerDefinition[] = options.enableTailscale
+    ? [mainContainer, buildTailscaleSidecarContainer(options)]
+    : [mainContainer]
+
   const response = await ecsClient.send(new RegisterTaskDefinitionCommand({
     family: options.family,
     requiresCompatibilities: ['FARGATE'],
@@ -77,23 +154,7 @@ export async function registerTaskDefinition(
     memory: String(options.memory),
     ...(options.executionRoleArn && { executionRoleArn: options.executionRoleArn }),
     ...(options.taskRoleArn && { taskRoleArn: options.taskRoleArn }),
-    containerDefinitions: [
-      {
-        name: ECS_AGENT_CONTAINER_NAME,
-        image: options.imageUri,
-        essential: true,
-        // No environment variables here: they are injected at RunTask time
-        // via containerOverrides so secrets never persist in the definition.
-        logConfiguration: {
-          logDriver: 'awslogs',
-          options: {
-            'awslogs-group': options.logGroupName,
-            'awslogs-region': options.region,
-            'awslogs-stream-prefix': 'ecs-agent',
-          },
-        },
-      },
-    ],
+    containerDefinitions,
   }))
 
   const taskDefinition = response.taskDefinition

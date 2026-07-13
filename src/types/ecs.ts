@@ -66,6 +66,14 @@ export interface EcsLaunchPayload {
   securityGroupIds?: unknown
   assignPublicIp?: unknown
   containerEnv?: unknown
+  /**
+   * Env vars applied via containerOverrides to the `tailscale` sidecar
+   * container specifically (see admin-docs
+   * docs/specifications/ssh-tailscale-support.md), rather than merged into
+   * `containerEnv`. Only meaningful when the task definition was registered
+   * with `enableTailscale` (`task-definition-registrar.ts`).
+   */
+  sidecarEnv?: unknown
 }
 
 /** Payload of the `ecs_stop` launcher command */
