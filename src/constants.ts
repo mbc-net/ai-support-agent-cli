@@ -190,6 +190,13 @@ export const API_ENDPOINTS = {
   // callers never pass a hostId directly, so a oneshot token cannot fetch an arbitrary host's key.
   SERVER_SETUP_SSH_CREDENTIAL: (tenantCode: string, commandId: string) =>
     `/api/${tenantCode}/agent/commands/${commandId}/server-setup-ssh-credential`,
+  // JIT SSH credential lookup scoped to a single ssh_exec command (see
+  // admin-docs docs/specifications/ssh-tailscale-support.md). Same
+  // commandId-scoped design as SERVER_SETUP_SSH_CREDENTIAL: the target host
+  // is resolved server-side from the command's payload, never from a
+  // client-supplied hostId.
+  SSH_EXEC_CREDENTIAL: (tenantCode: string, commandId: string) =>
+    `/api/${tenantCode}/agent/commands/${commandId}/ssh-exec-credential`,
   BROWSER_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/browser-credentials`,
   E2E_ENV_VARIABLES: (tenantCode: string) => `/api/${tenantCode}/agent/e2e-env-variables`,
   FILES_UPLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/upload-url`,
@@ -393,3 +400,28 @@ export const CLI_FLAG_VERBOSE = '--verbose'
 export const CLI_FLAG_NO_DOCKER = '--no-docker'
 export const CLI_FLAG_NO_DOCKERFILE_SYNC = '--no-dockerfile-sync'
 export const CLI_FLAG_NO_AUTO_UPDATE = '--no-auto-update'
+
+// === Tailscale sidecar (SSH connectivity via a customer tailnet) ===
+// See admin-docs docs/specifications/ssh-tailscale-support.md, section 2
+// ("アーキテクチャ概要"). The sidecar is added to the oneshot ECS task
+// definition only when `connectionType: 'tailscale'` support is enabled for
+// that ECS execution agent; existing (non-Tailscale) task definitions are
+// unaffected.
+/** Container name of the Tailscale sidecar in the oneshot ECS task definition. */
+export const TAILSCALE_SIDECAR_CONTAINER_NAME = 'tailscale'
+/** Image the Tailscale sidecar container runs. */
+export const TAILSCALE_SIDECAR_IMAGE = 'tailscale/tailscale'
+/**
+ * Default SOCKS5 port the sidecar's `tailscaled --tun=userspace-networking
+ * --socks5-server=localhost:<port>` listens on. Overridable per SSH host via
+ * `SshExecCredential.socksPort` (design doc section 3) to avoid collisions
+ * when multiple tailnets are in play.
+ */
+export const TAILSCALE_SOCKS_PORT = 1055
+/**
+ * Env var name used to inject the Tailscale authkey into the sidecar
+ * container via RunTask `containerOverrides` — never written to the task
+ * definition itself (design doc section 4, "認証情報の非露出"). Must never be
+ * logged.
+ */
+export const TAILSCALE_AUTHKEY_ENV_VAR = 'TS_AUTHKEY'

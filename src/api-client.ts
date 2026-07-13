@@ -26,6 +26,7 @@ import type {
   SendSlackFileResult,
   SendSlackMessageResult,
   SshCredentials,
+  SshExecCredential,
   SystemInfo,
   TriggerAlarmResult,
   TriggerE2eTestResult,
@@ -232,13 +233,36 @@ export class ApiClient {
    * JIT SSH credential lookup for a `server_setup_exec` command. The target
    * host is resolved server-side from the command's payload (never from a
    * client-supplied hostId), so this can safely be called with either an
-   * ECS oneshot token or a resident agent's normal token.
+   * ECS oneshot token or a resident agent's normal token. The response may
+   * carry Tailscale SOCKS5 fields (connectionType / tailnetHostname /
+   * socksPort / tailscaleAuthKey) the same way `getSshExecCredential`'s does
+   * — see `SshExecCredential` and `server-setup-runner.ts`'s
+   * `buildInventory`. Never log the returned credential; only log the
+   * commandId.
    */
-  async getServerSetupSshCredential(commandId: string, agentId: string): Promise<SshCredentials> {
+  async getServerSetupSshCredential(commandId: string, agentId: string): Promise<SshExecCredential> {
     this.validateCommandId(commandId)
     logger.debug(`Fetching server setup SSH credential for command: ${commandId}`)
-    return this.get<SshCredentials>(
+    return this.get<SshExecCredential>(
       API_ENDPOINTS.SERVER_SETUP_SSH_CREDENTIAL(this.tenantCode, commandId),
+      { params: { agentId } },
+    )
+  }
+
+  /**
+   * JIT SSH credential lookup for an `ssh_exec` command. Mirrors
+   * `getServerSetupSshCredential`'s commandId-scoped design: the target host
+   * is resolved server-side from the command's payload, so this can safely
+   * be called with either an ECS oneshot token or a resident agent's normal
+   * token. The response may carry Tailscale SOCKS5 fields (connectionType /
+   * tailnetHostname / socksPort / tailscaleAuthKey) — see `SshExecCredential`.
+   * Never log the returned credential; only log the commandId.
+   */
+  async getSshExecCredential(commandId: string, agentId: string): Promise<SshExecCredential> {
+    this.validateCommandId(commandId)
+    logger.debug(`Fetching SSH exec credential for command: ${commandId}`)
+    return this.get<SshExecCredential>(
+      API_ENDPOINTS.SSH_EXEC_CREDENTIAL(this.tenantCode, commandId),
       { params: { agentId } },
     )
   }

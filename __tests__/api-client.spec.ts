@@ -415,6 +415,56 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getSshExecCredential', () => {
+    it('should fetch the ssh_exec JIT credential scoped to a commandId', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          hostId: 'host-1',
+          hostname: 'server.example.com',
+          port: 22,
+          username: 'deploy',
+          authType: 'private_key',
+          privateKey: '-----BEGIN RSA PRIVATE KEY-----\nkey\n-----END RSA PRIVATE KEY-----\n',
+        },
+      })
+
+      const result = await client.getSshExecCredential('cmd-1', 'agent-1')
+      expect(result.hostId).toBe('host-1')
+      expect(result.hostname).toBe('server.example.com')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/commands/cmd-1/ssh-exec-credential',
+        { params: { agentId: 'agent-1' } },
+      )
+    })
+
+    it('should tolerate a response carrying Tailscale SOCKS5 fields', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          hostId: 'host-2',
+          hostname: 'unused.example.com',
+          port: 22,
+          username: 'deploy',
+          authType: 'private_key',
+          privateKey: 'key-material',
+          connectionType: 'tailscale',
+          tailnetHostname: 'db-server-1.tailxxxx.ts.net',
+          socksPort: 1055,
+        },
+      })
+
+      const result = await client.getSshExecCredential('cmd-2', 'agent-1')
+      expect(result.connectionType).toBe('tailscale')
+      expect(result.tailnetHostname).toBe('db-server-1.tailxxxx.ts.net')
+      expect(result.socksPort).toBe(1055)
+    })
+
+    it('should reject an invalid commandId', async () => {
+      await expect(client.getSshExecCredential('bad id!', 'agent-1')).rejects.toThrow(
+        'Invalid command ID format',
+      )
+    })
+  })
+
   describe('getRepoCredentials', () => {
     it('should fetch repo credentials', async () => {
       mockInstance.get.mockResolvedValue({

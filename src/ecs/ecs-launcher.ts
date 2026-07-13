@@ -6,14 +6,17 @@
  * oneshot ECS task with RunTask, injecting the per-run environment
  * (COMMAND_ID, oneshot token, ...) through containerOverrides.
  *
- * SECURITY: the containerEnv payload contains AGENT_ONESHOT_TOKEN. Its
- * values must never be logged — only log resource identifiers.
+ * SECURITY: the containerEnv/sidecarEnv payloads may contain
+ * AGENT_ONESHOT_TOKEN and, for Tailscale-enabled task definitions, the
+ * Tailscale authkey. Their values must never be logged — only log resource
+ * identifiers.
  */
 
 import { ECSClient, RunTaskCommand, StopTaskCommand } from '@aws-sdk/client-ecs'
+import type { ContainerOverride } from '@aws-sdk/client-ecs'
 
 import { regionFromArn } from './aws-arn'
-import { ECS_AGENT_CONTAINER_NAME } from '../constants'
+import { ECS_AGENT_CONTAINER_NAME, TAILSCALE_SIDECAR_CONTAINER_NAME } from '../constants'
 import { logger } from '../logger'
 import { type CommandResult, errorResult, successResult } from '../types'
 import { getErrorMessage } from '../utils'
@@ -25,12 +28,35 @@ interface ValidatedLaunchPayload {
   securityGroupIds: string[]
   assignPublicIp: boolean
   containerEnv: Record<string, string>
+  /**
+   * Env vars (e.g. `TAILSCALE_AUTHKEY_ENV_VAR`) applied via containerOverrides
+   * to the `tailscale` sidecar container specifically — never merged into
+   * the main container's `containerEnv`. Absent for task definitions that
+   * were not registered with `enableTailscale` (see
+   * `task-definition-registrar.ts`).
+   */
+  sidecarEnv?: Record<string, string>
 }
 
 function parseStringArray(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length === 0) return null
   if (!value.every((v) => typeof v === 'string' && v.length > 0)) return null
   return value as string[]
+}
+
+/** Validate an optional `Record<string, string>`-shaped env map payload field. `label` names it in error messages. */
+function parseOptionalStringRecord(value: unknown, label: string): Record<string, string> | string | undefined {
+  if (value === undefined) return undefined
+  if (Array.isArray(value)) return `${label} (object) must not be an array`
+  if (typeof value !== 'object' || value === null) return `${label} (object) is required for ecs_launch`
+  const parsed: Record<string, string> = {}
+  for (const [key, entryValue] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entryValue !== 'string') {
+      return `${label}.${key} must be a string`
+    }
+    parsed[key] = entryValue
+  }
+  return parsed
 }
 
 function validateLaunchPayload(p: Record<string, unknown>): ValidatedLaunchPayload | string {
@@ -55,6 +81,9 @@ function validateLaunchPayload(p: Record<string, unknown>): ValidatedLaunchPaylo
     containerEnv[key] = value
   }
 
+  const sidecarEnvResult = parseOptionalStringRecord(p.sidecarEnv, 'sidecarEnv')
+  if (typeof sidecarEnvResult === 'string') return sidecarEnvResult
+
   return {
     taskDefinitionArn,
     clusterArn,
@@ -62,6 +91,7 @@ function validateLaunchPayload(p: Record<string, unknown>): ValidatedLaunchPaylo
     securityGroupIds,
     assignPublicIp: p.assignPublicIp === true,
     containerEnv,
+    ...(sidecarEnvResult && { sidecarEnv: sidecarEnvResult }),
   }
 }
 
@@ -82,11 +112,25 @@ export async function ecsLaunch(p: Record<string, unknown>): Promise<CommandResu
     return errorResult(`Could not determine region from clusterArn: ${validated.clusterArn}`)
   }
 
-  // Do NOT log containerEnv — it carries AGENT_ONESHOT_TOKEN.
+  // Do NOT log containerEnv/sidecarEnv — they carry AGENT_ONESHOT_TOKEN and
+  // (for Tailscale-enabled task definitions) the Tailscale authkey.
   logger.info(`[ecs] RunTask: taskDefinition=${validated.taskDefinitionArn} cluster=${validated.clusterArn}`)
 
   try {
     const client = new ECSClient({ region })
+    const containerOverrides: ContainerOverride[] = [
+      {
+        name: ECS_AGENT_CONTAINER_NAME,
+        environment: Object.entries(validated.containerEnv).map(([name, value]) => ({ name, value })),
+      },
+    ]
+    if (validated.sidecarEnv) {
+      containerOverrides.push({
+        name: TAILSCALE_SIDECAR_CONTAINER_NAME,
+        environment: Object.entries(validated.sidecarEnv).map(([name, value]) => ({ name, value })),
+      })
+    }
+
     const response = await client.send(new RunTaskCommand({
       cluster: validated.clusterArn,
       taskDefinition: validated.taskDefinitionArn,
@@ -100,12 +144,7 @@ export async function ecsLaunch(p: Record<string, unknown>): Promise<CommandResu
         },
       },
       overrides: {
-        containerOverrides: [
-          {
-            name: ECS_AGENT_CONTAINER_NAME,
-            environment: Object.entries(validated.containerEnv).map(([name, value]) => ({ name, value })),
-          },
-        ],
+        containerOverrides,
       },
     }))
 

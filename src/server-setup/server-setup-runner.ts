@@ -17,8 +17,9 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { TAILSCALE_SOCKS_PORT } from '../constants'
 import { logger } from '../logger'
-import { type CommandResult, errorResult, type ServerSetupExecPayload, type ServerSetupStep, type ServerSetupStepResult, type SshCredentials, successResult } from '../types'
+import { type CommandResult, errorResult, type ServerSetupExecPayload, type ServerSetupStep, type ServerSetupStepResult, type SshExecCredential, successResult } from '../types'
 import { getErrorMessage } from '../utils'
 
 import { resolveKnownHostsPath } from './known-hosts-store'
@@ -242,8 +243,16 @@ const USERNAME_RE = /^[A-Za-z0-9_-]+$/
  * written into the inventory — be parsed as *additional* inventory
  * variables for the host, redirecting the `become: true` playbook run away
  * from the intended target.
+ *
+ * When `connectionType === 'tailscale'` (admin-docs
+ * docs/specifications/ssh-tailscale-support.md, section 3), `tailnetHostname`
+ * is what actually gets written to `ansible_host` (see `buildInventory`), so
+ * it is held to the exact same `HOSTNAME_RE` standard as `hostname` — an
+ * unvalidated `tailnetHostname` would open the identical inventory-variable-
+ * injection risk. `socksPort`, when present, is validated as a port number
+ * the same way `port` already is.
  */
-function validateSshCredential(credential: SshCredentials): string | null {
+function validateSshCredential(credential: SshExecCredential): string | null {
   if (!HOSTNAME_RE.test(credential.hostname)) {
     return `SSH credential hostname is not a valid hostname/IP address: ${JSON.stringify(credential.hostname)}`
   }
@@ -252,6 +261,17 @@ function validateSshCredential(credential: SshCredentials): string | null {
   }
   if (!Number.isInteger(credential.port) || credential.port < 1 || credential.port > 65535) {
     return `SSH credential port is out of range: ${JSON.stringify(credential.port)}`
+  }
+  if (credential.connectionType === 'tailscale') {
+    if (typeof credential.tailnetHostname !== 'string' || !HOSTNAME_RE.test(credential.tailnetHostname)) {
+      return `SSH credential tailnetHostname is not a valid hostname/IP address: ${JSON.stringify(credential.tailnetHostname)}`
+    }
+    if (
+      credential.socksPort !== undefined
+      && (!Number.isInteger(credential.socksPort) || credential.socksPort < 1 || credential.socksPort > 65535)
+    ) {
+      return `SSH credential socksPort is out of range: ${JSON.stringify(credential.socksPort)}`
+    }
   }
   return null
 }
@@ -271,14 +291,37 @@ function validateSshCredential(credential: SshCredentials): string | null {
  * connection and made a DNS/route hijack of the target silently forward the
  * private key and `extra-vars.json` (which may include `db_root_password`)
  * to an attacker-controlled host.
+ *
+ * Tailscale routing (admin-docs docs/specifications/ssh-tailscale-support.md,
+ * section 2/3): when `credential.connectionType === 'tailscale'`, the actual
+ * destination is `credential.tailnetHostname`, reached through the ECS
+ * oneshot task's `tailscaled --socks5-server` sidecar — `credential.hostname`
+ * is kept only as this inventory's host *key* (dictionary label), never as
+ * the connection target, matching the field's documented "still required,
+ * but not used to connect" status. `ansible_ssh_common_args` gets an
+ * additional `ProxyCommand` routing the SSH TCP stream through
+ * `127.0.0.1:<socksPort>` via `nc`'s SOCKS5 client mode (`-X 5 -x`) — the
+ * same sidecar hop the chat-side `ssh-executor.ts` makes natively in Node
+ * via the `socks` package's `SocksClient`, expressed here as an OpenSSH
+ * `ProxyCommand` because Ansible's `ssh` connection plugin shells out to the
+ * system `ssh` binary rather than opening the socket itself. No fallback: if
+ * the sidecar/tailnet hop fails, `ssh`/`ansible-playbook` simply fails to
+ * connect — there is no code path here that falls back to a direct,
+ * non-Tailscale connection (see CLAUDE.md's "フォールバック禁止ルール").
  */
-function buildInventory(credential: SshCredentials, keyPath: string, knownHostsPath: string): string {
-  const commonArgs = `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${knownHostsPath}`
+function buildInventory(credential: SshExecCredential, keyPath: string, knownHostsPath: string): string {
+  const isTailscale = credential.connectionType === 'tailscale'
+  const ansibleHost = isTailscale ? (credential.tailnetHostname as string) : credential.hostname
+  const socksPort = credential.socksPort ?? TAILSCALE_SOCKS_PORT
+  const proxyCommandArg = isTailscale
+    ? ` -o ProxyCommand="nc -X 5 -x 127.0.0.1:${socksPort} %h %p"`
+    : ''
+  const commonArgs = `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${knownHostsPath}${proxyCommandArg}`
   const inventory = {
     target: {
       hosts: {
         [credential.hostname]: {
-          ansible_host: credential.hostname,
+          ansible_host: ansibleHost,
           ansible_port: credential.port,
           ansible_user: credential.username,
           ansible_ssh_private_key_file: keyPath,
@@ -507,7 +550,7 @@ export async function runServerSetup(
     return errorResult(validated)
   }
 
-  let credential: SshCredentials
+  let credential: SshExecCredential
   try {
     credential = await ctx.client.getServerSetupSshCredential(ctx.commandId, ctx.agentId ?? '')
   } catch (error) {

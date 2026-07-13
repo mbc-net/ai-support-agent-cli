@@ -1117,3 +1117,158 @@ describe('runServerSetup - ansible-playbook spawn failure', () => {
     }
   })
 })
+
+// Tailscale connectionType support (admin-docs
+// docs/specifications/ssh-tailscale-support.md, section 2/3): `server_setup_exec`
+// shares the same JIT SSH credential shape (`SshExecCredential`) as `ssh_exec`'s
+// ssh-executor.ts. When `connectionType === 'tailscale'`, Ansible must be routed
+// through the ECS oneshot task's Tailscale sidecar SOCKS5 proxy instead of
+// connecting directly to `hostname`.
+describe('runServerSetup - Tailscale connectionType', () => {
+  const TAILSCALE_CREDENTIAL = {
+    ...CREDENTIAL,
+    connectionType: 'tailscale' as const,
+    tailnetHostname: 'db-server-1.tailnet-abc.ts.net',
+  }
+
+  function inventoryHostVars(hostKey: string): Record<string, unknown> {
+    const inventoryCall = mockWriteFileSync.mock.calls.find((call) => String(call[0]).endsWith('inventory.yml'))
+    expect(inventoryCall).toBeDefined()
+    const inventoryJson = JSON.parse(inventoryCall?.[1] as string) as {
+      target: { hosts: Record<string, Record<string, unknown>> }
+    }
+    return inventoryJson.target.hosts[hostKey]
+  }
+
+  it('uses tailnetHostname (not hostname) as ansible_host when connectionType is tailscale', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue(TAILSCALE_CREDENTIAL),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await Promise.resolve()
+    await Promise.resolve()
+    resolveExecFile(0, ansibleJsonOutput([
+      { name: 'os_init : Update apt cache', changed: true },
+      { name: 'docker : Install Docker Engine and compose plugin', changed: true },
+    ]))
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    const hostVars = inventoryHostVars(TAILSCALE_CREDENTIAL.hostname)
+    expect(hostVars.ansible_host).toBe(TAILSCALE_CREDENTIAL.tailnetHostname)
+    expect(hostVars.ansible_host).not.toBe(TAILSCALE_CREDENTIAL.hostname)
+  })
+
+  it('adds a SOCKS5 ProxyCommand (default port 1055) to ansible_ssh_common_args when connectionType is tailscale', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue(TAILSCALE_CREDENTIAL),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await Promise.resolve()
+    await Promise.resolve()
+    resolveExecFile(0, ansibleJsonOutput([
+      { name: 'os_init : Update apt cache', changed: true },
+      { name: 'docker : Install Docker Engine and compose plugin', changed: true },
+    ]))
+    await runPromise
+
+    const hostVars = inventoryHostVars(TAILSCALE_CREDENTIAL.hostname)
+    const commonArgs = String(hostVars.ansible_ssh_common_args)
+    expect(commonArgs).toContain('ProxyCommand')
+    expect(commonArgs).toContain('127.0.0.1:1055')
+    // Existing TOFU host-key-checking settings are preserved, not replaced.
+    expect(commonArgs).toContain('StrictHostKeyChecking=accept-new')
+    expect(commonArgs).toContain(`UserKnownHostsFile=${KNOWN_HOSTS_PATH}`)
+  })
+
+  it('uses a custom socksPort in the ProxyCommand when provided', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...TAILSCALE_CREDENTIAL, socksPort: 2080 }),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await Promise.resolve()
+    await Promise.resolve()
+    resolveExecFile(0, ansibleJsonOutput([
+      { name: 'os_init : Update apt cache', changed: true },
+      { name: 'docker : Install Docker Engine and compose plugin', changed: true },
+    ]))
+    await runPromise
+
+    const hostVars = inventoryHostVars(TAILSCALE_CREDENTIAL.hostname)
+    const commonArgs = String(hostVars.ansible_ssh_common_args)
+    expect(commonArgs).toContain('127.0.0.1:2080')
+    expect(commonArgs).not.toContain('127.0.0.1:1055')
+  })
+
+  it('does not add a ProxyCommand when connectionType is ssh (or unset) — existing behavior unchanged', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...CREDENTIAL, connectionType: 'ssh' as const }),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await Promise.resolve()
+    await Promise.resolve()
+    resolveExecFile(0, ansibleJsonOutput([
+      { name: 'os_init : Update apt cache', changed: true },
+      { name: 'docker : Install Docker Engine and compose plugin', changed: true },
+    ]))
+    await runPromise
+
+    const hostVars = inventoryHostVars(CREDENTIAL.hostname)
+    expect(hostVars.ansible_host).toBe(CREDENTIAL.hostname)
+    expect(String(hostVars.ansible_ssh_common_args)).not.toContain('ProxyCommand')
+  })
+
+  it('rejects a tailscale credential with a missing tailnetHostname before any temp dir is created', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({
+        ...CREDENTIAL,
+        connectionType: 'tailscale' as const,
+        tailnetHostname: undefined,
+      }),
+    })
+
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('tailnetHostname')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['contains a space', 'evil host.ts.net'],
+    ['contains an embedded inventory variable', 'host.ts.net ansible_connection=local'],
+    ['contains a quote', "host'name.ts.net"],
+    ['is empty', ''],
+  ])('rejects a tailnetHostname that %s', async (_label, tailnetHostname) => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({
+        ...TAILSCALE_CREDENTIAL,
+        tailnetHostname,
+      }),
+    })
+
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('tailnetHostname')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+
+  it.each([0, -1, 65536, 1.5])('rejects an out-of-range socksPort %s', async (socksPort) => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...TAILSCALE_CREDENTIAL, socksPort }),
+    })
+
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('socksPort')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+})
