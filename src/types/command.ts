@@ -1,5 +1,6 @@
 import type { ChatPayload } from './chat'
 import type { EcsLaunchPayload, EcsStopPayload } from './ecs'
+import type { ServerSetupExecPayload } from './server-setup'
 
 export type AgentCommandType =
   | 'execute_command'
@@ -22,6 +23,7 @@ export type AgentCommandType =
   | 'sync_repository'
   | 'ecs_launch'
   | 'ecs_stop'
+  | 'server_setup_exec'
 
 export type AgentCommandStatus =
   | 'PENDING'
@@ -153,3 +155,4 @@ export type CommandDispatch =
   | { type: 'sync_repository'; payload: SyncRepositoryPayload }
   | { type: 'ecs_launch'; payload: EcsLaunchPayload }
   | { type: 'ecs_stop'; payload: EcsStopPayload }
+  | { type: 'server_setup_exec'; payload: ServerSetupExecPayload }

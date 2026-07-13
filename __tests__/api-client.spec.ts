@@ -38,6 +38,17 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getTenantCode', () => {
+    it('returns the tenant code extracted from the token by default', () => {
+      expect(client.getTenantCode()).toBe('test_tenant')
+    })
+
+    it('reflects a later setTenantCode override', () => {
+      client.setTenantCode('other_tenant')
+      expect(client.getTenantCode()).toBe('other_tenant')
+    })
+  })
+
   describe('setProjectCode', () => {
     it('should update the project code used in file API paths', async () => {
       mockInstance.post.mockResolvedValue({
@@ -1404,6 +1415,100 @@ describe('ApiClient', () => {
         success: false,
         error: { code: 'NOT_FOUND', message: 'このスレッドはSlack会話に紐づいていません' },
       })
+    })
+  })
+
+  describe('updateSystemKnowledge', () => {
+    it('should POST to the agent/knowledge endpoint and return the created knowledge entry', async () => {
+      const knowledge = {
+        id: 'kn-1', tenantCode: 'test_tenant', category: 'faq', title: 'Title', content: 'Content', status: 'draft',
+      }
+      mockInstance.post.mockResolvedValue({ data: knowledge })
+
+      const result = await client.updateSystemKnowledge({
+        title: 'Title',
+        content: 'Content',
+        category: 'faq',
+        commandId: 'cmd-1',
+        agentId: 'agent-1',
+        callId: 'call-1',
+      })
+
+      expect(result).toEqual(knowledge)
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/knowledge',
+        {
+          title: 'Title',
+          content: 'Content',
+          category: 'faq',
+          commandId: 'cmd-1',
+          agentId: 'agent-1',
+          callId: 'call-1',
+        },
+        undefined,
+      )
+    })
+
+    it('should include id (revision), tags, and sourceIssue when provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { id: 'kn-1', status: 'published' } })
+
+      await client.updateSystemKnowledge({
+        id: 'kn-1',
+        title: 'Title',
+        content: 'Content',
+        category: 'faq',
+        tags: ['a', 'b'],
+        sourceIssue: 'ISSUE-1',
+        commandId: 'cmd-1',
+        agentId: 'agent-1',
+        callId: 'call-1',
+      })
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/knowledge',
+        {
+          id: 'kn-1',
+          title: 'Title',
+          content: 'Content',
+          category: 'faq',
+          tags: ['a', 'b'],
+          sourceIssue: 'ISSUE-1',
+          commandId: 'cmd-1',
+          agentId: 'agent-1',
+          callId: 'call-1',
+        },
+        undefined,
+      )
+    })
+
+    it('should work without commandId/agentId/callId (e.g. tool invoked outside a chat command context)', async () => {
+      mockInstance.post.mockResolvedValue({ data: { id: 'kn-1', status: 'draft' } })
+
+      await client.updateSystemKnowledge({
+        title: 'Title',
+        content: 'Content',
+        category: 'faq',
+      })
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/knowledge',
+        {
+          title: 'Title',
+          content: 'Content',
+          category: 'faq',
+        },
+        undefined,
+      )
+    })
+
+    it('should propagate errors (e.g. validation 4xx) without swallowing them', async () => {
+      mockInstance.post.mockRejectedValue(createAxiosError('title is required', 400))
+
+      await expect(client.updateSystemKnowledge({
+        title: '',
+        content: 'Content',
+        category: 'faq',
+      })).rejects.toThrow()
     })
   })
 

@@ -29,6 +29,8 @@ import type {
   SystemInfo,
   TriggerAlarmResult,
   TriggerE2eTestResult,
+  UpdateSystemKnowledgeRequest,
+  UpdateSystemKnowledgeResult,
   VersionInfo,
 } from './types'
 
@@ -70,6 +72,16 @@ export class ApiClient {
 
   setTenantCode(code: string): void {
     this.tenantCode = code
+  }
+
+  /**
+   * Read-only accessor for the tenant code derived from the current token
+   * (or overridden via `setTenantCode`). Used by `server-setup-runner.ts` to
+   * namespace the persistent per-host known_hosts file so distinct tenants
+   * never share (or overwrite) each other's recorded SSH host keys.
+   */
+  getTenantCode(): string {
+    return this.tenantCode
   }
 
   setProjectCode(code: string): void {
@@ -214,6 +226,21 @@ export class ApiClient {
   async getSshCredentials(hostId: string): Promise<SshCredentials> {
     logger.debug(`Fetching SSH credentials for host: ${hostId}`)
     return this.get<SshCredentials>(API_ENDPOINTS.SSH_CREDENTIALS(this.tenantCode, hostId))
+  }
+
+  /**
+   * JIT SSH credential lookup for a `server_setup_exec` command. The target
+   * host is resolved server-side from the command's payload (never from a
+   * client-supplied hostId), so this can safely be called with either an
+   * ECS oneshot token or a resident agent's normal token.
+   */
+  async getServerSetupSshCredential(commandId: string, agentId: string): Promise<SshCredentials> {
+    this.validateCommandId(commandId)
+    logger.debug(`Fetching server setup SSH credential for command: ${commandId}`)
+    return this.get<SshCredentials>(
+      API_ENDPOINTS.SERVER_SETUP_SSH_CREDENTIAL(this.tenantCode, commandId),
+      { params: { agentId } },
+    )
   }
 
   async getBrowserCredentials(name: string): Promise<BrowserCredentials> {
@@ -500,6 +527,25 @@ export class ApiClient {
     return this.post<TriggerE2eTestResult>(
       API_ENDPOINTS.AGENT_TOOL_TRIGGER_E2E_TEST(this.tenantCode),
       { testCaseId, taskId, executionMethod, environmentId, callId },
+    )
+  }
+
+  /**
+   * システムのナレッジベースへ登録・改訂する（`update_system_knowledge` MCPツール専用）。
+   *
+   * `id` を指定すると改訂、未指定なら新規作成として扱われる。他の `agent/tools/*`
+   * エンドポイントと異なり `{success, data, error}` ではなく、成功時（201）はナレッジ詳細
+   * オブジェクトを直接返す。失敗時（4xx/5xx・ネットワークエラー）は例外を投げる
+   * （呼び出し元は `withMcpErrorHandling` でエラーレスポンスに変換し、ローカルファイルへの
+   * フォールバックは行わない）。
+   */
+  async updateSystemKnowledge(
+    request: UpdateSystemKnowledgeRequest,
+  ): Promise<UpdateSystemKnowledgeResult> {
+    logger.debug(`Updating system knowledge: title="${request.title}"${request.id ? ` (revision of ${request.id})` : ''}`)
+    return this.post<UpdateSystemKnowledgeResult>(
+      API_ENDPOINTS.AGENT_KNOWLEDGE(this.tenantCode),
+      request,
     )
   }
 }

@@ -2,7 +2,7 @@ import type { ApiClient } from '../api-client'
 import { ERR_CHAT_REQUIRES_CLIENT, ERR_E2E_TEST_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_REBOOT_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, ERR_UPDATE_REQUIRES_CALLBACK, ERR_SYNC_REPOSITORY_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import { getWorkspaceDir } from '../project-dir'
-import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, type SyncRepositoryPayload, successResult } from '../types'
+import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, type ServerSetupExecPayload, type SyncRepositoryPayload, successResult } from '../types'
 import type { RepoSyncResult } from '../repo-sync'
 import { getErrorMessage } from '../utils'
 
@@ -268,6 +268,21 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
   ecs_stop: async ({ p }) => {
     const { ecsStop } = await import('../ecs/ecs-launcher')
     return ecsStop(p)
+  },
+
+  server_setup_exec: async ({ p, opts }) => {
+    // Loaded lazily so agents that never run server setup do not pay the
+    // Ansible dispatch cost. Payload/response may involve an SSH private
+    // key — never log it here.
+    if (!opts.commandId || !opts.client) {
+      return errorResult('server_setup_exec requires client context')
+    }
+    const { runServerSetup } = await import('../server-setup/server-setup-runner')
+    return runServerSetup(p as unknown as ServerSetupExecPayload, {
+      commandId: opts.commandId,
+      client: opts.client,
+      agentId: opts.agentId,
+    })
   },
 
   e2e_script_fix: async ({ p, opts }) => {

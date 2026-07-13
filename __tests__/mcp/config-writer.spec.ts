@@ -386,6 +386,68 @@ describe('config-writer', () => {
       expect(existsSync(commandConfigPath)).toBe(true)
     })
 
+    it('should always embed AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID using the commandId argument (update_system_knowledge server-side lookup)', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test_tenant:tokenId:rawToken',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(baseConfigPath, 'cmd-know-1', 'conv-123')
+
+      const content = JSON.parse(readFileSync(commandConfigPath, 'utf-8'))
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID).toBe('cmd-know-1')
+    })
+
+    it('should embed AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID when agentId is provided', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test_tenant:tokenId:rawToken',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(baseConfigPath, 'cmd-know-2', 'conv-123', undefined, 'agent-abc')
+
+      const content = JSON.parse(readFileSync(commandConfigPath, 'utf-8'))
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID).toBe('agent-abc')
+    })
+
+    it('should not include AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID when agentId is not provided', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test_tenant:tokenId:rawToken',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(baseConfigPath, 'cmd-know-3', 'conv-123')
+
+      const content = JSON.parse(readFileSync(commandConfigPath, 'utf-8'))
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID).toBeUndefined()
+    })
+
+    it('should embed both AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID and AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID together with taskId', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test_tenant:tokenId:rawToken',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(baseConfigPath, 'cmd-know-4', 'conv-123', 'task-xyz', 'agent-def')
+
+      const content = JSON.parse(readFileSync(commandConfigPath, 'utf-8'))
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID).toBe('cmd-know-4')
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID).toBe('agent-def')
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_TASK_ID).toBe('task-xyz')
+    })
+
     it('should throw when the base config file does not exist', () => {
       expect(() => writeCommandMcpConfig(join(testDir, 'does-not-exist.json'), 'cmd-5', 'conv-x'))
         .toThrow()
