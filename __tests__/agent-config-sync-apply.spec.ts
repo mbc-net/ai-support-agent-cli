@@ -122,6 +122,39 @@ describe('applyProjectConfig - error handling branches', () => {
     await expect(applyProjectConfig(deps, state, config)).resolves.not.toThrow()
   })
 
+  it('should pass domain, apiKey, projectKey, and isDefault through to writeMcpConfig for every backlog item', async () => {
+    // レビュー指摘: writeMcpConfig はモック化されているため、effectiveConfig.backlog.items
+    // の各フィールド(特に projectKey/isDefault。BACKLOG_ORG_<NAME>_* の組織名や
+    // BACKLOG_DEFAULT_ORG の選択に使われる)が正しくマッピングされて渡ることを
+    // 検証するテストがなかった。フィールド名の取り違え・欠落を検知する。
+    const deps = makeDeps()
+    const state = makeState()
+    const config = makeBaseConfig({
+      backlog: {
+        items: [
+          { id: 'dev', domain: 'mbc-net.backlog.com', apiKey: 'key-1', projectKey: 'JCCI_ECO_DEV', isDefault: false },
+          { id: 'jcci', domain: 'tokuteico.backlog.com', apiKey: 'key-2', projectKey: 'JCCI_ECO2', isDefault: true },
+        ],
+      },
+    })
+
+    await applyProjectConfig(deps, state, config)
+
+    expect(mockWriteMcpConfig).toHaveBeenCalledWith(
+      deps.projectDir,
+      deps.apiUrl,
+      deps.token,
+      deps.projectCode,
+      expect.any(String),
+      [
+        { domain: 'mbc-net.backlog.com', apiKey: 'key-1', projectKey: 'JCCI_ECO_DEV', isDefault: false },
+        { domain: 'tokuteico.backlog.com', apiKey: 'key-2', projectKey: 'JCCI_ECO2', isDefault: true },
+      ],
+      undefined,
+      deps.browserLocalPort,
+    )
+  })
+
   it('should sweep stale per-command MCP config files after writing the MCP config', async () => {
     // Orphaned config-*.json files (plaintext token + conversationId) can accumulate if
     // the agent process is SIGKILLed/OOM-killed before chat-executor.ts's own cleanup
