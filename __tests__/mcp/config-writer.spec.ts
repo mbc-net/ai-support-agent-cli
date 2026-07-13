@@ -121,7 +121,7 @@ describe('config-writer', () => {
         'test-token-123',
         'TEST_01',
         '/path/to/server.js',
-        [{ domain: 'myspace.backlog.jp', apiKey: 'backlog-api-key-123' }],
+        [{ domain: 'myspace.backlog.jp', apiKey: 'backlog-api-key-123', projectKey: 'MY_PROJ' }],
       )
 
       const content = JSON.parse(readFileSync(configPath, 'utf-8'))
@@ -203,7 +203,13 @@ describe('config-writer', () => {
       expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBeUndefined()
     })
 
-    it('should use first backlog config when multiple provided', () => {
+    it('should expose every backlog config via the official multi-org env vars (single process, multi-org support)', () => {
+      // 回帰再現: テナントが複数Backlog連携(異なる組織を含む)を設定していても、
+      // 従来は配列先頭の1件しかMCPサーバーの環境変数として露出せず、2件目以降が
+      // エージェントから一切アクセス不能になっていた。
+      // backlog-mcp-server(nulab公式)は単一プロセスでBACKLOG_ORG_<NAME>_DOMAIN /
+      // BACKLOG_ORG_<NAME>_API_KEY の環境変数ペアにより複数組織に対応するため、
+      // それを使って全件を1つの `backlog` サーバーに載せる。
       const configPath = writeMcpConfig(
         testDir,
         'http://localhost:3030',
@@ -211,14 +217,92 @@ describe('config-writer', () => {
         'TEST_01',
         '/path/to/server.js',
         [
-          { domain: 'first.backlog.jp', apiKey: 'key-1' },
-          { domain: 'second.backlog.jp', apiKey: 'key-2' },
+          { domain: 'mbc-net.backlog.com', apiKey: 'key-1', projectKey: 'JCCI_ECO_DEV' },
+          { domain: 'mbc-net.backlog.com', apiKey: 'key-1', projectKey: 'JCCI_ECO' },
+          { domain: 'tokuteico.backlog.com', apiKey: 'key-2', projectKey: 'JCCI_ECO2', isDefault: true },
         ],
       )
 
       const content = JSON.parse(readFileSync(configPath, 'utf-8'))
-      expect(content.mcpServers.backlog.env.BACKLOG_DOMAIN).toBe('first.backlog.jp')
-      expect(content.mcpServers.backlog.env.BACKLOG_API_KEY).toBe('key-1')
+      const backlog = content.mcpServers.backlog
+
+      expect(backlog.command).toBe('npx')
+      expect(backlog.args).toEqual(['backlog-mcp-server'])
+
+      expect(backlog.env.BACKLOG_ORG_JCCI_ECO_DEV_DOMAIN).toBe('mbc-net.backlog.com')
+      expect(backlog.env.BACKLOG_ORG_JCCI_ECO_DEV_API_KEY).toBe('key-1')
+
+      expect(backlog.env.BACKLOG_ORG_JCCI_ECO_DOMAIN).toBe('mbc-net.backlog.com')
+      expect(backlog.env.BACKLOG_ORG_JCCI_ECO_API_KEY).toBe('key-1')
+
+      expect(backlog.env.BACKLOG_ORG_JCCI_ECO2_DOMAIN).toBe('tokuteico.backlog.com')
+      expect(backlog.env.BACKLOG_ORG_JCCI_ECO2_API_KEY).toBe('key-2')
+
+      // isDefault: true の項目がデフォルト組織として選ばれること
+      expect(backlog.env.BACKLOG_DEFAULT_ORG).toBe('JCCI_ECO2')
+
+      // 単一組織用の env は複数組織モードでは含めない(backlog-mcp-server の仕様上不要)
+      expect(backlog.env.BACKLOG_DOMAIN).toBeUndefined()
+      expect(backlog.env.BACKLOG_API_KEY).toBeUndefined()
+    })
+
+    it('should default to the first backlog config when none is marked isDefault', () => {
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+        [
+          { domain: 'first.backlog.jp', apiKey: 'key-1', projectKey: 'FIRST' },
+          { domain: 'second.backlog.jp', apiKey: 'key-2', projectKey: 'SECOND' },
+        ],
+      )
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+      expect(content.mcpServers.backlog.env.BACKLOG_DEFAULT_ORG).toBe('FIRST')
+    })
+
+    it('should disambiguate backlog org env var names when projectKey collides after sanitization', () => {
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+        [
+          { domain: 'a.backlog.com', apiKey: 'key-a', projectKey: 'proj' },
+          { domain: 'b.backlog.com', apiKey: 'key-b', projectKey: 'PROJ' },
+        ],
+      )
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+      const env = content.mcpServers.backlog.env as Record<string, string>
+
+      expect(env.BACKLOG_ORG_PROJ_DOMAIN).toBe('a.backlog.com')
+      expect(env.BACKLOG_ORG_PROJ_API_KEY).toBe('key-a')
+      expect(env.BACKLOG_ORG_PROJ_2_DOMAIN).toBe('b.backlog.com')
+      expect(env.BACKLOG_ORG_PROJ_2_API_KEY).toBe('key-b')
+    })
+
+    it('should sanitize a projectKey that would otherwise produce an invalid env var name', () => {
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+        [
+          { domain: 'a.backlog.com', apiKey: 'key-a', projectKey: '1-proj/key' },
+          { domain: 'b.backlog.com', apiKey: 'key-b', projectKey: 'OK_PROJ' },
+        ],
+      )
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+      const env = content.mcpServers.backlog.env as Record<string, string>
+
+      expect(env.BACKLOG_ORG_ORG_1_PROJ_KEY_DOMAIN).toBe('a.backlog.com')
+      expect(env.BACKLOG_ORG_OK_PROJ_DOMAIN).toBe('b.backlog.com')
     })
   })
 
@@ -313,7 +397,7 @@ describe('config-writer', () => {
         'test-token-123',
         'TEST_01',
         '/path/to/server.js',
-        [{ domain: 'myspace.backlog.jp', apiKey: 'backlog-api-key-123' }],
+        [{ domain: 'myspace.backlog.jp', apiKey: 'backlog-api-key-123', projectKey: 'MY_PROJ' }],
       )
 
       const commandConfigPath = writeCommandMcpConfig(baseConfigPath, 'cmd-4', 'conv-abc')

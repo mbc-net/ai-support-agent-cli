@@ -81,6 +81,7 @@ export interface ProjectConfigResponse {
       domain: string
       apiKey: string
       projectKey: string
+      isDefault?: boolean
     }>
   }
   ssh?: {

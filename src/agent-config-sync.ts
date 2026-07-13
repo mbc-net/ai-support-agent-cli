@@ -195,6 +195,8 @@ export async function applyProjectConfig(
       const backlogConfigs = effectiveConfig.backlog?.items?.map((item) => ({
         domain: item.domain,
         apiKey: item.apiKey,
+        projectKey: item.projectKey,
+        isDefault: item.isDefault,
       }))
       state.mcpConfigPath = writeMcpConfig(
         deps.projectDir,
