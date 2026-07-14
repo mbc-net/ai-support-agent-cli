@@ -14,17 +14,32 @@
 
 import { execFile } from 'child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { dump } from 'js-yaml'
 import * as os from 'os'
 import * as path from 'path'
 
-import { TAILSCALE_SOCKS_PORT } from '../constants'
+import { ENV_VARS, TAILSCALE_SOCKS_PORT } from '../constants'
 import { logger } from '../logger'
-import { type CommandResult, errorResult, type ServerSetupExecPayload, type ServerSetupStep, type ServerSetupStepResult, type SshExecCredential, successResult } from '../types'
+import {
+  type CommandResult,
+  errorResult,
+  type ServerSetupCustomTaskMode,
+  type ServerSetupExecPayload,
+  type ServerSetupStep,
+  type ServerSetupStepResult,
+  type ServerSetupVariablesResponse,
+  type SshExecCredential,
+  successResult,
+} from '../types'
 import { getErrorMessage } from '../utils'
 
+import { validateCustomTasksYaml } from './ansible-task-guard'
 import { resolveKnownHostsPath } from './known-hosts-store'
 
 import type { ApiClient } from '../api-client'
+
+/** Valid values for `steps[].customTasksMode` (see `ServerSetupCustomTaskMode`). */
+const ALLOWED_CUSTOM_TASK_MODES: ReadonlySet<string> = new Set(['append', 'replace'])
 
 /** stepType values supported by the bundled Ansible roles (MVP scope). */
 const ALLOWED_STEP_TYPES: ReadonlySet<string> = new Set([
@@ -202,7 +217,54 @@ function validatePayload(p: ServerSetupExecPayload): ValidatedServerSetupPayload
     if (requiredParam && !(requiredParam in params)) {
       return `steps[${i}].params.${requiredParam} is required for stepType '${stepType}'`
     }
-    steps.push({ stepType: stepType as ServerSetupStep['stepType'], params })
+
+    // Tenant-admin-authored custom Ansible tasks (admin-docs
+    // docs/features/server-setup.md "カスタムAnsibleタスク"). The api side
+    // (`ServerSetupRecipeService`) already runs `validateCustomTasksYaml` at
+    // save time, but that check must not be trusted as the sole gate: a
+    // payload reaching this agent could originate from a compromised/buggy
+    // api build, a replayed/tampered command, or a future dispatch path that
+    // forgot to call it. This is the *authoritative* re-validation —
+    // rejecting here, before any SSH credential fetch or temp dir creation,
+    // exactly like every other malformed-payload check above.
+    let customTasksYaml: string | undefined
+    const rawCustomTasksYaml = (raw as { customTasksYaml?: unknown }).customTasksYaml
+    if (rawCustomTasksYaml !== undefined) {
+      if (typeof rawCustomTasksYaml !== 'string') {
+        return `steps[${i}].customTasksYaml must be a string`
+      }
+      customTasksYaml = rawCustomTasksYaml
+    }
+
+    let customTasksMode: ServerSetupCustomTaskMode | undefined
+    const rawCustomTasksMode = (raw as { customTasksMode?: unknown }).customTasksMode
+    if (rawCustomTasksMode !== undefined) {
+      if (typeof rawCustomTasksMode !== 'string' || !ALLOWED_CUSTOM_TASK_MODES.has(rawCustomTasksMode)) {
+        return `steps[${i}].customTasksMode must be one of: ${[...ALLOWED_CUSTOM_TASK_MODES].join(', ')}`
+      }
+      customTasksMode = rawCustomTasksMode as ServerSetupCustomTaskMode
+    }
+
+    if (customTasksYaml !== undefined) {
+      // `secretVarNames` is deliberately empty here: this is a structural
+      // pre-check (allowlist/forbidden-key/lookup/play-format/reserved-name)
+      // that must reject before any network call is made. The real
+      // `secretNames` (fetched via `fetchServerSetupVariables`, after the SSH
+      // credential is confirmed valid) are applied in a second pass inside
+      // `runServerSetup` to produce the final `no_log`-annotated tasks used
+      // by `generatePlaybook` — see the call site there.
+      const guardResult = validateCustomTasksYaml(customTasksYaml, stepType, new Set())
+      if (!guardResult.ok) {
+        return `server_setup_exec: custom task rejected: ${JSON.stringify(guardResult.violations)}`
+      }
+    }
+
+    steps.push({
+      stepType: stepType as ServerSetupStep['stepType'],
+      params,
+      ...(customTasksYaml !== undefined && { customTasksYaml }),
+      ...(customTasksMode !== undefined && { customTasksMode }),
+    })
   }
 
   return { executionId, sshHostId, steps }
@@ -225,6 +287,120 @@ function resolvePlaybookPath(): string {
     throw new Error(`Ansible playbook not found: ${playbookPath}`)
   }
   return playbookPath
+}
+
+/**
+ * JIT fetch of project (`ANSIBLE#`-prefixed `ConfigSetting`) variables for
+ * this `server_setup_exec` command's custom Ansible tasks (admin-docs
+ * docs/features/server-setup.md "カスタムAnsibleタスク"). Thin wrapper around
+ * `ApiClient.getServerSetupVariables` — kept as its own function (rather than
+ * calling the client inline in `runServerSetup`) so it can be unit-tested in
+ * isolation and so its call site reads the same way as
+ * `getServerSetupSshCredential`'s.
+ *
+ * The returned `secretNames` feed both `validateCustomTasksYaml`'s `no_log`
+ * annotation and this module's post-execution redaction (see
+ * `redactSecretValues`) — the belt-and-suspenders fallback for a task that
+ * somehow still printed a secret's plaintext despite `no_log`.
+ */
+export async function fetchServerSetupVariables(
+  client: ApiClient,
+  commandId: string,
+  agentId: string,
+): Promise<ServerSetupVariablesResponse> {
+  logger.debug(`Fetching server setup variables for command: ${commandId}`)
+  return client.getServerSetupVariables(commandId, agentId)
+}
+
+/** One requested step's data as needed by {@link generatePlaybook}. */
+export interface GeneratePlaybookStep {
+  stepType: string
+  customTasksMode?: string
+  normalizedTasks?: Record<string, unknown>[]
+}
+
+/**
+ * Build a playbook YAML string for a run that includes at least one step
+ * with custom Ansible tasks (`steps[].customTasksYaml`).
+ *
+ * Mirrors the bundled `ansible/playbook.yml`'s structure (same precheck
+ * task, transcribed verbatim below rather than read from disk so this
+ * function has no filesystem dependency of its own) but adds each step's
+ * `normalizedTasks` (already validated + `no_log`-annotated by
+ * `validateCustomTasksYaml`) as a tagged `post_tasks` block:
+ *
+ * - `customTasksMode !== 'replace'` (i.e. unset or `'append'`): the bundled
+ *   role for that stepType is kept in `roles:` (runs first, tagged
+ *   `stepType`), and — if `normalizedTasks` is present — the custom tasks
+ *   run afterwards as a `post_tasks` block with the same tag.
+ * - `customTasksMode === 'replace'`: the bundled role is *not* included; only
+ *   the `post_tasks` block (if any) runs for that stepType's tag.
+ *
+ * `--tags <stepType,...>` (built the same way as for the bundled playbook)
+ * still selects which of these run: `roles:` and `post_tasks:` entries are
+ * independently tagged per step, so `--tags` continues to work unmodified
+ * whether or not a step carries custom tasks.
+ */
+export function generatePlaybook(validatedSteps: readonly GeneratePlaybookStep[]): string {
+  const roles = validatedSteps
+    .filter((step) => step.customTasksMode !== 'replace')
+    .map((step) => ({ role: step.stepType, tags: step.stepType }))
+
+  const postTasks = validatedSteps
+    .filter((step) => Array.isArray(step.normalizedTasks) && step.normalizedTasks.length > 0)
+    .map((step) => ({ block: step.normalizedTasks, tags: step.stepType }))
+
+  const playbook: Record<string, unknown>[] = [
+    {
+      name: 'AI Support Agent server setup (custom tasks)',
+      hosts: 'all',
+      become: true,
+      gather_facts: true,
+      tasks: [
+        // Transcribed verbatim from ansible/playbook.yml's "precheck" task —
+        // see resolvePlaybookPath()'s doc comment and admin-docs
+        // docs/features/server-setup.md. Keeping this in sync manually (not
+        // read from disk) means the bundled playbook.yml and this generated
+        // one must be kept in sync by hand if the precheck task ever changes.
+        {
+          name: 'precheck : Verify supported OS',
+          'ansible.builtin.fail': {
+            msg:
+              'Unsupported OS: {{ ansible_distribution }} {{ ansible_distribution_version }}. '
+              + 'Only Ubuntu 22.04/24.04 LTS are supported by server setup execution.',
+          },
+          when:
+            "ansible_distribution != 'Ubuntu' or ansible_distribution_version not in ['22.04', '24.04']",
+          tags: 'always',
+        },
+      ],
+      ...(roles.length > 0 && { roles }),
+      ...(postTasks.length > 0 && { post_tasks: postTasks }),
+    },
+  ]
+
+  return dump(playbook)
+}
+
+/**
+ * Replace every occurrence of each (non-empty) secret value with `***` in
+ * `text`. Belt-and-suspenders redaction applied to `ansible-playbook`'s raw
+ * stdout/stderr (and, transitively, every `ServerSetupStepResult.message`
+ * derived from it) — the last line of defense for a secret value that leaked
+ * into command output despite `no_log: true` having been applied wherever
+ * `validateCustomTasksYaml` detected a `{{ secretVarName }}` reference.
+ *
+ * Empty-string values are skipped: replacing every occurrence of `''` would
+ * corrupt the text (a global regex match on an empty string matches between
+ * every character).
+ */
+export function redactSecretValues(text: string, secretValues: readonly string[]): string {
+  let redacted = text
+  for (const value of secretValues) {
+    if (!value) continue
+    redacted = redacted.split(value).join('***')
+  }
+  return redacted
 }
 
 /**
@@ -351,6 +527,19 @@ interface AnsibleRunResult {
 }
 
 /**
+ * Parse an optional uid/gid override from an environment variable value.
+ * Returns `undefined` for an unset/empty/non-numeric value so the caller can
+ * omit the corresponding `execFile` option entirely (preserving the current
+ * "run as whatever user the agent process itself runs as" behavior) rather
+ * than passing e.g. `NaN` through to Node's `child_process` uid/gid options.
+ */
+function parseOptionalUidOrGid(value: string | undefined): number | undefined {
+  if (!value) return undefined
+  const parsed = Number(value)
+  return Number.isInteger(parsed) ? parsed : undefined
+}
+
+/**
  * Run `ansible-playbook` via execFile (never a shell) so step params
  * (which flow into `-e @extra-vars.json`, not shell arguments) cannot be
  * used for shell injection. Resolves rather than rejects on a non-zero exit
@@ -358,13 +547,34 @@ interface AnsibleRunResult {
  * before the failure. A hard `timeout` (see `ANSIBLE_TIMEOUT_MS`) guards
  * against a hung target host or a stuck apt/dpkg lock leaving this promise
  * (and the caller's temp dir / private key) pending forever.
+ *
+ * Opt-in non-root execution: when `AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID`
+ * / `_GID` (see `ENV_VARS.SERVER_SETUP_ANSIBLE_UID`/`_GID`) are set,
+ * `ansible-playbook` itself is spawned under that uid/gid instead of the
+ * agent process's own user — an additional containment layer for a
+ * compromised/malicious custom Ansible task running *on the agent host*
+ * (e.g. via `ansible.builtin.command`/`shell`, both allow-listed), independent
+ * of `become: true`'s privilege escalation on the *target* host over SSH.
+ * Left unset by default: the agent process is often already running as a
+ * dedicated non-root service user in production, and forcing a uid/gid here
+ * unconditionally could break environments where the agent itself must run
+ * as root (e.g. to read `/etc/` config or bind privileged ports) — hence the
+ * opt-in design rather than an unconditional drop.
  */
 function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv): Promise<AnsibleRunResult> {
+  const uid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_UID])
+  const gid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_GID])
   return new Promise((resolve) => {
     execFile(
       'ansible-playbook',
       args,
-      { env, maxBuffer: ANSIBLE_MAX_BUFFER_BYTES, timeout: ANSIBLE_TIMEOUT_MS },
+      {
+        env,
+        maxBuffer: ANSIBLE_MAX_BUFFER_BYTES,
+        timeout: ANSIBLE_TIMEOUT_MS,
+        ...(uid !== undefined && { uid }),
+        ...(gid !== undefined && { gid }),
+      },
       (error, stdout, stderr) => {
         const stdoutStr = stdout ? stdout.toString() : ''
         const stderrStr = stderr ? stderr.toString() : ''
@@ -562,6 +772,21 @@ export async function runServerSetup(
     return errorResult(credentialError)
   }
 
+  // JIT fetch of project (`ANSIBLE#`) variables for custom Ansible tasks.
+  // Fetched unconditionally (not only when a step carries `customTasksYaml`)
+  // so its `secretNames` are available for redaction (see below) regardless
+  // of which step ends up producing output, and so its `variables` are
+  // available to be merged into extra-vars.json the same way step `params`
+  // are. Placed before any temp dir is created — like the SSH credential
+  // fetch above — so a failure here never leaves a private-key-holding temp
+  // dir behind.
+  let serverSetupVariables: ServerSetupVariablesResponse
+  try {
+    serverSetupVariables = await fetchServerSetupVariables(ctx.client, ctx.commandId, ctx.agentId ?? '')
+  } catch (error) {
+    return errorResult(`Failed to fetch server setup variables: ${getErrorMessage(error)}`)
+  }
+
   let playbookPath: string
   try {
     playbookPath = resolvePlaybookPath()
@@ -600,24 +825,84 @@ export async function runServerSetup(
       const inventoryPath = path.join(tmpDir, 'inventory.yml')
       writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath))
 
-      const extraVars: Record<string, string> = {}
+      // Project (`ANSIBLE#`) variables merged first so that an explicit
+      // step `param` (from the fixed per-stepType allow-list) always wins on
+      // a name collision, rather than a tenant-admin-defined project
+      // variable silently overriding a built-in role's own variable.
+      const extraVars: Record<string, string> = { ...serverSetupVariables.variables }
       for (const step of validated.steps) {
         Object.assign(extraVars, step.params)
       }
       const extraVarsPath = path.join(tmpDir, 'extra-vars.json')
-      // 0600: extra-vars.json may carry db_root_password in plaintext —
-      // same permission level as the private key and known_hosts file in
-      // this directory.
+      // 0600: extra-vars.json may carry db_root_password (and now ANSIBLE#
+      // project secret values) in plaintext — same permission level as the
+      // private key and known_hosts file in this directory.
       writeFileSync(extraVarsPath, JSON.stringify(extraVars), { mode: 0o600 })
 
+      // Steps carrying `customTasksYaml` are re-validated here (rather than
+      // reusing validatePayload's earlier, structural-only pass) using the
+      // *real* `secretNames` just fetched, so `normalizedTasks` carries
+      // accurate `no_log: true` annotations. `validatePayload` already
+      // proved this YAML passes the guard with an empty secret set, so a
+      // rejection here would mean the guard's own behavior is
+      // non-deterministic across calls — treated as an internal error
+      // (fail-closed) rather than silently falling back to the bundled
+      // playbook.
+      const secretNameSet = new Set(serverSetupVariables.secretNames)
+      const playbookSteps: GeneratePlaybookStep[] = []
+      for (const step of validated.steps) {
+        if (!step.customTasksYaml) {
+          playbookSteps.push({ stepType: step.stepType, customTasksMode: step.customTasksMode })
+          continue
+        }
+        const guardResult = validateCustomTasksYaml(step.customTasksYaml, step.stepType, secretNameSet)
+        if (!guardResult.ok) {
+          logger.error(
+            `[server-setup] custom task guard re-validation failed unexpectedly for step ${step.stepType}: ${JSON.stringify(guardResult.violations)}`,
+          )
+          return errorResult(
+            `server_setup_exec: custom task rejected at execution time: ${JSON.stringify(guardResult.violations)}`,
+          )
+        }
+        playbookSteps.push({
+          stepType: step.stepType,
+          customTasksMode: step.customTasksMode,
+          normalizedTasks: guardResult.normalizedTasks,
+        })
+      }
+
+      const hasCustomTasks = validated.steps.some((step) => Boolean(step.customTasksYaml))
+      let effectivePlaybookPath = playbookPath
+      if (hasCustomTasks) {
+        effectivePlaybookPath = path.join(tmpDir, 'generated-playbook.yml')
+        writeFileSync(effectivePlaybookPath, generatePlaybook(playbookSteps))
+      }
+
       const tags = validated.steps.map((s) => s.stepType).join(',')
-      const args = ['-i', inventoryPath, playbookPath, '--tags', tags, '-e', `@${extraVarsPath}`]
+      const args = ['-i', inventoryPath, effectivePlaybookPath, '--tags', tags, '-e', `@${extraVarsPath}`]
 
       logger.info(`[server-setup] Running ansible-playbook: executionId=${validated.executionId} tags=${tags}`)
-      const { code, stdout, stderr, timedOut, spawnError } = await runAnsiblePlaybook(args, {
+      const { code, stdout: rawStdout, stderr: rawStderr, timedOut, spawnError } = await runAnsiblePlaybook(args, {
         ...process.env,
         ANSIBLE_STDOUT_CALLBACK: 'json',
+        // Lets the generated playbook (written to tmpDir, outside
+        // ansible/roles/) resolve the bundled roles by name via `roles:`
+        // entries. Always set (harmless when the bundled playbook — which
+        // sits alongside its own roles/ directory — is used instead).
+        ANSIBLE_ROLES_PATH: path.join(resolveAnsibleDir(), 'roles'),
       })
+
+      // Belt-and-suspenders redaction (see redactSecretValues's doc
+      // comment): applied to the raw stdout/stderr *before* anything else
+      // reads them, so every downstream use — the `stderr`-derived `detail`
+      // in the code!==0 branch, `unmatchedFailureMessages`, and every
+      // `ServerSetupStepResult.message` parsed out of `stdout` — is already
+      // redacted.
+      const secretValues = Object.entries(serverSetupVariables.variables)
+        .filter(([name]) => secretNameSet.has(name))
+        .map(([, value]) => value)
+      const stdout = redactSecretValues(rawStdout, secretValues)
+      const stderr = redactSecretValues(rawStderr, secretValues)
 
       if (timedOut) {
         logger.error(

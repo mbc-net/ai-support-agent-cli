@@ -25,6 +25,7 @@ import type {
   RepoCredentials,
   SendSlackFileResult,
   SendSlackMessageResult,
+  ServerSetupVariablesResponse,
   SshCredentials,
   SshExecCredential,
   SystemInfo,
@@ -247,6 +248,24 @@ export class ApiClient {
     logger.debug(`Fetching server setup SSH credential for command: ${commandId}`)
     return this.get<SshExecCredential>(
       API_ENDPOINTS.SERVER_SETUP_SSH_CREDENTIAL(this.tenantCode, commandId),
+      { params: { agentId } },
+    )
+  }
+
+  /**
+   * JIT lookup of project (`ANSIBLE#`-prefixed `ConfigSetting`) variables for
+   * a `server_setup_exec` command's custom Ansible tasks. Mirrors
+   * `getServerSetupSshCredential`'s IDOR-prevention design: `projectCode` is
+   * resolved server-side from the command's `requestContext`, never passed
+   * by the caller. `secretNames` in the response drives `no_log: true`
+   * annotation (`ansible-task-guard.ts`) and post-execution redaction
+   * (`server-setup-runner.ts`) — never log the returned `variables` values.
+   */
+  async getServerSetupVariables(commandId: string, agentId: string): Promise<ServerSetupVariablesResponse> {
+    this.validateCommandId(commandId)
+    logger.debug(`Fetching server setup variables for command: ${commandId}`)
+    return this.get<ServerSetupVariablesResponse>(
+      API_ENDPOINTS.SERVER_SETUP_VARIABLES(this.tenantCode, commandId),
       { params: { agentId } },
     )
   }

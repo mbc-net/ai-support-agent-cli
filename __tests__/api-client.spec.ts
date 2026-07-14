@@ -499,6 +499,33 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getServerSetupVariables', () => {
+    it('should fetch server setup project variables scoped to a commandId', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          variables: { DB_HOST: '10.0.0.5', DB_PASSWORD: 's3cr3t' },
+          secretNames: ['DB_PASSWORD'],
+        },
+      })
+
+      const result = await client.getServerSetupVariables('cmd-1', 'agent-1')
+      expect(result).toEqual({
+        variables: { DB_HOST: '10.0.0.5', DB_PASSWORD: 's3cr3t' },
+        secretNames: ['DB_PASSWORD'],
+      })
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/commands/cmd-1/server-setup-variables',
+        { params: { agentId: 'agent-1' } },
+      )
+    })
+
+    it('should reject an invalid commandId', async () => {
+      await expect(client.getServerSetupVariables('bad id!', 'agent-1')).rejects.toThrow(
+        'Invalid command ID format',
+      )
+    })
+  })
+
   describe('getRepoCredentials', () => {
     it('should fetch repo credentials', async () => {
       mockInstance.get.mockResolvedValue({
