@@ -299,7 +299,22 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     }
   }
 
-  const agentId = extractTokenId(projects[0].token) ?? config.agentId ?? os.hostname()
+  // Each project's own token is bound (TOFU) to its own agentId server-side, so the
+  // agentId sent for a project's WebSocket connections must be derived from that
+  // project's own token, not shared across projects. If a token doesn't carry a
+  // tokenId, projects fall back to the same config/hostname value and can hit the
+  // same "Agent ID does not match the token binding" rejection this fix addresses,
+  // so surface it instead of silently sharing the fallback.
+  const resolveAgentId = (project: (typeof projects)[number]) => {
+    const tokenId = extractTokenId(project.token)
+    if (tokenId !== undefined) return tokenId
+    logger.warn(
+      `Could not extract tokenId from token for ${project.tenantCode}/${project.projectCode}; falling back to a shared agentId, which may cause "Agent ID does not match the token binding" errors if another project shares the same fallback`,
+    )
+    return config.agentId ?? os.hostname()
+  }
+  const forkAgentIds = projects.map(resolveAgentId)
+  const agentId = forkAgentIds[0]
   const { pollInterval, heartbeatInterval } = resolveIntervals(options)
 
   logger.info(t('runner.startingMulti', { count: projects.length }))
@@ -327,9 +342,9 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     }
   }
 
-  for (const project of projects) {
-    processManager.forkProject(project, agentId, forkOptions)
-  }
+  projects.forEach((project, index) => {
+    processManager.forkProject(project, forkAgentIds[index], forkOptions)
+  })
 
   saveConfig({ lastConnected: nowIso() })
 
@@ -342,7 +357,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     },
     onProjectAdded: (project) => {
       logger.info(`Hot-adding project: ${project.tenantCode}/${project.projectCode}`)
-      processManager.forkProject(project, agentId, forkOptions)
+      processManager.forkProject(project, resolveAgentId(project), forkOptions)
     },
     onProjectRemoved: (project) => {
       logger.info(`Hot-removing project: ${project.tenantCode}/${project.projectCode}`)

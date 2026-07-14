@@ -17,6 +17,17 @@ export interface BaseWebSocketOptions {
   heartbeatIntervalMs?: number
   /** 連続未応答 pong の許容回数。省略時は WS_PONG_MAX_MISSED。 */
   pongMaxMissed?: number
+  /**
+   * サーバーが恒久的な認証拒否（無効なトークン、Agent ID トークンバインディング不一致等）
+   * で接続を閉じる際に使う WebSocket クローズコード。省略時はこの判定を一切行わず、
+   * どのクローズコードでも常に再接続する（従来の挙動）。
+   *
+   * この値は接続先サーバー固有の取り決めであるため、オプトインにしている。例えば
+   * AppSyncSubscriber は AWS AppSync のリアルタイムエンドポイントと通信しており、
+   * そちらのクローズコードの意味はこの API サーバーの取り決めとは無関係なので、
+   * このオプションを渡さない（＝常に再接続する）。
+   */
+  authRejectedCloseCode?: number
 }
 
 /**
@@ -181,13 +192,32 @@ export abstract class BaseWebSocketConnection<TMessage> {
         }
       })
 
-      ws.on('close', () => {
+      ws.on('close', (code: number) => {
         this.stopHeartbeat()
-        this.onWebSocketClose()
-        if (!this.closed) {
-          logger.debug(`${this.options.logPrefix} Connection closed unexpectedly`)
-          void this.doReconnect()
+
+        if (
+          !this.closed &&
+          this.options.authRejectedCloseCode !== undefined &&
+          code === this.options.authRejectedCloseCode
+        ) {
+          // The server permanently rejected this connection's credentials (invalid/expired
+          // token, or Agent ID token-binding mismatch). Retrying with the same token/agentId
+          // would just repeat the same rejection forever, silently, at WARN/debug level — so
+          // stop reconnecting and surface this loudly instead of looping indefinitely. Skip
+          // onWebSocketClose() (which subclasses use for transient-drop grace handling) in
+          // favor of onPermanentClose(), since there is nothing to resume.
+          this.closed = true
+          logger.error(
+            `${this.options.logPrefix} Connection closed: authentication rejected by the server (code=${code}). Not retrying — check this project's token and Agent ID configuration.`,
+          )
+          this.onPermanentClose()
+          return
         }
+
+        this.onWebSocketClose()
+        if (this.closed) return
+        logger.debug(`${this.options.logPrefix} Connection closed unexpectedly`)
+        void this.doReconnect()
       })
 
       this.ws = ws
@@ -262,6 +292,16 @@ export abstract class BaseWebSocketConnection<TMessage> {
 
   /** WebSocket close イベント時の追加処理（サブクラスでオーバーライド可能） */
   protected onWebSocketClose(): void {
+    // default: no-op
+  }
+
+  /**
+   * サーバーによる恒久的な認証拒否（authRejectedCloseCode）でクローズされた際の処理
+   * （サブクラスでオーバーライド可能）。二度と再接続しないことが確定しているため、
+   * onWebSocketClose() のような再接続を前提としたグレース処理ではなく、即時の
+   * リソース解放を行うべき場面で使う。
+   */
+  protected onPermanentClose(): void {
     // default: no-op
   }
 

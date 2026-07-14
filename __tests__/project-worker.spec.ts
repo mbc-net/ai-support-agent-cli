@@ -135,12 +135,36 @@ describe('project-worker', () => {
         startMessage.options,
         undefined,
         undefined,
+        expect.any(Function),
       )
       expect(mockStart).toHaveBeenCalled()
       expect(processSendSpy).toHaveBeenCalledWith({
         type: 'started',
         tenantCode: 'mbc',
         projectCode: 'test-proj',
+      })
+    })
+
+    it('should forward a permanent auth rejection from ProjectAgent to the parent as an auth_rejected IPC message', async () => {
+      const { ProjectAgent } = require('../src/project-agent')
+
+      const worker = loadWorker()
+      worker.startWorker()
+
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      // The 6th constructor arg is the onAuthRejected callback wired to send IPC.
+      const onAuthRejected = (ProjectAgent as jest.Mock).mock.calls[0][5] as (transport: string) => void
+      expect(typeof onAuthRejected).toBe('function')
+
+      onAuthRejected('terminal')
+
+      expect(processSendSpy).toHaveBeenCalledWith({
+        type: 'auth_rejected',
+        tenantCode: 'mbc',
+        projectCode: 'test-proj',
+        transport: 'terminal',
       })
     })
 

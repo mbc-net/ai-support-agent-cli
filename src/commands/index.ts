@@ -2,7 +2,7 @@ import type { ApiClient } from '../api-client'
 import { ERR_CHAT_REQUIRES_CLIENT, ERR_E2E_TEST_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_REBOOT_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, ERR_UPDATE_REQUIRES_CALLBACK, ERR_SYNC_REPOSITORY_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import { getWorkspaceDir } from '../project-dir'
-import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, type ServerSetupExecPayload, type SyncRepositoryPayload, successResult } from '../types'
+import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, type ServerSetupExecPayload, type SshExecPayload, type SyncRepositoryPayload, successResult } from '../types'
 import type { RepoSyncResult } from '../repo-sync'
 import { getErrorMessage } from '../utils'
 
@@ -283,6 +283,36 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       client: opts.client,
       agentId: opts.agentId,
     })
+  },
+
+  ssh_exec: async ({ p, opts }) => {
+    // Loaded lazily so agents that never run ssh_exec do not pay the
+    // ssh2/socks require() cost. Payload/response may involve an SSH
+    // private key, password, or Tailscale authkey — never log them here.
+    if (!opts.commandId || !opts.client) {
+      return errorResult('ssh_exec requires client context')
+    }
+    const sshHostId = (p as SshExecPayload).sshHostId
+    if (typeof sshHostId !== 'string' || !sshHostId) {
+      return errorResult('sshHostId is required for ssh_exec')
+    }
+    const command = (p as SshExecPayload).command
+    if (typeof command !== 'string' || !command) {
+      return errorResult('command is required for ssh_exec')
+    }
+    const rawTimeout = (p as SshExecPayload).timeoutSeconds
+    const timeoutSeconds = typeof rawTimeout === 'number' ? rawTimeout : undefined
+
+    logger.debug(`[ssh_exec] sshHostId=${sshHostId}`)
+    try {
+      const { fetchSshExecCredential } = await import('./ssh-credential-client')
+      const { executeSshCommand } = await import('./ssh-executor')
+      const credential = await fetchSshExecCredential(opts.client, opts.commandId, opts.agentId ?? '')
+      const output = await executeSshCommand(credential, command, timeoutSeconds)
+      return successResult(output)
+    } catch (error) {
+      return errorResult(getErrorMessage(error))
+    }
   },
 
   e2e_script_fix: async ({ p, opts }) => {

@@ -24,6 +24,7 @@ export type AgentCommandType =
   | 'ecs_launch'
   | 'ecs_stop'
   | 'server_setup_exec'
+  | 'ssh_exec'
 
 export type AgentCommandStatus =
   | 'PENDING'
@@ -133,6 +134,21 @@ export interface SyncRepositoryPayload {
   branch?: unknown
 }
 
+/**
+ * Payload of the `ssh_exec` command: a single ad-hoc SSH command run against
+ * one SSH host (used by the chat `execute_ssh_command` tool's ECS oneshot
+ * dispatch path — see admin-docs
+ * `docs/specifications/ssh-tailscale-support.md`). The target host's
+ * connection parameters (including Tailscale SOCKS5 fields, when
+ * applicable) are resolved server-side and fetched JIT via
+ * `ssh-credential-client.ts`; this payload only carries the command itself.
+ */
+export interface SshExecPayload {
+  sshHostId?: unknown
+  command?: unknown
+  timeoutSeconds?: unknown
+}
+
 // Discriminated union for type-safe command dispatch
 export type CommandDispatch =
   | { type: 'execute_command'; payload: ShellCommandPayload }
@@ -156,3 +172,4 @@ export type CommandDispatch =
   | { type: 'ecs_launch'; payload: EcsLaunchPayload }
   | { type: 'ecs_stop'; payload: EcsStopPayload }
   | { type: 'server_setup_exec'; payload: ServerSetupExecPayload }
+  | { type: 'ssh_exec'; payload: SshExecPayload }

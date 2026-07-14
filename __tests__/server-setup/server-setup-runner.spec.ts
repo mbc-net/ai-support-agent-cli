@@ -55,10 +55,10 @@ jest.mock('../../src/server-setup/known-hosts-store', () => ({
   resolveKnownHostsPath: (...args: unknown[]) => mockResolveKnownHostsPath(...args),
 }))
 
-import { runServerSetup } from '../../src/server-setup/server-setup-runner'
+import { generatePlaybook, runServerSetup } from '../../src/server-setup/server-setup-runner'
 import { logger } from '../../src/logger'
 import type { ApiClient } from '../../src/api-client'
-import type { ServerSetupExecPayload, SshCredentials } from '../../src/types'
+import type { ServerSetupExecPayload, ServerSetupVariablesResponse, SshCredentials } from '../../src/types'
 
 const PRIVATE_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE-KEY-MATERIAL\n-----END OPENSSH PRIVATE KEY-----\n'
 
@@ -83,11 +83,16 @@ function makePayload(overrides: Partial<ServerSetupExecPayload> = {}): ServerSet
   }
 }
 
+const NO_VARIABLES: ServerSetupVariablesResponse = { variables: {}, secretNames: [] }
+
 function makeClient(
-  overrides: Partial<Record<'getServerSetupSshCredential' | 'getTenantCode', jest.Mock>> = {},
+  overrides: Partial<
+    Record<'getServerSetupSshCredential' | 'getServerSetupVariables' | 'getTenantCode', jest.Mock>
+  > = {},
 ): ApiClient {
   return {
     getServerSetupSshCredential: overrides.getServerSetupSshCredential ?? jest.fn().mockResolvedValue(CREDENTIAL),
+    getServerSetupVariables: overrides.getServerSetupVariables ?? jest.fn().mockResolvedValue(NO_VARIABLES),
     getTenantCode: overrides.getTenantCode ?? jest.fn().mockReturnValue('acme'),
   } as unknown as ApiClient
 }
@@ -138,6 +143,24 @@ function resolveExecFileWithError(
   const call = mockExecFile.mock.calls[mockExecFile.mock.calls.length - 1]
   const callback = call[call.length - 1] as (error: unknown, stdout: string, stderr: string) => void
   callback(error, stdout, stderr)
+}
+
+/**
+ * Flush microtasks until `execFile` has been invoked (or a small tick budget
+ * is exhausted), rather than a hardcoded `await Promise.resolve()` count.
+ *
+ * `runServerSetup` now awaits both the SSH credential fetch and the
+ * server-setup-variables fetch (see `fetchServerSetupVariables`) before
+ * reaching `ansible-playbook`'s `execFile` invocation, so the exact number of
+ * microtask hops needed to get there is no longer a fixed constant tests can
+ * hardcode — polling for the actual observable effect (execFile having been
+ * called) is more robust than re-tuning a tick count by hand every time an
+ * `await` is added/removed upstream.
+ */
+async function flushUntilExecFileCalled(): Promise<void> {
+  for (let i = 0; i < 50 && mockExecFile.mock.calls.length === 0; i++) {
+    await Promise.resolve()
+  }
 }
 
 /** Collect every string passed to any logger method. */
@@ -282,8 +305,7 @@ describe('runServerSetup - params allow-list per stepType', () => {
       }),
       { commandId: 'cmd-1', client },
     )
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, ansibleJsonOutput([
       { name: 'web_server : Install Apache' },
       { name: 'database : Set PostgreSQL postgres user password' },
@@ -344,8 +366,7 @@ describe('runServerSetup - required step params', () => {
       makePayload({ steps: [{ stepType: stepType as ServerSetupExecPayload['steps'][number]['stepType'], params }] }),
       { commandId: 'cmd-1', client },
     )
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, ansibleJsonOutput([{ name: `${stepType} : did something` }]))
     const result = await runPromise
 
@@ -408,8 +429,7 @@ describe('runServerSetup - enum-valued step params', () => {
       makePayload({ steps: [{ stepType: stepType as ServerSetupExecPayload['steps'][number]['stepType'], params }] }),
       { commandId: 'cmd-1', client },
     )
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, ansibleJsonOutput([{ name: `${stepType} : did something` }]))
     const result = await runPromise
 
@@ -423,8 +443,7 @@ describe('runServerSetup - SSH credential fetch', () => {
 
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
     // Let the credential fetch settle before resolving execFile.
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache', changed: true }]))
     await runPromise
 
@@ -434,8 +453,7 @@ describe('runServerSetup - SSH credential fetch', () => {
   it('passes the agentId through when provided', async () => {
     const client = makeClient()
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client, agentId: 'agent-42' })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache' }]))
     await runPromise
 
@@ -537,8 +555,7 @@ describe('runServerSetup - success path', () => {
     const client = makeClient()
 
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, ansibleJsonOutput([
       { name: 'os_init : Update apt cache', changed: true },
       { name: 'docker : Install Docker Engine and compose plugin', changed: true },
@@ -641,8 +658,7 @@ describe('runServerSetup - success path', () => {
       makePayload({ steps: [{ stepType: 'database', params: { db_type: 'mysql' } }] }),
       { commandId: 'cmd-1', client },
     )
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache' }]))
     const result = await runPromise
 
@@ -668,8 +684,7 @@ describe('runServerSetup - success path', () => {
       }),
       { commandId: 'cmd-1', client },
     )
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache', changed: true }]))
     const result = await runPromise
 
@@ -685,8 +700,7 @@ describe('runServerSetup - success path', () => {
       makePayload({ steps: [{ stepType: 'docker', params: {} }] }),
       { commandId: 'cmd-1', client },
     )
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, ansibleJsonOutput([{ name: 'docker : Install Docker Engine and compose plugin', skipped: true }]))
     const result = await runPromise
 
@@ -706,8 +720,7 @@ describe('runServerSetup - success path', () => {
       commandId: 'cmd-1',
       client,
     })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, 'not valid json {{{')
     const result = await runPromise
 
@@ -724,8 +737,7 @@ describe('runServerSetup - success path', () => {
       commandId: 'cmd-1',
       client,
     })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, '')
     const result = await runPromise
 
@@ -742,8 +754,7 @@ describe('runServerSetup - failure path', () => {
     const client = makeClient()
 
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(
       2,
       ansibleJsonOutput([
@@ -794,8 +805,7 @@ describe('runServerSetup - failure path', () => {
   it('never logs the private key value even when the run fails', async () => {
     const client = makeClient()
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(1, ansibleJsonOutput([{ name: 'os_init : Update apt cache', failed: true, msg: 'boom' }]), 'boom')
     await runPromise
 
@@ -816,8 +826,7 @@ describe('runServerSetup - failure path', () => {
     })
 
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache', changed: true }]))
     const result = await runPromise
 
@@ -839,8 +848,7 @@ describe('runServerSetup - failure path', () => {
     })
 
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(
       2,
       ansibleJsonOutput([{ name: 'os_init : Update apt cache', failed: true, msg: 'E: apt lock held' }]),
@@ -870,8 +878,7 @@ describe('runServerSetup - unmatched failing tasks (precheck / Gathering Facts)'
       commandId: 'cmd-1',
       client,
     })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(
       2,
       ansibleJsonOutput([
@@ -902,8 +909,7 @@ describe('runServerSetup - unmatched failing tasks (precheck / Gathering Facts)'
       commandId: 'cmd-1',
       client,
     })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(
       4,
       JSON.stringify({
@@ -942,8 +948,7 @@ describe('runServerSetup - unmatched failing tasks (precheck / Gathering Facts)'
       commandId: 'cmd-1',
       client,
     })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(
       2,
       ansibleJsonOutput([{ name: 'os_init : Update apt cache', failed: true, msg: 'E: package not found' }]),
@@ -963,8 +968,7 @@ describe('runServerSetup - unmatched failing tasks (precheck / Gathering Facts)'
       commandId: 'cmd-1',
       client,
     })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(
       4,
       JSON.stringify({
@@ -995,8 +999,7 @@ describe('runServerSetup - unmatched failing tasks (precheck / Gathering Facts)'
       commandId: 'cmd-1',
       client,
     })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(
       2,
       ansibleJsonOutput([{ name: 'precheck : Verify supported OS', failed: true }]),
@@ -1034,8 +1037,7 @@ describe('runServerSetup - ansible-playbook timeout', () => {
   it('returns a timeout error result, without stepResults, when execFile is killed for exceeding the timeout', async () => {
     const client = makeClient()
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
 
     const timeoutError: NodeJS.ErrnoException & { killed?: boolean; signal?: string | null } = Object.assign(
       new Error('Command timed out after 1800000ms'),
@@ -1059,8 +1061,7 @@ describe('runServerSetup - ansible-playbook timeout', () => {
   it('passes a positive timeout option to execFile so ansible-playbook cannot hang forever', async () => {
     const client = makeClient()
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache' }]))
     await runPromise
 
@@ -1073,8 +1074,7 @@ describe('runServerSetup - ansible-playbook spawn failure', () => {
   it('surfaces the underlying spawn error message and omits stepResults when ansible-playbook cannot be started (ENOENT)', async () => {
     const client = makeClient()
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
 
     const spawnError: NodeJS.ErrnoException = Object.assign(
       new Error('spawn ansible-playbook ENOENT'),
@@ -1099,8 +1099,7 @@ describe('runServerSetup - ansible-playbook spawn failure', () => {
   it('treats a numeric-but-nonzero exit as a normal failed run, not a spawn failure, even with empty stdout/stderr', async () => {
     const client = makeClient()
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushUntilExecFileCalled()
     resolveExecFile(1, '', '')
     const result = await runPromise
 
@@ -1115,5 +1114,621 @@ describe('runServerSetup - ansible-playbook spawn failure', () => {
         ],
       })
     }
+  })
+})
+
+// Tailscale connectionType support (admin-docs
+// docs/specifications/ssh-tailscale-support.md, section 2/3): `server_setup_exec`
+// shares the same JIT SSH credential shape (`SshExecCredential`) as `ssh_exec`'s
+// ssh-executor.ts. When `connectionType === 'tailscale'`, Ansible must be routed
+// through the ECS oneshot task's Tailscale sidecar SOCKS5 proxy instead of
+// connecting directly to `hostname`.
+describe('runServerSetup - Tailscale connectionType', () => {
+  const TAILSCALE_CREDENTIAL = {
+    ...CREDENTIAL,
+    connectionType: 'tailscale' as const,
+    tailnetHostname: 'db-server-1.tailnet-abc.ts.net',
+  }
+
+  function inventoryHostVars(hostKey: string): Record<string, unknown> {
+    const inventoryCall = mockWriteFileSync.mock.calls.find((call) => String(call[0]).endsWith('inventory.yml'))
+    expect(inventoryCall).toBeDefined()
+    const inventoryJson = JSON.parse(inventoryCall?.[1] as string) as {
+      target: { hosts: Record<string, Record<string, unknown>> }
+    }
+    return inventoryJson.target.hosts[hostKey]
+  }
+
+  it('uses tailnetHostname (not hostname) as ansible_host when connectionType is tailscale', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue(TAILSCALE_CREDENTIAL),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([
+      { name: 'os_init : Update apt cache', changed: true },
+      { name: 'docker : Install Docker Engine and compose plugin', changed: true },
+    ]))
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    const hostVars = inventoryHostVars(TAILSCALE_CREDENTIAL.hostname)
+    expect(hostVars.ansible_host).toBe(TAILSCALE_CREDENTIAL.tailnetHostname)
+    expect(hostVars.ansible_host).not.toBe(TAILSCALE_CREDENTIAL.hostname)
+  })
+
+  it('adds a SOCKS5 ProxyCommand (default port 1055) to ansible_ssh_common_args when connectionType is tailscale', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue(TAILSCALE_CREDENTIAL),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([
+      { name: 'os_init : Update apt cache', changed: true },
+      { name: 'docker : Install Docker Engine and compose plugin', changed: true },
+    ]))
+    await runPromise
+
+    const hostVars = inventoryHostVars(TAILSCALE_CREDENTIAL.hostname)
+    const commonArgs = String(hostVars.ansible_ssh_common_args)
+    expect(commonArgs).toContain('ProxyCommand')
+    expect(commonArgs).toContain('127.0.0.1:1055')
+    // Existing TOFU host-key-checking settings are preserved, not replaced.
+    expect(commonArgs).toContain('StrictHostKeyChecking=accept-new')
+    expect(commonArgs).toContain(`UserKnownHostsFile=${KNOWN_HOSTS_PATH}`)
+  })
+
+  it('uses a custom socksPort in the ProxyCommand when provided', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...TAILSCALE_CREDENTIAL, socksPort: 2080 }),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([
+      { name: 'os_init : Update apt cache', changed: true },
+      { name: 'docker : Install Docker Engine and compose plugin', changed: true },
+    ]))
+    await runPromise
+
+    const hostVars = inventoryHostVars(TAILSCALE_CREDENTIAL.hostname)
+    const commonArgs = String(hostVars.ansible_ssh_common_args)
+    expect(commonArgs).toContain('127.0.0.1:2080')
+    expect(commonArgs).not.toContain('127.0.0.1:1055')
+  })
+
+  it('does not add a ProxyCommand when connectionType is ssh (or unset) — existing behavior unchanged', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...CREDENTIAL, connectionType: 'ssh' as const }),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([
+      { name: 'os_init : Update apt cache', changed: true },
+      { name: 'docker : Install Docker Engine and compose plugin', changed: true },
+    ]))
+    await runPromise
+
+    const hostVars = inventoryHostVars(CREDENTIAL.hostname)
+    expect(hostVars.ansible_host).toBe(CREDENTIAL.hostname)
+    expect(String(hostVars.ansible_ssh_common_args)).not.toContain('ProxyCommand')
+  })
+
+  it('rejects a tailscale credential with a missing tailnetHostname before any temp dir is created', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({
+        ...CREDENTIAL,
+        connectionType: 'tailscale' as const,
+        tailnetHostname: undefined,
+      }),
+    })
+
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('tailnetHostname')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['contains a space', 'evil host.ts.net'],
+    ['contains an embedded inventory variable', 'host.ts.net ansible_connection=local'],
+    ['contains a quote', "host'name.ts.net"],
+    ['is empty', ''],
+  ])('rejects a tailnetHostname that %s', async (_label, tailnetHostname) => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({
+        ...TAILSCALE_CREDENTIAL,
+        tailnetHostname,
+      }),
+    })
+
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('tailnetHostname')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+
+  it.each([0, -1, 65536, 1.5])('rejects an out-of-range socksPort %s', async (socksPort) => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...TAILSCALE_CREDENTIAL, socksPort }),
+    })
+
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('socksPort')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+})
+
+// Custom Ansible tasks (admin-docs docs/features/server-setup.md「カスタム
+// Ansibleタスク」): tenant admins can attach a `customTasksYaml` (+
+// `customTasksMode`) to a step. The agent is the *authoritative* defense
+// boundary re-validating this YAML (see ansible-task-guard.spec.ts for the
+// guard's own exhaustive test coverage) — these tests cover only the
+// runner's wiring: rejecting a malformed/malicious payload before any
+// network call, and, on the happy path, generating a playbook that embeds
+// the normalized (no_log-annotated) custom tasks.
+describe('runServerSetup - custom Ansible tasks payload validation', () => {
+  it('rejects a step whose customTasksYaml fails the guard (forbidden task key), before any credential fetch', async () => {
+    const client = makeClient()
+    const yaml = `
+- name: Escape to another host
+  ansible.builtin.debug:
+    msg: hi
+  delegate_to: localhost
+`
+    const result = await runServerSetup(
+      makePayload({ steps: [{ stepType: 'os_init', params: {}, customTasksYaml: yaml }] }),
+      { commandId: 'cmd-1', client },
+    )
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('server_setup_exec: custom task rejected')
+      expect(result.error).toContain('delegate_to')
+    }
+    expect(client.getServerSetupSshCredential).not.toHaveBeenCalled()
+    expect(client.getServerSetupVariables).not.toHaveBeenCalled()
+  })
+
+  it('rejects a step whose customTasksYaml is not a string', async () => {
+    const client = makeClient()
+    const result = await runServerSetup(
+      makePayload({
+        steps: [{ stepType: 'os_init', params: {}, customTasksYaml: 123 as unknown as string }],
+      }),
+      { commandId: 'cmd-1', client },
+    )
+
+    expect(result).toEqual({ success: false, error: 'steps[0].customTasksYaml must be a string' })
+    expect(client.getServerSetupSshCredential).not.toHaveBeenCalled()
+  })
+
+  it('rejects a step whose customTasksMode is not append/replace', async () => {
+    const client = makeClient()
+    const result = await runServerSetup(
+      makePayload({
+        steps: [{ stepType: 'os_init', params: {}, customTasksMode: 'delete' as unknown as 'append' }],
+      }),
+      { commandId: 'cmd-1', client },
+    )
+
+    expect(result).toEqual({
+      success: false,
+      error: 'steps[0].customTasksMode must be one of: append, replace',
+    })
+    expect(client.getServerSetupSshCredential).not.toHaveBeenCalled()
+  })
+
+  it('accepts a step with valid customTasksYaml and customTasksMode and proceeds to fetch credentials', async () => {
+    const client = makeClient()
+    const yaml = `
+- name: Write a marker file
+  ansible.builtin.copy:
+    content: "hello"
+    dest: /tmp/marker
+`
+    const runPromise = runServerSetup(
+      makePayload({
+        steps: [{ stepType: 'os_init', params: {}, customTasksYaml: yaml, customTasksMode: 'append' }],
+      }),
+      { commandId: 'cmd-1', client },
+    )
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache', changed: true }]))
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    expect(client.getServerSetupSshCredential).toHaveBeenCalled()
+  })
+})
+
+describe('runServerSetup - server setup variables (project ANSIBLE# vars)', () => {
+  it('fetches server setup variables scoped to the commandId/agentId and merges them into extra-vars.json', async () => {
+    const client = makeClient({
+      getServerSetupVariables: jest.fn().mockResolvedValue({
+        variables: { DB_HOST: '10.0.0.5' },
+        secretNames: [],
+      }),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client, agentId: 'agent-9' })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([
+      { name: 'os_init : Update apt cache', changed: true },
+      { name: 'docker : Install Docker Engine and compose plugin', changed: true },
+    ]))
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    expect(client.getServerSetupVariables).toHaveBeenCalledWith('cmd-1', 'agent-9')
+    const extraVarsCall = mockWriteFileSync.mock.calls.find((call) => String(call[0]).endsWith('extra-vars.json'))
+    expect(JSON.parse(extraVarsCall?.[1] as string)).toEqual({ DB_HOST: '10.0.0.5' })
+  })
+
+  it("step params override a same-named project variable on conflict", async () => {
+    const client = makeClient({
+      getServerSetupVariables: jest.fn().mockResolvedValue({
+        variables: { domain: 'from-project-vars.example.com' },
+        secretNames: [],
+      }),
+    })
+    const runPromise = runServerSetup(
+      makePayload({ steps: [{ stepType: 'dns_tls', params: { domain: 'from-step-params.example.com' } }] }),
+      { commandId: 'cmd-1', client },
+    )
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{ name: 'dns_tls : Generate Caddyfile' }]))
+    await runPromise
+
+    const extraVarsCall = mockWriteFileSync.mock.calls.find((call) => String(call[0]).endsWith('extra-vars.json'))
+    expect(JSON.parse(extraVarsCall?.[1] as string)).toEqual({ domain: 'from-step-params.example.com' })
+  })
+
+  it('returns an error result and never creates a temp dir when the variables fetch fails', async () => {
+    const client = makeClient({
+      getServerSetupVariables: jest.fn().mockRejectedValue(new Error('503 unavailable')),
+    })
+
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('Failed to fetch server setup variables')
+      expect(result.error).toContain('503 unavailable')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+})
+
+describe('runServerSetup - ANSIBLE_ROLES_PATH', () => {
+  it('always sets ANSIBLE_ROLES_PATH to <ansibleDir>/roles, even without custom tasks', async () => {
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload({ steps: [{ stepType: 'os_init', params: {} }] }), {
+      commandId: 'cmd-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache' }]))
+    await runPromise
+
+    const [, , options] = mockExecFile.mock.calls[0]
+    const rolesPath = (options as { env: NodeJS.ProcessEnv }).env.ANSIBLE_ROLES_PATH
+    expect(rolesPath).toBeDefined()
+    expect(rolesPath).toMatch(/ansible[/\\]roles$/)
+  })
+})
+
+describe('runServerSetup - custom task playbook generation (execution)', () => {
+  it('writes a generated playbook to the temp dir and points ansible-playbook at it when a step carries customTasksYaml', async () => {
+    const client = makeClient()
+    const yaml = `
+- name: Write a marker file
+  ansible.builtin.copy:
+    content: "hello"
+    dest: /tmp/marker
+`
+    const runPromise = runServerSetup(
+      makePayload({
+        steps: [{ stepType: 'os_init', params: {}, customTasksYaml: yaml, customTasksMode: 'append' }],
+      }),
+      { commandId: 'cmd-1', client },
+    )
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache', changed: true }]))
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    const [, args] = mockExecFile.mock.calls[0]
+    const playbookArg = (args as string[])[2]
+    expect(playbookArg).toMatch(/generated-playbook\.yml$/)
+
+    const generatedCall = mockWriteFileSync.mock.calls.find((call) => String(call[0]).endsWith('generated-playbook.yml'))
+    expect(generatedCall).toBeDefined()
+    const generatedYaml = generatedCall?.[1] as string
+    expect(generatedYaml).toContain('precheck : Verify supported OS')
+    expect(generatedYaml).toContain('role: os_init')
+    expect(generatedYaml).toContain('Write a marker file')
+  })
+
+  it('uses the bundled playbook.yml path (unchanged behavior) when no step carries customTasksYaml', async () => {
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload({ steps: [{ stepType: 'os_init', params: {} }] }), {
+      commandId: 'cmd-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache' }]))
+    await runPromise
+
+    const [, args] = mockExecFile.mock.calls[0]
+    const playbookArg = (args as string[])[2]
+    expect(playbookArg).toMatch(/ansible\/playbook\.yml$/)
+    expect(mockWriteFileSync.mock.calls.some((call) => String(call[0]).endsWith('generated-playbook.yml'))).toBe(false)
+  })
+})
+
+// Redaction (belt-and-suspenders): even if a custom task somehow leaked a
+// secret value into ansible-playbook's stdout/stderr without `no_log` having
+// been applied, the runner must scrub the plaintext value before it reaches
+// the returned CommandResult (which is later persisted verbatim as
+// executionLogs — see server-setup-runner.ts's redactSecretValues doc
+// comment).
+describe('runServerSetup - secret redaction in ansible-playbook output', () => {
+  it('redacts a secret value that leaks into a step message via stdout', async () => {
+    const client = makeClient({
+      getServerSetupVariables: jest.fn().mockResolvedValue({
+        variables: { DB_PASSWORD: 'sup3r-s3cr3t-value' },
+        secretNames: ['DB_PASSWORD'],
+      }),
+    })
+    const runPromise = runServerSetup(makePayload({ steps: [{ stepType: 'os_init', params: {} }] }), {
+      commandId: 'cmd-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+    resolveExecFile(
+      2,
+      ansibleJsonOutput([
+        {
+          name: 'os_init : Update apt cache',
+          failed: true,
+          msg: 'leaked plaintext: sup3r-s3cr3t-value',
+        },
+      ]),
+      'fatal!',
+    )
+    const result = await runPromise
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(JSON.stringify(result.data)).not.toContain('sup3r-s3cr3t-value')
+      expect(JSON.stringify(result.data)).toContain('***')
+    }
+  })
+
+  it('redacts a secret value that leaks into stderr (surfaced in the top-level error message)', async () => {
+    const client = makeClient({
+      getServerSetupVariables: jest.fn().mockResolvedValue({
+        variables: { DB_PASSWORD: 'sup3r-s3cr3t-value' },
+        secretNames: ['DB_PASSWORD'],
+      }),
+    })
+    const runPromise = runServerSetup(makePayload({ steps: [{ stepType: 'os_init', params: {} }] }), {
+      commandId: 'cmd-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+    resolveExecFile(
+      2,
+      ansibleJsonOutput([{ name: 'os_init : Update apt cache', failed: true, msg: 'boom' }]),
+      'fatal: password was sup3r-s3cr3t-value',
+    )
+    const result = await runPromise
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).not.toContain('sup3r-s3cr3t-value')
+      expect(result.error).toContain('***')
+    }
+  })
+
+  it('does not attempt to redact an empty-string secret value (would corrupt output)', async () => {
+    const client = makeClient({
+      getServerSetupVariables: jest.fn().mockResolvedValue({
+        variables: { EMPTY_SECRET: '' },
+        secretNames: ['EMPTY_SECRET'],
+      }),
+    })
+    const runPromise = runServerSetup(makePayload({ steps: [{ stepType: 'os_init', params: {} }] }), {
+      commandId: 'cmd-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache', changed: true }]))
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    expect(result.data).toEqual({
+      stepResults: [{ stepType: 'os_init', status: 'ok', changed: true, message: 'os_init completed' }],
+    })
+  })
+
+  it('does not redact anything when there are no secret names', async () => {
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload({ steps: [{ stepType: 'os_init', params: {} }] }), {
+      commandId: 'cmd-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache', changed: true }]))
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    expect(result.data).toEqual({
+      stepResults: [{ stepType: 'os_init', status: 'ok', changed: true, message: 'os_init completed' }],
+    })
+  })
+})
+
+describe('runServerSetup - opt-in non-root ansible-playbook execution', () => {
+  const ORIGINAL_ENV = process.env
+
+  beforeEach(() => {
+    process.env = { ...ORIGINAL_ENV }
+  })
+
+  afterEach(() => {
+    process.env = ORIGINAL_ENV
+  })
+
+  it('does not set uid/gid on execFile options by default', async () => {
+    delete process.env.AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID
+    delete process.env.AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_GID
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload({ steps: [{ stepType: 'os_init', params: {} }] }), {
+      commandId: 'cmd-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache' }]))
+    await runPromise
+
+    const [, , options] = mockExecFile.mock.calls[0]
+    expect(options as Record<string, unknown>).not.toHaveProperty('uid')
+    expect(options as Record<string, unknown>).not.toHaveProperty('gid')
+  })
+
+  it('sets uid/gid on execFile options when the opt-in env vars are set', async () => {
+    process.env.AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID = '1500'
+    process.env.AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_GID = '1500'
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload({ steps: [{ stepType: 'os_init', params: {} }] }), {
+      commandId: 'cmd-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache' }]))
+    await runPromise
+
+    const [, , options] = mockExecFile.mock.calls[0]
+    expect((options as { uid?: number }).uid).toBe(1500)
+    expect((options as { gid?: number }).gid).toBe(1500)
+  })
+
+  it('ignores a non-numeric uid/gid override and omits the option entirely', async () => {
+    process.env.AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID = 'not-a-number'
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload({ steps: [{ stepType: 'os_init', params: {} }] }), {
+      commandId: 'cmd-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{ name: 'os_init : Update apt cache' }]))
+    await runPromise
+
+    const [, , options] = mockExecFile.mock.calls[0]
+    expect(options as Record<string, unknown>).not.toHaveProperty('uid')
+  })
+})
+
+describe('fetchServerSetupVariables', () => {
+  it("delegates to the client's getServerSetupVariables with the given commandId/agentId", async () => {
+    const client = makeClient({
+      getServerSetupVariables: jest.fn().mockResolvedValue({
+        variables: { FOO: 'bar' },
+        secretNames: [],
+      }),
+    })
+
+    const { fetchServerSetupVariables } = await import('../../src/server-setup/server-setup-runner')
+    const result = await fetchServerSetupVariables(client, 'cmd-1', 'agent-1')
+
+    expect(result).toEqual({ variables: { FOO: 'bar' }, secretNames: [] })
+    expect(client.getServerSetupVariables).toHaveBeenCalledWith('cmd-1', 'agent-1')
+  })
+
+  it('propagates a rejection from the client', async () => {
+    const client = makeClient({
+      getServerSetupVariables: jest.fn().mockRejectedValue(new Error('network error')),
+    })
+
+    const { fetchServerSetupVariables } = await import('../../src/server-setup/server-setup-runner')
+    await expect(fetchServerSetupVariables(client, 'cmd-1', 'agent-1')).rejects.toThrow('network error')
+  })
+})
+
+describe('generatePlaybook', () => {
+  it('always includes the precheck task tagged "always"', () => {
+    const yaml = generatePlaybook([{ stepType: 'os_init' }])
+    expect(yaml).toContain('precheck : Verify supported OS')
+    expect(yaml).toContain('tags: always')
+  })
+
+  it('includes a role entry for a step without customTasksMode (defaults to append behavior)', () => {
+    const yaml = generatePlaybook([{ stepType: 'docker' }])
+    expect(yaml).toMatch(/role:\s*docker/)
+  })
+
+  it('omits the role entry for a step with customTasksMode "replace"', () => {
+    const yaml = generatePlaybook([{ stepType: 'docker', customTasksMode: 'replace', normalizedTasks: [{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }] }])
+    expect(yaml).not.toMatch(/role:\s*docker/)
+    expect(yaml).toContain('post_tasks')
+  })
+
+  it('includes both the role and a post_tasks block for a step with customTasksMode "append" and normalizedTasks', () => {
+    const yaml = generatePlaybook([
+      { stepType: 'web_server', customTasksMode: 'append', normalizedTasks: [{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }] },
+    ])
+    expect(yaml).toMatch(/role:\s*web_server/)
+    expect(yaml).toContain('post_tasks')
+  })
+
+  it('omits post_tasks entirely when no step has normalizedTasks', () => {
+    const yaml = generatePlaybook([{ stepType: 'os_init' }, { stepType: 'docker' }])
+    expect(yaml).not.toContain('post_tasks')
+  })
+
+  it('produces valid, parseable YAML', () => {
+    const yaml = generatePlaybook([
+      { stepType: 'os_init' },
+      { stepType: 'database', customTasksMode: 'replace', normalizedTasks: [{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }] },
+    ])
+    const loaded = jest.requireActual('js-yaml').load(yaml) as unknown[]
+    expect(Array.isArray(loaded)).toBe(true)
+  })
+
+  describe('snapshot: append/replace mode across every stepType', () => {
+    const STEP_TYPES = ['os_init', 'docker', 'web_server', 'database', 'dns_tls'] as const
+
+    it.each(STEP_TYPES)('append mode for %s', (stepType) => {
+      const yaml = generatePlaybook([
+        {
+          stepType,
+          customTasksMode: 'append',
+          normalizedTasks: [{ name: `${stepType} : custom marker`, 'ansible.builtin.debug': { msg: 'hi' } }],
+        },
+      ])
+      expect(yaml).toMatchSnapshot()
+    })
+
+    it.each(STEP_TYPES)('replace mode for %s', (stepType) => {
+      const yaml = generatePlaybook([
+        {
+          stepType,
+          customTasksMode: 'replace',
+          normalizedTasks: [{ name: `${stepType} : custom marker`, 'ansible.builtin.debug': { msg: 'hi' } }],
+        },
+      ])
+      expect(yaml).toMatchSnapshot()
+    })
   })
 })

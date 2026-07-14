@@ -33,6 +33,7 @@ import { logger } from './logger'
 import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import { submitPendingResults } from './pending-result-store'
+import type { TransportKind } from './ipc-types'
 import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
@@ -73,6 +74,7 @@ export class ProjectAgent {
     vsCodeWs: null,
     processing: false,
     configSyncDebounceTimer: null,
+    authRejectedTransports: new Set(),
   }
 
   private transportDeps: TransportDeps
@@ -97,6 +99,7 @@ export class ProjectAgent {
     private readonly options: ProjectAgentOptions,
     localAgentChatMode?: AgentChatMode,
     defaultProjectDir?: string,
+    private readonly onAuthRejected?: (transport: TransportKind) => void,
   ) {
     this.client = new ApiClient(project.apiUrl, project.token)
     this.prefix = `[${project.projectCode}]`
@@ -130,6 +133,7 @@ export class ProjectAgent {
       projectCode: this.projectCode,
       pollInterval: this.options.pollInterval,
       heartbeatInterval: this.options.heartbeatInterval,
+      onAuthRejected: this.onAuthRejected,
     }
 
     // When running inside Docker, initialize dockerCustomizationHash from the

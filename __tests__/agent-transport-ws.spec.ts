@@ -1,4 +1,4 @@
-import { startTerminalWebSocket, startVsCodeTunnel, startHeartbeat, handleNotification, startSubscriptionMode, checkPendingCommands, stopTransport, TransportDeps, TransportState, CommandContext } from '../src/agent-transport'
+import { startTerminalWebSocket, startVsCodeTunnel, startHeartbeat, onTransportAuthRejected, handleNotification, startSubscriptionMode, checkPendingCommands, stopTransport, TransportDeps, TransportState, CommandContext } from '../src/agent-transport'
 import { NOTIFICATION_ACTION } from '../src/constants'
 
 // Mock all dependencies
@@ -83,6 +83,7 @@ function createMockState(): TransportState {
     vsCodeWs: null,
     processing: false,
     configSyncDebounceTimer: null,
+    authRejectedTransports: new Set(),
   }
 }
 
@@ -125,6 +126,7 @@ describe('startTerminalWebSocket', () => {
       'agent-1',
       '/test/project/workspace',
       undefined, // envVarsProvider (configSyncState 未指定時)
+      expect.any(Function), // onAuthRejected (常に heartbeat 記録用に配線される)
     )
     expect(state.terminalWs).not.toBeNull()
     expect(mockConnect).toHaveBeenCalled()
@@ -150,6 +152,7 @@ describe('startTerminalWebSocket', () => {
       'agent-1',
       '/test/project/workspace',
       undefined,
+      expect.any(Function),
     )
   })
 
@@ -185,6 +188,27 @@ describe('startTerminalWebSocket', () => {
     const provider = call[4] as () => Record<string, string> | undefined
     expect(provider).toBeDefined()
     expect(provider()).toEqual({ ANTHROPIC_API_KEY: 'sk-web' })
+  })
+
+  it('passes an onAuthRejected callback that records the terminal transport into state and relays to deps.onAuthRejected', () => {
+    const { isNodePtyAvailable, TerminalWebSocket } = require('../src/terminal')
+    isNodePtyAvailable.mockReturnValue(true)
+
+    const mockConnect = jest.fn().mockResolvedValue(undefined)
+    TerminalWebSocket.mockImplementation(() => ({ connect: mockConnect }))
+
+    const onAuthRejected = jest.fn()
+    const deps = createMockDeps({ onAuthRejected })
+    const state = createMockState()
+
+    startTerminalWebSocket(deps, state)
+
+    const cb = TerminalWebSocket.mock.calls[0][5] as () => void
+    expect(typeof cb).toBe('function')
+    cb()
+    // Records for heartbeat reporting AND relays to the external (IPC) callback.
+    expect(state.authRejectedTransports.has('terminal')).toBe(true)
+    expect(onAuthRejected).toHaveBeenCalledWith('terminal')
   })
 
   it('should handle connection failure gracefully', async () => {
@@ -235,6 +259,7 @@ describe('startVsCodeTunnel', () => {
       '/test/project/workspace/repos', // projectDir = reposDir (VS Code launch dir)
       '/test/project/workspace', // workspaceDir = file-upload resolution root
       undefined, // envVarsProvider (configSyncState 未指定時)
+      expect.any(Function), // onAuthRejected (常に heartbeat 記録用に配線される)
     )
     expect(state.vsCodeWs).not.toBeNull()
     expect(mockConnect).toHaveBeenCalled()
@@ -260,6 +285,7 @@ describe('startVsCodeTunnel', () => {
       '/test/project/workspace/repos', // projectDir = reposDir (VS Code launch dir)
       '/test/project/workspace', // workspaceDir = file-upload resolution root
       undefined,
+      expect.any(Function),
     )
   })
 
@@ -294,6 +320,25 @@ describe('startVsCodeTunnel', () => {
     const provider = VsCodeTunnelWebSocket.mock.calls[0][5] as () => Record<string, string> | undefined
     expect(provider).toBeDefined()
     expect(provider()).toEqual({ ANTHROPIC_MODEL: 'claude-sonnet-4-6' })
+  })
+
+  it('passes an onAuthRejected callback that records the vscode transport into state and relays to deps.onAuthRejected', () => {
+    const { VsCodeTunnelWebSocket } = require('../src/vscode')
+
+    const mockConnect = jest.fn().mockResolvedValue(undefined)
+    VsCodeTunnelWebSocket.mockImplementation(() => ({ connect: mockConnect }))
+
+    const onAuthRejected = jest.fn()
+    const deps = createMockDeps({ onAuthRejected })
+    const state = createMockState()
+
+    startVsCodeTunnel(deps, state)
+
+    const cb = VsCodeTunnelWebSocket.mock.calls[0][6] as () => void
+    expect(typeof cb).toBe('function')
+    cb()
+    expect(state.authRejectedTransports.has('vscode')).toBe(true)
+    expect(onAuthRejected).toHaveBeenCalledWith('vscode')
   })
 
   it('should handle connection failure gracefully', async () => {
@@ -344,6 +389,7 @@ describe('startVsCodeTunnel', () => {
       '/test/project/workspace/repos', // projectDir = reposDir (VS Code launch dir)
       '/test/project/workspace', // workspaceDir = file-upload resolution root
       undefined, // envVarsProvider (configSyncState 未指定時)
+      expect.any(Function), // onAuthRejected (常に heartbeat 記録用に配線される)
     )
   })
 })
@@ -413,6 +459,66 @@ describe('startHeartbeat', () => {
     // Advance past heartbeat interval to trigger setInterval callback
     await jest.advanceTimersByTimeAsync(5000)
     expect(deps.client.heartbeat).toHaveBeenCalledTimes(2)
+
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
+  })
+
+  it('reports the accumulated auth-rejected transports to the backend via the heartbeat', async () => {
+    const deps = createMockDeps({ heartbeatInterval: 5000 })
+    const state = createMockState()
+    // Two transports permanently rejected before this heartbeat fires.
+    onTransportAuthRejected(deps, state, 'terminal')
+    onTransportAuthRejected(deps, state, 'vscode')
+    const configSyncState = {
+      availableChatModes: ['api' as const],
+      activeChatMode: 'api' as const,
+      currentConfigHash: undefined,
+      serverConfig: null,
+      projectConfig: undefined,
+      mcpConfigPath: undefined,
+    }
+    const configSyncDeps = {
+      client: deps.client,
+      agentId: deps.agentId,
+      prefix: deps.prefix,
+      projectDir: deps.projectDir,
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    startHeartbeat(deps, state, configSyncState as any, configSyncDeps as any)
+    await jest.advanceTimersByTimeAsync(100)
+
+    // authRejectedTransports is the 9th heartbeat() arg (index 8).
+    const call = (deps.client.heartbeat as jest.Mock).mock.calls[0]
+    expect(call[8]).toEqual(expect.arrayContaining(['terminal', 'vscode']))
+
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
+  })
+
+  it('reports an empty auth-rejected transport list when none were rejected (clears any stale backend flag)', async () => {
+    const deps = createMockDeps({ heartbeatInterval: 5000 })
+    const state = createMockState()
+    const configSyncState = {
+      availableChatModes: ['api' as const],
+      activeChatMode: 'api' as const,
+      currentConfigHash: undefined,
+      serverConfig: null,
+      projectConfig: undefined,
+      mcpConfigPath: undefined,
+    }
+    const configSyncDeps = {
+      client: deps.client,
+      agentId: deps.agentId,
+      prefix: deps.prefix,
+      projectDir: deps.projectDir,
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    startHeartbeat(deps, state, configSyncState as any, configSyncDeps as any)
+    await jest.advanceTimersByTimeAsync(100)
+
+    const call = (deps.client.heartbeat as jest.Mock).mock.calls[0]
+    expect(call[8]).toEqual([])
 
     if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
   })
@@ -1663,6 +1769,7 @@ describe('startTerminalWebSocket: no projectDir', () => {
       deps.agentId,
       undefined,
       undefined,
+      expect.any(Function),
     )
   })
 })
@@ -1690,6 +1797,7 @@ describe('startVsCodeTunnel: no projectDir', () => {
       undefined, // reposDir (projectDir 未設定)
       undefined, // workspaceDir (projectDir 未設定)
       undefined, // envVarsProvider
+      expect.any(Function), // onAuthRejected (常に heartbeat 記録用に配線される)
     )
   })
 })
