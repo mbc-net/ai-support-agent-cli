@@ -50,6 +50,7 @@
     "@sentry/node": "^10.40.0",
     "axios": "^1.13.0",
     "commander": "^14.0.0",
+    "js-yaml": "^4.3.0",
     "mysql2": "^3.18.2",
     "open": "^11.0.0",
     "pg": "^8.19.0",
@@ -65,6 +66,7 @@
   "devDependencies": {
     "@playwright/test": "^1.58.2",
     "@types/jest": "^30.0.0",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.18.0",
     "@types/ssh2": "^1.15.5",

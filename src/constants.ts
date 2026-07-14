@@ -34,6 +34,14 @@ export const ENV_VARS = {
   CHAT_CHUNK_BATCH_ENABLED: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_ENABLED',
   CHAT_CHUNK_BATCH_WINDOW_MS: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_WINDOW_MS',
   CHAT_CHUNK_BATCH_MAX_BYTES: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_MAX_BYTES',
+  // Opt-in: run the bundled `ansible-playbook` process as an unprivileged
+  // uid/gid instead of the agent process's own user. Unset (the default)
+  // preserves existing behavior — ansible-playbook still runs as whatever
+  // user the agent process itself runs as, and privilege escalation on the
+  // *target* host is still driven entirely by the playbook's own `become:
+  // true` over SSH. See server-setup-runner.ts's `runAnsiblePlaybook`.
+  SERVER_SETUP_ANSIBLE_UID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID',
+  SERVER_SETUP_ANSIBLE_GID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_GID',
 } as const
 
 export const CONFIG_DIR = (() => {
@@ -190,6 +198,13 @@ export const API_ENDPOINTS = {
   // callers never pass a hostId directly, so a oneshot token cannot fetch an arbitrary host's key.
   SERVER_SETUP_SSH_CREDENTIAL: (tenantCode: string, commandId: string) =>
     `/api/${tenantCode}/agent/commands/${commandId}/server-setup-ssh-credential`,
+  // JIT lookup of project (ANSIBLE#-prefixed ConfigSetting) variables for a
+  // server_setup_exec command's custom Ansible tasks. Same commandId-scoped
+  // IDOR-prevention design as SERVER_SETUP_SSH_CREDENTIAL: projectCode is
+  // resolved server-side from the command's requestContext, never passed by
+  // the caller.
+  SERVER_SETUP_VARIABLES: (tenantCode: string, commandId: string) =>
+    `/api/${tenantCode}/agent/commands/${commandId}/server-setup-variables`,
   // JIT SSH credential lookup scoped to a single ssh_exec command (see
   // admin-docs docs/specifications/ssh-tailscale-support.md). Same
   // commandId-scoped design as SERVER_SETUP_SSH_CREDENTIAL: the target host
