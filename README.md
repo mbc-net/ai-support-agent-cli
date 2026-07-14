@@ -25,12 +25,26 @@ A daemon that turns your machine into an AI-powered remote agent. Install it, au
 - **Zero-config realtime** — AppSync WebSocket subscriptions deliver commands instantly. No polling delay, no port forwarding.
 - **Secure by default** — OAuth login, 0600 config permissions, nonce-protected callbacks, SQL injection detection, path traversal guards, and environment sanitization.
 
+## Hosted Service
+
+The quickest way to get started is with the managed service at **[ai-support-agent.com](https://ai-support-agent.com)**. Create an account there, then the CLI connects to it out of the box — these are the built-in defaults, so no extra flags are needed:
+
+| Endpoint | URL | Role |
+|----------|-----|------|
+| Product site | [ai-support-agent.com](https://ai-support-agent.com) | Landing page — sign up and learn more |
+| Web console | [app.ai-support-agent.com](https://app.ai-support-agent.com) | The Web UI where you send commands and watch results. Also the OAuth target that `login` opens in your browser (default `--url`). |
+| API | `https://api.ai-support-agent.com` | Agent ↔ server API the daemon talks to (default `--api-url`). |
+
+Running `ai-support-agent login` opens the hosted web console (`app.ai-support-agent.com`) in your browser, where you sign in and pick the tenant and project to link.
+
+**Self-hosting?** The CLI is not tied to the hosted service. Point it at your own deployment with `--url` / `--api-url` (or the `AI_SUPPORT_AGENT_API_URL` environment variable) — see [Configuration](#configuration).
+
 ## Quick Start
 
 ```bash
 npm install -g @ai-support-agent/cli
 
-# Opens your browser → select tenant & project → done
+# Opens app.ai-support-agent.com in your browser → sign in → select tenant & project → done
 ai-support-agent login
 
 # Start the daemon (Ctrl-C to stop)
@@ -215,7 +229,7 @@ Stored at `~/.ai-support-agent/config.json` (mode `0600`):
     {
       "projectCode": "MY_PROJECT",
       "token": "agt_xxxx",
-      "apiUrl": "https://api.example.com",
+      "apiUrl": "https://api.ai-support-agent.com",   // defaults to the hosted API
       "projectDir": "~/custom-path"     // optional override
     }
   ]

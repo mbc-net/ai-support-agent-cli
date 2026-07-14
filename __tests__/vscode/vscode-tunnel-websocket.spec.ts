@@ -743,6 +743,45 @@ describe('VsCodeTunnelWebSocket', () => {
     })
   })
 
+  describe('onPermanentClose', () => {
+    it('should call cleanup, same as an explicit disconnect (regression: resources leaked after a permanent auth-rejected close)', () => {
+      // A permanent auth-rejected close is a genuine teardown (the server will
+      // never accept this connection's credentials again), so it must release
+      // the same resources as onDisconnect() — code-server, port-forward
+      // proxies, browser sessions — not leave them running indefinitely.
+      const mockServer = { stop: jest.fn() }
+      const mockProxy = { closeAll: jest.fn() }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).vsCodeServer = mockServer
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).wsProxy = mockProxy
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).onPermanentClose()
+
+      expect(mockServer.stop).toHaveBeenCalled()
+      expect(mockProxy.closeAll).toHaveBeenCalled()
+    })
+
+    it('should invoke the onAuthRejected callback so the worker can notify the parent process', () => {
+      const onAuthRejected = jest.fn()
+      const t = new VsCodeTunnelWebSocket(
+        'https://api.example.com',
+        'test-token',
+        'agent-123',
+        '/test/project',
+        '/test/project/workspace',
+        undefined,
+        onAuthRejected,
+      )
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(t as any).onPermanentClose()
+
+      expect(onAuthRejected).toHaveBeenCalledTimes(1)
+    })
+  })
+
   describe('createWebSocket', () => {
     it('should create WebSocket with auth headers', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

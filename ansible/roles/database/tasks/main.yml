@@ -1,0 +1,121 @@
+---
+# database role: installs and starts MySQL or PostgreSQL, selected by the
+# `db_type` variable ('mysql' | 'postgresql'), and sets the root/postgres
+# admin password using the ansible.mysql / community.postgresql collections
+# (bundled into the agent CLI's Docker image via `ansible-galaxy collection
+# install`, see docker/Dockerfile).
+#
+# `ansible.mysql.mysql_user` (not `community.mysql.mysql_user`, which as of
+# community.mysql 5.x is deprecated in favor of this collection and slated
+# for removal in community.mysql 6.0.0) is used for MySQL.
+#
+# IMPORTANT: do not build the password-setting SQL as a raw string with the
+# password Jinja-interpolated directly into it (e.g.
+# `mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_root_password }}'"`
+# via `ansible.builtin.command`). A password containing a single quote would
+# break out of the SQL string literal there, letting arbitrary SQL run as
+# root/postgres. The mysql_user / postgresql_user modules below instead pass
+# the password as a bound module parameter, never as literal SQL text, so no
+# password value can escape its parameter position regardless of its
+# content.
+#
+# Any task that touches a password value MUST be marked `no_log: true` so
+# the value never reaches Ansible's own stdout/stderr or the JSON callback
+# output consumed by src/server-setup/server-setup-runner.ts.
+#
+# `db_type` is validated as an enum ('mysql' | 'postgresql') by
+# `ALLOWED_STEP_PARAMS`/`STEP_PARAM_ENUM_VALUES` in
+# src/server-setup/server-setup-runner.ts before this playbook ever runs, so
+# the `assert` below should never fire in practice. It exists as a second,
+# independent safety net: every task in this file is gated by a plain
+# `when: db_type == '...'` string comparison, so a value that doesn't match
+# ANY known engine (a typo, wrong case, ...) would otherwise match none of
+# them, causing every task to silently skip while `ansible-playbook` still
+# exits 0 — i.e. `runServerSetup` would report success despite installing
+# nothing.
+
+- name: "database : Validate db_type is supported"
+  ansible.builtin.assert:
+    that:
+      - db_type in ['mysql', 'postgresql']
+    fail_msg: >-
+      db_type must be one of 'mysql' or 'postgresql': got {{ db_type | to_json }}
+  when: db_type is defined
+
+- name: "database : Install MySQL server"
+  ansible.builtin.apt:
+    name:
+      - mysql-server
+    state: present
+    update_cache: true
+  when: (db_type | default('')) == 'mysql'
+
+- name: "database : Enable and start MySQL"
+  ansible.builtin.service:
+    name: mysql
+    state: started
+    enabled: true
+  when: (db_type | default('')) == 'mysql'
+
+- name: "database : Install PyMySQL (required by ansible.mysql.mysql_user)"
+  ansible.builtin.apt:
+    name: python3-pymysql
+    state: present
+    update_cache: true
+  when: (db_type | default('')) == 'mysql' and db_root_password is defined
+
+# `check_implicit_admin: true` + the explicit `login_user`/`login_password`
+# fallback make this task idempotent across re-runs. On a fresh MySQL
+# install, root@localhost authenticates via the `auth_socket` plugin (no
+# password) over the unix socket — the "implicit admin" connection
+# `check_implicit_admin` tries first. Setting `password` here switches
+# root@localhost to password auth, so a *second* run can no longer connect
+# as the implicit admin; `check_implicit_admin` then falls back to
+# connecting as `login_user`/`login_password` (the same, now-current,
+# `db_root_password`), which succeeds and is a no-op since the password
+# already matches. Without this, a second run would fail outright once the
+# implicit-admin connection stops working. This mirrors the "Handle multiple
+# non-idempotent password changed states" example in the upstream
+# community.mysql.mysql_user documentation (ansible.mysql.mysql_user shares
+# the same module interface).
+- name: "database : Set MySQL root password"
+  ansible.mysql.mysql_user:
+    name: root
+    host: localhost
+    password: "{{ db_root_password }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    check_implicit_admin: true
+    login_user: root
+    login_password: "{{ db_root_password }}"
+  when: (db_type | default('')) == 'mysql' and db_root_password is defined
+  no_log: true
+
+- name: "database : Install PostgreSQL server"
+  ansible.builtin.apt:
+    name:
+      - postgresql
+    state: present
+    update_cache: true
+  when: (db_type | default('')) == 'postgresql'
+
+- name: "database : Enable and start PostgreSQL"
+  ansible.builtin.service:
+    name: postgresql
+    state: started
+    enabled: true
+  when: (db_type | default('')) == 'postgresql'
+
+- name: "database : Install psycopg2 (required by community.postgresql.postgresql_user)"
+  ansible.builtin.apt:
+    name: python3-psycopg2
+    state: present
+    update_cache: true
+  when: (db_type | default('')) == 'postgresql' and db_root_password is defined
+
+- name: "database : Set PostgreSQL postgres user password"
+  become_user: postgres
+  community.postgresql.postgresql_user:
+    name: postgres
+    password: "{{ db_root_password }}"
+  when: (db_type | default('')) == 'postgresql' and db_root_password is defined
+  no_log: true

@@ -38,6 +38,17 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getTenantCode', () => {
+    it('returns the tenant code extracted from the token by default', () => {
+      expect(client.getTenantCode()).toBe('test_tenant')
+    })
+
+    it('reflects a later setTenantCode override', () => {
+      client.setTenantCode('other_tenant')
+      expect(client.getTenantCode()).toBe('other_tenant')
+    })
+  })
+
   describe('setProjectCode', () => {
     it('should update the project code used in file API paths', async () => {
       mockInstance.post.mockResolvedValue({
@@ -312,6 +323,40 @@ describe('ApiClient', () => {
       expect(callArgs).toHaveProperty('configHash', 'abc123')
       expect(callArgs).toHaveProperty('dockerBuildError', 'build failed')
     })
+
+    it('should include authRejectedTransports when provided (even an empty array, to clear a stale flag)', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat(
+        'test-id',
+        { platform: 'darwin', arch: 'arm64', cpuUsage: 50, memoryUsage: 60, uptime: 1000 },
+        undefined, // updateError
+        undefined, // availableChatModes
+        undefined, // activeChatMode
+        undefined, // ipAddress
+        undefined, // configHash
+        undefined, // dockerBuildError
+        ['terminal', 'vscode'], // authRejectedTransports
+      )
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).toHaveProperty('authRejectedTransports', ['terminal', 'vscode'])
+    })
+
+    it('should not include authRejectedTransports when not provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat('test-id', {
+        platform: 'darwin',
+        arch: 'arm64',
+        cpuUsage: 50,
+        memoryUsage: 60,
+        uptime: 1000,
+      })
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).not.toHaveProperty('authRejectedTransports')
+    })
   })
 
   describe('getPendingCommands', () => {
@@ -400,6 +445,83 @@ describe('ApiClient', () => {
       expect(mockInstance.get).toHaveBeenCalledWith(
         '/api/test_tenant/agent/ssh-credentials/host-1',
         undefined,
+      )
+    })
+  })
+
+  describe('getSshExecCredential', () => {
+    it('should fetch the ssh_exec JIT credential scoped to a commandId', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          hostId: 'host-1',
+          hostname: 'server.example.com',
+          port: 22,
+          username: 'deploy',
+          authType: 'private_key',
+          privateKey: '-----BEGIN RSA PRIVATE KEY-----\nkey\n-----END RSA PRIVATE KEY-----\n',
+        },
+      })
+
+      const result = await client.getSshExecCredential('cmd-1', 'agent-1')
+      expect(result.hostId).toBe('host-1')
+      expect(result.hostname).toBe('server.example.com')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/commands/cmd-1/ssh-exec-credential',
+        { params: { agentId: 'agent-1' } },
+      )
+    })
+
+    it('should tolerate a response carrying Tailscale SOCKS5 fields', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          hostId: 'host-2',
+          hostname: 'unused.example.com',
+          port: 22,
+          username: 'deploy',
+          authType: 'private_key',
+          privateKey: 'key-material',
+          connectionType: 'tailscale',
+          tailnetHostname: 'db-server-1.tailxxxx.ts.net',
+          socksPort: 1055,
+        },
+      })
+
+      const result = await client.getSshExecCredential('cmd-2', 'agent-1')
+      expect(result.connectionType).toBe('tailscale')
+      expect(result.tailnetHostname).toBe('db-server-1.tailxxxx.ts.net')
+      expect(result.socksPort).toBe(1055)
+    })
+
+    it('should reject an invalid commandId', async () => {
+      await expect(client.getSshExecCredential('bad id!', 'agent-1')).rejects.toThrow(
+        'Invalid command ID format',
+      )
+    })
+  })
+
+  describe('getServerSetupVariables', () => {
+    it('should fetch server setup project variables scoped to a commandId', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          variables: { DB_HOST: '10.0.0.5', DB_PASSWORD: 's3cr3t' },
+          secretNames: ['DB_PASSWORD'],
+        },
+      })
+
+      const result = await client.getServerSetupVariables('cmd-1', 'agent-1')
+      expect(result).toEqual({
+        variables: { DB_HOST: '10.0.0.5', DB_PASSWORD: 's3cr3t' },
+        secretNames: ['DB_PASSWORD'],
+      })
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/commands/cmd-1/server-setup-variables',
+        { params: { agentId: 'agent-1' } },
+      )
+    })
+
+    it('should reject an invalid commandId', async () => {
+      await expect(client.getServerSetupVariables('bad id!', 'agent-1')).rejects.toThrow(
+        'Invalid command ID format',
       )
     })
   })
@@ -1199,6 +1321,63 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('sendSlackFile', () => {
+    it('should POST to send-slack-file endpoint and return the result', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: true, data: { fileId: 'F123456', permalink: 'https://slack.example.com/files/F123456' } },
+      })
+
+      const result = await client.sendSlackFile('#general', 'cost.csv', 'a,b\n1,2')
+
+      expect(result).toEqual({
+        success: true,
+        data: { fileId: 'F123456', permalink: 'https://slack.example.com/files/F123456' },
+      })
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/send-slack-file',
+        { channel: '#general', fileName: 'cost.csv', content: 'a,b\n1,2', threadTs: undefined },
+        { timeout: 60_000 },
+      )
+    })
+
+    it('should pass threadTs when provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true, data: { fileId: 'F1' } } })
+
+      await client.sendSlackFile('#general', 'cost.csv', 'data', '111.222')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/send-slack-file',
+        { channel: '#general', fileName: 'cost.csv', content: 'data', threadTs: '111.222' },
+        { timeout: 60_000 },
+      )
+    })
+
+    it('should include callId in the POST body when provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true, data: { fileId: 'F1' } } })
+
+      await client.sendSlackFile('#general', 'cost.csv', 'data', undefined, 'call-id-1')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/tools/send-slack-file',
+        { channel: '#general', fileName: 'cost.csv', content: 'data', threadTs: undefined, callId: 'call-id-1' },
+        { timeout: 60_000 },
+      )
+    })
+
+    it('should return failure result when API reports an error', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { success: false, error: { code: 'NOT_FOUND', message: "チャンネル 'x' が見つかりません" } },
+      })
+
+      const result = await client.sendSlackFile('#missing', 'cost.csv', 'data')
+
+      expect(result).toEqual({
+        success: false,
+        error: { code: 'NOT_FOUND', message: "チャンネル 'x' が見つかりません" },
+      })
+    })
+  })
+
   describe('triggerAlarm', () => {
     it('should POST to trigger-alarm endpoint and return the result', async () => {
       mockInstance.post.mockResolvedValue({
@@ -1347,6 +1526,100 @@ describe('ApiClient', () => {
         success: false,
         error: { code: 'NOT_FOUND', message: 'このスレッドはSlack会話に紐づいていません' },
       })
+    })
+  })
+
+  describe('updateSystemKnowledge', () => {
+    it('should POST to the agent/knowledge endpoint and return the created knowledge entry', async () => {
+      const knowledge = {
+        id: 'kn-1', tenantCode: 'test_tenant', category: 'faq', title: 'Title', content: 'Content', status: 'draft',
+      }
+      mockInstance.post.mockResolvedValue({ data: knowledge })
+
+      const result = await client.updateSystemKnowledge({
+        title: 'Title',
+        content: 'Content',
+        category: 'faq',
+        commandId: 'cmd-1',
+        agentId: 'agent-1',
+        callId: 'call-1',
+      })
+
+      expect(result).toEqual(knowledge)
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/knowledge',
+        {
+          title: 'Title',
+          content: 'Content',
+          category: 'faq',
+          commandId: 'cmd-1',
+          agentId: 'agent-1',
+          callId: 'call-1',
+        },
+        undefined,
+      )
+    })
+
+    it('should include id (revision), tags, and sourceIssue when provided', async () => {
+      mockInstance.post.mockResolvedValue({ data: { id: 'kn-1', status: 'published' } })
+
+      await client.updateSystemKnowledge({
+        id: 'kn-1',
+        title: 'Title',
+        content: 'Content',
+        category: 'faq',
+        tags: ['a', 'b'],
+        sourceIssue: 'ISSUE-1',
+        commandId: 'cmd-1',
+        agentId: 'agent-1',
+        callId: 'call-1',
+      })
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/knowledge',
+        {
+          id: 'kn-1',
+          title: 'Title',
+          content: 'Content',
+          category: 'faq',
+          tags: ['a', 'b'],
+          sourceIssue: 'ISSUE-1',
+          commandId: 'cmd-1',
+          agentId: 'agent-1',
+          callId: 'call-1',
+        },
+        undefined,
+      )
+    })
+
+    it('should work without commandId/agentId/callId (e.g. tool invoked outside a chat command context)', async () => {
+      mockInstance.post.mockResolvedValue({ data: { id: 'kn-1', status: 'draft' } })
+
+      await client.updateSystemKnowledge({
+        title: 'Title',
+        content: 'Content',
+        category: 'faq',
+      })
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/knowledge',
+        {
+          title: 'Title',
+          content: 'Content',
+          category: 'faq',
+        },
+        undefined,
+      )
+    })
+
+    it('should propagate errors (e.g. validation 4xx) without swallowing them', async () => {
+      mockInstance.post.mockRejectedValue(createAxiosError('title is required', 400))
+
+      await expect(client.updateSystemKnowledge({
+        title: '',
+        content: 'Content',
+        category: 'faq',
+      })).rejects.toThrow()
     })
   })
 

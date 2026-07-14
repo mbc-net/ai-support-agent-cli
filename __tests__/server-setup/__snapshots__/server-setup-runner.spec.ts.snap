@@ -1,0 +1,266 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`generatePlaybook snapshot: append/replace mode across every stepType append mode for database 1`] = `
+"- name: AI Support Agent server setup (custom tasks)
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 'precheck : Verify supported OS'
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{
+          ansible_distribution_version }}. Only Ubuntu 22.04/24.04 LTS are
+          supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or ansible_distribution_version not in
+        ['22.04', '24.04']
+      tags: always
+  roles:
+    - role: database
+      tags: database
+  post_tasks:
+    - block:
+        - name: 'database : custom marker'
+          ansible.builtin.debug:
+            msg: hi
+      tags: database
+"
+`;
+
+exports[`generatePlaybook snapshot: append/replace mode across every stepType append mode for dns_tls 1`] = `
+"- name: AI Support Agent server setup (custom tasks)
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 'precheck : Verify supported OS'
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{
+          ansible_distribution_version }}. Only Ubuntu 22.04/24.04 LTS are
+          supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or ansible_distribution_version not in
+        ['22.04', '24.04']
+      tags: always
+  roles:
+    - role: dns_tls
+      tags: dns_tls
+  post_tasks:
+    - block:
+        - name: 'dns_tls : custom marker'
+          ansible.builtin.debug:
+            msg: hi
+      tags: dns_tls
+"
+`;
+
+exports[`generatePlaybook snapshot: append/replace mode across every stepType append mode for docker 1`] = `
+"- name: AI Support Agent server setup (custom tasks)
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 'precheck : Verify supported OS'
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{
+          ansible_distribution_version }}. Only Ubuntu 22.04/24.04 LTS are
+          supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or ansible_distribution_version not in
+        ['22.04', '24.04']
+      tags: always
+  roles:
+    - role: docker
+      tags: docker
+  post_tasks:
+    - block:
+        - name: 'docker : custom marker'
+          ansible.builtin.debug:
+            msg: hi
+      tags: docker
+"
+`;
+
+exports[`generatePlaybook snapshot: append/replace mode across every stepType append mode for os_init 1`] = `
+"- name: AI Support Agent server setup (custom tasks)
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 'precheck : Verify supported OS'
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{
+          ansible_distribution_version }}. Only Ubuntu 22.04/24.04 LTS are
+          supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or ansible_distribution_version not in
+        ['22.04', '24.04']
+      tags: always
+  roles:
+    - role: os_init
+      tags: os_init
+  post_tasks:
+    - block:
+        - name: 'os_init : custom marker'
+          ansible.builtin.debug:
+            msg: hi
+      tags: os_init
+"
+`;
+
+exports[`generatePlaybook snapshot: append/replace mode across every stepType append mode for web_server 1`] = `
+"- name: AI Support Agent server setup (custom tasks)
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 'precheck : Verify supported OS'
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{
+          ansible_distribution_version }}. Only Ubuntu 22.04/24.04 LTS are
+          supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or ansible_distribution_version not in
+        ['22.04', '24.04']
+      tags: always
+  roles:
+    - role: web_server
+      tags: web_server
+  post_tasks:
+    - block:
+        - name: 'web_server : custom marker'
+          ansible.builtin.debug:
+            msg: hi
+      tags: web_server
+"
+`;
+
+exports[`generatePlaybook snapshot: append/replace mode across every stepType replace mode for database 1`] = `
+"- name: AI Support Agent server setup (custom tasks)
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 'precheck : Verify supported OS'
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{
+          ansible_distribution_version }}. Only Ubuntu 22.04/24.04 LTS are
+          supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or ansible_distribution_version not in
+        ['22.04', '24.04']
+      tags: always
+  post_tasks:
+    - block:
+        - name: 'database : custom marker'
+          ansible.builtin.debug:
+            msg: hi
+      tags: database
+"
+`;
+
+exports[`generatePlaybook snapshot: append/replace mode across every stepType replace mode for dns_tls 1`] = `
+"- name: AI Support Agent server setup (custom tasks)
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 'precheck : Verify supported OS'
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{
+          ansible_distribution_version }}. Only Ubuntu 22.04/24.04 LTS are
+          supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or ansible_distribution_version not in
+        ['22.04', '24.04']
+      tags: always
+  post_tasks:
+    - block:
+        - name: 'dns_tls : custom marker'
+          ansible.builtin.debug:
+            msg: hi
+      tags: dns_tls
+"
+`;
+
+exports[`generatePlaybook snapshot: append/replace mode across every stepType replace mode for docker 1`] = `
+"- name: AI Support Agent server setup (custom tasks)
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 'precheck : Verify supported OS'
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{
+          ansible_distribution_version }}. Only Ubuntu 22.04/24.04 LTS are
+          supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or ansible_distribution_version not in
+        ['22.04', '24.04']
+      tags: always
+  post_tasks:
+    - block:
+        - name: 'docker : custom marker'
+          ansible.builtin.debug:
+            msg: hi
+      tags: docker
+"
+`;
+
+exports[`generatePlaybook snapshot: append/replace mode across every stepType replace mode for os_init 1`] = `
+"- name: AI Support Agent server setup (custom tasks)
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 'precheck : Verify supported OS'
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{
+          ansible_distribution_version }}. Only Ubuntu 22.04/24.04 LTS are
+          supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or ansible_distribution_version not in
+        ['22.04', '24.04']
+      tags: always
+  post_tasks:
+    - block:
+        - name: 'os_init : custom marker'
+          ansible.builtin.debug:
+            msg: hi
+      tags: os_init
+"
+`;
+
+exports[`generatePlaybook snapshot: append/replace mode across every stepType replace mode for web_server 1`] = `
+"- name: AI Support Agent server setup (custom tasks)
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 'precheck : Verify supported OS'
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{
+          ansible_distribution_version }}. Only Ubuntu 22.04/24.04 LTS are
+          supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or ansible_distribution_version not in
+        ['22.04', '24.04']
+      tags: always
+  post_tasks:
+    - block:
+        - name: 'web_server : custom marker'
+          ansible.builtin.debug:
+            msg: hi
+      tags: web_server
+"
+`;

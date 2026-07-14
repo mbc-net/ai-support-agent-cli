@@ -140,6 +140,44 @@ describe('runOneshot', () => {
     )
   })
 
+  it('allows server_setup_exec (Phase 3: server setup execution via ECS oneshot)', async () => {
+    mockGetCommand.mockResolvedValue({
+      commandId: 'cmd-123',
+      type: 'server_setup_exec',
+      payload: { executionId: 'exec-1', sshHostId: 'host-1', steps: [] },
+      status: 'PENDING',
+      createdAt: 1,
+    })
+
+    const code = await runOneshot(validEnv())
+
+    expect(code).toBe(0)
+    expect(mockExecuteCommand).toHaveBeenCalledWith(
+      'server_setup_exec',
+      expect.objectContaining({ executionId: 'exec-1', sshHostId: 'host-1' }),
+      expect.objectContaining({ commandId: 'cmd-123', agentId: 'ecs-agent-1' }),
+    )
+  })
+
+  it('allows ssh_exec (Tailscale SSH support via ECS oneshot — see admin-docs ssh-tailscale-support.md)', async () => {
+    mockGetCommand.mockResolvedValue({
+      commandId: 'cmd-123',
+      type: 'ssh_exec',
+      payload: { sshHostId: 'host-1', command: 'uptime' },
+      status: 'PENDING',
+      createdAt: 1,
+    })
+
+    const code = await runOneshot(validEnv())
+
+    expect(code).toBe(0)
+    expect(mockExecuteCommand).toHaveBeenCalledWith(
+      'ssh_exec',
+      expect.objectContaining({ sshHostId: 'host-1', command: 'uptime' }),
+      expect.objectContaining({ commandId: 'cmd-123', agentId: 'ecs-agent-1' }),
+    )
+  })
+
   it.each(['chat', 'e2e_test', 'file_read', 'ecs_launch'])(
     'rejects the unsupported command type "%s" up front and returns 1',
     async (type) => {

@@ -1,0 +1,52 @@
+---
+# Server setup playbook bundled with the agent CLI (agent/ansible/playbook.yml).
+#
+# Invoked by src/server-setup/server-setup-runner.ts as:
+#   ansible-playbook -i <inventory.yml> playbook.yml --tags <stepType,...> -e @<extra-vars.json>
+#
+# The inventory is JSON content written with a .yml extension (JSON is valid
+# YAML, so ansible-core's bundled `yaml` inventory plugin — matched by file
+# extension — parses it unambiguously); see server-setup-runner.ts's
+# buildInventory() for why.
+#
+# Each role below corresponds 1:1 to a ServerSetupStepType (os_init / docker /
+# web_server / database / dns_tls). `--tags` selects which roles run; task
+# names inside each role are prefixed "<stepType> : ..." so the runner can
+# group the `ansible-playbook --stdout-callback=json` output (produced by
+# the bundled `callback_plugins/json.py` — ansible-core does not ship a
+# `json` stdout callback of its own) back into one result per requested step.
+#
+# See admin-docs docs/features/server-setup.md for the full design,
+# especially "秘密鍵の受け渡し設計" (this playbook never touches the SSH key
+# file directly — it is only referenced via the inventory's
+# ansible_ssh_private_key_file).
+#
+# Supported OS: MVP scope is Ubuntu 22.04/24.04 LTS only (see precheck task
+# below, tagged `always` so it runs regardless of which --tags are passed).
+- name: AI Support Agent server setup
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: "precheck : Verify supported OS"
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{ ansible_distribution_version }}.
+          Only Ubuntu 22.04/24.04 LTS are supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or
+        ansible_distribution_version not in ['22.04', '24.04']
+      tags: always
+
+  roles:
+    - role: os_init
+      tags: os_init
+    - role: docker
+      tags: docker
+    - role: web_server
+      tags: web_server
+    - role: database
+      tags: database
+    - role: dns_tls
+      tags: dns_tls

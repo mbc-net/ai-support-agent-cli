@@ -2,7 +2,8 @@ import { EventEmitter } from 'events'
 import WebSocket from 'ws'
 
 import { BaseWebSocketConnection } from '../src/base-websocket'
-import { WS_HEARTBEAT_INTERVAL_MS, WS_PONG_MAX_MISSED } from '../src/constants'
+import { WS_CLOSE_CODE_AUTH_REJECTED, WS_HEARTBEAT_INTERVAL_MS, WS_PONG_MAX_MISSED } from '../src/constants'
+import { logger } from '../src/logger'
 
 jest.mock('../src/logger')
 
@@ -27,8 +28,8 @@ class MockWebSocket extends EventEmitter {
     this.emit('pong')
   }
 
-  simulateClose(): void {
-    this.emit('close')
+  simulateClose(code?: number, reason?: string): void {
+    this.emit('close', code, reason)
   }
 }
 
@@ -56,11 +57,12 @@ interface TestMessage {
 class TestWebSocketConnection extends BaseWebSocketConnection<TestMessage> {
   public receivedMessages: TestMessage[] = []
 
-  constructor() {
+  constructor(authRejectedCloseCode?: number) {
     super({
       maxReconnectRetries: 3,
       reconnectBaseDelayMs: 100,
       logPrefix: 'Test:',
+      authRejectedCloseCode,
     })
   }
 
@@ -135,6 +137,61 @@ describe('BaseWebSocketConnection default methods', () => {
     mockWsInstance!.simulateOpen()
     await jest.advanceTimersByTimeAsync(100)
 
+    conn.disconnect()
+  })
+
+  it('should NOT reconnect and should log an error when closed with the configured auth-rejected code (regression: infinite retry against a permanently rejected Agent ID)', async () => {
+    const conn = new TestWebSocketConnection(WS_CLOSE_CODE_AUTH_REJECTED)
+    const connectPromise = conn.connect()
+
+    mockWsInstance!.simulateOpen()
+    await connectPromise
+
+    const firstWs = mockWsInstance!
+    firstWs.simulateClose(WS_CLOSE_CODE_AUTH_REJECTED, 'agent_id_mismatch')
+
+    // Give any (incorrect) reconnect logic a chance to run.
+    await jest.advanceTimersByTimeAsync(5000)
+
+    // No new WebSocket should have been created — the server permanently rejected
+    // this connection's credentials, so retrying with the same token/agentId would
+    // just repeat the same rejection forever.
+    expect(mockWsInstance).toBe(firstWs)
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('authentication'))
+  })
+
+  it('should reconnect as usual when closed with an ordinary (non-auth-rejected) code', async () => {
+    const conn = new TestWebSocketConnection(WS_CLOSE_CODE_AUTH_REJECTED)
+    const connectPromise = conn.connect()
+
+    mockWsInstance!.simulateOpen()
+    await connectPromise
+
+    const firstWs = mockWsInstance!
+    firstWs.simulateClose(1006, 'abnormal closure')
+
+    await jest.advanceTimersByTimeAsync(100)
+
+    expect(mockWsInstance).not.toBe(firstWs)
+    conn.disconnect()
+  })
+
+  it('should keep reconnecting even on the shared close-code value when the connection opted out of auth-rejected handling (e.g. AppSyncSubscriber, whose close codes carry unrelated AWS-side meaning)', async () => {
+    // No authRejectedCloseCode passed — this connection never interprets any
+    // close code as a permanent auth rejection.
+    const conn = new TestWebSocketConnection()
+    const connectPromise = conn.connect()
+
+    mockWsInstance!.simulateOpen()
+    await connectPromise
+
+    const firstWs = mockWsInstance!
+    firstWs.simulateClose(WS_CLOSE_CODE_AUTH_REJECTED, 'unrelated meaning on this server')
+
+    await jest.advanceTimersByTimeAsync(100)
+
+    expect(mockWsInstance).not.toBe(firstWs)
+    expect(logger.error).not.toHaveBeenCalled()
     conn.disconnect()
   })
 

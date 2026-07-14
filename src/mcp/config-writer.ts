@@ -8,6 +8,71 @@ import { getErrorMessage } from '../utils'
 export interface BacklogMcpConfig {
   domain: string
   apiKey: string
+  projectKey: string
+  isDefault?: boolean
+}
+
+/**
+ * Backlog組織名（`BACKLOG_ORG_<NAME>_*` の `<NAME>` 部分）に使う識別子を
+ * サニタイズする。この値はそのまま環境変数名の一部になるため、シェルの
+ * 環境変数名として有効な文字（英大文字・数字・アンダースコア、先頭は
+ * アルファベットかアンダースコア）以外は `_` に置換する。
+ */
+function sanitizeBacklogOrgName(projectKey: string): string {
+  const upper = projectKey.toUpperCase().replace(/[^A-Z0-9_]/g, '_')
+  const safe = /^[A-Z_]/.test(upper) ? upper : `ORG_${upper}`
+  return safe || 'ORG'
+}
+
+/**
+ * Backlog連携の設定項目（`backlogConfigs`）から、単一の `backlog` MCPサーバー
+ * プロセスに渡す環境変数を構築する。
+ *
+ * `backlog-mcp-server`（nulab公式パッケージ）は単一プロセスで複数組織に
+ * 対応する公式機能を持ち、組織ごとに `BACKLOG_ORG_<NAME>_DOMAIN` /
+ * `BACKLOG_ORG_<NAME>_API_KEY` の環境変数ペアを与え、`BACKLOG_DEFAULT_ORG`
+ * でデフォルト組織を指定する（LLMはツール呼び出し時に `organization` 引数で
+ * 明示的に組織を切り替えられる）。設定項目が1件のみの場合は単一組織用の
+ * `BACKLOG_DOMAIN`/`BACKLOG_API_KEY` にフォールバックする。
+ *
+ * 参考: https://github.com/nulab/backlog-mcp-server#複数組織対応
+ */
+function buildBacklogServerEnv(backlogConfigs: BacklogMcpConfig[]): Record<string, string> {
+  if (backlogConfigs.length === 1) {
+    const cfg = backlogConfigs[0]
+    return {
+      BACKLOG_DOMAIN: cfg.domain,
+      BACKLOG_API_KEY: cfg.apiKey,
+    }
+  }
+
+  const env: Record<string, string> = {}
+  const usedNames = new Set<string>()
+  let defaultName: string | undefined
+
+  for (const cfg of backlogConfigs) {
+    const base = sanitizeBacklogOrgName(cfg.projectKey)
+    let name = base
+    let suffix = 2
+    while (usedNames.has(name)) {
+      name = `${base}_${suffix}`
+      suffix++
+    }
+    usedNames.add(name)
+
+    env[`BACKLOG_ORG_${name}_DOMAIN`] = cfg.domain
+    env[`BACKLOG_ORG_${name}_API_KEY`] = cfg.apiKey
+
+    if (cfg.isDefault && !defaultName) {
+      defaultName = name
+    }
+  }
+
+  // BACKLOG_DEFAULT_ORG は複数組織モードでは必須（未設定だとサーバー起動時に失敗する）。
+  // isDefault が指定された項目がなければ先頭の組織をデフォルトにする。
+  env.BACKLOG_DEFAULT_ORG = defaultName ?? [...usedNames][0]
+
+  return env
 }
 
 /**
@@ -82,6 +147,31 @@ export const CONVERSATION_ID_ENV = 'AI_SUPPORT_CONVERSATION_ID'
 export const TASK_ID_ENV = 'AI_SUPPORT_TASK_ID'
 
 /**
+ * このナレッジ登録依頼の元になったチャットコマンドのID の環境変数名。
+ *
+ * `update_system_knowledge` MCPツールが子プロセス側で
+ * `process.env[KNOWLEDGE_COMMAND_ID_ENV]` として読み取り、ナレッジ登録/改訂API
+ * （`POST /api/:tenantCode/agent/knowledge`）へ `commandId` として渡す。api側はこの
+ * `commandId` を使って `AgentCommandQueueService.getCommand(commandId, agentId, tenantCode)`
+ * によりコマンド生成時に刻印された本物の `knowledgeCanPublish`/`knowledgeRequesterUserId`
+ * を引き当てる（クライアント自己申告の値は信用しない）。LLM/モデルがツール呼び出し引数として
+ * 自由に指定できる値ではないため、ツールのスキーマには含めず、`CONVERSATION_ID_ENV`/
+ * `TASK_ID_ENV` と同じ理由（`StdioClientTransport` が呼び出し元プロセスの任意の環境変数を
+ * MCPサーバー子プロセスへ自動継承しない）により、per-command ファイルの `env` に明示的に
+ * 埋め込む必要がある。値は `writeCommandMcpConfig` の `commandId` 引数（呼び出し元が既に
+ * 持っている値）をそのまま使うため、常に埋め込まれる。
+ */
+export const KNOWLEDGE_COMMAND_ID_ENV = 'AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID'
+
+/**
+ * エージェント自身の agentId の環境変数名。`KNOWLEDGE_COMMAND_ID_ENV` と組み合わせて
+ * api側が `AgentCommandQueueService.getCommand(commandId, agentId, tenantCode)` で
+ * コマンドレコードを引き当てるために使う。`KNOWLEDGE_COMMAND_ID_ENV` と同じ理由・同じ経路で
+ * per-command ファイルの `env` に埋め込む必要がある。
+ */
+export const KNOWLEDGE_AGENT_ID_ENV = 'AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID'
+
+/**
  * MCP 設定ファイルを書き出す
  *
  * 0o600 権限で作成し、token は環境変数参照にする。
@@ -123,16 +213,14 @@ export function writeMcpConfig(
           }),
         },
       },
-      // Backlog MCPサーバー（設定がある場合のみ）
+      // Backlog MCPサーバー（設定がある場合のみ。複数設定時は単一プロセスで公式の
+      // 複数組織対応環境変数（BACKLOG_ORG_<NAME>_*）を使う）
       ...(backlogConfigs?.length
         ? {
             backlog: {
               command: 'npx',
               args: ['backlog-mcp-server'],
-              env: {
-                BACKLOG_DOMAIN: backlogConfigs[0].domain,
-                BACKLOG_API_KEY: backlogConfigs[0].apiKey,
-              },
+              env: buildBacklogServerEnv(backlogConfigs),
             },
           }
         : {}),
@@ -199,6 +287,7 @@ export function writeCommandMcpConfig(
   commandId: string,
   conversationId: string,
   taskId?: string,
+  agentId?: string,
 ): string {
   const raw = readFileSync(baseConfigPath, 'utf-8')
   const config = JSON.parse(raw) as McpConfigFile
@@ -209,6 +298,8 @@ export function writeCommandMcpConfig(
       ...(server.env ?? {}),
       [CONVERSATION_ID_ENV]: conversationId,
       ...(taskId && { [TASK_ID_ENV]: taskId }),
+      [KNOWLEDGE_COMMAND_ID_ENV]: commandId,
+      ...(agentId && { [KNOWLEDGE_AGENT_ID_ENV]: agentId }),
     }
   }
 

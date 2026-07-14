@@ -1,5 +1,6 @@
 import WebSocket from 'ws'
 
+import { WS_CLOSE_CODE_AUTH_REJECTED } from '../../src/constants'
 import * as wsConstants from '../../src/terminal/constants'
 import { TerminalWebSocket } from '../../src/terminal/terminal-websocket'
 import type { TerminalAgentMessage, TerminalServerMessage } from '../../src/terminal/terminal-websocket'
@@ -27,12 +28,14 @@ describe('TerminalWebSocket', () => {
     server.close(() => done())
   })
 
-  function createTerminalWs(): TerminalWebSocket {
+  function createTerminalWs(onAuthRejected?: () => void): TerminalWebSocket {
     return new TerminalWebSocket(
       `http://localhost:${serverPort}`,
       'test-token',
       'agent-1',
       '/tmp',
+      undefined,
+      onAuthRejected,
     )
   }
 
@@ -744,6 +747,56 @@ describe('TerminalWebSocket', () => {
     graceSpy.mockRestore()
     killAllSpy.mockRestore()
     Object.defineProperty(wsConstants, 'TERMINAL_WS_MAX_RECONNECT_RETRIES', { value: origRetries, writable: true })
+  })
+
+  // A permanent auth rejection (server closes with WS_CLOSE_CODE_AUTH_REJECTED,
+  // e.g. Agent ID token-binding mismatch) must NOT arm grace — there is nothing
+  // to resume, since reconnecting would send the same rejected credentials again.
+  // Regression test for the silent-failure-hunter finding: this used to route
+  // through onWebSocketClose() -> closeAllGracefully() just like a transient drop,
+  // leaving PTYs alive (and reconnect looping forever) for up to the grace window.
+  it('should kill all PTYs immediately (no grace) on a real auth-rejected close event, notify via onAuthRejected, and must not reconnect', async () => {
+    const onAuthRejected = jest.fn()
+    let serverWs: WebSocket | null = null
+    const sessionId = await new Promise<string>((resolve) => {
+      server.on('connection', (ws) => {
+        serverWs = ws
+        ws.on('message', (data) => {
+          const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+          if (msg.type === 'ready') {
+            resolve(msg.sessionId)
+          }
+        })
+        ws.send(
+          JSON.stringify({ type: 'open', sessionId: 'auth-rejected-session', cols: 80, rows: 24 }),
+        )
+      })
+
+      terminalWs = createTerminalWs(onAuthRejected)
+      void terminalWs.connect()
+    })
+
+    const manager = terminalWs.getSessionManager()
+    expect(manager.getSession(sessionId)?.isAlive()).toBe(true)
+
+    const graceSpy = jest.spyOn(manager, 'closeAllGracefully')
+    const killAllSpy = jest.spyOn(manager, 'closeAll')
+
+    const closed = new Promise<void>((resolve) => {
+      ;(serverWs as unknown as WebSocket).on('close', () => resolve())
+    })
+    ;(serverWs as unknown as WebSocket).close(WS_CLOSE_CODE_AUTH_REJECTED, 'agent_id_mismatch')
+    await closed
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(killAllSpy).toHaveBeenCalledTimes(1)
+    expect(graceSpy).not.toHaveBeenCalled()
+    expect(manager.size).toBe(0)
+    // The permanent rejection must be reported so the worker can notify the parent.
+    expect(onAuthRejected).toHaveBeenCalledTimes(1)
+
+    graceSpy.mockRestore()
+    killAllSpy.mockRestore()
   })
 
   // Explicit, user/agent-initiated shutdown must kill every PTY immediately

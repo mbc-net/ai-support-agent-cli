@@ -34,6 +34,14 @@ export const ENV_VARS = {
   CHAT_CHUNK_BATCH_ENABLED: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_ENABLED',
   CHAT_CHUNK_BATCH_WINDOW_MS: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_WINDOW_MS',
   CHAT_CHUNK_BATCH_MAX_BYTES: 'AI_SUPPORT_AGENT_CHAT_CHUNK_BATCH_MAX_BYTES',
+  // Opt-in: run the bundled `ansible-playbook` process as an unprivileged
+  // uid/gid instead of the agent process's own user. Unset (the default)
+  // preserves existing behavior — ansible-playbook still runs as whatever
+  // user the agent process itself runs as, and privilege escalation on the
+  // *target* host is still driven entirely by the playbook's own `become:
+  // true` over SSH. See server-setup-runner.ts's `runAnsiblePlaybook`.
+  SERVER_SETUP_ANSIBLE_UID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID',
+  SERVER_SETUP_ANSIBLE_GID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_GID',
 } as const
 
 export const CONFIG_DIR = (() => {
@@ -185,6 +193,25 @@ export const API_ENDPOINTS = {
   REPO_CREDENTIALS: (tenantCode: string, repositoryId: string) => `/api/${tenantCode}/agent/repo-credentials/${repositoryId}`,
   PROJECT_CONFIG: (tenantCode: string) => `/api/${tenantCode}/agent/project-config`,
   SSH_CREDENTIALS: (tenantCode: string, hostId: string) => `/api/${tenantCode}/agent/ssh-credentials/${hostId}`,
+  // JIT SSH credential lookup scoped to a single server_setup_exec command (see server-setup.md
+  // "秘密鍵の受け渡し設計"). The target host is resolved server-side from the command's payload —
+  // callers never pass a hostId directly, so a oneshot token cannot fetch an arbitrary host's key.
+  SERVER_SETUP_SSH_CREDENTIAL: (tenantCode: string, commandId: string) =>
+    `/api/${tenantCode}/agent/commands/${commandId}/server-setup-ssh-credential`,
+  // JIT lookup of project (ANSIBLE#-prefixed ConfigSetting) variables for a
+  // server_setup_exec command's custom Ansible tasks. Same commandId-scoped
+  // IDOR-prevention design as SERVER_SETUP_SSH_CREDENTIAL: projectCode is
+  // resolved server-side from the command's requestContext, never passed by
+  // the caller.
+  SERVER_SETUP_VARIABLES: (tenantCode: string, commandId: string) =>
+    `/api/${tenantCode}/agent/commands/${commandId}/server-setup-variables`,
+  // JIT SSH credential lookup scoped to a single ssh_exec command (see
+  // admin-docs docs/specifications/ssh-tailscale-support.md). Same
+  // commandId-scoped design as SERVER_SETUP_SSH_CREDENTIAL: the target host
+  // is resolved server-side from the command's payload, never from a
+  // client-supplied hostId.
+  SSH_EXEC_CREDENTIAL: (tenantCode: string, commandId: string) =>
+    `/api/${tenantCode}/agent/commands/${commandId}/ssh-exec-credential`,
   BROWSER_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/browser-credentials`,
   E2E_ENV_VARIABLES: (tenantCode: string) => `/api/${tenantCode}/agent/e2e-env-variables`,
   FILES_UPLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/upload-url`,
@@ -213,12 +240,16 @@ export const API_ENDPOINTS = {
   // Agent tool 関連エンドポイント（タスク実行画面のエージェントが呼び出す）
   AGENT_TOOL_SEND_SLACK_MESSAGE: (tenantCode: string) =>
     `/api/${tenantCode}/agent/tools/send-slack-message`,
+  AGENT_TOOL_SEND_SLACK_FILE: (tenantCode: string) =>
+    `/api/${tenantCode}/agent/tools/send-slack-file`,
   AGENT_TOOL_TRIGGER_ALARM: (tenantCode: string) =>
     `/api/${tenantCode}/agent/tools/trigger-alarm`,
   AGENT_TOOL_READ_SLACK_THREAD: (tenantCode: string) =>
     `/api/${tenantCode}/agent/tools/read-slack-thread`,
   AGENT_TOOL_TRIGGER_E2E_TEST: (tenantCode: string) =>
     `/api/${tenantCode}/agent/tools/trigger-e2e-test`,
+  // ドラフト→承認ワークフロー: システムのナレッジベースへ登録・改訂する（update_system_knowledge ツール）
+  AGENT_KNOWLEDGE: (tenantCode: string) => `/api/${tenantCode}/agent/knowledge`,
   // ECS execution agent registration (ecs publish)
   ECS_AGENTS: (tenantCode: string) => `/api/${tenantCode}/agent/ecs-agents`,
 } as const
@@ -312,6 +343,15 @@ export const APPSYNC_MAX_RECONNECT_RETRIES = INFINITE_RECONNECT_RETRIES
 export const APPSYNC_RECONNECT_BASE_DELAY_MS = DEFAULT_WS_RECONNECT_BASE_DELAY_MS
 export const WS_RECONNECT_MAX_DELAY_MS = 60_000
 
+// Close code the API gateway uses (api/src/agent/common/base-web.gateway.ts:
+// WS_CLOSE_CODE_AUTH_REJECTED) when it closes a connection due to a permanent
+// authentication rejection (invalid/expired token, or Agent ID token-binding
+// mismatch) rather than a transient drop. Infinite reconnect retries above exist
+// specifically for transient network outages; retrying with the SAME rejected
+// credentials would just repeat the same rejection forever, so this code must be
+// kept in sync with the server-side value.
+export const WS_CLOSE_CODE_AUTH_REJECTED = 4001
+
 // WebSocket heartbeat (ping/pong)
 // Without an application-level ping, an idle WebSocket that is silently dropped by a
 // load balancer (e.g. ALB idle timeout) never fires a 'close' event on the client, so
@@ -384,3 +424,28 @@ export const CLI_FLAG_VERBOSE = '--verbose'
 export const CLI_FLAG_NO_DOCKER = '--no-docker'
 export const CLI_FLAG_NO_DOCKERFILE_SYNC = '--no-dockerfile-sync'
 export const CLI_FLAG_NO_AUTO_UPDATE = '--no-auto-update'
+
+// === Tailscale sidecar (SSH connectivity via a customer tailnet) ===
+// See admin-docs docs/specifications/ssh-tailscale-support.md, section 2
+// ("アーキテクチャ概要"). The sidecar is added to the oneshot ECS task
+// definition only when `connectionType: 'tailscale'` support is enabled for
+// that ECS execution agent; existing (non-Tailscale) task definitions are
+// unaffected.
+/** Container name of the Tailscale sidecar in the oneshot ECS task definition. */
+export const TAILSCALE_SIDECAR_CONTAINER_NAME = 'tailscale'
+/** Image the Tailscale sidecar container runs. */
+export const TAILSCALE_SIDECAR_IMAGE = 'tailscale/tailscale'
+/**
+ * Default SOCKS5 port the sidecar's `tailscaled --tun=userspace-networking
+ * --socks5-server=localhost:<port>` listens on. Overridable per SSH host via
+ * `SshExecCredential.socksPort` (design doc section 3) to avoid collisions
+ * when multiple tailnets are in play.
+ */
+export const TAILSCALE_SOCKS_PORT = 1055
+/**
+ * Env var name used to inject the Tailscale authkey into the sidecar
+ * container via RunTask `containerOverrides` — never written to the task
+ * definition itself (design doc section 4, "認証情報の非露出"). Must never be
+ * logged.
+ */
+export const TAILSCALE_AUTHKEY_ENV_VAR = 'TS_AUTHKEY'

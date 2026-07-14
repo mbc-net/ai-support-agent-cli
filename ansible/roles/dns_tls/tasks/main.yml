@@ -1,0 +1,75 @@
+---
+# dns_tls role: Caddy (reverse proxy with automatic Let's Encrypt TLS),
+# configured from the `domain` variable.
+
+- name: "dns_tls : Install prerequisite packages"
+  ansible.builtin.apt:
+    name:
+      - debian-keyring
+      - debian-archive-keyring
+      - apt-transport-https
+      - curl
+      - gnupg
+    state: present
+    update_cache: true
+
+- name: "dns_tls : Create apt keyrings directory"
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: "dns_tls : Add Caddy GPG key"
+  ansible.builtin.get_url:
+    url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+    dest: /etc/apt/keyrings/caddy-stable.asc
+    mode: '0644'
+
+- name: "dns_tls : Add Caddy apt repository"
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/caddy-stable.asc]
+      https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main
+    state: present
+    filename: caddy-stable
+
+- name: "dns_tls : Install Caddy"
+  ansible.builtin.apt:
+    name: caddy
+    state: present
+    update_cache: true
+
+- name: "dns_tls : Validate domain is a well-formed FQDN"
+  ansible.builtin.assert:
+    that:
+      # Anchored (`match` = re.match, and the pattern ends in `$`) so a value
+      # with an embedded newline, space, or Caddyfile-syntax character
+      # (`{`, `}`, `#`, etc.) cannot slip through and be injected into
+      # Caddyfile.j2's generated reverse_proxy block.
+      - domain is match('^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$')
+    fail_msg: >-
+      domain must be a well-formed FQDN (letters/digits/hyphens and dots
+      only): got {{ domain | to_json }}
+  when: domain is defined
+
+- name: "dns_tls : Generate Caddyfile"
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /etc/caddy/Caddyfile
+    owner: root
+    group: root
+    mode: '0644'
+  when: domain is defined
+  register: dns_tls_caddyfile
+
+- name: "dns_tls : Enable and start Caddy"
+  ansible.builtin.service:
+    name: caddy
+    state: started
+    enabled: true
+
+- name: "dns_tls : Restart Caddy to apply Caddyfile changes"
+  ansible.builtin.service:
+    name: caddy
+    state: restarted
+  when: dns_tls_caddyfile is changed

@@ -23,11 +23,16 @@ import type {
   RegisterRequest,
   RegisterResponse,
   RepoCredentials,
+  SendSlackFileResult,
   SendSlackMessageResult,
+  ServerSetupVariablesResponse,
   SshCredentials,
+  SshExecCredential,
   SystemInfo,
   TriggerAlarmResult,
   TriggerE2eTestResult,
+  UpdateSystemKnowledgeRequest,
+  UpdateSystemKnowledgeResult,
   VersionInfo,
 } from './types'
 
@@ -69,6 +74,16 @@ export class ApiClient {
 
   setTenantCode(code: string): void {
     this.tenantCode = code
+  }
+
+  /**
+   * Read-only accessor for the tenant code derived from the current token
+   * (or overridden via `setTenantCode`). Used by `server-setup-runner.ts` to
+   * namespace the persistent per-host known_hosts file so distinct tenants
+   * never share (or overwrite) each other's recorded SSH host keys.
+   */
+  getTenantCode(): string {
+    return this.tenantCode
   }
 
   setProjectCode(code: string): void {
@@ -127,6 +142,7 @@ export class ApiClient {
     ipAddress?: string,
     configHash?: string,
     dockerBuildError?: string,
+    authRejectedTransports?: string[],
   ): Promise<HeartbeatResponse | void> {
     logger.debug('Sending heartbeat')
     return this.post<HeartbeatResponse>(API_ENDPOINTS.HEARTBEAT(this.tenantCode), {
@@ -140,6 +156,7 @@ export class ApiClient {
       ...(ipAddress && { ipAddress }),
       ...(configHash && { configHash }),
       ...(dockerBuildError !== undefined && { dockerBuildError }),
+      ...(authRejectedTransports !== undefined && { authRejectedTransports }),
     })
   }
 
@@ -213,6 +230,62 @@ export class ApiClient {
   async getSshCredentials(hostId: string): Promise<SshCredentials> {
     logger.debug(`Fetching SSH credentials for host: ${hostId}`)
     return this.get<SshCredentials>(API_ENDPOINTS.SSH_CREDENTIALS(this.tenantCode, hostId))
+  }
+
+  /**
+   * JIT SSH credential lookup for a `server_setup_exec` command. The target
+   * host is resolved server-side from the command's payload (never from a
+   * client-supplied hostId), so this can safely be called with either an
+   * ECS oneshot token or a resident agent's normal token. The response may
+   * carry Tailscale SOCKS5 fields (connectionType / tailnetHostname /
+   * socksPort / tailscaleAuthKey) the same way `getSshExecCredential`'s does
+   * — see `SshExecCredential` and `server-setup-runner.ts`'s
+   * `buildInventory`. Never log the returned credential; only log the
+   * commandId.
+   */
+  async getServerSetupSshCredential(commandId: string, agentId: string): Promise<SshExecCredential> {
+    this.validateCommandId(commandId)
+    logger.debug(`Fetching server setup SSH credential for command: ${commandId}`)
+    return this.get<SshExecCredential>(
+      API_ENDPOINTS.SERVER_SETUP_SSH_CREDENTIAL(this.tenantCode, commandId),
+      { params: { agentId } },
+    )
+  }
+
+  /**
+   * JIT lookup of project (`ANSIBLE#`-prefixed `ConfigSetting`) variables for
+   * a `server_setup_exec` command's custom Ansible tasks. Mirrors
+   * `getServerSetupSshCredential`'s IDOR-prevention design: `projectCode` is
+   * resolved server-side from the command's `requestContext`, never passed
+   * by the caller. `secretNames` in the response drives `no_log: true`
+   * annotation (`ansible-task-guard.ts`) and post-execution redaction
+   * (`server-setup-runner.ts`) — never log the returned `variables` values.
+   */
+  async getServerSetupVariables(commandId: string, agentId: string): Promise<ServerSetupVariablesResponse> {
+    this.validateCommandId(commandId)
+    logger.debug(`Fetching server setup variables for command: ${commandId}`)
+    return this.get<ServerSetupVariablesResponse>(
+      API_ENDPOINTS.SERVER_SETUP_VARIABLES(this.tenantCode, commandId),
+      { params: { agentId } },
+    )
+  }
+
+  /**
+   * JIT SSH credential lookup for an `ssh_exec` command. Mirrors
+   * `getServerSetupSshCredential`'s commandId-scoped design: the target host
+   * is resolved server-side from the command's payload, so this can safely
+   * be called with either an ECS oneshot token or a resident agent's normal
+   * token. The response may carry Tailscale SOCKS5 fields (connectionType /
+   * tailnetHostname / socksPort / tailscaleAuthKey) — see `SshExecCredential`.
+   * Never log the returned credential; only log the commandId.
+   */
+  async getSshExecCredential(commandId: string, agentId: string): Promise<SshExecCredential> {
+    this.validateCommandId(commandId)
+    logger.debug(`Fetching SSH exec credential for command: ${commandId}`)
+    return this.get<SshExecCredential>(
+      API_ENDPOINTS.SSH_EXEC_CREDENTIAL(this.tenantCode, commandId),
+      { params: { agentId } },
+    )
   }
 
   async getBrowserCredentials(name: string): Promise<BrowserCredentials> {
@@ -442,6 +515,18 @@ export class ApiClient {
     )
   }
 
+  // ファイル内容を含むボディは最大10MB（api側 src/main.ts の express.json 上限）かつ
+  // Slack files.uploadV2 は複数回のAPI往復を伴うため、既定の10秒タイムアウトでは
+  // 大きめのファイルで打ち切られやすい。saveSessionLog と同様に専用タイムアウトを設定する。
+  async sendSlackFile(channel: string, fileName: string, content: string, threadTs?: string, callId?: string): Promise<SendSlackFileResult> {
+    logger.debug(`Sending Slack file to channel: ${channel}`)
+    return this.post<SendSlackFileResult>(
+      API_ENDPOINTS.AGENT_TOOL_SEND_SLACK_FILE(this.tenantCode),
+      { channel, fileName, content, threadTs, callId },
+      { timeout: 60_000 },
+    )
+  }
+
   /**
    * 現在処理中のSlackスレッドの全文を読み取る（自ボットの過去投稿を含む）。
    *
@@ -487,6 +572,25 @@ export class ApiClient {
     return this.post<TriggerE2eTestResult>(
       API_ENDPOINTS.AGENT_TOOL_TRIGGER_E2E_TEST(this.tenantCode),
       { testCaseId, taskId, executionMethod, environmentId, callId },
+    )
+  }
+
+  /**
+   * システムのナレッジベースへ登録・改訂する（`update_system_knowledge` MCPツール専用）。
+   *
+   * `id` を指定すると改訂、未指定なら新規作成として扱われる。他の `agent/tools/*`
+   * エンドポイントと異なり `{success, data, error}` ではなく、成功時（201）はナレッジ詳細
+   * オブジェクトを直接返す。失敗時（4xx/5xx・ネットワークエラー）は例外を投げる
+   * （呼び出し元は `withMcpErrorHandling` でエラーレスポンスに変換し、ローカルファイルへの
+   * フォールバックは行わない）。
+   */
+  async updateSystemKnowledge(
+    request: UpdateSystemKnowledgeRequest,
+  ): Promise<UpdateSystemKnowledgeResult> {
+    logger.debug(`Updating system knowledge: title="${request.title}"${request.id ? ` (revision of ${request.id})` : ''}`)
+    return this.post<UpdateSystemKnowledgeResult>(
+      API_ENDPOINTS.AGENT_KNOWLEDGE(this.tenantCode),
+      request,
     )
   }
 }

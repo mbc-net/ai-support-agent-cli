@@ -81,6 +81,7 @@ export interface ProjectConfigResponse {
       domain: string
       apiKey: string
       projectKey: string
+      isDefault?: boolean
     }>
   }
   ssh?: {
@@ -142,6 +143,32 @@ export interface SshCredentials {
   username: string
   authType: string
   privateKey: string
+}
+
+/**
+ * SSH connection parameters returned by the `ssh_exec` JIT credential fetch
+ * (see `ssh-credential-client.ts`). Extends the base `SshCredentials` shape
+ * with the fields introduced by Tailscale support (admin-docs
+ * `docs/specifications/ssh-tailscale-support.md`, section 3).
+ *
+ * The api-side `ssh_exec` credential endpoint is implemented in a later
+ * phase (design doc: "api側の実装は別フェーズ(フェーズA/D)で拡張される"), so
+ * every field beyond the base `SshCredentials` shape stays optional here —
+ * this type must tolerate a response that does not yet include them.
+ *
+ * When `connectionType === 'tailscale'`, `tailnetHostname` (and optionally
+ * `socksPort`, default 1055) identify the SOCKS5 route through the ECS
+ * oneshot task's Tailscale sidecar; `hostname`/`port` are not used to reach
+ * the target in that case (see ssh-executor.ts). `tailscaleAuthKey` is
+ * carried through for forward-compatibility with the sidecar's `tailscale
+ * up --authkey` bootstrap; the agent CLI's SSH executor never reads it
+ * directly and must never log it.
+ */
+export interface SshExecCredential extends SshCredentials {
+  connectionType?: 'ssh' | 'tailscale'
+  tailnetHostname?: string
+  socksPort?: number
+  tailscaleAuthKey?: string
 }
 
 export interface BrowserCredentials {

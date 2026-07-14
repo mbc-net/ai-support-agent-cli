@@ -163,6 +163,24 @@ describe('isChildToParentMessage', () => {
     ).toBe(false)
   })
 
+  it('should accept an auth_rejected message', () => {
+    expect(
+      isChildToParentMessage({ type: 'auth_rejected', tenantCode: 'mbc', projectCode: 'p1', transport: 'terminal' }),
+    ).toBe(true)
+  })
+
+  it('should reject auth_rejected without transport', () => {
+    expect(
+      isChildToParentMessage({ type: 'auth_rejected', tenantCode: 'mbc', projectCode: 'p1' }),
+    ).toBe(false)
+  })
+
+  it('should reject auth_rejected without tenantCode', () => {
+    expect(
+      isChildToParentMessage({ type: 'auth_rejected', projectCode: 'p1', transport: 'terminal' }),
+    ).toBe(false)
+  })
+
   it('should reject unknown type', () => {
     expect(isChildToParentMessage({ type: 'unknown' })).toBe(false)
   })
