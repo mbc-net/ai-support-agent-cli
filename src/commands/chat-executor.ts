@@ -25,6 +25,14 @@ export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-co
 /** 実行中のチャットプロセスを commandId で管理 */
 const processManager = getProcessManager()
 
+const SLACK_MARKETPLACE_TOOLS: string[] = []
+const ERR_INVALID_SLACK_TOOL_POLICY = 'Slack Marketplace command is missing the required read-only tool policy'
+
+function isSlackMarketplaceCommand(payload: ChatPayload): boolean {
+  return payload.interactionOrigin === 'slack' &&
+    payload.toolPolicy === 'marketplace_read_only'
+}
+
 interface CliChatResult {
   text: string
   usage?: StreamJsonUsage
@@ -86,8 +94,18 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
     return errorResult(ERR_AGENT_ID_REQUIRED)
   }
 
+  if (
+    (payload.interactionOrigin === 'slack' || payload.toolPolicy === 'marketplace_read_only') &&
+    !isSlackMarketplaceCommand(payload)
+  ) {
+    return errorResult(ERR_INVALID_SLACK_TOOL_POLICY)
+  }
+
   const payloadMode = parseAgentChatModeOverride(payload.agentChatMode)
-  const modes = resolveChatModeCandidates(payloadMode, activeChatMode, availableChatModes, serverConfig, projectConfig)
+  const resolvedModes = resolveChatModeCandidates(payloadMode, activeChatMode, availableChatModes, serverConfig, projectConfig)
+  const modes = isSlackMarketplaceCommand(payload)
+    ? resolveSlackMarketplaceModes(resolvedModes, availableChatModes)
+    : resolvedModes
   const mode = modes[0] ?? 'claude_code'
   logger.debug(`[chat] Agent chat mode candidates: ${modes.join(' -> ')} (selected=${mode})`)
 
@@ -129,6 +147,16 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
   }
 
   return lastResult ?? executeCliChat(mode === 'codex' ? 'codex' : 'claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort)
+}
+
+function resolveSlackMarketplaceModes(
+  modes: AgentChatMode[],
+  availableChatModes: AgentChatMode[] | undefined,
+): AgentChatMode[] {
+  const safeModes = modes.filter((mode) => mode !== 'codex')
+  if (safeModes.length > 0) return safeModes
+  if (availableChatModes?.includes('api')) return ['api']
+  return ['claude_code']
 }
 
 function resolveChatModeCandidates(
@@ -295,7 +323,11 @@ async function executeCliChatOnce(
   let cleanupCommandMcpConfig: (() => void) | undefined
 
   try {
-    const allowedTools = mode === 'claude_code' ? serverConfig?.claudeCodeConfig?.allowedTools : undefined
+    const slackMarketplaceCommand = isSlackMarketplaceCommand(payload)
+    const configuredAllowedTools = mode === 'claude_code' ? serverConfig?.claudeCodeConfig?.allowedTools : undefined
+    const allowedTools = slackMarketplaceCommand
+      ? []
+      : configuredAllowedTools
     const systemPrompt = mode === 'codex'
       ? (serverConfig?.codexConfig?.systemPrompt ?? serverConfig?.claudeCodeConfig?.systemPrompt)
       : serverConfig?.claudeCodeConfig?.systemPrompt
@@ -307,7 +339,9 @@ async function executeCliChatOnce(
       : (serverConfig?.claudeCodeConfig?.addDirs ?? [])
     // Merge project directory auto-add dirs with server-configured dirs
     let addDirs: string[] | undefined
-    if (projectDir) {
+    if (slackMarketplaceCommand) {
+      addDirs = undefined
+    } else if (projectDir) {
       const autoAddDirs = getAutoAddDirs(projectDir)
       addDirs = [...autoAddDirs, ...serverAddDirs]
     } else {
@@ -317,9 +351,11 @@ async function executeCliChatOnce(
 
     // AWS認証情報を取得（プロファイル方式 or 環境変数直接注入）
     const projectCode = parseString(payload.projectCode) ?? projectConfig?.project.projectCode
-    const { awsEnv, gitEnv, cleanupGitCredentials: gitCleanup } = await buildEnvironmentCredentials(
-      payload, client, projectDir, projectConfig, projectCode, sendChunk,
-    )
+    const { awsEnv, gitEnv, cleanupGitCredentials: gitCleanup } = slackMarketplaceCommand
+      ? { awsEnv: undefined, gitEnv: undefined, cleanupGitCredentials: undefined }
+      : await buildEnvironmentCredentials(
+          payload, client, projectDir, projectConfig, projectCode, sendChunk,
+        )
     cleanupGitCredentials = gitCleanup
 
     // 添付ファイルのダウンロード
@@ -345,7 +381,7 @@ async function executeCliChatOnce(
     // 埋め込んだ専用の設定ファイルを都度書き出し、これを `--mcp-config` に使う
     // （`config-writer.ts` の `CONVERSATION_ID_ENV` 定義コメントも参照）。
     let commandMcpConfigPath: string | undefined
-    if (mcpConfigPath && conversationId) {
+    if (!slackMarketplaceCommand && mcpConfigPath && conversationId) {
       try {
         commandMcpConfigPath = writeCommandMcpConfig(mcpConfigPath, commandId, conversationId, taskIdStr, agentId)
         cleanupCommandMcpConfig = (): void => {
@@ -359,15 +395,21 @@ async function executeCliChatOnce(
         logger.warn(`[chat] Failed to write per-command MCP config for [${commandId}], falling back to the shared static MCP config (AI_SUPPORT_CONVERSATION_ID will be unavailable to MCP tools such as read_slack_thread): ${getErrorMessage(error)}`)
       }
     }
-    const effectiveMcpConfigPath = commandMcpConfigPath ?? mcpConfigPath
+    const effectiveMcpConfigPath = slackMarketplaceCommand
+      ? undefined
+      : commandMcpConfigPath ?? mcpConfigPath
 
-    const { filePathsNotice, cleanup: dlCleanup } = await downloadAttachments(
-      payload, client, agentId, projectDir, conversationId, commandId, sendChunk,
-    )
+    const { filePathsNotice, cleanup: dlCleanup } = slackMarketplaceCommand
+      ? { filePathsNotice: '', cleanup: undefined }
+      : await downloadAttachments(
+          payload, client, agentId, projectDir, conversationId, commandId, sendChunk,
+        )
     cleanupDownloads = dlCleanup
 
     // 会話全体のファイルリファレンスを埋め込み（MCPツール経由で読み取り可能）
-    const conversationFiles = parseConversationFiles(payload.conversationFiles)
+    const conversationFiles = slackMarketplaceCommand
+      ? []
+      : parseConversationFiles(payload.conversationFiles)
     const conversationFileNotice = buildConversationFileNotice(conversationFiles)
     if (conversationFiles.length > 0) {
       logger.info(`[chat] ${conversationFiles.length} conversation file references embedded for command [${commandId}]`)
@@ -408,7 +450,11 @@ async function executeCliChatOnce(
       addDirs,
       locale,
       awsEnv: { ...awsEnv, ...gitEnv },
-      cwd: projectDir ? getWorkspaceDir(projectDir) : undefined,
+      cwd: slackMarketplaceCommand
+        ? undefined
+        : projectDir
+          ? getWorkspaceDir(projectDir)
+          : undefined,
       systemPrompt,
       model,
       mcpConfigPath: effectiveMcpConfigPath,
@@ -426,13 +472,14 @@ async function executeCliChatOnce(
           e2eTestCaseId: payload.policyContext.e2eTestCaseId,
         }),
       },
-      envVarsOverride: projectConfig?.envVars,
+      envVarsOverride: slackMarketplaceCommand ? undefined : projectConfig?.envVars,
     }
     const handle = mode === 'codex'
       ? runCodex(runnerOptions)
       : runClaudeCode({
           ...runnerOptions,
           allowedTools,
+          tools: slackMarketplaceCommand ? SLACK_MARKETPLACE_TOOLS : undefined,
         })
     // プロセスを管理 Map に登録
     processManager.register(commandId, handle)
