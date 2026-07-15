@@ -269,6 +269,15 @@ export const ONESHOT_ENV_VARS = {
 /** Value of AGENT_MODE that switches the CLI into oneshot (ECS container) mode */
 export const AGENT_MODE_ONESHOT = 'oneshot'
 
+/**
+ * Capability declared by agents that can execute a server-setup recipe body
+ * (`server_setup_exec` with custom Ansible tasks). The api dispatch
+ * (`ServerSetupDispatchService`) refuses to dispatch a body-carrying recipe to
+ * any agent that does not advertise this — must stay in sync with the api's
+ * `SERVER_SETUP_CUSTOM_TASKS_CAPABILITY`.
+ */
+export const SERVER_SETUP_CUSTOM_TASKS_CAPABILITY = 'server_setup_custom_tasks'
+
 /** Fixed container name used in the registered ECS task definition */
 export const ECS_AGENT_CONTAINER_NAME = 'app'
 

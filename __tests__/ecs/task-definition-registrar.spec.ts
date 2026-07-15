@@ -226,4 +226,96 @@ describe('registerTaskDefinition', () => {
       expect(sidecar?.secrets).toBeUndefined()
     })
   })
+
+  describe('ECS container isolation (server-setup hardening)', () => {
+    beforeEach(() => {
+      logsMock.on(CreateLogGroupCommand).resolves({})
+      ecsMock.on(RegisterTaskDefinitionCommand).resolves({
+        taskDefinition: { taskDefinitionArn: TASK_DEF_ARN, family: 'ai-support-ecs-agent-mbc-ecs-x', revision: 5 },
+      })
+    })
+
+    it('adds no isolation fields and no task volumes by default (back-compat)', async () => {
+      await registerTaskDefinition(baseOptions())
+
+      const input = ecsMock.commandCalls(RegisterTaskDefinitionCommand)[0].args[0].input
+      const container = input.containerDefinitions?.[0]
+      expect(container?.readonlyRootFilesystem).toBeUndefined()
+      expect(container?.user).toBeUndefined()
+      expect(container?.linuxParameters).toBeUndefined()
+      expect(container?.mountPoints).toBeUndefined()
+      expect(input.volumes).toBeUndefined()
+      // No read-only-rootfs hardening env when the FS stays writable.
+      expect(container?.environment).toBeUndefined()
+    })
+
+    it('sets a read-only root filesystem and provisions writable /tmp and /workspace volumes', async () => {
+      await registerTaskDefinition({ ...baseOptions(), readonlyRootFilesystem: true })
+
+      const input = ecsMock.commandCalls(RegisterTaskDefinitionCommand)[0].args[0].input
+      const container = input.containerDefinitions?.[0]
+      expect(container?.readonlyRootFilesystem).toBe(true)
+
+      const mountPaths = (container?.mountPoints ?? []).map((m) => m.containerPath).sort()
+      expect(mountPaths).toEqual(['/tmp', '/workspace'])
+      expect(container?.mountPoints?.every((m) => m.readOnly === false)).toBe(true)
+
+      // Each mount is backed by a task-level ephemeral (Fargate scratch) volume.
+      const volumeNames = (input.volumes ?? []).map((v) => v.name).sort()
+      const mountVolumes = (container?.mountPoints ?? []).map((m) => m.sourceVolume).sort()
+      expect(volumeNames).toEqual(mountVolumes)
+      // Ephemeral: no host/config binding.
+      expect(input.volumes?.every((v) => v.host === undefined)).toBe(true)
+    })
+
+    it('injects HOME=/workspace (and Ansible local temp) so $HOME-relative writes land on the writable volume', async () => {
+      await registerTaskDefinition({ ...baseOptions(), readonlyRootFilesystem: true })
+
+      const container = ecsMock.commandCalls(RegisterTaskDefinitionCommand)[0].args[0].input.containerDefinitions?.[0]
+      const env = container?.environment ?? []
+      const byName = Object.fromEntries(env.map((e) => [e.name, e.value]))
+      // getConfigDir() -> $HOME/.ai-support-agent (known_hosts store) must be writable.
+      expect(byName.HOME).toBe('/workspace')
+      // Ansible controller-local temp dir redirected under the writable volume.
+      expect(byName.ANSIBLE_LOCAL_TEMP).toBe('/workspace/.ansible/tmp')
+      // Every injected value points under the writable /workspace mount.
+      expect(env.every((e) => (e.value ?? '').startsWith('/workspace'))).toBe(true)
+    })
+
+    it('runs the container as a non-root user and drops Linux capabilities', async () => {
+      await registerTaskDefinition({
+        ...baseOptions(),
+        user: '1000:1000',
+        dropCapabilities: ['ALL'],
+      })
+
+      const container = ecsMock.commandCalls(RegisterTaskDefinitionCommand)[0].args[0].input.containerDefinitions?.[0]
+      expect(container?.user).toBe('1000:1000')
+      expect(container?.linuxParameters?.capabilities?.drop).toEqual(['ALL'])
+    })
+
+    it('omits linuxParameters when dropCapabilities is an empty array', async () => {
+      await registerTaskDefinition({ ...baseOptions(), dropCapabilities: [] })
+
+      const container = ecsMock.commandCalls(RegisterTaskDefinitionCommand)[0].args[0].input.containerDefinitions?.[0]
+      expect(container?.linuxParameters).toBeUndefined()
+    })
+
+    it('combines isolation with the tailscale sidecar', async () => {
+      await registerTaskDefinition({
+        ...baseOptions(),
+        readonlyRootFilesystem: true,
+        user: 'appuser',
+        dropCapabilities: ['ALL'],
+        enableTailscale: true,
+      })
+
+      const input = ecsMock.commandCalls(RegisterTaskDefinitionCommand)[0].args[0].input
+      expect(input.containerDefinitions).toHaveLength(2)
+      const main = input.containerDefinitions?.find((c) => c.name === 'app')
+      expect(main?.readonlyRootFilesystem).toBe(true)
+      expect(main?.user).toBe('appuser')
+      expect(main?.dependsOn).toEqual([{ containerName: 'tailscale', condition: 'HEALTHY' }])
+    })
+  })
 })
