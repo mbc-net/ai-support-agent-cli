@@ -197,6 +197,37 @@ function resolveRolesPath(): string {
 }
 
 /**
+ * Resolve the bundled `callback_plugins/` directory that provides the `json`
+ * stdout callback (`callback_plugins/json.py`) selected via
+ * `ANSIBLE_STDOUT_CALLBACK=json`.
+ *
+ * ansible-core ships no `json` stdout callback of its own, so the agent bundles
+ * one. Ansible auto-discovers callback plugins only from a `callback_plugins/`
+ * directory next to the *running* playbook, but the generated playbook runs
+ * from a per-run temp dir — not from `ansible/` — so the callback is never
+ * adjacent to it. `ANSIBLE_CALLBACK_PLUGINS` must therefore point Ansible at
+ * the bundled dir explicitly (mirroring how `ANSIBLE_ROLES_PATH` exposes the
+ * bundled roles). Without it, ansible-playbook aborts before running anything
+ * with `ERROR! Invalid callback for stdout specified: json`. Its absence is a
+ * packaging error — surfaced as a clear failure before any temp dir (and
+ * therefore private key) is created.
+ */
+function resolveCallbackPluginsPath(): string {
+  const callbackPluginsPath = path.join(resolveAnsibleDir(), 'callback_plugins')
+  // Check the actual json.py callback file, not just the directory: a partial
+  // package (dir present, json.py missing) must fail here, up front, rather than
+  // pass this guard and reproduce "Invalid callback for stdout specified: json"
+  // only after the temp dir and SSH private key have been written to disk.
+  const jsonCallbackFile = path.join(callbackPluginsPath, 'json.py')
+  if (!existsSync(jsonCallbackFile)) {
+    throw new Error(
+      `Ansible json stdout callback not found: ${jsonCallbackFile}`,
+    )
+  }
+  return callbackPluginsPath
+}
+
+/**
  * JIT fetch of project (`ANSIBLE#`-prefixed `ConfigSetting`) variables for this
  * `server_setup_exec` command's Ansible tasks. Thin wrapper around
  * `ApiClient.getServerSetupVariables` — kept as its own function (rather than
@@ -554,8 +585,10 @@ export async function runServerSetup(
   }
 
   let rolesPath: string
+  let callbackPluginsPath: string
   try {
     rolesPath = resolveRolesPath()
+    callbackPluginsPath = resolveCallbackPluginsPath()
   } catch (error) {
     return errorResult(getErrorMessage(error))
   }
@@ -626,6 +659,12 @@ export async function runServerSetup(
         // Lets the generated playbook (written to tmpDir, outside
         // ansible/roles/) resolve the 5 bundled roles by name via `include_role`.
         ANSIBLE_ROLES_PATH: rolesPath,
+        // Exposes the bundled `json` stdout callback (callback_plugins/json.py)
+        // to Ansible. The generated playbook runs from tmpDir, not from
+        // ansible/, so Ansible's playbook-adjacent auto-discovery can't find it;
+        // without this the run aborts with "Invalid callback for stdout
+        // specified: json".
+        ANSIBLE_CALLBACK_PLUGINS: callbackPluginsPath,
       })
 
       // Belt-and-suspenders redaction (see redactSecretValues's doc comment):
