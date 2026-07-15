@@ -30,7 +30,7 @@ describe('server_setup_exec dispatch', () => {
   it('routes the payload to runServerSetup with the command context and returns its result', async () => {
     mockRunServerSetup.mockResolvedValue({ success: true, data: { stepResults: [] } })
     const client = {} as ApiClient
-    const payload = { executionId: 'exec-1', sshHostId: 'host-1', steps: [] }
+    const payload = { executionId: 'exec-1', sshHostId: 'host-1', body: '- include_role:\n    name: os_init' }
 
     const result = await executeCommand('server_setup_exec', payload, {
       commandId: 'cmd-1',
@@ -52,7 +52,7 @@ describe('server_setup_exec dispatch', () => {
 
     const result = await executeCommand(
       'server_setup_exec',
-      { executionId: 'exec-1', sshHostId: 'host-1', steps: [] },
+      { executionId: 'exec-1', sshHostId: 'host-1', body: '- include_role:\n    name: os_init' },
       { commandId: 'cmd-1', client },
     )
 
@@ -62,14 +62,14 @@ describe('server_setup_exec dispatch', () => {
   it('requires commandId and client, without invoking runServerSetup', async () => {
     const resultNoClient = await executeCommand(
       'server_setup_exec',
-      { executionId: 'exec-1', sshHostId: 'host-1', steps: [] },
+      { executionId: 'exec-1', sshHostId: 'host-1', body: '- include_role:\n    name: os_init' },
       { commandId: 'cmd-1' },
     )
     expect(resultNoClient).toEqual({ success: false, error: 'server_setup_exec requires client context' })
 
     const resultNoCommandId = await executeCommand(
       'server_setup_exec',
-      { executionId: 'exec-1', sshHostId: 'host-1', steps: [] },
+      { executionId: 'exec-1', sshHostId: 'host-1', body: '- include_role:\n    name: os_init' },
       { client: {} as ApiClient },
     )
     expect(resultNoCommandId).toEqual({ success: false, error: 'server_setup_exec requires client context' })

@@ -27,6 +27,7 @@ import {
   DEFAULT_ECS_MEMORY,
   ECS_AGENT_ID_PREFIX,
   ECS_TASK_FAMILY_PREFIX,
+  SERVER_SETUP_CUSTOM_TASKS_CAPABILITY,
 } from '../constants'
 import { publishImage } from '../ecs/ecr-publisher'
 import { regionFromArn, parseEcrRepositoryUri } from '../ecs/aws-arn'
@@ -53,6 +54,29 @@ export interface EcsPublishCliOptions {
   taskRole?: string
   launcherAgentId?: string
   project?: string
+  /**
+   * ECS container isolation (opt-in — omitting all three registers the exact
+   * same task definition as before). Intended for server-setup execution
+   * agents so a compromised custom Ansible task cannot persist to the
+   * container's root filesystem, run as root, or retain Linux capabilities.
+   */
+  readonlyRootfs?: boolean
+  runAsUser?: string
+  dropCapabilities?: string[]
+}
+
+/**
+ * Parse `--run-as-user` into the ECS `user` field. Accepts a bare uid, a
+ * `uid:gid`, or a plain username — passed through to ECS verbatim after a light
+ * shape check (letters/digits/underscore/hyphen, optionally a single `:`).
+ */
+export function parseRunAsUser(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const trimmed = value.trim()
+  if (!trimmed || !/^[A-Za-z0-9_-]+(:[A-Za-z0-9_-]+)?$/.test(trimmed)) {
+    throw new Error(`--run-as-user must be a uid, uid:gid, or username: ${value}`)
+  }
+  return trimmed
 }
 
 /**
@@ -115,6 +139,7 @@ export async function runEcsPublish(opts: EcsPublishCliOptions): Promise<void> {
   }
   const cpu = parsePositiveInt(opts.cpu, DEFAULT_ECS_CPU, 'cpu')
   const memory = parsePositiveInt(opts.memory, DEFAULT_ECS_MEMORY, 'memory')
+  const runAsUser = parseRunAsUser(opts.runAsUser)
 
   // Reuse the persisted agentId on re-publish (same ECR repository URI).
   const existingAgentId = project.ecsAgents?.[opts.repositoryUri]
@@ -145,6 +170,11 @@ export async function runEcsPublish(opts: EcsPublishCliOptions): Promise<void> {
     logGroupName,
     executionRoleArn: opts.executionRole,
     taskRoleArn: opts.taskRole,
+    ...(opts.readonlyRootfs && { readonlyRootFilesystem: true }),
+    ...(runAsUser !== undefined && { user: runAsUser }),
+    ...(opts.dropCapabilities && opts.dropCapabilities.length > 0 && {
+      dropCapabilities: opts.dropCapabilities,
+    }),
   })
 
   // 3. Register the agent with the API (Bearer = agent token)
@@ -154,7 +184,10 @@ export async function runEcsPublish(opts: EcsPublishCliOptions): Promise<void> {
   await client.registerEcsAgent({
     agentId,
     displayName: opts.name ?? `${repoParts.repositoryName}:${opts.tag}`,
-    capabilities: [],
+    // ECS execution agents can run server-setup recipe bodies (custom Ansible
+    // tasks) in the strict `ecs` guard mode; advertise the capability so the
+    // api will dispatch body-carrying recipes to this agent.
+    capabilities: [SERVER_SETUP_CUSTOM_TASKS_CAPABILITY],
     ecsConfig: {
       imageUri: image.imageUri,
       imageTag: image.imageTag,
@@ -205,6 +238,11 @@ export function registerEcsCommands(program: Command): void {
     .option('--task-role <arn>', t('cmd.ecsPublish.taskRole'))
     .option('--launcher-agent-id <id>', t('cmd.ecsPublish.launcherAgentId'))
     .option('--project <tenantCode/projectCode>', t('cmd.ecsPublish.project'))
+    // Opt-in ECS container isolation (server-setup hardening). Omitting all
+    // three preserves the previous task definition exactly.
+    .option('--readonly-rootfs', 'Register the container with a read-only root filesystem (tmpfs volumes for /tmp and the Ansible workspace)')
+    .option('--run-as-user <user>', 'Run the container as this non-root uid, uid:gid, or username')
+    .option('--drop-capabilities <caps...>', 'Linux capabilities to drop (e.g. ALL)')
     .action(async (opts: EcsPublishCliOptions) => {
       try {
         await runEcsPublish(opts)
