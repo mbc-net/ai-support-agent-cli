@@ -13,7 +13,7 @@ import {
   CreateLogGroupCommand,
 } from '@aws-sdk/client-cloudwatch-logs'
 import { ECSClient, RegisterTaskDefinitionCommand } from '@aws-sdk/client-ecs'
-import type { ContainerDefinition } from '@aws-sdk/client-ecs'
+import type { ContainerDefinition, MountPoint, Volume } from '@aws-sdk/client-ecs'
 
 import {
   ECS_AGENT_CONTAINER_NAME,
@@ -46,7 +46,53 @@ export interface RegisterEcsTaskDefinitionOptions {
    * the exact same single-container task definition as before, unchanged.
    */
   enableTailscale?: boolean
+  /**
+   * When true, registers the main container with a read-only root filesystem
+   * and provisions two writable ephemeral (Fargate scratch) volumes mounted at
+   * `/tmp` and `/workspace` so the agent's temp dir (SSH key JIT) and the
+   * ansible workspace still work. Opt-in server-setup hardening — omitting it
+   * leaves the container fully writable as before.
+   */
+  readonlyRootFilesystem?: boolean
+  /** Non-root user (uid, `uid:gid`, or username) to run the main container as. */
+  user?: string
+  /** Linux capabilities to drop from the main container (e.g. `['ALL']`). */
+  dropCapabilities?: string[]
 }
+
+/** Writable workspace mount path (one of {@link ISOLATION_VOLUMES}). */
+const ISOLATION_WORKSPACE_PATH = '/workspace'
+
+/** Ephemeral (Fargate scratch) volumes provisioned when `readonlyRootFilesystem` is set. */
+const ISOLATION_VOLUMES: readonly { name: string; containerPath: string }[] = [
+  { name: 'agent-tmp', containerPath: '/tmp' },
+  { name: 'agent-workspace', containerPath: ISOLATION_WORKSPACE_PATH },
+]
+
+/**
+ * Static environment injected into the read-only-rootfs main container so that
+ * everything the agent writes relative to `$HOME` lands on the writable
+ * `/workspace` volume instead of the now read-only root filesystem.
+ *
+ * Without this, a `readonlyRootFilesystem: true` container running as a
+ * non-root `user` (whose home is on the read-only root FS) cannot write:
+ * - the agent's persistent config dir — `getConfigDir()` resolves to
+ *   `$HOME/.ai-support-agent`, which holds the per-host `known_hosts` file
+ *   (`known-hosts-store.ts`) that every `server_setup_exec` TOFU check needs, and
+ * - Ansible's own controller-local temp dir (`$HOME/.ansible/tmp`, overridden
+ *   here explicitly via `ANSIBLE_LOCAL_TEMP`).
+ * so every `server_setup_exec` would fail with an EROFS/permission error.
+ *
+ * These are non-secret, static hardening values — unlike the per-run secrets
+ * (COMMAND_ID, oneshot token, …) injected via `containerOverrides` at RunTask
+ * time, with which they merge (distinct names, no collision). Only added when
+ * `readonlyRootFilesystem` is set, so the default (fully-writable) container is
+ * unchanged and still carries no task-definition environment.
+ */
+const READONLY_ROOTFS_ENV: readonly { name: string; value: string }[] = [
+  { name: 'HOME', value: ISOLATION_WORKSPACE_PATH },
+  { name: 'ANSIBLE_LOCAL_TEMP', value: `${ISOLATION_WORKSPACE_PATH}/.ansible/tmp` },
+]
 
 /**
  * Build the `tailscale` sidecar container definition. The sidecar only runs
@@ -123,6 +169,15 @@ export async function registerTaskDefinition(
 
   const ecsClient = new ECSClient({ region: options.region })
 
+  const mountPoints: MountPoint[] | undefined = options.readonlyRootFilesystem
+    ? ISOLATION_VOLUMES.map((v) => ({ sourceVolume: v.name, containerPath: v.containerPath, readOnly: false }))
+    : undefined
+  // Task-level ephemeral volumes (no `host`/`configuredAtLaunch` = Fargate
+  // scratch space) backing the read-only-rootfs container's writable paths.
+  const volumes: Volume[] | undefined = options.readonlyRootFilesystem
+    ? ISOLATION_VOLUMES.map((v) => ({ name: v.name }))
+    : undefined
+
   const mainContainer: ContainerDefinition = {
     name: ECS_AGENT_CONTAINER_NAME,
     image: options.imageUri,
@@ -137,6 +192,15 @@ export async function registerTaskDefinition(
         'awslogs-stream-prefix': 'ecs-agent',
       },
     },
+    ...(options.readonlyRootFilesystem && { readonlyRootFilesystem: true }),
+    // Redirect $HOME-relative writes (config dir known_hosts, Ansible temp) to
+    // the writable /workspace volume when the root FS is read-only.
+    ...(options.readonlyRootFilesystem && { environment: [...READONLY_ROOTFS_ENV] }),
+    ...(options.user && { user: options.user }),
+    ...(options.dropCapabilities && options.dropCapabilities.length > 0 && {
+      linuxParameters: { capabilities: { drop: options.dropCapabilities } },
+    }),
+    ...(mountPoints && { mountPoints }),
     ...(options.enableTailscale && {
       dependsOn: [{ containerName: TAILSCALE_SIDECAR_CONTAINER_NAME, condition: 'HEALTHY' }],
     }),
@@ -155,6 +219,7 @@ export async function registerTaskDefinition(
     ...(options.executionRoleArn && { executionRoleArn: options.executionRoleArn }),
     ...(options.taskRoleArn && { taskRoleArn: options.taskRoleArn }),
     containerDefinitions,
+    ...(volumes && { volumes }),
   }))
 
   const taskDefinition = response.taskDefinition

@@ -1,20 +1,43 @@
 import { DEFAULT_SCHEMA, load } from 'js-yaml'
 
 /**
- * api/src/server-setup/ansible-task-guard.ts とロジックを完全に同期させること。
- * canonical定義は admin-docs/docs/features/server-setup.md「セキュリティモデル
- * （カスタムタスク）」節。
+ * サーバーセットアップレシピ本体（`body` = Ansible タスク列 YAML）の静的検証ガード。
  *
- * **セキュリティ上重要**: このロジックは実行環境（agentホスト）への攻撃経路
+ * **セキュリティ上重要**: このロジックは実行環境（agentホスト / 当社 ECS）への攻撃経路
  * （任意コマンド実行・他ホストへの委譲・秘密情報の平文ログ出力・危険な
  * lookup/queryプラグイン経由のファイル読み取り等）を塞ぐための唯一の防御線。
  * allowlist に無いモジュール・危険なタスクキーは一律拒否し、フォールバックは
  * 行わない（CLAUDE.md フォールバック禁止ルール）。
  *
- * api 側は保存時（`ServerSetupRecipeService`）の一次検証のみを行い、agent 側の
- * この検証が実行前の**権威的な防御境界**となる（api 側検証をバイパルした
- * 不正 payload が届いた場合の最終防衛線）。
+ * ## 経路別モード（`mode`）
+ * - `ecs`: 当社基盤（ECS oneshot）で実行。厳格 allowlist を維持する。
+ * - `resident`: 顧客の閉域ネットワーク内の常駐エージェントで実行。モジュール allowlist を
+ *   寛容化する（追加モジュールを許可）。**ただし** denylist（危険タスクキー）・lookup 拒否・
+ *   copy/template の src 拒否・`ansible_*`/magic 変数拒否は両モードで維持する。
+ *
+ * API 保存時（レシピ作成/更新）は安全側に倒し `mode: 'ecs'`（厳格側）で検証してよい
+ * （早期 UX フィードバック）。権威判定は agent 実行時に `dispatchMode` に応じたモードで行う。
+ *
+ * ## `include_role` スニペット（組み込みステップ）
+ * 組み込みステップ（os_init/docker/web_server/database/dns_tls）は、bundled role を呼ぶ
+ * `include_role` タスクとして表現する。`include_role` は 5 ロールのみ許可し、role 名と
+ * 許可 param キーを専用バリデータで個別検査する。ロール変数は `include_role.vars`
+ * （モジュール引数内のネストマッピング）で渡す（task レベルの `vars` は禁止のまま）。
+ *
+ * 設計: admin-docs/docs/specifications/git-artifact-platform.md
  */
+
+export type AnsibleTaskRouteMode = 'resident' | 'ecs'
+
+export interface ValidateAnsibleTasksOptions {
+  /** 実行経路。`ecs`=厳格、`resident`=モジュール allowlist 寛容化。 */
+  mode: AnsibleTaskRouteMode
+  /**
+   * この検証呼び出し時点で「secretとして扱うべき」変数名の集合
+   * （api保存時は空集合でよい。no_log付与はagent実行時に行う）。
+   */
+  secretVarNames?: ReadonlySet<string>
+}
 
 export interface AnsibleTaskViolation {
   taskIndex: number
@@ -31,16 +54,7 @@ export interface AnsibleTaskValidationResult {
 /**
  * タスクの実行環境に影響を与える・実行先を変える・秘密情報を露出させる
  * リスクのあるキー（完全一致）。1つでも存在すれば当該タスクを拒否する。
- *
- * - `delegate_to`/`delegate_facts`/`local_action`: 実行対象ホストの変更
- *   （agentホスト以外・意図しないホストでの実行を許してしまう）
- * - `connection`: 接続方式の変更（local 接続等での agentホスト直接実行）
- * - `become_method`/`become_exe`/`become_flags`/`become_user`: 権限昇格方式の変更
- * - `vars`/`environment`: タスクスコープ変数・環境変数の注入（allowlist外の
- *   任意コード実行や機密情報の迂回に使われ得る）
- * - `notify`/`listen`: ハンドラ起動（allowlist外のハンドラ定義と組み合わさり得る）
- * - `hosts`: play形式の混入（本ガードはタスクのみを受け付ける）
- * - `import_playbook`: 任意の外部playbookの読み込み
+ * 両モード（resident/ecs）で維持する。
  */
 const FORBIDDEN_TASK_KEYS: ReadonlySet<string> = new Set([
   'delegate_to',
@@ -76,19 +90,25 @@ const CONTROL_KEYS: ReadonlySet<string> = new Set([
   'when',
   'no_log',
   'ignore_errors',
+  'loop',
+  'with_items',
+  'until',
+  'retries',
+  'delay',
 ])
 
 /**
- * `ansible.builtin.` を省略した短縮形での指定を許可するモジュール名。
- * ここに無いモジュール（`ansible.mysql.mysql_user` 等）はフルネームでのみ許可する。
+ * `ansible.builtin.` を省略した短縮形での指定を許可するモジュール名（厳格=ecs）。
  *
- * **CRITICAL修正**: `template` はここから完全に削除している。`ansible.builtin.template`
- * は `src` が常に Ansible コントローラ（=agentホスト）側のローカルファイルパスとして
- * 解決される仕様で、安全に使える代替パラメータが無いため allowlist から除外する
+ * **CRITICAL**: `template` はここから完全に除外している。`ansible.builtin.template`
+ * は `src` が常に Ansible コントローラ側のローカルファイルパスとして解決される仕様で、
+ * 安全に使える代替パラメータが無いため allowlist から除外する
  * （`copy` の `content` パラメータで代替可能）。
  */
 const BUILTIN_SHORT_NAMES: ReadonlySet<string> = new Set([
   'apt',
+  'apt_key',
+  'apt_repository',
   'copy',
   'file',
   'user',
@@ -109,13 +129,7 @@ const BUILTIN_SHORT_NAMES: ReadonlySet<string> = new Set([
 ])
 
 /**
- * カスタムAnsibleタスクで使用を許可するモジュール（フルネーム）のallowlist。
- *
- * **CRITICAL修正**: `ansible.builtin.template` は allowlist から完全に除外している
- * （理由は {@link BUILTIN_SHORT_NAMES} のコメント参照）。`ansible.builtin.copy` は
- * 許可を維持するが、`src` キーを持つタスクは別途拒否する
- * （{@link validateCustomTasksYaml} の copy/`src` チェック参照。`content` + `dest` の
- * みの利用に限定し、agentホストのローカルファイルを読み取れないようにする）。
+ * カスタム Ansible タスクで使用を許可するモジュール（フルネーム）の allowlist（厳格=ecs）。
  */
 const MODULE_ALLOWLIST: ReadonlySet<string> = new Set([
   'ansible.builtin.apt',
@@ -142,8 +156,76 @@ const MODULE_ALLOWLIST: ReadonlySet<string> = new Set([
   'community.postgresql.postgresql_user',
 ])
 
+/**
+ * `resident_agent`（顧客の閉域）経路で追加で許可するモジュール（フルネーム）。
+ *
+ * 顧客自機・閉域内の実行のため、当社基盤より広いモジュールを許容する。
+ * ただし denylist（危険タスクキー）・lookup 拒否・copy/template src 拒否・
+ * `ansible_*` 拒否は resident でも維持する（緩和はモジュール allowlist に限定）。
+ */
+const RESIDENT_EXTRA_MODULE_ALLOWLIST: ReadonlySet<string> = new Set([
+  'ansible.builtin.uri',
+  'ansible.builtin.git',
+  'ansible.builtin.unarchive',
+  'ansible.builtin.pip',
+  'ansible.builtin.cron',
+  'ansible.builtin.hostname',
+  'ansible.builtin.mount',
+  'ansible.posix.mount',
+  'ansible.posix.sysctl',
+  'ansible.posix.authorized_key',
+  'community.general.timezone',
+  'community.docker.docker_container',
+  'community.docker.docker_image',
+  'community.docker.docker_network',
+])
+
+/** resident 経路で追加許可する短縮形。 */
+const RESIDENT_EXTRA_SHORT_NAMES: ReadonlySet<string> = new Set([
+  'uri',
+  'git',
+  'unarchive',
+  'pip',
+  'cron',
+  'hostname',
+  'mount',
+])
+
 /** `copy` モジュールの正規化後キー名（`src` パラメータ拒否チェックに使用）。 */
 const COPY_MODULE_KEY = 'ansible.builtin.copy'
+
+/** `include_role` の正規化後キー名の集合。 */
+const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
+  'include_role',
+  'ansible.builtin.include_role',
+])
+
+/**
+ * `include_role` で呼び出しを許可する 5 つの bundled role。
+ * 組み込みステップ（スニペット）に 1:1 対応する。
+ */
+export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
+  'os_init',
+  'docker',
+  'web_server',
+  'database',
+  'dns_tls',
+])
+
+/**
+ * `include_role` のモジュール引数マッピングで許可する param キー。
+ * - `name`: 必須。上記 5 ロールのいずれか。
+ * - `vars`: ロール変数（マッピング）。task レベルの `vars`（禁止）とは別物で、
+ *   include_role のモジュール引数内にネストされるためロールスコープに閉じる。
+ * - `tasks_from`: ロール内の代替タスクファイル名（ロールディレクトリ内に閉じる）。
+ * - `public`: include したロールの変数を後続へ公開するか（真偽値）。
+ */
+const INCLUDE_ROLE_ALLOWED_PARAM_KEYS: ReadonlySet<string> = new Set([
+  'name',
+  'vars',
+  'tasks_from',
+  'public',
+])
 
 /** set_fact / register で禁止する予約語・マジック変数名（完全一致）。 */
 const RESERVED_VAR_NAMES: ReadonlySet<string> = new Set([
@@ -160,6 +242,13 @@ const RESERVED_VAR_NAMES: ReadonlySet<string> = new Set([
 /** `lookup(...)` / `query(...)` / `q(...)` プラグイン参照を検出する正規表現。 */
 const LOOKUP_PLUGIN_PATTERN = /\b(lookup|query|q)\s*\(/
 
+/**
+ * `include_role` の `tasks_from` に許可する文字クラス（英数・`_`・`-` のみ）。
+ * `/`・`..` 等のパス区切りを禁止し、ロールディレクトリ外の任意ファイルを
+ * tasks ファイルとして読み込ませる（パストラバーサル）攻撃を防ぐ。
+ */
+const TASKS_FROM_ALLOWED_PATTERN = /^[A-Za-z0-9_-]+$/
+
 const SET_FACT_MODULE_KEYS: ReadonlySet<string> = new Set([
   'set_fact',
   'ansible.builtin.set_fact',
@@ -169,9 +258,23 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** モジュールキーを `ansible.builtin.` 省略形からフルネームへ正規化する。 */
-function normalizeModuleKey(key: string): string {
-  return BUILTIN_SHORT_NAMES.has(key) ? `ansible.builtin.${key}` : key
+/**
+ * モジュールキーを `ansible.builtin.` 省略形からフルネームへ正規化する。
+ * mode によって認識する短縮形が変わる（resident は追加短縮形を認識する）。
+ */
+function normalizeModuleKey(key: string, mode: AnsibleTaskRouteMode): string {
+  if (BUILTIN_SHORT_NAMES.has(key)) return `ansible.builtin.${key}`
+  if (key === 'include_role') return 'ansible.builtin.include_role'
+  if (mode === 'resident' && RESIDENT_EXTRA_SHORT_NAMES.has(key)) {
+    return `ansible.builtin.${key}`
+  }
+  return key
+}
+
+/** mode に応じた実効モジュール allowlist を返す。 */
+function moduleAllowlistFor(mode: AnsibleTaskRouteMode): ReadonlySet<string> {
+  if (mode !== 'resident') return MODULE_ALLOWLIST
+  return new Set<string>([...MODULE_ALLOWLIST, ...RESIDENT_EXTRA_MODULE_ALLOWLIST])
 }
 
 /** 予約語・マジック変数名かどうかを判定する（`ansible_` プレフィックス or 完全一致）。 */
@@ -179,7 +282,7 @@ function isReservedVarName(name: string): boolean {
   return name.startsWith('ansible_') || RESERVED_VAR_NAMES.has(name)
 }
 
-/** 値（文字列・オブジェクト・配列を問わず）を再帰的に走査し、lookup/query参照が無いかを調べる。 */
+/** 値を再帰的に走査し、lookup/query参照が無いかを調べる。 */
 function containsLookupPluginReference(value: unknown): boolean {
   if (typeof value === 'string') {
     return LOOKUP_PLUGIN_PATTERN.test(value)
@@ -195,13 +298,8 @@ function containsLookupPluginReference(value: unknown): boolean {
 
 /**
  * タスクが `secretVarNames` のいずれかを `{{ ... }}` 式の中で参照しているかを判定する。
- *
- * **CRITICAL修正**: 以前は `{{ name }}`（前後空白のみ許容）の完全一致でしか検出できず、
- * `{{ NAME | quote }}` や `{{ NAME | default('') }}` のようなAnsibleで一般的な
- * Jinjaフィルタ付き参照をすり抜けて no_log が付与されなかった（secret平文が
- * 実行結果ログ=RDS executionLogsに残るリスク）。`{{` と `}}` で囲まれた式の
- * **どこかに単語境界で区切られた変数名トークンが1回でも出現するか**で判定するよう
- * 緩め、見落とし（false negative）を無くす方向にする（誤検知=過剰なno_log付与は許容）。
+ * Jinjaフィルタ付き参照（`{{ NAME | quote }}` 等）や複数変数混在の式でも検出する
+ * （見落とし＝secret 平文が実行ログに残るリスクを無くす方向。誤検知は許容）。
  */
 function referencesSecretVar(
   task: Record<string, unknown>,
@@ -238,22 +336,107 @@ function getModuleCandidateKeys(task: Record<string, unknown>): string[] {
 }
 
 /**
- * カスタムAnsibleタスクのYAML文字列を検証する。
- *
- * @param yaml テナントadminが入力したタスクYAML
- * @param stepType 対象ステップ種別（正規化後の `name` 前置に使用）
- * @param secretVarNames この検証呼び出し時点で「secretとして扱うべき」変数名の集合
- *   （agent実行時は `fetchServerSetupVariables` が解決した secretNames を渡し、
- *   no_log 付与を行う）
+ * `include_role` タスクのモジュール引数を検証する。
+ * - 引数はマッピングであること。
+ * - `name` が {@link INCLUDE_ROLE_ALLOWED_ROLES} のいずれかであること。
+ * - すべてのキーが {@link INCLUDE_ROLE_ALLOWED_PARAM_KEYS} に含まれること。
+ * - `vars`（ロール変数マッピング）の**各キー**が予約語・マジック変数名でないこと
+ *   （{@link isReservedVarName}）。task レベルの `vars` は {@link FORBIDDEN_TASK_KEYS} で
+ *   丸ごと拒否されるが、`include_role.vars` はロールスコープに閉じるため param として
+ *   許可している。しかし中身を検査しないと `vars: { ansible_connection: local }` 等の
+ *   magic 変数注入で、固定 `become: true` の play を agent ホスト自身へリダイレクトできて
+ *   しまう（本ガードが塞ぐべき委譲/接続すり替え攻撃の再発）。set_fact と同じ予約語チェックを
+ *   適用してこれを防ぐ。`vars` 値内の `lookup(...)` 参照は呼び出し側
+ *   （{@link validateAnsibleTasks} のタスク全体再帰 {@link containsLookupPluginReference}）で
+ *   別途拒否される。
+ * - `tasks_from`（ロール内の代替タスクファイル名）が英数・`_`・`-` のみ
+ *   （{@link TASKS_FROM_ALLOWED_PATTERN}）であること。`/` や `..` を含む値でロール
+ *   ディレクトリ外の任意ファイルを読み込ませるパストラバーサルを防ぐ。
  */
-export function validateCustomTasksYaml(
-  yaml: string,
-  stepType: string,
-  secretVarNames: ReadonlySet<string>,
+function validateIncludeRole(
+  taskIndex: number,
+  moduleKey: string,
+  moduleArgs: unknown,
+  violations: AnsibleTaskViolation[],
+): void {
+  if (!isPlainObject(moduleArgs)) {
+    violations.push({
+      taskIndex,
+      key: moduleKey,
+      reason: 'include_role args must be a mapping',
+    })
+    return
+  }
+
+  const roleName = moduleArgs.name
+  if (typeof roleName !== 'string' || !INCLUDE_ROLE_ALLOWED_ROLES.has(roleName)) {
+    violations.push({
+      taskIndex,
+      key: 'name',
+      reason: 'include_role name is not one of the allowed bundled roles',
+    })
+  }
+
+  for (const paramKey of Object.keys(moduleArgs)) {
+    if (!INCLUDE_ROLE_ALLOWED_PARAM_KEYS.has(paramKey)) {
+      violations.push({
+        taskIndex,
+        key: paramKey,
+        reason: 'include_role param key is not allowed',
+      })
+    }
+  }
+
+  // include_role.vars（ロール変数マッピング）の各キーを予約語・マジック変数名で検査する。
+  const vars = moduleArgs.vars
+  if (isPlainObject(vars)) {
+    for (const varName of Object.keys(vars)) {
+      if (isReservedVarName(varName)) {
+        violations.push({
+          taskIndex,
+          key: varName,
+          reason: 'reserved or magic variable name in include_role vars',
+        })
+      }
+    }
+  }
+
+  // tasks_from はロールディレクトリ内の代替タスクファイル名。パストラバーサルを
+  // 防ぐため、英数・`_`・`-` のみの allowlist で検証する（`/`・`..` は拒否）。
+  const tasksFrom = moduleArgs.tasks_from
+  if (tasksFrom !== undefined) {
+    if (
+      typeof tasksFrom !== 'string' ||
+      !TASKS_FROM_ALLOWED_PATTERN.test(tasksFrom)
+    ) {
+      violations.push({
+        taskIndex,
+        key: 'tasks_from',
+        reason:
+          'include_role tasks_from must match [A-Za-z0-9_-]+ (no path separators)',
+      })
+    }
+  }
+}
+
+/**
+ * サーバーセットアップレシピ本体（Ansible タスク列 YAML）を検証する。
+ *
+ * @param body テナントadminが入力したタスク YAML（トップレベルはタスクの配列）
+ * @param opts.mode 実行経路（`ecs`=厳格 / `resident`=寛容）
+ * @param opts.secretVarNames secretとして扱う変数名（no_log 付与判定用。api保存時は空でよい）
+ */
+export function validateAnsibleTasks(
+  body: string,
+  opts: ValidateAnsibleTasksOptions,
 ): AnsibleTaskValidationResult {
+  const mode = opts.mode
+  const secretVarNames = opts.secretVarNames ?? new Set<string>()
+  const allowlist = moduleAllowlistFor(mode)
+
   let parsed: unknown
   try {
-    parsed = load(yaml, { schema: DEFAULT_SCHEMA })
+    parsed = load(body, { schema: DEFAULT_SCHEMA })
   } catch (error) {
     return {
       ok: false,
@@ -278,6 +461,15 @@ export function validateCustomTasksYaml(
           key: 'root',
           reason: 'top-level must be a list of tasks, not a play',
         },
+      ],
+    }
+  }
+
+  if (parsed.length === 0) {
+    return {
+      ok: false,
+      violations: [
+        { taskIndex: -1, key: 'root', reason: 'tasks list must not be empty' },
       ],
     }
   }
@@ -314,14 +506,14 @@ export function validateCustomTasksYaml(
     }
     const task = rawTask
 
-    // 3. 危険なタスクキーの拒否
+    // 1. 危険なタスクキーの拒否（両モード）
     for (const key of Object.keys(task)) {
       if (FORBIDDEN_TASK_KEYS.has(key)) {
         violations.push({ taskIndex, key, reason: 'forbidden task key' })
       }
     }
 
-    // 4. モジュールキーの allowlist 照合
+    // 2. モジュールキーの照合
     const moduleCandidateKeys = getModuleCandidateKeys(task)
     if (moduleCandidateKeys.length === 0) {
       violations.push({
@@ -331,16 +523,20 @@ export function validateCustomTasksYaml(
       })
     } else {
       for (const key of moduleCandidateKeys) {
-        const normalized = normalizeModuleKey(key)
-        if (!MODULE_ALLOWLIST.has(normalized)) {
+        const normalized = normalizeModuleKey(key, mode)
+
+        // include_role は専用バリデータで検査する（5 ロール限定 + param キー allowlist）。
+        if (INCLUDE_ROLE_MODULE_KEYS.has(normalized)) {
+          validateIncludeRole(taskIndex, key, task[key], violations)
+          continue
+        }
+
+        if (!allowlist.has(normalized)) {
           violations.push({ taskIndex, key, reason: 'module not in allowlist' })
           continue
         }
 
-        // CRITICAL修正: copy モジュールは src（コントローラ=agentホスト側のローカル
-        // ファイルパス）を使うと remote_src が既定 false のため、agentホストの
-        // 任意ローカルファイルを対象サーバーへ転送できてしまう。content + dest の
-        // みの利用に限定する。
+        // copy は src（コントローラ側ローカルファイルパス）を拒否し content + dest に限定する。
         if (normalized === COPY_MODULE_KEY) {
           const moduleArgs = task[key]
           if (isPlainObject(moduleArgs) && 'src' in moduleArgs) {
@@ -354,7 +550,7 @@ export function validateCustomTasksYaml(
       }
     }
 
-    // 5. lookup/query プラグイン参照の拒否（タスク全体を再帰的に走査）
+    // 3. lookup/query プラグイン参照の拒否（タスク全体を再帰的に走査）
     if (containsLookupPluginReference(task)) {
       violations.push({
         taskIndex,
@@ -363,7 +559,7 @@ export function validateCustomTasksYaml(
       })
     }
 
-    // 6. set_fact / register の予約語・マジック変数名チェック
+    // 4. set_fact / register の予約語・マジック変数名チェック
     for (const key of moduleCandidateKeys) {
       if (!SET_FACT_MODULE_KEYS.has(key)) continue
       const factValue = task[key]
@@ -393,18 +589,12 @@ export function validateCustomTasksYaml(
     return { ok: false, violations }
   }
 
-  // 8. 正規化（name前置 + secret参照タスクへの no_log 付与）
+  // 5. 正規化（secret参照タスクへの no_log 付与）
   const normalizedTasks = parsed.map((rawTask) => {
     const task = { ...(rawTask as Record<string, unknown>) }
-    const moduleCandidateKeys = getModuleCandidateKeys(task)
-    const originalName = typeof task.name === 'string' ? task.name : undefined
-    const summary = originalName ?? moduleCandidateKeys[0] ?? 'task'
-    task.name = `${stepType} : ${summary}`
-
     if (referencesSecretVar(task, secretVarNames) && task.no_log !== true) {
       task.no_log = true
     }
-
     return task
   })
 

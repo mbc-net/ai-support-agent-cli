@@ -170,8 +170,23 @@ describe('ProjectAgent', () => {
 
       const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
       expect(payload.capabilities).toEqual([
-        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'ecs_launch',
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'ecs_launch',
       ])
+
+      agent.stop()
+    })
+
+    it('should always advertise the server_setup_custom_tasks capability', async () => {
+      // Without this, the api refuses to dispatch a body-carrying server-setup
+      // recipe to this resident agent (git-artifact-platform capability fix).
+      mockDetectEcsLauncherCapability.mockResolvedValue(false)
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
+      expect(payload.capabilities).toContain('server_setup_custom_tasks')
 
       agent.stop()
     })
@@ -185,7 +200,7 @@ describe('ProjectAgent', () => {
 
       const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
       expect(payload.capabilities).toEqual([
-        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode',
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks',
       ])
       expect(payload.capabilities).not.toContain('ecs_launch')
 

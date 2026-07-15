@@ -24,6 +24,7 @@ import {
   REGISTER_AUTH_ERROR_DELAY_MS,
   REGISTER_RETRY_BASE_DELAY_MS,
   REGISTER_RETRY_MAX_DELAY_MS,
+  SERVER_SETUP_CUSTOM_TASKS_CAPABILITY,
 } from './constants'
 import { calculateBackoff } from './retry-strategy'
 import { getConfigDir } from './config-manager'
@@ -367,6 +368,10 @@ export class ProjectAgent {
       ipAddress: getLocalIpAddress(),
       capabilities: [
         'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode',
+        // A resident agent can run server-setup recipe bodies (custom Ansible
+        // tasks) directly over SSH; the api refuses to dispatch a body-carrying
+        // recipe to any agent that does not advertise this capability.
+        SERVER_SETUP_CUSTOM_TASKS_CAPABILITY,
         ...(ecsLauncher ? ['ecs_launch'] : []),
       ],
       availableChatModes: this.configSyncState.availableChatModes,
