@@ -176,7 +176,26 @@ RUN npx --yes playwright install-deps chromium
 # ARG placed here so layers above remain cached when AGENT_VERSION changes.
 # =============================================================================
 ARG AGENT_VERSION=latest
-RUN npm install -g @anthropic-ai/claude-code @openai/codex @ai-support-agent/cli@${AGENT_VERSION} backlog-mcp-server \
+RUN npm install -g @anthropic-ai/claude-code @openai/codex @ai-support-agent/cli@${AGENT_VERSION} \
+    # backlog-mcp-server is installed separately with --ignore-scripts because
+    # backlog-mcp-server@0.13.0 added a `preinstall: npx only-allow pnpm` guard
+    # that aborts `npm install` (exit 254 / npx ENOENT in a fresh layer). The
+    # guard is a footgun leaked from the maintainer's npm->pnpm dev-workflow
+    # migration — nulab's own README still tells consumers to run it via
+    # `npx backlog-mcp-server` (npm). For 0.13.0 the published package ships
+    # pre-built with no needed install/postinstall scripts, so --ignore-scripts
+    # skips only that harmless guard and the resulting binary works (verified).
+    #
+    # PINNED to an exact version so --ignore-scripts stays scoped to a release
+    # we verified: an unpinned install would let a future version's
+    # legitimately-needed lifecycle script (e.g. a native-binary download) be
+    # silently skipped, shipping a broken binary with a green build. Bumping
+    # this version is a deliberate step that must re-verify the guard/scripts.
+    # The `--version` smoke check right after install turns any such broken /
+    # incomplete install into a loud build failure instead of a silent one.
+    # Kept on its own command so the packages above retain their lifecycle scripts.
+    && npm install -g backlog-mcp-server@0.13.0 --ignore-scripts \
+    && backlog-mcp-server --version \
     && npm cache clean --force
 
 # Install playwright npm package as peer of @ai-support-agent/cli, then download
