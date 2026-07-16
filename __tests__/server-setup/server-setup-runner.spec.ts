@@ -462,6 +462,48 @@ describe('runServerSetup - bundled roles resolution', () => {
     expect(mockMkdtempSync).not.toHaveBeenCalled()
     expect(mockExecFile).not.toHaveBeenCalled()
   })
+
+  it('returns an error result when the bundled callback_plugins directory cannot be found (json stdout callback would otherwise be missing)', async () => {
+    const client = makeClient()
+    // roles/ exists (real check passes) but callback_plugins/ is missing —
+    // packaging error must fail clearly before creating a temp dir / private key.
+    // (Use `includes` so the bundled json.py under callback_plugins/ is also
+    // treated as absent, matching a genuinely missing directory.)
+    mockExistsSync.mockImplementation((...args: Parameters<typeof actualFs.existsSync>) => {
+      const p = String(args[0])
+      if (p.includes('callback_plugins')) return false
+      return actualFs.existsSync(...args)
+    })
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('json stdout callback not found')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+
+  it('returns an error result when callback_plugins/ exists but the bundled json.py callback file is missing (partial packaging must fail loudly, not after the temp dir/private key is created)', async () => {
+    const client = makeClient()
+    // The directory is present but the required json.py stdout callback file is
+    // absent. Checking only the directory would let this through and reproduce
+    // the original "Invalid callback for stdout specified: json" error after the
+    // private key is already on disk. Guard must reject it up front.
+    mockExistsSync.mockImplementation((...args: Parameters<typeof actualFs.existsSync>) => {
+      const p = String(args[0])
+      if (p.endsWith(`callback_plugins${require('path').sep}json.py`)) return false
+      return actualFs.existsSync(...args)
+    })
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('json stdout callback not found')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
 })
 
 describe('runServerSetup - success path', () => {
@@ -496,6 +538,13 @@ describe('runServerSetup - success path', () => {
     const env = (options as { env: NodeJS.ProcessEnv }).env
     expect(env.ANSIBLE_STDOUT_CALLBACK).toBe('json')
     expect(env.ANSIBLE_ROLES_PATH).toMatch(/ansible[/\\]roles$/)
+    // The bundled `json` stdout callback lives at ansible/callback_plugins/json.py.
+    // Ansible auto-discovers callback plugins only from a callback_plugins/ dir
+    // next to the *running* playbook — but the generated playbook runs from a
+    // temp dir, so the runner MUST point ANSIBLE_CALLBACK_PLUGINS at the bundled
+    // callback_plugins/ dir (mirroring ANSIBLE_ROLES_PATH). Without it,
+    // ansible-playbook aborts with "Invalid callback for stdout specified: json".
+    expect(env.ANSIBLE_CALLBACK_PLUGINS).toMatch(/ansible[/\\]callback_plugins$/)
     expect((options as { timeout: number }).timeout).toBeGreaterThan(0)
 
     // extra-vars.json = project variables only (empty here), 0600.
