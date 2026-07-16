@@ -36,6 +36,8 @@ export type AgentCommandStatus =
 export interface AgentCommand {
   commandId: string
   type: AgentCommandType
+  /** APIが保存した依頼者ID。Slack Webhook起点では `slack:` プレフィックスを持つ。 */
+  userId?: unknown
   payload: Record<string, unknown>
   status: AgentCommandStatus
   createdAt: number
