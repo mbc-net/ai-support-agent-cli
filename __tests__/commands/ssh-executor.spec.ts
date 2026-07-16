@@ -73,7 +73,9 @@ function directCredential(overrides: Partial<SshExecCredential> = {}): SshExecCr
     hostname: '203.0.113.10',
     port: 22,
     username: 'ubuntu',
-    authType: 'key',
+    // Mirrors the real api enum (api/src/project/dto/ssh-config.dto.ts:
+    // `enum: ['password', 'privateKey']`).
+    authType: 'privateKey',
     privateKey: PRIVATE_KEY,
     ...overrides,
   }
@@ -262,6 +264,18 @@ describe('executeSshCommand', () => {
       await expect(
         executeSshCommand({ ...directCredential(), hostname: '' }, 'echo hi', 5),
       ).rejects.toThrow(/hostname/)
+      expect(mockClientCtor).not.toHaveBeenCalled()
+    })
+
+    // Regression: server-setup-runner.ts's validateSshCredential rejects an
+    // authType that isn't 'password'/'privateKey' rather than silently
+    // falling back to the key path (フォールバック禁止) — an unrecognized
+    // authType here must not fall back to treating credential.privateKey
+    // (which could be anything) as SSH key material either.
+    it('rejects an unsupported authType instead of falling back to key auth', async () => {
+      await expect(
+        executeSshCommand(directCredential({ authType: 'kerberos' }), 'echo hi', 5),
+      ).rejects.toThrow(/authType/)
       expect(mockClientCtor).not.toHaveBeenCalled()
     })
   })

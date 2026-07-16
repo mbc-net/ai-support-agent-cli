@@ -239,6 +239,23 @@ const RESERVED_VAR_NAMES: ReadonlySet<string> = new Set([
   'environment',
 ])
 
+/**
+ * 接続用の認証情報を保持する Ansible 予約変数（完全一致）。`buildInventory`
+ * が `authType === 'password'` のホストに設定する `ansible_ssh_pass` など、
+ * テナント側の `secretVarNames`（ANSIBLE# プロジェクト変数）とは別に、常に
+ * secret 扱いする。`isReservedVarName`（set_fact/register での書き込み禁止）
+ * とは独立に、`referencesSecretVar` 側（no_log 付与のためのタスク内容の
+ * **参照**検出）にも常時マージする — でなければ `fail_msg: "{{
+ * ansible_ssh_pass }}"` のようなタスクでパスワードが平文のまま
+ * stepResults[].message / 実行エラー文字列に露出する。
+ */
+const ALWAYS_SECRET_VAR_NAMES: ReadonlySet<string> = new Set([
+  'ansible_ssh_pass',
+  'ansible_password',
+  'ansible_ssh_private_key_file',
+  'ansible_become_pass',
+])
+
 /** `lookup(...)` / `query(...)` / `q(...)` プラグイン参照を検出する正規表現。 */
 const LOOKUP_PLUGIN_PATTERN = /\b(lookup|query|q)\s*\(/
 
@@ -590,9 +607,13 @@ export function validateAnsibleTasks(
   }
 
   // 5. 正規化（secret参照タスクへの no_log 付与）
+  // ALWAYS_SECRET_VAR_NAMES は secretVarNames（テナントのANSIBLE#変数、api保存
+  // 時は空集合になり得る）とは独立に常時マージする — 接続用認証情報の変数名は
+  // テナント設定に関わらず常に secret 扱いする。
+  const noLogVarNames = new Set([...secretVarNames, ...ALWAYS_SECRET_VAR_NAMES])
   const normalizedTasks = parsed.map((rawTask) => {
     const task = { ...(rawTask as Record<string, unknown>) }
-    if (referencesSecretVar(task, secretVarNames) && task.no_log !== true) {
+    if (referencesSecretVar(task, noLogVarNames) && task.no_log !== true) {
       task.no_log = true
     }
     return task

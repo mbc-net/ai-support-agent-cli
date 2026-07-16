@@ -12,6 +12,10 @@ ARG APT_CACHE_BUST=2026-05-21
 RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
     && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip git openssh-client vim jq \
+    # sshpass: Ansible's `ssh` connection plugin shells out to this for
+    # ansible_ssh_pass (password-authType server_setup_exec hosts); without
+    # it, ansible-playbook fails to authenticate against password-only hosts.
+    sshpass \
     default-mysql-client postgresql-client \
     gnupg apt-transport-https \
     # Build tools for native addons (node-pty)
