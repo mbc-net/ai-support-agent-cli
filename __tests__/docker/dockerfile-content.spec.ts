@@ -151,7 +151,9 @@ describe('Dockerfile content validation', () => {
       })
 
       it('does not leave any apt-get update call without a retry chain', () => {
-        // 4 locations x 3 attempts (1 initial + 2 retries) each = 12.
+        // 4 locations x 3 attempts (1 initial + 2 retries) = 12, plus one extra
+        // `--allow-insecure-repositories` fallback attempt on the pre-gh update
+        // (see the "degraded apt signature" describe below) = 13.
         // Strip comment lines first: the Dockerfile mentions "apt-get update"
         // in comments ("reduce apt-get update calls", "before apt-get update").
         const codeOnly = content
@@ -159,7 +161,73 @@ describe('Dockerfile content validation', () => {
           .filter((line) => !line.trim().startsWith('#'))
           .join('\n')
         const totalUpdateCalls = (codeOnly.match(/apt-get update\b/g) || []).length
-        expect(totalUpdateCalls).toBe(12)
+        expect(totalUpdateCalls).toBe(13)
+      })
+    })
+
+    describe('gh/glab install tolerates degraded apt signature verification', () => {
+      // When this layer runs on a cached base whose Debian signing keys have
+      // rotated (or whose GPG state is otherwise degraded — a recurring Docker
+      // Desktop symptom), apt reports "At least one invalid signature was
+      // encountered" for EVERY repo, including the Debian base repos. The FIRST
+      // apt-get update in this RUN block already tolerates that with
+      // `--allow-insecure-repositories ... || true`, but the SECOND update (run
+      // right before installing gh) and the `apt-get install gh` were left on
+      // the strict path, so they hard-fail the whole image build with exit 100.
+      //
+      // The fix must NOT blindly weaken security: it degrades to
+      // --allow-unauthenticated ONLY when the strict update actually fails with
+      // the "invalid signature" symptom (a degraded base gpgv). Every other kind
+      // of failure — network, bad URL, a genuine tampered-package signature
+      // mismatch — must still surface as a hard build failure. Fall-backs log a
+      // WARNING to stderr, and gh/glab are smoke-checked so a broken or missing
+      // binary fails the build loudly instead of shipping green.
+
+      let normalized: string
+
+      beforeAll(() => {
+        normalized = content
+          .replace(/\\\r?\n/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+      })
+
+      it('probes for the "invalid signature" symptom before degrading, and only sets DEGRADED on that exact symptom', () => {
+        // The strict update failure path captures apt output and only flags
+        // DEGRADED when the known degraded-base symptom is present.
+        expect(normalized).toContain(
+          'UPD_OUT="$(apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false 2>&1)"',
+        )
+        expect(normalized).toMatch(
+          /if echo "\$UPD_OUT" \| grep -q "invalid signature"; then/,
+        )
+        expect(normalized).toMatch(/DEGRADED=1/)
+      })
+
+      it('installs gh with --allow-unauthenticated ONLY inside the DEGRADED branch (never unconditionally)', () => {
+        // The unauthenticated install must appear exactly once, gated by the
+        // DEGRADED flag; the else branch keeps full authentication.
+        const unauthGhCount = (
+          normalized.match(/--allow-unauthenticated gh\b/g) || []
+        ).length
+        expect(unauthGhCount).toBe(1)
+        expect(normalized).toMatch(
+          /if \[ -n "\$DEGRADED" \]; then apt-get install -y --no-install-recommends --allow-unauthenticated gh ; else apt-get install -y --no-install-recommends gh ; fi/,
+        )
+      })
+
+      it('logs a WARNING to stderr on every fall-back so degraded installs are visible in the build log', () => {
+        expect(normalized).toMatch(
+          /echo "WARNING: gh: degraded base GPG detected; continuing in degraded \(unauthenticated\) mode" >&2/,
+        )
+        expect(normalized).toMatch(
+          /echo "WARNING: gh: strict package-list refresh failed; probing for degraded base GPG \(invalid signature\)" >&2/,
+        )
+      })
+
+      it('smoke-checks gh and glab at build time so a broken/missing binary fails the build loudly', () => {
+        expect(normalized).toMatch(/&& gh --version\b/)
+        expect(normalized).toMatch(/&& glab --version\b/)
       })
     })
   })
