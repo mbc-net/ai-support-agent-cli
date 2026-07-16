@@ -530,6 +530,31 @@ tasks:
       const task = result.normalizedTasks?.[0] as Record<string, unknown>
       expect(task.no_log).toBeUndefined()
     })
+
+    // Regression: server-setup-runner.ts's buildInventory sets
+    // ansible_ssh_pass for authType: 'password' hosts. Without this,
+    // ansible.builtin.assert with fail_msg: "{{ ansible_ssh_pass }}" (or
+    // ansible.builtin.debug referencing the same variable) would leak the
+    // plaintext SSH password into stepResults[].message / the top-level
+    // error string, since secretVarNames (tenant ANSIBLE# variables) never
+    // includes it. This must be caught even with an empty/absent
+    // secretVarNames (e.g. api-save-time validation).
+    it.each([
+      ['ansible_ssh_pass', '{{ ansible_ssh_pass }}'],
+      ['ansible_ssh_private_key_file', '{{ ansible_ssh_private_key_file }}'],
+      ['ansible_become_pass', '{{ ansible_become_pass }}'],
+      ['ansible_password', '{{ ansible_password }}'],
+    ])('forces no_log on a task referencing the reserved connection var %s, even with no secretVarNames', (_name, expr) => {
+      const body = `
+- name: Leak connection secret
+  ansible.builtin.debug:
+    msg: "${expr}"
+`
+      const result = validateAnsibleTasks(body, { mode: 'ecs' })
+      expect(result.ok).toBe(true)
+      const task = result.normalizedTasks?.[0] as Record<string, unknown>
+      expect(task.no_log).toBe(true)
+    })
   })
 
   describe('不正な入力', () => {

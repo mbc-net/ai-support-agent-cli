@@ -86,6 +86,15 @@ export async function executeSshCommand(
   if (!credential.hostname || !credential.username || !credential.authType) {
     throw new Error('SSH connection requires hostname, username, and authType to be set')
   }
+  // `authType` decides whether `credential.privateKey` (an overloaded field,
+  // see this file's doc comment) is SSH key material or a plaintext
+  // password. An unrecognized authType must never silently fall back to the
+  // key path (フォールバック禁止) — mirrors server-setup-runner.ts's
+  // validateSshCredential, which guards the same overloaded field for the
+  // `server_setup_exec` command.
+  if (credential.authType !== 'password' && credential.authType !== 'privateKey') {
+    throw new Error(`SSH credential authType is not supported: ${JSON.stringify(credential.authType)}`)
+  }
 
   // Resolved (and, for Tailscale, connected) before the ssh2 Client is even
   // constructed: a SOCKS5 failure must surface as-is, not as a subsequent
