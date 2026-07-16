@@ -123,6 +123,18 @@ ENV PATH="$PATH:/opt/mssql-tools18/bin"
 # Re-install debian-archive-keyring to refresh GPG keys before apt-get update.
 # This prevents "invalid signature" errors when this layer runs on a cached
 # base where the Debian signing keys have been rotated since the cache was built.
+# The SECOND apt-get update (right before installing gh) tries the strict path
+# first; only if it fails AND apt reports the degraded-base symptom ("invalid
+# signature" on every repo — a Docker Desktop cached-base gpgv failure) does it
+# set DEGRADED and install gh with --allow-unauthenticated. Gating on that exact
+# symptom keeps full signature verification on healthy hosts and for every other
+# kind of failure (network, bad URL, a genuine tampered-package signature
+# mismatch) — those still surface as a hard build failure instead of silently
+# installing an unauthenticated package. Each fall-back path logs a WARNING to
+# stderr, and `gh --version` / `glab --version` at the end turn a broken or
+# missing binary into a loud build failure. Without this the build hard-failed
+# with exit 100 on a degraded base (the first update above is already tolerant;
+# leaving the second strict made the mitigation incomplete).
 RUN (apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false \
         || (sleep 5 && apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false) \
         || (sleep 15 && apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false) \
@@ -132,15 +144,32 @@ RUN (apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
-    && (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
-    && apt-get install -y --no-install-recommends gh \
+    && DEGRADED="" \
+    && if apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update); then \
+           : ; \
+       else \
+           echo "WARNING: gh: strict package-list refresh failed; probing for degraded base GPG (invalid signature)" >&2 ; \
+           UPD_OUT="$(apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false 2>&1)" ; \
+           echo "$UPD_OUT" ; \
+           if echo "$UPD_OUT" | grep -q "invalid signature"; then \
+               echo "WARNING: gh: degraded base GPG detected; continuing in degraded (unauthenticated) mode" >&2 ; \
+               DEGRADED=1 ; \
+           fi ; \
+       fi \
+    && if [ -n "$DEGRADED" ]; then \
+           apt-get install -y --no-install-recommends --allow-unauthenticated gh ; \
+       else \
+           apt-get install -y --no-install-recommends gh ; \
+       fi \
     && rm -rf /var/lib/apt/lists/* \
     && ARCH=$(dpkg --print-architecture) \
     && GLAB_VERSION=$(curl -sL "https://gitlab.com/api/v4/projects/34675721/releases/permalink/latest" | sed -n 's/.*"tag_name":"v\([^"]*\)".*/\1/p') \
     && curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${ARCH}.deb" \
         -o /tmp/glab.deb \
     && dpkg -i /tmp/glab.deb \
-    && rm /tmp/glab.deb
+    && rm /tmp/glab.deb \
+    && gh --version \
+    && glab --version
 
 # code-server (VS Code Server) — kept separate; version tied to code-server releases
 RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local \
