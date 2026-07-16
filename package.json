@@ -25,6 +25,7 @@
     "dist",
     "docker",
     "ansible",
+    "!ansible/callback_plugins/tests/**",
     "playwright.subprocess.config.js",
     "LICENSE",
     "README.md",
