@@ -68,12 +68,15 @@ import type { ServerSetupExecPayload, ServerSetupVariablesResponse, SshCredentia
 
 const PRIVATE_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE-KEY-MATERIAL\n-----END OPENSSH PRIVATE KEY-----\n'
 
+// authType mirrors the real api enum (api/src/project/dto/ssh-config.dto.ts:
+// `enum: ['password', 'privateKey']`) so tests reflect an actual server
+// response shape rather than an arbitrary "not password" placeholder.
 const CREDENTIAL: SshCredentials = {
   hostId: 'host-1',
   hostname: '203.0.113.10',
   port: 22,
   username: 'ubuntu',
-  authType: 'key',
+  authType: 'privateKey',
   privateKey: PRIVATE_KEY,
 }
 
@@ -969,6 +972,103 @@ describe('runServerSetup - Tailscale connectionType', () => {
   })
 })
 
+// Regression coverage for the bug where a password-authenticated SSH host
+// (authType: 'password') had its plaintext password written to a temp
+// `id_rsa` file and pointed to by `ansible_ssh_private_key_file` — the same
+// mistake `commands/ssh-executor.ts` already avoids (it branches on
+// `credential.authType === 'password'` for `ssh_exec`). OpenSSH cannot parse
+// a plaintext password as PEM/OpenSSH key material, so the target host
+// rejected the connection with "Load key ...: error in libcrypto" /
+// "Permission denied (publickey,password)".
+describe('runServerSetup - password authentication (authType)', () => {
+  const PASSWORD_CREDENTIAL = {
+    ...CREDENTIAL,
+    authType: 'password' as const,
+    privateKey: 's3cret-pw', // overloaded field: holds the password when authType === 'password'
+  }
+
+  function inventoryHostVars(hostKey: string): Record<string, unknown> {
+    const inventoryJson = JSON.parse(writtenFile('inventory.yml') as string) as {
+      target: { hosts: Record<string, Record<string, unknown>> }
+    }
+    return inventoryJson.target.hosts[hostKey]
+  }
+
+  it('uses ansible_ssh_pass (not a private key file) and never writes id_rsa for a password credential', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue(PASSWORD_CREDENTIAL),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    expect(writtenFile('id_rsa')).toBeUndefined()
+    const hostVars = inventoryHostVars(PASSWORD_CREDENTIAL.hostname)
+    expect(hostVars.ansible_ssh_pass).toBe('s3cret-pw')
+    expect(hostVars.ansible_ssh_private_key_file).toBeUndefined()
+  })
+
+  it('still writes id_rsa (0600) and sets ansible_ssh_private_key_file, with no ansible_ssh_pass, for a key credential', async () => {
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    expect(writtenFile('id_rsa')).toBe(PRIVATE_KEY)
+    const idRsaCall = mockWriteFileSync.mock.calls.find((c) => String(c[0]).endsWith('id_rsa'))
+    expect(idRsaCall?.[2]).toEqual({ mode: 0o600 })
+    const hostVars = inventoryHostVars(CREDENTIAL.hostname)
+    expect(hostVars.ansible_ssh_private_key_file).toEqual(expect.stringContaining('id_rsa'))
+    expect(hostVars.ansible_ssh_pass).toBeUndefined()
+  })
+
+  it('rejects a password credential with an empty password before any temp dir is created', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...PASSWORD_CREDENTIAL, privateKey: '' }),
+    })
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('privateKey')
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+
+  it('rejects a credential with an unsupported authType before any temp dir is created', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...CREDENTIAL, authType: 'kerberos' }),
+    })
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('authType')
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+
+  it('combines password auth with a Tailscale ProxyCommand (ansible_ssh_pass set, no private key, ProxyCommand present)', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({
+        ...PASSWORD_CREDENTIAL,
+        connectionType: 'tailscale' as const,
+        tailnetHostname: 'db-server-1.tailnet-abc.ts.net',
+      }),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    const hostVars = inventoryHostVars(PASSWORD_CREDENTIAL.hostname)
+    expect(hostVars.ansible_ssh_pass).toBe('s3cret-pw')
+    expect(hostVars.ansible_ssh_private_key_file).toBeUndefined()
+    expect(String(hostVars.ansible_ssh_common_args)).toContain('ProxyCommand')
+  })
+})
+
 describe('runServerSetup - server setup variables (project ANSIBLE# vars)', () => {
   it('fetches variables scoped to commandId/agentId and merges them into extra-vars.json', async () => {
     const client = makeClient({
@@ -1070,6 +1170,36 @@ describe('runServerSetup - secret redaction and no_log', () => {
     expect(result.success).toBe(false)
     if (!result.success) {
       expect(result.error).not.toContain('sup3r-s3cr3t-value')
+      expect(result.error).toContain('***')
+    }
+  })
+
+  // Regression: the SSH password (credential.privateKey for authType:
+  // 'password') never appears in secretNames (that only covers tenant
+  // ANSIBLE# project variables), so it was previously excluded from the
+  // belt-and-suspenders stdout/stderr redaction entirely — a leaked
+  // ansible_ssh_pass value (e.g. via a task's fail_msg) would have surfaced
+  // in plaintext in the top-level error.
+  it('redacts the SSH password from a leaked message even though it is absent from secretNames', async () => {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({
+        ...CREDENTIAL,
+        authType: 'password' as const,
+        privateKey: 'sup3r-s3cr3t-ssh-password',
+      }),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(
+      2,
+      ansibleJsonOutput([{ name: 'Leak connection secret', failed: true, msg: 'boom' }]),
+      'fatal: password was sup3r-s3cr3t-ssh-password',
+    )
+    const result = await runPromise
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).not.toContain('sup3r-s3cr3t-ssh-password')
       expect(result.error).toContain('***')
     }
   })

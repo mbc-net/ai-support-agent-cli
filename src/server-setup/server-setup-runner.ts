@@ -321,6 +321,18 @@ function validateSshCredential(credential: SshExecCredential): string | null {
   if (!Number.isInteger(credential.port) || credential.port < 1 || credential.port > 65535) {
     return `SSH credential port is out of range: ${JSON.stringify(credential.port)}`
   }
+  // `authType` decides whether `privateKey` (an overloaded field — see
+  // `buildInventory`'s doc comment) is treated as SSH key material or a
+  // plaintext password. An unrecognized value must never silently fall back
+  // to the key path (フォールバック禁止) — that is exactly how a
+  // password-authType host got its password written to disk as if it were
+  // key material, producing `error in libcrypto` when OpenSSH tried to parse it.
+  if (credential.authType !== 'password' && credential.authType !== 'privateKey') {
+    return `SSH credential authType is not supported: ${JSON.stringify(credential.authType)}`
+  }
+  if (!credential.privateKey) {
+    return `SSH credential privateKey is empty for authType ${JSON.stringify(credential.authType)}`
+  }
   if (credential.connectionType === 'tailscale') {
     if (typeof credential.tailnetHostname !== 'string' || !HOSTNAME_RE.test(credential.tailnetHostname)) {
       return `SSH credential tailnetHostname is not a valid hostname/IP address: ${JSON.stringify(credential.tailnetHostname)}`
@@ -349,6 +361,14 @@ function validateSshCredential(credential: SshExecCredential): string | null {
  * oneshot task's `tailscaled --socks5-server` sidecar; `ansible_ssh_common_args`
  * gets an additional `ProxyCommand` routing the SSH TCP stream through
  * `127.0.0.1:<socksPort>` via `nc`'s SOCKS5 client mode.
+ *
+ * Auth: `credential.privateKey` is an overloaded field (see
+ * `commands/ssh-executor.ts`'s doc comment) that holds either SSH key
+ * material or a plaintext password, depending on `credential.authType`.
+ * `authType === 'password'` sets `ansible_ssh_pass` (consumed by Ansible's
+ * `ssh` connection plugin via the `sshpass` binary) and omits
+ * `ansible_ssh_private_key_file` entirely — `keyPath` is only meaningful, and
+ * only written to disk by the caller, in the key case.
  */
 function buildInventory(credential: SshExecCredential, keyPath: string, knownHostsPath: string): string {
   const isTailscale = credential.connectionType === 'tailscale'
@@ -358,6 +378,9 @@ function buildInventory(credential: SshExecCredential, keyPath: string, knownHos
     ? ` -o ProxyCommand="nc -X 5 -x 127.0.0.1:${socksPort} %h %p"`
     : ''
   const commonArgs = `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${knownHostsPath}${proxyCommandArg}`
+  const authVars = credential.authType === 'password'
+    ? { ansible_ssh_pass: credential.privateKey }
+    : { ansible_ssh_private_key_file: keyPath }
   const inventory = {
     target: {
       hosts: {
@@ -365,7 +388,7 @@ function buildInventory(credential: SshExecCredential, keyPath: string, knownHos
           ansible_host: ansibleHost,
           ansible_port: credential.port,
           ansible_user: credential.username,
-          ansible_ssh_private_key_file: keyPath,
+          ...authVars,
           ansible_ssh_common_args: commonArgs,
         },
       },
@@ -611,15 +634,25 @@ export async function runServerSetup(
   let result: CommandResult = errorResult('server_setup_exec: no result was produced')
   try {
     result = await (async (): Promise<CommandResult> => {
+      // `credential.privateKey` only holds actual key material when
+      // authType !== 'password' (see buildInventory's doc comment) — writing
+      // a plaintext password here as if it were a key file is what caused
+      // OpenSSH's "error in libcrypto" (it can't parse a password as PEM/
+      // OpenSSH key data).
       const keyPath = path.join(tmpDir, 'id_rsa')
-      // 0600: only the current user may read/write the private key.
-      writeFileSync(keyPath, credential.privateKey, { mode: 0o600 })
+      if (credential.authType !== 'password') {
+        // 0600: only the current user may read/write the private key.
+        writeFileSync(keyPath, credential.privateKey, { mode: 0o600 })
+      }
 
       // Written with a .yml extension (JSON is valid YAML) so ansible-core's
       // bundled `yaml` inventory plugin — matched by file extension — parses it
       // unambiguously; see buildInventory's doc comment.
+      // 0600: for a password credential this file carries the plaintext
+      // password (ansible_ssh_pass) — same permission level as id_rsa/
+      // extra-vars.json alongside it.
       const inventoryPath = path.join(tmpDir, 'inventory.yml')
-      writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath))
+      writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath), { mode: 0o600 })
 
       // Project (`ANSIBLE#`) variables are the entire extra-vars set now that
       // per-step params are gone; body tasks reference them via `{{ VAR }}`.
@@ -669,9 +702,17 @@ export async function runServerSetup(
 
       // Belt-and-suspenders redaction (see redactSecretValues's doc comment):
       // applied to the raw stdout/stderr *before* anything else reads them.
+      // The SSH password (credential.privateKey when authType === 'password')
+      // is included unconditionally — it never appears in secretNameSet
+      // (that only covers tenant ANSIBLE# project variables) but is exactly
+      // as sensitive, and `ansible-task-guard`'s no_log annotation is a
+      // first line of defense, not the only one.
       const secretValues = Object.entries(serverSetupVariables.variables)
         .filter(([name]) => secretNameSet.has(name))
         .map(([, value]) => value)
+      if (credential.authType === 'password') {
+        secretValues.push(credential.privateKey)
+      }
       const stdout = redactSecretValues(rawStdout, secretValues)
       const stderr = redactSecretValues(rawStderr, secretValues)
 
