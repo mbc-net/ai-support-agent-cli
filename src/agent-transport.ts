@@ -345,8 +345,17 @@ async function processCommand(
   ctx.transportState.processing = true
   try {
     const detail = await deps.client.getCommand(commandId, deps.agentId)
-    logger.debug(`${deps.prefix} Command detail [${commandId}]: type=${detail.type}, payload=${JSON.stringify(detail.payload).substring(0, LOG_PAYLOAD_LIMIT)}`)
-    const result = await executeCommand(detail.type, detail.payload, {
+    const trustedPayload = detail.type === 'chat' &&
+      typeof detail.userId === 'string' &&
+      detail.userId.startsWith('slack:')
+      ? {
+          ...detail.payload,
+          interactionOrigin: 'slack',
+          toolPolicy: 'marketplace_read_only',
+        }
+      : detail.payload
+    logger.debug(`${deps.prefix} Command detail [${commandId}]: type=${detail.type}, payload=${JSON.stringify(trustedPayload).substring(0, LOG_PAYLOAD_LIMIT)}`)
+    const result = await executeCommand(detail.type, trustedPayload, {
       commandId,
       client: deps.client,
       serverConfig: ctx.configSyncState.serverConfig ?? undefined,
