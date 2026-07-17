@@ -130,6 +130,52 @@ export function buildImage(version: string, customDockerfile?: string): void {
 }
 
 /**
+ * Remove every locally cached `ai-support-agent` image tag other than
+ * `currentVersion`. Each version bump builds a brand new multi-GB image
+ * (Playwright/Ansible/AWS CLI etc. baked in) and nothing ever removed the
+ * superseded tag, so repeated rebuilds across versions silently grew the
+ * Docker Desktop disk without bound until it was exhausted mid-build (surfaced
+ * as an unrelated-looking "not enough free space" apt-get failure). Scoped to
+ * our own IMAGE_NAME only — never touches images/cache belonging to other
+ * projects. Best-effort: a tag that fails to remove (e.g. still referenced by
+ * a running container) is skipped rather than aborting the rest.
+ */
+/** Extract the most useful message from a failed execFileSync call: prefer captured stderr over the generic "Command failed: ..." message. */
+function execErrorMessage(err: unknown): string {
+  const stderr = (err as { stderr?: Buffer | string } | undefined)?.stderr
+  if (stderr && stderr.toString().trim().length > 0) return stderr.toString().trim()
+  return err instanceof Error ? err.message : String(err)
+}
+
+export function pruneOldImages(currentVersion: string): void {
+  let tags: string[]
+  try {
+    const output = execFileSync(getDockerPath(), ['images', '--format', '{{.Tag}}', IMAGE_NAME], { encoding: 'utf-8' })
+    tags = output
+      .toString()
+      .split('\n')
+      .map((tag) => tag.trim())
+      .filter((tag) => tag.length > 0 && tag !== currentVersion)
+  } catch (err: unknown) {
+    // Listing images failed (e.g. Docker unavailable, or the `docker images`
+    // output format changed). Logged rather than swallowed silently: if this
+    // keeps failing, pruning silently never runs and the disk-exhaustion bug
+    // this function exists to prevent would recur with no visible signal.
+    logger.warn(t('docker.oldImageListFailed', { message: execErrorMessage(err) }))
+    return
+  }
+
+  for (const tag of tags) {
+    try {
+      execFileSync(getDockerPath(), ['rmi', '-f', `${IMAGE_NAME}:${tag}`], { stdio: ['ignore', 'ignore', 'pipe'] })
+      logger.info(t('docker.oldImageRemoved', { tag }))
+    } catch (err: unknown) {
+      logger.warn(t('docker.oldImagePruneFailed', { tag, message: execErrorMessage(err) }))
+    }
+  }
+}
+
+/**
  * Build a deterministic container name for a project.
  * Format: ai-{tenantCode}-{projectCode}-{agentId}
  * All components are lowercased and non-alphanumeric chars (except hyphens) are replaced with hyphens.

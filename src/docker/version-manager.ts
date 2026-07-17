@@ -8,7 +8,7 @@ import { execFileSync } from 'child_process'
 
 import { AGENT_VERSION, NPM_COMMAND } from '../constants'
 import { isValidVersion, isNewerVersion } from '../utils/version'
-import { imageExists, buildImage } from './docker-utils'
+import { imageExists, buildImage, pruneOldImages } from './docker-utils'
 import { t } from '../i18n'
 import { logger } from '../logger'
 
@@ -58,6 +58,9 @@ export function ensureImage(customDockerfile?: string): string {
   const version = isNewerVersion(AGENT_VERSION, installedVersion) ? installedVersion : AGENT_VERSION
   if (!imageExists(version)) {
     buildImage(version, customDockerfile)
+    // Only the version just built is still needed locally — remove older
+    // tags now so disk usage doesn't grow unbounded across version bumps.
+    pruneOldImages(version)
   } else {
     logger.info(t('docker.imageFound', { version }))
   }
