@@ -749,7 +749,7 @@ describe('runServerSetup - failure path', () => {
         {
           name: 'precheck : Verify supported OS',
           failed: true,
-          msg: 'Unsupported OS: Debian 12. Only Ubuntu 22.04/24.04 LTS are supported by server setup execution.',
+          msg: 'Unsupported OS: Debian 12. Only Ubuntu 22.04/24.04/26.04 LTS are supported by server setup execution.',
         },
       ]),
       'fatal!',
@@ -1438,6 +1438,58 @@ describe('generatePlaybook', () => {
     const play = (loaded as Array<Record<string, unknown>>)[0]
     // 3 system precheck tasks (fact gather, sudo probe, sudo assert) + the OS precheck.
     expect((play.tasks as unknown[]).length).toBe(4)
+  })
+
+  it('allows Ubuntu 22.04, 24.04, and 26.04 in the OS precheck (fixed allowlist, not a general ">=22.04 LTS" rule)', () => {
+    const yaml = generatePlaybook([{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }])
+    const play = (load(yaml) as Array<Record<string, unknown>>)[0]
+    const tasks = play.tasks as Array<Record<string, unknown>>
+    const osPrecheckTask = tasks[3]
+    expect(osPrecheckTask.name).toBe('precheck : Verify supported OS')
+    const when = osPrecheckTask.when as string
+    expect(when).toContain("not in ['22.04', '24.04', '26.04']")
+  })
+
+  it('still rejects an Ubuntu version outside the fixed allowlist (e.g. 27.04) via the OS precheck condition', () => {
+    const yaml = generatePlaybook([{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }])
+    const play = (load(yaml) as Array<Record<string, unknown>>)[0]
+    const tasks = play.tasks as Array<Record<string, unknown>>
+    const osPrecheckTask = tasks[3]
+    const when = osPrecheckTask.when as string
+    // '27.04' must not appear among the allowed values.
+    expect(when).not.toContain("'27.04'")
+    const fail = osPrecheckTask['ansible.builtin.fail'] as { msg: string }
+    expect(fail.msg).toContain('Only Ubuntu 22.04/24.04/26.04 LTS are supported')
+  })
+
+  it('keeps the unused static ansible/playbook.yml\'s OS precheck in sync with generatePlaybook()\'s (a prior fix — PR #605 — let these drift once already)', () => {
+    const path = require('path') as typeof import('path')
+    const staticPlaybookYaml = actualFs.readFileSync(
+      path.join(__dirname, '../../ansible/playbook.yml'),
+      'utf-8',
+    )
+    const staticPlay = (load(staticPlaybookYaml) as Array<Record<string, unknown>>)[0]
+    const staticOsPrecheck = (staticPlay.tasks as Array<Record<string, unknown>>).find(
+      (t) => t.name === 'precheck : Verify supported OS',
+    )
+    expect(staticOsPrecheck).toBeDefined()
+
+    const generatedYaml = generatePlaybook([])
+    const generatedPlay = (load(generatedYaml) as Array<Record<string, unknown>>)[0]
+    const generatedOsPrecheck = (generatedPlay.tasks as Array<Record<string, unknown>>).find(
+      (t) => t.name === 'precheck : Verify supported OS',
+    )
+    expect(generatedOsPrecheck).toBeDefined()
+
+    expect((staticOsPrecheck as Record<string, unknown>)['ansible.builtin.fail']).toEqual(
+      (generatedOsPrecheck as Record<string, unknown>)['ansible.builtin.fail'],
+    )
+    expect((staticOsPrecheck as Record<string, unknown>).when).toBe(
+      (generatedOsPrecheck as Record<string, unknown>).when,
+    )
+    expect((staticOsPrecheck as Record<string, unknown>).tags).toBe(
+      (generatedOsPrecheck as Record<string, unknown>).tags,
+    )
   })
 })
 
