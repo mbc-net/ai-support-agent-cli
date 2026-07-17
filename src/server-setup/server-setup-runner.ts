@@ -63,18 +63,20 @@ const ANSIBLE_TIMEOUT_MS = 30 * 60 * 1000
 /**
  * System-generated OS precheck task, prepended to every generated play (before
  * the tenant admin's body tasks). Tagged `always` so it runs regardless of any
- * task-level tags a body task might carry. Ubuntu 22.04/24.04 LTS is the MVP
- * scope (matching the bundled roles' assumptions).
+ * task-level tags a body task might carry. Ubuntu 22.04/24.04/26.04 LTS is the
+ * MVP scope (matching the bundled roles' assumptions) — a fixed allowlist, not
+ * a general ">= 22.04" rule, so a future LTS (e.g. 28.04) still needs an
+ * explicit addition here before it is accepted.
  */
 const PRECHECK_TASK: Record<string, unknown> = {
   name: 'precheck : Verify supported OS',
   'ansible.builtin.fail': {
     msg:
       'Unsupported OS: {{ ansible_distribution }} {{ ansible_distribution_version }}. '
-      + 'Only Ubuntu 22.04/24.04 LTS are supported by server setup execution.',
+      + 'Only Ubuntu 22.04/24.04/26.04 LTS are supported by server setup execution.',
   },
   when:
-    "ansible_distribution != 'Ubuntu' or ansible_distribution_version not in ['22.04', '24.04']",
+    "ansible_distribution != 'Ubuntu' or ansible_distribution_version not in ['22.04', '24.04', '26.04']",
   tags: 'always',
 }
 
