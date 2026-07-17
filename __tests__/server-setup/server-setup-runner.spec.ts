@@ -55,6 +55,7 @@ jest.mock('../../src/server-setup/known-hosts-store', () => ({
 import { load } from 'js-yaml'
 
 import {
+  cleanupStaleServerSetupDirs,
   fetchServerSetupVariables,
   generatePlaybook,
   parseAnsibleOutput,
@@ -1365,5 +1366,112 @@ describe('redactSecretValues', () => {
 
   it('returns the text unchanged when there are no secrets', () => {
     expect(redactSecretValues('hello', [])).toBe('hello')
+  })
+})
+
+// cleanupStaleServerSetupDirs の挙動を unit テストする。実ファイル操作は fs を
+// spy する形ではなく、実ディレクトリを作って検証する（TerminalSession.
+// cleanupStaleSandboxes と同じ設計）。ただし実行中の常駐エージェントが同一
+// ホスト上で保持している本物の /tmp エントリを誤って巻き込まないよう、
+// os.tmpdir() 配下に隔離用の scratch ディレクトリを都度作成し、baseDir引数
+// でそこだけを対象にする（本物の /tmp は一切走査しない）。
+const SERVER_SETUP_TMP_PREFIX = 'ai-support-agent-server-setup-'
+
+describe('cleanupStaleServerSetupDirs', () => {
+  const os = require('os') as typeof import('os')
+  const path = require('path') as typeof import('path')
+
+  let baseDir: string
+
+  beforeEach(() => {
+    baseDir = actualFs.mkdtempSync(path.join(os.tmpdir(), 'cleanup-stale-server-setup-test-'))
+  })
+
+  afterEach(() => {
+    actualFs.rmSync(baseDir, { recursive: true, force: true })
+  })
+
+  function makeStaleDir(name: string, mtimeMs: number): string {
+    const fullPath = path.join(baseDir, name)
+    actualFs.mkdirSync(fullPath, { recursive: true })
+    // mtime を過去にする
+    const t = new Date(mtimeMs)
+    actualFs.utimesSync(fullPath, t, t)
+    return fullPath
+  }
+
+  it('24 時間以上古いものを削除する', () => {
+    const oldPath = makeStaleDir(
+      SERVER_SETUP_TMP_PREFIX + 'jest-old-' + Math.random().toString(36).slice(2),
+      Date.now() - 25 * 60 * 60 * 1000,
+    )
+
+    const removed = cleanupStaleServerSetupDirs(24 * 60 * 60 * 1000, baseDir)
+    expect(removed).toBe(1)
+    expect(actualFs.existsSync(oldPath)).toBe(false)
+  })
+
+  it('新しいもの (24 時間以内) は残す', () => {
+    const freshPath = makeStaleDir(
+      SERVER_SETUP_TMP_PREFIX + 'jest-fresh-' + Math.random().toString(36).slice(2),
+      Date.now() - 1000, // 1 秒前
+    )
+
+    cleanupStaleServerSetupDirs(24 * 60 * 60 * 1000, baseDir)
+    expect(actualFs.existsSync(freshPath)).toBe(true)
+  })
+
+  it('maxAgeMs=0 で全削除する', () => {
+    const freshPath = makeStaleDir(
+      SERVER_SETUP_TMP_PREFIX + 'jest-all-' + Math.random().toString(36).slice(2),
+      Date.now() - 1000,
+    )
+
+    const removed = cleanupStaleServerSetupDirs(0, baseDir)
+    expect(removed).toBe(1)
+    expect(actualFs.existsSync(freshPath)).toBe(false)
+  })
+
+  it('プレフィックスが一致しないエントリには触れない', () => {
+    const unrelatedPath = makeStaleDir(
+      'unrelated-app-dir-' + Math.random().toString(36).slice(2),
+      Date.now() - 25 * 60 * 60 * 1000,
+    )
+
+    const removed = cleanupStaleServerSetupDirs(24 * 60 * 60 * 1000, baseDir)
+    expect(removed).toBe(0)
+    expect(actualFs.existsSync(unrelatedPath)).toBe(true)
+  })
+
+  it('baseDir の readdirSync が失敗したら 0 を返す', () => {
+    const nonexistentDir = path.join(baseDir, 'does-not-exist')
+    expect(cleanupStaleServerSetupDirs(24 * 60 * 60 * 1000, nonexistentDir)).toBe(0)
+  })
+
+  it('個別の削除失敗はログに記録し、他のディレクトリの削除は継続する', () => {
+    const badPath = makeStaleDir(
+      SERVER_SETUP_TMP_PREFIX + 'jest-bad-' + Math.random().toString(36).slice(2),
+      Date.now() - 25 * 60 * 60 * 1000,
+    )
+    const goodPath = makeStaleDir(
+      SERVER_SETUP_TMP_PREFIX + 'jest-good-' + Math.random().toString(36).slice(2),
+      Date.now() - 25 * 60 * 60 * 1000,
+    )
+
+    mockRmSync.mockImplementation((...args: Parameters<typeof actualFs.rmSync>) => {
+      if (args[0] === badPath) {
+        throw new Error('EACCES: permission denied')
+      }
+      return actualFs.rmSync(...args)
+    })
+
+    const removed = cleanupStaleServerSetupDirs(24 * 60 * 60 * 1000, baseDir)
+
+    expect(removed).toBe(1)
+    expect(actualFs.existsSync(badPath)).toBe(true)
+    expect(actualFs.existsSync(goodPath)).toBe(false)
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('EACCES: permission denied'),
+    )
   })
 })
