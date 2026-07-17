@@ -39,6 +39,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { execFileSync } from 'child_process'
+import { t } from '../../src/i18n'
 
 jest.mock('fs')
 const mockExistsSync = fs.existsSync as jest.MockedFunction<typeof fs.existsSync>
@@ -57,11 +58,14 @@ import {
   imageExists,
   buildImage,
   dockerLogin,
+  pruneOldImages,
   IMAGE_NAME,
 } from '../../src/docker/docker-utils'
 import { logger } from '../../src/logger'
 
 const mockExecFileSync = execFileSync as jest.MockedFunction<typeof execFileSync>
+const mockLogger = logger as jest.Mocked<typeof logger>
+const mockT = t as jest.MockedFunction<typeof t>
 
 describe('docker-utils', () => {
   const originalEnv = process.env
@@ -362,6 +366,141 @@ describe('docker-utils', () => {
       expect(args).toContain('-f')
       expect(args).toContain('/custom/MyDockerfile')
       expect(logger.info).toHaveBeenCalledWith('docker.usingCustomDockerfile')
+    })
+  })
+
+  describe('pruneOldImages', () => {
+    it('removes every tag of our own image except the current version', () => {
+      mockExecFileSync.mockImplementation((_cmd, args) => {
+        if ((args as string[])[0] === 'images') {
+          return Buffer.from('1.0.0\n2.0.0\n3.0.0\n')
+        }
+        return Buffer.from('')
+      })
+
+      pruneOldImages('3.0.0')
+
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'docker',
+        ['images', '--format', '{{.Tag}}', IMAGE_NAME],
+        { encoding: 'utf-8' },
+      )
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'docker',
+        ['rmi', '-f', `${IMAGE_NAME}:1.0.0`],
+        { stdio: ['ignore', 'ignore', 'pipe'] },
+      )
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'docker',
+        ['rmi', '-f', `${IMAGE_NAME}:2.0.0`],
+        { stdio: ['ignore', 'ignore', 'pipe'] },
+      )
+      expect(mockExecFileSync).not.toHaveBeenCalledWith(
+        'docker',
+        ['rmi', '-f', `${IMAGE_NAME}:3.0.0`],
+        expect.anything(),
+      )
+    })
+
+    it('does nothing when only the current version image is present', () => {
+      mockExecFileSync.mockImplementation((_cmd, args) => {
+        if ((args as string[])[0] === 'images') {
+          return Buffer.from('3.0.0\n')
+        }
+        return Buffer.from('')
+      })
+
+      pruneOldImages('3.0.0')
+
+      expect(mockExecFileSync).toHaveBeenCalledTimes(1)
+    })
+
+    it('ignores blank lines in the tag listing', () => {
+      mockExecFileSync.mockImplementation((_cmd, args) => {
+        if ((args as string[])[0] === 'images') {
+          return Buffer.from('1.0.0\n\n\n3.0.0\n')
+        }
+        return Buffer.from('')
+      })
+
+      pruneOldImages('3.0.0')
+
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'docker',
+        ['rmi', '-f', `${IMAGE_NAME}:1.0.0`],
+        { stdio: ['ignore', 'ignore', 'pipe'] },
+      )
+      expect(mockExecFileSync).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not throw when listing images fails, and logs a warning so a persistent failure here stays visible', () => {
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error('Cannot connect to the Docker daemon')
+      })
+
+      expect(() => pruneOldImages('3.0.0')).not.toThrow()
+      expect(mockT).toHaveBeenCalledWith(
+        'docker.oldImageListFailed',
+        expect.objectContaining({ message: expect.stringContaining('Cannot connect to the Docker daemon') }),
+      )
+      expect(mockLogger.warn).toHaveBeenCalledWith('docker.oldImageListFailed')
+    })
+
+    it('surfaces the actual docker stderr (not just "Command failed") when listing images fails', () => {
+      const err = new Error('Command failed') as Error & { stderr: Buffer }
+      err.stderr = Buffer.from('permission denied while trying to connect to the Docker daemon socket')
+      mockExecFileSync.mockImplementation(() => {
+        throw err
+      })
+
+      pruneOldImages('3.0.0')
+
+      expect(mockT).toHaveBeenCalledWith(
+        'docker.oldImageListFailed',
+        expect.objectContaining({ message: 'permission denied while trying to connect to the Docker daemon socket' }),
+      )
+    })
+
+    it('continues removing remaining old images when one rmi call fails (e.g. in use by a running container)', () => {
+      mockExecFileSync.mockImplementation((_cmd, args) => {
+        const argv = args as string[]
+        if (argv[0] === 'images') {
+          return Buffer.from('1.0.0\n2.0.0\n3.0.0\n')
+        }
+        if (argv[0] === 'rmi' && argv[2] === `${IMAGE_NAME}:1.0.0`) {
+          throw new Error('image is being used by running container')
+        }
+        return Buffer.from('')
+      })
+
+      expect(() => pruneOldImages('3.0.0')).not.toThrow()
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'docker',
+        ['rmi', '-f', `${IMAGE_NAME}:2.0.0`],
+        { stdio: ['ignore', 'ignore', 'pipe'] },
+      )
+    })
+
+    it('logs the real docker stderr (not the generic "Command failed" message) when an rmi call fails', () => {
+      const err = new Error('Command failed') as Error & { stderr: Buffer }
+      err.stderr = Buffer.from('Error response from daemon: conflict: unable to remove repository reference')
+      mockExecFileSync.mockImplementation((_cmd, args) => {
+        const argv = args as string[]
+        if (argv[0] === 'images') {
+          return Buffer.from('1.0.0\n3.0.0\n')
+        }
+        throw err
+      })
+
+      pruneOldImages('3.0.0')
+
+      expect(mockT).toHaveBeenCalledWith(
+        'docker.oldImagePruneFailed',
+        expect.objectContaining({
+          tag: '1.0.0',
+          message: 'Error response from daemon: conflict: unable to remove repository reference',
+        }),
+      )
     })
   })
 
