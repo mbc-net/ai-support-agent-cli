@@ -15,6 +15,7 @@ import { exitWithError, getErrorMessage, isInDocker, nowIso, validateApiUrl } fr
 import { ApiClient } from './api-client'
 import { startConfigWatcher } from './config-watcher'
 import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
+import { cleanupStaleServerSetupDirs } from './server-setup/server-setup-runner'
 import { extractTokenId } from './utils/token-utils'
 import { TerminalSession } from './terminal/terminal-session'
 
@@ -215,6 +216,18 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     }
   } catch (err: unknown) {
     logger.warn(`Failed to clean up stale terminal-sandbox dirs: ${getErrorMessage(err)}`)
+  }
+
+  // 起動時に古い server-setup ディレクトリを掃除する。SSH秘密鍵を含む
+  // ため、terminal-sandbox と同じ理由（SIGKILL/クラッシュで finally が
+  // 走らず孤立し、累積すると ENOSPC を引き起こす）で同じパターンを適用する。
+  try {
+    const removed = cleanupStaleServerSetupDirs()
+    if (removed > 0) {
+      logger.info(`Cleaned up ${removed} stale server-setup dir(s) in /tmp`)
+    }
+  } catch (err: unknown) {
+    logger.warn(`Failed to clean up stale server-setup dirs: ${getErrorMessage(err)}`)
   }
 
   const config = loadConfig()
