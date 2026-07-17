@@ -21,6 +21,7 @@ jest.mock('../../src/utils/version', () => ({
 jest.mock('../../src/docker/docker-utils', () => ({
   imageExists: jest.fn(),
   buildImage: jest.fn(),
+  pruneOldImages: jest.fn(),
 }))
 
 jest.mock('../../src/i18n', () => ({
@@ -39,7 +40,7 @@ jest.mock('../../src/logger', () => ({
 
 import { execFileSync } from 'child_process'
 import { isValidVersion, isNewerVersion } from '../../src/utils/version'
-import { imageExists, buildImage } from '../../src/docker/docker-utils'
+import { imageExists, buildImage, pruneOldImages } from '../../src/docker/docker-utils'
 import {
   getInstalledVersion,
   resetInstalledVersionCache,
@@ -52,6 +53,7 @@ const mockIsValidVersion = isValidVersion as jest.MockedFunction<typeof isValidV
 const mockIsNewerVersion = isNewerVersion as jest.MockedFunction<typeof isNewerVersion>
 const mockImageExists = imageExists as jest.MockedFunction<typeof imageExists>
 const mockBuildImage = buildImage as jest.MockedFunction<typeof buildImage>
+const mockPruneOldImages = pruneOldImages as jest.MockedFunction<typeof pruneOldImages>
 const mockLogger = logger as jest.Mocked<typeof logger>
 
 describe('version-manager', () => {
@@ -190,6 +192,21 @@ describe('version-manager', () => {
       expect(version).toBe('1.0.0')
     })
 
+    it('prunes old versioned images after a fresh build so disk usage does not grow unbounded across version bumps', () => {
+      mockExecFileSync.mockImplementation(() => { throw new Error('fail') })
+      mockIsNewerVersion.mockReturnValue(false)
+      mockImageExists.mockReturnValue(false)
+
+      const version = ensureImage()
+
+      expect(mockBuildImage).toHaveBeenCalledWith('1.0.0', undefined)
+      expect(mockPruneOldImages).toHaveBeenCalledWith(version)
+      // Prune must run after the build completes, not before
+      expect(mockBuildImage.mock.invocationCallOrder[0]).toBeLessThan(
+        mockPruneOldImages.mock.invocationCallOrder[0],
+      )
+    })
+
     it('logs info when image already exists', () => {
       mockExecFileSync.mockImplementation(() => { throw new Error('fail') })
       mockIsNewerVersion.mockReturnValue(false)
@@ -199,6 +216,16 @@ describe('version-manager', () => {
 
       expect(mockBuildImage).not.toHaveBeenCalled()
       expect(mockLogger.info).toHaveBeenCalledWith('docker.imageFound')
+    })
+
+    it('does not prune when the image already exists (nothing new was built)', () => {
+      mockExecFileSync.mockImplementation(() => { throw new Error('fail') })
+      mockIsNewerVersion.mockReturnValue(false)
+      mockImageExists.mockReturnValue(true)
+
+      ensureImage()
+
+      expect(mockPruneOldImages).not.toHaveBeenCalled()
     })
 
     it('uses installed version when it is newer than compile-time version', () => {
