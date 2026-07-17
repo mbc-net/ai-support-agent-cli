@@ -58,7 +58,10 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     beautifulsoup4==4.* lxml==5.* \
     # Character encoding detection (for legacy files)
     chardet==5.* \
-    # Server setup execution: runs agent/ansible/playbook.yml against target hosts.
+    # Server setup execution: runs a dynamically generated playbook (built by
+    # generatePlaybook() in src/server-setup/server-setup-runner.ts, written to
+    # a per-run temp dir — NOT the static agent/ansible/playbook.yml, which is
+    # unused at runtime) against target hosts.
     # Pinned to a range validated against ansible/callback_plugins/json.py and
     # ansible/roles/database (CallbackBase's v2_runner_on_*/v2_playbook_on_stats
     # hooks and module result shapes are internal APIs, not covered by ansible-core's
