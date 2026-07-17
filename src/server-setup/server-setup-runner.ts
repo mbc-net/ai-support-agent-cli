@@ -10,8 +10,9 @@
  *      lenient) — see `resolveRouteMode`,
  *   2. fetches the target host's SSH private key Just-In-Time from the API,
  *   3. generates a single enclosing play (`hosts`/`become`/`gather_facts` all
- *      fixed by the agent, never by the caller) around a system-generated OS
- *      precheck task plus the validated body tasks, and runs it with
+ *      fixed by the agent, never by the caller) around system-generated
+ *      precheck tasks (explicit fact-gathering, a NOPASSWD-sudo probe, and an
+ *      OS check) plus the validated body tasks, and runs it with
  *      `ansible-playbook`,
  *   4. reports **per-task** results, and — critically — always removes the
  *      temp directory (private key included) afterwards, whether the run
@@ -74,6 +75,79 @@ const PRECHECK_TASK: Record<string, unknown> = {
   },
   when:
     "ansible_distribution != 'Ubuntu' or ansible_distribution_version not in ['22.04', '24.04']",
+  tags: 'always',
+}
+
+/**
+ * System-generated fact-gathering task, run explicitly with `become: false`.
+ * The play disables the implicit `gather_facts` (see `generatePlaybook`)
+ * because that implicit task inherits the play's `become: true` — and the
+ * fact-gathering module (`ansible.legacy.setup`) then fails outright on any
+ * host whose SSH user lacks NOPASSWD sudo ("interactive authentication is
+ * required"), before `PRECHECK_TASK` or any body task ever runs. The facts
+ * this runner depends on (`ansible_distribution`/`ansible_distribution_version`,
+ * read from `/etc/os-release`) do not require root, so gathering them without
+ * privilege escalation is sufficient.
+ */
+const GATHER_FACTS_TASK: Record<string, unknown> = {
+  name: 'precheck : Gather facts (no privilege escalation)',
+  'ansible.builtin.setup': {},
+  become: false,
+  tags: 'always',
+}
+
+/**
+ * `register` name for `SUDO_PRECHECK_PROBE_TASK`'s result. Ansible's `-e`
+ * extra-vars (which is exactly how project `ANSIBLE#` variables reach the
+ * play — see `runServerSetup`'s `extra-vars.json` write) **always** win over
+ * a `register`ed variable, regardless of evaluation order. If a tenant admin
+ * happened to name a project variable the same as this register target, its
+ * value would silently shadow the probe result and corrupt
+ * `SUDO_PRECHECK_ASSERT_TASK`'s `when` condition. This name is namespaced and
+ * long enough to make an accidental collision practically impossible, and
+ * `validateNoReservedVariableCollision` rejects the run outright (rather than
+ * silently misbehaving) on the astronomically unlikely case a project
+ * variable is named exactly this.
+ */
+export const SUDO_PROBE_REGISTER_VAR = '__ai_support_agent_server_setup_sudo_probe'
+
+/**
+ * Probes whether the SSH user can escalate via sudo without a password,
+ * without itself escalating (`become: false`) and without failing the play
+ * on a non-zero result (`failed_when: false`) — the result is inspected by
+ * `SUDO_PRECHECK_ASSERT_TASK` instead, so the failure is reported with a
+ * clear, actionable message rather than surfacing as an opaque module
+ * execution failure.
+ */
+const SUDO_PRECHECK_PROBE_TASK: Record<string, unknown> = {
+  name: 'precheck : Probe passwordless sudo',
+  'ansible.builtin.command': { cmd: 'sudo -n true' },
+  become: false,
+  changed_when: false,
+  failed_when: false,
+  register: SUDO_PROBE_REGISTER_VAR,
+  tags: 'always',
+}
+
+/**
+ * Fails the play with an actionable message when `SUDO_PRECHECK_PROBE_TASK`
+ * reported a non-zero return code (sudo required a password). Every bundled
+ * role runs privileged tasks (apt/user/ufw/etc.), so NOPASSWD sudo is a hard
+ * prerequisite for server setup — this is a deliberate design constraint, not
+ * a feature this runner supports working around.
+ */
+const SUDO_PRECHECK_ASSERT_TASK: Record<string, unknown> = {
+  name: 'precheck : Verify passwordless sudo',
+  'ansible.builtin.fail': {
+    msg:
+      'Passwordless (NOPASSWD) sudo is required for server setup, but the SSH '
+      + "user '{{ ansible_user }}' cannot escalate without a password on "
+      + '{{ inventory_hostname }}. Grant NOPASSWD sudo to this user (e.g. a '
+      + 'sudoers entry) and retry. Server setup does not support '
+      + 'password-based sudo.',
+  },
+  when: `${SUDO_PROBE_REGISTER_VAR}.rc | default(1) != 0`,
+  become: false,
   tags: 'always',
 }
 
@@ -251,10 +325,12 @@ export async function fetchServerSetupVariables(
 
 /**
  * Build the playbook YAML for a run: a single play with agent-fixed
- * `hosts`/`become`/`gather_facts`, whose `tasks` are the system-generated OS
- * precheck followed by the tenant admin's validated (+`no_log`-annotated) body
- * tasks. The caller never supplies play-level keys (the guard rejects any
- * `hosts`/`roles`/`vars_files` element), so the play here cannot be hijacked.
+ * `hosts`/`become`/`gather_facts`, whose `tasks` are the system-generated
+ * prechecks — explicit fact-gathering, a NOPASSWD-sudo probe/assert, then the
+ * OS check — followed by the tenant admin's validated (+`no_log`-annotated)
+ * body tasks. The caller never supplies play-level keys (the guard rejects
+ * any `hosts`/`roles`/`vars_files` element), so the play here cannot be
+ * hijacked.
  */
 export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]): string {
   const playbook: Record<string, unknown>[] = [
@@ -262,8 +338,17 @@ export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]):
       name: 'AI Support Agent server setup',
       hosts: 'all',
       become: true,
-      gather_facts: true,
-      tasks: [PRECHECK_TASK, ...bodyTasks],
+      // The implicit gather_facts task would inherit become:true and fail on
+      // any host lacking NOPASSWD sudo; facts are gathered explicitly instead
+      // (see GATHER_FACTS_TASK below).
+      gather_facts: false,
+      tasks: [
+        GATHER_FACTS_TASK,
+        SUDO_PRECHECK_PROBE_TASK,
+        SUDO_PRECHECK_ASSERT_TASK,
+        PRECHECK_TASK,
+        ...bodyTasks,
+      ],
     },
   ]
   return dump(playbook)
@@ -664,6 +749,17 @@ export async function runServerSetup(
     serverSetupVariables = await fetchServerSetupVariables(ctx.client, ctx.commandId, ctx.agentId ?? '')
   } catch (error) {
     return errorResult(`Failed to fetch server setup variables: ${getErrorMessage(error)}`)
+  }
+
+  // Extra-vars always outrank a `register`ed variable in Ansible's precedence
+  // order, so a project variable that happened to share SUDO_PROBE_REGISTER_VAR's
+  // name would silently shadow the sudo probe's result. Fail closed with a
+  // clear message instead of letting the precheck misbehave.
+  if (Object.prototype.hasOwnProperty.call(serverSetupVariables.variables, SUDO_PROBE_REGISTER_VAR)) {
+    return errorResult(
+      `Project variable name '${SUDO_PROBE_REGISTER_VAR}' is reserved for server setup's internal `
+      + 'passwordless-sudo precheck and cannot be used. Rename this project variable and retry.',
+    )
   }
 
   let rolesPath: string

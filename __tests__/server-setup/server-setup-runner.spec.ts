@@ -62,6 +62,7 @@ import {
   redactSecretValues,
   resolveRouteMode,
   runServerSetup,
+  SUDO_PROBE_REGISTER_VAR,
 } from '../../src/server-setup/server-setup-runner'
 import { logger } from '../../src/logger'
 import type { ApiClient } from '../../src/api-client'
@@ -515,7 +516,20 @@ describe('runServerSetup - success path', () => {
     const client = makeClient()
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
     await flushUntilExecFileCalled()
-    resolveExecFile(0, defaultOutput())
+    // Mirrors the *actual* system task list generatePlaybook() prepends
+    // (fact gather, sudo probe, sudo assert, OS precheck) ahead of the body,
+    // rather than only the OS-precheck-plus-body subset `defaultOutput()`
+    // uses elsewhere — this is the one test that also asserts on the real
+    // generated-playbook.yml content below, so it should reflect the true
+    // task list end to end.
+    resolveExecFile(0, ansibleJsonOutput([
+      { name: 'precheck : Gather facts (no privilege escalation)', changed: false },
+      { name: 'precheck : Probe passwordless sudo', changed: false },
+      { name: 'precheck : Verify passwordless sudo', skipped: true },
+      { name: 'precheck : Verify supported OS', skipped: true },
+      { name: 'os_init : Update apt cache', changed: true },
+      { name: 'docker : Install Docker Engine and compose plugin', changed: true },
+    ]))
     const result = await runPromise
 
     expect(result.success).toBe(true)
@@ -564,7 +578,9 @@ describe('runServerSetup - success path', () => {
     const play = (load(generatedYaml) as Array<Record<string, unknown>>)[0]
     expect(play.hosts).toBe('all')
     expect(play.become).toBe(true)
-    expect(play.gather_facts).toBe(true)
+    // Facts are gathered explicitly (become:false) by a system task instead —
+    // see the `generatePlaybook` describe block below for why.
+    expect(play.gather_facts).toBe(false)
 
     // inventory.yml references the fetched host/port/user/key path with TOFU.
     const inventoryJson = JSON.parse(writtenFile('inventory.yml') as string) as {
@@ -579,9 +595,12 @@ describe('runServerSetup - success path', () => {
     expect(hostVars.ansible_ssh_common_args).toContain(`UserKnownHostsFile=${KNOWN_HOSTS_PATH}`)
     expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'host-1')
 
-    // Per-task results (the precheck was skipped, the two body steps changed).
+    // Per-task results (facts gathered, sudo verified, OS precheck skipped, the two body steps changed).
     expect(result.data).toEqual({
       stepResults: [
+        { name: 'precheck : Gather facts (no privilege escalation)', status: 'ok', changed: false, message: 'precheck : Gather facts (no privilege escalation) completed' },
+        { name: 'precheck : Probe passwordless sudo', status: 'ok', changed: false, message: 'precheck : Probe passwordless sudo completed' },
+        { name: 'precheck : Verify passwordless sudo', status: 'skipped', changed: false, message: 'precheck : Verify passwordless sudo skipped' },
         { name: 'precheck : Verify supported OS', status: 'skipped', changed: false, message: 'precheck : Verify supported OS skipped' },
         { name: 'os_init : Update apt cache', status: 'ok', changed: true, message: 'os_init : Update apt cache completed' },
         { name: 'docker : Install Docker Engine and compose plugin', status: 'ok', changed: true, message: 'docker : Install Docker Engine and compose plugin completed' },
@@ -618,6 +637,31 @@ describe('runServerSetup - success path', () => {
       changed: false,
       message: 'Connection timed out',
     })
+  })
+
+  it('succeeds normally when passwordless sudo is configured (probe rc=0, assert skipped)', async () => {
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([
+      { name: 'precheck : Gather facts (no privilege escalation)', changed: false },
+      { name: 'precheck : Probe passwordless sudo', changed: false },
+      { name: 'precheck : Verify passwordless sudo', skipped: true },
+      { name: 'precheck : Verify supported OS', skipped: true },
+      { name: 'os_init : Update apt cache', changed: true },
+    ]))
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    const stepResults = (result.data as { stepResults: Array<Record<string, unknown>> }).stepResults
+    expect(stepResults.map((s) => s.name)).toEqual([
+      'precheck : Gather facts (no privilege escalation)',
+      'precheck : Probe passwordless sudo',
+      'precheck : Verify passwordless sudo',
+      'precheck : Verify supported OS',
+      'os_init : Update apt cache',
+    ])
+    expect(stepResults.every((s) => s.status !== 'failed')).toBe(true)
   })
 
   it('fails the run when stdout is malformed (non-JSON), even though ansible-playbook exited 0', async () => {
@@ -716,6 +760,36 @@ describe('runServerSetup - failure path', () => {
     if (!result.success) {
       expect(result.error).toContain('ansible-playbook exited with code 2')
       expect(result.error).toContain('Unsupported OS: Debian 12')
+    }
+  })
+
+  it('surfaces a clear, actionable error when the target host lacks NOPASSWD sudo (regression: previously this bubbled up as the opaque "ansible.legacy.setup" gather_facts failure)', async () => {
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(
+      2,
+      ansibleJsonOutput([
+        { name: 'precheck : Gather facts (no privilege escalation)', changed: false },
+        { name: 'precheck : Probe passwordless sudo', changed: false },
+        {
+          name: 'precheck : Verify passwordless sudo',
+          failed: true,
+          msg:
+            "Passwordless (NOPASSWD) sudo is required for server setup, but the SSH user 'deploy' "
+            + 'cannot escalate without a password on 203.0.113.10. Grant NOPASSWD sudo to this user '
+            + '(e.g. a sudoers entry) and retry. Server setup does not support password-based sudo.',
+        },
+      ]),
+      'fatal!',
+    )
+    const result = await runPromise
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('ansible-playbook exited with code 2')
+      expect(result.error).toContain('Passwordless (NOPASSWD) sudo is required')
+      expect(result.error).not.toContain('ansible.legacy.setup')
     }
   })
 
@@ -1099,6 +1173,24 @@ describe('runServerSetup - server setup variables (project ANSIBLE# vars)', () =
     expect(mockMkdtempSync).not.toHaveBeenCalled()
     expect(mockExecFile).not.toHaveBeenCalled()
   })
+
+  it('rejects a project variable whose name collides with the internal sudo-probe register variable, before any temp dir is created (extra-vars always outrank a registered var in Ansible, which would silently corrupt the NOPASSWD precheck)', async () => {
+    const client = makeClient({
+      getServerSetupVariables: jest.fn().mockResolvedValue({
+        variables: { [SUDO_PROBE_REGISTER_VAR]: 'attacker-controlled-or-accidental-value' },
+        secretNames: [],
+      }),
+    })
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain(SUDO_PROBE_REGISTER_VAR)
+      expect(result.error).toContain('reserved')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
 })
 
 describe('runServerSetup - secret redaction and no_log', () => {
@@ -1282,16 +1374,61 @@ describe('generatePlaybook', () => {
     expect(yaml).toContain('tags: always')
   })
 
-  it('wraps the body tasks in a single play with fixed hosts/become/gather_facts', () => {
+  it('wraps the body tasks in a single play with fixed hosts/become, and disables the implicit gather_facts', () => {
     const yaml = generatePlaybook([{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }])
     const play = (load(yaml) as Array<Record<string, unknown>>)[0]
     expect(play.hosts).toBe('all')
     expect(play.become).toBe(true)
-    expect(play.gather_facts).toBe(true)
+    // The implicit gather_facts task would run under become:true — which
+    // fails outright (ansible.legacy.setup "interactive authentication is
+    // required") on a host whose SSH user lacks NOPASSWD sudo. Facts are
+    // gathered explicitly instead (see the system tasks below), so the play
+    // itself must not gather facts implicitly.
+    expect(play.gather_facts).toBe(false)
     const tasks = play.tasks as Array<Record<string, unknown>>
-    // precheck first, then the body task.
-    expect(tasks[0].name).toBe('precheck : Verify supported OS')
-    expect(tasks[1].name).toBe('x')
+    // system tasks first (fact gather, then NOPASSWD sudo precheck, then OS
+    // precheck), then the body task.
+    expect(tasks[0].name).toBe('precheck : Gather facts (no privilege escalation)')
+    expect(tasks[1].name).toBe('precheck : Probe passwordless sudo')
+    expect(tasks[2].name).toBe('precheck : Verify passwordless sudo')
+    expect(tasks[3].name).toBe('precheck : Verify supported OS')
+    expect(tasks[4].name).toBe('x')
+  })
+
+  it('gathers facts explicitly without privilege escalation (become:false), so gathering does not require NOPASSWD sudo', () => {
+    const yaml = generatePlaybook([{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }])
+    const play = (load(yaml) as Array<Record<string, unknown>>)[0]
+    const tasks = play.tasks as Array<Record<string, unknown>>
+    const gatherTask = tasks[0]
+    expect(gatherTask['ansible.builtin.setup']).toBeDefined()
+    expect(gatherTask.become).toBe(false)
+    expect(gatherTask.tags).toBe('always')
+  })
+
+  it('probes passwordless sudo without privilege escalation and never fails the play by itself', () => {
+    const yaml = generatePlaybook([{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }])
+    const play = (load(yaml) as Array<Record<string, unknown>>)[0]
+    const tasks = play.tasks as Array<Record<string, unknown>>
+    const probeTask = tasks[1]
+    expect(probeTask['ansible.builtin.command']).toEqual({ cmd: 'sudo -n true' })
+    expect(probeTask.become).toBe(false)
+    expect(probeTask.failed_when).toBe(false)
+    expect(probeTask.changed_when).toBe(false)
+    expect(probeTask.register).toBe(SUDO_PROBE_REGISTER_VAR)
+    expect(probeTask.tags).toBe('always')
+  })
+
+  it('fails with a clear, actionable message when the passwordless-sudo probe reports a non-zero rc', () => {
+    const yaml = generatePlaybook([{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }])
+    const play = (load(yaml) as Array<Record<string, unknown>>)[0]
+    const tasks = play.tasks as Array<Record<string, unknown>>
+    const assertTask = tasks[2]
+    const fail = assertTask['ansible.builtin.fail'] as { msg: string }
+    expect(fail.msg).toContain('Passwordless (NOPASSWD) sudo is required')
+    expect(fail.msg).toContain('password-based sudo')
+    expect(assertTask.when).toBe(`${SUDO_PROBE_REGISTER_VAR}.rc | default(1) != 0`)
+    expect(assertTask.become).toBe(false)
+    expect(assertTask.tags).toBe('always')
   })
 
   it('produces valid, parseable YAML for an empty body', () => {
@@ -1299,7 +1436,8 @@ describe('generatePlaybook', () => {
     const loaded = load(yaml) as unknown[]
     expect(Array.isArray(loaded)).toBe(true)
     const play = (loaded as Array<Record<string, unknown>>)[0]
-    expect((play.tasks as unknown[]).length).toBe(1)
+    // 3 system precheck tasks (fact gather, sudo probe, sudo assert) + the OS precheck.
+    expect((play.tasks as unknown[]).length).toBe(4)
   })
 })
 
