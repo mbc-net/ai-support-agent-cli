@@ -22,7 +22,7 @@
  */
 
 import { execFile } from 'child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs'
 import { dump } from 'js-yaml'
 import * as os from 'os'
 import * as path from 'path'
@@ -567,6 +567,65 @@ export function parseAnsibleOutput(rawOutput: string): ParsedAnsibleOutput {
   return { taskResults, outputUnparseable }
 }
 
+/** Prefix shared by every per-run temp dir `runServerSetup` creates via `mkdtempSync`. */
+const SERVER_SETUP_TMP_PREFIX = 'ai-support-agent-server-setup-'
+
+/**
+ * Sweep orphaned server-setup temp dirs (SSH private key, inventory,
+ * extra-vars.json, generated playbook — see `runServerSetup`'s doc comment).
+ *
+ * `runServerSetup` always removes its own temp dir in a `finally` block, but
+ * that `finally` never runs if the resident agent process itself is
+ * SIGKILL'd / OOM-killed / crashes / is forcibly restarted mid-run — the
+ * private-key-holding dir is then orphaned in `/tmp` forever. Over a resident
+ * agent's long uptime these accumulate and can exhaust `/tmp`, causing
+ * `mkdtempSync` itself to fail with ENOSPC (same failure mode already fixed
+ * for `terminal-sandbox-*` dirs by `TerminalSession.cleanupStaleSandboxes`
+ * and for per-command MCP config files by `cleanupStaleCommandMcpConfigs` —
+ * this mirrors that same pattern here).
+ *
+ * Defaults to only dirs at least 24h old so a concurrently in-flight
+ * `runServerSetup` call on another process is never touched. `maxAgeMs=0`
+ * removes all matching dirs regardless of age.
+ *
+ * A dedicated, fully-namespaced prefix (rather than a short generic one) is
+ * used so this sweep can never mistake an unrelated app's `/tmp` entry for
+ * one of ours. Individual removal failures (e.g. a permissions error) are
+ * logged rather than silently swallowed, since the resource at stake is a
+ * plaintext SSH private key.
+ *
+ * @param maxAgeMs delete dirs at least this old (ms); 0 removes all
+ * @param baseDir directory to scan, overridable so tests never sweep the
+ *   real `/tmp` (defaults to `os.tmpdir()`)
+ * @returns number of dirs removed
+ */
+export function cleanupStaleServerSetupDirs(
+  maxAgeMs: number = 24 * 60 * 60 * 1000,
+  baseDir: string = os.tmpdir(),
+): number {
+  let removed = 0
+  let entries: string[]
+  try {
+    entries = readdirSync(baseDir)
+  } catch {
+    return 0
+  }
+  const now = Date.now()
+  for (const name of entries) {
+    if (!name.startsWith(SERVER_SETUP_TMP_PREFIX)) continue
+    const fullPath = path.join(baseDir, name)
+    try {
+      const stat = statSync(fullPath)
+      if (maxAgeMs > 0 && now - stat.mtimeMs < maxAgeMs) continue
+      rmSync(fullPath, { recursive: true, force: true })
+      removed++
+    } catch (error) {
+      logger.warn(`[server-setup] Failed to clean up stale server-setup dir ${name}: ${getErrorMessage(error)}`)
+    }
+  }
+  return removed
+}
+
 /**
  * Execute a `server_setup_exec` command: re-validate the body, fetch the SSH
  * credential and project variables, generate + run the playbook, and report
@@ -627,7 +686,7 @@ export async function runServerSetup(
     return errorResult(`Failed to resolve known_hosts file: ${getErrorMessage(error)}`)
   }
 
-  const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'ss-'))
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), SERVER_SETUP_TMP_PREFIX))
   // Every exit path below assigns `result`, but keep a safe default so
   // TypeScript's definite-assignment analysis can't leave it unset by the time
   // `finally` reads it.
