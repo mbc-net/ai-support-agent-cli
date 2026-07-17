@@ -31,8 +31,9 @@
 # file directly — it is only referenced via the inventory's
 # ansible_ssh_private_key_file).
 #
-# Supported OS: MVP scope is Ubuntu 22.04/24.04 LTS only (see precheck task
-# below, tagged `always` so it runs regardless of which --tags are passed).
+# Supported OS: MVP scope is Ubuntu 22.04/24.04/26.04 LTS only (see precheck
+# task below, tagged `always` so it runs regardless of which --tags are
+# passed). Fixed allowlist, not a general ">= 22.04" rule.
 - name: AI Support Agent server setup
   hosts: all
   become: true
@@ -43,10 +44,10 @@
       ansible.builtin.fail:
         msg: >-
           Unsupported OS: {{ ansible_distribution }} {{ ansible_distribution_version }}.
-          Only Ubuntu 22.04/24.04 LTS are supported by server setup execution.
+          Only Ubuntu 22.04/24.04/26.04 LTS are supported by server setup execution.
       when: >-
         ansible_distribution != 'Ubuntu' or
-        ansible_distribution_version not in ['22.04', '24.04']
+        ansible_distribution_version not in ['22.04', '24.04', '26.04']
       tags: always
 
   roles:
