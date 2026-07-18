@@ -1,5 +1,7 @@
 import { DEFAULT_SCHEMA, load } from 'js-yaml'
 
+import { toErrorMessage } from '../utils'
+
 /**
  * サーバーセットアップレシピ本体（`body` = Ansible タスク列 YAML）の静的検証ガード。
  *
@@ -488,9 +490,7 @@ export function validateAnsibleTasks(
         {
           taskIndex: -1,
           key: 'root',
-          reason: `YAML parse failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          reason: `YAML parse failed: ${toErrorMessage(error)}`,
         },
       ],
     }

@@ -8,7 +8,7 @@ import { loadConfig, getProjectList } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
-import { getErrorMessage } from '../../utils'
+import { ensureDir, getErrorMessage } from '../../utils'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import {
@@ -533,25 +533,17 @@ export function writeProjectServiceFiles(
 
   const logDir = getLogDir()
   const projectLogDir = getProjectLogDir(logDir, projectKey)
-  if (!fs.existsSync(projectLogDir)) {
-    fs.mkdirSync(projectLogDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(projectLogDir, 0o700)
 
   const systemdDir = getSystemdUserDir()
-  if (!fs.existsSync(systemdDir)) {
-    fs.mkdirSync(systemdDir, { recursive: true })
-  }
+  ensureDir(systemdDir)
 
   const servicesDir = getServicesDir()
   const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  if (!fs.existsSync(projectServiceDir)) {
-    fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(projectServiceDir, 0o700)
 
   const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  if (!fs.existsSync(projectConfigHostDir)) {
-    fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(projectConfigHostDir, 0o700)
 
   // Validate project.projectDir the same way buildProjectVolumeMounts does on
   // the interactive path. If the user-supplied dir is empty, doesn't exist,
@@ -667,14 +659,10 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     }
 
     const logDir = getLogDir()
-    if (!fs.existsSync(logDir)) {
-      fs.mkdirSync(logDir, { recursive: true })
-    }
+    ensureDir(logDir)
 
     const systemdDir = getSystemdUserDir()
-    if (!fs.existsSync(systemdDir)) {
-      fs.mkdirSync(systemdDir, { recursive: true })
-    }
+    ensureDir(systemdDir)
 
     const updateScriptPath = getUpdateScriptPath()
     const updateScript = generateUpdateScript()

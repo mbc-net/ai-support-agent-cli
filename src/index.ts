@@ -31,6 +31,7 @@ import {
 } from './config-manager'
 import { initI18n, t } from './i18n'
 import { logger } from './logger'
+import { toErrorMessage } from './utils'
 
 initI18n()
 
@@ -218,7 +219,7 @@ if (process.env[ONESHOT_ENV_VARS.AGENT_MODE] === AGENT_MODE_ONESHOT) {
   import('./oneshot-runner')
     .then(({ runOneshotFromEnv }) => runOneshotFromEnv())
     .catch((error: unknown) => {
-      logger.error(`[oneshot] Fatal startup error: ${error instanceof Error ? error.message : String(error)}`)
+      logger.error(`[oneshot] Fatal startup error: ${toErrorMessage(error)}`)
       process.exit(1)
     })
 } else {
