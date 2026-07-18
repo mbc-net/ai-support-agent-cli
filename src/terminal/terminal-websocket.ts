@@ -200,7 +200,9 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
         // Authentication success acknowledgement from server — no action needed
         break
       case 'error': {
-        const errMsg = (msg as unknown as Record<string, unknown>).message ?? (msg as unknown as Record<string, unknown>).error ?? 'unknown'
+        // `error` は TerminalServerMessage の公式フィールドではないが、サーバー実装が
+        // message の代わりに送ってくる可能性があるため防御的に読む
+        const errMsg = msg.message ?? (msg as unknown as Record<string, unknown>).error ?? 'unknown'
         logger.warn(`[terminal-ws] Server error (session=${msg.sessionId ?? 'none'}): ${errMsg}`)
         break
       }
