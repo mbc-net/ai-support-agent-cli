@@ -20,6 +20,7 @@ import {
 } from '../../utils/path-utils'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
+import { ensureDir, ensureSecureDir } from './service-template-helpers'
 import type { ProjectStatus, ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
 import {
   assertProjectCodeIsSafe,
@@ -308,20 +309,14 @@ export function writeAndRegisterProjectTask(
   // them (e.g. WSL/SMB shares).
   const logDir = getLogDir()
   const projectLogDir = getProjectLogDir(logDir, projectKey)
-  if (!fs.existsSync(projectLogDir)) {
-    fs.mkdirSync(projectLogDir, { recursive: true, mode: 0o700 })
-  }
+  ensureSecureDir(projectLogDir)
 
   const servicesDir = getServicesDir()
   const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  if (!fs.existsSync(projectServiceDir)) {
-    fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
-  }
+  ensureSecureDir(projectServiceDir)
 
   const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  if (!fs.existsSync(projectConfigHostDir)) {
-    fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
-  }
+  ensureSecureDir(projectConfigHostDir)
 
   const validatedProjectDir = validateProjectDirForMount(project.projectDir)
 
@@ -374,9 +369,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
     }
 
     const logDir = getLogDir()
-    if (!fs.existsSync(logDir)) {
-      fs.mkdirSync(logDir, { recursive: true })
-    }
+    ensureDir(logDir)
 
     // Detect sanitizeServiceNameSegment() collisions where two valid codes map to the same task
     // name. Shared helper guarantees identical semantics with linux/darwin.

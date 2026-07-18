@@ -22,7 +22,7 @@ import {
   toContainerApiUrl,
   validateProjectDirForMount,
 } from './wrapper-helpers'
-import { buildDockerRunWithLogRotate } from './service-template-helpers'
+import { buildDockerRunWithLogRotate, ensureDir, ensureSecureDir } from './service-template-helpers'
 import {
   getDarwinLaunchAgentsDir,
   getDarwinLogDir,
@@ -508,25 +508,17 @@ export function writeProjectServiceFiles(
 
   const logDir = getLogDir()
   const projectLogDir = getProjectLogDir(logDir, projectKey)
-  if (!fs.existsSync(projectLogDir)) {
-    fs.mkdirSync(projectLogDir, { recursive: true, mode: 0o700 })
-  }
+  ensureSecureDir(projectLogDir)
 
   const launchAgentsDir = getDarwinLaunchAgentsDir()
-  if (!fs.existsSync(launchAgentsDir)) {
-    fs.mkdirSync(launchAgentsDir, { recursive: true })
-  }
+  ensureDir(launchAgentsDir)
 
   const servicesDir = getServicesDir()
   const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  if (!fs.existsSync(projectServiceDir)) {
-    fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
-  }
+  ensureSecureDir(projectServiceDir)
 
   const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  if (!fs.existsSync(projectConfigHostDir)) {
-    fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
-  }
+  ensureSecureDir(projectConfigHostDir)
 
   // Validate project.projectDir same way the Linux wrapper does. If
   // missing, empty, or blocked (e.g. `/etc`, `~/.ssh`), drop it so
@@ -609,14 +601,10 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     }
 
     const logDir = getLogDir()
-    if (!fs.existsSync(logDir)) {
-      fs.mkdirSync(logDir, { recursive: true })
-    }
+    ensureDir(logDir)
 
     const launchAgentsDir = getDarwinLaunchAgentsDir()
-    if (!fs.existsSync(launchAgentsDir)) {
-      fs.mkdirSync(launchAgentsDir, { recursive: true })
-    }
+    ensureDir(launchAgentsDir)
 
     const updateScriptPath = getUpdateScriptPath()
     const updateScript = generateUpdateScript()

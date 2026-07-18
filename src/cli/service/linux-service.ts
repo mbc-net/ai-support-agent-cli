@@ -19,7 +19,7 @@ import {
   toContainerApiUrl,
   validateProjectDirForMount,
 } from './wrapper-helpers'
-import { buildDockerRunWithLogRotate } from './service-template-helpers'
+import { buildDockerRunWithLogRotate, ensureDir, ensureSecureDir } from './service-template-helpers'
 import type {
   ProjectStatus,
   ServiceConfig,
@@ -533,25 +533,17 @@ export function writeProjectServiceFiles(
 
   const logDir = getLogDir()
   const projectLogDir = getProjectLogDir(logDir, projectKey)
-  if (!fs.existsSync(projectLogDir)) {
-    fs.mkdirSync(projectLogDir, { recursive: true, mode: 0o700 })
-  }
+  ensureSecureDir(projectLogDir)
 
   const systemdDir = getSystemdUserDir()
-  if (!fs.existsSync(systemdDir)) {
-    fs.mkdirSync(systemdDir, { recursive: true })
-  }
+  ensureDir(systemdDir)
 
   const servicesDir = getServicesDir()
   const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  if (!fs.existsSync(projectServiceDir)) {
-    fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
-  }
+  ensureSecureDir(projectServiceDir)
 
   const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  if (!fs.existsSync(projectConfigHostDir)) {
-    fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
-  }
+  ensureSecureDir(projectConfigHostDir)
 
   // Validate project.projectDir the same way buildProjectVolumeMounts does on
   // the interactive path. If the user-supplied dir is empty, doesn't exist,
@@ -667,14 +659,10 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     }
 
     const logDir = getLogDir()
-    if (!fs.existsSync(logDir)) {
-      fs.mkdirSync(logDir, { recursive: true })
-    }
+    ensureDir(logDir)
 
     const systemdDir = getSystemdUserDir()
-    if (!fs.existsSync(systemdDir)) {
-      fs.mkdirSync(systemdDir, { recursive: true })
-    }
+    ensureDir(systemdDir)
 
     const updateScriptPath = getUpdateScriptPath()
     const updateScript = generateUpdateScript()

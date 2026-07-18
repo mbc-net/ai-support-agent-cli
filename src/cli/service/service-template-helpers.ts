@@ -1,4 +1,27 @@
+import * as fs from 'fs'
+
 import { shellQuote } from './wrapper-helpers'
+
+/** Directory mode restricting access to the owner only (used for dirs holding tokens/secrets). */
+const SECURE_DIR_MODE = 0o700
+
+/** Creates `dir` (and parents) if it does not already exist. */
+export function ensureDir(dir: string): void {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+}
+
+/**
+ * Creates `dir` (and parents) if it does not already exist, restricted to
+ * owner-only access. Used for directories holding per-project tokens/secrets
+ * (service wrapper scripts, project config, logs).
+ */
+export function ensureSecureDir(dir: string): void {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: SECURE_DIR_MODE })
+  }
+}
 
 /**
  * Build the bash snippet that runs a docker container, optionally routing
