@@ -485,7 +485,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
           const isEnoent = isErrnoException(err, 'ENOENT')
           const isNoServer = stderr.includes('no server running') || stderr.includes('no sessions')
           if (!isEnoent && !isNoServer) {
-            logger.warn(`[terminal-ws] tmux list-sessions unexpected error: ${(err as NodeJS.ErrnoException).code ?? 'unknown'} - ${err.message}`)
+            logger.warn(`[terminal-ws] tmux list-sessions unexpected error: ${err.code ?? 'unknown'} - ${err.message}`)
           }
           this.send({ type: 'tmux_sessions', requestId, sessions: [] })
           return
