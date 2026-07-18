@@ -3,6 +3,7 @@ import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios'
 import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL, ENV_VARS } from './constants'
 import { logger } from './logger'
 import { RetryStrategy } from './retry-strategy'
+import { toErrorMessage } from './utils'
 import { extractTenantCodeFromToken } from './utils/token-utils'
 import type {
   AgentCommand,
@@ -449,7 +450,7 @@ export class ApiClient {
         tenantCode,
         projectCode,
         alertNumber,
-        error: error instanceof Error ? error.message : String(error),
+        error: toErrorMessage(error),
       })
       return null
     }

@@ -8,7 +8,7 @@ import { logger } from '../logger'
 import type { ChatChunkType } from '../types'
 import { createActivityTimeout } from '../utils/activity-timeout'
 import { StreamLineParser } from '../utils/stream-parser'
-import { isErrnoException } from '../utils'
+import { isErrnoException, toErrorMessage } from '../utils'
 
 import { buildCleanEnv } from './claude-code-args'
 import { killWithEscalation } from './cli-process-kill'
@@ -298,7 +298,7 @@ export function buildCodexMcpConfigOverrides(mcpConfigPath: string): string[] {
     }
     return args
   } catch (error) {
-    logger.warn(`[chat] Failed to load Codex MCP config: ${error instanceof Error ? error.message : String(error)}`)
+    logger.warn(`[chat] Failed to load Codex MCP config: ${toErrorMessage(error)}`)
     return []
   }
 }
@@ -345,7 +345,7 @@ function readOutputLastMessage(filePath: string): string | undefined {
     if (!fs.existsSync(filePath)) return undefined
     return fs.readFileSync(filePath, 'utf-8')
   } catch (error) {
-    logger.debug(`[chat] Failed to read codex last message: ${error instanceof Error ? error.message : String(error)}`)
+    logger.debug(`[chat] Failed to read codex last message: ${toErrorMessage(error)}`)
     return undefined
   }
 }
@@ -354,7 +354,7 @@ function cleanupOutputLastMessage(filePath: string): void {
   try {
     fs.rmSync(path.dirname(filePath), { recursive: true, force: true })
   } catch (error) {
-    logger.debug(`[chat] Failed to remove codex last message temp dir: ${error instanceof Error ? error.message : String(error)}`)
+    logger.debug(`[chat] Failed to remove codex last message temp dir: ${toErrorMessage(error)}`)
   }
 }
 
