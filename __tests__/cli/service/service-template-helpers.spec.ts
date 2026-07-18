@@ -1,79 +1,10 @@
-import * as fs from 'fs'
-import * as os from 'os'
-import * as path from 'path'
-
-import { buildDockerRunWithLogRotate, ensureDir, ensureSecureDir } from '../../../src/cli/service/service-template-helpers'
+import { buildDockerRunWithLogRotate } from '../../../src/cli/service/service-template-helpers'
 
 /**
- * ensureDir/ensureSecureDir are thin fs wrappers; exercised against the real
- * filesystem (jest's tmpdir gives isolation) rather than mocking fs, per the
- * project's established pattern for sync fs helpers (see log-rotator.spec.ts).
+ * ensureDir (used by darwin/linux/win32-service.ts for both plain and
+ * owner-only-mode directories) lives in ../../../src/utils and is covered by
+ * __tests__/utils.spec.ts — no need to duplicate that coverage here.
  */
-function makeTempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'service-template-helpers-spec-'))
-}
-
-function rmrf(dir: string): void {
-  try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
-}
-
-describe('ensureDir', () => {
-  let tmpDir: string
-
-  afterEach(() => {
-    rmrf(tmpDir)
-  })
-
-  it('creates the directory (recursively) when it does not exist', () => {
-    tmpDir = makeTempDir()
-    const target = path.join(tmpDir, 'a', 'b')
-    expect(fs.existsSync(target)).toBe(false)
-    ensureDir(target)
-    expect(fs.existsSync(target)).toBe(true)
-    expect(fs.statSync(target).isDirectory()).toBe(true)
-  })
-
-  it('is a no-op when the directory already exists', () => {
-    tmpDir = makeTempDir()
-    ensureDir(tmpDir)
-    expect(() => ensureDir(tmpDir)).not.toThrow()
-    expect(fs.existsSync(tmpDir)).toBe(true)
-  })
-})
-
-describe('ensureSecureDir', () => {
-  let tmpDir: string
-
-  afterEach(() => {
-    rmrf(tmpDir)
-  })
-
-  it('creates the directory (recursively) when it does not exist', () => {
-    tmpDir = makeTempDir()
-    const target = path.join(tmpDir, 'a', 'b')
-    expect(fs.existsSync(target)).toBe(false)
-    ensureSecureDir(target)
-    expect(fs.existsSync(target)).toBe(true)
-    expect(fs.statSync(target).isDirectory()).toBe(true)
-  })
-
-  it('restricts the created directory to owner-only access on POSIX', () => {
-    if (process.platform === 'win32') return
-    tmpDir = makeTempDir()
-    const target = path.join(tmpDir, 'secure')
-    ensureSecureDir(target)
-    const mode = fs.statSync(target).mode & 0o777
-    expect(mode).toBe(0o700)
-  })
-
-  it('is a no-op when the directory already exists', () => {
-    tmpDir = makeTempDir()
-    ensureSecureDir(tmpDir)
-    expect(() => ensureSecureDir(tmpDir)).not.toThrow()
-    expect(fs.existsSync(tmpDir)).toBe(true)
-  })
-})
-
 describe('buildDockerRunWithLogRotate', () => {
   const buildDockerRun = (outputRedirect: string) =>
     `docker run --rm -i --name "test-container" \\\n  -e FOO=bar \\${outputRedirect}`

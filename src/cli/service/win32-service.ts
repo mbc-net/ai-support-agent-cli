@@ -9,7 +9,7 @@ import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
 import type { ProjectRegistration } from '../../types'
-import { getErrorMessage } from '../../utils'
+import { ensureDir, getErrorMessage } from '../../utils'
 import {
   getProjectConfigHostDir,
   getProjectLogDir,
@@ -20,7 +20,6 @@ import {
 } from '../../utils/path-utils'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
-import { ensureDir, ensureSecureDir } from './service-template-helpers'
 import type { ProjectStatus, ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
 import {
   assertProjectCodeIsSafe,
@@ -309,14 +308,14 @@ export function writeAndRegisterProjectTask(
   // them (e.g. WSL/SMB shares).
   const logDir = getLogDir()
   const projectLogDir = getProjectLogDir(logDir, projectKey)
-  ensureSecureDir(projectLogDir)
+  ensureDir(projectLogDir, 0o700)
 
   const servicesDir = getServicesDir()
   const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  ensureSecureDir(projectServiceDir)
+  ensureDir(projectServiceDir, 0o700)
 
   const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  ensureSecureDir(projectConfigHostDir)
+  ensureDir(projectConfigHostDir, 0o700)
 
   const validatedProjectDir = validateProjectDirForMount(project.projectDir)
 

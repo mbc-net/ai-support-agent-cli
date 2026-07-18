@@ -8,7 +8,7 @@ import { loadConfig, getProjectList } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
-import { getErrorMessage } from '../../utils'
+import { ensureDir, getErrorMessage } from '../../utils'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import {
@@ -19,7 +19,7 @@ import {
   toContainerApiUrl,
   validateProjectDirForMount,
 } from './wrapper-helpers'
-import { buildDockerRunWithLogRotate, ensureDir, ensureSecureDir } from './service-template-helpers'
+import { buildDockerRunWithLogRotate } from './service-template-helpers'
 import type {
   ProjectStatus,
   ServiceConfig,
@@ -533,17 +533,17 @@ export function writeProjectServiceFiles(
 
   const logDir = getLogDir()
   const projectLogDir = getProjectLogDir(logDir, projectKey)
-  ensureSecureDir(projectLogDir)
+  ensureDir(projectLogDir, 0o700)
 
   const systemdDir = getSystemdUserDir()
   ensureDir(systemdDir)
 
   const servicesDir = getServicesDir()
   const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  ensureSecureDir(projectServiceDir)
+  ensureDir(projectServiceDir, 0o700)
 
   const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  ensureSecureDir(projectConfigHostDir)
+  ensureDir(projectConfigHostDir, 0o700)
 
   // Validate project.projectDir the same way buildProjectVolumeMounts does on
   // the interactive path. If the user-supplied dir is empty, doesn't exist,

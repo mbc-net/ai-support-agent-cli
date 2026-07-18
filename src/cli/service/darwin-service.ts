@@ -10,7 +10,7 @@ import type { ProjectStatus } from './types'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
-import { getErrorMessage } from '../../utils'
+import { ensureDir, getErrorMessage } from '../../utils'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
@@ -22,7 +22,7 @@ import {
   toContainerApiUrl,
   validateProjectDirForMount,
 } from './wrapper-helpers'
-import { buildDockerRunWithLogRotate, ensureDir, ensureSecureDir } from './service-template-helpers'
+import { buildDockerRunWithLogRotate } from './service-template-helpers'
 import {
   getDarwinLaunchAgentsDir,
   getDarwinLogDir,
@@ -508,17 +508,17 @@ export function writeProjectServiceFiles(
 
   const logDir = getLogDir()
   const projectLogDir = getProjectLogDir(logDir, projectKey)
-  ensureSecureDir(projectLogDir)
+  ensureDir(projectLogDir, 0o700)
 
   const launchAgentsDir = getDarwinLaunchAgentsDir()
   ensureDir(launchAgentsDir)
 
   const servicesDir = getServicesDir()
   const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  ensureSecureDir(projectServiceDir)
+  ensureDir(projectServiceDir, 0o700)
 
   const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  ensureSecureDir(projectConfigHostDir)
+  ensureDir(projectConfigHostDir, 0o700)
 
   // Validate project.projectDir same way the Linux wrapper does. If
   // missing, empty, or blocked (e.g. `/etc`, `~/.ssh`), drop it so
