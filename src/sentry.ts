@@ -29,6 +29,25 @@ export async function initSentry(): Promise<void> {
           message: breadcrumb.message ? maskSecrets(breadcrumb.message) : breadcrumb.message,
         }))
       }
+      if (event.exception?.values) {
+        event.exception.values = event.exception.values.map((exception) => ({
+          ...exception,
+          value: exception.value ? maskSecrets(exception.value) : exception.value,
+          stacktrace: exception.stacktrace
+            ? {
+                ...exception.stacktrace,
+                frames: exception.stacktrace.frames?.map((frame) => ({
+                  ...frame,
+                  context_line: frame.context_line
+                    ? maskSecrets(frame.context_line)
+                    : frame.context_line,
+                  pre_context: frame.pre_context?.map((line) => maskSecrets(line)),
+                  post_context: frame.post_context?.map((line) => maskSecrets(line)),
+                })),
+              }
+            : exception.stacktrace,
+        }))
+      }
       return event
     },
     beforeBreadcrumb(breadcrumb) {
