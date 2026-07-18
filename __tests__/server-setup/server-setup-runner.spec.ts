@@ -295,7 +295,7 @@ tasks:
     }
   })
 
-  it('rejects an include_role referencing a role outside the allowed 5', async () => {
+  it('rejects an include_role referencing a role outside the allowed bundled roles', async () => {
     const client = makeClient()
     const body = `
 - name: rootkit

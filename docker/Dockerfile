@@ -77,10 +77,17 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # vulnerable to SQL injection via a password containing a single quote.
 # `ansible.mysql` is used rather than the now-deprecated
 # `community.mysql.mysql_user` (removal planned for community.mysql 6.0.0).
+# `ansible.posix` provides `authorized_key`, used by
+# ansible/roles/ssh_key/tasks/main.yml to add SSH public keys to a target
+# user's ~/.ssh/authorized_keys. This module is allowlisted in
+# src/server-setup/ansible-task-guard.ts's *base* MODULE_ALLOWLIST (both ecs
+# and resident routes), so it must be installed here unconditionally, not
+# gated behind the database role's collections.
 # Version ranges pinned for the same reproducibility reason as ansible-core
 # above — an unbounded install could silently pick up a future major release
-# with a changed module interface (e.g. mysql_user/postgresql_user parameter
-# shape) that ansible/roles/database/tasks/main.yml wasn't validated against.
+# with a changed module interface (e.g. mysql_user/postgresql_user/
+# authorized_key parameter shape) that the bundled roles weren't validated
+# against.
 # Installed to /usr/share/ansible/collections — one of ansible-core's default
 # collection search paths regardless of the runtime user's $HOME — so the
 # collections are found no matter which UID the container ultimately runs as
@@ -88,6 +95,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 RUN ansible-galaxy collection install \
     'ansible.mysql:>=5.0.0,<6.0.0' \
     'community.postgresql:>=4.0.0,<5.0.0' \
+    'ansible.posix:>=1.5.0,<2.0.0' \
     -p /usr/share/ansible/collections \
     && chmod -R a+rX /usr/share/ansible/collections
 
