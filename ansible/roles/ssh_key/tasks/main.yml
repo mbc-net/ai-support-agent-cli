@@ -1,0 +1,47 @@
+---
+# ssh_key role: adds one or more SSH public keys to a target user's
+# ~/.ssh/authorized_keys via ansible.posix.authorized_key (bundled into the
+# agent CLI's Docker image via `ansible-galaxy collection install`, see
+# docker/Dockerfile).
+#
+# `ssh_key_user` and `ssh_key_public_key` are required role variables with no
+# defaults — the recipe author must supply both explicitly (e.g.
+# `ssh_key_public_key: "{{ MY_PROJECT_SSH_KEY_VAR }}"` referencing an
+# ANSIBLE# project variable). Unlike web_server_type/db_type (enum values
+# checked before this playbook ever runs, per server-setup-runner.ts), there
+# is no such precheck for these free-form string variables, so the assert
+# below is the *only* safety net: without it, `ansible.posix.authorized_key`
+# would fail with a generic Jinja "'ssh_key_user' is undefined" error instead
+# of a message that tells the recipe author what to fix.
+#
+# Each `that` expression short-circuits on `is defined`/`is string` before
+# ever touching `| trim`, so it never raises a raw Jinja UndefinedError for a
+# missing variable. `is string` matters on its own: a bare `default('')`
+# guard (this role's original approach) only substitutes when the variable is
+# genuinely undefined — an explicit `null` or `true` passes through
+# `default('')` unchanged, and Jinja's `trim` filter happily stringifies
+# either ("None"/"True", both non-empty) instead of raising, so `length > 0`
+# would wrongly evaluate true and let the assert pass. Verified against a
+# real ansible-core run: `ssh_key_user: null` and `ssh_key_user: true` both
+# silently passed the `default('')`-only version.
+#
+# `ssh_key_public_key` may hold multiple keys separated by newlines —
+# `authorized_key`'s `key` parameter natively accepts a newline-separated
+# list, so no extra splitting logic is needed here.
+
+- name: "ssh_key : Validate required variables are set"
+  ansible.builtin.assert:
+    that:
+      - ssh_key_user is defined and ssh_key_user is string and (ssh_key_user | trim | length > 0)
+      - ssh_key_public_key is defined and ssh_key_public_key is string and (ssh_key_public_key | trim | length > 0)
+    fail_msg: >-
+      ssh_key_user and ssh_key_public_key must both be set to non-empty
+      strings (e.g. via the recipe's include_role.vars, with
+      ssh_key_public_key referencing an ANSIBLE# project variable).
+
+- name: "ssh_key : Add authorized SSH public key(s)"
+  ansible.posix.authorized_key:
+    user: "{{ ssh_key_user }}"
+    key: "{{ ssh_key_public_key }}"
+    state: present
+    exclusive: false

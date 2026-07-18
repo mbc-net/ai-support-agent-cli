@@ -19,10 +19,15 @@ import { DEFAULT_SCHEMA, load } from 'js-yaml'
  * （早期 UX フィードバック）。権威判定は agent 実行時に `dispatchMode` に応じたモードで行う。
  *
  * ## `include_role` スニペット（組み込みステップ）
- * 組み込みステップ（os_init/docker/web_server/database/dns_tls）は、bundled role を呼ぶ
- * `include_role` タスクとして表現する。`include_role` は 5 ロールのみ許可し、role 名と
- * 許可 param キーを専用バリデータで個別検査する。ロール変数は `include_role.vars`
- * （モジュール引数内のネストマッピング）で渡す（task レベルの `vars` は禁止のまま）。
+ * 組み込みステップ（os_init/docker/web_server/database/dns_tls/ssh_key）は、bundled role を
+ * 呼ぶ `include_role` タスクとして表現する。`include_role` は 6 ロールのみ許可し、role 名と
+ * 許可 param キーを専用バリデータで個別検査する。ロール変数は **task レベルの `vars:`**
+ * （`include_role:` と同じインデントの兄弟キー）で渡す。`ansible.builtin.include_role`
+ * モジュールに `vars` というパラメータは存在しない（モジュール引数内にネストすると実機の
+ * `ansible-playbook` が `Invalid options for ansible.builtin.include_role: vars` で拒否する
+ * ため、そちらは許可しない）。include_role タスクに限り task レベルの `vars` を
+ * `FORBIDDEN_TASK_KEYS` の対象から除外し、中身は他タスクの `vars`（禁止のまま）と同じ
+ * 予約語・マジック変数名チェックを適用する。
  *
  * 設計: admin-docs/docs/specifications/git-artifact-platform.md
  */
@@ -154,6 +159,10 @@ const MODULE_ALLOWLIST: ReadonlySet<string> = new Set([
   'ansible.builtin.wait_for',
   'ansible.mysql.mysql_user',
   'community.postgresql.postgresql_user',
+  // Not resident-specific: SSH key management is an operation on the *target*
+  // server, not a controller-host attack surface (unlike lookup/copy-src),
+  // so it belongs in the base allowlist alongside the ssh_key bundled role.
+  'ansible.posix.authorized_key',
 ])
 
 /**
@@ -173,7 +182,6 @@ const RESIDENT_EXTRA_MODULE_ALLOWLIST: ReadonlySet<string> = new Set([
   'ansible.builtin.mount',
   'ansible.posix.mount',
   'ansible.posix.sysctl',
-  'ansible.posix.authorized_key',
   'community.general.timezone',
   'community.docker.docker_container',
   'community.docker.docker_image',
@@ -201,7 +209,7 @@ const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * `include_role` で呼び出しを許可する 5 つの bundled role。
+ * `include_role` で呼び出しを許可する 6 つの bundled role。
  * 組み込みステップ（スニペット）に 1:1 対応する。
  */
 export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
@@ -210,19 +218,25 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'web_server',
   'database',
   'dns_tls',
+  'ssh_key',
 ])
 
 /**
  * `include_role` のモジュール引数マッピングで許可する param キー。
- * - `name`: 必須。上記 5 ロールのいずれか。
- * - `vars`: ロール変数（マッピング）。task レベルの `vars`（禁止）とは別物で、
- *   include_role のモジュール引数内にネストされるためロールスコープに閉じる。
+ * - `name`: 必須。上記 6 ロールのいずれか。
  * - `tasks_from`: ロール内の代替タスクファイル名（ロールディレクトリ内に閉じる）。
  * - `public`: include したロールの変数を後続へ公開するか（真偽値）。
+ *
+ * **`vars` はここに含めない**: `ansible.builtin.include_role` モジュールに `vars` という
+ * パラメータは存在しない（実機の `ansible-playbook --syntax-check` で
+ * `[ERROR]: Invalid options for ansible.builtin.include_role: vars` になることを確認済み）。
+ * ロール変数は代わりに **task レベルの `vars:`**（`include_role:` と同じインデントの
+ * 兄弟キー）で渡す。`validateAnsibleTasks` 側で、include_role タスクに限り task レベルの
+ * `vars` を `FORBIDDEN_TASK_KEYS` の対象から除外し、その中身を
+ * {@link validateIncludeRoleTaskVars} で検証する。
  */
 const INCLUDE_ROLE_ALLOWED_PARAM_KEYS: ReadonlySet<string> = new Set([
   'name',
-  'vars',
   'tasks_from',
   'public',
 ])
@@ -356,16 +370,8 @@ function getModuleCandidateKeys(task: Record<string, unknown>): string[] {
  * `include_role` タスクのモジュール引数を検証する。
  * - 引数はマッピングであること。
  * - `name` が {@link INCLUDE_ROLE_ALLOWED_ROLES} のいずれかであること。
- * - すべてのキーが {@link INCLUDE_ROLE_ALLOWED_PARAM_KEYS} に含まれること。
- * - `vars`（ロール変数マッピング）の**各キー**が予約語・マジック変数名でないこと
- *   （{@link isReservedVarName}）。task レベルの `vars` は {@link FORBIDDEN_TASK_KEYS} で
- *   丸ごと拒否されるが、`include_role.vars` はロールスコープに閉じるため param として
- *   許可している。しかし中身を検査しないと `vars: { ansible_connection: local }` 等の
- *   magic 変数注入で、固定 `become: true` の play を agent ホスト自身へリダイレクトできて
- *   しまう（本ガードが塞ぐべき委譲/接続すり替え攻撃の再発）。set_fact と同じ予約語チェックを
- *   適用してこれを防ぐ。`vars` 値内の `lookup(...)` 参照は呼び出し側
- *   （{@link validateAnsibleTasks} のタスク全体再帰 {@link containsLookupPluginReference}）で
- *   別途拒否される。
+ * - すべてのキーが {@link INCLUDE_ROLE_ALLOWED_PARAM_KEYS} に含まれること（`vars` はここに
+ *   含まれない — {@link validateIncludeRoleTaskVars} 参照）。
  * - `tasks_from`（ロール内の代替タスクファイル名）が英数・`_`・`-` のみ
  *   （{@link TASKS_FROM_ALLOWED_PATTERN}）であること。`/` や `..` を含む値でロール
  *   ディレクトリ外の任意ファイルを読み込ませるパストラバーサルを防ぐ。
@@ -404,20 +410,6 @@ function validateIncludeRole(
     }
   }
 
-  // include_role.vars（ロール変数マッピング）の各キーを予約語・マジック変数名で検査する。
-  const vars = moduleArgs.vars
-  if (isPlainObject(vars)) {
-    for (const varName of Object.keys(vars)) {
-      if (isReservedVarName(varName)) {
-        violations.push({
-          taskIndex,
-          key: varName,
-          reason: 'reserved or magic variable name in include_role vars',
-        })
-      }
-    }
-  }
-
   // tasks_from はロールディレクトリ内の代替タスクファイル名。パストラバーサルを
   // 防ぐため、英数・`_`・`-` のみの allowlist で検証する（`/`・`..` は拒否）。
   const tasksFrom = moduleArgs.tasks_from
@@ -431,6 +423,41 @@ function validateIncludeRole(
         key: 'tasks_from',
         reason:
           'include_role tasks_from must match [A-Za-z0-9_-]+ (no path separators)',
+      })
+    }
+  }
+}
+
+/**
+ * `include_role` タスクにロール変数を渡す唯一の正しい形は task レベルの `vars:`
+ * （`include_role:` と同じインデントの兄弟キー）である —
+ * `ansible.builtin.include_role` モジュールに `vars` というパラメータは存在せず、
+ * モジュール引数内にネストすると実機の `ansible-playbook` が
+ * `[ERROR]: Invalid options for ansible.builtin.include_role: vars` で拒否する
+ * （検証済み。{@link INCLUDE_ROLE_ALLOWED_PARAM_KEYS} のコメント参照）。
+ *
+ * `validateAnsibleTasks` は include_role タスクに限り、task レベルの `vars` を
+ * {@link FORBIDDEN_TASK_KEYS} の対象から除外して通過させる。この関数はその中身を、
+ * 従来 `include_role.vars` に適用していたのと同じ予約語・マジック変数名チェック
+ * （{@link isReservedVarName}）で検査する。中身を検査しないと
+ * `vars: { ansible_connection: local }` 等の magic 変数注入で、固定 `become: true` の
+ * play を agent ホスト自身へリダイレクトできてしまう（本ガードが塞ぐべき委譲/接続
+ * すり替え攻撃の再発）。`vars` 値内の `lookup(...)` 参照は呼び出し側
+ * （{@link validateAnsibleTasks} のタスク全体再帰 {@link containsLookupPluginReference}）
+ * で別途拒否される。
+ */
+function validateIncludeRoleTaskVars(
+  taskIndex: number,
+  taskLevelVars: unknown,
+  violations: AnsibleTaskViolation[],
+): void {
+  if (!isPlainObject(taskLevelVars)) return
+  for (const varName of Object.keys(taskLevelVars)) {
+    if (isReservedVarName(varName)) {
+      violations.push({
+        taskIndex,
+        key: varName,
+        reason: 'reserved or magic variable name in include_role vars',
       })
     }
   }
@@ -523,8 +550,16 @@ export function validateAnsibleTasks(
     }
     const task = rawTask
 
+    // include_role タスクか否かを先に判定する。task レベルの `vars` は
+    // FORBIDDEN_TASK_KEYS の対象だが、include_role タスクに限り、ロール変数を渡す
+    // 唯一の正しい形（validateIncludeRoleTaskVars 参照）として例外的に許可する。
+    const isIncludeRoleTask = Object.keys(task).some((key) =>
+      INCLUDE_ROLE_MODULE_KEYS.has(normalizeModuleKey(key, mode)),
+    )
+
     // 1. 危険なタスクキーの拒否（両モード）
     for (const key of Object.keys(task)) {
+      if (key === 'vars' && isIncludeRoleTask) continue
       if (FORBIDDEN_TASK_KEYS.has(key)) {
         violations.push({ taskIndex, key, reason: 'forbidden task key' })
       }
@@ -542,9 +577,11 @@ export function validateAnsibleTasks(
       for (const key of moduleCandidateKeys) {
         const normalized = normalizeModuleKey(key, mode)
 
-        // include_role は専用バリデータで検査する（5 ロール限定 + param キー allowlist）。
+        // include_role は専用バリデータで検査する（6 ロール限定 + param キー allowlist）。
+        // ロール変数（task レベルの vars）は validateIncludeRoleTaskVars で別途検査する。
         if (INCLUDE_ROLE_MODULE_KEYS.has(normalized)) {
           validateIncludeRole(taskIndex, key, task[key], violations)
+          validateIncludeRoleTaskVars(taskIndex, task.vars, violations)
           continue
         }
 

@@ -3,7 +3,7 @@
  *
  * The payload is `{ executionId, sshHostId, body }` where `body` is a recipe
  * body: a top-level YAML **list of Ansible tasks** authored by a tenant admin
- * (built-in steps appear as `include_role` tasks referencing the 5 bundled
+ * (built-in steps appear as `include_role` tasks referencing the 6 bundled
  * roles). This runner:
  *   1. re-validates `body` with the authoritative task guard
  *      (`validateAnsibleTasks`), route-aware (`ecs` strict / `resident`
@@ -847,7 +847,7 @@ export async function runServerSetup(
         ...process.env,
         ANSIBLE_STDOUT_CALLBACK: 'json',
         // Lets the generated playbook (written to tmpDir, outside
-        // ansible/roles/) resolve the 5 bundled roles by name via `include_role`.
+        // ansible/roles/) resolve the 6 bundled roles by name via `include_role`.
         ANSIBLE_ROLES_PATH: rolesPath,
         // Exposes the bundled `json` stdout callback (callback_plugins/json.py)
         // to Ansible. The generated playbook runs from tmpDir, not from
