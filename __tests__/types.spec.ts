@@ -1,4 +1,4 @@
-import { successResult, errorResult } from '../src/types'
+import { errorResult, isSupportedSshAuthType, successResult } from '../src/types'
 
 describe('successResult', () => {
   it('should create a success result with data', () => {
@@ -43,5 +43,23 @@ describe('errorResult', () => {
   it('should include data when data is false', () => {
     const result = errorResult('failed', false)
     expect(result).toEqual({ success: false, error: 'failed', data: false })
+  })
+})
+
+describe('isSupportedSshAuthType', () => {
+  it('should return true for "password"', () => {
+    expect(isSupportedSshAuthType('password')).toBe(true)
+  })
+
+  it('should return true for "privateKey"', () => {
+    expect(isSupportedSshAuthType('privateKey')).toBe(true)
+  })
+
+  it('should return false for an unrecognized authType', () => {
+    expect(isSupportedSshAuthType('token')).toBe(false)
+  })
+
+  it('should return false for an empty string', () => {
+    expect(isSupportedSshAuthType('')).toBe(false)
   })
 })

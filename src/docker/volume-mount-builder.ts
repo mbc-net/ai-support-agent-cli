@@ -62,6 +62,27 @@ export interface ProjectDirMapping {
   projectCode: string
 }
 
+/**
+ * Combined blocked-path prefixes (built-in + host-sensitive) used to reject
+ * project directories from being bind-mounted into containers.
+ */
+function getBlockedMountPrefixes(): string[] {
+  return [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
+}
+
+/**
+ * True when `resolvedPath` exactly matches, or is nested under, any of
+ * `blockedPrefixes`. Single source of truth for the blocked-prefix check
+ * that was duplicated between `buildVolumeMounts` and
+ * `buildProjectVolumeMounts`.
+ */
+function isPathBlocked(resolvedPath: string, blockedPrefixes: readonly string[]): boolean {
+  return blockedPrefixes.some((prefix) => {
+    const prefixWithoutSlash = stripTrailingSlash(prefix)
+    return resolvedPath === prefixWithoutSlash || resolvedPath.startsWith(prefix)
+  })
+}
+
 /** Mount the Claude Code config files (.claude dir and .claude.json) into the container */
 function mountClaudeConfig(mounts: string[], home: string): void {
   const claudeDir = path.join(home, '.claude')
@@ -120,7 +141,7 @@ export function buildVolumeMounts(): { mounts: string[]; projectMappings: Projec
   const config = loadConfig()
   if (config?.projects) {
     const mounted = new Set<string>()
-    const blockedPrefixes = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
+    const blockedPrefixes = getBlockedMountPrefixes()
     for (const project of config.projects) {
       if (project.projectDir && !mounted.has(project.projectDir) && fs.existsSync(project.projectDir)) {
         let resolved: string
@@ -130,11 +151,7 @@ export function buildVolumeMounts(): { mounts: string[]; projectMappings: Projec
           logger.warn(`[docker] Cannot resolve path, skipping: ${project.projectDir}`)
           continue
         }
-        const isBlocked = blockedPrefixes.some((prefix) => {
-          const prefixWithoutSlash = stripTrailingSlash(prefix)
-          return resolved === prefixWithoutSlash || resolved.startsWith(prefix)
-        })
-        if (isBlocked) {
+        if (isPathBlocked(resolved, blockedPrefixes)) {
           logger.warn(`[docker] Skipping blocked path for volume mount: ${project.projectDir}`)
           continue
         }
@@ -270,16 +287,12 @@ export function buildProjectVolumeMounts(
   // `${CONFIG_DIR}/projects/<t>/<p>`, which lives INSIDE the metadata
   // mount and produces a doubly nested workspace tree on disk.
   const containerProjectDir = `${CONTAINER_PROJECTS_BASE}/${project.projectCode}`
-  const blockedPrefixes = [...BLOCKED_PATH_PREFIXES, ...getSensitiveHomePaths()]
+  const blockedPrefixes = getBlockedMountPrefixes()
   let projectDirMounted = false
   if (project.projectDir && fs.existsSync(project.projectDir)) {
     try {
       const resolved = fs.realpathSync(project.projectDir)
-      const isBlocked = blockedPrefixes.some((prefix) => {
-        const prefixWithoutSlash = stripTrailingSlash(prefix)
-        return resolved === prefixWithoutSlash || resolved.startsWith(prefix)
-      })
-      if (!isBlocked) {
+      if (!isPathBlocked(resolved, blockedPrefixes)) {
         mounts.push('-v', `${project.projectDir}:${containerProjectDir}:rw`)
         projectDirMounted = true
       } else {

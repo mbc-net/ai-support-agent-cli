@@ -3,7 +3,7 @@ import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 
 import type { ApiClient } from './api-client'
-import { detectAvailableChatModes, resolveActiveChatMode } from './chat-mode-detector'
+import { detectAvailableChatModes, isExplicitChatModeSelection, resolveActiveChatMode } from './chat-mode-detector'
 import { CONFIG_SYNC_DEBOUNCE_MS } from './constants'
 import { logger } from './logger'
 import { writeAwsConfig } from './aws-profile'
@@ -376,17 +376,6 @@ export async function refreshChatMode(
   if (verbose) {
     logger.info(`${deps.prefix} Active chat mode: ${state.activeChatMode ?? 'none'}`)
   }
-}
-
-function isExplicitChatModeSelection(
-  availableChatModes: AgentChatMode[],
-  localAgentChatMode: AgentChatMode | undefined,
-  defaultAgentChatMode: AgentChatMode | undefined,
-): boolean {
-  return (
-    (localAgentChatMode !== undefined && availableChatModes.includes(localAgentChatMode)) ||
-    (defaultAgentChatMode !== undefined && availableChatModes.includes(defaultAgentChatMode))
-  )
 }
 
 /**

@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
+import { exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('sanitizeNameSegment', () => {
@@ -320,6 +320,106 @@ describe('ensureDir', () => {
     ensureDir(dir)
     // Directory exists and is usable; exact mode is OS/umask dependent.
     expect(fs.statSync(dir).isDirectory()).toBe(true)
+  })
+})
+
+describe('sweepStaleEntries', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sweep-stale-entries-test-'))
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true })
+  })
+
+  /** Backdate an entry's mtime so it is treated as older than `maxAgeMs`. */
+  function backdate(fullPath: string, ageMs: number): void {
+    const past = new Date(Date.now() - ageMs)
+    fs.utimesSync(fullPath, past, past)
+  }
+
+  it('should return 0 and not throw when the directory does not exist', () => {
+    const missing = path.join(tmpDir, 'does-not-exist')
+    expect(sweepStaleEntries(missing, () => true)).toBe(0)
+  })
+
+  it('should skip entries whose name does not match the predicate', () => {
+    fs.writeFileSync(path.join(tmpDir, 'keep-me.txt'), 'x')
+    const removed = sweepStaleEntries(tmpDir, (name) => name.startsWith('config-'), { maxAgeMs: 0 })
+    expect(removed).toBe(0)
+    expect(fs.existsSync(path.join(tmpDir, 'keep-me.txt'))).toBe(true)
+  })
+
+  it('should skip matching entries younger than maxAgeMs', () => {
+    const fresh = path.join(tmpDir, 'config-fresh.json')
+    fs.writeFileSync(fresh, '{}')
+    const removed = sweepStaleEntries(tmpDir, (name) => name.startsWith('config-'), {
+      maxAgeMs: 24 * 60 * 60 * 1000,
+    })
+    expect(removed).toBe(0)
+    expect(fs.existsSync(fresh)).toBe(true)
+  })
+
+  it('should remove matching entries at least maxAgeMs old', () => {
+    const stale = path.join(tmpDir, 'config-stale.json')
+    fs.writeFileSync(stale, '{}')
+    backdate(stale, 25 * 60 * 60 * 1000)
+    const removed = sweepStaleEntries(tmpDir, (name) => name.startsWith('config-'), {
+      maxAgeMs: 24 * 60 * 60 * 1000,
+    })
+    expect(removed).toBe(1)
+    expect(fs.existsSync(stale)).toBe(false)
+  })
+
+  it('should remove every matching entry regardless of age when maxAgeMs is 0', () => {
+    fs.writeFileSync(path.join(tmpDir, 'config-a.json'), '{}')
+    fs.writeFileSync(path.join(tmpDir, 'config-b.json'), '{}')
+    fs.writeFileSync(path.join(tmpDir, 'unrelated.txt'), 'x')
+    const removed = sweepStaleEntries(tmpDir, (name) => name.startsWith('config-'), { maxAgeMs: 0 })
+    expect(removed).toBe(2)
+    expect(fs.existsSync(path.join(tmpDir, 'unrelated.txt'))).toBe(true)
+  })
+
+  it('should recursively remove a matching directory when recursive is true', () => {
+    const dir = path.join(tmpDir, 'terminal-sandbox-abc')
+    fs.mkdirSync(dir)
+    fs.writeFileSync(path.join(dir, 'inside.txt'), 'x')
+    const removed = sweepStaleEntries(tmpDir, (name) => name.startsWith('terminal-sandbox-'), {
+      maxAgeMs: 0,
+      recursive: true,
+    })
+    expect(removed).toBe(1)
+    expect(fs.existsSync(dir)).toBe(false)
+  })
+
+  it('should silently swallow a per-entry removal failure when onError is omitted', () => {
+    // A symlink pointing at a target that doesn't exist makes fs.statSync
+    // (which follows links) throw ENOENT — a real removal failure without
+    // needing to mock the fs module.
+    const broken = path.join(tmpDir, 'config-broken.json')
+    fs.symlinkSync(path.join(tmpDir, 'does-not-exist'), broken)
+    expect(() =>
+      sweepStaleEntries(tmpDir, (name) => name.startsWith('config-'), { maxAgeMs: 0 }),
+    ).not.toThrow()
+  })
+
+  it('should invoke onError with the entry name and error, and continue the sweep', () => {
+    const broken = path.join(tmpDir, 'config-broken.json')
+    const good = path.join(tmpDir, 'config-good.json')
+    fs.symlinkSync(path.join(tmpDir, 'does-not-exist'), broken)
+    fs.writeFileSync(good, '{}')
+    const onError = jest.fn()
+    const removed = sweepStaleEntries(tmpDir, (name) => name.startsWith('config-'), {
+      maxAgeMs: 0,
+      onError,
+    })
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError).toHaveBeenCalledWith('config-broken.json', expect.anything())
+    // The other matching entry is still removed despite the first one's failure.
+    expect(removed).toBe(1)
+    expect(fs.existsSync(good)).toBe(false)
   })
 })
 

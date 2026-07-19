@@ -26,15 +26,22 @@
  * never be logged.
  */
 
+import { TAILSCALE_SOCKS_PORT } from '../constants'
 import { logger } from '../logger'
-import type { SshExecCredential } from '../types'
+import { isSupportedSshAuthType, type SshExecCredential } from '../types'
 import { getErrorMessage } from '../utils'
 
 /** Default timeout when the caller/payload does not specify one. */
 export const DEFAULT_SSH_EXEC_TIMEOUT_SECONDS = 30
 
-/** Default SOCKS5 listen port for the Tailscale sidecar (design doc section 2). */
-export const DEFAULT_TAILSCALE_SOCKS_PORT = 1055
+/**
+ * Default SOCKS5 listen port for the Tailscale sidecar (design doc section 2).
+ * Re-exported from `constants.ts`'s `TAILSCALE_SOCKS_PORT` — the single
+ * source of truth also used by `server-setup-runner.ts` and
+ * `task-definition-registrar.ts` — so this module keeps its existing export
+ * name for callers that already import `DEFAULT_TAILSCALE_SOCKS_PORT` from here.
+ */
+export const DEFAULT_TAILSCALE_SOCKS_PORT = TAILSCALE_SOCKS_PORT
 
 /**
  * Establish a SOCKS5-proxied TCP socket to the tailnet host, via the
@@ -89,10 +96,10 @@ export async function executeSshCommand(
   // `authType` decides whether `credential.privateKey` (an overloaded field,
   // see this file's doc comment) is SSH key material or a plaintext
   // password. An unrecognized authType must never silently fall back to the
-  // key path (フォールバック禁止) — mirrors server-setup-runner.ts's
-  // validateSshCredential, which guards the same overloaded field for the
-  // `server_setup_exec` command.
-  if (credential.authType !== 'password' && credential.authType !== 'privateKey') {
+  // key path (フォールバック禁止) — shares `isSupportedSshAuthType` with
+  // server-setup-runner.ts's validateSshCredential, which guards the same
+  // overloaded field for the `server_setup_exec` command.
+  if (!isSupportedSshAuthType(credential.authType)) {
     throw new Error(`SSH credential authType is not supported: ${JSON.stringify(credential.authType)}`)
   }
 

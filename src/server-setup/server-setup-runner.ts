@@ -23,7 +23,7 @@
  */
 
 import { execFile } from 'child_process'
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { dump } from 'js-yaml'
 import * as os from 'os'
 import * as path from 'path'
@@ -33,13 +33,14 @@ import { logger } from '../logger'
 import {
   type CommandResult,
   errorResult,
+  isSupportedSshAuthType,
   type ServerSetupExecPayload,
   type ServerSetupTaskResult,
   type ServerSetupVariablesResponse,
   type SshExecCredential,
   successResult,
 } from '../types'
-import { getErrorMessage } from '../utils'
+import { getErrorMessage, sweepStaleEntries } from '../utils'
 
 import { type AnsibleTaskRouteMode, validateAnsibleTasks } from './ansible-task-guard'
 import { resolveKnownHostsPath } from './known-hosts-store'
@@ -386,6 +387,11 @@ const HOSTNAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/
 /** Portable username: letters/digits/underscore/hyphen only. */
 const USERNAME_RE = /^[A-Za-z0-9_-]+$/
 
+/** True when `value` is an integer in the valid TCP port range (1-65535). */
+function isValidPort(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= 65535
+}
+
 /**
  * Reject a fetched SSH credential whose hostname/username/port isn't a plain,
  * unambiguous value. Without this, a hostname or username containing e.g. a
@@ -405,7 +411,7 @@ function validateSshCredential(credential: SshExecCredential): string | null {
   if (!USERNAME_RE.test(credential.username)) {
     return `SSH credential username contains disallowed characters: ${JSON.stringify(credential.username)}`
   }
-  if (!Number.isInteger(credential.port) || credential.port < 1 || credential.port > 65535) {
+  if (!isValidPort(credential.port)) {
     return `SSH credential port is out of range: ${JSON.stringify(credential.port)}`
   }
   // `authType` decides whether `privateKey` (an overloaded field — see
@@ -414,7 +420,9 @@ function validateSshCredential(credential: SshExecCredential): string | null {
   // to the key path (フォールバック禁止) — that is exactly how a
   // password-authType host got its password written to disk as if it were
   // key material, producing `error in libcrypto` when OpenSSH tried to parse it.
-  if (credential.authType !== 'password' && credential.authType !== 'privateKey') {
+  // Shared with commands/ssh-executor.ts's executeSshCommand via
+  // isSupportedSshAuthType so the two guards cannot silently drift apart.
+  if (!isSupportedSshAuthType(credential.authType)) {
     return `SSH credential authType is not supported: ${JSON.stringify(credential.authType)}`
   }
   if (!credential.privateKey) {
@@ -424,10 +432,7 @@ function validateSshCredential(credential: SshExecCredential): string | null {
     if (typeof credential.tailnetHostname !== 'string' || !HOSTNAME_RE.test(credential.tailnetHostname)) {
       return `SSH credential tailnetHostname is not a valid hostname/IP address: ${JSON.stringify(credential.tailnetHostname)}`
     }
-    if (
-      credential.socksPort !== undefined
-      && (!Number.isInteger(credential.socksPort) || credential.socksPort < 1 || credential.socksPort > 65535)
-    ) {
+    if (credential.socksPort !== undefined && !isValidPort(credential.socksPort)) {
       return `SSH credential socksPort is out of range: ${JSON.stringify(credential.socksPort)}`
     }
   }
@@ -690,27 +695,13 @@ export function cleanupStaleServerSetupDirs(
   maxAgeMs: number = 24 * 60 * 60 * 1000,
   baseDir: string = os.tmpdir(),
 ): number {
-  let removed = 0
-  let entries: string[]
-  try {
-    entries = readdirSync(baseDir)
-  } catch {
-    return 0
-  }
-  const now = Date.now()
-  for (const name of entries) {
-    if (!name.startsWith(SERVER_SETUP_TMP_PREFIX)) continue
-    const fullPath = path.join(baseDir, name)
-    try {
-      const stat = statSync(fullPath)
-      if (maxAgeMs > 0 && now - stat.mtimeMs < maxAgeMs) continue
-      rmSync(fullPath, { recursive: true, force: true })
-      removed++
-    } catch (error) {
+  return sweepStaleEntries(baseDir, (name) => name.startsWith(SERVER_SETUP_TMP_PREFIX), {
+    maxAgeMs,
+    recursive: true,
+    onError: (name, error) => {
       logger.warn(`[server-setup] Failed to clean up stale server-setup dir ${name}: ${getErrorMessage(error)}`)
-    }
-  }
-  return removed
+    },
+  })
 }
 
 /**
