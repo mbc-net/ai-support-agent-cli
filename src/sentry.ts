@@ -23,6 +23,18 @@ export async function initSentry(): Promise<void> {
     tracesSampleRate: 0.05,
     sendDefaultPii: false,
     beforeSend(event) {
+      if (event.message) {
+        event.message = maskSecrets(event.message)
+      }
+      if (event.extra) {
+        const maskedExtra: Record<string, unknown> = { ...event.extra }
+        for (const [key, value] of Object.entries(maskedExtra)) {
+          if (typeof value === 'string') {
+            maskedExtra[key] = maskSecrets(value)
+          }
+        }
+        event.extra = maskedExtra
+      }
       if (event.breadcrumbs) {
         event.breadcrumbs = event.breadcrumbs.map((breadcrumb) => ({
           ...breadcrumb,

@@ -300,6 +300,79 @@ describe('sentry', () => {
       const result = beforeSend(event)
       expect(result.exception.values[0].value).toBeUndefined()
     })
+
+    it('event.message 内の機密情報をマスクする', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = {
+        message: 'Request failed with Bearer eyJhbGciOiJIUzI1NiJ9',
+      }
+      const result = beforeSend(event)
+      expect(result.message).toBe('Request failed with Bearer ****')
+    })
+
+    it('event.message が undefined の場合はそのまま保持する', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = { exception: { values: [] } }
+      const result = beforeSend(event)
+      expect(result.message).toBeUndefined()
+    })
+
+    it('event.extra の文字列値内の機密情報をマスクする', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = {
+        extra: {
+          handler: 'uncaughtException',
+          detail: 'token=abc123',
+        },
+      }
+      const result = beforeSend(event)
+      expect(result.extra.detail).toBe('token=****')
+      expect(result.extra.handler).toBe('uncaughtException')
+    })
+
+    it('event.extra の非文字列値はそのまま保持する', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = {
+        extra: {
+          count: 3,
+          flag: true,
+          nested: { token: 'abc123' },
+          list: ['token=abc123'],
+        },
+      }
+      const result = beforeSend(event)
+      expect(result.extra.count).toBe(3)
+      expect(result.extra.flag).toBe(true)
+      expect(result.extra.nested).toEqual({ token: 'abc123' })
+      expect(result.extra.list).toEqual(['token=abc123'])
+    })
+
+    it('event.extra が undefined の場合はそのまま返す', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = { message: 'no extra field' }
+      const result = beforeSend(event)
+      expect(result.extra).toBeUndefined()
+    })
   })
 
   describe('beforeBreadcrumb', () => {
