@@ -7,6 +7,7 @@ import { BaseWebSocketConnection } from '../base-websocket'
 import { WS_CLOSE_CODE_AUTH_REJECTED, WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import { logger } from '../logger'
 import { buildWsUrl, getErrorMessage, isErrnoException } from '../utils'
+import { isSafeSessionId } from '../utils/safe-session-id'
 
 import type { EnvVarsProvider } from '../env-vars-filter'
 import {
@@ -275,6 +276,20 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
         type: 'error',
         sessionId: 'unknown',
         error: 'Missing sessionId in open message',
+      })
+      return
+    }
+
+    // sessionId はこの後 TerminalSession 内で SSH 鍵の tmp ファイルパス
+    // (path.join(os.tmpdir(), `ssh-key-${sessionId}`)) や GIT_SSH_COMMAND
+    // 環境変数の文字列展開に使われる。英数字・ハイフン・アンダースコア以外を
+    // 許可すると path traversal / コマンドインジェクションの原因になるため、
+    // PTY を作る前に文字種を検証する（no-fallback: 不正なら即エラーで中断）。
+    if (!isSafeSessionId(serverSessionId)) {
+      this.send({
+        type: 'error',
+        sessionId: 'unknown',
+        error: 'Invalid sessionId',
       })
       return
     }
