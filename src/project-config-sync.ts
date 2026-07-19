@@ -5,7 +5,7 @@ import type { ApiClient } from './api-client'
 import { getCacheDir } from './project-dir'
 import { logger } from './logger'
 import type { CachedProjectConfig, ProjectConfigResponse } from './types'
-import { atomicWriteFile, nowIso } from './utils'
+import { atomicWriteFile, getErrorMessage, nowIso } from './utils'
 import { safeJsonParse } from './utils/json-parse'
 
 const CACHE_FILE_NAME = 'project-config.json'
@@ -49,7 +49,7 @@ export async function syncProjectConfig(
 
     return { config, fromCache: false }
   } catch (error) {
-    logger.warn(`${prefix} Failed to sync project config: ${error}`)
+    logger.warn(`${prefix} Failed to sync project config: ${getErrorMessage(error)}`)
 
     // Try loading from cache on failure
     if (projectDir) {
@@ -111,7 +111,7 @@ export function saveCachedConfig(
 
     logger.debug(`Config cached to ${cachePath}`)
   } catch (error) {
-    logger.warn(`Failed to save config cache: ${error}`)
+    logger.warn(`Failed to save config cache: ${getErrorMessage(error)}`)
   }
 }
 
