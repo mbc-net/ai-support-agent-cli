@@ -234,6 +234,24 @@ export class ApiClient {
   }
 
   /**
+   * Shared implementation for the commandId-scoped JIT lookups below
+   * (`getServerSetupSshCredential` / `getServerSetupVariables` /
+   * `getSshExecCredential`): validate the commandId, log at debug level, and
+   * GET the given endpoint with `agentId` as a query param. Extracted because
+   * all three otherwise repeated this exact sequence verbatim.
+   */
+  private async getCommandScopedResource<T>(
+    commandId: string,
+    agentId: string,
+    endpoint: string,
+    debugMessage: string,
+  ): Promise<T> {
+    this.validateCommandId(commandId)
+    logger.debug(debugMessage)
+    return this.get<T>(endpoint, { params: { agentId } })
+  }
+
+  /**
    * JIT SSH credential lookup for a `server_setup_exec` command. The target
    * host is resolved server-side from the command's payload (never from a
    * client-supplied hostId), so this can safely be called with either an
@@ -245,11 +263,11 @@ export class ApiClient {
    * commandId.
    */
   async getServerSetupSshCredential(commandId: string, agentId: string): Promise<SshExecCredential> {
-    this.validateCommandId(commandId)
-    logger.debug(`Fetching server setup SSH credential for command: ${commandId}`)
-    return this.get<SshExecCredential>(
+    return this.getCommandScopedResource<SshExecCredential>(
+      commandId,
+      agentId,
       API_ENDPOINTS.SERVER_SETUP_SSH_CREDENTIAL(this.tenantCode, commandId),
-      { params: { agentId } },
+      `Fetching server setup SSH credential for command: ${commandId}`,
     )
   }
 
@@ -263,11 +281,11 @@ export class ApiClient {
    * (`server-setup-runner.ts`) — never log the returned `variables` values.
    */
   async getServerSetupVariables(commandId: string, agentId: string): Promise<ServerSetupVariablesResponse> {
-    this.validateCommandId(commandId)
-    logger.debug(`Fetching server setup variables for command: ${commandId}`)
-    return this.get<ServerSetupVariablesResponse>(
+    return this.getCommandScopedResource<ServerSetupVariablesResponse>(
+      commandId,
+      agentId,
       API_ENDPOINTS.SERVER_SETUP_VARIABLES(this.tenantCode, commandId),
-      { params: { agentId } },
+      `Fetching server setup variables for command: ${commandId}`,
     )
   }
 
@@ -281,11 +299,11 @@ export class ApiClient {
    * Never log the returned credential; only log the commandId.
    */
   async getSshExecCredential(commandId: string, agentId: string): Promise<SshExecCredential> {
-    this.validateCommandId(commandId)
-    logger.debug(`Fetching SSH exec credential for command: ${commandId}`)
-    return this.get<SshExecCredential>(
+    return this.getCommandScopedResource<SshExecCredential>(
+      commandId,
+      agentId,
       API_ENDPOINTS.SSH_EXEC_CREDENTIAL(this.tenantCode, commandId),
-      { params: { agentId } },
+      `Fetching SSH exec credential for command: ${commandId}`,
     )
   }
 

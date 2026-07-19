@@ -219,6 +219,17 @@ describe('registerTaskDefinition', () => {
       ])
       expect(sidecar?.healthCheck?.command).toEqual(['CMD-SHELL', 'tailscale status || exit 1'])
       expect(sidecar?.healthCheck?.retries).toBeGreaterThan(0)
+      // Same awslogs group/region as the main container, but its own stream
+      // prefix — shared via buildAwsLogsConfig so the two containers' log
+      // configs cannot drift apart except for the prefix.
+      expect(sidecar?.logConfiguration).toEqual({
+        logDriver: 'awslogs',
+        options: {
+          'awslogs-group': mainContainer?.logConfiguration?.options?.['awslogs-group'],
+          'awslogs-region': mainContainer?.logConfiguration?.options?.['awslogs-region'],
+          'awslogs-stream-prefix': 'tailscale',
+        },
+      })
       // Never carries the authkey (or any environment variables) statically —
       // it is injected per-run via containerOverrides (ecs-launcher.ts), same
       // rationale as the main container's own environment omission above.
