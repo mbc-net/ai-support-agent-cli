@@ -618,6 +618,87 @@ describe('TerminalWebSocket', () => {
     void terminalWs.connect()
   })
 
+  it('should send error and not create a session when open message has an unsafe sessionId (command injection payload)', (done) => {
+    server.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+        if (msg.type === 'error') {
+          expect(msg.sessionId).toBe('unknown')
+          expect(msg.error).toContain('Invalid sessionId')
+          // No session should have been created for the malicious sessionId
+          const manager = terminalWs.getSessionManager()
+          expect(manager.size).toBe(0)
+          done()
+        }
+      })
+
+      const openMsg: TerminalServerMessage = {
+        type: 'open',
+        sessionId: 'x; touch /tmp/pwned; #',
+        cols: 80,
+        rows: 24,
+      }
+      ws.send(JSON.stringify(openMsg))
+    })
+
+    terminalWs = createTerminalWs()
+    void terminalWs.connect()
+  })
+
+  it('should send error and not create a session when open message has a path-traversal sessionId', (done) => {
+    server.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+        if (msg.type === 'error') {
+          expect(msg.sessionId).toBe('unknown')
+          expect(msg.error).toContain('Invalid sessionId')
+          const manager = terminalWs.getSessionManager()
+          expect(manager.size).toBe(0)
+          done()
+        }
+      })
+
+      const openMsg: TerminalServerMessage = {
+        type: 'open',
+        sessionId: '../../etc/passwd',
+        cols: 80,
+        rows: 24,
+      }
+      ws.send(JSON.stringify(openMsg))
+    })
+
+    terminalWs = createTerminalWs()
+    void terminalWs.connect()
+  })
+
+  it('should still create a session for a valid (safe) sessionId (no regression)', (done) => {
+    server.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as TerminalAgentMessage
+        if (msg.type === 'ready') {
+          expect(msg.sessionId).toBe('valid-session-id_123')
+          const manager = terminalWs.getSessionManager()
+          expect(manager.getSession('valid-session-id_123')?.isAlive()).toBe(true)
+
+          const closeMsg: TerminalServerMessage = { type: 'close', sessionId: msg.sessionId }
+          ws.send(JSON.stringify(closeMsg))
+          done()
+        }
+      })
+
+      const openMsg: TerminalServerMessage = {
+        type: 'open',
+        sessionId: 'valid-session-id_123',
+        cols: 80,
+        rows: 24,
+      }
+      ws.send(JSON.stringify(openMsg))
+    })
+
+    terminalWs = createTerminalWs()
+    void terminalWs.connect()
+  })
+
   it('should use resolved cwd when cwd is a valid subdirectory', (done) => {
     server.on('connection', (ws) => {
       ws.on('message', (data) => {

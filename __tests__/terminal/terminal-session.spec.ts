@@ -402,6 +402,28 @@ describe('TerminalSession', () => {
         expect(env.GIT_SSH_KEY_CONTENT_BASE64).toBeUndefined()
       })
 
+      it('GIT_SSH_COMMAND の -i 引数がダブルクォートで囲まれている（コマンドインジェクション防御の二重防御）', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-content\n-----END OPENSSH PRIVATE KEY-----'
+        const base64Key = Buffer.from(pemKey).toString('base64')
+        const sessionId = 'test-ssh-quote'
+
+        session = new TerminalSession(sessionId, {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: base64Key,
+          },
+        })
+
+        const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+        const expectedPath = path.join(os.tmpdir(), `ssh-key-${sessionId}`)
+        expect(env.GIT_SSH_COMMAND).toBe(
+          `ssh -i "${expectedPath}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`,
+        )
+      })
+
       it('SSH 鍵ファイルが実際に作成されている', () => {
         const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-file-content\n-----END OPENSSH PRIVATE KEY-----'
         const base64Key = Buffer.from(pemKey).toString('base64')
