@@ -146,6 +146,28 @@ export interface SshCredentials {
 }
 
 /**
+ * The only two `authType` values the agent CLI knows how to act on: whether
+ * the overloaded `privateKey` field (see `SshExecCredential`) holds SSH key
+ * material or a plaintext password.
+ *
+ * Single source of truth for the `authType !== 'password' && authType !==
+ * 'privateKey'` check that was independently duplicated in
+ * `commands/ssh-executor.ts` (`executeSshCommand`) and
+ * `server-setup/server-setup-runner.ts` (`validateSshCredential`) — both
+ * comments already noted they "mirror" each other. An unrecognized value
+ * must never silently fall back to the key path (フォールバック禁止 —
+ * see CLAUDE.md), which is exactly the bug this shared guard prevents from
+ * drifting between the two call sites.
+ */
+export const SUPPORTED_SSH_AUTH_TYPES = ['password', 'privateKey'] as const
+
+export type SshAuthType = (typeof SUPPORTED_SSH_AUTH_TYPES)[number]
+
+export function isSupportedSshAuthType(authType: string): authType is SshAuthType {
+  return (SUPPORTED_SSH_AUTH_TYPES as readonly string[]).includes(authType)
+}
+
+/**
  * SSH connection parameters returned by the `ssh_exec` JIT credential fetch
  * (see `ssh-credential-client.ts`). Extends the base `SshCredentials` shape
  * with the fields introduced by Tailscale support (admin-docs

@@ -1,4 +1,5 @@
 import * as fs from 'fs'
+import * as path from 'path'
 import axios from 'axios'
 
 import { ENV_VARS } from './constants'
@@ -244,4 +245,67 @@ export function exitWithError(message: string): never {
  */
 export function nowIso(): string {
   return new Date().toISOString()
+}
+
+/**
+ * Sweep `dir` for stale entries left behind by a crashed/killed process,
+ * removing each one that matches `matches(name)` and is at least `maxAgeMs`
+ * old (by mtime).
+ *
+ * Single source of truth for the "orphaned temp file/dir" sweep idiom that
+ * was independently duplicated three times — `TerminalSession.
+ * cleanupStaleSandboxes` (terminal-sandbox-* dirs in os.tmpdir()),
+ * `cleanupStaleServerSetupDirs` (server-setup temp dirs holding an SSH
+ * private key), and `cleanupStaleCommandMcpConfigs` (per-command MCP config
+ * files carrying a plaintext token) — each with the same readdir → filter by
+ * name → stat → age-check → rm shape, differing only in the match predicate,
+ * whether removal is recursive, and how an individual removal failure is
+ * reported.
+ *
+ * A missing/unreadable `dir` is treated as "nothing to clean" (returns 0),
+ * matching all three previous implementations.
+ *
+ * @param dir directory to scan
+ * @param matches predicate deciding whether an entry name is a candidate
+ * @param options.maxAgeMs delete entries at least this old (ms); default 24h;
+ *   `0` removes every matching entry regardless of age
+ * @param options.recursive passed through to `fs.rmSync` (true for
+ *   directories, false — the default — for plain files)
+ * @param options.onError called (name, error) when removing a single matched
+ *   entry fails; the sweep continues with the remaining entries either way.
+ *   Omit to swallow the failure silently (matches the original
+ *   `cleanupStaleSandboxes` behavior).
+ * @returns number of entries removed
+ */
+export function sweepStaleEntries(
+  dir: string,
+  matches: (name: string) => boolean,
+  options: {
+    maxAgeMs?: number
+    recursive?: boolean
+    onError?: (name: string, error: unknown) => void
+  } = {},
+): number {
+  const { maxAgeMs = 24 * 60 * 60 * 1000, recursive = false, onError } = options
+  let entries: string[]
+  try {
+    entries = fs.readdirSync(dir)
+  } catch {
+    return 0
+  }
+  const now = Date.now()
+  let removed = 0
+  for (const name of entries) {
+    if (!matches(name)) continue
+    const fullPath = path.join(dir, name)
+    try {
+      const stat = fs.statSync(fullPath)
+      if (maxAgeMs > 0 && now - stat.mtimeMs < maxAgeMs) continue
+      fs.rmSync(fullPath, { recursive, force: true })
+      removed++
+    } catch (error) {
+      onError?.(name, error)
+    }
+  }
+  return removed
 }

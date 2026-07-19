@@ -26,6 +26,7 @@ jest.mock('../src/project-agent', () => ({
 }))
 
 jest.mock('../src/chat-mode-detector', () => ({
+  ...jest.requireActual('../src/chat-mode-detector'),
   detectAvailableChatModes: jest.fn().mockResolvedValue([]),
   resolveActiveChatMode: jest.fn().mockReturnValue(undefined),
 }))

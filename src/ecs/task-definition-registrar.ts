@@ -60,6 +60,25 @@ export interface RegisterEcsTaskDefinitionOptions {
   dropCapabilities?: string[]
 }
 
+/**
+ * Build the `awslogs` log driver configuration shared by both containers
+ * registered in the task definition (main + optional Tailscale sidecar) —
+ * only the stream prefix differs between them.
+ */
+function buildAwsLogsConfig(
+  options: Pick<RegisterEcsTaskDefinitionOptions, 'logGroupName' | 'region'>,
+  streamPrefix: string,
+): NonNullable<ContainerDefinition['logConfiguration']> {
+  return {
+    logDriver: 'awslogs',
+    options: {
+      'awslogs-group': options.logGroupName,
+      'awslogs-region': options.region,
+      'awslogs-stream-prefix': streamPrefix,
+    },
+  }
+}
+
 /** Writable workspace mount path (one of {@link ISOLATION_VOLUMES}). */
 const ISOLATION_WORKSPACE_PATH = '/workspace'
 
@@ -120,14 +139,7 @@ function buildTailscaleSidecarContainer(options: RegisterEcsTaskDefinitionOption
       retries: 6,
       startPeriod: 20,
     },
-    logConfiguration: {
-      logDriver: 'awslogs',
-      options: {
-        'awslogs-group': options.logGroupName,
-        'awslogs-region': options.region,
-        'awslogs-stream-prefix': 'tailscale',
-      },
-    },
+    logConfiguration: buildAwsLogsConfig(options, 'tailscale'),
   }
 }
 
@@ -184,14 +196,7 @@ export async function registerTaskDefinition(
     essential: true,
     // No environment variables here: they are injected at RunTask time
     // via containerOverrides so secrets never persist in the definition.
-    logConfiguration: {
-      logDriver: 'awslogs',
-      options: {
-        'awslogs-group': options.logGroupName,
-        'awslogs-region': options.region,
-        'awslogs-stream-prefix': 'ecs-agent',
-      },
-    },
+    logConfiguration: buildAwsLogsConfig(options, 'ecs-agent'),
     ...(options.readonlyRootFilesystem && { readonlyRootFilesystem: true }),
     // Redirect $HOME-relative writes (config dir known_hosts, Ansible temp) to
     // the writable /workspace volume when the root FS is read-only.

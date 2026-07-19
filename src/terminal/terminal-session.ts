@@ -9,7 +9,7 @@ import { logger } from '../logger'
 import { buildSafeEnv } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
-import { getErrorMessage } from '../utils'
+import { getErrorMessage, sweepStaleEntries } from '../utils'
 import {
   SCROLLBACK_BUFFER_MAX_BYTES,
   TERMINAL_DEFAULT_COLS,
@@ -211,28 +211,10 @@ export class TerminalSession {
    * @returns 削除した件数
    */
   static cleanupStaleSandboxes(maxAgeMs: number = 24 * 60 * 60 * 1000): number {
-    const tmpDir = os.tmpdir()
-    let removed = 0
-    let entries: string[]
-    try {
-      entries = fs.readdirSync(tmpDir)
-    } catch {
-      return 0
-    }
-    const now = Date.now()
-    for (const name of entries) {
-      if (!name.startsWith('terminal-sandbox-')) continue
-      const fullPath = path.join(tmpDir, name)
-      try {
-        const stat = fs.statSync(fullPath)
-        if (maxAgeMs > 0 && now - stat.mtimeMs < maxAgeMs) continue
-        fs.rmSync(fullPath, { recursive: true, force: true })
-        removed++
-      } catch {
-        // ignore individual failures
-      }
-    }
-    return removed
+    return sweepStaleEntries(os.tmpdir(), (name) => name.startsWith('terminal-sandbox-'), {
+      maxAgeMs,
+      recursive: true,
+    })
   }
 
   constructor(sessionId: string, options: TerminalSessionOptions = {}) {
