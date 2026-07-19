@@ -118,6 +118,17 @@ describe('validateAnsibleTasks', () => {
       expect(validateAnsibleTasks(body, ecs).ok).toBe(false)
     })
 
+    it('ansible.posix.authorized_key はベース allowlist に昇格済みのため ecs/resident 双方で許可される（ssh_key 組み込みステップ用）', () => {
+      const body = `
+- name: Add SSH public key
+  ansible.posix.authorized_key:
+    user: appuser
+    key: "{{ SSH_PUBLIC_KEY }}"
+`
+      expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
+      expect(validateAnsibleTasks(body, resident).ok).toBe(true)
+    })
+
     it('モジュールキーが1つも無いタスク（制御キーのみ）は拒否される', () => {
       const body = `
 - name: No module
@@ -134,8 +145,8 @@ describe('validateAnsibleTasks', () => {
   })
 
   describe('include_role スニペットの検証', () => {
-    it.each(['os_init', 'docker', 'web_server', 'database', 'dns_tls'])(
-      'include_role name=%s（許可された 5 ロール）は通過する',
+    it.each(['os_init', 'docker', 'web_server', 'database', 'dns_tls', 'ssh_key'])(
+      'include_role name=%s（許可された 6 ロール）は通過する',
       (roleName) => {
         const body = `
 - name: bundled step
@@ -146,7 +157,7 @@ describe('validateAnsibleTasks', () => {
       },
     )
 
-    it('許可されていない 6 番目のロール名は拒否される', () => {
+    it('許可されていないロール名は拒否される', () => {
       const body = `
 - name: bundled step
   include_role:
@@ -164,7 +175,21 @@ describe('validateAnsibleTasks', () => {
       ).toBe(true)
     })
 
-    it('include_role.vars（ロール変数）は許可される', () => {
+    it('include_role の直後の task レベル vars（ロール変数）は許可される', () => {
+      // `ansible.builtin.include_role` に `vars` というモジュールパラメータは存在しない
+      // （実機の ansible-playbook --syntax-check で確認済み）。ロール変数は
+      // include_role: と同じインデントの task レベル vars: で渡す。
+      const body = `
+- name: bundled step
+  include_role:
+    name: web_server
+  vars:
+    web_server_port: 8080
+`
+      expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
+    })
+
+    it('include_role のモジュール引数内にネストした vars は拒否される（Ansible的に無効な構文のため）', () => {
       const body = `
 - name: bundled step
   include_role:
@@ -172,7 +197,14 @@ describe('validateAnsibleTasks', () => {
     vars:
       web_server_port: 8080
 `
-      expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
+      const result = validateAnsibleTasks(body, ecs)
+      expect(result.ok).toBe(false)
+      expect(
+        hasReason(
+          result.violations,
+          (v) => v.key === 'vars' && v.reason === 'include_role param key is not allowed',
+        ),
+      ).toBe(true)
     })
 
     it('include_role の許可されていない param キーは拒否される', () => {
@@ -205,15 +237,15 @@ describe('validateAnsibleTasks', () => {
       ).toBe(true)
     })
 
-    describe('include_role.vars の予約語・マジック変数名注入拒否（両モード）', () => {
+    describe('include_role 直後の task レベル vars の予約語・マジック変数名注入拒否（両モード）', () => {
       it('vars に ansible_connection を含む include_role は ecs/resident 双方で拒否される', () => {
         // 攻撃再現: 固定 become:true の play を agent ホスト自身へリダイレクトする試み。
         const body = `
 - name: bundled step
   include_role:
     name: web_server
-    vars:
-      ansible_connection: local
+  vars:
+    ansible_connection: local
 `
         for (const opts of [ecs, resident]) {
           const result = validateAnsibleTasks(body, opts)
@@ -243,8 +275,8 @@ describe('validateAnsibleTasks', () => {
 - name: bundled step
   include_role:
     name: docker
-    vars:
-      ${varName}: something
+  vars:
+    ${varName}: something
 `
           for (const opts of [ecs, resident]) {
             const result = validateAnsibleTasks(body, opts)
@@ -266,9 +298,9 @@ describe('validateAnsibleTasks', () => {
 - name: bundled step
   include_role:
     name: web_server
-    vars:
-      web_server_port: 8080
-      web_server_type: nginx
+  vars:
+    web_server_port: 8080
+    web_server_type: nginx
 `
         expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
         expect(validateAnsibleTasks(body, resident).ok).toBe(true)
@@ -279,8 +311,8 @@ describe('validateAnsibleTasks', () => {
 - name: bundled step
   include_role:
     name: database
-    vars:
-      db_password: "{{ lookup('file', '/etc/secret') }}"
+  vars:
+    db_password: "{{ lookup('file', '/etc/secret') }}"
 `
         for (const opts of [ecs, resident]) {
           const result = validateAnsibleTasks(body, opts)

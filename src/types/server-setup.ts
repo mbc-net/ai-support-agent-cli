@@ -3,7 +3,7 @@
  *
  * A `server_setup_exec` command runs a recipe **body** — a top-level YAML list
  * of Ansible tasks authored by a tenant admin (built-in steps are expressed as
- * `include_role` tasks referencing the 5 bundled roles under `ansible/roles/`)
+ * `include_role` tasks referencing the 6 bundled roles under `ansible/roles/`)
  * — against a single target host, using an SSH private key fetched
  * Just-In-Time from the API (never persisted beyond the lifetime of the
  * command). The agent generates the enclosing play

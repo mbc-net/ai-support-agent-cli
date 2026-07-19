@@ -3,17 +3,18 @@ import fs from 'fs'
 import path from 'path'
 import { spawn } from 'child_process'
 
-import { CHAT_SIGKILL_DELAY, CHAT_TIMEOUT, ERR_CODEX_CLI_NOT_FOUND, LOG_DEBUG_LIMIT } from '../constants'
+import { CHAT_TIMEOUT, ERR_CODEX_CLI_NOT_FOUND, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import type { ChatChunkType } from '../types'
 import { createActivityTimeout } from '../utils/activity-timeout'
 import { StreamLineParser } from '../utils/stream-parser'
-import { isErrnoException } from '../utils'
+import { isErrnoException, toErrorMessage } from '../utils'
 
 import { buildCleanEnv } from './claude-code-args'
+import { killWithEscalation } from './cli-process-kill'
+import { applyEnvVarsOverride, applyPolicyContextEnv, type PolicyContext } from './cli-runner-env'
 import { resolveCodexInvocation } from './codex-command'
 import { prepareBundledCodexPluginProfile } from './plugin-dir'
-import type { PolicyContext } from './claude-code-runner'
 
 const CODEX_SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const
 type CodexSandboxMode = typeof CODEX_SANDBOX_MODES[number]
@@ -116,23 +117,8 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
     const cleanEnv = buildCleanEnv()
     const env: Record<string, string> = awsEnv ? { ...cleanEnv, ...awsEnv } : { ...cleanEnv }
 
-    if (policyContext) {
-      if (policyContext.tenantCode) env.AI_SUPPORT_TENANT_CODE = policyContext.tenantCode
-      if (policyContext.projectCode) env.AI_SUPPORT_PROJECT_CODE = policyContext.projectCode
-      if (policyContext.conversationId) env.AI_SUPPORT_CONVERSATION_ID = policyContext.conversationId
-      if (policyContext.browserSessionId) env.AI_SUPPORT_BROWSER_SESSION_ID = policyContext.browserSessionId
-      if (policyContext.browserLocalPort) env.AI_SUPPORT_BROWSER_LOCAL_PORT = String(policyContext.browserLocalPort)
-      if (policyContext.e2eExecutionId) env.AI_SUPPORT_E2E_EXECUTION_ID = policyContext.e2eExecutionId
-      if (policyContext.e2eTestCaseId) env.AI_SUPPORT_E2E_TEST_CASE_ID = policyContext.e2eTestCaseId
-      if (policyContext.taskId) env.AI_SUPPORT_TASK_ID = policyContext.taskId
-    }
-
-    if (envVarsOverride) {
-      for (const [key, value] of Object.entries(envVarsOverride)) {
-        if (typeof value !== 'string' || value === '') continue
-        env[key] = value
-      }
-    }
+    applyPolicyContextEnv(env, policyContext)
+    applyEnvVarsOverride(env, envVarsOverride)
 
     const resolvedModel = model?.trim() || env.OPENAI_MODEL?.trim() || undefined
     const outputLastMessagePath = createOutputLastMessagePath()
@@ -161,13 +147,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
     killFn = () => {
       if (child.killed) return
       logger.info(`[chat] Killing codex CLI process (pid=${child.pid})`)
-      child.kill('SIGTERM')
-      setTimeout(() => {
-        if (!child.killed) {
-          logger.warn(`[chat] codex CLI still running after SIGTERM, sending SIGKILL (pid=${child.pid})`)
-          child.kill('SIGKILL')
-        }
-      }, CHAT_SIGKILL_DELAY)
+      killWithEscalation(child, 'codex')
     }
 
     let resultText = ''
@@ -178,13 +158,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
     const streamParser = new StreamLineParser()
     const activityTimeout = createActivityTimeout(CHAT_TIMEOUT, () => {
       logger.warn(`[chat] codex CLI timed out (pid=${child.pid}), sending SIGTERM`)
-      child.kill('SIGTERM')
-      sigkillTimer = setTimeout(() => {
-        if (!child.killed) {
-          logger.warn(`[chat] codex CLI still running after SIGTERM, sending SIGKILL (pid=${child.pid})`)
-          child.kill('SIGKILL')
-        }
-      }, CHAT_SIGKILL_DELAY)
+      sigkillTimer = killWithEscalation(child, 'codex')
     })
 
     const updateText = (nextText: string): void => {
@@ -324,7 +298,7 @@ export function buildCodexMcpConfigOverrides(mcpConfigPath: string): string[] {
     }
     return args
   } catch (error) {
-    logger.warn(`[chat] Failed to load Codex MCP config: ${error instanceof Error ? error.message : String(error)}`)
+    logger.warn(`[chat] Failed to load Codex MCP config: ${toErrorMessage(error)}`)
     return []
   }
 }
@@ -371,7 +345,7 @@ function readOutputLastMessage(filePath: string): string | undefined {
     if (!fs.existsSync(filePath)) return undefined
     return fs.readFileSync(filePath, 'utf-8')
   } catch (error) {
-    logger.debug(`[chat] Failed to read codex last message: ${error instanceof Error ? error.message : String(error)}`)
+    logger.debug(`[chat] Failed to read codex last message: ${toErrorMessage(error)}`)
     return undefined
   }
 }
@@ -380,7 +354,7 @@ function cleanupOutputLastMessage(filePath: string): void {
   try {
     fs.rmSync(path.dirname(filePath), { recursive: true, force: true })
   } catch (error) {
-    logger.debug(`[chat] Failed to remove codex last message temp dir: ${error instanceof Error ? error.message : String(error)}`)
+    logger.debug(`[chat] Failed to remove codex last message temp dir: ${toErrorMessage(error)}`)
   }
 }
 

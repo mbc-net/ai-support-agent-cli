@@ -3,6 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { logger } from '../logger'
+import { toErrorMessage } from '../utils'
 
 /**
  * 同梱の Claude Code プラグインディレクトリを解決する。
@@ -114,7 +115,7 @@ export function prepareBundledCodexPluginProfile(
       marketplaceRoot,
     }
   } catch (error) {
-    logger.warn(`[plugin-dir] failed to prepare bundled Codex plugin profile: ${error instanceof Error ? error.message : String(error)}`)
+    logger.warn(`[plugin-dir] failed to prepare bundled Codex plugin profile: ${toErrorMessage(error)}`)
     return null
   }
 }

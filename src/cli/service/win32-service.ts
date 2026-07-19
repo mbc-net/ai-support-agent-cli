@@ -9,7 +9,7 @@ import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
 import type { ProjectRegistration } from '../../types'
-import { getErrorMessage } from '../../utils'
+import { ensureDir, getErrorMessage } from '../../utils'
 import {
   getProjectConfigHostDir,
   getProjectLogDir,
@@ -308,20 +308,14 @@ export function writeAndRegisterProjectTask(
   // them (e.g. WSL/SMB shares).
   const logDir = getLogDir()
   const projectLogDir = getProjectLogDir(logDir, projectKey)
-  if (!fs.existsSync(projectLogDir)) {
-    fs.mkdirSync(projectLogDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(projectLogDir, 0o700)
 
   const servicesDir = getServicesDir()
   const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  if (!fs.existsSync(projectServiceDir)) {
-    fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(projectServiceDir, 0o700)
 
   const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  if (!fs.existsSync(projectConfigHostDir)) {
-    fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(projectConfigHostDir, 0o700)
 
   const validatedProjectDir = validateProjectDirForMount(project.projectDir)
 
@@ -374,9 +368,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
     }
 
     const logDir = getLogDir()
-    if (!fs.existsSync(logDir)) {
-      fs.mkdirSync(logDir, { recursive: true })
-    }
+    ensureDir(logDir)
 
     // Detect sanitizeServiceNameSegment() collisions where two valid codes map to the same task
     // name. Shared helper guarantees identical semantics with linux/darwin.

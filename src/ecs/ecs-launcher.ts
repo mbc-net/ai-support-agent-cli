@@ -38,6 +38,11 @@ interface ValidatedLaunchPayload {
   sidecarEnv?: Record<string, string>
 }
 
+/** Convert a `{name: value}` env map into ECS's `[{name, value}]` override shape. */
+function toEnvironmentEntries(env: Record<string, string>): { name: string; value: string }[] {
+  return Object.entries(env).map(([name, value]) => ({ name, value }))
+}
+
 function parseStringArray(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length === 0) return null
   if (!value.every((v) => typeof v === 'string' && v.length > 0)) return null
@@ -121,13 +126,13 @@ export async function ecsLaunch(p: Record<string, unknown>): Promise<CommandResu
     const containerOverrides: ContainerOverride[] = [
       {
         name: ECS_AGENT_CONTAINER_NAME,
-        environment: Object.entries(validated.containerEnv).map(([name, value]) => ({ name, value })),
+        environment: toEnvironmentEntries(validated.containerEnv),
       },
     ]
     if (validated.sidecarEnv) {
       containerOverrides.push({
         name: TAILSCALE_SIDECAR_CONTAINER_NAME,
-        environment: Object.entries(validated.sidecarEnv).map(([name, value]) => ({ name, value })),
+        environment: toEnvironmentEntries(validated.sidecarEnv),
       })
     }
 

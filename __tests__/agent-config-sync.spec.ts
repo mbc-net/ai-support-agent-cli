@@ -36,6 +36,10 @@ jest.mock('../src/project-dir', () => ({
 const mockDetectAvailableChatModes = jest.fn()
 const mockResolveActiveChatMode = jest.fn()
 jest.mock('../src/chat-mode-detector', () => ({
+  // isExplicitChatModeSelection is kept as the real implementation: it is a
+  // pure predicate (not an I/O boundary like detect/resolve) and the tests
+  // below assert its real output via state.activeChatModeExplicit.
+  ...jest.requireActual('../src/chat-mode-detector'),
   detectAvailableChatModes: mockDetectAvailableChatModes,
   resolveActiveChatMode: mockResolveActiveChatMode,
 }))

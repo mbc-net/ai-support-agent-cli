@@ -13,6 +13,7 @@ jest.mock('../src/appsync-subscriber')
 jest.mock('../src/commands')
 jest.mock('../src/logger')
 jest.mock('../src/chat-mode-detector', () => ({
+  ...jest.requireActual('../src/chat-mode-detector'),
   detectAvailableChatModes: jest.fn().mockResolvedValue([]),
   resolveActiveChatMode: jest.fn().mockReturnValue(undefined),
 }))

@@ -86,6 +86,28 @@ export function resolveActiveChatMode(
 }
 
 /**
+ * `resolveActiveChatMode` が「ローカル設定」または「サーバー設定」のいずれかを
+ * 明示的に採用したか（＝ステップ3の自動検出フォールバックに落ちていないか）を判定する。
+ *
+ * `resolveActiveChatMode` のステップ1・2と全く同じ優先順位判定
+ * （`localOverride`/`serverDefault` が `available` に含まれるか）を評価する。
+ * かつては agent-config-sync.ts に独立した実装として重複していたため、
+ * `resolveActiveChatMode` の優先順位ロジックが変わってもこちらが追従せず、
+ * 判定がサイレントにズレる懸念があった。ここに一本化することで両者が
+ * 常に同じ判定基準を共有する。
+ */
+export function isExplicitChatModeSelection(
+  availableChatModes: AgentChatMode[],
+  localAgentChatMode: AgentChatMode | undefined,
+  defaultAgentChatMode: AgentChatMode | undefined,
+): boolean {
+  return (
+    (localAgentChatMode !== undefined && availableChatModes.includes(localAgentChatMode)) ||
+    (defaultAgentChatMode !== undefined && availableChatModes.includes(defaultAgentChatMode))
+  )
+}
+
+/**
  * Claude Code CLI が利用可能かチェックする
  */
 async function isClaudeCodeAvailable(): Promise<boolean> {

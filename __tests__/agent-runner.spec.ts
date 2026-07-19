@@ -53,6 +53,7 @@ jest.mock('../src/auto-updater', () => ({
   startAutoUpdater: jest.fn().mockReturnValue({ stop: jest.fn() }),
 }))
 jest.mock('../src/chat-mode-detector', () => ({
+  ...jest.requireActual('../src/chat-mode-detector'),
   detectAvailableChatModes: jest.fn().mockResolvedValue([]),
   resolveActiveChatMode: jest.fn().mockReturnValue(undefined),
 }))

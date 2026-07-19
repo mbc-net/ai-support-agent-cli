@@ -1,5 +1,10 @@
 import { buildDockerRunWithLogRotate } from '../../../src/cli/service/service-template-helpers'
 
+/**
+ * ensureDir (used by darwin/linux/win32-service.ts for both plain and
+ * owner-only-mode directories) lives in ../../../src/utils and is covered by
+ * __tests__/utils.spec.ts — no need to duplicate that coverage here.
+ */
 describe('buildDockerRunWithLogRotate', () => {
   const buildDockerRun = (outputRedirect: string) =>
     `docker run --rm -i --name "test-container" \\\n  -e FOO=bar \\${outputRedirect}`
