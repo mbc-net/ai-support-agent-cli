@@ -222,6 +222,7 @@ export function startVsCodeTunnel(
     workspaceDir,
     configSyncState ? () => configSyncState.projectConfig?.envVars : undefined,
     () => onTransportAuthRejected(deps, state, 'vscode'),
+    deps.tenantCode,
   )
 
   state.vsCodeWs.connect().catch((error) => {
