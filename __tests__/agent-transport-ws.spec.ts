@@ -260,6 +260,7 @@ describe('startVsCodeTunnel', () => {
       '/test/project/workspace', // workspaceDir = file-upload resolution root
       undefined, // envVarsProvider (configSyncState 未指定時)
       expect.any(Function), // onAuthRejected (常に heartbeat 記録用に配線される)
+      'test', // tenantCode (validateTenantCodeの照合基準としてdeps.tenantCodeを渡す)
     )
     expect(state.vsCodeWs).not.toBeNull()
     expect(mockConnect).toHaveBeenCalled()
@@ -286,6 +287,7 @@ describe('startVsCodeTunnel', () => {
       '/test/project/workspace', // workspaceDir = file-upload resolution root
       undefined,
       expect.any(Function),
+      'test', // tenantCode
     )
   })
 
@@ -390,6 +392,7 @@ describe('startVsCodeTunnel', () => {
       '/test/project/workspace', // workspaceDir = file-upload resolution root
       undefined, // envVarsProvider (configSyncState 未指定時)
       expect.any(Function), // onAuthRejected (常に heartbeat 記録用に配線される)
+      'test', // tenantCode (validateTenantCodeの照合基準としてdeps.tenantCodeを渡す)
     )
   })
 })
@@ -1842,6 +1845,7 @@ describe('startVsCodeTunnel: no projectDir', () => {
       undefined, // workspaceDir (projectDir 未設定)
       undefined, // envVarsProvider
       expect.any(Function), // onAuthRejected (常に heartbeat 記録用に配線される)
+      deps.tenantCode, // tenantCode
     )
   })
 })

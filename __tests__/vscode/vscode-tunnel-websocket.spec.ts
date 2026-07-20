@@ -2174,7 +2174,59 @@ describe('VsCodeTunnelWebSocket', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(tunnel as any).handlePortForwardOpen({ type: 'port_forward_open', sessionId: 'pf-err' })
       expect(sentMessages).toHaveLength(1)
-      expect(sentMessages[0]).toEqual({ type: 'error', sessionId: 'pf-err', message: 'Missing targetPort' })
+      // Missing targetPort now fails the same Number.isInteger + range validation
+      // as any other malformed value (see 'targetPort validation' below), so it
+      // is reported as 'invalid targetPort' rather than a separate message.
+      expect(sentMessages[0]).toEqual({ type: 'error', sessionId: 'pf-err', message: 'invalid targetPort' })
+    })
+  })
+
+  // MEDIUM: targetPort must be validated as an integer in the valid TCP port
+  // range (1-65535) before being handed to `new VsCodeWsProxy(targetPort)`.
+  // Without this, an attacker-controlled (or buggy) API server could send an
+  // arbitrary string / out-of-range / negative value through.
+  describe('handlePortForwardOpen - targetPort validation (MEDIUM)', () => {
+    it('should reject targetPort: 0', () => {
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).handlePortForwardOpen({ type: 'port_forward_open', sessionId: 'pf-zero', targetPort: 0 })
+      expect(VsCodeWsProxy).not.toHaveBeenCalled()
+      expect(sentMessages).toEqual([{ type: 'error', sessionId: 'pf-zero', message: 'invalid targetPort' }])
+    })
+
+    it('should reject targetPort: 70000 (above valid TCP port range)', () => {
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).handlePortForwardOpen({ type: 'port_forward_open', sessionId: 'pf-huge', targetPort: 70000 })
+      expect(VsCodeWsProxy).not.toHaveBeenCalled()
+      expect(sentMessages).toEqual([{ type: 'error', sessionId: 'pf-huge', message: 'invalid targetPort' }])
+    })
+
+    it("should reject targetPort: 'abc' (non-numeric)", () => {
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).handlePortForwardOpen({ type: 'port_forward_open', sessionId: 'pf-nan', targetPort: 'abc' as unknown as number })
+      expect(VsCodeWsProxy).not.toHaveBeenCalled()
+      expect(sentMessages).toEqual([{ type: 'error', sessionId: 'pf-nan', message: 'invalid targetPort' }])
+    })
+
+    it('should reject targetPort: -1 (negative)', () => {
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).handlePortForwardOpen({ type: 'port_forward_open', sessionId: 'pf-neg', targetPort: -1 })
+      expect(VsCodeWsProxy).not.toHaveBeenCalled()
+      expect(sentMessages).toEqual([{ type: 'error', sessionId: 'pf-neg', message: 'invalid targetPort' }])
+    })
+
+    it('should accept a normal targetPort (e.g. 3000) and open the session as before', () => {
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+      VsCodeWsProxy.mockImplementation(() => ({}))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tunnel as any).handlePortForwardOpen({ type: 'port_forward_open', sessionId: 'pf-ok', targetPort: 3000 })
+      expect(VsCodeWsProxy).toHaveBeenCalledWith(3000)
+      expect(sentMessages).toEqual([{ type: 'port_forward_ready', sessionId: 'pf-ok', targetPort: 3000 }])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((tunnel as any).portForwardSessions.has('pf-ok')).toBe(true)
     })
   })
 
@@ -3623,6 +3675,324 @@ describe('VsCodeTunnelWebSocket', () => {
         value: 'abc',
         rect: { x: 1, y: 2, width: 3, height: 4 },
       })
+    })
+  })
+
+  // MEDIUM: defense-in-depth tenantCode check. The API server is expected to
+  // include `tenantCode` on open/vscode_open/port_forward_open messages, and
+  // this agent-side connection was itself established for a single known
+  // tenant (passed as the trailing constructor arg). If a message's
+  // tenantCode ever disagrees with the connection's own tenantCode — e.g. a
+  // server-side bug or a compromised/misrouted relay — the agent must refuse
+  // rather than silently acting for the wrong tenant.
+  describe('tenantCode validation (MEDIUM defense-in-depth)', () => {
+    const buildTunnelWithTenant = (tenantCode: string | undefined): VsCodeTunnelWebSocket => {
+      const t = new (VsCodeTunnelWebSocket as unknown as new (
+        apiUrl: string,
+        token: string,
+        agentId: string,
+        projectDir?: string,
+        workspaceDir?: string,
+        envVarsProvider?: () => Record<string, string> | undefined,
+        onAuthRejected?: () => void,
+        tenantCode?: string,
+      ) => VsCodeTunnelWebSocket)(
+        'https://api.example.com',
+        'test-token',
+        'agent-123',
+        '/test/project',
+        '/test/project/workspace',
+        undefined,
+        undefined,
+        tenantCode,
+      )
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(t as any).ws = mockWs
+      return t
+    }
+
+    describe('handleVsCodeOpen', () => {
+      it('should reject a message tenantCode that mismatches the connection tenantCode', async () => {
+        const { VsCodeServer } = require('../../src/vscode/vscode-server')
+        const t = buildTunnelWithTenant('tenant-a')
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (t as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-tn1', tenantCode: 'tenant-b' })
+
+        expect(VsCodeServer).not.toHaveBeenCalled()
+        expect(sentMessages).toEqual([{ type: 'error', sessionId: 'sess-tn1', message: 'tenant mismatch' }])
+      })
+
+      it('should allow a message tenantCode that matches the connection tenantCode', async () => {
+        const { VsCodeServer } = require('../../src/vscode/vscode-server')
+        const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+        VsCodeServer.mockImplementation(() => ({
+          start: jest.fn().mockResolvedValue(undefined),
+          getPort: jest.fn().mockReturnValue(8443),
+          isRunning: false,
+        }))
+        VsCodeWsProxy.mockImplementation(() => ({}))
+        const t = buildTunnelWithTenant('tenant-a')
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (t as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-tn2', tenantCode: 'tenant-a' })
+
+        expect(sentMessages[0].type).toBe('vscode_ready')
+      })
+
+      it('should not enforce tenantCode when the message omits it (backward compatible)', async () => {
+        const { VsCodeServer } = require('../../src/vscode/vscode-server')
+        const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+        VsCodeServer.mockImplementation(() => ({
+          start: jest.fn().mockResolvedValue(undefined),
+          getPort: jest.fn().mockReturnValue(8443),
+          isRunning: false,
+        }))
+        VsCodeWsProxy.mockImplementation(() => ({}))
+        const t = buildTunnelWithTenant('tenant-a')
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (t as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-tn3' })
+
+        expect(sentMessages[0].type).toBe('vscode_ready')
+      })
+
+      it('should not enforce tenantCode when the connection itself has none configured', async () => {
+        const { VsCodeServer } = require('../../src/vscode/vscode-server')
+        const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+        VsCodeServer.mockImplementation(() => ({
+          start: jest.fn().mockResolvedValue(undefined),
+          getPort: jest.fn().mockReturnValue(8443),
+          isRunning: false,
+        }))
+        VsCodeWsProxy.mockImplementation(() => ({}))
+        const t = buildTunnelWithTenant(undefined)
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (t as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-tn4', tenantCode: 'tenant-anything' })
+
+        expect(sentMessages[0].type).toBe('vscode_ready')
+      })
+    })
+
+    describe('handlePortForwardOpen', () => {
+      it('should reject a message tenantCode that mismatches the connection tenantCode', () => {
+        const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+        const t = buildTunnelWithTenant('tenant-a')
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(t as any).handlePortForwardOpen({
+          type: 'port_forward_open',
+          sessionId: 'pf-tn1',
+          targetPort: 3000,
+          tenantCode: 'tenant-b',
+        })
+
+        expect(VsCodeWsProxy).not.toHaveBeenCalled()
+        expect(sentMessages).toEqual([{ type: 'error', sessionId: 'pf-tn1', message: 'tenant mismatch' }])
+      })
+
+      it('should allow a matching tenantCode and omitted tenantCode alike', () => {
+        const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+        VsCodeWsProxy.mockImplementation(() => ({}))
+        const t = buildTunnelWithTenant('tenant-a')
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(t as any).handlePortForwardOpen({
+          type: 'port_forward_open',
+          sessionId: 'pf-tn2',
+          targetPort: 3000,
+          tenantCode: 'tenant-a',
+        })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(t as any).handlePortForwardOpen({
+          type: 'port_forward_open',
+          sessionId: 'pf-tn3',
+          targetPort: 3001,
+        })
+
+        expect(sentMessages).toEqual([
+          { type: 'port_forward_ready', sessionId: 'pf-tn2', targetPort: 3000 },
+          { type: 'port_forward_ready', sessionId: 'pf-tn3', targetPort: 3001 },
+        ])
+      })
+    })
+
+    describe('handleBrowserOpen', () => {
+      it('should reject a message tenantCode that mismatches the connection tenantCode', async () => {
+        const t = buildTunnelWithTenant('tenant-a')
+        t.browserSessionManager.getOrCreate = jest.fn()
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (t as any).handleBrowserOpen({ type: 'browser_open', sessionId: 'sess-btn1', tenantCode: 'tenant-b' })
+
+        expect(t.browserSessionManager.getOrCreate).not.toHaveBeenCalled()
+        expect(sentMessages).toEqual([{ type: 'error', sessionId: 'sess-btn1', message: 'tenant mismatch' }])
+      })
+
+      it('should allow a matching tenantCode and omitted tenantCode alike', async () => {
+        const mockPage = {
+          url: jest.fn().mockReturnValue('about:blank'),
+          title: jest.fn().mockResolvedValue(''),
+          screenshot: jest.fn().mockResolvedValue(Buffer.from('fake')),
+        }
+        const mockSession = {
+          getPage: jest.fn().mockResolvedValue(mockPage),
+          startLiveView: jest.fn(),
+          getCurrentUrl: jest.fn().mockReturnValue('about:blank'),
+          getPageTitle: jest.fn().mockResolvedValue(''),
+          actionLog: { onChange: null },
+        }
+        const t = buildTunnelWithTenant('tenant-a')
+        t.browserSessionManager.getOrCreate = jest.fn().mockResolvedValue(mockSession)
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (t as any).handleBrowserOpen({ type: 'browser_open', sessionId: 'sess-btn2', tenantCode: 'tenant-a' })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (t as any).handleBrowserOpen({ type: 'browser_open', sessionId: 'sess-btn3' })
+
+        expect(sentMessages.filter((m) => m.type === 'browser_ready')).toHaveLength(2)
+      })
+    })
+  })
+
+  // MEDIUM: symlink-escape guard for vscode_open's projectDir containment.
+  // The lexical (string-based) containment check from the HIGH fix cannot
+  // detect a symlink planted inside the trusted root that points OUTSIDE it —
+  // the resolved string is lexically inside, but the real (canonical) file is
+  // not. This exercises the additional fs.realpath-based physical guard.
+  describe('handleVsCodeOpen - projectDir containment via symlink (MEDIUM)', () => {
+    let tmpRoot: string
+    let outsideDir: string
+
+    beforeEach(async () => {
+      tmpRoot = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'vscode-ws-root-'))
+      outsideDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'vscode-ws-outside-'))
+    })
+
+    afterEach(async () => {
+      await fsPromises.rm(tmpRoot, { recursive: true, force: true })
+      await fsPromises.rm(outsideDir, { recursive: true, force: true })
+    })
+
+    const buildTunnelForRoot = (root: string): VsCodeTunnelWebSocket => {
+      const t = new VsCodeTunnelWebSocket(
+        'https://api.example.com',
+        'test-token',
+        'agent-123',
+        root,
+        path.join(root, 'workspace'),
+      )
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(t as any).ws = mockWs
+      return t
+    }
+
+    it('should reject a symlink inside the trusted root whose real target is outside it', async () => {
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const linkPath = path.join(tmpRoot, 'evil-link')
+      await fsPromises.symlink(outsideDir, linkPath, 'dir')
+      const t = buildTunnelForRoot(tmpRoot)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (t as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-sym1', projectDir: 'evil-link' })
+
+      expect(VsCodeServer).not.toHaveBeenCalled()
+      expect(sentMessages).toEqual([{ type: 'error', sessionId: 'sess-sym1', message: 'projectDir outside workspace' }])
+    })
+
+    it('should allow a regular (non-symlink) subdirectory inside the trusted root', async () => {
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+      VsCodeServer.mockImplementation(() => ({
+        start: jest.fn().mockResolvedValue(undefined),
+        getPort: jest.fn().mockReturnValue(8443),
+        isRunning: false,
+      }))
+      VsCodeWsProxy.mockImplementation(() => ({}))
+      const goodDir = path.join(tmpRoot, 'good')
+      await fsPromises.mkdir(goodDir)
+      const t = buildTunnelForRoot(tmpRoot)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (t as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-sym2', projectDir: 'good' })
+
+      expect(sentMessages[0].type).toBe('vscode_ready')
+      expect(VsCodeServer).toHaveBeenCalledWith(expect.objectContaining({ projectDir: goodDir }))
+    })
+
+    it('should allow a symlink inside the trusted root whose real target is also inside it', async () => {
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+      VsCodeServer.mockImplementation(() => ({
+        start: jest.fn().mockResolvedValue(undefined),
+        getPort: jest.fn().mockReturnValue(8443),
+        isRunning: false,
+      }))
+      VsCodeWsProxy.mockImplementation(() => ({}))
+      const realTarget = path.join(tmpRoot, 'real-target')
+      await fsPromises.mkdir(realTarget)
+      const linkPath = path.join(tmpRoot, 'inside-link')
+      await fsPromises.symlink(realTarget, linkPath, 'dir')
+      const t = buildTunnelForRoot(tmpRoot)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (t as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-sym3', projectDir: 'inside-link' })
+
+      expect(sentMessages[0].type).toBe('vscode_ready')
+    })
+
+    // HIGH: a naive `fs.realpath(resolved)` check rejects outright (ENOENT)
+    // when the requested leaf directory doesn't exist yet — a common case,
+    // since projectDir is often a not-yet-created subdirectory. That would
+    // silently skip validation of a symlink placed at an INTERMEDIATE path
+    // component, letting fs.mkdirSync's recursive creation (in
+    // vscode-server.ts) follow the symlink at the OS level and land outside
+    // the trusted root. The fix walks up to the deepest EXISTING ancestor
+    // (the symlink itself, since its leaf doesn't exist) and canonicalizes
+    // that instead.
+    it('should reject when an intermediate path component is an escaping symlink even if the leaf does not exist yet', async () => {
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const linkPath = path.join(tmpRoot, 'evil-link')
+      await fsPromises.symlink(outsideDir, linkPath, 'dir')
+      const t = buildTunnelForRoot(tmpRoot)
+
+      // 'evil-link/not-created-yet' — the leaf itself does not exist, only
+      // the intermediate symlink does.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (t as any).handleVsCodeOpen({
+        type: 'vscode_open',
+        sessionId: 'sess-sym4',
+        projectDir: 'evil-link/not-created-yet',
+      })
+
+      expect(VsCodeServer).not.toHaveBeenCalled()
+      expect(sentMessages).toEqual([{ type: 'error', sessionId: 'sess-sym4', message: 'projectDir outside workspace' }])
+    })
+
+    it('should allow a not-yet-created subdirectory under a regular (non-symlink) directory', async () => {
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+      VsCodeServer.mockImplementation(() => ({
+        start: jest.fn().mockResolvedValue(undefined),
+        getPort: jest.fn().mockReturnValue(8443),
+        isRunning: false,
+      }))
+      VsCodeWsProxy.mockImplementation(() => ({}))
+      const t = buildTunnelForRoot(tmpRoot)
+
+      // Neither 'good' nor 'good/not-created-yet' exist on disk.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (t as any).handleVsCodeOpen({
+        type: 'vscode_open',
+        sessionId: 'sess-sym5',
+        projectDir: 'good/not-created-yet',
+      })
+
+      expect(sentMessages[0].type).toBe('vscode_ready')
+      expect(VsCodeServer).toHaveBeenCalledWith(
+        expect.objectContaining({ projectDir: path.join(tmpRoot, 'good', 'not-created-yet') }),
+      )
     })
   })
 })
