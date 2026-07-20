@@ -9,6 +9,7 @@ import { logger } from '../logger'
 import { buildSafeEnv } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
+import { GENERAL_KNOWN_HOSTS_ID, resolveKnownHostsPath } from '../utils/known-hosts-store'
 import { getErrorMessage, sweepStaleEntries } from '../utils'
 import {
   SCROLLBACK_BUFFER_MAX_BYTES,
@@ -280,7 +281,18 @@ export class TerminalSession {
         const sshKeyPath = path.join(os.tmpdir(), `ssh-key-${sessionId}`)
         fs.writeFileSync(sshKeyPath, pemContent, { mode: 0o600 })
         this.sshKeyFile = sshKeyPath
-        env.GIT_SSH_COMMAND = `ssh -i "${sshKeyPath}" ${SSH_NO_HOST_CHECK_FLAGS}`
+        const tenantCode = this.meta?.tenantCode
+        let hostCheckFlags = SSH_NO_HOST_CHECK_FLAGS
+        if (!tenantCode) {
+          logger.warn(`[terminal:${sessionId}] tenantCode is unavailable (no meta on open); falling back to non-TOFU SSH host-key checking`)
+        } else {
+          try {
+            hostCheckFlags = `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${resolveKnownHostsPath(tenantCode, GENERAL_KNOWN_HOSTS_ID)}"`
+          } catch (knownHostsError) {
+            logger.warn(`[terminal:${sessionId}] Failed to resolve known_hosts path; falling back to non-TOFU SSH host-key checking: ${getErrorMessage(knownHostsError)}`)
+          }
+        }
+        env.GIT_SSH_COMMAND = `ssh -i "${sshKeyPath}" ${hostCheckFlags}`
         logger.debug(`[terminal:${sessionId}] SSH key configured for git operations`)
       } catch {
         logger.warn(`[terminal:${sessionId}] Failed to set up SSH key for git; continuing without SSH key`)

@@ -1,6 +1,8 @@
 /**
- * Persistent, per-SSH-host known_hosts file for `server_setup_exec`'s TOFU
- * (Trust On First Use) host key checking.
+ * Persistent, per-SSH-host known_hosts file for TOFU (Trust On First Use)
+ * host key checking, shared across every subsystem that performs
+ * git-over-ssh operations: server-setup, repo-sync, git-credential-setup,
+ * and terminal-session.
  *
  * Unlike the SSH private key (fetched Just-In-Time and always removed with
  * the rest of the per-run temp directory — see `server-setup-runner.ts`), a
@@ -24,6 +26,13 @@ import * as path from 'path'
 
 import { getConfigDir } from '../config-manager'
 import { ensureDir, sanitizeNameSegment } from '../utils'
+
+/**
+ * 接続先ホストが呼び出し時点で判明しない経路専用の共有 sshHostId。
+ * terminal-session の対話シェル、git-credential-setup の未登録ホストへの
+ * フォールバック等で使う。sanitizeNameSegment 通過後も 'shared' のまま。
+ */
+export const GENERAL_KNOWN_HOSTS_ID = 'shared'
 
 /** Directory (under the persistent config dir) holding one known_hosts file per (tenantCode, sshHostId) pair. */
 export function knownHostsDir(): string {
