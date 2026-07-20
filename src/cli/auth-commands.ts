@@ -1,4 +1,4 @@
-import type { Command } from 'commander'
+import { Option, type Command } from 'commander'
 
 import { ApiClient } from '../api-client'
 import { startAuthServer } from '../auth-server'
@@ -105,7 +105,16 @@ export function registerAuthCommands(program: Command): void {
   program
     .command('configure')
     .description(t('cmd.configure'))
-    .requiredOption('--token <token>', t('cmd.configure.token'))
+    .addOption(
+      // env(): allows the token to be supplied via the AI_SUPPORT_AGENT_TOKEN
+      // environment variable instead of --token. Automated callers (e.g. the
+      // server-setup ai_support_agent Ansible role) use this to avoid the
+      // token appearing in process argv, which is readable by any local user
+      // via `ps`/`/proc/<pid>/cmdline` for as long as the process runs.
+      new Option('--token <token>', t('cmd.configure.token'))
+        .env('AI_SUPPORT_AGENT_TOKEN')
+        .makeOptionMandatory(),
+    )
     .option('--api-url <url>', t('cmd.configure.apiUrl'), DEFAULT_API_URL)
     .option('--project-code <code>', t('cmd.configure.projectCode'))
     .action(async (opts: { token: string; apiUrl: string; projectCode?: string }) => {

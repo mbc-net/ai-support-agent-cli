@@ -1,0 +1,156 @@
+---
+# ai_support_agent role: installs this project's own CLI
+# (@ai-support-agent/cli), authenticates it non-interactively via
+# `ai-support-agent configure`, and registers it as a systemd **user**
+# service via `ai-support-agent service install` so it runs persistently on
+# the target server (resident_agent execution path).
+#
+# Depends on the nvm role having already been run for the same user
+# (`ai_support_agent_user` must match nvm's `nvm_user`, default 'appuser'
+# for both).
+#
+# `ai_support_agent_token` and `ai_support_agent_api_url` have NO default —
+# unlike nvm_user/node_version, there is no sensible default for a bearer
+# token or API URL, so (following the ssh_key role's precedent) both are
+# required via `assert` rather than silently defaulted.
+#
+# `configure` and `service install` are called as two explicit, separate
+# tasks rather than relying on `configure`'s internal auto-install
+# (`installAndStartProject`), so each step's success/failure is visible
+# independently in the playbook run.
+#
+# `service install` registers a systemd **user** unit
+# (`~/.config/systemd/user`), which only runs when either a user session is
+# active or "lingering" is enabled for that user (`loginctl enable-linger`).
+# On a freshly provisioned VPS there is no active login session, so linger
+# must be enabled explicitly. Enabling linger alone does not guarantee an
+# already-running per-user systemd instance (it normally starts at the next
+# login/boot) — `user@<uid>.service` is started explicitly so
+# XDG_RUNTIME_DIR (/run/user/<uid>) and the user's systemd/D-Bus instance
+# exist immediately, without waiting for an actual login. Verified against a
+# real systemd (Ubuntu 24.04) container: `loginctl enable-linger` +
+# `systemctl start user@<uid>.service` + `XDG_RUNTIME_DIR=/run/user/<uid>`
+# is sufficient for `systemctl --user` (which `service install` calls
+# internally) to succeed with no active login session.
+#
+# **Secret handling (`ai_support_agent_token`)**: the token is passed to the
+# `configure` step via Ansible's `environment:` (a real OS environment
+# variable set at process-spawn time), never interpolated by Jinja into the
+# shell script text and never passed as a `--token` CLI flag. This matters
+# for two independent reasons:
+#   1. Jinja renders `{{ ai_support_agent_token }}` into the script BEFORE
+#      bash parses it. A token containing shell metacharacters
+#      (`"`, `` ` ``, `$(...)`) would be interpreted as shell syntax rather
+#      than literal text — arbitrary command execution as
+#      `ai_support_agent_user`. `environment:` values are never re-parsed by
+#      a shell, so this is not possible.
+#   2. A `--token` CLI argument is visible to any local user via `ps`/
+#      `/proc/<pid>/cmdline` (world-readable by default) for as long as the
+#      process runs. `ai-support-agent configure` reads the token from the
+#      `AI_SUPPORT_AGENT_TOKEN` environment variable when `--token` is
+#      omitted (`agent/src/cli/auth-commands.ts`, added alongside this
+#      role), so the token appears only in `/proc/<pid>/environ`, which
+#      (unlike cmdline) requires the same uid or CAP_SYS_PTRACE to read.
+# `ai_support_agent_api_url`/`ai_support_agent_project_code` are not
+# secrets, but are passed the same way (env var + `"$VAR"` shell expansion)
+# to avoid the same Jinja-into-shell-text interpolation hazard.
+
+- name: "ai_support_agent : Validate required variables are set"
+  ansible.builtin.assert:
+    that:
+      - ai_support_agent_token is defined and ai_support_agent_token is string and (ai_support_agent_token | trim | length > 0)
+      - ai_support_agent_api_url is defined and ai_support_agent_api_url is string and (ai_support_agent_api_url | trim | length > 0)
+    fail_msg: >-
+      ai_support_agent_token and ai_support_agent_api_url must both be set to
+      non-empty strings (e.g. via the recipe's include_role.vars, with
+      ai_support_agent_token referencing an ANSIBLE# project variable).
+
+- name: "ai_support_agent : Validate nvm role has been run for this user"
+  ansible.builtin.stat:
+    path: "/home/{{ ai_support_agent_user | default('appuser') }}/.nvm/nvm.sh"
+  register: ai_support_agent_nvm_check
+
+- name: "ai_support_agent : Assert Node.js/npm (via nvm role) is available"
+  ansible.builtin.assert:
+    that:
+      - ai_support_agent_nvm_check.stat.exists
+    fail_msg: >-
+      Node.js/npm not found for user '{{ ai_support_agent_user | default('appuser') }}'.
+      Include the nvm role (with a matching nvm_user) before ai_support_agent.
+
+- name: "ai_support_agent : Install ai-support-agent CLI via npm"
+  ansible.builtin.shell: |
+    set -e
+    export NVM_DIR="/home/{{ ai_support_agent_user | default('appuser') }}/.nvm"
+    . "$NVM_DIR/nvm.sh"
+    npm install -g {{ ai_support_agent_package | default('@ai-support-agent/cli') }}
+  args:
+    executable: /bin/bash
+  become_user: "{{ ai_support_agent_user | default('appuser') }}"
+  register: ai_support_agent_install_result
+  changed_when: "'up to date' not in ai_support_agent_install_result.stdout"
+
+- name: "ai_support_agent : Resolve numeric uid for the target user"
+  ansible.builtin.command:
+    cmd: "id -u {{ ai_support_agent_user | default('appuser') }}"
+  register: ai_support_agent_uid
+  changed_when: false
+
+- name: "ai_support_agent : Configure ai-support-agent CLI (non-interactive auth)"
+  block:
+    - name: "ai_support_agent : Run configure"
+      ansible.builtin.shell: |
+        set -e
+        export NVM_DIR="/home/{{ ai_support_agent_user | default('appuser') }}/.nvm"
+        . "$NVM_DIR/nvm.sh"
+        ai-support-agent configure --api-url "$AI_SUPPORT_AGENT_API_URL" ${AI_SUPPORT_AGENT_PROJECT_CODE:+--project-code "$AI_SUPPORT_AGENT_PROJECT_CODE"}
+      args:
+        executable: /bin/bash
+      become_user: "{{ ai_support_agent_user | default('appuser') }}"
+      environment:
+        AI_SUPPORT_AGENT_TOKEN: "{{ ai_support_agent_token }}"
+        AI_SUPPORT_AGENT_API_URL: "{{ ai_support_agent_api_url }}"
+        AI_SUPPORT_AGENT_PROJECT_CODE: "{{ ai_support_agent_project_code | default('') }}"
+      # Rewrites the CLI's config file on every run; treated as always
+      # "changed" rather than guessed at via stdout heuristics.
+      changed_when: true
+      no_log: true
+  rescue:
+    - name: "ai_support_agent : Fail with a token-safe diagnostic message"
+      ansible.builtin.fail:
+        msg: >-
+          ai-support-agent configure failed for api_url
+          '{{ ai_support_agent_api_url }}' (token and command output
+          redacted by no_log). Check network reachability to api_url and
+          that the token is valid.
+
+- name: "ai_support_agent : Check whether linger is already enabled"
+  ansible.builtin.command:
+    cmd: "loginctl show-user {{ ai_support_agent_user | default('appuser') }} --property=Linger --value"
+  register: ai_support_agent_linger_status
+  changed_when: false
+
+- name: "ai_support_agent : Enable linger (keeps the user's systemd instance running without an active login session)"
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ ai_support_agent_user | default('appuser') }}"
+  when: (ai_support_agent_linger_status.stdout | default('')) != 'yes'
+
+- name: "ai_support_agent : Start the per-user systemd instance"
+  ansible.builtin.systemd:
+    name: "user@{{ ai_support_agent_uid.stdout }}.service"
+    state: started
+
+- name: "ai_support_agent : Register as a systemd user service"
+  ansible.builtin.shell: |
+    set -e
+    export NVM_DIR="/home/{{ ai_support_agent_user | default('appuser') }}/.nvm"
+    . "$NVM_DIR/nvm.sh"
+    ai-support-agent service install
+  args:
+    executable: /bin/bash
+  become_user: "{{ ai_support_agent_user | default('appuser') }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ ai_support_agent_uid.stdout }}"
+  # (Re)installs/overwrites the systemd unit file on every run; treated as
+  # always "changed" rather than guessed at via stdout heuristics.
+  changed_when: true

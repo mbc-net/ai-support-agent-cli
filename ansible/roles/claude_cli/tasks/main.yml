@@ -1,0 +1,58 @@
+---
+# claude_cli role: installs Claude Code CLI (@anthropic-ai/claude-code) via
+# npm, using the Node.js/npm environment the nvm role sets up.
+#
+# Depends on the nvm role having already been run for the same user
+# (`claude_cli_user` must match nvm's `nvm_user`, default 'appuser' for
+# both). Asserts nvm's presence so a missing/misordered nvm role fails with
+# a clear message instead of an obscure "npm: command not found".
+#
+# `ANTHROPIC_API_KEY` is optional (recipe authors reference an ANSIBLE#
+# project variable). When supplied, it is persisted to
+# `~/.config/environment.d/anthropic.conf` — the mechanism `systemd --user`
+# reads to populate environment variables for user services (relevant for
+# the ai_support_agent role's systemd user service, which spawns `claude` as
+# a subprocess) — rather than only being available for the npm install
+# step itself.
+
+- name: "claude_cli : Validate nvm role has been run for this user"
+  ansible.builtin.stat:
+    path: "/home/{{ claude_cli_user | default('appuser') }}/.nvm/nvm.sh"
+  register: claude_cli_nvm_check
+
+- name: "claude_cli : Assert Node.js/npm (via nvm role) is available"
+  ansible.builtin.assert:
+    that:
+      - claude_cli_nvm_check.stat.exists
+    fail_msg: >-
+      Node.js/npm not found for user '{{ claude_cli_user | default('appuser') }}'.
+      Include the nvm role (with a matching nvm_user) before claude_cli.
+
+- name: "claude_cli : Install Claude Code CLI via npm"
+  ansible.builtin.shell: |
+    set -e
+    export NVM_DIR="/home/{{ claude_cli_user | default('appuser') }}/.nvm"
+    . "$NVM_DIR/nvm.sh"
+    npm install -g {{ claude_cli_package | default('@anthropic-ai/claude-code') }}
+  args:
+    executable: /bin/bash
+  become_user: "{{ claude_cli_user | default('appuser') }}"
+  register: claude_cli_install_result
+  changed_when: "'up to date' not in claude_cli_install_result.stdout"
+
+- name: "claude_cli : Create systemd user environment.d directory"
+  ansible.builtin.file:
+    path: "/home/{{ claude_cli_user | default('appuser') }}/.config/environment.d"
+    state: directory
+    owner: "{{ claude_cli_user | default('appuser') }}"
+    mode: '0700'
+  when: ANTHROPIC_API_KEY is defined
+
+- name: "claude_cli : Persist ANTHROPIC_API_KEY for systemd --user services"
+  ansible.builtin.copy:
+    content: "ANTHROPIC_API_KEY={{ ANTHROPIC_API_KEY }}\n"
+    dest: "/home/{{ claude_cli_user | default('appuser') }}/.config/environment.d/anthropic.conf"
+    owner: "{{ claude_cli_user | default('appuser') }}"
+    mode: '0600'
+  when: ANTHROPIC_API_KEY is defined
+  no_log: true

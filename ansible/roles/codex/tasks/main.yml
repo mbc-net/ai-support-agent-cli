@@ -1,0 +1,56 @@
+---
+# codex role: installs OpenAI Codex CLI (@openai/codex) via npm, using the
+# Node.js/npm environment the nvm role sets up.
+#
+# Depends on the nvm role having already been run for the same user
+# (`codex_user` must match nvm's `nvm_user`, default 'appuser' for both).
+# Asserts nvm's presence so a missing/misordered nvm role fails with a
+# clear message instead of an obscure "npm: command not found".
+#
+# `OPENAI_API_KEY` is optional (recipe authors reference an ANSIBLE#
+# project variable). When supplied, it is persisted to
+# `~/.config/environment.d/openai.conf` — the mechanism `systemd --user`
+# reads to populate environment variables for user services — rather than
+# only being available for the npm install step itself.
+
+- name: "codex : Validate nvm role has been run for this user"
+  ansible.builtin.stat:
+    path: "/home/{{ codex_user | default('appuser') }}/.nvm/nvm.sh"
+  register: codex_nvm_check
+
+- name: "codex : Assert Node.js/npm (via nvm role) is available"
+  ansible.builtin.assert:
+    that:
+      - codex_nvm_check.stat.exists
+    fail_msg: >-
+      Node.js/npm not found for user '{{ codex_user | default('appuser') }}'.
+      Include the nvm role (with a matching nvm_user) before codex.
+
+- name: "codex : Install Codex CLI via npm"
+  ansible.builtin.shell: |
+    set -e
+    export NVM_DIR="/home/{{ codex_user | default('appuser') }}/.nvm"
+    . "$NVM_DIR/nvm.sh"
+    npm install -g {{ codex_package | default('@openai/codex') }}
+  args:
+    executable: /bin/bash
+  become_user: "{{ codex_user | default('appuser') }}"
+  register: codex_install_result
+  changed_when: "'up to date' not in codex_install_result.stdout"
+
+- name: "codex : Create systemd user environment.d directory"
+  ansible.builtin.file:
+    path: "/home/{{ codex_user | default('appuser') }}/.config/environment.d"
+    state: directory
+    owner: "{{ codex_user | default('appuser') }}"
+    mode: '0700'
+  when: OPENAI_API_KEY is defined
+
+- name: "codex : Persist OPENAI_API_KEY for systemd --user services"
+  ansible.builtin.copy:
+    content: "OPENAI_API_KEY={{ OPENAI_API_KEY }}\n"
+    dest: "/home/{{ codex_user | default('appuser') }}/.config/environment.d/openai.conf"
+    owner: "{{ codex_user | default('appuser') }}"
+    mode: '0600'
+  when: OPENAI_API_KEY is defined
+  no_log: true
