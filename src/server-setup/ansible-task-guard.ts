@@ -21,8 +21,9 @@ import { toErrorMessage } from '../utils'
  * （早期 UX フィードバック）。権威判定は agent 実行時に `dispatchMode` に応じたモードで行う。
  *
  * ## `include_role` スニペット（組み込みステップ）
- * 組み込みステップ（os_init/docker/web_server/database/dns_tls/ssh_key）は、bundled role を
- * 呼ぶ `include_role` タスクとして表現する。`include_role` は 6 ロールのみ許可し、role 名と
+ * 組み込みステップ（os_init/ssh_key/docker/nvm/claude_cli/codex/ai_support_agent/
+ * web_server/database/dns_tls）は、bundled role を呼ぶ `include_role` タスクとして
+ * 表現する。`include_role` は 10 ロールのみ許可し、role 名と
  * 許可 param キーを専用バリデータで個別検査する。ロール変数は **task レベルの `vars:`**
  * （`include_role:` と同じインデントの兄弟キー）で渡す。`ansible.builtin.include_role`
  * モジュールに `vars` というパラメータは存在しない（モジュール引数内にネストすると実機の
@@ -211,21 +212,29 @@ const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * `include_role` で呼び出しを許可する 6 つの bundled role。
+ * `include_role` で呼び出しを許可する 10 個の bundled role。
  * 組み込みステップ（スニペット）に 1:1 対応する。
+ *
+ * `claude_cli`/`codex`/`ai_support_agent` は `nvm` ロールで導入した Node.js/npm に
+ * 依存する。ロール間の自動依存機構は無いため、レシピ作成者が `nvm` を先に
+ * include する運用とし、各ロールは前提を `assert` で検証する。
  */
 export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'os_init',
+  'ssh_key',
   'docker',
+  'nvm',
+  'claude_cli',
+  'codex',
+  'ai_support_agent',
   'web_server',
   'database',
   'dns_tls',
-  'ssh_key',
 ])
 
 /**
  * `include_role` のモジュール引数マッピングで許可する param キー。
- * - `name`: 必須。上記 6 ロールのいずれか。
+ * - `name`: 必須。上記 10 ロールのいずれか。
  * - `tasks_from`: ロール内の代替タスクファイル名（ロールディレクトリ内に閉じる）。
  * - `public`: include したロールの変数を後続へ公開するか（真偽値）。
  *
@@ -577,7 +586,7 @@ export function validateAnsibleTasks(
       for (const key of moduleCandidateKeys) {
         const normalized = normalizeModuleKey(key, mode)
 
-        // include_role は専用バリデータで検査する（6 ロール限定 + param キー allowlist）。
+        // include_role は専用バリデータで検査する（10 ロール限定 + param キー allowlist）。
         // ロール変数（task レベルの vars）は validateIncludeRoleTaskVars で別途検査する。
         if (INCLUDE_ROLE_MODULE_KEYS.has(normalized)) {
           validateIncludeRole(taskIndex, key, task[key], violations)

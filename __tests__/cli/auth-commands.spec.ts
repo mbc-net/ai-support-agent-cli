@@ -93,6 +93,41 @@ describe('cli/auth-commands', () => {
   })
 
   describe('configure action', () => {
+    it('should accept --token from the AI_SUPPORT_AGENT_TOKEN env var when the flag is omitted (avoids the token appearing in process argv/ps output)', async () => {
+      const mockGetProjectConfig = jest.fn().mockResolvedValue({
+        project: { tenantCode: 'mbc', projectCode: 'RESOLVED_01', projectName: 'Resolved Project' },
+        configHash: 'hash',
+        agent: { agentEnabled: true, builtinAgentEnabled: true, builtinFallbackEnabled: true },
+      })
+      MockedApiClient.mockImplementation(() => ({
+        getProjectConfig: mockGetProjectConfig,
+      }) as unknown as ApiClient)
+
+      const previousToken = process.env.AI_SUPPORT_AGENT_TOKEN
+      process.env.AI_SUPPORT_AGENT_TOKEN = 'env-token'
+      try {
+        const program = new Command()
+          .exitOverride()
+          .configureOutput({ writeOut: () => {}, writeErr: () => {} })
+
+        registerAuthCommands(program)
+
+        const configureCmd = program.commands.find((cmd) => cmd.name() === 'configure')!
+        await configureCmd.parseAsync(['node', 'test', '--api-url', 'http://my-api'])
+
+        expect(MockedApiClient).toHaveBeenCalledWith('http://my-api', 'env-token')
+        expect(mockedAddProject).toHaveBeenCalledWith(
+          expect.objectContaining({ token: 'env-token' }),
+        )
+      } finally {
+        if (previousToken === undefined) {
+          delete process.env.AI_SUPPORT_AGENT_TOKEN
+        } else {
+          process.env.AI_SUPPORT_AGENT_TOKEN = previousToken
+        }
+      }
+    })
+
     it('should auto-resolve projectCode from API when --project-code is not specified', async () => {
       const mockGetProjectConfig = jest.fn().mockResolvedValue({
         project: { tenantCode: 'mbc', projectCode: 'RESOLVED_01', projectName: 'Resolved Project' },
