@@ -13,6 +13,7 @@ import {
   SELECTOR_TIMEOUT_NAVIGATION_MS,
   SELECTOR_TIMEOUT_SINGLE_MS,
 } from '../mcp/tools/browser/browser-types'
+import { validateUrl } from '../mcp/tools/browser/browser-security'
 import { actionLogPreview } from '../mcp/tools/browser/selector-utils'
 
 /**
@@ -180,10 +181,20 @@ export async function executePlaywrightScript(
 
     try {
       switch (step.type) {
-        case 'goto':
-          await page.goto(step.args.url, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
-          session.actionLog.add('chat', 'navigate', step.args.url)
+        case 'goto': {
+          // Scripted navigation must pass the same SSRF/scheme validation as
+          // the interactive browser_navigate path — otherwise a generated
+          // script can call page.goto('file:///etc/passwd') or a metadata-
+          // endpoint URL and bypass validateUrl entirely.
+          const gotoUrl = step.args.url
+          const validation = validateUrl(gotoUrl)
+          if (!validation.valid) {
+            throw new Error(`Blocked navigation (${validation.reason}): ${gotoUrl}`)
+          }
+          await page.goto(gotoUrl, { waitUntil: 'domcontentloaded', timeout: SELECTOR_TIMEOUT_NAVIGATION_MS })
+          session.actionLog.add('chat', 'navigate', gotoUrl)
           break
+        }
         case 'click':
           await page.click(step.args.selector, { timeout: SELECTOR_TIMEOUT_SINGLE_MS })
           session.actionLog.add('chat', 'click', step.args.selector)

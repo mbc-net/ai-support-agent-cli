@@ -466,7 +466,29 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       return
     }
 
-    const projectDir = msg.projectDir ?? this.projectDir
+    let projectDir: string | undefined
+    if (msg.projectDir) {
+      // Client/API-supplied projectDir MUST be contained within the trusted
+      // workspace root (`this.projectDir`). Without this check, an absolute
+      // path (e.g. `/` or `~/.ssh`) or a `../` traversal would let code-server
+      // be launched (with `--auth none`) rooted outside the workspace,
+      // exposing arbitrary host files with no authentication.
+      const trustedRoot = this.projectDir
+      if (!trustedRoot) {
+        this.send({ type: 'error', sessionId, message: 'No project directory' })
+        return
+      }
+      const resolved = path.resolve(trustedRoot, msg.projectDir)
+      const isInsideRoot = resolved === trustedRoot || resolved.startsWith(trustedRoot + path.sep)
+      if (!isInsideRoot) {
+        this.send({ type: 'error', sessionId, message: 'projectDir outside workspace' })
+        return
+      }
+      projectDir = resolved
+    } else {
+      projectDir = this.projectDir
+    }
+
     if (!projectDir) {
       this.send({ type: 'error', sessionId, message: 'No project directory' })
       return
