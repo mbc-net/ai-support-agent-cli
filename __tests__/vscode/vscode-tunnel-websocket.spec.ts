@@ -201,8 +201,11 @@ describe('VsCodeTunnelWebSocket', () => {
         isRunning: false,
       }))
 
+      // No msg.projectDir override here (falls back to the tunnel's trusted
+      // '/test/project' root) — this test exercises the start() failure path,
+      // not projectDir containment (see the dedicated containment tests below).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (tunnel as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-1', projectDir: '/test' })
+      await (tunnel as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-1' })
       expect(sentMessages).toHaveLength(1)
       expect(sentMessages[0].type).toBe('error')
       expect(sentMessages[0].sessionId).toBe('sess-1')
@@ -280,7 +283,7 @@ describe('VsCodeTunnelWebSocket', () => {
       expect(sentMessages[0]).toEqual({ type: 'vscode_ready', sessionId: 'sess-1', port: 8443, projectDir: '/test/project' })
     })
 
-    it('should use projectDir from message if provided', async () => {
+    it('should use projectDir from message if provided and it is inside the workspace root', async () => {
       const { VsCodeServer } = require('../../src/vscode/vscode-server')
       const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
 
@@ -291,10 +294,14 @@ describe('VsCodeTunnelWebSocket', () => {
       }))
       VsCodeWsProxy.mockImplementation(() => ({}))
 
+      // tunnel's trusted root (this.projectDir) is '/test/project' — a
+      // relative subdirectory request resolves under it and is allowed.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (tunnel as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-1', projectDir: '/custom/dir' })
+      await (tunnel as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-1', projectDir: 'workspace/repos/foo' })
 
-      expect(VsCodeServer).toHaveBeenCalledWith({ projectDir: '/custom/dir' })
+      expect(VsCodeServer).toHaveBeenCalledWith(
+        expect.objectContaining({ projectDir: path.join('/test/project', 'workspace/repos/foo') }),
+      )
     })
 
     it('should warn when envVarsProvider is set but returns falsy', async () => {
@@ -328,8 +335,11 @@ describe('VsCodeTunnelWebSocket', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(tunnelWithProvider as any).ws = mockWs
 
+      // No msg.projectDir override — falls back to tunnelWithProvider's own
+      // trusted root ('/test/project'). This test exercises the envVars-not-ready
+      // warning, not projectDir containment.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (tunnelWithProvider as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-env-warn', projectDir: '/test' })
+      await (tunnelWithProvider as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-env-warn' })
 
       expect(logger.warn).toHaveBeenCalledWith(
         expect.stringContaining('before envVars are available'),
@@ -382,14 +392,123 @@ describe('VsCodeTunnelWebSocket', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(tunnelWithProvider as any).vsCodeServerEnvSignature = 'OLD_KEY=old_value'
 
+      // No msg.projectDir override — falls back to tunnelWithProvider's own
+      // trusted root ('/test/project'). This test exercises the envVars-changed
+      // restart logic, not projectDir containment.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (tunnelWithProvider as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-restart', projectDir: '/test' })
+      await (tunnelWithProvider as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-restart' })
 
       expect(logger.info).toHaveBeenCalledWith(
         expect.stringContaining('envVars changed since last code-server start'),
       )
       expect(mockStop).toHaveBeenCalled()
       expect(mockStart).toHaveBeenCalled()
+    })
+  })
+
+  describe('handleVsCodeOpen - projectDir containment', () => {
+    // tunnel (from beforeEach) is constructed with trusted root '/test/project'.
+
+    it('should reject an absolute projectDir outside the workspace root and never construct VsCodeServer', async () => {
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-1', projectDir: '/' })
+
+      expect(VsCodeServer).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({
+        type: 'error',
+        sessionId: 'sess-1',
+        message: 'projectDir outside workspace',
+      })
+    })
+
+    it('should reject a path-traversal projectDir and never construct VsCodeServer', async () => {
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-1', projectDir: '../../etc' })
+
+      expect(VsCodeServer).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({
+        type: 'error',
+        sessionId: 'sess-1',
+        message: 'projectDir outside workspace',
+      })
+    })
+
+    it('should allow projectDir when it resolves to exactly the workspace root', async () => {
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+
+      VsCodeServer.mockImplementation(() => ({
+        start: jest.fn().mockResolvedValue(undefined),
+        getPort: jest.fn().mockReturnValue(8443),
+        isRunning: false,
+      }))
+      VsCodeWsProxy.mockImplementation(() => ({}))
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-1', projectDir: '/test/project' })
+
+      expect(VsCodeServer).toHaveBeenCalledWith(
+        expect.objectContaining({ projectDir: '/test/project' }),
+      )
+      expect(sentMessages[0].type).toBe('vscode_ready')
+    })
+
+    it('should reject a sibling directory that merely shares a name prefix with the root', async () => {
+      // Regression guard for a naive `startsWith(trustedRoot)` check (without
+      // the path.sep suffix), which would incorrectly treat
+      // '/test/project-evil' as being inside '/test/project'.
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-1', projectDir: '/test/project-evil' })
+
+      expect(VsCodeServer).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({
+        type: 'error',
+        sessionId: 'sess-1',
+        message: 'projectDir outside workspace',
+      })
+    })
+
+    it('should use this.projectDir unchanged when msg.projectDir is not provided (no regression)', async () => {
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const { VsCodeWsProxy } = require('../../src/vscode/vscode-ws-proxy')
+
+      VsCodeServer.mockImplementation(() => ({
+        start: jest.fn().mockResolvedValue(undefined),
+        getPort: jest.fn().mockReturnValue(8443),
+        isRunning: false,
+      }))
+      VsCodeWsProxy.mockImplementation(() => ({}))
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (tunnel as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-1' })
+
+      expect(VsCodeServer).toHaveBeenCalledWith(
+        expect.objectContaining({ projectDir: '/test/project' }),
+      )
+      expect(sentMessages[0]).toEqual({ type: 'vscode_ready', sessionId: 'sess-1', port: 8443, projectDir: '/test/project' })
+    })
+
+    it('should reject a projectDir override when the tunnel has no trusted root configured', async () => {
+      const { VsCodeServer } = require('../../src/vscode/vscode-server')
+      const t = new VsCodeTunnelWebSocket('https://api.example.com', 'token', 'agent-1')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(t as any).ws = mockWs
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (t as any).handleVsCodeOpen({ type: 'vscode_open', sessionId: 'sess-1', projectDir: '/anything' })
+
+      expect(VsCodeServer).not.toHaveBeenCalled()
+      expect(sentMessages).toHaveLength(1)
+      expect(sentMessages[0]).toEqual({ type: 'error', sessionId: 'sess-1', message: 'No project directory' })
     })
   })
 

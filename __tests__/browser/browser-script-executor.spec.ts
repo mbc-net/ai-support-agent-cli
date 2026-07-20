@@ -218,4 +218,51 @@ describe('browser-script-executor', () => {
     expect(result.completedSteps).toBe(0)
     expect(result.totalSteps).toBe(0)
   })
+
+  describe('goto URL validation (SSRF / local-file guard)', () => {
+    it('should block a file:// URL and never call page.goto', async () => {
+      const result = await executePlaywrightScript(
+        mockSession,
+        "await page.goto('file:///etc/passwd', { waitUntil: 'domcontentloaded' });",
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.failedLine).toContain('file:///etc/passwd')
+      expect(result.results[0].error).toContain('Blocked navigation')
+      expect(mockPage.goto).not.toHaveBeenCalled()
+    })
+
+    it('should block a cloud metadata-endpoint URL and never call page.goto', async () => {
+      const result = await executePlaywrightScript(
+        mockSession,
+        "await page.goto('http://169.254.169.254/latest/meta-data/', { waitUntil: 'domcontentloaded' });",
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.failedLine).toContain('169.254.169.254')
+      expect(result.results[0].error).toContain('Blocked navigation')
+      expect(mockPage.goto).not.toHaveBeenCalled()
+    })
+
+    it('should block a javascript: URL and never call page.goto', async () => {
+      const result = await executePlaywrightScript(
+        mockSession,
+        "await page.goto('javascript:alert(1)', { waitUntil: 'domcontentloaded' });",
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.results[0].error).toContain('Blocked navigation')
+      expect(mockPage.goto).not.toHaveBeenCalled()
+    })
+
+    it('should still allow a normal https:// goto (no regression)', async () => {
+      const result = await executePlaywrightScript(
+        mockSession,
+        "await page.goto('https://example.com', { waitUntil: 'domcontentloaded' });",
+      )
+
+      expect(result.success).toBe(true)
+      expect(mockPage.goto).toHaveBeenCalledWith('https://example.com', expect.any(Object))
+    })
+  })
 })
