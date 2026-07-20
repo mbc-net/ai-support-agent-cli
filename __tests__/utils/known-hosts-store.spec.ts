@@ -1,5 +1,5 @@
 /**
- * Tests for src/server-setup/known-hosts-store.ts
+ * Tests for src/utils/known-hosts-store.ts
  *
  * Covers the persistence behavior that item #4 of the code review fixes:
  * the known_hosts file used for `StrictHostKeyChecking=accept-new` (TOFU)
@@ -33,7 +33,7 @@ jest.mock('os', () => {
   }
 })
 
-import { knownHostsDir, resolveKnownHostsPath } from '../../src/server-setup/known-hosts-store'
+import { knownHostsDir, resolveKnownHostsPath } from '../../src/utils/known-hosts-store'
 
 describe('known-hosts-store', () => {
   afterEach(() => {

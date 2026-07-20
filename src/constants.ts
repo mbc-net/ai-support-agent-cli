@@ -325,10 +325,13 @@ export const GIT_CLONE_TIMEOUT = 120_000
 export const GIT_FETCH_TIMEOUT = 60_000
 export const GIT_CHECKOUT_TIMEOUT = 30_000
 
-// SSH options shared by every place that shells out to `ssh` for git operations
-// (GIT_SSH_COMMAND env value, generated SSH wrapper scripts). The agent manages
-// its own per-repository key material, so known_hosts verification is skipped
-// intentionally rather than left to the ambient environment.
+// Legacy fallback SSH options, used ONLY when tenantCode is unavailable (no
+// meta on a terminal `open`, or an unauthenticated ApiClient) and TOFU host-key
+// checking cannot be namespaced per tenant. The normal path (repo-sync.ts,
+// git-credential-setup.ts, terminal-session.ts) uses `resolveKnownHostsPath`
+// (src/utils/known-hosts-store.ts) + `-o StrictHostKeyChecking=accept-new` so
+// host-key changes ARE detected. Do not use these flags directly for a new
+// git-over-ssh call site — that would silently skip MITM detection.
 export const SSH_NO_HOST_CHECK_FLAGS = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
 // Child process management

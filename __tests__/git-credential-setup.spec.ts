@@ -12,6 +12,14 @@ import type { ProjectConfigResponse, RepoCredentials } from '../src/types'
 
 jest.mock('../src/logger')
 
+const mockResolveKnownHostsPath = jest.fn(
+  (tenantCode: string, sshHostId: string) => `/fake-known-hosts/${tenantCode}__${sshHostId}`,
+)
+jest.mock('../src/utils/known-hosts-store', () => ({
+  GENERAL_KNOWN_HOSTS_ID: 'shared',
+  resolveKnownHostsPath: (...args: unknown[]) => mockResolveKnownHostsPath(...(args as [string, string])),
+}))
+
 describe('git-credential-setup', () => {
   describe('extractHostFromUrl', () => {
     it('should extract host from SSH URL', () => {
@@ -54,34 +62,44 @@ describe('git-credential-setup', () => {
   })
 
   describe('buildSshWrapperScript', () => {
-    it('should generate script with host-based key selection', () => {
+    it('should generate script with host-based key selection and per-host known_hosts paths', () => {
       const entries = [
-        { host: 'gitlab.com', keyPath: '/tmp/ssh-key-abc' },
-        { host: 'github.com', keyPath: '/tmp/ssh-key-def' },
+        { host: 'gitlab.com', keyPath: '/tmp/ssh-key-abc', knownHostsPath: '/fake-known-hosts/acme__gitlab.com' },
+        { host: 'github.com', keyPath: '/tmp/ssh-key-def', knownHostsPath: '/fake-known-hosts/acme__github.com' },
       ]
-      const script = buildSshWrapperScript(entries)
+      const script = buildSshWrapperScript(entries, '/fake-known-hosts/acme__shared')
 
       expect(script).toContain('#!/bin/sh')
       expect(script).toContain('gitlab.com')
       expect(script).toContain('/tmp/ssh-key-abc')
       expect(script).toContain('github.com')
       expect(script).toContain('/tmp/ssh-key-def')
-      expect(script).toContain('StrictHostKeyChecking=no')
-      expect(script).toContain('UserKnownHostsFile=/dev/null')
+      expect(script).toContain('StrictHostKeyChecking=accept-new')
+      // Distinct known_hosts paths per registered host
+      expect(script).toContain('UserKnownHostsFile="/fake-known-hosts/acme__gitlab.com"')
+      expect(script).toContain('UserKnownHostsFile="/fake-known-hosts/acme__github.com"')
+      expect(script).not.toContain('StrictHostKeyChecking=no')
+      expect(script).not.toContain('UserKnownHostsFile=/dev/null')
     })
 
     it('should extract hostname from first non-option argument', () => {
-      const script = buildSshWrapperScript([{ host: 'gitlab.com', keyPath: '/tmp/key' }])
+      const script = buildSshWrapperScript(
+        [{ host: 'gitlab.com', keyPath: '/tmp/key', knownHostsPath: '/fake-known-hosts/acme__gitlab.com' }],
+        '/fake-known-hosts/acme__shared',
+      )
       // Script should skip options (args starting with -)
       expect(script).toContain('-*) ;;')
       // Should extract host from user@host using sed
       expect(script).toContain("sed 's/.*@//'")
     })
 
-    it('should include default case for unknown hosts', () => {
-      const script = buildSshWrapperScript([{ host: 'gitlab.com', keyPath: '/tmp/key' }])
+    it('should include default case for unknown hosts, falling back to the shared known_hosts bucket', () => {
+      const script = buildSshWrapperScript(
+        [{ host: 'gitlab.com', keyPath: '/tmp/key', knownHostsPath: '/fake-known-hosts/acme__gitlab.com' }],
+        '/fake-known-hosts/acme__shared',
+      )
       expect(script).toContain('*)')
-      expect(script).toContain('exec ssh -o StrictHostKeyChecking=no')
+      expect(script).toContain('exec ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="/fake-known-hosts/acme__shared"')
     })
   })
 
@@ -126,6 +144,7 @@ describe('git-credential-setup', () => {
   describe('buildGitCredentialEnv', () => {
     const mockClient = {
       getRepoCredentials: jest.fn(),
+      getTenantCode: jest.fn().mockReturnValue('acme'),
     } as unknown as ApiClient
 
     const baseRepo: NonNullable<ProjectConfigResponse['repositories']>[number] = {
@@ -146,6 +165,33 @@ describe('git-credential-setup', () => {
       const result = await buildGitCredentialEnv(mockClient, [])
       expect(result.env).toEqual({})
       result.cleanup() // should not throw
+    })
+
+    // 回帰対策: client.getTenantCode() が '' を返す（テナント未確立）場合、
+    // repo-sync.ts の buildAuthEnv と同じ規約で非TOFU（SSH_NO_HOST_CHECK_FLAGS）に
+    // フォールバックし、resolveKnownHostsPath('', host) という「テナント不明」の
+    // 共有ネームスペースが暗黙に作られないことを確認する。
+    it('should fall back to non-TOFU SSH flags (not a shared "" tenant namespace) when tenantCode is empty', async () => {
+      ;(mockClient.getTenantCode as jest.Mock).mockReturnValueOnce('')
+      const sshKey = '-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----\n'
+      ;(mockClient.getRepoCredentials as jest.Mock).mockResolvedValue({
+        repositoryId: 'repo-1',
+        repositoryUrl: 'git@gitlab.com:org/my-repo.git',
+        authMethod: 'ssh',
+        authSecret: sshKey,
+      } as RepoCredentials)
+
+      const result = await buildGitCredentialEnv(mockClient, [baseRepo])
+
+      try {
+        const wrapperContent = fs.readFileSync(result.env.GIT_SSH_COMMAND, 'utf-8')
+        expect(wrapperContent).toContain('StrictHostKeyChecking=no')
+        expect(wrapperContent).toContain('UserKnownHostsFile=/dev/null')
+        expect(wrapperContent).not.toContain('accept-new')
+        expect(mockResolveKnownHostsPath).not.toHaveBeenCalled()
+      } finally {
+        result.cleanup()
+      }
     })
 
     it('should set up SSH wrapper for SSH repositories', async () => {
@@ -171,7 +217,46 @@ describe('git-credential-setup', () => {
         // Verify wrapper content
         const wrapperContent = fs.readFileSync(wrapperPath, 'utf-8')
         expect(wrapperContent).toContain('gitlab.com')
-        expect(wrapperContent).toContain('StrictHostKeyChecking=no')
+        expect(wrapperContent).toContain('StrictHostKeyChecking=accept-new')
+        expect(wrapperContent).toContain('UserKnownHostsFile="/fake-known-hosts/acme__gitlab.com"')
+      } finally {
+        result.cleanup()
+      }
+    })
+
+    it('should resolve distinct known_hosts paths per host for multiple SSH repositories', async () => {
+      const githubRepo = {
+        ...baseRepo,
+        repositoryId: 'repo-2',
+        repositoryCode: 'another-repo',
+        repositoryName: 'Another Repo',
+        repositoryUrl: 'git@github.com:org/another-repo.git',
+      }
+
+      ;(mockClient.getRepoCredentials as jest.Mock)
+        .mockResolvedValueOnce({
+          repositoryId: 'repo-1',
+          repositoryUrl: 'git@gitlab.com:org/my-repo.git',
+          authMethod: 'ssh',
+          authSecret: '-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----\n',
+        } as RepoCredentials)
+        .mockResolvedValueOnce({
+          repositoryId: 'repo-2',
+          repositoryUrl: 'git@github.com:org/another-repo.git',
+          authMethod: 'ssh',
+          authSecret: '-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----\n',
+        } as RepoCredentials)
+
+      const result = await buildGitCredentialEnv(mockClient, [baseRepo, githubRepo])
+
+      try {
+        const wrapperContent = fs.readFileSync(result.env.GIT_SSH_COMMAND, 'utf-8')
+        expect(wrapperContent).toContain('UserKnownHostsFile="/fake-known-hosts/acme__gitlab.com"')
+        expect(wrapperContent).toContain('UserKnownHostsFile="/fake-known-hosts/acme__github.com"')
+        expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'gitlab.com')
+        expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'github.com')
+        // Fallback bucket for the wrapper's default case
+        expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'shared')
       } finally {
         result.cleanup()
       }

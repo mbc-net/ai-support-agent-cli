@@ -41,9 +41,9 @@ import {
   successResult,
 } from '../types'
 import { getErrorMessage, sweepStaleEntries } from '../utils'
+import { resolveKnownHostsPath } from '../utils/known-hosts-store'
 
 import { type AnsibleTaskRouteMode, validateAnsibleTasks } from './ansible-task-guard'
-import { resolveKnownHostsPath } from './known-hosts-store'
 
 import type { ApiClient } from '../api-client'
 

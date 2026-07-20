@@ -22,6 +22,13 @@ jest.mock('fs', () => {
 })
 jest.mock('../src/logger')
 
+const FAKE_KNOWN_HOSTS_PATH = '/fake-config-dir/known-hosts/acme__github.com'
+const mockResolveKnownHostsPath = jest.fn().mockReturnValue(FAKE_KNOWN_HOSTS_PATH)
+jest.mock('../src/utils/known-hosts-store', () => ({
+  GENERAL_KNOWN_HOSTS_ID: 'shared',
+  resolveKnownHostsPath: (...args: unknown[]) => mockResolveKnownHostsPath(...args),
+}))
+
 const mockedFs = fs as jest.Mocked<typeof fs>
 
 describe('repo-sync', () => {
@@ -183,20 +190,28 @@ describe('repo-sync', () => {
   })
 
   describe('buildAuthEnv', () => {
+    beforeEach(() => {
+      mockResolveKnownHostsPath.mockClear()
+      mockResolveKnownHostsPath.mockReturnValue(FAKE_KNOWN_HOSTS_PATH)
+    })
+
     it('should return empty env for non-SSH auth', () => {
-      const { env, cleanup } = buildAuthEnv('api_key', 'token')
+      const { env, cleanup } = buildAuthEnv('api_key', 'token', undefined, 'https://github.com/org/repo.git')
       expect(env).toEqual({})
       cleanup() // no-op
     })
 
-    it('should create SSH key file and GIT_SSH_COMMAND for SSH auth', () => {
+    it('should create SSH key file and GIT_SSH_COMMAND with legacy no-host-check flags when tenantCode is undefined (regression)', () => {
       mockedFs.writeFileSync.mockImplementation(() => {})
       mockedFs.unlinkSync.mockImplementation(() => {})
 
-      const { env, cleanup } = buildAuthEnv('ssh', 'ssh-private-key-content')
+      const { env, cleanup } = buildAuthEnv('ssh', 'ssh-private-key-content', undefined, 'git@github.com:org/repo.git')
 
       expect(env.GIT_SSH_COMMAND).toContain('ssh -i')
       expect(env.GIT_SSH_COMMAND).toContain('-o StrictHostKeyChecking=no')
+      expect(env.GIT_SSH_COMMAND).toContain('-o UserKnownHostsFile=/dev/null')
+      // TOFU path must not be consulted when tenantCode is unavailable
+      expect(mockResolveKnownHostsPath).not.toHaveBeenCalled()
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('ssh-key-'),
         expect.any(String),
@@ -211,6 +226,30 @@ describe('repo-sync', () => {
       expect(mockedFs.unlinkSync).toHaveBeenCalled()
     })
 
+    it('should use TOFU (accept-new) + persistent known_hosts file when tenantCode is provided', () => {
+      mockedFs.writeFileSync.mockImplementation(() => {})
+      mockedFs.unlinkSync.mockImplementation(() => {})
+
+      const { env } = buildAuthEnv('ssh', 'ssh-private-key-content', 'acme', 'git@github.com:org/repo.git')
+
+      expect(env.GIT_SSH_COMMAND).toContain('ssh -i')
+      expect(env.GIT_SSH_COMMAND).toContain('-o StrictHostKeyChecking=accept-new')
+      expect(env.GIT_SSH_COMMAND).toContain(`-o UserKnownHostsFile="${FAKE_KNOWN_HOSTS_PATH}"`)
+      expect(env.GIT_SSH_COMMAND).not.toContain('StrictHostKeyChecking=no')
+
+      // Resolved using the host extracted from the SSH repository URL
+      expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'github.com')
+    })
+
+    it('should fall back to the shared known-hosts bucket when the host cannot be extracted from the URL', () => {
+      mockedFs.writeFileSync.mockImplementation(() => {})
+      mockedFs.unlinkSync.mockImplementation(() => {})
+
+      buildAuthEnv('ssh', 'ssh-private-key-content', 'acme', 'not-a-valid-url')
+
+      expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'shared')
+    })
+
     it('should not throw when cleanup fails and log warning', () => {
       mockedFs.writeFileSync.mockImplementation(() => {})
       mockedFs.unlinkSync.mockImplementation(() => {
@@ -219,7 +258,7 @@ describe('repo-sync', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { logger: loggerMock } = require('../src/logger') as { logger: { warn: jest.Mock } }
-      const { cleanup } = buildAuthEnv('ssh', 'key')
+      const { cleanup } = buildAuthEnv('ssh', 'key', undefined, 'git@github.com:org/repo.git')
       expect(() => cleanup()).not.toThrow()
       expect(loggerMock.warn).toHaveBeenCalledWith(
         expect.stringContaining('Failed to delete temporary SSH key file'),
@@ -230,6 +269,7 @@ describe('repo-sync', () => {
   describe('syncRepositories', () => {
     const mockClient = {
       getRepoCredentials: jest.fn(),
+      getTenantCode: jest.fn().mockReturnValue('acme'),
     } as unknown as ApiClient
 
     const repositories: NonNullable<ProjectConfigResponse['repositories']> = [
@@ -478,11 +518,67 @@ describe('repo-sync', () => {
       expect(results[0].status).toBe('cloned')
       expect(results[1].status).toBe('skipped')
     })
+
+    describe('TOFU plumbing (tenantCode -> resolveKnownHostsPath) for ssh repositories', () => {
+      const sshRepositories: NonNullable<ProjectConfigResponse['repositories']> = [
+        {
+          repositoryId: 'REPO_SSH',
+          repositoryCode: 'ssh-repo',
+          repositoryName: 'ssh-repo',
+          repositoryUrl: 'git@gitlab.com:org/ssh-repo.git',
+          provider: 'gitlab',
+          branch: 'main',
+          authMethod: 'ssh',
+        },
+      ]
+
+      beforeEach(() => {
+        mockResolveKnownHostsPath.mockClear()
+        mockResolveKnownHostsPath.mockReturnValue(FAKE_KNOWN_HOSTS_PATH)
+        mockedFs.writeFileSync.mockImplementation(() => {})
+        mockedFs.unlinkSync.mockImplementation(() => {})
+        ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+          repositoryId: 'REPO_SSH',
+          repositoryUrl: 'git@gitlab.com:org/ssh-repo.git',
+          authMethod: 'ssh',
+          authSecret: '-----BEGIN OPENSSH PRIVATE KEY-----\nABCD\n-----END OPENSSH PRIVATE KEY-----\n',
+        })
+      })
+
+      it('resolves the TOFU known_hosts path with the tenantCode and the URL host when cloning', async () => {
+        mockedFs.existsSync.mockReturnValue(false)
+
+        const results = await syncRepositories(mockClient, sshRepositories, '/tmp/repos', '[TEST]')
+
+        expect(results[0].status).toBe('cloned')
+        expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'gitlab.com')
+      })
+
+      it('resolves the TOFU known_hosts path with the tenantCode and the URL host when pulling', async () => {
+        mockedFs.existsSync.mockReturnValue(true)
+
+        const results = await syncRepositories(mockClient, sshRepositories, '/tmp/repos', '[TEST]')
+
+        expect(results[0].status).toBe('updated')
+        expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'gitlab.com')
+      })
+
+      it('falls back to legacy no-host-check flags (no TOFU lookup) when the client has no tenantCode', async () => {
+        ;(mockClient as unknown as { getTenantCode: jest.Mock }).getTenantCode.mockReturnValueOnce('')
+        mockedFs.existsSync.mockReturnValue(false)
+
+        const results = await syncRepositories(mockClient, sshRepositories, '/tmp/repos', '[TEST]')
+
+        expect(results[0].status).toBe('cloned')
+        expect(mockResolveKnownHostsPath).not.toHaveBeenCalled()
+      })
+    })
   })
 
   describe('syncRepositoryByCode', () => {
     const mockClient = {
       getRepoCredentials: jest.fn(),
+      getTenantCode: jest.fn().mockReturnValue('acme'),
     } as unknown as ApiClient
 
     const repositories: NonNullable<ProjectConfigResponse['repositories']> = [

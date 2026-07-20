@@ -5,9 +5,11 @@ import { promisify } from 'util'
 
 import type { ApiClient } from './api-client'
 import { GIT_CHECKOUT_TIMEOUT, GIT_CLONE_TIMEOUT, GIT_FETCH_TIMEOUT, SSH_NO_HOST_CHECK_FLAGS } from './constants'
+import { extractHostFromUrl } from './git-credential-setup'
 import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
 import { getErrorMessage } from './utils'
+import { GENERAL_KNOWN_HOSTS_ID, resolveKnownHostsPath } from './utils/known-hosts-store'
 import { normalizePemKey } from './utils/pem-key'
 import { createSecureTempFile, safeUnlink } from './utils/temp-file'
 
@@ -86,6 +88,7 @@ async function syncSingleRepository(
 ): Promise<RepoSyncResult> {
   // 認証情報をJIT取得
   const credentials = await client.getRepoCredentials(repo.repositoryId)
+  const tenantCode = client.getTenantCode() || undefined
 
   const repoDir = path.join(reposDir, repo.repositoryCode)
 
@@ -100,7 +103,7 @@ async function syncSingleRepository(
 
   if (fs.existsSync(gitDir)) {
     // 既存クローン → fetch + checkout + reset
-    await pullRepository(repoDir, repo.branch, credentials.authMethod, credentials.authSecret)
+    await pullRepository(repoDir, tenantCode, credentials.repositoryUrl, repo.branch, credentials.authMethod, credentials.authSecret)
     logger.info(`${prefix} Repository updated: ${repo.repositoryName} (${repo.branch})`)
     return {
       repositoryId: repo.repositoryId,
@@ -112,6 +115,7 @@ async function syncSingleRepository(
     // 新規クローン
     await cloneRepository(
       repoDir,
+      tenantCode,
       credentials.repositoryUrl,
       repo.branch,
       credentials.authMethod,
@@ -129,6 +133,7 @@ async function syncSingleRepository(
 
 async function cloneRepository(
   repoDir: string,
+  tenantCode: string | undefined,
   repositoryUrl: string,
   branch: string,
   authMethod: string,
@@ -136,7 +141,7 @@ async function cloneRepository(
 ): Promise<void> {
   await fs.promises.mkdir(path.dirname(repoDir), { recursive: true })
 
-  const { env, cleanup } = buildAuthEnv(authMethod, authSecret)
+  const { env, cleanup } = buildAuthEnv(authMethod, authSecret, tenantCode, repositoryUrl)
 
   try {
     validateBranchName(branch)
@@ -159,11 +164,13 @@ async function cloneRepository(
 
 async function pullRepository(
   repoDir: string,
+  tenantCode: string | undefined,
+  repositoryUrl: string,
   branch: string,
   authMethod: string,
   authSecret: string,
 ): Promise<void> {
-  const { env, cleanup } = buildAuthEnv(authMethod, authSecret)
+  const { env, cleanup } = buildAuthEnv(authMethod, authSecret, tenantCode, repositoryUrl)
 
   try {
     validateBranchName(branch)
@@ -247,9 +254,24 @@ export { normalizePemKey } from './utils/pem-key'
 export function buildAuthEnv(
   authMethod: string,
   authSecret: string,
+  tenantCode: string | undefined,
+  repositoryUrl: string,
 ): { env: Record<string, string>; cleanup: () => void } {
   if (authMethod !== 'ssh') {
     return { env: {}, cleanup: () => {} }
+  }
+
+  let hostCheckFlags = SSH_NO_HOST_CHECK_FLAGS
+  if (!tenantCode) {
+    logger.warn('[repo-sync] tenantCode is unavailable; falling back to non-TOFU SSH host-key checking')
+  } else {
+    try {
+      const host = extractHostFromUrl(repositoryUrl)
+      const sshHostId = host || GENERAL_KNOWN_HOSTS_ID
+      hostCheckFlags = `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${resolveKnownHostsPath(tenantCode, sshHostId)}"`
+    } catch (error) {
+      logger.warn(`[repo-sync] Failed to resolve known_hosts path; falling back to non-TOFU SSH host-key checking: ${getErrorMessage(error)}`)
+    }
   }
 
   const normalizedKey = normalizePemKey(authSecret)
@@ -257,7 +279,7 @@ export function buildAuthEnv(
 
   return {
     env: {
-      GIT_SSH_COMMAND: `ssh -i "${tmpKeyPath}" ${SSH_NO_HOST_CHECK_FLAGS}`,
+      GIT_SSH_COMMAND: `ssh -i "${tmpKeyPath}" ${hostCheckFlags}`,
     },
     cleanup: () => {
       safeUnlink(tmpKeyPath, `Failed to delete temporary SSH key file: ${tmpKeyPath}`)

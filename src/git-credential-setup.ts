@@ -7,6 +7,7 @@ import { SSH_NO_HOST_CHECK_FLAGS } from './constants'
 import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
 import { atomicWriteFile, getErrorMessage } from './utils'
+import { GENERAL_KNOWN_HOSTS_ID, resolveKnownHostsPath } from './utils/known-hosts-store'
 import { normalizePemKey } from './utils/pem-key'
 import { createSecureTempFile, safeUnlink } from './utils/temp-file'
 
@@ -61,10 +62,20 @@ export function extractPathFromUrl(url: string): string {
  * SSHラッパースクリプトを生成する
  * ホスト名に応じて適切なSSH鍵を選択する
  */
-export function buildSshWrapperScript(entries: { host: string; keyPath: string }[]): string {
-  const cases = entries.map((entry) =>
-    `  ${entry.host})\n    exec ssh -i "${entry.keyPath}" ${SSH_NO_HOST_CHECK_FLAGS} "$@"\n    ;;`,
-  ).join('\n')
+export function buildSshWrapperScript(
+  entries: { host: string; keyPath: string; knownHostsPath: string | undefined }[],
+  fallbackKnownHostsPath: string | undefined,
+): string {
+  const cases = entries.map((entry) => {
+    const hostCheckFlags = entry.knownHostsPath
+      ? `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${entry.knownHostsPath}"`
+      : SSH_NO_HOST_CHECK_FLAGS
+    return `  ${entry.host})\n    exec ssh -i "${entry.keyPath}" ${hostCheckFlags} "$@"\n    ;;`
+  }).join('\n')
+
+  const fallbackFlags = fallbackKnownHostsPath
+    ? `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${fallbackKnownHostsPath}"`
+    : SSH_NO_HOST_CHECK_FLAGS
 
   return `#!/bin/sh
 # Extract hostname from ssh arguments
@@ -91,7 +102,7 @@ done
 case "$HOST" in
 ${cases}
   *)
-    exec ssh ${SSH_NO_HOST_CHECK_FLAGS} "$@"
+    exec ssh ${fallbackFlags} "$@"
     ;;
 esac
 `
@@ -151,8 +162,12 @@ export async function buildGitCredentialEnv(
     return { env: {}, cleanup: () => {} }
   }
 
+  // tenantCode 未確立（''）の場合は undefined 扱いにし、repo-sync.ts の buildAuthEnv と
+  // 同じ規約で「テナント不明時は非TOFUにフォールバック」を統一する（テナント間の
+  // 意図しない共有ネームスペース化を防ぐ）。
+  const tenantCode = client.getTenantCode() || undefined
   const tempFiles: string[] = []
-  const sshEntries: { host: string; keyPath: string }[] = []
+  const sshEntries: { host: string; keyPath: string; knownHostsPath: string | undefined }[] = []
   const httpsEntries: { host: string; pathPrefix: string; token: string }[] = []
 
   for (const repo of repositories) {
@@ -165,7 +180,7 @@ export async function buildGitCredentialEnv(
       }
 
       if (credentials.authMethod === 'ssh') {
-        await addSshEntry(credentials.authSecret, host, sshEntries, tempFiles)
+        await addSshEntry(credentials.authSecret, host, tenantCode, sshEntries, tempFiles)
       } else {
         const pathPrefix = extractPathFromUrl(credentials.repositoryUrl)
         httpsEntries.push({ host, pathPrefix, token: credentials.authSecret })
@@ -179,7 +194,20 @@ export async function buildGitCredentialEnv(
 
   // SSH ラッパースクリプト
   if (sshEntries.length > 0) {
-    const wrapperPath = writeTempScript(buildSshWrapperScript(sshEntries), 'git-ssh-wrapper')
+    let fallbackKnownHostsPath: string | undefined
+    if (!tenantCode) {
+      logger.warn('[git-cred] tenantCode is unavailable; falling back to non-TOFU SSH host-key checking for unregistered hosts')
+    } else {
+      try {
+        fallbackKnownHostsPath = resolveKnownHostsPath(tenantCode, GENERAL_KNOWN_HOSTS_ID)
+      } catch (error) {
+        logger.warn(`[git-cred] Failed to resolve shared known_hosts path; falling back to non-TOFU SSH host-key checking for unregistered hosts: ${getErrorMessage(error)}`)
+      }
+    }
+    const wrapperPath = writeTempScript(
+      buildSshWrapperScript(sshEntries, fallbackKnownHostsPath),
+      'git-ssh-wrapper',
+    )
     tempFiles.push(wrapperPath)
     env.GIT_SSH_COMMAND = wrapperPath
   }
@@ -206,13 +234,15 @@ export async function buildGitCredentialEnv(
 async function addSshEntry(
   authSecret: string,
   host: string,
-  sshEntries: { host: string; keyPath: string }[],
+  tenantCode: string | undefined,
+  sshEntries: { host: string; keyPath: string; knownHostsPath: string | undefined }[],
   tempFiles: string[],
 ): Promise<void> {
   const normalizedKey = normalizePemKey(authSecret)
   const tmpKeyPath = createSecureTempFile(normalizedKey, 'ssh-key')
   tempFiles.push(tmpKeyPath)
-  sshEntries.push({ host, keyPath: tmpKeyPath })
+  const knownHostsPath = tenantCode ? resolveKnownHostsPath(tenantCode, host) : undefined
+  sshEntries.push({ host, keyPath: tmpKeyPath, knownHostsPath })
 }
 
 function writeTempScript(content: string, prefix: string): string {
