@@ -7,11 +7,50 @@
 # Asserts nvm's presence so a missing/misordered nvm role fails with a
 # clear message instead of an obscure "npm: command not found".
 #
-# `OPENAI_API_KEY` is optional (recipe authors reference an ANSIBLE#
-# project variable). When supplied, it is persisted to
-# `~/.config/environment.d/openai.conf` — the mechanism `systemd --user`
-# reads to populate environment variables for user services — rather than
-# only being available for the npm install step itself.
+# **Authentication is corrected here vs. this role's first version**: merely
+# setting `OPENAI_API_KEY` as an environment variable does NOT authenticate
+# Codex CLI — per Codex's own docs (https://developers.openai.com/codex/auth),
+# API-key auth requires explicitly running
+# `printenv OPENAI_API_KEY | codex login --with-api-key`, and credentials
+# are then stored in `~/.codex/auth.json`. This role now runs that command
+# explicitly rather than leaving the CLI unauthenticated (verified against
+# a real Codex CLI install: without this, `codex login status` reports
+# "Not logged in" even with the env var set).
+#
+# `codex_api_key` (optional) authenticates via API key;
+# `codex_oauth_token` (optional, an Enterprise "access token" per Codex's
+# OAuth-adjacent auth path) authenticates via
+# `codex login --with-access-token`. Both may be supplied; each is an
+# independent, unconditional attempt — one failing does NOT skip or abort
+# the other (both `shell` tasks below use `failed_when: false` and are
+# reconciled by a single diagnostic task afterwards). An earlier revision
+# wrapped each attempt in its own `block`/`rescue` that called
+# `ansible.builtin.fail` directly; because `rescue` re-raising a failure
+# halts the whole play immediately, a failing API-key attempt silently
+# prevented the OAuth attempt (and every later role in the recipe, e.g.
+# `ai_support_agent`/`web_server`) from ever running — verified with a real
+# ansible-core 2.21 run. The current two-independent-tasks-plus-one-
+# diagnostic structure mirrors the `ai_support_agent` role's multi-item
+# loop diagnostic for the same reason.
+#
+# **Secret handling**: neither the API key nor the access token is ever
+# passed via Ansible's `environment:` keyword. That keyword is NOT a safe
+# way to pass secrets to a `shell`/`command` task — verified with a real
+# `ansible-playbook -vvv` run that the connection plugin's EXEC trace line
+# prints `environment:` values in cleartext (e.g.
+# `<host> EXEC /bin/sh -c 'OPENAI_API_KEY=sk-... /path/to/python ...'`)
+# regardless of `no_log: true` on the task (`no_log` only redacts the
+# task's own registered result, not the connection layer's own verbose
+# trace). `ansible.builtin.copy`'s `content:` parameter, by contrast, IS
+# correctly redacted at every verbosity level — so each secret is instead
+# written via `ansible.builtin.tempfile` + `copy: content:` (both
+# `no_log: true`) to a 0600 file owned by `codex_user`, and the shell task
+# reads it via `$(cat ...)` — the Jinja-rendered script text itself only
+# ever contains the file *path* (not a secret), so nothing secret is ever
+# present in any Ansible-visible command line at any verbosity. Each temp
+# file is deleted at the end of its own script and again by an
+# unconditional cleanup task as a safety net in case the script fails
+# before reaching its own `rm`.
 
 - name: "codex : Validate nvm role has been run for this user"
   ansible.builtin.stat:
@@ -38,19 +77,95 @@
   register: codex_install_result
   changed_when: "'up to date' not in codex_install_result.stdout"
 
-- name: "codex : Create systemd user environment.d directory"
-  ansible.builtin.file:
-    path: "/home/{{ codex_user | default('appuser') }}/.config/environment.d"
-    state: directory
-    owner: "{{ codex_user | default('appuser') }}"
-    mode: '0700'
-  when: OPENAI_API_KEY is defined
+- name: "codex : Create a secure temporary file for the API key"
+  ansible.builtin.tempfile:
+    state: file
+    prefix: codex_api_key_
+  register: codex_api_key_tempfile
+  changed_when: false
+  when: codex_api_key is defined and (codex_api_key | trim | length > 0)
 
-- name: "codex : Persist OPENAI_API_KEY for systemd --user services"
+- name: "codex : Write the API key into its temp file"
   ansible.builtin.copy:
-    content: "OPENAI_API_KEY={{ OPENAI_API_KEY }}\n"
-    dest: "/home/{{ codex_user | default('appuser') }}/.config/environment.d/openai.conf"
+    content: "{{ codex_api_key }}"
+    dest: "{{ codex_api_key_tempfile.path }}"
     owner: "{{ codex_user | default('appuser') }}"
     mode: '0600'
-  when: OPENAI_API_KEY is defined
+  when: codex_api_key is defined and (codex_api_key | trim | length > 0)
   no_log: true
+
+- name: "codex : Attempt API key authentication"
+  ansible.builtin.shell: |
+    set -e -o pipefail
+    export NVM_DIR="/home/{{ codex_user | default('appuser') }}/.nvm"
+    . "$NVM_DIR/nvm.sh"
+    cat "{{ codex_api_key_tempfile.path }}" | codex login --with-api-key
+    rm -f "{{ codex_api_key_tempfile.path }}"
+  args:
+    executable: /bin/bash
+  become_user: "{{ codex_user | default('appuser') }}"
+  register: codex_api_key_login_result
+  failed_when: false
+  changed_when: true
+  no_log: true
+  when: codex_api_key is defined and (codex_api_key | trim | length > 0)
+
+- name: "codex : Remove the API key temp file if it still exists (cleanup safety net)"
+  ansible.builtin.file:
+    path: "{{ codex_api_key_tempfile.path }}"
+    state: absent
+  when: codex_api_key is defined and (codex_api_key | trim | length > 0)
+  changed_when: false
+
+- name: "codex : Create a secure temporary file for the OAuth access token"
+  ansible.builtin.tempfile:
+    state: file
+    prefix: codex_oauth_token_
+  register: codex_oauth_token_tempfile
+  changed_when: false
+  when: codex_oauth_token is defined and (codex_oauth_token | trim | length > 0)
+
+- name: "codex : Write the OAuth access token into its temp file"
+  ansible.builtin.copy:
+    content: "{{ codex_oauth_token }}"
+    dest: "{{ codex_oauth_token_tempfile.path }}"
+    owner: "{{ codex_user | default('appuser') }}"
+    mode: '0600'
+  when: codex_oauth_token is defined and (codex_oauth_token | trim | length > 0)
+  no_log: true
+
+- name: "codex : Attempt OAuth (Enterprise) access token authentication"
+  ansible.builtin.shell: |
+    set -e -o pipefail
+    export NVM_DIR="/home/{{ codex_user | default('appuser') }}/.nvm"
+    . "$NVM_DIR/nvm.sh"
+    cat "{{ codex_oauth_token_tempfile.path }}" | codex login --with-access-token
+    rm -f "{{ codex_oauth_token_tempfile.path }}"
+  args:
+    executable: /bin/bash
+  become_user: "{{ codex_user | default('appuser') }}"
+  register: codex_oauth_login_result
+  failed_when: false
+  changed_when: true
+  no_log: true
+  when: codex_oauth_token is defined and (codex_oauth_token | trim | length > 0)
+
+- name: "codex : Remove the OAuth access token temp file if it still exists (cleanup safety net)"
+  ansible.builtin.file:
+    path: "{{ codex_oauth_token_tempfile.path }}"
+    state: absent
+  when: codex_oauth_token is defined and (codex_oauth_token | trim | length > 0)
+  changed_when: false
+
+- name: "codex : Fail if any attempted authentication method failed (secret-safe diagnostic)"
+  ansible.builtin.fail:
+    msg: >-
+      Codex authentication failed for user
+      '{{ codex_user | default('appuser') }}':
+      {{ 'API key login failed. ' if (codex_api_key_login_result is defined and codex_api_key_login_result.rc is defined and codex_api_key_login_result.rc != 0) else '' }}
+      {{ 'OAuth access token login failed. ' if (codex_oauth_login_result is defined and codex_oauth_login_result.rc is defined and codex_oauth_login_result.rc != 0) else '' }}
+      (Key/token and command output redacted by no_log.) Check that the
+      supplied credential(s) are valid.
+  when: >-
+    (codex_api_key_login_result is defined and codex_api_key_login_result.rc is defined and codex_api_key_login_result.rc != 0)
+    or (codex_oauth_login_result is defined and codex_oauth_login_result.rc is defined and codex_oauth_login_result.rc != 0)

@@ -7,13 +7,23 @@
 # both). Asserts nvm's presence so a missing/misordered nvm role fails with
 # a clear message instead of an obscure "npm: command not found".
 #
-# `ANTHROPIC_API_KEY` is optional (recipe authors reference an ANSIBLE#
-# project variable). When supplied, it is persisted to
-# `~/.config/environment.d/anthropic.conf` — the mechanism `systemd --user`
-# reads to populate environment variables for user services (relevant for
-# the ai_support_agent role's systemd user service, which spawns `claude` as
-# a subprocess) — rather than only being available for the npm install
-# step itself.
+# `ANTHROPIC_API_KEY`/`claude_cli_oauth_token` are both optional (recipe
+# authors reference an ANSIBLE# project variable) and may be supplied
+# together — the `claude` CLI's own precedence between an API key and an
+# OAuth token applies, this role does not choose between them. When
+# supplied, each is persisted to its own file under
+# `~/.config/environment.d/` — the mechanism `systemd --user` reads to
+# populate environment variables for user services (relevant for the
+# ai_support_agent role's systemd user service, which spawns `claude` as a
+# subprocess) — rather than only being available for the npm install step
+# itself. `CLAUDE_CODE_OAUTH_TOKEN` is the env var
+# `agent/src/utils/claude-json-oauth-sync.ts` looks for to sync OAuth
+# credentials into `~/.claude.json` the next time `claude` runs (invoked
+# lazily from `claude-code-runner.ts`/`terminal-session.ts`/
+# `vscode-server.ts`, not by this role directly). Each secret is written to
+# its own file (rather than one shared file built from a Jinja
+# if/conditional block) to sidestep Jinja whitespace/newline edge cases
+# when only one of the two is set.
 
 - name: "claude_cli : Validate nvm role has been run for this user"
   ansible.builtin.stat:
@@ -46,7 +56,7 @@
     state: directory
     owner: "{{ claude_cli_user | default('appuser') }}"
     mode: '0700'
-  when: ANTHROPIC_API_KEY is defined
+  when: ANTHROPIC_API_KEY is defined or claude_cli_oauth_token is defined
 
 - name: "claude_cli : Persist ANTHROPIC_API_KEY for systemd --user services"
   ansible.builtin.copy:
@@ -55,4 +65,13 @@
     owner: "{{ claude_cli_user | default('appuser') }}"
     mode: '0600'
   when: ANTHROPIC_API_KEY is defined
+  no_log: true
+
+- name: "claude_cli : Persist CLAUDE_CODE_OAUTH_TOKEN for systemd --user services"
+  ansible.builtin.copy:
+    content: "CLAUDE_CODE_OAUTH_TOKEN={{ claude_cli_oauth_token }}\n"
+    dest: "/home/{{ claude_cli_user | default('appuser') }}/.config/environment.d/claude-oauth.conf"
+    owner: "{{ claude_cli_user | default('appuser') }}"
+    mode: '0600'
+  when: claude_cli_oauth_token is defined
   no_log: true

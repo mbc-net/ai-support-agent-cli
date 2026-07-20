@@ -1,26 +1,40 @@
 ---
 # ai_support_agent role: installs this project's own CLI
 # (@ai-support-agent/cli), authenticates it non-interactively via
-# `ai-support-agent configure`, and registers it as a systemd **user**
-# service via `ai-support-agent service install` so it runs persistently on
-# the target server (resident_agent execution path).
+# `ai-support-agent configure` (once per token — see "multiple tokens"
+# below), and registers it as a systemd **user** service via
+# `ai-support-agent service install` so it runs persistently on the target
+# server (resident_agent execution path).
 #
 # Depends on the nvm role having already been run for the same user
 # (`ai_support_agent_user` must match nvm's `nvm_user`, default 'appuser'
 # for both).
 #
-# `ai_support_agent_token` and `ai_support_agent_api_url` have NO default —
-# unlike nvm_user/node_version, there is no sensible default for a bearer
-# token or API URL, so (following the ssh_key role's precedent) both are
-# required via `assert` rather than silently defaulted.
+# **Multiple tokens**: `ai_support_agent_tokens` accepts a list of
+# `{token, project_code?, api_url?}` entries. The underlying CLI already
+# supports registering several tenant/project pairs on one host — each
+# `configure` call upserts a `ProjectRegistration` keyed by
+# tenantCode+projectCode (`src/config-manager.ts`), and `service install`
+# (`src/cli/service/linux-service.ts`) creates one systemd user unit per
+# registered project. This role therefore runs `configure` once per list
+# entry, then `service install` **once** at the end (it enumerates every
+# registered project itself). The legacy singular `ai_support_agent_token`/
+# `ai_support_agent_api_url`/`ai_support_agent_project_code` variables are
+# still supported and merged into the same list for backward compatibility.
 #
-# `configure` and `service install` are called as two explicit, separate
-# tasks rather than relying on `configure`'s internal auto-install
+# **`ai_support_agent_api_url` is optional** for every entry: the CLI's own
+# `configure` command already defaults to `DEFAULT_API_URL` (the production
+# API) when `--api-url` is omitted (`src/constants.ts`), so this only needs
+# to be set to point at a non-production API (e.g. an on-prem/staging
+# verification environment).
+#
+# `configure` and `service install` are called as explicit, separate tasks
+# rather than relying on `configure`'s internal auto-install
 # (`installAndStartProject`), so each step's success/failure is visible
 # independently in the playbook run.
 #
-# `service install` registers a systemd **user** unit
-# (`~/.config/systemd/user`), which only runs when either a user session is
+# `service install` registers systemd **user** units
+# (`~/.config/systemd/user`), which only run when either a user session is
 # active or "lingering" is enabled for that user (`loginctl enable-linger`).
 # On a freshly provisioned VPS there is no active login session, so linger
 # must be enabled explicitly. Enabling linger alone does not guarantee an
@@ -33,37 +47,79 @@
 # is sufficient for `systemctl --user` (which `service install` calls
 # internally) to succeed with no active login session.
 #
-# **Secret handling (`ai_support_agent_token`)**: the token is passed to the
-# `configure` step via Ansible's `environment:` (a real OS environment
-# variable set at process-spawn time), never interpolated by Jinja into the
-# shell script text and never passed as a `--token` CLI flag. This matters
-# for two independent reasons:
-#   1. Jinja renders `{{ ai_support_agent_token }}` into the script BEFORE
-#      bash parses it. A token containing shell metacharacters
-#      (`"`, `` ` ``, `$(...)`) would be interpreted as shell syntax rather
-#      than literal text — arbitrary command execution as
-#      `ai_support_agent_user`. `environment:` values are never re-parsed by
-#      a shell, so this is not possible.
+# **Secret handling (tokens)**: each token is never interpolated by Jinja
+# into the shell script text, never passed as a `--token` CLI flag, and
+# (unlike an earlier revision of this role) never passed via Ansible's
+# `environment:` keyword either. This matters for three independent
+# reasons:
+#   1. Jinja renders `{{ ... }}` into the script BEFORE bash parses it. A
+#      token containing shell metacharacters (`"`, `` ` ``, `$(...)`) would
+#      be interpreted as shell syntax rather than literal text — arbitrary
+#      command execution as `ai_support_agent_user`.
 #   2. A `--token` CLI argument is visible to any local user via `ps`/
 #      `/proc/<pid>/cmdline` (world-readable by default) for as long as the
 #      process runs. `ai-support-agent configure` reads the token from the
 #      `AI_SUPPORT_AGENT_TOKEN` environment variable when `--token` is
-#      omitted (`agent/src/cli/auth-commands.ts`, added alongside this
-#      role), so the token appears only in `/proc/<pid>/environ`, which
-#      (unlike cmdline) requires the same uid or CAP_SYS_PTRACE to read.
-# `ai_support_agent_api_url`/`ai_support_agent_project_code` are not
-# secrets, but are passed the same way (env var + `"$VAR"` shell expansion)
-# to avoid the same Jinja-into-shell-text interpolation hazard.
+#      omitted (`agent/src/cli/auth-commands.ts`).
+#   3. Ansible's `environment:` keyword is itself NOT a safe channel for a
+#      secret passed to a `shell`/`command` task — verified with a real
+#      `ansible-playbook -vvv` run that the connection plugin's EXEC trace
+#      line prints `environment:` values in cleartext (e.g.
+#      `<host> EXEC /bin/sh -c 'AI_SUPPORT_AGENT_TOKEN=... /path/to/python
+#      ...'`) regardless of `no_log: true` on the task (`no_log` only
+#      redacts the task's own registered result, not the connection
+#      layer's own verbose trace).
+# Each token is instead written via `ansible.builtin.tempfile` +
+# `copy: content:` (both `no_log: true`) to a 0600 file owned by
+# `ai_support_agent_user` — `copy`'s `content:` parameter IS correctly
+# redacted at every verbosity level — and the configure task reads it back
+# via `$(cat ...)`, so the Jinja-rendered script text only ever contains a
+# file *path* (not a secret). The temp file is deleted at the end of its
+# own script and again by an unconditional cleanup task as a safety net.
+# `api_url`/`project_code` are not secrets, so they are still passed via
+# `environment:` + `"$VAR"`/`${VAR:+...}` shell expansion (only to avoid
+# Jinja-into-shell-text interpolation, reason 1 above — reasons 2/3 do not
+# apply to non-secret values).
+#
+# **Diagnostics under `no_log` + `loop`**: `no_log: true` on a looped task
+# censors the entire per-iteration result (including `loop_control.label`),
+# so a naive loop would report only "ok" or a generic failure with zero
+# detail. This role instead sets `failed_when: false` on the configure loop
+# (so it always completes all iterations and Ansible's own `failed` field
+# is never trusted) and inspects each iteration's raw shell exit code
+# (`.rc`) in a follow-up, non-`no_log` task to report exactly which
+# `project_code` entries failed — without ever printing a token.
 
-- name: "ai_support_agent : Validate required variables are set"
+- name: "ai_support_agent : Merge legacy single-token variable into the token list"
+  ansible.builtin.set_fact:
+    ai_support_agent_configure_items: >-
+      {{ (ai_support_agent_tokens | default([]))
+         + ([{'token': ai_support_agent_token,
+              'api_url': ai_support_agent_api_url | default(''),
+              'project_code': ai_support_agent_project_code | default('')}]
+            if (ai_support_agent_token is defined and ai_support_agent_token is string
+                and (ai_support_agent_token | trim | length > 0))
+            else []) }}
+  no_log: true
+
+- name: "ai_support_agent : Validate at least one token is configured"
   ansible.builtin.assert:
     that:
-      - ai_support_agent_token is defined and ai_support_agent_token is string and (ai_support_agent_token | trim | length > 0)
-      - ai_support_agent_api_url is defined and ai_support_agent_api_url is string and (ai_support_agent_api_url | trim | length > 0)
+      - ai_support_agent_configure_items | length > 0
     fail_msg: >-
-      ai_support_agent_token and ai_support_agent_api_url must both be set to
-      non-empty strings (e.g. via the recipe's include_role.vars, with
-      ai_support_agent_token referencing an ANSIBLE# project variable).
+      At least one token must be set, either via ai_support_agent_tokens
+      (a list of {token, project_code?, api_url?} entries) or the legacy
+      ai_support_agent_token variable.
+
+- name: "ai_support_agent : Validate every token list entry has a non-empty token"
+  ansible.builtin.assert:
+    that:
+      - item.token is defined and item.token is string and (item.token | trim | length > 0)
+    fail_msg: >-
+      Every ai_support_agent_tokens entry must have a non-empty 'token'
+      field.
+  loop: "{{ ai_support_agent_configure_items }}"
+  no_log: true
 
 - name: "ai_support_agent : Validate nvm role has been run for this user"
   ansible.builtin.stat:
@@ -96,33 +152,84 @@
   register: ai_support_agent_uid
   changed_when: false
 
-- name: "ai_support_agent : Configure ai-support-agent CLI (non-interactive auth)"
-  block:
-    - name: "ai_support_agent : Run configure"
-      ansible.builtin.shell: |
-        set -e
-        export NVM_DIR="/home/{{ ai_support_agent_user | default('appuser') }}/.nvm"
-        . "$NVM_DIR/nvm.sh"
-        ai-support-agent configure --api-url "$AI_SUPPORT_AGENT_API_URL" ${AI_SUPPORT_AGENT_PROJECT_CODE:+--project-code "$AI_SUPPORT_AGENT_PROJECT_CODE"}
-      args:
-        executable: /bin/bash
-      become_user: "{{ ai_support_agent_user | default('appuser') }}"
-      environment:
-        AI_SUPPORT_AGENT_TOKEN: "{{ ai_support_agent_token }}"
-        AI_SUPPORT_AGENT_API_URL: "{{ ai_support_agent_api_url }}"
-        AI_SUPPORT_AGENT_PROJECT_CODE: "{{ ai_support_agent_project_code | default('') }}"
-      # Rewrites the CLI's config file on every run; treated as always
-      # "changed" rather than guessed at via stdout heuristics.
-      changed_when: true
-      no_log: true
-  rescue:
-    - name: "ai_support_agent : Fail with a token-safe diagnostic message"
-      ansible.builtin.fail:
-        msg: >-
-          ai-support-agent configure failed for api_url
-          '{{ ai_support_agent_api_url }}' (token and command output
-          redacted by no_log). Check network reachability to api_url and
-          that the token is valid.
+- name: "ai_support_agent : Create a secure temporary file for each token"
+  # Neither Ansible's `environment:` keyword nor Jinja-interpolating a token
+  # into the shell script text is used to pass tokens to the configure
+  # step below — see the module header comment ("Secret handling") for why
+  # `environment:` leaks its values in `ansible-playbook -vvv` EXEC traces
+  # regardless of `no_log`. `ansible.builtin.copy`'s `content:` parameter
+  # (used in the next task), by contrast, is redacted correctly at every
+  # verbosity level, so each token is written to its own 0600 temp file and
+  # read back inside the shell script via `$(cat ...)` instead.
+  ansible.builtin.tempfile:
+    state: file
+    prefix: ai_support_agent_token_
+  loop: "{{ ai_support_agent_configure_items }}"
+  loop_control:
+    label: "(token file, redacted)"
+  register: ai_support_agent_token_tempfiles
+  changed_when: false
+
+- name: "ai_support_agent : Write each token into its own temp file"
+  ansible.builtin.copy:
+    content: "{{ item.0.token }}"
+    dest: "{{ item.1.path }}"
+    owner: "{{ ai_support_agent_user | default('appuser') }}"
+    mode: '0600'
+  loop: "{{ ai_support_agent_configure_items | zip(ai_support_agent_token_tempfiles.results) | list }}"
+  loop_control:
+    label: "(token file, redacted)"
+  no_log: true
+  changed_when: true
+
+- name: "ai_support_agent : Configure ai-support-agent CLI for each token (non-interactive auth)"
+  ansible.builtin.shell: |
+    set -e
+    export NVM_DIR="/home/{{ ai_support_agent_user | default('appuser') }}/.nvm"
+    . "$NVM_DIR/nvm.sh"
+    export AI_SUPPORT_AGENT_TOKEN="$(cat '{{ item.1.path }}')"
+    ai-support-agent configure ${AI_SUPPORT_AGENT_API_URL:+--api-url "$AI_SUPPORT_AGENT_API_URL"} ${AI_SUPPORT_AGENT_PROJECT_CODE:+--project-code "$AI_SUPPORT_AGENT_PROJECT_CODE"}
+    rm -f '{{ item.1.path }}'
+  args:
+    executable: /bin/bash
+  become_user: "{{ ai_support_agent_user | default('appuser') }}"
+  environment:
+    AI_SUPPORT_AGENT_API_URL: "{{ item.0.api_url | default('') }}"
+    AI_SUPPORT_AGENT_PROJECT_CODE: "{{ item.0.project_code | default('') }}"
+  loop: "{{ ai_support_agent_configure_items | zip(ai_support_agent_token_tempfiles.results) | list }}"
+  loop_control:
+    label: "{{ item.0.project_code | default('(default project)') }}"
+  register: ai_support_agent_configure_results
+  # Always completes every iteration (never halts mid-loop on the first
+  # failure) so the diagnostic task below can report every failing entry.
+  # Ansible's own `failed`/`changed` fields become unreliable once forced
+  # here, so the diagnostic task keys off the raw shell `.rc` instead.
+  failed_when: false
+  changed_when: true
+  no_log: true
+
+- name: "ai_support_agent : Remove any leftover token temp files (cleanup safety net)"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ ai_support_agent_token_tempfiles.results }}"
+  loop_control:
+    label: "(token file, redacted)"
+  changed_when: false
+
+- name: "ai_support_agent : Fail if any configure attempt failed (token-safe diagnostic)"
+  vars:
+    ai_support_agent_failed_items: "{{ ai_support_agent_configure_results.results | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list }}"
+    ai_support_agent_failed_project_codes: "{{ ai_support_agent_failed_items | map(attribute='item.0.project_code', default='(default project)') | list }}"
+  ansible.builtin.fail:
+    msg: >-
+      {{ ai_support_agent_failed_items | length }} of
+      {{ ai_support_agent_configure_items | length }} ai-support-agent
+      configure attempt(s) failed. Failing project_code(s):
+      {{ ai_support_agent_failed_project_codes }}
+      (token and command output redacted by no_log). Check network
+      reachability to api_url and that each token is valid.
+  when: ai_support_agent_failed_items | length > 0
 
 - name: "ai_support_agent : Check whether linger is already enabled"
   ansible.builtin.command:
@@ -140,7 +247,7 @@
     name: "user@{{ ai_support_agent_uid.stdout }}.service"
     state: started
 
-- name: "ai_support_agent : Register as a systemd user service"
+- name: "ai_support_agent : Register all configured projects as systemd user services"
   ansible.builtin.shell: |
     set -e
     export NVM_DIR="/home/{{ ai_support_agent_user | default('appuser') }}/.nvm"
@@ -151,6 +258,7 @@
   become_user: "{{ ai_support_agent_user | default('appuser') }}"
   environment:
     XDG_RUNTIME_DIR: "/run/user/{{ ai_support_agent_uid.stdout }}"
-  # (Re)installs/overwrites the systemd unit file on every run; treated as
-  # always "changed" rather than guessed at via stdout heuristics.
+  # (Re)installs/overwrites the systemd unit files (one per registered
+  # project) on every run; treated as always "changed" rather than guessed
+  # at via stdout heuristics.
   changed_when: true
