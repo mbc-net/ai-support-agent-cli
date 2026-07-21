@@ -245,6 +245,54 @@ describe('security', () => {
         })
       }
     })
+
+    it.each([
+      ['STARSHIP_CONFIG', '/home/user/.config/starship.toml'],
+      ['EDITOR', 'nvim'],
+      ['VISUAL', 'nvim'],
+    ])(
+      'should pass through %s so Docker-configured tooling (starship/editor) works in real terminals',
+      (key, value) => {
+        const original = process.env[key]
+        process.env[key] = value
+        try {
+          const env = buildSafeEnv()
+          expect(env[key]).toBe(value)
+        } finally {
+          if (original === undefined) delete process.env[key]
+          else process.env[key] = original
+        }
+      },
+    )
+
+    // Regression test: XDG_CONFIG_HOME/XDG_DATA_HOME/XDG_STATE_HOME/
+    // XDG_CACHE_HOME must NOT be in the allowlist. Docker's nvim setup now
+    // sets these only inside a wrapper script scoped to the nvim process
+    // itself (see docker/Dockerfile's /opt/nvim/bin/nvim wrapper), not as a
+    // Dockerfile-level ENV. If they were passed through here, any
+    // XDG-Base-Directory-compliant CLI in the real terminal (e.g. `gh`,
+    // `glab`) would be silently redirected to /opt/nvim-config et al., which
+    // are chmod a+rwX (world-writable) — e.g. `gh auth login` would write its
+    // auth token to a world-writable directory instead of $HOME/.config/gh.
+    it.each([
+      ['XDG_CONFIG_HOME', '/home/user/.config'],
+      ['XDG_DATA_HOME', '/home/user/.local/share'],
+      ['XDG_STATE_HOME', '/home/user/.local/state'],
+      ['XDG_CACHE_HOME', '/home/user/.cache'],
+    ])(
+      'should NOT pass through %s (nvim-only via wrapper script, not a shell-wide allowlist entry)',
+      (key, value) => {
+        const original = process.env[key]
+        process.env[key] = value
+        try {
+          const env = buildSafeEnv()
+          expect(env[key]).toBeUndefined()
+        } finally {
+          if (original === undefined) delete process.env[key]
+          else process.env[key] = original
+        }
+      },
+    )
   })
 
   describe('constants', () => {

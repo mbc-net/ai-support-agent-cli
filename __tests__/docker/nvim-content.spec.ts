@@ -19,6 +19,17 @@ describe('docker/nvim/init.lua content validation', () => {
     content = fs.readFileSync(INIT_LUA, 'utf-8')
   })
 
+  /**
+   * Returns the source text starting at the plugin's `"owner/repo"` spec
+   * string, bounded to a window big enough to reach that plugin's own
+   * top-level fields (e.g. `commit = "..."`) but not the next plugin entry.
+   */
+  function pluginBlock(repoSpec: string): string {
+    const start = content.indexOf(`"${repoSpec}"`)
+    expect(start).toBeGreaterThan(-1)
+    return content.slice(start, start + 300)
+  }
+
   it('bootstraps lazy.nvim as the plugin manager', () => {
     expect(content).toMatch(/folke\/lazy\.nvim/)
   })
@@ -67,6 +78,45 @@ describe('docker/nvim/init.lua content validation', () => {
   it('configures rainbow_csv for CSV column rainbow highlighting + RBQL', () => {
     expect(content).toMatch(/mechatroner\/rainbow_csv/)
   })
+
+  it('configures gitsigns.nvim for change signs + hunk stage/reset + line blame', () => {
+    expect(content).toMatch(/lewis6991\/gitsigns\.nvim/)
+  })
+
+  it('configures neo-tree.nvim (v3.x) as the sidebar file explorer', () => {
+    expect(content).toMatch(/nvim-neo-tree\/neo-tree\.nvim/)
+    expect(content).toMatch(/branch = "v3\.x"/)
+  })
+
+  it('configures diffview.nvim for reviewing diffs/history in a dedicated view', () => {
+    expect(content).toMatch(/sindrets\/diffview\.nvim/)
+  })
+
+  it('configures lazygit.nvim to launch the lazygit TUI from within nvim', () => {
+    expect(content).toMatch(/kdheepak\/lazygit\.nvim/)
+  })
+
+  // gitsigns.nvim / neo-tree.nvim / diffview.nvim / lazygit.nvim were added
+  // pointing at a branch tip (floating), same as nvim-treesitter above: a
+  // rebuild from the same commit of THIS repo could still silently pull a
+  // newer, incompatible or compromised upstream commit. Pin each to the
+  // specific commit verified via the GitHub API at the time they were added,
+  // mirroring the nvim-treesitter `commit = "<40-hex-sha>"` pattern.
+  it('pins gitsigns.nvim to a specific commit (not floating on its default branch)', () => {
+    expect(pluginBlock('lewis6991/gitsigns.nvim')).toMatch(/commit = "[0-9a-f]{40}"/)
+  })
+
+  it('pins neo-tree.nvim to a specific commit on the v3.x branch (not floating)', () => {
+    expect(pluginBlock('nvim-neo-tree/neo-tree.nvim')).toMatch(/commit = "[0-9a-f]{40}"/)
+  })
+
+  it('pins diffview.nvim to a specific commit (not floating on its default branch)', () => {
+    expect(pluginBlock('sindrets/diffview.nvim')).toMatch(/commit = "[0-9a-f]{40}"/)
+  })
+
+  it('pins lazygit.nvim to a specific commit (not floating on its default branch)', () => {
+    expect(pluginBlock('kdheepak/lazygit.nvim')).toMatch(/commit = "[0-9a-f]{40}"/)
+  })
 })
 
 describe('Dockerfile bundles a modern neovim + fzf + the plugin set', () => {
@@ -105,18 +155,43 @@ describe('Dockerfile bundles a modern neovim + fzf + the plugin set', () => {
     expect(dockerfileContent).toMatch(/apt-get install -y --no-install-recommends[\s\S]*?\bfzf\b/)
   })
 
-  it('sets XDG dirs to a location writable by any runtime UID (not $HOME, which differs by UID)', () => {
-    // Mirrors the existing /opt/playwright-browsers pattern: the container
-    // may run as root (build time) or an arbitrary UID (entrypoint.sh's
-    // dynamic passwd-entry handling for --user), so plugin state must live
-    // somewhere both can reach regardless of $HOME.
-    expect(dockerfileContent).toMatch(/ENV XDG_CONFIG_HOME=\/opt\/nvim-config/)
-    expect(dockerfileContent).toMatch(/ENV XDG_DATA_HOME=\/opt\/nvim-data/)
+  it('sets XDG dirs to a location writable by any runtime UID, scoped to nvim only via a wrapper script (not a Dockerfile-level ENV)', () => {
+    // Mirrors the existing /opt/playwright-browsers pattern for the
+    // /opt-based paths: the container may run as root (build time) or an
+    // arbitrary UID (entrypoint.sh's dynamic passwd-entry handling for
+    // --user), so plugin state must live somewhere both can reach regardless
+    // of $HOME.
+    //
+    // These must NOT be a Dockerfile-level `ENV`, though: that would apply to
+    // every process in the container, not just nvim, silently redirecting
+    // other XDG-Base-Directory-compliant CLIs (e.g. `gh`, `glab`) to these
+    // nvim-specific, world-writable (chmod a+rwX below) directories — e.g.
+    // `gh auth login` would write its auth token to a world-writable
+    // directory instead of $HOME/.config/gh. Scoping the exports inside the
+    // nvim wrapper script itself confines them to nvim's own process tree.
+    expect(dockerfileContent).not.toMatch(/^ENV XDG_CONFIG_HOME=/m)
+    expect(dockerfileContent).not.toMatch(/^ENV XDG_DATA_HOME=/m)
+    expect(dockerfileContent).not.toMatch(/^ENV XDG_STATE_HOME=/m)
+    expect(dockerfileContent).not.toMatch(/^ENV XDG_CACHE_HOME=/m)
+    expect(dockerfileContent).toMatch(/export XDG_CONFIG_HOME=\/opt\/nvim-config/)
+    expect(dockerfileContent).toMatch(/export XDG_DATA_HOME=\/opt\/nvim-data/)
+    expect(dockerfileContent).toMatch(/export XDG_STATE_HOME=\/opt\/nvim-state/)
+    expect(dockerfileContent).toMatch(/export XDG_CACHE_HOME=\/opt\/nvim-cache/)
   })
 
-  it('copies docker/nvim/init.lua into $XDG_CONFIG_HOME/nvim/init.lua', () => {
+  it('renames the built binary to nvim-bin and installs a wrapper at /opt/nvim/bin/nvim that sets XDG_* before exec-ing it', () => {
     expect(dockerfileContent).toMatch(
-      /COPY docker\/nvim\/init\.lua \$XDG_CONFIG_HOME\/nvim\/init\.lua\b/,
+      /mv \/opt\/nvim\/bin\/nvim \/opt\/nvim\/bin\/nvim-bin\b/,
+    )
+    expect(dockerfileContent).toMatch(
+      /exec \/opt\/nvim\/bin\/nvim-bin "\$@"/,
+    )
+    expect(dockerfileContent).toMatch(/chmod \+x \/opt\/nvim\/bin\/nvim\b/)
+  })
+
+  it('copies docker/nvim/init.lua into /opt/nvim-config/nvim/init.lua (a literal path, since XDG_CONFIG_HOME is no longer a Dockerfile-level ENV)', () => {
+    expect(dockerfileContent).toMatch(
+      /COPY docker\/nvim\/init\.lua \/opt\/nvim-config\/nvim\/init\.lua\b/,
     )
   })
 
@@ -183,6 +258,8 @@ describe('Dockerfile bundles a modern neovim + fzf + the plugin set', () => {
   })
 
   it('makes the baked-in plugin/config dirs readable and writable by any runtime UID', () => {
-    expect(dockerfileContent).toMatch(/chmod -R a\+rwX \$XDG_CONFIG_HOME \$XDG_DATA_HOME/)
+    expect(dockerfileContent).toMatch(
+      /chmod -R a\+rwX \/opt\/nvim-config \/opt\/nvim-data \/opt\/nvim-state \/opt\/nvim-cache\b/,
+    )
   })
 })
