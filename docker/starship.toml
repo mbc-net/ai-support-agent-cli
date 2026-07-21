@@ -1,0 +1,12 @@
+# starship プロンプト設定。
+#
+# 明示指定したモジュールのみ上書きし、それ以外は starship のデフォルト
+# （format = "$all" 相当）に従う。
+#
+# container モジュール（コンテナ内であることを示す "[Docker]" 等の表示）の
+# デフォルトスタイルは "red bold dimmed"。dimmed（減光）属性により、暗い
+# ターミナル背景上でコントラストが低く視認しづらいため、dimmed を外す。
+"$schema" = "https://starship.rs/config-schema.json"
+
+[container]
+style = "bold red"

@@ -51,11 +51,12 @@ const LEGACY_OPTIONAL_ASSET = path.join('docker', 'entrypoint.sh')
  * hash (see NEW_OPTIONAL_ASSETS below for why the rest are deliberately
  * excluded).
  */
-const OPTIONAL_DOCKER_ASSETS = [
+export const OPTIONAL_DOCKER_ASSETS = [
   LEGACY_OPTIONAL_ASSET,
   path.join('docker', 'tmux.conf'),
   path.join('docker', 'bashrc-extra.sh'),
   path.join('docker', 'nvim', 'init.lua'),
+  path.join('docker', 'starship.toml'),
 ]
 
 /**
