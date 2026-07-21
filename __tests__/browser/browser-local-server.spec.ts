@@ -280,6 +280,19 @@ describe('BrowserLocalServer', () => {
       expect(res.body.success).toBe(false)
       expect(res.body.fallbackToChat).toBe(true)
     })
+
+    it('should block a scripted goto to a disallowed URL and never call page.goto', async () => {
+      const { validateUrl } = require('../../src/mcp/tools/browser/browser-security')
+      ;(validateUrl as jest.Mock).mockReturnValueOnce({ valid: false, reason: 'Blocked protocol' })
+
+      const res = await httpRequest(port, 'POST', '/browser/sess-1/execute-script', JSON.stringify({
+        script: "await page.goto('file:///etc/passwd', { waitUntil: 'domcontentloaded' });",
+      }))
+      expect(res.status).toBe(200)
+      expect(res.body.success).toBe(false)
+      expect(res.body.failedLine).toContain('file:///etc/passwd')
+      expect(mockPage.goto).not.toHaveBeenCalled()
+    })
   })
 
   describe('unknown action', () => {

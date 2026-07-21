@@ -48,7 +48,7 @@ jest.mock('fs', () => {
 
 const KNOWN_HOSTS_PATH = '/fake-config-dir/server-setup/known-hosts/acme__host-1'
 const mockResolveKnownHostsPath = jest.fn().mockReturnValue(KNOWN_HOSTS_PATH)
-jest.mock('../../src/server-setup/known-hosts-store', () => ({
+jest.mock('../../src/utils/known-hosts-store', () => ({
   resolveKnownHostsPath: (...args: unknown[]) => mockResolveKnownHostsPath(...args),
 }))
 

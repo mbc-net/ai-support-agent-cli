@@ -1,0 +1,63 @@
+---
+# nvm role: installs NVM (Node Version Manager) for a given user, then a
+# Node.js version via that NVM install.
+#
+# `claude_cli`/`codex`/`ai_support_agent` roles depend on the Node.js/npm
+# environment this role sets up. There is no automatic role-dependency
+# mechanism for `include_role` tasks, so recipe authors must include this
+# role BEFORE those three (each asserts nvm's presence in its own
+# tasks/main.yml so a missing/misordered nvm role fails with a clear
+# message rather than an obscure "npm: command not found").
+#
+# `nvm_user`/`nvm_version`/`node_version` all have sensible defaults (unlike
+# e.g. ssh_key's `ssh_key_public_key`, which cannot), so a bare
+# `include_role: {name: nvm}` with no vars at all already works end to end.
+
+- name: "nvm : Install prerequisite packages"
+  ansible.builtin.apt:
+    name:
+      - curl
+      - ca-certificates
+    state: present
+    update_cache: true
+
+- name: "nvm : Resolve NVM install directory"
+  ansible.builtin.set_fact:
+    nvm_resolved_dir: "/home/{{ nvm_user | default('appuser') }}/.nvm"
+
+- name: "nvm : Create NVM install directory"
+  ansible.builtin.file:
+    path: "{{ nvm_resolved_dir }}"
+    state: directory
+    owner: "{{ nvm_user | default('appuser') }}"
+    mode: '0755'
+
+- name: "nvm : Download NVM install script"
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/nvm-sh/nvm/{{ nvm_version | default('v0.40.6') }}/install.sh"
+    dest: /tmp/nvm-install.sh
+    mode: '0755'
+
+# `creates:` makes this idempotent: a re-run (or a recipe that includes nvm
+# twice for different later roles) skips re-running the installer once
+# nvm.sh already exists for this user.
+- name: "nvm : Run NVM install script"
+  ansible.builtin.command:
+    cmd: bash /tmp/nvm-install.sh
+  become_user: "{{ nvm_user | default('appuser') }}"
+  environment:
+    NVM_DIR: "{{ nvm_resolved_dir }}"
+  args:
+    creates: "{{ nvm_resolved_dir }}/nvm.sh"
+
+- name: "nvm : Install Node.js via NVM"
+  ansible.builtin.shell: |
+    set -e
+    export NVM_DIR="{{ nvm_resolved_dir }}"
+    . "$NVM_DIR/nvm.sh"
+    nvm install {{ node_version | default('--lts') }}
+  args:
+    executable: /bin/bash
+  become_user: "{{ nvm_user | default('appuser') }}"
+  register: nvm_install_node_result
+  changed_when: "'is already installed' not in nvm_install_node_result.stdout"

@@ -1,5 +1,9 @@
+import { readdirSync } from 'fs'
+import * as path from 'path'
+
 import {
   AnsibleTaskViolation,
+  INCLUDE_ROLE_ALLOWED_ROLES,
   validateAnsibleTasks,
 } from '../../src/server-setup/ansible-task-guard'
 
@@ -145,8 +149,19 @@ describe('validateAnsibleTasks', () => {
   })
 
   describe('include_role スニペットの検証', () => {
-    it.each(['os_init', 'docker', 'web_server', 'database', 'dns_tls', 'ssh_key'])(
-      'include_role name=%s（許可された 6 ロール）は通過する',
+    it.each([
+      'os_init',
+      'docker',
+      'web_server',
+      'database',
+      'dns_tls',
+      'ssh_key',
+      'nvm',
+      'claude_cli',
+      'codex',
+      'ai_support_agent',
+    ])(
+      'include_role name=%s（許可された 10 ロール）は通過する',
       (roleName) => {
         const body = `
 - name: bundled step
@@ -156,6 +171,16 @@ describe('validateAnsibleTasks', () => {
         expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
       },
     )
+
+    it('INCLUDE_ROLE_ALLOWED_ROLES と ansible/roles/ 配下の実ディレクトリが1:1で対応する（allowlist追加漏れ・ロールdir追加漏れの非対称を検出）', () => {
+      const rolesDir = path.join(__dirname, '..', '..', 'ansible', 'roles')
+      const actualRoleDirs = readdirSync(rolesDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort()
+
+      expect([...INCLUDE_ROLE_ALLOWED_ROLES].sort()).toEqual(actualRoleDirs)
+    })
 
     it('許可されていないロール名は拒否される', () => {
       const body = `

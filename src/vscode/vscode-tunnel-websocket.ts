@@ -62,6 +62,15 @@ export interface VsCodeServerMessage {
   filePaths?: string[]
   files?: Array<{ name: string; mimeType: string; dataBase64: string }>
   sessionId?: string
+  /**
+   * Tenant code the API server attaches to `vscode_open`/`port_forward_open`/
+   * `browser_open` messages. When present, it is checked against this
+   * connection's own (trusted, constructor-supplied) tenant code as a
+   * defense-in-depth measure — see `validateTenantCode`. Optional and not
+   * enforced when absent, for backward compatibility with callers that do
+   * not yet send it.
+   */
+  tenantCode?: string
   requestId?: string
   subSocketId?: string
   projectDir?: string
@@ -275,6 +284,15 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
      */
     private readonly envVarsProvider?: EnvVarsProvider,
     private readonly onAuthRejected?: () => void,
+    /**
+     * This connection's own, trusted tenant code (established out-of-band at
+     * connection setup — e.g. from the agent's provisioning config), used as
+     * the comparison baseline for `validateTenantCode`. Optional and placed
+     * last so existing positional call sites are unaffected; when absent,
+     * tenantCode validation is skipped entirely (no baseline to compare
+     * against).
+     */
+    private readonly tenantCode?: string,
   ) {
     super({
       maxReconnectRetries: VSCODE_WS_MAX_RECONNECT_RETRIES,
@@ -466,7 +484,72 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       return
     }
 
-    const projectDir = msg.projectDir ?? this.projectDir
+    if (!this.validateTenantCode(sessionId, msg.tenantCode)) return
+
+    let projectDir: string | undefined
+    if (msg.projectDir) {
+      // Client/API-supplied projectDir MUST be contained within the trusted
+      // workspace root (`this.projectDir`). Without this check, an absolute
+      // path (e.g. `/` or `~/.ssh`) or a `../` traversal would let code-server
+      // be launched (with `--auth none`) rooted outside the workspace,
+      // exposing arbitrary host files with no authentication.
+      const trustedRoot = this.projectDir
+      if (!trustedRoot) {
+        this.send({ type: 'error', sessionId, message: 'No project directory' })
+        return
+      }
+      const resolved = path.resolve(trustedRoot, msg.projectDir)
+      const isInsideRoot = resolved === trustedRoot || resolved.startsWith(trustedRoot + path.sep)
+      if (!isInsideRoot) {
+        this.send({ type: 'error', sessionId, message: 'projectDir outside workspace' })
+        return
+      }
+
+      // HIGH defense-in-depth: the lexical (string) containment check above
+      // only guards against traversal at the string level. A symlink planted
+      // inside the trusted root (e.g. by a prior local compromise) that
+      // points OUTSIDE it would pass that check — `resolved` is lexically
+      // inside the root, but its real (canonical) location is not.
+      //
+      // Re-checking via `fs.realpath(resolved)` directly is NOT sufficient:
+      // when the leaf path itself does not exist yet (a common case — the
+      // caller is often about to create a new directory), `realpath` rejects
+      // with ENOENT on the whole call, which would silently skip the check
+      // entirely even if an INTERMEDIATE path component is the malicious
+      // symlink. `fs.mkdirSync(..., { recursive: true })` (called downstream
+      // in vscode-server.ts to set up the workspace) follows symlinks at
+      // every intermediate component when creating the missing tail, so a
+      // symlink two levels up combined with a not-yet-existing leaf would
+      // bypass this guard completely with no error.
+      //
+      // Instead, walk up from `resolved` to find the deepest path segment
+      // that actually exists, and canonicalize THAT — this always includes
+      // any symlink placed anywhere along the path, whether or not the final
+      // leaf exists.
+      //
+      // This check only applies when `trustedRoot` itself resolves on disk.
+      // In production `this.projectDir` is always a real, already-existing
+      // workspace directory, so this is not a loophole for real deployments —
+      // it only skips the check for callers that pass a purely virtual root
+      // that was never meant to exist on the filesystem at all (there is no
+      // real symlink threat to canonicalize against in that case).
+      const realTrustedRoot = await fs.realpath(trustedRoot).catch(() => null)
+      if (realTrustedRoot !== null) {
+        const existingAncestor = await this.findDeepestExistingAncestor(resolved)
+        const realAncestor = await fs.realpath(existingAncestor).catch(() => existingAncestor)
+        const isReallyInsideRoot =
+          realAncestor === realTrustedRoot || realAncestor.startsWith(realTrustedRoot + path.sep)
+        if (!isReallyInsideRoot) {
+          this.send({ type: 'error', sessionId, message: 'projectDir outside workspace' })
+          return
+        }
+      }
+
+      projectDir = resolved
+    } else {
+      projectDir = this.projectDir
+    }
+
     if (!projectDir) {
       this.send({ type: 'error', sessionId, message: 'No project directory' })
       return
@@ -695,9 +778,16 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       return
     }
 
-    const targetPort = msg.targetPort
-    if (!targetPort) {
-      this.send({ type: 'error', sessionId, message: 'Missing targetPort' })
+    if (!this.validateTenantCode(sessionId, msg.tenantCode)) return
+
+    // MEDIUM: targetPort must be validated as an integer within the valid TCP
+    // port range before being forwarded to `new VsCodeWsProxy(targetPort)`.
+    // The previous truthy-only check (`!targetPort`) let any non-zero,
+    // non-numeric, or out-of-range value (including negative numbers or
+    // strings) through unchecked.
+    const targetPort = Number(msg.targetPort)
+    if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
+      this.send({ type: 'error', sessionId, message: 'invalid targetPort' })
       return
     }
 
@@ -799,6 +889,8 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
       this.sendMissingSessionIdError()
       return
     }
+
+    if (!this.validateTenantCode(sessionId, msg.tenantCode)) return
 
     // Reset any stale cursor state for this sessionId on (re)open. The idle-timeout
     // auto-close path closes a session via BrowserSessionManager WITHOUT routing
@@ -1501,8 +1593,61 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     this.send({ type: 'error', message: 'Missing sessionId' })
   }
 
+  /**
+   * MEDIUM defense-in-depth: verify a message's `tenantCode` (when present)
+   * against this connection's own trusted tenant code (`this.tenantCode`,
+   * fixed at construction time). Per CLAUDE.md's WebSocket tenant-isolation
+   * rule, `vscode_open`/`port_forward_open`/`browser_open` messages should
+   * carry `tenantCode` so a mismatch (server bug, misrouted relay, or a
+   * compromised path upstream) can be caught here rather than silently
+   * acting for the wrong tenant.
+   *
+   * Intentionally NOT enforced (returns true) when either side is absent:
+   *  - `msgTenantCode` absent: backward compatible with callers/API versions
+   *    that do not yet send it.
+   *  - `this.tenantCode` absent: this connection has no established baseline
+   *    to compare against (nothing to validate).
+   * Sends a `tenant mismatch` error and returns false on a genuine mismatch.
+   */
+  private validateTenantCode(sessionId: string | undefined, msgTenantCode: string | undefined): boolean {
+    if (!msgTenantCode || !this.tenantCode) return true
+    if (msgTenantCode !== this.tenantCode) {
+      logger.warn(
+        `[vscode-ws] tenantCode mismatch (session=${sessionId ?? 'none'}): expected=${this.tenantCode} received=${msgTenantCode}`,
+      )
+      this.send({ type: 'error', sessionId, message: 'tenant mismatch' })
+      return false
+    }
+    return true
+  }
+
   private sendBrowserSessionNotFoundError(sessionId: string): void {
     this.send({ type: 'error', sessionId, message: 'Browser session not found' })
+  }
+
+  /**
+   * Walk up from `candidate` toward the filesystem root and return the
+   * deepest path segment that actually exists on disk.
+   *
+   * Used for symlink-aware containment checks: `fs.realpath` on a path whose
+   * leaf does not exist yet rejects outright, which would skip validation of
+   * any intermediate symlink. Finding the deepest *existing* ancestor first
+   * lets the caller canonicalize that instead — any symlink placed anywhere
+   * along the path is necessarily part of an existing ancestor, so this
+   * always surfaces it regardless of whether the final leaf exists.
+   */
+  private async findDeepestExistingAncestor(candidate: string): Promise<string> {
+    let current = candidate
+    for (;;) {
+      try {
+        await fs.access(current)
+        return current
+      } catch {
+        const parent = path.dirname(current)
+        if (parent === current) return current
+        current = parent
+      }
+    }
   }
 
   /**
