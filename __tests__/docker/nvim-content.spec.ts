@@ -51,6 +51,22 @@ describe('docker/nvim/init.lua content validation', () => {
   it('uses /bin/bash as the shell (the container has no zsh, unlike the reference config)', () => {
     expect(content).toMatch(/vim\.opt\.shell = "\/bin\/bash"/)
   })
+
+  // 参照設定（koichimurakami/dotfiles の nvim/init.lua）に揃えて追加した項目。
+  // SSH/他マシン接続まわり（shell/*-vpn.sh, skhd, wezterm）は対象外。
+  it('enables command-line completion menu (wildmenu/wildmode), matching the reference config', () => {
+    expect(content).toMatch(/vim\.opt\.wildmenu = true/)
+    expect(content).toMatch(/vim\.opt\.wildmode = "longest:full,full"/)
+  })
+
+  it('configures csvview.nvim for CSV/TSV column-aligned display', () => {
+    expect(content).toMatch(/hat0uma\/csvview\.nvim/)
+    expect(content).toMatch(/ft = \{ "csv", "tsv" \}/)
+  })
+
+  it('configures rainbow_csv for CSV column rainbow highlighting + RBQL', () => {
+    expect(content).toMatch(/mechatroner\/rainbow_csv/)
+  })
 })
 
 describe('Dockerfile bundles a modern neovim + fzf + the plugin set', () => {

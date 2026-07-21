@@ -324,6 +324,7 @@ export const ANTHROPIC_CONTENT_TYPE = {
 export const GIT_CLONE_TIMEOUT = 120_000
 export const GIT_FETCH_TIMEOUT = 60_000
 export const GIT_CHECKOUT_TIMEOUT = 30_000
+export const GIT_CONFIG_TIMEOUT = 10_000
 
 // Legacy fallback SSH options, used ONLY when tenantCode is unavailable (no
 // meta on a terminal `open`, or an unauthenticated ApiClient) and TOFU host-key
