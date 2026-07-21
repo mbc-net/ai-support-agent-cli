@@ -51,6 +51,23 @@ export const SAFE_ENV_KEYS: readonly string[] = [
   'WEBHOOK_TRIGGERED',
   'WEBHOOK_BODY',
   'WEBHOOK_BODY_TRUNCATED',
+  // Dockerfile sets these for interactive terminal tooling (starship prompt
+  // config, default editor), but they were missing from this allowlist so
+  // buildSafeEnv() silently dropped them — real terminal sessions never saw
+  // the Docker-configured starship/editor setup.
+  //
+  // XDG_CONFIG_HOME/XDG_DATA_HOME/XDG_STATE_HOME/XDG_CACHE_HOME are
+  // deliberately NOT included here (nor are they a Dockerfile-level ENV
+  // anymore): they only matter for nvim, which now gets them from a wrapper
+  // script scoped to its own process (see docker/Dockerfile's
+  // /opt/nvim/bin/nvim wrapper). Passing them through to the whole shell
+  // would redirect every other XDG-Base-Directory-compliant CLI (e.g. `gh`,
+  // `glab`) to these nvim-specific, world-writable directories — e.g. `gh
+  // auth login` would write its auth token to a world-writable directory
+  // instead of $HOME/.config/gh.
+  'STARSHIP_CONFIG',
+  'EDITOR',
+  'VISUAL',
 ]
 
 export function getSensitiveHomePaths(): string[] {

@@ -166,4 +166,86 @@ require("lazy").setup({
     "mechatroner/rainbow_csv",
     ft = { "csv", "tsv" },
   },
+  -- Git: 行の変更サイン + ハンク単位 stage/reset + 行 blame
+  -- ブランチ先端（floating）参照ではなく、動作確認済みのコミットに固定する
+  -- （nvim-treesitter と同じ理由: 再ビルド時に無関係な更新を予期せず取り込まないため）。
+  {
+    "lewis6991/gitsigns.nvim",
+    commit = "31d6fb2d618bca1482b9f274751ead5f03461408",
+    event = { "BufReadPre", "BufNewFile" },
+    opts = {
+      on_attach = function(bufnr)
+        local gs = require("gitsigns")
+        local function map(mode, l, r, desc)
+          vim.keymap.set(mode, l, r, { buffer = bufnr, desc = desc })
+        end
+        map("n", "]c", function()
+          if vim.wo.diff then vim.cmd.normal({ "]c", bang = true }) else gs.nav_hunk("next") end
+        end, "Next hunk")
+        map("n", "[c", function()
+          if vim.wo.diff then vim.cmd.normal({ "[c", bang = true }) else gs.nav_hunk("prev") end
+        end, "Prev hunk")
+        map("n", "<leader>Gs", gs.stage_hunk, "Stage hunk")
+        map("v", "<leader>Gs", function() gs.stage_hunk({ vim.fn.line("."), vim.fn.line("v") }) end, "Stage hunk")
+        map("n", "<leader>Gr", gs.reset_hunk, "Reset hunk")
+        map("v", "<leader>Gr", function() gs.reset_hunk({ vim.fn.line("."), vim.fn.line("v") }) end, "Reset hunk")
+        map("n", "<leader>GS", gs.stage_buffer, "Stage buffer")
+        map("n", "<leader>Gp", gs.preview_hunk, "Preview hunk")
+        map("n", "<leader>Gb", function() gs.blame_line({ full = true }) end, "Blame line")
+        map("n", "<leader>Gd", gs.diffthis, "Diff this")
+      end,
+    },
+  },
+  -- ファイルツリー（サイドバー型エクスプローラ）
+  -- v3.x はブランチ先端（floating）参照のため、動作確認済みのコミットに固定する。
+  {
+    "nvim-neo-tree/neo-tree.nvim",
+    branch = "v3.x",
+    commit = "ebd66767191714e008ce73b769518a763ff31bdc",
+    dependencies = {
+      "nvim-lua/plenary.nvim",
+      "nvim-tree/nvim-web-devicons",
+      "MunifTanjim/nui.nvim",
+    },
+    cmd = "Neotree",
+    keys = {
+      { "<leader>e", "<cmd>Neotree toggle<cr>", desc = "Explorer toggle" },
+    },
+    opts = {
+      close_if_last_window = true,
+      window = { width = 32 },
+      filesystem = {
+        follow_current_file = { enabled = true },
+        use_libuv_file_watcher = true,
+        filtered_items = {
+          hide_dotfiles = false,
+          hide_gitignored = false,
+        },
+      },
+    },
+  },
+  -- Git: 差分・履歴を専用ビューで閲覧（レビュー/マージ解決）
+  -- ブランチ先端（floating）参照ではなく、動作確認済みのコミットに固定する。
+  {
+    "sindrets/diffview.nvim",
+    commit = "4516612fe98ff56ae0415a259ff6361a89419b0a",
+    dependencies = { "nvim-lua/plenary.nvim", "nvim-tree/nvim-web-devicons" },
+    cmd = { "DiffviewOpen", "DiffviewClose", "DiffviewFileHistory", "DiffviewToggleFiles" },
+    keys = {
+      { "<leader>Gv", "<cmd>DiffviewOpen<cr>", desc = "Diffview open" },
+      { "<leader>Gf", "<cmd>DiffviewFileHistory<cr>", desc = "Diffview file history" },
+      { "<leader>Gc", "<cmd>DiffviewClose<cr>", desc = "Diffview close" },
+    },
+  },
+  -- Git: lazygit(TUI) を nvim から起動
+  -- ブランチ先端（floating）参照ではなく、動作確認済みのコミットに固定する。
+  {
+    "kdheepak/lazygit.nvim",
+    commit = "a04ad0dbc725134edbee3a5eea29290976695357",
+    dependencies = { "nvim-lua/plenary.nvim" },
+    cmd = { "LazyGit", "LazyGitCurrentFile", "LazyGitFilter", "LazyGitFilterCurrentFile" },
+    keys = {
+      { "<leader>Gg", "<cmd>LazyGit<cr>", desc = "LazyGit" },
+    },
+  },
 })

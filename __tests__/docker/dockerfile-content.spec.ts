@@ -232,6 +232,106 @@ describe('Dockerfile content validation', () => {
       })
     })
 
+    describe('vi/vim resolve to the built neovim, not apt vim.basic', () => {
+      // apt installs `vim` (Layer 1), which registers `vim.basic` as an
+      // update-alternatives choice for `vi`/`vim` at priority 30. Neovim is
+      // separately built from source into /opt/nvim/bin/nvim and symlinked to
+      // /usr/local/bin/nvim, but without registering it as an alternative for
+      // vi/vim, typing `vi`/`vim` in the agent shell still launches apt's vim
+      // instead of nvim. Registering nvim at priority 60 (higher than
+      // vim.basic's 30) makes update-alternatives select it automatically.
+      // Verified in a minimal Debian bookworm container: after
+      // `apt-get install vim` + this update-alternatives call,
+      // `update-alternatives --display vi`/`vim` both point at nvim.
+      it('registers /opt/nvim/bin/nvim as the vi alternative at a priority higher than apt vim.basic (30)', () => {
+        expect(content).toMatch(
+          /update-alternatives --install \/usr\/bin\/vi vi \/opt\/nvim\/bin\/nvim 60\b/,
+        )
+      })
+
+      it('registers /opt/nvim/bin/nvim as the vim alternative at a priority higher than apt vim.basic (30)', () => {
+        expect(content).toMatch(
+          /update-alternatives --install \/usr\/bin\/vim vim \/opt\/nvim\/bin\/nvim 60\b/,
+        )
+      })
+
+      // update-alternatives --install only proves the candidate was
+      // registered — not that it actually won priority and resolves. A
+      // pure path-equality check (readlink -f) would only prove "registered
+      // as a candidate", not that /usr/bin/vi and /usr/bin/vim actually
+      // *invoke* neovim at build time. Running `vi --version`/`vim
+      // --version` and grepping for the NVIM banner closes that gap: if
+      // update-alternatives silently picked a different alternative (e.g. a
+      // stale prior registration, or priority tie resolution surprises),
+      // this fails the build loudly instead of shipping a vi/vim that
+      // silently launches apt's vim.basic instead of neovim.
+      it('verifies at build time that vi/vim actually resolve to and execute neovim (readlink -f path check + NVIM version banner), not just that the alternative was registered', () => {
+        const normalized = content.replace(/\\\r?\n\s*/g, ' ')
+        expect(normalized).toMatch(
+          /\[ "\$\(readlink -f \/usr\/bin\/vi\)" = "\/opt\/nvim\/bin\/nvim" \]/,
+        )
+        expect(normalized).toMatch(
+          /\[ "\$\(readlink -f \/usr\/bin\/vim\)" = "\/opt\/nvim\/bin\/nvim" \]/,
+        )
+        expect(normalized).toMatch(/vi --version \| grep -q NVIM\b/)
+        expect(normalized).toMatch(/vim --version \| grep -q NVIM\b/)
+      })
+    })
+
+    describe('lazygit binary (lazygit.nvim shells out to it)', () => {
+      // lazygit.nvim (bundled in docker/nvim/init.lua) launches the `lazygit`
+      // TUI as an external process — it is not an nvim plugin dependency that
+      // lazy.nvim can install, so the real binary must be present on PATH.
+      // Debian bookworm does not package lazygit, so (mirroring eza above) a
+      // dual-arch GitHub release tarball is downloaded and pinned to an exact
+      // version rather than "latest".
+      it('pins LAZYGIT_VERSION to an exact version (not "latest")', () => {
+        expect(content).toMatch(/ARG LAZYGIT_VERSION=\d+\.\d+\.\d+\b/)
+      })
+
+      it('downloads the linux tarball, branching on dpkg architecture (x86_64 / arm64)', () => {
+        expect(content).toMatch(
+          /lazygit_\$\{LAZYGIT_VERSION\}_linux_\$\{LAZYGIT_ARCH\}\.tar\.gz/,
+        )
+        expect(content).toMatch(/LAZYGIT_ARCH="arm64"/)
+        expect(content).toMatch(/LAZYGIT_ARCH="x86_64"/)
+      })
+
+      it('extracts the lazygit binary to /usr/local/bin', () => {
+        expect(content).toMatch(/mv \/tmp\/lazygit-extract\/lazygit \/usr\/local\/bin\/lazygit\b/)
+      })
+
+      it('smoke-checks lazygit at build time so a broken/missing binary fails the build loudly', () => {
+        expect(content).toMatch(/&& lazygit --version\b/)
+      })
+
+      // Code review (second opinion) flagged that downloading a GitHub
+      // release binary and running it (`lazygit --version`) with no
+      // integrity check means a compromised release asset or a tampered
+      // download path would be installed and executed without detection.
+      // Pinning the expected SHA-256 per architecture and verifying it with
+      // `sha256sum -c` before extraction closes that gap.
+      it('pins a SHA-256 checksum for each architecture (x86_64 / arm64)', () => {
+        expect(content).toMatch(/ARG LAZYGIT_SHA256_X86_64=[0-9a-f]{64}\b/)
+        expect(content).toMatch(/ARG LAZYGIT_SHA256_ARM64=[0-9a-f]{64}\b/)
+      })
+
+      it('verifies the downloaded tarball against the pinned checksum with sha256sum -c before extracting it', () => {
+        const normalized = content.replace(/\\\r?\n\s*/g, ' ')
+        expect(normalized).toMatch(
+          /echo "\$\{?LAZYGIT_SHA256\}?\s+\/tmp\/lazygit\.tar\.gz" \| sha256sum -c -/,
+        )
+        // The checksum verification must run after the download and before
+        // extraction, not after the fact.
+        const downloadIdx = normalized.indexOf('lazygit.tar.gz')
+        const verifyIdx = normalized.indexOf('sha256sum -c -')
+        const extractIdx = normalized.indexOf('tar -xzf /tmp/lazygit.tar.gz')
+        expect(downloadIdx).toBeGreaterThan(-1)
+        expect(verifyIdx).toBeGreaterThan(downloadIdx)
+        expect(extractIdx).toBeGreaterThan(verifyIdx)
+      })
+    })
+
     describe('git pager disabled for the agent shell', () => {
       // git branch/log/diff/show default to piping through an interactive
       // pager (less) whenever stdout is a tty. This agent's shell is driven by
