@@ -13,6 +13,15 @@ vim.opt.hlsearch = true
 vim.opt.clipboard = "unnamed"
 vim.opt.number = true
 
+-- クリップボード連携: vim.g.clipboard をここで独自設定しないこと。
+-- Neovim は vim.g.clipboard が未設定のとき、$TMUX が設定され tmux 実行ファイルが
+-- 見つかれば組込みプロバイダ（runtime/autoload/provider/clipboard.vim の
+-- s:set_tmux()）を自動選択し、copy に `tmux load-buffer -w -`、paste に
+-- `tmux refresh-client -l && sleep 0.05 && tmux save-buffer -`（ホスト側の最新
+-- クリップボード内容をOSC 52で問い合わせてから読む）を設定済みで zero-config で
+-- 動作する。ここで vim.g.clipboard を独自定義すると、この組込みプロバイダを
+-- 上書きしてしまい、素朴な実装（refresh-client を挟まないpaste等）に後退する。
+
 -- コマンドライン補完: 最初のTabで最長共通部分まで補完しつつ候補メニュー表示、
 -- 以降のTabで候補を巡回する（set wildmenu / wildmode=longest:full,full 相当）
 vim.opt.wildmenu = true
