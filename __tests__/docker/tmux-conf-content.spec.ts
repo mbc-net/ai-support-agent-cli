@@ -40,6 +40,18 @@ describe('docker/tmux.conf content validation', () => {
     expect(content).toMatch(/window-status-current-format\s+'/)
     expect(content).toMatch(/window-status-format\s+'/)
   })
+
+  // 回帰テスト: status-right の #{?cond,...} 条件式内で #[fg=X\,bg=Y\,bold] の
+  // ようにバックスラッシュでカンマをエスケープする書き方は、Debianパッケージの
+  // tmux 3.3a（このDockerイメージが実際にインストールするバージョン）では
+  // 正しくパースできず、生の設定文字列がそのままステータスバーに表示される
+  // （実機のDockerイメージ上のtmux 3.3aで再現・検証済み。手元のtmux 3.6bでは
+  // 問題なく動くため気づきにくい）。#[...] のスタイル属性はスペース区切り
+  // （#[fg=X bg=Y bold]）にすれば同じtmux 3.3aで正しく描画されることを確認済み。
+  it('does NOT use backslash-escaped commas inside #[...] style tags (breaks tmux 3.3a parsing)', () => {
+    const brokenPattern = /#\[[^\]]*\\,/
+    expect(content).not.toMatch(brokenPattern)
+  })
 })
 
 describe('Dockerfile bundles the tmux status-bar config', () => {

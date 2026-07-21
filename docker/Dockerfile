@@ -202,10 +202,17 @@ RUN nvim --headless "+Lazy! sync" +qa \
     && nvim --headless -c "lua local installed={} for _,l in ipairs(require('nvim-treesitter.config').get_installed()) do installed[l]=true end if not (installed.markdown and installed.markdown_inline) then print('MISSING TREESITTER PARSERS') vim.cmd('cquit 1') end" -c "qa" \
     && chmod -R a+rwX $XDG_CONFIG_HOME $XDG_DATA_HOME $XDG_STATE_HOME $XDG_CACHE_HOME
 
+# nvim をデフォルトエディタにする（git commit 等が $EDITOR/$VISUAL を参照する）
+ENV EDITOR=nvim VISUAL=nvim
+
 # starship prompt (pinned version — the install script's --version pins
 # it to a verified release rather than tracking "latest" across rebuilds)
 RUN curl -sS https://starship.rs/install.sh | sh -s -- --yes --version v1.26.0 \
     && starship --version
+# 実行時UID（entrypoint.shが動的に割り当てる）に依存せず全セッションに
+# 同じプロンプト設定を適用するため、$HOME/.config/starship.toml ではなく
+# 固定パスをSTARSHIP_CONFIGで明示する（/etc/tmux.confと同じパターン）。
+ENV STARSHIP_CONFIG=/etc/starship.toml
 
 # eza (ls replacement with icons) — not packaged for Debian bookworm, so a
 # dual-arch GitHub release binary is downloaded instead (verified against a
@@ -384,5 +391,10 @@ RUN chmod +x /entrypoint.sh && chmod a+w /etc/passwd
 # runtime UID entrypoint.sh assigns) — see docker/tmux.conf for the status
 # bar styling.
 COPY docker/tmux.conf /etc/tmux.conf
+
+# System-wide starship config (STARSHIP_CONFIG above points here) — see
+# docker/starship.toml for why the container module's default "dimmed"
+# style is overridden.
+COPY docker/starship.toml /etc/starship.toml
 
 ENTRYPOINT ["/entrypoint.sh"]

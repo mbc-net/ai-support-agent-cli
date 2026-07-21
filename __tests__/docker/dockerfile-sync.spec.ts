@@ -86,6 +86,8 @@ const SRC_BASHRC_EXTRA = '/mock/docker/bashrc-extra.sh'
 const DEST_BASHRC_EXTRA = '/mock/config-dir/docker/bashrc-extra.sh'
 const SRC_NVIM_INIT = '/mock/docker/nvim/init.lua'
 const DEST_NVIM_INIT = '/mock/config-dir/docker/nvim/init.lua'
+const SRC_STARSHIP_TOML = '/mock/docker/starship.toml'
+const DEST_STARSHIP_TOML = '/mock/config-dir/docker/starship.toml'
 
 const BUNDLED_CONTENT = 'FROM node:24-slim\n# bundled v2'
 const OLD_BUNDLED_CONTENT = 'FROM node:24-slim\n# bundled v1'
@@ -100,6 +102,7 @@ const CUSTOM_ENTRYPOINT_CONTENT = '#!/bin/sh\n# my custom entrypoint'
 const TMUX_CONF_CONTENT = 'set -g status on'
 const BASHRC_EXTRA_CONTENT = 'alias ls="eza --icons"'
 const NVIM_INIT_CONTENT = 'vim.g.mapleader = " "'
+const STARSHIP_TOML_CONTENT = '[container]\nstyle = "bold red"'
 
 describe('dockerfile-sync', () => {
   describe('syncDockerfileToConfigDir', () => {
@@ -277,17 +280,23 @@ describe('dockerfile-sync', () => {
     // assets missing from the sync unit breaks `docker build` with a COPY
     // "file not found" for every existing user on their next build.
     // -------------------------------------------------------------------------
-    describe('additional bundled docker assets (tmux.conf, bashrc-extra.sh, nvim/init.lua)', () => {
-      it('syncs tmux.conf, bashrc-extra.sh, and nvim/init.lua alongside the Dockerfile when all are present in the bundle', () => {
+    describe('additional bundled docker assets (tmux.conf, bashrc-extra.sh, nvim/init.lua, starship.toml)', () => {
+      it('syncs tmux.conf, bashrc-extra.sh, nvim/init.lua, and starship.toml alongside the Dockerfile when all are present in the bundle', () => {
         mockedFs.existsSync.mockImplementation((p: unknown) => {
           const s = String(p)
-          return s === SRC_TMUX_CONF || s === SRC_BASHRC_EXTRA || s === SRC_NVIM_INIT
+          return (
+            s === SRC_TMUX_CONF ||
+            s === SRC_BASHRC_EXTRA ||
+            s === SRC_NVIM_INIT ||
+            s === SRC_STARSHIP_TOML
+          )
         })
         mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
           if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
           if (p === SRC_TMUX_CONF) return Buffer.from(TMUX_CONF_CONTENT)
           if (p === SRC_BASHRC_EXTRA) return Buffer.from(BASHRC_EXTRA_CONTENT)
           if (p === SRC_NVIM_INIT) return Buffer.from(NVIM_INIT_CONTENT)
+          if (p === SRC_STARSHIP_TOML) return Buffer.from(STARSHIP_TOML_CONTENT)
           throw new Error(`unexpected readFileSync: ${String(p)}`)
         })
 
@@ -296,6 +305,7 @@ describe('dockerfile-sync', () => {
         expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_TMUX_CONF, DEST_TMUX_CONF)
         expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_BASHRC_EXTRA, DEST_BASHRC_EXTRA)
         expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_NVIM_INIT, DEST_NVIM_INIT)
+        expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_STARSHIP_TOML, DEST_STARSHIP_TOML)
       })
 
       it('the combined hash covers only the legacy Dockerfile(+entrypoint.sh) pair, NOT the new assets (they are never customisation-protected)', () => {
@@ -307,13 +317,19 @@ describe('dockerfile-sync', () => {
         // those two files.
         mockedFs.existsSync.mockImplementation((p: unknown) => {
           const s = String(p)
-          return s === SRC_TMUX_CONF || s === SRC_BASHRC_EXTRA || s === SRC_NVIM_INIT
+          return (
+            s === SRC_TMUX_CONF ||
+            s === SRC_BASHRC_EXTRA ||
+            s === SRC_NVIM_INIT ||
+            s === SRC_STARSHIP_TOML
+          )
         })
         mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
           if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
           if (p === SRC_TMUX_CONF) return Buffer.from(TMUX_CONF_CONTENT)
           if (p === SRC_BASHRC_EXTRA) return Buffer.from(BASHRC_EXTRA_CONTENT)
           if (p === SRC_NVIM_INIT) return Buffer.from(NVIM_INIT_CONTENT)
+          if (p === SRC_STARSHIP_TOML) return Buffer.from(STARSHIP_TOML_CONTENT)
           throw new Error(`unexpected readFileSync: ${String(p)}`)
         })
 
