@@ -189,6 +189,8 @@
   "docker.dockerfileUpdated": "Bundled Dockerfile changed — updated config: {{path}}",
   "docker.dockerfileCustomized": "Skipped Dockerfile update (customised). To apply the latest bundled version manually: {{path}}",
   "docker.dockerfileSyncFailed": "Failed to write Dockerfile to config dir: {{message}}",
+  "docker.dockerAssetSynced": "Bundled config updated: {{path}}",
+  "docker.dockerAssetSyncFailed": "Failed to sync bundled config {{path}}: {{message}}",
   "docker.diffNoTarget": "No Dockerfile to diff. Specify a path or set dockerfilePath in config.",
   "docker.diffTargetNotFound": "Dockerfile not found: {{path}}",
   "docker.diffIdentical": "Dockerfile is identical to the bundled default.",

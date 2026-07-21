@@ -386,6 +386,87 @@ describe('dockerfile-sync', () => {
         expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_BASHRC_EXTRA, DEST_BASHRC_EXTRA)
         expect(mockedFs.copyFileSync).not.toHaveBeenCalledWith(SRC_NVIM_INIT, DEST_NVIM_INIT)
       })
+
+      // 回帰テスト: "copied whenever missing" は文字通り「宛先が無いときだけ」
+      // 実装されていた。tmux.conf のようにPR #621で一度でも同期された既存
+      // ユーザーの config-dir には既に destが存在するため、以後バンドル側の
+      // tmux.conf をどれだけ修正しても（例: PR #625のフッター崩れ修正）二度と
+      // 同期されず、修正が永久に届かない実害があった。
+      it('REGRESSION: an already-synced new asset whose content is stale (bundle changed) IS re-copied, not left untouched forever', () => {
+        const OLD_TMUX_CONF_CONTENT = 'set -g status on\n# old (buggy) status-right'
+        const NEW_TMUX_CONF_CONTENT = 'set -g status on\n# fixed status-right'
+        // Legacy pair (Dockerfile) is already fully in sync (hash file
+        // present, matching, bundle unchanged) so it takes the no-op branch —
+        // isolating this test to the new-asset staleness logic under test,
+        // rather than incidentally also exercising the legacy "no hash file"
+        // unconditional-overwrite branch.
+        mockedFs.existsSync.mockImplementation((p: unknown) => {
+          const s = String(p)
+          // Existing user: tmux.conf was already synced by a previous CLI
+          // version and still sits in the config dir with stale content.
+          return s === HASH_FILE || s === DEST_DOCKERFILE || s === SRC_TMUX_CONF || s === DEST_TMUX_CONF
+        })
+        mockedFs.readFileSync.mockImplementation((p: unknown): string | Buffer => {
+          if (p === HASH_FILE) return BUNDLED_HASH
+          if (p === DEST_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+          if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+          if (p === SRC_TMUX_CONF) return Buffer.from(NEW_TMUX_CONF_CONTENT)
+          if (p === DEST_TMUX_CONF) return Buffer.from(OLD_TMUX_CONF_CONTENT)
+          throw new Error(`unexpected readFileSync: ${String(p)}`)
+        })
+
+        syncDockerfileToConfigDir()
+
+        expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_TMUX_CONF, DEST_TMUX_CONF)
+        // Legacy pair must stay untouched — this test's own asset going
+        // stale should never make the Dockerfile look re-synced too.
+        expect(mockedFs.copyFileSync).not.toHaveBeenCalledWith(SRC_DOCKERFILE, DEST_DOCKERFILE)
+      })
+
+      it('does NOT re-copy a new asset whose config-dir content already matches the bundle (avoids needless writes)', () => {
+        mockedFs.existsSync.mockImplementation((p: unknown) => {
+          const s = String(p)
+          return s === HASH_FILE || s === DEST_DOCKERFILE || s === SRC_TMUX_CONF || s === DEST_TMUX_CONF
+        })
+        mockedFs.readFileSync.mockImplementation((p: unknown): string | Buffer => {
+          if (p === HASH_FILE) return BUNDLED_HASH
+          if (p === DEST_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+          if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+          if (p === SRC_TMUX_CONF) return Buffer.from(TMUX_CONF_CONTENT)
+          if (p === DEST_TMUX_CONF) return Buffer.from(TMUX_CONF_CONTENT)
+          throw new Error(`unexpected readFileSync: ${String(p)}`)
+        })
+
+        syncDockerfileToConfigDir()
+
+        expect(mockedFs.copyFileSync).not.toHaveBeenCalledWith(SRC_TMUX_CONF, DEST_TMUX_CONF)
+      })
+
+      it('a new asset staleness-check failure (e.g. unreadable dest) does NOT abort the independent legacy Dockerfile sync', () => {
+        // silent-failure-hunter finding: isOutOfDate() reads both src and
+        // dest, which — unlike the old fs.existsSync-only check — can throw.
+        // That must stay isolated to the failing asset and not take the
+        // unrelated (and more important) legacy pair sync down with it.
+        mockedFs.existsSync.mockImplementation((p: unknown) => {
+          const s = String(p)
+          return s === HASH_FILE || s === DEST_DOCKERFILE || s === SRC_TMUX_CONF || s === DEST_TMUX_CONF
+        })
+        mockedFs.readFileSync.mockImplementation((p: unknown): string | Buffer => {
+          if (p === HASH_FILE) return BUNDLED_HASH
+          if (p === DEST_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+          if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+          if (p === SRC_TMUX_CONF) return Buffer.from(TMUX_CONF_CONTENT)
+          if (p === DEST_TMUX_CONF) throw new Error('EACCES: permission denied')
+          throw new Error(`unexpected readFileSync: ${String(p)}`)
+        })
+
+        expect(() => syncDockerfileToConfigDir()).not.toThrow()
+
+        expect(mockedFs.copyFileSync).not.toHaveBeenCalledWith(SRC_TMUX_CONF, DEST_TMUX_CONF)
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('docker.dockerAssetSyncFailed'))
+        // Unrelated legacy pair must be unaffected by the new-asset failure.
+        expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('docker.dockerfileSyncFailed'))
+      })
     })
 
     // -------------------------------------------------------------------------

@@ -10,11 +10,17 @@
  *   - The legacy pair (Dockerfile + entrypoint.sh): hash-protected, so a
  *     user's customisation survives future syncs (see
  *     syncDockerfileToConfigDir()'s own doc comment for the state machine).
- *   - New assets (tmux.conf, bashrc-extra.sh, nvim/init.lua, ...): simply
- *     copied whenever missing, with no hash protection — they can't be
- *     "customised" the first time they ever reach a user's config dir, and
- *     folding them into the legacy hash breaks that hash's meaning (see
- *     NEW_OPTIONAL_ASSETS' doc comment).
+ *   - New assets (tmux.conf, bashrc-extra.sh, nvim/init.lua, ...): kept in
+ *     sync with the bundle on every run (copied whenever the config-dir
+ *     copy is missing OR its content differs from the bundled version), with
+ *     no customisation protection — they can't be "customised" the first
+ *     time they ever reach a user's config dir, and folding them into the
+ *     legacy hash breaks that hash's meaning (see NEW_OPTIONAL_ASSETS' doc
+ *     comment). Comparing content (not just existence) is required: a user
+ *     who already synced an older version of one of these files must still
+ *     receive later bundle updates on their next sync, or the fix in that
+ *     later bundle version never reaches them no matter how many times they
+ *     upgrade the CLI (see the REGRESSION test in dockerfile-sync.spec.ts).
  */
 
 import * as crypto from 'crypto'
@@ -68,8 +74,14 @@ export const OPTIONAL_DOCKER_ASSETS = [
  * as the Dockerfile would either spuriously warn forever or — worse —
  * silently overwrite a customised Dockerfile the moment any new asset here
  * is added (this happened: see dockerfile-sync.spec.ts's REGRESSION test).
- * They are simply copied whenever their dest doesn't exist yet, independent
- * of whether the Dockerfile/entrypoint.sh pair is customised.
+ * They are kept in sync with the bundle whenever their dest is missing OR
+ * its content differs from the bundled version (see isOutOfDate), no matter
+ * how many times the CLI has been upgraded since the dest was first synced —
+ * "copy only if the dest doesn't exist yet" left later bundle fixes to these
+ * files permanently unreachable for anyone who had already synced an older
+ * copy (this also happened: see the "already-synced ... IS re-copied"
+ * REGRESSION test). This is all independent of whether the
+ * Dockerfile/entrypoint.sh pair is customised.
  */
 const NEW_OPTIONAL_ASSETS = OPTIONAL_DOCKER_ASSETS.filter((p) => p !== LEGACY_OPTIONAL_ASSET)
 
@@ -93,6 +105,17 @@ function copyPairs(configDir: string, pairs: SyncPair[]): void {
     fs.mkdirSync(path.dirname(pair.dest), { recursive: true })
     fs.copyFileSync(pair.src, pair.dest)
   }
+}
+
+/**
+ * True when `pair.dest` is missing or its content differs from `pair.src`.
+ * Used for the no-customisation-protection asset group: these are meant to
+ * always mirror the bundle, so a stale (but present) config-dir copy from an
+ * older CLI version must still be treated as needing a re-copy.
+ */
+function isOutOfDate(pair: SyncPair): boolean {
+  if (!fs.existsSync(pair.dest)) return true
+  return !fs.readFileSync(pair.src).equals(fs.readFileSync(pair.dest))
 }
 
 /**
@@ -125,18 +148,27 @@ export function syncDockerfileToConfigDir(): void {
       legacyPairs.push({ src: srcEntrypoint, dest: path.join(configDir, LEGACY_OPTIONAL_ASSET) })
     }
 
-    // New assets: copied whenever missing, independent of the legacy hash
-    // state (see NEW_OPTIONAL_ASSETS' doc comment for why).
-    const newPairs: SyncPair[] = []
+    // New assets: kept in sync with the bundle whenever missing OR stale,
+    // independent of the legacy hash state (see NEW_OPTIONAL_ASSETS' doc
+    // comment for why). Each asset's staleness check now reads both its
+    // bundled and config-dir content (isOutOfDate), which — unlike the old
+    // fs.existsSync-only check — can throw (unreadable dest, permissions,
+    // a symlink race, ...). That must not take down the legacy
+    // Dockerfile+entrypoint.sh sync below, which is unrelated and more
+    // important, so each asset is isolated in its own try/catch rather than
+    // letting one bad file abort the whole function via the outer catch.
     for (const relPath of NEW_OPTIONAL_ASSETS) {
       const src = path.join(contextDir, relPath)
-      if (fs.existsSync(src)) {
-        newPairs.push({ src, dest: path.join(configDir, relPath) })
+      if (!fs.existsSync(src)) continue
+      const pair: SyncPair = { src, dest: path.join(configDir, relPath) }
+      try {
+        if (isOutOfDate(pair)) {
+          copyPairs(configDir, [pair])
+          logger.info(t('docker.dockerAssetSynced', { path: pair.dest }))
+        }
+      } catch (err: unknown) {
+        logger.warn(t('docker.dockerAssetSyncFailed', { path: pair.dest, message: getErrorMessage(err) }))
       }
-    }
-    const missingNewPairs = newPairs.filter((pair) => !fs.existsSync(pair.dest))
-    if (missingNewPairs.length > 0) {
-      copyPairs(configDir, missingNewPairs)
     }
 
     const legacyDestMissing = legacyPairs.some((pair) => !fs.existsSync(pair.dest))
