@@ -141,9 +141,9 @@ describe('Dockerfile content validation', () => {
           .trim()
       })
 
-      it('retries the main OS packages, MSSQL tools, and gh/glab final apt-get update (3 attempts, 5s/15s backoff)', () => {
+      it('retries the main OS packages, neovim build deps, libclang-dev, MSSQL tools, and gh/glab final apt-get update (3 attempts, 5s/15s backoff)', () => {
         const occurrences = normalized.split(BARE_RETRY_CHAIN).length - 1
-        expect(occurrences).toBe(3)
+        expect(occurrences).toBe(5)
       })
 
       it('retries the GitHub/GitLab CLI keyring-refresh apt-get update while preserving the tolerant `|| true` fallback', () => {
@@ -151,9 +151,10 @@ describe('Dockerfile content validation', () => {
       })
 
       it('does not leave any apt-get update call without a retry chain', () => {
-        // 4 locations x 3 attempts (1 initial + 2 retries) = 12, plus one extra
+        // 6 locations (5 bare-retry + 1 keyring-refresh) x 3 attempts (1
+        // initial + 2 retries) = 18, plus one extra
         // `--allow-insecure-repositories` fallback attempt on the pre-gh update
-        // (see the "degraded apt signature" describe below) = 13.
+        // (see the "degraded apt signature" describe below) = 19.
         // Strip comment lines first: the Dockerfile mentions "apt-get update"
         // in comments ("reduce apt-get update calls", "before apt-get update").
         const codeOnly = content
@@ -161,7 +162,7 @@ describe('Dockerfile content validation', () => {
           .filter((line) => !line.trim().startsWith('#'))
           .join('\n')
         const totalUpdateCalls = (codeOnly.match(/apt-get update\b/g) || []).length
-        expect(totalUpdateCalls).toBe(13)
+        expect(totalUpdateCalls).toBe(19)
       })
     })
 
@@ -228,6 +229,19 @@ describe('Dockerfile content validation', () => {
       it('smoke-checks gh and glab at build time so a broken/missing binary fails the build loudly', () => {
         expect(normalized).toMatch(/&& gh --version\b/)
         expect(normalized).toMatch(/&& glab --version\b/)
+      })
+    })
+
+    describe('git pager disabled for the agent shell', () => {
+      // git branch/log/diff/show default to piping through an interactive
+      // pager (less) whenever stdout is a tty. This agent's shell is driven by
+      // an AI agent (or an automated flow) over a PTY with no human at the
+      // keyboard to press "q" — an interactive pager left enabled means any
+      // such command can hang forever waiting for input that never comes.
+      // core.pager=cat makes these commands print directly, like `cat`, with
+      // no pager and no risk of blocking the session.
+      it('sets git core.pager to cat system-wide', () => {
+        expect(content).toMatch(/git config --system core\.pager cat\b/)
       })
     })
   })
