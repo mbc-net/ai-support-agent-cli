@@ -154,9 +154,21 @@ RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get updat
     ninja-build gettext cmake pkg-config \
     && rm -rf /var/lib/apt/lists/*
 ARG NVIM_VERSION=v0.12.4
+# The real binary is renamed to nvim-bin and /opt/nvim/bin/nvim becomes a
+# thin wrapper that exports the XDG_* vars (see the config block below) only
+# for nvim's own process tree, then execs the real binary. This keeps
+# /opt/nvim/bin/nvim as the stable path referenced by the symlink below and
+# by update-alternatives further down — only what that path points AT
+# changes (binary -> wrapper) — while confining the nvim-specific XDG
+# redirection to nvim itself instead of leaking it to every process in the
+# container via a Dockerfile-level ENV (see the config block below for why
+# that matters).
 RUN git clone --depth 1 --branch "${NVIM_VERSION}" https://github.com/neovim/neovim /tmp/neovim-src \
     && cd /tmp/neovim-src \
     && make CMAKE_BUILD_TYPE=Release CMAKE_INSTALL_PREFIX=/opt/nvim install \
+    && mv /opt/nvim/bin/nvim /opt/nvim/bin/nvim-bin \
+    && printf '#!/bin/sh\nexport XDG_CONFIG_HOME=/opt/nvim-config\nexport XDG_DATA_HOME=/opt/nvim-data\nexport XDG_STATE_HOME=/opt/nvim-state\nexport XDG_CACHE_HOME=/opt/nvim-cache\nexec /opt/nvim/bin/nvim-bin "$@"\n' > /opt/nvim/bin/nvim \
+    && chmod +x /opt/nvim/bin/nvim \
     && ln -s /opt/nvim/bin/nvim /usr/local/bin/nvim \
     && rm -rf /tmp/neovim-src \
     && nvim --version
@@ -186,24 +198,38 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --pr
     && tree-sitter --version
 
 # Neovim config + plugin set, pre-installed at build time so the agent shell
-# doesn't need network access on first use. XDG dirs point at /opt rather than
-# $HOME: $HOME differs depending on whether the container runs as root (build
-# time) or an arbitrary UID (entrypoint.sh's dynamic passwd-entry handling for
-# --user), the same reasoning as /opt/playwright-browsers below.
-ENV XDG_CONFIG_HOME=/opt/nvim-config
-ENV XDG_DATA_HOME=/opt/nvim-data
-ENV XDG_STATE_HOME=/opt/nvim-state
-ENV XDG_CACHE_HOME=/opt/nvim-cache
-RUN mkdir -p $XDG_CONFIG_HOME/nvim
-COPY docker/nvim/init.lua $XDG_CONFIG_HOME/nvim/init.lua
+# doesn't need network access on first use. These paths are baked into the
+# nvim wrapper script above (not a Dockerfile-level ENV) so they apply only
+# when nvim itself runs — not to every process in the container (a
+# Dockerfile-level ENV here would also redirect unrelated XDG-compliant CLIs
+# like `gh` to these nvim-specific, world-writable directories; see
+# security review finding for src/security.ts SAFE_ENV_KEYS).
+# XDG dirs point at /opt rather than $HOME: $HOME differs depending on
+# whether the container runs as root (build time) or an arbitrary UID
+# (entrypoint.sh's dynamic passwd-entry handling for --user), the same
+# reasoning as /opt/playwright-browsers below.
+RUN mkdir -p /opt/nvim-config/nvim
+COPY docker/nvim/init.lua /opt/nvim-config/nvim/init.lua
 RUN nvim --headless "+Lazy! sync" +qa \
     && nvim --headless -c "lua local missing={} for _,p in pairs(require('lazy').plugins()) do if not p._.installed then table.insert(missing,p.name) end end if #missing>0 then print('MISSING PLUGINS: '..table.concat(missing,', ')) vim.cmd('cquit 1') end" -c "qa" \
     && nvim --headless -c "lua require('nvim-treesitter').install({'markdown','markdown_inline'}):wait(300000)" -c "qa" \
     && nvim --headless -c "lua local installed={} for _,l in ipairs(require('nvim-treesitter.config').get_installed()) do installed[l]=true end if not (installed.markdown and installed.markdown_inline) then print('MISSING TREESITTER PARSERS') vim.cmd('cquit 1') end" -c "qa" \
-    && chmod -R a+rwX $XDG_CONFIG_HOME $XDG_DATA_HOME $XDG_STATE_HOME $XDG_CACHE_HOME
+    && chmod -R a+rwX /opt/nvim-config /opt/nvim-data /opt/nvim-state /opt/nvim-cache
 
 # nvim をデフォルトエディタにする（git commit 等が $EDITOR/$VISUAL を参照する）
 ENV EDITOR=nvim VISUAL=nvim
+
+# vi/vim コマンド自体もnvimを指すようにする（apt版vim.basicの優先度30より
+# 高い60を指定し、update-alternativesでnvimを優先させる。実機検証済み）
+# --install は候補として登録できたことしか保証しないため、実際に
+# /usr/bin/vi・/usr/bin/vim がnvimへ解決され、かつ実行できることまで
+# ビルド時に検証する（readlink -fでのパス一致 + --versionのNVIMバナー確認）。
+RUN update-alternatives --install /usr/bin/vi vi /opt/nvim/bin/nvim 60 \
+    && update-alternatives --install /usr/bin/vim vim /opt/nvim/bin/nvim 60 \
+    && [ "$(readlink -f /usr/bin/vi)" = "/opt/nvim/bin/nvim" ] \
+    && [ "$(readlink -f /usr/bin/vim)" = "/opt/nvim/bin/nvim" ] \
+    && vi --version | grep -q NVIM \
+    && vim --version | grep -q NVIM
 
 # starship prompt (pinned version — the install script's --version pins
 # it to a verified release rather than tracking "latest" across rebuilds)
@@ -228,6 +254,32 @@ RUN ARCH=$(dpkg --print-architecture) \
     && mv /tmp/eza-extract/eza /usr/local/bin/eza \
     && rm -rf /tmp/eza.tar.gz /tmp/eza-extract \
     && eza --version
+
+# lazygit (TUI git client, shelled out to by the lazygit.nvim plugin in
+# docker/nvim/init.lua) — not packaged for Debian bookworm, so a dual-arch
+# GitHub release binary is downloaded, following the same pattern as eza above.
+#
+# Code review (second opinion) flagged that the download had no integrity
+# check: if the GitHub release asset or the delivery path were ever tampered
+# with, the resulting binary would be installed and executed as-is — the
+# trailing `lazygit --version` smoke check happily "passes" for a malicious
+# binary too, since it only proves *a* binary ran, not that it's the genuine
+# release. The SHA-256 values below were taken from lazygit's own
+# `checksums.txt` release asset and cross-verified by independently
+# downloading each tarball and hashing it locally before pinning.
+ARG LAZYGIT_VERSION=0.63.1
+ARG LAZYGIT_SHA256_X86_64=8e033bc78c8e192dee9510e951f6c9e154289b7198d22c924ed1d0a951b0dac1
+ARG LAZYGIT_SHA256_ARM64=555dbc9a8efcf2e33bc24e7fbd9463e9fa375e3c5e23cc270763733c38eeae36
+RUN ARCH=$(dpkg --print-architecture) \
+    && if [ "$ARCH" = "arm64" ]; then LAZYGIT_ARCH="arm64"; LAZYGIT_SHA256="$LAZYGIT_SHA256_ARM64"; else LAZYGIT_ARCH="x86_64"; LAZYGIT_SHA256="$LAZYGIT_SHA256_X86_64"; fi \
+    && curl -fSL "https://github.com/jesseduffield/lazygit/releases/download/v${LAZYGIT_VERSION}/lazygit_${LAZYGIT_VERSION}_linux_${LAZYGIT_ARCH}.tar.gz" \
+        -o /tmp/lazygit.tar.gz \
+    && echo "${LAZYGIT_SHA256}  /tmp/lazygit.tar.gz" | sha256sum -c - \
+    && mkdir -p /tmp/lazygit-extract \
+    && tar -xzf /tmp/lazygit.tar.gz -C /tmp/lazygit-extract \
+    && mv /tmp/lazygit-extract/lazygit /usr/local/bin/lazygit \
+    && rm -rf /tmp/lazygit.tar.gz /tmp/lazygit-extract \
+    && lazygit --version
 
 # Apply starship/eza/bat to every interactive bash session. Debian's bash
 # sources /etc/bash.bashrc even when invoked with --rcfile (verified against
