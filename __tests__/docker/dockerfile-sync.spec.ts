@@ -80,6 +80,12 @@ const DEST_DOCKERFILE = '/mock/config-dir/Dockerfile'
 const SRC_DOCKERFILE = '/mock/docker/Dockerfile'
 const SRC_ENTRYPOINT = '/mock/docker/entrypoint.sh'
 const DEST_ENTRYPOINT = '/mock/config-dir/docker/entrypoint.sh'
+const SRC_TMUX_CONF = '/mock/docker/tmux.conf'
+const DEST_TMUX_CONF = '/mock/config-dir/docker/tmux.conf'
+const SRC_BASHRC_EXTRA = '/mock/docker/bashrc-extra.sh'
+const DEST_BASHRC_EXTRA = '/mock/config-dir/docker/bashrc-extra.sh'
+const SRC_NVIM_INIT = '/mock/docker/nvim/init.lua'
+const DEST_NVIM_INIT = '/mock/config-dir/docker/nvim/init.lua'
 
 const BUNDLED_CONTENT = 'FROM node:24-slim\n# bundled v2'
 const OLD_BUNDLED_CONTENT = 'FROM node:24-slim\n# bundled v1'
@@ -90,6 +96,10 @@ const CUSTOM_CONTENT = 'FROM node:24-slim\n# my custom stuff'
 const ENTRYPOINT_CONTENT = '#!/bin/sh\n# entrypoint v2'
 const OLD_ENTRYPOINT_CONTENT = '#!/bin/sh\n# entrypoint v1'
 const CUSTOM_ENTRYPOINT_CONTENT = '#!/bin/sh\n# my custom entrypoint'
+
+const TMUX_CONF_CONTENT = 'set -g status on'
+const BASHRC_EXTRA_CONTENT = 'alias ls="eza --icons"'
+const NVIM_INIT_CONTENT = 'vim.g.mapleader = " "'
 
 describe('dockerfile-sync', () => {
   describe('syncDockerfileToConfigDir', () => {
@@ -256,6 +266,109 @@ describe('dockerfile-sync', () => {
         )
         expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.dockerfileSynced'))
         expect(logger.warn).not.toHaveBeenCalled()
+      })
+    })
+
+    // -------------------------------------------------------------------------
+    // Additional bundled docker assets (tmux.conf, bashrc-extra.sh,
+    // nvim/init.lua). The Dockerfile COPYs each of these from the build
+    // context, and resolveDockerfile() switches the build context to the
+    // config dir once a synced Dockerfile exists there — so any of these
+    // assets missing from the sync unit breaks `docker build` with a COPY
+    // "file not found" for every existing user on their next build.
+    // -------------------------------------------------------------------------
+    describe('additional bundled docker assets (tmux.conf, bashrc-extra.sh, nvim/init.lua)', () => {
+      it('syncs tmux.conf, bashrc-extra.sh, and nvim/init.lua alongside the Dockerfile when all are present in the bundle', () => {
+        mockedFs.existsSync.mockImplementation((p: unknown) => {
+          const s = String(p)
+          return s === SRC_TMUX_CONF || s === SRC_BASHRC_EXTRA || s === SRC_NVIM_INIT
+        })
+        mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+          if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+          if (p === SRC_TMUX_CONF) return Buffer.from(TMUX_CONF_CONTENT)
+          if (p === SRC_BASHRC_EXTRA) return Buffer.from(BASHRC_EXTRA_CONTENT)
+          if (p === SRC_NVIM_INIT) return Buffer.from(NVIM_INIT_CONTENT)
+          throw new Error(`unexpected readFileSync: ${String(p)}`)
+        })
+
+        syncDockerfileToConfigDir()
+
+        expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_TMUX_CONF, DEST_TMUX_CONF)
+        expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_BASHRC_EXTRA, DEST_BASHRC_EXTRA)
+        expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_NVIM_INIT, DEST_NVIM_INIT)
+      })
+
+      it('the combined hash covers only the legacy Dockerfile(+entrypoint.sh) pair, NOT the new assets (they are never customisation-protected)', () => {
+        // New assets are copied unconditionally whenever their dest is
+        // missing (see the regression test below for why): they must stay
+        // out of the hash so the hash keeps meaning exactly what it always
+        // meant — "has the user customised Dockerfile/entrypoint.sh" — and
+        // doesn't spuriously flip to "customised" for reasons unrelated to
+        // those two files.
+        mockedFs.existsSync.mockImplementation((p: unknown) => {
+          const s = String(p)
+          return s === SRC_TMUX_CONF || s === SRC_BASHRC_EXTRA || s === SRC_NVIM_INIT
+        })
+        mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+          if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+          if (p === SRC_TMUX_CONF) return Buffer.from(TMUX_CONF_CONTENT)
+          if (p === SRC_BASHRC_EXTRA) return Buffer.from(BASHRC_EXTRA_CONTENT)
+          if (p === SRC_NVIM_INIT) return Buffer.from(NVIM_INIT_CONTENT)
+          throw new Error(`unexpected readFileSync: ${String(p)}`)
+        })
+
+        syncDockerfileToConfigDir()
+
+        expect(mockedFs.writeFileSync).toHaveBeenCalledWith(HASH_FILE, BUNDLED_HASH, 'utf-8')
+      })
+
+      it('REGRESSION: a customised Dockerfile is NOT overwritten just because a brand-new asset (never synced before) needs to be added', () => {
+        // Bug this guards against: computing `destMissing` over the full
+        // pair set (Dockerfile + entrypoint.sh + every new asset) means a
+        // brand-new asset's dest — which can never exist yet for an
+        // existing user — always makes `destMissing` true, which used to
+        // route into the "no hash file or dest missing → overwrite
+        // unconditionally" branch. That silently clobbered a customised
+        // Dockerfile the moment ANY new optional asset was added to
+        // OPTIONAL_DOCKER_ASSETS, bypassing the hash-comparison entirely.
+        mockedFs.existsSync.mockImplementation((p: unknown) => {
+          const s = String(p)
+          // Existing user: hash file + customised Dockerfile already present.
+          // tmux.conf is a brand-new asset this user has never had.
+          return s === HASH_FILE || s === DEST_DOCKERFILE || s === SRC_TMUX_CONF
+        })
+        mockedFs.readFileSync.mockImplementation((p: unknown): Buffer | string => {
+          if (p === HASH_FILE) return OLD_BUNDLED_HASH
+          if (p === DEST_DOCKERFILE) return Buffer.from(CUSTOM_CONTENT)
+          if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+          if (p === SRC_TMUX_CONF) return Buffer.from(TMUX_CONF_CONTENT)
+          throw new Error(`unexpected readFileSync: ${String(p)}`)
+        })
+
+        syncDockerfileToConfigDir()
+
+        expect(mockedFs.copyFileSync).not.toHaveBeenCalledWith(SRC_DOCKERFILE, DEST_DOCKERFILE)
+        expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_TMUX_CONF, DEST_TMUX_CONF)
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('docker.dockerfileCustomized'))
+      })
+
+      it('a missing optional asset (e.g. nvim/init.lua not yet bundled) does not block syncing the rest', () => {
+        mockedFs.existsSync.mockImplementation((p: unknown) => {
+          const s = String(p)
+          return s === SRC_TMUX_CONF || s === SRC_BASHRC_EXTRA
+        })
+        mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+          if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+          if (p === SRC_TMUX_CONF) return Buffer.from(TMUX_CONF_CONTENT)
+          if (p === SRC_BASHRC_EXTRA) return Buffer.from(BASHRC_EXTRA_CONTENT)
+          throw new Error(`unexpected readFileSync: ${String(p)}`)
+        })
+
+        expect(() => syncDockerfileToConfigDir()).not.toThrow()
+
+        expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_TMUX_CONF, DEST_TMUX_CONF)
+        expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_BASHRC_EXTRA, DEST_BASHRC_EXTRA)
+        expect(mockedFs.copyFileSync).not.toHaveBeenCalledWith(SRC_NVIM_INIT, DEST_NVIM_INIT)
       })
     })
 

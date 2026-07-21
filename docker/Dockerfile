@@ -24,6 +24,11 @@ RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get updat
     iputils-ping net-tools dnsutils whois traceroute netcat-openbsd iproute2 \
     # Terminal multiplexer (auto-attached for each agent console session)
     tmux \
+    # fzf-lua (nvim plugin) shells out to this for fuzzy file/grep/buffer search
+    fzf \
+    # cat replacement with syntax highlighting (Debian ships the binary as
+    # /usr/bin/batcat, not /usr/bin/bat, due to a package name clash)
+    bat \
     # Python 3 + pip (for document processing tools and node-gyp)
     python3 python3-pip python3-venv \
     # Pandoc (universal document converter: docx/pdf/html/markdown/etc.)
@@ -39,6 +44,14 @@ RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get updat
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+
+# git branch/log/diff/show default to piping through an interactive pager
+# (less) whenever stdout is a tty. This shell is driven by an AI agent over a
+# PTY with no human at the keyboard to press "q" — an interactive pager left
+# enabled means any such command can hang forever waiting for input that
+# never comes. core.pager=cat makes these commands print directly, with no
+# pager and no risk of blocking the session.
+RUN git config --system core.pager cat
 
 # =============================================================================
 # Layer 2: Python tools (stable — version-pinned)
@@ -117,6 +130,105 @@ RUN curl -fSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o
         -o /tmp/session-manager-plugin.deb \
     && dpkg -i /tmp/session-manager-plugin.deb \
     && rm /tmp/session-manager-plugin.deb
+
+# Neovim, built from source (pinned tag) — Debian bookworm's apt "neovim"
+# package is 0.7.x, too old for the nvim-treesitter main-branch API
+# (require("nvim-treesitter").install() / vim.treesitter.start()) used by
+# docker/nvim/init.lua. A prebuilt release tarball was tried first and
+# rejected: neovim's official arm64 release tarballs (v0.10.4+, the first to
+# ship a separate arm64 asset) are linked against GLIBC >= 2.38, but this
+# image's Debian bookworm base ships GLIBC 2.36 — the binary fails at
+# container runtime with "version `GLIBC_2.38' not found" on arm64 hosts
+# (verified against a real build; this affects local agent CLI runs on Apple
+# Silicon Docker Desktop, not just ECS). Building from source links against
+# whatever glibc this build stage actually has, so one Dockerfile path works
+# on both amd64 and arm64 with no version-specific compatibility trap.
+#
+# Pinned to v0.12.4, not v0.10.4: verified against a real build that
+# nvim-treesitter's main branch (pinned by commit below) calls
+# vim.list.unique(), added in Neovim v0.12.0 ("feat(lua): add
+# vim.list.unique()") — on v0.10.4 the parser install step fails with
+# "attempt to index field 'list' (a nil value)".
+RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
+    && apt-get install -y --no-install-recommends \
+    ninja-build gettext cmake pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+ARG NVIM_VERSION=v0.12.4
+RUN git clone --depth 1 --branch "${NVIM_VERSION}" https://github.com/neovim/neovim /tmp/neovim-src \
+    && cd /tmp/neovim-src \
+    && make CMAKE_BUILD_TYPE=Release CMAKE_INSTALL_PREFIX=/opt/nvim install \
+    && ln -s /opt/nvim/bin/nvim /usr/local/bin/nvim \
+    && rm -rf /tmp/neovim-src \
+    && nvim --version
+
+# tree-sitter CLI — nvim-treesitter's parser install shells out to this to
+# compile grammars (verified against a real build: without it, parser
+# install fails with "Error during \"tree-sitter build\": ENOENT ...
+# 'tree-sitter'"). Built from source via cargo: both the tree-sitter-cli npm
+# package and tree-sitter/tree-sitter's own GitHub release arm64 binary are
+# linked against GLIBC >= 2.39 (verified against a real build) — the same
+# class of trap as neovim's prebuilt arm64 tarball above. rustc/cargo from
+# apt (bookworm ships 1.63) are old enough that tree-sitter-cli may fail to
+# build (MSRV), so rustup installs a toolchain first, mirroring this
+# Dockerfile's other official-install-script tools (starship, code-server
+# below). Both the toolchain and the crate are pinned to exact versions
+# verified against a real build — not "stable"/unpinned "latest" — since the
+# nvim-treesitter commit above was pinned specifically for compatibility
+# with THIS build; an unpinned toolchain/crate bump could silently break that
+# compatibility on the next image rebuild with no source change here.
+RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
+    && apt-get install -y --no-install-recommends libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1 \
+    && . "$HOME/.cargo/env" \
+    && cargo install tree-sitter-cli --version 0.26.11 --locked --root /usr/local \
+    && rm -rf "$HOME/.rustup" "$HOME/.cargo" \
+    && tree-sitter --version
+
+# Neovim config + plugin set, pre-installed at build time so the agent shell
+# doesn't need network access on first use. XDG dirs point at /opt rather than
+# $HOME: $HOME differs depending on whether the container runs as root (build
+# time) or an arbitrary UID (entrypoint.sh's dynamic passwd-entry handling for
+# --user), the same reasoning as /opt/playwright-browsers below.
+ENV XDG_CONFIG_HOME=/opt/nvim-config
+ENV XDG_DATA_HOME=/opt/nvim-data
+ENV XDG_STATE_HOME=/opt/nvim-state
+ENV XDG_CACHE_HOME=/opt/nvim-cache
+RUN mkdir -p $XDG_CONFIG_HOME/nvim
+COPY docker/nvim/init.lua $XDG_CONFIG_HOME/nvim/init.lua
+RUN nvim --headless "+Lazy! sync" +qa \
+    && nvim --headless -c "lua local missing={} for _,p in pairs(require('lazy').plugins()) do if not p._.installed then table.insert(missing,p.name) end end if #missing>0 then print('MISSING PLUGINS: '..table.concat(missing,', ')) vim.cmd('cquit 1') end" -c "qa" \
+    && nvim --headless -c "lua require('nvim-treesitter').install({'markdown','markdown_inline'}):wait(300000)" -c "qa" \
+    && nvim --headless -c "lua local installed={} for _,l in ipairs(require('nvim-treesitter.config').get_installed()) do installed[l]=true end if not (installed.markdown and installed.markdown_inline) then print('MISSING TREESITTER PARSERS') vim.cmd('cquit 1') end" -c "qa" \
+    && chmod -R a+rwX $XDG_CONFIG_HOME $XDG_DATA_HOME $XDG_STATE_HOME $XDG_CACHE_HOME
+
+# starship prompt (pinned version — the install script's --version pins
+# it to a verified release rather than tracking "latest" across rebuilds)
+RUN curl -sS https://starship.rs/install.sh | sh -s -- --yes --version v1.26.0 \
+    && starship --version
+
+# eza (ls replacement with icons) — not packaged for Debian bookworm, so a
+# dual-arch GitHub release binary is downloaded instead (verified against a
+# real build: unlike neovim's arm64 tarball, eza's aarch64-unknown-linux-gnu
+# release does NOT require a newer glibc than this image's bookworm base).
+ARG EZA_VERSION=v0.23.5
+RUN ARCH=$(dpkg --print-architecture) \
+    && if [ "$ARCH" = "arm64" ]; then EZA_ARCH="aarch64"; else EZA_ARCH="x86_64"; fi \
+    && curl -fSL "https://github.com/eza-community/eza/releases/download/${EZA_VERSION}/eza_${EZA_ARCH}-unknown-linux-gnu.tar.gz" \
+        -o /tmp/eza.tar.gz \
+    && mkdir -p /tmp/eza-extract \
+    && tar -xzf /tmp/eza.tar.gz -C /tmp/eza-extract \
+    && mv /tmp/eza-extract/eza /usr/local/bin/eza \
+    && rm -rf /tmp/eza.tar.gz /tmp/eza-extract \
+    && eza --version
+
+# Apply starship/eza/bat to every interactive bash session. Debian's bash
+# sources /etc/bash.bashrc even when invoked with --rcfile (verified against
+# a real container) — unlike /etc/profile.d/*.sh, which only runs for LOGIN
+# shells and would never fire for the agent's real terminal session (bash
+# --rcfile <tmp>/.bashrc, see terminal-session.ts).
+COPY docker/bashrc-extra.sh /tmp/bashrc-extra.sh
+RUN cat /tmp/bashrc-extra.sh >> /etc/bash.bashrc && rm /tmp/bashrc-extra.sh
 
 # MSSQL tools (amd64 only — kept separate due to conditional apt-get)
 RUN ARCH=$(dpkg --print-architecture) && \
@@ -267,5 +379,10 @@ RUN chmod 777 /workspace
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && chmod a+w /etc/passwd
+
+# System-wide tmux config (applies to every session regardless of the
+# runtime UID entrypoint.sh assigns) — see docker/tmux.conf for the status
+# bar styling.
+COPY docker/tmux.conf /etc/tmux.conf
 
 ENTRYPOINT ["/entrypoint.sh"]
