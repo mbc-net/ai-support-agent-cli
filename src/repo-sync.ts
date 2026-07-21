@@ -4,7 +4,13 @@ import * as path from 'path'
 import { promisify } from 'util'
 
 import type { ApiClient } from './api-client'
-import { GIT_CHECKOUT_TIMEOUT, GIT_CLONE_TIMEOUT, GIT_FETCH_TIMEOUT, SSH_NO_HOST_CHECK_FLAGS } from './constants'
+import {
+  GIT_CHECKOUT_TIMEOUT,
+  GIT_CLONE_TIMEOUT,
+  GIT_CONFIG_TIMEOUT,
+  GIT_FETCH_TIMEOUT,
+  SSH_NO_HOST_CHECK_FLAGS,
+} from './constants'
 import { extractHostFromUrl } from './git-credential-setup'
 import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
@@ -38,6 +44,49 @@ export async function runGit(
     ...(options.cwd ? { cwd: options.cwd } : {}),
     env: { ...process.env, ...options.env },
     timeout: options.timeout,
+  })
+}
+
+/**
+ * Whether `repoDir` is already registered in the current $HOME's global
+ * safe.directory list. `git config --global --add` never deduplicates, so
+ * callers must check first — otherwise a long-running session that syncs
+ * the same repository repeatedly (pullRepository on every sync, or the
+ * `sync_repository` MCP tool) grows ~/.gitconfig by one line per call
+ * forever. Any failure to read the list (no entries yet — exit 1 — or a
+ * genuine error) is treated as "not registered" so the caller falls through
+ * to registering it; worst case is one redundant --add, not a skipped one.
+ */
+async function isSafeDirectoryRegistered(repoDir: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('git', ['config', '--global', '--get-all', 'safe.directory'], {
+      env: { ...process.env },
+      timeout: GIT_CONFIG_TIMEOUT,
+    })
+    return stdout.split('\n').map((line) => line.trim()).includes(repoDir)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Trust `repoDir` for git commands under the current UID.
+ *
+ * git 2.35.2+ refuses to run inside a repository owned by a different UID
+ * ("detected dubious ownership") unless explicitly trusted via
+ * safe.directory. docker/entrypoint.sh registers whatever repos already
+ * exist under the workspace at container start, but repos synced here
+ * (server-setup git-sync, e2e test repositories, project repositories
+ * linked via the web UI) can be cloned mid-session, after that scan already
+ * ran — so clone/pull must register their own repoDir before running any
+ * other git command against it. Always an exact path (never the '*'
+ * wildcard), so trust stays scoped to this specific repository.
+ */
+async function registerSafeDirectory(repoDir: string): Promise<void> {
+  if (await isSafeDirectoryRegistered(repoDir)) return
+  await runGit(['config', '--global', '--add', 'safe.directory', repoDir], {
+    env: {},
+    timeout: GIT_CONFIG_TIMEOUT,
   })
 }
 
@@ -140,6 +189,7 @@ async function cloneRepository(
   authSecret: string,
 ): Promise<void> {
   await fs.promises.mkdir(path.dirname(repoDir), { recursive: true })
+  await registerSafeDirectory(repoDir)
 
   const { env, cleanup } = buildAuthEnv(authMethod, authSecret, tenantCode, repositoryUrl)
 
@@ -170,6 +220,8 @@ async function pullRepository(
   authMethod: string,
   authSecret: string,
 ): Promise<void> {
+  await registerSafeDirectory(repoDir)
+
   const { env, cleanup } = buildAuthEnv(authMethod, authSecret, tenantCode, repositoryUrl)
 
   try {

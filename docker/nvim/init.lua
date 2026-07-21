@@ -13,6 +13,11 @@ vim.opt.hlsearch = true
 vim.opt.clipboard = "unnamed"
 vim.opt.number = true
 
+-- コマンドライン補完: 最初のTabで最長共通部分まで補完しつつ候補メニュー表示、
+-- 以降のTabで候補を巡回する（set wildmenu / wildmode=longest:full,full 相当）
+vim.opt.wildmenu = true
+vim.opt.wildmode = "longest:full,full"
+
 -- 見やすさのため既定の配色から変更（追加プラグイン不要の同梱テーマ）
 vim.cmd.colorscheme("habamax")
 
@@ -130,5 +135,35 @@ require("lazy").setup({
       code = { sign = false, width = "block", right_pad = 1 },
       checkbox = { enabled = true },
     },
+  },
+  -- CSV/TSV を列整形して表示（非破壊・区切り自動判定）。値の編集はこれが土台。
+  {
+    "hat0uma/csvview.nvim",
+    ft = { "csv", "tsv" },
+    cmd = { "CsvViewEnable", "CsvViewDisable", "CsvViewToggle" },
+    opts = {
+      view = {
+        display_mode = "border", -- 列区切りを罫線風に表示
+      },
+      -- csvview 有効時のみ効くフィールド移動キー（Excel風ナビゲーション）
+      keymaps = {
+        -- フィールド選択のテキストオブジェクト
+        textobject_field_inner = { "if", mode = { "o", "x" } },
+        textobject_field_outer = { "af", mode = { "o", "x" } },
+        -- Tab/S-Tab で左右のフィールド、Enter/S-Enter で上下の行へ移動
+        jump_next_field_end = { "<Tab>", mode = { "n", "v" } },
+        jump_prev_field_end = { "<S-Tab>", mode = { "n", "v" } },
+        jump_next_row = { "<Enter>", mode = { "n", "v" } },
+        jump_prev_row = { "<S-Enter>", mode = { "n", "v" } },
+      },
+    },
+    keys = {
+      { "<leader>cv", "<cmd>CsvViewToggle<cr>", desc = "CSV view toggle" },
+    },
+  },
+  -- 列ごとの虹色ハイライト + RBQL(SQLライクな絞り込み/集計)
+  {
+    "mechatroner/rainbow_csv",
+    ft = { "csv", "tsv" },
   },
 })

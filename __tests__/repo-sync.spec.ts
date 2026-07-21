@@ -343,6 +343,117 @@ describe('repo-sync', () => {
       expect(results[0].status).toBe('updated')
     })
 
+    // 回帰テスト: entrypoint.sh はコンテナ起動時点で /workspace 配下に既に
+    // 存在するリポジトリのみ safe.directory へ登録する（実行UIDと所有者UIDの
+    // 不一致で git コマンドが "detected dubious ownership" で失敗する問題の
+    // 対策、docker/entrypoint.sh 参照）。セッション中にWeb経由で新規クローン・
+    // 更新されるリポジトリはその時点では未登録のため、clone/pull 自体が
+    // 対象ディレクトリを都度 safe.directory へ登録する必要がある。
+    it('registers the repo directory with git safe.directory before cloning (new repo)', async () => {
+      ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+        repositoryId: 'REPO_01',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        authMethod: 'api_key',
+        authSecret: 'ghp_token123',
+      })
+
+      mockedFs.existsSync.mockReturnValue(false)
+
+      await syncRepositories(mockClient, repositories, '/tmp/repos', '[TEST]')
+
+      const calls = (child_process.execFile as unknown as jest.Mock).mock.calls
+      // 未登録かどうかの事前確認（--get-all）を経てから --add する
+      const getAllCall = calls.find(
+        (call) => call[0] === 'git' && (call[1] as string[])[0] === 'config' && (call[1] as string[])[2] === '--get-all',
+      )
+      const addCall = calls.find(
+        (call) => call[0] === 'git' && (call[1] as string[])[0] === 'config' && (call[1] as string[])[2] === '--add',
+      )
+      expect(getAllCall).toBeDefined()
+      expect(addCall).toBeDefined()
+      expect(addCall![1]).toEqual([
+        'config',
+        '--global',
+        '--add',
+        'safe.directory',
+        path.join('/tmp/repos', 'my-repo'),
+      ])
+
+      // 登録（確認→追加）は clone より前（clone 自体もこのディレクトリに
+      // 対して git を実行するため）
+      const cloneIndex = calls.findIndex((call) => (call[1] as string[])[0] === 'clone')
+      expect(calls.indexOf(getAllCall)).toBeLessThan(cloneIndex)
+      expect(calls.indexOf(addCall)).toBeLessThan(cloneIndex)
+    })
+
+    it('registers the repo directory with git safe.directory before pulling (existing repo)', async () => {
+      ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+        repositoryId: 'REPO_01',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        authMethod: 'api_key',
+        authSecret: 'ghp_token123',
+      })
+
+      mockedFs.existsSync.mockReturnValue(true)
+
+      await syncRepositories(mockClient, repositories, '/tmp/repos', '[TEST]')
+
+      const calls = (child_process.execFile as unknown as jest.Mock).mock.calls
+      const addCall = calls.find(
+        (call) => call[0] === 'git' && (call[1] as string[])[0] === 'config' && (call[1] as string[])[2] === '--add',
+      )
+      expect(addCall).toBeDefined()
+      expect(addCall![1]).toEqual([
+        'config',
+        '--global',
+        '--add',
+        'safe.directory',
+        path.join('/tmp/repos', 'my-repo'),
+      ])
+
+      const fetchIndex = calls.findIndex((call) => (call[1] as string[])[0] === 'fetch')
+      expect(calls.indexOf(addCall)).toBeLessThan(fetchIndex)
+    })
+
+    // 回帰テスト: --add は既存値の重複有無を確認しないため、事前チェックなしに
+    // 呼ぶと同一セッションでの繰り返し同期（毎回 pullRepository を通る／
+    // sync_repository MCPツールの再呼び出し）のたびに ~/.gitconfig に同じ
+    // パスが際限なく積み上がる（レビュー指摘）。既に登録済みなら --add
+    // 自体を呼ばないことを確認する。
+    it('does NOT re-register safe.directory when the repo is already registered (avoids unbounded ~/.gitconfig growth)', async () => {
+      ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+        repositoryId: 'REPO_01',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        authMethod: 'api_key',
+        authSecret: 'ghp_token123',
+      })
+
+      mockedFs.existsSync.mockReturnValue(true)
+      const repoDir = path.join('/tmp/repos', 'my-repo')
+      ;(child_process.execFile as unknown as jest.Mock).mockImplementation(
+        (...args: unknown[]) => {
+          const callback = args[args.length - 1]
+          const gitArgs = args[1] as string[]
+          if (typeof callback === 'function') {
+            if (gitArgs[0] === 'config' && gitArgs[2] === '--get-all') {
+              callback(null, { stdout: `${repoDir}\n`, stderr: '' })
+            } else {
+              callback(null, { stdout: '', stderr: '' })
+            }
+          }
+          return { on: jest.fn(), kill: jest.fn() }
+        },
+      )
+
+      await syncRepositories(mockClient, repositories, '/tmp/repos', '[TEST]')
+
+      const calls = (child_process.execFile as unknown as jest.Mock).mock.calls
+      const addCall = calls.find(
+        (call) => call[0] === 'git' && (call[1] as string[])[0] === 'config' && (call[1] as string[])[2] === '--add',
+      )
+      expect(addCall).toBeUndefined()
+    })
+
     it('should handle checkout failure with branch creation fallback', async () => {
       ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
         repositoryId: 'REPO_01',

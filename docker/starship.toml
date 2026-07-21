@@ -1,12 +1,24 @@
 # starship プロンプト設定。
 #
 # 明示指定したモジュールのみ上書きし、それ以外は starship のデフォルト
-# （format = "$all" 相当）に従う。
+# （format = "$all" 相当。$line_break を含むため directory 行とプロンプト行の
+# 2行構成はそのまま維持される）に従う。
 #
-# container モジュール（コンテナ内であることを示す "[Docker]" 等の表示）の
-# デフォルトスタイルは "red bold dimmed"。dimmed（減光）属性により、暗い
-# ターミナル背景上でコントラストが低く視認しづらいため、dimmed を外す。
+# directory / username / container を、tmuxステータスバー（docker/tmux.conf）
+# と統一感のある背景色付きブロック（ピル）表示にする。starshipのデフォルトは
+# いずれもプレーンな前景色文字のみで、特に username のデフォルト
+# （style_root = "red bold"）はroot実行時に暗い背景上で視認しづらい。
 "$schema" = "https://starship.rs/config-schema.json"
 
+[directory]
+style = "bg:#3b82f6 fg:#ffffff"
+format = "[ 󰉋 $path ]($style) "
+
+[username]
+style_user = "bg:#6366f1 fg:#ffffff"
+style_root = "bg:#6366f1 fg:#ffffff"
+format = "[ $user ]($style) "
+
 [container]
-style = "bold red"
+style = "bg:#ef4444 fg:#ffffff"
+format = "[ $symbol $name ]($style) "
