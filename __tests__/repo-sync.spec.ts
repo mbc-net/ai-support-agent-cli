@@ -22,6 +22,13 @@ jest.mock('fs', () => {
 })
 jest.mock('../src/logger')
 
+const FAKE_KNOWN_HOSTS_PATH = '/fake-config-dir/known-hosts/acme__github.com'
+const mockResolveKnownHostsPath = jest.fn().mockReturnValue(FAKE_KNOWN_HOSTS_PATH)
+jest.mock('../src/utils/known-hosts-store', () => ({
+  GENERAL_KNOWN_HOSTS_ID: 'shared',
+  resolveKnownHostsPath: (...args: unknown[]) => mockResolveKnownHostsPath(...args),
+}))
+
 const mockedFs = fs as jest.Mocked<typeof fs>
 
 describe('repo-sync', () => {
@@ -183,20 +190,28 @@ describe('repo-sync', () => {
   })
 
   describe('buildAuthEnv', () => {
+    beforeEach(() => {
+      mockResolveKnownHostsPath.mockClear()
+      mockResolveKnownHostsPath.mockReturnValue(FAKE_KNOWN_HOSTS_PATH)
+    })
+
     it('should return empty env for non-SSH auth', () => {
-      const { env, cleanup } = buildAuthEnv('api_key', 'token')
+      const { env, cleanup } = buildAuthEnv('api_key', 'token', undefined, 'https://github.com/org/repo.git')
       expect(env).toEqual({})
       cleanup() // no-op
     })
 
-    it('should create SSH key file and GIT_SSH_COMMAND for SSH auth', () => {
+    it('should create SSH key file and GIT_SSH_COMMAND with legacy no-host-check flags when tenantCode is undefined (regression)', () => {
       mockedFs.writeFileSync.mockImplementation(() => {})
       mockedFs.unlinkSync.mockImplementation(() => {})
 
-      const { env, cleanup } = buildAuthEnv('ssh', 'ssh-private-key-content')
+      const { env, cleanup } = buildAuthEnv('ssh', 'ssh-private-key-content', undefined, 'git@github.com:org/repo.git')
 
       expect(env.GIT_SSH_COMMAND).toContain('ssh -i')
       expect(env.GIT_SSH_COMMAND).toContain('-o StrictHostKeyChecking=no')
+      expect(env.GIT_SSH_COMMAND).toContain('-o UserKnownHostsFile=/dev/null')
+      // TOFU path must not be consulted when tenantCode is unavailable
+      expect(mockResolveKnownHostsPath).not.toHaveBeenCalled()
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('ssh-key-'),
         expect.any(String),
@@ -211,6 +226,30 @@ describe('repo-sync', () => {
       expect(mockedFs.unlinkSync).toHaveBeenCalled()
     })
 
+    it('should use TOFU (accept-new) + persistent known_hosts file when tenantCode is provided', () => {
+      mockedFs.writeFileSync.mockImplementation(() => {})
+      mockedFs.unlinkSync.mockImplementation(() => {})
+
+      const { env } = buildAuthEnv('ssh', 'ssh-private-key-content', 'acme', 'git@github.com:org/repo.git')
+
+      expect(env.GIT_SSH_COMMAND).toContain('ssh -i')
+      expect(env.GIT_SSH_COMMAND).toContain('-o StrictHostKeyChecking=accept-new')
+      expect(env.GIT_SSH_COMMAND).toContain(`-o UserKnownHostsFile="${FAKE_KNOWN_HOSTS_PATH}"`)
+      expect(env.GIT_SSH_COMMAND).not.toContain('StrictHostKeyChecking=no')
+
+      // Resolved using the host extracted from the SSH repository URL
+      expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'github.com')
+    })
+
+    it('should fall back to the shared known-hosts bucket when the host cannot be extracted from the URL', () => {
+      mockedFs.writeFileSync.mockImplementation(() => {})
+      mockedFs.unlinkSync.mockImplementation(() => {})
+
+      buildAuthEnv('ssh', 'ssh-private-key-content', 'acme', 'not-a-valid-url')
+
+      expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'shared')
+    })
+
     it('should not throw when cleanup fails and log warning', () => {
       mockedFs.writeFileSync.mockImplementation(() => {})
       mockedFs.unlinkSync.mockImplementation(() => {
@@ -219,7 +258,7 @@ describe('repo-sync', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { logger: loggerMock } = require('../src/logger') as { logger: { warn: jest.Mock } }
-      const { cleanup } = buildAuthEnv('ssh', 'key')
+      const { cleanup } = buildAuthEnv('ssh', 'key', undefined, 'git@github.com:org/repo.git')
       expect(() => cleanup()).not.toThrow()
       expect(loggerMock.warn).toHaveBeenCalledWith(
         expect.stringContaining('Failed to delete temporary SSH key file'),
@@ -230,6 +269,7 @@ describe('repo-sync', () => {
   describe('syncRepositories', () => {
     const mockClient = {
       getRepoCredentials: jest.fn(),
+      getTenantCode: jest.fn().mockReturnValue('acme'),
     } as unknown as ApiClient
 
     const repositories: NonNullable<ProjectConfigResponse['repositories']> = [
@@ -301,6 +341,117 @@ describe('repo-sync', () => {
 
       expect(results).toHaveLength(1)
       expect(results[0].status).toBe('updated')
+    })
+
+    // 回帰テスト: entrypoint.sh はコンテナ起動時点で /workspace 配下に既に
+    // 存在するリポジトリのみ safe.directory へ登録する（実行UIDと所有者UIDの
+    // 不一致で git コマンドが "detected dubious ownership" で失敗する問題の
+    // 対策、docker/entrypoint.sh 参照）。セッション中にWeb経由で新規クローン・
+    // 更新されるリポジトリはその時点では未登録のため、clone/pull 自体が
+    // 対象ディレクトリを都度 safe.directory へ登録する必要がある。
+    it('registers the repo directory with git safe.directory before cloning (new repo)', async () => {
+      ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+        repositoryId: 'REPO_01',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        authMethod: 'api_key',
+        authSecret: 'ghp_token123',
+      })
+
+      mockedFs.existsSync.mockReturnValue(false)
+
+      await syncRepositories(mockClient, repositories, '/tmp/repos', '[TEST]')
+
+      const calls = (child_process.execFile as unknown as jest.Mock).mock.calls
+      // 未登録かどうかの事前確認（--get-all）を経てから --add する
+      const getAllCall = calls.find(
+        (call) => call[0] === 'git' && (call[1] as string[])[0] === 'config' && (call[1] as string[])[2] === '--get-all',
+      )
+      const addCall = calls.find(
+        (call) => call[0] === 'git' && (call[1] as string[])[0] === 'config' && (call[1] as string[])[2] === '--add',
+      )
+      expect(getAllCall).toBeDefined()
+      expect(addCall).toBeDefined()
+      expect(addCall![1]).toEqual([
+        'config',
+        '--global',
+        '--add',
+        'safe.directory',
+        path.join('/tmp/repos', 'my-repo'),
+      ])
+
+      // 登録（確認→追加）は clone より前（clone 自体もこのディレクトリに
+      // 対して git を実行するため）
+      const cloneIndex = calls.findIndex((call) => (call[1] as string[])[0] === 'clone')
+      expect(calls.indexOf(getAllCall)).toBeLessThan(cloneIndex)
+      expect(calls.indexOf(addCall)).toBeLessThan(cloneIndex)
+    })
+
+    it('registers the repo directory with git safe.directory before pulling (existing repo)', async () => {
+      ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+        repositoryId: 'REPO_01',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        authMethod: 'api_key',
+        authSecret: 'ghp_token123',
+      })
+
+      mockedFs.existsSync.mockReturnValue(true)
+
+      await syncRepositories(mockClient, repositories, '/tmp/repos', '[TEST]')
+
+      const calls = (child_process.execFile as unknown as jest.Mock).mock.calls
+      const addCall = calls.find(
+        (call) => call[0] === 'git' && (call[1] as string[])[0] === 'config' && (call[1] as string[])[2] === '--add',
+      )
+      expect(addCall).toBeDefined()
+      expect(addCall![1]).toEqual([
+        'config',
+        '--global',
+        '--add',
+        'safe.directory',
+        path.join('/tmp/repos', 'my-repo'),
+      ])
+
+      const fetchIndex = calls.findIndex((call) => (call[1] as string[])[0] === 'fetch')
+      expect(calls.indexOf(addCall)).toBeLessThan(fetchIndex)
+    })
+
+    // 回帰テスト: --add は既存値の重複有無を確認しないため、事前チェックなしに
+    // 呼ぶと同一セッションでの繰り返し同期（毎回 pullRepository を通る／
+    // sync_repository MCPツールの再呼び出し）のたびに ~/.gitconfig に同じ
+    // パスが際限なく積み上がる（レビュー指摘）。既に登録済みなら --add
+    // 自体を呼ばないことを確認する。
+    it('does NOT re-register safe.directory when the repo is already registered (avoids unbounded ~/.gitconfig growth)', async () => {
+      ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+        repositoryId: 'REPO_01',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        authMethod: 'api_key',
+        authSecret: 'ghp_token123',
+      })
+
+      mockedFs.existsSync.mockReturnValue(true)
+      const repoDir = path.join('/tmp/repos', 'my-repo')
+      ;(child_process.execFile as unknown as jest.Mock).mockImplementation(
+        (...args: unknown[]) => {
+          const callback = args[args.length - 1]
+          const gitArgs = args[1] as string[]
+          if (typeof callback === 'function') {
+            if (gitArgs[0] === 'config' && gitArgs[2] === '--get-all') {
+              callback(null, { stdout: `${repoDir}\n`, stderr: '' })
+            } else {
+              callback(null, { stdout: '', stderr: '' })
+            }
+          }
+          return { on: jest.fn(), kill: jest.fn() }
+        },
+      )
+
+      await syncRepositories(mockClient, repositories, '/tmp/repos', '[TEST]')
+
+      const calls = (child_process.execFile as unknown as jest.Mock).mock.calls
+      const addCall = calls.find(
+        (call) => call[0] === 'git' && (call[1] as string[])[0] === 'config' && (call[1] as string[])[2] === '--add',
+      )
+      expect(addCall).toBeUndefined()
     })
 
     it('should handle checkout failure with branch creation fallback', async () => {
@@ -478,11 +629,67 @@ describe('repo-sync', () => {
       expect(results[0].status).toBe('cloned')
       expect(results[1].status).toBe('skipped')
     })
+
+    describe('TOFU plumbing (tenantCode -> resolveKnownHostsPath) for ssh repositories', () => {
+      const sshRepositories: NonNullable<ProjectConfigResponse['repositories']> = [
+        {
+          repositoryId: 'REPO_SSH',
+          repositoryCode: 'ssh-repo',
+          repositoryName: 'ssh-repo',
+          repositoryUrl: 'git@gitlab.com:org/ssh-repo.git',
+          provider: 'gitlab',
+          branch: 'main',
+          authMethod: 'ssh',
+        },
+      ]
+
+      beforeEach(() => {
+        mockResolveKnownHostsPath.mockClear()
+        mockResolveKnownHostsPath.mockReturnValue(FAKE_KNOWN_HOSTS_PATH)
+        mockedFs.writeFileSync.mockImplementation(() => {})
+        mockedFs.unlinkSync.mockImplementation(() => {})
+        ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+          repositoryId: 'REPO_SSH',
+          repositoryUrl: 'git@gitlab.com:org/ssh-repo.git',
+          authMethod: 'ssh',
+          authSecret: '-----BEGIN OPENSSH PRIVATE KEY-----\nABCD\n-----END OPENSSH PRIVATE KEY-----\n',
+        })
+      })
+
+      it('resolves the TOFU known_hosts path with the tenantCode and the URL host when cloning', async () => {
+        mockedFs.existsSync.mockReturnValue(false)
+
+        const results = await syncRepositories(mockClient, sshRepositories, '/tmp/repos', '[TEST]')
+
+        expect(results[0].status).toBe('cloned')
+        expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'gitlab.com')
+      })
+
+      it('resolves the TOFU known_hosts path with the tenantCode and the URL host when pulling', async () => {
+        mockedFs.existsSync.mockReturnValue(true)
+
+        const results = await syncRepositories(mockClient, sshRepositories, '/tmp/repos', '[TEST]')
+
+        expect(results[0].status).toBe('updated')
+        expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'gitlab.com')
+      })
+
+      it('falls back to legacy no-host-check flags (no TOFU lookup) when the client has no tenantCode', async () => {
+        ;(mockClient as unknown as { getTenantCode: jest.Mock }).getTenantCode.mockReturnValueOnce('')
+        mockedFs.existsSync.mockReturnValue(false)
+
+        const results = await syncRepositories(mockClient, sshRepositories, '/tmp/repos', '[TEST]')
+
+        expect(results[0].status).toBe('cloned')
+        expect(mockResolveKnownHostsPath).not.toHaveBeenCalled()
+      })
+    })
   })
 
   describe('syncRepositoryByCode', () => {
     const mockClient = {
       getRepoCredentials: jest.fn(),
+      getTenantCode: jest.fn().mockReturnValue('acme'),
     } as unknown as ApiClient
 
     const repositories: NonNullable<ProjectConfigResponse['repositories']> = [

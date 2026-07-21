@@ -10,10 +10,18 @@ back to the human-readable `default` callback; `parseStepResults()` would
 then fail to `JSON.parse` that output and report *every* requested step as
 "skipped" regardless of what actually happened on the target host.
 
-Ansible auto-discovers callback plugins from a `callback_plugins/`
-directory next to the running playbook (this file lives at
-`ansible/callback_plugins/json.py`, next to `ansible/playbook.yml`), so no
-collection install or extra configuration is required to pick this up.
+HOW ANSIBLE FINDS THIS FILE: the runner generates its playbook into a
+per-run temp directory (not this `ansible/` directory), so Ansible's
+"callback_plugins/ next to the running playbook" auto-discovery does NOT
+pick this file up. `src/server-setup/server-setup-runner.ts` therefore
+points `ANSIBLE_CALLBACK_PLUGINS` explicitly at this directory (via
+`resolveCallbackPluginsPath()`, mirroring how `ANSIBLE_ROLES_PATH` exposes
+the bundled `roles/`). Do NOT remove that env var: without it Ansible cannot
+load this callback and aborts every run with
+`ERROR! Invalid callback for stdout specified: json`.
+(Historical note: an earlier revision ran `ansible/playbook.yml` directly
+from this directory, where adjacent auto-discovery worked; that is no longer
+the execution path.)
 
 OUTPUT CONTRACT: emits exactly one line of JSON at the end of the run,
 shaped as

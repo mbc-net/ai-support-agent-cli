@@ -53,6 +53,7 @@ jest.mock('../src/auto-updater', () => ({
   startAutoUpdater: jest.fn().mockReturnValue({ stop: jest.fn() }),
 }))
 jest.mock('../src/chat-mode-detector', () => ({
+  ...jest.requireActual('../src/chat-mode-detector'),
   detectAvailableChatModes: jest.fn().mockResolvedValue([]),
   resolveActiveChatMode: jest.fn().mockReturnValue(undefined),
 }))
@@ -124,6 +125,10 @@ jest.mock('../src/terminal/terminal-session', () => ({
   },
 }))
 
+jest.mock('../src/server-setup/server-setup-runner', () => ({
+  cleanupStaleServerSetupDirs: jest.fn().mockReturnValue(0),
+}))
+
 const MockApiClient = ApiClient as jest.MockedClass<typeof ApiClient>
 const mockedLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>
 const mockedGetProjectList = getProjectList as jest.MockedFunction<typeof getProjectList>
@@ -169,6 +174,8 @@ describe('agent-runner', () => {
     jest.clearAllMocks()
     const { TerminalSession } = require('../src/terminal/terminal-session')
     TerminalSession.cleanupStaleSandboxes.mockReturnValue(0)
+    const { cleanupStaleServerSetupDirs } = require('../src/server-setup/server-setup-runner')
+    cleanupStaleServerSetupDirs.mockReturnValue(0)
     const { isAlreadyRunning, readPidFile } = require('../src/pid-manager')
     isAlreadyRunning.mockReturnValue(false)
     readPidFile.mockReturnValue(null)
@@ -925,6 +932,61 @@ describe('agent-runner', () => {
 
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('Failed to clean up stale terminal-sandbox dirs'),
+    )
+  })
+
+  // Regression test for the ENOSPC bug: agent-runner's startup sequence must
+  // also sweep orphaned server-setup temp dirs (which hold SSH private
+  // keys), the same way it already does for `terminal-sandbox-*` above.
+  // Without this, a resident agent process killed mid-`server_setup_exec`
+  // (SIGKILL/OOM/crash) leaves its private-key-holding temp dir behind
+  // forever, and these accumulate across the agent's long uptime until /tmp
+  // runs out of space (mkdtemp then fails with ENOSPC).
+  it('should call cleanupStaleServerSetupDirs on startup', async () => {
+    const { cleanupStaleServerSetupDirs } = require('../src/server-setup/server-setup-runner')
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(cleanupStaleServerSetupDirs).toHaveBeenCalled()
+  })
+
+  it('should log info message when cleanupStaleServerSetupDirs removes at least one dir', async () => {
+    const { cleanupStaleServerSetupDirs } = require('../src/server-setup/server-setup-runner')
+    cleanupStaleServerSetupDirs.mockReturnValue(2)
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('Cleaned up 2 stale server-setup dir(s)'),
+    )
+  })
+
+  it('should log warning when cleanupStaleServerSetupDirs throws', async () => {
+    const { cleanupStaleServerSetupDirs } = require('../src/server-setup/server-setup-runner')
+    cleanupStaleServerSetupDirs.mockImplementation(() => { throw new Error('cleanup failed') })
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to clean up stale server-setup dirs'),
     )
   })
 

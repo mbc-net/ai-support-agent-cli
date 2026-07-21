@@ -12,6 +12,10 @@ ARG APT_CACHE_BUST=2026-05-21
 RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
     && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip git openssh-client vim jq \
+    # sshpass: Ansible's `ssh` connection plugin shells out to this for
+    # ansible_ssh_pass (password-authType server_setup_exec hosts); without
+    # it, ansible-playbook fails to authenticate against password-only hosts.
+    sshpass \
     default-mysql-client postgresql-client \
     gnupg apt-transport-https \
     # Build tools for native addons (node-pty)
@@ -20,6 +24,11 @@ RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get updat
     iputils-ping net-tools dnsutils whois traceroute netcat-openbsd iproute2 \
     # Terminal multiplexer (auto-attached for each agent console session)
     tmux \
+    # fzf-lua (nvim plugin) shells out to this for fuzzy file/grep/buffer search
+    fzf \
+    # cat replacement with syntax highlighting (Debian ships the binary as
+    # /usr/bin/batcat, not /usr/bin/bat, due to a package name clash)
+    bat \
     # Python 3 + pip (for document processing tools and node-gyp)
     python3 python3-pip python3-venv \
     # Pandoc (universal document converter: docx/pdf/html/markdown/etc.)
@@ -35,6 +44,14 @@ RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get updat
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+
+# git branch/log/diff/show default to piping through an interactive pager
+# (less) whenever stdout is a tty. This shell is driven by an AI agent over a
+# PTY with no human at the keyboard to press "q" — an interactive pager left
+# enabled means any such command can hang forever waiting for input that
+# never comes. core.pager=cat makes these commands print directly, with no
+# pager and no risk of blocking the session.
+RUN git config --system core.pager cat
 
 # =============================================================================
 # Layer 2: Python tools (stable — version-pinned)
@@ -54,7 +71,10 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     beautifulsoup4==4.* lxml==5.* \
     # Character encoding detection (for legacy files)
     chardet==5.* \
-    # Server setup execution: runs agent/ansible/playbook.yml against target hosts.
+    # Server setup execution: runs a dynamically generated playbook (built by
+    # generatePlaybook() in src/server-setup/server-setup-runner.ts, written to
+    # a per-run temp dir — NOT the static agent/ansible/playbook.yml, which is
+    # unused at runtime) against target hosts.
     # Pinned to a range validated against ansible/callback_plugins/json.py and
     # ansible/roles/database (CallbackBase's v2_runner_on_*/v2_playbook_on_stats
     # hooks and module result shapes are internal APIs, not covered by ansible-core's
@@ -70,10 +90,17 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # vulnerable to SQL injection via a password containing a single quote.
 # `ansible.mysql` is used rather than the now-deprecated
 # `community.mysql.mysql_user` (removal planned for community.mysql 6.0.0).
+# `ansible.posix` provides `authorized_key`, used by
+# ansible/roles/ssh_key/tasks/main.yml to add SSH public keys to a target
+# user's ~/.ssh/authorized_keys. This module is allowlisted in
+# src/server-setup/ansible-task-guard.ts's *base* MODULE_ALLOWLIST (both ecs
+# and resident routes), so it must be installed here unconditionally, not
+# gated behind the database role's collections.
 # Version ranges pinned for the same reproducibility reason as ansible-core
 # above — an unbounded install could silently pick up a future major release
-# with a changed module interface (e.g. mysql_user/postgresql_user parameter
-# shape) that ansible/roles/database/tasks/main.yml wasn't validated against.
+# with a changed module interface (e.g. mysql_user/postgresql_user/
+# authorized_key parameter shape) that the bundled roles weren't validated
+# against.
 # Installed to /usr/share/ansible/collections — one of ansible-core's default
 # collection search paths regardless of the runtime user's $HOME — so the
 # collections are found no matter which UID the container ultimately runs as
@@ -81,6 +108,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 RUN ansible-galaxy collection install \
     'ansible.mysql:>=5.0.0,<6.0.0' \
     'community.postgresql:>=4.0.0,<5.0.0' \
+    'ansible.posix:>=1.5.0,<2.0.0' \
     -p /usr/share/ansible/collections \
     && chmod -R a+rX /usr/share/ansible/collections
 
@@ -103,6 +131,164 @@ RUN curl -fSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o
     && dpkg -i /tmp/session-manager-plugin.deb \
     && rm /tmp/session-manager-plugin.deb
 
+# Neovim, built from source (pinned tag) — Debian bookworm's apt "neovim"
+# package is 0.7.x, too old for the nvim-treesitter main-branch API
+# (require("nvim-treesitter").install() / vim.treesitter.start()) used by
+# docker/nvim/init.lua. A prebuilt release tarball was tried first and
+# rejected: neovim's official arm64 release tarballs (v0.10.4+, the first to
+# ship a separate arm64 asset) are linked against GLIBC >= 2.38, but this
+# image's Debian bookworm base ships GLIBC 2.36 — the binary fails at
+# container runtime with "version `GLIBC_2.38' not found" on arm64 hosts
+# (verified against a real build; this affects local agent CLI runs on Apple
+# Silicon Docker Desktop, not just ECS). Building from source links against
+# whatever glibc this build stage actually has, so one Dockerfile path works
+# on both amd64 and arm64 with no version-specific compatibility trap.
+#
+# Pinned to v0.12.4, not v0.10.4: verified against a real build that
+# nvim-treesitter's main branch (pinned by commit below) calls
+# vim.list.unique(), added in Neovim v0.12.0 ("feat(lua): add
+# vim.list.unique()") — on v0.10.4 the parser install step fails with
+# "attempt to index field 'list' (a nil value)".
+RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
+    && apt-get install -y --no-install-recommends \
+    ninja-build gettext cmake pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+ARG NVIM_VERSION=v0.12.4
+# The real binary is renamed to nvim-bin and /opt/nvim/bin/nvim becomes a
+# thin wrapper that exports the XDG_* vars (see the config block below) only
+# for nvim's own process tree, then execs the real binary. This keeps
+# /opt/nvim/bin/nvim as the stable path referenced by the symlink below and
+# by update-alternatives further down — only what that path points AT
+# changes (binary -> wrapper) — while confining the nvim-specific XDG
+# redirection to nvim itself instead of leaking it to every process in the
+# container via a Dockerfile-level ENV (see the config block below for why
+# that matters).
+RUN git clone --depth 1 --branch "${NVIM_VERSION}" https://github.com/neovim/neovim /tmp/neovim-src \
+    && cd /tmp/neovim-src \
+    && make CMAKE_BUILD_TYPE=Release CMAKE_INSTALL_PREFIX=/opt/nvim install \
+    && mv /opt/nvim/bin/nvim /opt/nvim/bin/nvim-bin \
+    && printf '#!/bin/sh\nexport XDG_CONFIG_HOME=/opt/nvim-config\nexport XDG_DATA_HOME=/opt/nvim-data\nexport XDG_STATE_HOME=/opt/nvim-state\nexport XDG_CACHE_HOME=/opt/nvim-cache\nexec /opt/nvim/bin/nvim-bin "$@"\n' > /opt/nvim/bin/nvim \
+    && chmod +x /opt/nvim/bin/nvim \
+    && ln -s /opt/nvim/bin/nvim /usr/local/bin/nvim \
+    && rm -rf /tmp/neovim-src \
+    && nvim --version
+
+# tree-sitter CLI — nvim-treesitter's parser install shells out to this to
+# compile grammars (verified against a real build: without it, parser
+# install fails with "Error during \"tree-sitter build\": ENOENT ...
+# 'tree-sitter'"). Built from source via cargo: both the tree-sitter-cli npm
+# package and tree-sitter/tree-sitter's own GitHub release arm64 binary are
+# linked against GLIBC >= 2.39 (verified against a real build) — the same
+# class of trap as neovim's prebuilt arm64 tarball above. rustc/cargo from
+# apt (bookworm ships 1.63) are old enough that tree-sitter-cli may fail to
+# build (MSRV), so rustup installs a toolchain first, mirroring this
+# Dockerfile's other official-install-script tools (starship, code-server
+# below). Both the toolchain and the crate are pinned to exact versions
+# verified against a real build — not "stable"/unpinned "latest" — since the
+# nvim-treesitter commit above was pinned specifically for compatibility
+# with THIS build; an unpinned toolchain/crate bump could silently break that
+# compatibility on the next image rebuild with no source change here.
+RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
+    && apt-get install -y --no-install-recommends libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1 \
+    && . "$HOME/.cargo/env" \
+    && cargo install tree-sitter-cli --version 0.26.11 --locked --root /usr/local \
+    && rm -rf "$HOME/.rustup" "$HOME/.cargo" \
+    && tree-sitter --version
+
+# Neovim config + plugin set, pre-installed at build time so the agent shell
+# doesn't need network access on first use. These paths are baked into the
+# nvim wrapper script above (not a Dockerfile-level ENV) so they apply only
+# when nvim itself runs — not to every process in the container (a
+# Dockerfile-level ENV here would also redirect unrelated XDG-compliant CLIs
+# like `gh` to these nvim-specific, world-writable directories; see
+# security review finding for src/security.ts SAFE_ENV_KEYS).
+# XDG dirs point at /opt rather than $HOME: $HOME differs depending on
+# whether the container runs as root (build time) or an arbitrary UID
+# (entrypoint.sh's dynamic passwd-entry handling for --user), the same
+# reasoning as /opt/playwright-browsers below.
+RUN mkdir -p /opt/nvim-config/nvim
+COPY docker/nvim/init.lua /opt/nvim-config/nvim/init.lua
+RUN nvim --headless "+Lazy! sync" +qa \
+    && nvim --headless -c "lua local missing={} for _,p in pairs(require('lazy').plugins()) do if not p._.installed then table.insert(missing,p.name) end end if #missing>0 then print('MISSING PLUGINS: '..table.concat(missing,', ')) vim.cmd('cquit 1') end" -c "qa" \
+    && nvim --headless -c "lua require('nvim-treesitter').install({'markdown','markdown_inline'}):wait(300000)" -c "qa" \
+    && nvim --headless -c "lua local installed={} for _,l in ipairs(require('nvim-treesitter.config').get_installed()) do installed[l]=true end if not (installed.markdown and installed.markdown_inline) then print('MISSING TREESITTER PARSERS') vim.cmd('cquit 1') end" -c "qa" \
+    && chmod -R a+rwX /opt/nvim-config /opt/nvim-data /opt/nvim-state /opt/nvim-cache
+
+# nvim をデフォルトエディタにする（git commit 等が $EDITOR/$VISUAL を参照する）
+ENV EDITOR=nvim VISUAL=nvim
+
+# vi/vim コマンド自体もnvimを指すようにする（apt版vim.basicの優先度30より
+# 高い60を指定し、update-alternativesでnvimを優先させる。実機検証済み）
+# --install は候補として登録できたことしか保証しないため、実際に
+# /usr/bin/vi・/usr/bin/vim がnvimへ解決され、かつ実行できることまで
+# ビルド時に検証する（readlink -fでのパス一致 + --versionのNVIMバナー確認）。
+RUN update-alternatives --install /usr/bin/vi vi /opt/nvim/bin/nvim 60 \
+    && update-alternatives --install /usr/bin/vim vim /opt/nvim/bin/nvim 60 \
+    && [ "$(readlink -f /usr/bin/vi)" = "/opt/nvim/bin/nvim" ] \
+    && [ "$(readlink -f /usr/bin/vim)" = "/opt/nvim/bin/nvim" ] \
+    && vi --version | grep -q NVIM \
+    && vim --version | grep -q NVIM
+
+# starship prompt (pinned version — the install script's --version pins
+# it to a verified release rather than tracking "latest" across rebuilds)
+RUN curl -sS https://starship.rs/install.sh | sh -s -- --yes --version v1.26.0 \
+    && starship --version
+# 実行時UID（entrypoint.shが動的に割り当てる）に依存せず全セッションに
+# 同じプロンプト設定を適用するため、$HOME/.config/starship.toml ではなく
+# 固定パスをSTARSHIP_CONFIGで明示する（/etc/tmux.confと同じパターン）。
+ENV STARSHIP_CONFIG=/etc/starship.toml
+
+# eza (ls replacement with icons) — not packaged for Debian bookworm, so a
+# dual-arch GitHub release binary is downloaded instead (verified against a
+# real build: unlike neovim's arm64 tarball, eza's aarch64-unknown-linux-gnu
+# release does NOT require a newer glibc than this image's bookworm base).
+ARG EZA_VERSION=v0.23.5
+RUN ARCH=$(dpkg --print-architecture) \
+    && if [ "$ARCH" = "arm64" ]; then EZA_ARCH="aarch64"; else EZA_ARCH="x86_64"; fi \
+    && curl -fSL "https://github.com/eza-community/eza/releases/download/${EZA_VERSION}/eza_${EZA_ARCH}-unknown-linux-gnu.tar.gz" \
+        -o /tmp/eza.tar.gz \
+    && mkdir -p /tmp/eza-extract \
+    && tar -xzf /tmp/eza.tar.gz -C /tmp/eza-extract \
+    && mv /tmp/eza-extract/eza /usr/local/bin/eza \
+    && rm -rf /tmp/eza.tar.gz /tmp/eza-extract \
+    && eza --version
+
+# lazygit (TUI git client, shelled out to by the lazygit.nvim plugin in
+# docker/nvim/init.lua) — not packaged for Debian bookworm, so a dual-arch
+# GitHub release binary is downloaded, following the same pattern as eza above.
+#
+# Code review (second opinion) flagged that the download had no integrity
+# check: if the GitHub release asset or the delivery path were ever tampered
+# with, the resulting binary would be installed and executed as-is — the
+# trailing `lazygit --version` smoke check happily "passes" for a malicious
+# binary too, since it only proves *a* binary ran, not that it's the genuine
+# release. The SHA-256 values below were taken from lazygit's own
+# `checksums.txt` release asset and cross-verified by independently
+# downloading each tarball and hashing it locally before pinning.
+ARG LAZYGIT_VERSION=0.63.1
+ARG LAZYGIT_SHA256_X86_64=8e033bc78c8e192dee9510e951f6c9e154289b7198d22c924ed1d0a951b0dac1
+ARG LAZYGIT_SHA256_ARM64=555dbc9a8efcf2e33bc24e7fbd9463e9fa375e3c5e23cc270763733c38eeae36
+RUN ARCH=$(dpkg --print-architecture) \
+    && if [ "$ARCH" = "arm64" ]; then LAZYGIT_ARCH="arm64"; LAZYGIT_SHA256="$LAZYGIT_SHA256_ARM64"; else LAZYGIT_ARCH="x86_64"; LAZYGIT_SHA256="$LAZYGIT_SHA256_X86_64"; fi \
+    && curl -fSL "https://github.com/jesseduffield/lazygit/releases/download/v${LAZYGIT_VERSION}/lazygit_${LAZYGIT_VERSION}_linux_${LAZYGIT_ARCH}.tar.gz" \
+        -o /tmp/lazygit.tar.gz \
+    && echo "${LAZYGIT_SHA256}  /tmp/lazygit.tar.gz" | sha256sum -c - \
+    && mkdir -p /tmp/lazygit-extract \
+    && tar -xzf /tmp/lazygit.tar.gz -C /tmp/lazygit-extract \
+    && mv /tmp/lazygit-extract/lazygit /usr/local/bin/lazygit \
+    && rm -rf /tmp/lazygit.tar.gz /tmp/lazygit-extract \
+    && lazygit --version
+
+# Apply starship/eza/bat to every interactive bash session. Debian's bash
+# sources /etc/bash.bashrc even when invoked with --rcfile (verified against
+# a real container) — unlike /etc/profile.d/*.sh, which only runs for LOGIN
+# shells and would never fire for the agent's real terminal session (bash
+# --rcfile <tmp>/.bashrc, see terminal-session.ts).
+COPY docker/bashrc-extra.sh /tmp/bashrc-extra.sh
+RUN cat /tmp/bashrc-extra.sh >> /etc/bash.bashrc && rm /tmp/bashrc-extra.sh
+
 # MSSQL tools (amd64 only — kept separate due to conditional apt-get)
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then \
@@ -119,6 +305,18 @@ ENV PATH="$PATH:/opt/mssql-tools18/bin"
 # Re-install debian-archive-keyring to refresh GPG keys before apt-get update.
 # This prevents "invalid signature" errors when this layer runs on a cached
 # base where the Debian signing keys have been rotated since the cache was built.
+# The SECOND apt-get update (right before installing gh) tries the strict path
+# first; only if it fails AND apt reports the degraded-base symptom ("invalid
+# signature" on every repo — a Docker Desktop cached-base gpgv failure) does it
+# set DEGRADED and install gh with --allow-unauthenticated. Gating on that exact
+# symptom keeps full signature verification on healthy hosts and for every other
+# kind of failure (network, bad URL, a genuine tampered-package signature
+# mismatch) — those still surface as a hard build failure instead of silently
+# installing an unauthenticated package. Each fall-back path logs a WARNING to
+# stderr, and `gh --version` / `glab --version` at the end turn a broken or
+# missing binary into a loud build failure. Without this the build hard-failed
+# with exit 100 on a degraded base (the first update above is already tolerant;
+# leaving the second strict made the mitigation incomplete).
 RUN (apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false \
         || (sleep 5 && apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false) \
         || (sleep 15 && apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false) \
@@ -128,15 +326,32 @@ RUN (apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
-    && (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
-    && apt-get install -y --no-install-recommends gh \
+    && DEGRADED="" \
+    && if apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update); then \
+           : ; \
+       else \
+           echo "WARNING: gh: strict package-list refresh failed; probing for degraded base GPG (invalid signature)" >&2 ; \
+           UPD_OUT="$(apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false 2>&1)" ; \
+           echo "$UPD_OUT" ; \
+           if echo "$UPD_OUT" | grep -q "invalid signature"; then \
+               echo "WARNING: gh: degraded base GPG detected; continuing in degraded (unauthenticated) mode" >&2 ; \
+               DEGRADED=1 ; \
+           fi ; \
+       fi \
+    && if [ -n "$DEGRADED" ]; then \
+           apt-get install -y --no-install-recommends --allow-unauthenticated gh ; \
+       else \
+           apt-get install -y --no-install-recommends gh ; \
+       fi \
     && rm -rf /var/lib/apt/lists/* \
     && ARCH=$(dpkg --print-architecture) \
     && GLAB_VERSION=$(curl -sL "https://gitlab.com/api/v4/projects/34675721/releases/permalink/latest" | sed -n 's/.*"tag_name":"v\([^"]*\)".*/\1/p') \
     && curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${ARCH}.deb" \
         -o /tmp/glab.deb \
     && dpkg -i /tmp/glab.deb \
-    && rm /tmp/glab.deb
+    && rm /tmp/glab.deb \
+    && gh --version \
+    && glab --version
 
 # code-server (VS Code Server) — kept separate; version tied to code-server releases
 RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local \
@@ -172,7 +387,26 @@ RUN npx --yes playwright install-deps chromium
 # ARG placed here so layers above remain cached when AGENT_VERSION changes.
 # =============================================================================
 ARG AGENT_VERSION=latest
-RUN npm install -g @anthropic-ai/claude-code @openai/codex @ai-support-agent/cli@${AGENT_VERSION} backlog-mcp-server \
+RUN npm install -g @anthropic-ai/claude-code @openai/codex @ai-support-agent/cli@${AGENT_VERSION} \
+    # backlog-mcp-server is installed separately with --ignore-scripts because
+    # backlog-mcp-server@0.13.0 added a `preinstall: npx only-allow pnpm` guard
+    # that aborts `npm install` (exit 254 / npx ENOENT in a fresh layer). The
+    # guard is a footgun leaked from the maintainer's npm->pnpm dev-workflow
+    # migration — nulab's own README still tells consumers to run it via
+    # `npx backlog-mcp-server` (npm). For 0.13.0 the published package ships
+    # pre-built with no needed install/postinstall scripts, so --ignore-scripts
+    # skips only that harmless guard and the resulting binary works (verified).
+    #
+    # PINNED to an exact version so --ignore-scripts stays scoped to a release
+    # we verified: an unpinned install would let a future version's
+    # legitimately-needed lifecycle script (e.g. a native-binary download) be
+    # silently skipped, shipping a broken binary with a green build. Bumping
+    # this version is a deliberate step that must re-verify the guard/scripts.
+    # The `--version` smoke check right after install turns any such broken /
+    # incomplete install into a loud build failure instead of a silent one.
+    # Kept on its own command so the packages above retain their lifecycle scripts.
+    && npm install -g backlog-mcp-server@0.13.0 --ignore-scripts \
+    && backlog-mcp-server --version \
     && npm cache clean --force
 
 # Install playwright npm package as peer of @ai-support-agent/cli, then download
@@ -204,5 +438,15 @@ RUN chmod 777 /workspace
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && chmod a+w /etc/passwd
+
+# System-wide tmux config (applies to every session regardless of the
+# runtime UID entrypoint.sh assigns) — see docker/tmux.conf for the status
+# bar styling.
+COPY docker/tmux.conf /etc/tmux.conf
+
+# System-wide starship config (STARSHIP_CONFIG above points here) — see
+# docker/starship.toml for why the container module's default "dimmed"
+# style is overridden.
+COPY docker/starship.toml /etc/starship.toml
 
 ENTRYPOINT ["/entrypoint.sh"]

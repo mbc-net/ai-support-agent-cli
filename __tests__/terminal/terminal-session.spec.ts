@@ -6,6 +6,13 @@ jest.mock('fs', () => ({
   accessSync: jest.fn(),
 }))
 
+const FAKE_KNOWN_HOSTS_PATH = '/fake-known-hosts/acme__shared'
+const mockResolveKnownHostsPath = jest.fn().mockReturnValue(FAKE_KNOWN_HOSTS_PATH)
+jest.mock('../../src/utils/known-hosts-store', () => ({
+  GENERAL_KNOWN_HOSTS_ID: 'shared',
+  resolveKnownHostsPath: (...args: unknown[]) => mockResolveKnownHostsPath(...args),
+}))
+
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -402,6 +409,28 @@ describe('TerminalSession', () => {
         expect(env.GIT_SSH_KEY_CONTENT_BASE64).toBeUndefined()
       })
 
+      it('GIT_SSH_COMMAND の -i 引数がダブルクォートで囲まれている（コマンドインジェクション防御の二重防御）', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
+        const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-content\n-----END OPENSSH PRIVATE KEY-----'
+        const base64Key = Buffer.from(pemKey).toString('base64')
+        const sessionId = 'test-ssh-quote'
+
+        session = new TerminalSession(sessionId, {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: base64Key,
+          },
+        })
+
+        const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+        const expectedPath = path.join(os.tmpdir(), `ssh-key-${sessionId}`)
+        expect(env.GIT_SSH_COMMAND).toBe(
+          `ssh -i "${expectedPath}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`,
+        )
+      })
+
       it('SSH 鍵ファイルが実際に作成されている', () => {
         const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-file-content\n-----END OPENSSH PRIVATE KEY-----'
         const base64Key = Buffer.from(pemKey).toString('base64')
@@ -477,6 +506,52 @@ describe('TerminalSession', () => {
           // Clean up the directory we created as a collision trap
           try { fs.rmSync(sshKeyPath, { recursive: true, force: true }) } catch { /* ignore */ }
         }
+      })
+
+      it('meta.tenantCode がある場合は TOFU (accept-new) + 永続 known_hosts を使う', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+        mockResolveKnownHostsPath.mockClear()
+        mockResolveKnownHostsPath.mockReturnValue(FAKE_KNOWN_HOSTS_PATH)
+
+        const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-content\n-----END OPENSSH PRIVATE KEY-----'
+        const base64Key = Buffer.from(pemKey).toString('base64')
+
+        session = new TerminalSession('test-ssh-tofu', {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: base64Key,
+          },
+          meta: { tenantCode: 'acme', projectCode: 'ACME_01', userId: 'user-1' },
+        })
+
+        const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+        expect(env.GIT_SSH_COMMAND).toContain('ssh -i')
+        expect(env.GIT_SSH_COMMAND).toContain('-o StrictHostKeyChecking=accept-new')
+        expect(env.GIT_SSH_COMMAND).toContain(`-o UserKnownHostsFile="${FAKE_KNOWN_HOSTS_PATH}"`)
+        expect(env.GIT_SSH_COMMAND).not.toContain('StrictHostKeyChecking=no')
+        expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'shared')
+      })
+
+      it('meta がない場合は従来の StrictHostKeyChecking=no のまま（回帰なし確認）', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+        mockResolveKnownHostsPath.mockClear()
+
+        const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-content\n-----END OPENSSH PRIVATE KEY-----'
+        const base64Key = Buffer.from(pemKey).toString('base64')
+
+        session = new TerminalSession('test-ssh-no-meta', {
+          envVarsOverride: {
+            GIT_SSH_KEY_CONTENT_BASE64: base64Key,
+          },
+        })
+
+        const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+        expect(env.GIT_SSH_COMMAND).toContain('-o StrictHostKeyChecking=no')
+        expect(env.GIT_SSH_COMMAND).toContain('-o UserKnownHostsFile=/dev/null')
+        expect(mockResolveKnownHostsPath).not.toHaveBeenCalled()
       })
 
       it('GIT_SSH_KEY_CONTENT_BASE64 がない場合は GIT_SSH_COMMAND を設定しない', () => {

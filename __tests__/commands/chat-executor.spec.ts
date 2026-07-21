@@ -132,6 +132,39 @@ describe('chat-executor', () => {
   })
 
   describe('activeChatMode routing', () => {
+    it('fails closed when a Slack command is missing the Marketplace tool policy', async () => {
+      const result = await executeChatCommand({
+        payload: { ...basePayload, interactionOrigin: 'slack' },
+        commandId: 'cmd-slack-missing-policy',
+        client: mockClient,
+        agentId: 'agent-1',
+      })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('required read-only tool policy')
+      expect(require('child_process').spawn).not.toHaveBeenCalled()
+    })
+
+    it('does not execute Codex for Slack Marketplace commands and uses API mode when available', async () => {
+      const { executeApiChatCommand } = require('../../src/commands/api-chat-executor')
+      const result = await executeChatCommand({
+        payload: {
+          ...basePayload,
+          interactionOrigin: 'slack',
+          toolPolicy: 'marketplace_read_only',
+          agentChatMode: 'codex',
+        },
+        commandId: 'cmd-slack-codex',
+        client: mockClient,
+        availableChatModes: ['codex', 'api'],
+        agentId: 'agent-1',
+      })
+
+      expect(result.success).toBe(true)
+      expect(executeApiChatCommand).toHaveBeenCalled()
+      expect(require('child_process').spawn).not.toHaveBeenCalled()
+    })
+
     it('should use claude_code mode by default (no activeChatMode)', async () => {
       const { spawn } = require('child_process')
       const mockProcess = {
@@ -1196,6 +1229,58 @@ describe('chat-executor', () => {
         ['-p', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-4-6', '--allowedTools', 'WebFetch', '--allowedTools', 'WebSearch', 'Hello, world!'],
         expect.any(Object),
       )
+    })
+
+    it('disables all Claude tools and project access for Slack Marketplace commands', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const serverConfig: AgentServerConfig = {
+        agentEnabled: true,
+        builtinAgentEnabled: true,
+        builtinFallbackEnabled: true,
+        externalAgentEnabled: true,
+        chatMode: 'agent',
+        claudeCodeConfig: {
+          allowedTools: ['Read', 'Grep', 'Glob', 'Bash', 'Write', 'mcp__dangerous__*'],
+          addDirs: ['/secrets'],
+        },
+      }
+      const payload: ChatPayload = {
+        ...basePayload,
+        interactionOrigin: 'slack',
+        toolPolicy: 'marketplace_read_only',
+      }
+
+      const resultPromise = executeChatCommand({
+        payload,
+        commandId: 'cmd-slack-read-only',
+        client: mockClient,
+        serverConfig,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        projectDir: '/workspace/project',
+        mcpConfigPath: '/tmp/mcp-config.json',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+      await resultPromise
+
+      const [, args, options] = spawn.mock.calls[0]
+      expect(args).toEqual(expect.arrayContaining([
+        '--tools', '',
+      ]))
+      expect(args).not.toEqual(expect.arrayContaining(['--allowedTools']))
+      expect(args).not.toEqual(expect.arrayContaining(['Bash']))
+      expect(args).not.toEqual(expect.arrayContaining(['Write']))
+      expect(args).not.toEqual(expect.arrayContaining(['mcp__dangerous__*']))
+      expect(args).not.toEqual(expect.arrayContaining(['--add-dir']))
+      expect(args).not.toEqual(expect.arrayContaining(['--mcp-config']))
+      expect(options.env).not.toHaveProperty('AWS_PROFILE')
+      expect(options.cwd).toBeUndefined()
     })
 
     it('should pass model from serverConfig.claudeCodeConfig to CLI args', async () => {

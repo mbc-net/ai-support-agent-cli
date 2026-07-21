@@ -10,7 +10,7 @@ import type { ProjectStatus } from './types'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
-import { getErrorMessage } from '../../utils'
+import { ensureDir, getErrorMessage } from '../../utils'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
@@ -508,25 +508,17 @@ export function writeProjectServiceFiles(
 
   const logDir = getLogDir()
   const projectLogDir = getProjectLogDir(logDir, projectKey)
-  if (!fs.existsSync(projectLogDir)) {
-    fs.mkdirSync(projectLogDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(projectLogDir, 0o700)
 
   const launchAgentsDir = getDarwinLaunchAgentsDir()
-  if (!fs.existsSync(launchAgentsDir)) {
-    fs.mkdirSync(launchAgentsDir, { recursive: true })
-  }
+  ensureDir(launchAgentsDir)
 
   const servicesDir = getServicesDir()
   const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  if (!fs.existsSync(projectServiceDir)) {
-    fs.mkdirSync(projectServiceDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(projectServiceDir, 0o700)
 
   const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  if (!fs.existsSync(projectConfigHostDir)) {
-    fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
-  }
+  ensureDir(projectConfigHostDir, 0o700)
 
   // Validate project.projectDir same way the Linux wrapper does. If
   // missing, empty, or blocked (e.g. `/etc`, `~/.ssh`), drop it so
@@ -609,14 +601,10 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     }
 
     const logDir = getLogDir()
-    if (!fs.existsSync(logDir)) {
-      fs.mkdirSync(logDir, { recursive: true })
-    }
+    ensureDir(logDir)
 
     const launchAgentsDir = getDarwinLaunchAgentsDir()
-    if (!fs.existsSync(launchAgentsDir)) {
-      fs.mkdirSync(launchAgentsDir, { recursive: true })
-    }
+    ensureDir(launchAgentsDir)
 
     const updateScriptPath = getUpdateScriptPath()
     const updateScript = generateUpdateScript()

@@ -32,6 +32,93 @@ describe('Dockerfile content validation', () => {
       expect(content).toContain('fonts-noto-cjk')
     })
 
+    describe('backlog-mcp-server pnpm-only preinstall guard', () => {
+      // backlog-mcp-server@0.13.0 added `preinstall: npx only-allow pnpm`,
+      // which aborts `npm install` (exit 254 / npx ENOENT in a fresh Docker
+      // layer). The guard is a footgun from the maintainer's npm->pnpm
+      // dev-workflow migration — the README still tells consumers to run it via
+      // `npx backlog-mcp-server`. Installing it on the plain `npm install -g`
+      // line therefore breaks the whole image build. It must be installed:
+      //  - with `--ignore-scripts` (skips the guard; the package ships
+      //    pre-built with no needed install/postinstall scripts at 0.13.0),
+      //  - PINNED to an exact version, so `--ignore-scripts` stays scoped to a
+      //    verified release rather than silently skipping a future version's
+      //    legitimately-needed lifecycle script, and
+      //  - on its OWN command so the other global packages keep their scripts.
+
+      // Packages that must stay on a normal (scripts-enabled) install.
+      const PROTECTED_PACKAGES = [
+        '@anthropic-ai/claude-code',
+        '@openai/codex',
+        '@ai-support-agent/cli',
+      ]
+
+      let npmInstallCommands: string[]
+
+      beforeAll(() => {
+        // Reduce the Dockerfile to individual shell commands so each
+        // `npm install` invocation is asserted on its own:
+        //  1. strip `#` comment lines (the workaround is explained inline inside
+        //     the RUN block; BuildKit strips such comments before running), so
+        //     comment prose doesn't pollute the code assertions;
+        //  2. join backslash line-continuations into single logical lines;
+        //  3. split on `&&` — the CLI install and the backlog install are two
+        //     separate `npm install` commands chained within one RUN.
+        npmInstallCommands = content
+          .split('\n')
+          .filter((line) => !line.trim().startsWith('#'))
+          .join('\n')
+          .replace(/\\\r?\n\s*/g, ' ')
+          .split('\n')
+          .flatMap((line) => line.split('&&'))
+          .map((cmd) => cmd.trim())
+          .filter((cmd) => cmd.includes('npm install'))
+      })
+
+      // Match the bare `--ignore-scripts` flag on a shell-token boundary so
+      // `--ignore-scripts=false` (which does NOT disable scripts) is not a
+      // false positive.
+      const hasIgnoreScripts = (cmd: string): boolean =>
+        /(?:^|\s)--ignore-scripts(?:\s|$)/.test(cmd)
+
+      // Match the `backlog-mcp-server` package token (optionally `@version`) on
+      // a token boundary so a similarly-named package isn't a false positive.
+      const installsBacklog = (cmd: string): boolean =>
+        /(?:^|\s)backlog-mcp-server(?:@\S+)?(?:\s|$)/.test(cmd)
+
+      it('installs backlog-mcp-server pinned to an exact version with --ignore-scripts to bypass the pnpm-only preinstall guard', () => {
+        const backlogInstalls = npmInstallCommands.filter(installsBacklog)
+        expect(backlogInstalls.length).toBeGreaterThan(0)
+        for (const cmd of backlogInstalls) {
+          expect(hasIgnoreScripts(cmd)).toBe(true)
+          // Exact version pin (x.y.z): keeps --ignore-scripts scoped to a
+          // verified release. An unpinned install would let a future version's
+          // needed lifecycle script be silently skipped.
+          expect(cmd).toMatch(/(?:^|\s)backlog-mcp-server@\d+\.\d+\.\d+(?:\s|$)/)
+        }
+      })
+
+      it('keeps every other global app package on a normal install (scripts enabled), separate from backlog-mcp-server', () => {
+        for (const pkg of PROTECTED_PACKAGES) {
+          const installCmd = npmInstallCommands.find((cmd) => cmd.includes(pkg))
+          expect(installCmd).toBeDefined()
+          // Must not disable scripts (these packages may rely on their install
+          // scripts) and must not carry backlog-mcp-server in the same
+          // invocation (which would re-introduce the guard failure).
+          expect(hasIgnoreScripts(installCmd as string)).toBe(false)
+          expect(installsBacklog(installCmd as string)).toBe(false)
+        }
+      })
+
+      it('smoke-checks the backlog-mcp-server binary at build time so a broken/incomplete install fails the build loudly', () => {
+        // With --ignore-scripts a future version needing a real postinstall
+        // could otherwise ship broken silently. Running the CLI (which exits 0)
+        // right after install makes such breakage fail the Docker build.
+        const normalized = content.replace(/\\\r?\n\s*/g, ' ')
+        expect(normalized).toMatch(/backlog-mcp-server --version/)
+      })
+    })
+
     describe('apt-get update retry on transient network/DNS failure', () => {
       // Transient DNS/network hiccups against deb.debian.org make a single
       // `apt-get update` failure abort the whole build. Every occurrence must
@@ -54,9 +141,9 @@ describe('Dockerfile content validation', () => {
           .trim()
       })
 
-      it('retries the main OS packages, MSSQL tools, and gh/glab final apt-get update (3 attempts, 5s/15s backoff)', () => {
+      it('retries the main OS packages, neovim build deps, libclang-dev, MSSQL tools, and gh/glab final apt-get update (3 attempts, 5s/15s backoff)', () => {
         const occurrences = normalized.split(BARE_RETRY_CHAIN).length - 1
-        expect(occurrences).toBe(3)
+        expect(occurrences).toBe(5)
       })
 
       it('retries the GitHub/GitLab CLI keyring-refresh apt-get update while preserving the tolerant `|| true` fallback', () => {
@@ -64,7 +151,10 @@ describe('Dockerfile content validation', () => {
       })
 
       it('does not leave any apt-get update call without a retry chain', () => {
-        // 4 locations x 3 attempts (1 initial + 2 retries) each = 12.
+        // 6 locations (5 bare-retry + 1 keyring-refresh) x 3 attempts (1
+        // initial + 2 retries) = 18, plus one extra
+        // `--allow-insecure-repositories` fallback attempt on the pre-gh update
+        // (see the "degraded apt signature" describe below) = 19.
         // Strip comment lines first: the Dockerfile mentions "apt-get update"
         // in comments ("reduce apt-get update calls", "before apt-get update").
         const codeOnly = content
@@ -72,7 +162,186 @@ describe('Dockerfile content validation', () => {
           .filter((line) => !line.trim().startsWith('#'))
           .join('\n')
         const totalUpdateCalls = (codeOnly.match(/apt-get update\b/g) || []).length
-        expect(totalUpdateCalls).toBe(12)
+        expect(totalUpdateCalls).toBe(19)
+      })
+    })
+
+    describe('gh/glab install tolerates degraded apt signature verification', () => {
+      // When this layer runs on a cached base whose Debian signing keys have
+      // rotated (or whose GPG state is otherwise degraded — a recurring Docker
+      // Desktop symptom), apt reports "At least one invalid signature was
+      // encountered" for EVERY repo, including the Debian base repos. The FIRST
+      // apt-get update in this RUN block already tolerates that with
+      // `--allow-insecure-repositories ... || true`, but the SECOND update (run
+      // right before installing gh) and the `apt-get install gh` were left on
+      // the strict path, so they hard-fail the whole image build with exit 100.
+      //
+      // The fix must NOT blindly weaken security: it degrades to
+      // --allow-unauthenticated ONLY when the strict update actually fails with
+      // the "invalid signature" symptom (a degraded base gpgv). Every other kind
+      // of failure — network, bad URL, a genuine tampered-package signature
+      // mismatch — must still surface as a hard build failure. Fall-backs log a
+      // WARNING to stderr, and gh/glab are smoke-checked so a broken or missing
+      // binary fails the build loudly instead of shipping green.
+
+      let normalized: string
+
+      beforeAll(() => {
+        normalized = content
+          .replace(/\\\r?\n/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+      })
+
+      it('probes for the "invalid signature" symptom before degrading, and only sets DEGRADED on that exact symptom', () => {
+        // The strict update failure path captures apt output and only flags
+        // DEGRADED when the known degraded-base symptom is present.
+        expect(normalized).toContain(
+          'UPD_OUT="$(apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false 2>&1)"',
+        )
+        expect(normalized).toMatch(
+          /if echo "\$UPD_OUT" \| grep -q "invalid signature"; then/,
+        )
+        expect(normalized).toMatch(/DEGRADED=1/)
+      })
+
+      it('installs gh with --allow-unauthenticated ONLY inside the DEGRADED branch (never unconditionally)', () => {
+        // The unauthenticated install must appear exactly once, gated by the
+        // DEGRADED flag; the else branch keeps full authentication.
+        const unauthGhCount = (
+          normalized.match(/--allow-unauthenticated gh\b/g) || []
+        ).length
+        expect(unauthGhCount).toBe(1)
+        expect(normalized).toMatch(
+          /if \[ -n "\$DEGRADED" \]; then apt-get install -y --no-install-recommends --allow-unauthenticated gh ; else apt-get install -y --no-install-recommends gh ; fi/,
+        )
+      })
+
+      it('logs a WARNING to stderr on every fall-back so degraded installs are visible in the build log', () => {
+        expect(normalized).toMatch(
+          /echo "WARNING: gh: degraded base GPG detected; continuing in degraded \(unauthenticated\) mode" >&2/,
+        )
+        expect(normalized).toMatch(
+          /echo "WARNING: gh: strict package-list refresh failed; probing for degraded base GPG \(invalid signature\)" >&2/,
+        )
+      })
+
+      it('smoke-checks gh and glab at build time so a broken/missing binary fails the build loudly', () => {
+        expect(normalized).toMatch(/&& gh --version\b/)
+        expect(normalized).toMatch(/&& glab --version\b/)
+      })
+    })
+
+    describe('vi/vim resolve to the built neovim, not apt vim.basic', () => {
+      // apt installs `vim` (Layer 1), which registers `vim.basic` as an
+      // update-alternatives choice for `vi`/`vim` at priority 30. Neovim is
+      // separately built from source into /opt/nvim/bin/nvim and symlinked to
+      // /usr/local/bin/nvim, but without registering it as an alternative for
+      // vi/vim, typing `vi`/`vim` in the agent shell still launches apt's vim
+      // instead of nvim. Registering nvim at priority 60 (higher than
+      // vim.basic's 30) makes update-alternatives select it automatically.
+      // Verified in a minimal Debian bookworm container: after
+      // `apt-get install vim` + this update-alternatives call,
+      // `update-alternatives --display vi`/`vim` both point at nvim.
+      it('registers /opt/nvim/bin/nvim as the vi alternative at a priority higher than apt vim.basic (30)', () => {
+        expect(content).toMatch(
+          /update-alternatives --install \/usr\/bin\/vi vi \/opt\/nvim\/bin\/nvim 60\b/,
+        )
+      })
+
+      it('registers /opt/nvim/bin/nvim as the vim alternative at a priority higher than apt vim.basic (30)', () => {
+        expect(content).toMatch(
+          /update-alternatives --install \/usr\/bin\/vim vim \/opt\/nvim\/bin\/nvim 60\b/,
+        )
+      })
+
+      // update-alternatives --install only proves the candidate was
+      // registered — not that it actually won priority and resolves. A
+      // pure path-equality check (readlink -f) would only prove "registered
+      // as a candidate", not that /usr/bin/vi and /usr/bin/vim actually
+      // *invoke* neovim at build time. Running `vi --version`/`vim
+      // --version` and grepping for the NVIM banner closes that gap: if
+      // update-alternatives silently picked a different alternative (e.g. a
+      // stale prior registration, or priority tie resolution surprises),
+      // this fails the build loudly instead of shipping a vi/vim that
+      // silently launches apt's vim.basic instead of neovim.
+      it('verifies at build time that vi/vim actually resolve to and execute neovim (readlink -f path check + NVIM version banner), not just that the alternative was registered', () => {
+        const normalized = content.replace(/\\\r?\n\s*/g, ' ')
+        expect(normalized).toMatch(
+          /\[ "\$\(readlink -f \/usr\/bin\/vi\)" = "\/opt\/nvim\/bin\/nvim" \]/,
+        )
+        expect(normalized).toMatch(
+          /\[ "\$\(readlink -f \/usr\/bin\/vim\)" = "\/opt\/nvim\/bin\/nvim" \]/,
+        )
+        expect(normalized).toMatch(/vi --version \| grep -q NVIM\b/)
+        expect(normalized).toMatch(/vim --version \| grep -q NVIM\b/)
+      })
+    })
+
+    describe('lazygit binary (lazygit.nvim shells out to it)', () => {
+      // lazygit.nvim (bundled in docker/nvim/init.lua) launches the `lazygit`
+      // TUI as an external process — it is not an nvim plugin dependency that
+      // lazy.nvim can install, so the real binary must be present on PATH.
+      // Debian bookworm does not package lazygit, so (mirroring eza above) a
+      // dual-arch GitHub release tarball is downloaded and pinned to an exact
+      // version rather than "latest".
+      it('pins LAZYGIT_VERSION to an exact version (not "latest")', () => {
+        expect(content).toMatch(/ARG LAZYGIT_VERSION=\d+\.\d+\.\d+\b/)
+      })
+
+      it('downloads the linux tarball, branching on dpkg architecture (x86_64 / arm64)', () => {
+        expect(content).toMatch(
+          /lazygit_\$\{LAZYGIT_VERSION\}_linux_\$\{LAZYGIT_ARCH\}\.tar\.gz/,
+        )
+        expect(content).toMatch(/LAZYGIT_ARCH="arm64"/)
+        expect(content).toMatch(/LAZYGIT_ARCH="x86_64"/)
+      })
+
+      it('extracts the lazygit binary to /usr/local/bin', () => {
+        expect(content).toMatch(/mv \/tmp\/lazygit-extract\/lazygit \/usr\/local\/bin\/lazygit\b/)
+      })
+
+      it('smoke-checks lazygit at build time so a broken/missing binary fails the build loudly', () => {
+        expect(content).toMatch(/&& lazygit --version\b/)
+      })
+
+      // Code review (second opinion) flagged that downloading a GitHub
+      // release binary and running it (`lazygit --version`) with no
+      // integrity check means a compromised release asset or a tampered
+      // download path would be installed and executed without detection.
+      // Pinning the expected SHA-256 per architecture and verifying it with
+      // `sha256sum -c` before extraction closes that gap.
+      it('pins a SHA-256 checksum for each architecture (x86_64 / arm64)', () => {
+        expect(content).toMatch(/ARG LAZYGIT_SHA256_X86_64=[0-9a-f]{64}\b/)
+        expect(content).toMatch(/ARG LAZYGIT_SHA256_ARM64=[0-9a-f]{64}\b/)
+      })
+
+      it('verifies the downloaded tarball against the pinned checksum with sha256sum -c before extracting it', () => {
+        const normalized = content.replace(/\\\r?\n\s*/g, ' ')
+        expect(normalized).toMatch(
+          /echo "\$\{?LAZYGIT_SHA256\}?\s+\/tmp\/lazygit\.tar\.gz" \| sha256sum -c -/,
+        )
+        // The checksum verification must run after the download and before
+        // extraction, not after the fact.
+        const downloadIdx = normalized.indexOf('lazygit.tar.gz')
+        const verifyIdx = normalized.indexOf('sha256sum -c -')
+        const extractIdx = normalized.indexOf('tar -xzf /tmp/lazygit.tar.gz')
+        expect(downloadIdx).toBeGreaterThan(-1)
+        expect(verifyIdx).toBeGreaterThan(downloadIdx)
+        expect(extractIdx).toBeGreaterThan(verifyIdx)
+      })
+    })
+
+    describe('git pager disabled for the agent shell', () => {
+      // git branch/log/diff/show default to piping through an interactive
+      // pager (less) whenever stdout is a tty. This agent's shell is driven by
+      // an AI agent (or an automated flow) over a PTY with no human at the
+      // keyboard to press "q" — an interactive pager left enabled means any
+      // such command can hang forever waiting for input that never comes.
+      // core.pager=cat makes these commands print directly, like `cat`, with
+      // no pager and no risk of blocking the session.
+      it('sets git core.pager to cat system-wide', () => {
+        expect(content).toMatch(/git config --system core\.pager cat\b/)
       })
     })
   })

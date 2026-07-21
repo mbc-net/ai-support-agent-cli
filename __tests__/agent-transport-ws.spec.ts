@@ -260,6 +260,7 @@ describe('startVsCodeTunnel', () => {
       '/test/project/workspace', // workspaceDir = file-upload resolution root
       undefined, // envVarsProvider (configSyncState 未指定時)
       expect.any(Function), // onAuthRejected (常に heartbeat 記録用に配線される)
+      'test', // tenantCode (validateTenantCodeの照合基準としてdeps.tenantCodeを渡す)
     )
     expect(state.vsCodeWs).not.toBeNull()
     expect(mockConnect).toHaveBeenCalled()
@@ -286,6 +287,7 @@ describe('startVsCodeTunnel', () => {
       '/test/project/workspace', // workspaceDir = file-upload resolution root
       undefined,
       expect.any(Function),
+      'test', // tenantCode
     )
   })
 
@@ -390,6 +392,7 @@ describe('startVsCodeTunnel', () => {
       '/test/project/workspace', // workspaceDir = file-upload resolution root
       undefined, // envVarsProvider (configSyncState 未指定時)
       expect.any(Function), // onAuthRejected (常に heartbeat 記録用に配線される)
+      'test', // tenantCode (validateTenantCodeの照合基準としてdeps.tenantCodeを渡す)
     )
   })
 })
@@ -625,6 +628,50 @@ describe('processCommand processing flag', () => {
 
     expect(processingDuringExecution).toBe(true)
     expect(state.processing).toBe(false)
+  })
+
+  it('forces the Marketplace tool policy from the trusted Slack command userId', async () => {
+    const { executeCommand } = require('../src/commands')
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands: jest.fn().mockResolvedValue([]),
+        getCommand: jest.fn().mockResolvedValue({
+          type: 'chat',
+          userId: 'slack:U123456',
+          payload: {
+            message: 'run pwd',
+            agentChatMode: 'claude_code',
+            interactionOrigin: 'web',
+            toolPolicy: 'unrestricted',
+          },
+        }),
+        submitResult: jest.fn().mockResolvedValue(undefined),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    const ctx = createMockCtx(state)
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n-slack', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
+      content: {
+        commandId: 'cmd-slack',
+        agentId: 'agent-1',
+        tenantCode: 'test',
+        projectCode: 'TEST_PROJ',
+        type: 'chat',
+      },
+    })
+
+    expect(executeCommand).toHaveBeenCalledWith(
+      'chat',
+      expect.objectContaining({
+        interactionOrigin: 'slack',
+        toolPolicy: 'marketplace_read_only',
+      }),
+      expect.anything(),
+    )
   })
 
   it('should reset processing=false even when command execution throws', async () => {
@@ -1798,6 +1845,7 @@ describe('startVsCodeTunnel: no projectDir', () => {
       undefined, // workspaceDir (projectDir 未設定)
       undefined, // envVarsProvider
       expect.any(Function), // onAuthRejected (常に heartbeat 記録用に配線される)
+      deps.tenantCode, // tenantCode
     )
   })
 })

@@ -269,6 +269,15 @@ export const ONESHOT_ENV_VARS = {
 /** Value of AGENT_MODE that switches the CLI into oneshot (ECS container) mode */
 export const AGENT_MODE_ONESHOT = 'oneshot'
 
+/**
+ * Capability declared by agents that can execute a server-setup recipe body
+ * (`server_setup_exec` with custom Ansible tasks). The api dispatch
+ * (`ServerSetupDispatchService`) refuses to dispatch a body-carrying recipe to
+ * any agent that does not advertise this — must stay in sync with the api's
+ * `SERVER_SETUP_CUSTOM_TASKS_CAPABILITY`.
+ */
+export const SERVER_SETUP_CUSTOM_TASKS_CAPABILITY = 'server_setup_custom_tasks'
+
 /** Fixed container name used in the registered ECS task definition */
 export const ECS_AGENT_CONTAINER_NAME = 'app'
 
@@ -315,11 +324,15 @@ export const ANTHROPIC_CONTENT_TYPE = {
 export const GIT_CLONE_TIMEOUT = 120_000
 export const GIT_FETCH_TIMEOUT = 60_000
 export const GIT_CHECKOUT_TIMEOUT = 30_000
+export const GIT_CONFIG_TIMEOUT = 10_000
 
-// SSH options shared by every place that shells out to `ssh` for git operations
-// (GIT_SSH_COMMAND env value, generated SSH wrapper scripts). The agent manages
-// its own per-repository key material, so known_hosts verification is skipped
-// intentionally rather than left to the ambient environment.
+// Legacy fallback SSH options, used ONLY when tenantCode is unavailable (no
+// meta on a terminal `open`, or an unauthenticated ApiClient) and TOFU host-key
+// checking cannot be namespaced per tenant. The normal path (repo-sync.ts,
+// git-credential-setup.ts, terminal-session.ts) uses `resolveKnownHostsPath`
+// (src/utils/known-hosts-store.ts) + `-o StrictHostKeyChecking=accept-new` so
+// host-key changes ARE detected. Do not use these flags directly for a new
+// git-over-ssh call site — that would silently skip MITM detection.
 export const SSH_NO_HOST_CHECK_FLAGS = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
 // Child process management

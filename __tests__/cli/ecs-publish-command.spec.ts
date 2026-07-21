@@ -61,6 +61,7 @@ import { Command } from 'commander'
 
 import {
   type EcsPublishCliOptions,
+  parseRunAsUser,
   registerEcsCommands,
   resolveTargetProject,
   runEcsPublish,
@@ -146,6 +147,20 @@ describe('resolveTargetProject', () => {
   })
 })
 
+describe('parseRunAsUser', () => {
+  it('returns undefined for an unset value', () => {
+    expect(parseRunAsUser(undefined)).toBeUndefined()
+  })
+
+  it.each(['1000', '1000:1000', 'appuser', 'app-user_1'])('accepts %s', (value) => {
+    expect(parseRunAsUser(value)).toBe(value)
+  })
+
+  it.each(['bad user', '1000:', ':1000', 'a:b:c', ''])('rejects %s', (value) => {
+    expect(() => parseRunAsUser(value)).toThrow('--run-as-user must be a uid')
+  })
+})
+
 describe('runEcsPublish', () => {
   it('publishes the image, registers the task definition and the agent, then persists the agentId', async () => {
     await runEcsPublish(baseOpts({ name: 'My ECS Agent', assignPublicIp: true, launcherAgentId: 'launcher-1' }))
@@ -172,7 +187,9 @@ describe('runEcsPublish', () => {
     const registration = mockRegisterEcsAgent.mock.calls[0][0]
     expect(registration.agentId).toMatch(/^ecs-[0-9a-f-]{36}$/)
     expect(registration.displayName).toBe('My ECS Agent')
-    expect(registration.capabilities).toEqual([])
+    // ECS execution agents advertise the server-setup custom-tasks capability
+    // so the api will dispatch body-carrying recipes to them.
+    expect(registration.capabilities).toEqual(['server_setup_custom_tasks'])
     expect(registration.ecsConfig).toMatchObject({
       imageUri: `${REPO_URI}@${DIGEST}`,
       imageTag: 'v1',
@@ -242,6 +259,37 @@ describe('runEcsPublish', () => {
     expect(config.logGroupName).toBe('/custom/group')
     // assignPublicIp not specified -> omitted from the registration
     expect('assignPublicIp' in config).toBe(false)
+  })
+
+  it('does not pass any ECS isolation fields by default (back-compat)', async () => {
+    await runEcsPublish(baseOpts())
+    const tdOptions = mockRegisterTaskDefinition.mock.calls[0][0]
+    expect('readonlyRootFilesystem' in tdOptions).toBe(false)
+    expect('user' in tdOptions).toBe(false)
+    expect('dropCapabilities' in tdOptions).toBe(false)
+  })
+
+  it('passes opt-in ECS isolation fields through to the registrar', async () => {
+    await runEcsPublish(baseOpts({
+      readonlyRootfs: true,
+      runAsUser: '1000:1000',
+      dropCapabilities: ['ALL'],
+    }))
+    const tdOptions = mockRegisterTaskDefinition.mock.calls[0][0]
+    expect(tdOptions.readonlyRootFilesystem).toBe(true)
+    expect(tdOptions.user).toBe('1000:1000')
+    expect(tdOptions.dropCapabilities).toEqual(['ALL'])
+  })
+
+  it('omits an empty --drop-capabilities list', async () => {
+    await runEcsPublish(baseOpts({ dropCapabilities: [] }))
+    expect('dropCapabilities' in mockRegisterTaskDefinition.mock.calls[0][0]).toBe(false)
+  })
+
+  it('rejects an invalid --run-as-user before publishing anything', async () => {
+    await expect(runEcsPublish(baseOpts({ runAsUser: 'bad user!' })))
+      .rejects.toThrow('--run-as-user must be a uid')
+    expect(mockPublishImage).not.toHaveBeenCalled()
   })
 
   it('throws when no configuration exists', async () => {

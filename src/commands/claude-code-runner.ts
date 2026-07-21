@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 
-import { CHAT_SIGKILL_DELAY, CHAT_TIMEOUT, CHAT_TOOL_EXECUTION_TIMEOUT, DEFAULT_CLAUDE_MODEL, ERR_CLAUDE_CLI_NOT_FOUND, LOG_DEBUG_LIMIT } from '../constants'
+import { CHAT_TIMEOUT, CHAT_TOOL_EXECUTION_TIMEOUT, DEFAULT_CLAUDE_MODEL, ERR_CLAUDE_CLI_NOT_FOUND, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import type { ChatChunkType } from '../types'
 import { createActivityTimeout } from '../utils/activity-timeout'
@@ -10,6 +10,8 @@ import { StreamLineParser } from '../utils/stream-parser'
 
 import { buildClaudeArgs, buildCleanEnv } from './claude-code-args'
 import { processStreamJsonLine, type StreamJsonUsage } from './claude-code-stream'
+import { killWithEscalation } from './cli-process-kill'
+import { applyEnvVarsOverride, applyPolicyContextEnv, type PolicyContext } from './cli-runner-env'
 import { resolveValidPluginDir } from './plugin-dir'
 import { isErrnoException } from '../utils'
 
@@ -39,23 +41,14 @@ export interface ClaudeCodeHandle {
   cancel: () => void
 }
 
-/** Hook payload に含めるポリシー評価コンテキスト */
-export interface PolicyContext {
-  tenantCode?: string
-  projectCode?: string
-  conversationId?: string
-  browserSessionId?: string
-  browserLocalPort?: number
-  e2eExecutionId?: string
-  e2eTestCaseId?: string
-  taskId?: string
-}
+export type { PolicyContext }
 
 /** runClaudeCode のオプション */
 export interface RunClaudeCodeOptions {
   message: string
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>
   allowedTools?: string[]
+  tools?: string[]
   addDirs?: string[]
   locale?: string
   awsEnv?: Record<string, string>
@@ -82,7 +75,7 @@ export interface RunClaudeCodeOptions {
  * ClaudeCodeHandle を返す: result Promise と kill 関数
  */
 export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
-  const { message, sendChunk, allowedTools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt, model, policyContext, envVarsOverride } = options
+  const { message, sendChunk, allowedTools, tools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt, model, policyContext, envVarsOverride } = options
 
   let killFn: () => void = () => { /* noop until child is spawned */ }
 
@@ -95,26 +88,10 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     const env: Record<string, string> = awsEnv ? { ...cleanEnv, ...awsEnv } : { ...cleanEnv }
 
     // Hook payload 用のポリシーコンテキスト環境変数を設定
-    if (policyContext) {
-      if (policyContext.tenantCode) env.AI_SUPPORT_TENANT_CODE = policyContext.tenantCode
-      if (policyContext.projectCode) env.AI_SUPPORT_PROJECT_CODE = policyContext.projectCode
-      if (policyContext.conversationId) env.AI_SUPPORT_CONVERSATION_ID = policyContext.conversationId
-      if (policyContext.browserSessionId) env.AI_SUPPORT_BROWSER_SESSION_ID = policyContext.browserSessionId
-      if (policyContext.browserLocalPort) env.AI_SUPPORT_BROWSER_LOCAL_PORT = String(policyContext.browserLocalPort)
-      if (policyContext.e2eExecutionId) env.AI_SUPPORT_E2E_EXECUTION_ID = policyContext.e2eExecutionId
-      if (policyContext.e2eTestCaseId) env.AI_SUPPORT_E2E_TEST_CASE_ID = policyContext.e2eTestCaseId
-      if (policyContext.taskId) env.AI_SUPPORT_TASK_ID = policyContext.taskId
-    }
+    applyPolicyContextEnv(env, policyContext)
 
     // Web 設定（CLAUDE_CODE# / ENV#）の env 上書き — 最後にマージして cleanEnv より優先
-    // 非文字列値（null/undefined/数値等）は spawn が文字列化して "null" 等が
-    // env として設定されてしまうため、防御的に typeof チェックする
-    if (envVarsOverride) {
-      for (const [key, value] of Object.entries(envVarsOverride)) {
-        if (typeof value !== 'string' || value === '') continue
-        env[key] = value
-      }
-    }
+    applyEnvVarsOverride(env, envVarsOverride)
     // --model に渡す値を「JSON設定 > env > デフォルト」の優先順位で解決する。
     // claude CLI は --model フラグ > ANTHROPIC_MODEL env の順で評価するため、
     // env が指定されている場合は --model を付けず CLI に env を尊重させる。
@@ -124,7 +101,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     const resolvedModel = explicitModel
       ? explicitModel
       : (envModel ? undefined : DEFAULT_CLAUDE_MODEL)
-    const args = buildClaudeArgs(message, { allowedTools, addDirs, locale, mcpConfigPath, systemPrompt, model: resolvedModel, pluginDir: resolveValidPluginDir() ?? undefined })
+    const args = buildClaudeArgs(message, { allowedTools, tools, addDirs, locale, mcpConfigPath, systemPrompt, model: resolvedModel, pluginDir: resolveValidPluginDir() ?? undefined })
 
     // どの経路でモデルが決まったかをログ出力し、「--model が付かなかった理由
     // （env 尊重 vs バグ）」をログだけで判別できるようにする。
@@ -154,13 +131,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     killFn = () => {
       if (child.killed) return
       logger.info(`[chat] Killing claude CLI process (pid=${child.pid})`)
-      child.kill('SIGTERM')
-      setTimeout(() => {
-        if (!child.killed) {
-          logger.warn(`[chat] claude CLI still running after SIGTERM, sending SIGKILL (pid=${child.pid})`)
-          child.kill('SIGKILL')
-        }
-      }, CHAT_SIGKILL_DELAY)
+      killWithEscalation(child, 'claude')
     }
 
     let resultText = ''
@@ -181,13 +152,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     let sigkillTimer: NodeJS.Timeout | undefined
     const activityTimeout = createActivityTimeout(CHAT_TIMEOUT, () => {
       logger.warn(`[chat] claude CLI timed out (pid=${child.pid}), sending SIGTERM`)
-      child.kill('SIGTERM')
-      sigkillTimer = setTimeout(() => {
-        if (!child.killed) {
-          logger.warn(`[chat] claude CLI still running after SIGTERM, sending SIGKILL (pid=${child.pid})`)
-          child.kill('SIGKILL')
-        }
-      }, CHAT_SIGKILL_DELAY)
+      sigkillTimer = killWithEscalation(child, 'claude')
     }, CHAT_TOOL_EXECUTION_TIMEOUT)
 
     child.stdout.on('data', (data: Buffer) => {

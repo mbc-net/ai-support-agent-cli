@@ -201,6 +201,178 @@ describe('sentry', () => {
       const result = beforeSend(event)
       expect(result.breadcrumbs[0].message).toBeUndefined()
     })
+
+    it('exception.values[].value 内の機密情報をマスクする', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = {
+        exception: {
+          values: [
+            {
+              type: 'Error',
+              value: 'Failed with Bearer eyJhbGciOiJIUzI1NiJ9',
+            },
+          ],
+        },
+      }
+      const result = beforeSend(event)
+      expect(result.exception.values[0].value).toBe('Failed with Bearer ****')
+    })
+
+    it('exception.values が複数ある場合は全て機密情報をマスクする', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = {
+        exception: {
+          values: [
+            { type: 'Error', value: 'token=abc123' },
+            { type: 'Error', value: 'password=mypass123' },
+          ],
+        },
+      }
+      const result = beforeSend(event)
+      expect(result.exception.values[0].value).toBe('token=****')
+      expect(result.exception.values[1].value).toBe('password=****')
+    })
+
+    it('exception.values[].stacktrace.frames 内の文字列情報もマスクする', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = {
+        exception: {
+          values: [
+            {
+              type: 'Error',
+              value: 'boom',
+              stacktrace: {
+                frames: [
+                  {
+                    filename: 'src/foo.ts',
+                    context_line: 'const token = "token=abc123"',
+                    pre_context: ['password=mypass123'],
+                    post_context: ['normal line'],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      }
+      const result = beforeSend(event)
+      const frame = result.exception.values[0].stacktrace.frames[0]
+      expect(frame.context_line).toBe(maskSecrets('const token = "token=abc123"'))
+      expect(frame.context_line).not.toContain('abc123')
+      expect(frame.pre_context[0]).toBe('password=****')
+      expect(frame.post_context[0]).toBe('normal line')
+    })
+
+    it('exception.values が undefined の場合はそのまま返す', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = { message: 'no exception field' }
+      const result = beforeSend(event)
+      expect(result).toEqual(event)
+    })
+
+    it('value が undefined の exception エントリはそのまま保持する', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = {
+        exception: {
+          values: [{ type: 'Error' }],
+        },
+      }
+      const result = beforeSend(event)
+      expect(result.exception.values[0].value).toBeUndefined()
+    })
+
+    it('event.message 内の機密情報をマスクする', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = {
+        message: 'Request failed with Bearer eyJhbGciOiJIUzI1NiJ9',
+      }
+      const result = beforeSend(event)
+      expect(result.message).toBe('Request failed with Bearer ****')
+    })
+
+    it('event.message が undefined の場合はそのまま保持する', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = { exception: { values: [] } }
+      const result = beforeSend(event)
+      expect(result.message).toBeUndefined()
+    })
+
+    it('event.extra の文字列値内の機密情報をマスクする', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = {
+        extra: {
+          handler: 'uncaughtException',
+          detail: 'token=abc123',
+        },
+      }
+      const result = beforeSend(event)
+      expect(result.extra.detail).toBe('token=****')
+      expect(result.extra.handler).toBe('uncaughtException')
+    })
+
+    it('event.extra の非文字列値はそのまま保持する', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = {
+        extra: {
+          count: 3,
+          flag: true,
+          nested: { token: 'abc123' },
+          list: ['token=abc123'],
+        },
+      }
+      const result = beforeSend(event)
+      expect(result.extra.count).toBe(3)
+      expect(result.extra.flag).toBe(true)
+      expect(result.extra.nested).toEqual({ token: 'abc123' })
+      expect(result.extra.list).toEqual(['token=abc123'])
+    })
+
+    it('event.extra が undefined の場合はそのまま返す', async () => {
+      jest.resetModules()
+      process.env.SENTRY_DSN = 'https://test@sentry.io/123'
+      const mod = require('../src/sentry')
+      await mod.initSentry()
+      const beforeSend = mockInit.mock.calls[0][0].beforeSend
+      const event = { message: 'no extra field' }
+      const result = beforeSend(event)
+      expect(result.extra).toBeUndefined()
+    })
   })
 
   describe('beforeBreadcrumb', () => {

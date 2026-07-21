@@ -28,6 +28,7 @@ export function buildClaudeArgs(
   message: string,
   options?: {
     allowedTools?: string[]
+    tools?: string[]
     addDirs?: string[]
     locale?: string
     mcpConfigPath?: string
@@ -37,6 +38,9 @@ export function buildClaudeArgs(
   },
 ): string[] {
   const args = ['-p', '--output-format', 'stream-json', CLI_FLAG_VERBOSE]
+  if (options?.tools !== undefined) {
+    args.push('--tools', options.tools.join(','))
+  }
   if (options?.pluginDir) {
     args.push('--plugin-dir', options.pluginDir)
   }

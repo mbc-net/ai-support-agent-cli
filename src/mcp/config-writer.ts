@@ -1,9 +1,9 @@
 import { randomUUID } from 'crypto'
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 
 import { logger } from '../logger'
-import { getErrorMessage } from '../utils'
+import { getErrorMessage, sweepStaleEntries } from '../utils'
 
 export interface BacklogMcpConfig {
   domain: string
@@ -339,29 +339,17 @@ export function cleanupStaleCommandMcpConfigs(
   maxAgeMs: number = 24 * 60 * 60 * 1000,
 ): number {
   const dir = dirname(baseConfigPath)
-  let entries: string[]
-  try {
-    entries = readdirSync(dir)
-  } catch {
-    return 0
-  }
-
-  const now = Date.now()
-  let removed = 0
-  for (const name of entries) {
-    if (!name.startsWith('config-') || !name.endsWith('.json')) continue
-    const fullPath = join(dir, name)
-    try {
-      const stat = statSync(fullPath)
-      if (maxAgeMs > 0 && now - stat.mtimeMs < maxAgeMs) continue
-      rmSync(fullPath, { force: true })
-      removed++
-    } catch (error) {
-      // 個々のファイル失敗で掃除全体を止めないが、無音のまま握り潰さず記録する
-      // （どのファイルが掃除されなかったか運用上追跡できるようにする）。
-      logger.warn(`[mcp-config] Failed to clean up stale per-command MCP config ${name}: ${getErrorMessage(error)}`)
-    }
-  }
-  return removed
+  return sweepStaleEntries(
+    dir,
+    (name) => name.startsWith('config-') && name.endsWith('.json'),
+    {
+      maxAgeMs,
+      onError: (name, error) => {
+        // 個々のファイル失敗で掃除全体を止めないが、無音のまま握り潰さず記録する
+        // （どのファイルが掃除されなかったか運用上追跡できるようにする）。
+        logger.warn(`[mcp-config] Failed to clean up stale per-command MCP config ${name}: ${getErrorMessage(error)}`)
+      },
+    },
+  )
 }
 
