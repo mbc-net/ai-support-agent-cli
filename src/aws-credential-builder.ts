@@ -14,6 +14,7 @@ export interface AwsCredentialResult {
   env?: Record<string, string>
   errors: string[]
   ssoAuthRequired: SsoAuthRequiredInfo[]
+  cleanup?: () => void
 }
 
 interface CredentialError {
@@ -64,7 +65,7 @@ export async function buildAwsProfileCredentials(
   if (!accounts?.length) return { errors: [], ssoAuthRequired: [] }
 
   const projectCode = projectConfig.project.projectCode
-  const { writeAwsCredentials, buildAwsProfileEnv } = await import('./aws-profile')
+  const { writeAwsCredentials, buildAwsProfileEnv, cleanupAwsCredentials } = await import('./aws-profile')
   const credentialMap = new Map<string, import('./types').AwsCredentials>()
   const errors: string[] = []
   const ssoAuthRequired: SsoAuthRequiredInfo[] = []
@@ -86,8 +87,15 @@ export async function buildAwsProfileCredentials(
 
   if (credentialMap.size === 0) return { errors, ssoAuthRequired }
 
-  // credentials ファイルに書き込み
-  writeAwsCredentials(projectDir, projectCode, credentialMap)
+  // credentials ファイルに書き込み（呼び出しごとに一意なパス。並行実行される
+  // 別のチャットコマンドのファイルと衝突しない）
+  const credentialsPath = writeAwsCredentials(projectDir, projectCode, credentialMap)
+  if (!credentialsPath) {
+    // 書き込み失敗時は env を提供せず、cleanup も無害な no-op にする。
+    // 利用者への通知（sendAwsCredentialNotices 経由）に載せるため errors にも記録する。
+    errors.push('AWS認証情報ファイルの書き込みに失敗しました')
+    return { errors, ssoAuthRequired, cleanup: () => {} }
+  }
 
   // デフォルトアカウントを特定
   const defaultAccount = accounts.find((a) => a.isDefault) ?? accounts[0]
@@ -95,11 +103,12 @@ export async function buildAwsProfileCredentials(
   const env = buildAwsProfileEnv(
     projectDir,
     projectCode,
+    credentialsPath,
     defaultAccount.name,
     defaultAccount.region,
   )
 
-  return { env, errors, ssoAuthRequired }
+  return { env, errors, ssoAuthRequired, cleanup: () => cleanupAwsCredentials(credentialsPath) }
 }
 
 /**
@@ -123,11 +132,11 @@ export async function buildSingleAccountAwsEnv(
       ...(creds.sessionToken ? { AWS_SESSION_TOKEN: creds.sessionToken } : {}),
     }
     logger.info(`[chat] AWS credentials obtained for region=${creds.region}`)
-    return { env, errors: [], ssoAuthRequired: [] }
+    return { env, errors: [], ssoAuthRequired: [], cleanup: () => {} }
   } catch (error) {
     const { errorMessage, ssoInfo } = extractAwsCredentialError(error, awsAccountId)
     const ssoAuthRequired: SsoAuthRequiredInfo[] = ssoInfo ? [ssoInfo] : []
     logger.warn(`[chat] Failed to get AWS credentials: ${getErrorMessage(error)}`)
-    return { errors: [errorMessage], ssoAuthRequired }
+    return { errors: [errorMessage], ssoAuthRequired, cleanup: () => {} }
   }
 }

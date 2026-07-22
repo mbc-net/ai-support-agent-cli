@@ -319,6 +319,7 @@ async function executeCliChatOnce(
   }
 
   let cleanupDownloads: (() => void) | undefined
+  let cleanupAwsCredentials: (() => void) | undefined
   let cleanupGitCredentials: (() => void) | undefined
   let cleanupCommandMcpConfig: (() => void) | undefined
 
@@ -351,11 +352,12 @@ async function executeCliChatOnce(
 
     // AWS認証情報を取得（プロファイル方式 or 環境変数直接注入）
     const projectCode = parseString(payload.projectCode) ?? projectConfig?.project.projectCode
-    const { awsEnv, gitEnv, cleanupGitCredentials: gitCleanup } = slackMarketplaceCommand
-      ? { awsEnv: undefined, gitEnv: undefined, cleanupGitCredentials: undefined }
+    const { awsEnv, gitEnv, cleanupAwsCredentials: awsCleanup, cleanupGitCredentials: gitCleanup } = slackMarketplaceCommand
+      ? { awsEnv: undefined, gitEnv: undefined, cleanupAwsCredentials: undefined, cleanupGitCredentials: undefined }
       : await buildEnvironmentCredentials(
           payload, client, projectDir, projectConfig, projectCode, sendChunk,
         )
+    cleanupAwsCredentials = awsCleanup
     cleanupGitCredentials = gitCleanup
 
     // 添付ファイルのダウンロード
@@ -515,12 +517,14 @@ async function executeCliChatOnce(
 
     // 一時ファイルをクリーンアップ
     cleanupDownloads?.()
+    cleanupAwsCredentials?.()
     cleanupGitCredentials?.()
     cleanupCommandMcpConfig?.()
 
     return successResult(result.text)
   } catch (error) {
     cleanupDownloads?.()
+    cleanupAwsCredentials?.()
     cleanupGitCredentials?.()
     cleanupCommandMcpConfig?.()
     if (suppressRuntimeUnavailableError && isRuntimeUnavailableErrorMessage(mode, getErrorMessage(error))) {
@@ -549,18 +553,38 @@ async function buildEnvironmentCredentials(
 ): Promise<{
   awsEnv: Record<string, string> | undefined
   gitEnv: Record<string, string> | undefined
+  cleanupAwsCredentials: (() => void) | undefined
   cleanupGitCredentials: (() => void) | undefined
 }> {
   let awsEnv: Record<string, string> | undefined
+  let cleanupAwsCredentials: (() => void) | undefined
   if (projectDir && projectConfig?.aws?.accounts?.length) {
     const awsResult = await buildAwsProfileCredentials(client, projectDir, projectConfig)
     awsEnv = awsResult.env
-    if (sendChunk) await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
+    cleanupAwsCredentials = awsResult.cleanup
+    // 既に credentials ファイルへ書き込み済みのため、通知送信が失敗しても
+    // cleanup の代入自体は成立させ、握り潰して処理を継続する（Git認証情報側の
+    // 既存パターンと対称にする。cleanup 未実行のまま例外伝播すると平文の
+    // credentials ファイルが残置される）
+    if (sendChunk) {
+      try {
+        await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
+      } catch (error) {
+        logger.warn(`[chat] Failed to send AWS credential notices: ${getErrorMessage(error)}`)
+      }
+    }
   } else {
     const awsAccountId = parseString(payload.awsAccountId) ?? undefined
     const awsResult = await buildSingleAccountAwsEnv(client, awsAccountId)
     awsEnv = awsResult.env
-    if (sendChunk) await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
+    cleanupAwsCredentials = awsResult.cleanup
+    if (sendChunk) {
+      try {
+        await sendAwsCredentialNotices(awsResult, projectCode, sendChunk)
+      } catch (error) {
+        logger.warn(`[chat] Failed to send AWS credential notices: ${getErrorMessage(error)}`)
+      }
+    }
   }
 
   let gitEnv: Record<string, string> | undefined
@@ -575,7 +599,7 @@ async function buildEnvironmentCredentials(
     }
   }
 
-  return { awsEnv, gitEnv, cleanupGitCredentials }
+  return { awsEnv, gitEnv, cleanupAwsCredentials, cleanupGitCredentials }
 }
 
 /**

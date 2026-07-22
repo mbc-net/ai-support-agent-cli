@@ -31,6 +31,7 @@ jest.mock('../src/repo-sync', () => ({
 jest.mock('../src/project-dir', () => ({
   getReposDir: jest.fn((dir: string) => `${dir}/workspace/repos`),
   getSshDir: jest.fn((dir: string) => `${dir}/.ssh`),
+  getAwsDir: jest.fn((dir: string) => `${dir}/.ai-support-agent/aws`),
 }))
 
 const mockDetectAvailableChatModes = jest.fn()
@@ -44,8 +45,11 @@ jest.mock('../src/chat-mode-detector', () => ({
   resolveActiveChatMode: mockResolveActiveChatMode,
 }))
 
+const mockWriteAwsConfig = jest.fn()
+const mockCleanupStaleAwsCredentials = jest.fn().mockReturnValue(0)
 jest.mock('../src/aws-profile', () => ({
-  writeAwsConfig: jest.fn(),
+  writeAwsConfig: mockWriteAwsConfig,
+  cleanupStaleAwsCredentials: mockCleanupStaleAwsCredentials,
 }))
 jest.mock('../src/mcp/config-writer', () => ({
   writeMcpConfig: jest.fn().mockReturnValue('/tmp/mcp.json'),
@@ -65,6 +69,7 @@ import {
   resolveMcpServerPath,
 } from '../src/agent-config-sync'
 import { CONFIG_SYNC_DEBOUNCE_MS } from '../src/constants'
+import { logger } from '../src/logger'
 
 function makeDeps(overrides?: Partial<ConfigSyncDeps>): ConfigSyncDeps {
   return {
@@ -168,6 +173,76 @@ describe('performConfigSync', () => {
     await performConfigSync(deps, state)
 
     expect(state.currentConfigHash).toBe('new-hash-xyz')
+  })
+
+  describe('stale AWS credentials cleanup', () => {
+    // Mirrors the existing "config sync sweeps stale per-command MCP config
+    // files" self-healing pattern for orphaned credentials-* files left
+    // behind by a SIGKILLed/OOM-killed agent process (see aws-profile.ts's
+    // cleanupStaleAwsCredentials()).
+    it('should call cleanupStaleAwsCredentials with the project aws dir on every sync', async () => {
+      const config = makeBaseConfig()
+      mockSyncProjectConfig.mockResolvedValue({ config, fromCache: false })
+
+      const deps = makeDeps({ projectDir: '/tmp/project' })
+      const state = makeState()
+
+      await performConfigSync(deps, state)
+
+      expect(mockCleanupStaleAwsCredentials).toHaveBeenCalledWith('/tmp/project/.ai-support-agent/aws')
+    })
+
+    it('should log the removed count when stale AWS credentials files were cleaned up', async () => {
+      const config = makeBaseConfig()
+      mockSyncProjectConfig.mockResolvedValue({ config, fromCache: false })
+      mockCleanupStaleAwsCredentials.mockReturnValueOnce(2)
+
+      const deps = makeDeps()
+      const state = makeState()
+
+      await performConfigSync(deps, state)
+
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Cleaned up 2 stale AWS credentials file(s)'))
+    })
+
+    it('should not log when no stale AWS credentials files were found', async () => {
+      const config = makeBaseConfig()
+      mockSyncProjectConfig.mockResolvedValue({ config, fromCache: false })
+      mockCleanupStaleAwsCredentials.mockReturnValueOnce(0)
+
+      const deps = makeDeps()
+      const state = makeState()
+
+      await performConfigSync(deps, state)
+
+      expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('Cleaned up'))
+    })
+
+    it('should warn and continue when cleanupStaleAwsCredentials throws', async () => {
+      const config = makeBaseConfig()
+      mockSyncProjectConfig.mockResolvedValue({ config, fromCache: false })
+      mockCleanupStaleAwsCredentials.mockImplementationOnce(() => {
+        throw new Error('EACCES: permission denied')
+      })
+
+      const deps = makeDeps()
+      const state = makeState()
+
+      await expect(performConfigSync(deps, state)).resolves.toBe(true)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to clean up stale AWS credentials files'))
+    })
+
+    it('should not call cleanupStaleAwsCredentials when projectDir is not set', async () => {
+      const config = makeBaseConfig()
+      mockSyncProjectConfig.mockResolvedValue({ config, fromCache: false })
+
+      const deps = makeDeps({ projectDir: undefined })
+      const state = makeState()
+
+      await performConfigSync(deps, state)
+
+      expect(mockCleanupStaleAwsCredentials).not.toHaveBeenCalled()
+    })
   })
 })
 
