@@ -214,6 +214,10 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/commands/${commandId}/ssh-exec-credential`,
   BROWSER_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/browser-credentials`,
   E2E_ENV_VARIABLES: (tenantCode: string) => `/api/${tenantCode}/agent/e2e-env-variables`,
+  // プロジェクト共有の E2E サポートファイル（Playwright spec から相対 import されるヘルパー群）。
+  // projectCode はサーバー側が agent トークンから解決するため URL に含めない（E2E_ENV_VARIABLES と同方式）
+  E2E_SUPPORT_FILES: (tenantCode: string, _projectCode: string) =>
+    `/api/${tenantCode}/agent/e2e-support-files`,
   FILES_UPLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/upload-url`,
   FILES_DOWNLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/download-url`,
   E2E_EXECUTION_STATUS: (tenantCode: string, _projectCode: string, executionId: string) =>
