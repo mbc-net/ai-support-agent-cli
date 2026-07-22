@@ -1,11 +1,12 @@
 import { spawn } from 'child_process'
 
-import { CHAT_TIMEOUT, CHAT_TOOL_EXECUTION_TIMEOUT, DEFAULT_CLAUDE_MODEL, ERR_CLAUDE_CLI_NOT_FOUND, LOG_DEBUG_LIMIT } from '../constants'
+import { CHAT_TIMEOUT, CHAT_TOOL_EXECUTION_TIMEOUT, DEFAULT_CLAUDE_MODEL, ERR_CLAUDE_CLI_NOT_FOUND, LOG_DEBUG_LIMIT, LOG_STDERR_ON_FAILURE_LIMIT } from '../constants'
 import { logger } from '../logger'
 import type { ChatChunkType } from '../types'
 import { createActivityTimeout } from '../utils/activity-timeout'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
+import { collectSecretEnvValues, redactSecretValues } from '../utils/secret-redaction'
 import { StreamLineParser } from '../utils/stream-parser'
 
 import { buildClaudeArgs, buildCleanEnv } from './claude-code-args'
@@ -197,6 +198,20 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
       // メッセージ本文を除いた引数（監査用）
       const metadataArgs = args.slice(0, -1)
       logger.debug(`[chat] claude CLI exited (pid=${child.pid}, code=${code}, duration=${durationMs}ms)`)
+      // stderr は既定（--verbose 無し）では logger.debug が抑制されるため、失敗時の
+      // 診断情報が本番相当環境で一切残らない問題があった。ここで warn レベルに
+      // 出力し、--verbose 無しでも失敗原因を追えるようにする（ユーザー向け
+      // エラーメッセージ自体は formatClaudeExitError の安全な汎用文言のまま変更しない）。
+      // - redactSecretValues: stderr は claude CLI という外部プロセスの未制御なテキストで、
+      //   認証エラー時に渡した env の値（ANTHROPIC_API_KEY 等）をそのままエコーする可能性が
+      //   ある。maskSecrets（logger.ts）はパターンベースで `key=value` 形式等しか拾えないため、
+      //   ここでは実際に渡した秘密っぽい env 値そのものを値ベースで追加マスクする。
+      // - slice(-LIMIT): 実際の失敗原因（fatal error）は通常 stderr の末尾に出るため、
+      //   先頭ではなく末尾を優先して残す。
+      if (code !== 0 && stderrText) {
+        const redactedStderr = redactSecretValues(stderrText, collectSecretEnvValues(env))
+        logger.warn(`[chat] claude CLI failed (pid=${child.pid}, code=${code}): ${redactedStderr.slice(-LOG_STDERR_ON_FAILURE_LIMIT)}`)
+      }
       if (code === 0) {
         resolve({
           text: resultText,

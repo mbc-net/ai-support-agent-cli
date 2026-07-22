@@ -29,18 +29,24 @@ jest.mock('../../src/logger', () => ({
   },
 }))
 
-import { ensureClaudeJsonOAuthAccount } from '../../src/utils/claude-json-oauth-sync'
+import { ensureClaudeJsonOAuthAccount, resolveOAuthToken } from '../../src/utils/claude-json-oauth-sync'
 
 describe('ensureClaudeJsonOAuthAccount', () => {
   let tmpHome: string
   let claudeJsonPath: string
   let lockPath: string
 
+  let savedOauthTokenEnv: string | undefined
+
   beforeEach(() => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-json-test-'))
     claudeJsonPath = path.join(tmpHome, '.claude.json')
     lockPath = path.join(tmpHome, '.claude.json.lock')
     ;(os.homedir as jest.Mock).mockReturnValue(tmpHome)
+    // 他テストファイル/実行環境からの汚染を遮断し、process.env フォールバックの
+    // テストを決定的にする
+    savedOauthTokenEnv = process.env.CLAUDE_CODE_OAUTH_TOKEN
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN
   })
 
   afterEach(() => {
@@ -49,6 +55,8 @@ describe('ensureClaudeJsonOAuthAccount', () => {
     } catch {
       // ignore
     }
+    if (savedOauthTokenEnv === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+    else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedOauthTokenEnv
   })
 
   describe('token validation (gating)', () => {
@@ -88,6 +96,74 @@ describe('ensureClaudeJsonOAuthAccount', () => {
         { prefix: '[test]' },
       )
       expect(fs.existsSync(claudeJsonPath)).toBe(false)
+    })
+  })
+
+  describe('process.env fallback (docker -e CLAUDE_CODE_OAUTH_TOKEN injection, not via envVarsOverride)', () => {
+    // linux-service.ts / darwin-service.ts / win32-service.ts は
+    // `docker run -e CLAUDE_CODE_OAUTH_TOKEN=<token>` として実コンテナ環境変数に
+    // トークンを注入する。この経路は envVarsOverride を経由しないため、
+    // process.env も見ないと同期が silently スキップされていた（過去の欠陥）。
+    it('syncs oauthAccount using process.env.CLAUDE_CODE_OAUTH_TOKEN when envVarsOverride is undefined', () => {
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'sk-ant-oat-from-docker-env'
+
+      ensureClaudeJsonOAuthAccount(undefined, { prefix: '[test]' })
+
+      expect(fs.existsSync(claudeJsonPath)).toBe(true)
+      const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'))
+      expect(data.oauthAccount).toEqual({})
+      expect(data.hasCompletedOnboarding).toBe(true)
+    })
+
+    it('syncs oauthAccount using process.env.CLAUDE_CODE_OAUTH_TOKEN when envVarsOverride lacks the token', () => {
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'sk-ant-oat-from-docker-env'
+
+      ensureClaudeJsonOAuthAccount({ ANTHROPIC_API_KEY: 'sk-test' }, { prefix: '[test]' })
+
+      expect(fs.existsSync(claudeJsonPath)).toBe(true)
+    })
+
+    it('still does nothing when process.env.CLAUDE_CODE_OAUTH_TOKEN is also unset/invalid', () => {
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = '   '
+
+      ensureClaudeJsonOAuthAccount(undefined, { prefix: '[test]' })
+
+      expect(fs.existsSync(claudeJsonPath)).toBe(false)
+    })
+
+    it('syncs when envVarsOverride and process.env both provide a valid token', () => {
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'sk-ant-oat-from-docker-env'
+
+      ensureClaudeJsonOAuthAccount(
+        { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-from-web-config' },
+        { prefix: '[test]' },
+      )
+
+      expect(fs.existsSync(claudeJsonPath)).toBe(true)
+    })
+  })
+
+  describe('resolveOAuthToken (token source precedence)', () => {
+    // ensureClaudeJsonOAuthAccount の書き込み結果からは、envVarsOverride /
+    // process.env のどちらのトークンが実際に採用されたかを直接観測できない
+    // （どちらでも ~/.claude.json への書き込み内容は同一 oauthAccount={} のため）。
+    // 優先順位そのものを検証するため、トークン解決ロジックを単体で検証する。
+    it('prefers envVarsOverride token over process.env when both are present', () => {
+      expect(
+        resolveOAuthToken(
+          { CLAUDE_CODE_OAUTH_TOKEN: 'from-web-config' },
+          'from-docker-env',
+        ),
+      ).toBe('from-web-config')
+    })
+
+    it('falls back to process.env when envVarsOverride does not provide the token', () => {
+      expect(resolveOAuthToken(undefined, 'from-docker-env')).toBe('from-docker-env')
+      expect(resolveOAuthToken({ ANTHROPIC_API_KEY: 'x' }, 'from-docker-env')).toBe('from-docker-env')
+    })
+
+    it('returns undefined when neither source provides the token', () => {
+      expect(resolveOAuthToken(undefined, undefined)).toBeUndefined()
     })
   })
 

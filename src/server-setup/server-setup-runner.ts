@@ -42,6 +42,7 @@ import {
 } from '../types'
 import { getErrorMessage, sweepStaleEntries } from '../utils'
 import { resolveKnownHostsPath } from '../utils/known-hosts-store'
+import { redactSecretValues } from '../utils/secret-redaction'
 
 import { type AnsibleTaskRouteMode, validateAnsibleTasks } from './ansible-task-guard'
 
@@ -357,26 +358,10 @@ export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]):
   return dump(playbook)
 }
 
-/**
- * Replace every occurrence of each (non-empty) secret value with `***` in
- * `text`. Belt-and-suspenders redaction applied to `ansible-playbook`'s raw
- * stdout/stderr (and, transitively, every `ServerSetupTaskResult.message`
- * derived from it) — the last line of defense for a secret value that leaked
- * into command output despite `no_log: true` having been applied wherever
- * `validateAnsibleTasks` detected a `{{ secretVarName }}` reference.
- *
- * Empty-string values are skipped: replacing every occurrence of `''` would
- * corrupt the text (a global match on an empty string matches between every
- * character).
- */
-export function redactSecretValues(text: string, secretValues: readonly string[]): string {
-  let redacted = text
-  for (const value of secretValues) {
-    if (!value) continue
-    redacted = redacted.split(value).join('***')
-  }
-  return redacted
-}
+// redactSecretValues moved to ../utils/secret-redaction (shared by claude-code-runner.ts /
+// codex-runner.ts). Re-exported here (see import above) so existing imports from this
+// module keep working.
+export { redactSecretValues }
 
 /**
  * Plain hostname or dotted-decimal IPv4 address: letters/digits/hyphens/dots

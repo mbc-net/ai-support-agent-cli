@@ -147,6 +147,13 @@ export const LOG_PAYLOAD_LIMIT = 500
 export const LOG_RESULT_LIMIT = 300
 export const LOG_DEBUG_LIMIT = 200
 export const CHUNK_LOG_LIMIT = 100
+/**
+ * claude/codex CLI サブプロセスが非0終了コードで終了した際、失敗診断用に
+ * warn レベルでログ出力する stderr 全文の切り詰め上限。
+ * LOG_DEBUG_LIMIT はチャンク単位のプレビュー用で、かつ --verbose 時のみ出力されるため、
+ * 失敗時の診断にはこの独立した（より大きな）上限を持つ warn ログが必要。
+ */
+export const LOG_STDERR_ON_FAILURE_LIMIT = 4000
 
 // Browser proxy
 /** BrowserProxySession の HTTP リクエストタイムアウト（60秒） */
