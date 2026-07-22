@@ -49,7 +49,17 @@ export function registerCredentialsTool(server: McpServer, apiClient: ApiClient)
       if (type === 'db') {
         try {
           const credentials = await apiClient.getDbCredentials(name)
-          return mcpJsonResponse(credentials)
+          // password は秘匿情報のため LLM への応答には含めない（db_query と同様の方針）
+          return mcpJsonResponse({
+            name: credentials.name,
+            engine: credentials.engine,
+            host: credentials.host,
+            port: credentials.port,
+            database: credentials.database,
+            user: credentials.user,
+            ssl: credentials.ssl,
+            writePermissions: credentials.writePermissions,
+          })
         } catch (error) {
           logger.debug(`[credentials] DB credential error for ${name}: ${String(error)}`)
           throw error

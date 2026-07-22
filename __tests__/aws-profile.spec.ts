@@ -14,8 +14,11 @@ import {
   writeAwsConfig,
   generateAwsCredentials,
   writeAwsCredentials,
+  cleanupAwsCredentials,
+  cleanupStaleAwsCredentials,
   buildAwsProfileEnv,
 } from '../src/aws-profile'
+import { logger } from '../src/logger'
 import type { AwsCredentials, ProjectConfigResponse } from '../src/types'
 
 type AwsAccount = NonNullable<ProjectConfigResponse['aws']>['accounts'][number]
@@ -340,15 +343,16 @@ describe('aws-profile', () => {
   describe('writeAwsCredentials', () => {
     const projectDir = '/tmp/test-project'
     const awsDir = path.join(projectDir, '.ai-support-agent', 'aws')
-    const credentialsPath = path.join(awsDir, 'credentials')
-    const tmpPath = credentialsPath + '.tmp'
+    const credentialsPrefix = path.join(awsDir, 'credentials-')
 
-    it('should create aws directory if missing and write credentials atomically', () => {
+    beforeEach(() => {
       mockedFs.existsSync.mockReturnValue(false)
       mockedFs.writeFileSync.mockReturnValue(undefined)
       mockedFs.renameSync.mockReturnValue(undefined)
       mockedFs.mkdirSync.mockReturnValue(undefined)
+    })
 
+    it('should create aws directory if missing and write credentials atomically to a uniquely-named file', () => {
       const credentialMap = new Map<string, AwsCredentials>([
         [
           'dev',
@@ -360,88 +364,310 @@ describe('aws-profile', () => {
         ],
       ])
 
-      writeAwsCredentials(projectDir, 'MBC_01', credentialMap)
+      const result = writeAwsCredentials(projectDir, 'MBC_01', credentialMap)
 
       expect(mockedFs.mkdirSync).toHaveBeenCalledWith(awsDir, { recursive: true, mode: 0o700 })
+      // Filename must not be the fixed 'credentials' name — it must carry a
+      // random per-call suffix so concurrent chat commands never share a path.
+      expect(result).toBeDefined()
+      expect(result?.startsWith(credentialsPrefix)).toBe(true)
+      expect(result?.slice(credentialsPrefix.length)).toMatch(/^[0-9a-f]{32}$/)
+
+      const tmpPath = `${result}.tmp`
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
         tmpPath,
         expect.stringContaining('[MBC_01-dev]'),
         { mode: 0o600 },
       )
-      expect(mockedFs.renameSync).toHaveBeenCalledWith(tmpPath, credentialsPath)
+      expect(mockedFs.renameSync).toHaveBeenCalledWith(tmpPath, result)
+    })
+
+    it('should return a different path on each call (unique per invocation)', () => {
+      const credentialMap = new Map<string, AwsCredentials>([
+        [
+          'dev',
+          {
+            accessKeyId: 'AKIATEST',
+            secretAccessKey: 'secretTest',
+            region: 'ap-northeast-1',
+          },
+        ],
+      ])
+
+      const path1 = writeAwsCredentials(projectDir, 'MBC_01', credentialMap)
+      const path2 = writeAwsCredentials(projectDir, 'MBC_01', credentialMap)
+
+      expect(path1).toBeDefined()
+      expect(path2).toBeDefined()
+      expect(path1).not.toBe(path2)
     })
 
     it('should always call mkdir (recursive) even if aws directory already exists', () => {
-      mockedFs.mkdirSync.mockReturnValue(undefined)
-      mockedFs.writeFileSync.mockReturnValue(undefined)
-      mockedFs.renameSync.mockReturnValue(undefined)
-
       writeAwsCredentials(projectDir, 'MBC_01', new Map())
 
       expect(mockedFs.mkdirSync).toHaveBeenCalledWith(awsDir, { recursive: true, mode: 0o700 })
     })
 
-    it('should handle write errors gracefully', () => {
-      mockedFs.existsSync.mockReturnValue(true)
+    it('should return undefined and not throw on write errors', () => {
       mockedFs.writeFileSync.mockImplementation(() => {
         throw new Error('ENOSPC: no space left on device')
       })
 
-      // Should not throw
+      let result: string | undefined
+      expect(() => {
+        result = writeAwsCredentials(projectDir, 'MBC_01', new Map())
+      }).not.toThrow()
+      expect(result).toBeUndefined()
+    })
+
+    it('should best-effort delete the leftover .tmp file when renameSync fails after writeFileSync succeeded', () => {
+      mockedFs.renameSync.mockImplementation(() => {
+        throw new Error('EPERM: operation not permitted, rename')
+      })
+      mockedFs.rmSync.mockReturnValue(undefined)
+
+      const result = writeAwsCredentials(projectDir, 'MBC_01', new Map())
+
+      expect(result).toBeUndefined()
+      const tmpPathArg = (mockedFs.renameSync as jest.Mock).mock.calls[0][0] as string
+      expect(tmpPathArg.startsWith(credentialsPrefix)).toBe(true)
+      expect(tmpPathArg.endsWith('.tmp')).toBe(true)
+      expect(mockedFs.rmSync).toHaveBeenCalledWith(tmpPathArg, { force: true })
+    })
+
+    it('should not throw when the best-effort .tmp cleanup itself fails', () => {
+      mockedFs.renameSync.mockImplementation(() => {
+        throw new Error('EPERM: operation not permitted, rename')
+      })
+      mockedFs.rmSync.mockImplementation(() => {
+        throw new Error('EBUSY: resource busy or locked')
+      })
+
       expect(() => writeAwsCredentials(projectDir, 'MBC_01', new Map())).not.toThrow()
+    })
+
+    it('should not attempt .tmp cleanup when the failure happens before a path was generated', () => {
+      mockedFs.mkdirSync.mockImplementation(() => {
+        throw new Error('EACCES: permission denied')
+      })
+
+      const result = writeAwsCredentials(projectDir, 'MBC_01', new Map())
+
+      expect(result).toBeUndefined()
+      expect(mockedFs.rmSync).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('cleanupAwsCredentials', () => {
+    // cleanupAwsCredentials now takes the exact absolute path that was
+    // written by writeAwsCredentials() for a single call, rather than
+    // deriving a fixed <projectDir>/.ai-support-agent/aws/credentials path.
+    // This is what makes cleanup safe when multiple chat commands for the
+    // same project run concurrently (each writes and cleans up its own
+    // uniquely-named file — see writeAwsCredentials above).
+    const awsDir = path.join('/tmp/test-project', '.ai-support-agent', 'aws')
+    const credentialsPath = path.join(awsDir, 'credentials-aabbccdd112233445566778899aabb0')
+    const configPath = path.join(awsDir, 'config')
+
+    it('should delete exactly the given credentials file', () => {
+      mockedFs.rmSync.mockReturnValue(undefined)
+
+      cleanupAwsCredentials(credentialsPath)
+
+      expect(mockedFs.rmSync).toHaveBeenCalledWith(credentialsPath, { force: true })
+    })
+
+    it('should not delete the config file in the same aws directory', () => {
+      mockedFs.rmSync.mockReturnValue(undefined)
+
+      cleanupAwsCredentials(credentialsPath)
+
+      expect(mockedFs.rmSync).not.toHaveBeenCalledWith(configPath, expect.anything())
+    })
+
+    it('should best-effort delete the .tmp companion file atomicWriteFile can leave behind on rename failure', () => {
+      mockedFs.rmSync.mockReturnValue(undefined)
+
+      cleanupAwsCredentials(credentialsPath)
+
+      expect(mockedFs.rmSync).toHaveBeenCalledWith(`${credentialsPath}.tmp`, { force: true })
+    })
+
+    it('should not throw when the credentials file does not exist', () => {
+      mockedFs.rmSync.mockImplementation(() => {
+        throw new Error('ENOENT: no such file or directory, unlink')
+      })
+
+      expect(() => cleanupAwsCredentials(credentialsPath)).not.toThrow()
+    })
+
+    it('should not throw when the .tmp companion file does not exist (still attempts the main file)', () => {
+      mockedFs.rmSync.mockImplementation((target: fs.PathLike) => {
+        if (String(target).endsWith('.tmp')) {
+          throw new Error('ENOENT: no such file or directory, unlink')
+        }
+      })
+
+      expect(() => cleanupAwsCredentials(credentialsPath)).not.toThrow()
+      expect(mockedFs.rmSync).toHaveBeenCalledWith(credentialsPath, { force: true })
+      expect(mockedFs.rmSync).toHaveBeenCalledWith(`${credentialsPath}.tmp`, { force: true })
+    })
+  })
+
+  describe('cleanupStaleAwsCredentials', () => {
+    // Mirrors cleanupStaleCommandMcpConfigs (mcp/config-writer.ts): because
+    // writeAwsCredentials() now writes to a uniquely-named `credentials-*`
+    // file per call rather than a fixed shared path, a chat command that is
+    // SIGKILLed/OOM-killed before cleanupAwsCredentials() runs leaves a
+    // plaintext-AWS-credentials orphan behind forever (no later write ever
+    // overwrites it). Sweep old ones on every config sync so they self-heal.
+    const awsDir = path.join('/tmp/test-project', '.ai-support-agent', 'aws')
+    const oldMs = Date.now() - 25 * 60 * 60 * 1000
+    const freshMs = Date.now() - 1000
+
+    function statFor(mtimeMs: number): fs.Stats {
+      return { mtimeMs } as fs.Stats
+    }
+
+    it('should remove credentials-* files older than maxAgeMs', () => {
+      mockedFs.readdirSync.mockReturnValue(['credentials-aaaa1111'] as unknown as fs.Dirent[])
+      mockedFs.statSync.mockReturnValue(statFor(oldMs))
+      mockedFs.rmSync.mockReturnValue(undefined)
+
+      const removed = cleanupStaleAwsCredentials(awsDir)
+
+      expect(removed).toBe(1)
+      expect(mockedFs.rmSync).toHaveBeenCalledWith(path.join(awsDir, 'credentials-aaaa1111'), { recursive: false, force: true })
+    })
+
+    it('should also match .tmp companion files left by a failed atomic write', () => {
+      mockedFs.readdirSync.mockReturnValue(['credentials-bbbb2222.tmp'] as unknown as fs.Dirent[])
+      mockedFs.statSync.mockReturnValue(statFor(oldMs))
+      mockedFs.rmSync.mockReturnValue(undefined)
+
+      const removed = cleanupStaleAwsCredentials(awsDir)
+
+      expect(removed).toBe(1)
+      expect(mockedFs.rmSync).toHaveBeenCalledWith(path.join(awsDir, 'credentials-bbbb2222.tmp'), { recursive: false, force: true })
+    })
+
+    it('should not remove credentials-* files newer than maxAgeMs', () => {
+      mockedFs.readdirSync.mockReturnValue(['credentials-cccc3333'] as unknown as fs.Dirent[])
+      mockedFs.statSync.mockReturnValue(statFor(freshMs))
+
+      const removed = cleanupStaleAwsCredentials(awsDir)
+
+      expect(removed).toBe(0)
+      expect(mockedFs.rmSync).not.toHaveBeenCalled()
+    })
+
+    it('should not remove the config file or other unrelated files in the same directory', () => {
+      mockedFs.readdirSync.mockReturnValue(['config', 'unrelated-file.txt'] as unknown as fs.Dirent[])
+      mockedFs.statSync.mockReturnValue(statFor(oldMs))
+
+      const removed = cleanupStaleAwsCredentials(awsDir)
+
+      expect(removed).toBe(0)
+      expect(mockedFs.rmSync).not.toHaveBeenCalled()
+    })
+
+    it('should remove all matching files when maxAgeMs=0', () => {
+      mockedFs.readdirSync.mockReturnValue(['credentials-dddd4444'] as unknown as fs.Dirent[])
+      mockedFs.statSync.mockReturnValue(statFor(freshMs))
+      mockedFs.rmSync.mockReturnValue(undefined)
+
+      const removed = cleanupStaleAwsCredentials(awsDir, 0)
+
+      expect(removed).toBe(1)
+    })
+
+    it('should return 0 when the directory cannot be read', () => {
+      mockedFs.readdirSync.mockImplementation(() => {
+        throw new Error('ENOENT: no such file or directory, scandir')
+      })
+
+      const removed = cleanupStaleAwsCredentials(awsDir)
+
+      expect(removed).toBe(0)
+    })
+
+    it('should ignore individual file removal failures, log a warning, and continue', () => {
+      mockedFs.readdirSync.mockReturnValue(['credentials-eeee5555'] as unknown as fs.Dirent[])
+      mockedFs.statSync.mockReturnValue(statFor(oldMs))
+      mockedFs.rmSync.mockImplementation(() => {
+        throw new Error('EBUSY: resource busy or locked')
+      })
+
+      const removed = cleanupStaleAwsCredentials(awsDir)
+
+      expect(removed).toBe(0)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('credentials-eeee5555'))
     })
   })
 
   describe('buildAwsProfileEnv', () => {
     const projectDir = '/home/user/projects/MBC_01'
     const awsDir = path.join(projectDir, '.ai-support-agent', 'aws')
+    const credentialsPath = path.join(awsDir, 'credentials-deadbeefdeadbeefdeadbeefdeadbeef')
 
-    it('should return config and credentials file paths', () => {
-      const env = buildAwsProfileEnv(projectDir, 'MBC_01')
+    it('should return the fixed config file path and the caller-supplied credentials path', () => {
+      const env = buildAwsProfileEnv(projectDir, 'MBC_01', credentialsPath)
 
       expect(env.AWS_CONFIG_FILE).toBe(path.join(awsDir, 'config'))
-      expect(env.AWS_SHARED_CREDENTIALS_FILE).toBe(path.join(awsDir, 'credentials'))
+      expect(env.AWS_SHARED_CREDENTIALS_FILE).toBe(credentialsPath)
     })
 
     it('should set AWS_PROFILE when defaultAccountName is provided', () => {
-      const env = buildAwsProfileEnv(projectDir, 'MBC_01', 'dev')
+      const env = buildAwsProfileEnv(projectDir, 'MBC_01', credentialsPath, 'dev')
 
       expect(env.AWS_PROFILE).toBe('MBC_01-dev')
     })
 
     it('should not set AWS_PROFILE when defaultAccountName is not provided', () => {
-      const env = buildAwsProfileEnv(projectDir, 'MBC_01')
+      const env = buildAwsProfileEnv(projectDir, 'MBC_01', credentialsPath)
 
       expect(env.AWS_PROFILE).toBeUndefined()
     })
 
     it('should not set AWS_PROFILE when defaultAccountName is undefined', () => {
-      const env = buildAwsProfileEnv(projectDir, 'MBC_01', undefined)
+      const env = buildAwsProfileEnv(projectDir, 'MBC_01', credentialsPath, undefined)
 
       expect(env.AWS_PROFILE).toBeUndefined()
     })
 
     it('should set AWS_DEFAULT_REGION when defaultRegion is provided', () => {
-      const env = buildAwsProfileEnv(projectDir, 'MBC_01', 'dev', 'ap-northeast-1')
+      const env = buildAwsProfileEnv(projectDir, 'MBC_01', credentialsPath, 'dev', 'ap-northeast-1')
 
       expect(env.AWS_DEFAULT_REGION).toBe('ap-northeast-1')
     })
 
     it('should not set AWS_DEFAULT_REGION when defaultRegion is not provided', () => {
-      const env = buildAwsProfileEnv(projectDir, 'MBC_01', 'dev')
+      const env = buildAwsProfileEnv(projectDir, 'MBC_01', credentialsPath, 'dev')
 
       expect(env.AWS_DEFAULT_REGION).toBeUndefined()
     })
 
     it('should set all environment variables when all parameters are provided', () => {
-      const env = buildAwsProfileEnv(projectDir, 'MBC_01', 'prod', 'us-east-1')
+      const env = buildAwsProfileEnv(projectDir, 'MBC_01', credentialsPath, 'prod', 'us-east-1')
 
       expect(env).toEqual({
         AWS_CONFIG_FILE: path.join(awsDir, 'config'),
-        AWS_SHARED_CREDENTIALS_FILE: path.join(awsDir, 'credentials'),
+        AWS_SHARED_CREDENTIALS_FILE: credentialsPath,
         AWS_PROFILE: 'MBC_01-prod',
         AWS_DEFAULT_REGION: 'us-east-1',
       })
+    })
+
+    it('should use distinct credentials paths for two concurrent calls sharing the same projectDir', () => {
+      // Regression test for the parallel-chat-commands race: two calls for the
+      // same project must never resolve to the same AWS_SHARED_CREDENTIALS_FILE.
+      const pathA = path.join(awsDir, 'credentials-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+      const pathB = path.join(awsDir, 'credentials-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')
+
+      const envA = buildAwsProfileEnv(projectDir, 'MBC_01', pathA, 'dev')
+      const envB = buildAwsProfileEnv(projectDir, 'MBC_01', pathB, 'dev')
+
+      expect(envA.AWS_SHARED_CREDENTIALS_FILE).not.toBe(envB.AWS_SHARED_CREDENTIALS_FILE)
     })
   })
 })

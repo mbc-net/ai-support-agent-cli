@@ -1950,6 +1950,142 @@ describe('chat-executor', () => {
       )
       expect(systemCall).toBeUndefined()
     })
+
+    // AWS credential cleanup: writeAwsCredentials() (called via
+    // buildAwsProfileCredentials) writes a plaintext AWS credentials file to
+    // a uniquely-named path under <projectDir>/.ai-support-agent/aws/, and
+    // executeCliChatOnce wires its cleanup on both the success path and the
+    // catch block, mirroring the equivalent Git credential cleanup
+    // (cleanupGitCredentials, see the "git credential setup" describe block
+    // below).
+    it('should call AWS cleanup on success', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      // Declared locally (not at module scope) to sidestep ts-jest's
+      // hoist-jest statement reordering, which only touches top-level
+      // statements — see mockGitCleanup above for the module-scope pattern
+      // used by the (already-implemented) Git credential cleanup, which
+      // doesn't need per-test overrides for this case.
+      const localMockAwsCleanup = jest.fn()
+
+      const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
+      ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce({
+        env: { AWS_PROFILE: 'TEST-dev' },
+        errors: [],
+        ssoAuthRequired: [],
+        cleanup: localMockAwsCleanup,
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-aws-cleanup', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        projectDir: '/tmp/project', projectConfig,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+
+      expect(localMockAwsCleanup).toHaveBeenCalled()
+    })
+
+    it('should call AWS cleanup on error, once per retry attempt', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess1 = createMockChildProcess()
+      const mockProcess2 = createMockChildProcess()
+      spawn.mockReturnValueOnce(mockProcess1).mockReturnValueOnce(mockProcess2)
+
+      // Separate mocks per attempt (rather than one mock reused across both
+      // buildAwsProfileCredentials() calls) so that a regression where only
+      // one of the two attempts' cleanup fires would be caught — reusing a
+      // single mock and asserting only toHaveBeenCalled() would miss that.
+      const firstAttemptCleanup = jest.fn()
+      const secondAttemptCleanup = jest.fn()
+
+      const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
+      ;(buildAwsProfileCredentials as jest.Mock)
+        .mockResolvedValueOnce({
+          env: { AWS_PROFILE: 'TEST-dev' },
+          errors: [],
+          ssoAuthRequired: [],
+          cleanup: firstAttemptCleanup,
+        })
+        .mockResolvedValueOnce({
+          env: { AWS_PROFILE: 'TEST-dev' },
+          errors: [],
+          ssoAuthRequired: [],
+          cleanup: secondAttemptCleanup,
+        })
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-aws-cleanup-error', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        projectDir: '/tmp/project', projectConfig,
+      })
+
+      // First attempt fails
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess1.emit('close', 2)
+
+      // Wait for retry delay then trigger second attempt
+      await new Promise((r) => setTimeout(r, 3100))
+      mockProcess2.emit('close', 2)
+
+      await resultPromise
+
+      expect(firstAttemptCleanup).toHaveBeenCalledTimes(1)
+      expect(secondAttemptCleanup).toHaveBeenCalledTimes(1)
+    }, 10000)
+
+    // Regression test for a HIGH-severity finding: sendAwsCredentialNotices()
+    // was previously awaited outside a try/catch. If it throws, the throw
+    // propagates out of buildEnvironmentCredentials() before its return value
+    // is destructured, so `cleanupAwsCredentials` (the outer variable) is
+    // never assigned and the already-written plaintext AWS credentials file
+    // is never cleaned up. chat-executor.ts now wraps that call in try/catch
+    // (mirroring the existing git credential setup try/catch) so cleanup is
+    // always wired up even when notice delivery itself fails.
+    it('should still call AWS cleanup and complete when sending AWS credential notices throws', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const localMockAwsCleanup = jest.fn()
+
+      const { buildAwsProfileCredentials } = require('../../src/aws-credential-builder')
+      ;(buildAwsProfileCredentials as jest.Mock).mockResolvedValueOnce({
+        env: { AWS_PROFILE: 'TEST-dev' },
+        errors: [],
+        // Malformed on purpose: sendAwsCredentialNotices() does
+        // `for (const ssoInfo of awsResult.ssoAuthRequired)`, which throws a
+        // synchronous TypeError when this is not iterable.
+        ssoAuthRequired: null,
+        cleanup: localMockAwsCleanup,
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload, commandId: 'cmd-aws-notice-throw', client: mockClient,
+        activeChatMode: 'claude_code', agentId: 'agent-1',
+        projectDir: '/tmp/project', projectConfig,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+
+      // The command must still succeed (the throw must not propagate out of
+      // buildEnvironmentCredentials), and the credentials file must still be
+      // cleaned up despite the notice-sending failure.
+      expect(result.success).toBe(true)
+      expect(localMockAwsCleanup).toHaveBeenCalled()
+    })
   })
 
   describe('conversation history', () => {

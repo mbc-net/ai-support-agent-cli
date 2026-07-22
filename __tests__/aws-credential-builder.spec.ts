@@ -8,13 +8,14 @@ jest.mock('../src/logger')
 
 // Mock aws-profile
 jest.mock('../src/aws-profile', () => ({
-  writeAwsCredentials: jest.fn(),
+  writeAwsCredentials: jest.fn().mockReturnValue('/mock/.ai-support-agent/aws/credentials-mockhash'),
   buildAwsProfileEnv: jest.fn().mockReturnValue({
     AWS_CONFIG_FILE: '/mock/.ai-support-agent/aws/config',
-    AWS_SHARED_CREDENTIALS_FILE: '/mock/.ai-support-agent/aws/credentials',
+    AWS_SHARED_CREDENTIALS_FILE: '/mock/.ai-support-agent/aws/credentials-mockhash',
     AWS_PROFILE: 'TEST-dev',
     AWS_DEFAULT_REGION: 'ap-northeast-1',
   }),
+  cleanupAwsCredentials: jest.fn(),
 }))
 
 describe('aws-credential-builder', () => {
@@ -119,18 +120,99 @@ describe('aws-credential-builder', () => {
       expect(buildAwsProfileEnv).toHaveBeenCalledWith(
         '/tmp/project',
         'TEST',
+        '/mock/.ai-support-agent/aws/credentials-mockhash', // path written by writeAwsCredentials
         'dev', // default account name
         'ap-northeast-1', // default account region
       )
 
       expect(result.env).toEqual({
         AWS_CONFIG_FILE: '/mock/.ai-support-agent/aws/config',
-        AWS_SHARED_CREDENTIALS_FILE: '/mock/.ai-support-agent/aws/credentials',
+        AWS_SHARED_CREDENTIALS_FILE: '/mock/.ai-support-agent/aws/credentials-mockhash',
         AWS_PROFILE: 'TEST-dev',
         AWS_DEFAULT_REGION: 'ap-northeast-1',
       })
       expect(result.errors).toEqual([])
       expect(result.ssoAuthRequired).toEqual([])
+    })
+
+    it('should include a cleanup function that deletes exactly the credentials file that was written', async () => {
+      // Git credentials already expose { env, cleanup } (see GitCredentialResult
+      // in git-credential-setup.ts) and chat-executor.ts invokes that cleanup on
+      // both success and error to remove the temporary SSH/credential-helper
+      // files it wrote. buildAwsProfileCredentials() mirrors this: it returns a
+      // `cleanup` closure that calls cleanupAwsCredentials() with the exact path
+      // writeAwsCredentials() returned for this call (not a shared projectDir-derived
+      // path), so concurrent calls never delete each other's file.
+      const client = {
+        getAwsCredentials: jest.fn().mockResolvedValue({
+          accessKeyId: 'AKIA_DEV',
+          secretAccessKey: 'secret_dev',
+          region: 'ap-northeast-1',
+        }),
+      } as unknown as ApiClient
+
+      const { cleanupAwsCredentials } = require('../src/aws-profile')
+
+      const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+
+      expect(typeof result.cleanup).toBe('function')
+      result.cleanup?.()
+      expect(cleanupAwsCredentials).toHaveBeenCalledWith('/mock/.ai-support-agent/aws/credentials-mockhash')
+    })
+
+    it('should not delete a concurrent call\'s credentials file when only one cleanup is invoked (parallel-safety regression test)', async () => {
+      // Regression test for the HIGH-severity finding: writeAwsCredentials()
+      // returns a distinct path per call, and each result's cleanup() must
+      // close over its own call's path only.
+      const client = {
+        getAwsCredentials: jest.fn().mockResolvedValue({
+          accessKeyId: 'AKIA_DEV',
+          secretAccessKey: 'secret_dev',
+          region: 'ap-northeast-1',
+        }),
+      } as unknown as ApiClient
+
+      const { writeAwsCredentials, cleanupAwsCredentials } = require('../src/aws-profile')
+      ;(writeAwsCredentials as jest.Mock)
+        .mockReturnValueOnce('/mock/.ai-support-agent/aws/credentials-callA')
+        .mockReturnValueOnce('/mock/.ai-support-agent/aws/credentials-callB')
+
+      const resultA = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+      const resultB = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+
+      resultA.cleanup?.()
+
+      expect(cleanupAwsCredentials).toHaveBeenCalledTimes(1)
+      expect(cleanupAwsCredentials).toHaveBeenCalledWith('/mock/.ai-support-agent/aws/credentials-callA')
+      expect(cleanupAwsCredentials).not.toHaveBeenCalledWith('/mock/.ai-support-agent/aws/credentials-callB')
+
+      resultB.cleanup?.()
+      expect(cleanupAwsCredentials).toHaveBeenCalledTimes(2)
+      expect(cleanupAwsCredentials).toHaveBeenCalledWith('/mock/.ai-support-agent/aws/credentials-callB')
+    })
+
+    it('should return no env, an error notice, and a safe no-op cleanup when writeAwsCredentials fails to write', async () => {
+      const client = {
+        getAwsCredentials: jest.fn().mockResolvedValue({
+          accessKeyId: 'AKIA_DEV',
+          secretAccessKey: 'secret_dev',
+          region: 'ap-northeast-1',
+        }),
+      } as unknown as ApiClient
+
+      const { writeAwsCredentials, cleanupAwsCredentials } = require('../src/aws-profile')
+      ;(writeAwsCredentials as jest.Mock).mockReturnValueOnce(undefined)
+
+      const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+
+      expect(result.env).toBeUndefined()
+      expect(typeof result.cleanup).toBe('function')
+      expect(() => result.cleanup?.()).not.toThrow()
+      expect(cleanupAwsCredentials).not.toHaveBeenCalled()
+      // MEDIUM regression guard: a disk write failure must surface to the
+      // caller (sendAwsCredentialNotices) via `errors`, not just a debug log —
+      // otherwise the CLI silently drops to no AWS credentials with no notice.
+      expect(result.errors).toContain('AWS認証情報ファイルの書き込みに失敗しました')
     })
 
     it('should return errors when all credential fetches fail', async () => {
@@ -213,6 +295,7 @@ describe('aws-credential-builder', () => {
       expect(buildAwsProfileEnv).toHaveBeenCalledWith(
         '/tmp/project',
         'TEST',
+        '/mock/.ai-support-agent/aws/credentials-mockhash',
         'alpha',
         'eu-west-1',
       )
@@ -509,6 +592,25 @@ describe('aws-credential-builder', () => {
       expect(result.env).not.toHaveProperty('AWS_SESSION_TOKEN')
       expect(result.errors).toEqual([])
       expect(result.ssoAuthRequired).toEqual([])
+    })
+
+    it('should include a no-op cleanup function', async () => {
+      // buildSingleAccountAwsEnv() never writes a credentials file to disk (it
+      // only builds an env var map), so its `cleanup` should exist for
+      // interface parity with buildAwsProfileCredentials()'s AwsCredentialResult
+      // but be a safe no-op when invoked.
+      const client = {
+        getAwsCredentials: jest.fn().mockResolvedValue({
+          accessKeyId: 'AKIATEST',
+          secretAccessKey: 'secretTest',
+          region: 'ap-northeast-1',
+        }),
+      } as unknown as ApiClient
+
+      const result = await buildSingleAccountAwsEnv(client, 'prod-account')
+
+      expect(typeof result.cleanup).toBe('function')
+      expect(() => result.cleanup?.()).not.toThrow()
     })
 
     it('should return error when getAwsCredentials fails', async () => {

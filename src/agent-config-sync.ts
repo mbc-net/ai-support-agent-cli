@@ -6,9 +6,9 @@ import type { ApiClient } from './api-client'
 import { detectAvailableChatModes, isExplicitChatModeSelection, resolveActiveChatMode } from './chat-mode-detector'
 import { CONFIG_SYNC_DEBOUNCE_MS } from './constants'
 import { logger } from './logger'
-import { writeAwsConfig } from './aws-profile'
+import { cleanupStaleAwsCredentials, writeAwsConfig } from './aws-profile'
 import { cleanupStaleCommandMcpConfigs, writeMcpConfig } from './mcp/config-writer'
-import { getReposDir, getSshDir } from './project-dir'
+import { getAwsDir, getReposDir, getSshDir } from './project-dir'
 import { syncProjectConfig } from './project-config-sync'
 import { syncRepositories, syncRepositoryByCode } from './repo-sync'
 import type { RepoSyncResult } from './repo-sync'
@@ -175,6 +175,24 @@ export async function applyProjectConfig(
       writeAwsConfig(deps.projectDir, effectiveConfig.project.projectCode, effectiveConfig.aws.accounts)
     } catch (error) {
       logger.warn(`${deps.prefix} Failed to write AWS config: ${getErrorMessage(error)}`)
+    }
+  }
+
+  // 孤立した AWS credentials-* ファイルを掃除する。
+  // 通常は chat-executor.ts がコマンド完了時（成功・エラー両方）に削除するが、
+  // agent process が SIGKILL / OOM で異常終了すると平文の AWS 認証情報を含む
+  // ファイルが残り続ける（呼び出しごとに一意なファイル名のため、旧・固定名方式と
+  // 異なり次回の上書きでも消えない）。config sync のたびに実行することで自己修復する
+  // （cleanupStaleCommandMcpConfigs と同じ設計）。accounts が現在未設定でも過去の
+  // 孤立ファイルを掃除できるよう、projectDir のみを条件にする。
+  if (deps.projectDir) {
+    try {
+      const removedCount = cleanupStaleAwsCredentials(getAwsDir(deps.projectDir))
+      if (removedCount > 0) {
+        logger.info(`${deps.prefix} Cleaned up ${removedCount} stale AWS credentials file(s)`)
+      }
+    } catch (error) {
+      logger.warn(`${deps.prefix} Failed to clean up stale AWS credentials files: ${getErrorMessage(error)}`)
     }
   }
 
