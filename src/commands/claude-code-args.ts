@@ -35,6 +35,14 @@ export function buildClaudeArgs(
     systemPrompt?: string
     model?: string
     pluginDir?: string
+    /**
+     * `--mcp-config` を渡さないだけでは Claude Code CLI のプロジェクト/ユーザー
+     * レベルの MCP 自動読み込みを防げない。true の場合 `--strict-mcp-config` を
+     * 付与し、MCP サーバーが一切読み込まれないことを保証する
+     * （Slack Marketplace の「読み取り専用ツールのみ許可」という設計意図が
+     * MCP 経由で回避されるのを防ぐ）。
+     */
+    strictMcpConfig?: boolean
   },
 ): string[] {
   const args = ['-p', '--output-format', 'stream-json', CLI_FLAG_VERBOSE]
@@ -65,6 +73,9 @@ export function buildClaudeArgs(
   }
   if (options?.mcpConfigPath) {
     args.push('--mcp-config', options.mcpConfigPath)
+  }
+  if (options?.strictMcpConfig) {
+    args.push('--strict-mcp-config')
   }
   // システムプロンプトを構築: 言語設定 + サーバー設定 + file_upload 指示
   const promptParts: string[] = []

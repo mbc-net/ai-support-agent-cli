@@ -329,7 +329,37 @@ export const SSE_EVENT = {
 export const ANTHROPIC_CONTENT_TYPE = {
   TEXT_DELTA: 'text_delta',
   TOOL_USE: 'tool_use',
+  INPUT_JSON_DELTA: 'input_json_delta',
 } as const
+
+// === api モード tool-use (Slack Marketplace 読み取り専用ツール) ===
+// Slack起点 + marketplace_read_only の api モードでのみ有効になる、
+// Read/Grep/Glob を含む「モデルとのやり取り（Anthropic API 呼び出し）」の上限回数
+// （確定方針8）。ループは MAX_TOOL_TURNS 回目に tool_use が要求された場合、その
+// ツールは実行せずに打ち切るため、実際のツール実行往復は最大 MAX_TOOL_TURNS - 1 回
+// にとどまる（API 呼び出し自体は最大 MAX_TOOL_TURNS 回行われる）。
+export const MAX_TOOL_TURNS = 8
+// Read ツール出力の打ち切り上限（確定方針8: 25,000行 または 500KB のいずれか先に到達した方）
+export const API_TOOL_READ_MAX_LINES = 25_000
+export const API_TOOL_READ_MAX_BYTES = 500 * 1024
+// Grep ツールのマッチ件数上限（確定方針8）
+export const API_TOOL_GREP_MAX_MATCHES = 200
+// Grep の1マッチあたりの行テキスト長上限。ガードが無いと、サイズ上限(5MB)ぎりぎりの
+// ファイルに極端に長い1行がある場合、そのマッチがそのまま tool_result に載り
+// 出力（≒トークン消費）が肥大化しうる。
+export const API_TOOL_GREP_MAX_LINE_CHARS = 2000
+// Glob ツールの結果件数上限（確定方針8には明記なし。暴走防止のための実装上の安全策）
+export const API_TOOL_GLOB_MAX_RESULTS = 1000
+// Read/Grep がファイル内容をメモリに全読み込みする前のサイズ上限。これを超える
+// ファイルは Read ではエラー、Grep では（バイナリ/データダンプ扱いで）検索対象から
+// スキップする。API_TOOL_READ_MAX_BYTES（読み込み後の出力打ち切り閾値=500KB）とは
+// 別物で、読み込み前のガード（OOM 防止）のためこちらは大きめの値を取る。
+export const API_TOOL_MAX_READABLE_FILE_BYTES = 5 * 1024 * 1024
+// Grep/Glob を実行する Worker スレッドの壁時計タイムアウト。ReDoS・シンボリックリンク
+// 循環・その他未知のハングに対する構造的な最終防御（唯一の防御ではなく、
+// isDangerousRegexPattern による静的ヒューリスティックは早期の高速パスに過ぎない）。
+// 超過時は worker.terminate() で強制終了する。
+export const API_TOOL_WORKER_TIMEOUT_MS = 3_000
 
 // Git clone/pull
 export const GIT_CLONE_TIMEOUT = 120_000
