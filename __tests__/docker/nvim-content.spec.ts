@@ -119,6 +119,32 @@ describe('docker/nvim/init.lua content validation', () => {
   })
 })
 
+describe('docker/nvim/init.lua clipboard integration (visual-mode yank reaching the host clipboard)', () => {
+  // 背景: Neovim（runtime/autoload/provider/clipboard.vim の s:set_tmux()、
+  // https://github.com/neovim/neovim/blob/master/runtime/autoload/provider/clipboard.vim
+  // で確認済み）は vim.g.clipboard が未設定のとき、$TMUX が設定され tmux 実行ファイル
+  // が見つかれば「tmux load-buffer -w -」（copy）と「tmux refresh-client -l &&
+  // sleep 0.05 && tmux save-buffer -」（paste。ホスト側の最新クリップボード内容を
+  // OSC 52 で問い合わせてから読む）を自動設定する。これは zero-config で、かつ
+  // agent/docker/tmux.conf の `set -g set-clipboard external`（tmux 自身の
+  // load-buffer 等の操作は許可し、ペイン内の任意プログラムが自発的に送出する
+  // OSC 52 は無視する。過去のコードレビューでHIGH指摘）とも整合する
+  // （load-buffer はtmux自身の操作として扱われるため external 下でも通る）。
+  //
+  // そのため vim.g.clipboard をここで独自に上書き設定してはならない。組込み
+  // プロバイダを潰し、素朴な自作実装（特に paste 側の refresh-client 抜け＝
+  // ホストでコピーした最新内容が反映されない後退）に置き換わってしまう。
+  let content: string
+
+  beforeAll(() => {
+    content = fs.readFileSync(INIT_LUA, 'utf-8')
+  })
+
+  it('does NOT set vim.g.clipboard, so Neovim\'s built-in zero-config tmux OSC 52 provider (auto-detected via $TMUX) stays active instead of being shadowed by a custom, likely-inferior reimplementation', () => {
+    expect(content).not.toMatch(/vim\.g\.clipboard\s*=/)
+  })
+})
+
 describe('Dockerfile bundles a modern neovim + fzf + the plugin set', () => {
   let dockerfileContent: string
 
