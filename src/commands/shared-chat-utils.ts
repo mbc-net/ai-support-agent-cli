@@ -6,8 +6,18 @@ import {
   ENV_VARS,
 } from '../constants'
 import { logger } from '../logger'
-import type { ChatChunkType, ChatFileInfo, CommandResult, HistoryMessage } from '../types'
+import type { ChatChunkType, ChatFileInfo, ChatPayload, CommandResult, HistoryMessage } from '../types'
 import { getErrorMessage, truncateString } from '../utils'
+
+/**
+ * Slack Marketplace 起点（読み取り専用ツールポリシー）のコマンドかどうかを判定する。
+ * chat-executor.ts（claude_code 経路）と api-chat-executor.ts（api 経路）の両方から
+ * 参照される共有判定ロジック。
+ */
+export function isSlackMarketplaceCommand(payload: ChatPayload): boolean {
+  return payload.interactionOrigin === 'slack' &&
+    payload.toolPolicy === 'marketplace_read_only'
+}
 
 /**
  * 外部からのhistoryデータをパースし、有効なHistoryMessage配列を返す

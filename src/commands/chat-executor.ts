@@ -9,7 +9,7 @@ import { writeCommandMcpConfig } from '../mcp/config-writer'
 import { type AgentChatMode, type AgentServerConfig, type ChatChunkType, type ChatFileInfo, type ChatPayload, type CommandResult, errorResult, type ProjectConfigResponse, successResult } from '../types'
 import { getErrorMessage, parseString, sleep, truncateString } from '../utils'
 
-import { getAutoAddDirs, getWorkspaceDir } from '../project-dir'
+import { getAutoAddDirs, getReposDir, getWorkspaceDir } from '../project-dir'
 import { ensureAllowedToolsInSettings } from '../utils/claude-settings'
 import { executeApiChatCommand } from './api-chat-executor'
 import type { StreamJsonUsage } from './claude-code-stream'
@@ -17,7 +17,7 @@ import { ERR_CLAUDE_EXIT_CODE_1, ERR_CLAUDE_USAGE_LIMIT_REACHED, runClaudeCode }
 import { ERR_CODEX_AUTH_INVALID, ERR_CODEX_EXIT_CODE_1, runCodex } from './codex-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { getProcessManager } from './process-manager'
-import { createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
+import { createChunkSender, formatHistoryForClaudeCode, handleChatError, isSlackMarketplaceCommand, parseHistory, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
@@ -25,12 +25,40 @@ export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-co
 /** 実行中のチャットプロセスを commandId で管理 */
 const processManager = getProcessManager()
 
-const SLACK_MARKETPLACE_TOOLS: string[] = []
+// Slack Marketplace 起点のコマンドで CLI (claude_code) に許可するツール。
+// 読み取り専用・書き込み/実行/MCP/認証情報アクセスは一切含めない（確定方針1）。
+const SLACK_MARKETPLACE_TOOLS: string[] = ['Read', 'Grep', 'Glob']
 const ERR_INVALID_SLACK_TOOL_POLICY = 'Slack Marketplace command is missing the required read-only tool policy'
 
-function isSlackMarketplaceCommand(payload: ChatPayload): boolean {
-  return payload.interactionOrigin === 'slack' &&
-    payload.toolPolicy === 'marketplace_read_only'
+/** Slack Marketplace コマンドの Claude Code サンドボックス設定 */
+interface SlackMarketplaceSandbox {
+  /** claude CLI サブプロセスの cwd。検証済みディレクトリの1つに明示的に固定する */
+  cwd: string | undefined
+  addDirs: string[] | undefined
+  /** 有効なサンドボックスディレクトリが無い場合は空配列（fail closed） */
+  tools: string[]
+}
+
+/**
+ * Slack Marketplace コマンドの addDir/cwd/tools を解決する。
+ *
+ * `--add-dir` は追加許可であって隔離ではないため、cwd を agent デーモン自身の
+ * プロセス cwd に委ねたままだと、意図した workspace/repos・workspace/docs の範囲を
+ * 超えて読める可能性がある。ここでは cwd を getAutoAddDirs(projectDir) が返す
+ * 検証済みディレクトリ（repos を優先）に明示的に固定する。
+ *
+ * projectDir が無い、またはサンドボックス対象ディレクトリが実在しない場合は
+ * Read/Grep/Glob を有効化せず fail closed にする（tools を空配列にする。既存の
+ * 「全ツール遮断」パスと同じ安全側の挙動）。
+ */
+function resolveSlackMarketplaceSandbox(projectDir: string | undefined): SlackMarketplaceSandbox {
+  const sandboxDirs = projectDir ? getAutoAddDirs(projectDir) : []
+  if (sandboxDirs.length === 0) {
+    return { cwd: undefined, addDirs: undefined, tools: [] }
+  }
+  const reposDir = projectDir ? getReposDir(projectDir) : undefined
+  const cwd = reposDir && sandboxDirs.includes(reposDir) ? reposDir : sandboxDirs[0]
+  return { cwd, addDirs: sandboxDirs, tools: SLACK_MARKETPLACE_TOOLS }
 }
 
 interface CliChatResult {
@@ -125,7 +153,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
     const hasFallbackCandidate = i < modes.length - 1
     switch (candidate) {
       case 'api':
-        return executeApiChatCommand(payload, commandId, client, serverConfig, agentId)
+        return executeApiChatCommand(payload, commandId, client, serverConfig, agentId, { projectDir, tenantCode })
       case 'codex': {
         const result = await executeCliChat('codex', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, hasFallbackCandidate)
         if (result.success || !isRuntimeUnavailable('codex', result) || !hasFallbackCandidate) return result
@@ -340,8 +368,14 @@ async function executeCliChatOnce(
       : (serverConfig?.claudeCodeConfig?.addDirs ?? [])
     // Merge project directory auto-add dirs with server-configured dirs
     let addDirs: string[] | undefined
+    // 確定方針3 + fail closed: workspace/repos・workspace/docs のみを addDir 対象にし、
+    // cwd をそのうち検証済みの1つ（repos 優先）に明示的に固定する。server 由来の
+    // addDirs（serverConfig.claudeCodeConfig.addDirs 等）は含めない。projectDir が無い、
+    // またはサンドボックス対象ディレクトリが実在しない場合は Read/Grep/Glob を
+    // 有効化せず fail closed にする（resolveSlackMarketplaceSandbox が tools: [] を返す）。
+    const slackSandbox = slackMarketplaceCommand ? resolveSlackMarketplaceSandbox(projectDir) : undefined
     if (slackMarketplaceCommand) {
-      addDirs = undefined
+      addDirs = slackSandbox?.addDirs
     } else if (projectDir) {
       const autoAddDirs = getAutoAddDirs(projectDir)
       addDirs = [...autoAddDirs, ...serverAddDirs]
@@ -453,7 +487,7 @@ async function executeCliChatOnce(
       locale,
       awsEnv: { ...awsEnv, ...gitEnv },
       cwd: slackMarketplaceCommand
-        ? undefined
+        ? slackSandbox?.cwd
         : projectDir
           ? getWorkspaceDir(projectDir)
           : undefined,
@@ -481,7 +515,11 @@ async function executeCliChatOnce(
       : runClaudeCode({
           ...runnerOptions,
           allowedTools,
-          tools: slackMarketplaceCommand ? SLACK_MARKETPLACE_TOOLS : undefined,
+          tools: slackMarketplaceCommand ? (slackSandbox?.tools ?? []) : undefined,
+          // --mcp-config を渡さないだけでは Claude Code CLI のプロジェクト/ユーザー
+          // レベルの MCP 自動読み込みを防げないため、Slack Marketplace では
+          // --strict-mcp-config を明示し MCP サーバーを一切読み込ませない。
+          strictMcpConfig: slackMarketplaceCommand,
         })
     // プロセスを管理 Map に登録
     processManager.register(commandId, handle)

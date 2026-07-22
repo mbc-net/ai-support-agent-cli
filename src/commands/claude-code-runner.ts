@@ -53,6 +53,8 @@ export interface RunClaudeCodeOptions {
   locale?: string
   awsEnv?: Record<string, string>
   mcpConfigPath?: string
+  /** `--strict-mcp-config` を付与するか。詳細は claude-code-args.ts のコメント参照 */
+  strictMcpConfig?: boolean
   cwd?: string
   systemPrompt?: string
   /** claude CLI に渡すモデル。
@@ -75,7 +77,7 @@ export interface RunClaudeCodeOptions {
  * ClaudeCodeHandle を返す: result Promise と kill 関数
  */
 export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
-  const { message, sendChunk, allowedTools, tools, addDirs, locale, awsEnv, mcpConfigPath, cwd, systemPrompt, model, policyContext, envVarsOverride } = options
+  const { message, sendChunk, allowedTools, tools, addDirs, locale, awsEnv, mcpConfigPath, strictMcpConfig, cwd, systemPrompt, model, policyContext, envVarsOverride } = options
 
   let killFn: () => void = () => { /* noop until child is spawned */ }
 
@@ -101,7 +103,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     const resolvedModel = explicitModel
       ? explicitModel
       : (envModel ? undefined : DEFAULT_CLAUDE_MODEL)
-    const args = buildClaudeArgs(message, { allowedTools, tools, addDirs, locale, mcpConfigPath, systemPrompt, model: resolvedModel, pluginDir: resolveValidPluginDir() ?? undefined })
+    const args = buildClaudeArgs(message, { allowedTools, tools, addDirs, locale, mcpConfigPath, strictMcpConfig, systemPrompt, model: resolvedModel, pluginDir: resolveValidPluginDir() ?? undefined })
 
     // どの経路でモデルが決まったかをログ出力し、「--model が付かなかった理由
     // （env 尊重 vs バグ）」をログだけで判別できるようにする。

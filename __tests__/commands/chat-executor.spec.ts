@@ -39,6 +39,7 @@ jest.mock('../../src/commands/codex-command', () => ({
 jest.mock('../../src/project-dir', () => ({
   getAutoAddDirs: jest.fn().mockReturnValue(['/mock/repos', '/mock/docs']),
   getWorkspaceDir: jest.fn((dir: string) => `${dir}/workspace`),
+  getReposDir: jest.fn(() => '/mock/repos'),
 }))
 
 // Mock aws-credential-builder
@@ -781,7 +782,7 @@ describe('chat-executor', () => {
       const result = await executeChatCommand({ payload: basePayload, commandId: 'cmd-3', client: mockClient, serverConfig, activeChatMode: 'api', agentId: 'agent-1' })
       expect(result.success).toBe(true)
       expect(executeApiChatCommand).toHaveBeenCalledWith(
-        basePayload, 'cmd-3', mockClient, serverConfig, 'agent-1',
+        basePayload, 'cmd-3', mockClient, serverConfig, 'agent-1', { projectDir: undefined, tenantCode: undefined },
       )
     })
 
@@ -800,7 +801,7 @@ describe('chat-executor', () => {
 
       expect(result.success).toBe(true)
       expect(executeApiChatCommand).toHaveBeenCalledWith(
-        payload, 'cmd-payload-api', mockClient, undefined, 'agent-1',
+        payload, 'cmd-payload-api', mockClient, undefined, 'agent-1', { projectDir: undefined, tenantCode: undefined },
       )
     })
 
@@ -1231,7 +1232,7 @@ describe('chat-executor', () => {
       )
     })
 
-    it('disables all Claude tools and project access for Slack Marketplace commands', async () => {
+    it('restricts Slack Marketplace commands to read-only tools scoped to repos/docs, blocking Bash/Write/MCP/auth', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockChildProcess()
       spawn.mockReturnValue(mockProcess)
@@ -1270,16 +1271,65 @@ describe('chat-executor', () => {
       await resultPromise
 
       const [, args, options] = spawn.mock.calls[0]
-      expect(args).toEqual(expect.arrayContaining([
-        '--tools', '',
-      ]))
+      // Only Read/Grep/Glob are enabled via --tools; --allowedTools (which would have
+      // carried the server-configured Bash/Write/mcp__dangerous__* list) must be absent.
+      expect(args).toEqual(expect.arrayContaining(['--tools', 'Read,Grep,Glob']))
       expect(args).not.toEqual(expect.arrayContaining(['--allowedTools']))
       expect(args).not.toEqual(expect.arrayContaining(['Bash']))
       expect(args).not.toEqual(expect.arrayContaining(['Write']))
       expect(args).not.toEqual(expect.arrayContaining(['mcp__dangerous__*']))
-      expect(args).not.toEqual(expect.arrayContaining(['--add-dir']))
+      // addDirs come from getAutoAddDirs(projectDir) (repos/docs), never the
+      // server-configured '/secrets' dir.
+      const addDirIndexes = args.reduce((acc: number[], arg: string, idx: number) => {
+        if (arg === '--add-dir') acc.push(idx)
+        return acc
+      }, [] as number[])
+      expect(addDirIndexes.length).toBeGreaterThan(0)
+      const addDirValues = addDirIndexes.map((idx: number) => args[idx + 1])
+      expect(addDirValues).toEqual(expect.arrayContaining(['/mock/repos', '/mock/docs']))
+      expect(args).not.toEqual(expect.arrayContaining(['/secrets']))
       expect(args).not.toEqual(expect.arrayContaining(['--mcp-config']))
+      // --mcp-config を渡さないだけではプロジェクト/ユーザーレベルの MCP 自動読み込みを
+      // 防げないため、--strict-mcp-config を明示して MCP を完全に無効化する。
+      expect(args).toEqual(expect.arrayContaining(['--strict-mcp-config']))
       expect(options.env).not.toHaveProperty('AWS_PROFILE')
+      // cwd は --add-dir で許可された検証済みディレクトリ（repos 優先）に明示固定する。
+      // agent デーモン自身のプロセス cwd を継承させない（--add-dir は追加許可であって
+      // 隔離ではないため）。
+      expect(options.cwd).toBe('/mock/repos')
+    })
+
+    it('fails closed (empty --tools, no cwd) for Slack Marketplace commands when no projectDir is provided', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const payload: ChatPayload = {
+        ...basePayload,
+        interactionOrigin: 'slack',
+        toolPolicy: 'marketplace_read_only',
+      }
+
+      const resultPromise = executeChatCommand({
+        payload,
+        commandId: 'cmd-slack-no-projectdir',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+      await resultPromise
+
+      const [, args, options] = spawn.mock.calls[0]
+      // Without a projectDir there is no validated sandbox directory to scope
+      // Read/Grep/Glob to, so tools fail closed to the same "block everything"
+      // behavior as before Read/Grep/Glob were ever enabled.
+      expect(args).toEqual(expect.arrayContaining(['--tools', '']))
+      expect(args).not.toEqual(expect.arrayContaining(['--add-dir']))
+      expect(args).toEqual(expect.arrayContaining(['--strict-mcp-config']))
       expect(options.cwd).toBeUndefined()
     })
 
