@@ -220,6 +220,8 @@
   "service.uninstalled": "Service files removed.",
   "service.daemonReloadFailed": "Warning: systemctl --user daemon-reload failed: {{message}}",
   "service.enableFailed": "Warning: systemctl --user enable {{unit}} failed: {{message}}. The service will run now but may not auto-start at next login.",
+  "service.lingerEnabled": "Enabled systemd lingering (loginctl enable-linger) so the service keeps running after you log out.",
+  "service.lingerEnableFailed": "Warning: could not automatically enable systemd lingering for user {{username}} ({{message}}). Without it, the service stops as soon as your login session ends. Run `sudo loginctl enable-linger {{username}}` (or `loginctl enable-linger {{username}}` without sudo, depending on your system's policy) to keep it running after logout.",
   "service.orphanUnitRemoveFailed": "Warning: failed to remove orphaned unit {{unit}}: {{message}}",
   "service.unitStartFailed": "Failed to start {{unit}}: {{message}}",
   "service.unitStopFailed": "Failed to stop {{unit}}: {{message}}",

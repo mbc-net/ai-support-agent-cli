@@ -220,6 +220,8 @@
   "service.uninstalled": "サービスファイルを削除しました。",
   "service.daemonReloadFailed": "警告: systemctl --user daemon-reload に失敗しました: {{message}}",
   "service.enableFailed": "警告: systemctl --user enable {{unit}} に失敗しました: {{message}}。現在のセッションではサービスは起動しますが、次回ログイン時に自動起動しない可能性があります。",
+  "service.lingerEnabled": "systemd lingering（loginctl enable-linger）を有効化しました。ログアウト後もサービスが起動し続けます。",
+  "service.lingerEnableFailed": "警告: ユーザー {{username}} の systemd lingering を自動設定できませんでした（{{message}}）。設定しない場合、ログインセッションが終了した時点でサービスが停止します。`sudo loginctl enable-linger {{username}}`（システムのポリシーによっては sudo なしの `loginctl enable-linger {{username}}`）を手動で実行し、ログアウト後も稼働し続けるようにしてください。",
   "service.orphanUnitRemoveFailed": "警告: 残存ユニット {{unit}} の削除に失敗しました: {{message}}",
   "service.unitStartFailed": "{{unit}} の起動に失敗しました: {{message}}",
   "service.unitStopFailed": "{{unit}} の停止に失敗しました: {{message}}",
