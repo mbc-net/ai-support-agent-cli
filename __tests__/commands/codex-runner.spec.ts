@@ -2,7 +2,16 @@ import os from 'os'
 import fs from 'fs'
 import path from 'path'
 
-import { ERR_CODEX_AUTH_INVALID, buildCodexArgs, buildCodexMcpConfigOverrides, formatCodexExitError, isCodexAuthError, redactCodexArgs } from '../../src/commands/codex-runner'
+import { LOG_STDERR_ON_FAILURE_LIMIT } from '../../src/constants'
+import { ERR_CODEX_AUTH_INVALID, buildCodexArgs, buildCodexMcpConfigOverrides, formatCodexExitError, isCodexAuthError, redactCodexArgs, runCodex } from '../../src/commands/codex-runner'
+import { logger } from '../../src/logger'
+import { createMockChildProcess } from '../helpers/mock-factory'
+
+jest.mock('../../src/logger')
+
+jest.mock('child_process', () => ({
+  spawn: jest.fn(),
+}))
 
 describe('codex-runner', () => {
   describe('buildCodexArgs', () => {
@@ -153,6 +162,168 @@ describe('codex-runner', () => {
     it('formats auth failures as actionable messages', () => {
       expect(formatCodexExitError(1, 'Your session has ended. Please log in again.')).toBe(ERR_CODEX_AUTH_INVALID)
       expect(formatCodexExitError(1, 'some other failure')).toBe('codex CLI がコード 1 で終了しました')
+    })
+  })
+
+  describe('runCodex', () => {
+    beforeEach(() => {
+      jest.clearAllMocks()
+    })
+
+    it('should resolve with text on success (code 0)', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runCodex({ message: 'hello', sendChunk })
+
+      mockProcess.emitStdout('data', Buffer.from(JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'agent_message', text: 'response text' },
+      }) + '\n'))
+      mockProcess.emit('close', 0)
+
+      const result = await handle.result
+      expect(result.metadata.exitCode).toBe(0)
+    })
+
+    it('should reject when CLI exits with non-zero code', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runCodex({ message: 'hello', sendChunk })
+
+      mockProcess.emit('close', 1)
+
+      await expect(handle.result).rejects.toThrow('コード 1')
+    })
+
+    it('should reject with an actionable auth error when stderr indicates an invalidated session', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runCodex({ message: 'hello', sendChunk })
+
+      mockProcess.emitStderr('data', Buffer.from('Your session has ended. Please log in again.\n'))
+      mockProcess.emit('close', 1)
+
+      await expect(handle.result).rejects.toThrow(ERR_CODEX_AUTH_INVALID)
+    })
+
+    it('should reject with ENOENT error when codex CLI is not found', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runCodex({ message: 'hello', sendChunk })
+
+      const enoentError = new Error('spawn codex ENOENT') as NodeJS.ErrnoException
+      enoentError.code = 'ENOENT'
+      mockProcess.emit('error', enoentError)
+
+      await expect(handle.result).rejects.toThrow()
+    })
+
+    it('should log the captured stderr at warn level when the CLI exits non-zero (so it is visible without --verbose)', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runCodex({ message: 'hello', sendChunk })
+
+      mockProcess.emitStderr('data', Buffer.from('Error: some internal codex CLI failure detail\n'))
+      mockProcess.emit('close', 1)
+
+      await expect(handle.result).rejects.toThrow()
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('some internal codex CLI failure detail'),
+      )
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/pid=12345/),
+      )
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/code=1/),
+      )
+    })
+
+    it('should not log a stderr warning when the CLI exits with code 0 (success)', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runCodex({ message: 'hello', sendChunk })
+
+      mockProcess.emitStderr('data', Buffer.from('some informational noise\n'))
+      mockProcess.emit('close', 0)
+
+      await handle.result
+
+      const stderrWarnCalls = (logger.warn as jest.Mock).mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('codex CLI'),
+      )
+      expect(stderrWarnCalls).toHaveLength(0)
+    })
+
+    it('should redact known secret env values from the stderr before logging at warn level', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const secretValue = 'sk-codex-super-secret-abc123'
+
+      const handle = runCodex({
+        message: 'hello',
+        sendChunk,
+        envVarsOverride: { CODEX_API_KEY: secretValue },
+      })
+
+      mockProcess.emitStderr('data', Buffer.from(`Error: invalid key ${secretValue} rejected\n`))
+      mockProcess.emit('close', 1)
+
+      await expect(handle.result).rejects.toThrow()
+
+      const warnCalls = (logger.warn as jest.Mock).mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('codex CLI failed'),
+      )
+      expect(warnCalls).toHaveLength(1)
+      const [loggedMessage] = warnCalls[0]
+      expect(loggedMessage).not.toContain(secretValue)
+      expect(loggedMessage).toContain('***')
+    })
+
+    it('should keep the most recent (tail) portion of long stderr, not the head, when truncating for the warn log', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runCodex({ message: 'hello', sendChunk })
+
+      const headMarker = 'HEAD_MARKER_SHOULD_BE_DROPPED'
+      const tailMarker = 'TAIL_MARKER_FATAL_ERROR'
+      const filler = 'x'.repeat(LOG_STDERR_ON_FAILURE_LIMIT + 100)
+      mockProcess.emitStderr('data', Buffer.from(`${headMarker}${filler}${tailMarker}`))
+      mockProcess.emit('close', 1)
+
+      await expect(handle.result).rejects.toThrow()
+
+      const warnCalls = (logger.warn as jest.Mock).mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('codex CLI failed'),
+      )
+      expect(warnCalls).toHaveLength(1)
+      const [loggedMessage] = warnCalls[0]
+      expect(loggedMessage).toContain(tailMarker)
+      expect(loggedMessage).not.toContain(headMarker)
     })
   })
 })

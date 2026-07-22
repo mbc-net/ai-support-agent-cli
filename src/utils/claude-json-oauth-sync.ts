@@ -275,7 +275,25 @@ function atomicWriteJson(targetPath: string, data: unknown): void {
 }
 
 /**
- * envVarsOverride に `CLAUDE_CODE_OAUTH_TOKEN` が含まれていれば、
+ * envVarsOverride（Web 設定 CLAUDE_CODE# / ENV# 経由）と processEnvToken
+ * （`process.env.CLAUDE_CODE_OAUTH_TOKEN`。`linux-service.ts` 等の
+ * `docker run -e CLAUDE_CODE_OAUTH_TOKEN=<token>` 経由で渡る）のどちらから
+ * トークンを採用するかを解決する。envVarsOverride が優先。
+ *
+ * トークン解決ロジックを独立させているのは、`ensureClaudeJsonOAuthAccount`
+ * の書き込み結果（~/.claude.json）だけからは、どちらのソースが実際に
+ * 採用されたかを直接観測できない（結果は常に同じ `oauthAccount: {}` になる）
+ * ため。優先順位（`??` の分岐）自体を単体でテスト可能にする。
+ */
+export function resolveOAuthToken(
+  envVarsOverride: Record<string, string> | undefined,
+  processEnvToken: string | undefined,
+): string | undefined {
+  return envVarsOverride?.CLAUDE_CODE_OAUTH_TOKEN ?? processEnvToken
+}
+
+/**
+ * envVarsOverride または process.env に `CLAUDE_CODE_OAUTH_TOKEN` が含まれていれば、
  * `~/.claude.json` を以下の状態にする:
  *
  * 1. `oauthAccount` キー（オブジェクト）を存在させる
@@ -287,7 +305,7 @@ function atomicWriteJson(targetPath: string, data: unknown): void {
  * `CLAUDE_CODE_OAUTH_TOKEN` env だけで対話 REPL が起動する。
  *
  * 動作詳細:
- * - envVarsOverride に CLAUDE_CODE_OAUTH_TOKEN が無い / 不正な場合は何もしない
+ * - 有効なトークンが (resolveOAuthToken 経由で) 見つからない場合は何もしない
  * - 並列 spawn での lost update を防ぐため lockfile で排他
  * - `~/.claude.json` が存在しない or 破損している場合は最小限の JSON で新規作成
  *   (破損時は `.claude.json.broken-<ts>` にバックアップを残す)
@@ -303,7 +321,12 @@ export function ensureClaudeJsonOAuthAccount(
   envVarsOverride: Record<string, string> | undefined,
   ctx: { prefix: string },
 ): void {
-  const token = envVarsOverride?.CLAUDE_CODE_OAUTH_TOKEN
+  // envVarsOverride は Web 設定（CLAUDE_CODE# / ENV#）経由のトークンのみを含む。
+  // `linux-service.ts` / `darwin-service.ts` / `win32-service.ts` は
+  // `docker run -e CLAUDE_CODE_OAUTH_TOKEN=<token>` として実プロセス環境変数に
+  // トークンを注入する（Web 設定を経由しない）ため、process.env もフォールバックで
+  // 見ないと、この経路のトークンでは oauthAccount 同期が silently スキップされる。
+  const token = resolveOAuthToken(envVarsOverride, process.env.CLAUDE_CODE_OAUTH_TOKEN)
   if (!isAcceptableToken(token)) return
 
   const claudeJsonPath = getClaudeJsonPath()
