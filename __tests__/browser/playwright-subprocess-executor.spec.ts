@@ -1,24 +1,38 @@
 import { EventEmitter } from 'events'
+import * as nodeFs from 'fs'
 import { promises as fs } from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 import * as childProcess from 'child_process'
 
 import { runPlaywrightSubprocess, parsePlaywrightJsonOutput } from '../../src/browser/playwright-subprocess-executor'
 
-// Mock fs and child_process
-jest.mock('fs', () => ({
-  promises: {
-    writeFile: jest.fn(),
-    readFile: jest.fn(),
-    unlink: jest.fn(),
-  },
-}))
-
+// Only child_process is mocked; file writes are verified against the real
+// OS temp directory (spying on fs sync functions is a known trap in this repo).
 jest.mock('child_process', () => ({
   spawn: jest.fn(),
 }))
 
-const mockFs = fs as jest.Mocked<typeof fs>
 const mockSpawn = childProcess.spawn as jest.MockedFunction<typeof childProcess.spawn>
+
+/** The per-execution run directory the executor is expected to use */
+function runDirFor(executionId: string): string {
+  return path.resolve(os.tmpdir(), `ai-support-e2e-${executionId}`)
+}
+
+/** Recursively snapshot a directory's files as { relativePath: content } */
+function snapshotDir(dir: string, base = dir): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const entry of nodeFs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      Object.assign(out, snapshotDir(full, base))
+    } else {
+      out[path.relative(base, full)] = nodeFs.readFileSync(full, 'utf-8')
+    }
+  }
+  return out
+}
 
 /** Helper to create a mock ChildProcess */
 function createMockChild(exitCode: number | null = 0, stderrData?: string): EventEmitter & {
@@ -42,6 +56,45 @@ function createMockChild(exitCode: number | null = 0, stderrData?: string): Even
   })
 
   return child
+}
+
+/** What the spawn mock captured at the moment Playwright was launched */
+interface SpawnCapture {
+  bin?: string
+  args?: string[]
+  env?: NodeJS.ProcessEnv
+  /** Files present in the run directory at spawn time */
+  files?: Record<string, string>
+}
+
+/**
+ * Install a spawn mock that captures the CLI invocation and the run-directory
+ * contents at spawn time, optionally writes the Playwright JSON reporter
+ * output to the path given in E2E_JSON_OUTPUT, then exits.
+ */
+function setupSpawn(opts: {
+  exitCode?: number | null
+  stderrData?: string
+  resultJson?: string
+  capture?: SpawnCapture
+}): void {
+  const { exitCode = 0, stderrData, resultJson, capture } = opts
+  mockSpawn.mockImplementation(((bin: string, args: string[], spawnOpts: { env?: NodeJS.ProcessEnv }) => {
+    if (capture) {
+      capture.bin = bin
+      capture.args = args
+      capture.env = spawnOpts?.env
+      const configFile = args[args.indexOf('--config') + 1]
+      capture.files = snapshotDir(path.dirname(configFile))
+    }
+    if (resultJson !== undefined) {
+      const outputPath = spawnOpts?.env?.E2E_JSON_OUTPUT
+      if (outputPath) {
+        nodeFs.writeFileSync(outputPath, resultJson, 'utf-8')
+      }
+    }
+    return createMockChild(exitCode, stderrData)
+  }) as any)
 }
 
 /** Helper to create a Playwright JSON reporter output */
@@ -499,10 +552,25 @@ describe('parsePlaywrightJsonOutput', () => {
 })
 
 describe('runPlaywrightSubprocess', () => {
+  /** executionIds used per test — their run directories are force-removed after each test */
+  const usedExecutionIds: string[] = []
+
+  function uniqueExecutionId(label: string): string {
+    const id = `jesttest-${label}-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+    usedExecutionIds.push(id)
+    return id
+  }
+
   beforeEach(() => {
     jest.clearAllMocks()
-    mockFs.writeFile.mockResolvedValue(undefined)
-    mockFs.unlink.mockResolvedValue(undefined)
+  })
+
+  afterEach(async () => {
+    // Safety net: the executor is expected to remove its run directory itself,
+    // but never leave residue in the shared temp dir if an assertion failed.
+    for (const id of usedExecutionIds.splice(0)) {
+      await fs.rm(runDirFor(id), { recursive: true, force: true })
+    }
   })
 
   // --- executionId validation (path traversal prevention) ---
@@ -553,19 +621,17 @@ describe('runPlaywrightSubprocess', () => {
   })
 
   it('should accept executionId with alphanumeric characters, hyphens, and underscores', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+    setupSpawn({ resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]) })
 
     // Should not throw for a valid executionId
     const result = await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-001_ABC',
+      executionId: uniqueExecutionId('valid_ABC-1'),
     })
     expect(result.success).toBe(true)
   })
 
-  it('should not clean up temp files when executionId is invalid (throws before writeFile)', async () => {
+  it('should not create a run directory nor spawn when executionId is invalid', async () => {
     await expect(
       runPlaywrightSubprocess({
         script: "await page.goto('/')",
@@ -573,125 +639,333 @@ describe('runPlaywrightSubprocess', () => {
       }),
     ).rejects.toThrow(/Invalid executionId/)
 
-    // writeFile and unlink should never have been called
-    expect(mockFs.writeFile).not.toHaveBeenCalled()
-    expect(mockFs.unlink).not.toHaveBeenCalled()
+    expect(mockSpawn).not.toHaveBeenCalled()
   })
 
-  it('should write the script to a temp file and run playwright', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test 1', status: 'passed', duration: 100 }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+  // --- run directory expansion ---
+
+  it('should write the script to test.spec.ts inside the run directory and run playwright', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test 1', status: 'passed', duration: 100 }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('write-spec')
 
     const result = await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-001',
+      executionId,
     })
 
-    expect(mockFs.writeFile).toHaveBeenCalledWith(
-      '/tmp/ai-support-e2e-exec-001.spec.ts',
-      "await page.goto('/')",
-      'utf-8',
-    )
+    expect(capture.files?.['test.spec.ts']).toBe("await page.goto('/')")
+    expect(capture.args?.[1]).toBe(path.join(runDirFor(executionId), 'test.spec.ts'))
     expect(result.success).toBe(true)
     expect(result.passedTests).toBe(1)
   })
 
-  it('should set E2E_JSON_OUTPUT env var for the subprocess', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+  it('should generate a per-run playwright config with testDir set to the run directory', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('config')
 
     await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-002',
+      executionId,
     })
 
-    const spawnCall = mockSpawn.mock.calls[0]
-    const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
-    expect(spawnEnv.E2E_JSON_OUTPUT).toBe('/tmp/ai-support-e2e-exec-002-result.json')
+    const config = capture.files?.['playwright.config.js']
+    expect(config).toBeDefined()
+    // testDir must point at the run directory itself so relative imports resolve
+    expect(config).toContain('testDir: __dirname')
+    // Settings carried over from playwright.subprocess.config.js
+    expect(config).toContain('timeout: 120_000')
+    expect(config).toContain('headless: true')
+    expect(config).toContain("screenshot: 'only-on-failure'")
+    expect(config).toContain("trace: 'retain-on-failure'")
+    expect(config).toContain("baseURL: process.env.E2E_BASE_URL ?? 'http://localhost:3000'")
+    expect(config).toContain("reporter: [['json', { outputFile: process.env.E2E_JSON_OUTPUT")
+    expect(config).toContain('workers: 1')
   })
 
-  it('should set E2E_BASE_URL when baseUrl is provided', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+  it('should pass the per-run config file as the --config argument', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('args')
 
     await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-003',
-      baseUrl: 'https://myapp.example.com',
+      executionId,
     })
 
-    const spawnCall = mockSpawn.mock.calls[0]
-    const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
-    expect(spawnEnv.E2E_BASE_URL).toBe('https://myapp.example.com')
+    expect(capture.args?.[0]).toBe('test')
+    expect(capture.args).toContain('--config')
+    const configArg = capture.args![capture.args!.indexOf('--config') + 1]
+    expect(configArg).toBe(path.join(runDirFor(executionId), 'playwright.config.js'))
   })
 
-  it('should not set E2E_BASE_URL when baseUrl is not provided', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+  // --- support files ---
+
+  it('should expand support files with nested relative paths into the run directory', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('support-nested')
+
+    const result = await runPlaywrightSubprocess({
+      script: "import { LoginPage } from './lib/pages/login.page'",
+      executionId,
+      supportFiles: [
+        { path: 'lib/pages/login.page.ts', content: 'export class LoginPage {}' },
+        { path: 'helpers.ts', content: 'export const wait = () => {}' },
+      ],
+    })
+
+    expect(capture.files?.[path.join('lib', 'pages', 'login.page.ts')]).toBe('export class LoginPage {}')
+    expect(capture.files?.['helpers.ts']).toBe('export const wait = () => {}')
+    expect(result.success).toBe(true)
+  })
+
+  it('should reject a support file path containing ".." and not spawn playwright', async () => {
+    const executionId = uniqueExecutionId('support-dotdot')
+
+    await expect(
+      runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+        supportFiles: [{ path: '../evil.ts', content: 'evil' }],
+      }),
+    ).rejects.toThrow(/Invalid support file path/)
+
+    expect(mockSpawn).not.toHaveBeenCalled()
+    // The run directory must still be cleaned up
+    expect(nodeFs.existsSync(runDirFor(executionId))).toBe(false)
+  })
+
+  it('should reject a support file path with ".." nested inside a subdirectory', async () => {
+    const executionId = uniqueExecutionId('support-nested-dotdot')
+
+    await expect(
+      runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+        supportFiles: [{ path: 'lib/../../evil.ts', content: 'evil' }],
+      }),
+    ).rejects.toThrow(/Invalid support file path/)
+
+    expect(mockSpawn).not.toHaveBeenCalled()
+  })
+
+  it('should reject an absolute support file path', async () => {
+    const executionId = uniqueExecutionId('support-absolute')
+
+    await expect(
+      runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+        supportFiles: [{ path: '/etc/hostile.ts', content: 'evil' }],
+      }),
+    ).rejects.toThrow(/Invalid support file path/)
+
+    expect(mockSpawn).not.toHaveBeenCalled()
+    expect(nodeFs.existsSync('/etc/hostile.ts')).toBe(false)
+  })
+
+  it('should let the spec win when a support file path collides with test.spec.ts', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('support-collision')
 
     await runPlaywrightSubprocess({
-      script: "await page.goto('/')",
-      executionId: 'exec-004',
+      script: 'the real spec',
+      executionId,
+      supportFiles: [{ path: 'test.spec.ts', content: 'hostile spec override' }],
     })
 
-    const spawnCall = mockSpawn.mock.calls[0]
-    const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
-    expect(spawnEnv.E2E_BASE_URL).toBeUndefined()
+    expect(capture.files?.['test.spec.ts']).toBe('the real spec')
   })
 
-  it('should clean up temp files on success', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
-
-    await runPlaywrightSubprocess({
-      script: "await page.goto('/')",
-      executionId: 'exec-005',
+  it('should behave as before when supportFiles is not provided (backward compatibility)', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
     })
-
-    expect(mockFs.unlink).toHaveBeenCalledWith('/tmp/ai-support-e2e-exec-005.spec.ts')
-    expect(mockFs.unlink).toHaveBeenCalledWith('/tmp/ai-support-e2e-exec-005-result.json')
-  })
-
-  it('should clean up temp files even when subprocess fails', async () => {
-    mockFs.readFile.mockRejectedValue(new Error('File not found'))
-    mockSpawn.mockReturnValue(createMockChild(1, 'Error: test failed') as any)
-
-    await runPlaywrightSubprocess({
-      script: "await page.goto('/')",
-      executionId: 'exec-006',
-    })
-
-    expect(mockFs.unlink).toHaveBeenCalledWith('/tmp/ai-support-e2e-exec-006.spec.ts')
-    expect(mockFs.unlink).toHaveBeenCalledWith('/tmp/ai-support-e2e-exec-006-result.json')
-  })
-
-  it('should return failure when JSON output file cannot be read', async () => {
-    mockFs.readFile.mockRejectedValue(new Error('File not found'))
-    mockSpawn.mockReturnValue(createMockChild(1, 'Something went wrong') as any)
+    const executionId = uniqueExecutionId('no-support')
 
     const result = await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-007',
+      executionId,
+    })
+
+    expect(result.success).toBe(true)
+    // Only the spec and the per-run config are expanded
+    expect(Object.keys(capture.files ?? {}).sort()).toEqual(['playwright.config.js', 'test.spec.ts'])
+  })
+
+  // --- env wiring ---
+
+  it('should set E2E_JSON_OUTPUT to result.json inside the run directory', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('json-output')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+    })
+
+    expect(capture.env?.E2E_JSON_OUTPUT).toBe(path.join(runDirFor(executionId), 'result.json'))
+  })
+
+  it('should set E2E_BASE_URL when baseUrl is provided', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId: uniqueExecutionId('base-url'),
+      baseUrl: 'https://myapp.example.com',
+    })
+
+    expect(capture.env?.E2E_BASE_URL).toBe('https://myapp.example.com')
+  })
+
+  it('should not set E2E_BASE_URL when baseUrl is not provided', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId: uniqueExecutionId('no-base-url'),
+    })
+
+    expect(capture.env?.E2E_BASE_URL).toBeUndefined()
+  })
+
+  // --- cleanup ---
+
+  it('should remove the run directory on success', async () => {
+    setupSpawn({ resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]) })
+    const executionId = uniqueExecutionId('cleanup-ok')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+    })
+
+    expect(nodeFs.existsSync(runDirFor(executionId))).toBe(false)
+  })
+
+  it('should remove the run directory even when the subprocess fails', async () => {
+    setupSpawn({ exitCode: 1, stderrData: 'Error: test failed' })
+    const executionId = uniqueExecutionId('cleanup-fail')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+      supportFiles: [{ path: 'lib/util.ts', content: 'export {}' }],
+    })
+
+    expect(nodeFs.existsSync(runDirFor(executionId))).toBe(false)
+  })
+
+  it('should remove the run directory when the subprocess rejects (spawn error)', async () => {
+    const child = new EventEmitter() as any
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.kill = jest.fn()
+    child.stdin = null
+    mockSpawn.mockImplementation((() => {
+      process.nextTick(() => {
+        child.emit('error', new Error('ENOENT: playwright not found'))
+      })
+      return child
+    }) as any)
+    const executionId = uniqueExecutionId('cleanup-spawn-error')
+
+    await expect(
+      runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+      }),
+    ).rejects.toThrow('ENOENT: playwright not found')
+
+    expect(nodeFs.existsSync(runDirFor(executionId))).toBe(false)
+  })
+
+  it('should clean up and rethrow when the run directory cannot be created', async () => {
+    const executionId = uniqueExecutionId('mkdir-fail')
+    // Pre-create a regular file where the run directory should go → mkdir fails
+    nodeFs.writeFileSync(runDirFor(executionId), 'not a directory', 'utf-8')
+
+    await expect(
+      runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+      }),
+    ).rejects.toThrow()
+
+    expect(mockSpawn).not.toHaveBeenCalled()
+    // finally-cleanup removes even the offending file (rm with force+recursive)
+    expect(nodeFs.existsSync(runDirFor(executionId))).toBe(false)
+  })
+
+  it('should ignore errors during run directory cleanup', async () => {
+    setupSpawn({ resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]) })
+    const rmSpy = jest.spyOn(fs, 'rm').mockRejectedValueOnce(new Error('Permission denied'))
+
+    // Should not throw despite rm failure
+    const result = await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId: uniqueExecutionId('cleanup-error-ignored'),
+    })
+    expect(result.success).toBe(true)
+    rmSpy.mockRestore()
+  })
+
+  // --- result handling ---
+
+  it('should return failure when JSON output file cannot be read', async () => {
+    // Spawn exits with error and never writes the result file
+    setupSpawn({ exitCode: 1, stderrData: 'Something went wrong' })
+
+    const result = await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId: uniqueExecutionId('no-json'),
     })
 
     expect(result.success).toBe(false)
     expect(result.totalTests).toBe(0)
-    expect(result.errorOutput).toBeTruthy()
+    expect(result.errorOutput).toBe('Something went wrong')
   })
 
   it('should use fallback message when JSON output missing and no stderr', async () => {
-    mockFs.readFile.mockRejectedValue(new Error('File not found'))
     // exit code 0 means no stderr (success exit but no output file)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+    setupSpawn({ exitCode: 0 })
 
     const result = await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-no-stderr',
+      executionId: uniqueExecutionId('no-stderr'),
     })
 
     expect(result.success).toBe(false)
@@ -699,15 +973,17 @@ describe('runPlaywrightSubprocess', () => {
   })
 
   it('should include stderr output in error result when tests fail', async () => {
-    const jsonOutput = makePlaywrightJson([
-      { title: 'Failing test', status: 'failed', error: 'Assertion error' },
-    ])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(1, 'Playwright stderr output') as any)
+    setupSpawn({
+      exitCode: 1,
+      stderrData: 'Playwright stderr output',
+      resultJson: makePlaywrightJson([
+        { title: 'Failing test', status: 'failed', error: 'Assertion error' },
+      ]),
+    })
 
     const result = await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-008',
+      executionId: uniqueExecutionId('stderr'),
     })
 
     expect(result.success).toBe(false)
@@ -715,7 +991,7 @@ describe('runPlaywrightSubprocess', () => {
   })
 
   it('should reject when process times out', async () => {
-    // Create a child that never emits close
+    // Create a child that never emits close until killed
     const child = new EventEmitter() as any
     child.stdout = new EventEmitter()
     child.stderr = new EventEmitter()
@@ -725,74 +1001,24 @@ describe('runPlaywrightSubprocess', () => {
     })
     child.stdin = null
     mockSpawn.mockReturnValue(child as any)
-    mockFs.readFile.mockRejectedValue(new Error('File not found'))
+    const executionId = uniqueExecutionId('timeout')
 
     const resultPromise = runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-timeout',
+      executionId,
       timeoutMs: 10, // Very short timeout
     })
 
     await expect(resultPromise).rejects.toThrow(/timed out/)
-  })
-
-  it('should reject when spawn emits an error event', async () => {
-    const child = new EventEmitter() as any
-    child.stdout = new EventEmitter()
-    child.stderr = new EventEmitter()
-    child.kill = jest.fn()
-    child.stdin = null
-    mockSpawn.mockReturnValue(child as any)
-
-    process.nextTick(() => {
-      child.emit('error', new Error('ENOENT: playwright not found'))
-    })
-
-    await expect(
-      runPlaywrightSubprocess({
-        script: "await page.goto('/')",
-        executionId: 'exec-spawn-error',
-      }),
-    ).rejects.toThrow('ENOENT: playwright not found')
-  })
-
-  it('should clean up temp files even when writeFile throws', async () => {
-    mockFs.writeFile.mockRejectedValue(new Error('Disk full'))
-    mockFs.unlink.mockResolvedValue(undefined)
-
-    await expect(
-      runPlaywrightSubprocess({
-        script: "await page.goto('/')",
-        executionId: 'exec-writefail',
-      }),
-    ).rejects.toThrow('Disk full')
-
-    expect(mockFs.unlink).toHaveBeenCalledWith('/tmp/ai-support-e2e-exec-writefail.spec.ts')
-    expect(mockFs.unlink).toHaveBeenCalledWith('/tmp/ai-support-e2e-exec-writefail-result.json')
-  })
-
-  it('should ignore errors when cleaning up temp files', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
-    mockFs.unlink.mockRejectedValue(new Error('Permission denied'))
-
-    // Should not throw despite unlink failure
-    const result = await runPlaywrightSubprocess({
-      script: "await page.goto('/')",
-      executionId: 'exec-cleanup-fail',
-    })
-    expect(result.success).toBe(true)
+    expect(nodeFs.existsSync(runDirFor(executionId))).toBe(false)
   })
 
   it('should handle success result without errorOutput when tests pass', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+    setupSpawn({ resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]) })
 
     const result = await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-pass',
+      executionId: uniqueExecutionId('pass'),
     })
 
     expect(result.success).toBe(true)
@@ -800,25 +1026,28 @@ describe('runPlaywrightSubprocess', () => {
   })
 
   it('should handle stdout data from subprocess', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-
     // Child that emits stdout data
     const child = new EventEmitter() as any
     child.stdout = new EventEmitter()
     child.stderr = new EventEmitter()
     child.kill = jest.fn()
     child.stdin = null
-    mockSpawn.mockReturnValue(child as any)
-
-    process.nextTick(() => {
-      child.stdout.emit('data', Buffer.from('Running 1 test...\n'))
-      child.emit('close', 0)
-    })
+    const executionId = uniqueExecutionId('stdout')
+    mockSpawn.mockImplementation(((bin: string, args: string[], spawnOpts: { env?: NodeJS.ProcessEnv }) => {
+      const outputPath = spawnOpts?.env?.E2E_JSON_OUTPUT
+      if (outputPath) {
+        nodeFs.writeFileSync(outputPath, makePlaywrightJson([{ title: 'Test', status: 'passed' }]), 'utf-8')
+      }
+      process.nextTick(() => {
+        child.stdout.emit('data', Buffer.from('Running 1 test...\n'))
+        child.emit('close', 0)
+      })
+      return child
+    }) as any)
 
     const result = await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-stdout',
+      executionId,
     })
     expect(result.success).toBe(true)
   })
@@ -826,31 +1055,34 @@ describe('runPlaywrightSubprocess', () => {
   // --- envVars merging ---
 
   it('should merge valid envVars into the subprocess env', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
 
     await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-envvars-ok',
+      executionId: uniqueExecutionId('envvars-ok'),
       envVars: { API_KEY: 'secret-value', RETRY_COUNT: '3' },
     })
 
-    const spawnCall = mockSpawn.mock.calls[0]
-    const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
-    expect(spawnEnv.API_KEY).toBe('secret-value')
-    expect(spawnEnv.RETRY_COUNT).toBe('3')
+    expect(capture.env?.API_KEY).toBe('secret-value')
+    expect(capture.env?.RETRY_COUNT).toBe('3')
   })
 
   it('should ignore envVars keys with an invalid format and log a warning', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
     const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    const executionId = uniqueExecutionId('envvars-bad-key')
 
     await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-envvars-bad-key',
+      executionId,
       envVars: {
         'lowercase_key': 'value',
         'has space': 'value',
@@ -859,25 +1091,26 @@ describe('runPlaywrightSubprocess', () => {
       },
     })
 
-    const spawnCall = mockSpawn.mock.calls[0]
-    const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
-    expect(spawnEnv['lowercase_key']).toBeUndefined()
-    expect(spawnEnv['has space']).toBeUndefined()
-    expect(spawnEnv['1STARTS_WITH_DIGIT']).toBeUndefined()
-    expect(spawnEnv.VALID_KEY).toBe('kept')
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('exec-envvars-bad-key'))
+    expect(capture.env?.['lowercase_key']).toBeUndefined()
+    expect(capture.env?.['has space']).toBeUndefined()
+    expect(capture.env?.['1STARTS_WITH_DIGIT']).toBeUndefined()
+    expect(capture.env?.VALID_KEY).toBe('kept')
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(executionId))
     warnSpy.mockRestore()
   })
 
   it('should not allow envVars to override reserved keys (E2E_JSON_OUTPUT, E2E_BASE_URL, PATH)', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
     const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    const executionId = uniqueExecutionId('envvars-reserved')
 
     await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-envvars-reserved',
+      executionId,
       baseUrl: 'https://real.example.com',
       envVars: {
         E2E_JSON_OUTPUT: '/tmp/malicious.json',
@@ -886,32 +1119,32 @@ describe('runPlaywrightSubprocess', () => {
       },
     })
 
-    const spawnCall = mockSpawn.mock.calls[0]
-    const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
-    expect(spawnEnv.E2E_JSON_OUTPUT).toBe('/tmp/ai-support-e2e-exec-envvars-reserved-result.json')
-    expect(spawnEnv.E2E_BASE_URL).toBe('https://real.example.com')
-    expect(spawnEnv.PATH).toBe(process.env.PATH)
+    expect(capture.env?.E2E_JSON_OUTPUT).toBe(path.join(runDirFor(executionId), 'result.json'))
+    expect(capture.env?.E2E_BASE_URL).toBe('https://real.example.com')
+    expect(capture.env?.PATH).toBe(process.env.PATH)
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('E2E_JSON_OUTPUT'))
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('E2E_BASE_URL'))
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('PATH'))
     // The reserved-key warnings (module-specific) must be traceable to the execution.
     expect(warnSpy.mock.calls.some(
       (call) => typeof call[0] === 'string'
-        && call[0].includes('exec-envvars-reserved')
+        && call[0].includes(executionId)
         && call[0].includes('E2E_JSON_OUTPUT'),
     )).toBe(true)
     warnSpy.mockRestore()
   })
 
   it('should reject dangerous runtime-hijacking env keys (NODE_OPTIONS, PLAYWRIGHT_BROWSERS_PATH, LD_PRELOAD, DYLD_INSERT_LIBRARIES) via the shared denylist', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
     const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
 
     await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-envvars-rce',
+      executionId: uniqueExecutionId('envvars-rce'),
       envVars: {
         NODE_OPTIONS: '--require /tmp/evil.js',
         PLAYWRIGHT_BROWSERS_PATH: '/tmp/evil-browsers',
@@ -921,78 +1154,43 @@ describe('runPlaywrightSubprocess', () => {
       },
     })
 
-    const spawnCall = mockSpawn.mock.calls[0]
-    const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
-    expect(spawnEnv.NODE_OPTIONS).toBe(process.env.NODE_OPTIONS)
-    expect(spawnEnv.PLAYWRIGHT_BROWSERS_PATH).toBe(process.env.PLAYWRIGHT_BROWSERS_PATH)
-    expect(spawnEnv.LD_PRELOAD).toBe(process.env.LD_PRELOAD)
-    expect(spawnEnv.DYLD_INSERT_LIBRARIES).toBe(process.env.DYLD_INSERT_LIBRARIES)
-    expect(spawnEnv.SAFE_KEY).toBe('kept')
+    expect(capture.env?.NODE_OPTIONS).toBe(process.env.NODE_OPTIONS)
+    expect(capture.env?.PLAYWRIGHT_BROWSERS_PATH).toBe(process.env.PLAYWRIGHT_BROWSERS_PATH)
+    expect(capture.env?.LD_PRELOAD).toBe(process.env.LD_PRELOAD)
+    expect(capture.env?.DYLD_INSERT_LIBRARIES).toBe(process.env.DYLD_INSERT_LIBRARIES)
+    expect(capture.env?.SAFE_KEY).toBe('kept')
     warnSpy.mockRestore()
   })
 
   it('should include the executionId in warnings emitted by the shared env filter', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
+    setupSpawn({ resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]) })
     const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    const executionId = uniqueExecutionId('trace-me')
 
     await runPlaywrightSubprocess({
       script: "await page.goto('/')",
-      executionId: 'exec-trace-me',
+      executionId,
       envVars: { NODE_OPTIONS: '--require /tmp/evil.js' },
     })
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('exec-trace-me'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(executionId))
     warnSpy.mockRestore()
   })
 
-  it('should set only internal env vars when envVars is not provided', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
-
-    await runPlaywrightSubprocess({
-      script: "await page.goto('/')",
-      executionId: 'exec-envvars-none',
+  it('should set NODE_PATH to bundled node_modules so run-dir specs can import @playwright/test', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
     })
-
-    const spawnCall = mockSpawn.mock.calls[0]
-    const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
-    expect(spawnEnv.E2E_JSON_OUTPUT).toBe('/tmp/ai-support-e2e-exec-envvars-none-result.json')
-  })
-
-  it('should set NODE_PATH to bundled node_modules so /tmp specs can import @playwright/test', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
 
     await runPlaywrightSubprocess({
       script: "import { test } from '@playwright/test'; test('t', async () => {})",
-      executionId: 'exec-node-path',
+      executionId: uniqueExecutionId('node-path'),
       envVars: { NODE_PATH: '/tmp/evil-node-path' },
     })
 
-    const spawnCall = mockSpawn.mock.calls[0]
-    const spawnEnv = spawnCall[2]?.env as NodeJS.ProcessEnv
-    expect(spawnEnv.NODE_PATH).toContain('node_modules')
-    expect(spawnEnv.NODE_PATH).not.toBe('/tmp/evil-node-path')
-  })
-
-  it('should pass spec file and config file as playwright arguments', async () => {
-    const jsonOutput = makePlaywrightJson([{ title: 'Test', status: 'passed' }])
-    mockFs.readFile.mockResolvedValue(jsonOutput as any)
-    mockSpawn.mockReturnValue(createMockChild(0) as any)
-
-    await runPlaywrightSubprocess({
-      script: "await page.goto('/')",
-      executionId: 'exec-args',
-    })
-
-    const spawnArgs = mockSpawn.mock.calls[0][1] as string[]
-    expect(spawnArgs[0]).toBe('test')
-    expect(spawnArgs[1]).toContain('ai-support-e2e-exec-args.spec.ts')
-    expect(spawnArgs).toContain('--config')
-    expect(spawnArgs[spawnArgs.indexOf('--config') + 1]).toContain('playwright.subprocess.config.js')
+    expect(capture.env?.NODE_PATH).toContain('node_modules')
+    expect(capture.env?.NODE_PATH).not.toBe('/tmp/evil-node-path')
   })
 })
