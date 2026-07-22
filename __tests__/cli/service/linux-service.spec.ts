@@ -3,6 +3,14 @@ import * as path from 'path'
 
 jest.mock('fs')
 jest.mock('child_process')
+jest.mock('os', () => {
+  const actual = jest.requireActual('os')
+  // Wrap (not stub) userInfo so every existing os.homedir()/os.userInfo()
+  // call in this file keeps its real behavior by default; only the
+  // lingering tests that need to simulate an unresolvable user override it
+  // per-call via mockImplementationOnce.
+  return { ...actual, userInfo: jest.fn(actual.userInfo) }
+})
 jest.mock('../../../src/logger')
 jest.mock('../../../src/i18n', () => ({
   initI18n: jest.fn(),
@@ -54,6 +62,7 @@ import { logger } from '../../../src/logger'
 import { loadConfig, getProjectList } from '../../../src/config-manager'
 
 const mockedFs = jest.mocked(fs)
+const mockedOs = jest.mocked(os)
 const mockedExecSync = jest.mocked(execSync)
 const mockedLoadConfig = jest.mocked(loadConfig)
 const mockedGetProjectList = jest.mocked(getProjectList)
@@ -770,7 +779,14 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
 
       strategy.install({})
 
-      expect(logger.success).toHaveBeenCalledTimes(2)
+      // Filtered to the per-project install message specifically — total
+      // logger.success call count also includes the (independent) systemd
+      // lingering success log, so asserting an exact total here would
+      // couple this test to unrelated behavior.
+      const projectInstalledCalls = (logger.success as jest.Mock).mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('service.projectInstalled'),
+      )
+      expect(projectInstalledCalls).toHaveLength(2)
     })
 
     it('should log multi hint and log rotation notice', () => {
@@ -825,6 +841,146 @@ describe('LinuxServiceStrategy — multi-project mode', () => {
       )
       // install still reports success per project even with enable warnings
       expect(logger.success).toHaveBeenCalledTimes(2)
+    })
+
+    describe('systemd lingering', () => {
+      it('should auto-enable systemd lingering when it is currently disabled', () => {
+        mockedFs.existsSync.mockReturnValue(true)
+        const username = os.userInfo().username
+        mockedExecSync.mockImplementation((cmd: unknown) => {
+          if (typeof cmd === 'string' && cmd.includes('loginctl show-user')) {
+            return Buffer.from('Linger=no\n')
+          }
+          return Buffer.from('')
+        })
+
+        strategy.install({})
+
+        expect(mockedExecSync).toHaveBeenCalledWith(
+          `loginctl show-user '${username}' -p Linger`,
+          { stdio: 'pipe', timeout: 5000 },
+        )
+        expect(mockedExecSync).toHaveBeenCalledWith(
+          `loginctl enable-linger '${username}'`,
+          { stdio: 'pipe', timeout: 5000 },
+        )
+        expect(logger.success).toHaveBeenCalledWith('service.lingerEnabled')
+      })
+
+      it('should not attempt to enable lingering when it is already enabled', () => {
+        mockedFs.existsSync.mockReturnValue(true)
+        mockedExecSync.mockImplementation((cmd: unknown) => {
+          if (typeof cmd === 'string' && cmd.includes('loginctl show-user')) {
+            return Buffer.from('Linger=yes\n')
+          }
+          return Buffer.from('')
+        })
+
+        strategy.install({})
+
+        const lingerEnableCall = (mockedExecSync as jest.Mock).mock.calls.find(
+          (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('enable-linger'),
+        )
+        expect(lingerEnableCall).toBeUndefined()
+        expect(logger.success).not.toHaveBeenCalledWith('service.lingerEnabled')
+      })
+
+      it('should silently skip lingering configuration when the loginctl binary itself is unavailable', () => {
+        mockedFs.existsSync.mockReturnValue(true)
+        mockedExecSync.mockImplementation((cmd: unknown) => {
+          if (typeof cmd === 'string' && cmd.includes('command -v loginctl')) {
+            throw new Error('loginctl: command not found')
+          }
+          return Buffer.from('')
+        })
+
+        strategy.install({})
+
+        const lingerRelatedCall = (mockedExecSync as jest.Mock).mock.calls.find(
+          (call: unknown[]) => typeof call[0] === 'string'
+            && ((call[0] as string).includes('loginctl show-user') || (call[0] as string).includes('enable-linger')),
+        )
+        expect(lingerRelatedCall).toBeUndefined()
+        expect(logger.warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('service.linger'),
+        )
+        expect(logger.success).not.toHaveBeenCalledWith('service.lingerEnabled')
+      })
+
+      it('should still attempt to enable lingering when the show-user probe fails but loginctl itself is available', () => {
+        // Regression: logind lazily creates its User object on first login,
+        // so an unattended-provisioned host (cloud-init/Ansible, no
+        // interactive session ever opened for this user) can fail the probe
+        // while loginctl is fully functional. Skipping the enable attempt
+        // there would silently reproduce the bug this function exists to
+        // catch, so a probe failure must NOT short-circuit the attempt.
+        mockedFs.existsSync.mockReturnValue(true)
+        const username = os.userInfo().username
+        mockedExecSync.mockImplementation((cmd: unknown) => {
+          if (typeof cmd === 'string' && cmd.includes('loginctl show-user')) {
+            throw new Error('Failed to get user: No such user')
+          }
+          return Buffer.from('')
+        })
+
+        strategy.install({})
+
+        expect(mockedExecSync).toHaveBeenCalledWith(
+          `loginctl enable-linger '${username}'`,
+          { stdio: 'pipe', timeout: 5000 },
+        )
+        expect(logger.success).toHaveBeenCalledWith('service.lingerEnabled')
+      })
+
+      it('should warn with a manual fallback command when auto-enabling lingering fails', () => {
+        mockedFs.existsSync.mockReturnValue(true)
+        mockedExecSync.mockImplementation((cmd: unknown) => {
+          if (typeof cmd === 'string' && cmd.includes('loginctl show-user')) {
+            return Buffer.from('Linger=no\n')
+          }
+          if (typeof cmd === 'string' && cmd.includes('loginctl enable-linger')) {
+            throw new Error('Interactive authentication required')
+          }
+          return Buffer.from('')
+        })
+
+        strategy.install({})
+
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('service.lingerEnableFailed'),
+        )
+      })
+
+      it('should not throw when the running user cannot be resolved (e.g. no /etc/passwd entry for a dynamic UID)', () => {
+        mockedFs.existsSync.mockReturnValue(true)
+        mockedExecSync.mockReturnValue(Buffer.from(''))
+        mockedOs.userInfo.mockImplementationOnce(() => {
+          throw new Error('unable to obtain user info')
+        })
+
+        expect(() => strategy.install({})).not.toThrow()
+        const lingerRelatedCall = (mockedExecSync as jest.Mock).mock.calls.find(
+          (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('loginctl'),
+        )
+        expect(lingerRelatedCall).toBeUndefined()
+      })
+
+      it('should not check lingering when no project units were written', () => {
+        mockedFs.existsSync.mockReturnValue(true)
+        mockedExecSync.mockReturnValue(Buffer.from(''))
+        mockedGetProjectList.mockReturnValue([
+          { tenantCode: 'mbc', projectCode: 'X;Y', token: 't1', apiUrl: 'https://api' },
+        ])
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        mockedFs.readdirSync.mockReturnValue([] as any)
+
+        strategy.install({})
+
+        const lingerCheckCall = (mockedExecSync as jest.Mock).mock.calls.find(
+          (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('loginctl'),
+        )
+        expect(lingerCheckCall).toBeUndefined()
+      })
     })
 
     it('should warn when daemon-reload fails during install', () => {
@@ -1821,6 +1977,72 @@ describe('installAndStartProject', () => {
     installAndStartProject(project)
 
     expect(logger.warn).toHaveBeenCalled()
+  })
+
+  describe('systemd lingering', () => {
+    it('should auto-enable systemd lingering when it is currently disabled', () => {
+      const username = os.userInfo().username
+      mockedExecSync.mockImplementation((cmd: unknown) => {
+        if (typeof cmd === 'string' && cmd.includes('loginctl show-user')) {
+          return Buffer.from('Linger=no\n')
+        }
+        return Buffer.from('active')
+      })
+
+      installAndStartProject(project)
+
+      expect(mockedExecSync).toHaveBeenCalledWith(
+        `loginctl enable-linger '${username}'`,
+        { stdio: 'pipe', timeout: 5000 },
+      )
+      expect(logger.success).toHaveBeenCalledWith('service.lingerEnabled')
+    })
+
+    it('should not attempt to enable lingering when it is already enabled', () => {
+      mockedExecSync.mockImplementation((cmd: unknown) => {
+        if (typeof cmd === 'string' && cmd.includes('loginctl show-user')) {
+          return Buffer.from('Linger=yes\n')
+        }
+        return Buffer.from('active')
+      })
+
+      installAndStartProject(project)
+
+      const lingerEnableCall = (mockedExecSync as jest.Mock).mock.calls.find(
+        (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('enable-linger'),
+      )
+      expect(lingerEnableCall).toBeUndefined()
+    })
+
+    it('should not throw when the running user cannot be resolved (e.g. no /etc/passwd entry for a dynamic UID)', () => {
+      mockedExecSync.mockReturnValue(Buffer.from('active'))
+      mockedOs.userInfo.mockImplementationOnce(() => {
+        throw new Error('unable to obtain user info')
+      })
+
+      expect(() => installAndStartProject(project)).not.toThrow()
+      const lingerRelatedCall = (mockedExecSync as jest.Mock).mock.calls.find(
+        (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('loginctl'),
+      )
+      expect(lingerRelatedCall).toBeUndefined()
+    })
+
+    it('should warn but not throw when auto-enabling lingering fails', () => {
+      mockedExecSync.mockImplementation((cmd: unknown) => {
+        if (typeof cmd === 'string' && cmd.includes('loginctl show-user')) {
+          return Buffer.from('Linger=no\n')
+        }
+        if (typeof cmd === 'string' && cmd.includes('loginctl enable-linger')) {
+          throw new Error('Interactive authentication required')
+        }
+        return Buffer.from('active')
+      })
+
+      expect(() => installAndStartProject(project)).not.toThrow()
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('service.lingerEnableFailed'),
+      )
+    })
   })
 })
 

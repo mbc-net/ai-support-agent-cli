@@ -57,7 +57,12 @@ describe('credentials tool', () => {
   })
 
   describe('DB credentials', () => {
-    it('should return DB credentials', async () => {
+    // SECURITY: get_credentials(type:'db') omits the raw `password` field from
+    // the MCP tool-call response fed to the LLM, matching db_query
+    // (src/mcp/tools/db-query.ts)'s "return results only" pattern. This test
+    // guards against a regression that would reintroduce the password into
+    // the response.
+    it('should return DB credentials without exposing the raw password', async () => {
       setupTool({
         getDbCredentials: jest.fn().mockResolvedValue({
           name: 'MAIN',
@@ -66,15 +71,47 @@ describe('credentials tool', () => {
           port: 3306,
           database: 'testdb',
           user: 'root',
-          password: 'pass',
+          password: 'super-secret-db-password',
         }),
       })
 
       const result = await toolCallback({ type: 'db', name: 'MAIN' }) as { content: Array<{ text: string }> }
-      const parsed = JSON.parse(result.content[0].text)
+      const parsed = JSON.parse(result.content[0].text) as Record<string, unknown>
+
+      // Non-secret fields useful to the LLM (e.g. for context/diagnostics)
+      // should still be present.
       expect(parsed.name).toBe('MAIN')
       expect(parsed.engine).toBe('mysql')
-      expect(parsed.password).toBe('pass')
+      expect(parsed.host).toBe('localhost')
+      expect(parsed.port).toBe(3306)
+      expect(parsed.database).toBe('testdb')
+      expect(parsed.user).toBe('root')
+
+      // The raw password must never be returned to the LLM tool-call response.
+      expect(parsed).not.toHaveProperty('password')
+      expect(result.content[0].text).not.toContain('super-secret-db-password')
+    })
+
+    it('should not expose the password even when writePermissions/ssl are present', async () => {
+      setupTool({
+        getDbCredentials: jest.fn().mockResolvedValue({
+          name: 'MAIN',
+          engine: 'postgresql',
+          host: 'db.example.com',
+          port: 5432,
+          database: 'testdb',
+          user: 'postgres',
+          password: 'another-secret-pw',
+          ssl: { mode: 'require' },
+          writePermissions: { insert: true, update: false, delete: false },
+        }),
+      })
+
+      const result = await toolCallback({ type: 'db', name: 'MAIN' }) as { content: Array<{ text: string }> }
+      const parsed = JSON.parse(result.content[0].text) as Record<string, unknown>
+
+      expect(parsed).not.toHaveProperty('password')
+      expect(result.content[0].text).not.toContain('another-secret-pw')
     })
   })
 
