@@ -159,6 +159,88 @@ export function detectSystemSystemdUnits(): string[] {
 // getProjectConfigHostDir, getServicesDir, and getUpdateScriptPath are imported from ../../utils/path-utils
 
 // ---------------------------------------------------------------------------
+// systemd lingering (loginctl enable-linger)
+// ---------------------------------------------------------------------------
+
+// Any single loginctl probe/mutation gets this long to respond. Bounds the
+// worst case where a desktop polkit authentication agent pops a GUI prompt
+// for org.freedesktop.login1.set-user-linger and nothing is there to answer
+// it — without a timeout, `service install` would hang indefinitely instead
+// of falling through to the warning path.
+const LOGINCTL_TIMEOUT_MS = 5000
+
+/** True only when the `loginctl` binary itself is on PATH. */
+function isLoginctlAvailable(): boolean {
+  try {
+    execSync('command -v loginctl', { stdio: 'pipe', timeout: LOGINCTL_TIMEOUT_MS })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Per-project systemd units run under `systemctl --user`, which is torn
+ * down — killing every unit under it — the moment the user's last login
+ * session ends, unless lingering is enabled for that user. `enable`/`start`
+ * succeed either way, so a host with lingering off looks fully installed
+ * right up until the operator's session (e.g. an SSH connection) closes and
+ * every project goes dark with no error anywhere in this flow. Detected via
+ * an actual incident: services legitimately running were reported "offline"
+ * because the heartbeat gap during a linger-less session gap exceeded the
+ * API's online timeout.
+ *
+ * Best-effort: already enabled → silent no-op. loginctl itself missing
+ * (containers, WSL1, minimal hosts without systemd-logind) → silent no-op,
+ * nothing actionable to tell the user. Otherwise we always attempt
+ * `enable-linger`, even if the preceding `show-user` probe itself failed —
+ * logind lazily creates its User object on first login, so a host
+ * provisioned unattended (cloud-init/Ansible, no interactive session ever
+ * opened for this user) can fail the probe while `loginctl` is fully
+ * functional; skipping the attempt there would silently reproduce the exact
+ * bug this function exists to catch. Enabled or the enable attempt failed →
+ * logged, so the operator always ends up either linger-enabled or told
+ * exactly what manual command fixes it.
+ */
+function ensureLingeringEnabled(): void {
+  let username: string
+  try {
+    username = os.userInfo().username
+  } catch {
+    // No /etc/passwd (NSS) entry for the running UID — e.g. a minimal
+    // container with a dynamically-assigned UID. Nothing to key the
+    // loginctl calls off of, so there's nothing actionable to do; the
+    // service units were already written and enabled by the caller before
+    // this runs, so bail out without disturbing that outcome.
+    return
+  }
+
+  if (!isLoginctlAvailable()) return
+
+  let lingerState: 'yes' | 'no' | null = null
+  try {
+    const output = execSync(`loginctl show-user ${shellQuote(username)} -p Linger`, { stdio: 'pipe', timeout: LOGINCTL_TIMEOUT_MS }).toString()
+    const match = output.match(/Linger=(\w+)/)
+    lingerState = match ? (match[1] as 'yes' | 'no') : null
+  } catch {
+    // Probe failed (permission error, logind hasn't lazily created the
+    // User object yet, timeout, ...). Fall through and attempt
+    // enable-linger anyway rather than silently doing nothing — see the
+    // function doc for why this matters for unattended provisioning.
+  }
+
+  if (lingerState === 'yes') return
+
+  try {
+    execSync(`loginctl enable-linger ${shellQuote(username)}`, { stdio: 'pipe', timeout: LOGINCTL_TIMEOUT_MS })
+    logger.success(t('service.lingerEnabled'))
+  } catch (error) {
+    const message = getErrorMessage(error)
+    logger.warn(t('service.lingerEnableFailed', { username: shellQuote(username), message }))
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Legacy single-unit generation (kept for backward compatibility / tests)
 // ---------------------------------------------------------------------------
 
@@ -642,6 +724,8 @@ export function installAndStartProject(
   } catch {
     logger.warn(t('service.loadWarning', { label: unitName }))
   }
+
+  ensureLingeringEnabled()
 }
 
 // ---------------------------------------------------------------------------
@@ -804,6 +888,11 @@ export class LinuxServiceStrategy implements ServiceStrategy {
         logger.warn(t('service.enableFailed', { unit: unitFile, message }))
       }
       logger.success(t('service.projectInstalled', { projectCode, path: unitPath }))
+    }
+
+    // Only worth checking if we actually installed something to keep alive.
+    if (writtenUnits.length > 0) {
+      ensureLingeringEnabled()
     }
 
     // Hide the "now run `service start`" hint when nothing was installed —
