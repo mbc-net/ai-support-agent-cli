@@ -52,6 +52,11 @@ jest.mock('../src/utils', () => ({
 jest.mock('../src/project-dir', () => ({
   getWorkspaceDir: jest.fn((dir: string) => `${dir}/workspace`),
   getReposDir: jest.fn((dir: string) => `${dir}/workspace/repos`),
+  getAwsDir: jest.fn((dir: string) => `${dir}/aws`),
+}))
+
+jest.mock('../src/aws-profile', () => ({
+  cleanupStaleAwsCredentials: jest.fn().mockReturnValue(0),
 }))
 
 function createMockDeps(overrides?: Partial<TransportDeps>): TransportDeps {
@@ -564,6 +569,108 @@ describe('startHeartbeat', () => {
     expect(logger.error).toHaveBeenCalled()
 
     if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
+  })
+
+  it('cleans up stale AWS credentials files when projectDir is set', async () => {
+    const { cleanupStaleAwsCredentials } = require('../src/aws-profile')
+    const { getAwsDir } = require('../src/project-dir')
+    ;(cleanupStaleAwsCredentials as jest.Mock).mockReturnValue(2)
+
+    const deps = createMockDeps({ heartbeatInterval: 5000, projectDir: '/test/project' })
+    const state = createMockState()
+    const configSyncState = {
+      availableChatModes: ['api' as const],
+      activeChatMode: 'api' as const,
+      currentConfigHash: undefined,
+      serverConfig: null,
+      projectConfig: undefined,
+      mcpConfigPath: undefined,
+    }
+    const configSyncDeps = {
+      client: deps.client,
+      agentId: deps.agentId,
+      prefix: deps.prefix,
+      projectDir: deps.projectDir,
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    startHeartbeat(deps, state, configSyncState as any, configSyncDeps as any)
+    await jest.advanceTimersByTimeAsync(100)
+
+    expect(getAwsDir).toHaveBeenCalledWith('/test/project')
+    expect(cleanupStaleAwsCredentials).toHaveBeenCalledWith('/test/project/aws')
+
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
+  })
+
+  it('does not clean up AWS credentials files when projectDir is undefined', async () => {
+    const { cleanupStaleAwsCredentials } = require('../src/aws-profile')
+    ;(cleanupStaleAwsCredentials as jest.Mock).mockReturnValue(0)
+
+    const deps = createMockDeps({ heartbeatInterval: 5000, projectDir: undefined })
+    const state = createMockState()
+    const configSyncState = {
+      availableChatModes: ['api' as const],
+      activeChatMode: 'api' as const,
+      currentConfigHash: undefined,
+      serverConfig: null,
+      projectConfig: undefined,
+      mcpConfigPath: undefined,
+    }
+    const configSyncDeps = {
+      client: deps.client,
+      agentId: deps.agentId,
+      prefix: deps.prefix,
+      projectDir: deps.projectDir,
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    startHeartbeat(deps, state, configSyncState as any, configSyncDeps as any)
+    await jest.advanceTimersByTimeAsync(100)
+
+    expect(cleanupStaleAwsCredentials).not.toHaveBeenCalled()
+    expect(deps.client.heartbeat).toHaveBeenCalledTimes(1)
+
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
+  })
+
+  it('continues sending the heartbeat even when cleanupStaleAwsCredentials throws', async () => {
+    const { cleanupStaleAwsCredentials } = require('../src/aws-profile')
+    const { logger } = require('../src/logger')
+    ;(cleanupStaleAwsCredentials as jest.Mock).mockImplementation(() => {
+      throw new Error('EACCES: permission denied')
+    })
+
+    const deps = createMockDeps({ heartbeatInterval: 5000, projectDir: '/test/project' })
+    const state = createMockState()
+    const configSyncState = {
+      availableChatModes: ['api' as const],
+      activeChatMode: 'api' as const,
+      currentConfigHash: undefined,
+      serverConfig: null,
+      projectConfig: undefined,
+      mcpConfigPath: undefined,
+    }
+    const configSyncDeps = {
+      client: deps.client,
+      agentId: deps.agentId,
+      prefix: deps.prefix,
+      projectDir: deps.projectDir,
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    startHeartbeat(deps, state, configSyncState as any, configSyncDeps as any)
+    await jest.advanceTimersByTimeAsync(100)
+
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to clean up stale AWS credentials files'))
+    // The heartbeat call itself must still happen despite the cleanup failure.
+    expect(deps.client.heartbeat).toHaveBeenCalledTimes(1)
+
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)
+    // Restore the default (non-throwing) implementation so later tests/describe
+    // blocks in this file are not affected (jest.clearAllMocks() clears call
+    // data but not implementations set via mockImplementation/mockReturnValue).
+    ;(cleanupStaleAwsCredentials as jest.Mock).mockReset().mockReturnValue(0)
   })
 })
 

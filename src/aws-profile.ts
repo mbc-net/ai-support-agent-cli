@@ -1,10 +1,11 @@
+import * as crypto from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
 
 import { getAwsDir } from './project-dir'
 import { logger } from './logger'
 import type { AwsCredentials, ProjectConfigResponse } from './types'
-import { atomicWriteFile } from './utils'
+import { atomicWriteFile, getErrorMessage, sweepStaleEntries } from './utils'
 
 type AwsAccount = NonNullable<ProjectConfigResponse['aws']>['accounts'][number]
 
@@ -109,41 +110,121 @@ export function generateAwsCredentials(
 /**
  * Write AWS credentials file to project's aws directory.
  * Uses atomic write (temp + rename) with 0o600 permissions.
+ *
+ * The filename includes a random per-call suffix (rather than a fixed
+ * `credentials` name) because the same project directory can be shared by
+ * multiple concurrent chat commands (including parallel Slack conversations).
+ * A fixed shared path would let one command's cleanup delete a still-running
+ * command's credentials file. Returns the absolute path actually written, or
+ * `undefined` if the write failed (see the `try/catch` below).
  */
 export function writeAwsCredentials(
   projectDir: string,
   projectCode: string,
   credentialMap: Map<string, AwsCredentials>,
-): void {
+): string | undefined {
+  // Declared outside the try block so the catch block can still best-effort
+  // remove the `.tmp` companion file if atomicWriteFile() got as far as
+  // creating it (e.g. writeFileSync succeeded but the rename step failed).
+  // Without this, a failed write's `.tmp` leftover would only be cleaned up
+  // by the periodic cleanupStaleAwsCredentials() sweep, not immediately.
+  let credentialsPath: string | undefined
   try {
     const awsDir = getAwsDir(projectDir)
     fs.mkdirSync(awsDir, { recursive: true, mode: 0o700 })
 
     const content = generateAwsCredentials(projectCode, credentialMap)
-    const credentialsPath = path.join(awsDir, 'credentials')
+    const suffix = crypto.randomBytes(16).toString('hex')
+    credentialsPath = path.join(awsDir, `credentials-${suffix}`)
     atomicWriteFile(credentialsPath, content)
 
     logger.debug(`AWS credentials written to ${credentialsPath} (${credentialMap.size} profiles)`)
+    return credentialsPath
   } catch (error) {
     logger.warn(`Failed to write AWS credentials: ${error}`)
+    if (credentialsPath) {
+      try {
+        fs.rmSync(`${credentialsPath}.tmp`, { force: true })
+      } catch (cleanupError) {
+        logger.warn(`Failed to remove leftover AWS credentials temp file: ${cleanupError}`)
+      }
+    }
+    return undefined
   }
 }
 
 /**
+ * Delete the AWS credentials file written by writeAwsCredentials().
+ * Takes the exact absolute path that was written (not a projectDir-derived
+ * fixed path), so that cleaning up one call's credentials can never affect a
+ * concurrent call's file. Also best-effort removes the `.tmp` companion file
+ * that atomicWriteFile() can leave behind if its rename step fails.
+ * Best-effort: does not throw if either file is already gone.
+ */
+export function cleanupAwsCredentials(credentialsPath: string): void {
+  try {
+    fs.rmSync(credentialsPath, { force: true })
+  } catch (error) {
+    logger.warn(`Failed to delete AWS credentials file: ${error}`)
+  }
+  try {
+    fs.rmSync(`${credentialsPath}.tmp`, { force: true })
+  } catch (error) {
+    logger.warn(`Failed to delete AWS credentials temp file: ${error}`)
+  }
+}
+
+/**
+ * Sweep `awsDir` for orphaned `credentials-*` files (including `.tmp`
+ * companions left behind by a failed atomicWriteFile() rename).
+ *
+ * Normally a credentials file is removed by cleanupAwsCredentials() when its
+ * chat command finishes (success or error). But because each call now writes
+ * to a uniquely-named file (rather than a fixed shared `credentials` path —
+ * see writeAwsCredentials() above), a chat command's SIGKILL/OOM before
+ * cleanup runs leaves a plaintext-AWS-credentials orphan behind permanently:
+ * unlike the old fixed-name scheme, there is no next write to overwrite it.
+ * Sweeping on every config sync self-heals this, mirroring
+ * cleanupStaleCommandMcpConfigs()'s design for per-command MCP configs.
+ *
+ * @param awsDir getAwsDir(projectDir) — the project's aws directory
+ * @param maxAgeMs delete entries at least this old (ms). Default 24h; 0
+ *   removes every matching entry regardless of age
+ * @returns number of entries removed
+ */
+export function cleanupStaleAwsCredentials(awsDir: string, maxAgeMs: number = 24 * 60 * 60 * 1000): number {
+  return sweepStaleEntries(
+    awsDir,
+    (name) => name.startsWith('credentials-'),
+    {
+      maxAgeMs,
+      onError: (name, error) => {
+        // 個々のファイル失敗で掃除全体を止めないが、無音のまま握り潰さず記録する
+        // （どのファイルが掃除されなかったか運用上追跡できるようにする）。
+        logger.warn(`Failed to clean up stale AWS credentials file ${name}: ${getErrorMessage(error)}`)
+      },
+    },
+  )
+}
+
+/**
  * Build environment variables for Claude Code to use AWS profiles.
- * Sets AWS_CONFIG_FILE and AWS_SHARED_CREDENTIALS_FILE to project-specific paths.
+ * Sets AWS_CONFIG_FILE to the project's shared config path and
+ * AWS_SHARED_CREDENTIALS_FILE to the caller-supplied credentials path
+ * (the exact file written by writeAwsCredentials() for this call).
  * Optionally sets AWS_PROFILE and AWS_DEFAULT_REGION for the default account.
  */
 export function buildAwsProfileEnv(
   projectDir: string,
   projectCode: string,
+  credentialsPath: string,
   defaultAccountName?: string,
   defaultRegion?: string,
 ): Record<string, string> {
   const awsDir = getAwsDir(projectDir)
   const env: Record<string, string> = {
     AWS_CONFIG_FILE: path.join(awsDir, 'config'),
-    AWS_SHARED_CREDENTIALS_FILE: path.join(awsDir, 'credentials'),
+    AWS_SHARED_CREDENTIALS_FILE: credentialsPath,
   }
 
   if (defaultAccountName) {

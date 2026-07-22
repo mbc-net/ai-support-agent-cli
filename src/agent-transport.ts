@@ -5,7 +5,7 @@ import { LOG_PAYLOAD_LIMIT, LOG_RESULT_LIMIT, NOTIFICATION_ACTION } from './cons
 import { t } from './i18n'
 import type { TransportKind } from './ipc-types'
 import { logger } from './logger'
-import { getWorkspaceDir, getReposDir } from './project-dir'
+import { getWorkspaceDir, getReposDir, getAwsDir } from './project-dir'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
 import { TerminalWebSocket, isNodePtyAvailable } from './terminal'
 import { getErrorMessage, isAuthenticationError } from './utils'
@@ -14,6 +14,7 @@ import { executeCommand } from './commands'
 import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
 import { refreshChatMode, scheduleConfigSync } from './agent-config-sync'
 import { savePendingResult, removePendingResult } from './pending-result-store'
+import { cleanupStaleAwsCredentials } from './aws-profile'
 
 export interface TransportState {
   heartbeatTimer: ReturnType<typeof setInterval> | null
@@ -124,6 +125,22 @@ export function startHeartbeat(
   const sendHeartbeat = async (): Promise<void> => {
     try {
       await refreshChatMode(configSyncDeps, configSyncState, false)
+
+      // 孤立した AWS credentials-* ファイルの掃除は agent-config-sync.ts の
+      // applyProjectConfig でも行われるが、それは configHash 変化時にしか呼ばれない
+      // （syncProjectConfig が hash 一致時は同期をスキップするため）。設定が長期間
+      // 変化しないまま稼働し続けると掃除の機会が失われるため、heartbeat 側にも
+      // 安全網としてフックする（sweepStaleEntries は冪等なので二重実行しても無害）。
+      if (deps.projectDir) {
+        try {
+          const removedCount = cleanupStaleAwsCredentials(getAwsDir(deps.projectDir))
+          if (removedCount > 0) {
+            logger.info(`${deps.prefix} Cleaned up ${removedCount} stale AWS credentials file(s)`)
+          }
+        } catch (error) {
+          logger.warn(`${deps.prefix} Failed to clean up stale AWS credentials files: ${getErrorMessage(error)}`)
+        }
+      }
 
       const response = await deps.client.heartbeat(
         deps.agentId,
