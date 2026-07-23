@@ -1,4 +1,5 @@
-import { existsSync } from 'fs'
+import { existsSync, promises as fs } from 'fs'
+import * as path from 'path'
 import { chromium } from 'playwright'
 
 import { runPlaywrightSubprocess } from '../../src/browser/playwright-subprocess-executor'
@@ -167,5 +168,34 @@ test('flat legacy test', async ({ page }) => {
     // No nested-step metadata for the legacy per-test format
     expect(result.steps[0].executedAt).toBeUndefined()
     expect(result.steps[0].screenshotBase64).toBeUndefined()
+  }, 60_000)
+
+  it('does not leak a test-results/ directory into the process cwd', async () => {
+    // Regression test: Playwright's default `outputDir` resolves relative to
+    // the CHILD PROCESS's cwd, not the config file's directory — confirmed
+    // experimentally (see fix commit). Since `spawnPlaywright` did not pass a
+    // `cwd` option and `RUN_CONFIG_TEMPLATE` did not set `outputDir`
+    // explicitly, every real execution left a `test-results/` directory in
+    // whatever directory the agent process happened to be started from,
+    // which `cleanupRunDir` (scoped to the per-execution temp runDir) never
+    // touches.
+    const cwdTestResultsDir = path.join(process.cwd(), 'test-results')
+    await fs.rm(cwdTestResultsDir, { recursive: true, force: true })
+
+    const script = `
+import { test } from '@playwright/test'
+
+test('simple pass', async ({ page }) => {
+  await page.setContent('<div>ok</div>')
+})
+`
+    const result = await runPlaywrightSubprocess({
+      script,
+      executionId: uniqueExecutionId('cwd-leak'),
+      timeoutMs: 60_000,
+    })
+
+    expect(result.success).toBe(true)
+    expect(existsSync(cwdTestResultsDir)).toBe(false)
   }, 60_000)
 })
