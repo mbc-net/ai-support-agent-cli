@@ -247,6 +247,9 @@ async function executePlaywrightSubprocessMode(
         action: step.title,
         status: step.status,
         ...(step.error && { error: step.error }),
+        ...(step.duration !== undefined && { duration: step.duration }),
+        ...(step.executedAt && { executedAt: step.executedAt }),
+        ...(step.screenshotBase64 && { screenshotBase64: step.screenshotBase64 }),
         // screenshotPath is a local filesystem path that the API cannot access;
         // do not send it as screenshotUrl — omit it from the API payload entirely.
       })

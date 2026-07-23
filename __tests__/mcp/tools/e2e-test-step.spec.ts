@@ -83,6 +83,33 @@ describe('registerE2eTestStepTool', () => {
     )
   })
 
+  it('should include executedAt (ISO timestamp close to the call time) when reporting a step', async () => {
+    process.env.AI_SUPPORT_E2E_EXECUTION_ID = 'exec-1'
+    process.env.AI_SUPPORT_AGENT_TENANT_CODE = 'mbc'
+    process.env.AI_SUPPORT_AGENT_PROJECT_CODE = 'MBC_01'
+
+    mockApiClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    registerE2eTestStepTool(server as unknown as McpServer, mockApiClient as any)
+
+    const handler = server.tool.mock.calls[0][3]
+    const before = Date.now()
+    await handler({
+      stepNumber: 1,
+      action: 'Click login button',
+      status: 'passed',
+      duration: 500,
+    })
+    const after = Date.now()
+
+    const callArgs = mockApiClient.reportE2eTestStep.mock.calls[0][3] as Record<string, unknown>
+    expect(typeof callArgs.executedAt).toBe('string')
+    // Must be a valid ISO timestamp representing "now" (within this test's execution window)
+    const executedAtMs = Date.parse(callArgs.executedAt as string)
+    expect(executedAtMs).toBeGreaterThanOrEqual(before)
+    expect(executedAtMs).toBeLessThanOrEqual(after)
+  })
+
   it('should return message when tenant/project code is missing', async () => {
     process.env.AI_SUPPORT_E2E_EXECUTION_ID = 'exec-1'
     delete process.env.AI_SUPPORT_AGENT_TENANT_CODE
