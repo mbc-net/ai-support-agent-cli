@@ -402,7 +402,7 @@ export function generateWrapperScript(opts: {
   const envLines: string[] = [
     `  -e AI_SUPPORT_AGENT_IN_DOCKER=1 \\`,
     `  -e HOME=${qContainerHome} \\`,
-    `  -e CODEX_HOME=${shellQuote(`${containerHome}/.codex`)} \\`,
+    `  -e ${ENV_VARS.CODEX_HOME}=${shellQuote(`${containerHome}/.codex`)} \\`,
     `  -e AI_SUPPORT_AGENT_CONFIG_DIR=${qContainerConfigDir} \\`,
     `  -e AI_SUPPORT_AGENT_TOKEN=${qToken} \\`,
     `  -e AI_SUPPORT_AGENT_API_URL=${qApiUrl} \\`,
@@ -411,16 +411,16 @@ export function generateWrapperScript(opts: {
     `  -e AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${shellQuote(`${opts.projectCode}=${containerProjectDir}`)} \\`,
   ]
   if (opts.anthropicApiKey) {
-    envLines.push(`  -e ANTHROPIC_API_KEY=${shellQuote(opts.anthropicApiKey)} \\`)
+    envLines.push(`  -e ${ENV_VARS.ANTHROPIC_API_KEY}=${shellQuote(opts.anthropicApiKey)} \\`)
   }
   if (opts.claudeCodeOauthToken) {
-    envLines.push(`  -e CLAUDE_CODE_OAUTH_TOKEN=${shellQuote(opts.claudeCodeOauthToken)} \\`)
+    envLines.push(`  -e ${ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN}=${shellQuote(opts.claudeCodeOauthToken)} \\`)
   }
   if (opts.codexApiKey) {
-    envLines.push(`  -e CODEX_API_KEY=${shellQuote(opts.codexApiKey)} \\`)
+    envLines.push(`  -e ${ENV_VARS.CODEX_API_KEY}=${shellQuote(opts.codexApiKey)} \\`)
   }
   if (opts.codexAccessToken) {
-    envLines.push(`  -e CODEX_ACCESS_TOKEN=${shellQuote(opts.codexAccessToken)} \\`)
+    envLines.push(`  -e ${ENV_VARS.CODEX_ACCESS_TOKEN}=${shellQuote(opts.codexAccessToken)} \\`)
   }
 
   const containerArgs = [
@@ -647,10 +647,10 @@ export function writeProjectServiceFiles(
     projectDir: validatedProjectDir,
     token: project.token,
     apiUrl: project.apiUrl,
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    anthropicApiKey: process.env[ENV_VARS.ANTHROPIC_API_KEY],
     claudeCodeOauthToken: process.env[ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN],
-    codexApiKey: process.env.CODEX_API_KEY,
-    codexAccessToken: process.env.CODEX_ACCESS_TOKEN,
+    codexApiKey: process.env[ENV_VARS.CODEX_API_KEY],
+    codexAccessToken: process.env[ENV_VARS.CODEX_ACCESS_TOKEN],
     verbose: options.verbose,
     updateScriptPath,
     logDir: projectLogDir,

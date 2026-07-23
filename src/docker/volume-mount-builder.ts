@@ -9,6 +9,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getConfigDir, loadConfig } from '../config-manager'
+import { ENV_VARS } from '../constants'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import {
@@ -27,13 +28,13 @@ export const CONTAINER_HOME = '/home/node'
 
 /** Passthrough environment variables from host to container */
 export const PASSTHROUGH_ENV_VARS = [
-  'AI_SUPPORT_AGENT_TOKEN',
-  'AI_SUPPORT_AGENT_API_URL',
-  'AI_SUPPORT_AGENT_CONFIG_DIR',
-  'ANTHROPIC_API_KEY',
-  'CLAUDE_CODE_OAUTH_TOKEN',
-  'CODEX_API_KEY',
-  'CODEX_ACCESS_TOKEN',
+  ENV_VARS.TOKEN,
+  ENV_VARS.API_URL,
+  ENV_VARS.CONFIG_DIR,
+  ENV_VARS.ANTHROPIC_API_KEY,
+  ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN,
+  ENV_VARS.CODEX_API_KEY,
+  ENV_VARS.CODEX_ACCESS_TOKEN,
 ]
 
 /**
@@ -42,8 +43,8 @@ export const PASSTHROUGH_ENV_VARS = [
  * handled explicitly (token, apiUrl, configDir) rather than via passthrough.
  */
 export const CLAUDE_CREDENTIAL_ENV_VARS = [
-  'ANTHROPIC_API_KEY',
-  'CLAUDE_CODE_OAUTH_TOKEN',
+  ENV_VARS.ANTHROPIC_API_KEY,
+  ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN,
 ] as const
 
 /**
@@ -52,8 +53,8 @@ export const CLAUDE_CREDENTIAL_ENV_VARS = [
  * CODEX_HOME at the writable container home path.
  */
 export const CODEX_CREDENTIAL_ENV_VARS = [
-  'CODEX_API_KEY',
-  'CODEX_ACCESS_TOKEN',
+  ENV_VARS.CODEX_API_KEY,
+  ENV_VARS.CODEX_ACCESS_TOKEN,
 ] as const
 
 export interface ProjectDirMapping {
@@ -177,11 +178,11 @@ export function buildEnvArgs(projectMappings: ProjectDirMapping[]): string[] {
   const args: string[] = []
 
   // Mark process as running inside a Docker container
-  args.push('-e', 'AI_SUPPORT_AGENT_IN_DOCKER=1')
+  args.push('-e', `${ENV_VARS.IN_DOCKER}=1`)
 
   // Set HOME to container-internal path (not host path)
   args.push('-e', `HOME=${CONTAINER_HOME}`)
-  args.push('-e', `CODEX_HOME=${path.posix.join(CONTAINER_HOME, '.codex')}`)
+  args.push('-e', `${ENV_VARS.CODEX_HOME}=${path.posix.join(CONTAINER_HOME, '.codex')}`)
 
   // Map config dir to container-internal path
   const hostConfigDir = getConfigDir()
@@ -190,7 +191,7 @@ export function buildEnvArgs(projectMappings: ProjectDirMapping[]): string[] {
 
   for (const key of PASSTHROUGH_ENV_VARS) {
     if (process.env[key]) {
-      if (key === 'AI_SUPPORT_AGENT_CONFIG_DIR') {
+      if (key === ENV_VARS.CONFIG_DIR) {
         args.push('-e', `${key}=${containerConfigDir}`)
       } else {
         args.push('-e', `${key}=${process.env[key]}`)
@@ -204,7 +205,7 @@ export function buildEnvArgs(projectMappings: ProjectDirMapping[]): string[] {
     const mapping = projectMappings
       .map((m) => `${m.projectCode}=${m.containerDir}`)
       .join(';')
-    args.push('-e', `AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${mapping}`)
+    args.push('-e', `${ENV_VARS.PROJECT_DIR_MAP}=${mapping}`)
   }
 
   return args
@@ -241,21 +242,21 @@ export function buildProjectVolumeMounts(
   mounts.push('-v', `${projectConfigHostDir}:${containerConfigDir}:rw`)
 
   // Standard env vars for per-project container
-  envArgs.push('-e', 'AI_SUPPORT_AGENT_IN_DOCKER=1')
+  envArgs.push('-e', `${ENV_VARS.IN_DOCKER}=1`)
   envArgs.push('-e', `HOME=${CONTAINER_HOME}`)
-  envArgs.push('-e', `CODEX_HOME=${path.posix.join(CONTAINER_HOME, '.codex')}`)
-  envArgs.push('-e', `AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir}`)
+  envArgs.push('-e', `${ENV_VARS.CODEX_HOME}=${path.posix.join(CONTAINER_HOME, '.codex')}`)
+  envArgs.push('-e', `${ENV_VARS.CONFIG_DIR}=${containerConfigDir}`)
 
   // Pass token and apiUrl per-project
   if (project.token) {
-    envArgs.push('-e', `AI_SUPPORT_AGENT_TOKEN=${project.token}`)
+    envArgs.push('-e', `${ENV_VARS.TOKEN}=${project.token}`)
   }
   if (project.apiUrl) {
     // Replace localhost/127.0.0.1 with host.docker.internal so the container can reach the host.
     // toContainerApiUrl uses a boundary lookahead to avoid false matches on
     // hosts like `localhost.example.com`.
     const containerApiUrl = toContainerApiUrl(project.apiUrl)
-    envArgs.push('-e', `AI_SUPPORT_AGENT_API_URL=${containerApiUrl}`)
+    envArgs.push('-e', `${ENV_VARS.API_URL}=${containerApiUrl}`)
   }
 
   // Pass Claude / Anthropic credential env vars if set
@@ -325,7 +326,7 @@ export function buildProjectVolumeMounts(
     }
     mounts.push('-v', `${defaultHostProjectDir}:${containerProjectDir}:rw`)
   }
-  envArgs.push('-e', `AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${project.projectCode}=${containerProjectDir}`)
+  envArgs.push('-e', `${ENV_VARS.PROJECT_DIR_MAP}=${project.projectCode}=${containerProjectDir}`)
 
   return { mounts, envArgs }
 }

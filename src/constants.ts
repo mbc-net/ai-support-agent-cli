@@ -42,6 +42,17 @@ export const ENV_VARS = {
   // true` over SSH. See server-setup-runner.ts's `runAnsiblePlaybook`.
   SERVER_SETUP_ANSIBLE_UID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID',
   SERVER_SETUP_ANSIBLE_GID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_GID',
+  // Third-party CLI credential/config env vars (Claude Code / Codex). These are
+  // not namespaced under AI_SUPPORT_AGENT_* — their names are fixed by the
+  // external CLI they configure — but are centralized here for the same
+  // reason as the rest of ENV_VARS: they are passed through to Docker
+  // containers and generated service scripts from several files
+  // (cli/service/*-service.ts, docker/volume-mount-builder.ts), and a typo in
+  // any one of them would silently produce an unset variable in the container.
+  ANTHROPIC_API_KEY: 'ANTHROPIC_API_KEY',
+  CODEX_API_KEY: 'CODEX_API_KEY',
+  CODEX_ACCESS_TOKEN: 'CODEX_ACCESS_TOKEN',
+  CODEX_HOME: 'CODEX_HOME',
 } as const
 
 export const CONFIG_DIR = (() => {
