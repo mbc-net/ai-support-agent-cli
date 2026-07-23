@@ -5,7 +5,11 @@ import * as os from 'os'
 import * as path from 'path'
 import * as childProcess from 'child_process'
 
-import { runPlaywrightSubprocess, parsePlaywrightJsonOutput } from '../../src/browser/playwright-subprocess-executor'
+import {
+  runPlaywrightSubprocess,
+  parsePlaywrightJsonOutput,
+  HARNESS_STEP_SCREENSHOT_PREFIX,
+} from '../../src/browser/playwright-subprocess-executor'
 
 // Only child_process is mocked; file writes are verified against the real
 // OS temp directory (spying on fs sync functions is a known trap in this repo).
@@ -905,6 +909,291 @@ describe('parsePlaywrightJsonOutput', () => {
     const result = parsePlaywrightJsonOutput(json)
     expect(result.steps[0].duration).toBe(0)
   })
+
+  // --- harness index-based screenshot mapping (preferred path) ---
+
+  it('should map screenshots to steps by the index embedded in the harness attachment name', () => {
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'step one', duration: 10 },
+        { title: 'step two', duration: 10 },
+      ],
+      attachments: [
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}0`, contentType: 'image/png', body: 'shot-zero' },
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}1`, contentType: 'image/png', body: 'shot-one' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBe('shot-zero')
+    expect(result.steps[1].screenshotBase64).toBe('shot-one')
+  })
+
+  it('should map by index regardless of attachment order in the array', () => {
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'step one', duration: 10 },
+        { title: 'step two', duration: 10 },
+      ],
+      // index 1 listed before index 0 on purpose
+      attachments: [
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}1`, contentType: 'image/png', body: 'shot-one' },
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}0`, contentType: 'image/png', body: 'shot-zero' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBe('shot-zero')
+    expect(result.steps[1].screenshotBase64).toBe('shot-one')
+  })
+
+  it('should leave only the missing-index step without a screenshot and NOT warn (per-step degradation for a skipped step)', () => {
+    const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    // Three steps, but index 0 (a skipped step) has no harness screenshot.
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'skipped step', duration: 1 },
+        { title: 'real step one', duration: 10 },
+        { title: 'real step two', duration: 10 },
+      ],
+      attachments: [
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}1`, contentType: 'image/png', body: 'shot-one' },
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}2`, contentType: 'image/png', body: 'shot-two' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBeUndefined()
+    expect(result.steps[1].screenshotBase64).toBe('shot-one')
+    expect(result.steps[2].screenshotBase64).toBe('shot-two')
+    // Index mapping never trips the positional count-mismatch warning.
+    expect(warnSpy).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+
+  it('should DROP all screenshots and warn when the harness index space is inflated by hook steps', () => {
+    const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    // 2 body steps in nestedSteps, but harness indices 0,1,2 present: a
+    // test.step() ran inside a beforeEach/afterEach hook (invisible to the
+    // parser), inflating the index space. Mapping by index would misattribute
+    // the hook's screenshot to a body step, so drop them all.
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'body one', duration: 10 },
+        { title: 'body two', duration: 10 },
+      ],
+      attachments: [
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}0`, contentType: 'image/png', body: 'hook-shot' },
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}1`, contentType: 'image/png', body: 'body-one-shot' },
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}2`, contentType: 'image/png', body: 'body-two-shot' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps).toHaveLength(2)
+    expect(result.steps[0].screenshotBase64).toBeUndefined()
+    expect(result.steps[1].screenshotBase64).toBeUndefined()
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Harness screenshot index out of range'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Nested step test')) // testTitle in message
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('saw index 2'))
+    warnSpy.mockRestore()
+  })
+
+  it('should NOT trigger the inflation guard for a skipped step (max index stays within range)', () => {
+    const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    // 3 steps where index 1 (the skipped step) has no screenshot: harness keys
+    // are {0,2}, max key 2 < nestedSteps.length(3), so the guard must NOT fire —
+    // the skipped step simply has no screenshot, the others keep theirs.
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'real zero', duration: 10 },
+        { title: 'skipped one', duration: 1 },
+        { title: 'real two', duration: 10 },
+      ],
+      attachments: [
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}0`, contentType: 'image/png', body: 'shot-zero' },
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}2`, contentType: 'image/png', body: 'shot-two' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBe('shot-zero')
+    expect(result.steps[1].screenshotBase64).toBeUndefined()
+    expect(result.steps[2].screenshotBase64).toBe('shot-two')
+    expect(warnSpy).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+
+  it('should ignore non-indexed image attachments when harness-indexed ones exist', () => {
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'step one', duration: 10 },
+        { title: 'step two', duration: 10 },
+      ],
+      attachments: [
+        // a self-attached (non-indexed) screenshot from the spec — must be ignored
+        { name: 'screenshot', contentType: 'image/png', body: 'self-attached' },
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}0`, contentType: 'image/png', body: 'harness-zero' },
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}1`, contentType: 'image/png', body: 'harness-one' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBe('harness-zero')
+    expect(result.steps[1].screenshotBase64).toBe('harness-one')
+  })
+
+  it('should ignore a harness attachment whose index is not a valid integer', () => {
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [{ title: 'step one', duration: 10 }],
+      attachments: [
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}notanumber`, contentType: 'image/png', body: 'bad' },
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}0`, contentType: 'image/png', body: 'good-zero' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBe('good-zero')
+  })
+
+  it('should omit the screenshot when a harness-indexed attachment has no string body', () => {
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [{ title: 'step one', duration: 10 }],
+      attachments: [
+        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}0`, contentType: 'image/png' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    // No indexed body → falls through to fallback which also finds no usable
+    // (string-bodied) attachment, so the step simply has no screenshot.
+    expect(result.steps[0].screenshotBase64).toBeUndefined()
+  })
+
+  it('should fall back to positional mapping when only non-indexed image attachments are present (backward compat)', () => {
+    const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'step one', duration: 10 },
+        { title: 'step two', duration: 10 },
+      ],
+      attachments: [
+        { name: 'screenshot', contentType: 'image/png', body: 'positional-one' },
+        { name: 'screenshot', contentType: 'image/png', body: 'positional-two' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBe('positional-one')
+    expect(result.steps[1].screenshotBase64).toBe('positional-two')
+    expect(warnSpy).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+
+  it('should treat non-array attachments on a nested-step result as no screenshots', () => {
+    const json = JSON.stringify({
+      suites: [
+        {
+          specs: [
+            {
+              title: 'Bad nested attachments',
+              tests: [
+                {
+                  results: [
+                    {
+                      status: 'passed',
+                      duration: 10,
+                      startTime: '2026-07-23T04:09:18.639Z',
+                      steps: [{ title: 'step one', duration: 10 }],
+                      attachments: 'not-array',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps[0].screenshotBase64).toBeUndefined()
+  })
+
+  it('should ignore an image attachment whose name is not a string', () => {
+    const json = JSON.stringify({
+      suites: [
+        {
+          specs: [
+            {
+              title: 'Non-string attachment name',
+              tests: [
+                {
+                  results: [
+                    {
+                      status: 'passed',
+                      duration: 10,
+                      startTime: '2026-07-23T04:09:18.639Z',
+                      steps: [{ title: 'step one', duration: 10 }],
+                      attachments: [
+                        { name: 123, contentType: 'image/png', body: 'weird' },
+                        { name: `${HARNESS_STEP_SCREENSHOT_PREFIX}0`, contentType: 'image/png', body: 'good' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps[0].screenshotBase64).toBe('good')
+  })
+
+  it('should keep the positional count-mismatch warning on the fallback path', () => {
+    const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'step one', duration: 10 },
+        { title: 'step two', duration: 10 },
+        { title: 'step three', duration: 10 },
+      ],
+      // non-indexed and fewer than the step count → positional mismatch → drop
+      attachments: [
+        { name: 'screenshot', contentType: 'image/png', body: 'only-one' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBeUndefined()
+    expect(result.steps[1].screenshotBase64).toBeUndefined()
+    expect(result.steps[2].screenshotBase64).toBeUndefined()
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Screenshot/step count mismatch'))
+    warnSpy.mockRestore()
+  })
 })
 
 describe('runPlaywrightSubprocess', () => {
@@ -1167,8 +1456,13 @@ describe('runPlaywrightSubprocess', () => {
     })
 
     expect(result.success).toBe(true)
-    // Only the spec and the per-run config are expanded
-    expect(Object.keys(capture.files ?? {}).sort()).toEqual(['playwright.config.js', 'test.spec.ts'])
+    // The spec, the per-run config, and (captureStepScreenshots defaults to
+    // true) the harness step-screenshot preload module are expanded.
+    expect(Object.keys(capture.files ?? {}).sort()).toEqual([
+      'playwright.config.js',
+      'step-screenshot-patch.js',
+      'test.spec.ts',
+    ])
   })
 
   // --- env wiring ---
@@ -1218,6 +1512,125 @@ describe('runPlaywrightSubprocess', () => {
     })
 
     expect(capture.env?.E2E_BASE_URL).toBeUndefined()
+  })
+
+  // --- step-screenshot preload injection (captureStepScreenshots) ---
+
+  /** Path the harness preload module is expected to occupy in the run dir. */
+  function patchPathFor(executionId: string): string {
+    return path.join(runDirFor(executionId), 'step-screenshot-patch.js')
+  }
+
+  it('should write the step-screenshot preload and inject it via NODE_OPTIONS by default', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('screenshot-default')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+    })
+
+    // The preload module is written into the run directory...
+    const patch = capture.files?.['step-screenshot-patch.js']
+    expect(patch).toBeDefined()
+    expect(patch).toContain("require('@playwright/test')")
+    expect(patch).toContain('fullPage: true')
+    // ...and injected into the child's NODE_OPTIONS as a QUOTED --require so a
+    // temp path containing a space cannot break Node startup.
+    expect(capture.env?.NODE_OPTIONS).toContain(`--require "${patchPathFor(executionId)}"`)
+  })
+
+  it('should inject the preload when captureStepScreenshots is explicitly true', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('screenshot-true')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+      captureStepScreenshots: true,
+    })
+
+    expect(capture.files?.['step-screenshot-patch.js']).toBeDefined()
+    expect(capture.env?.NODE_OPTIONS).toContain(`--require "${patchPathFor(executionId)}"`)
+  })
+
+  it('should quote the injected --require path so a temp dir with a space does not break Node startup', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('screenshot-quoted')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+    })
+
+    // The injected fragment must open with `--require "` (quote immediately
+    // after the flag) rather than an unquoted path.
+    expect(capture.env?.NODE_OPTIONS).toContain('--require "')
+    expect(capture.env?.NODE_OPTIONS).toMatch(/--require "[^"]*step-screenshot-patch\.js"/)
+  })
+
+  it('should NOT write the preload nor set --require when captureStepScreenshots is false', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('screenshot-false')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+      captureStepScreenshots: false,
+    })
+
+    // No preload module is written...
+    expect(capture.files?.['step-screenshot-patch.js']).toBeUndefined()
+    expect(Object.keys(capture.files ?? {}).sort()).toEqual([
+      'playwright.config.js',
+      'test.spec.ts',
+    ])
+    // ...and NODE_OPTIONS carries no injected --require for our patch.
+    expect(capture.env?.NODE_OPTIONS ?? '').not.toContain('step-screenshot-patch.js')
+  })
+
+  it('should preserve a pre-existing NODE_OPTIONS when injecting the preload', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('screenshot-preserve-node-options')
+
+    const originalNodeOptions = process.env.NODE_OPTIONS
+    process.env.NODE_OPTIONS = '--max-old-space-size=2048'
+    try {
+      await runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+      })
+    } finally {
+      if (originalNodeOptions === undefined) {
+        delete process.env.NODE_OPTIONS
+      } else {
+        process.env.NODE_OPTIONS = originalNodeOptions
+      }
+    }
+
+    // Both the inherited flag and the injected (quoted) --require must be present.
+    expect(capture.env?.NODE_OPTIONS).toContain('--max-old-space-size=2048')
+    expect(capture.env?.NODE_OPTIONS).toContain(`--require "${patchPathFor(executionId)}"`)
   })
 
   // --- cleanup ---
@@ -1410,6 +1823,53 @@ describe('runPlaywrightSubprocess', () => {
     expect(result.success).toBe(true)
   })
 
+  it('should route [step-screenshot] stderr lines to logger.warn and other lines to logger.debug, even on exit code 0', async () => {
+    // The harness preload writes capture-failure diagnostics to stderr; those
+    // must be VISIBLE in normal operation (logger.debug is gated behind
+    // --verbose), so a "[step-screenshot]" line goes to logger.warn while
+    // routine Playwright stderr stays at logger.debug. Both must be forwarded on
+    // a PASSING test (stderrOutput is only returned on a non-zero exit).
+    const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    const debugSpy = jest.spyOn(require('../../src/logger').logger, 'debug').mockImplementation(() => {})
+    const child = new EventEmitter() as any
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.kill = jest.fn()
+    child.stdin = null
+    const executionId = uniqueExecutionId('stderr-forward')
+    mockSpawn.mockImplementation(((bin: string, args: string[], spawnOpts: { env?: NodeJS.ProcessEnv }) => {
+      const outputPath = spawnOpts?.env?.E2E_JSON_OUTPUT
+      if (outputPath) {
+        nodeFs.writeFileSync(outputPath, makePlaywrightJson([{ title: 'Test', status: 'passed' }]), 'utf-8')
+      }
+      process.nextTick(() => {
+        // One [step-screenshot] line (→ warn) and one routine line (→ debug),
+        // delivered in a single chunk to also exercise per-line splitting.
+        child.stderr.emit(
+          'data',
+          Buffer.from('[step-screenshot] capture failed for step "x"\nRoutine Playwright noise\n'),
+        )
+        child.emit('close', 0) // success exit code
+      })
+      return child
+    }) as any)
+
+    const result = await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+    })
+
+    expect(result.success).toBe(true)
+    // The capture-failure line is surfaced at warn level.
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[playwright-subprocess] stderr:'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('capture failed for step'))
+    // Routine stderr stays at debug and never reaches warn.
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('Routine Playwright noise'))
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('Routine Playwright noise'))
+    warnSpy.mockRestore()
+    debugSpy.mockRestore()
+  })
+
   // --- envVars merging ---
 
   it('should merge valid envVars into the subprocess env', async () => {
@@ -1503,6 +1963,10 @@ describe('runPlaywrightSubprocess', () => {
     await runPlaywrightSubprocess({
       script: "await page.goto('/')",
       executionId: uniqueExecutionId('envvars-rce'),
+      // Disable the harness preload so NODE_OPTIONS is not legitimately set by
+      // this module — this test's sole concern is that USER-supplied
+      // NODE_OPTIONS cannot hijack the runtime via the shared denylist.
+      captureStepScreenshots: false,
       envVars: {
         NODE_OPTIONS: '--require /tmp/evil.js',
         PLAYWRIGHT_BROWSERS_PATH: '/tmp/evil-browsers',
