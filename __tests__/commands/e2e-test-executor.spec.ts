@@ -274,6 +274,36 @@ describe('e2e-test-executor', () => {
     expect(result.success).toBe(true)
   })
 
+  it('logs a status-report failure loudly (error level with executionId) instead of swallowing it', async () => {
+    // Hardening for the silent-failure class behind the totalSteps=0 bug: a
+    // non-retryable 4xx from a DTO whitelist/validation mismatch must not be
+    // swallowed as a warning. It has to surface at error level with the
+    // execution's identity so the failed report is detectable.
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+      success: true,
+      data: 'Done',
+    })
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+    mockClient.updateE2eExecutionStatus.mockResolvedValueOnce(undefined) // running
+    mockClient.updateE2eExecutionStatus.mockRejectedValueOnce(
+      new Error('Request failed with status code 400'),
+    ) // final report fails
+
+    const result = await executeE2eTest(baseOptions)
+
+    // The command itself still completes gracefully (no throw).
+    expect(result.success).toBe(true)
+    // ...but the reporting failure is loud, not silent.
+    const loudCall = errorSpy.mock.calls.find(
+      (c) =>
+        typeof c[0] === 'string' &&
+        c[0].includes('Failed to report execution status') &&
+        c[0].includes('exec-1'),
+    )
+    expect(loudCall).toBeDefined()
+    errorSpy.mockRestore()
+  })
+
   it('should handle missing tenantCode gracefully in status reporting', async () => {
     const options = { ...baseOptions, tenantCode: undefined }
     ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
@@ -784,6 +814,60 @@ describe('e2e-test-executor', () => {
         }),
       )
     }
+  })
+
+  it('reports aggregate step counts to the API under DTO field names (totalSteps/passedSteps/failedSteps)', async () => {
+    // Regression for the "passed but totalSteps=0" defect: the subprocess mode
+    // reported the aggregates as totalTests/passedTests/failedTests, but the API
+    // DTO (UpdateExecutionStatusDto) whitelists only totalSteps/passedSteps/
+    // failedSteps. Under ValidationPipe({whitelist:true}) the mismatched fields
+    // are silently stripped, so the execution's totalSteps stayed at its
+    // creation-time default of 0 even for a passed run with recorded steps.
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 5,
+      passedTests: 5,
+      failedTests: 0,
+      steps: [
+        { title: 'Step 1', status: 'passed', duration: 10 },
+        { title: 'Step 2', status: 'passed', duration: 10 },
+        { title: 'Step 3', status: 'passed', duration: 10 },
+        { title: 'Step 4', status: 'passed', duration: 10 },
+        { title: 'Step 5', status: 'passed', duration: 10 },
+      ],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    // The final status report is the one carrying the aggregate counts.
+    const finalCall = (mockClient.updateE2eExecutionStatus as jest.Mock).mock.calls.find(
+      (c) => c[3] && (c[3].status === 'passed' || c[3].status === 'failed'),
+    )
+    expect(finalCall).toBeDefined()
+    const payload = finalCall![3]
+
+    expect(payload).toMatchObject({
+      status: 'passed',
+      totalSteps: 5,
+      passedSteps: 5,
+      failedSteps: 0,
+    })
+    // The mismatched field names must not be sent (they would be stripped by
+    // the whitelist and leave totalSteps at 0).
+    expect(payload).not.toHaveProperty('totalTests')
+    expect(payload).not.toHaveProperty('passedTests')
+    expect(payload).not.toHaveProperty('failedTests')
   })
 
   it('should report steps for playwright subprocess mode', async () => {
