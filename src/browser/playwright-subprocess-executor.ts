@@ -273,6 +273,12 @@ const { defineConfig } = require('@playwright/test')
 
 module.exports = defineConfig({
   testDir: __dirname,
+  // Playwright's default outputDir ('test-results') resolves relative to the
+  // CHILD PROCESS's cwd, not this config file's directory — confirmed
+  // experimentally. Without this, trace/artifact output leaks into whatever
+  // directory the agent process happened to be started from instead of the
+  // per-execution runDir, and is never cleaned up by cleanupRunDir.
+  outputDir: path.join(__dirname, 'test-results'),
   timeout: 120_000,
   use: {
     headless: true,
