@@ -11,8 +11,9 @@
  *   2. fetches the target host's SSH private key Just-In-Time from the API,
  *   3. generates a single enclosing play (`hosts`/`become`/`gather_facts` all
  *      fixed by the agent, never by the caller) around system-generated
- *      precheck tasks (explicit fact-gathering, a NOPASSWD-sudo probe, and an
- *      OS check) plus the validated body tasks, and runs it with
+ *      precheck tasks (explicit fact-gathering, a NOPASSWD-sudo probe, an OS
+ *      check, and an `acl`-package install so become_user temp-file handoff
+ *      works) plus the validated body tasks, and runs it with
  *      `ansible-playbook`,
  *   4. reports **per-task** results, and — critically — always removes the
  *      temp directory (private key included) afterwards, whether the run
@@ -79,6 +80,42 @@ const PRECHECK_TASK: Record<string, unknown> = {
   },
   when:
     "ansible_distribution != 'Ubuntu' or ansible_distribution_version not in ['22.04', '24.04', '26.04']",
+  tags: 'always',
+}
+
+/**
+ * System-generated task that installs the `acl` package on the target, run as
+ * root (it inherits the play's `become: true` — deliberately NOT `become:false`
+ * like the no-escalation precheck tasks above) after the NOPASSWD-sudo assert
+ * has already proved root escalation is possible.
+ *
+ * Why this is mandatory: every bundled role that switches to an unprivileged
+ * `become_user` different from the SSH connection user
+ * (nvm/claude_cli/codex/ai_support_agent/database) triggers Ansible's
+ * become-to-unprivileged temp-file handoff, which grants that user access to
+ * the AnsiballZ temp files via `setfacl`. `setfacl` ships in the `acl`
+ * package, which a fresh Ubuntu host does NOT have installed. Without it —
+ * and with no `pipelining`/`allow_world_readable_tmpfiles` fallback configured
+ * — the first such task fails with "Failed to set permissions on the temporary
+ * files Ansible needs to create when becoming an unprivileged user ... chmod:
+ * invalid operator (expected +, -, or =, but found A)" (the `chmod ... A`
+ * being Ansible's ACL-style fallback that GNU chmod rejects once setfacl is
+ * unavailable). Installing `acl` here — before any body task — is the remedy
+ * Ansible's own docs list first for this exact error, and fixes it structurally
+ * for every role regardless of which the recipe body includes.
+ *
+ * Placed after `PRECHECK_TASK` so an unsupported OS fails the run before we
+ * attempt apt; `cache_valid_time` avoids a redundant `apt update` when a role
+ * (e.g. os_init/nvm) has already refreshed the cache in the same run.
+ */
+const ENSURE_ACL_TASK: Record<string, unknown> = {
+  name: 'precheck : Ensure acl (setfacl) is installed',
+  'ansible.builtin.apt': {
+    name: 'acl',
+    state: 'present',
+    update_cache: true,
+    cache_valid_time: 3600,
+  },
   tags: 'always',
 }
 
@@ -330,11 +367,12 @@ export async function fetchServerSetupVariables(
 /**
  * Build the playbook YAML for a run: a single play with agent-fixed
  * `hosts`/`become`/`gather_facts`, whose `tasks` are the system-generated
- * prechecks — explicit fact-gathering, a NOPASSWD-sudo probe/assert, then the
- * OS check — followed by the tenant admin's validated (+`no_log`-annotated)
- * body tasks. The caller never supplies play-level keys (the guard rejects
- * any `hosts`/`roles`/`vars_files` element), so the play here cannot be
- * hijacked.
+ * prechecks — explicit fact-gathering, a NOPASSWD-sudo probe/assert, the OS
+ * check, then the `acl`-package install (so become_user temp-file handoff
+ * works in the bundled roles) — followed by the tenant admin's validated
+ * (+`no_log`-annotated) body tasks. The caller never supplies play-level keys
+ * (the guard rejects any `hosts`/`roles`/`vars_files` element), so the play
+ * here cannot be hijacked.
  */
 export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]): string {
   const playbook: Record<string, unknown>[] = [
@@ -351,6 +389,7 @@ export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]):
         SUDO_PRECHECK_PROBE_TASK,
         SUDO_PRECHECK_ASSERT_TASK,
         PRECHECK_TASK,
+        ENSURE_ACL_TASK,
         ...bodyTasks,
       ],
     },

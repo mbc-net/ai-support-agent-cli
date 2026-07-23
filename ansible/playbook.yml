@@ -50,6 +50,22 @@
         ansible_distribution_version not in ['22.04', '24.04', '26.04']
       tags: always
 
+    # Bundled roles switch to an unprivileged `become_user` (nvm/claude_cli/
+    # codex/ai_support_agent use appuser, database uses postgres). Ansible's
+    # become-to-unprivileged temp-file handoff needs `setfacl` (from the `acl`
+    # package), which a fresh Ubuntu host lacks — without it the first such task
+    # fails with "Failed to set permissions on the temporary files Ansible needs
+    # to create when becoming an unprivileged user ... chmod: invalid operator
+    # ... found A". Install `acl` (as root) before any role runs.
+    # generatePlaybook() in server-setup-runner.ts emits the equivalent task.
+    - name: "precheck : Ensure acl (setfacl) is installed"
+      ansible.builtin.apt:
+        name: acl
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      tags: always
+
   roles:
     - role: os_init
       tags: os_init
