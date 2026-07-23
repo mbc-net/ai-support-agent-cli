@@ -8,10 +8,12 @@
 
 import { spawn } from 'child_process'
 import { promises as fs } from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 
 import { filterEnvVarsOverride } from '../env-vars-filter'
 import { logger } from '../logger'
+import type { E2eSupportFile } from '../types'
 
 export interface PlaywrightSubprocessOptions {
   script: string
@@ -19,6 +21,12 @@ export interface PlaywrightSubprocessOptions {
   baseUrl?: string
   timeoutMs?: number
   envVars?: Record<string, string>
+  /**
+   * プロジェクト共有のサポートファイル（例: `lib/login.page.ts`）。
+   * 実行ごとの専用ディレクトリ（runDir）へ相対パスのまま展開され、
+   * spec 本体から相対 import できるようになる。
+   */
+  supportFiles?: E2eSupportFile[]
 }
 
 export interface PlaywrightSubprocessStepResult {
@@ -182,15 +190,62 @@ function parsePlaywrightJsonOutput(jsonContent: string): PlaywrightSubprocessRes
 }
 
 /**
+ * Per-run Playwright config written into the run directory.
+ *
+ * Mirrors the settings of the repo-level `playwright.subprocess.config.js`
+ * (timeout, use.headless/screenshot/trace/baseURL, JSON reporter, workers),
+ * except `testDir` points at the run directory itself (`__dirname`) so the
+ * spec can relative-import support files expanded alongside it.
+ */
+const RUN_CONFIG_TEMPLATE = `const path = require('path')
+const { defineConfig } = require('@playwright/test')
+
+module.exports = defineConfig({
+  testDir: __dirname,
+  timeout: 120_000,
+  use: {
+    headless: true,
+    screenshot: 'only-on-failure',
+    trace: 'retain-on-failure',
+    baseURL: process.env.E2E_BASE_URL ?? 'http://localhost:3000',
+  },
+  reporter: [['json', { outputFile: process.env.E2E_JSON_OUTPUT ?? path.join(__dirname, 'result.json') }]],
+  workers: 1,
+})
+`
+
+/**
+ * Resolve a support file's relative path against the run directory,
+ * rejecting any path that would escape it (path traversal defense).
+ *
+ * The API validates paths server-side too, but the agent re-validates at
+ * its own trust boundary: reject any path containing `..` outright, then
+ * verify the resolved destination stays inside the run directory (this
+ * also rejects absolute paths).
+ */
+function resolveSupportFilePath(runDir: string, relativePath: string): string {
+  if (relativePath.includes('..')) {
+    throw new Error(`Invalid support file path (contains ".."): "${relativePath}"`)
+  }
+  const dest = path.resolve(runDir, relativePath)
+  if (!dest.startsWith(runDir + path.sep)) {
+    throw new Error(`Invalid support file path (escapes run directory): "${relativePath}"`)
+  }
+  return dest
+}
+
+/**
  * Run a Playwright test script in a child process.
  *
- * Writes the script to a temp file, executes it via the Playwright CLI,
- * and parses the JSON reporter output. Temp files are always cleaned up.
+ * Expands the spec, an optional set of project support files, and a per-run
+ * Playwright config into a dedicated run directory under the OS temp dir,
+ * executes the spec via the Playwright CLI, and parses the JSON reporter
+ * output. The run directory is always cleaned up.
  */
 export async function runPlaywrightSubprocess(
   options: PlaywrightSubprocessOptions,
 ): Promise<PlaywrightSubprocessResult> {
-  const { script, executionId, baseUrl, timeoutMs = DEFAULT_TIMEOUT_MS, envVars } = options
+  const { script, executionId, baseUrl, timeoutMs = DEFAULT_TIMEOUT_MS, envVars, supportFiles } = options
 
   // Sanitize executionId to prevent path traversal
   if (!/^[a-zA-Z0-9_-]+$/.test(executionId)) {
@@ -198,26 +253,35 @@ export async function runPlaywrightSubprocess(
       `Invalid executionId: "${executionId}" — must be alphanumeric, hyphens, or underscores only`,
     )
   }
-  const tmpSpecFile = path.resolve('/tmp', `ai-support-e2e-${executionId}.spec.ts`)
-  const tmpResultFile = path.resolve('/tmp', `ai-support-e2e-${executionId}-result.json`)
-  // Verify paths are inside /tmp as a safety net
-  if (!tmpSpecFile.startsWith('/tmp/') || !tmpResultFile.startsWith('/tmp/')) {
-    throw new Error('Resolved tmp file path is outside /tmp directory')
-  }
+  const runDir = path.resolve(os.tmpdir(), `ai-support-e2e-${executionId}`)
+  const specFile = path.join(runDir, 'test.spec.ts')
+  const configFile = path.join(runDir, 'playwright.config.js')
+  const resultFile = path.join(runDir, 'result.json')
 
   try {
-    // Write the test script to a temp file
-    await fs.writeFile(tmpSpecFile, script, 'utf-8')
+    await fs.mkdir(runDir, { recursive: true })
+
+    // Expand support files first so the spec and config (written below)
+    // always win if a support file path collides with them.
+    for (const file of supportFiles ?? []) {
+      const dest = resolveSupportFilePath(runDir, file.path)
+      await fs.mkdir(path.dirname(dest), { recursive: true })
+      await fs.writeFile(dest, file.content, 'utf-8')
+    }
+
+    // Write the test script and the per-run Playwright config
+    await fs.writeFile(specFile, script, 'utf-8')
+    await fs.writeFile(configFile, RUN_CONFIG_TEMPLATE, 'utf-8')
 
     // Run Playwright subprocess
     const errorOutput = await spawnPlaywright(
-      tmpSpecFile, tmpResultFile, baseUrl, timeoutMs, envVars, executionId,
+      specFile, configFile, resultFile, baseUrl, timeoutMs, envVars, executionId,
     )
 
     // Read and parse the JSON output
     let jsonContent: string
     try {
-      jsonContent = await fs.readFile(tmpResultFile, 'utf-8')
+      jsonContent = await fs.readFile(resultFile, 'utf-8')
     } catch {
       logger.warn(`[playwright-subprocess] JSON output not found for execution ${executionId}`)
       return {
@@ -236,9 +300,8 @@ export async function runPlaywrightSubprocess(
     }
     return result
   } finally {
-    // Always clean up temp files
-    await cleanupFile(tmpSpecFile)
-    await cleanupFile(tmpResultFile)
+    // Always clean up the entire run directory
+    await cleanupRunDir(runDir)
   }
 }
 
@@ -248,6 +311,7 @@ export async function runPlaywrightSubprocess(
  */
 function spawnPlaywright(
   specFile: string,
+  configFile: string,
   resultFile: string,
   baseUrl: string | undefined,
   timeoutMs: number,
@@ -255,9 +319,8 @@ function spawnPlaywright(
   executionId: string,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    // Find the config file relative to the spec file's project root
+    // Resolve the agent's bundled node_modules so the spec can import @playwright/test
     const agentRootDir = path.join(__dirname, '..', '..')
-    const configFile = path.join(agentRootDir, 'playwright.subprocess.config.js')
     const nodeModulesDir = path.join(agentRootDir, 'node_modules')
 
     const env: NodeJS.ProcessEnv = {
@@ -323,12 +386,12 @@ function spawnPlaywright(
   })
 }
 
-/** Remove a file, ignoring errors if it doesn't exist */
-async function cleanupFile(filePath: string): Promise<void> {
+/** Remove the run directory recursively, ignoring cleanup errors */
+async function cleanupRunDir(runDir: string): Promise<void> {
   try {
-    await fs.unlink(filePath)
+    await fs.rm(runDir, { recursive: true, force: true })
   } catch {
-    // File may not exist if Playwright failed early — ignore
+    // Best-effort cleanup — ignore
   }
 }
 

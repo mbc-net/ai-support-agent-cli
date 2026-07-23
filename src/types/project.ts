@@ -209,6 +209,19 @@ export interface E2eEnvironmentVariablesResponse {
   variables: Record<string, string>
 }
 
+/**
+ * プロジェクト共有の E2E サポートファイル（例: `lib/login.page.ts`）。
+ * `path` は実行ディレクトリからの相対パスで、Playwright spec から相対 import される。
+ */
+export interface E2eSupportFile {
+  path: string
+  content: string
+}
+
+export interface E2eSupportFilesResponse {
+  files: E2eSupportFile[]
+}
+
 export interface CloudwatchConfig {
   enabled: boolean
   /** サーバーが分 × 60000 に変換済みの ms 値 */

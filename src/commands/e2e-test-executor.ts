@@ -8,6 +8,7 @@ import type {
   AgentChatMode,
   AgentServerConfig,
   CommandResult,
+  E2eSupportFile,
   ProjectConfigResponse,
 } from '../types'
 import { errorResult, successResult } from '../types/command'
@@ -201,6 +202,20 @@ async function executePlaywrightSubprocessMode(
     }
   }
 
+  // プロジェクト共有サポートファイル（lib/ 等）の取得。環境変数取得の「失敗→error」とは
+  // 意図的に異なり、取得失敗は実行エラーにしない（旧 API サーバー相手でも import を
+  // 使わない spec は従来どおり動く必要があるため）。
+  let supportFiles: E2eSupportFile[] = []
+  if (tenantCode && projectCode) {
+    try {
+      supportFiles = await client.getE2eSupportFiles(tenantCode, projectCode)
+    } catch (err: unknown) {
+      logger.warn(
+        `[e2e_test] Failed to fetch support files (continuing without them) [${executionId}]: ${toErrorMessage(err)}`,
+      )
+    }
+  }
+
   let subprocessResult
   try {
     subprocessResult = await runPlaywrightSubprocess({
@@ -208,6 +223,7 @@ async function executePlaywrightSubprocessMode(
       executionId,
       baseUrl: targetUrl,
       envVars: environmentVariables,
+      supportFiles,
       timeoutMs: undefined,
     })
   } catch (err: unknown) {

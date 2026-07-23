@@ -2,7 +2,7 @@ import { EventEmitter } from 'events'
 
 import type { ApiClient } from '../../src/api-client'
 import { cancelApiChatProcess, executeApiChatCommand, _getRunningApiChats } from '../../src/commands/api-chat-executor'
-import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED } from '../../src/constants'
+import { ERR_AGENT_ID_REQUIRED, ERR_MESSAGE_REQUIRED, MAX_TOOL_TURNS } from '../../src/constants'
 import type { AgentServerConfig, ChatPayload } from '../../src/types'
 
 jest.mock('../../src/logger')
@@ -22,6 +22,24 @@ jest.mock('axios', () => {
 import axios from 'axios'
 
 const mockedAxiosPost = axios.post as jest.MockedFunction<typeof axios.post>
+
+// project-dir / api-tool-executor mocking is only used by the tool-use
+// (Slack Marketplace) describe block below; the pre-existing tests in this
+// file never take the Slack Marketplace branch, so they are unaffected.
+jest.mock('../../src/project-dir', () => ({
+  getAutoAddDirs: jest.fn().mockReturnValue(['/mock/repos', '/mock/docs']),
+}))
+jest.mock('../../src/commands/api-tool-executor', () => {
+  const actual = jest.requireActual('../../src/commands/api-tool-executor')
+  return {
+    buildReadOnlyToolSchemas: actual.buildReadOnlyToolSchemas,
+    executeReadOnlyTool: jest.fn(),
+  }
+})
+
+import { executeReadOnlyTool as mockedExecuteReadOnlyTool } from '../../src/commands/api-tool-executor'
+
+const mockedExecuteTool = mockedExecuteReadOnlyTool as jest.MockedFunction<typeof mockedExecuteReadOnlyTool>
 
 describe('api-chat-executor', () => {
   const mockClient = {
@@ -766,5 +784,305 @@ describe('api-chat-executor', () => {
       type: 'delta',
       content: expect.stringContaining('unknown'),
     }), 'agent-1')
+  })
+
+  describe('tool-use (Slack Marketplace)', () => {
+    const slackPayload: ChatPayload = {
+      message: 'What does file.txt contain?',
+      interactionOrigin: 'slack',
+      toolPolicy: 'marketplace_read_only',
+    }
+
+    function sseData(obj: unknown): Buffer {
+      return Buffer.from(`data: ${JSON.stringify(obj)}\n\n`)
+    }
+
+    it('does not build tools or execute any tool for a non-Slack-Marketplace payload (unchanged default behavior)', async () => {
+      const stream = new EventEmitter()
+      mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+      const resultPromise = executeApiChatCommand(basePayload, 'cmd-no-tools', mockClient, baseConfig, 'agent-1')
+      await new Promise((r) => setTimeout(r, 50))
+      stream.emit('end')
+      await resultPromise
+
+      const body = mockedAxiosPost.mock.calls[0][1] as Record<string, unknown>
+      expect(body.tools).toBeUndefined()
+      expect(mockedExecuteTool).not.toHaveBeenCalled()
+    })
+
+    it('includes exactly the Read/Grep/Glob tool schemas in the request body for a Slack Marketplace payload', async () => {
+      const stream = new EventEmitter()
+      mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+      const resultPromise = executeApiChatCommand(
+        slackPayload, 'cmd-tools-schema', mockClient, baseConfig, 'agent-1', { projectDir: '/mock/project' },
+      )
+      await new Promise((r) => setTimeout(r, 50))
+      stream.emit('data', sseData({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } }))
+      stream.emit('end')
+      await resultPromise
+
+      const body = mockedAxiosPost.mock.calls[0][1] as Record<string, unknown>
+      const tools = body.tools as Array<{ name: string }>
+      expect(tools.map((t) => t.name)).toEqual(['Read', 'Grep', 'Glob'])
+    })
+
+    it('executes a tool_use round trip: sends tool_call/tool_result chunks and re-calls the API with the tool_result', async () => {
+      const stream1 = new EventEmitter()
+      const stream2 = new EventEmitter()
+      mockedAxiosPost
+        .mockResolvedValueOnce({ data: stream1 } as any)
+        .mockResolvedValueOnce({ data: stream2 } as any)
+      mockedExecuteTool.mockResolvedValue({ output: 'Hello World', isError: false })
+
+      const resultPromise = executeApiChatCommand(
+        slackPayload, 'cmd-tool-roundtrip', mockClient, baseConfig, 'agent-1', { projectDir: '/mock/project' },
+      )
+
+      await new Promise((r) => setTimeout(r, 50))
+      stream1.emit('data', sseData({ type: 'message_start', message: { usage: { input_tokens: 10 } } }))
+      stream1.emit('data', sseData({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'toolu_1', name: 'Read', input: {} },
+      }))
+      stream1.emit('data', sseData({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: '{"file_path":"/mock/project/workspace/repos/file.txt"}' },
+      }))
+      stream1.emit('data', sseData({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 5 } }))
+      stream1.emit('end')
+
+      await new Promise((r) => setTimeout(r, 50))
+
+      stream2.emit('data', sseData({ type: 'message_start', message: { usage: { input_tokens: 20 } } }))
+      stream2.emit('data', sseData({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }))
+      stream2.emit('data', sseData({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'The file contains: Hello World' },
+      }))
+      stream2.emit('data', sseData({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 8 } }))
+      stream2.emit('end')
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+      if (result.success) {
+        expect(result.data).toBe('The file contains: Hello World')
+      }
+
+      expect(mockedAxiosPost).toHaveBeenCalledTimes(2)
+      expect(mockedExecuteTool).toHaveBeenCalledWith(
+        'Read',
+        { file_path: '/mock/project/workspace/repos/file.txt' },
+        ['/mock/repos', '/mock/docs'],
+        expect.any(AbortSignal),
+      )
+
+      expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-tool-roundtrip', expect.objectContaining({
+        type: 'tool_call',
+        content: expect.stringContaining('"toolName":"Read"'),
+      }), 'agent-1')
+      expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-tool-roundtrip', expect.objectContaining({
+        type: 'tool_result',
+        content: expect.stringContaining('"success":true'),
+      }), 'agent-1')
+
+      // The second API call's messages must carry the first turn's assistant
+      // tool_use content block followed by a user message with the tool_result.
+      const secondCallBody = mockedAxiosPost.mock.calls[1][1] as Record<string, unknown>
+      const messages = secondCallBody.messages as Array<{ role: string; content: unknown }>
+      const assistantMsg = messages.find((m) => m.role === 'assistant')
+      expect(assistantMsg?.content).toEqual([
+        { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/mock/project/workspace/repos/file.txt' } },
+      ])
+      const toolResultMsg = messages[messages.length - 1]
+      expect(toolResultMsg.role).toBe('user')
+      expect(toolResultMsg.content).toEqual([
+        { type: 'tool_result', tool_use_id: 'toolu_1', content: 'Hello World' },
+      ])
+
+      // usage totals are summed across both turns
+      const doneCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) => (call[1] as { type: string }).type === 'done',
+      )
+      const doneContent = JSON.parse((doneCall[1] as { content: string }).content)
+      expect(doneContent.usage).toEqual({
+        totalInputTokens: 30,
+        totalOutputTokens: 13,
+        totalTokens: 43,
+      })
+    })
+
+    it('marks the tool_result as is_error and reports failure when the tool execution fails', async () => {
+      const stream1 = new EventEmitter()
+      const stream2 = new EventEmitter()
+      mockedAxiosPost
+        .mockResolvedValueOnce({ data: stream1 } as any)
+        .mockResolvedValueOnce({ data: stream2 } as any)
+      mockedExecuteTool.mockResolvedValue({ output: 'Error: Access denied', isError: true })
+
+      const resultPromise = executeApiChatCommand(
+        slackPayload, 'cmd-tool-error', mockClient, baseConfig, 'agent-1', { projectDir: '/mock/project' },
+      )
+
+      await new Promise((r) => setTimeout(r, 50))
+      stream1.emit('data', sseData({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'toolu_err', name: 'Read', input: {} },
+      }))
+      stream1.emit('data', sseData({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: '{"file_path":"/etc/passwd"}' },
+      }))
+      stream1.emit('data', sseData({ type: 'message_delta', delta: { stop_reason: 'tool_use' } }))
+      stream1.emit('end')
+
+      await new Promise((r) => setTimeout(r, 50))
+      stream2.emit('data', sseData({ type: 'message_delta', delta: { stop_reason: 'end_turn' } }))
+      stream2.emit('end')
+
+      await resultPromise
+
+      expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-tool-error', expect.objectContaining({
+        type: 'tool_result',
+        content: expect.stringContaining('"success":false'),
+      }), 'agent-1')
+
+      const secondCallBody = mockedAxiosPost.mock.calls[1][1] as Record<string, unknown>
+      const messages = secondCallBody.messages as Array<{ role: string; content: unknown }>
+      const toolResultMsg = messages[messages.length - 1]
+      expect(toolResultMsg.content).toEqual([
+        { type: 'tool_result', tool_use_id: 'toolu_err', content: 'Error: Access denied', is_error: true },
+      ])
+    })
+
+    it('stops after MAX_TOOL_TURNS turns and sends a truncation notice without executing the final tool call', async () => {
+      let callCount = 0
+      mockedAxiosPost.mockImplementation((async () => {
+        callCount++
+        const stream = new EventEmitter()
+        setImmediate(() => {
+          stream.emit('data', sseData({
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'tool_use', id: `toolu_${callCount}`, name: 'Read', input: {} },
+          }))
+          stream.emit('data', sseData({
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'input_json_delta', partial_json: '{"file_path":"/mock/project/workspace/repos/x.txt"}' },
+          }))
+          stream.emit('data', sseData({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 1 } }))
+          stream.emit('end')
+        })
+        return { data: stream } as any
+      }) as typeof mockedAxiosPost)
+      mockedExecuteTool.mockResolvedValue({ output: 'ok', isError: false })
+
+      const result = await executeApiChatCommand(
+        slackPayload, 'cmd-max-turns', mockClient, baseConfig, 'agent-1', { projectDir: '/mock/project' },
+      )
+
+      expect(result.success).toBe(true)
+      expect(mockedAxiosPost).toHaveBeenCalledTimes(MAX_TOOL_TURNS)
+      // The MAX_TOOL_TURNS-th turn's tool_use is truncated before execution,
+      // so only MAX_TOOL_TURNS - 1 tool executions actually happen.
+      expect(mockedExecuteTool).toHaveBeenCalledTimes(MAX_TOOL_TURNS - 1)
+      expect(mockClient.submitChatChunk).toHaveBeenCalledWith('cmd-max-turns', expect.objectContaining({
+        type: 'delta',
+        content: expect.stringContaining(String(MAX_TOOL_TURNS)),
+      }), 'agent-1')
+
+      const doneCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+        (call: unknown[]) => (call[1] as { type: string }).type === 'done',
+      )
+      const doneContent = JSON.parse((doneCall[1] as { content: string }).content)
+      expect(doneContent.toolTurnsTruncated).toBe(true)
+    })
+
+    it('does not build tool schemas or a sandbox when toolContext.projectDir is missing, so every tool call is rejected', async () => {
+      const stream1 = new EventEmitter()
+      const stream2 = new EventEmitter()
+      mockedAxiosPost
+        .mockResolvedValueOnce({ data: stream1 } as any)
+        .mockResolvedValueOnce({ data: stream2 } as any)
+      mockedExecuteTool.mockResolvedValue({ output: 'Error: No sandboxed directories are available for this command', isError: true })
+
+      const resultPromise = executeApiChatCommand(
+        slackPayload, 'cmd-no-projectdir', mockClient, baseConfig, 'agent-1',
+      )
+
+      await new Promise((r) => setTimeout(r, 50))
+      stream1.emit('data', sseData({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'toolu_np', name: 'Read', input: {} },
+      }))
+      stream1.emit('data', sseData({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: '{"file_path":"/mock/project/workspace/repos/x.txt"}' },
+      }))
+      stream1.emit('data', sseData({ type: 'message_delta', delta: { stop_reason: 'tool_use' } }))
+      stream1.emit('end')
+
+      await new Promise((r) => setTimeout(r, 50))
+      stream2.emit('data', sseData({ type: 'message_delta', delta: { stop_reason: 'end_turn' } }))
+      stream2.emit('end')
+
+      await resultPromise
+
+      expect(mockedExecuteTool).toHaveBeenCalledWith(
+        'Read',
+        { file_path: '/mock/project/workspace/repos/x.txt' },
+        [],
+        expect.any(AbortSignal),
+      )
+    })
+
+    it('propagates an already-aborted AbortSignal into the tool call when the chat is cancelled before the tool executes', async () => {
+      const stream1 = new EventEmitter()
+      mockedAxiosPost.mockResolvedValueOnce({ data: stream1 } as any)
+      let capturedSignal: AbortSignal | undefined
+      mockedExecuteTool.mockImplementation(async (_name, _input, _roots, signal) => {
+        capturedSignal = signal
+        return { output: 'cancelled before execution', isError: true }
+      })
+
+      const resultPromise = executeApiChatCommand(
+        slackPayload, 'cmd-tool-cancel', mockClient, baseConfig, 'agent-1', { projectDir: '/mock/project' },
+      )
+
+      await new Promise((r) => setTimeout(r, 50))
+      // Cancel the chat command (aborts the same AbortController that gets
+      // passed through to runToolTurn -> executeReadOnlyTool for Grep/Glob;
+      // here we use Read only to keep the mock simple, but the wiring is
+      // identical for all three tools since executeReadOnlyTool always
+      // receives the same abortSignal argument).
+      cancelApiChatProcess('cmd-tool-cancel')
+
+      stream1.emit('data', sseData({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'toolu_cancel', name: 'Read', input: {} },
+      }))
+      stream1.emit('data', sseData({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: '{"file_path":"/mock/project/workspace/repos/x.txt"}' },
+      }))
+      stream1.emit('data', sseData({ type: 'message_delta', delta: { stop_reason: 'tool_use' } }))
+      stream1.emit('end')
+
+      await resultPromise
+
+      expect(capturedSignal).toBeInstanceOf(AbortSignal)
+      expect(capturedSignal?.aborted).toBe(true)
+    })
   })
 })

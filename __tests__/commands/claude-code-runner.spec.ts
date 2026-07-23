@@ -1,7 +1,8 @@
 import os from 'os'
 
-import { ERR_CLAUDE_CLI_NOT_FOUND, ENV_VARS } from '../../src/constants'
+import { ERR_CLAUDE_CLI_NOT_FOUND, ENV_VARS, LOG_STDERR_ON_FAILURE_LIMIT } from '../../src/constants'
 import { ERR_CLAUDE_USAGE_LIMIT_REACHED, buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache, formatClaudeExitError, isClaudeUsageLimitError, parseFileUploadResult, processStreamJsonLine, runClaudeCode } from '../../src/commands/claude-code-runner'
+import { logger } from '../../src/logger'
 import { createMockChildProcess } from '../helpers/mock-factory'
 
 jest.mock('../../src/logger')
@@ -11,6 +12,18 @@ jest.mock('child_process', () => ({
 }))
 
 jest.mock('../../src/commands/plugin-dir')
+
+// runClaudeCode() は spawn() 前に ensureClaudeJsonIntegrity() / ensureClaudeJsonOAuthAccount()
+// を実行し、実 os.homedir() の ~/.claude.json に触れうる。本ファイルの対象は
+// サブプロセスの spawn/stream/close ロジックであり、この同期処理自体ではないため
+// 丸ごとモックし、開発者の実環境変数（例: シェルに export された CLAUDE_CODE_OAUTH_TOKEN）
+// 次第で `npm test` が実ホームディレクトリの ~/.claude.json を書き換えてしまう事故を防ぐ。
+jest.mock('../../src/utils/claude-json-oauth-sync', () => ({
+  ensureClaudeJsonOAuthAccount: jest.fn(),
+}))
+jest.mock('../../src/utils/claude-config-validator', () => ({
+  ensureClaudeJsonIntegrity: jest.fn(),
+}))
 
 /** NDJSON行を作るヘルパー */
 function makeAssistantLine(text: string): string {
@@ -987,6 +1000,131 @@ describe('claude-code-runner', () => {
       mockProcess.emit('close', 1)
 
       await expect(handle.result).rejects.toThrow('コード 1')
+    })
+
+    it('should log the captured stderr at warn level when the CLI exits non-zero (so it is visible without --verbose)', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      mockProcess.emitStderr('data', Buffer.from('Error: some internal claude CLI failure detail\n'))
+      mockProcess.emit('close', 1)
+
+      await expect(handle.result).rejects.toThrow()
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('some internal claude CLI failure detail'),
+      )
+      // pid とexit codeで運用者が既存の spawned/exited ログと相関付けられること
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/pid=12345/),
+      )
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/code=1/),
+      )
+    })
+
+    it('should not log a stderr warning when the CLI exits non-zero with no stderr output', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      mockProcess.emit('close', 1)
+
+      await expect(handle.result).rejects.toThrow()
+
+      const stderrWarnCalls = (logger.warn as jest.Mock).mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('claude CLI'),
+      )
+      expect(stderrWarnCalls).toHaveLength(0)
+    })
+
+    it('should redact known secret env values from the stderr before logging at warn level', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const secretValue = 'sk-ant-super-secret-abc123'
+
+      const handle = runClaudeCode({
+        message: 'hello',
+        sendChunk,
+        // ANTHROPIC_API_KEY のような秘密っぽいキー名の env 値は、パターンベースの
+        // maskSecrets（logger.ts）では拾えない裸のトークン形式でも redactSecretValues
+        // により値ベースでマスクされることを検証する
+        envVarsOverride: { ANTHROPIC_API_KEY: secretValue },
+      })
+
+      mockProcess.emitStderr('data', Buffer.from(`Error: invalid key ${secretValue} rejected\n`))
+      mockProcess.emit('close', 1)
+
+      await expect(handle.result).rejects.toThrow()
+
+      const warnCalls = (logger.warn as jest.Mock).mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('claude CLI failed'),
+      )
+      expect(warnCalls).toHaveLength(1)
+      const [loggedMessage] = warnCalls[0]
+      expect(loggedMessage).not.toContain(secretValue)
+      expect(loggedMessage).toContain('***')
+    })
+
+    it('should keep the most recent (tail) portion of long stderr, not the head, when truncating for the warn log', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      // 実際の失敗原因（fatal エラー）は通常 stderr の末尾に出る。
+      // 先頭を優先して切り詰めると、まさにその情報が失われる。
+      const headMarker = 'HEAD_MARKER_SHOULD_BE_DROPPED'
+      const tailMarker = 'TAIL_MARKER_FATAL_ERROR'
+      const filler = 'x'.repeat(LOG_STDERR_ON_FAILURE_LIMIT + 100)
+      mockProcess.emitStderr('data', Buffer.from(`${headMarker}${filler}${tailMarker}`))
+      mockProcess.emit('close', 1)
+
+      await expect(handle.result).rejects.toThrow()
+
+      const warnCalls = (logger.warn as jest.Mock).mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('claude CLI failed'),
+      )
+      expect(warnCalls).toHaveLength(1)
+      const [loggedMessage] = warnCalls[0]
+      expect(loggedMessage).toContain(tailMarker)
+      expect(loggedMessage).not.toContain(headMarker)
+    })
+
+    it('should not log a stderr warning when the CLI exits with code 0 (success)', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      // --verbose 相当のログ等、成功時にもstderrに何か出ることはある
+      mockProcess.emitStderr('data', Buffer.from('some informational noise\n'))
+      mockProcess.emitStdout('data', Buffer.from(makeResultLine('ok') + '\n'))
+      mockProcess.emit('close', 0)
+
+      await handle.result
+
+      const stderrWarnCalls = (logger.warn as jest.Mock).mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('claude CLI'),
+      )
+      expect(stderrWarnCalls).toHaveLength(0)
     })
 
     it('should reject with a usage limit error when Claude Code reaches Monthly Limit', async () => {
