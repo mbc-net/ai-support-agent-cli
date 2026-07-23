@@ -12,7 +12,7 @@ import type {
   ProjectConfigResponse,
 } from '../types'
 import { errorResult, successResult } from '../types/command'
-import { parseString, toErrorMessage } from '../utils'
+import { getErrorMessage, parseString, toErrorMessage } from '../utils'
 
 import { executeChatCommand } from './chat-executor'
 
@@ -266,10 +266,15 @@ async function executePlaywrightSubprocessMode(
     finalStatus, duration,
     subprocessResult.success ? undefined : (subprocessResult.errorOutput ?? `${subprocessResult.failedTests} test(s) failed`),
     testCaseId,
+    // The API DTO (UpdateExecutionStatusDto) whitelists only totalSteps/
+    // passedSteps/failedSteps. These must match those names — the subprocess
+    // executor's *Tests counters are per-test.step() counts — otherwise
+    // ValidationPipe({whitelist:true}) strips them and the execution's
+    // totalSteps stays at its creation-time default of 0.
     {
-      passedTests: subprocessResult.passedTests,
-      failedTests: subprocessResult.failedTests,
-      totalTests: subprocessResult.totalTests,
+      passedSteps: subprocessResult.passedTests,
+      failedSteps: subprocessResult.failedTests,
+      totalSteps: subprocessResult.totalTests,
     },
   )
 
@@ -547,8 +552,17 @@ async function reportExecutionStatus(
       },
     )
   } catch (err: unknown) {
-    logger.warn(
-      `[e2e_test] Failed to update execution status: ${toErrorMessage(err)}`,
+    // This report carries the execution's outcome (status + step aggregates)
+    // and is what drives the API-side alarm/notification workflow. A failure
+    // here must be loud: non-retryable 4xx (e.g. a DTO whitelist/validation
+    // mismatch — the same class of bug that silently left totalSteps at 0) are
+    // never retried by RetryStrategy, so warning-only would let the execution
+    // stay stuck as "running" with no signal to anyone. Log at error level with
+    // identifying context and the API's own message (getErrorMessage surfaces
+    // the HTTP status and server-side validation message for AxiosErrors).
+    logger.error(
+      `[e2e_test] Failed to report execution status (status=${status}) ` +
+        `[execution=${executionId} tenant=${tenantCode} project=${projectCode}]: ${getErrorMessage(err)}`,
     )
   }
 }
