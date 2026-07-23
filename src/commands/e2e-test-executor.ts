@@ -162,6 +162,20 @@ function warnIfLegacyEnvironmentVariablesPresent(
   )
 }
 
+/**
+ * `captureStepScreenshots` ペイロードフィールドを boolean として解釈する。
+ *
+ * API は boolean で送るが、デプロイ順序の窓や手動再実行で文字列 `"false"` が
+ * 来る可能性も考慮する。未指定（undefined/null）や解釈不能な値は既定の
+ * true（ハーネス側スクリーンショット取得を有効）にフォールバックし、明示的な
+ * false（boolean false / 文字列 "false"）のときのみ無効化する。
+ */
+function parseBooleanDefaultTrue(value: unknown): boolean {
+  if (value === false) return false
+  if (typeof value === 'string' && value.toLowerCase() === 'false') return false
+  return true
+}
+
 /** Playwright subprocess モードのパラメータ */
 interface PlaywrightSubprocessModeParams extends ExecuteE2eTestOptions {
   executionId: string
@@ -216,6 +230,10 @@ async function executePlaywrightSubprocessMode(
     }
   }
 
+  // captureStepScreenshots defaults to true; only an explicit `false`
+  // (boolean or the string "false") disables the harness-level auto-capture.
+  const captureStepScreenshots = parseBooleanDefaultTrue(params.payload.captureStepScreenshots)
+
   let subprocessResult
   try {
     subprocessResult = await runPlaywrightSubprocess({
@@ -225,6 +243,7 @@ async function executePlaywrightSubprocessMode(
       envVars: environmentVariables,
       supportFiles,
       timeoutMs: undefined,
+      captureStepScreenshots,
     })
   } catch (err: unknown) {
     const errorMessage = toErrorMessage(err)
