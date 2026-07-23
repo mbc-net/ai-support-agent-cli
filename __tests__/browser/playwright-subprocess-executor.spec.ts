@@ -549,6 +549,362 @@ describe('parsePlaywrightJsonOutput', () => {
     const result = parsePlaywrightJsonOutput(json)
     expect(result.steps[0].screenshotPath).toBeUndefined()
   })
+
+  // --- nested test.step() results (new format) ---
+
+  /** Build a single-test JSON reporter output with nested `steps[]` (test.step() format). */
+  function makeNestedStepJson(opts: {
+    startTime?: string
+    steps: Array<{ title: string; duration?: number; error?: string }>
+    attachments?: Array<{ name?: string; contentType?: string; body?: unknown }>
+  }): string {
+    return JSON.stringify({
+      suites: [
+        {
+          specs: [
+            {
+              title: 'Nested step test',
+              tests: [
+                {
+                  title: 'Nested step test',
+                  results: [
+                    {
+                      status: opts.steps.some((s) => s.error) ? 'failed' : 'passed',
+                      duration: opts.steps.reduce((sum, s) => sum + (s.duration ?? 0), 0),
+                      ...(opts.startTime !== undefined && { startTime: opts.startTime }),
+                      steps: opts.steps.map((s) => ({
+                        title: s.title,
+                        duration: s.duration,
+                        ...(s.error && { error: { message: s.error } }),
+                      })),
+                      attachments: opts.attachments ?? [],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+  }
+
+  it('should parse nested test.step() results into individual steps with title/duration/executedAt/screenshotBase64', () => {
+    const startTime = '2026-07-23T04:09:18.639Z'
+    const json = makeNestedStepJson({
+      startTime,
+      steps: [
+        { title: 'step one', duration: 22 },
+        { title: 'step two', duration: 18 },
+      ],
+      attachments: [
+        { name: 'screenshot', contentType: 'image/png', body: 'AAAA-base64' },
+        { name: 'screenshot', contentType: 'image/png', body: 'BBBB-base64' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps).toHaveLength(2)
+    expect(result.steps[0]).toEqual({
+      title: 'step one',
+      status: 'passed',
+      duration: 22,
+      executedAt: new Date(Date.parse(startTime)).toISOString(),
+      screenshotBase64: 'AAAA-base64',
+    })
+    expect(result.steps[1]).toEqual({
+      title: 'step two',
+      status: 'passed',
+      duration: 18,
+      executedAt: new Date(Date.parse(startTime) + 22).toISOString(),
+      screenshotBase64: 'BBBB-base64',
+    })
+    // Step two's executedAt must be strictly later than step one's
+    expect(Date.parse(result.steps[1].executedAt!)).toBeGreaterThan(Date.parse(result.steps[0].executedAt!))
+    expect(result.passedTests).toBe(2)
+    expect(result.failedTests).toBe(0)
+    expect(result.totalTests).toBe(2)
+    expect(result.success).toBe(true)
+  })
+
+  it('should mark a nested step failed with its error, matching real JSON where later steps never appear', () => {
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'step one', duration: 22 },
+        { title: 'step two', duration: 18, error: 'Element not found' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    // Only the two steps present in the JSON are reported (a would-be "step
+    // three" simply never appears in Playwright's output, so there is
+    // nothing for the parser to truncate).
+    expect(result.steps).toHaveLength(2)
+    expect(result.steps[0].status).toBe('passed')
+    expect(result.steps[1]).toEqual(
+      expect.objectContaining({
+        title: 'step two',
+        status: 'failed',
+        error: 'Element not found',
+        duration: 18,
+      }),
+    )
+    expect(result.passedTests).toBe(1)
+    expect(result.failedTests).toBe(1)
+    expect(result.totalTests).toBe(2)
+    expect(result.success).toBe(false)
+  })
+
+  it('should omit executedAt for nested steps when the test result has no valid startTime', () => {
+    const json = makeNestedStepJson({
+      steps: [{ title: 'step one', duration: 10 }],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].executedAt).toBeUndefined()
+  })
+
+  it('should warn and omit screenshotBase64 for ALL nested steps when there are fewer image attachments than steps (count mismatch — shortage)', () => {
+    const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'step one', duration: 10 },
+        { title: 'step two', duration: 10 },
+        { title: 'step three', duration: 10 },
+      ],
+      attachments: [
+        { name: 'screenshot', contentType: 'image/png', body: 'one' },
+        { name: 'screenshot', contentType: 'image/png', body: 'two' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps).toHaveLength(3)
+    expect(result.steps[0].screenshotBase64).toBeUndefined()
+    expect(result.steps[1].screenshotBase64).toBeUndefined()
+    expect(result.steps[2].screenshotBase64).toBeUndefined()
+    // Other fields must still be reported normally
+    expect(result.steps[0].title).toBe('step one')
+    expect(result.steps[0].status).toBe('passed')
+    expect(result.steps[0].duration).toBe(10)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Screenshot/step count mismatch'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('3 step(s)'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('2 image attachment(s)'))
+    warnSpy.mockRestore()
+  })
+
+  it('should warn and omit screenshotBase64 for ALL nested steps when there are more image attachments than steps (count mismatch — excess)', () => {
+    const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'step one', duration: 10 },
+        { title: 'step two', duration: 10 },
+      ],
+      attachments: [
+        { name: 'screenshot', contentType: 'image/png', body: 'one' },
+        { name: 'screenshot', contentType: 'image/png', body: 'two' },
+        { name: 'screenshot', contentType: 'image/png', body: 'three' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps).toHaveLength(2)
+    expect(result.steps[0].screenshotBase64).toBeUndefined()
+    expect(result.steps[1].screenshotBase64).toBeUndefined()
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Screenshot/step count mismatch'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('2 step(s)'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('3 image attachment(s)'))
+    warnSpy.mockRestore()
+  })
+
+  it('should NOT warn and should associate screenshots correctly when step count and image attachment count match', () => {
+    const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'step one', duration: 10 },
+        { title: 'step two', duration: 10 },
+      ],
+      attachments: [
+        { name: 'screenshot', contentType: 'image/png', body: 'match-one' },
+        { name: 'screenshot', contentType: 'image/png', body: 'match-two' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBe('match-one')
+    expect(result.steps[1].screenshotBase64).toBe('match-two')
+    expect(warnSpy).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+
+  it('should NOT warn and should leave screenshotBase64 undefined for all steps when there are zero image attachments (captureStepScreenshots=false)', () => {
+    const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'step one', duration: 10 },
+        { title: 'step two', duration: 10 },
+      ],
+      attachments: [],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBeUndefined()
+    expect(result.steps[1].screenshotBase64).toBeUndefined()
+    expect(warnSpy).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+
+  it('should map only image/png attachments positionally, ignoring other attachment types (e.g. trace zip)', () => {
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'step one', duration: 10 },
+        { title: 'step two', duration: 10 },
+      ],
+      attachments: [
+        { name: 'trace', contentType: 'application/zip', body: 'zip-bytes' },
+        { name: 'screenshot', contentType: 'image/png', body: 'png-one' },
+        { name: 'screenshot', contentType: 'image/png', body: 'png-two' },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBe('png-one')
+    expect(result.steps[1].screenshotBase64).toBe('png-two')
+  })
+
+  it('should omit screenshotBase64 when the matching attachment has no string body', () => {
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [{ title: 'step one', duration: 10 }],
+      attachments: [{ name: 'screenshot', contentType: 'image/png' }],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+
+    expect(result.steps[0].screenshotBase64).toBeUndefined()
+  })
+
+  it('should fall back to unknown for a nested step with no title', () => {
+    const json = JSON.stringify({
+      suites: [
+        {
+          specs: [
+            {
+              title: 'No step title',
+              tests: [
+                {
+                  results: [
+                    {
+                      status: 'passed',
+                      duration: 10,
+                      startTime: '2026-07-23T04:09:18.639Z',
+                      steps: [{ duration: 10 }],
+                      attachments: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps[0].title).toBe('unknown')
+  })
+
+  it('should use the legacy per-test fallback when the result has an empty nested steps array', () => {
+    // Some older/edge-case reporter output may include `steps: []` explicitly
+    // (as opposed to omitting the field entirely) — this must still fall
+    // back to reporting the whole test as a single step.
+    const json = JSON.stringify({
+      suites: [
+        {
+          specs: [
+            {
+              title: 'Empty nested steps',
+              tests: [
+                {
+                  results: [{ status: 'passed', duration: 100, steps: [], attachments: [] }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps).toHaveLength(1)
+    expect(result.steps[0]).toEqual({
+      title: 'Empty nested steps',
+      status: 'passed',
+      duration: 100,
+    })
+  })
+
+  it('should treat a nested step with a zero duration correctly (falsy but valid)', () => {
+    const json = makeNestedStepJson({
+      startTime: '2026-07-23T04:09:18.639Z',
+      steps: [
+        { title: 'instant step', duration: 0 },
+        { title: 'next step', duration: 5 },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps[0].duration).toBe(0)
+    // cumulative offset must still be 0 (not skipped) so the next step's
+    // executedAt is exactly startTime, not shifted
+    expect(result.steps[1].executedAt).toBe(
+      new Date(Date.parse('2026-07-23T04:09:18.639Z') + 0).toISOString(),
+    )
+  })
+
+  it('should default a nested step duration to 0 when duration is not a number', () => {
+    const json = JSON.stringify({
+      suites: [
+        {
+          specs: [
+            {
+              title: 'Non-numeric nested duration',
+              tests: [
+                {
+                  results: [
+                    {
+                      status: 'passed',
+                      duration: 100,
+                      startTime: '2026-07-23T04:09:18.639Z',
+                      steps: [{ title: 'weird step', duration: 'fast' }],
+                      attachments: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps[0].duration).toBe(0)
+  })
 })
 
 describe('runPlaywrightSubprocess', () => {
@@ -683,7 +1039,9 @@ describe('runPlaywrightSubprocess', () => {
     // Settings carried over from playwright.subprocess.config.js
     expect(config).toContain('timeout: 120_000')
     expect(config).toContain('headless: true')
-    expect(config).toContain("screenshot: 'only-on-failure'")
+    // Automatic Playwright screenshots are disabled — steps attach their own
+    // screenshots explicitly via testInfo.attach() (see RUN_CONFIG_TEMPLATE comment).
+    expect(config).toContain("screenshot: 'off'")
     expect(config).toContain("trace: 'retain-on-failure'")
     expect(config).toContain("baseURL: process.env.E2E_BASE_URL ?? 'http://localhost:3000'")
     expect(config).toContain("reporter: [['json', { outputFile: process.env.E2E_JSON_OUTPUT")

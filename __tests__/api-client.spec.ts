@@ -1136,6 +1136,25 @@ describe('ApiClient', () => {
         undefined,
       )
     })
+
+    it('should pass executedAt and screenshotBase64 through to the POST body unchanged', async () => {
+      mockInstance.post.mockResolvedValue({})
+
+      const body = {
+        stepNumber: 1,
+        action: 'click',
+        status: 'passed' as const,
+        executedAt: '2026-07-23T04:09:18.639Z',
+        screenshotBase64: 'iVBORw0KG-fake-base64',
+      }
+      await client.reportE2eTestStep('mbc', 'MBC_01', 'exec-1', body)
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        expect.stringContaining('exec-1'),
+        body,
+        undefined,
+      )
+    })
   })
 
   describe('updateE2eTestScript', () => {

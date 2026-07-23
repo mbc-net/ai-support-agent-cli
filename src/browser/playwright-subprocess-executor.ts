@@ -34,7 +34,12 @@ export interface PlaywrightSubprocessStepResult {
   status: 'passed' | 'failed' | 'skipped'
   error?: string
   duration?: number
+  /** @deprecated Local filesystem path — kept only for backward compatibility. Prefer `screenshotBase64`. */
   screenshotPath?: string
+  /** ISO timestamp of when this step ran, derived from the test's startTime plus cumulative prior step durations. */
+  executedAt?: string
+  /** Base64-encoded PNG captured via `testInfo.attach()` inside the corresponding `test.step()` call. */
+  screenshotBase64?: string
 }
 
 export interface PlaywrightSubprocessResult {
@@ -122,42 +127,106 @@ function parsePlaywrightJsonOutput(jsonContent: string): PlaywrightSubprocessRes
 
           // Use the last result (most recent retry)
           const lastResult = results[results.length - 1]
-          const status = String(lastResult.status ?? 'failed')
-          const duration = typeof lastResult.duration === 'number' ? lastResult.duration : undefined
+          const nestedSteps = lastResult.steps as Array<Record<string, unknown>> | undefined
 
-          let errorMessage: string | undefined
-          const error = lastResult.error as Record<string, unknown> | undefined
-          if (error) {
-            errorMessage = String(error.message ?? '')
-          }
+          if (Array.isArray(nestedSteps) && nestedSteps.length > 0) {
+            // test.step() was used: each nested step becomes its own reported
+            // step. Screenshots attached via testInfo.attach() inside a step
+            // are flattened onto the test's `attachments` array (not nested
+            // under the step), so they are matched back to steps positionally
+            // (Nth test.step() call <-> Nth image/png attachment).
+            const testStartTimeMs = Date.parse(String(lastResult.startTime ?? ''))
+            const imageAttachments = (
+              Array.isArray(lastResult.attachments)
+                ? (lastResult.attachments as Array<Record<string, unknown>>)
+                : []
+            ).filter((a) => a.contentType === 'image/png')
 
-          // Extract screenshot path from attachments
-          let screenshotPath: string | undefined
-          const attachments = lastResult.attachments as Array<Record<string, unknown>> | undefined
-          if (Array.isArray(attachments)) {
-            const screenshotAttachment = attachments.find(
-              (a) => a.name === 'screenshot' && a.contentType === 'image/png',
-            )
-            if (screenshotAttachment && screenshotAttachment.path) {
-              screenshotPath = String(screenshotAttachment.path)
+            // Screenshots are matched back to steps purely positionally (Nth
+            // test.step() call <-> Nth image/png attachment) since Playwright
+            // flattens attachments onto the test, not the step. If the
+            // counts don't line up — e.g. the generated script (outside this
+            // repo) skipped or double-called attach() in some step — that
+            // positional mapping is no longer trustworthy for ANY step, not
+            // just the tail. Silently misattributing a screenshot to the
+            // wrong step is worse than reporting none, so skip the
+            // association entirely and only warn.
+            const countsMismatch =
+              imageAttachments.length !== 0 && imageAttachments.length !== nestedSteps.length
+            if (countsMismatch) {
+              logger.warn(
+                `[playwright-subprocess] Screenshot/step count mismatch for a test: ${nestedSteps.length} step(s) but ${imageAttachments.length} image attachment(s). Screenshots will not be attached to avoid mismatched association.`,
+              )
             }
-          }
 
-          const stepStatus =
-            status === 'passed' ? 'passed' : status === 'skipped' ? 'skipped' : 'failed'
+            let cumulativeMs = 0
+            nestedSteps.forEach((nestedStep, idx) => {
+              const stepDuration = typeof nestedStep.duration === 'number' ? nestedStep.duration : 0
+              const stepError = nestedStep.error as Record<string, unknown> | undefined
+              const executedAt = Number.isFinite(testStartTimeMs)
+                ? new Date(testStartTimeMs + cumulativeMs).toISOString()
+                : undefined
+              const attachment = countsMismatch ? undefined : imageAttachments[idx]
+              const screenshotBase64 =
+                attachment && typeof attachment.body === 'string' ? attachment.body : undefined
 
-          steps.push({
-            title: testTitle,
-            status: stepStatus,
-            ...(errorMessage && { error: errorMessage }),
-            ...(duration !== undefined && { duration }),
-            ...(screenshotPath && { screenshotPath }),
-          })
+              steps.push({
+                title: String(nestedStep.title ?? 'unknown'),
+                status: stepError ? 'failed' : 'passed',
+                ...(stepError && { error: String(stepError.message ?? '') }),
+                duration: stepDuration,
+                ...(executedAt && { executedAt }),
+                ...(screenshotBase64 && { screenshotBase64 }),
+              })
 
-          if (stepStatus === 'passed') {
-            passedTests++
-          } else if (stepStatus === 'failed') {
-            failedTests++
+              cumulativeMs += stepDuration
+              if (stepError) {
+                failedTests++
+              } else {
+                passedTests++
+              }
+            })
+          } else {
+            // Legacy fallback for specs that do not use test.step(): report
+            // the whole test as a single step (unchanged from before nested
+            // step-level reporting was introduced).
+            const status = String(lastResult.status ?? 'failed')
+            const duration = typeof lastResult.duration === 'number' ? lastResult.duration : undefined
+
+            let errorMessage: string | undefined
+            const error = lastResult.error as Record<string, unknown> | undefined
+            if (error) {
+              errorMessage = String(error.message ?? '')
+            }
+
+            // Extract screenshot path from attachments
+            let screenshotPath: string | undefined
+            const attachments = lastResult.attachments as Array<Record<string, unknown>> | undefined
+            if (Array.isArray(attachments)) {
+              const screenshotAttachment = attachments.find(
+                (a) => a.name === 'screenshot' && a.contentType === 'image/png',
+              )
+              if (screenshotAttachment && screenshotAttachment.path) {
+                screenshotPath = String(screenshotAttachment.path)
+              }
+            }
+
+            const stepStatus =
+              status === 'passed' ? 'passed' : status === 'skipped' ? 'skipped' : 'failed'
+
+            steps.push({
+              title: testTitle,
+              status: stepStatus,
+              ...(errorMessage && { error: errorMessage }),
+              ...(duration !== undefined && { duration }),
+              ...(screenshotPath && { screenshotPath }),
+            })
+
+            if (stepStatus === 'passed') {
+              passedTests++
+            } else if (stepStatus === 'failed') {
+              failedTests++
+            }
           }
         }
       }
@@ -193,9 +262,11 @@ function parsePlaywrightJsonOutput(jsonContent: string): PlaywrightSubprocessRes
  * Per-run Playwright config written into the run directory.
  *
  * Mirrors the settings of the repo-level `playwright.subprocess.config.js`
- * (timeout, use.headless/screenshot/trace/baseURL, JSON reporter, workers),
- * except `testDir` points at the run directory itself (`__dirname`) so the
- * spec can relative-import support files expanded alongside it.
+ * (timeout, use.headless/trace/baseURL, JSON reporter, workers), except
+ * `testDir` points at the run directory itself (`__dirname`) so the spec
+ * can relative-import support files expanded alongside it, and `use.screenshot`
+ * is intentionally `'off'` here (see comment below) instead of the mirrored
+ * file's `'only-on-failure'`.
  */
 const RUN_CONFIG_TEMPLATE = `const path = require('path')
 const { defineConfig } = require('@playwright/test')
@@ -205,7 +276,10 @@ module.exports = defineConfig({
   timeout: 120_000,
   use: {
     headless: true,
-    screenshot: 'only-on-failure',
+    // Screenshots are captured explicitly inside test.step() via
+    // testInfo.attach(), so Playwright's own automatic screenshot capture
+    // is disabled here to avoid duplicate/unassociated screenshots.
+    screenshot: 'off',
     trace: 'retain-on-failure',
     baseURL: process.env.E2E_BASE_URL ?? 'http://localhost:3000',
   },

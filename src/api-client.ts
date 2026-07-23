@@ -16,6 +16,7 @@ import type {
   E2eEnvironmentVariablesResponse,
   E2eSupportFile,
   E2eSupportFilesResponse,
+  E2eTestStepPayload,
   EcsAgentRegistration,
   HeartbeatResponse,
   PendingAlert,
@@ -413,7 +414,7 @@ export class ApiClient {
     )
   }
 
-  async reportE2eTestStep<B = Record<string, unknown>>(
+  async reportE2eTestStep<B = E2eTestStepPayload>(
     tenantCode: string,
     projectCode: string,
     executionId: string,

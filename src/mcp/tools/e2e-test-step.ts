@@ -103,6 +103,9 @@ export function registerE2eTestStepTool(
             status: args.status,
             error: args.error,
             duration: args.duration,
+            // Tool-call time is used as the step's execution time since the
+            // AI reports each step immediately after performing it.
+            executedAt: new Date().toISOString(),
             ...(screenshotBase64 && { screenshotBase64 }),
             ...(testCaseId && { testCaseId }),
           },
