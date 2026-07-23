@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { ENV_VARS } from '../constants'
 import { logger } from '../logger'
 import { toErrorMessage } from '../utils'
 
@@ -52,7 +53,7 @@ const BUNDLED_CODEX_MARKETPLACE_NAME = 'ai-support-agent-bundled'
 const BUNDLED_CODEX_PROFILE_NAME = 'ai-support-agent-bundled'
 
 export function resolveCodexHome(): string {
-  return process.env.CODEX_HOME || path.join(os.homedir(), '.codex')
+  return process.env[ENV_VARS.CODEX_HOME] || path.join(os.homedir(), '.codex')
 }
 
 export function prepareBundledCodexPluginProfile(

@@ -83,6 +83,47 @@ export class DockerSupervisor {
     this.projectAgentIds.set(this.projectKey(project), agentId)
   }
 
+  /**
+   * Read the `registered-agent-id` marker file (written by the container
+   * after it registers with the server) and apply it to in-memory state if
+   * it differs from what we already have.
+   *
+   * Single source of truth for the "read marker → compare → update" idiom
+   * that used to be duplicated three times in this class — before a rebuild,
+   * before spawning, and inside the runtime `fs.watch` callback — each with
+   * its own copy of the readFileSync/trim/compare logic and its own risk of
+   * drifting from the other two.
+   *
+   * Reads directly in a try/catch rather than gating on `fs.existsSync`
+   * first: the watch-callback call site can race a rename event against the
+   * container still writing the file, so a plain existsSync-then-read would
+   * reintroduce that TOCTOU gap the original watch-callback's try/catch was
+   * written to avoid. The other two previous call sites only guarded with
+   * `existsSync` (a read failure after that check would have propagated
+   * uncaught); swallowing ENOENT/any read failure here is a deliberate
+   * unification onto the safer of the two prior behaviors, not a no-op
+   * refactor of already-identical code.
+   *
+   * Returns the previous/new id pair when the marker caused an update, or
+   * `null` when the marker is absent, unreadable, empty, or unchanged
+   * (nothing to log).
+   */
+  private applyRegisteredAgentId(
+    project: ProjectRegistration,
+    registeredAgentIdPath: string,
+  ): { previousId: string | undefined; newId: string } | null {
+    let registeredId: string
+    try {
+      registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
+    } catch {
+      return null
+    }
+    const previousId = this.getProjectAgentId(project)
+    if (!registeredId || registeredId === previousId) return null
+    this.setProjectAgentId(project, registeredId)
+    return { previousId, newId: registeredId }
+  }
+
   private createProjectApiClient(project: ProjectRegistration): ApiClient {
     return new ApiClient(project.apiUrl, project.token)
   }
@@ -175,12 +216,7 @@ export class DockerSupervisor {
       // Load the registered agentId before building so build logs are stored under
       // the correct agentId (the one shown in the Web UI), not the host agentId.
       const registeredAgentIdPath = path.join(projectConfigHostDir, DOCKER_MARKER_REGISTERED_AGENT_ID)
-      if (fs.existsSync(registeredAgentIdPath)) {
-        const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
-        if (registeredId && registeredId !== this.getProjectAgentId(project)) {
-          this.setProjectAgentId(project, registeredId)
-        }
-      }
+      this.applyRegisteredAgentId(project, registeredAgentIdPath)
 
       if (fs.existsSync(projectDockerfile)) {
         try {
@@ -238,12 +274,9 @@ export class DockerSupervisor {
 
     // Load the server-assigned agentId written by the container after registration.
     const registeredAgentIdPath = path.join(projectConfigHostDir, DOCKER_MARKER_REGISTERED_AGENT_ID)
-    if (fs.existsSync(registeredAgentIdPath)) {
-      const registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
-      if (registeredId && registeredId !== this.getProjectAgentId(project)) {
-        logger.info(`[docker] Using registered agentId for ${key}: ${registeredId}`)
-        this.setProjectAgentId(project, registeredId)
-      }
+    const appliedAtStartup = this.applyRegisteredAgentId(project, registeredAgentIdPath)
+    if (appliedAtStartup) {
+      logger.info(`[docker] Using registered agentId for ${key}: ${appliedAtStartup.newId}`)
     }
 
     const { mounts, envArgs } = buildProjectVolumeMounts(project, projectConfigHostDir)
@@ -320,11 +353,9 @@ export class DockerSupervisor {
         registeredIdWatcher = fs.watch(projectConfigHostDir, (eventType, filename) => {
           if (filename === DOCKER_MARKER_REGISTERED_AGENT_ID && (eventType === 'rename' || eventType === 'change')) {
             try {
-              const newId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
-              const currentId = supervisor.getProjectAgentId(project)
-              if (newId && newId !== currentId) {
-                logger.info(`[docker] Container registered with agentId: ${newId} (was: ${currentId})`)
-                supervisor.setProjectAgentId(project, newId)
+              const applied = supervisor.applyRegisteredAgentId(project, registeredAgentIdPath)
+              if (applied) {
+                logger.info(`[docker] Container registered with agentId: ${applied.newId} (was: ${applied.previousId})`)
               }
             } catch {
               // File may not exist yet if rename event fires before write completes

@@ -10,6 +10,7 @@ import {
   CHAT_TIMEOUT,
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_MAX_TOKENS,
+  ENV_VARS,
   ERR_AGENT_ID_REQUIRED,
   ERR_ANTHROPIC_API_KEY_NOT_SET,
   ERR_MESSAGE_REQUIRED,
@@ -110,7 +111,7 @@ export async function executeApiChatCommand(
     return errorResult(ERR_MESSAGE_REQUIRED)
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY
+  const apiKey = process.env[ENV_VARS.ANTHROPIC_API_KEY]
   if (!apiKey) {
     return errorResult(ERR_ANTHROPIC_API_KEY_NOT_SET)
   }

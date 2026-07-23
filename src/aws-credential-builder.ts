@@ -70,19 +70,37 @@ export async function buildAwsProfileCredentials(
   const errors: string[] = []
   const ssoAuthRequired: SsoAuthRequiredInfo[] = []
 
-  for (const account of accounts) {
-    try {
-      logger.info(`[chat] Fetching AWS credentials for profile: ${account.name} (${account.id})`)
-      const creds = await client.getAwsCredentials(account.id)
-      credentialMap.set(account.name, creds)
-    } catch (error) {
-      const { errorMessage, ssoInfo } = extractAwsCredentialError(error, account.name)
-      errors.push(errorMessage)
-      if (ssoInfo) {
-        ssoAuthRequired.push(ssoInfo)
+  // Each account's credentials come from an independent API call, so fetch
+  // them concurrently instead of paying N round trips back-to-back at chat
+  // startup. Every entry catches its own error (never rejects) so Promise.all
+  // always resolves with one result per account, in the original account
+  // order — keeping `errors`/`ssoAuthRequired` deterministic regardless of
+  // which fetch actually finishes first. `ok` is an explicit discriminant
+  // (rather than relying on structural `'creds' in result` narrowing) so the
+  // fulfilled/failed branches stay unambiguous to the type checker.
+  const fetched = await Promise.all(
+    accounts.map(async (account) => {
+      try {
+        logger.info(`[chat] Fetching AWS credentials for profile: ${account.name} (${account.id})`)
+        const creds = await client.getAwsCredentials(account.id)
+        return { ok: true as const, account, creds }
+      } catch (error) {
+        return { ok: false as const, account, error }
       }
-      logger.warn(`[chat] Failed to get AWS credentials for ${account.name}: ${getErrorMessage(error)}`)
+    }),
+  )
+
+  for (const result of fetched) {
+    if (result.ok) {
+      credentialMap.set(result.account.name, result.creds)
+      continue
     }
+    const { errorMessage, ssoInfo } = extractAwsCredentialError(result.error, result.account.name)
+    errors.push(errorMessage)
+    if (ssoInfo) {
+      ssoAuthRequired.push(ssoInfo)
+    }
+    logger.warn(`[chat] Failed to get AWS credentials for ${result.account.name}: ${getErrorMessage(result.error)}`)
   }
 
   if (credentialMap.size === 0) return { errors, ssoAuthRequired }

@@ -197,7 +197,7 @@ export function generateWin32WrapperScript(opts: {
   const envLines: string[] = [
     `  -e AI_SUPPORT_AGENT_IN_DOCKER=1 ^`,
     `  -e HOME=${containerHome} ^`,
-    `  -e CODEX_HOME=${containerHome}/.codex ^`,
+    `  -e ${ENV_VARS.CODEX_HOME}=${containerHome}/.codex ^`,
     `  -e AI_SUPPORT_AGENT_CONFIG_DIR=${containerConfigDir} ^`,
     // `-e NAME` (no value) tells docker to inherit the value from the wrapper's
     // own environment, which we set via `set` below. This keeps secrets off the
@@ -206,10 +206,10 @@ export function generateWin32WrapperScript(opts: {
     `  -e AI_SUPPORT_AGENT_API_URL ^`,
     `  -e AI_SUPPORT_AGENT_PROJECT_DIR_MAP ^`,
   ]
-  if (opts.anthropicApiKey) envLines.push(`  -e ANTHROPIC_API_KEY ^`)
-  if (opts.claudeCodeOauthToken) envLines.push(`  -e CLAUDE_CODE_OAUTH_TOKEN ^`)
-  if (opts.codexApiKey) envLines.push(`  -e CODEX_API_KEY ^`)
-  if (opts.codexAccessToken) envLines.push(`  -e CODEX_ACCESS_TOKEN ^`)
+  if (opts.anthropicApiKey) envLines.push(`  -e ${ENV_VARS.ANTHROPIC_API_KEY} ^`)
+  if (opts.claudeCodeOauthToken) envLines.push(`  -e ${ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN} ^`)
+  if (opts.codexApiKey) envLines.push(`  -e ${ENV_VARS.CODEX_API_KEY} ^`)
+  if (opts.codexAccessToken) envLines.push(`  -e ${ENV_VARS.CODEX_ACCESS_TOKEN} ^`)
 
   const containerArgs = [
     'ai-support-agent', 'start', CLI_FLAG_NO_DOCKER,
@@ -222,10 +222,10 @@ export function generateWin32WrapperScript(opts: {
     `set "AI_SUPPORT_AGENT_API_URL=${containerApiUrl}"`,
     `set "AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${opts.projectCode}=${containerProjectDir}"`,
   ]
-  if (opts.anthropicApiKey) setLines.push(`set "ANTHROPIC_API_KEY=${opts.anthropicApiKey}"`)
-  if (opts.claudeCodeOauthToken) setLines.push(`set "CLAUDE_CODE_OAUTH_TOKEN=${opts.claudeCodeOauthToken}"`)
-  if (opts.codexApiKey) setLines.push(`set "CODEX_API_KEY=${opts.codexApiKey}"`)
-  if (opts.codexAccessToken) setLines.push(`set "CODEX_ACCESS_TOKEN=${opts.codexAccessToken}"`)
+  if (opts.anthropicApiKey) setLines.push(`set "${ENV_VARS.ANTHROPIC_API_KEY}=${opts.anthropicApiKey}"`)
+  if (opts.claudeCodeOauthToken) setLines.push(`set "${ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN}=${opts.claudeCodeOauthToken}"`)
+  if (opts.codexApiKey) setLines.push(`set "${ENV_VARS.CODEX_API_KEY}=${opts.codexApiKey}"`)
+  if (opts.codexAccessToken) setLines.push(`set "${ENV_VARS.CODEX_ACCESS_TOKEN}=${opts.codexAccessToken}"`)
 
   const dockerRun = [
     `docker run --rm -i --name "${containerName}" ^`,
@@ -328,10 +328,10 @@ export function writeAndRegisterProjectTask(
     projectDir: validatedProjectDir,
     token: project.token,
     apiUrl: project.apiUrl,
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    anthropicApiKey: process.env[ENV_VARS.ANTHROPIC_API_KEY],
     claudeCodeOauthToken: process.env[ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN],
-    codexApiKey: process.env.CODEX_API_KEY,
-    codexAccessToken: process.env.CODEX_ACCESS_TOKEN,
+    codexApiKey: process.env[ENV_VARS.CODEX_API_KEY],
+    codexAccessToken: process.env[ENV_VARS.CODEX_ACCESS_TOKEN],
     verbose: options.verbose,
   })
   // The wrapper holds the token in plaintext — write it owner-only.

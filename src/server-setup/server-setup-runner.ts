@@ -705,29 +705,35 @@ export async function runServerSetup(
     return errorResult(validated)
   }
 
-  let credential: SshExecCredential
-  try {
-    credential = await ctx.client.getServerSetupSshCredential(ctx.commandId, ctx.agentId ?? '')
-  } catch (error) {
-    return errorResult(`Failed to fetch SSH credential: ${getErrorMessage(error)}`)
+  // The SSH credential and the project (`ANSIBLE#`) variables come from two
+  // independent API calls, so fetch them concurrently rather than paying
+  // both round trips back-to-back. Each settles on its own so a failure in
+  // one still surfaces its own specific error message (credential error
+  // takes priority when both fail, matching the previous sequential order).
+  const [credentialSettled, variablesSettled] = await Promise.allSettled([
+    ctx.client.getServerSetupSshCredential(ctx.commandId, ctx.agentId ?? ''),
+    // JIT fetch of project variables. Fetched unconditionally so its
+    // `secretNames` are available for redaction and its `variables` for
+    // extra-vars.json. Placed before any temp dir is created — like the SSH
+    // credential fetch — so a failure here never leaves a private-key-
+    // holding temp dir behind.
+    fetchServerSetupVariables(ctx.client, ctx.commandId, ctx.agentId ?? ''),
+  ])
+
+  if (credentialSettled.status === 'rejected') {
+    return errorResult(`Failed to fetch SSH credential: ${getErrorMessage(credentialSettled.reason)}`)
   }
+  const credential: SshExecCredential = credentialSettled.value
 
   const credentialError = validateSshCredential(credential)
   if (credentialError) {
     return errorResult(credentialError)
   }
 
-  // JIT fetch of project (`ANSIBLE#`) variables. Fetched unconditionally so its
-  // `secretNames` are available for redaction and its `variables` for
-  // extra-vars.json. Placed before any temp dir is created — like the SSH
-  // credential fetch above — so a failure here never leaves a private-key-
-  // holding temp dir behind.
-  let serverSetupVariables: ServerSetupVariablesResponse
-  try {
-    serverSetupVariables = await fetchServerSetupVariables(ctx.client, ctx.commandId, ctx.agentId ?? '')
-  } catch (error) {
-    return errorResult(`Failed to fetch server setup variables: ${getErrorMessage(error)}`)
+  if (variablesSettled.status === 'rejected') {
+    return errorResult(`Failed to fetch server setup variables: ${getErrorMessage(variablesSettled.reason)}`)
   }
+  const serverSetupVariables: ServerSetupVariablesResponse = variablesSettled.value
 
   // Extra-vars always outrank a `register`ed variable in Ansible's precedence
   // order, so a project variable that happened to share SUDO_PROBE_REGISTER_VAR's
