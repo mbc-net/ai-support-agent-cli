@@ -8,10 +8,11 @@ import type {
   AgentChatMode,
   AgentServerConfig,
   CommandResult,
+  E2eSupportFile,
   ProjectConfigResponse,
 } from '../types'
 import { errorResult, successResult } from '../types/command'
-import { parseString, toErrorMessage } from '../utils'
+import { getErrorMessage, parseString, toErrorMessage } from '../utils'
 
 import { executeChatCommand } from './chat-executor'
 
@@ -161,6 +162,20 @@ function warnIfLegacyEnvironmentVariablesPresent(
   )
 }
 
+/**
+ * `captureStepScreenshots` ペイロードフィールドを boolean として解釈する。
+ *
+ * API は boolean で送るが、デプロイ順序の窓や手動再実行で文字列 `"false"` が
+ * 来る可能性も考慮する。未指定（undefined/null）や解釈不能な値は既定の
+ * true（ハーネス側スクリーンショット取得を有効）にフォールバックし、明示的な
+ * false（boolean false / 文字列 "false"）のときのみ無効化する。
+ */
+function parseBooleanDefaultTrue(value: unknown): boolean {
+  if (value === false) return false
+  if (typeof value === 'string' && value.toLowerCase() === 'false') return false
+  return true
+}
+
 /** Playwright subprocess モードのパラメータ */
 interface PlaywrightSubprocessModeParams extends ExecuteE2eTestOptions {
   executionId: string
@@ -201,6 +216,24 @@ async function executePlaywrightSubprocessMode(
     }
   }
 
+  // プロジェクト共有サポートファイル（lib/ 等）の取得。環境変数取得の「失敗→error」とは
+  // 意図的に異なり、取得失敗は実行エラーにしない（旧 API サーバー相手でも import を
+  // 使わない spec は従来どおり動く必要があるため）。
+  let supportFiles: E2eSupportFile[] = []
+  if (tenantCode && projectCode) {
+    try {
+      supportFiles = await client.getE2eSupportFiles(tenantCode, projectCode)
+    } catch (err: unknown) {
+      logger.warn(
+        `[e2e_test] Failed to fetch support files (continuing without them) [${executionId}]: ${toErrorMessage(err)}`,
+      )
+    }
+  }
+
+  // captureStepScreenshots defaults to true; only an explicit `false`
+  // (boolean or the string "false") disables the harness-level auto-capture.
+  const captureStepScreenshots = parseBooleanDefaultTrue(params.payload.captureStepScreenshots)
+
   let subprocessResult
   try {
     subprocessResult = await runPlaywrightSubprocess({
@@ -208,7 +241,9 @@ async function executePlaywrightSubprocessMode(
       executionId,
       baseUrl: targetUrl,
       envVars: environmentVariables,
+      supportFiles,
       timeoutMs: undefined,
+      captureStepScreenshots,
     })
   } catch (err: unknown) {
     const errorMessage = toErrorMessage(err)
@@ -231,6 +266,10 @@ async function executePlaywrightSubprocessMode(
         action: step.title,
         status: step.status,
         ...(step.error && { error: step.error }),
+        ...(step.skipReason && { skipReason: step.skipReason }),
+        ...(step.duration !== undefined && { duration: step.duration }),
+        ...(step.executedAt && { executedAt: step.executedAt }),
+        ...(step.screenshotBase64 && { screenshotBase64: step.screenshotBase64 }),
         // screenshotPath is a local filesystem path that the API cannot access;
         // do not send it as screenshotUrl — omit it from the API payload entirely.
       })
@@ -247,10 +286,15 @@ async function executePlaywrightSubprocessMode(
     finalStatus, duration,
     subprocessResult.success ? undefined : (subprocessResult.errorOutput ?? `${subprocessResult.failedTests} test(s) failed`),
     testCaseId,
+    // The API DTO (UpdateExecutionStatusDto) whitelists only totalSteps/
+    // passedSteps/failedSteps. These must match those names — the subprocess
+    // executor's *Tests counters are per-test.step() counts — otherwise
+    // ValidationPipe({whitelist:true}) strips them and the execution's
+    // totalSteps stays at its creation-time default of 0.
     {
-      passedTests: subprocessResult.passedTests,
-      failedTests: subprocessResult.failedTests,
-      totalTests: subprocessResult.totalTests,
+      passedSteps: subprocessResult.passedTests,
+      failedSteps: subprocessResult.failedTests,
+      totalSteps: subprocessResult.totalTests,
     },
   )
 
@@ -528,8 +572,17 @@ async function reportExecutionStatus(
       },
     )
   } catch (err: unknown) {
-    logger.warn(
-      `[e2e_test] Failed to update execution status: ${toErrorMessage(err)}`,
+    // This report carries the execution's outcome (status + step aggregates)
+    // and is what drives the API-side alarm/notification workflow. A failure
+    // here must be loud: non-retryable 4xx (e.g. a DTO whitelist/validation
+    // mismatch — the same class of bug that silently left totalSteps at 0) are
+    // never retried by RetryStrategy, so warning-only would let the execution
+    // stay stuck as "running" with no signal to anyone. Log at error level with
+    // identifying context and the API's own message (getErrorMessage surfaces
+    // the HTTP status and server-side validation message for AxiosErrors).
+    logger.error(
+      `[e2e_test] Failed to report execution status (status=${status}) ` +
+        `[execution=${executionId} tenant=${tenantCode} project=${projectCode}]: ${getErrorMessage(err)}`,
     )
   }
 }

@@ -11,8 +11,9 @@
  *   2. fetches the target host's SSH private key Just-In-Time from the API,
  *   3. generates a single enclosing play (`hosts`/`become`/`gather_facts` all
  *      fixed by the agent, never by the caller) around system-generated
- *      precheck tasks (explicit fact-gathering, a NOPASSWD-sudo probe, and an
- *      OS check) plus the validated body tasks, and runs it with
+ *      precheck tasks (explicit fact-gathering, a NOPASSWD-sudo probe, an OS
+ *      check, and an `acl`-package install so become_user temp-file handoff
+ *      works) plus the validated body tasks, and runs it with
  *      `ansible-playbook`,
  *   4. reports **per-task** results, and — critically — always removes the
  *      temp directory (private key included) afterwards, whether the run
@@ -42,6 +43,7 @@ import {
 } from '../types'
 import { getErrorMessage, sweepStaleEntries } from '../utils'
 import { resolveKnownHostsPath } from '../utils/known-hosts-store'
+import { redactSecretValues } from '../utils/secret-redaction'
 
 import { type AnsibleTaskRouteMode, validateAnsibleTasks } from './ansible-task-guard'
 
@@ -78,6 +80,42 @@ const PRECHECK_TASK: Record<string, unknown> = {
   },
   when:
     "ansible_distribution != 'Ubuntu' or ansible_distribution_version not in ['22.04', '24.04', '26.04']",
+  tags: 'always',
+}
+
+/**
+ * System-generated task that installs the `acl` package on the target, run as
+ * root (it inherits the play's `become: true` — deliberately NOT `become:false`
+ * like the no-escalation precheck tasks above) after the NOPASSWD-sudo assert
+ * has already proved root escalation is possible.
+ *
+ * Why this is mandatory: every bundled role that switches to an unprivileged
+ * `become_user` different from the SSH connection user
+ * (nvm/claude_cli/codex/ai_support_agent/database) triggers Ansible's
+ * become-to-unprivileged temp-file handoff, which grants that user access to
+ * the AnsiballZ temp files via `setfacl`. `setfacl` ships in the `acl`
+ * package, which a fresh Ubuntu host does NOT have installed. Without it —
+ * and with no `pipelining`/`allow_world_readable_tmpfiles` fallback configured
+ * — the first such task fails with "Failed to set permissions on the temporary
+ * files Ansible needs to create when becoming an unprivileged user ... chmod:
+ * invalid operator (expected +, -, or =, but found A)" (the `chmod ... A`
+ * being Ansible's ACL-style fallback that GNU chmod rejects once setfacl is
+ * unavailable). Installing `acl` here — before any body task — is the remedy
+ * Ansible's own docs list first for this exact error, and fixes it structurally
+ * for every role regardless of which the recipe body includes.
+ *
+ * Placed after `PRECHECK_TASK` so an unsupported OS fails the run before we
+ * attempt apt; `cache_valid_time` avoids a redundant `apt update` when a role
+ * (e.g. os_init/nvm) has already refreshed the cache in the same run.
+ */
+const ENSURE_ACL_TASK: Record<string, unknown> = {
+  name: 'precheck : Ensure acl (setfacl) is installed',
+  'ansible.builtin.apt': {
+    name: 'acl',
+    state: 'present',
+    update_cache: true,
+    cache_valid_time: 3600,
+  },
   tags: 'always',
 }
 
@@ -329,11 +367,12 @@ export async function fetchServerSetupVariables(
 /**
  * Build the playbook YAML for a run: a single play with agent-fixed
  * `hosts`/`become`/`gather_facts`, whose `tasks` are the system-generated
- * prechecks — explicit fact-gathering, a NOPASSWD-sudo probe/assert, then the
- * OS check — followed by the tenant admin's validated (+`no_log`-annotated)
- * body tasks. The caller never supplies play-level keys (the guard rejects
- * any `hosts`/`roles`/`vars_files` element), so the play here cannot be
- * hijacked.
+ * prechecks — explicit fact-gathering, a NOPASSWD-sudo probe/assert, the OS
+ * check, then the `acl`-package install (so become_user temp-file handoff
+ * works in the bundled roles) — followed by the tenant admin's validated
+ * (+`no_log`-annotated) body tasks. The caller never supplies play-level keys
+ * (the guard rejects any `hosts`/`roles`/`vars_files` element), so the play
+ * here cannot be hijacked.
  */
 export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]): string {
   const playbook: Record<string, unknown>[] = [
@@ -350,6 +389,7 @@ export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]):
         SUDO_PRECHECK_PROBE_TASK,
         SUDO_PRECHECK_ASSERT_TASK,
         PRECHECK_TASK,
+        ENSURE_ACL_TASK,
         ...bodyTasks,
       ],
     },
@@ -357,26 +397,10 @@ export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]):
   return dump(playbook)
 }
 
-/**
- * Replace every occurrence of each (non-empty) secret value with `***` in
- * `text`. Belt-and-suspenders redaction applied to `ansible-playbook`'s raw
- * stdout/stderr (and, transitively, every `ServerSetupTaskResult.message`
- * derived from it) — the last line of defense for a secret value that leaked
- * into command output despite `no_log: true` having been applied wherever
- * `validateAnsibleTasks` detected a `{{ secretVarName }}` reference.
- *
- * Empty-string values are skipped: replacing every occurrence of `''` would
- * corrupt the text (a global match on an empty string matches between every
- * character).
- */
-export function redactSecretValues(text: string, secretValues: readonly string[]): string {
-  let redacted = text
-  for (const value of secretValues) {
-    if (!value) continue
-    redacted = redacted.split(value).join('***')
-  }
-  return redacted
-}
+// redactSecretValues moved to ../utils/secret-redaction (shared by claude-code-runner.ts /
+// codex-runner.ts). Re-exported here (see import above) so existing imports from this
+// module keep working.
+export { redactSecretValues }
 
 /**
  * Plain hostname or dotted-decimal IPv4 address: letters/digits/hyphens/dots
@@ -720,29 +744,35 @@ export async function runServerSetup(
     return errorResult(validated)
   }
 
-  let credential: SshExecCredential
-  try {
-    credential = await ctx.client.getServerSetupSshCredential(ctx.commandId, ctx.agentId ?? '')
-  } catch (error) {
-    return errorResult(`Failed to fetch SSH credential: ${getErrorMessage(error)}`)
+  // The SSH credential and the project (`ANSIBLE#`) variables come from two
+  // independent API calls, so fetch them concurrently rather than paying
+  // both round trips back-to-back. Each settles on its own so a failure in
+  // one still surfaces its own specific error message (credential error
+  // takes priority when both fail, matching the previous sequential order).
+  const [credentialSettled, variablesSettled] = await Promise.allSettled([
+    ctx.client.getServerSetupSshCredential(ctx.commandId, ctx.agentId ?? ''),
+    // JIT fetch of project variables. Fetched unconditionally so its
+    // `secretNames` are available for redaction and its `variables` for
+    // extra-vars.json. Placed before any temp dir is created — like the SSH
+    // credential fetch — so a failure here never leaves a private-key-
+    // holding temp dir behind.
+    fetchServerSetupVariables(ctx.client, ctx.commandId, ctx.agentId ?? ''),
+  ])
+
+  if (credentialSettled.status === 'rejected') {
+    return errorResult(`Failed to fetch SSH credential: ${getErrorMessage(credentialSettled.reason)}`)
   }
+  const credential: SshExecCredential = credentialSettled.value
 
   const credentialError = validateSshCredential(credential)
   if (credentialError) {
     return errorResult(credentialError)
   }
 
-  // JIT fetch of project (`ANSIBLE#`) variables. Fetched unconditionally so its
-  // `secretNames` are available for redaction and its `variables` for
-  // extra-vars.json. Placed before any temp dir is created — like the SSH
-  // credential fetch above — so a failure here never leaves a private-key-
-  // holding temp dir behind.
-  let serverSetupVariables: ServerSetupVariablesResponse
-  try {
-    serverSetupVariables = await fetchServerSetupVariables(ctx.client, ctx.commandId, ctx.agentId ?? '')
-  } catch (error) {
-    return errorResult(`Failed to fetch server setup variables: ${getErrorMessage(error)}`)
+  if (variablesSettled.status === 'rejected') {
+    return errorResult(`Failed to fetch server setup variables: ${getErrorMessage(variablesSettled.reason)}`)
   }
+  const serverSetupVariables: ServerSetupVariablesResponse = variablesSettled.value
 
   // Extra-vars always outrank a `register`ed variable in Ansible's precedence
   // order, so a project variable that happened to share SUDO_PROBE_REGISTER_VAR's

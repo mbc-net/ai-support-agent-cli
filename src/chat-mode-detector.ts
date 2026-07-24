@@ -1,6 +1,6 @@
 import { execFile } from 'child_process'
 
-import { CLAUDE_DETECT_TIMEOUT_MS, CODEX_DETECT_TIMEOUT_MS } from './constants'
+import { CLAUDE_DETECT_TIMEOUT_MS, CODEX_DETECT_TIMEOUT_MS, ENV_VARS } from './constants'
 import { logger } from './logger'
 import type { AgentChatMode } from './types'
 import { resolveCodexInvocation } from './commands/codex-command'
@@ -27,7 +27,7 @@ export async function detectAvailableChatModes(): Promise<AgentChatMode[]> {
   }
 
   // Anthropic API Key の検出
-  if (process.env.ANTHROPIC_API_KEY) {
+  if (process.env[ENV_VARS.ANTHROPIC_API_KEY]) {
     modes.push('api')
   }
 

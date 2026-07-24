@@ -163,6 +163,22 @@ describe('claude-code-args', () => {
       expect(result[idx + 1]).toBe('/tmp/mcp.json')
     })
 
+    it('should add --strict-mcp-config when strictMcpConfig is true', () => {
+      const result = buildClaudeArgs('msg', { strictMcpConfig: true })
+      expect(result).toContain('--strict-mcp-config')
+    })
+
+    it('should not add --strict-mcp-config when strictMcpConfig is false or omitted', () => {
+      expect(buildClaudeArgs('msg', { strictMcpConfig: false })).not.toContain('--strict-mcp-config')
+      expect(buildClaudeArgs('msg')).not.toContain('--strict-mcp-config')
+    })
+
+    it('should add --strict-mcp-config without --mcp-config when only strictMcpConfig is set (Slack Marketplace shape)', () => {
+      const result = buildClaudeArgs('msg', { strictMcpConfig: true, tools: ['Read', 'Grep', 'Glob'] })
+      expect(result).toContain('--strict-mcp-config')
+      expect(result).not.toContain('--mcp-config')
+    })
+
     it('should include file_upload instruction in system prompt when mcpConfigPath is provided', () => {
       const result = buildClaudeArgs('msg', { mcpConfigPath: '/tmp/mcp.json' })
       const promptIdx = result.indexOf('--append-system-prompt')

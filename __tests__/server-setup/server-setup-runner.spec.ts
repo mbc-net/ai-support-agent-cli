@@ -1374,6 +1374,51 @@ describe('generatePlaybook', () => {
     expect(yaml).toContain('tags: always')
   })
 
+  // Regression: every bundled role that switches to an unprivileged
+  // `become_user` (nvm/claude_cli/codex/ai_support_agent/database) fails with
+  // "Failed to set permissions on the temporary files Ansible needs to create
+  // when becoming an unprivileged user ... chmod: invalid operator ... found A"
+  // unless `setfacl` (from the `acl` package) is available on the target. A
+  // fresh Ubuntu host does not ship `acl`, and the runner sets no
+  // pipelining/world-readable fallback, so the generated play MUST install
+  // `acl` (as root, before the body) so the setfacl-based temp-file handoff
+  // works for every subsequent become_user task, regardless of which roles the
+  // recipe body includes.
+  it('installs the `acl` package (as root) before the body tasks so become_user temp-file handoff works', () => {
+    const yaml = generatePlaybook([{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }])
+    const play = (load(yaml) as Array<Record<string, unknown>>)[0]
+    const tasks = play.tasks as Array<Record<string, unknown>>
+
+    const aclIndex = tasks.findIndex((t) => t.name === 'precheck : Ensure acl (setfacl) is installed')
+    expect(aclIndex).toBeGreaterThanOrEqual(0)
+
+    const aclTask = tasks[aclIndex]
+    // apt install, name=acl, state=present. update_cache + cache_valid_time so
+    // a role that already refreshed the cache in the same run (os_init/nvm)
+    // isn't forced to `apt update` again.
+    expect(aclTask['ansible.builtin.apt']).toEqual({
+      name: 'acl',
+      state: 'present',
+      update_cache: true,
+      cache_valid_time: 3600,
+    })
+    // Runs as root: it must inherit the play's become:true rather than carry
+    // its own become key — the no-escalation precheck tasks set `become: false`,
+    // so an absent become key here is what keeps this task at root (the level
+    // the NOPASSWD-sudo assert above already verified is possible).
+    expect(aclTask.become).toBeUndefined()
+    expect(aclTask.tags).toBe('always')
+
+    // Must run AFTER the OS precheck (so we never apt-install on an
+    // unsupported OS) and BEFORE the first body task (so setfacl exists before
+    // any body become_user step).
+    const osPrecheckIndex = tasks.findIndex((t) => t.name === 'precheck : Verify supported OS')
+    const bodyIndex = tasks.findIndex((t) => t.name === 'x')
+    expect(osPrecheckIndex).toBeGreaterThanOrEqual(0)
+    expect(aclIndex).toBeGreaterThan(osPrecheckIndex)
+    expect(aclIndex).toBeLessThan(bodyIndex)
+  })
+
   it('wraps the body tasks in a single play with fixed hosts/become, and disables the implicit gather_facts', () => {
     const yaml = generatePlaybook([{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }])
     const play = (load(yaml) as Array<Record<string, unknown>>)[0]
@@ -1387,12 +1432,13 @@ describe('generatePlaybook', () => {
     expect(play.gather_facts).toBe(false)
     const tasks = play.tasks as Array<Record<string, unknown>>
     // system tasks first (fact gather, then NOPASSWD sudo precheck, then OS
-    // precheck), then the body task.
+    // precheck, then the acl install), then the body task.
     expect(tasks[0].name).toBe('precheck : Gather facts (no privilege escalation)')
     expect(tasks[1].name).toBe('precheck : Probe passwordless sudo')
     expect(tasks[2].name).toBe('precheck : Verify passwordless sudo')
     expect(tasks[3].name).toBe('precheck : Verify supported OS')
-    expect(tasks[4].name).toBe('x')
+    expect(tasks[4].name).toBe('precheck : Ensure acl (setfacl) is installed')
+    expect(tasks[5].name).toBe('x')
   })
 
   it('gathers facts explicitly without privilege escalation (become:false), so gathering does not require NOPASSWD sudo', () => {
@@ -1436,8 +1482,9 @@ describe('generatePlaybook', () => {
     const loaded = load(yaml) as unknown[]
     expect(Array.isArray(loaded)).toBe(true)
     const play = (loaded as Array<Record<string, unknown>>)[0]
-    // 3 system precheck tasks (fact gather, sudo probe, sudo assert) + the OS precheck.
-    expect((play.tasks as unknown[]).length).toBe(4)
+    // 3 system precheck tasks (fact gather, sudo probe, sudo assert) + the OS
+    // precheck + the acl install.
+    expect((play.tasks as unknown[]).length).toBe(5)
   })
 
   it('allows Ubuntu 22.04, 24.04, and 26.04 in the OS precheck (fixed allowlist, not a general ">=22.04 LTS" rule)', () => {

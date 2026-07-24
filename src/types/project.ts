@@ -209,6 +209,47 @@ export interface E2eEnvironmentVariablesResponse {
   variables: Record<string, string>
 }
 
+/**
+ * プロジェクト共有の E2E サポートファイル（例: `lib/login.page.ts`）。
+ * `path` は実行ディレクトリからの相対パスで、Playwright spec から相対 import される。
+ */
+export interface E2eSupportFile {
+  path: string
+  content: string
+}
+
+export interface E2eSupportFilesResponse {
+  files: E2eSupportFile[]
+}
+
+/**
+ * `ApiClient.reportE2eTestStep` に送信するペイロード。
+ * AI 実行（`report_test_step` MCP ツール）と Playwright subprocess 実行
+ * （`e2e-test-executor.ts`）の両方から使われるため、双方が送るフィールドの
+ * 合併集合として全て任意項目にしている。
+ */
+export interface E2eTestStepPayload {
+  testCaseId?: string
+  stepNumber: number
+  action: string
+  selector?: string
+  expected?: string
+  actual?: string
+  status: 'passed' | 'failed' | 'skipped'
+  error?: string
+  duration?: number
+  /** ステップが実行された時刻（ISO文字列）。Playwright subprocess モードでは
+   * テストの startTime + それ以前のstep累積durationから算出され、AI実行
+   * モードでは `report_test_step` ツール呼び出し時刻がそのまま使われる。 */
+  executedAt?: string
+  /** Base64エンコードされたPNGスクリーンショット */
+  screenshotBase64?: string
+  /** テスト全体が `test.skip(cond, reason)` でスキップされた理由。Playwright
+   * subprocess モードでスキップされたテストについてのみ設定される（レポーターの
+   * annotations から抽出）。AI 実行モードでは送信されない。 */
+  skipReason?: string
+}
+
 export interface CloudwatchConfig {
   enabled: boolean
   /** サーバーが分 × 60000 に変換済みの ms 値 */

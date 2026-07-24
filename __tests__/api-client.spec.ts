@@ -599,6 +599,39 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getE2eSupportFiles', () => {
+    it('should fetch E2E support files for a project and return the files array', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          files: [
+            { path: 'lib/login.page.ts', content: 'export class LoginPage {}' },
+            { path: 'lib/pages/top.page.ts', content: 'export class TopPage {}' },
+          ],
+        },
+      })
+
+      const result = await client.getE2eSupportFiles('test_tenant', 'PROJ_01')
+      expect(result).toEqual([
+        { path: 'lib/login.page.ts', content: 'export class LoginPage {}' },
+        { path: 'lib/pages/top.page.ts', content: 'export class TopPage {}' },
+      ])
+      // projectCode は URL に含まれない（サーバー側が agent トークンから解決する）
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/e2e-support-files',
+        undefined,
+      )
+    })
+
+    it('should return an empty array when no support files are registered', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: { files: [] },
+      })
+
+      const result = await client.getE2eSupportFiles('test_tenant', 'PROJ_02')
+      expect(result).toEqual([])
+    })
+  })
+
   describe('submitResult', () => {
     it('should submit command result', async () => {
       mockInstance.post.mockResolvedValue({ data: { success: true } })
@@ -1100,6 +1133,25 @@ describe('ApiClient', () => {
       expect(mockInstance.post).toHaveBeenCalledWith(
         expect.stringContaining('exec-1'),
         { stepNumber: 1, action: 'click' },
+        undefined,
+      )
+    })
+
+    it('should pass executedAt and screenshotBase64 through to the POST body unchanged', async () => {
+      mockInstance.post.mockResolvedValue({})
+
+      const body = {
+        stepNumber: 1,
+        action: 'click',
+        status: 'passed' as const,
+        executedAt: '2026-07-23T04:09:18.639Z',
+        screenshotBase64: 'iVBORw0KG-fake-base64',
+      }
+      await client.reportE2eTestStep('mbc', 'MBC_01', 'exec-1', body)
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        expect.stringContaining('exec-1'),
+        body,
         undefined,
       )
     })

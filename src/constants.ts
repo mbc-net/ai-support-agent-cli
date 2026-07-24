@@ -42,6 +42,17 @@ export const ENV_VARS = {
   // true` over SSH. See server-setup-runner.ts's `runAnsiblePlaybook`.
   SERVER_SETUP_ANSIBLE_UID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID',
   SERVER_SETUP_ANSIBLE_GID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_GID',
+  // Third-party CLI credential/config env vars (Claude Code / Codex). These are
+  // not namespaced under AI_SUPPORT_AGENT_* — their names are fixed by the
+  // external CLI they configure — but are centralized here for the same
+  // reason as the rest of ENV_VARS: they are passed through to Docker
+  // containers and generated service scripts from several files
+  // (cli/service/*-service.ts, docker/volume-mount-builder.ts), and a typo in
+  // any one of them would silently produce an unset variable in the container.
+  ANTHROPIC_API_KEY: 'ANTHROPIC_API_KEY',
+  CODEX_API_KEY: 'CODEX_API_KEY',
+  CODEX_ACCESS_TOKEN: 'CODEX_ACCESS_TOKEN',
+  CODEX_HOME: 'CODEX_HOME',
 } as const
 
 export const CONFIG_DIR = (() => {
@@ -147,6 +158,13 @@ export const LOG_PAYLOAD_LIMIT = 500
 export const LOG_RESULT_LIMIT = 300
 export const LOG_DEBUG_LIMIT = 200
 export const CHUNK_LOG_LIMIT = 100
+/**
+ * claude/codex CLI サブプロセスが非0終了コードで終了した際、失敗診断用に
+ * warn レベルでログ出力する stderr 全文の切り詰め上限。
+ * LOG_DEBUG_LIMIT はチャンク単位のプレビュー用で、かつ --verbose 時のみ出力されるため、
+ * 失敗時の診断にはこの独立した（より大きな）上限を持つ warn ログが必要。
+ */
+export const LOG_STDERR_ON_FAILURE_LIMIT = 4000
 
 // Browser proxy
 /** BrowserProxySession の HTTP リクエストタイムアウト（60秒） */
@@ -214,6 +232,10 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/commands/${commandId}/ssh-exec-credential`,
   BROWSER_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/browser-credentials`,
   E2E_ENV_VARIABLES: (tenantCode: string) => `/api/${tenantCode}/agent/e2e-env-variables`,
+  // プロジェクト共有の E2E サポートファイル（Playwright spec から相対 import されるヘルパー群）。
+  // projectCode はサーバー側が agent トークンから解決するため URL に含めない（E2E_ENV_VARIABLES と同方式）
+  E2E_SUPPORT_FILES: (tenantCode: string, _projectCode: string) =>
+    `/api/${tenantCode}/agent/e2e-support-files`,
   FILES_UPLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/upload-url`,
   FILES_DOWNLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/download-url`,
   E2E_EXECUTION_STATUS: (tenantCode: string, _projectCode: string, executionId: string) =>
@@ -318,7 +340,37 @@ export const SSE_EVENT = {
 export const ANTHROPIC_CONTENT_TYPE = {
   TEXT_DELTA: 'text_delta',
   TOOL_USE: 'tool_use',
+  INPUT_JSON_DELTA: 'input_json_delta',
 } as const
+
+// === api モード tool-use (Slack Marketplace 読み取り専用ツール) ===
+// Slack起点 + marketplace_read_only の api モードでのみ有効になる、
+// Read/Grep/Glob を含む「モデルとのやり取り（Anthropic API 呼び出し）」の上限回数
+// （確定方針8）。ループは MAX_TOOL_TURNS 回目に tool_use が要求された場合、その
+// ツールは実行せずに打ち切るため、実際のツール実行往復は最大 MAX_TOOL_TURNS - 1 回
+// にとどまる（API 呼び出し自体は最大 MAX_TOOL_TURNS 回行われる）。
+export const MAX_TOOL_TURNS = 8
+// Read ツール出力の打ち切り上限（確定方針8: 25,000行 または 500KB のいずれか先に到達した方）
+export const API_TOOL_READ_MAX_LINES = 25_000
+export const API_TOOL_READ_MAX_BYTES = 500 * 1024
+// Grep ツールのマッチ件数上限（確定方針8）
+export const API_TOOL_GREP_MAX_MATCHES = 200
+// Grep の1マッチあたりの行テキスト長上限。ガードが無いと、サイズ上限(5MB)ぎりぎりの
+// ファイルに極端に長い1行がある場合、そのマッチがそのまま tool_result に載り
+// 出力（≒トークン消費）が肥大化しうる。
+export const API_TOOL_GREP_MAX_LINE_CHARS = 2000
+// Glob ツールの結果件数上限（確定方針8には明記なし。暴走防止のための実装上の安全策）
+export const API_TOOL_GLOB_MAX_RESULTS = 1000
+// Read/Grep がファイル内容をメモリに全読み込みする前のサイズ上限。これを超える
+// ファイルは Read ではエラー、Grep では（バイナリ/データダンプ扱いで）検索対象から
+// スキップする。API_TOOL_READ_MAX_BYTES（読み込み後の出力打ち切り閾値=500KB）とは
+// 別物で、読み込み前のガード（OOM 防止）のためこちらは大きめの値を取る。
+export const API_TOOL_MAX_READABLE_FILE_BYTES = 5 * 1024 * 1024
+// Grep/Glob を実行する Worker スレッドの壁時計タイムアウト。ReDoS・シンボリックリンク
+// 循環・その他未知のハングに対する構造的な最終防御（唯一の防御ではなく、
+// isDangerousRegexPattern による静的ヒューリスティックは早期の高速パスに過ぎない）。
+// 超過時は worker.terminate() で強制終了する。
+export const API_TOOL_WORKER_TIMEOUT_MS = 3_000
 
 // Git clone/pull
 export const GIT_CLONE_TIMEOUT = 120_000

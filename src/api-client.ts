@@ -14,6 +14,9 @@ import type {
   CommandResult,
   DbCredentials,
   E2eEnvironmentVariablesResponse,
+  E2eSupportFile,
+  E2eSupportFilesResponse,
+  E2eTestStepPayload,
   EcsAgentRegistration,
   HeartbeatResponse,
   PendingAlert,
@@ -321,6 +324,18 @@ export class ApiClient {
     return response.variables
   }
 
+  /**
+   * プロジェクト共有の E2E サポートファイル（Playwright spec から相対 import
+   * されるヘルパー群、例: `lib/login.page.ts`）を取得する。
+   */
+  async getE2eSupportFiles(tenantCode: string, projectCode: string): Promise<E2eSupportFile[]> {
+    logger.debug(`Fetching E2E support files for project: ${projectCode}`)
+    const response = await this.get<E2eSupportFilesResponse>(
+      API_ENDPOINTS.E2E_SUPPORT_FILES(tenantCode, projectCode),
+    )
+    return response.files
+  }
+
   async getRepoCredentials(repositoryId: string): Promise<RepoCredentials> {
     logger.debug(`Fetching repo credentials for: ${repositoryId}`)
     return this.get<RepoCredentials>(API_ENDPOINTS.REPO_CREDENTIALS(this.tenantCode, repositoryId))
@@ -399,7 +414,7 @@ export class ApiClient {
     )
   }
 
-  async reportE2eTestStep<B = Record<string, unknown>>(
+  async reportE2eTestStep<B = E2eTestStepPayload>(
     tenantCode: string,
     projectCode: string,
     executionId: string,
