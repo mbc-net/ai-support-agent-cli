@@ -977,6 +977,73 @@ describe('e2e-test-executor', () => {
     expect(stepCall).not.toHaveProperty('screenshotBase64')
   })
 
+  it('should forward skipReason from a skipped playwright subprocess step to reportE2eTestStep', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 0,
+      failedTests: 0,
+      steps: [
+        {
+          title: 'Skipped test',
+          status: 'skipped',
+          skipReason: 'admin creds not set',
+        },
+      ],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(mockClient.reportE2eTestStep).toHaveBeenCalledWith(
+      'mbc',
+      'MBC_01',
+      'exec-1',
+      expect.objectContaining({
+        stepNumber: 1,
+        action: 'Skipped test',
+        status: 'skipped',
+        skipReason: 'admin creds not set',
+      }),
+    )
+  })
+
+  it('should omit skipReason when a playwright subprocess step does not provide it', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [{ title: 'Passing step', status: 'passed', duration: 50 }],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    const stepCall = mockClient.reportE2eTestStep.mock.calls[0][3] as Record<string, unknown>
+    expect(stepCall).not.toHaveProperty('skipReason')
+  })
+
   it('should NOT send screenshotPath as screenshotUrl to API (local path cannot be accessed by server)', async () => {
     ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
       success: false,

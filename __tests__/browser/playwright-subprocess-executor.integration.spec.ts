@@ -595,4 +595,41 @@ test('skip then parallel', async ({ page }) => {
     // Distinct per-step images (a=red captured ~t0, b=blue captured ~t200).
     expect(parA!.screenshotBase64).not.toBe(parB!.screenshotBase64)
   }, 60_000)
+
+  it('captures the reason from a whole-test test.skip(cond, reason) and reports it as the skipped step skipReason', async () => {
+    // Real Playwright emits the reason in the test result's `annotations`
+    // ([{ type: 'skip', description }]) with status 'skipped' and no nested
+    // steps, so the parser's LEGACY branch handles it as a single step.
+    const script = `
+import { test } from '@playwright/test'
+
+test.describe('skip reason suite', () => {
+  test('normal test with a step', async ({ page }) => {
+    await test.step('render ok', async () => {
+      await page.setContent('<div>ok</div>')
+    })
+  })
+
+  test('skipped test', async ({ page }) => {
+    test.skip(true, 'admin creds not set')
+    await page.setContent('<div>never runs</div>')
+  })
+})
+`
+    const result = await runPlaywrightSubprocess({
+      script,
+      executionId: uniqueExecutionId('skip-reason'),
+      timeoutMs: 60_000,
+    })
+
+    const skipped = result.steps.find((s) => s.status === 'skipped')
+    expect(skipped).toBeDefined()
+    expect(skipped!.skipReason).toBe('admin creds not set')
+
+    // The normal test's step is unaffected and carries no skipReason.
+    const normal = result.steps.find((s) => s.title === 'render ok')
+    expect(normal).toBeDefined()
+    expect(normal!.status).toBe('passed')
+    expect(normal!.skipReason).toBeUndefined()
+  }, 60_000)
 })
