@@ -49,6 +49,12 @@ export interface PlaywrightSubprocessStepResult {
   executedAt?: string
   /** Base64-encoded PNG captured via `testInfo.attach()` inside the corresponding `test.step()` call. */
   screenshotBase64?: string
+  /**
+   * Reason a whole test was skipped via `test.skip(cond, reason)`. Extracted
+   * from the test result's `annotations` (the `{ type: 'skip', description }`
+   * entry) in the LEGACY per-test branch. Only present for skipped steps.
+   */
+  skipReason?: string
 }
 
 export interface PlaywrightSubprocessResult {
@@ -243,6 +249,17 @@ function parsePlaywrightJsonOutput(jsonContent: string): PlaywrightSubprocessRes
                   attachment && typeof attachment.body === 'string' ? attachment.body : undefined
               }
 
+              // VERIFIED LIMITATION (Playwright JSON reporter): a step-level
+              // skip via `test.step.skip()` is emitted with ONLY `{ title,
+              // duration }` — NO status field, NO error, NO annotation, and no
+              // skip marker of any kind. It is therefore indistinguishable from
+              // a passed step here and is reported as `passed`. Per-step skip
+              // detection is NOT possible with the JSON reporter (do not attempt
+              // to infer it from duration===0 or similar heuristics — those are
+              // unreliable). Only WHOLE-test skips (`test.skip(cond, reason)`)
+              // are detectable: those land in the LEGACY branch below with
+              // `status: 'skipped'` and carry their reason in `annotations`
+              // (see `skipReason` extraction there).
               steps.push({
                 title: String(nestedStep.title ?? 'unknown'),
                 status: stepError ? 'failed' : 'passed',
@@ -287,12 +304,32 @@ function parsePlaywrightJsonOutput(jsonContent: string): PlaywrightSubprocessRes
             const stepStatus =
               status === 'passed' ? 'passed' : status === 'skipped' ? 'skipped' : 'failed'
 
+            // For a whole-test skip (test.skip(cond, reason)) Playwright records
+            // the reason in the result's `annotations` as a `{ type: 'skip',
+            // description }` entry. Extract it only for skipped steps, guarding
+            // that annotations may be missing/non-array and entries may lack a
+            // (string) description.
+            let skipReason: string | undefined
+            if (stepStatus === 'skipped') {
+              const annotations = lastResult.annotations
+              if (Array.isArray(annotations)) {
+                const skipAnnotation = annotations.find(
+                  (a) => a && typeof a === 'object' && (a as Record<string, unknown>).type === 'skip',
+                ) as Record<string, unknown> | undefined
+                const description = skipAnnotation?.description
+                if (typeof description === 'string' && description.length > 0) {
+                  skipReason = description
+                }
+              }
+            }
+
             steps.push({
               title: testTitle,
               status: stepStatus,
               ...(errorMessage && { error: errorMessage }),
               ...(duration !== undefined && { duration }),
               ...(screenshotPath && { screenshotPath }),
+              ...(skipReason && { skipReason }),
             })
 
             if (stepStatus === 'passed') {

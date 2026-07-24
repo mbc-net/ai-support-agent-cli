@@ -862,6 +862,117 @@ describe('parsePlaywrightJsonOutput', () => {
     })
   })
 
+  // --- skip reason capture (LEGACY per-test branch) ---
+
+  /**
+   * Build a legacy-branch (no nested test.step) JSON result carrying the given
+   * status, optional annotations, and no nested `steps` — the shape real
+   * Playwright 1.61 emits for a whole-test `test.skip(cond, reason)`.
+   */
+  function makeLegacyResultJson(opts: {
+    title?: string
+    status: 'passed' | 'failed' | 'skipped'
+    annotations?: unknown
+    error?: string
+  }): string {
+    const result: Record<string, unknown> = {
+      status: opts.status,
+      duration: 0,
+      steps: [],
+      attachments: [],
+    }
+    if (opts.annotations !== undefined) result.annotations = opts.annotations
+    if (opts.error) result.error = { message: opts.error }
+    return JSON.stringify({
+      suites: [
+        {
+          specs: [
+            {
+              title: opts.title ?? 'legacy test',
+              tests: [{ results: [result] }],
+            },
+          ],
+        },
+      ],
+    })
+  }
+
+  it('should capture skipReason from the test result annotations for a skipped legacy test', () => {
+    const json = makeLegacyResultJson({
+      status: 'skipped',
+      annotations: [{ type: 'skip', description: 'my reason' }],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps).toHaveLength(1)
+    expect(result.steps[0].status).toBe('skipped')
+    expect(result.steps[0].skipReason).toBe('my reason')
+  })
+
+  it('should leave skipReason undefined when a skipped legacy test has no annotations', () => {
+    const json = makeLegacyResultJson({ status: 'skipped' })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps[0].status).toBe('skipped')
+    expect(result.steps[0].skipReason).toBeUndefined()
+  })
+
+  it('should leave skipReason undefined when annotations exist but none has type "skip"', () => {
+    const json = makeLegacyResultJson({
+      status: 'skipped',
+      annotations: [{ type: 'issue', description: 'JIRA-123' }],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps[0].status).toBe('skipped')
+    expect(result.steps[0].skipReason).toBeUndefined()
+  })
+
+  it('should leave skipReason undefined when the "skip" annotation lacks a description', () => {
+    const json = makeLegacyResultJson({
+      status: 'skipped',
+      annotations: [{ type: 'skip' }],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps[0].status).toBe('skipped')
+    expect(result.steps[0].skipReason).toBeUndefined()
+  })
+
+  it('should leave skipReason undefined when annotations is present but not an array', () => {
+    const json = makeLegacyResultJson({
+      status: 'skipped',
+      annotations: { type: 'skip', description: 'not-an-array' },
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps[0].status).toBe('skipped')
+    expect(result.steps[0].skipReason).toBeUndefined()
+  })
+
+  it('should NOT set skipReason on a passed legacy test even if a skip annotation is present', () => {
+    const json = makeLegacyResultJson({
+      status: 'passed',
+      annotations: [{ type: 'skip', description: 'should be ignored' }],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps[0].status).toBe('passed')
+    expect(result.steps[0].skipReason).toBeUndefined()
+  })
+
+  it('should NOT set skipReason on a failed legacy test even if a skip annotation is present', () => {
+    const json = makeLegacyResultJson({
+      status: 'failed',
+      error: 'boom',
+      annotations: [{ type: 'skip', description: 'should be ignored' }],
+    })
+
+    const result = parsePlaywrightJsonOutput(json)
+    expect(result.steps[0].status).toBe('failed')
+    expect(result.steps[0].skipReason).toBeUndefined()
+  })
+
   it('should treat a nested step with a zero duration correctly (falsy but valid)', () => {
     const json = makeNestedStepJson({
       startTime: '2026-07-23T04:09:18.639Z',

@@ -266,6 +266,7 @@ async function executePlaywrightSubprocessMode(
         action: step.title,
         status: step.status,
         ...(step.error && { error: step.error }),
+        ...(step.skipReason && { skipReason: step.skipReason }),
         ...(step.duration !== undefined && { duration: step.duration }),
         ...(step.executedAt && { executedAt: step.executedAt }),
         ...(step.screenshotBase64 && { screenshotBase64: step.screenshotBase64 }),
