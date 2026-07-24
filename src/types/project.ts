@@ -244,6 +244,10 @@ export interface E2eTestStepPayload {
   executedAt?: string
   /** Base64エンコードされたPNGスクリーンショット */
   screenshotBase64?: string
+  /** テスト全体が `test.skip(cond, reason)` でスキップされた理由。Playwright
+   * subprocess モードでスキップされたテストについてのみ設定される（レポーターの
+   * annotations から抽出）。AI 実行モードでは送信されない。 */
+  skipReason?: string
 }
 
 export interface CloudwatchConfig {
