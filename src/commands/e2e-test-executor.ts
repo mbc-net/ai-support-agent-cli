@@ -8,6 +8,7 @@ import type {
   AgentChatMode,
   AgentServerConfig,
   CommandResult,
+  E2eBasicAuth,
   E2eSupportFile,
   ProjectConfigResponse,
 } from '../types'
@@ -63,6 +64,7 @@ export async function executeE2eTest(
   const executionMethod = parseString(payload.executionMethod) ?? 'ai'
   const playwrightScript = parseString(payload.playwrightScript)
   const steps = Array.isArray(payload.steps) ? payload.steps : undefined
+  const basicAuth = parseBasicAuth(payload.basicAuth, executionId ?? 'unknown')
 
   if (!executionId) {
     return errorResult('executionId is required for e2e_test')
@@ -101,6 +103,7 @@ export async function executeE2eTest(
       scenario,
       targetUrl: targetUrl ?? undefined,
       environmentId: environmentId ?? undefined,
+      basicAuth,
       startTime,
     })
   }
@@ -176,6 +179,35 @@ function parseBooleanDefaultTrue(value: unknown): boolean {
   return true
 }
 
+/**
+ * payload.basicAuth を `E2eBasicAuth` としてパースする。
+ *
+ * `username` と `passwordVariableKey` が両方とも非空文字列のときのみ有効な
+ * オブジェクトを返す。平文パスワードは payload に含まれない設計のため、
+ * ここでも受け取らない。
+ *
+ * - `basicAuth` 自体が完全に無い（null/undefined/非オブジェクト）場合は、
+ *   Basic 認証を使わない通常の実行なので**無言で** undefined を返す。
+ * - オブジェクトは在るが `username` か `passwordVariableKey` の**片方だけ**が
+ *   欠落/空の場合は、設定ミスの可能性が高い（無言で認証なし実行して 401 →
+ *   要素待ちタイムアウトになると原因が分かりにくい）ため、`logger.warn` で
+ *   可視化してから undefined を返す。警告には triage 用に executionId のみを
+ *   含め、値（username 等）は出さない。
+ */
+function parseBasicAuth(value: unknown, executionId: string): E2eBasicAuth | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const obj = value as Record<string, unknown>
+  const username = parseString(obj.username)
+  const passwordVariableKey = parseString(obj.passwordVariableKey)
+  if (!username || !passwordVariableKey) {
+    logger.warn(
+      `[e2e_test] basicAuth ignored: incomplete (missing username or passwordVariableKey) [${executionId}]`,
+    )
+    return undefined
+  }
+  return { username, passwordVariableKey }
+}
+
 /** Playwright subprocess モードのパラメータ */
 interface PlaywrightSubprocessModeParams extends ExecuteE2eTestOptions {
   executionId: string
@@ -184,6 +216,7 @@ interface PlaywrightSubprocessModeParams extends ExecuteE2eTestOptions {
   scenario: string
   targetUrl?: string
   environmentId?: string
+  basicAuth?: E2eBasicAuth
   startTime: number
 }
 
@@ -196,7 +229,7 @@ async function executePlaywrightSubprocessMode(
   params: PlaywrightSubprocessModeParams,
 ): Promise<CommandResult> {
   const {
-    client, tenantCode, executionId, testCaseId, playwrightScript, targetUrl, environmentId, startTime,
+    client, tenantCode, executionId, testCaseId, playwrightScript, targetUrl, environmentId, basicAuth, startTime,
   } = params
   const projectCode = params.projectConfig?.project?.projectCode
 
@@ -214,6 +247,30 @@ async function executePlaywrightSubprocessMode(
       )
       return errorResult(`Failed to fetch E2E environment variables: ${errorMessage}`)
     }
+  }
+
+  // Basic 認証（HTTP Basic）の資格情報を解決する。password は payload に含まれず、
+  // E2E シークレット変数マップ（environmentVariables）から passwordVariableKey で
+  // 引く。解決できない場合はフォールバックせず error にして早期終了する
+  // （黙って続行すると 401 で要素待ちが 120 秒 SIGKILL タイムアウトになるため）。
+  // エラーメッセージにはキー名のみ含め、パスワード値は決して出さない。
+  let httpCredentials: { username: string; password: string } | undefined
+  if (basicAuth) {
+    // 契約: `environmentVariables` のキーは API 側 `resolveByPrefix('E2E#')` により
+    // `E2E#` プレフィックスが除去済み（例: DDB 上の `E2E#BASIC_AUTH_PASSWORD` は
+    // ここでは `BASIC_AUTH_PASSWORD` として現れる）。`passwordVariableKey` も
+    // 同様に `E2E#` を付けない素のキー名で、そのまま添字参照で一致する。
+    const password = environmentVariables?.[basicAuth.passwordVariableKey]
+    if (!password) {
+      const message = `Basic auth password variable "${basicAuth.passwordVariableKey}" not found`
+      logger.error(`[e2e_test] ${message} [${executionId}]`)
+      await reportExecutionStatus(
+        client, tenantCode, projectCode, executionId,
+        'error', Date.now() - startTime, message, testCaseId,
+      )
+      return errorResult(message)
+    }
+    httpCredentials = { username: basicAuth.username, password }
   }
 
   // プロジェクト共有サポートファイル（lib/ 等）の取得。環境変数取得の「失敗→error」とは
@@ -244,6 +301,7 @@ async function executePlaywrightSubprocessMode(
       supportFiles,
       timeoutMs: undefined,
       captureStepScreenshots,
+      httpCredentials,
     })
   } catch (err: unknown) {
     const errorMessage = toErrorMessage(err)

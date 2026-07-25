@@ -36,6 +36,15 @@ export interface PlaywrightSubprocessOptions {
    * false の場合はプリロードを注入しない。
    */
   captureStepScreenshots?: boolean
+  /**
+   * Basic 認証（HTTP Basic）で保護された環境向けの資格情報。指定時、
+   * Playwright の `use.httpCredentials` に注入される。ただし平文の値は
+   * per-run config 本文には書かれず、`E2E_HTTP_CREDENTIALS_USERNAME` /
+   * `E2E_HTTP_CREDENTIALS_PASSWORD` として子プロセスの env にのみ渡され、
+   * config は `process.env.E2E_HTTP_CREDENTIALS_*` を参照する（baseURL が
+   * `process.env.E2E_BASE_URL` を参照するのと同じ流儀）。
+   */
+  httpCredentials?: { username: string; password: string }
 }
 
 export interface PlaywrightSubprocessStepResult {
@@ -86,7 +95,14 @@ export const HARNESS_STEP_SCREENSHOT_PREFIX = 'harness-step-screenshot-'
  * keys are not dangerous in general (they're not in the shared denylist),
  * they're only reserved because this module itself assigns them below.
  */
-const RESERVED_ENV_KEYS = new Set(['E2E_JSON_OUTPUT', 'E2E_BASE_URL'])
+const RESERVED_ENV_KEYS = new Set([
+  'E2E_JSON_OUTPUT',
+  'E2E_BASE_URL',
+  // Basic-auth credentials: this module sets these from `httpCredentials`
+  // below, so a caller-supplied `envVars` entry must never redirect them.
+  'E2E_HTTP_CREDENTIALS_USERNAME',
+  'E2E_HTTP_CREDENTIALS_PASSWORD',
+])
 
 /**
  * Merge user-supplied environment variables into the subprocess env in place.
@@ -378,7 +394,15 @@ function parsePlaywrightJsonOutput(jsonContent: string): PlaywrightSubprocessRes
  * is intentionally `'off'` here (see comment below) instead of the mirrored
  * file's `'only-on-failure'`.
  */
-const RUN_CONFIG_TEMPLATE = `const path = require('path')
+function buildRunConfig(includeHttpCredentials: boolean): string {
+  // Only reference process.env — never the plaintext values — so the config
+  // body on disk never contains the Basic-auth username/password. Emitted only
+  // when httpCredentials was supplied so an unauthenticated run has no
+  // httpCredentials section at all.
+  const httpCredentialsLine = includeHttpCredentials
+    ? '    httpCredentials: { username: process.env.E2E_HTTP_CREDENTIALS_USERNAME, password: process.env.E2E_HTTP_CREDENTIALS_PASSWORD },\n'
+    : ''
+  return `const path = require('path')
 const { defineConfig } = require('@playwright/test')
 
 module.exports = defineConfig({
@@ -398,11 +422,12 @@ module.exports = defineConfig({
     screenshot: 'off',
     trace: 'retain-on-failure',
     baseURL: process.env.E2E_BASE_URL ?? 'http://localhost:3000',
-  },
+${httpCredentialsLine}  },
   reporter: [['json', { outputFile: process.env.E2E_JSON_OUTPUT ?? path.join(__dirname, 'result.json') }]],
   workers: 1,
 })
 `
+}
 
 /** Filename of the preload patch module written into the run directory. */
 const STEP_SCREENSHOT_PATCH_FILENAME = 'step-screenshot-patch.js'
@@ -623,6 +648,7 @@ export async function runPlaywrightSubprocess(
     envVars,
     supportFiles,
     captureStepScreenshots = true,
+    httpCredentials,
   } = options
 
   // Sanitize executionId to prevent path traversal
@@ -649,7 +675,7 @@ export async function runPlaywrightSubprocess(
 
     // Write the test script and the per-run Playwright config
     await fs.writeFile(specFile, script, 'utf-8')
-    await fs.writeFile(configFile, RUN_CONFIG_TEMPLATE, 'utf-8')
+    await fs.writeFile(configFile, buildRunConfig(httpCredentials !== undefined), 'utf-8')
 
     // Write the harness-level step-screenshot preload module unless disabled.
     // When present, its path is injected into the child's NODE_OPTIONS below.
@@ -662,6 +688,7 @@ export async function runPlaywrightSubprocess(
     // Run Playwright subprocess
     const errorOutput = await spawnPlaywright(
       specFile, configFile, resultFile, baseUrl, timeoutMs, envVars, executionId, patchModulePath,
+      httpCredentials,
     )
 
     // Read and parse the JSON output
@@ -704,6 +731,7 @@ function spawnPlaywright(
   envVars: Record<string, string> | undefined,
   executionId: string,
   patchModulePath: string | undefined,
+  httpCredentials: { username: string; password: string } | undefined,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     // Resolve the agent's bundled node_modules so the spec can import @playwright/test
@@ -717,6 +745,14 @@ function spawnPlaywright(
     }
     if (baseUrl) {
       env.E2E_BASE_URL = baseUrl
+    }
+    // Basic-auth credentials go into the env ONLY (the per-run config on disk
+    // references these via process.env, never the plaintext values). Set before
+    // mergeEnvVars so a caller-supplied override is rejected by RESERVED_ENV_KEYS
+    // and this module's values win.
+    if (httpCredentials) {
+      env.E2E_HTTP_CREDENTIALS_USERNAME = httpCredentials.username
+      env.E2E_HTTP_CREDENTIALS_PASSWORD = httpCredentials.password
     }
     mergeEnvVars(env, envVars, executionId)
 
