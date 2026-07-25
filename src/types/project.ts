@@ -223,6 +223,19 @@ export interface E2eSupportFilesResponse {
 }
 
 /**
+ * E2E 実行トリガー payload に載る Basic 認証（HTTP Basic）情報。
+ *
+ * 平文パスワードは payload に含めない設計で、`passwordVariableKey` は E2E
+ * シークレット変数マップ（`getE2eEnvironmentVariables(environmentId)` が返す
+ * 復号済み map）のキー名を指す。agent はそのキーで password を解決し、
+ * Playwright の `use.httpCredentials` に env 参照で注入する。
+ */
+export interface E2eBasicAuth {
+  username: string
+  passwordVariableKey: string
+}
+
+/**
  * `ApiClient.reportE2eTestStep` に送信するペイロード。
  * AI 実行（`report_test_step` MCP ツール）と Playwright subprocess 実行
  * （`e2e-test-executor.ts`）の両方から使われるため、双方が送るフィールドの

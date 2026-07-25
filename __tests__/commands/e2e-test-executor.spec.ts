@@ -1412,6 +1412,220 @@ describe('e2e-test-executor', () => {
     errorSpy.mockRestore()
   })
 
+  // --- basic auth (httpCredentials) ---
+
+  it('should resolve the basicAuth password from the environment variable map and forward httpCredentials to runPlaywrightSubprocess', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.getE2eEnvironmentVariables.mockResolvedValue({ BASIC_PW: 'sekret', OTHER: 'x' })
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+        environmentId: 'env-1',
+        basicAuth: { username: 'basic-user', passwordVariableKey: 'BASIC_PW' },
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    expect(result.success).toBe(true)
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        httpCredentials: { username: 'basic-user', password: 'sekret' },
+      }),
+    )
+  })
+
+  it('should end the execution with error (and NOT run the subprocess) when the basicAuth password variable is missing from the map', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.getE2eEnvironmentVariables.mockResolvedValue({ OTHER: 'x' })
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+        environmentId: 'env-1',
+        basicAuth: { username: 'basic-user', passwordVariableKey: 'MISSING_PW' },
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      // Error names the missing key, so operators can fix the environment...
+      expect(result.error).toContain('MISSING_PW')
+    }
+    // ...but the Playwright subprocess must NOT run (would 401 then SIGKILL).
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).not.toHaveBeenCalled()
+    // The failure must be reported as an error status, not swallowed.
+    const errorStatusCall = mockClient.updateE2eExecutionStatus.mock.calls.find(
+      (call: unknown[]) => (call[3] as { status?: string })?.status === 'error',
+    )
+    expect(errorStatusCall).toBeDefined()
+    // The reported errorMessage carries the key name but never a password value.
+    expect(String((errorStatusCall![3] as { errorMessage?: string }).errorMessage)).toContain('MISSING_PW')
+    errorSpy.mockRestore()
+  })
+
+  it('should forward no httpCredentials to runPlaywrightSubprocess when basicAuth is absent', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
+      expect.objectContaining({ httpCredentials: undefined }),
+    )
+  })
+
+  it('should treat a non-object basicAuth as absent WITHOUT warning (no credentials, no error)', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+        basicAuth: 'not-an-object',
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    expect(result.success).toBe(true)
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
+      expect.objectContaining({ httpCredentials: undefined }),
+    )
+    // A fully-absent / non-object basicAuth is silent — no incomplete warning.
+    expect(warnSpy.mock.calls.some((call) => String(call[0]).includes('basicAuth ignored'))).toBe(false)
+    warnSpy.mockRestore()
+  })
+
+  it('should WARN (partial basicAuth) and treat it as absent when passwordVariableKey is missing', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.getE2eEnvironmentVariables.mockResolvedValue({ BASIC_PW: 'sekret' })
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+        environmentId: 'env-1',
+        // username present but passwordVariableKey missing → partial → warn + absent
+        basicAuth: { username: 'basic-user' },
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    expect(result.success).toBe(true)
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
+      expect.objectContaining({ httpCredentials: undefined }),
+    )
+    // The partial basicAuth must be surfaced (not silently dropped), carrying
+    // the executionId for triage but no secret values.
+    const incompleteWarn = warnSpy.mock.calls
+      .map((call) => String(call[0]))
+      .find((msg) => msg.includes('basicAuth ignored'))
+    expect(incompleteWarn).toBeDefined()
+    expect(incompleteWarn).toContain('exec-1')
+    // No secret value leaks into the warning (only the username was present).
+    expect(incompleteWarn).not.toContain('basic-user')
+    warnSpy.mockRestore()
+  })
+
+  it('should WARN (partial basicAuth) and treat it as absent when username is missing', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.getE2eEnvironmentVariables.mockResolvedValue({ BASIC_PW: 'sekret' })
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+        environmentId: 'env-1',
+        // passwordVariableKey present but username missing → partial → warn + absent
+        basicAuth: { passwordVariableKey: 'BASIC_PW' },
+      },
+    }
+
+    const result = await executeE2eTest(options)
+
+    expect(result.success).toBe(true)
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
+      expect.objectContaining({ httpCredentials: undefined }),
+    )
+    const incompleteWarn = warnSpy.mock.calls
+      .map((call) => String(call[0]))
+      .find((msg) => msg.includes('basicAuth ignored'))
+    expect(incompleteWarn).toBeDefined()
+    expect(incompleteWarn).toContain('exec-1')
+    warnSpy.mockRestore()
+  })
+
   // --- shared support files ---
 
   it('should fetch project support files and forward them to runPlaywrightSubprocess', async () => {

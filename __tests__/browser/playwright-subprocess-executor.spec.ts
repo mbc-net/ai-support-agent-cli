@@ -2126,4 +2126,96 @@ describe('runPlaywrightSubprocess', () => {
     expect(capture.env?.NODE_PATH).toContain('node_modules')
     expect(capture.env?.NODE_PATH).not.toBe('/tmp/evil-node-path')
   })
+
+  // --- httpCredentials (Basic auth) injection ---
+
+  it('should reference E2E_HTTP_CREDENTIALS_* via process.env in the config and NOT embed plaintext credentials', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('http-creds-config')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+      httpCredentials: { username: 'basic-user', password: 'super-secret-pw' },
+    })
+
+    const config = capture.files?.['playwright.config.js']
+    expect(config).toBeDefined()
+    // The config body references the credentials only through process.env, the
+    // same way baseURL references process.env.E2E_BASE_URL.
+    expect(config).toContain('httpCredentials: { username: process.env.E2E_HTTP_CREDENTIALS_USERNAME')
+    expect(config).toContain('password: process.env.E2E_HTTP_CREDENTIALS_PASSWORD')
+    // No plaintext credential literal must appear in the generated config body.
+    expect(config).not.toContain('basic-user')
+    expect(config).not.toContain('super-secret-pw')
+  })
+
+  it('should set E2E_HTTP_CREDENTIALS_USERNAME/PASSWORD in the subprocess env when httpCredentials is provided', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('http-creds-env')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+      httpCredentials: { username: 'basic-user', password: 'super-secret-pw' },
+    })
+
+    expect(capture.env?.E2E_HTTP_CREDENTIALS_USERNAME).toBe('basic-user')
+    expect(capture.env?.E2E_HTTP_CREDENTIALS_PASSWORD).toBe('super-secret-pw')
+  })
+
+  it('should NOT emit an httpCredentials section in the config nor the env when httpCredentials is not provided', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('http-creds-absent')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+    })
+
+    const config = capture.files?.['playwright.config.js']
+    expect(config).toBeDefined()
+    expect(config).not.toContain('httpCredentials')
+    expect(capture.env?.E2E_HTTP_CREDENTIALS_USERNAME).toBeUndefined()
+    expect(capture.env?.E2E_HTTP_CREDENTIALS_PASSWORD).toBeUndefined()
+  })
+
+  it('should not allow envVars to override the reserved E2E_HTTP_CREDENTIALS_* keys', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const warnSpy = jest.spyOn(require('../../src/logger').logger, 'warn').mockImplementation(() => {})
+    const executionId = uniqueExecutionId('http-creds-reserved')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+      httpCredentials: { username: 'real-user', password: 'real-pw' },
+      envVars: {
+        E2E_HTTP_CREDENTIALS_USERNAME: 'evil-user',
+        E2E_HTTP_CREDENTIALS_PASSWORD: 'evil-pw',
+      },
+    })
+
+    // The module's own values must win over any user-supplied override.
+    expect(capture.env?.E2E_HTTP_CREDENTIALS_USERNAME).toBe('real-user')
+    expect(capture.env?.E2E_HTTP_CREDENTIALS_PASSWORD).toBe('real-pw')
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('E2E_HTTP_CREDENTIALS_USERNAME'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('E2E_HTTP_CREDENTIALS_PASSWORD'))
+    warnSpy.mockRestore()
+  })
 })
