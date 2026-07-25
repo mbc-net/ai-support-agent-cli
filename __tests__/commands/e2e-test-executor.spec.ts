@@ -1155,6 +1155,200 @@ describe('e2e-test-executor', () => {
     )
   })
 
+  it('should report partial steps and a failed (timed-out) status when the subprocess times out WITH recovered partial results', async () => {
+    // Regression for the observability bug: a timeout used to be swallowed as a
+    // bare "timed out" error with totalSteps=0. Now the subprocess recovers the
+    // partial result.json, so the real per-test failure must be reported as a
+    // step and the aggregate counts must NOT collapse to 0.
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      timedOut: true,
+      totalTests: 2,
+      passedTests: 1,
+      failedTests: 1,
+      steps: [
+        { title: 'test1 assertion', status: 'failed', error: 'expect(received).toBe(expected)', duration: 30 },
+        { title: 'test2 nav', status: 'passed', duration: 40 },
+      ],
+      errorOutput: 'Playwright subprocess timed out after 120000ms (partial results recovered)',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    // The real failure is reported as a step (not silently dropped).
+    expect(mockClient.reportE2eTestStep).toHaveBeenCalledWith(
+      'mbc',
+      'MBC_01',
+      'exec-1',
+      expect.objectContaining({
+        action: 'test1 assertion',
+        status: 'failed',
+        error: 'expect(received).toBe(expected)',
+      }),
+    )
+
+    const finalCall = mockClient.updateE2eExecutionStatus.mock.calls.find(
+      (c: unknown[]) => {
+        const s = (c[3] as Record<string, unknown>).status
+        return s === 'failed' || s === 'error'
+      },
+    )
+    expect(finalCall).toBeDefined()
+    expect(finalCall![3]).toMatchObject({
+      status: 'failed',
+      totalSteps: 2,
+      passedSteps: 1,
+      failedSteps: 1,
+    })
+    expect((finalCall![3] as Record<string, unknown>).totalSteps).not.toBe(0)
+    expect((finalCall![3] as Record<string, unknown>).errorMessage).toMatch(/timed out/i)
+  })
+
+  it('should report an error status (not failed) when the subprocess times out with NO recoverable partial results', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      timedOut: true,
+      totalTests: 0,
+      passedTests: 0,
+      failedTests: 0,
+      steps: [],
+      errorOutput: 'Playwright subprocess timed out after 120000ms',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    // Nothing was recovered → no per-step reports at all.
+    expect(mockClient.reportE2eTestStep).not.toHaveBeenCalled()
+
+    const finalCall = mockClient.updateE2eExecutionStatus.mock.calls.find(
+      (c: unknown[]) => {
+        const s = (c[3] as Record<string, unknown>).status
+        return s === 'failed' || s === 'error'
+      },
+    )
+    expect(finalCall).toBeDefined()
+    // No partial evidence → surface as error (true failure to produce results),
+    // still carrying the timeout as the cause.
+    expect((finalCall![3] as Record<string, unknown>).status).toBe('error')
+    expect((finalCall![3] as Record<string, unknown>).errorMessage).toMatch(/timed out/i)
+  })
+
+  it('should escalate step-report failures to error logs with step context and note them in the final errorMessage', async () => {
+    // The recovered partial steps are the true cause carried to the API; if a
+    // per-step report fails it must be LOUD (logger.error with identifying
+    // context) and the aggregate errorMessage must flag that some recovered
+    // evidence may be missing — never swallowed at warn level.
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      timedOut: true,
+      totalTests: 2,
+      passedTests: 0,
+      failedTests: 2,
+      steps: [
+        { title: 'test1 assertion', status: 'failed', error: 'boom1' },
+        { title: 'test2 assertion', status: 'failed', error: 'boom2' },
+      ],
+      errorOutput: 'Playwright subprocess timed out after 120000ms (partial results recovered)',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    // First step report fails, second succeeds.
+    mockClient.reportE2eTestStep
+      .mockRejectedValueOnce(new Error('DDB throttled'))
+      .mockResolvedValueOnce(undefined)
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    // The failed step report is logged at ERROR with identifying context.
+    const stepErrLog = errorSpy.mock.calls
+      .map((c) => String(c[0]))
+      .find((m) => m.includes('test1 assertion'))
+    expect(stepErrLog).toBeDefined()
+    expect(stepErrLog).toContain('exec-1')
+    expect(stepErrLog).toContain('step=1')
+    expect(stepErrLog).toContain('failed')
+    expect(stepErrLog).toContain('DDB throttled')
+
+    // The aggregate errorMessage flags that some recovered steps did not persist.
+    const finalCall = mockClient.updateE2eExecutionStatus.mock.calls.find(
+      (c: unknown[]) => {
+        const s = (c[3] as Record<string, unknown>).status
+        return s === 'failed' || s === 'error'
+      },
+    )
+    expect(finalCall).toBeDefined()
+    expect(String((finalCall![3] as Record<string, unknown>).errorMessage)).toMatch(
+      /1\/2 step report\(s\) failed to persist/,
+    )
+    // The original cause (the timeout note) is preserved ahead of the annotation.
+    expect(String((finalCall![3] as Record<string, unknown>).errorMessage)).toMatch(/timed out/i)
+    errorSpy.mockRestore()
+  })
+
+  it('should keep the final errorMessage undefined on a passed run even if a step report fails', async () => {
+    // A passing run has no "true cause" steps to lose; the existing
+    // success → undefined errorMessage contract must not be broken.
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [{ title: 'ok step', status: 'passed', duration: 10 }],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockRejectedValue(new Error('transient'))
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const options: ExecuteE2eTestOptions = {
+      ...baseOptions,
+      payload: {
+        ...baseOptions.payload,
+        playwrightScript: "await page.goto('/')",
+        executionMethod: 'playwright',
+      },
+    }
+
+    await executeE2eTest(options)
+
+    const passedCall = mockClient.updateE2eExecutionStatus.mock.calls.find(
+      (c: unknown[]) => (c[3] as Record<string, unknown>).status === 'passed',
+    )
+    expect(passedCall).toBeDefined()
+    expect(passedCall![3]).not.toHaveProperty('errorMessage')
+    errorSpy.mockRestore()
+  })
+
   it('should pass the resolved targetUrl as baseUrl to runPlaywrightSubprocess', async () => {
     ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
       success: true,

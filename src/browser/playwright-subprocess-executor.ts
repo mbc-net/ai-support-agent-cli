@@ -73,10 +73,61 @@ export interface PlaywrightSubprocessResult {
   failedTests: number
   steps: PlaywrightSubprocessStepResult[]
   errorOutput?: string
+  /**
+   * True when the whole-subprocess timeout fired. On timeout the executor no
+   * longer discards everything: a graceful SIGINT lets Playwright flush a
+   * partial `result.json`, so `steps`/`failedTests` may still carry the REAL
+   * per-test failures that were the true cause. `errorOutput` always notes the
+   * timeout so it is never hidden behind those partial results. Callers use
+   * this to distinguish "timed out but recovered partial evidence" (report as
+   * failed) from "timed out with nothing recovered" (report as error).
+   */
+  timedOut?: boolean
 }
 
 /** Default timeout for subprocess execution (120 seconds) */
 const DEFAULT_TIMEOUT_MS = 120_000
+
+/**
+ * Grace period after a timeout SIGINT before escalating to SIGKILL.
+ *
+ * On timeout we send SIGINT first so Playwright can run its `onEnd` reporter
+ * hook and flush a partial `result.json` (SIGKILL would kill it before that,
+ * losing every already-recorded per-test failure). If the process is still
+ * alive after this window it is force-killed with SIGKILL.
+ */
+export const SIGKILL_GRACE_MS = 5_000
+
+/**
+ * Final deadline after SIGKILL before force-resolving the Promise regardless of
+ * whether `close` ever fired.
+ *
+ * Playwright forks Chromium as a GRANDCHILD that inherits the direct child's
+ * stdio pipes. SIGKILLing only the direct child can leave the grandchild
+ * holding those pipes open, so the `close` event never fires and this Promise
+ * would stay unresolved forever — hanging the whole agent. When this window
+ * elapses with no `close`, we force-resolve as `timedOut` so the run always
+ * settles (the timeout is still surfaced as the cause).
+ */
+export const FORCE_RESOLVE_AFTER_SIGKILL_MS = 5_000
+
+/**
+ * Per-action wait cap (locator resolution, click, fill, etc.) applied via the
+ * per-run config `use.actionTimeout`. Bounding this well below the per-test
+ * `timeout` (120s) is the key to the observability fix: a single element that
+ * never appears fails ITS test quickly instead of pinning the test to 120s and
+ * letting the whole-subprocess timeout kill everything at once. Aligned with
+ * the AI browser mode's single-selector wait (SELECTOR_TIMEOUT_SINGLE_MS=10s),
+ * with headroom for slower CI.
+ */
+const E2E_ACTION_TIMEOUT_MS = 15_000
+
+/**
+ * Navigation wait cap (`page.goto` / `waitForNavigation`) applied via the
+ * per-run config `use.navigationTimeout`. Matches the AI browser mode's
+ * SELECTOR_TIMEOUT_NAVIGATION_MS (30s).
+ */
+const E2E_NAVIGATION_TIMEOUT_MS = 30_000
 
 /**
  * Attachment-name prefix used by the harness step-screenshot preload. Each
@@ -416,6 +467,13 @@ module.exports = defineConfig({
   timeout: 120_000,
   use: {
     headless: true,
+    // Bound per-action / navigation waits BELOW the per-test timeout (120s) so a
+    // single element that never appears fails its own test quickly, instead of
+    // pinning that test to 120s and triggering a whole-subprocess kill that
+    // loses every already-recorded per-test failure. expect()'s default 5s
+    // assertion timeout is left as-is.
+    actionTimeout: ${E2E_ACTION_TIMEOUT_MS},
+    navigationTimeout: ${E2E_NAVIGATION_TIMEOUT_MS},
     // Screenshots are captured explicitly inside test.step() via
     // testInfo.attach(), so Playwright's own automatic screenshot capture
     // is disabled here to avoid duplicate/unassociated screenshots.
@@ -686,16 +744,35 @@ export async function runPlaywrightSubprocess(
     }
 
     // Run Playwright subprocess
-    const errorOutput = await spawnPlaywright(
+    const { errorOutput, timedOut } = await spawnPlaywright(
       specFile, configFile, resultFile, baseUrl, timeoutMs, envVars, executionId, patchModulePath,
       httpCredentials,
     )
+
+    const timeoutNote = `Playwright subprocess timed out after ${timeoutMs}ms`
 
     // Read and parse the JSON output
     let jsonContent: string
     try {
       jsonContent = await fs.readFile(resultFile, 'utf-8')
     } catch {
+      // No JSON at all. On timeout this is a true hard death (even the graceful
+      // SIGINT could not flush anything): surface the timeout as the cause,
+      // with the accumulated stderr appended when present. Do not swallow it.
+      if (timedOut) {
+        logger.warn(
+          `[playwright-subprocess] JSON output not found after timeout for execution ${executionId}`,
+        )
+        return {
+          success: false,
+          totalTests: 0,
+          passedTests: 0,
+          failedTests: 0,
+          steps: [],
+          timedOut: true,
+          errorOutput: errorOutput ? `${timeoutNote}\n${errorOutput}` : timeoutNote,
+        }
+      }
       logger.warn(`[playwright-subprocess] JSON output not found for execution ${executionId}`)
       return {
         success: false,
@@ -708,6 +785,22 @@ export async function runPlaywrightSubprocess(
     }
 
     const result = parsePlaywrightJsonOutput(jsonContent)
+
+    // Timed out but a partial result.json WAS flushed by the graceful SIGINT:
+    // keep the recovered per-test failures, but force success=false, mark
+    // timedOut, and prepend the timeout note to errorOutput so the timeout is
+    // never hidden behind the partial results.
+    if (timedOut) {
+      const note = `${timeoutNote} (partial results recovered)`
+      const detail = errorOutput || result.errorOutput
+      return {
+        ...result,
+        success: false,
+        timedOut: true,
+        errorOutput: detail ? `${note}\n${detail}` : note,
+      }
+    }
+
     if (errorOutput && !result.success) {
       return { ...result, errorOutput }
     }
@@ -718,9 +811,25 @@ export async function runPlaywrightSubprocess(
   }
 }
 
+/** Outcome of a spawned Playwright run. */
+interface SpawnPlaywrightOutcome {
+  /**
+   * Accumulated stderr. Non-empty on a non-zero exit or a timeout (so the true
+   * cause is preserved); empty string on a clean pass.
+   */
+  errorOutput: string
+  /** True when the whole-subprocess timeout fired (graceful SIGINT was sent). */
+  timedOut: boolean
+}
+
 /**
  * Spawn the Playwright CLI process and wait for it to finish.
- * Returns stderr output (empty string on success).
+ *
+ * On timeout it does NOT reject: it sends SIGINT first so Playwright can flush
+ * a partial `result.json`, waits `SIGKILL_GRACE_MS`, then force-kills if still
+ * alive, and finally resolves with `{ timedOut: true }` plus the accumulated
+ * stderr so the caller can recover the partial results and surface the cause.
+ * Only a spawn-level `error` event rejects.
  */
 function spawnPlaywright(
   specFile: string,
@@ -732,7 +841,7 @@ function spawnPlaywright(
   executionId: string,
   patchModulePath: string | undefined,
   httpCredentials: { username: string; password: string } | undefined,
-): Promise<string> {
+): Promise<SpawnPlaywrightOutcome> {
   return new Promise((resolve, reject) => {
     // Resolve the agent's bundled node_modules so the spec can import @playwright/test
     const agentRootDir = path.join(__dirname, '..', '..')
@@ -816,27 +925,93 @@ function spawnPlaywright(
     })
 
     let timedOut = false
+    let sigkillTimer: ReturnType<typeof setTimeout> | undefined
+    let forceResolveTimer: ReturnType<typeof setTimeout> | undefined
+
+    // Single-settle guard: `close`, `error`, and the post-SIGKILL final
+    // deadline can all race to end this Promise. Only the first wins, and it
+    // clears every outstanding timer so no later timer callback runs. (Promise
+    // settlement is itself idempotent, but the flag also prevents the redundant
+    // side effects — force-kills, force-resolve logging — from firing after the
+    // process already exited.)
+    let settled = false
+    const clearAllTimers = (): void => {
+      clearTimeout(timer)
+      if (sigkillTimer) clearTimeout(sigkillTimer)
+      if (forceResolveTimer) clearTimeout(forceResolveTimer)
+    }
+    const settleResolve = (outcome: SpawnPlaywrightOutcome): void => {
+      if (settled) return
+      settled = true
+      clearAllTimers()
+      resolve(outcome)
+    }
+    const settleReject = (err: Error): void => {
+      if (settled) return
+      settled = true
+      clearAllTimers()
+      reject(err)
+    }
+
     const timer = setTimeout(() => {
       timedOut = true
-      logger.warn(`[playwright-subprocess] Timeout after ${timeoutMs}ms, killing process`)
-      child.kill('SIGKILL')
+      // Graceful first: SIGINT lets Playwright run onEnd and flush a partial
+      // result.json (SIGKILL would kill it before that, discarding every
+      // already-recorded per-test failure — the real cause of the timeout).
+      //
+      // Platform note: on Windows, Node maps SIGINT/SIGTERM/SIGKILL all to an
+      // immediate TerminateProcess — there is no graceful signal delivery, so
+      // the SIGINT-flush-then-escalate dance does not actually let Playwright
+      // write a partial result.json. That is acceptable: the final-deadline
+      // safeguard below still prevents a hang, and the timeout is surfaced as an
+      // error rather than silently lost. No platform branching is needed.
+      logger.warn(
+        `[playwright-subprocess] Timeout after ${timeoutMs}ms, sending SIGINT for graceful shutdown`,
+      )
+      child.kill('SIGINT')
+      // Escalate to SIGKILL only if the process is still alive after the grace
+      // window. If it closes first, the close handler clears this timer so no
+      // SIGKILL is sent.
+      sigkillTimer = setTimeout(() => {
+        logger.warn(
+          `[playwright-subprocess] Still alive ${SIGKILL_GRACE_MS}ms after SIGINT, sending SIGKILL`,
+        )
+        child.kill('SIGKILL')
+        // Final safeguard: a SIGKILLed direct child whose Chromium grandchild
+        // still holds the inherited stdio pipes may never emit `close`. Force
+        // the Promise to settle after this window so the agent can never hang.
+        forceResolveTimer = setTimeout(() => {
+          const note = `Playwright subprocess timed out after ${timeoutMs}ms and did not exit after SIGKILL`
+          logger.error(
+            `[playwright-subprocess] ${note}; force-resolving to avoid an indefinite hang`,
+          )
+          settleResolve({
+            errorOutput: stderrOutput ? `${note}\n${stderrOutput}` : note,
+            timedOut: true,
+          })
+        }, FORCE_RESOLVE_AFTER_SIGKILL_MS)
+      }, SIGKILL_GRACE_MS)
     }, timeoutMs)
 
     child.on('close', (code) => {
-      clearTimeout(timer)
       if (timedOut) {
-        reject(new Error(`Playwright subprocess timed out after ${timeoutMs}ms`))
+        // Do NOT reject: the graceful SIGINT may have flushed a partial
+        // result.json. Resolve with the accumulated stderr (the true cause) so
+        // runPlaywrightSubprocess can read and report whatever was recovered.
+        logger.info(
+          `[playwright-subprocess] Process exited after timeout with code ${code}`,
+        )
+        settleResolve({ errorOutput: stderrOutput, timedOut: true })
         return
       }
       // Playwright exits with non-zero on test failures, which is expected
       // We resolve in all cases and let the JSON output determine success
       logger.info(`[playwright-subprocess] Process exited with code ${code}`)
-      resolve(code !== 0 ? stderrOutput : '')
+      settleResolve({ errorOutput: code !== 0 ? stderrOutput : '', timedOut: false })
     })
 
     child.on('error', (err) => {
-      clearTimeout(timer)
-      reject(err)
+      settleReject(err)
     })
   })
 }

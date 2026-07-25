@@ -313,7 +313,13 @@ async function executePlaywrightSubprocessMode(
     return errorResult(`Playwright subprocess error: ${errorMessage}`)
   }
 
-  // Report each step
+  // Report each step. These per-step reports carry the RECOVERED partial
+  // failures (the true cause on a timeout) to the API, so a failure here is not
+  // cosmetic — it means real evidence may never reach the operator. Escalate to
+  // logger.error with identifying context (matching reportExecutionStatus's own
+  // error logging) and count the failures so the aggregate report can flag that
+  // some recovered steps may be missing. Do not swallow at warn level.
+  let stepReportFailures = 0
   for (let i = 0; i < subprocessResult.steps.length; i++) {
     const step = subprocessResult.steps[i]
     if (!tenantCode || !projectCode) break
@@ -332,17 +338,46 @@ async function executePlaywrightSubprocessMode(
         // do not send it as screenshotUrl — omit it from the API payload entirely.
       })
     } catch (err: unknown) {
-      logger.warn(`[e2e_test] Failed to report playwright step ${i + 1}: ${toErrorMessage(err)}`)
+      stepReportFailures++
+      logger.error(
+        `[e2e_test] Failed to report playwright step ` +
+          `[execution=${executionId} step=${i + 1} title="${step.title}" status=${step.status}]: ${toErrorMessage(err)}`,
+      )
     }
   }
 
   const duration = Date.now() - startTime
-  const finalStatus = subprocessResult.success ? 'passed' : 'failed'
+  // On timeout the subprocess now resolves (no throw) so partial per-test
+  // failures — reported as steps just above — are never lost. Reflect reality:
+  // - passed → passed
+  // - timed out WITH no recovered evidence (no steps) → error (nothing ran to
+  //   completion; the errorOutput carries the timeout as the cause)
+  // - otherwise (real failures, or a timeout WITH recovered partial results) →
+  //   failed, with the timeout noted in errorOutput. No symptom hiding.
+  let finalStatus: string
+  if (subprocessResult.success) {
+    finalStatus = 'passed'
+  } else if (subprocessResult.timedOut && subprocessResult.steps.length === 0) {
+    finalStatus = 'error'
+  } else {
+    finalStatus = 'failed'
+  }
+
+  // Build the aggregate errorMessage. On success it stays undefined (unchanged
+  // contract). On failure, if any per-step report failed to persist, append a
+  // note so an operator reading only the aggregate result knows some recovered
+  // evidence may be missing.
+  let errorMessage = subprocessResult.success
+    ? undefined
+    : (subprocessResult.errorOutput ?? `${subprocessResult.failedTests} test(s) failed`)
+  if (errorMessage !== undefined && stepReportFailures > 0) {
+    errorMessage += ` (${stepReportFailures}/${subprocessResult.steps.length} step report(s) failed to persist)`
+  }
 
   await reportExecutionStatus(
     client, tenantCode, projectCode, executionId,
     finalStatus, duration,
-    subprocessResult.success ? undefined : (subprocessResult.errorOutput ?? `${subprocessResult.failedTests} test(s) failed`),
+    errorMessage,
     testCaseId,
     // The API DTO (UpdateExecutionStatusDto) whitelists only totalSteps/
     // passedSteps/failedSteps. These must match those names — the subprocess
