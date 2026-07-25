@@ -9,6 +9,8 @@ import {
   runPlaywrightSubprocess,
   parsePlaywrightJsonOutput,
   HARNESS_STEP_SCREENSHOT_PREFIX,
+  SIGKILL_GRACE_MS,
+  FORCE_RESOLVE_AFTER_SIGKILL_MS,
 } from '../../src/browser/playwright-subprocess-executor'
 
 // Only child_process is mocked; file writes are verified against the real
@@ -1448,6 +1450,29 @@ describe('runPlaywrightSubprocess', () => {
     expect(config).toContain('workers: 1')
   })
 
+  it('should bound per-action and navigation waits below the whole-subprocess timeout in the per-run config', async () => {
+    const capture: SpawnCapture = {}
+    setupSpawn({
+      resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
+      capture,
+    })
+    const executionId = uniqueExecutionId('action-nav-timeout')
+
+    await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+    })
+
+    const config = capture.files?.['playwright.config.js']
+    expect(config).toBeDefined()
+    // actionTimeout bounds locator/click/fill waits so a single hung element
+    // fails that test quickly instead of pinning it to the per-test 120s and
+    // triggering a whole-subprocess kill (the root cause of lost results).
+    expect(config).toContain('actionTimeout: 15000')
+    // navigationTimeout aligns with the AI mode's SELECTOR_TIMEOUT_NAVIGATION_MS.
+    expect(config).toContain('navigationTimeout: 30000')
+  })
+
   it('should pass the per-run config file as the --config argument', async () => {
     const capture: SpawnCapture = {}
     setupSpawn({
@@ -1872,27 +1897,263 @@ describe('runPlaywrightSubprocess', () => {
     expect(result.errorOutput).toBe('Playwright stderr output')
   })
 
-  it('should reject when process times out', async () => {
-    // Create a child that never emits close until killed
+  // --- timeout handling: graceful SIGINT + partial-result recovery ---
+
+  /** Repeatedly yield via setImmediate until the spawn mock has been invoked, so
+   * the pre-spawn async fs writes finish and the subprocess timeout timer is
+   * armed. setImmediate (kept real via `doNotFake` in the fake-timer tests)
+   * yields to the libuv poll phase so real fs IO can complete; a process.nextTick
+   * loop would starve that phase and the writes would never resolve. */
+  async function waitForSpawn(): Promise<void> {
+    for (let i = 0; i < 1000 && mockSpawn.mock.calls.length === 0; i++) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+  }
+
+  it('should recover partial results (not reject) when it times out but a partial result.json was flushed by the graceful SIGINT', async () => {
+    // The real cause of an E2E timeout is usually that ONE test hung waiting for
+    // an element while OTHER tests already recorded real assertion failures.
+    // A graceful SIGINT lets Playwright flush that partial result.json; the
+    // executor must return those real per-test failures instead of losing them.
+    let jsonOutputPath: string | undefined
     const child = new EventEmitter() as any
     child.stdout = new EventEmitter()
     child.stderr = new EventEmitter()
-    child.kill = jest.fn(() => {
-      // Simulate kill causing close
-      process.nextTick(() => child.emit('close', null))
-    })
     child.stdin = null
-    mockSpawn.mockReturnValue(child as any)
-    const executionId = uniqueExecutionId('timeout')
+    child.kill = jest.fn((signal?: string) => {
+      if (signal === 'SIGINT' && jsonOutputPath) {
+        nodeFs.writeFileSync(
+          jsonOutputPath,
+          makePlaywrightJson([
+            { title: 'test1 assertion', status: 'failed', error: 'expect(received).toBe(expected)' },
+          ]),
+          'utf-8',
+        )
+        process.nextTick(() => child.emit('close', null))
+      }
+    })
+    mockSpawn.mockImplementation(((_bin: string, _args: string[], spawnOpts: { env?: NodeJS.ProcessEnv }) => {
+      jsonOutputPath = spawnOpts?.env?.E2E_JSON_OUTPUT
+      process.nextTick(() => {
+        child.stderr.emit('data', Buffer.from('Test timeout of 15000ms exceeded while waiting for locator'))
+      })
+      return child
+    }) as any)
+    const executionId = uniqueExecutionId('timeout-partial')
 
-    const resultPromise = runPlaywrightSubprocess({
+    const result = await runPlaywrightSubprocess({
       script: "await page.goto('/')",
       executionId,
-      timeoutMs: 10, // Very short timeout
+      timeoutMs: 10, // fire the subprocess timeout almost immediately
     })
 
-    await expect(resultPromise).rejects.toThrow(/timed out/)
+    // The partial per-test failure survives — this is the whole point of the fix.
+    expect(result.timedOut).toBe(true)
+    expect(result.success).toBe(false)
+    expect(result.failedTests).toBe(1)
+    expect(result.steps).toHaveLength(1)
+    expect(result.steps[0].status).toBe('failed')
+    expect(result.steps[0].error).toContain('expect')
+    // The timeout itself is still surfaced (not hidden behind the partial result).
+    expect(result.errorOutput).toMatch(/timed out/i)
+    // The accumulated stderr (the true cause) is preserved alongside the note.
+    expect(result.errorOutput).toContain('waiting for locator')
     expect(nodeFs.existsSync(runDirFor(executionId))).toBe(false)
+  })
+
+  it('should resolve with a timed-out result (no reject) when the process times out and no JSON was flushed at all', async () => {
+    const child = new EventEmitter() as any
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.stdin = null
+    child.kill = jest.fn((signal?: string) => {
+      // Even the graceful SIGINT cannot flush anything here (true hard death).
+      if (signal === 'SIGINT') process.nextTick(() => child.emit('close', null))
+    })
+    mockSpawn.mockReturnValue(child as any)
+    const executionId = uniqueExecutionId('timeout-nojson')
+
+    const result = await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+      timeoutMs: 10,
+    })
+
+    expect(result.timedOut).toBe(true)
+    expect(result.success).toBe(false)
+    expect(result.totalTests).toBe(0)
+    expect(result.steps).toHaveLength(0)
+    expect(result.errorOutput).toMatch(/timed out/i)
+    expect(nodeFs.existsSync(runDirFor(executionId))).toBe(false)
+  })
+
+  it('should send SIGINT first on timeout, then escalate to SIGKILL only after the grace period if still alive', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] })
+    try {
+      const child = new EventEmitter() as any
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      child.stdin = null
+      child.kill = jest.fn() // stuck process: never closes on its own
+      mockSpawn.mockReturnValue(child as any)
+      const executionId = uniqueExecutionId('sigint-then-sigkill')
+
+      const resultPromise = runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+        timeoutMs: 100,
+      })
+
+      // Let the pre-spawn fs writes settle so the timeout timer is armed.
+      await waitForSpawn()
+
+      // Subprocess timeout fires → graceful SIGINT first, NO SIGKILL yet.
+      jest.advanceTimersByTime(100)
+      expect(child.kill).toHaveBeenCalledTimes(1)
+      expect(child.kill).toHaveBeenLastCalledWith('SIGINT')
+
+      // Still alive after the grace window → escalate to SIGKILL.
+      jest.advanceTimersByTime(SIGKILL_GRACE_MS)
+      expect(child.kill).toHaveBeenCalledTimes(2)
+      expect(child.kill).toHaveBeenLastCalledWith('SIGKILL')
+
+      // Restore real timers before the IO-heavy tail (readFile / cleanup) so
+      // those promises settle normally, then let the process close.
+      jest.useRealTimers()
+      child.emit('close', null)
+      const result = await resultPromise
+      expect(result.timedOut).toBe(true)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('should NOT send SIGKILL when the process exits within the grace period after SIGINT', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] })
+    try {
+      const child = new EventEmitter() as any
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      child.stdin = null
+      child.kill = jest.fn()
+      mockSpawn.mockReturnValue(child as any)
+      const executionId = uniqueExecutionId('sigint-no-sigkill')
+
+      const resultPromise = runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+        timeoutMs: 100,
+      })
+      await waitForSpawn()
+
+      jest.advanceTimersByTime(100) // → SIGINT
+      expect(child.kill).toHaveBeenCalledTimes(1)
+      expect(child.kill).toHaveBeenLastCalledWith('SIGINT')
+
+      // Process exits during the grace window, before escalation. The close
+      // handler must clear the pending SIGKILL timer.
+      child.emit('close', null)
+
+      // Even after the grace window fully elapses, SIGKILL must not be sent.
+      jest.advanceTimersByTime(SIGKILL_GRACE_MS)
+      expect(child.kill).toHaveBeenCalledTimes(1)
+      expect(child.kill).not.toHaveBeenCalledWith('SIGKILL')
+
+      // Restore real timers so the IO-heavy tail (readFile / cleanup) settles.
+      jest.useRealTimers()
+      await resultPromise
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('should force-resolve (timedOut) after the final deadline when the process never emits close even after SIGKILL', async () => {
+    // Playwright forks Chromium as a grandchild inheriting the stdio pipes;
+    // SIGKILLing the direct child can leave the grandchild holding the pipe so
+    // 'close' never fires — without a final deadline the Promise (and the whole
+    // agent) would hang forever. The final deadline must always settle it.
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] })
+    try {
+      const child = new EventEmitter() as any
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      child.stdin = null
+      child.kill = jest.fn() // never closes, even after SIGKILL
+      mockSpawn.mockImplementation(((_bin: string, _args: string[]) => {
+        // Emit stderr (the true cause) so it is folded into the force-resolve
+        // errorOutput note.
+        process.nextTick(() => {
+          child.stderr.emit('data', Buffer.from('Test timeout of 15000ms exceeded while waiting for locator'))
+        })
+        return child
+      }) as any)
+      const executionId = uniqueExecutionId('force-resolve')
+
+      const resultPromise = runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+        timeoutMs: 100,
+      })
+      await waitForSpawn()
+
+      jest.advanceTimersByTime(100) // → SIGINT
+      expect(child.kill).toHaveBeenLastCalledWith('SIGINT')
+      jest.advanceTimersByTime(SIGKILL_GRACE_MS) // → SIGKILL
+      expect(child.kill).toHaveBeenLastCalledWith('SIGKILL')
+
+      // 'close' NEVER fires. Only the final deadline can settle the Promise.
+      jest.advanceTimersByTime(FORCE_RESOLVE_AFTER_SIGKILL_MS)
+
+      jest.useRealTimers()
+      const result = await resultPromise
+      expect(result.timedOut).toBe(true)
+      expect(result.success).toBe(false)
+      expect(result.errorOutput).toMatch(/timed out/i)
+      // The accumulated stderr (true cause) is folded into the note.
+      expect(result.errorOutput).toContain('waiting for locator')
+
+      // Double-settle guard: a late 'close' AND a late 'error' after the
+      // deadline already settled must both be harmless no-ops (the settled flag
+      // blocks a second resolve and a second reject — the latter would
+      // otherwise surface as an unhandled rejection).
+      expect(() => child.emit('close', 0)).not.toThrow()
+      expect(() => child.emit('error', new Error('late error after settle'))).not.toThrow()
+
+      expect(nodeFs.existsSync(runDirFor(executionId))).toBe(false)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('should force-resolve with a bare timeout note (no stderr appended) when the process produced no stderr', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] })
+    try {
+      const child = new EventEmitter() as any
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      child.stdin = null
+      child.kill = jest.fn() // never closes; produces no stderr
+      mockSpawn.mockReturnValue(child as any)
+      const executionId = uniqueExecutionId('force-resolve-nostderr')
+
+      const resultPromise = runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+        timeoutMs: 100,
+      })
+      await waitForSpawn()
+
+      jest.advanceTimersByTime(100) // → SIGINT
+      jest.advanceTimersByTime(SIGKILL_GRACE_MS) // → SIGKILL
+      jest.advanceTimersByTime(FORCE_RESOLVE_AFTER_SIGKILL_MS) // → force-resolve
+
+      jest.useRealTimers()
+      const result = await resultPromise
+      expect(result.timedOut).toBe(true)
+      expect(result.errorOutput).toMatch(/timed out/i)
+    } finally {
+      jest.useRealTimers()
+    }
   })
 
   it('should handle success result without errorOutput when tests pass', async () => {
