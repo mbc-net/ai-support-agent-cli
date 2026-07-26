@@ -234,6 +234,79 @@ describe('agent-runner', () => {
     )
   })
 
+  it('should start directly from an agent-scoped PAT with --token and --project (no --api-url)', async () => {
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'mbc:pat-token-id:pat-raw-secret',
+      project: 'mbc/MBC_01',
+    })
+
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    // apiUrl defaults to the production URL; the PAT is passed through unchanged.
+    expect(MockApiClient).toHaveBeenCalledWith(
+      'https://api.ai-support-agent.com',
+      'mbc:pat-token-id:pat-raw-secret',
+    )
+    // The resolved connection target is logged (i18n runs uninitialized in this
+    // suite, so t() returns the message key). The actual apiUrl interpolation of
+    // these keys is asserted in __tests__/i18n.spec.ts.
+    expect(logger.info).toHaveBeenCalledWith('runner.directConnecting')
+    // A dedicated notice must fire when --api-url was omitted and the default was used.
+    expect(logger.info).toHaveBeenCalledWith('runner.directDefaultApiUrl')
+    expect(mockedSaveConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ lastConnected: expect.any(String) }),
+    )
+  })
+
+  it('should honor an explicit --api-url alongside --token and --project (PAT flow)', async () => {
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'mbc:pat-token-id:pat-raw-secret',
+      apiUrl: 'http://cli-api',
+      project: 'mbc/MBC_01',
+    })
+
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(MockApiClient).toHaveBeenCalledWith('http://cli-api', 'mbc:pat-token-id:pat-raw-secret')
+    // The connection target is still logged...
+    expect(logger.info).toHaveBeenCalledWith('runner.directConnecting')
+    // ...but the "using the default" notice must NOT fire when --api-url is given.
+    expect(logger.info).not.toHaveBeenCalledWith('runner.directDefaultApiUrl')
+  })
+
+  it('should call process.exit(1) when the PAT tenant does not match --project tenant', async () => {
+    mockedLoadConfig.mockReturnValue(null)
+
+    await expect(
+      startAgent({
+        token: 'mbc:pat-token-id:pat-raw-secret',
+        project: 'jcci/JCCI_01',
+      }),
+    ).rejects.toThrow('process.exit called')
+    expect(exitSpy).toHaveBeenCalledWith(1)
+    // ApiClient must never be constructed for a rejected mismatch.
+    expect(MockApiClient).not.toHaveBeenCalled()
+  })
+
+  it('should call process.exit(1) when --project is missing the tenant/project separator', async () => {
+    mockedLoadConfig.mockReturnValue(null)
+
+    await expect(
+      startAgent({
+        token: 'mbc:pat-token-id:pat-raw-secret',
+        project: 'MBC_01',
+      }),
+    ).rejects.toThrow('process.exit called')
+    expect(exitSpy).toHaveBeenCalledWith(1)
+    expect(MockApiClient).not.toHaveBeenCalled()
+  })
+
   it('should fall back to env vars when no config and no CLI args', withEnvVars(
     { [ENV_VARS.TOKEN]: 'env-token', [ENV_VARS.API_URL]: 'http://env-api' },
     async () => {

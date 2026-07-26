@@ -143,6 +143,46 @@ describe('i18n', () => {
       initI18n('en')
       expect(t('runner.starting')).toBe('Starting agent...')
     })
+
+    it('should interpolate the resolved apiUrl into the direct-connect message (en)', () => {
+      const { initI18n, t } = require('../src/i18n')
+      initI18n('en')
+      const message = t('runner.directConnecting', {
+        apiUrl: 'https://api.ai-support-agent.com',
+        tenantCode: 'mbc',
+        projectCode: 'MBC_01',
+      })
+      expect(message).toContain('https://api.ai-support-agent.com')
+      expect(message).toContain('mbc')
+      expect(message).toContain('MBC_01')
+    })
+
+    it('should interpolate the resolved apiUrl into the direct-connect message (ja)', () => {
+      const { initI18n, t } = require('../src/i18n')
+      initI18n('ja')
+      const message = t('runner.directConnecting', {
+        apiUrl: 'https://api.ai-support-agent.com',
+        tenantCode: 'mbc',
+        projectCode: 'MBC_01',
+      })
+      expect(message).toContain('https://api.ai-support-agent.com')
+      expect(message).toContain('MBC_01')
+    })
+
+    it('should interpolate the default apiUrl notice for both locales', () => {
+      const enModule = require('../src/i18n')
+      enModule.initI18n('en')
+      expect(
+        enModule.t('runner.directDefaultApiUrl', { apiUrl: 'https://api.ai-support-agent.com' }),
+      ).toContain('https://api.ai-support-agent.com')
+
+      jest.resetModules()
+      const jaModule = require('../src/i18n')
+      jaModule.initI18n('ja')
+      expect(
+        jaModule.t('runner.directDefaultApiUrl', { apiUrl: 'https://api.ai-support-agent.com' }),
+      ).toContain('https://api.ai-support-agent.com')
+    })
   })
 
   describe('path traversal prevention', () => {
