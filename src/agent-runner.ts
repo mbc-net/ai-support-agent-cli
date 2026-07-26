@@ -1,7 +1,7 @@
 import * as os from 'os'
 
 import { type AutoUpdaterHandle, startAutoUpdater } from './auto-updater'
-import { AGENT_VERSION, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJECT_CODE_CLI_DIRECT, PROJECT_CODE_ENV_DEFAULT, DOCKER_UPDATE_EXIT_CODE, ENV_VARS } from './constants'
+import { AGENT_VERSION, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJECT_CODE_CLI_DIRECT, PROJECT_CODE_ENV_DEFAULT, DOCKER_UPDATE_EXIT_CODE, ENV_VARS } from './constants'
 import { getProjectList, loadConfig, saveConfig } from './config-manager'
 import { t } from './i18n'
 import { logger } from './logger'
@@ -16,7 +16,7 @@ import { ApiClient } from './api-client'
 import { startConfigWatcher } from './config-watcher'
 import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
 import { cleanupStaleServerSetupDirs } from './server-setup/server-setup-runner'
-import { extractTokenId } from './utils/token-utils'
+import { extractTokenId, resolveDirectStartTarget } from './utils/token-utils'
 import { TerminalSession } from './terminal/terminal-session'
 
 export { extractTokenId }
@@ -237,19 +237,61 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
   const envApiUrl = process.env[ENV_VARS.API_URL]
 
   // CLI args > config > env vars
-  if (options.token && options.apiUrl) {
-    const urlError = validateApiUrl(options.apiUrl)
+  //
+  // Direct start (no browser OAuth): an agent token or an agent-scoped Personal
+  // Access Token (PAT) is passed on the command line. Triggered when --token is
+  // combined with either --api-url (legacy agent-token flow) or --project (PAT
+  // flow: `start --token <PAT> --project <tenantCode>/<projectCode>`). When
+  // --api-url is omitted the production API URL is used.
+  if (options.token && (options.apiUrl || options.project)) {
+    const apiUrl = options.apiUrl ?? DEFAULT_API_URL
+    const urlError = validateApiUrl(apiUrl)
     if (urlError) {
       exitWithError(urlError)
     }
     logger.warn(t('runner.cliTokenWarning'))
-    const agentId = extractTokenId(options.token) ?? config?.agentId ?? os.hostname()
-    const project: ProjectRegistration = {
+
+    // Derive tenantCode from the token; take projectCode from --project when given.
+    // Reject a --project whose tenantCode does not match the token's tenantCode.
+    const target = resolveDirectStartTarget(options.token, options.project, {
       tenantCode: 'unknown',
       projectCode: PROJECT_CODE_CLI_DIRECT,
-      token: options.token,
-      apiUrl: options.apiUrl,
+    })
+    if (!target.ok) {
+      if (target.reason === 'tenant-mismatch') {
+        exitWithError(
+          t('runner.tokenProjectTenantMismatch', {
+            tokenTenant: target.tokenTenantCode,
+            projectTenant: target.projectTenantCode,
+          }),
+        )
+      }
+      // `resolveDirectStartTarget` only returns a non-ok result when a --project
+      // was supplied, so it is guaranteed to be defined here.
+      exitWithError(t('runner.projectFormatInvalid', { project: options.project as string }))
     }
+
+    const agentId = extractTokenId(options.token) ?? config?.agentId ?? os.hostname()
+    const project: ProjectRegistration = {
+      tenantCode: target.tenantCode,
+      projectCode: target.projectCode,
+      token: options.token,
+      apiUrl,
+    }
+
+    // Surface the resolved connection target so an accidental connection to the
+    // production API (e.g. --api-url omitted → DEFAULT_API_URL) is visible in the
+    // logs, matching how logMultiProjectStartup prints each project's apiUrl.
+    if (!options.apiUrl) {
+      logger.info(t('runner.directDefaultApiUrl', { apiUrl }))
+    }
+    logger.info(
+      t('runner.directConnecting', {
+        apiUrl,
+        tenantCode: target.tenantCode,
+        projectCode: target.projectCode,
+      }),
+    )
 
     runSingleProject(project, agentId, options, config?.agentChatMode, config?.defaultProjectDir)
     saveConfig({ lastConnected: nowIso() })

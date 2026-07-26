@@ -60,6 +60,25 @@ ai-support-agent add-project          # browser OAuth flow
 ai-support-agent status               # verify registered projects
 ```
 
+### Start with a Personal Access Token (agent scope)
+
+Instead of the browser OAuth flow, you can start an agent with a **Personal Access
+Token (PAT)** that you issue for yourself in the web app. Issue a PAT whose scope
+includes `agent` and whose `projectCode` is set, then start the agent under your own
+permissions ("personal plan"):
+
+```bash
+# The tenant comes from the token; the project is given with --project.
+ai-support-agent start --token <tenantCode>:<tokenId>:<rawToken> --project <tenantCode>/<projectCode>
+```
+
+- No browser login and no prior `login`/`configure` step is required.
+- `--api-url` is optional and defaults to the production API (`https://api.ai-support-agent.com`).
+- The tenant in `--project` must match the tenant the PAT was issued for; a mismatch
+  is rejected before the agent registers.
+- Prefer passing the token via the `AI_SUPPORT_AGENT_TOKEN` environment variable so it
+  does not appear in process listings (`ps aux`).
+
 ### Run in Docker
 
 ```bash
@@ -189,8 +208,8 @@ Options (install):
 ### `start` Options
 
 ```
---token <token>            Auth token (overrides config file)
---api-url <url>            API URL (overrides config file)
+--token <token>            Auth token or agent-scoped PAT (overrides config file)
+--api-url <url>            API URL (defaults to the production API)
 --verbose                  Enable debug logging
 --heartbeat-interval <ms>  Heartbeat interval (default: 60000)
 --no-auto-update           Disable auto-update for this session
@@ -198,7 +217,8 @@ Options (install):
 --no-docker                Force native mode (skip Docker)
 --dockerfile <path>        Custom Dockerfile path (overrides config and bundled default)
 --no-dockerfile-sync       Skip writing the default Dockerfile to config dir
---project <tenantCode/projectCode>  Start only the matching project
+--project <tenantCode/projectCode>  Start only the matching project; with --token
+                                    it selects the project for a direct (PAT) start
 ```
 
 ### `set-project-dir` Options
