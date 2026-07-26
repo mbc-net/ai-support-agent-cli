@@ -84,6 +84,36 @@ export const CHAT_CHUNK_BATCH_MAX_BYTES = 8 * 1024 // 8 KB
 // DB query connection timeout (MySQL connectTimeout / PostgreSQL connectionTimeoutMillis)
 export const DB_CONNECT_TIMEOUT_MS = 10_000
 
+// === Plain-SSH DB tunnel keepalive (db-tunnel.ts) ===
+// The agent process is long-lived, so an idle bastion connection can be dropped
+// by an intermediary (NAT/firewall idle timeout) without either side noticing.
+// ssh2's keepalive sends SSH-level keepalive requests and tears the connection
+// down after `keepaliveCountMax` consecutive unanswered probes.
+/** Interval (ms) between SSH keepalive probes on an established DB tunnel. */
+export const SSH_KEEPALIVE_INTERVAL_MS = 15_000
+/** Number of consecutive unanswered keepalive probes before the SSH connection is closed. */
+export const SSH_KEEPALIVE_COUNT_MAX = 3
+
+// === SSM port-forwarding DB tunnel (db-ssm-tunnel.ts) ===
+// When a DB SSH host is of connectionType 'ssm', the agent opens a local port
+// forward via `aws ssm start-session ... AWS-StartPortForwardingSessionToRemoteHost`
+// (session-manager-plugin) instead of a plain SSH tunnel. These constants bound
+// the "wait until the local forwarded port accepts a TCP connection" poll and the
+// graceful shutdown of the session-manager-plugin subprocess.
+/** Interval between TCP probes of the local forwarded port while waiting for it to open. */
+export const SSM_PORT_POLL_INTERVAL_MS = 200
+/** Per-probe TCP connect timeout when polling the local forwarded port. */
+export const SSM_PORT_PROBE_TIMEOUT_MS = 1_000
+/** Grace period after SIGTERM before escalating to SIGKILL when tearing down the SSM session subprocess. */
+export const SSM_KILL_GRACE_MS = 5_000
+/**
+ * Max bytes of the session-manager-plugin's stderr to retain for diagnostics.
+ * Bounded so a chatty/misbehaving plugin cannot grow the buffer without limit in
+ * the long-lived agent process; only the most recent bytes (the tail, where the
+ * failure reason appears) are kept.
+ */
+export const SSM_STDERR_MAX_BYTES = 8 * 1024
+
 // Command executor constants
 export const CMD_DEFAULT_TIMEOUT = 60_000
 export const MAX_CMD_TIMEOUT = 10 * 60 * 1000 // 10 minutes

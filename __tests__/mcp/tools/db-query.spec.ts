@@ -1,16 +1,27 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 import { ApiClient } from '../../../src/api-client'
-import { validateSql, executeQuery, registerDbQueryTool } from '../../../src/mcp/tools/db-query'
+import { validateSql, executeQuery, executeQueryWithTunnel, registerDbQueryTool } from '../../../src/mcp/tools/db-query'
+import { openSshTunnel } from '../../../src/mcp/tools/db-tunnel'
+import { openSsmTunnel } from '../../../src/mcp/tools/db-ssm-tunnel'
 
 jest.mock('../../../src/api-client')
 jest.mock('../../../src/logger')
+jest.mock('../../../src/mcp/tools/db-tunnel', () => ({
+  openSshTunnel: jest.fn(),
+}))
+jest.mock('../../../src/mcp/tools/db-ssm-tunnel', () => ({
+  openSsmTunnel: jest.fn(),
+}))
 jest.mock('mysql2/promise', () => ({
   createConnection: jest.fn(),
 }))
 jest.mock('pg', () => ({
   Client: jest.fn(),
 }))
+
+const mockOpenSshTunnel = openSshTunnel as jest.MockedFunction<typeof openSshTunnel>
+const mockOpenSsmTunnel = openSsmTunnel as jest.MockedFunction<typeof openSsmTunnel>
 
 describe('db-query tool', () => {
   describe('validateSql', () => {
@@ -693,6 +704,205 @@ describe('db-query tool', () => {
           expect.objectContaining({ ssl: false }),
         )
       })
+    })
+  })
+
+  describe('executeQueryWithTunnel', () => {
+    beforeEach(() => {
+      mockOpenSshTunnel.mockReset()
+      mockOpenSsmTunnel.mockReset()
+      require('mysql2/promise').createConnection.mockReset()
+    })
+
+    it('executes directly (no tunnel) when credentials have no ssh', async () => {
+      const mockConnection = {
+        query: jest.fn().mockResolvedValue([[{ id: 1 }]]),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const mysql2 = require('mysql2/promise')
+      mysql2.createConnection.mockResolvedValue(mockConnection)
+      const getSshCredentials = jest.fn()
+      const apiClient = { getSshCredentials } as unknown as ApiClient
+
+      const result = await executeQueryWithTunnel(
+        apiClient,
+        { name: 'MAIN', engine: 'mysql', host: 'db.example.com', port: 3306, database: 'testdb', user: 'root', password: 'pass' },
+        'SELECT 1',
+      )
+
+      expect(result).toEqual([{ id: 1 }])
+      expect(getSshCredentials).not.toHaveBeenCalled()
+      expect(mockOpenSshTunnel).not.toHaveBeenCalled()
+      const opts = mysql2.createConnection.mock.calls[0][0]
+      expect(opts.host).toBe('db.example.com')
+      expect(opts.port).toBe(3306)
+    })
+
+    it('opens an SSH tunnel and connects to the local endpoint when ssh is set', async () => {
+      const mockConnection = {
+        query: jest.fn().mockResolvedValue([[{ id: 42 }]]),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const mysql2 = require('mysql2/promise')
+      mysql2.createConnection.mockResolvedValue(mockConnection)
+
+      const close = jest.fn().mockResolvedValue(undefined)
+      mockOpenSshTunnel.mockResolvedValue({ host: '127.0.0.1', port: 15000, close })
+
+      const sshCred = { hostId: 'host-1', hostname: '203.0.113.10', port: 22, username: 'ubuntu', authType: 'privateKey', privateKey: 'KEY' }
+      const getSshCredentials = jest.fn().mockResolvedValue(sshCred)
+      const apiClient = { getSshCredentials } as unknown as ApiClient
+
+      const result = await executeQueryWithTunnel(
+        apiClient,
+        { name: 'MAIN', engine: 'mysql', host: 'db.internal', port: 3306, database: 'testdb', user: 'root', password: 'pass', ssh: { hostId: 'host-1' } },
+        'SELECT 1',
+      )
+
+      expect(result).toEqual([{ id: 42 }])
+      expect(getSshCredentials).toHaveBeenCalledWith('host-1')
+      expect(mockOpenSshTunnel).toHaveBeenCalledWith(sshCred, { host: 'db.internal', port: 3306 })
+      const opts = mysql2.createConnection.mock.calls[0][0]
+      expect(opts.host).toBe('127.0.0.1')
+      expect(opts.port).toBe(15000)
+      expect(opts.user).toBe('root')
+      expect(opts.database).toBe('testdb')
+      expect(close).toHaveBeenCalled()
+    })
+
+    it('closes the tunnel even when the query fails', async () => {
+      const mockConnection = {
+        query: jest.fn().mockRejectedValue(new Error('query boom')),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const mysql2 = require('mysql2/promise')
+      mysql2.createConnection.mockResolvedValue(mockConnection)
+
+      const close = jest.fn().mockResolvedValue(undefined)
+      mockOpenSshTunnel.mockResolvedValue({ host: '127.0.0.1', port: 15000, close })
+
+      const getSshCredentials = jest.fn().mockResolvedValue({
+        hostId: 'host-1', hostname: 'h', port: 22, username: 'u', authType: 'privateKey', privateKey: 'KEY',
+      })
+      const apiClient = { getSshCredentials } as unknown as ApiClient
+
+      await expect(executeQueryWithTunnel(
+        apiClient,
+        { name: 'MAIN', engine: 'mysql', host: 'db.internal', port: 3306, database: 'testdb', user: 'root', password: 'pass', ssh: { hostId: 'host-1' } },
+        'SELECT 1',
+      )).rejects.toThrow('query boom')
+
+      expect(close).toHaveBeenCalled()
+    })
+
+    it('opens an SSM tunnel when the credential connectionType is ssm', async () => {
+      const mockConnection = {
+        query: jest.fn().mockResolvedValue([[{ id: 7 }]]),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      require('mysql2/promise').createConnection.mockResolvedValue(mockConnection)
+
+      const close = jest.fn().mockResolvedValue(undefined)
+      mockOpenSsmTunnel.mockResolvedValue({ host: '127.0.0.1', port: 15005, close })
+
+      const ssmCred = {
+        hostId: 'host-ssm',
+        connectionType: 'ssm',
+        instanceId: 'i-0abc123',
+        region: 'ap-northeast-1',
+        awsCredentials: { accessKeyId: 'AK', secretAccessKey: 'SK', sessionToken: 'ST' },
+      }
+      const getSshCredentials = jest.fn().mockResolvedValue(ssmCred)
+      const apiClient = { getSshCredentials } as unknown as ApiClient
+
+      const result = await executeQueryWithTunnel(
+        apiClient,
+        { name: 'MAIN', engine: 'mysql', host: 'db.internal', port: 3306, database: 'testdb', user: 'root', password: 'pass', ssh: { hostId: 'host-ssm' } },
+        'SELECT 1',
+      )
+
+      expect(result).toEqual([{ id: 7 }])
+      expect(getSshCredentials).toHaveBeenCalledWith('host-ssm')
+      expect(mockOpenSsmTunnel).toHaveBeenCalledWith({
+        instanceId: 'i-0abc123',
+        region: 'ap-northeast-1',
+        awsCredentials: { accessKeyId: 'AK', secretAccessKey: 'SK', sessionToken: 'ST' },
+        target: { host: 'db.internal', port: 3306 },
+      })
+      expect(mockOpenSshTunnel).not.toHaveBeenCalled()
+      const opts = require('mysql2/promise').createConnection.mock.calls[0][0]
+      expect(opts.host).toBe('127.0.0.1')
+      expect(opts.port).toBe(15005)
+      expect(close).toHaveBeenCalled()
+    })
+
+    it('uses the plain SSH tunnel when connectionType is ssh', async () => {
+      const mockConnection = {
+        query: jest.fn().mockResolvedValue([[{ id: 1 }]]),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      require('mysql2/promise').createConnection.mockResolvedValue(mockConnection)
+
+      const close = jest.fn().mockResolvedValue(undefined)
+      mockOpenSshTunnel.mockResolvedValue({ host: '127.0.0.1', port: 16000, close })
+
+      const sshCred = { hostId: 'host-1', hostname: 'h', port: 22, username: 'u', authType: 'privateKey', privateKey: 'KEY', connectionType: 'ssh' }
+      const getSshCredentials = jest.fn().mockResolvedValue(sshCred)
+      const apiClient = { getSshCredentials } as unknown as ApiClient
+
+      await executeQueryWithTunnel(
+        apiClient,
+        { name: 'MAIN', engine: 'mysql', host: 'db.internal', port: 3306, database: 'testdb', user: 'root', password: 'pass', ssh: { hostId: 'host-1' } },
+        'SELECT 1',
+      )
+
+      expect(mockOpenSshTunnel).toHaveBeenCalledWith(sshCred, { host: 'db.internal', port: 3306 })
+      expect(mockOpenSsmTunnel).not.toHaveBeenCalled()
+    })
+
+    it('rejects tailscale credentials for DB tunneling', async () => {
+      const getSshCredentials = jest.fn().mockResolvedValue({ hostId: 'host-ts', connectionType: 'tailscale' })
+      const apiClient = { getSshCredentials } as unknown as ApiClient
+
+      await expect(executeQueryWithTunnel(
+        apiClient,
+        { name: 'MAIN', engine: 'mysql', host: 'db.internal', port: 3306, database: 'testdb', user: 'root', password: 'pass', ssh: { hostId: 'host-ts' } },
+        'SELECT 1',
+      )).rejects.toThrow(/Tailscale .* not supported/)
+
+      expect(mockOpenSshTunnel).not.toHaveBeenCalled()
+      expect(mockOpenSsmTunnel).not.toHaveBeenCalled()
+    })
+
+    it('hard-errors on an unknown connectionType (no silent plain-SSH fallback)', async () => {
+      const getSshCredentials = jest.fn().mockResolvedValue({ hostId: 'host-x', connectionType: 'wireguard' })
+      const apiClient = { getSshCredentials } as unknown as ApiClient
+
+      await expect(executeQueryWithTunnel(
+        apiClient,
+        { name: 'MAIN', engine: 'mysql', host: 'db.internal', port: 3306, database: 'testdb', user: 'root', password: 'pass', ssh: { hostId: 'host-x' } },
+        'SELECT 1',
+      )).rejects.toThrow(/Unsupported SSH connectionType for DB tunneling: "wireguard"/)
+
+      expect(mockOpenSshTunnel).not.toHaveBeenCalled()
+      expect(mockOpenSsmTunnel).not.toHaveBeenCalled()
+    })
+
+    it('rejects ssm credentials missing instanceId/region/awsCredentials', async () => {
+      const getSshCredentials = jest.fn().mockResolvedValue({
+        hostId: 'host-ssm', connectionType: 'ssm', region: 'ap-northeast-1',
+        awsCredentials: { accessKeyId: 'AK', secretAccessKey: 'SK' },
+        // instanceId missing
+      })
+      const apiClient = { getSshCredentials } as unknown as ApiClient
+
+      await expect(executeQueryWithTunnel(
+        apiClient,
+        { name: 'MAIN', engine: 'mysql', host: 'db.internal', port: 3306, database: 'testdb', user: 'root', password: 'pass', ssh: { hostId: 'host-ssm' } },
+        'SELECT 1',
+      )).rejects.toThrow(/SSM DB tunnel requires instanceId/)
+
+      expect(mockOpenSsmTunnel).not.toHaveBeenCalled()
     })
   })
 

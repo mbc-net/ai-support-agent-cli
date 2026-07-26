@@ -127,6 +127,15 @@ export interface DbCredentials {
   password: string
   ssl?: { mode: string }
   writePermissions?: { insert: boolean; update: boolean; delete: boolean }
+  /**
+   * When present, the DB connection must be reached through a plain SSH tunnel
+   * (local port forward) to the bastion identified by `hostId`. The agent
+   * resolves the SSH credential via `ApiClient.getSshCredentials(hostId)` and
+   * opens the tunnel before connecting mysql2/pg to the forwarded local
+   * endpoint (see `db-tunnel.ts` / `executeQueryWithTunnel`). Mirrors the
+   * api-side `DbCredentialsResponseDto.ssh` field.
+   */
+  ssh?: { hostId: string }
 }
 
 export interface RepoCredentials {
@@ -136,14 +145,91 @@ export interface RepoCredentials {
   authSecret: string
 }
 
-export interface SshCredentials {
+/** Fields common to every SSH credential the agent resolves, regardless of transport. */
+interface SshCredentialCommon {
   hostId: string
+}
+
+/**
+ * Plain-SSH connection fields (a bastion reached over a real SSH channel). These
+ * are required for the plain-SSH transport and for the `ssh_exec` JIT path
+ * (`SshExecCredential`), but absent from the SSM transport's credential response
+ * (`SshCredentialsResponseDto` returns no `privateKey` for `connectionType:
+ * 'ssm'`), which carries `instanceId`/`region`/`awsCredentials` instead.
+ */
+interface PlainSshConnectionFields {
   hostname: string
   port: number
   username: string
   authType: string
+  /** Holds SSH key material or, for `authType: 'password'`, a plaintext password. SECURITY: never log. */
   privateKey: string
 }
+
+/**
+ * Short-lived AWS credentials used to authenticate the `aws ssm start-session`
+ * subprocess (connectionType === 'ssm' only). SECURITY: never log these.
+ */
+export interface SsmAwsCredentials {
+  accessKeyId: string
+  secretAccessKey: string
+  sessionToken?: string
+}
+
+/**
+ * Plain SSH bastion credential (connectionType `'ssh'` or undefined). Reached
+ * over a real SSH channel — see `db-tunnel.ts` / `openSshTunnel`. The plain-SSH
+ * connection fields (hostname/port/username/authType/privateKey) are required.
+ */
+export interface PlainSshCredentials extends SshCredentialCommon, PlainSshConnectionFields {
+  connectionType?: 'ssh'
+}
+
+/**
+ * SSM-managed instance credential (connectionType `'ssm'`). Reached via
+ * `aws ssm start-session ... AWS-StartPortForwardingSessionToRemoteHost`
+ * (session-manager-plugin) — see `db-ssm-tunnel.ts` / `openSsmTunnel`. The api
+ * returns no `privateKey` for this transport; `instanceId`/`region`/
+ * `awsCredentials` are required instead and the plain-SSH fields are absent.
+ */
+export interface SsmDbCredentials extends SshCredentialCommon {
+  connectionType: 'ssm'
+  /** SSM-managed target instance id. */
+  instanceId: string
+  /** AWS region the SSM session runs in. */
+  region: string
+  awsCredentials: SsmAwsCredentials
+  hostname?: undefined
+  port?: undefined
+  username?: undefined
+  authType?: undefined
+  privateKey?: undefined
+}
+
+/**
+ * Tailscale host credential (connectionType `'tailscale'`). Not supported for DB
+ * tunneling — `openTunnelForCredential` rejects it with a hard error. Modeled so
+ * the discriminated union stays exhaustive over the api's `connectionType` values.
+ */
+export interface TailscaleDbCredentials extends SshCredentialCommon {
+  connectionType: 'tailscale'
+  hostname?: string
+  port?: number
+  username?: string
+  authType?: string
+  privateKey?: string
+}
+
+/**
+ * Credential returned by `ApiClient.getSshCredentials(hostId)` for the DB tunnel
+ * path. A discriminated union on `connectionType` so the type — not just runtime
+ * checks — expresses that the plain-SSH transport requires
+ * hostname/port/username/authType/privateKey while the SSM transport requires
+ * instanceId/region/awsCredentials. Mirrors the api-side
+ * `SshCredentialsResponseDto` (whose plain-SSH fields are non-null only for the
+ * SSH transport).
+ */
+export type SshCredentials = PlainSshCredentials | SsmDbCredentials | TailscaleDbCredentials
 
 /**
  * The only two `authType` values the agent CLI knows how to act on: whether
@@ -169,14 +255,20 @@ export function isSupportedSshAuthType(authType: string): authType is SshAuthTyp
 
 /**
  * SSH connection parameters returned by the `ssh_exec` JIT credential fetch
- * (see `ssh-credential-client.ts`). Extends the base `SshCredentials` shape
- * with the fields introduced by Tailscale support (admin-docs
+ * (see `ssh-credential-client.ts`). Shares the plain-SSH connection fields
+ * (`PlainSshConnectionFields`) — which the `ssh_exec` path always requires — and
+ * adds the fields introduced by Tailscale support (admin-docs
  * `docs/specifications/ssh-tailscale-support.md`, section 3).
+ *
+ * This is a separate type from the DB-tunnel `SshCredentials` union: the
+ * `ssh_exec` path never uses the SSM transport, so its base connection fields
+ * stay required (server-setup-runner.ts / ssh-executor.ts rely on them), while
+ * the DB-tunnel union makes them optional for the SSM variant.
  *
  * The api-side `ssh_exec` credential endpoint is implemented in a later
  * phase (design doc: "api側の実装は別フェーズ(フェーズA/D)で拡張される"), so
- * every field beyond the base `SshCredentials` shape stays optional here —
- * this type must tolerate a response that does not yet include them.
+ * every Tailscale field stays optional here — this type must tolerate a
+ * response that does not yet include them.
  *
  * When `connectionType === 'tailscale'`, `tailnetHostname` (and optionally
  * `socksPort`, default 1055) identify the SOCKS5 route through the ECS
@@ -186,7 +278,7 @@ export function isSupportedSshAuthType(authType: string): authType is SshAuthTyp
  * up --authkey` bootstrap; the agent CLI's SSH executor never reads it
  * directly and must never log it.
  */
-export interface SshExecCredential extends SshCredentials {
+export interface SshExecCredential extends SshCredentialCommon, PlainSshConnectionFields {
   connectionType?: 'ssh' | 'tailscale'
   tailnetHostname?: string
   socksPort?: number
@@ -220,6 +312,19 @@ export interface E2eSupportFile {
 
 export interface E2eSupportFilesResponse {
   files: E2eSupportFile[]
+}
+
+/**
+ * E2E 実行トリガー payload に載る Basic 認証（HTTP Basic）情報。
+ *
+ * 平文パスワードは payload に含めない設計で、`passwordVariableKey` は E2E
+ * シークレット変数マップ（`getE2eEnvironmentVariables(environmentId)` が返す
+ * 復号済み map）のキー名を指す。agent はそのキーで password を解決し、
+ * Playwright の `use.httpCredentials` に env 参照で注入する。
+ */
+export interface E2eBasicAuth {
+  username: string
+  passwordVariableKey: string
 }
 
 /**
