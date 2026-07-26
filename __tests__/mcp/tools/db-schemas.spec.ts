@@ -2,15 +2,21 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 import { ApiClient } from '../../../src/api-client'
 import { registerDbSchemasTool } from '../../../src/mcp/tools/db-schemas'
+import { openSshTunnel } from '../../../src/mcp/tools/db-tunnel'
 
 jest.mock('../../../src/api-client')
 jest.mock('../../../src/logger')
+jest.mock('../../../src/mcp/tools/db-tunnel', () => ({
+  openSshTunnel: jest.fn(),
+}))
 jest.mock('mysql2/promise', () => ({
   createConnection: jest.fn(),
 }))
 jest.mock('pg', () => ({
   Client: jest.fn(),
 }))
+
+const mockOpenSshTunnel = openSshTunnel as jest.MockedFunction<typeof openSshTunnel>
 
 describe('db-schemas tool', () => {
   let toolCallback: (args: { name: string }) => Promise<unknown>
@@ -95,6 +101,47 @@ describe('db-schemas tool', () => {
           text: JSON.stringify([{ table_name: 'users', column_name: 'id', data_type: 'integer' }], null, 2),
         }],
       })
+    })
+
+    it('should open an SSH tunnel when the connection has ssh configured', async () => {
+      const mockConnection = {
+        query: jest.fn().mockResolvedValue([[{ TABLE_NAME: 'users', COLUMN_NAME: 'id' }]]),
+        end: jest.fn().mockResolvedValue(undefined),
+      }
+      const mysql2 = require('mysql2/promise')
+      mysql2.createConnection.mockReset()
+      mysql2.createConnection.mockResolvedValue(mockConnection)
+
+      const close = jest.fn().mockResolvedValue(undefined)
+      mockOpenSshTunnel.mockReset()
+      mockOpenSshTunnel.mockResolvedValue({ host: '127.0.0.1', port: 16000, close })
+
+      const sshCred = { hostId: 'host-1', hostname: 'h', port: 22, username: 'u', authType: 'privateKey', privateKey: 'KEY' }
+      const getSshCredentials = jest.fn().mockResolvedValue(sshCred)
+
+      const mockServer = {
+        tool: jest.fn().mockImplementation((_n: string, _d: string, _s: unknown, cb: typeof toolCallback) => {
+          toolCallback = cb
+        }),
+      } as unknown as McpServer
+      const mockClient = {
+        getDbCredentials: jest.fn().mockResolvedValue({
+          name: 'MAIN', engine: 'mysql', host: 'db.internal', port: 3306,
+          database: 'testdb', user: 'root', password: 'pass', ssh: { hostId: 'host-1' },
+        }),
+        getSshCredentials,
+      } as unknown as ApiClient
+
+      registerDbSchemasTool(mockServer, mockClient)
+
+      await toolCallback({ name: 'MAIN' })
+
+      expect(getSshCredentials).toHaveBeenCalledWith('host-1')
+      expect(mockOpenSshTunnel).toHaveBeenCalledWith(sshCred, { host: 'db.internal', port: 3306 })
+      const opts = mysql2.createConnection.mock.calls[0][0]
+      expect(opts.host).toBe('127.0.0.1')
+      expect(opts.port).toBe(16000)
+      expect(close).toHaveBeenCalled()
     })
 
     it('should handle errors', async () => {

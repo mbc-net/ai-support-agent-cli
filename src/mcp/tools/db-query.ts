@@ -3,7 +3,9 @@ import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
 import { DB_CONNECT_TIMEOUT_MS } from '../../constants'
-import type { DbCredentials } from '../../types'
+import type { DbCredentials, SshCredentials } from '../../types'
+import { openSsmTunnel } from './db-ssm-tunnel'
+import { type DbTunnel, openSshTunnel } from './db-tunnel'
 import { mcpErrorResponse, mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
 
 /** コメントインジェクション検出パターン */
@@ -231,6 +233,87 @@ export async function executeQuery(
   throw new Error(`Unsupported database engine: ${credentials.engine}`)
 }
 
+/**
+ * Open the tunnel appropriate for the resolved SSH credential's transport.
+ *
+ * Both branches return the same `DbTunnel` (`{ host, port, close }`) shape so
+ * the caller stays transport-agnostic:
+ *  - `'ssm'`: `aws ssm start-session` local port forward (`openSsmTunnel`).
+ *    Requires instanceId/region/awsCredentials; フォールバック禁止 — missing
+ *    fields are a hard error, never a silent plain-SSH fallback.
+ *  - `'tailscale'`: not supported for DB tunneling (hard error).
+ *  - `'ssh'` / undefined: plain SSH local port forward (`openSshTunnel`).
+ *  - any other value: hard error. フォールバック禁止 — an unrecognized transport
+ *    must never silently fall back to the plain-SSH path (same discipline as
+ *    `isSupportedSshAuthType`). `connectionType` arrives over the network, so it
+ *    is validated at runtime even though the type restricts it.
+ */
+function openTunnelForCredential(
+  cred: SshCredentials,
+  target: { host: string; port: number },
+): Promise<DbTunnel> {
+  const connectionType: string | undefined = cred.connectionType
+  if (
+    connectionType !== undefined &&
+    connectionType !== 'ssh' &&
+    connectionType !== 'ssm' &&
+    connectionType !== 'tailscale'
+  ) {
+    throw new Error(
+      `Unsupported SSH connectionType for DB tunneling: ${JSON.stringify(connectionType)}`,
+    )
+  }
+
+  if (cred.connectionType === 'ssm') {
+    if (!cred.instanceId || !cred.region || !cred.awsCredentials) {
+      throw new Error(
+        'SSM DB tunnel requires instanceId, region, and awsCredentials from the SSH credential response',
+      )
+    }
+    return openSsmTunnel({
+      instanceId: cred.instanceId,
+      region: cred.region,
+      awsCredentials: cred.awsCredentials,
+      target,
+    })
+  }
+
+  if (cred.connectionType === 'tailscale') {
+    throw new Error('Tailscale SSH hosts are not supported for DB tunneling')
+  }
+
+  return openSshTunnel(cred, target)
+}
+
+/**
+ * Execute a query against `credentials`, transparently routing through an SSH
+ * (plain or SSM) tunnel when `credentials.ssh` is set.
+ *
+ * When tunneled: resolves the SSH credential (`apiClient.getSshCredentials`),
+ * opens a local port forward to the DB host/port (plain SSH or SSM depending on
+ * the credential's `connectionType`), connects mysql2/pg to the forwarded
+ * `127.0.0.1:<localPort>` endpoint (all other connection fields —
+ * user/password/database/ssl — unchanged), and always closes the tunnel in a
+ * `finally`. When `ssh` is absent, connects directly as before.
+ */
+export async function executeQueryWithTunnel(
+  apiClient: ApiClient,
+  credentials: DbCredentials,
+  sql: string,
+): Promise<unknown[]> {
+  if (!credentials.ssh?.hostId) {
+    return executeQuery(credentials, sql)
+  }
+
+  const cred = await apiClient.getSshCredentials(credentials.ssh.hostId)
+  const tunnel = await openTunnelForCredential(cred, { host: credentials.host, port: credentials.port })
+  try {
+    return await executeQuery({ ...credentials, host: tunnel.host, port: tunnel.port }, sql)
+  } finally {
+    await tunnel.close()
+  }
+}
+
 /** db_query ツールを MCP サーバーに登録する */
 export function registerDbQueryTool(server: McpServer, apiClient: ApiClient): void {
   server.tool(
@@ -250,8 +333,8 @@ export function registerDbQueryTool(server: McpServer, apiClient: ApiClient): vo
         return mcpErrorResponse(validation.error!)
       }
 
-      // Execute query
-      const rows = await executeQuery(credentials, sql)
+      // Execute query (opens a plain SSH tunnel first when configured)
+      const rows = await executeQueryWithTunnel(apiClient, credentials, sql)
 
       // Format result
       return mcpJsonResponse(rows)
