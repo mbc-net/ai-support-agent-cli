@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { ApiClient } from '../../api-client'
-import { executeQuery } from './db-query'
+import { executeQueryWithTunnel } from './db-query'
 import { mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
 
 const MYSQL_SCHEMA_QUERY = `
@@ -58,7 +58,7 @@ export function registerDbSchemasTool(server: McpServer, apiClient: ApiClient): 
         ? MYSQL_SCHEMA_QUERY
         : PG_SCHEMA_QUERY
 
-      const rows = await executeQuery(credentials, query)
+      const rows = await executeQueryWithTunnel(apiClient, credentials, query)
 
       return mcpJsonResponse(rows)
     }),

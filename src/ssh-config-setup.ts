@@ -3,7 +3,7 @@ import * as path from 'path'
 
 import type { ApiClient } from './api-client'
 import { logger } from './logger'
-import type { ProjectConfigResponse, SshCredentials } from './types'
+import type { PlainSshCredentials, ProjectConfigResponse } from './types'
 import { atomicWriteFile, getErrorMessage } from './utils'
 import { normalizePemKey } from './utils/pem-key'
 
@@ -43,6 +43,15 @@ export async function setupSshConfig(
   for (const host of sshConfig.hosts) {
     try {
       const credentials = await client.getSshCredentials(host.hostId)
+      // Only plain-SSH hosts have a private key to write to disk. SSM/Tailscale
+      // credentials carry no `privateKey` (their transport is opened elsewhere),
+      // so skip them here rather than writing an empty/undefined key file.
+      if (credentials.connectionType === 'ssm' || credentials.connectionType === 'tailscale') {
+        logger.info(
+          `[ssh] Skipping key file for host ${host.hostId} (${host.name}): connectionType ${credentials.connectionType} has no SSH key`,
+        )
+        continue
+      }
       writeKeyFile(sshDir, credentials)
       configEntries.push({
         hostId: credentials.hostId,
@@ -69,7 +78,7 @@ export async function setupSshConfig(
 /**
  * Write a private key file to {sshDir}/ai-support-agent-{hostId}
  */
-function writeKeyFile(sshDir: string, credentials: SshCredentials): void {
+function writeKeyFile(sshDir: string, credentials: PlainSshCredentials): void {
   const keyPath = path.join(sshDir, `${KEY_FILE_PREFIX}${credentials.hostId}`)
   const normalizedKey = normalizePemKey(credentials.privateKey)
   atomicWriteFile(keyPath, normalizedKey)
