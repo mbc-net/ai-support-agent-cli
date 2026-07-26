@@ -43,3 +43,52 @@ export function extractTenantCodeFromToken(token: string): string {
   const parts = token.split(':')
   return parts.length >= 3 ? parts[0] : ''
 }
+
+/**
+ * Resolution result for a direct `start --token ... [--project ...]` invocation.
+ */
+export type DirectStartTargetResult =
+  | { ok: true; tenantCode: string; projectCode: string }
+  | { ok: false; reason: 'invalid-project-format' }
+  | { ok: false; reason: 'tenant-mismatch'; tokenTenantCode: string; projectTenantCode: string }
+
+/**
+ * Resolve the tenant/project target for a direct `start` without browser OAuth.
+ *
+ * Both agent tokens and agent-scoped Personal Access Tokens (PAT) share the
+ * `{tenantCode}:{tokenId}:{rawToken}` format, so the tenantCode is always derived
+ * from the token itself:
+ *
+ * - Without `--project`: the caller-supplied fallback is used (legacy CLI-direct
+ *   mode where the server resolves the project from the token).
+ * - With `--project "tenantCode/projectCode"`: tenantCode/projectCode come from the
+ *   flag. The flag's tenantCode must match the tenantCode embedded in the token; a
+ *   mismatch is rejected so a PAT issued for one tenant cannot be pointed at another.
+ *   When the token carries no embedded tenantCode (non-standard token), the flag's
+ *   tenantCode is trusted as-is.
+ */
+export function resolveDirectStartTarget(
+  token: string,
+  project: string | undefined,
+  fallback: { tenantCode: string; projectCode: string },
+): DirectStartTargetResult {
+  if (!project) {
+    return { ok: true, tenantCode: fallback.tenantCode, projectCode: fallback.projectCode }
+  }
+
+  const slashIdx = project.indexOf('/')
+  // Reject when there is no separator, an empty tenantCode, or an empty projectCode.
+  if (slashIdx <= 0 || slashIdx === project.length - 1) {
+    return { ok: false, reason: 'invalid-project-format' }
+  }
+
+  const projectTenantCode = project.substring(0, slashIdx)
+  const projectCode = project.substring(slashIdx + 1)
+  const tokenTenantCode = extractTenantCodeFromToken(token)
+
+  if (tokenTenantCode && tokenTenantCode !== projectTenantCode) {
+    return { ok: false, reason: 'tenant-mismatch', tokenTenantCode, projectTenantCode }
+  }
+
+  return { ok: true, tenantCode: projectTenantCode, projectCode }
+}
