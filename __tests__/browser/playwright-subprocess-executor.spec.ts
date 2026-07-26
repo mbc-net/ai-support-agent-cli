@@ -1905,7 +1905,23 @@ describe('runPlaywrightSubprocess', () => {
    * yields to the libuv poll phase so real fs IO can complete; a process.nextTick
    * loop would starve that phase and the writes would never resolve. */
   async function waitForSpawn(): Promise<void> {
-    for (let i = 0; i < 1000 && mockSpawn.mock.calls.length === 0; i++) {
+    // Wait for runPlaywrightSubprocess to finish its real async pre-spawn setup
+    // (mkdir + writeFile) and actually spawn — only then is the timeout timer
+    // armed, so advancing fake timers becomes meaningful. A fixed iteration cap
+    // is NOT safe here: on a loaded CI runner the pre-spawn fs I/O can take more
+    // event-loop turns than the cap (libuv threadpool contention across parallel
+    // jest workers), so waitForSpawn would return BEFORE spawn, leave the timer
+    // un-armed, and the SIGINT assertions would fail intermittently (the CI
+    // flake). Bound the wait by REAL wall-clock time — jest.getRealSystemTime()
+    // returns real time even under fake timers — so it is robust to any load yet
+    // can never hang.
+    const startedAt = jest.getRealSystemTime()
+    while (mockSpawn.mock.calls.length === 0) {
+      if (jest.getRealSystemTime() - startedAt > 10_000) {
+        throw new Error(
+          'waitForSpawn: playwright was never spawned within 10s (test setup error)',
+        )
+      }
       await new Promise<void>((resolve) => setImmediate(resolve))
     }
   }
@@ -2152,6 +2168,73 @@ describe('runPlaywrightSubprocess', () => {
       expect(result.timedOut).toBe(true)
       expect(result.errorOutput).toMatch(/timed out/i)
     } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('arms the timeout timer even when pre-spawn fs setup is slow — waitForSpawn must wait for the real spawn, not a fixed poll cap (regression: CI-only SIGINT flake)', async () => {
+    // Regression for the intermittent CI failure "Expected: SIGINT" in the
+    // force-resolve / SIGINT-escalation tests. runPlaywrightSubprocess performs
+    // real async fs work (mkdir + writeFile) BEFORE it spawns and arms the
+    // timeout timer. A fixed-iteration waitForSpawn can exhaust its cap before
+    // that fs work completes on a heavily-loaded CI runner (libuv threadpool
+    // contention across parallel jest workers), returning BEFORE spawn. The
+    // timer is then still un-armed when the test calls advanceTimersByTime, so
+    // no SIGINT is sent and the assertion fails. waitForSpawn must therefore
+    // wait for the actual spawn regardless of how many event-loop turns the
+    // pre-spawn fs setup takes.
+    //
+    // This reproduces that load deterministically by delaying the first
+    // pre-spawn fs write by far more event-loop turns than any fixed poll cap.
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] })
+    const yieldTurns = async (n: number): Promise<void> => {
+      for (let i = 0; i < n; i++) {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+      }
+    }
+    const realWriteFile = fs.writeFile.bind(fs)
+    let delayedOnce = false
+    const writeFileSpy = jest
+      .spyOn(fs, 'writeFile')
+      .mockImplementation((async (...args: Parameters<typeof fs.writeFile>) => {
+        // Delay only the first write so spawn happens well past a fixed cap.
+        if (!delayedOnce) {
+          delayedOnce = true
+          await yieldTurns(3000)
+        }
+        return (realWriteFile as (...a: unknown[]) => Promise<void>)(...args)
+      }) as unknown as typeof fs.writeFile)
+    try {
+      const child = new EventEmitter() as any
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      child.stdin = null
+      child.kill = jest.fn()
+      mockSpawn.mockReturnValue(child as any)
+      const executionId = uniqueExecutionId('slow-setup-arm')
+
+      const resultPromise = runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+        timeoutMs: 100,
+      })
+
+      // Must wait for the ACTUAL spawn (after the slow fs write), not a bounded
+      // number of turns. With a fixed-cap waitForSpawn this returns early and
+      // the assertion below fails, reproducing the CI flake.
+      await waitForSpawn()
+      writeFileSpy.mockRestore()
+
+      // The timeout timer is armed (spawn happened) → advancing fires SIGINT.
+      jest.advanceTimersByTime(100)
+      expect(child.kill).toHaveBeenLastCalledWith('SIGINT')
+
+      // Settle so nothing leaks.
+      jest.useRealTimers()
+      child.emit('close', null)
+      await resultPromise
+    } finally {
+      writeFileSpy.mockRestore()
       jest.useRealTimers()
     }
   })
