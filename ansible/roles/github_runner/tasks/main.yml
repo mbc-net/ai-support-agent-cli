@@ -1,0 +1,320 @@
+---
+# github_runner role: downloads the GitHub Actions self-hosted runner release
+# tarball, registers this host as a self-hosted runner (repo- or org-scoped),
+# and installs it as a system service via the runner's own `svc.sh`.
+#
+# **Two registration token flows (exactly one is required):**
+#   1. `github_runner_pat` — a Personal Access Token. This role calls the
+#      GitHub API (via `ansible.builtin.uri`) to mint a short-lived
+#      *registration token* on your behalf (repo endpoint
+#      `/repos/{owner}/{repo}/actions/runners/registration-token` or org
+#      endpoint `/orgs/{org}/actions/runners/registration-token`). The PAT is a
+#      long-lived secret; it is sent only as the `Authorization` header of a
+#      `no_log: true` `uri` task (task args are redacted by no_log at every
+#      verbosity, unlike Ansible `environment:`) and NEVER touches argv, a
+#      shell command line, or `environment:`.
+#   2. `github_runner_registration_token` — a short-lived registration token
+#      obtained out-of-band and used directly.
+# Setting both, or neither, is an error (asserted below).
+#
+# **config.sh argv limitation.** GitHub's `config.sh` accepts the
+# registration token ONLY via the `--token` argv flag; there is no
+# environment-variable option for it. The token therefore unavoidably appears
+# on argv during `config.sh` (visible via `ps` for the duration of that one
+# command). Exposure is bounded because a GitHub *registration* token is
+# short-lived (~1 hour) and single-purpose; the task is still marked
+# `no_log: true`, and the token is read from a 0600 tempfile via `$(cat ...)`
+# (never Jinja-interpolated, so a token containing shell metacharacters cannot
+# inject).
+#
+# **Shell-injection safety for non-secret inputs.** Every tenant-supplied,
+# non-secret value that reaches a `shell` task (`github_runner_url`, the
+# derived API URL, `github_runner_dir`, `github_runner_user`, ...) is passed
+# via `environment:` and referenced as a quoted `"$VAR"` — NEVER
+# Jinja-interpolated into the script text. The task guard
+# (`src/server-setup/ansible-task-guard.ts`) validates include_role var
+# *names* only, not their *values*, so a value like
+# `github_runner_url: "x'; rm -rf / #"` must not be able to break out of the
+# script; routing through `environment:` (which the shell treats as data, not
+# code) closes that hole. Module parameters (`get_url`/`unarchive`/`file`/
+# `stat`) are not shell-interpreted, so Jinja there is safe.
+#
+# **Failure diagnostics.** `no_log: true` censors the ENTIRE task result, so
+# the register/config steps use `failed_when: false` + a separate, non-`no_log`
+# `fail` task that surfaces only a non-secret status/exit code. This also lets
+# the token temp file be cleaned up unconditionally BEFORE the failure is
+# raised, so a plaintext token never survives a failed run on disk.
+#
+# **org vs repo.** `--runnergroup` is only valid for org-scoped runners and is
+# passed ONLY when `github_runner_scope: org`.
+#
+# **Dependency on os_init.** The runner is owned by and runs as
+# `github_runner_user` (default `appuser`), which must already exist — create
+# it via the os_init bundled role first (this role asserts it exists but does
+# not create it), and keep the name in sync with os_init's user.
+
+- name: "github_runner : Compute which token flow is configured"
+  ansible.builtin.set_fact:
+    github_runner_has_pat: "{{ (github_runner_pat | default('') | trim | length) > 0 }}"
+    github_runner_has_regtoken: "{{ (github_runner_registration_token | default('') | trim | length) > 0 }}"
+  no_log: true
+
+- name: "github_runner : Validate exactly one token flow is configured"
+  ansible.builtin.assert:
+    that:
+      - (github_runner_has_pat | bool) != (github_runner_has_regtoken | bool)
+    fail_msg: >-
+      Exactly one of github_runner_pat (to auto-generate a registration token
+      via the GitHub API) or github_runner_registration_token (used directly)
+      must be set — not both, and not neither.
+
+- name: "github_runner : Validate github_runner_url is set"
+  ansible.builtin.assert:
+    that:
+      - (github_runner_url | default('') | trim | length) > 0
+    fail_msg: >-
+      github_runner_url is required (https://github.com/OWNER/REPO for repo
+      scope, or https://github.com/ORG for org scope).
+
+- name: "github_runner : Validate github_runner_scope is supported"
+  ansible.builtin.assert:
+    that:
+      - (github_runner_scope | default('repo')) in ['repo', 'org']
+    fail_msg: >-
+      github_runner_scope must be one of 'repo' or 'org': got
+      {{ github_runner_scope | default('repo') | to_json }}
+
+- name: "github_runner : Check the runner OS user exists"
+  ansible.builtin.command:
+    # command module (not shell) — args are exec'd directly, so a crafted
+    # github_runner_user cannot shell-inject here.
+    argv:
+      - getent
+      - passwd
+      - "{{ github_runner_user | default('appuser') }}"
+  register: github_runner_user_check
+  changed_when: false
+  failed_when: false
+
+- name: "github_runner : Assert the runner OS user exists"
+  ansible.builtin.assert:
+    that:
+      - github_runner_user_check.rc == 0
+    fail_msg: >-
+      OS user '{{ github_runner_user | default('appuser') }}' does not exist.
+      Create it via the os_init bundled role first (github_runner_user must
+      match os_init's user).
+
+- name: "github_runner : Compute effective runner directory and CPU architecture"
+  ansible.builtin.set_fact:
+    github_runner_dir_effective: >-
+      {{ github_runner_dir | default('/home/' + (github_runner_user | default('appuser')) + '/actions-runner') }}
+    github_runner_arch: "{{ 'x64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+
+- name: "github_runner : Resolve the latest runner release (version=latest only)"
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/actions/runner/releases/latest
+    return_content: true
+    timeout: 30
+  register: github_runner_latest_release
+  when: (github_runner_version | default('latest')) == 'latest'
+
+- name: "github_runner : Resolve the effective runner version"
+  ansible.builtin.set_fact:
+    github_runner_version_resolved: >-
+      {{ (github_runner_latest_release.json.tag_name | regex_replace('^v', ''))
+         if (github_runner_version | default('latest')) == 'latest'
+         else github_runner_version }}
+
+- name: "github_runner : Create the runner directory owned by the runner user"
+  ansible.builtin.file:
+    path: "{{ github_runner_dir_effective }}"
+    state: directory
+    owner: "{{ github_runner_user | default('appuser') }}"
+    group: "{{ github_runner_user | default('appuser') }}"
+    mode: '0755'
+
+- name: "github_runner : Download the GitHub Actions runner tarball"
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/actions/runner/releases/download/v{{ github_runner_version_resolved }}/actions-runner-linux-{{ github_runner_arch }}-{{ github_runner_version_resolved }}.tar.gz
+    dest: "{{ github_runner_dir_effective }}/actions-runner.tar.gz"
+    owner: "{{ github_runner_user | default('appuser') }}"
+    mode: '0644'
+    timeout: 60
+
+- name: "github_runner : Unpack the runner tarball"
+  ansible.builtin.unarchive:
+    src: "{{ github_runner_dir_effective }}/actions-runner.tar.gz"
+    dest: "{{ github_runner_dir_effective }}"
+    remote_src: true
+    owner: "{{ github_runner_user | default('appuser') }}"
+    group: "{{ github_runner_user | default('appuser') }}"
+    creates: "{{ github_runner_dir_effective }}/config.sh"
+
+- name: "github_runner : Compute the registration-token API endpoint (non-secret)"
+  vars:
+    github_runner_slug: >-
+      {{ github_runner_url | regex_replace('^https?://github.com/', '') | regex_replace('/$', '') }}
+  ansible.builtin.set_fact:
+    github_runner_api_url: >-
+      {{ ('https://api.github.com/repos/' + github_runner_slug + '/actions/runners/registration-token')
+         if (github_runner_scope | default('repo')) == 'repo'
+         else ('https://api.github.com/orgs/' + github_runner_slug + '/actions/runners/registration-token') }}
+
+# --- PAT flow: mint a short-lived registration token via the GitHub API ---
+# The PAT is sent only as the Authorization header of this no_log uri task
+# (task args are redacted by no_log). No PAT tempfile, no curl, no shell — so
+# there is no argv/shell-injection surface for the PAT.
+- name: "github_runner : Generate a registration token via the GitHub API (PAT flow)"
+  ansible.builtin.uri:
+    url: "{{ github_runner_api_url }}"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ github_runner_pat }}"
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    status_code: 201
+    timeout: 30
+  register: github_runner_regtoken_resp
+  failed_when: false
+  no_log: true
+  when: github_runner_has_pat | bool
+
+- name: "github_runner : Fail if the GitHub API did not return a registration token (PAT flow)"
+  # Non-no_log: surfaces only the HTTP status (never the PAT or the minted
+  # token) so an invalid/insufficient PAT (401/403) or wrong owner/repo/org in
+  # github_runner_url (404) is diagnosable. Placed BEFORE the token temp file
+  # is created, so a PAT-mint failure leaves nothing behind on disk.
+  ansible.builtin.fail:
+    msg: >-
+      Failed to mint a GitHub registration token (HTTP status
+      {{ github_runner_regtoken_resp.status | default('n/a') }}). Check that
+      github_runner_pat is valid with the required scope and that
+      github_runner_url ({{ github_runner_url }}, scope
+      {{ github_runner_scope | default('repo') }}) is correct.
+  when:
+    - github_runner_has_pat | bool
+    - (github_runner_regtoken_resp.status | default(0)) != 201
+
+- name: "github_runner : Create a secure temp file for the registration token"
+  # Created only AFTER the PAT-mint diagnostic above, so a failed PAT mint
+  # halts the play before any temp file exists (nothing to leave behind). Both
+  # flows (PAT-minted / directly supplied) write the token into this file next.
+  ansible.builtin.tempfile:
+    state: file
+    prefix: github_runner_regtoken_
+  register: github_runner_regtoken_tempfile
+  changed_when: false
+
+- name: "github_runner : Write the minted registration token to its temp file (PAT flow)"
+  ansible.builtin.copy:
+    content: "{{ github_runner_regtoken_resp.json.token }}"
+    dest: "{{ github_runner_regtoken_tempfile.path }}"
+    owner: "{{ github_runner_user | default('appuser') }}"
+    mode: '0600'
+  no_log: true
+  changed_when: true
+  when: github_runner_has_pat | bool
+
+# --- Direct flow: use the supplied registration token as-is ---
+- name: "github_runner : Write the supplied registration token to its temp file (direct flow)"
+  ansible.builtin.copy:
+    content: "{{ github_runner_registration_token }}"
+    dest: "{{ github_runner_regtoken_tempfile.path }}"
+    owner: "{{ github_runner_user | default('appuser') }}"
+    mode: '0600'
+  no_log: true
+  changed_when: true
+  when: github_runner_has_regtoken | bool
+
+- name: "github_runner : Configure the runner (config.sh) as the runner user"
+  # config.sh accepts the token only via `--token` argv (no env option; see
+  # header). The token is read from its 0600 temp file via `$(cat ...)`; ALL
+  # other (non-secret) options come from `environment:` and are referenced as
+  # quoted "$VAR" — never Jinja-interpolated into the script (shell-injection
+  # safety). `failed_when: false` so the cleanup + diagnostic below always run.
+  ansible.builtin.shell: |
+    set -e
+    cd "$RUNNER_DIR"
+    ARGS=(--unattended
+      --url "$RUNNER_URL"
+      --token "$(cat '{{ github_runner_regtoken_tempfile.path }}')"
+      --name "$RUNNER_NAME"
+      --labels "$RUNNER_LABELS"
+      --work "$RUNNER_WORK")
+    if [ "$RUNNER_REPLACE" = "true" ]; then
+      ARGS+=(--replace)
+    fi
+    if [ "$RUNNER_IS_ORG" = "true" ]; then
+      ARGS+=(--runnergroup "$RUNNER_GROUP")
+    fi
+    if [ "$RUNNER_EPHEMERAL" = "true" ]; then
+      ARGS+=(--ephemeral)
+    fi
+    ./config.sh "${ARGS[@]}"
+  args:
+    executable: /bin/bash
+  become_user: "{{ github_runner_user | default('appuser') }}"
+  environment:
+    RUNNER_DIR: "{{ github_runner_dir_effective }}"
+    RUNNER_URL: "{{ github_runner_url }}"
+    RUNNER_NAME: "{{ github_runner_name | default(ansible_hostname) }}"
+    RUNNER_LABELS: "{{ github_runner_labels | default('') }}"
+    RUNNER_WORK: "{{ github_runner_work | default('_work') }}"
+    RUNNER_GROUP: "{{ github_runner_group | default('Default') }}"
+    RUNNER_IS_ORG: "{{ ((github_runner_scope | default('repo')) == 'org') | bool | lower }}"
+    RUNNER_REPLACE: "{{ (github_runner_replace | default(true)) | bool | lower }}"
+    RUNNER_EPHEMERAL: "{{ (github_runner_ephemeral | default(false)) | bool | lower }}"
+  register: github_runner_config_result
+  failed_when: false
+  no_log: true
+  changed_when: github_runner_config_result.rc == 0
+
+- name: "github_runner : Remove the registration-token temp file (runs regardless of outcome)"
+  ansible.builtin.file:
+    path: "{{ github_runner_regtoken_tempfile.path }}"
+    state: absent
+  changed_when: false
+
+- name: "github_runner : Fail if runner configuration failed (token-safe diagnostic)"
+  ansible.builtin.fail:
+    msg: >-
+      GitHub runner configuration (config.sh) failed
+      (rc={{ github_runner_config_result.rc | default(1) }}). Verify that the
+      registration token is still valid (they expire ~1h) and that
+      github_runner_url ({{ github_runner_url }}) is reachable. Command output
+      is redacted (no_log) to protect the token.
+  when: (github_runner_config_result.rc | default(1) | int) != 0
+
+- name: "github_runner : Check whether the runner service is already installed"
+  # `svc.sh install` fails if the service already exists, so it is guarded on
+  # the `.service` marker file the runner writes into its directory. `stat` is
+  # a module param (not shell), so Jinja here is injection-safe.
+  ansible.builtin.stat:
+    path: "{{ github_runner_dir_effective }}/.service"
+  register: github_runner_svc_marker
+
+- name: "github_runner : Install the runner service (first run only)"
+  ansible.builtin.shell: |
+    set -e
+    cd "$RUNNER_DIR"
+    ./svc.sh install "$RUNNER_SVC_USER"
+  args:
+    executable: /bin/bash
+  environment:
+    RUNNER_DIR: "{{ github_runner_dir_effective }}"
+    RUNNER_SVC_USER: "{{ github_runner_user | default('appuser') }}"
+  when: not github_runner_svc_marker.stat.exists
+  changed_when: true
+
+- name: "github_runner : Start the runner service"
+  ansible.builtin.shell: |
+    set -e
+    cd "$RUNNER_DIR"
+    ./svc.sh start
+  args:
+    executable: /bin/bash
+  environment:
+    RUNNER_DIR: "{{ github_runner_dir_effective }}"
+  changed_when: true
