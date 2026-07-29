@@ -1,0 +1,248 @@
+---
+# gitlab_runner role: installs GitLab Runner from GitLab's official
+# packagecloud apt repository (mirrors the docker role's apt-repo pattern)
+# and registers this host as a runner against a GitLab instance,
+# non-interactively.
+#
+# **Two registration token flows (exactly one is required):**
+#   1. `gitlab_runner_auth_token` — the modern *authentication* token
+#      (prefixed `glrt-`). The runner is pre-created in the GitLab UI/API and
+#      its configuration (tags, run-untagged, locked, ...) lives server-side,
+#      so the legacy `gitlab_runner_tag_list`/`_run_untagged`/`_locked`
+#      variables are NOT passed in this flow — and, importantly, their
+#      corresponding environment variables (RUNNER_TAG_LIST/
+#      REGISTER_RUN_UNTAGGED/REGISTER_LOCKED, which `gitlab-runner register`
+#      binds via go-flags `env:`) are NOT set either, so they cannot be picked
+#      up implicitly. gitlab-runner reads the auth token from the
+#      `CI_SERVER_TOKEN` environment variable.
+#   2. `gitlab_runner_registration_token` — the legacy *registration* token.
+#      The runner is created at register time, so tag-list/run-untagged/locked
+#      ARE applied here. gitlab-runner reads this token from the
+#      `REGISTRATION_TOKEN` environment variable.
+# Setting both, or neither, is an error (asserted below). The two flows are
+# separate tasks (`when` on the token kind) precisely so each sets only the
+# environment variables relevant to it.
+#
+# **executor=docker requires the `docker` role.** When
+# `gitlab_runner_executor: docker`, this role asserts that a `docker` binary
+# is present (there is no automatic inter-role dependency mechanism), and the
+# recipe author must `include_role: docker` *before* this role. The
+# `gitlab_runner_docker_image` variable is only meaningful for this executor.
+#
+# **Idempotency:** `gitlab-runner register` is safe to re-run, but a second
+# identical registration creates a *duplicate* runner entry on the GitLab
+# side. This is acceptable for the MVP; de-duplication is out of scope.
+#
+# **Secret handling (tokens).** Identical to the ai_support_agent role — see
+# that role's header for the full rationale. In short, the token is NEVER:
+#   - Jinja-interpolated into the shell script text (a token with shell
+#     metacharacters would otherwise be interpreted as shell syntax);
+#   - passed as a `--token` CLI flag (visible via `ps`/`/proc/<pid>/cmdline`);
+#   - passed via Ansible's `environment:` keyword (leaks in cleartext in
+#     `ansible-playbook -vvv` EXEC traces regardless of `no_log`).
+# Instead it is written via `ansible.builtin.tempfile` +
+# `ansible.builtin.copy: content:` (both `no_log: true`) to a 0600 file, and
+# read back INSIDE the register script via `export VAR="$(cat '<path>')"`.
+# Only non-secret configuration (URL, executor, description, tag-list, ...)
+# is passed via `environment:`. The temp file is removed by a dedicated
+# cleanup task that runs REGARDLESS of the registration outcome — the register
+# tasks use `failed_when: false` so Ansible does not halt the play before the
+# cleanup and the token never survives a failed run on disk (mirrors
+# ai_support_agent's `failed_when: false` + delayed-`fail` ordering).
+#
+# **Failure diagnostics.** `no_log: true` censors the ENTIRE register task
+# result (rc/stdout/stderr/msg), so a bare failure would tell the operator
+# nothing. The register tasks therefore run with `failed_when: false` and a
+# separate, non-`no_log` `fail` task reports the exit code (an integer — no
+# secret) so "invalid token" vs "host unreachable" can be triaged.
+
+- name: "gitlab_runner : Compute which token flow is configured"
+  ansible.builtin.set_fact:
+    gitlab_runner_has_auth: "{{ (gitlab_runner_auth_token | default('') | trim | length) > 0 }}"
+    gitlab_runner_has_reg: "{{ (gitlab_runner_registration_token | default('') | trim | length) > 0 }}"
+  no_log: true
+
+- name: "gitlab_runner : Validate exactly one token flow is configured"
+  ansible.builtin.assert:
+    that:
+      - (gitlab_runner_has_auth | bool) != (gitlab_runner_has_reg | bool)
+    fail_msg: >-
+      Exactly one of gitlab_runner_auth_token (modern glrt- auth token) or
+      gitlab_runner_registration_token (legacy registration token) must be
+      set — not both, and not neither.
+
+- name: "gitlab_runner : Validate gitlab_runner_url is set"
+  ansible.builtin.assert:
+    that:
+      - (gitlab_runner_url | default('') | trim | length) > 0
+    fail_msg: >-
+      gitlab_runner_url is required (e.g. https://gitlab.com).
+
+- name: "gitlab_runner : Validate gitlab_runner_executor is supported"
+  ansible.builtin.assert:
+    that:
+      - (gitlab_runner_executor | default('shell')) in ['shell', 'docker']
+    fail_msg: >-
+      gitlab_runner_executor must be one of 'shell' or 'docker': got
+      {{ gitlab_runner_executor | default('shell') | to_json }}
+
+- name: "gitlab_runner : Check whether Docker is installed (executor=docker only)"
+  ansible.builtin.shell: command -v docker
+  args:
+    executable: /bin/bash
+  register: gitlab_runner_docker_check
+  changed_when: false
+  failed_when: false
+  when: (gitlab_runner_executor | default('shell')) == 'docker'
+
+- name: "gitlab_runner : Assert Docker is available for executor=docker"
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_docker_check.rc == 0
+    fail_msg: >-
+      gitlab_runner_executor=docker requires Docker to be installed. Include
+      the 'docker' bundled role before gitlab_runner.
+  when: (gitlab_runner_executor | default('shell')) == 'docker'
+
+- name: "gitlab_runner : Create apt keyrings directory"
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: "gitlab_runner : Add GitLab Runner packagecloud GPG key"
+  ansible.builtin.get_url:
+    url: https://packages.gitlab.com/runner/gitlab-runner/gpgkey
+    dest: /etc/apt/keyrings/gitlab-runner.asc
+    mode: '0644'
+
+- name: "gitlab_runner : Add GitLab Runner apt repository"
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/gitlab-runner.asc]
+      https://packages.gitlab.com/runner/gitlab-runner/ubuntu/
+      {{ ansible_distribution_release }} main
+    state: present
+    filename: gitlab-runner
+
+- name: "gitlab_runner : Install gitlab-runner"
+  ansible.builtin.apt:
+    name: gitlab-runner
+    state: present
+    update_cache: true
+
+- name: "gitlab_runner : Create a secure temporary file for the token"
+  # See header ("Secret handling"): the token is written to its own 0600 temp
+  # file and read back inside the register script via `$(cat ...)`, never via
+  # `environment:` (leaks under -vvv) nor Jinja-into-shell-text.
+  ansible.builtin.tempfile:
+    state: file
+    prefix: gitlab_runner_token_
+  register: gitlab_runner_token_tempfile
+  changed_when: false
+
+- name: "gitlab_runner : Write the token into its temp file"
+  ansible.builtin.copy:
+    content: >-
+      {{ gitlab_runner_auth_token if (gitlab_runner_has_auth | bool)
+         else gitlab_runner_registration_token }}
+    dest: "{{ gitlab_runner_token_tempfile.path }}"
+    mode: '0600'
+  no_log: true
+  changed_when: true
+
+- name: "gitlab_runner : Register the runner — authentication token flow (non-interactive)"
+  # Auth-token flow: only the executor/docker-image are runner-local config;
+  # tag-list/run-untagged/locked live server-side and are deliberately NOT set
+  # (neither as argv nor as env, see header). `failed_when: false` so the
+  # cleanup + diagnostic tasks below always run (token never left on disk).
+  ansible.builtin.shell: |
+    set -e
+    export CI_SERVER_TOKEN="$(cat '{{ gitlab_runner_token_tempfile.path }}')"
+    ARGS=(register --non-interactive
+      --url "$CI_SERVER_URL"
+      --executor "$RUNNER_EXECUTOR"
+      --description "$RUNNER_NAME")
+    if [ "$GITLAB_RUNNER_IS_DOCKER" = "true" ]; then
+      ARGS+=(--docker-image "$DOCKER_IMAGE")
+    fi
+    gitlab-runner register "${ARGS[@]}"
+  args:
+    executable: /bin/bash
+  environment:
+    CI_SERVER_URL: "{{ gitlab_runner_url }}"
+    RUNNER_EXECUTOR: "{{ gitlab_runner_executor | default('shell') }}"
+    RUNNER_NAME: "{{ gitlab_runner_description | default(ansible_hostname) }}"
+    DOCKER_IMAGE: "{{ gitlab_runner_docker_image | default('alpine:latest') }}"
+    GITLAB_RUNNER_IS_DOCKER: "{{ ((gitlab_runner_executor | default('shell')) == 'docker') | bool | lower }}"
+  when: gitlab_runner_has_auth | bool
+  register: gitlab_runner_register_auth
+  failed_when: false
+  no_log: true
+  changed_when: gitlab_runner_register_auth.rc == 0
+
+- name: "gitlab_runner : Register the runner — legacy registration token flow (non-interactive)"
+  # Legacy flow: the runner is created at register time, so tag-list/
+  # run-untagged/locked ARE applied. These env vars are set ONLY here.
+  ansible.builtin.shell: |
+    set -e
+    export REGISTRATION_TOKEN="$(cat '{{ gitlab_runner_token_tempfile.path }}')"
+    ARGS=(register --non-interactive
+      --url "$CI_SERVER_URL"
+      --executor "$RUNNER_EXECUTOR"
+      --description "$RUNNER_NAME"
+      --tag-list "$RUNNER_TAG_LIST"
+      --run-untagged="$REGISTER_RUN_UNTAGGED"
+      --locked="$REGISTER_LOCKED")
+    if [ "$GITLAB_RUNNER_IS_DOCKER" = "true" ]; then
+      ARGS+=(--docker-image "$DOCKER_IMAGE")
+    fi
+    gitlab-runner register "${ARGS[@]}"
+  args:
+    executable: /bin/bash
+  environment:
+    CI_SERVER_URL: "{{ gitlab_runner_url }}"
+    RUNNER_EXECUTOR: "{{ gitlab_runner_executor | default('shell') }}"
+    RUNNER_NAME: "{{ gitlab_runner_description | default(ansible_hostname) }}"
+    DOCKER_IMAGE: "{{ gitlab_runner_docker_image | default('alpine:latest') }}"
+    RUNNER_TAG_LIST: "{{ gitlab_runner_tag_list | default('') }}"
+    REGISTER_RUN_UNTAGGED: "{{ (gitlab_runner_run_untagged | default(true)) | bool | lower }}"
+    REGISTER_LOCKED: "{{ (gitlab_runner_locked | default(false)) | bool | lower }}"
+    GITLAB_RUNNER_IS_DOCKER: "{{ ((gitlab_runner_executor | default('shell')) == 'docker') | bool | lower }}"
+  when: gitlab_runner_has_reg | bool
+  register: gitlab_runner_register_legacy
+  failed_when: false
+  no_log: true
+  changed_when: gitlab_runner_register_legacy.rc == 0
+
+- name: "gitlab_runner : Remove the token temp file (runs regardless of registration outcome)"
+  ansible.builtin.file:
+    path: "{{ gitlab_runner_token_tempfile.path }}"
+    state: absent
+  changed_when: false
+
+- name: "gitlab_runner : Fail if registration failed (token-safe diagnostic)"
+  # The register tasks are no_log (they touch the token), so this separate,
+  # non-no_log task surfaces the exit code — an integer, never the token — so
+  # the operator can distinguish an invalid token from an unreachable server.
+  vars:
+    gitlab_runner_register_rc: >-
+      {{ (gitlab_runner_register_auth.rc | default(1))
+         if (gitlab_runner_has_auth | bool)
+         else (gitlab_runner_register_legacy.rc | default(1)) }}
+  ansible.builtin.fail:
+    msg: >-
+      gitlab-runner registration failed (rc={{ gitlab_runner_register_rc }}).
+      Verify that gitlab_runner_url ({{ gitlab_runner_url }}) is reachable and
+      that the
+      {{ 'authentication' if (gitlab_runner_has_auth | bool) else 'registration' }}
+      token is valid. Command output is redacted (no_log) to protect the token.
+  when: (gitlab_runner_register_rc | int) != 0
+
+- name: "gitlab_runner : Enable and start the gitlab-runner service"
+  # The gitlab-runner deb package installs its own system service; ensure it
+  # is enabled and running.
+  ansible.builtin.service:
+    name: gitlab-runner
+    state: started
+    enabled: true
