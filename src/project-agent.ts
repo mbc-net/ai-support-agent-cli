@@ -443,8 +443,11 @@ export class ProjectAgent {
    * Starts all transport-layer services using the completed register response:
    * AppSync subscription, heartbeat, CloudWatch alert polling, and terminal/VS Code WebSocket.
    *
-   * Throws if AppSync credentials are absent so the caller's retry loop retries the
-   * whole registration flow (credentials may appear once a server-side rollout completes).
+   * Throws if the AppSync URL is absent so the caller's retry loop retries the
+   * whole registration flow (the URL may appear once a server-side rollout
+   * completes). The agent authenticates to AppSync with its own agent token
+   * (`this.token`) via the Lambda authorizer, so the master API key is no
+   * longer required here.
    */
   private async startServices(result: RegisterResponse): Promise<void> {
     const commandContext = {
@@ -458,10 +461,18 @@ export class ProjectAgent {
       onSyncRepository: (repositoryCode: string, branch?: string) => this.performSyncRepository(repositoryCode, branch),
     }
 
-    if (!result.appsyncUrl || !result.appsyncApiKey) {
-      // Propagate to runRegisterLoop so we retry — credentials may appear once
+    if (!result.appsyncUrl) {
+      // Propagate to runRegisterLoop so we retry — the URL may appear once
       // a server-side rollout completes.
-      throw new Error('AppSync credentials missing in register response')
+      throw new Error('AppSync URL missing in register response')
+    }
+    if (!this.token) {
+      // AppSync now authenticates via the agent token. An empty token would
+      // subscribe with an empty Authorization header and get silently, and
+      // permanently, rejected while register still reports success. Throw so
+      // runRegisterLoop treats it as a registration failure and retries,
+      // rather than fixing the agent in a no-op subscription.
+      throw new Error('Agent token missing — cannot authenticate AppSync subscription')
     }
     logger.info(`${this.prefix} Starting subscription mode (realtime)`)
     // When running inside a Docker container, localhost refers to the container itself.
@@ -473,7 +484,9 @@ export class ProjectAgent {
       commandContext,
       AppSyncSubscriber,
       resolvedAppsyncUrl,
-      result.appsyncApiKey,
+      // Authenticate to AppSync with the agent token (Lambda authorizer),
+      // not the master API key.
+      this.token,
     )
 
     startHeartbeat(this.transportDeps, this.transportState, this.configSyncState, this.configSyncDeps)
