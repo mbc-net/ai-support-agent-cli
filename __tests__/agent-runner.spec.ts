@@ -62,6 +62,7 @@ jest.mock('../src/appsync-subscriber', () => ({
     connect: jest.fn().mockResolvedValue(undefined),
     subscribe: jest.fn(),
     onReconnect: jest.fn(),
+    onPersistentFailure: jest.fn(),
     disconnect: jest.fn(),
   })),
 }))

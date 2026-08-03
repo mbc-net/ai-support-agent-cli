@@ -1210,6 +1210,7 @@ describe('startSubscriptionMode', () => {
       connect: jest.fn().mockResolvedValue(undefined),
       subscribe: jest.fn(),
       onReconnect: jest.fn(),
+      onPersistentFailure: jest.fn(),
       disconnect: jest.fn(),
     }
     const MockSubscriberClass = jest.fn().mockImplementation(() => mockSubscriber)
@@ -1228,6 +1229,32 @@ describe('startSubscriptionMode', () => {
     expect(state.subscriber).toBe(mockSubscriber)
   })
 
+  it('should register an onPersistentFailure callback that logs an ERROR when fired', async () => {
+    const { logger } = require('../src/logger')
+
+    let persistentFailureCallback: (() => void) | undefined
+    const mockSubscriber = {
+      connect: jest.fn().mockResolvedValue(undefined),
+      subscribe: jest.fn(),
+      onReconnect: jest.fn(),
+      onPersistentFailure: jest.fn((cb: () => void) => { persistentFailureCallback = cb }),
+      disconnect: jest.fn(),
+    }
+    const MockSubscriberClass = jest.fn().mockImplementation(() => mockSubscriber)
+
+    const deps = createMockDeps()
+    const state = createMockState()
+    const ctx = makeCtx(state)
+
+    await startSubscriptionMode(deps, state, ctx, MockSubscriberClass, 'wss://appsync.example.com', 'agent-token')
+
+    expect(mockSubscriber.onPersistentFailure).toHaveBeenCalledWith(expect.any(Function))
+    expect(persistentFailureCallback).toBeDefined()
+
+    persistentFailureCallback!()
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('AppSync realtime delivery degraded'))
+  })
+
   it('should throw when connection fails', async () => {
     const { logger } = require('../src/logger')
 
@@ -1235,6 +1262,7 @@ describe('startSubscriptionMode', () => {
       connect: jest.fn().mockRejectedValue(new Error('connection error')),
       subscribe: jest.fn(),
       onReconnect: jest.fn(),
+      onPersistentFailure: jest.fn(),
       disconnect: jest.fn(),
     }
     const MockSubscriberClass = jest.fn().mockImplementation(() => mockSubscriber)
@@ -1258,6 +1286,7 @@ describe('startSubscriptionMode', () => {
       connect: jest.fn().mockResolvedValue(undefined),
       subscribe: jest.fn(),
       onReconnect: jest.fn((cb: () => void) => { reconnectCallback = cb }),
+      onPersistentFailure: jest.fn(),
       disconnect: jest.fn(),
     }
     const MockSubscriberClass = jest.fn().mockImplementation(() => mockSubscriber)
@@ -1307,6 +1336,7 @@ describe('startSubscriptionMode', () => {
       connect: jest.fn().mockResolvedValue(undefined),
       subscribe: jest.fn((_tenant: string, cb: (n: any) => void) => { subscribeCallback = cb }),
       onReconnect: jest.fn(),
+      onPersistentFailure: jest.fn(),
       disconnect: jest.fn(),
     }
     const MockSubscriberClass = jest.fn().mockImplementation(() => mockSubscriber)
