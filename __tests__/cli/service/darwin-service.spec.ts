@@ -326,6 +326,16 @@ describe('generateWrapperScript', () => {
     expect(result).toContain('--project mbc/MBC_01')
   })
 
+  it('does NOT add a host-user writability preflight (container runs as root here, so the Linux --user EACCES fix does not apply)', () => {
+    // The macOS wrapper runs the container as root (no --user), so it can write
+    // bind-mounted host dirs regardless of ownership; adding the Linux writability
+    // preflight here would risk aborting a working setup, so it must be absent.
+    const result = generateWrapperScript(baseOpts)
+    expect(result).not.toContain('_ais_ensure_mount_dir')
+    // no `--user` flag on the docker run line (comment may mention it)
+    expect(result).not.toMatch(/docker run[^\n]*--user/)
+  })
+
   it('should load nvm and set PATH for launchd compatibility', () => {
     const result = generateWrapperScript(baseOpts)
 
