@@ -114,6 +114,16 @@ describe('generateWin32WrapperScript', () => {
     expect(result).toContain('--project mbc/MBC_01')
   })
 
+  it('does NOT add a host-user writability preflight (container runs as root here, so the Linux --user EACCES fix does not apply)', () => {
+    // The Windows wrapper runs the container as root (no --user), so the Linux
+    // "root-owned bind-mount source -> EACCES" failure does not apply; a preflight
+    // that aborts on non-writable dirs would only risk breaking a working setup.
+    const result = generateWin32WrapperScript(baseOpts)
+    // no `--user` flag on the docker run line (comment may mention it)
+    expect(result).not.toMatch(/docker run[^\r\n]*--user/)
+    expect(result).not.toMatch(/md "[^"]*\\\.codex"/)
+  })
+
   it('sets secrets via `set` and passes them by name (not on the command line)', () => {
     const result = generateWin32WrapperScript(baseOpts)
     expect(result).toContain('set "AI_SUPPORT_AGENT_TOKEN=test-token"')
