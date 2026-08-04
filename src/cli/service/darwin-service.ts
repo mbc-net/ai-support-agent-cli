@@ -358,6 +358,11 @@ fi
 # Remove stale container if it exists (e.g. from a previous crash)
 docker rm -f "${containerName}" 2>/dev/null || true
 
+# NOTE: unlike the Linux wrapper, this macOS wrapper does NOT pass \`--user\`, so the
+# container runs as root and can write bind-mounted host dirs regardless of their
+# host ownership. The "docker auto-creates a MISSING bind-mount source as root ->
+# in-container user can't write it (EACCES on ~/.codex)" failure is therefore
+# specific to the Linux (\`--user uid:gid\`) wrapper and does not apply here.
 ${dockerRunBlock}
 if [ "$EXIT_CODE" -eq 42 ]; then
   exec "${opts.updateScriptPath}"

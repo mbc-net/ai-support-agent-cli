@@ -253,6 +253,32 @@ describe('generateWrapperScript', () => {
     expect(result).toContain("--project 'mbc/MBC_01'")
   })
 
+  it('ensures the host .codex / .claude bind-mount sources are writable before docker run (repairs a root-owned leftover, else fails loud)', () => {
+    // Root cause of the codex EACCES failures: run.sh mounts ${HOME}/.codex
+    // unconditionally. When the host dir is MISSING, `docker run` auto-creates the
+    // bind-mount source as root, so the in-container `node` (uid 1000) cannot write
+    // it and the bundled codex plugin prep fails with EACCES on every chat. A prior
+    // run may have already left such a root-owned dir behind, so the wrapper must
+    // verify/repair writability (not just mkdir) BEFORE `docker run`.
+    const result = generateWrapperScript(baseOpts)
+    const home = os.homedir().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+    // Both mount sources are ensured before the container starts.
+    expect(result).toMatch(new RegExp(`_ais_ensure_mount_dir[^\\n]*${home}/\\.codex`))
+    expect(result).toMatch(new RegExp(`_ais_ensure_mount_dir[^\\n]*${home}/\\.claude`))
+    expect(result.search(/_ais_ensure_mount_dir[^\n]*\.codex/)).toBeLessThan(result.indexOf('docker run --rm'))
+
+    // The helper detects an unwritable (root-owned) dir, repairs an empty one, and
+    // fails loudly (aborts docker) instead of silently starting into an EACCES loop.
+    expect(result).toContain('rmdir "$_d"')
+    expect(result).toMatch(/ERROR:[^\n]*not writable/)
+    expect(result).toMatch(/_ais_ensure_mount_dir[^\n]*\|\| exit 1/)
+    // Writability is checked twice: initial gate + a post-repair re-check so a
+    // concurrent same-$HOME project that already repaired the dir resolves the
+    // rmdir race harmlessly instead of failing this start attempt.
+    expect(result.split('[ -w "$_d" ]').length - 1).toBeGreaterThanOrEqual(2)
+  })
+
   it('should run the container as the invoking user (--user uid:gid)', () => {
     // Without --user, a container started by a systemd --user service runs
     // as root inside the container but bind-mounted host paths owned by the

@@ -675,6 +675,83 @@ describe('processStreamJsonLine', () => {
       const result = processStreamJsonLine(line, sendChunk, 1, makeState())
       expect(result.text).toBeUndefined()
     })
+
+    // Real captured output: on an auth (401) failure claude emits a result event
+    // with subtype:"success" but is_error:true and api_error_status:401. The line
+    // must surface an error object so the runner can classify the failure instead
+    // of falling back to the generic "claude CLI がコード 1 で終了しました" wording.
+    it('returns error info when the result event has is_error true (401 auth failure)', () => {
+      const sendChunk = makeSendChunk()
+      const line = JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: true,
+        api_error_status: 401,
+        result: 'Failed to authenticate. API Error: 401 OAuth access token is invalid.',
+        terminal_reason: 'api_error',
+      })
+      const result = processStreamJsonLine(line, sendChunk, 1, makeState())
+      expect(result.error).toEqual({
+        text: 'Failed to authenticate. API Error: 401 OAuth access token is invalid.',
+        apiErrorStatus: 401,
+      })
+    })
+
+    it('does not return error info for a normal successful result event', () => {
+      const sendChunk = makeSendChunk()
+      const line = JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' })
+      const result = processStreamJsonLine(line, sendChunk, 1, makeState())
+      expect(result.error).toBeUndefined()
+    })
+
+    it('captures an is_error result even when the result text field is absent (e.g. error_max_turns)', () => {
+      const sendChunk = makeSendChunk()
+      // error_max_turns / error_during_execution can arrive without a `result` text field.
+      const line = JSON.stringify({
+        type: 'result',
+        subtype: 'error_max_turns',
+        is_error: true,
+        terminal_reason: 'max_turns',
+      })
+      const result = processStreamJsonLine(line, sendChunk, 1, makeState())
+      // Falls back to subtype (first non-empty of result → subtype → terminal_reason).
+      expect(result.error?.text).toBe('error_max_turns')
+      // The error text must NOT be surfaced as a successful answer.
+      expect(result.text).toBeUndefined()
+    })
+
+    it('never produces an empty error text for an is_error result with empty result string', () => {
+      const sendChunk = makeSendChunk()
+      const line = JSON.stringify({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        result: '',
+      })
+      const result = processStreamJsonLine(line, sendChunk, 1, makeState())
+      expect(result.error).toBeDefined()
+      expect(result.error!.text.trim().length).toBeGreaterThan(0)
+      expect(result.error!.text).toBe('error_during_execution')
+    })
+  })
+
+  // ------------------------------------------------------------------ system/api_retry event
+  describe('type: system / subtype: api_retry', () => {
+    it('logs a warning carrying the HTTP error status so 401/429 are visible without --verbose', () => {
+      const sendChunk = makeSendChunk()
+      const line = JSON.stringify({
+        type: 'system',
+        subtype: 'api_retry',
+        attempt: 1,
+        max_retries: 10,
+        error_status: 401,
+        error: 'authentication_failed',
+      })
+      processStreamJsonLine(line, sendChunk, 4242, makeState())
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/api_retry.*401|401.*api_retry|authentication_failed/),
+      )
+    })
   })
 
   // ------------------------------------------------------------------ system/init event

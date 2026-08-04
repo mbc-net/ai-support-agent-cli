@@ -43,13 +43,42 @@ export interface StreamJsonLine {
   // result イベントのフィールド（usage と total_cost_usd は別フィールドとして並存）
   usage?: Omit<StreamJsonUsage, 'total_cost_usd'>
   total_cost_usd?: number
+  // result イベントのエラーフィールド。
+  // 認証失敗(401)等では subtype:"success" のまま is_error:true / api_error_status で
+  // API エラーを通知してくる（terminal_reason:"api_error"）。stderr は空のことが多く、
+  // これらを拾わないと失敗原因がユーザーにもログにも残らない。
+  is_error?: boolean
+  api_error_status?: number
+  // 異常終了理由（例: "api_error"）。result テキストが欠落した is_error のフォールバック用。
+  terminal_reason?: string
+  // system/api_retry イベントのフィールド（リトライ時に HTTP ステータスを通知）
+  error_status?: number
+  error?: string
+  attempt?: number
   // init イベントのフィールド
   tools?: string[]
   mcp_servers?: StreamJsonMcpServer[]
 }
 
+/**
+ * result イベントが API エラーだった場合の要約。
+ * runner が終了コード非0時にユーザー向けメッセージを分類・ログ出力するために使う。
+ */
+export interface StreamJsonError {
+  text: string
+  apiErrorStatus?: number
+}
+
 /** file_upload ツール結果を file_attachment チャンクに変換する */
 const FILE_UPLOAD_TOOL_NAME = 'mcp__ai-support-agent__file_upload'
+
+/** 与えられた候補のうち、trim して非空の最初の文字列を返す（全て空なら undefined） */
+function firstNonEmpty(...candidates: Array<string | undefined>): string | undefined {
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim() !== '') return c
+  }
+  return undefined
+}
 
 /**
  * stream-json の NDJSON 1行をパースし、テキストやツール呼び出し情報を処理する
@@ -57,14 +86,15 @@ const FILE_UPLOAD_TOOL_NAME = 'mcp__ai-support-agent__file_upload'
  *
  * @returns newSentTextLength: 送信済みテキスト長, text: resultイベントのテキスト(undefinedなら未取得),
  *          toolExecutionChange: ツール実行状態の変化 ('started' | 'finished' | undefined),
- *          usage: resultイベントのトークン使用量・コスト情報(undefinedなら未取得)
+ *          usage: resultイベントのトークン使用量・コスト情報(undefinedなら未取得),
+ *          error: resultイベントが API エラー(is_error)だった場合の要約(undefinedなら成功)
  */
 export function processStreamJsonLine(
   line: string,
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
   pid: number,
   state: { sentTextLength: number; pendingFileUploadIds?: Set<string>; pendingToolNames?: Map<string, string> },
-): { newSentTextLength: number; text?: string; toolExecutionChange?: 'started' | 'finished'; usage?: StreamJsonUsage } {
+): { newSentTextLength: number; text?: string; toolExecutionChange?: 'started' | 'finished'; usage?: StreamJsonUsage; error?: StreamJsonError } {
   const parsed = safeJsonParse<StreamJsonLine>(line)
   if (!parsed) {
     logger.debug(`[chat] stream-json parse error (pid=${pid}): ${line.substring(0, LOG_DEBUG_LIMIT)}`)
@@ -175,15 +205,43 @@ export function processStreamJsonLine(
     return { newSentTextLength: 0, toolExecutionChange: hasActualToolResult ? 'finished' : undefined }
   }
 
-  if (parsed.type === 'result' && parsed.result !== undefined) {
+  if (parsed.type === 'result') {
     const usage = parsed.usage
       ? { ...parsed.usage, total_cost_usd: parsed.total_cost_usd }
       : undefined
-    return {
-      newSentTextLength: state.sentTextLength,
-      text: parsed.result,
-      usage,
+    // is_error の result は subtype:"success" のまま届く（認証失敗 401 等）。さらに
+    // error_max_turns / error_during_execution 等では `result` テキストが欠落・空のことも
+    // あるため、is_error を result フィールドの有無に依存させず独立に評価する。エラーテキストは
+    // result → subtype → terminal_reason の順で最初の非空を採用し、全て空でも汎用文言で握り潰さない。
+    if (parsed.is_error) {
+      // 認証失敗等では subtype が "success" のまま届くため、subtype はエラーテキストの
+      // フォールバック候補から除外する（"…で終了しました: success" のような矛盾文言を避ける）。
+      const subtypeText = parsed.subtype && parsed.subtype !== 'success' ? parsed.subtype : undefined
+      const errorText =
+        firstNonEmpty(parsed.result, subtypeText, parsed.terminal_reason) ??
+        'claude CLI が API エラーで終了しました'
+      const error: StreamJsonError = {
+        text: errorText,
+        ...(parsed.api_error_status !== undefined ? { apiErrorStatus: parsed.api_error_status } : {}),
+      }
+      // is_error のテキストは正常な回答として扱わない（text は返さない）
+      return { newSentTextLength: state.sentTextLength, usage, error }
     }
+    if (parsed.result !== undefined) {
+      return { newSentTextLength: state.sentTextLength, text: parsed.result, usage }
+    }
+    // result フィールドも is_error も無い result イベント
+    return { newSentTextLength: state.sentTextLength, usage }
+  }
+
+  // API リトライ（レート制限/認証失敗等）は system/api_retry で通知される。
+  // stderr には出ないため、ここで WARN に残し --verbose 無しでも原因を追えるようにする。
+  // 秘密値のマスクは env を持つ runner 側でしか行えないため、この非マスク経路では
+  // 構造化された非秘密情報（attempt / status）のみを出し、自由文の error 本文は出さない。
+  if (parsed.type === 'system' && parsed.subtype === 'api_retry') {
+    logger.warn(
+      `[chat] claude CLI api_retry (pid=${pid}, attempt=${parsed.attempt ?? '?'}): status=${parsed.error_status ?? '?'}`,
+    )
   }
 
   if (parsed.type === 'system' && parsed.subtype === 'init') {

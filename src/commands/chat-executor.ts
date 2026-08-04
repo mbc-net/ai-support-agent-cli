@@ -13,7 +13,7 @@ import { getAutoAddDirs, getReposDir, getWorkspaceDir } from '../project-dir'
 import { ensureAllowedToolsInSettings } from '../utils/claude-settings'
 import { executeApiChatCommand } from './api-chat-executor'
 import type { StreamJsonUsage } from './claude-code-stream'
-import { ERR_CLAUDE_EXIT_CODE_1, ERR_CLAUDE_USAGE_LIMIT_REACHED, runClaudeCode } from './claude-code-runner'
+import { ERR_CLAUDE_AUTH_FAILED, ERR_CLAUDE_EXIT_CODE_1, ERR_CLAUDE_USAGE_LIMIT_REACHED, runClaudeCode } from './claude-code-runner'
 import { ERR_CODEX_AUTH_INVALID, ERR_CODEX_EXIT_CODE_1, runCodex } from './codex-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { getProcessManager } from './process-manager'
@@ -227,6 +227,11 @@ function isClaudeCodeUnavailable(result: CommandResult): boolean {
   return !result.success && typeof result.error === 'string' && (
     result.error.includes(ERR_CLAUDE_CLI_NOT_FOUND) ||
     result.error.includes(ERR_CLAUDE_USAGE_LIMIT_REACHED) ||
+    // 認証失敗(401)はリトライしても同じトークンで必ず失敗するため即座に実行不能扱いにし、
+    // 設定済みの次モード（codex 等）へフォールバックする（codex の ERR_CODEX_AUTH_INVALID と対称）。
+    // 従来は 401 も ERR_CLAUDE_EXIT_CODE_1 に化けて実行不能判定に入っていたため、この追加は
+    // その挙動を維持しつつ、より明確な文言で同じ分岐に載せる。
+    result.error.includes(ERR_CLAUDE_AUTH_FAILED) ||
     result.error.includes(ERR_CLAUDE_EXIT_CODE_1)
   )
 }
@@ -574,7 +579,7 @@ async function executeCliChatOnce(
 
 function isRuntimeUnavailableErrorMessage(mode: 'claude_code' | 'codex', message: string): boolean {
   return mode === 'claude_code'
-    ? message.includes(ERR_CLAUDE_CLI_NOT_FOUND) || message.includes(ERR_CLAUDE_USAGE_LIMIT_REACHED) || message.includes(ERR_CLAUDE_EXIT_CODE_1)
+    ? message.includes(ERR_CLAUDE_CLI_NOT_FOUND) || message.includes(ERR_CLAUDE_USAGE_LIMIT_REACHED) || message.includes(ERR_CLAUDE_AUTH_FAILED) || message.includes(ERR_CLAUDE_EXIT_CODE_1)
     : message.includes(ERR_CODEX_CLI_NOT_FOUND) || message.includes(ERR_CODEX_EXIT_CODE_1)
 }
 
