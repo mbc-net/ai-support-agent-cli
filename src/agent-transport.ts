@@ -70,11 +70,11 @@ export async function startSubscriptionMode(
   deps: TransportDeps,
   state: TransportState,
   ctx: CommandContext,
-  AppSyncSubscriberClass: new (url: string, apiKey: string) => AppSyncSubscriber,
+  AppSyncSubscriberClass: new (url: string, authToken: string) => AppSyncSubscriber,
   appsyncUrl: string,
-  appsyncApiKey: string,
+  authToken: string,
 ): Promise<void> {
-  state.subscriber = new AppSyncSubscriberClass(appsyncUrl, appsyncApiKey)
+  state.subscriber = new AppSyncSubscriberClass(appsyncUrl, authToken)
 
   try {
     await state.subscriber.connect()
@@ -96,6 +96,18 @@ export async function startSubscriptionMode(
     // Alert のフォールバック: 再接続時に pending アラームを一括処理
     const alertProcessor = new AlertProcessor(deps.client, deps.tenantCode, deps.projectCode)
     void alertProcessor.checkPendingAlerts()
+  })
+
+  // AppSync が連続して接続確立（connection_ack）に失敗し続けた場合に発火する。
+  // subscriber 側で既に ERROR ログ出力済みだが、ここでも project 単位で可視化する
+  // （無限サイレント再接続に埋もれさせない）。再接続は継続しているため一過性障害・
+  // rollout 遅延は自己回復する。完全な再登録（runRegisterLoop 再突入）やサーバー側
+  // への可視化（TransportKind への 'appsync' 追加）は follow-up。
+  state.subscriber.onPersistentFailure(() => {
+    logger.error(
+      `${deps.prefix} AppSync realtime delivery degraded: persistently failing to connect. ` +
+        `Verify the agent token and that the AppSync Lambda authorizer is enabled for this environment. Still retrying.`,
+    )
   })
 }
 

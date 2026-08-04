@@ -102,6 +102,7 @@ describe('ProjectAgent', () => {
     connect: jest.Mock
     subscribe: jest.Mock
     onReconnect: jest.Mock
+    onPersistentFailure: jest.Mock
     disconnect: jest.Mock
   }
 
@@ -131,6 +132,7 @@ describe('ProjectAgent', () => {
       connect: jest.fn().mockResolvedValue(undefined),
       subscribe: jest.fn(),
       onReconnect: jest.fn(),
+      onPersistentFailure: jest.fn(),
       disconnect: jest.fn(),
     }
     MockAppSyncSubscriber.mockImplementation(() => mockSubscriber as unknown as AppSyncSubscriber)
@@ -290,7 +292,7 @@ describe('ProjectAgent', () => {
       randomSpy.mockRestore()
     })
 
-    it('should retry AppSync credentials missing as a regular registration failure', async () => {
+    it('should retry AppSync URL missing as a regular registration failure', async () => {
       mockClient.register
         .mockResolvedValueOnce({
           agentId: 'test-id',
@@ -521,14 +523,58 @@ describe('ProjectAgent', () => {
 
       await jest.advanceTimersByTimeAsync(100)
 
+      // AppSync now authenticates with the agent token (this.token), not the API key.
       expect(MockAppSyncSubscriber).toHaveBeenCalledWith(
         'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
-        'da2-testkey123',
+        'tok',
       )
       expect(mockSubscriber.connect).toHaveBeenCalled()
       expect(mockSubscriber.subscribe).toHaveBeenCalledWith('test-tenant', expect.any(Function))
       expect(mockSubscriber.onReconnect).toHaveBeenCalled()
       expect(logger.success).toHaveBeenCalledWith(expect.stringContaining('AppSync WebSocket'))
+
+      agent.stop()
+    })
+
+    it('should start the subscriber even when appsyncApiKey is absent (agent-token auth)', async () => {
+      // The agent authenticates to AppSync with its own token via the Lambda
+      // authorizer, so a missing appsyncApiKey must no longer block startup.
+      mockClient.register.mockResolvedValue({
+        agentId: 'test-id',
+        tenantCode: 'test-tenant',
+        appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+        appsyncApiKey: null,
+        transportMode: 'realtime',
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(MockAppSyncSubscriber).toHaveBeenCalledWith(
+        'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+        'tok',
+      )
+      expect(mockSubscriber.connect).toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('should retry (not start the subscriber) when the agent token is empty', async () => {
+      // An empty token would subscribe with an empty Authorization header and be
+      // silently, permanently rejected while register still "succeeds". Startup
+      // must throw so runRegisterLoop treats it as a registration failure and
+      // retries — never starting a no-op subscription.
+      const projectWithoutToken = { tenantCode: 'mbc', projectCode: 'test-proj', token: '', apiUrl: 'http://api' }
+
+      const agent = new ProjectAgent(projectWithoutToken, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(logger.warn).toHaveBeenCalledWith('runner.registerStartedFailing')
+      expect(MockAppSyncSubscriber).not.toHaveBeenCalled()
 
       agent.stop()
     })
@@ -567,7 +613,7 @@ describe('ProjectAgent', () => {
 
         expect(MockAppSyncSubscriber).toHaveBeenCalledWith(
           'http://host.docker.internal:4001/graphql',
-          'da2-testkey123',
+          'tok',
         )
 
         agent.stop()
@@ -596,7 +642,7 @@ describe('ProjectAgent', () => {
 
         expect(MockAppSyncSubscriber).toHaveBeenCalledWith(
           'http://localhost:4001/graphql',
-          'da2-testkey123',
+          'tok',
         )
 
         agent.stop()

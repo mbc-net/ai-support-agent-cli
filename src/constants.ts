@@ -438,6 +438,20 @@ export const APPSYNC_MAX_RECONNECT_RETRIES = INFINITE_RECONNECT_RETRIES
 export const APPSYNC_RECONNECT_BASE_DELAY_MS = DEFAULT_WS_RECONNECT_BASE_DELAY_MS
 export const WS_RECONNECT_MAX_DELAY_MS = 60_000
 
+// Number of consecutive connection attempts that close WITHOUT ever reaching
+// connection_ack before the AppSync subscriber escalates to a loud ERROR and
+// fires its onPersistentFailure callback. This is a signal-agnostic safety net:
+// a handshake rejection (HTTP 401 during the WS upgrade, which never yields a
+// parsed message) and a post-connect failure both manifest as "closed without
+// ack", so this catches invalid/expired/empty tokens and a Lambda authorizer
+// that is not enabled for the environment — without the false positives of
+// substring-matching downstream error payloads. Reconnection is NOT stopped
+// (transient outages / rollout lag self-heal); the escalation only makes the
+// degraded state visible. The exact close/HTTP/message shape of an authorizer
+// rejection must be confirmed in dev verification (A8) and this threshold
+// tuned accordingly.
+export const APPSYNC_CONNECT_FAILURE_ESCALATION_THRESHOLD = 5
+
 // Close code the API gateway uses (api/src/agent/common/base-web.gateway.ts:
 // WS_CLOSE_CODE_AUTH_REJECTED) when it closes a connection due to a permanent
 // authentication rejection (invalid/expired token, or Agent ID token-binding
