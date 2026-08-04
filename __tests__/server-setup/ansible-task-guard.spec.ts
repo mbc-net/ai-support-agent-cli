@@ -182,6 +182,34 @@ describe('validateAnsibleTasks', () => {
       expect([...INCLUDE_ROLE_ALLOWED_ROLES].sort()).toEqual(actualRoleDirs)
     })
 
+    it('include_role name=gitlab_runner（task レベル vars 付き）は ecs/resident 双方で通過する', () => {
+      const body = `
+- name: register gitlab runner
+  include_role:
+    name: gitlab_runner
+  vars:
+    gitlab_runner_url: https://gitlab.com
+    gitlab_runner_auth_token: "{{ GITLAB_RUNNER_AUTH_TOKEN }}"
+    gitlab_runner_executor: shell
+`
+      expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
+      expect(validateAnsibleTasks(body, resident).ok).toBe(true)
+    })
+
+    it('include_role name=github_runner（task レベル vars 付き）は ecs/resident 双方で通過する', () => {
+      const body = `
+- name: register github runner
+  include_role:
+    name: github_runner
+  vars:
+    github_runner_url: https://github.com/OWNER/REPO
+    github_runner_scope: repo
+    github_runner_pat: "{{ GITHUB_RUNNER_PAT }}"
+`
+      expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
+      expect(validateAnsibleTasks(body, resident).ok).toBe(true)
+    })
+
     it('許可されていないロール名は拒否される', () => {
       const body = `
 - name: bundled step

@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events'
 
 import { AppSyncSubscriber } from '../src/appsync-subscriber'
+import { APPSYNC_CONNECT_FAILURE_ESCALATION_THRESHOLD } from '../src/constants'
 
 jest.mock('../src/logger')
 
@@ -50,7 +51,8 @@ jest.mock('ws', () => {
 
 describe('AppSyncSubscriber', () => {
   const appsyncUrl = 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql'
-  const apiKey = 'da2-testkey123'
+  // Agent token shape: `{tenantCode}:{tokenId}:{rawToken}` sent via Authorization.
+  const authToken = 'mbc:tok-1:rawsecret'
 
   let exitSpy: jest.SpyInstance
 
@@ -68,7 +70,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('connection URL derivation', () => {
     it('should convert https to wss and replace appsync-api with appsync-realtime-api', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       const connectPromise = subscriber.connect()
 
       // Wait for WebSocket creation
@@ -86,7 +88,7 @@ describe('AppSyncSubscriber', () => {
     })
 
     it('should use /graphql/realtime path for local simulator', () => {
-      const subscriber = new AppSyncSubscriber('http://localhost:4001/graphql', apiKey)
+      const subscriber = new AppSyncSubscriber('http://localhost:4001/graphql', authToken)
       const connectPromise = subscriber.connect()
 
       expect(mockWsInstance).not.toBeNull()
@@ -100,12 +102,12 @@ describe('AppSyncSubscriber', () => {
     })
 
     it('should reject non-HTTP/HTTPS URLs', () => {
-      expect(() => new AppSyncSubscriber('ftp://example.com/graphql', apiKey))
+      expect(() => new AppSyncSubscriber('ftp://example.com/graphql', authToken))
         .toThrow('AppSync URL must use HTTP or HTTPS protocol')
     })
 
     it('should include base64-encoded header and payload in URL', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       const connectPromise = subscriber.connect()
 
       const url = mockWsInstance!.url
@@ -117,7 +119,10 @@ describe('AppSyncSubscriber', () => {
 
       const header = JSON.parse(Buffer.from(headerMatch![1], 'base64').toString())
       expect(header).toHaveProperty('host')
-      expect(header).toHaveProperty('x-api-key', apiKey)
+      // Auth now uses the agent token via the Authorization header (Lambda
+      // authorizer), not the master API key.
+      expect(header).toHaveProperty('Authorization', authToken)
+      expect(header).not.toHaveProperty('x-api-key')
       expect(header).toHaveProperty('content-type', 'application/json')
 
       const payload = JSON.parse(Buffer.from(payloadMatch![1], 'base64').toString())
@@ -133,7 +138,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('message flow', () => {
     it('should send connection_init on open', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       const connectPromise = subscriber.connect()
 
       mockWsInstance!.simulateOpen()
@@ -148,7 +153,7 @@ describe('AppSyncSubscriber', () => {
     })
 
     it('should send start message with subscription after connection_ack', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
 
       // Set up subscription before connect
       subscriber.subscribe('test-tenant', jest.fn())
@@ -171,12 +176,16 @@ describe('AppSyncSubscriber', () => {
       expect(data.variables.tenantCode).toBe('test-tenant')
       expect(data.query).toContain('subscription OnMessage')
 
+      // The start message must carry the agent token via Authorization, not x-api-key.
+      expect(startCall.payload.extensions.authorization).toHaveProperty('Authorization', authToken)
+      expect(startCall.payload.extensions.authorization).not.toHaveProperty('x-api-key')
+
       subscriber.disconnect()
     })
 
     it('should dispatch data messages to handler', async () => {
       const handler = jest.fn()
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', handler)
 
       const connectPromise = subscriber.connect()
@@ -211,7 +220,7 @@ describe('AppSyncSubscriber', () => {
   describe('keep-alive handling', () => {
     it('should silently consume ka messages', async () => {
       const handler = jest.fn()
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', handler)
 
       const connectPromise = subscriber.connect()
@@ -229,7 +238,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('auto-reconnect', () => {
     it('should attempt reconnect on unexpected close', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       const reconnectCallback = jest.fn()
       subscriber.onReconnect(reconnectCallback)
       subscriber.subscribe('test-tenant', jest.fn())
@@ -262,7 +271,7 @@ describe('AppSyncSubscriber', () => {
     })
 
     it('should use exponential backoff for reconnect', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -298,7 +307,7 @@ describe('AppSyncSubscriber', () => {
     })
 
     it('should not reconnect after disconnect() is called', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
 
       const connectPromise = subscriber.connect()
       mockWsInstance!.simulateOpen()
@@ -320,7 +329,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('disconnect', () => {
     it('should send stop message and close WebSocket', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -339,8 +348,11 @@ describe('AppSyncSubscriber', () => {
   })
 
   describe('error message handling', () => {
-    it('should handle error messages without crashing', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { logger } = require('../src/logger')
+
+    it('should warn and keep reconnecting on a non-auth error', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -348,8 +360,161 @@ describe('AppSyncSubscriber', () => {
       mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })
       await connectPromise
 
-      // Should not throw
-      mockWsInstance!.simulateMessage({ type: 'error', payload: { errorCode: 'unauthorized' } })
+      const firstWs = mockWsInstance!
+
+      // A transient/query error (no auth markers) must stay at warn level and
+      // must NOT stop reconnection.
+      mockWsInstance!.simulateMessage({
+        type: 'error',
+        payload: { errors: [{ errorType: 'MaxSubscriptionsReachedError' }] },
+      })
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('AppSync error'))
+      expect(logger.error).not.toHaveBeenCalled()
+      expect(firstWs.close).not.toHaveBeenCalled()
+
+      // Reconnection is still armed: an unexpected close creates a fresh socket.
+      firstWs.simulateClose()
+      await jest.advanceTimersByTimeAsync(1000)
+      expect(mockWsInstance).not.toBe(firstWs)
+
+      subscriber.disconnect()
+    })
+
+    it('should treat an error with no payload as a non-auth error (warn)', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      const connectPromise = subscriber.connect()
+      mockWsInstance!.simulateOpen()
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })
+      await connectPromise
+
+      // No payload → JSON.stringify(undefined ?? {}) has no auth markers.
+      mockWsInstance!.simulateMessage({ type: 'error' })
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('AppSync error'))
+      expect(logger.error).not.toHaveBeenCalled()
+
+      subscriber.disconnect()
+    })
+
+    it('should NOT stop or escalate on an auth-shaped error message (no payload false-positive)', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
+      const onPersistentFailure = jest.fn()
+      subscriber.onPersistentFailure(onPersistentFailure)
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      const connectPromise = subscriber.connect()
+      mockWsInstance!.simulateOpen()
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })
+      await connectPromise
+
+      const firstWs = mockWsInstance!
+
+      // An error payload that *looks* like auth (Unauthorized/403) must NOT be
+      // treated as a permanent rejection: doing so false-positives on unrelated
+      // downstream errors. It only warns and keeps reconnecting.
+      mockWsInstance!.simulateMessage({
+        type: 'error',
+        payload: { errors: [{ errorType: 'UnauthorizedException', message: 'Forbidden 403 AccessDenied' }] },
+      })
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('AppSync error'))
+      expect(onPersistentFailure).not.toHaveBeenCalled()
+      expect(firstWs.close).not.toHaveBeenCalled()
+
+      // Reconnection is still armed.
+      firstWs.simulateClose()
+      await jest.advanceTimersByTimeAsync(1000)
+      expect(mockWsInstance).not.toBe(firstWs)
+
+      subscriber.disconnect()
+    })
+  })
+
+  describe('connection-failure escalation', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { logger } = require('../src/logger')
+
+    it('should ERROR + fire onPersistentFailure after N consecutive closes without ack, and keep reconnecting', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
+      const onPersistentFailure = jest.fn()
+      subscriber.onPersistentFailure(onPersistentFailure)
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      // Never ack: every attempt closes before connection_ack (handshake
+      // rejection / immediate drop), which is what an unenabled authorizer or a
+      // bad token looks like.
+      void subscriber.connect()
+
+      const seenWs = new Set<unknown>()
+      seenWs.add(mockWsInstance)
+
+      for (let i = 0; i < APPSYNC_CONNECT_FAILURE_ESCALATION_THRESHOLD; i++) {
+        mockWsInstance!.simulateClose()
+        // Advance past the (capped) backoff so the reconnect creates a new ws.
+        await jest.advanceTimersByTimeAsync(60_000)
+        seenWs.add(mockWsInstance)
+      }
+
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('persistently failing to connect'))
+      expect(onPersistentFailure).toHaveBeenCalledTimes(1)
+      // Not closed: fresh sockets kept being created (reconnection continues).
+      expect(seenWs.size).toBeGreaterThan(APPSYNC_CONNECT_FAILURE_ESCALATION_THRESHOLD)
+
+      // Further failures must not re-fire the escalation within the same streak.
+      mockWsInstance!.simulateClose()
+      await jest.advanceTimersByTimeAsync(60_000)
+      expect(onPersistentFailure).toHaveBeenCalledTimes(1)
+
+      subscriber.disconnect()
+    })
+
+    it('should reset the failure counter and notified flag on connection_ack', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
+      const onPersistentFailure = jest.fn()
+      subscriber.onPersistentFailure(onPersistentFailure)
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      void subscriber.connect()
+
+      // Accumulate failures just below the threshold.
+      for (let i = 0; i < APPSYNC_CONNECT_FAILURE_ESCALATION_THRESHOLD - 1; i++) {
+        mockWsInstance!.simulateClose()
+        await jest.advanceTimersByTimeAsync(60_000)
+      }
+      expect(onPersistentFailure).not.toHaveBeenCalled()
+
+      // A successful connection acks → counter and notified flag reset.
+      mockWsInstance!.simulateOpen()
+      mockWsInstance!.simulateMessage({ type: 'connection_ack', payload: { connectionTimeoutMs: 300000 } })
+
+      // Another near-threshold streak must NOT escalate, proving the reset (the
+      // first close here is the acked connection dropping and is not counted).
+      for (let i = 0; i < APPSYNC_CONNECT_FAILURE_ESCALATION_THRESHOLD - 1; i++) {
+        mockWsInstance!.simulateClose()
+        await jest.advanceTimersByTimeAsync(60_000)
+      }
+      expect(onPersistentFailure).not.toHaveBeenCalled()
+      expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('persistently failing to connect'))
+
+      subscriber.disconnect()
+    })
+
+    it('should not throw when the escalation fires with no onPersistentFailure callback registered', async () => {
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
+      // No onPersistentFailure registered → covers the optional-call false branch.
+      subscriber.subscribe('test-tenant', jest.fn())
+
+      void subscriber.connect()
+
+      for (let i = 0; i < APPSYNC_CONNECT_FAILURE_ESCALATION_THRESHOLD; i++) {
+        mockWsInstance!.simulateClose()
+        await jest.advanceTimersByTimeAsync(60_000)
+      }
+
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('persistently failing to connect'))
 
       subscriber.disconnect()
     })
@@ -357,7 +522,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('complete message handling', () => {
     it('should handle complete messages and reset subscriptionId', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -379,7 +544,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('start_ack message handling', () => {
     it('should handle start_ack messages silently', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -396,7 +561,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('JSON parse error handling', () => {
     it('should handle invalid JSON messages gracefully', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
 
       const connectPromise = subscriber.connect()
       mockWsInstance!.simulateOpen()
@@ -413,7 +578,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('persistent reconnect', () => {
     it('should keep reconnecting past the historical 5-attempt limit', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -443,7 +608,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('keep-alive timeout', () => {
     it('should close WebSocket when keep-alive times out', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -462,7 +627,7 @@ describe('AppSyncSubscriber', () => {
     })
 
     it('should reset keep-alive timer on data messages', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -492,7 +657,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('data messages without handler', () => {
     it('should not crash when data arrives without a handler', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
 
       const connectPromise = subscriber.connect()
       mockWsInstance!.simulateOpen()
@@ -512,7 +677,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('subscribe after connect', () => {
     it('should send subscription immediately if already connected', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
 
       const connectPromise = subscriber.connect()
       mockWsInstance!.simulateOpen()
@@ -535,7 +700,7 @@ describe('AppSyncSubscriber', () => {
   describe('connection_ack without resolveConnect (reconnect path)', () => {
     it('should handle connection_ack during reconnect without resolveConnect', async () => {
       const handler = jest.fn()
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', handler)
 
       const connectPromise = subscriber.connect()
@@ -566,7 +731,7 @@ describe('AppSyncSubscriber', () => {
     })
 
     it('should use DEFAULT_APPSYNC_TIMEOUT_MS when connectionTimeoutMs is missing in connection_ack', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -586,7 +751,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('onParsedMessage connection_ack without resolveConnect', () => {
     it('should not crash when connection_ack arrives without resolveConnect (direct call)', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -608,7 +773,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('sendSubscription when ws is not OPEN', () => {
     it('should not send subscription when ws readyState is not OPEN', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -629,7 +794,7 @@ describe('AppSyncSubscriber', () => {
     })
 
     it('should not send subscription when ws is null', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -652,7 +817,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('onDisconnect send error handling', () => {
     it('should ignore errors thrown during stop message send on disconnect', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -672,7 +837,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('keep-alive timeout with ws null', () => {
     it('should not throw when ws is null when keep-alive timeout fires', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
@@ -693,7 +858,7 @@ describe('AppSyncSubscriber', () => {
 
   describe('resetKeepAliveTimer when keepAliveTimeoutMs is zero', () => {
     it('should not set a timer when keepAliveTimeoutMs is 0', async () => {
-      const subscriber = new AppSyncSubscriber(appsyncUrl, apiKey)
+      const subscriber = new AppSyncSubscriber(appsyncUrl, authToken)
       subscriber.subscribe('test-tenant', jest.fn())
 
       const connectPromise = subscriber.connect()
