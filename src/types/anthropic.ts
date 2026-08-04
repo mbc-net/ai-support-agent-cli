@@ -2,6 +2,10 @@
 export interface ApiUsage {
   inputTokens: number
   outputTokens: number
+  /** プロンプトキャッシュ作成に使われた入力トークン数（Anthropic の cache_creation_input_tokens）。応答に含まれない場合は undefined。 */
+  cacheCreationInputTokens?: number
+  /** プロンプトキャッシュ読み取りで得られた入力トークン数（Anthropic の cache_read_input_tokens）。応答に含まれない場合は undefined。 */
+  cacheReadInputTokens?: number
 }
 
 /** callAnthropicApi の戻り値 */
@@ -62,7 +66,13 @@ export interface AnthropicToolUseRequest {
 /** Anthropic SSE ストリーミングイベント型 */
 export interface AnthropicMessageStartEvent {
   type: 'message_start'
-  message?: { usage?: { input_tokens?: number } }
+  message?: {
+    usage?: {
+      input_tokens?: number
+      cache_creation_input_tokens?: number
+      cache_read_input_tokens?: number
+    }
+  }
 }
 
 export interface AnthropicMessageDeltaEvent {
