@@ -412,6 +412,146 @@ describe('api-chat-executor', () => {
     })
   })
 
+  it('should include cache tokens in done usage when message_start reports them', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-cache-usage', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // message_start with input_tokens + cache tokens (Anthropic wire field names are snake_case)
+    stream.emit('data', Buffer.from(
+      'data: {"type":"message_start","message":{"usage":{"input_tokens":42,"cache_creation_input_tokens":100,"cache_read_input_tokens":25}}}\n\n',
+    ))
+    stream.emit('data', Buffer.from(
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n',
+    ))
+    stream.emit('data', Buffer.from(
+      'data: {"type":"message_delta","usage":{"output_tokens":15}}\n\n',
+    ))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+
+    const doneCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+      (call: unknown[]) => (call[1] as { type: string }).type === 'done',
+    )
+    expect(doneCall).toBeTruthy()
+    const doneContent = JSON.parse((doneCall[1] as { content: string }).content)
+    // cache fields use the same camelCase naming as the main chat-executor path
+    expect(doneContent.usage).toEqual({
+      totalInputTokens: 42,
+      totalOutputTokens: 15,
+      totalTokens: 57,
+      cacheCreationInputTokens: 100,
+      cacheReadInputTokens: 25,
+    })
+  })
+
+  it('should sum cache tokens across tool-use turns', async () => {
+    const stream1 = new EventEmitter()
+    const stream2 = new EventEmitter()
+    mockedAxiosPost
+      .mockResolvedValueOnce({ data: stream1 } as any)
+      .mockResolvedValueOnce({ data: stream2 } as any)
+    mockedExecuteTool.mockResolvedValue({ output: '{"result":"ok"}', isError: false })
+
+    const slackPayload: ChatPayload = {
+      ...basePayload,
+      interactionOrigin: 'slack',
+      toolPolicy: 'marketplace_read_only',
+    } as ChatPayload
+
+    const resultPromise = executeApiChatCommand(
+      slackPayload, 'cmd-cache-turns', mockClient, baseConfig, 'agent-1', { projectDir: '/mock/project' },
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // Turn 1: requests a tool, reports cache tokens
+    stream1.emit('data', Buffer.from(
+      'data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":5}}}\n\n',
+    ))
+    stream1.emit('data', Buffer.from(
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Read"}}\n\n',
+    ))
+    stream1.emit('data', Buffer.from(
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n',
+    ))
+    stream1.emit('data', Buffer.from(
+      'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}\n\n',
+    ))
+    stream1.emit('end')
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // Turn 2: final answer, reports more cache tokens
+    stream2.emit('data', Buffer.from(
+      'data: {"type":"message_start","message":{"usage":{"input_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":30}}}\n\n',
+    ))
+    stream2.emit('data', Buffer.from(
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}\n\n',
+    ))
+    stream2.emit('data', Buffer.from(
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8}}\n\n',
+    ))
+    stream2.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+
+    const doneCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+      (call: unknown[]) => (call[1] as { type: string }).type === 'done',
+    )
+    const doneContent = JSON.parse((doneCall[1] as { content: string }).content)
+    expect(doneContent.usage).toEqual({
+      totalInputTokens: 30,
+      totalOutputTokens: 13,
+      totalTokens: 43,
+      cacheCreationInputTokens: 100,
+      cacheReadInputTokens: 35,
+    })
+  })
+
+  it('should omit cache fields from done usage when response has no cache info', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      basePayload, 'cmd-no-cache', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    stream.emit('data', Buffer.from(
+      'data: {"type":"message_start","message":{"usage":{"input_tokens":42}}}\n\n',
+    ))
+    stream.emit('data', Buffer.from(
+      'data: {"type":"message_delta","usage":{"output_tokens":15}}\n\n',
+    ))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+
+    const doneCall = (mockClient.submitChatChunk as jest.Mock).mock.calls.find(
+      (call: unknown[]) => (call[1] as { type: string }).type === 'done',
+    )
+    const doneContent = JSON.parse((doneCall[1] as { content: string }).content)
+    // No cache keys should be present when the response omits cache usage
+    expect(doneContent.usage).toEqual({
+      totalInputTokens: 42,
+      totalOutputTokens: 15,
+      totalTokens: 57,
+    })
+    expect('cacheCreationInputTokens' in doneContent.usage).toBe(false)
+    expect('cacheReadInputTokens' in doneContent.usage).toBe(false)
+  })
+
   it('should handle message_start without usage gracefully', async () => {
     const stream = new EventEmitter()
     mockedAxiosPost.mockResolvedValue({ data: stream } as any)
