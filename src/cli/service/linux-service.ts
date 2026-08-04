@@ -487,6 +487,38 @@ docker rm -f ${qContainerName} 2>/dev/null || true
 _DOCKER_UID=$(id -u)
 _DOCKER_GID=$(id -g)
 
+# Ensure each host bind-mount source exists and is writable by THIS (service)
+# user before \`docker run\`. Docker auto-creates a MISSING source as root, which
+# the in-container \`node\` user then cannot write — the bundled codex plugin prep
+# fails with EACCES under ~/.codex on every chat (and ~/.claude has the same mode).
+# A prior run may have already left such a root-owned dir behind, so repair an
+# empty one; otherwise fail loudly (with a chown hint) instead of silently
+# starting docker into an EACCES loop.
+# NOTE: writability is judged with \`[ -w ]\` (effective access of THIS user). The
+# container runs as \`--user \$(id -u):\$(id -g)\` — primary gid only, no supplementary
+# groups — so a dir owned \`root:<supplementary-group> 0770\` would pass here yet
+# still be unwritable in the container. That ownership does not arise from this bug
+# (docker auto-creates root:root 0755) and is left as a known limitation.
+_ais_ensure_mount_dir() {
+  _d=\$1
+  if [ -w "\$_d" ]; then return 0; fi
+  if [ ! -e "\$_d" ]; then
+    mkdir -p "\$_d" 2>/dev/null && return 0
+    echo "ERROR: cannot create agent bind-mount dir \$_d" >&2
+    return 1
+  fi
+  if [ -z "\$(ls -A "\$_d" 2>/dev/null)" ] && rmdir "\$_d" 2>/dev/null && mkdir -p "\$_d" 2>/dev/null; then
+    return 0
+  fi
+  # A concurrently-starting project (same \$HOME) may have already repaired it
+  # between our checks; re-test before failing so the race resolves harmlessly.
+  if [ -w "\$_d" ]; then return 0; fi
+  echo "ERROR: \$_d exists but is not writable by this user (likely root-owned by a previous docker auto-mount). Fix: sudo chown -R \$(id -u):\$(id -g) \$_d" >&2
+  return 1
+}
+_ais_ensure_mount_dir ${shellQuote(`${homeDir}/.codex`)} || exit 1
+_ais_ensure_mount_dir ${shellQuote(`${homeDir}/.claude`)} || exit 1
+
 ${dockerRunBlock}
 if [ "$EXIT_CODE" -eq 42 ]; then
   exec ${qUpdateScriptPath}

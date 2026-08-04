@@ -420,6 +420,45 @@ describe('chat-executor', () => {
       expect(spawn).toHaveBeenNthCalledWith(2, 'codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
     })
 
+    it('should fall back to codex when Claude Code fails authentication (401 via stream-json, empty stderr)', async () => {
+      const { spawn } = require('child_process')
+      const claudeProcess = createMockChildProcess()
+      const codexProcess = createMockChildProcess()
+      spawn
+        .mockReturnValueOnce(claudeProcess)
+        .mockReturnValueOnce(codexProcess)
+
+      const resultPromise = executeChatCommand({
+        payload: basePayload,
+        commandId: 'cmd-claude-auth-401-fallback',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        availableChatModes: ['claude_code', 'codex'],
+        agentId: 'agent-1',
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      // 401 rides the stream-json result (is_error) with NO stderr, exit code 1.
+      // Regression guard: a fresh ERR_CLAUDE_AUTH_FAILED must still be treated as
+      // "runtime unavailable" so it falls back to codex instead of retrying the
+      // same dead token (and it must NOT retry claude — 2nd spawn is codex).
+      claudeProcess.emitStdout('data', Buffer.from(JSON.stringify({
+        type: 'result', subtype: 'success', is_error: true, api_error_status: 401,
+        result: 'Failed to authenticate. API Error: 401 OAuth access token is invalid.',
+      }) + '\n'))
+      claudeProcess.emit('close', 1)
+
+      await new Promise((r) => setTimeout(r, 10))
+      codexProcess.emitStdout('data', Buffer.from(JSON.stringify({ type: 'agent_message', message: 'Codex handled 401 fallback' }) + '\n'))
+      codexProcess.emit('close', 0)
+
+      const result = await resultPromise
+      expect(result.success).toBe(true)
+      expect(result.data).toBe('Codex handled 401 fallback')
+      expect(spawn).toHaveBeenNthCalledWith(1, 'claude', expect.any(Array), expect.any(Object))
+      expect(spawn).toHaveBeenNthCalledWith(2, 'codex', expect.arrayContaining(['exec', '--json']), expect.any(Object))
+    })
+
     it('should use project fallback order from Codex to Claude Code when Codex CLI is unavailable', async () => {
       const { spawn } = require('child_process')
       const codexProcess = {

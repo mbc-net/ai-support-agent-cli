@@ -1,7 +1,7 @@
 import os from 'os'
 
 import { ERR_CLAUDE_CLI_NOT_FOUND, ENV_VARS, LOG_STDERR_ON_FAILURE_LIMIT } from '../../src/constants'
-import { ERR_CLAUDE_USAGE_LIMIT_REACHED, buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache, formatClaudeExitError, isClaudeUsageLimitError, parseFileUploadResult, processStreamJsonLine, runClaudeCode } from '../../src/commands/claude-code-runner'
+import { ERR_CLAUDE_AUTH_FAILED, ERR_CLAUDE_USAGE_LIMIT_REACHED, buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache, formatClaudeExitError, isClaudeUsageLimitError, parseFileUploadResult, processStreamJsonLine, runClaudeCode } from '../../src/commands/claude-code-runner'
 import { logger } from '../../src/logger'
 import { createMockChildProcess } from '../helpers/mock-factory'
 
@@ -56,6 +56,21 @@ function makeInitLine(): string {
     subtype: 'init',
     tools: ['Read', 'Write'],
     mcp_servers: [],
+  })
+}
+
+/**
+ * Real captured shape of a claude `--print --output-format stream-json` result
+ * on an authentication (401) failure: subtype "success" but is_error true.
+ */
+function makeErrorResultLine(text: string, apiErrorStatus?: number): string {
+  return JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    is_error: true,
+    ...(apiErrorStatus !== undefined ? { api_error_status: apiErrorStatus } : {}),
+    result: text,
+    terminal_reason: 'api_error',
   })
 }
 
@@ -1047,6 +1062,83 @@ describe('claude-code-runner', () => {
       expect(stderrWarnCalls).toHaveLength(0)
     })
 
+    it('rejects with an auth-error message and logs the 401 when the failure rides the stream-json (empty stderr)', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      // Reproduces the real 401 stream: init, synthetic assistant text, then an
+      // is_error result — all on stdout, with NO stderr — and exit code 1.
+      mockProcess.emitStdout('data', Buffer.from(makeInitLine() + '\n'))
+      mockProcess.emitStdout('data', Buffer.from(makeAssistantLine('Failed to authenticate. API Error: 401 OAuth access token is invalid.') + '\n'))
+      mockProcess.emitStdout('data', Buffer.from(makeErrorResultLine('Failed to authenticate. API Error: 401 OAuth access token is invalid.', 401) + '\n'))
+      mockProcess.emit('close', 1)
+
+      // The user-facing rejection must be the actionable auth message, NOT the
+      // generic "claude CLI がコード 1 で終了しました".
+      await expect(handle.result).rejects.toThrow(ERR_CLAUDE_AUTH_FAILED)
+
+      // And the cause must be logged at warn level (visible without --verbose),
+      // correlatable by pid and carrying the 401 status.
+      const warnCalls = (logger.warn as jest.Mock).mock.calls.map(([m]) => String(m))
+      expect(warnCalls.some((m) => /401/.test(m))).toBe(true)
+      expect(warnCalls.some((m) => /pid=12345/.test(m))).toBe(true)
+    })
+
+    it('redacts secret env values from a stream-json error before it reaches the user message or logs', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+      const secretValue = 'sk-ant-oat01-super-secret-abc123'
+
+      const handle = runClaudeCode({
+        message: 'hello',
+        sendChunk,
+        envVarsOverride: { CLAUDE_CODE_OAUTH_TOKEN: secretValue },
+      })
+
+      // A non-401/non-usage API error whose text echoes the token (claude CLI is an
+      // uncontrolled external process). This text must NOT reach the rejection
+      // message (which handleChatError forwards to the end user) nor the warn log.
+      mockProcess.emitStdout('data', Buffer.from(makeErrorResultLine(`Bad request: token ${secretValue} rejected`, 400) + '\n'))
+      mockProcess.emit('close', 1)
+
+      let rejectionMessage = ''
+      await handle.result.catch((e) => { rejectionMessage = String(e?.message ?? e) })
+
+      expect(rejectionMessage).not.toContain(secretValue)
+      expect(rejectionMessage).toContain('***')
+
+      const warnMessages = (logger.warn as jest.Mock).mock.calls.map(([m]) => String(m))
+      expect(warnMessages.some((m) => m.includes(secretValue))).toBe(false)
+    })
+
+    it('treats an is_error result as a failure even when the process exits 0 (no silent success)', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      const sendChunk = jest.fn().mockResolvedValue(undefined)
+
+      const handle = runClaudeCode({ message: 'hello', sendChunk })
+
+      // is_error and exit code are independent fields. A 401 that somehow pairs with
+      // exit 0 must NOT resolve as a (empty) success — it must reject so the caller
+      // can classify/fallback instead of persisting a blank "successful" answer.
+      mockProcess.emitStdout('data', Buffer.from(makeErrorResultLine('Failed to authenticate. API Error: 401 OAuth access token is invalid.', 401) + '\n'))
+      mockProcess.emit('close', 0)
+
+      await expect(handle.result).rejects.toThrow(ERR_CLAUDE_AUTH_FAILED)
+      const warnMessages = (logger.warn as jest.Mock).mock.calls.map(([m]) => String(m))
+      expect(warnMessages.some((m) => /is_error but exit 0/.test(m))).toBe(true)
+    })
+
     it('should redact known secret env values from the stderr before logging at warn level', async () => {
       const { spawn } = require('child_process')
       const mockProcess = createMockChildProcess()
@@ -1185,6 +1277,61 @@ describe('claude-code-runner', () => {
       expect(isClaudeUsageLimitError('ファイルサイズ制限に達しました。')).toBe(false)
       expect(formatClaudeExitError(1, 'Monthly limit reached')).toBe(ERR_CLAUDE_USAGE_LIMIT_REACHED)
       expect(formatClaudeExitError(1, 'some other failure')).toBe('claude CLI がコード 1 で終了しました')
+    })
+
+    it('classifies a 401 stream-json error as an auth failure instead of the generic exit message', () => {
+      // stderr is empty on a 401 (the error rides the stream-json stdout), which
+      // is exactly why the old stderr-only path produced the useless generic text.
+      const streamError = {
+        text: 'Failed to authenticate. API Error: 401 OAuth access token is invalid.',
+        apiErrorStatus: 401,
+      }
+      expect(formatClaudeExitError(1, '', streamError)).toBe(ERR_CLAUDE_AUTH_FAILED)
+    })
+
+    it('classifies a 401 by message text even when api_error_status is absent', () => {
+      const streamError = { text: 'API Error: 401 Invalid bearer token. Please run /login' }
+      expect(formatClaudeExitError(1, '', streamError)).toBe(ERR_CLAUDE_AUTH_FAILED)
+    })
+
+    it('classifies a 401 that appears only on stderr (CLI-version differences)', () => {
+      expect(formatClaudeExitError(1, 'API Error: 401 Invalid bearer token')).toBe(ERR_CLAUDE_AUTH_FAILED)
+    })
+
+    it('classifies a usage-limit stream-json error (not just stderr)', () => {
+      const streamError = { text: 'Claude AI usage limit reached. Monthly limit reached' }
+      expect(formatClaudeExitError(1, '', streamError)).toBe(ERR_CLAUDE_USAGE_LIMIT_REACHED)
+    })
+
+    it('surfaces the actual error text for other stream-json errors instead of the generic message', () => {
+      const streamError = { text: 'Overloaded: please try again later', apiErrorStatus: 529 }
+      const msg = formatClaudeExitError(1, '', streamError)
+      expect(msg).toContain('Overloaded: please try again later')
+      expect(msg).not.toBe('claude CLI がコード 1 で終了しました')
+    })
+
+    it('detects auth failures across the wordings claude actually emits', () => {
+      const { isClaudeAuthError } = require('../../src/commands/claude-code-runner')
+      // Real captured wording (401 + auth/api context)
+      expect(isClaudeAuthError('Failed to authenticate. API Error: 401 OAuth access token is invalid.')).toBe(true)
+      // Interactive-terminal wording
+      expect(isClaudeAuthError('API Error: 401 Invalid bearer token. Please run /login')).toBe(true)
+      // api_retry error field
+      expect(isClaudeAuthError('authentication_failed')).toBe(true)
+      expect(isClaudeAuthError('Unauthorized')).toBe(true)
+      // Non-auth failures must not be misclassified
+      expect(isClaudeAuthError('Overloaded: please try again later')).toBe(false)
+      expect(isClaudeAuthError('Claude AI usage limit reached')).toBe(false)
+    })
+
+    it('does not over-detect 401: bare number or non-auth 401 context is not an auth error', () => {
+      const { isClaudeAuthError } = require('../../src/commands/claude-code-runner')
+      // "401" embedded in a larger number → word boundary rejects it
+      expect(isClaudeAuthError('processed 40123 records')).toBe(false)
+      // standalone 401 but no auth/api context → not classified as auth
+      expect(isClaudeAuthError('deleted 401 rows from the table')).toBe(false)
+      // standalone 401 WITH auth/api context → auth
+      expect(isClaudeAuthError('HTTP 401 returned by the API error handler')).toBe(true)
     })
 
     it('should pass awsEnv to spawn environment', async () => {
