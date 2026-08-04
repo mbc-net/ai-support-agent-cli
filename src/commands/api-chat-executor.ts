@@ -166,6 +166,14 @@ export async function executeApiChatCommand(
         )
         totalUsage.inputTokens += turnResult.usage.inputTokens
         totalUsage.outputTokens += turnResult.usage.outputTokens
+        // キャッシュトークンはターンごとに報告される。存在するターンのみ加算し、
+        // 一度も報告されなければ undefined のまま（done チャンクから省略される）。
+        if (turnResult.usage.cacheCreationInputTokens !== undefined) {
+          totalUsage.cacheCreationInputTokens = (totalUsage.cacheCreationInputTokens ?? 0) + turnResult.usage.cacheCreationInputTokens
+        }
+        if (turnResult.usage.cacheReadInputTokens !== undefined) {
+          totalUsage.cacheReadInputTokens = (totalUsage.cacheReadInputTokens ?? 0) + turnResult.usage.cacheReadInputTokens
+        }
         fullText += turnResult.text
 
         const wantsToolExecution = Boolean(tools) && turnResult.stopReason === 'tool_use' && turnResult.toolUses.length > 0
@@ -201,6 +209,10 @@ export async function executeApiChatCommand(
         totalInputTokens: totalUsage.inputTokens,
         totalOutputTokens: totalUsage.outputTokens,
         totalTokens: totalUsage.inputTokens + totalUsage.outputTokens,
+        // 主経路 chat-executor.ts と同じ camelCase 命名。undefined の場合は
+        // JSON.stringify がキーを省略する（応答にキャッシュ情報が無いケース）。
+        cacheCreationInputTokens: totalUsage.cacheCreationInputTokens,
+        cacheReadInputTokens: totalUsage.cacheReadInputTokens,
       },
       ...(toolTurnsTruncated ? { toolTurnsTruncated: true } : {}),
     })
@@ -360,10 +372,20 @@ async function streamAnthropicMessage(
         if (!event) return
 
         if (event.type === SSE_EVENT.MESSAGE_START) {
-          // message_start イベントから input_tokens を取得
+          // message_start イベントから input_tokens とキャッシュトークンを取得
           const inputTokens = event.message?.usage?.input_tokens
           if (typeof inputTokens === 'number') {
             usage.inputTokens = inputTokens
+          }
+          // プロンプトキャッシュ関連のトークンは message_start の usage に snake_case で載る。
+          // 応答に含まれない場合は undefined のまま（done チャンクからは省略される）。
+          const cacheCreation = event.message?.usage?.cache_creation_input_tokens
+          if (typeof cacheCreation === 'number') {
+            usage.cacheCreationInputTokens = cacheCreation
+          }
+          const cacheRead = event.message?.usage?.cache_read_input_tokens
+          if (typeof cacheRead === 'number') {
+            usage.cacheReadInputTokens = cacheRead
           }
         } else if (event.type === SSE_EVENT.MESSAGE_DELTA) {
           // message_delta イベントから output_tokens と stop_reason を取得
