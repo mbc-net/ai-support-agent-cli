@@ -17,7 +17,7 @@ import { ERR_CLAUDE_AUTH_FAILED, ERR_CLAUDE_EXIT_CODE_1, ERR_CLAUDE_USAGE_LIMIT_
 import { ERR_CODEX_AUTH_INVALID, ERR_CODEX_EXIT_CODE_1, runCodex } from './codex-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { getProcessManager } from './process-manager'
-import { createChunkSender, formatHistoryForClaudeCode, handleChatError, isSlackMarketplaceCommand, parseHistory, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
+import { buildPageContextNotice, createChunkSender, formatHistoryForClaudeCode, handleChatError, isSlackMarketplaceCommand, parseHistory, parsePageContext, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
@@ -462,7 +462,11 @@ async function executeCliChatOnce(
     // file_upload ツールに必要なメタデータをメッセージに付加
     const metadataNotice = buildMetadataNotice(conversationId, commandId, projectCode, effectiveMcpConfigPath)
 
-    const messageWithHistory = formatHistoryForClaudeCode(history, message + filePathsNotice + conversationFileNotice + metadataNotice)
+    // 埋め込みウィジェットのページコンテキスト（機能: 外部エージェント経路への
+    // ページコンテキスト配線）。untrusted な参考情報ブロックとしてメッセージへ付加する。
+    const pageContextNotice = buildPageContextNotice(parsePageContext(payload.pageContext))
+
+    const messageWithHistory = formatHistoryForClaudeCode(history, message + pageContextNotice + filePathsNotice + conversationFileNotice + metadataNotice)
 
     // Ensure allowedTools are registered in Claude Code settings.json
     if (mode === 'claude_code' && allowedTools?.length) {

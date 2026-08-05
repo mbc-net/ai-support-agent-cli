@@ -193,6 +193,45 @@ describe('chat-executor', () => {
       expect(spawn).toHaveBeenCalledWith('claude', ['-p', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-4-6', 'Hello, world!'], expect.any(Object))
     })
 
+    it('appends the pageContext notice to the claude_code CLI message', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 124,
+      }
+      spawn.mockReturnValue(mockProcess)
+      mockProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') {
+          cb(Buffer.from(ndjsonResult('CLI response')))
+        }
+      })
+      mockProcess.stderr.on.mockImplementation(() => {})
+      mockProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') {
+          cb(0)
+        }
+      })
+
+      const result = await executeChatCommand({
+        payload: {
+          message: 'このページは何ですか？',
+          pageContext: { url: 'https://host.example.com/orders/1', title: '注文詳細' },
+        },
+        commandId: 'cmd-pagectx',
+        client: mockClient,
+        agentId: 'agent-1',
+      })
+      expect(result.success).toBe(true)
+      const spawnArgs = spawn.mock.calls[0][1] as string[]
+      const cliMessage = spawnArgs[spawnArgs.length - 1]
+      expect(cliMessage).toContain('このページは何ですか？')
+      expect(cliMessage).toContain('<page_context untrusted="true">')
+      expect(cliMessage).toContain('URL: https://host.example.com/orders/1')
+      expect(cliMessage).toContain('Title: 注文詳細')
+    })
+
     it('should use codex when no mode is selected and only codex is available', async () => {
       const { spawn } = require('child_process')
       const mockProcess = {
