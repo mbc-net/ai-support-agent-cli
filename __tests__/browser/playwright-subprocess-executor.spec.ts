@@ -1641,13 +1641,23 @@ describe('runPlaywrightSubprocess', () => {
       resultJson: makePlaywrightJson([{ title: 'Test', status: 'passed' }]),
       capture,
     })
+    const originalBaseUrl = process.env.E2E_BASE_URL
+    process.env.E2E_BASE_URL = 'https://stale-parent.example.com'
 
-    await runPlaywrightSubprocess({
-      script: "await page.goto('/')",
-      executionId: uniqueExecutionId('no-base-url'),
-    })
+    try {
+      await runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId: uniqueExecutionId('no-base-url'),
+      })
 
-    expect(capture.env?.E2E_BASE_URL).toBeUndefined()
+      expect(capture.env?.E2E_BASE_URL).toBeUndefined()
+    } finally {
+      if (originalBaseUrl === undefined) {
+        delete process.env.E2E_BASE_URL
+      } else {
+        process.env.E2E_BASE_URL = originalBaseUrl
+      }
+    }
   })
 
   // --- step-screenshot preload injection (captureStepScreenshots) ---
@@ -2523,17 +2533,34 @@ describe('runPlaywrightSubprocess', () => {
       capture,
     })
     const executionId = uniqueExecutionId('http-creds-absent')
+    const originalUsername = process.env.E2E_HTTP_CREDENTIALS_USERNAME
+    const originalPassword = process.env.E2E_HTTP_CREDENTIALS_PASSWORD
+    process.env.E2E_HTTP_CREDENTIALS_USERNAME = 'stale-parent-user'
+    process.env.E2E_HTTP_CREDENTIALS_PASSWORD = 'stale-parent-password'
 
-    await runPlaywrightSubprocess({
-      script: "await page.goto('/')",
-      executionId,
-    })
+    try {
+      await runPlaywrightSubprocess({
+        script: "await page.goto('/')",
+        executionId,
+      })
 
-    const config = capture.files?.['playwright.config.js']
-    expect(config).toBeDefined()
-    expect(config).not.toContain('httpCredentials')
-    expect(capture.env?.E2E_HTTP_CREDENTIALS_USERNAME).toBeUndefined()
-    expect(capture.env?.E2E_HTTP_CREDENTIALS_PASSWORD).toBeUndefined()
+      const config = capture.files?.['playwright.config.js']
+      expect(config).toBeDefined()
+      expect(config).not.toContain('httpCredentials')
+      expect(capture.env?.E2E_HTTP_CREDENTIALS_USERNAME).toBeUndefined()
+      expect(capture.env?.E2E_HTTP_CREDENTIALS_PASSWORD).toBeUndefined()
+    } finally {
+      if (originalUsername === undefined) {
+        delete process.env.E2E_HTTP_CREDENTIALS_USERNAME
+      } else {
+        process.env.E2E_HTTP_CREDENTIALS_USERNAME = originalUsername
+      }
+      if (originalPassword === undefined) {
+        delete process.env.E2E_HTTP_CREDENTIALS_PASSWORD
+      } else {
+        process.env.E2E_HTTP_CREDENTIALS_PASSWORD = originalPassword
+      }
+    }
   })
 
   it('should not allow envVars to override the reserved E2E_HTTP_CREDENTIALS_* keys', async () => {
