@@ -18,10 +18,36 @@ export interface ChatPayload {
   toolPolicy?: unknown
   /** タスク実行中のタスクID（タスク詳細のE2Eテストタブ逆引き用。trigger_e2e_testツールがE2E実行に紐付ける） */
   taskId?: unknown
+  /**
+   * 埋め込みウィジェットのページコンテキスト（機能: 外部エージェント経路への
+   * ページコンテキスト配線）。閲覧中ページの url/title/content/user。サーバ由来だが
+   * 中身（特に content）は埋め込み先サイト由来の**非信頼データ**であり、
+   * buildPageContextNotice で untrusted な参考情報ブロックとして反映する。
+   */
+  pageContext?: unknown
+  /**
+   * ウィジェット単位の追加システムプロンプト。サーバー側で管理者が設定した値で、
+   * プロジェクトの systemPrompt の後ろへ追記する。
+   */
+  widgetSystemPrompt?: unknown
   policyContext?: {
     e2eExecutionId?: string
     e2eTestCaseId?: string
     [key: string]: unknown
+  }
+}
+
+/**
+ * パース済みページコンテキスト（機能: 外部エージェント経路へのページコンテキスト配線）。
+ */
+export interface PageContextInfo {
+  url?: string
+  title?: string
+  content?: string
+  user?: {
+    name?: string
+    email?: string
+    groups?: string[]
   }
 }
 

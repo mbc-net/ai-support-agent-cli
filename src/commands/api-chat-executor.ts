@@ -45,7 +45,7 @@ import { StreamLineParser } from '../utils/stream-parser'
 
 import { buildReadOnlyToolSchemas, executeReadOnlyTool } from './api-tool-executor'
 import { cancelProcess, getProcessManager, _getRunningProcesses } from './process-manager'
-import { createChunkSender, handleChatError, isSlackMarketplaceCommand, parseHistory, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
+import { buildPageContextNotice, combineSystemPrompts, createChunkSender, handleChatError, isSlackMarketplaceCommand, parseHistory, parsePageContext, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
 
 /** 実行中の API チャットを commandId で管理（chat-executor と共有シングルトン） */
 const processManager = getProcessManager()
@@ -125,7 +125,10 @@ export async function executeApiChatCommand(
   try {
     const model = config?.claudeCodeConfig?.model ?? DEFAULT_ANTHROPIC_MODEL
     const maxTokens = config?.claudeCodeConfig?.maxTokens ?? DEFAULT_MAX_TOKENS
-    const systemPrompt = config?.claudeCodeConfig?.systemPrompt
+    const systemPrompt = combineSystemPrompts(
+      config?.claudeCodeConfig?.systemPrompt,
+      payload.widgetSystemPrompt,
+    )
 
     const historyMessages = parseHistory(payload.history)
 
@@ -139,9 +142,14 @@ export async function executeApiChatCommand(
       ? getAutoAddDirs(toolContext.projectDir)
       : []
 
+    // 埋め込みウィジェットのページコンテキスト（機能: 外部エージェント経路への
+    // ページコンテキスト配線）。untrusted な参考情報ブロックとして現ターンの
+    // ユーザーメッセージへ付加する（api モードは画像 vision 非対応のためテキストのみ）。
+    const pageContextNotice = buildPageContextNotice(parsePageContext(payload.pageContext))
+
     const messages: AnthropicRequestMessage[] = [
       ...historyMessages.map((msg) => toRequestMessage(msg)),
-      { role: 'user', content: message },
+      { role: 'user', content: message + pageContextNotice },
     ]
 
     const abortController = new AbortController()
