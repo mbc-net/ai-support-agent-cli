@@ -25,6 +25,11 @@ export interface ChatPayload {
    * buildPageContextNotice で untrusted な参考情報ブロックとして反映する。
    */
   pageContext?: unknown
+  /**
+   * ウィジェット単位の追加システムプロンプト。サーバー側で管理者が設定した値で、
+   * プロジェクトの systemPrompt の後ろへ追記する。
+   */
+  widgetSystemPrompt?: unknown
   policyContext?: {
     e2eExecutionId?: string
     e2eTestCaseId?: string

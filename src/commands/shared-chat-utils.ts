@@ -136,6 +136,18 @@ export function buildPageContextNotice(pageContext: PageContextInfo | undefined)
 }
 
 /**
+ * プロジェクト設定とウィジェット設定のシステムプロンプトを順序を保って結合する。
+ * 空文字列や文字列以外は無視し、何も残らない場合は undefined を返す。
+ */
+export function combineSystemPrompts(...values: unknown[]): string | undefined {
+  const prompts = values
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim())
+    .filter(Boolean)
+  return prompts.length > 0 ? prompts.join('\n\n') : undefined
+}
+
+/**
  * チャンクのバッチ送信設定。
  * - enabled: false の場合は従来どおり 1 チャンク = 1 POST（即時送信）
  * - windowMs: delta をまとめる時間窓（この時間内の連続 delta を 1 POST に結合）

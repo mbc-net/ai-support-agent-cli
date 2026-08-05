@@ -1,5 +1,5 @@
 import type { ApiClient } from '../../src/api-client'
-import { buildPageContextNotice, createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, parsePageContext, resolveChunkBatchConfig, sendFileAttachmentChunk } from '../../src/commands/shared-chat-utils'
+import { buildPageContextNotice, combineSystemPrompts, createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, parsePageContext, resolveChunkBatchConfig, sendFileAttachmentChunk } from '../../src/commands/shared-chat-utils'
 import type { ChatFileInfo } from '../../src/types'
 
 jest.mock('../../src/logger')
@@ -11,6 +11,18 @@ describe('shared-chat-utils', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+  })
+
+  describe('combineSystemPrompts', () => {
+    it('文字列をtrimして順序どおり空行で結合する', () => {
+      expect(combineSystemPrompts(' project ', ' widget ')).toBe(
+        'project\n\nwidget',
+      )
+    })
+
+    it('空文字列と文字列以外を無視し、値がなければundefinedを返す', () => {
+      expect(combineSystemPrompts('', '   ', undefined, 123)).toBeUndefined()
+    })
   })
 
   describe('createChunkSender', () => {

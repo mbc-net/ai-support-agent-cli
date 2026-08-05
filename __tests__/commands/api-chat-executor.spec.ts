@@ -240,6 +240,31 @@ describe('api-chat-executor', () => {
     expect(body.max_tokens).toBe(1024)
   })
 
+  it('should append the widget system prompt in API mode', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const resultPromise = executeApiChatCommand(
+      {
+        ...basePayload,
+        widgetSystemPrompt: 'WIDGET_SYSTEM_PROMPT',
+      },
+      'cmd-widget-system-prompt',
+      mockClient,
+      baseConfig,
+      'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    stream.emit('end')
+    await resultPromise
+
+    const body = mockedAxiosPost.mock.calls[0][1] as Record<string, unknown>
+    expect(body.system).toBe(
+      'You are a helpful assistant.\n\nWIDGET_SYSTEM_PROMPT',
+    )
+  })
+
   it('should handle stream errors', async () => {
     const stream = new EventEmitter()
     mockedAxiosPost.mockResolvedValue({ data: stream } as any)
