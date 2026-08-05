@@ -17,7 +17,7 @@ import { ERR_CLAUDE_AUTH_FAILED, ERR_CLAUDE_EXIT_CODE_1, ERR_CLAUDE_USAGE_LIMIT_
 import { ERR_CODEX_AUTH_INVALID, ERR_CODEX_EXIT_CODE_1, runCodex } from './codex-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { getProcessManager } from './process-manager'
-import { buildPageContextNotice, createChunkSender, formatHistoryForClaudeCode, handleChatError, isSlackMarketplaceCommand, parseHistory, parsePageContext, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
+import { buildPageContextNotice, combineSystemPrompts, createChunkSender, formatHistoryForClaudeCode, handleChatError, isSlackMarketplaceCommand, parseHistory, parsePageContext, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
@@ -362,9 +362,13 @@ async function executeCliChatOnce(
     const allowedTools = slackMarketplaceCommand
       ? []
       : configuredAllowedTools
-    const systemPrompt = mode === 'codex'
+    const configuredSystemPrompt = mode === 'codex'
       ? (serverConfig?.codexConfig?.systemPrompt ?? serverConfig?.claudeCodeConfig?.systemPrompt)
       : serverConfig?.claudeCodeConfig?.systemPrompt
+    const systemPrompt = combineSystemPrompts(
+      configuredSystemPrompt,
+      payload.widgetSystemPrompt,
+    )
     const model = mode === 'codex'
       ? (serverConfig?.codexConfig?.model ?? serverConfig?.claudeCodeConfig?.model)
       : serverConfig?.claudeCodeConfig?.model

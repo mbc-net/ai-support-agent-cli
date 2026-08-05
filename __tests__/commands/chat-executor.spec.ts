@@ -232,6 +232,86 @@ describe('chat-executor', () => {
       expect(cliMessage).toContain('Title: 注文詳細')
     })
 
+    it('appends the widget system prompt after the configured Claude Code system prompt', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 125,
+      }
+      spawn.mockReturnValue(mockProcess)
+      mockProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') cb(Buffer.from(ndjsonResult('CLI response')))
+      })
+      mockProcess.stderr.on.mockImplementation(() => {})
+      mockProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const result = await executeChatCommand({
+        payload: {
+          message: '受注データを確認してください',
+          widgetSystemPrompt: 'WIDGET_SYSTEM_PROMPT',
+        },
+        commandId: 'cmd-widget-system-prompt-claude',
+        client: mockClient,
+        agentId: 'agent-1',
+        serverConfig: {
+          claudeCodeConfig: { systemPrompt: 'PROJECT_SYSTEM_PROMPT' },
+        } as AgentServerConfig,
+      })
+
+      expect(result.success).toBe(true)
+      const spawnArgs = spawn.mock.calls[0][1] as string[]
+      const promptIndex = spawnArgs.indexOf('--append-system-prompt')
+      expect(promptIndex).toBeGreaterThanOrEqual(0)
+      expect(spawnArgs[promptIndex + 1]).toBe(
+        'PROJECT_SYSTEM_PROMPT\n\nWIDGET_SYSTEM_PROMPT',
+      )
+    })
+
+    it('appends the widget system prompt after the configured Codex system prompt', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        on: jest.fn(),
+        pid: 126,
+      }
+      spawn.mockReturnValue(mockProcess)
+      mockProcess.stdout.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+        if (event === 'data') {
+          cb(Buffer.from(JSON.stringify({ type: 'agent_message', message: 'Codex response' }) + '\n'))
+        }
+      })
+      mockProcess.stderr.on.mockImplementation(() => {})
+      mockProcess.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') cb(0)
+      })
+
+      const result = await executeChatCommand({
+        payload: {
+          message: '受注データを確認してください',
+          widgetSystemPrompt: 'WIDGET_SYSTEM_PROMPT',
+        },
+        commandId: 'cmd-widget-system-prompt-codex',
+        client: mockClient,
+        availableChatModes: ['codex'],
+        agentId: 'agent-1',
+        serverConfig: {
+          codexConfig: { systemPrompt: 'PROJECT_SYSTEM_PROMPT' },
+        } as AgentServerConfig,
+      })
+
+      expect(result.success).toBe(true)
+      const spawnArgs = spawn.mock.calls[0][1] as string[]
+      const cliMessage = spawnArgs[spawnArgs.length - 1]
+      expect(cliMessage).toContain(
+        'PROJECT_SYSTEM_PROMPT\n\nWIDGET_SYSTEM_PROMPT',
+      )
+    })
+
     it('should use codex when no mode is selected and only codex is available', async () => {
       const { spawn } = require('child_process')
       const mockProcess = {

@@ -45,7 +45,7 @@ import { StreamLineParser } from '../utils/stream-parser'
 
 import { buildReadOnlyToolSchemas, executeReadOnlyTool } from './api-tool-executor'
 import { cancelProcess, getProcessManager, _getRunningProcesses } from './process-manager'
-import { buildPageContextNotice, createChunkSender, handleChatError, isSlackMarketplaceCommand, parseHistory, parsePageContext, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
+import { buildPageContextNotice, combineSystemPrompts, createChunkSender, handleChatError, isSlackMarketplaceCommand, parseHistory, parsePageContext, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
 
 /** 実行中の API チャットを commandId で管理（chat-executor と共有シングルトン） */
 const processManager = getProcessManager()
@@ -125,7 +125,10 @@ export async function executeApiChatCommand(
   try {
     const model = config?.claudeCodeConfig?.model ?? DEFAULT_ANTHROPIC_MODEL
     const maxTokens = config?.claudeCodeConfig?.maxTokens ?? DEFAULT_MAX_TOKENS
-    const systemPrompt = config?.claudeCodeConfig?.systemPrompt
+    const systemPrompt = combineSystemPrompts(
+      config?.claudeCodeConfig?.systemPrompt,
+      payload.widgetSystemPrompt,
+    )
 
     const historyMessages = parseHistory(payload.history)
 
