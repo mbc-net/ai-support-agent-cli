@@ -623,6 +623,38 @@ describe('api-chat-executor', () => {
     )
   })
 
+  it('should append pageContext notice to the current user message', async () => {
+    const stream = new EventEmitter()
+    mockedAxiosPost.mockResolvedValue({ data: stream } as any)
+
+    const payloadWithPageContext: ChatPayload = {
+      message: 'このページは何ですか？',
+      pageContext: {
+        url: 'https://host.example.com/orders/1',
+        title: '注文詳細',
+      },
+    }
+
+    const resultPromise = executeApiChatCommand(
+      payloadWithPageContext, 'cmd-pagectx', mockClient, baseConfig, 'agent-1',
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    stream.emit('data', Buffer.from('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}\n\n'))
+    stream.emit('end')
+
+    const result = await resultPromise
+    expect(result.success).toBe(true)
+
+    const body = mockedAxiosPost.mock.calls[0][1] as { messages: { role: string; content: string }[] }
+    const lastUserMessage = body.messages[body.messages.length - 1]
+    expect(lastUserMessage.role).toBe('user')
+    expect(lastUserMessage.content).toContain('このページは何ですか？')
+    expect(lastUserMessage.content).toContain('<page_context untrusted="true">')
+    expect(lastUserMessage.content).toContain('URL: https://host.example.com/orders/1')
+    expect(lastUserMessage.content).toContain('Title: 注文詳細')
+  })
+
   it('should map non-assistant roles to user in history', async () => {
     const stream = new EventEmitter()
     mockedAxiosPost.mockResolvedValue({ data: stream } as any)
