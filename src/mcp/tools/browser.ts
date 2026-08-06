@@ -33,7 +33,7 @@ import {
   tryClickSelectors,
   tryFillSelectors,
 } from './browser/selector-utils'
-import { mcpErrorResponse, mcpTextImageResponse, mcpTextResponse, screenshotToBase64, withMcpErrorHandling } from './mcp-response'
+import { mcpErrorResponse, mcpScreenshotResponse, mcpTextResponse, screenshotToBase64, withMcpErrorHandling } from './mcp-response'
 
 /** Cache the resolved session ID from BrowserLocalServer */
 let resolvedProxySessionId: string | null = null
@@ -181,8 +181,7 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
 
       if (session instanceof BrowserProxySession) {
         const result = await session.navigate(url, { waitForSelector, waitForTimeout, fullPage: fullPage ?? true })
-        const base64 = screenshotToBase64(result.screenshot)
-        return mcpTextImageResponse(`Page: ${result.title}\nURL: ${result.url}`, base64, 'image/png')
+        return mcpScreenshotResponse(`Page: ${result.title}\nURL: ${result.url}`, result.screenshot)
       }
 
       if (viewport) {
@@ -198,11 +197,10 @@ function registerBrowserNavigateTool(server: McpServer, defaultSession: BrowserS
       const title: string = await page.title()
       const currentUrl: string = page.url()
       const screenshotBuffer = await session.screenshot(fullPage ?? true)
-      const base64 = screenshotToBase64(screenshotBuffer)
 
       session.actionLog.add('chat', 'navigate', url)
 
-      return mcpTextImageResponse(`Page: ${title}\nURL: ${currentUrl}`, base64, 'image/png')
+      return mcpScreenshotResponse(`Page: ${title}\nURL: ${currentUrl}`, screenshotBuffer)
     }),
   )
 }
@@ -248,7 +246,7 @@ function registerBrowserClickTool(server: McpServer, defaultSession: BrowserSess
         const result = await session.click(selector, { waitForNavigation: waitForNavigation ?? false, screenshot: screenshot ?? true })
         const statusText = `Clicked: ${selector}\nPage: ${result.title}\nURL: ${result.url}`
         if (result.screenshot) {
-          return mcpTextImageResponse(statusText, screenshotToBase64(result.screenshot), 'image/png')
+          return mcpScreenshotResponse(statusText, result.screenshot)
         }
         return mcpTextResponse(statusText)
       }
@@ -265,8 +263,7 @@ function registerBrowserClickTool(server: McpServer, defaultSession: BrowserSess
 
       if (screenshot) {
         const screenshotBuffer = await session.screenshot(true)
-        const base64 = screenshotToBase64(screenshotBuffer)
-        return mcpTextImageResponse(statusText, base64, 'image/png')
+        return mcpScreenshotResponse(statusText, screenshotBuffer)
       }
 
       return mcpTextResponse(statusText)
@@ -294,7 +291,7 @@ function registerBrowserFillTool(server: McpServer, defaultSession: BrowserSessi
       if (session instanceof BrowserProxySession) {
         const screenshotBuf = await session.fill(selector, value, screenshot ?? false)
         if (screenshotBuf) {
-          return mcpTextImageResponse(`Filled: ${selector}`, screenshotToBase64(screenshotBuf), 'image/png')
+          return mcpScreenshotResponse(`Filled: ${selector}`, screenshotBuf)
         }
         return mcpTextResponse(`Filled: ${selector}`)
       }
@@ -306,8 +303,7 @@ function registerBrowserFillTool(server: McpServer, defaultSession: BrowserSessi
 
       if (screenshot) {
         const screenshotBuffer = await session.screenshot(true)
-        const base64 = screenshotToBase64(screenshotBuffer)
-        return mcpTextImageResponse(`Filled: ${matchedSelector}`, base64, 'image/png')
+        return mcpScreenshotResponse(`Filled: ${matchedSelector}`, screenshotBuffer)
       }
 
       return mcpTextResponse(`Filled: ${matchedSelector}`)

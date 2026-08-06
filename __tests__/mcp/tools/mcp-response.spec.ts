@@ -4,6 +4,7 @@ import {
   getErrorMessage,
   mcpErrorResponse,
   mcpImageResponse,
+  mcpScreenshotResponse,
   mcpTextImageResponse,
   mcpTextResponse,
   newIdempotencyKey,
@@ -93,6 +94,30 @@ describe('mcp-response helpers', () => {
     it('should not include isError', () => {
       const result = mcpTextImageResponse('info', 'data', 'image/jpeg')
       expect(result).not.toHaveProperty('isError')
+    })
+  })
+
+  describe('mcpScreenshotResponse', () => {
+    it('should encode the buffer to base64 and wrap it as a PNG text+image response', () => {
+      const buf = Buffer.from('hello')
+      const result = mcpScreenshotResponse('Page info', buf)
+      expect(result).toEqual({
+        content: [
+          { type: 'text', text: 'Page info' },
+          {
+            type: 'image',
+            data: buf.toString('base64'),
+            mimeType: 'image/png',
+          },
+        ],
+      })
+    })
+
+    it('should be equivalent to mcpTextImageResponse with screenshotToBase64 + image/png', () => {
+      const buf = Buffer.from([1, 2, 3, 4])
+      expect(mcpScreenshotResponse('t', buf)).toEqual(
+        mcpTextImageResponse('t', screenshotToBase64(buf), 'image/png'),
+      )
     })
   })
 
