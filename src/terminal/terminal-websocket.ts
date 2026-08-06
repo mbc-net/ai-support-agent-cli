@@ -3,7 +3,7 @@ import { execFile, type ExecFileException } from 'child_process'
 
 import WebSocket from 'ws'
 
-import { BaseWebSocketConnection } from '../base-websocket'
+import { BaseWebSocketConnection, buildAgentWsHeaders } from '../base-websocket'
 import { WS_CLOSE_CODE_AUTH_REJECTED, WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import { logger } from '../logger'
 import { buildWsUrl, getErrorMessage, isErrnoException } from '../utils'
@@ -165,15 +165,12 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
   }
 
   protected createWebSocket(): WebSocket {
-    // Re-send ALB sticky cookies captured on the previous handshake so a
-    // reconnect lands on the same API task (scale-out safe).
-    const cookie = this.getStickyCookieHeader()
     return new WebSocket(this.wsUrl, {
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        'X-Agent-Id': this.agentId,
-        ...(cookie ? { Cookie: cookie } : {}),
-      },
+      headers: buildAgentWsHeaders(
+        this.token,
+        this.agentId,
+        this.getStickyCookieHeader(),
+      ),
     })
   }
 

@@ -7,7 +7,7 @@ import { logger } from '../../logger'
 import { getActiveSession } from './browser'
 import { BrowserSession } from './browser/browser-session'
 import { BrowserSessionManager } from './browser/browser-session-manager'
-import { mcpTextResponse, withMcpErrorHandling } from './mcp-response'
+import { mcpTextResponse, screenshotToBase64, withMcpErrorHandling } from './mcp-response'
 import { toErrorMessage } from '../../utils'
 
 /**
@@ -80,7 +80,7 @@ export function registerE2eTestStepTool(
               )
             } else {
               const buffer = await activeSession.screenshot(true)
-              screenshotBase64 = buffer.toString('base64')
+              screenshotBase64 = screenshotToBase64(buffer)
               logger.debug(`[e2e_test] Screenshot captured for step ${args.stepNumber} (${(buffer.length / 1024).toFixed(1)}KB)`)
             }
           } catch (err: unknown) {
