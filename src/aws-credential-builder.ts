@@ -3,7 +3,7 @@ import axios from 'axios'
 import type { ApiClient } from './api-client'
 import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
-import { getErrorMessage, isSsoAuthRequiredError } from './utils'
+import { axiosResponseData, getErrorMessage, isSsoAuthRequiredError } from './utils'
 
 export interface SsoAuthRequiredInfo {
   accountId: string
@@ -28,7 +28,7 @@ interface CredentialError {
 function extractAwsCredentialError(error: unknown, accountName: string): CredentialError {
   if (axios.isAxiosError(error) && error.response) {
     const status = error.response.status
-    const data = error.response.data as Record<string, unknown> | undefined
+    const data = axiosResponseData(error)
 
     if (data) {
       // SSO認証切れの場合は専用メッセージ + SSO情報

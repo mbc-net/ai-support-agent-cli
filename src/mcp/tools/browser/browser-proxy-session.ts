@@ -13,6 +13,14 @@ import { BROWSER_PROXY_REQUEST_TIMEOUT_MS } from '../../../constants'
 import { logger } from '../../../logger'
 import { BrowserActionLog } from './browser-action-log'
 
+/**
+ * ローカル HTTP サーバー応答の base64 スクリーンショット文字列を Buffer に復号する。
+ * `result.screenshot`（型なし）の `as string` キャストと base64 復号の重複を集約する。
+ */
+function decodeScreenshot(value: unknown): Buffer {
+  return Buffer.from(value as string, 'base64')
+}
+
 export class BrowserProxySession {
   readonly variables: ProxyVariableMap
   readonly actionLog = new BrowserActionLog()
@@ -41,7 +49,7 @@ export class BrowserProxySession {
     return {
       title: result.title as string,
       url: result.url as string,
-      screenshot: Buffer.from(result.screenshot as string, 'base64'),
+      screenshot: decodeScreenshot(result.screenshot),
     }
   }
 
@@ -60,7 +68,7 @@ export class BrowserProxySession {
     return {
       title: result.title as string,
       url: result.url as string,
-      screenshot: result.screenshot ? Buffer.from(result.screenshot as string, 'base64') : undefined,
+      screenshot: result.screenshot ? decodeScreenshot(result.screenshot) : undefined,
     }
   }
 
@@ -69,7 +77,7 @@ export class BrowserProxySession {
    */
   async fill(selector: string, value: string, screenshot?: boolean): Promise<Buffer | undefined> {
     const result = await this.post('fill', { selector, value, screenshot: screenshot ?? false })
-    return result.screenshot ? Buffer.from(result.screenshot as string, 'base64') : undefined
+    return result.screenshot ? decodeScreenshot(result.screenshot) : undefined
   }
 
   /**
@@ -95,7 +103,7 @@ export class BrowserProxySession {
    */
   async screenshot(fullPage?: boolean): Promise<Buffer> {
     const result = await this.post('screenshot', { fullPage: fullPage ?? true })
-    return Buffer.from(result.screenshot as string, 'base64')
+    return decodeScreenshot(result.screenshot)
   }
 
   /**

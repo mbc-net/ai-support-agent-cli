@@ -63,6 +63,14 @@ export function mcpTextImageResponse(text: string, base64Data: string, mimeType:
 }
 
 /**
+ * スクリーンショット Buffer を含む MCP レスポンス（PNG 固定）を生成する。
+ * `screenshotToBase64` + `mcpTextImageResponse(..., 'image/png')` の合成を統一する。
+ */
+export function mcpScreenshotResponse(text: string, screenshot: Buffer) {
+  return mcpTextImageResponse(text, screenshotToBase64(screenshot), 'image/png')
+}
+
+/**
  * MCP ツールハンドラのエラーハンドリングラッパー。
  * ツール実装関数を受け取り、例外発生時に `mcpErrorResponse` へ変換して返す。
  * AxiosError の場合はHTTPステータスとサーバーメッセージも含めた詳細なエラーを返す。
