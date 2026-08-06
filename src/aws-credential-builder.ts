@@ -4,6 +4,7 @@ import type { ApiClient } from './api-client'
 import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
 import { axiosResponseData, getErrorMessage, isSsoAuthRequiredError } from './utils'
+import { buildAwsCredentialEnv } from './utils/aws-credential-env'
 
 export interface SsoAuthRequiredInfo {
   accountId: string
@@ -143,12 +144,7 @@ export async function buildSingleAccountAwsEnv(
   try {
     logger.info(`[chat] Fetching AWS credentials for account: ${awsAccountId}`)
     const creds = await client.getAwsCredentials(awsAccountId)
-    const env: Record<string, string> = {
-      AWS_ACCESS_KEY_ID: creds.accessKeyId,
-      AWS_SECRET_ACCESS_KEY: creds.secretAccessKey,
-      AWS_DEFAULT_REGION: creds.region,
-      ...(creds.sessionToken ? { AWS_SESSION_TOKEN: creds.sessionToken } : {}),
-    }
+    const env: Record<string, string> = buildAwsCredentialEnv(creds, creds.region)
     logger.info(`[chat] AWS credentials obtained for region=${creds.region}`)
     return { env, errors: [], ssoAuthRequired: [], cleanup: () => {} }
   } catch (error) {

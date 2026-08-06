@@ -42,17 +42,15 @@ import {
   SSM_STDERR_MAX_BYTES,
 } from '../../constants'
 import { logger } from '../../logger'
+import type { SsmAwsCredentials } from '../../types/project'
 import { getAddressPort } from '../../utils'
+import { buildAwsCredentialEnv } from '../../utils/aws-credential-env'
 import type { DbTunnel, TunnelTarget } from './db-tunnel'
 
 export interface SsmTunnelParams {
   instanceId: string
   region: string
-  awsCredentials: {
-    accessKeyId: string
-    secretAccessKey: string
-    sessionToken?: string
-  }
+  awsCredentials: SsmAwsCredentials
   target: TunnelTarget
   /** Total budget for the local forwarded port to start accepting connections. */
   timeoutMs?: number
@@ -138,10 +136,7 @@ export async function openSsmTunnel(params: SsmTunnelParams): Promise<DbTunnel> 
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    AWS_ACCESS_KEY_ID: awsCredentials.accessKeyId,
-    AWS_SECRET_ACCESS_KEY: awsCredentials.secretAccessKey,
-    AWS_DEFAULT_REGION: region,
-    ...(awsCredentials.sessionToken ? { AWS_SESSION_TOKEN: awsCredentials.sessionToken } : {}),
+    ...buildAwsCredentialEnv(awsCredentials, region),
   }
 
   const args = [
