@@ -3,7 +3,7 @@ import * as path from 'node:path'
 
 import WebSocket from 'ws'
 
-import { BaseWebSocketConnection } from '../base-websocket'
+import { BaseWebSocketConnection, buildAgentWsHeaders } from '../base-websocket'
 import { BrowserLocalServer } from '../browser/browser-local-server'
 import { WS_CLOSE_CODE_AUTH_REJECTED, WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import type { EnvVarsProvider } from '../env-vars-filter'
@@ -15,6 +15,7 @@ import {
 import { validateUrl } from '../mcp/tools/browser/browser-security'
 import { SELECTOR_TIMEOUT_NAVIGATION_MS } from '../mcp/tools/browser/browser-types'
 import type { BrowserSession, FileChooserPayload } from '../mcp/tools/browser/browser-session'
+import { screenshotToBase64 } from '../mcp/tools/mcp-response'
 import { executePlaywrightScript } from '../browser/browser-script-executor'
 
 import {
@@ -312,15 +313,12 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   protected createWebSocket(): WebSocket {
-    // Re-send ALB sticky cookies captured on the previous handshake so a
-    // reconnect lands on the same API task (scale-out safe).
-    const cookie = this.getStickyCookieHeader()
     return new WebSocket(this.wsUrl, {
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        'X-Agent-Id': this.agentId,
-        ...(cookie ? { Cookie: cookie } : {}),
-      },
+      headers: buildAgentWsHeaders(
+        this.token,
+        this.agentId,
+        this.getStickyCookieHeader(),
+      ),
     })
   }
 
@@ -1205,7 +1203,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     try {
       const buffer = await session.screenshot(true)
-      const base64 = buffer.toString('base64')
+      const base64 = screenshotToBase64(buffer)
       const currentUrl = session.getCurrentUrl()
       const pageTitle = await session.getPageTitle()
 

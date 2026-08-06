@@ -1,4 +1,14 @@
-import { parseToken, extractTokenId, extractTenantCodeFromToken, resolveDirectStartTarget } from '../../src/utils/token-utils'
+import { bearerHeader, parseToken, extractTokenId, extractTenantCodeFromToken, resolveDirectStartTarget } from '../../src/utils/token-utils'
+
+describe('bearerHeader', () => {
+  it('prefixes the token with "Bearer "', () => {
+    expect(bearerHeader('abc123')).toBe('Bearer abc123')
+  })
+
+  it('handles an empty token', () => {
+    expect(bearerHeader('')).toBe('Bearer ')
+  })
+})
 
 describe('parseToken', () => {
   it('returns parsed components for valid token', () => {

@@ -5,7 +5,25 @@ import WebSocket from 'ws'
 import { WS_HEARTBEAT_INTERVAL_MS, WS_PONG_MAX_MISSED } from './constants'
 import { logger } from './logger'
 import { getErrorMessage } from './utils'
+import { bearerHeader } from './utils/token-utils'
 import { attemptReconnect } from './ws-reconnect'
+
+/**
+ * Build the handshake headers for an agent WebSocket connection
+ * (terminal / vscode tunnel). Re-sends the ALB sticky cookie when present so a
+ * reconnect lands on the same API task (scale-out safe).
+ */
+export function buildAgentWsHeaders(
+  token: string,
+  agentId: string,
+  cookie?: string,
+): Record<string, string> {
+  return {
+    Authorization: bearerHeader(token),
+    'X-Agent-Id': agentId,
+    ...(cookie ? { Cookie: cookie } : {}),
+  }
+}
 
 export interface BaseWebSocketOptions {
   maxReconnectRetries: number

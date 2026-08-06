@@ -14,6 +14,14 @@ export interface ParsedToken {
 }
 
 /**
+ * Build an HTTP `Authorization` header value for a bearer token.
+ * Consolidates the repeated `` `Bearer ${token}` `` template literal.
+ */
+export function bearerHeader(token: string): string {
+  return `Bearer ${token}`
+}
+
+/**
  * Parse a token string into its components.
  * Returns null if the token does not match the expected 3-part format.
  */

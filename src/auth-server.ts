@@ -4,6 +4,7 @@ import * as http from 'http'
 import { AUTH_TIMEOUT, ERR_AUTH_SERVER_START_FAILED, LOCALHOST_ADDRESS, MAX_AUTH_BODY_SIZE } from './constants'
 import { t } from './i18n'
 import { parseString } from './utils'
+import { sendJson } from './utils/http-response'
 
 export interface AuthResult {
   token: string
@@ -40,8 +41,7 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
       if (req.method === 'POST' && req.url === '/callback') {
         const contentType = req.headers['content-type'] ?? ''
         if (!contentType.startsWith('application/json')) {
-          res.writeHead(415, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Unsupported Media Type: expected application/json' }))
+          sendJson(res, 415, { error: 'Unsupported Media Type: expected application/json' })
           return
         }
         let body = ''
@@ -49,8 +49,7 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
         req.on('data', (chunk: Buffer) => {
           bodySize += chunk.length
           if (bodySize > MAX_AUTH_BODY_SIZE) {
-            res.writeHead(413, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'Request body too large' }))
+            sendJson(res, 413, { error: 'Request body too large' })
             req.destroy()
             return
           }
@@ -63,8 +62,7 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
             const token = parseString(data.token)
 
             if (!token) {
-              res.writeHead(400, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ error: 'Missing token' }))
+              sendJson(res, 400, { error: 'Missing token' })
               return
             }
 
@@ -72,20 +70,17 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
               && data.nonce.length === nonce.length
               && crypto.timingSafeEqual(Buffer.from(data.nonce), Buffer.from(nonce))
             if (!nonceValid) {
-              res.writeHead(403, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ error: 'Invalid nonce' }))
+              sendJson(res, 403, { error: 'Invalid nonce' })
               return
             }
 
             if (nonceUsed) {
-              res.writeHead(400, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ error: 'Nonce already used' }))
+              sendJson(res, 400, { error: 'Nonce already used' })
               return
             }
             nonceUsed = true
 
-            res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ success: true }))
+            sendJson(res, 200, { success: true })
 
             if (callbackResolve) {
               callbackResolve({
@@ -96,8 +91,7 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
               })
             }
           } catch {
-            res.writeHead(400, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'Invalid request body' }))
+            sendJson(res, 400, { error: 'Invalid request body' })
           }
         })
         return

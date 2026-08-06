@@ -25,6 +25,7 @@ import {
   tryFillSelectors,
 } from '../mcp/tools/browser/selector-utils'
 import { screenshotToBase64 } from '../mcp/tools/mcp-response'
+import { sendJson } from '../utils/http-response'
 import { executePlaywrightScript } from './browser-script-executor'
 
 /** Action log entry emitted to the caller */
@@ -361,11 +362,6 @@ export class BrowserLocalServer {
     const entries = Array.from(session.variables.entries()) as [string, string][]
     sendJson(res, 200, { variables: Object.fromEntries(entries) })
   }
-}
-
-function sendJson(res: http.ServerResponse, status: number, data: unknown): void {
-  res.writeHead(status, { 'Content-Type': 'application/json' })
-  res.end(JSON.stringify(data))
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {
