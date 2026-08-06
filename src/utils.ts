@@ -71,6 +71,14 @@ export function axiosResponseData(
 }
 
 /**
+ * AxiosError の HTTP レスポンスステータスコードを安全に取り出す。
+ * axios エラーでない場合は undefined を返す（`as AxiosError` キャストの代替）。
+ */
+export function axiosResponseStatus(error: unknown): number | undefined {
+  return axios.isAxiosError(error) ? error.response?.status : undefined
+}
+
+/**
  * エラーから詳細なメッセージを抽出する。
  * AxiosError の場合はレスポンスボディの message/error フィールドとHTTPステータスコードを含める。
  * それ以外の Error はメッセージを、非 Error は String() を返す。

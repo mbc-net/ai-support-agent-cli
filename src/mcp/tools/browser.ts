@@ -15,6 +15,7 @@ import { ApiClient } from '../../api-client'
 import { LOCALHOST_ADDRESS } from '../../constants'
 import { logger } from '../../logger'
 import { sleep } from '../../utils'
+import { streamToBuffer } from '../../utils/stream-collect'
 import { BrowserProxySession } from './browser/browser-proxy-session'
 import { validateUrl } from './browser/browser-security'
 import { BrowserSession } from './browser/browser-session'
@@ -120,10 +121,7 @@ async function resolveFirstSessionId(localPort: string): Promise<string | null> 
 function httpGet(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
     http.get(url, { timeout: BROWSER_TIMEOUT_REQUEST_MS }, (res) => {
-      const chunks: Buffer[] = []
-      res.on('data', (chunk: Buffer) => chunks.push(chunk))
-      res.on('end', () => resolve(Buffer.concat(chunks).toString()))
-      res.on('error', reject)
+      streamToBuffer(res).then((buf) => resolve(buf.toString()), reject)
     }).on('error', reject)
   })
 }
