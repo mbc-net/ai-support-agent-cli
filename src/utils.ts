@@ -311,6 +311,28 @@ export function nowIso(): string {
 }
 
 /**
+ * Append `text` to `current` while keeping the total length within `limit`
+ * bytes/chars. If the result would exceed `limit`, only the portion that fits
+ * is appended and `truncated` is returned as `true` so the caller can emit a
+ * one-time warning. Centralizes the cap-and-append idiom used by the Docker
+ * container/build log accumulators.
+ */
+export function appendWithLimit(
+  current: string,
+  text: string,
+  limit: number,
+): { result: string; truncated: boolean } {
+  if (current.length + text.length <= limit) {
+    return { result: current + text, truncated: false }
+  }
+  const remaining = limit - current.length
+  return {
+    result: current + (remaining > 0 ? text.slice(0, remaining) : ''),
+    truncated: true,
+  }
+}
+
+/**
  * Sweep `dir` for stale entries left behind by a crashed/killed process,
  * removing each one that matches `matches(name)` and is at least `maxAgeMs`
  * old (by mtime).

@@ -31,7 +31,7 @@ import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { removePidFile } from '../pid-manager'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
-import { atomicWriteFile, getErrorMessage } from '../utils'
+import { appendWithLimit, atomicWriteFile, getErrorMessage } from '../utils'
 import type { DockerRunOptions } from './docker-runner'
 import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, resolveImageTag, getDockerPath } from './docker-utils'
 import { buildProjectVolumeMounts } from './volume-mount-builder'
@@ -371,11 +371,9 @@ export class DockerSupervisor {
         const text = buf
         buf = ''
         if (!logTruncated) {
-          if (fullLog.length + text.length <= DOCKER_MAX_SESSION_LOG_BYTES) {
-            fullLog += text
-          } else {
-            const remaining = DOCKER_MAX_SESSION_LOG_BYTES - fullLog.length
-            fullLog += remaining > 0 ? text.slice(0, remaining) : ''
+          const appended = appendWithLimit(fullLog, text, DOCKER_MAX_SESSION_LOG_BYTES)
+          fullLog = appended.result
+          if (appended.truncated) {
             logTruncated = true
             logger.warn(`[docker] Container log for ${key} exceeded 2 MB limit; remaining output will not be saved to S3`)
           }

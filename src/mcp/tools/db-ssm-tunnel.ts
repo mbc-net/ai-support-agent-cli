@@ -42,7 +42,7 @@ import {
 } from '../../constants'
 import { logger } from '../../logger'
 import { getAddressPort } from '../../utils'
-import type { DbTunnel } from './db-tunnel'
+import type { DbTunnel, TunnelTarget } from './db-tunnel'
 
 export interface SsmTunnelParams {
   instanceId: string
@@ -52,7 +52,7 @@ export interface SsmTunnelParams {
     secretAccessKey: string
     sessionToken?: string
   }
-  target: { host: string; port: number }
+  target: TunnelTarget
   /** Total budget for the local forwarded port to start accepting connections. */
   timeoutMs?: number
 }
