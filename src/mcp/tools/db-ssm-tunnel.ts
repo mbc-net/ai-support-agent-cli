@@ -35,6 +35,7 @@ import { createServer, Socket } from 'net'
 
 import {
   DB_CONNECT_TIMEOUT_MS,
+  LOCALHOST_ADDRESS,
   SSM_KILL_GRACE_MS,
   SSM_PORT_POLL_INTERVAL_MS,
   SSM_PORT_PROBE_TIMEOUT_MS,
@@ -62,7 +63,7 @@ function reserveLocalPort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createServer()
     server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(0, LOCALHOST_ADDRESS, () => {
       const port = getAddressPort(server)
       if (port !== undefined) {
         server.close(() => resolve(port))
@@ -88,7 +89,7 @@ function probePort(port: number): Promise<boolean> {
     socket.once('connect', () => finish(true))
     socket.once('error', () => finish(false))
     socket.once('timeout', () => finish(false))
-    socket.connect(port, '127.0.0.1')
+    socket.connect(port, LOCALHOST_ADDRESS)
   })
 }
 
@@ -241,7 +242,7 @@ export async function openSsmTunnel(params: SsmTunnelParams): Promise<DbTunnel> 
   )
 
   return {
-    host: '127.0.0.1',
+    host: LOCALHOST_ADDRESS,
     port: localPort,
     close: () => killSubprocess(child),
   }

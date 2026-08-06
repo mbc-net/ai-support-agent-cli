@@ -135,6 +135,9 @@ export const HIDDEN_ENTRIES = ['.claude', '.codex']
 // Loopback address used when binding local HTTP servers and building local URLs
 export const LOCALHOST_ADDRESS = '127.0.0.1'
 
+// Default SSH port when a credential/host does not specify one
+export const DEFAULT_SSH_PORT = 22
+
 // Default login URL (production). Must point at the app subdomain that actually hosts
 // /agent-callback (web/) — the root domain serves the public marketing site
 // (public-site/) and has no such route. Keep in sync with frontBaseUrl in
