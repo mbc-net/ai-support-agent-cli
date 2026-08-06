@@ -27,6 +27,8 @@ import { createServer, type Socket } from 'net'
 
 import {
   DB_CONNECT_TIMEOUT_MS,
+  DEFAULT_SSH_PORT,
+  LOCALHOST_ADDRESS,
   SSH_KEEPALIVE_COUNT_MAX,
   SSH_KEEPALIVE_INTERVAL_MS,
 } from '../../constants'
@@ -89,7 +91,7 @@ export async function openSshTunnel(
 
     const connectConfig: Record<string, unknown> = {
       host: ssh.hostname,
-      port: ssh.port || 22,
+      port: ssh.port || DEFAULT_SSH_PORT,
       username: ssh.username,
       readyTimeout: DB_CONNECT_TIMEOUT_MS,
       keepaliveInterval: SSH_KEEPALIVE_INTERVAL_MS,
@@ -102,7 +104,7 @@ export async function openSshTunnel(
   })
 
   const server = createServer((socket: Socket) => {
-    conn.forwardOut('127.0.0.1', 0, target.host, target.port, (err, stream) => {
+    conn.forwardOut(LOCALHOST_ADDRESS, 0, target.host, target.port, (err, stream) => {
       if (err) {
         // Surface why the forward channel could not be opened (bastion refused,
         // target unreachable, channel limit) — SSH key material is not part of
@@ -140,7 +142,7 @@ export async function openSshTunnel(
       conn.end()
       reject(err)
     })
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(0, LOCALHOST_ADDRESS, () => {
       const port = getAddressPort(server)
       if (port !== undefined) {
         resolve(port)
@@ -156,7 +158,7 @@ export async function openSshTunnel(
   )
 
   return {
-    host: '127.0.0.1',
+    host: LOCALHOST_ADDRESS,
     port: localPort,
     close: () =>
       new Promise<void>((resolve) => {

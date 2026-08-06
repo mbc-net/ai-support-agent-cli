@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 import { ApiClient } from '../../api-client'
+import { DEFAULT_SSH_PORT } from '../../constants'
 import { mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
 
 /** get_project_info ツールを MCP サーバーに登録する */
@@ -52,7 +53,7 @@ export function registerProjectInfoTool(
             hostId: h.hostId,
             name: h.name,
             hostname: h.hostname,
-            port: h.port ?? 22,
+            port: h.port ?? DEFAULT_SSH_PORT,
             username: h.username,
             authType: h.authType,
             description: h.description,
