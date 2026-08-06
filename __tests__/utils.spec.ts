@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { axiosResponseData, exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
+import { axiosResponseData, axiosResponseStatus, exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('sanitizeNameSegment', () => {
@@ -506,6 +506,29 @@ describe('axiosResponseData', () => {
     expect(axiosResponseData(new Error('plain'))).toBeUndefined()
     expect(axiosResponseData('string error')).toBeUndefined()
     expect(axiosResponseData(null)).toBeUndefined()
+  })
+})
+
+describe('axiosResponseStatus', () => {
+  it('returns the status code for an AxiosError with a response', () => {
+    const error = new AxiosError('boom', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 404,
+      statusText: 'Not Found',
+      data: {},
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(axiosResponseStatus(error)).toBe(404)
+  })
+
+  it('returns undefined for an AxiosError without a response', () => {
+    expect(axiosResponseStatus(new AxiosError('Network Error', 'ERR_NETWORK'))).toBeUndefined()
+  })
+
+  it('returns undefined for a non-Axios error', () => {
+    expect(axiosResponseStatus(new Error('plain'))).toBeUndefined()
+    expect(axiosResponseStatus('string error')).toBeUndefined()
+    expect(axiosResponseStatus(null)).toBeUndefined()
   })
 })
 

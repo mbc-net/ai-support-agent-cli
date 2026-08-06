@@ -24,7 +24,7 @@ import {
   HTTP_RESPONSE_CHUNK_SIZE,
 } from './constants'
 import { VsCodeServer } from './vscode-server'
-import { proxyHttpRequest } from './vscode-http-proxy'
+import { proxyHttpRequest, type ProxyResponse } from './vscode-http-proxy'
 import { VsCodeWsProxy } from './vscode-ws-proxy'
 
 /**
@@ -668,7 +668,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
    */
   private sendHttpResponse(
     msg: VsCodeServerMessage,
-    response: { statusCode: number; headers: Record<string, string>; body: string },
+    response: ProxyResponse,
   ): void {
     // レスポンスボディが大きい場合はチャンク分割
     const bodyLength = response.body.length
@@ -691,7 +691,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
    */
   private sendChunkedHttpResponse(
     msg: VsCodeServerMessage,
-    response: { statusCode: number; headers: Record<string, string>; body: string },
+    response: ProxyResponse,
   ): void {
     const bodyLength = response.body.length
     const totalChunks = Math.ceil(bodyLength / HTTP_RESPONSE_CHUNK_SIZE)

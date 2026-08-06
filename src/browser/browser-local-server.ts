@@ -26,6 +26,7 @@ import {
 } from '../mcp/tools/browser/selector-utils'
 import { screenshotToBase64 } from '../mcp/tools/mcp-response'
 import { sendJson } from '../utils/http-response'
+import { streamToBuffer } from '../utils/stream-collect'
 import { executePlaywrightScript } from './browser-script-executor'
 
 /** Action log entry emitted to the caller */
@@ -365,10 +366,5 @@ export class BrowserLocalServer {
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = []
-    req.on('data', (chunk: Buffer) => chunks.push(chunk))
-    req.on('end', () => resolve(Buffer.concat(chunks).toString()))
-    req.on('error', reject)
-  })
+  return streamToBuffer(req).then((buf) => buf.toString())
 }
