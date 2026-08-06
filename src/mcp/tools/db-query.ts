@@ -5,7 +5,7 @@ import { ApiClient } from '../../api-client'
 import { DB_CONNECT_TIMEOUT_MS } from '../../constants'
 import type { DbCredentials, SshCredentials } from '../../types'
 import { openSsmTunnel } from './db-ssm-tunnel'
-import { type DbTunnel, openSshTunnel } from './db-tunnel'
+import { type DbTunnel, type TunnelTarget, openSshTunnel } from './db-tunnel'
 import { mcpErrorResponse, mcpJsonResponse, withMcpErrorHandling } from './mcp-response'
 
 /** コメントインジェクション検出パターン */
@@ -250,7 +250,7 @@ export async function executeQuery(
  */
 function openTunnelForCredential(
   cred: SshCredentials,
-  target: { host: string; port: number },
+  target: TunnelTarget,
 ): Promise<DbTunnel> {
   const connectionType: string | undefined = cred.connectionType
   if (

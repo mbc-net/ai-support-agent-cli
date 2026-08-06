@@ -41,6 +41,12 @@ export interface DbTunnel {
   close: () => Promise<void>
 }
 
+/** The remote endpoint a tunnel forwards to. */
+export interface TunnelTarget {
+  host: string
+  port: number
+}
+
 /**
  * Open a plain SSH tunnel (local port forward) to `target` via the bastion
  * described by `ssh`. Returns the local endpoint to connect to and a `close()`
@@ -48,7 +54,7 @@ export interface DbTunnel {
  */
 export async function openSshTunnel(
   ssh: SshCredentials,
-  target: { host: string; port: number },
+  target: TunnelTarget,
 ): Promise<DbTunnel> {
   if (!ssh.hostname || !ssh.username || !ssh.authType) {
     throw new Error('SSH tunnel requires hostname, username, and authType to be set')

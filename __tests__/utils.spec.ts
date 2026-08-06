@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { atomicWriteJson, decodeBase64Utf8, getAddressPort, axiosResponseData, axiosResponseStatus, pickPresentEnv, exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
+import { appendWithLimit, atomicWriteJson, decodeBase64Utf8, getAddressPort, axiosResponseData, axiosResponseStatus, pickPresentEnv, exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('sanitizeNameSegment', () => {
@@ -1080,5 +1080,49 @@ describe('getAddressPort', () => {
       address: () => null,
     } as unknown as import('net').Server
     expect(getAddressPort(server)).toBeUndefined()
+  })
+})
+
+describe('appendWithLimit', () => {
+  it('appends fully and reports not truncated when within the limit', () => {
+    expect(appendWithLimit('abc', 'de', 10)).toEqual({
+      result: 'abcde',
+      truncated: false,
+    })
+  })
+
+  it('appends fully when the result is exactly at the limit', () => {
+    expect(appendWithLimit('abc', 'de', 5)).toEqual({
+      result: 'abcde',
+      truncated: false,
+    })
+  })
+
+  it('truncates the appended text to the remaining space and flags truncated', () => {
+    expect(appendWithLimit('abc', 'defgh', 5)).toEqual({
+      result: 'abcde',
+      truncated: true,
+    })
+  })
+
+  it('appends nothing but still flags truncated when already at the limit', () => {
+    expect(appendWithLimit('abcde', 'fgh', 5)).toEqual({
+      result: 'abcde',
+      truncated: true,
+    })
+  })
+
+  it('appends nothing and flags truncated when already over the limit', () => {
+    expect(appendWithLimit('abcdef', 'gh', 5)).toEqual({
+      result: 'abcdef',
+      truncated: true,
+    })
+  })
+
+  it('appends into an empty accumulator', () => {
+    expect(appendWithLimit('', 'hello', 10)).toEqual({
+      result: 'hello',
+      truncated: false,
+    })
   })
 })

@@ -131,6 +131,15 @@ jest.mock('../../src/utils', () => ({
     const { writeFileSync } = require('fs') as typeof import('fs')
     writeFileSync(filePath, content, 'utf-8')
   }),
+  // Real implementation — the log-cap behavior is exercised by these tests.
+  appendWithLimit: (current: string, text: string, limit: number) =>
+    current.length + text.length <= limit
+      ? { result: current + text, truncated: false }
+      : {
+          result:
+            current + (limit - current.length > 0 ? text.slice(0, limit - current.length) : ''),
+          truncated: true,
+        },
 }))
 
 import { spawn } from 'child_process'
