@@ -13,7 +13,7 @@ import { resolveDockerfile } from './dockerfile-path'
 import { AGENT_VERSION } from '../constants'
 import { t } from '../i18n'
 import { logger } from '../logger'
-import { sanitizeNameSegment } from '../utils'
+import { sanitizeNameSegment, toErrorMessage } from '../utils'
 
 export const IMAGE_NAME = 'ai-support-agent'
 
@@ -144,7 +144,7 @@ export function buildImage(version: string, customDockerfile?: string): void {
 function execErrorMessage(err: unknown): string {
   const stderr = (err as { stderr?: Buffer | string } | undefined)?.stderr
   if (stderr && stderr.toString().trim().length > 0) return stderr.toString().trim()
-  return err instanceof Error ? err.message : String(err)
+  return toErrorMessage(err)
 }
 
 export function pruneOldImages(currentVersion: string): void {
