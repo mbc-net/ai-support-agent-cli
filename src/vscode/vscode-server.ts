@@ -15,7 +15,7 @@ import {
   buildOpenFolderDisableKeybindings,
   isZshShell,
 } from '../terminal/sandbox-init-script'
-import { getErrorMessage, readJsonSync, sleep } from '../utils'
+import { getAddressPort, getErrorMessage, readJsonSync, sleep } from '../utils'
 
 import {
   VSCODE_DEFAULT_PORT,
@@ -270,9 +270,8 @@ export class VsCodeServer {
     return new Promise<number>((resolve, reject) => {
       const server = net.createServer()
       server.listen(0, VSCODE_BIND_HOST, () => {
-        const addr = server.address()
-        if (addr && typeof addr === 'object') {
-          const port = addr.port
+        const port = getAddressPort(server)
+        if (port !== undefined) {
           server.close(() => resolve(port))
         } else {
           server.close(() => reject(new Error('Failed to get assigned port')))

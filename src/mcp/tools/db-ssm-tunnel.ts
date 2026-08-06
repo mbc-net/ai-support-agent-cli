@@ -31,7 +31,7 @@
  */
 
 import { spawn, type ChildProcess } from 'child_process'
-import { createServer, Socket, type AddressInfo } from 'net'
+import { createServer, Socket } from 'net'
 
 import {
   DB_CONNECT_TIMEOUT_MS,
@@ -41,6 +41,7 @@ import {
   SSM_STDERR_MAX_BYTES,
 } from '../../constants'
 import { logger } from '../../logger'
+import { getAddressPort } from '../../utils'
 import type { DbTunnel } from './db-tunnel'
 
 export interface SsmTunnelParams {
@@ -62,9 +63,8 @@ function reserveLocalPort(): Promise<number> {
     const server = createServer()
     server.once('error', reject)
     server.listen(0, '127.0.0.1', () => {
-      const address = server.address() as AddressInfo | null
-      if (address && typeof address === 'object') {
-        const { port } = address
+      const port = getAddressPort(server)
+      if (port !== undefined) {
         server.close(() => resolve(port))
       } else {
         server.close(() => reject(new Error('Failed to reserve a local tunnel port')))

@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { axiosResponseData, axiosResponseStatus, pickPresentEnv, exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
+import { atomicWriteJson, decodeBase64Utf8, getAddressPort, axiosResponseData, axiosResponseStatus, pickPresentEnv, exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('sanitizeNameSegment', () => {
@@ -1011,5 +1011,74 @@ describe('pickPresentEnv', () => {
 
   it('returns an empty object for an empty key list', () => {
     expect(pickPresentEnv([])).toEqual({})
+  })
+})
+
+describe('atomicWriteJson', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atomic-json-test-'))
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true })
+  })
+
+  it('writes the object as 2-space indented JSON', () => {
+    const filePath = path.join(tmpDir, 'data.json')
+    atomicWriteJson(filePath, { b: 2, a: 1 })
+    const written = fs.readFileSync(filePath, 'utf-8')
+    expect(written).toBe(JSON.stringify({ b: 2, a: 1 }, null, 2))
+    expect(JSON.parse(written)).toEqual({ b: 2, a: 1 })
+  })
+
+  it('atomically replaces an existing file', () => {
+    const filePath = path.join(tmpDir, 'data.json')
+    atomicWriteJson(filePath, { v: 1 })
+    atomicWriteJson(filePath, { v: 2 })
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf-8'))).toEqual({ v: 2 })
+  })
+})
+
+describe('decodeBase64Utf8', () => {
+  it('decodes a base64 string to utf-8', () => {
+    const original = 'hello 世界'
+    const encoded = Buffer.from(original, 'utf-8').toString('base64')
+    expect(decodeBase64Utf8(encoded)).toBe(original)
+  })
+
+  it('returns an empty string for empty input', () => {
+    expect(decodeBase64Utf8('')).toBe('')
+  })
+
+  it('matches Buffer.from(x, "base64").toString("utf-8")', () => {
+    const encoded = Buffer.from('-----BEGIN KEY-----', 'utf-8').toString('base64')
+    expect(decodeBase64Utf8(encoded)).toBe(
+      Buffer.from(encoded, 'base64').toString('utf-8'),
+    )
+  })
+})
+
+describe('getAddressPort', () => {
+  it('returns the port when address() yields an AddressInfo object', () => {
+    const server = {
+      address: () => ({ address: '127.0.0.1', family: 'IPv4', port: 54321 }),
+    } as unknown as import('net').Server
+    expect(getAddressPort(server)).toBe(54321)
+  })
+
+  it('returns undefined when address() is a string (UNIX socket)', () => {
+    const server = {
+      address: () => '/tmp/sock',
+    } as unknown as import('net').Server
+    expect(getAddressPort(server)).toBeUndefined()
+  })
+
+  it('returns undefined when address() is null (not listening)', () => {
+    const server = {
+      address: () => null,
+    } as unknown as import('net').Server
+    expect(getAddressPort(server)).toBeUndefined()
   })
 })

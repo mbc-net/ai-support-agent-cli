@@ -5,7 +5,7 @@ import { getConfigDir } from './config-manager'
 import { logger } from './logger'
 import { ApiClient } from './api-client'
 import type { CommandResult } from './types/command'
-import { atomicWriteFile, axiosResponseStatus, ensureDir, getErrorMessage, isNonAuthClientError, nowIso } from './utils'
+import { atomicWriteJson, axiosResponseStatus, ensureDir, getErrorMessage, isNonAuthClientError, nowIso } from './utils'
 import { safeJsonParse } from './utils/json-parse'
 
 const PENDING_RESULTS_DIR = 'pending-results'
@@ -49,7 +49,7 @@ export function savePendingResult(
       tenantCode,
       savedAt: nowIso(),
     }
-    atomicWriteFile(filePath, JSON.stringify(data, null, 2))
+    atomicWriteJson(filePath, data)
   } catch (error) {
     logger.debug(`Failed to save pending result for ${commandId}: ${getErrorMessage(error)}`)
   }
