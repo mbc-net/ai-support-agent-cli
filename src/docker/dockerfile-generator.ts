@@ -4,6 +4,7 @@
 
 import { IMAGE_NAME } from './docker-utils'
 import { validatePackageNames } from './docker-security'
+import { pickPresentEnv } from '../utils'
 
 /**
  * Safe, non-sensitive system environment variables forwarded to `docker build`.
@@ -76,12 +77,7 @@ export function generateProjectDockerfile(
  * Excludes sensitive variables (API keys, tokens) that should not be available during build.
  */
 export function buildDockerEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {}
-  for (const key of BUILD_ENV_PASSTHROUGH_KEYS) {
-    if (process.env[key] !== undefined) {
-      env[key] = process.env[key]
-    }
-  }
+  const env: NodeJS.ProcessEnv = pickPresentEnv(BUILD_ENV_PASSTHROUGH_KEYS)
   env['BUILDKIT_PROGRESS'] = 'plain'
   return env
 }

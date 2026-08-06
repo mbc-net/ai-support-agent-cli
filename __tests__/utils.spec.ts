@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { axiosResponseData, axiosResponseStatus, exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
+import { axiosResponseData, axiosResponseStatus, pickPresentEnv, exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('sanitizeNameSegment', () => {
@@ -979,5 +979,37 @@ describe('exitWithError', () => {
     // Verify the function is typed as `never` by confirming it always throws
     expect(() => exitWithError('another error')).toThrow()
     expect(exitSpy).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('pickPresentEnv', () => {
+  const ORIGINAL = process.env
+
+  afterEach(() => {
+    process.env = ORIGINAL
+  })
+
+  it('includes only keys that are defined in process.env', () => {
+    process.env = { ...ORIGINAL, FOO_PRESENT: 'a', BAR_PRESENT: 'b' }
+    delete (process.env as Record<string, unknown>).BAZ_ABSENT
+    expect(
+      pickPresentEnv(['FOO_PRESENT', 'BAR_PRESENT', 'BAZ_ABSENT']),
+    ).toEqual({ FOO_PRESENT: 'a', BAR_PRESENT: 'b' })
+  })
+
+  it('includes keys whose value is an empty string (defined but empty)', () => {
+    process.env = { ...ORIGINAL, EMPTY_VAL: '' }
+    expect(pickPresentEnv(['EMPTY_VAL'])).toEqual({ EMPTY_VAL: '' })
+  })
+
+  it('returns an empty object when no keys are present', () => {
+    process.env = { ...ORIGINAL }
+    delete (process.env as Record<string, unknown>).NOPE_1
+    delete (process.env as Record<string, unknown>).NOPE_2
+    expect(pickPresentEnv(['NOPE_1', 'NOPE_2'])).toEqual({})
+  })
+
+  it('returns an empty object for an empty key list', () => {
+    expect(pickPresentEnv([])).toEqual({})
   })
 })

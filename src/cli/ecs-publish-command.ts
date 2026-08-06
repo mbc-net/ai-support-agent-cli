@@ -21,6 +21,7 @@ import { Command } from 'commander'
 
 import { ApiClient } from '../api-client'
 import { addProject, getProjectList, loadConfig } from '../config-manager'
+import { splitProjectRef } from '../utils/token-utils'
 import {
   DEFAULT_ECS_CPU,
   DEFAULT_ECS_LOG_GROUP,
@@ -96,12 +97,11 @@ export function resolveTargetProject(
     const available = projects.map((p) => `${p.tenantCode}/${p.projectCode}`).join(', ')
     throw new Error(`Multiple projects are registered. Specify one with --project <tenantCode/projectCode>. Available: ${available}`)
   }
-  const slashIdx = projectFlag.indexOf('/')
-  if (slashIdx < 0) {
+  const parsed = splitProjectRef(projectFlag)
+  if (!parsed) {
     throw new Error(`--project must be in "tenantCode/projectCode" format: ${projectFlag}`)
   }
-  const tenantCode = projectFlag.substring(0, slashIdx)
-  const projectCode = projectFlag.substring(slashIdx + 1)
+  const { tenantCode, projectCode } = parsed
   const project = projects.find((p) => p.tenantCode === tenantCode && p.projectCode === projectCode)
   if (!project) {
     throw new Error(`Project not found: ${projectFlag}`)

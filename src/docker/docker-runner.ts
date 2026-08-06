@@ -10,6 +10,7 @@ import * as os from 'os'
 
 import { ApiClient } from '../api-client'
 import { type AutoUpdaterHandle, startAutoUpdater } from '../auto-updater'
+import { splitProjectRef } from '../utils/token-utils'
 import { validateUpdateChannel } from '../cli/validators'
 import {
   AGENT_VERSION,
@@ -197,13 +198,12 @@ export function runInDocker(opts: DockerRunOptions): void {
   let projects: ReturnType<typeof getProjectList>
 
   if (opts.project) {
-    const slashIdx = opts.project.indexOf('/')
-    if (slashIdx < 0) {
+    const parsed = splitProjectRef(opts.project)
+    if (!parsed) {
       exitWithError(`[docker] --project must be in "tenantCode/projectCode" format: ${opts.project}`)
       return // unreachable in production; guards against mocked process.exit in tests
     }
-    const tenantCode = opts.project.substring(0, slashIdx)
-    const projectCode = opts.project.substring(slashIdx + 1)
+    const { tenantCode, projectCode } = parsed
     projects = allProjects.filter(
       (p) => p.tenantCode === tenantCode && p.projectCode === projectCode,
     )

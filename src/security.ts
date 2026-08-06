@@ -5,7 +5,7 @@ import * as path from 'path'
 import { ERR_NO_FILE_PATH_SPECIFIED } from './constants'
 import { t } from './i18n'
 import type { CommandResult } from './types'
-import { parseString, stripTrailingSlash } from './utils'
+import { parseString, pickPresentEnv, stripTrailingSlash } from './utils'
 
 export const BLOCKED_COMMAND_PATTERNS = [
   /\brm\s+-rf\s+\/(?!\w)/,
@@ -78,11 +78,7 @@ export function getSensitiveHomePaths(): string[] {
 }
 
 export function buildSafeEnv(): Record<string, string> {
-  const env: Record<string, string> = {}
-  for (const key of SAFE_ENV_KEYS) {
-    if (process.env[key] !== undefined) env[key] = process.env[key]!
-  }
-  return env
+  return pickPresentEnv(SAFE_ENV_KEYS)
 }
 
 export function validateCommand(command: string): string | null {

@@ -1,4 +1,4 @@
-import { bearerHeader, parseToken, extractTokenId, extractTenantCodeFromToken, resolveDirectStartTarget } from '../../src/utils/token-utils'
+import { bearerHeader, parseToken, extractTokenId, extractTenantCodeFromToken, resolveDirectStartTarget, splitProjectRef } from '../../src/utils/token-utils'
 
 describe('bearerHeader', () => {
   it('prefixes the token with "Bearer "', () => {
@@ -143,5 +143,33 @@ describe('resolveDirectStartTarget', () => {
     expect(
       resolveDirectStartTarget('mbc:tokenid:rawtoken', 'mbc/MBC_01/sub', fallback),
     ).toEqual({ ok: true, tenantCode: 'mbc', projectCode: 'MBC_01/sub' })
+  })
+})
+
+describe('splitProjectRef', () => {
+  it('splits "tenantCode/projectCode" on the first slash', () => {
+    expect(splitProjectRef('mbc/MBC_01')).toEqual({
+      tenantCode: 'mbc',
+      projectCode: 'MBC_01',
+    })
+  })
+
+  it('keeps everything after the first slash in projectCode', () => {
+    expect(splitProjectRef('mbc/MBC_01/sub')).toEqual({
+      tenantCode: 'mbc',
+      projectCode: 'MBC_01/sub',
+    })
+  })
+
+  it('returns null when there is no slash', () => {
+    expect(splitProjectRef('MBC_01')).toBeNull()
+    expect(splitProjectRef('')).toBeNull()
+  })
+
+  it('allows an empty tenantCode when the ref starts with a slash', () => {
+    expect(splitProjectRef('/MBC_01')).toEqual({
+      tenantCode: '',
+      projectCode: 'MBC_01',
+    })
   })
 })

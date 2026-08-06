@@ -49,6 +49,22 @@ export function toErrorMessage(error: unknown): string {
 }
 
 /**
+ * 許可リストのキーのうち、`process.env` に定義されている（undefined でない）ものだけを
+ * 抽出した環境変数マップを返す。未定義キーは含めない。
+ * `buildSafeEnv` / `buildDockerEnv` の重複したパススルーループを共通化する。
+ */
+export function pickPresentEnv(
+  keys: readonly string[],
+): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const key of keys) {
+    const value = process.env[key]
+    if (value !== undefined) env[key] = value
+  }
+  return env
+}
+
+/**
  * unknown な catch 値を Error インスタンスに正規化する。
  * Error ならそのまま、それ以外は `String()` をメッセージにした Error を生成する。
  * `err instanceof Error ? err : new Error(String(err))` の重複イディオムを集約する。
