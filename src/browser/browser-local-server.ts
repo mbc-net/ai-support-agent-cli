@@ -25,6 +25,7 @@ import {
   tryFillSelectors,
 } from '../mcp/tools/browser/selector-utils'
 import { screenshotToBase64 } from '../mcp/tools/mcp-response'
+import { getAddressPort } from '../utils'
 import { sendJson } from '../utils/http-response'
 import { streamToBuffer } from '../utils/stream-collect'
 import { executePlaywrightScript } from './browser-script-executor'
@@ -60,9 +61,9 @@ export class BrowserLocalServer {
       // Bind to LOCALHOST_ADDRESS only, port 0 = random available port
       server.unref()
       server.listen(0, LOCALHOST_ADDRESS, () => {
-        const addr = server.address()
-        if (addr && typeof addr === 'object') {
-          this.port = addr.port
+        const port = getAddressPort(server)
+        if (port !== undefined) {
+          this.port = port
           this.server = server
           logger.info(`[browser-local-server] Listening on ${LOCALHOST_ADDRESS}:${this.port}`)
           resolve(this.port)

@@ -23,7 +23,7 @@
  * plaintext password) must never be logged.
  */
 
-import { createServer, type AddressInfo, type Socket } from 'net'
+import { createServer, type Socket } from 'net'
 
 import {
   DB_CONNECT_TIMEOUT_MS,
@@ -32,6 +32,7 @@ import {
 } from '../../constants'
 import { logger } from '../../logger'
 import { isSupportedSshAuthType, type SshCredentials } from '../../types'
+import { getAddressPort } from '../../utils'
 
 /** A live SSH local port forward. Connect to `host:port`; call `close()` when done. */
 export interface DbTunnel {
@@ -134,9 +135,9 @@ export async function openSshTunnel(
       reject(err)
     })
     server.listen(0, '127.0.0.1', () => {
-      const address = server.address() as AddressInfo | null
-      if (address && typeof address === 'object') {
-        resolve(address.port)
+      const port = getAddressPort(server)
+      if (port !== undefined) {
+        resolve(port)
       } else {
         conn.end()
         reject(new Error('Failed to determine local tunnel port'))

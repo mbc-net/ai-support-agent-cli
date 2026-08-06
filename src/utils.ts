@@ -1,4 +1,5 @@
 import * as fs from 'fs'
+import type { Server } from 'net'
 import * as path from 'path'
 import axios from 'axios'
 
@@ -22,6 +23,32 @@ export function atomicWriteFile(filePath: string, content: string, mode = 0o600)
   const tmpPath = filePath + '.tmp'
   fs.writeFileSync(tmpPath, content, { mode })
   fs.renameSync(tmpPath, filePath)
+}
+
+/**
+ * オブジェクトを 2 スペースインデントの JSON として atomicWriteFile で書き込む。
+ * `atomicWriteFile(path, JSON.stringify(data, null, 2))` の重複を集約する。
+ */
+export function atomicWriteJson(filePath: string, data: unknown, mode = 0o600): void {
+  atomicWriteFile(filePath, JSON.stringify(data, null, 2), mode)
+}
+
+/**
+ * base64 文字列を UTF-8 文字列にデコードする。
+ * `Buffer.from(value, 'base64').toString('utf-8')` の重複を集約する。
+ */
+export function decodeBase64Utf8(value: string): string {
+  return Buffer.from(value, 'base64').toString('utf-8')
+}
+
+/**
+ * `net.Server.address()`（`string | AddressInfo | null`）から数値ポートを安全に取り出す。
+ * 未リッスン / UNIX ソケット等でポートを特定できない場合は undefined を返す
+ * （`as AddressInfo` キャストの代替となるランタイムガード）。
+ */
+export function getAddressPort(server: Server): number | undefined {
+  const address = server.address()
+  return address && typeof address === 'object' ? address.port : undefined
 }
 
 /**

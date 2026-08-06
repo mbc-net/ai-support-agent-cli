@@ -10,7 +10,7 @@ import { buildSafeEnv } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
 import { GENERAL_KNOWN_HOSTS_ID, resolveKnownHostsPath } from '../utils/known-hosts-store'
-import { getErrorMessage, sweepStaleEntries } from '../utils'
+import { decodeBase64Utf8, getErrorMessage, sweepStaleEntries } from '../utils'
 import {
   SCROLLBACK_BUFFER_MAX_BYTES,
   TERMINAL_DEFAULT_COLS,
@@ -277,7 +277,7 @@ export class TerminalSession {
 
     if (sshKeyBase64) {
       try {
-        const pemContent = Buffer.from(sshKeyBase64, 'base64').toString('utf-8')
+        const pemContent = decodeBase64Utf8(sshKeyBase64)
         const sshKeyPath = path.join(os.tmpdir(), `ssh-key-${sessionId}`)
         fs.writeFileSync(sshKeyPath, pemContent, { mode: 0o600 })
         this.sshKeyFile = sshKeyPath
