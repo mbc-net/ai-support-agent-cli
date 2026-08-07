@@ -14,7 +14,6 @@ import { getProjectImageTag } from './dockerfile-path'
 import {
   CLI_FLAG_VERBOSE,
   CLI_FLAG_NO_AUTO_UPDATE,
-  CLI_FLAG_NO_DOCKER,
   DOCKER_BUILD_ERROR_MAX_BYTES,
   DOCKER_LOG_FLUSH_INTERVAL_MS,
   DOCKER_MARKER_BUILT_HASH,
@@ -32,6 +31,7 @@ import { removePidFile } from '../pid-manager'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
 import { appendWithLimit, atomicWriteFile, getErrorMessage } from '../utils'
+import { CONTAINER_START_ARGV, buildDockerUserArgs } from './docker-args'
 import type { DockerRunOptions } from './docker-runner'
 import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, resolveImageTag, getDockerPath } from './docker-utils'
 import { buildProjectVolumeMounts } from './volume-mount-builder'
@@ -281,10 +281,7 @@ export class DockerSupervisor {
 
     const { mounts, envArgs } = buildProjectVolumeMounts(project, projectConfigHostDir)
 
-    const containerArgs = [
-      'ai-support-agent', 'start', CLI_FLAG_NO_DOCKER,
-      '--project', key,
-    ]
+    const containerArgs = [...CONTAINER_START_ARGV, '--project', key]
     if (this.opts.pollInterval !== undefined) {
       containerArgs.push('--poll-interval', String(this.opts.pollInterval))
     }
@@ -307,7 +304,7 @@ export class DockerSupervisor {
     const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
     const dockerArgs = [
       'run', '--rm', '--name', containerName, '--cidfile', cidFile,
-      ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
+      ...buildDockerUserArgs(),
       ...mounts,
       ...buildDevMounts(),
       ...envArgs,

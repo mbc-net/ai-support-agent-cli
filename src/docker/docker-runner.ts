@@ -16,7 +16,6 @@ import {
   AGENT_VERSION,
   CLI_FLAG_VERBOSE,
   CLI_FLAG_NO_AUTO_UPDATE,
-  CLI_FLAG_NO_DOCKER,
   DOCKER_UPDATE_EXIT_CODE,
   ENV_VARS,
 } from '../constants'
@@ -29,6 +28,7 @@ import { t } from '../i18n'
 import { logger } from '../logger'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { exitWithError, getErrorMessage } from '../utils'
+import { CONTAINER_START_ARGV, buildDockerUserArgs } from './docker-args'
 import { IMAGE_NAME, checkDockerAvailable, getDockerPath } from './docker-utils'
 import { ensureImage } from './version-manager'
 import { syncDockerfileToConfigDir } from './dockerfile-sync'
@@ -58,7 +58,7 @@ export interface DockerRunOptions {
 }
 
 export function buildContainerArgs(opts: DockerRunOptions): string[] {
-  const args: string[] = ['ai-support-agent', 'start', CLI_FLAG_NO_DOCKER]
+  const args: string[] = [...CONTAINER_START_ARGV]
 
   if (opts.token) {
     args.push('--token', opts.token)
@@ -262,7 +262,7 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   const dockerArgs = [
     'run', '--rm', ...interactive,
-    ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
+    ...buildDockerUserArgs(),
     ...mounts,
     ...envArgs,
     `${IMAGE_NAME}:${version}`,
