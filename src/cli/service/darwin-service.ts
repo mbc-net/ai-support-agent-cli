@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS } from '../../constants'
+import { readAgentCredentialEnv } from './agent-credential-env'
 import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
 import type { ProjectRegistration } from '../../types'
 import type { ProjectStatus } from './types'
@@ -540,10 +541,7 @@ export function writeProjectServiceFiles(
     projectDir: validatedProjectDir,
     token: project.token,
     apiUrl: project.apiUrl,
-    anthropicApiKey: process.env[ENV_VARS.ANTHROPIC_API_KEY],
-    claudeCodeOauthToken: process.env[ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN],
-    codexApiKey: process.env[ENV_VARS.CODEX_API_KEY],
-    codexAccessToken: process.env[ENV_VARS.CODEX_ACCESS_TOKEN],
+    ...readAgentCredentialEnv(),
     verbose: options.verbose,
     updateScriptPath,
     logDir: projectLogDir,
