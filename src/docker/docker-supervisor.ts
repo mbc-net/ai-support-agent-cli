@@ -31,6 +31,7 @@ import { removePidFile } from '../pid-manager'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
 import { appendWithLimit, atomicWriteFile, getErrorMessage } from '../utils'
+import { readMarkerFile } from '../utils/marker-file'
 import { CONTAINER_START_ARGV, buildDockerUserArgs } from './docker-args'
 import type { DockerRunOptions } from './docker-runner'
 import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, resolveImageTag, getDockerPath } from './docker-utils'
@@ -112,10 +113,8 @@ export class DockerSupervisor {
     project: ProjectRegistration,
     registeredAgentIdPath: string,
   ): { previousId: string | undefined; newId: string } | null {
-    let registeredId: string
-    try {
-      registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
-    } catch {
+    const registeredId = readMarkerFile(registeredAgentIdPath)
+    if (registeredId === undefined) {
       return null
     }
     const previousId = this.getProjectAgentId(project)
