@@ -97,22 +97,25 @@ export function resetDockerPathCache(): void {
   delete process.env.DOCKER_HOST
 }
 
-export function checkDockerAvailable(): boolean {
+/**
+ * Run a docker command with all output suppressed and report whether it exited
+ * successfully. Any non-zero exit or spawn error is swallowed and returns false.
+ */
+function dockerCommandSucceeds(args: string[]): boolean {
   try {
-    execFileSync(getDockerPath(), ['info'], { stdio: 'ignore' })
+    execFileSync(getDockerPath(), args, { stdio: 'ignore' })
     return true
   } catch {
     return false
   }
 }
 
+export function checkDockerAvailable(): boolean {
+  return dockerCommandSucceeds(['info'])
+}
+
 export function imageExists(version: string): boolean {
-  try {
-    execFileSync(getDockerPath(), ['image', 'inspect', `${IMAGE_NAME}:${version}`], { stdio: 'ignore' })
-    return true
-  } catch {
-    return false
-  }
+  return dockerCommandSucceeds(['image', 'inspect', `${IMAGE_NAME}:${version}`])
 }
 
 export function buildImage(version: string, customDockerfile?: string): void {
@@ -264,12 +267,7 @@ export function makeSessionId(): string {
 
 /** Check if a project-specific image tag exists; fall back to base image tag. */
 export function resolveImageTag(projectTag: string, baseTag: string): string {
-  try {
-    execFileSync(getDockerPath(), ['image', 'inspect', projectTag], { stdio: 'ignore' })
-    return projectTag
-  } catch /* istanbul ignore next */ {
-    return baseTag
-  }
+  return dockerCommandSucceeds(['image', 'inspect', projectTag]) ? projectTag : baseTag
 }
 
 export { AGENT_VERSION }
