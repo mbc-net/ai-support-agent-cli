@@ -22,6 +22,7 @@ import {
 } from './wrapper-helpers'
 import {
   buildDockerRunWithLogRotate,
+  LOAD_NVM_BASH,
   REDACT_SECRETS_BASH,
 } from './service-template-helpers'
 import type {
@@ -450,9 +451,7 @@ export function generateWrapperScript(opts: {
 set -uo pipefail
 
 # Load nvm if available so that node/npm are on PATH when launched as a systemd service
-export NVM_DIR="\${HOME}/.nvm"
-# shellcheck disable=SC1091
-[ -s "\${NVM_DIR}/nvm.sh" ] && source "\${NVM_DIR}/nvm.sh"
+${LOAD_NVM_BASH}
 # Also try common system locations as fallback
 export PATH="/usr/local/bin:/usr/bin:/bin:\${PATH}"
 
@@ -544,9 +543,7 @@ set -uo pipefail
 shopt -s nullglob
 
 # Load nvm if available so that node/npm are on PATH when launched from systemd
-export NVM_DIR="\${HOME}/.nvm"
-# shellcheck disable=SC1091
-[ -s "\${NVM_DIR}/nvm.sh" ] && source "\${NVM_DIR}/nvm.sh"
+${LOAD_NVM_BASH}
 export PATH="/usr/local/bin:/usr/bin:/bin:\${PATH}"
 
 LOG_PREFIX="[update-and-restart $(date -u '+%Y-%m-%dT%H:%M:%SZ')]"
