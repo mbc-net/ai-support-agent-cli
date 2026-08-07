@@ -1,6 +1,27 @@
 import { shellQuote } from './wrapper-helpers'
 
 /**
+ * Bash `redact_secrets()` function embedded in the update-and-restart scripts
+ * generated for both platforms (launchd on macOS, systemd on Linux).
+ *
+ * npm/login flows leak Bearer tokens, `_authToken=…`, `X-Auth-Token:` headers
+ * and registry URLs with embedded basic-auth into command output, which the
+ * agent log forwards to Sentry/heartbeat. Both platform generators must apply
+ * the identical set of redaction patterns, so the snippet is kept here to
+ * avoid the two copies drifting apart. Interpolate it verbatim into the
+ * generated script (it defines a shell function; call sites pipe through
+ * `| redact_secrets >&2`).
+ */
+export const REDACT_SECRETS_BASH = `redact_secrets() {
+  sed -E \\
+    -e 's#(Bearer )[A-Za-z0-9._-]+#\\1***REDACTED***#gi' \\
+    -e 's#(authToken[[:space:]]*[:=][[:space:]]*"?)[^"[:space:]]+#\\1***REDACTED***#gi' \\
+    -e 's#(_authToken[[:space:]]*[:=][[:space:]]*"?)[^"[:space:]]+#\\1***REDACTED***#gi' \\
+    -e 's#(X-Auth-Token:[[:space:]]*)[^[:space:]]+#\\1***REDACTED***#gi' \\
+    -e 's#(https?://)[^/:[:space:]@]+:[^@/[:space:]]+@#\\1***REDACTED***@#gi'
+}`
+
+/**
  * Build the bash snippet that runs a docker container, optionally routing
  * its stdout/stderr through `ai-support-agent log-rotate` subprocesses.
  *

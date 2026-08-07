@@ -23,7 +23,10 @@ import {
   toContainerApiUrl,
   validateProjectDirForMount,
 } from './wrapper-helpers'
-import { buildDockerRunWithLogRotate } from './service-template-helpers'
+import {
+  buildDockerRunWithLogRotate,
+  REDACT_SECRETS_BASH,
+} from './service-template-helpers'
 import {
   getDarwinLaunchAgentsDir,
   getDarwinLogDir,
@@ -393,14 +396,7 @@ LOG_PREFIX="[update-and-restart $(date -u '+%Y-%m-%dT%H:%M:%SZ')]"
 # Best-effort secret redaction for command output that we echo to stderr.
 # npm/login flows leak Bearer tokens, _authToken=..., and registry URLs with
 # embedded basic-auth, all of which the agent log forwards to Sentry/heartbeat.
-redact_secrets() {
-  sed -E \\
-    -e 's#(Bearer )[A-Za-z0-9._-]+#\\1***REDACTED***#gi' \\
-    -e 's#(authToken[[:space:]]*[:=][[:space:]]*"?)[^"[:space:]]+#\\1***REDACTED***#gi' \\
-    -e 's#(_authToken[[:space:]]*[:=][[:space:]]*"?)[^"[:space:]]+#\\1***REDACTED***#gi' \\
-    -e 's#(X-Auth-Token:[[:space:]]*)[^[:space:]]+#\\1***REDACTED***#gi' \\
-    -e 's#(https?://)[^/:[:space:]@]+:[^@/[:space:]]+@#\\1***REDACTED***@#gi'
-}
+${REDACT_SECRETS_BASH}
 
 # 1. Unload all per-project LaunchAgent services
 for plist in "${launchAgentsDir}"/com.ai-support-agent.cli.*.plist; do
