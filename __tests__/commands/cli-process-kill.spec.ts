@@ -1,4 +1,4 @@
-import { killWithEscalation, scheduleForceKill } from '../../src/commands/cli-process-kill'
+import { killWithEscalation, makeKillFn, scheduleForceKill } from '../../src/commands/cli-process-kill'
 import { CHAT_SIGKILL_DELAY } from '../../src/constants'
 import { createMockChildProcess } from '../helpers/mock-factory'
 
@@ -48,6 +48,37 @@ describe('cli-process-kill', () => {
       jest.advanceTimersByTime(CHAT_SIGKILL_DELAY)
       expect(child.kill).toHaveBeenCalledTimes(1)
       expect(child.kill).not.toHaveBeenCalledWith('SIGKILL')
+    })
+  })
+
+  describe('makeKillFn', () => {
+    it('returns a function that escalates SIGTERM → SIGKILL when the process is running', () => {
+      const child = createMockChildProcess()
+      const kill = makeKillFn(child, 'claude')
+      expect(child.kill).not.toHaveBeenCalled() // not invoked until called
+      kill()
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+      jest.advanceTimersByTime(CHAT_SIGKILL_DELAY)
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL')
+      expect(child.kill).toHaveBeenCalledTimes(2)
+    })
+
+    it('is a no-op when the process was already killed', () => {
+      const child = createMockChildProcess()
+      child.killed = true
+      makeKillFn(child, 'codex')()
+      jest.advanceTimersByTime(CHAT_SIGKILL_DELAY)
+      expect(child.kill).not.toHaveBeenCalled()
+    })
+
+    it('can be invoked multiple times (each escalates only while running)', () => {
+      const child = createMockChildProcess()
+      const kill = makeKillFn(child, 'claude')
+      kill()
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+      child.killed = true
+      kill() // already killed → no further signal
+      expect(child.kill).toHaveBeenCalledTimes(1)
     })
   })
 })
