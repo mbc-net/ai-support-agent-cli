@@ -36,6 +36,14 @@ import {
 } from './browser/selector-utils'
 import { mcpErrorResponse, mcpScreenshotResponse, mcpTextResponse, screenshotToBase64, withMcpErrorHandling } from './mcp-response'
 
+/**
+ * Error returned by every browser tool (other than navigate/close) when no
+ * active session exists yet. Kept as a single constant so the guard message
+ * stays identical across all tools.
+ */
+const NO_ACTIVE_SESSION_MSG =
+  'No active browser session. Use browser_navigate first.'
+
 /** Cache the resolved session ID from BrowserLocalServer */
 let resolvedProxySessionId: string | null = null
 
@@ -235,7 +243,7 @@ function registerBrowserClickTool(server: McpServer, defaultSession: BrowserSess
     async ({ selector, waitForNavigation, screenshot }) => withMcpErrorHandling(async () => {
       const session = await getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
-        return mcpErrorResponse('No active browser session. Use browser_navigate first.')
+        return mcpErrorResponse(NO_ACTIVE_SESSION_MSG)
       }
 
       logger.debug(`[browser] Clicking: ${selector}`)
@@ -281,7 +289,7 @@ function registerBrowserFillTool(server: McpServer, defaultSession: BrowserSessi
     async ({ selector, value, screenshot }) => withMcpErrorHandling(async () => {
       const session = await getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
-        return mcpErrorResponse('No active browser session. Use browser_navigate first.')
+        return mcpErrorResponse(NO_ACTIVE_SESSION_MSG)
       }
 
       logger.debug(`[browser] Filling: ${selector}`)
@@ -319,7 +327,7 @@ function registerBrowserGetTextTool(server: McpServer, defaultSession: BrowserSe
     async ({ selector }) => withMcpErrorHandling(async () => {
       const session = await getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
-        return mcpErrorResponse('No active browser session. Use browser_navigate first.')
+        return mcpErrorResponse(NO_ACTIVE_SESSION_MSG)
       }
 
       const target = selector ?? 'body'
@@ -420,7 +428,7 @@ function registerBrowserExtractTool(server: McpServer, defaultSession: BrowserSe
     async ({ selector, variableName }) => withMcpErrorHandling(async () => {
       const session = await getActiveSession(manager, defaultSession)
       if (!session.isActive()) {
-        return mcpErrorResponse('No active browser session. Use browser_navigate first.')
+        return mcpErrorResponse(NO_ACTIVE_SESSION_MSG)
       }
 
       logger.debug(`[browser] Extracting: ${selector} → ${variableName}`)
