@@ -10,6 +10,7 @@ import { buildSafeEnv } from '../security'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
 import { GENERAL_KNOWN_HOSTS_ID, resolveKnownHostsPath } from '../utils/known-hosts-store'
+import { shellQuote } from '../utils/shell-quote'
 import { decodeBase64Utf8, getErrorMessage, sweepStaleEntries } from '../utils'
 import {
   SCROLLBACK_BUFFER_MAX_BYTES,
@@ -318,10 +319,10 @@ export class TerminalSession {
     // tmux 自動アタッチ: tmux が利用可能ならターミナルを tmux セッション内で起動する。
     // tmux が新規ウィンドウ/ペインを開く際に使うシェルを $SHELL で指定するため、
     // sandbox 制限付きのラッパースクリプトを生成して $SHELL に設定する。
-    const shellQuoted = shell.replace(/'/g, "'\\''")
-    const argsQuoted = shellArgs.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')
+    const shellQuoted = shellQuote(shell)
+    const argsQuoted = shellArgs.map((a) => shellQuote(a)).join(' ')
     const wrapperPath = path.join(tmpDir, 'shell-wrapper')
-    fs.writeFileSync(wrapperPath, `#!/bin/sh\nexec '${shellQuoted}' ${argsQuoted} "$@"\n`, {
+    fs.writeFileSync(wrapperPath, `#!/bin/sh\nexec ${shellQuoted} ${argsQuoted} "$@"\n`, {
       mode: 0o700,
     })
 
