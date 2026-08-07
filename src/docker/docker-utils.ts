@@ -14,6 +14,7 @@ import { AGENT_VERSION } from '../constants'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { sanitizeNameSegment, toErrorMessage } from '../utils'
+import { dateParts } from '../utils/date-parts'
 
 export const IMAGE_NAME = 'ai-support-agent'
 
@@ -253,16 +254,8 @@ export function buildDevMounts(): string[] {
  * Format: YYYYMMDDHHmmss
  */
 export function makeSessionId(): string {
-  const d = new Date()
-  const pad = (n: number, len = 2): string => String(n).padStart(len, '0')
-  return (
-    String(d.getFullYear()) +
-    pad(d.getMonth() + 1) +
-    pad(d.getDate()) +
-    pad(d.getHours()) +
-    pad(d.getMinutes()) +
-    pad(d.getSeconds())
-  )
+  const { year, month, day, hours, minutes, seconds } = dateParts(new Date())
+  return year + month + day + hours + minutes + seconds
 }
 
 /** Check if a project-specific image tag exists; fall back to base image tag. */
