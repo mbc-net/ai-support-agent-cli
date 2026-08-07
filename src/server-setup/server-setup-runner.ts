@@ -43,6 +43,7 @@ import {
 } from '../types'
 import { getErrorMessage, sweepStaleEntries } from '../utils'
 import { resolveKnownHostsPath } from '../utils/known-hosts-store'
+import { isValidPort } from '../utils/port'
 import { redactSecretValues } from '../utils/secret-redaction'
 
 import { type AnsibleTaskRouteMode, validateAnsibleTasks } from './ansible-task-guard'
@@ -411,10 +412,6 @@ const HOSTNAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/
 /** Portable username: letters/digits/underscore/hyphen only. */
 const USERNAME_RE = /^[A-Za-z0-9_-]+$/
 
-/** True when `value` is an integer in the valid TCP port range (1-65535). */
-function isValidPort(value: number): boolean {
-  return Number.isInteger(value) && value >= 1 && value <= 65535
-}
 
 /**
  * Reject a fetched SSH credential whose hostname/username/port isn't a plain,

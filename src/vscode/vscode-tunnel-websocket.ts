@@ -9,6 +9,7 @@ import { WS_CLOSE_CODE_AUTH_REJECTED, WS_RECONNECT_MAX_DELAY_MS } from '../const
 import type { EnvVarsProvider } from '../env-vars-filter'
 import { logger } from '../logger'
 import { getErrorMessage, buildWsUrl } from '../utils'
+import { isValidPort } from '../utils/port'
 import {
   BrowserSessionManager,
 } from '../mcp/tools/browser/browser-session-manager'
@@ -784,7 +785,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     // non-numeric, or out-of-range value (including negative numbers or
     // strings) through unchecked.
     const targetPort = Number(msg.targetPort)
-    if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
+    if (!isValidPort(targetPort)) {
       this.send({ type: 'error', sessionId, message: 'invalid targetPort' })
       return
     }
