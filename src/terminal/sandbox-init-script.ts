@@ -6,6 +6,8 @@
  * terminal-session.ts と vscode-server.ts の両方から利用される共有モジュール。
  */
 
+import { shellQuote } from '../utils/shell-quote'
+
 /**
  * シェルパスが zsh かどうかを判定する。
  * 引数なしの場合は process.env.SHELL を参照する。
@@ -92,12 +94,12 @@ claude() {
 }
 
 export function buildSandboxInitScript(projectDir: string): string {
-  // シェル変数に埋め込む際にシングルクォートをエスケープ
-  const escaped = projectDir.replace(/'/g, "'\\''")
+  // シェル変数に埋め込む際にシングルクォートで安全に囲む
+  const quotedDir = shellQuote(projectDir)
   // __SANDBOX_REAL は realpath で解決した物理パス。
   // pwd -P との比較に使い、シンボリックリンクの不一致を防ぐ。
   return `
-__SANDBOX_DIR='${escaped}'
+__SANDBOX_DIR=${quotedDir}
 __SANDBOX_REAL="$(cd "\${__SANDBOX_DIR}" && pwd -P)"
 __sandbox_is_inside() {
   local cur
