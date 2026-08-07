@@ -22,6 +22,21 @@ export const REDACT_SECRETS_BASH = `redact_secrets() {
 }`
 
 /**
+ * Bash snippet that sources nvm so `node`/`npm` are on PATH when the wrapper
+ * runs under a service manager (launchd on macOS, systemd on Linux).
+ *
+ * Both platform generators emit this identical three-line block. The
+ * surrounding `# Load nvm …` comment and the PATH fallback that follows differ
+ * per platform, so those stay inline at each call site; only the invariant
+ * `NVM_DIR` export + guarded `source` is shared here to keep the copies from
+ * drifting. The `\${…}` sequences are intentionally escaped so they reach the
+ * generated script as literal shell parameter expansions.
+ */
+export const LOAD_NVM_BASH = `export NVM_DIR="\${HOME}/.nvm"
+# shellcheck disable=SC1091
+[ -s "\${NVM_DIR}/nvm.sh" ] && source "\${NVM_DIR}/nvm.sh"`
+
+/**
  * Build the bash snippet that runs a docker container, optionally routing
  * its stdout/stderr through `ai-support-agent log-rotate` subprocesses.
  *
