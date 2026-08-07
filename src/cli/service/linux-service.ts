@@ -53,6 +53,11 @@ export { getCliEntryPoint, getNodePath }
 const SERVICE_NAME = 'ai-support-agent.service'
 const SERVICE_PREFIX = 'ai-support-agent'
 
+// Reloads the systemd user manager so it picks up unit-file changes. Issued
+// from several install/enable/uninstall/start/restart paths; the surrounding
+// try/catch (whether a failure is fatal or tolerated) differs per call site.
+const DAEMON_RELOAD_CMD = 'systemctl --user daemon-reload'
+
 const getSystemdUserDir = getLinuxSystemdUserDir
 const getLogDir = getLinuxLogDir
 
@@ -710,7 +715,7 @@ export function installAndStartProject(
   // Reload systemd so the new/updated unit is recognised. Use the same
   // diagnostic key as the strategy install() so support logs can correlate.
   try {
-    execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
+    execSync(DAEMON_RELOAD_CMD, { stdio: 'pipe' })
   } catch (error) {
     const message = getErrorMessage(error)
     logger.warn(t('service.daemonReloadFailed', { message }))
@@ -898,7 +903,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     // after attempting enable. The warning makes clear that auto-start may
     // not work until linger is enabled.
     try {
-      execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
+      execSync(DAEMON_RELOAD_CMD, { stdio: 'pipe' })
     } catch (error) {
       const message = getErrorMessage(error)
       logger.warn(t('service.daemonReloadFailed', { message }))
@@ -957,7 +962,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
       }
     }
 
-    try { execSync('systemctl --user daemon-reload', { stdio: 'pipe' }) } catch { /* tolerate */ }
+    try { execSync(DAEMON_RELOAD_CMD, { stdio: 'pipe' }) } catch { /* tolerate */ }
 
     logger.success(t('service.uninstalled'))
   }
@@ -972,7 +977,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
 
     let failed = false
     try {
-      execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
+      execSync(DAEMON_RELOAD_CMD, { stdio: 'pipe' })
     } catch {
       // tolerate — start may still work
     }
@@ -1028,7 +1033,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
 
     let failed = false
     try {
-      execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
+      execSync(DAEMON_RELOAD_CMD, { stdio: 'pipe' })
     } catch {
       // tolerate
     }
