@@ -1,4 +1,7 @@
-import { buildDockerRunWithLogRotate } from '../../../src/cli/service/service-template-helpers'
+import {
+  buildDockerRunWithLogRotate,
+  REDACT_SECRETS_BASH,
+} from '../../../src/cli/service/service-template-helpers'
 
 /**
  * ensureDir (used by darwin/linux/win32-service.ts for both plain and
@@ -136,5 +139,27 @@ describe('buildDockerRunWithLogRotate', () => {
       })
       expect(mock).toHaveBeenCalledWith(expect.stringContaining('$_ROT_DIR/out'))
     })
+  })
+})
+
+describe('REDACT_SECRETS_BASH', () => {
+  it('defines a redact_secrets() shell function', () => {
+    expect(REDACT_SECRETS_BASH.startsWith('redact_secrets() {')).toBe(true)
+    expect(REDACT_SECRETS_BASH.endsWith('}')).toBe(true)
+    expect(REDACT_SECRETS_BASH).toContain('sed -E')
+  })
+
+  it('covers all five secret patterns', () => {
+    expect(REDACT_SECRETS_BASH).toContain('(Bearer )')
+    expect(REDACT_SECRETS_BASH).toContain('(authToken')
+    expect(REDACT_SECRETS_BASH).toContain('(_authToken')
+    expect(REDACT_SECRETS_BASH).toContain('(X-Auth-Token:')
+    expect(REDACT_SECRETS_BASH).toContain('(https?://)')
+  })
+
+  it('replaces matches with the ***REDACTED*** marker', () => {
+    // One marker per sed -e pattern (5 total).
+    const markers = REDACT_SECRETS_BASH.match(/\*\*\*REDACTED\*\*\*/g)
+    expect(markers).toHaveLength(5)
   })
 })

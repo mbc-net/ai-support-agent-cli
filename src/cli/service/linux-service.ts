@@ -20,7 +20,10 @@ import {
   toContainerApiUrl,
   validateProjectDirForMount,
 } from './wrapper-helpers'
-import { buildDockerRunWithLogRotate } from './service-template-helpers'
+import {
+  buildDockerRunWithLogRotate,
+  REDACT_SECRETS_BASH,
+} from './service-template-helpers'
 import type {
   ProjectStatus,
   ServiceConfig,
@@ -549,14 +552,7 @@ export PATH="/usr/local/bin:/usr/bin:/bin:\${PATH}"
 LOG_PREFIX="[update-and-restart $(date -u '+%Y-%m-%dT%H:%M:%SZ')]"
 
 # Best-effort secret redaction for command output that we echo to stderr.
-redact_secrets() {
-  sed -E \\
-    -e 's#(Bearer )[A-Za-z0-9._-]+#\\1***REDACTED***#gi' \\
-    -e 's#(authToken[[:space:]]*[:=][[:space:]]*"?)[^"[:space:]]+#\\1***REDACTED***#gi' \\
-    -e 's#(_authToken[[:space:]]*[:=][[:space:]]*"?)[^"[:space:]]+#\\1***REDACTED***#gi' \\
-    -e 's#(X-Auth-Token:[[:space:]]*)[^[:space:]]+#\\1***REDACTED***#gi' \\
-    -e 's#(https?://)[^/:[:space:]@]+:[^@/[:space:]]+@#\\1***REDACTED***@#gi'
-}
+${REDACT_SECRETS_BASH}
 
 SYSTEMD_USER_DIR=${qSystemdDir}
 
