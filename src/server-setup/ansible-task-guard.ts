@@ -1,6 +1,7 @@
 import { DEFAULT_SCHEMA, load } from 'js-yaml'
 
 import { toErrorMessage } from '../utils'
+import { isPlainObject } from '../utils/is-plain-object'
 
 /**
  * サーバーセットアップレシピ本体（`body` = Ansible タスク列 YAML）の静的検証ガード。
@@ -300,10 +301,6 @@ const SET_FACT_MODULE_KEYS: ReadonlySet<string> = new Set([
   'set_fact',
   'ansible.builtin.set_fact',
 ])
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 /**
  * モジュールキーを `ansible.builtin.` 省略形からフルネームへ正規化する。
