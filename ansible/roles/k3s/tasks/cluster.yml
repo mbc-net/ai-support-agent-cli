@@ -1,0 +1,210 @@
+---
+# cluster: install k3s as a server (init or join) via the official installer,
+# driven by /etc/rancher/k3s/config.yaml (instruction §3.3). HA is host-by-host:
+# the init node runs first (cluster-init), then join nodes point at it. All
+# nodes share k3s_token.
+#
+# Secret handling:
+#   * k3s_token → K3S_TOKEN env at install (persisted by k3s to a 0600 file);
+#     never written to config.yaml, never on argv. Install task is no_log.
+#   * etcd-S3 access/secret keys → 0600 config.yaml.d drop-in (no_log); off argv.
+
+- name: "k3s : Validate k3s_version is pinned"
+  ansible.builtin.assert:
+    that:
+      - (k3s_version | default('') | trim | length) > 0
+    fail_msg: >-
+      k3s_version is required and must be pinned explicitly (e.g. v1.33.4+k3s1).
+      Leaving it unset would let the installer pull the latest release, so nodes
+      added later would drift to a different version.
+
+- name: "k3s : Validate k3s_token is set"
+  ansible.builtin.assert:
+    that:
+      - (k3s_token | default('') | trim | length) > 0
+    fail_msg: >-
+      k3s_token is required (the shared cluster token, same on every node).
+      Reference an ANSIBLE# secret variable, e.g. k3s_token: "{{ '{{' }} K3S_TOKEN {{ '}}' }}".
+  no_log: true
+
+- name: "k3s : Validate join options when k3s_bootstrap is join"
+  ansible.builtin.assert:
+    that:
+      - (k3s_server_url | default('') | trim | length) > 0
+      - k3s_server_url is match('^https://')
+    fail_msg: >-
+      k3s_bootstrap=join requires k3s_server_url set to the init node's API,
+      e.g. https://192.168.10.11:6443. Got {{ k3s_server_url | default('') | to_json }}.
+  when: (k3s_bootstrap | default('init')) == 'join'
+
+- name: "k3s : Validate etcd-S3 options when enabled"
+  ansible.builtin.assert:
+    that:
+      - (k3s_etcd_s3_bucket | default('') | trim | length) > 0
+      - (k3s_etcd_s3_access_key | default('') | trim | length) > 0
+      - (k3s_etcd_s3_secret_key | default('') | trim | length) > 0
+    fail_msg: >-
+      k3s_etcd_s3_enabled=true requires k3s_etcd_s3_bucket, k3s_etcd_s3_access_key
+      and k3s_etcd_s3_secret_key (reference ANSIBLE# secret variables for the keys).
+  no_log: true
+  when: k3s_etcd_s3_enabled | bool
+
+# --- config files ------------------------------------------------------------
+- name: "k3s : Create k3s config directories"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - /etc/rancher/k3s
+    - /etc/rancher/k3s/config.yaml.d
+
+- name: "k3s : Render /etc/rancher/k3s/config.yaml (non-secret server options)"
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  notify: restart k3s
+
+- name: "k3s : Write etcd-S3 credentials drop-in (0600, secret)"
+  # to_nice_yaml escapes values safely (a key containing quotes/newlines cannot
+  # break the file); no_log keeps the secret out of all task output.
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/config.yaml.d/etcd-s3-credentials.yaml
+    content: >-
+      {{ {'etcd-s3-access-key': k3s_etcd_s3_access_key,
+          'etcd-s3-secret-key': k3s_etcd_s3_secret_key} | to_nice_yaml }}
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when: k3s_etcd_s3_enabled | bool
+  notify: restart k3s
+
+- name: "k3s : Remove etcd-S3 credentials drop-in when disabled"
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/config.yaml.d/etcd-s3-credentials.yaml
+    state: absent
+  when: not (k3s_etcd_s3_enabled | bool)
+  notify: restart k3s
+
+# --- version-guarded install -------------------------------------------------
+- name: "k3s : Check the currently installed k3s version (if any)"
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - --version
+  register: k3s_version_check
+  changed_when: false
+  failed_when: false
+
+- name: "k3s : Decide whether k3s needs to be (re)installed for the pinned version"
+  ansible.builtin.set_fact:
+    # rc != 0 → not installed. Otherwise compare the reported "vX.Y.Z+k3s1" token
+    # against the pinned version; reinstall only when it differs.
+    k3s_needs_install: >-
+      {{ (k3s_version_check.rc != 0)
+         or (k3s_version not in (k3s_version_check.stdout | default(''))) }}
+
+- name: "k3s : Validate the k3s installer URL (https + pinned host)"
+  # The script this URL returns is executed as root, so the host is pinned to an
+  # INLINE LITERAL (not a variable) — get.k3s.io is Rancher's single-tenant
+  # domain. Keeping the allowlist inline means a recipe cannot override the
+  # allowlist alongside k3s_install_url to bypass this. Mirror support is a role
+  # code change, by design.
+  ansible.builtin.assert:
+    that:
+      - (k3s_install_url | urlsplit('scheme')) == 'https'
+      - (k3s_install_url | urlsplit('hostname')) == 'get.k3s.io'
+    fail_msg: >-
+      k3s_install_url must be https on host get.k3s.io.
+      Got {{ k3s_install_url | to_json }}.
+  when: k3s_needs_install | bool
+
+- name: "k3s : Download the k3s install script (only when install is needed)"
+  ansible.builtin.get_url:
+    url: "{{ k3s_install_url }}"
+    dest: /usr/local/share/k3s-install.sh
+    owner: root
+    group: root
+    mode: "0755"
+    timeout: 60
+  when: k3s_needs_install | bool
+
+- name: "k3s : Run the k3s installer for the pinned version (token via env, no_log)"
+  # command (not shell); the token and version are passed as environment values,
+  # never Jinja-spliced into a script. INSTALL_K3S_EXEC carries only optional
+  # advanced flags (k3s_extra_server_args) — all normal options come from
+  # config.yaml. no_log protects K3S_TOKEN; a non-secret diagnostic follows.
+  ansible.builtin.command:
+    argv:
+      - sh
+      - /usr/local/share/k3s-install.sh
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    INSTALL_K3S_EXEC: "{{ k3s_extra_server_args | join(' ') }}"
+    K3S_TOKEN: "{{ k3s_token }}"
+  register: k3s_install_result
+  failed_when: false
+  no_log: true
+  changed_when: k3s_install_result.rc == 0
+  when: k3s_needs_install | bool
+
+- name: "k3s : Fail if the k3s installer errored (token-safe diagnostic)"
+  ansible.builtin.fail:
+    msg: >-
+      k3s installer failed (rc={{ k3s_install_result.rc | default(1) }}).
+      Output is redacted (no_log) to protect K3S_TOKEN. Check network access to
+      {{ k3s_install_url }} and that k3s_version ({{ k3s_version }}) is a valid
+      release tag.
+  when:
+    - k3s_needs_install | bool
+    - (k3s_install_result.rc | default(1) | int) != 0
+
+- name: "k3s : Ensure k3s service is enabled and started"
+  ansible.builtin.systemd:
+    name: k3s
+    enabled: true
+    state: started
+
+# Apply any pending config-change restart BEFORE the readiness wait, so the
+# wait observes the node running with its final configuration.
+- name: "k3s : Apply pending k3s restart (config changes) before readiness check"
+  ansible.builtin.meta: flush_handlers
+
+# --- readiness ---------------------------------------------------------------
+- name: "k3s : Wait for this node to report Ready (init node)"
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - get
+      - nodes
+  register: k3s_nodes_ready
+  until: k3s_nodes_ready.rc == 0
+  retries: "{{ k3s_ready_retries | int }}"
+  delay: "{{ k3s_ready_delay | int }}"
+  changed_when: false
+  when: (k3s_bootstrap | default('init')) == 'init'
+
+- name: "k3s : Wait for k3s service to be active (join node)"
+  # No failed_when override: `systemctl is-active` exits non-zero while the
+  # service is not yet active, so if the retries are exhausted the final attempt
+  # fails and the play stops LOUDLY (a join that never comes up — crash loop,
+  # token mismatch, unreachable k3s_server_url — must not be reported as success).
+  # `is-active` output carries no secrets, so no_log is unnecessary.
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - k3s
+  register: k3s_join_active
+  until: k3s_join_active.stdout | trim == 'active'
+  retries: "{{ k3s_ready_retries | int }}"
+  delay: "{{ k3s_ready_delay | int }}"
+  changed_when: false
+  when: (k3s_bootstrap | default('init')) == 'join'
