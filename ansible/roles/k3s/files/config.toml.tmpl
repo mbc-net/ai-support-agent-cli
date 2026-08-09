@@ -1,0 +1,16 @@
+{{ template "base" . }}
+
+# gVisor (runsc) runtime handler, appended by the k3s bundled role.
+#
+# This is the containerd v1 template (`config.toml.tmpl`), used by OLDER k3s /
+# containerd v1, where the CRI plugin id is `io.containerd.grpc.v1.cri`. Newer
+# k3s ships containerd v2 and reads `config-v3.toml.tmpl` (see that file for the
+# `io.containerd.cri.v1.runtime` form). Select the matching file via
+# k3s_containerd_template_name and VERIFY against `k3s ctr version` — see the
+# admin-docs server-setup gVisor notes.
+#
+# k3s auto-generates its containerd config; this template is the supported
+# extension point (do NOT edit the generated config directly). It inherits the
+# stock config via `{{ template "base" . }}` and only adds the runsc runtime.
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"

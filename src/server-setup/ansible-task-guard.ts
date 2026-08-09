@@ -222,6 +222,10 @@ const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
  * 依存する。`gitlab_runner`/`github_runner`（CI ランナー登録）で executor=docker を
  * 使う場合は `docker` ロールに依存する。ロール間の自動依存機構は無いため、レシピ
  * 作成者が依存ロールを先に include する運用とし、各ロールは前提を `assert` で検証する。
+ *
+ * `k3s` は単一ロールで OS 前提整備・ephemeral ディスク・k3s(HA/単一)・gVisor を
+ * トグル変数で制御する重量ロール。破壊的なディスク操作・秘匿トークンを扱うため、
+ * ロール内部で by-id/UUID 強制・冪等ガード・no_log を徹底する（roles/k3s 参照）。
  */
 export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'os_init',
@@ -236,6 +240,7 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'dns_tls',
   'gitlab_runner',
   'github_runner',
+  'k3s',
 ])
 
 /**

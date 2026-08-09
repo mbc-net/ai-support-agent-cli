@@ -1,0 +1,91 @@
+---
+# common: OS prerequisites for k3s / Longhorn / OpenSearch (instruction §3.1).
+# Everything here is naturally idempotent (apt state=present, sysctl,
+# copy-by-checksum, guarded swapoff), so a second run reports changed=0.
+
+- name: "k3s : Install required packages"
+  ansible.builtin.apt:
+    name: "{{ k3s_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: "k3s : Enable and start iscsid (Longhorn volume attach)"
+  ansible.builtin.systemd:
+    name: iscsid
+    enabled: true
+    state: started
+  when: k3s_enable_iscsid | bool
+
+# --- swap off (etcd/kubelet require swap disabled) ---------------------------
+- name: "k3s : Disable swap now (only if some swap is active)"
+  ansible.builtin.command:
+    cmd: swapoff -a
+  when:
+    - k3s_disable_swap | bool
+    - (ansible_swaptotal_mb | default(0) | int) > 0
+  changed_when: (ansible_swaptotal_mb | default(0) | int) > 0
+
+- name: "k3s : Comment out swap entries in /etc/fstab (persist across reboot)"
+  ansible.builtin.replace:
+    path: /etc/fstab
+    # Comment any active (non-comment) line whose mount point / type is swap.
+    regexp: '^([^#\n].*\s+swap\s+.*)$'
+    replace: '# \1'
+  when: k3s_disable_swap | bool
+
+# --- sysctl ------------------------------------------------------------------
+- name: "k3s : Write sysctl tunables to /etc/sysctl.d/99-k3s.conf"
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-k3s.conf
+    sysctl_set: true
+    reload: true
+    state: present
+  loop: "{{ k3s_sysctl | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+# --- kernel modules ----------------------------------------------------------
+- name: "k3s : Persist kernel modules via /etc/modules-load.d/k3s.conf"
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k3s.conf
+    content: "{{ k3s_kernel_modules | join('\n') }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: "k3s : List currently loaded kernel modules"
+  ansible.builtin.command:
+    argv:
+      - /sbin/lsmod
+  register: k3s_lsmod
+  changed_when: false
+
+- name: "k3s : Load required kernel modules that are not yet loaded"
+  # command (not shell) with argv — a crafted module name cannot shell-inject.
+  # `when` skips already-loaded modules → a re-run reports changed=0 (idempotent).
+  # No failed_when override: if a required module is genuinely unavailable,
+  # modprobe fails and the play stops LOUDLY (a swallowed iscsi_tcp failure would
+  # only surface weeks later as a Longhorn volume-attach failure with no trail).
+  ansible.builtin.command:
+    argv:
+      - /sbin/modprobe
+      - "{{ item }}"
+  loop: "{{ k3s_kernel_modules }}"
+  when: item not in (k3s_lsmod.stdout_lines | map('regex_replace', '^(\\S+).*$', '\\1') | list)
+  changed_when: true
+
+# --- time sync ---------------------------------------------------------------
+- name: "k3s : Ensure time sync service is installed (chrony only; timesyncd ships with the OS)"
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+  when: k3s_time_sync_service == 'chrony'
+
+- name: "k3s : Enable and start the time sync service"
+  ansible.builtin.systemd:
+    name: "{{ k3s_time_sync_service }}"
+    enabled: true
+    state: started

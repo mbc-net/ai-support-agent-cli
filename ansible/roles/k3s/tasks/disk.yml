@@ -1,0 +1,222 @@
+---
+# disk: ephemeral SSD (partition + ext4 + mount) and bind mounts for k3s
+# containerd/kubelet (instruction §3.2). DESTRUCTIVE — opt-in via k3s_setup_disk.
+#
+# Idempotency & safety model (a mistake here wipes the OS):
+#   * The device is addressed ONLY by its stable /dev/disk/by-id/<id> symlink.
+#     A bare /dev/nvme* / /dev/sd* name is REJECTED (kernel enumeration order is
+#     not stable across reboots, so a bare name can point at the OS disk).
+#   * A filesystem LABEL (k3s_ephemeral_fs_label) is the idempotency key:
+#     partitioning + mkfs run ONLY when no filesystem with that label exists, so
+#     a re-run never repartitions or reformats (changed=0).
+#   * Before formatting we assert the resolved device carries no mounted "/",
+#     as a last-resort guard against a mis-supplied by-id pointing at the OS disk.
+
+- name: "k3s : Validate k3s_ephemeral_disk_id is set"
+  ansible.builtin.assert:
+    that:
+      - (k3s_ephemeral_disk_id | default('') | trim | length) > 0
+    fail_msg: >-
+      k3s_ephemeral_disk_id is required when k3s_setup_disk is true. Provide the
+      by-id name of the ephemeral SSD, e.g. nvme-Samsung_SSD_...  (see
+      `ls -l /dev/disk/by-id`). Bare /dev/nvme* names are not allowed.
+
+- name: "k3s : Reject unstable/absolute device names for k3s_ephemeral_disk_id"
+  ansible.builtin.assert:
+    that:
+      # by-id names contain no slash and are not raw /dev/ device nodes.
+      - "'/' not in k3s_ephemeral_disk_id"
+      - not (k3s_ephemeral_disk_id is match('^(dev|nvme[0-9]|sd[a-z]|vd[a-z]|mmcblk).*'))
+    fail_msg: >-
+      k3s_ephemeral_disk_id must be a /dev/disk/by-id name (no slashes, not a
+      raw device like nvme0n1/sda). Got {{ k3s_ephemeral_disk_id | to_json }}.
+      Using a raw kernel device name is unsafe — enumeration order is not stable.
+
+- name: "k3s : Validate every mount target is absolute and under /var/lib/"
+  # Mounting an empty ephemeral dir over /etc or / (and persisting it to fstab)
+  # would brick the host on next boot. The by-id device is guarded elsewhere;
+  # here we constrain the DESTINATION paths (ephemeral mount + every bind dest)
+  # so a hostile k3s_ephemeral_mount / k3s_bind_mounts[].dest cannot escape
+  # k3s's own data area. The /var/lib/ prefix is an INLINE LITERAL (not a
+  # variable) so a recipe cannot override the allowlist to bypass this; all
+  # k3s/kubelet/longhorn/ephemeral paths live under /var/lib/.
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item.startswith('/var/lib/')
+      - "'..' not in item"
+    fail_msg: >-
+      Mount target {{ item | to_json }} must be an absolute path (no '..') under
+      /var/lib/.
+    quiet: true
+  loop: "{{ [k3s_ephemeral_mount] + (k3s_bind_mounts | map(attribute='dest') | list) }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: "k3s : Resolve the ephemeral device and its first partition (by-id)"
+  ansible.builtin.set_fact:
+    # by-id partition symlinks are <disk-id>-part1 — themselves stable.
+    k3s_ephemeral_device: "/dev/disk/by-id/{{ k3s_ephemeral_disk_id }}"
+    k3s_ephemeral_partition: "/dev/disk/by-id/{{ k3s_ephemeral_disk_id }}-part1"
+
+- name: "k3s : Confirm the by-id device exists and is a block device"
+  ansible.builtin.stat:
+    path: "{{ k3s_ephemeral_device }}"
+    follow: true
+  register: k3s_ephemeral_stat
+
+- name: "k3s : Assert the by-id device is present"
+  ansible.builtin.assert:
+    that:
+      - k3s_ephemeral_stat.stat.exists
+      - k3s_ephemeral_stat.stat.isblk | default(false)
+    fail_msg: >-
+      {{ k3s_ephemeral_device }} is not a block device on this host. Check
+      k3s_ephemeral_disk_id against `ls -l /dev/disk/by-id`.
+
+- name: "k3s : Safety guard — ensure the target device does not host the root filesystem"
+  ansible.builtin.command:
+    argv:
+      - lsblk
+      - -nro
+      - MOUNTPOINT
+      - "{{ k3s_ephemeral_device }}"
+  register: k3s_ephemeral_mountpoints
+  changed_when: false
+
+- name: "k3s : Abort if the ephemeral device carries a system mountpoint"
+  ansible.builtin.assert:
+    that:
+      - "'/' not in (k3s_ephemeral_mountpoints.stdout_lines | map('trim') | list)"
+      - "'/boot' not in (k3s_ephemeral_mountpoints.stdout_lines | map('trim') | list)"
+      - "'/boot/efi' not in (k3s_ephemeral_mountpoints.stdout_lines | map('trim') | list)"
+    fail_msg: >-
+      REFUSING to format {{ k3s_ephemeral_device }}: it currently carries a
+      system mountpoint (/, /boot or /boot/efi). This is almost certainly the
+      OS disk, not the ephemeral SSD. Re-check k3s_ephemeral_disk_id.
+
+- name: "k3s : Check whether a filesystem with the ephemeral label already exists"
+  ansible.builtin.command:
+    argv:
+      - blkid
+      - -L
+      - "{{ k3s_ephemeral_fs_label }}"
+  register: k3s_ephemeral_label_lookup
+  changed_when: false
+  failed_when: false
+
+- name: "k3s : Record whether the ephemeral disk still needs partition + format"
+  ansible.builtin.set_fact:
+    # rc != 0 means blkid found no device with that label → first-time setup.
+    k3s_ephemeral_needs_setup: "{{ k3s_ephemeral_label_lookup.rc != 0 }}"
+
+- name: "k3s : Install parted (only when the disk needs first-time setup)"
+  ansible.builtin.apt:
+    name: parted
+    state: present
+  when: k3s_ephemeral_needs_setup | bool
+
+- name: "k3s : Create GPT table and a single full-disk partition (first-time only)"
+  # command (not shell); the device path is a fixed by-id string we validated.
+  ansible.builtin.command:
+    argv:
+      - parted
+      - --script
+      - "{{ k3s_ephemeral_device }}"
+      - mklabel
+      - gpt
+      - mkpart
+      - primary
+      - ext4
+      - 0%
+      - 100%
+  when: k3s_ephemeral_needs_setup | bool
+  changed_when: true
+
+- name: "k3s : Settle udev so the -part1 by-id symlink appears"
+  ansible.builtin.command:
+    argv:
+      - udevadm
+      - settle
+  when: k3s_ephemeral_needs_setup | bool
+  changed_when: false
+
+- name: "k3s : Format the partition ext4 with the ephemeral label (first-time only)"
+  ansible.builtin.command:
+    argv:
+      - mkfs.ext4
+      - -L
+      - "{{ k3s_ephemeral_fs_label }}"
+      - "{{ k3s_ephemeral_partition }}"
+  when: k3s_ephemeral_needs_setup | bool
+  changed_when: true
+
+- name: "k3s : Read the ephemeral filesystem UUID (register in fstab by UUID)"
+  ansible.builtin.command:
+    argv:
+      - blkid
+      - -L
+      - "{{ k3s_ephemeral_fs_label }}"
+      - -s
+      - UUID
+      - -o
+      - value
+  register: k3s_ephemeral_uuid_lookup
+  changed_when: false
+
+- name: "k3s : Assert the ephemeral UUID resolved"
+  ansible.builtin.assert:
+    that:
+      - (k3s_ephemeral_uuid_lookup.stdout | trim | length) > 0
+    fail_msg: "Could not read the UUID of the ephemeral filesystem after setup."
+
+- name: "k3s : Mount the ephemeral filesystem by UUID and persist in fstab"
+  ansible.posix.mount:
+    path: "{{ k3s_ephemeral_mount }}"
+    src: "UUID={{ k3s_ephemeral_uuid_lookup.stdout | trim }}"
+    fstype: ext4
+    opts: "{{ k3s_ephemeral_mount_opts }}"
+    state: mounted
+
+# --- bind mounts (created BEFORE k3s installs) -------------------------------
+- name: "k3s : Create ephemeral bind source directories"
+  ansible.builtin.file:
+    path: "{{ item.src }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ k3s_bind_mounts }}"
+  loop_control:
+    label: "{{ item.src }}"
+
+- name: "k3s : Create bind target directories"
+  ansible.builtin.file:
+    path: "{{ item.dest }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ k3s_bind_mounts }}"
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: "k3s : Bind-mount ephemeral subdirs onto k3s paths and persist in fstab"
+  ansible.posix.mount:
+    path: "{{ item.dest }}"
+    src: "{{ item.src }}"
+    fstype: none
+    opts: bind
+    state: mounted
+  loop: "{{ k3s_bind_mounts }}"
+  loop_control:
+    label: "{{ item.dest }}"
+
+# --- Longhorn data dir (directory only; Longhorn install is out of scope) -----
+- name: "k3s : Create Longhorn data directory"
+  ansible.builtin.file:
+    path: "{{ k3s_longhorn_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"

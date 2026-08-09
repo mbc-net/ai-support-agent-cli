@@ -1,0 +1,122 @@
+---
+# gvisor: install runsc + containerd-shim-runsc-v1 and register a `runsc`
+# RuntimeClass so agent sandbox Pods can opt into gVisor isolation
+# (instruction §3.4). The default runtime is left as runc — only Pods with
+# runtimeClassName: runsc use gVisor (changing the default would break Longhorn
+# and other system components).
+#
+# runsc/containerd-shim binaries are downloaded from the gVisor release bucket
+# with sha512 verification (get_url checksum). Idempotent: get_url skips when the
+# on-disk binary already matches the checksum.
+
+- name: "k3s : Assert k3s is installed before configuring gVisor"
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_binary_for_gvisor
+
+- name: "k3s : Fail if k3s is not installed (gVisor needs k3s containerd)"
+  ansible.builtin.assert:
+    that:
+      - k3s_binary_for_gvisor.stat.exists
+    fail_msg: >-
+      gvisor_enabled=true but k3s is not installed on this host. Run the k3s
+      cluster step (k3s_setup_cluster) on this node first, or enable both.
+
+- name: "k3s : Validate the gVisor download base (https + pinned host AND path)"
+  # runsc is downloaded and installed 0755 root; its checksum comes from the
+  # same base, so a hostile base supplies both the binary and a matching
+  # checksum. storage.googleapis.com is a SHARED CDN — any GCS user can serve
+  # https://storage.googleapis.com/<their-bucket>/... — so pinning the host
+  # alone is insufficient; the path is also pinned to the official gVisor
+  # release prefix. Both are INLINE LITERALS (not variables) so a recipe cannot
+  # override the allowlist to bypass the check.
+  ansible.builtin.assert:
+    that:
+      - (k3s_gvisor_base_url | urlsplit('scheme')) == 'https'
+      - (k3s_gvisor_base_url | urlsplit('hostname')) == 'storage.googleapis.com'
+      - (k3s_gvisor_base_url | urlsplit('path')) is match('/gvisor/releases/release(/|$)')
+    fail_msg: >-
+      k3s_gvisor_base_url must be https on storage.googleapis.com under
+      /gvisor/releases/release. Got {{ k3s_gvisor_base_url | to_json }}.
+
+- name: "k3s : Validate the containerd template basename"
+  # Constrained to the two known basenames (a template file ships for each);
+  # this also blocks path traversal via k3s_containerd_template_name.
+  ansible.builtin.assert:
+    that:
+      - k3s_containerd_template_name in ['config.toml.tmpl', 'config-v3.toml.tmpl']
+    fail_msg: >-
+      k3s_containerd_template_name must be 'config.toml.tmpl' (containerd v1 /
+      older k3s) or 'config-v3.toml.tmpl' (containerd v2 / newer k3s). Got
+      {{ k3s_containerd_template_name | to_json }}.
+
+- name: "k3s : Compute gVisor download base for this architecture"
+  ansible.builtin.set_fact:
+    # gVisor publishes under x86_64 / aarch64 — ansible_architecture already
+    # reports exactly these values on Ubuntu.
+    k3s_gvisor_url_base: "{{ k3s_gvisor_base_url }}/{{ k3s_gvisor_release }}/{{ ansible_architecture }}"
+
+- name: "k3s : Download runsc and containerd-shim-runsc-v1 (sha512-verified)"
+  ansible.builtin.get_url:
+    url: "{{ k3s_gvisor_url_base }}/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    checksum: "sha512:{{ k3s_gvisor_url_base }}/{{ item }}.sha512"
+    owner: root
+    group: root
+    mode: "0755"
+    timeout: 120
+  loop:
+    - runsc
+    - containerd-shim-runsc-v1
+
+- name: "k3s : Ensure the k3s containerd config template directory exists"
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/agent/etc/containerd
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "k3s : Install the containerd config template with the runsc runtime"
+  # copy (not template): the file is a containerd Go-template and contains
+  # `{{ '{{' }} template "base" . {{ '}}' }}` literals that must reach containerd
+  # verbatim, not be rendered by Ansible. A template file ships for each of the
+  # two allowed basenames (validated above), so src == the basename — no
+  # rewrite, and the version-matched content is always what gets written.
+  ansible.builtin.copy:
+    src: "{{ k3s_containerd_template_name }}"
+    dest: "/var/lib/rancher/k3s/agent/etc/containerd/{{ k3s_containerd_template_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart k3s
+
+- name: "k3s : Ensure the runsc RuntimeClass reference directory exists"
+  # Fixed reference path (not a variable) — avoids arbitrary-path writes.
+  ansible.builtin.file:
+    path: /etc/k3s-gvisor
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "k3s : Place the runsc RuntimeClass reference manifest"
+  ansible.builtin.copy:
+    src: runsc-runtimeclass.yaml
+    dest: /etc/k3s-gvisor/runsc-runtimeclass.yaml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: "k3s : Auto-apply the runsc RuntimeClass on the init node (opt-in)"
+  # k3s applies any manifest under server/manifests automatically; only the init
+  # (server) node has this directory and only when the operator opts in.
+  ansible.builtin.copy:
+    src: runsc-runtimeclass.yaml
+    dest: /var/lib/rancher/k3s/server/manifests/runsc-runtimeclass.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - k3s_gvisor_apply_runtimeclass | bool
+    - (k3s_bootstrap | default('init')) == 'init'
