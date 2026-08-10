@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import WebSocket from 'ws'
 
-import { BaseWebSocketConnection } from '../src/base-websocket'
+import { BaseWebSocketConnection, buildAgentWsHeaders } from '../src/base-websocket'
 import { WS_CLOSE_CODE_AUTH_REJECTED, WS_HEARTBEAT_INTERVAL_MS, WS_PONG_MAX_MISSED } from '../src/constants'
 import { logger } from '../src/logger'
 
@@ -562,5 +562,27 @@ describe('BaseWebSocketConnection heartbeat (isAlive / missed-pong method)', () 
     expect(mockWsInstance!.terminate).not.toHaveBeenCalled()
 
     conn.disconnect()
+  })
+})
+
+describe('buildAgentWsHeaders', () => {
+  it('builds Authorization and X-Agent-Id headers without a cookie', () => {
+    expect(buildAgentWsHeaders('tok', 'agent-1')).toEqual({
+      Authorization: 'Bearer tok',
+      'X-Agent-Id': 'agent-1',
+    })
+  })
+
+  it('includes the Cookie header when a sticky cookie is provided', () => {
+    expect(buildAgentWsHeaders('tok', 'agent-1', 'AWSALB=xyz')).toEqual({
+      Authorization: 'Bearer tok',
+      'X-Agent-Id': 'agent-1',
+      Cookie: 'AWSALB=xyz',
+    })
+  })
+
+  it('omits the Cookie header when the cookie is an empty string', () => {
+    const headers = buildAgentWsHeaders('tok', 'agent-1', '')
+    expect(headers).not.toHaveProperty('Cookie')
   })
 })

@@ -13,7 +13,8 @@ import { resolveDockerfile } from './dockerfile-path'
 import { AGENT_VERSION } from '../constants'
 import { t } from '../i18n'
 import { logger } from '../logger'
-import { sanitizeNameSegment } from '../utils'
+import { sanitizeNameSegment, toErrorMessage } from '../utils'
+import { dateParts } from '../utils/date-parts'
 
 export const IMAGE_NAME = 'ai-support-agent'
 
@@ -97,22 +98,25 @@ export function resetDockerPathCache(): void {
   delete process.env.DOCKER_HOST
 }
 
-export function checkDockerAvailable(): boolean {
+/**
+ * Run a docker command with all output suppressed and report whether it exited
+ * successfully. Any non-zero exit or spawn error is swallowed and returns false.
+ */
+function dockerCommandSucceeds(args: string[]): boolean {
   try {
-    execFileSync(getDockerPath(), ['info'], { stdio: 'ignore' })
+    execFileSync(getDockerPath(), args, { stdio: 'ignore' })
     return true
   } catch {
     return false
   }
 }
 
+export function checkDockerAvailable(): boolean {
+  return dockerCommandSucceeds(['info'])
+}
+
 export function imageExists(version: string): boolean {
-  try {
-    execFileSync(getDockerPath(), ['image', 'inspect', `${IMAGE_NAME}:${version}`], { stdio: 'ignore' })
-    return true
-  } catch {
-    return false
-  }
+  return dockerCommandSucceeds(['image', 'inspect', `${IMAGE_NAME}:${version}`])
 }
 
 export function buildImage(version: string, customDockerfile?: string): void {
@@ -144,7 +148,7 @@ export function buildImage(version: string, customDockerfile?: string): void {
 function execErrorMessage(err: unknown): string {
   const stderr = (err as { stderr?: Buffer | string } | undefined)?.stderr
   if (stderr && stderr.toString().trim().length > 0) return stderr.toString().trim()
-  return err instanceof Error ? err.message : String(err)
+  return toErrorMessage(err)
 }
 
 export function pruneOldImages(currentVersion: string): void {
@@ -250,26 +254,13 @@ export function buildDevMounts(): string[] {
  * Format: YYYYMMDDHHmmss
  */
 export function makeSessionId(): string {
-  const d = new Date()
-  const pad = (n: number, len = 2): string => String(n).padStart(len, '0')
-  return (
-    String(d.getFullYear()) +
-    pad(d.getMonth() + 1) +
-    pad(d.getDate()) +
-    pad(d.getHours()) +
-    pad(d.getMinutes()) +
-    pad(d.getSeconds())
-  )
+  const { year, month, day, hours, minutes, seconds } = dateParts(new Date())
+  return year + month + day + hours + minutes + seconds
 }
 
 /** Check if a project-specific image tag exists; fall back to base image tag. */
 export function resolveImageTag(projectTag: string, baseTag: string): string {
-  try {
-    execFileSync(getDockerPath(), ['image', 'inspect', projectTag], { stdio: 'ignore' })
-    return projectTag
-  } catch /* istanbul ignore next */ {
-    return baseTag
-  }
+  return dockerCommandSucceeds(['image', 'inspect', projectTag]) ? projectTag : baseTag
 }
 
 export { AGENT_VERSION }

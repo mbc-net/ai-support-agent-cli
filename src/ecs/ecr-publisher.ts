@@ -15,7 +15,7 @@ import { DescribeImagesCommand, ECRClient, GetAuthorizationTokenCommand } from '
 import { parseEcrRepositoryUri } from './aws-arn'
 import { getDockerPath } from '../docker/docker-utils'
 import { logger } from '../logger'
-import { toError } from '../utils'
+import { decodeBase64Utf8, toError } from '../utils'
 
 export interface PublishImageOptions {
   /** ECR repository URI (push destination) */
@@ -75,7 +75,7 @@ export async function loginToEcr(client: ECRClient, registry: string): Promise<v
   if (!token) {
     throw new Error('ECR GetAuthorizationToken returned no authorization data')
   }
-  const decoded = Buffer.from(token, 'base64').toString('utf-8')
+  const decoded = decodeBase64Utf8(token)
   const separator = decoded.indexOf(':')
   if (separator < 0) {
     throw new Error('ECR authorization token has an unexpected format')

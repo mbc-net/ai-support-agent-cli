@@ -10,12 +10,12 @@ import * as os from 'os'
 
 import { ApiClient } from '../api-client'
 import { type AutoUpdaterHandle, startAutoUpdater } from '../auto-updater'
+import { splitProjectRef } from '../utils/token-utils'
 import { validateUpdateChannel } from '../cli/validators'
 import {
   AGENT_VERSION,
   CLI_FLAG_VERBOSE,
   CLI_FLAG_NO_AUTO_UPDATE,
-  CLI_FLAG_NO_DOCKER,
   DOCKER_UPDATE_EXIT_CODE,
   ENV_VARS,
 } from '../constants'
@@ -28,6 +28,7 @@ import { t } from '../i18n'
 import { logger } from '../logger'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { exitWithError, getErrorMessage } from '../utils'
+import { CONTAINER_START_ARGV, buildDockerUserArgs } from './docker-args'
 import { IMAGE_NAME, checkDockerAvailable, getDockerPath } from './docker-utils'
 import { ensureImage } from './version-manager'
 import { syncDockerfileToConfigDir } from './dockerfile-sync'
@@ -57,7 +58,7 @@ export interface DockerRunOptions {
 }
 
 export function buildContainerArgs(opts: DockerRunOptions): string[] {
-  const args: string[] = ['ai-support-agent', 'start', CLI_FLAG_NO_DOCKER]
+  const args: string[] = [...CONTAINER_START_ARGV]
 
   if (opts.token) {
     args.push('--token', opts.token)
@@ -197,13 +198,12 @@ export function runInDocker(opts: DockerRunOptions): void {
   let projects: ReturnType<typeof getProjectList>
 
   if (opts.project) {
-    const slashIdx = opts.project.indexOf('/')
-    if (slashIdx < 0) {
+    const parsed = splitProjectRef(opts.project)
+    if (!parsed) {
       exitWithError(`[docker] --project must be in "tenantCode/projectCode" format: ${opts.project}`)
       return // unreachable in production; guards against mocked process.exit in tests
     }
-    const tenantCode = opts.project.substring(0, slashIdx)
-    const projectCode = opts.project.substring(slashIdx + 1)
+    const { tenantCode, projectCode } = parsed
     projects = allProjects.filter(
       (p) => p.tenantCode === tenantCode && p.projectCode === projectCode,
     )
@@ -262,7 +262,7 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   const dockerArgs = [
     'run', '--rm', ...interactive,
-    ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
+    ...buildDockerUserArgs(),
     ...mounts,
     ...envArgs,
     `${IMAGE_NAME}:${version}`,

@@ -852,6 +852,11 @@ function spawnPlaywright(
       E2E_JSON_OUTPUT: resultFile,
       NODE_PATH: nodeModulesDir,
     }
+    // These values are owned by this execution. Do not let stale target or
+    // credentials from the long-lived agent process leak into a later run.
+    delete env.E2E_BASE_URL
+    delete env.E2E_HTTP_CREDENTIALS_USERNAME
+    delete env.E2E_HTTP_CREDENTIALS_PASSWORD
     if (baseUrl) {
       env.E2E_BASE_URL = baseUrl
     }

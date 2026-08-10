@@ -1,4 +1,5 @@
 import * as fs from 'fs'
+import type { Server } from 'net'
 import * as path from 'path'
 import axios from 'axios'
 
@@ -22,6 +23,32 @@ export function atomicWriteFile(filePath: string, content: string, mode = 0o600)
   const tmpPath = filePath + '.tmp'
   fs.writeFileSync(tmpPath, content, { mode })
   fs.renameSync(tmpPath, filePath)
+}
+
+/**
+ * オブジェクトを 2 スペースインデントの JSON として atomicWriteFile で書き込む。
+ * `atomicWriteFile(path, JSON.stringify(data, null, 2))` の重複を集約する。
+ */
+export function atomicWriteJson(filePath: string, data: unknown, mode = 0o600): void {
+  atomicWriteFile(filePath, JSON.stringify(data, null, 2), mode)
+}
+
+/**
+ * base64 文字列を UTF-8 文字列にデコードする。
+ * `Buffer.from(value, 'base64').toString('utf-8')` の重複を集約する。
+ */
+export function decodeBase64Utf8(value: string): string {
+  return Buffer.from(value, 'base64').toString('utf-8')
+}
+
+/**
+ * `net.Server.address()`（`string | AddressInfo | null`）から数値ポートを安全に取り出す。
+ * 未リッスン / UNIX ソケット等でポートを特定できない場合は undefined を返す
+ * （`as AddressInfo` キャストの代替となるランタイムガード）。
+ */
+export function getAddressPort(server: Server): number | undefined {
+  const address = server.address()
+  return address && typeof address === 'object' ? address.port : undefined
 }
 
 /**
@@ -49,12 +76,49 @@ export function toErrorMessage(error: unknown): string {
 }
 
 /**
+ * 許可リストのキーのうち、`process.env` に定義されている（undefined でない）ものだけを
+ * 抽出した環境変数マップを返す。未定義キーは含めない。
+ * `buildSafeEnv` / `buildDockerEnv` の重複したパススルーループを共通化する。
+ */
+export function pickPresentEnv(
+  keys: readonly string[],
+): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const key of keys) {
+    const value = process.env[key]
+    if (value !== undefined) env[key] = value
+  }
+  return env
+}
+
+/**
  * unknown な catch 値を Error インスタンスに正規化する。
  * Error ならそのまま、それ以外は `String()` をメッセージにした Error を生成する。
  * `err instanceof Error ? err : new Error(String(err))` の重複イディオムを集約する。
  */
 export function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
+}
+
+/**
+ * AxiosError のレスポンスボディを型付けして取り出す。
+ * axios エラーでない・`response` が無い場合は undefined を返す。
+ * 各所で重複していた `error.response.data as Record<string, unknown> | undefined`
+ * の取り出しを集約する。
+ */
+export function axiosResponseData(
+  error: unknown,
+): Record<string, unknown> | undefined {
+  if (!axios.isAxiosError(error) || !error.response) return undefined
+  return error.response.data as Record<string, unknown> | undefined
+}
+
+/**
+ * AxiosError の HTTP レスポンスステータスコードを安全に取り出す。
+ * axios エラーでない場合は undefined を返す（`as AxiosError` キャストの代替）。
+ */
+export function axiosResponseStatus(error: unknown): number | undefined {
+  return axios.isAxiosError(error) ? error.response?.status : undefined
 }
 
 /**
@@ -65,7 +129,7 @@ export function toError(error: unknown): Error {
 export function getErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error) && error.response) {
     const status = error.response.status
-    const data = error.response.data as Record<string, unknown> | undefined
+    const data = axiosResponseData(error)
 
     if (data) {
       const serverMessage = data.message ?? data.error
@@ -160,8 +224,7 @@ export function isNonAuthClientError(error: unknown): boolean {
  * 各モジュールで重複していた同一ロジックをここに集約する。
  */
 export function isSsoAuthRequiredError(error: unknown): boolean {
-  if (!axios.isAxiosError(error) || !error.response) return false
-  const data = error.response.data as Record<string, unknown> | undefined
+  const data = axiosResponseData(error)
   if (!data) return false
   return data.error === 'SSO_AUTH_REQUIRED' || data.errorCode === 'SSO_AUTH_REQUIRED'
 }
@@ -245,6 +308,28 @@ export function exitWithError(message: string): never {
  */
 export function nowIso(): string {
   return new Date().toISOString()
+}
+
+/**
+ * Append `text` to `current` while keeping the total length within `limit`
+ * bytes/chars. If the result would exceed `limit`, only the portion that fits
+ * is appended and `truncated` is returned as `true` so the caller can emit a
+ * one-time warning. Centralizes the cap-and-append idiom used by the Docker
+ * container/build log accumulators.
+ */
+export function appendWithLimit(
+  current: string,
+  text: string,
+  limit: number,
+): { result: string; truncated: boolean } {
+  if (current.length + text.length <= limit) {
+    return { result: current + text, truncated: false }
+  }
+  const remaining = limit - current.length
+  return {
+    result: current + (remaining > 0 ? text.slice(0, remaining) : ''),
+    truncated: true,
+  }
 }
 
 /**

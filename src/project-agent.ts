@@ -40,6 +40,7 @@ import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
 import { getUpdateVersionFilePath } from './utils/path-utils'
 import { atomicWriteFile, getErrorMessage, isAuthenticationError, isInDocker, resolveUrlForDocker, sleep } from './utils'
+import { readMarkerFile } from './utils/marker-file'
 
 export interface ProjectAgentOptions {
   pollInterval: number
@@ -143,13 +144,10 @@ export class ProjectAgent {
     // so docker-built-hash lives at the root of getConfigDir().
     if (isInDocker()) {
       const builtHashPath = path.join(getConfigDir(), DOCKER_MARKER_BUILT_HASH)
-      try {
-        const builtHash = fs.readFileSync(builtHashPath, 'utf-8').trim()
-        if (builtHash) {
-          this.configSyncState.dockerCustomizationHash = builtHash
-        }
-      } catch {
-        // File does not exist yet — first startup, leave dockerCustomizationHash as undefined
+      // File may not exist yet — first startup, leave dockerCustomizationHash as undefined.
+      const builtHash = readMarkerFile(builtHashPath)
+      if (builtHash) {
+        this.configSyncState.dockerCustomizationHash = builtHash
       }
     }
   }

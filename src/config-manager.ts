@@ -7,7 +7,7 @@ import { CONFIG_DIR, CONFIG_FILE, PROJECT_CODE_DEFAULT } from './constants'
 import { t } from './i18n'
 import { logger } from './logger'
 import type { AgentConfig, LegacyAgentConfig, ProjectRegistration } from './types'
-import { atomicWriteFile, nowIso, sanitizeNameSegment } from './utils'
+import { atomicWriteJson, nowIso, sanitizeNameSegment } from './utils'
 import { safeJsonParse } from './utils/json-parse'
 
 export function getConfigDir(): string {
@@ -22,7 +22,7 @@ function getConfigPath(): string {
 }
 
 function writeConfigFile(configPath: string, data: AgentConfig): void {
-  atomicWriteFile(configPath, JSON.stringify(data, null, 2))
+  atomicWriteJson(configPath, data)
 }
 
 function generateAgentId(): string {

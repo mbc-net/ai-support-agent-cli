@@ -3,18 +3,20 @@ import * as path from 'node:path'
 
 import WebSocket from 'ws'
 
-import { BaseWebSocketConnection } from '../base-websocket'
+import { BaseWebSocketConnection, buildAgentWsHeaders } from '../base-websocket'
 import { BrowserLocalServer } from '../browser/browser-local-server'
 import { WS_CLOSE_CODE_AUTH_REJECTED, WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import type { EnvVarsProvider } from '../env-vars-filter'
 import { logger } from '../logger'
 import { getErrorMessage, buildWsUrl } from '../utils'
+import { isValidPort } from '../utils/port'
 import {
   BrowserSessionManager,
 } from '../mcp/tools/browser/browser-session-manager'
 import { validateUrl } from '../mcp/tools/browser/browser-security'
 import { SELECTOR_TIMEOUT_NAVIGATION_MS } from '../mcp/tools/browser/browser-types'
 import type { BrowserSession, FileChooserPayload } from '../mcp/tools/browser/browser-session'
+import { screenshotToBase64 } from '../mcp/tools/mcp-response'
 import { executePlaywrightScript } from '../browser/browser-script-executor'
 
 import {
@@ -23,7 +25,7 @@ import {
   HTTP_RESPONSE_CHUNK_SIZE,
 } from './constants'
 import { VsCodeServer } from './vscode-server'
-import { proxyHttpRequest } from './vscode-http-proxy'
+import { proxyHttpRequest, type ProxyResponse } from './vscode-http-proxy'
 import { VsCodeWsProxy } from './vscode-ws-proxy'
 
 /**
@@ -312,15 +314,12 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   protected createWebSocket(): WebSocket {
-    // Re-send ALB sticky cookies captured on the previous handshake so a
-    // reconnect lands on the same API task (scale-out safe).
-    const cookie = this.getStickyCookieHeader()
     return new WebSocket(this.wsUrl, {
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        'X-Agent-Id': this.agentId,
-        ...(cookie ? { Cookie: cookie } : {}),
-      },
+      headers: buildAgentWsHeaders(
+        this.token,
+        this.agentId,
+        this.getStickyCookieHeader(),
+      ),
     })
   }
 
@@ -670,7 +669,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
    */
   private sendHttpResponse(
     msg: VsCodeServerMessage,
-    response: { statusCode: number; headers: Record<string, string>; body: string },
+    response: ProxyResponse,
   ): void {
     // レスポンスボディが大きい場合はチャンク分割
     const bodyLength = response.body.length
@@ -693,7 +692,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
    */
   private sendChunkedHttpResponse(
     msg: VsCodeServerMessage,
-    response: { statusCode: number; headers: Record<string, string>; body: string },
+    response: ProxyResponse,
   ): void {
     const bodyLength = response.body.length
     const totalChunks = Math.ceil(bodyLength / HTTP_RESPONSE_CHUNK_SIZE)
@@ -786,7 +785,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
     // non-numeric, or out-of-range value (including negative numbers or
     // strings) through unchecked.
     const targetPort = Number(msg.targetPort)
-    if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
+    if (!isValidPort(targetPort)) {
       this.send({ type: 'error', sessionId, message: 'invalid targetPort' })
       return
     }
@@ -1205,7 +1204,7 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
 
     try {
       const buffer = await session.screenshot(true)
-      const base64 = buffer.toString('base64')
+      const base64 = screenshotToBase64(buffer)
       const currentUrl = session.getCurrentUrl()
       const pageTitle = await session.getPageTitle()
 

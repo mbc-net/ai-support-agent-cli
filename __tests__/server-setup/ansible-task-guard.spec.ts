@@ -160,8 +160,9 @@ describe('validateAnsibleTasks', () => {
       'claude_cli',
       'codex',
       'ai_support_agent',
+      'k3s',
     ])(
-      'include_role name=%s（許可された 10 ロール）は通過する',
+      'include_role name=%s（許可された 11 ロール）は通過する',
       (roleName) => {
         const body = `
 - name: bundled step
@@ -205,6 +206,22 @@ describe('validateAnsibleTasks', () => {
     github_runner_url: https://github.com/OWNER/REPO
     github_runner_scope: repo
     github_runner_pat: "{{ GITHUB_RUNNER_PAT }}"
+`
+      expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
+      expect(validateAnsibleTasks(body, resident).ok).toBe(true)
+    })
+
+    it('include_role name=k3s は task レベル vars（k3s_version / k3s_bootstrap / k3s_token）付きで ecs/resident 双方で通過する', () => {
+      const body = `
+- name: k3s クラスタ構築
+  include_role:
+    name: k3s
+  vars:
+    k3s_version: v1.33.4+k3s1
+    k3s_bootstrap: init
+    k3s_token: "{{ K3S_TOKEN }}"
+    k3s_setup_disk: false
+    gvisor_enabled: true
 `
       expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
       expect(validateAnsibleTasks(body, resident).ok).toBe(true)

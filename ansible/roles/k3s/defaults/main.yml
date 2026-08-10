@@ -1,0 +1,124 @@
+---
+# k3s role defaults.
+#
+# This single role provisions an on-premises k3s (Kubernetes) node. Every
+# original instruction that was written for one specific set of PCs is
+# generalised here into a role variable — nothing (device names, IPs, node
+# count, versions, taints, buckets) is hardcoded. Override any of these via the
+# recipe's task-level `vars:` (the web snippet ships placeholders for the
+# common ones). See admin-docs/docs/features/server-setup.md for the full table.
+#
+# The framework runs one recipe against one SSH host per execution, so a
+# multi-node HA cluster is provisioned host-by-host: run the recipe on the
+# init node first (k3s_bootstrap: init), then on each additional node
+# (k3s_bootstrap: join, k3s_server_url pointing at the init node). All nodes
+# share the same pre-generated k3s_token.
+
+# --- Feature toggles ---------------------------------------------------------
+# common/cluster default ON; the destructive disk step and the (AWS-credential
+# bearing) gVisor / etcd-S3 steps are opt-in (default OFF) per the design.
+k3s_setup_common: true
+k3s_setup_disk: false
+k3s_setup_cluster: true
+gvisor_enabled: false
+
+# --- common: OS prerequisites (instruction §3.1) -----------------------------
+k3s_packages:
+  - open-iscsi   # Longhorn attaches volumes over iSCSI
+  - nfs-common   # Longhorn RWX (NFS provisioner)
+  - util-linux
+  - jq
+  - curl
+k3s_enable_iscsid: true
+k3s_disable_swap: true
+# sysctl keys/values applied to /etc/sysctl.d/99-k3s.conf. vm.max_map_count is
+# an OpenSearch start requirement; keep it even before OpenSearch is deployed.
+k3s_sysctl:
+  vm.max_map_count: "262144"
+  vm.swappiness: "0"
+  fs.inotify.max_user_instances: "8192"
+  fs.inotify.max_user_watches: "524288"
+  net.bridge.bridge-nf-call-iptables: "1"
+  net.ipv4.ip_forward: "1"
+k3s_kernel_modules:
+  - overlay
+  - br_netfilter
+  - iscsi_tcp
+# Time sync service to enable (etcd is sensitive to inter-node clock skew).
+k3s_time_sync_service: systemd-timesyncd
+
+# --- disk: ephemeral SSD + bind mounts (instruction §3.2) --------------------
+# DESTRUCTIVE. Only runs when k3s_setup_disk: true. The device MUST be given by
+# a stable /dev/disk/by-id name (or UUID); a bare /dev/nvme* name is rejected
+# because kernel enumeration order is not stable and a wrong target destroys
+# the OS disk. Formatting is guarded so a re-run never reformats.
+k3s_ephemeral_disk_id: ""            # REQUIRED when k3s_setup_disk (by-id name)
+k3s_ephemeral_mount: /var/lib/ephemeral
+k3s_ephemeral_fs_label: ephemeral
+k3s_ephemeral_mount_opts: "defaults,noatime"
+# bind mounts created BEFORE k3s installs, so k3s writes straight onto the
+# ephemeral disk (mounting after k3s start would hide existing data).
+k3s_bind_mounts:
+  - src: /var/lib/ephemeral/containerd
+    dest: /var/lib/rancher/k3s/agent/containerd
+  - src: /var/lib/ephemeral/kubelet
+    dest: /var/lib/kubelet
+# Longhorn data dir — directory is created only; installing Longhorn is out of
+# scope (done via GitOps).
+k3s_longhorn_path: /var/lib/longhorn
+
+# NOTE ON SECURITY ALLOWLISTS: the download-host, download-path and mount-path
+# allowlists that constrain hostile var values are intentionally NOT defined
+# here as variables. Any role variable is overridable by the recipe's
+# include_role task-level vars, so an allowlist kept as a variable could be
+# overridden alongside the value it is meant to guard, defeating the check. The
+# allowlists are therefore embedded as INLINE LITERALS in the relevant `assert`
+# `that:` clauses (cluster.yml install URL, gvisor.yml gVisor URL, disk.yml
+# mount targets) — the same non-overridable pattern used for the containerd
+# template basename. Air-gapped mirror support is deliberately a role code
+# change, not a recipe-supplied value.
+
+# --- cluster: k3s install (instruction §3.3) ---------------------------------
+k3s_version: ""                      # REQUIRED: pin explicitly, e.g. v1.33.4+k3s1
+k3s_bootstrap: init                  # init | join
+k3s_token: ""                        # REQUIRED (secret): shared cluster token
+k3s_server_url: ""                   # REQUIRED when join: https://<init-ip>:6443
+k3s_disable:                         # k3s bundled components to disable
+  - traefik
+  - servicelb
+k3s_node_taints: []                  # e.g. ["workload=opensearch:NoSchedule"]
+k3s_kubeconfig_mode: "644"
+k3s_node_ip: ""                      # optional --node-ip
+k3s_extra_server_args: []            # any extra `k3s server` flags (list)
+k3s_install_url: https://get.k3s.io
+# Node-ready wait after (init) install: retries * delay seconds.
+k3s_ready_retries: 30
+k3s_ready_delay: 10
+
+# --- etcd S3 snapshots (instruction §3.3/§3.5; opt-in) -----------------------
+k3s_etcd_s3_enabled: false
+k3s_etcd_s3_bucket: ""
+k3s_etcd_s3_region: ap-northeast-1
+k3s_etcd_s3_endpoint: ""             # optional (S3-compatible endpoint)
+k3s_etcd_s3_folder: ""               # optional prefix inside the bucket
+k3s_etcd_s3_access_key: ""           # secret (ANSIBLE# var); off argv via env file
+k3s_etcd_s3_secret_key: ""           # secret (ANSIBLE# var)
+k3s_etcd_snapshot_schedule_cron: "0 */6 * * *"
+k3s_etcd_snapshot_retention: 20
+
+# --- gvisor (instruction §3.4; opt-in) ---------------------------------------
+# gVisor (runsc) release channel/version and download host. "latest" tracks the
+# newest release; pin a date tag (e.g. 20240603.0) for reproducibility.
+k3s_gvisor_release: latest
+k3s_gvisor_base_url: https://storage.googleapis.com/gvisor/releases/release
+# containerd config template filename varies by k3s/containerd version
+# (config.toml.tmpl on older k3s / containerd v1, config-v3.toml.tmpl on
+# containerd v2 / newer k3s). Restricted to these two known basenames by an
+# assert in gvisor.yml (a matching template file ships for each). VERIFY on the
+# actual k3s version being installed — see the role's gvisor.yml header/docs.
+k3s_containerd_template_name: config-v3.toml.tmpl
+# When true AND this is the init node, the RuntimeClass manifest is dropped into
+# k3s's auto-apply manifests dir so k3s registers it. When false, the manifest
+# is only written to the fixed reference path (/etc/k3s-gvisor/, hardcoded in
+# gvisor.yml — not a variable — for manual / Argo CD apply).
+k3s_gvisor_apply_runtimeclass: false

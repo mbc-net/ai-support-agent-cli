@@ -95,6 +95,9 @@ describe('constants', () => {
     // Localhost address
     expect(constants.LOCALHOST_ADDRESS).toBe('127.0.0.1')
 
+    // Default SSH port
+    expect(constants.DEFAULT_SSH_PORT).toBe(22)
+
     // Project code defaults
     expect(constants.PROJECT_CODE_DEFAULT).toBe('default')
     expect(constants.PROJECT_CODE_CLI_DIRECT).toBe('cli-direct')

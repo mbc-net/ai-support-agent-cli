@@ -1,12 +1,11 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
-import type { AxiosError } from 'axios'
 import { getConfigDir } from './config-manager'
 import { logger } from './logger'
 import { ApiClient } from './api-client'
 import type { CommandResult } from './types/command'
-import { atomicWriteFile, ensureDir, getErrorMessage, isNonAuthClientError, nowIso } from './utils'
+import { atomicWriteJson, axiosResponseStatus, ensureDir, getErrorMessage, isNonAuthClientError, nowIso } from './utils'
 import { safeJsonParse } from './utils/json-parse'
 
 const PENDING_RESULTS_DIR = 'pending-results'
@@ -50,7 +49,7 @@ export function savePendingResult(
       tenantCode,
       savedAt: nowIso(),
     }
-    atomicWriteFile(filePath, JSON.stringify(data, null, 2))
+    atomicWriteJson(filePath, data)
   } catch (error) {
     logger.debug(`Failed to save pending result for ${commandId}: ${getErrorMessage(error)}`)
   }
@@ -126,7 +125,7 @@ export async function submitPendingResults(): Promise<void> {
       // is invalid — discard the pending result instead of retrying forever.
       // 401/403 are auth issues that may be resolved after re-login, so keep the file.
       if (isNonAuthClientError(error)) {
-        const status = (error as AxiosError).response?.status
+        const status = axiosResponseStatus(error)
         removePendingResult(pending.commandId)
         logger.warn(`Discarded pending result ${pending.commandId}: server returned ${status}`)
         continue
