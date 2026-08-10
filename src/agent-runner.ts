@@ -16,7 +16,7 @@ import { ApiClient } from './api-client'
 import { startConfigWatcher } from './config-watcher'
 import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
 import { cleanupStaleServerSetupDirs } from './server-setup/server-setup-runner'
-import { extractTokenId, resolveDirectStartTarget } from './utils/token-utils'
+import { extractTokenId, resolveDirectStartTarget, splitProjectRef } from './utils/token-utils'
 import { TerminalSession } from './terminal/terminal-session'
 
 export { extractTokenId }
@@ -312,10 +312,10 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
       let tenantCode = 'unknown'
       let projectCode = PROJECT_CODE_ENV_DEFAULT
       if (options.project) {
-        const slashIdx = options.project.indexOf('/')
-        if (slashIdx >= 0) {
-          tenantCode = options.project.substring(0, slashIdx)
-          projectCode = options.project.substring(slashIdx + 1)
+        const parsed = splitProjectRef(options.project)
+        if (parsed) {
+          tenantCode = parsed.tenantCode
+          projectCode = parsed.projectCode
         }
       }
 

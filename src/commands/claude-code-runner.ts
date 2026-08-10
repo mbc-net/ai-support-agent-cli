@@ -11,7 +11,7 @@ import { StreamLineParser } from '../utils/stream-parser'
 
 import { buildClaudeArgs, buildCleanEnv } from './claude-code-args'
 import { processStreamJsonLine, type StreamJsonUsage, type StreamJsonError } from './claude-code-stream'
-import { killWithEscalation } from './cli-process-kill'
+import { killWithEscalation, makeKillFn } from './cli-process-kill'
 import { applyEnvVarsOverride, applyPolicyContextEnv, type PolicyContext } from './cli-runner-env'
 import { resolveValidPluginDir } from './plugin-dir'
 import { isErrnoException } from '../utils'
@@ -143,11 +143,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
     logger.debug(`[chat] claude CLI spawned (pid=${child.pid}, cmd=claude ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')})`)
 
     // kill 関数を設定: SIGTERM → SIGKILL パターン
-    killFn = () => {
-      if (child.killed) return
-      logger.info(`[chat] Killing claude CLI process (pid=${child.pid})`)
-      killWithEscalation(child, 'claude')
-    }
+    killFn = makeKillFn(child, 'claude')
 
     let resultText = ''
     let resultUsage: StreamJsonUsage | undefined

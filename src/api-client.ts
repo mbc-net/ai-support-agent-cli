@@ -4,7 +4,7 @@ import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_R
 import { logger } from './logger'
 import { RetryStrategy } from './retry-strategy'
 import { toErrorMessage } from './utils'
-import { extractTenantCodeFromToken } from './utils/token-utils'
+import { bearerHeader, extractTenantCodeFromToken } from './utils/token-utils'
 import type {
   AgentCommand,
   AgentServerConfig,
@@ -64,7 +64,7 @@ export class ApiClient {
     this.client = axios.create({
       baseURL: apiUrl,
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: bearerHeader(token),
         'Content-Type': 'application/json',
       },
       timeout: API_REQUEST_TIMEOUT,
@@ -95,7 +95,7 @@ export class ApiClient {
   }
 
   updateToken(newToken: string): void {
-    this.client.defaults.headers['Authorization'] = `Bearer ${newToken}`
+    this.client.defaults.headers['Authorization'] = bearerHeader(newToken)
     this.tenantCode = extractTenantCodeFromToken(newToken)
   }
 

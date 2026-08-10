@@ -1,0 +1,47 @@
+---
+# k3s role: provisions one on-premises k3s node. All previously PC-specific
+# values are role variables (see defaults/main.yml) — device names, IPs, node
+# count, versions, taints, buckets are never hardcoded.
+#
+# Composition is by toggle, in a single role (not four), per the design:
+#   k3s_setup_common  → OS prerequisites (sysctl/swap/packages/modules/time)
+#   k3s_setup_disk    → ephemeral SSD partition + bind mounts (DESTRUCTIVE, opt-in)
+#   k3s_setup_cluster → k3s install (init/join) + optional etcd-S3 snapshots
+#   gvisor_enabled    → runsc + containerd runtime template + RuntimeClass
+#
+# Multi-node HA is host-by-host: run on the init node (k3s_bootstrap: init)
+# first, then each join node (k3s_bootstrap: join, k3s_server_url set). All
+# nodes share the same k3s_token.
+#
+# SECURITY: the task guard (src/server-setup/ansible-task-guard.ts) validates
+# include_role variable *names* only, never their *values*. So any tenant-
+# supplied value that reaches a `shell`/`command` is treated as hostile: secrets
+# (k3s_token, AWS keys) are passed via `environment:` / 0600 files with
+# `no_log: true` and never Jinja-interpolated into a script; other values are
+# validated (asserts below) and routed through module params or `environment:`
+# quoted "$VAR", never spliced into script text.
+
+# --- Cross-cutting input validation -----------------------------------------
+- name: "k3s : Validate k3s_bootstrap is init or join"
+  ansible.builtin.assert:
+    that:
+      - (k3s_bootstrap | default('init')) in ['init', 'join']
+    fail_msg: >-
+      k3s_bootstrap must be 'init' (first/only server, --cluster-init) or
+      'join' (additional server): got {{ k3s_bootstrap | default('init') | to_json }}
+
+- name: "k3s : Run common OS prerequisites"
+  ansible.builtin.include_tasks: common.yml
+  when: k3s_setup_common | bool
+
+- name: "k3s : Prepare ephemeral disk and bind mounts"
+  ansible.builtin.include_tasks: disk.yml
+  when: k3s_setup_disk | bool
+
+- name: "k3s : Install and configure k3s"
+  ansible.builtin.include_tasks: cluster.yml
+  when: k3s_setup_cluster | bool
+
+- name: "k3s : Install gVisor (runsc) runtime"
+  ansible.builtin.include_tasks: gvisor.yml
+  when: gvisor_enabled | bool

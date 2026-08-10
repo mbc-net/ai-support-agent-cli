@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
+import { appendWithLimit, atomicWriteJson, decodeBase64Utf8, getAddressPort, axiosResponseData, axiosResponseStatus, pickPresentEnv, exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('sanitizeNameSegment', () => {
@@ -485,6 +485,53 @@ describe('getErrorMessage (Axios detailed)', () => {
   })
 })
 
+describe('axiosResponseData', () => {
+  it('returns the typed response body for an AxiosError with a response', () => {
+    const error = new AxiosError('boom', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 400,
+      statusText: 'Bad Request',
+      data: { message: 'nope', code: 42 },
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(axiosResponseData(error)).toEqual({ message: 'nope', code: 42 })
+  })
+
+  it('returns undefined for an AxiosError without a response', () => {
+    const error = new AxiosError('Network Error', 'ERR_NETWORK')
+    expect(axiosResponseData(error)).toBeUndefined()
+  })
+
+  it('returns undefined for a non-Axios error', () => {
+    expect(axiosResponseData(new Error('plain'))).toBeUndefined()
+    expect(axiosResponseData('string error')).toBeUndefined()
+    expect(axiosResponseData(null)).toBeUndefined()
+  })
+})
+
+describe('axiosResponseStatus', () => {
+  it('returns the status code for an AxiosError with a response', () => {
+    const error = new AxiosError('boom', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 404,
+      statusText: 'Not Found',
+      data: {},
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+    expect(axiosResponseStatus(error)).toBe(404)
+  })
+
+  it('returns undefined for an AxiosError without a response', () => {
+    expect(axiosResponseStatus(new AxiosError('Network Error', 'ERR_NETWORK'))).toBeUndefined()
+  })
+
+  it('returns undefined for a non-Axios error', () => {
+    expect(axiosResponseStatus(new Error('plain'))).toBeUndefined()
+    expect(axiosResponseStatus('string error')).toBeUndefined()
+    expect(axiosResponseStatus(null)).toBeUndefined()
+  })
+})
+
 describe('isAuthenticationError', () => {
   it('should return true for 401 AxiosError', () => {
     const error = new AxiosError('Unauthorized', 'ERR_BAD_REQUEST', undefined, undefined, {
@@ -932,5 +979,150 @@ describe('exitWithError', () => {
     // Verify the function is typed as `never` by confirming it always throws
     expect(() => exitWithError('another error')).toThrow()
     expect(exitSpy).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('pickPresentEnv', () => {
+  const ORIGINAL = process.env
+
+  afterEach(() => {
+    process.env = ORIGINAL
+  })
+
+  it('includes only keys that are defined in process.env', () => {
+    process.env = { ...ORIGINAL, FOO_PRESENT: 'a', BAR_PRESENT: 'b' }
+    delete (process.env as Record<string, unknown>).BAZ_ABSENT
+    expect(
+      pickPresentEnv(['FOO_PRESENT', 'BAR_PRESENT', 'BAZ_ABSENT']),
+    ).toEqual({ FOO_PRESENT: 'a', BAR_PRESENT: 'b' })
+  })
+
+  it('includes keys whose value is an empty string (defined but empty)', () => {
+    process.env = { ...ORIGINAL, EMPTY_VAL: '' }
+    expect(pickPresentEnv(['EMPTY_VAL'])).toEqual({ EMPTY_VAL: '' })
+  })
+
+  it('returns an empty object when no keys are present', () => {
+    process.env = { ...ORIGINAL }
+    delete (process.env as Record<string, unknown>).NOPE_1
+    delete (process.env as Record<string, unknown>).NOPE_2
+    expect(pickPresentEnv(['NOPE_1', 'NOPE_2'])).toEqual({})
+  })
+
+  it('returns an empty object for an empty key list', () => {
+    expect(pickPresentEnv([])).toEqual({})
+  })
+})
+
+describe('atomicWriteJson', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atomic-json-test-'))
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true })
+  })
+
+  it('writes the object as 2-space indented JSON', () => {
+    const filePath = path.join(tmpDir, 'data.json')
+    atomicWriteJson(filePath, { b: 2, a: 1 })
+    const written = fs.readFileSync(filePath, 'utf-8')
+    expect(written).toBe(JSON.stringify({ b: 2, a: 1 }, null, 2))
+    expect(JSON.parse(written)).toEqual({ b: 2, a: 1 })
+  })
+
+  it('atomically replaces an existing file', () => {
+    const filePath = path.join(tmpDir, 'data.json')
+    atomicWriteJson(filePath, { v: 1 })
+    atomicWriteJson(filePath, { v: 2 })
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf-8'))).toEqual({ v: 2 })
+  })
+})
+
+describe('decodeBase64Utf8', () => {
+  it('decodes a base64 string to utf-8', () => {
+    const original = 'hello 世界'
+    const encoded = Buffer.from(original, 'utf-8').toString('base64')
+    expect(decodeBase64Utf8(encoded)).toBe(original)
+  })
+
+  it('returns an empty string for empty input', () => {
+    expect(decodeBase64Utf8('')).toBe('')
+  })
+
+  it('matches Buffer.from(x, "base64").toString("utf-8")', () => {
+    const encoded = Buffer.from('-----BEGIN KEY-----', 'utf-8').toString('base64')
+    expect(decodeBase64Utf8(encoded)).toBe(
+      Buffer.from(encoded, 'base64').toString('utf-8'),
+    )
+  })
+})
+
+describe('getAddressPort', () => {
+  it('returns the port when address() yields an AddressInfo object', () => {
+    const server = {
+      address: () => ({ address: '127.0.0.1', family: 'IPv4', port: 54321 }),
+    } as unknown as import('net').Server
+    expect(getAddressPort(server)).toBe(54321)
+  })
+
+  it('returns undefined when address() is a string (UNIX socket)', () => {
+    const server = {
+      address: () => '/tmp/sock',
+    } as unknown as import('net').Server
+    expect(getAddressPort(server)).toBeUndefined()
+  })
+
+  it('returns undefined when address() is null (not listening)', () => {
+    const server = {
+      address: () => null,
+    } as unknown as import('net').Server
+    expect(getAddressPort(server)).toBeUndefined()
+  })
+})
+
+describe('appendWithLimit', () => {
+  it('appends fully and reports not truncated when within the limit', () => {
+    expect(appendWithLimit('abc', 'de', 10)).toEqual({
+      result: 'abcde',
+      truncated: false,
+    })
+  })
+
+  it('appends fully when the result is exactly at the limit', () => {
+    expect(appendWithLimit('abc', 'de', 5)).toEqual({
+      result: 'abcde',
+      truncated: false,
+    })
+  })
+
+  it('truncates the appended text to the remaining space and flags truncated', () => {
+    expect(appendWithLimit('abc', 'defgh', 5)).toEqual({
+      result: 'abcde',
+      truncated: true,
+    })
+  })
+
+  it('appends nothing but still flags truncated when already at the limit', () => {
+    expect(appendWithLimit('abcde', 'fgh', 5)).toEqual({
+      result: 'abcde',
+      truncated: true,
+    })
+  })
+
+  it('appends nothing and flags truncated when already over the limit', () => {
+    expect(appendWithLimit('abcdef', 'gh', 5)).toEqual({
+      result: 'abcdef',
+      truncated: true,
+    })
+  })
+
+  it('appends into an empty accumulator', () => {
+    expect(appendWithLimit('', 'hello', 10)).toEqual({
+      result: 'hello',
+      truncated: false,
+    })
   })
 })

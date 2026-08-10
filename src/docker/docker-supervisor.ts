@@ -14,7 +14,6 @@ import { getProjectImageTag } from './dockerfile-path'
 import {
   CLI_FLAG_VERBOSE,
   CLI_FLAG_NO_AUTO_UPDATE,
-  CLI_FLAG_NO_DOCKER,
   DOCKER_BUILD_ERROR_MAX_BYTES,
   DOCKER_LOG_FLUSH_INTERVAL_MS,
   DOCKER_MARKER_BUILT_HASH,
@@ -31,7 +30,9 @@ import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { removePidFile } from '../pid-manager'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
-import { atomicWriteFile, getErrorMessage } from '../utils'
+import { appendWithLimit, atomicWriteFile, getErrorMessage } from '../utils'
+import { readMarkerFile } from '../utils/marker-file'
+import { CONTAINER_START_ARGV, buildDockerUserArgs } from './docker-args'
 import type { DockerRunOptions } from './docker-runner'
 import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, resolveImageTag, getDockerPath } from './docker-utils'
 import { buildProjectVolumeMounts } from './volume-mount-builder'
@@ -112,10 +113,8 @@ export class DockerSupervisor {
     project: ProjectRegistration,
     registeredAgentIdPath: string,
   ): { previousId: string | undefined; newId: string } | null {
-    let registeredId: string
-    try {
-      registeredId = fs.readFileSync(registeredAgentIdPath, 'utf-8').trim()
-    } catch {
+    const registeredId = readMarkerFile(registeredAgentIdPath)
+    if (registeredId === undefined) {
       return null
     }
     const previousId = this.getProjectAgentId(project)
@@ -281,10 +280,7 @@ export class DockerSupervisor {
 
     const { mounts, envArgs } = buildProjectVolumeMounts(project, projectConfigHostDir)
 
-    const containerArgs = [
-      'ai-support-agent', 'start', CLI_FLAG_NO_DOCKER,
-      '--project', key,
-    ]
+    const containerArgs = [...CONTAINER_START_ARGV, '--project', key]
     if (this.opts.pollInterval !== undefined) {
       containerArgs.push('--poll-interval', String(this.opts.pollInterval))
     }
@@ -307,7 +303,7 @@ export class DockerSupervisor {
     const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
     const dockerArgs = [
       'run', '--rm', '--name', containerName, '--cidfile', cidFile,
-      ...(process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : []),
+      ...buildDockerUserArgs(),
       ...mounts,
       ...buildDevMounts(),
       ...envArgs,
@@ -371,11 +367,9 @@ export class DockerSupervisor {
         const text = buf
         buf = ''
         if (!logTruncated) {
-          if (fullLog.length + text.length <= DOCKER_MAX_SESSION_LOG_BYTES) {
-            fullLog += text
-          } else {
-            const remaining = DOCKER_MAX_SESSION_LOG_BYTES - fullLog.length
-            fullLog += remaining > 0 ? text.slice(0, remaining) : ''
+          const appended = appendWithLimit(fullLog, text, DOCKER_MAX_SESSION_LOG_BYTES)
+          fullLog = appended.result
+          if (appended.truncated) {
             logTruncated = true
             logger.warn(`[docker] Container log for ${key} exceeded 2 MB limit; remaining output will not be saved to S3`)
           }

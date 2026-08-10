@@ -26,7 +26,7 @@
  * never be logged.
  */
 
-import { TAILSCALE_SOCKS_PORT } from '../constants'
+import { DEFAULT_SSH_PORT, LOCALHOST_ADDRESS, TAILSCALE_SOCKS_PORT } from '../constants'
 import { logger } from '../logger'
 import { isSupportedSshAuthType, type SshExecCredential } from '../types'
 import { getErrorMessage } from '../utils'
@@ -52,7 +52,7 @@ async function createTailscaleSocksSocket(credential: SshExecCredential): Promis
   if (!credential.tailnetHostname) {
     throw new Error('Tailscale connection requires tailnetHostname')
   }
-  const destinationPort = credential.port || 22
+  const destinationPort = credential.port || DEFAULT_SSH_PORT
   const socksPort = credential.socksPort ?? DEFAULT_TAILSCALE_SOCKS_PORT
 
   logger.debug(
@@ -63,7 +63,7 @@ async function createTailscaleSocksSocket(credential: SshExecCredential): Promis
   try {
     const { socket } = await SocksClient.createConnection({
       proxy: {
-        host: '127.0.0.1',
+        host: LOCALHOST_ADDRESS,
         port: socksPort,
         type: 5,
       },
@@ -175,7 +175,7 @@ export async function executeSshCommand(
       connectConfig.sock = sock
     } else {
       connectConfig.host = credential.hostname
-      connectConfig.port = credential.port || 22
+      connectConfig.port = credential.port || DEFAULT_SSH_PORT
     }
 
     conn.connect(connectConfig)

@@ -21,3 +21,17 @@ export function killWithEscalation(child: ChildProcess, cliLabel: string): NodeJ
   child.kill('SIGTERM')
   return scheduleForceKill(child, cliLabel)
 }
+
+/**
+ * CLI 子プロセス用の kill 関数を生成する。
+ * 既に kill 済みなら何もせず、そうでなければログを出して
+ * {@link killWithEscalation}（SIGTERM → SIGKILL）を実行する。
+ * claude / codex ランナーで共通の kill クロージャを一元化する。
+ */
+export function makeKillFn(child: ChildProcess, cliLabel: string): () => void {
+  return () => {
+    if (child.killed) return
+    logger.info(`[chat] Killing ${cliLabel} CLI process (pid=${child.pid})`)
+    killWithEscalation(child, cliLabel)
+  }
+}

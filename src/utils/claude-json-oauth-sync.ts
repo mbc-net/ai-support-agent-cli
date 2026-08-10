@@ -33,6 +33,7 @@ import * as path from 'path'
 
 import { logger } from '../logger'
 import { isErrnoException, getErrorMessage } from '../utils'
+import { isPlainObject } from './is-plain-object'
 
 /** ~/.claude.json のパスを返す */
 function getClaudeJsonPath(): string {
@@ -122,17 +123,6 @@ function withLock<T>(lockPath: string, fn: () => T): T | null {
     }
   }
   return null
-}
-
-/**
- * トップレベルが plain object かどうか
- */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    !Array.isArray(value)
-  )
 }
 
 /**

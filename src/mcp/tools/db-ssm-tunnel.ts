@@ -31,27 +31,27 @@
  */
 
 import { spawn, type ChildProcess } from 'child_process'
-import { createServer, Socket, type AddressInfo } from 'net'
+import { createServer, Socket } from 'net'
 
 import {
   DB_CONNECT_TIMEOUT_MS,
+  LOCALHOST_ADDRESS,
   SSM_KILL_GRACE_MS,
   SSM_PORT_POLL_INTERVAL_MS,
   SSM_PORT_PROBE_TIMEOUT_MS,
   SSM_STDERR_MAX_BYTES,
 } from '../../constants'
 import { logger } from '../../logger'
-import type { DbTunnel } from './db-tunnel'
+import type { SsmAwsCredentials } from '../../types/project'
+import { getAddressPort } from '../../utils'
+import { buildAwsCredentialEnv } from '../../utils/aws-credential-env'
+import type { DbTunnel, TunnelTarget } from './db-tunnel'
 
 export interface SsmTunnelParams {
   instanceId: string
   region: string
-  awsCredentials: {
-    accessKeyId: string
-    secretAccessKey: string
-    sessionToken?: string
-  }
-  target: { host: string; port: number }
+  awsCredentials: SsmAwsCredentials
+  target: TunnelTarget
   /** Total budget for the local forwarded port to start accepting connections. */
   timeoutMs?: number
 }
@@ -61,10 +61,9 @@ function reserveLocalPort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createServer()
     server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address() as AddressInfo | null
-      if (address && typeof address === 'object') {
-        const { port } = address
+    server.listen(0, LOCALHOST_ADDRESS, () => {
+      const port = getAddressPort(server)
+      if (port !== undefined) {
         server.close(() => resolve(port))
       } else {
         server.close(() => reject(new Error('Failed to reserve a local tunnel port')))
@@ -88,7 +87,7 @@ function probePort(port: number): Promise<boolean> {
     socket.once('connect', () => finish(true))
     socket.once('error', () => finish(false))
     socket.once('timeout', () => finish(false))
-    socket.connect(port, '127.0.0.1')
+    socket.connect(port, LOCALHOST_ADDRESS)
   })
 }
 
@@ -137,10 +136,7 @@ export async function openSsmTunnel(params: SsmTunnelParams): Promise<DbTunnel> 
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    AWS_ACCESS_KEY_ID: awsCredentials.accessKeyId,
-    AWS_SECRET_ACCESS_KEY: awsCredentials.secretAccessKey,
-    AWS_DEFAULT_REGION: region,
-    ...(awsCredentials.sessionToken ? { AWS_SESSION_TOKEN: awsCredentials.sessionToken } : {}),
+    ...buildAwsCredentialEnv(awsCredentials, region),
   }
 
   const args = [
@@ -241,7 +237,7 @@ export async function openSsmTunnel(params: SsmTunnelParams): Promise<DbTunnel> 
   )
 
   return {
-    host: '127.0.0.1',
+    host: LOCALHOST_ADDRESS,
     port: localPort,
     close: () => killSubprocess(child),
   }

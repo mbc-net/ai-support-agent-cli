@@ -7,6 +7,7 @@
 import type { Browser, BrowserContext, FileChooser, Page } from 'playwright'
 
 import { logger } from '../../../logger'
+import { screenshotToBase64 } from '../mcp-response'
 import { BrowserActionLog } from './browser-action-log'
 import { BROWSER_IDLE_TIMEOUT_MS, LIVE_VIEW_DEBOUNCE_MS, LIVE_VIEW_JPEG_QUALITY } from './browser-types'
 import { DeviceEmulation, DEVICE_PRESETS } from './device-presets'
@@ -497,7 +498,7 @@ export class BrowserSession {
     try {
       // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
       const buffer = await this.page!.screenshot({ fullPage: false, type: 'jpeg', quality: LIVE_VIEW_JPEG_QUALITY }) as Buffer
-      const base64 = buffer.toString('base64')
+      const base64 = screenshotToBase64(buffer)
       if (base64 === this._lastFrameData) return
       this._lastFrameData = base64
       getOnFrame()?.(base64)

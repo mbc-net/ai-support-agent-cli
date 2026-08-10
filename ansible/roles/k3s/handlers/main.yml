@@ -1,0 +1,8 @@
+---
+# Restart k3s when its config (server options or etcd-S3 credentials) changed
+# after the server was already installed. Runs at play end, by which point the
+# install step has created k3s.service, so a restart is always valid here.
+- name: restart k3s
+  ansible.builtin.systemd:
+    name: k3s
+    state: restarted

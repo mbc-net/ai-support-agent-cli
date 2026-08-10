@@ -14,6 +14,14 @@ export interface ParsedToken {
 }
 
 /**
+ * Build an HTTP `Authorization` header value for a bearer token.
+ * Consolidates the repeated `` `Bearer ${token}` `` template literal.
+ */
+export function bearerHeader(token: string): string {
+  return `Bearer ${token}`
+}
+
+/**
  * Parse a token string into its components.
  * Returns null if the token does not match the expected 3-part format.
  */
@@ -91,4 +99,19 @@ export function resolveDirectStartTarget(
   }
 
   return { ok: true, tenantCode: projectTenantCode, projectCode }
+}
+
+/**
+ * `--project` フラグ等の `"tenantCode/projectCode"` 文字列を最初の `/` で分割する。
+ * `/` が無い場合は null を返す（呼び出し元がデフォルト/エラーの分岐を持つ）。
+ */
+export function splitProjectRef(
+  ref: string,
+): { tenantCode: string; projectCode: string } | null {
+  const slashIdx = ref.indexOf('/')
+  if (slashIdx < 0) return null
+  return {
+    tenantCode: ref.substring(0, slashIdx),
+    projectCode: ref.substring(slashIdx + 1),
+  }
 }

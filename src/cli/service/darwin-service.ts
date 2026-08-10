@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS } from '../../constants'
+import { readAgentCredentialEnv } from './agent-credential-env'
 import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
 import type { ProjectRegistration } from '../../types'
 import type { ProjectStatus } from './types'
@@ -22,7 +23,11 @@ import {
   toContainerApiUrl,
   validateProjectDirForMount,
 } from './wrapper-helpers'
-import { buildDockerRunWithLogRotate } from './service-template-helpers'
+import {
+  buildDockerRunWithLogRotate,
+  LOAD_NVM_BASH,
+  REDACT_SECRETS_BASH,
+} from './service-template-helpers'
 import {
   getDarwinLaunchAgentsDir,
   getDarwinLogDir,
@@ -327,9 +332,7 @@ export function generateWrapperScript(opts: {
 set -uo pipefail
 
 # Load nvm if available so that node/npm are on PATH when launched as a launchd service
-export NVM_DIR="\${HOME}/.nvm"
-# shellcheck disable=SC1091
-[ -s "\${NVM_DIR}/nvm.sh" ] && source "\${NVM_DIR}/nvm.sh"
+${LOAD_NVM_BASH}
 # Also try Homebrew node as fallback
 export PATH="/opt/homebrew/bin:/usr/local/bin:\${PATH}"
 
@@ -381,9 +384,7 @@ export function generateUpdateScript(): string {
 set -uo pipefail
 
 # Load nvm if available so that node/npm are on PATH when launched as a launchd service
-export NVM_DIR="\${HOME}/.nvm"
-# shellcheck disable=SC1091
-[ -s "\${NVM_DIR}/nvm.sh" ] && source "\${NVM_DIR}/nvm.sh"
+${LOAD_NVM_BASH}
 # Also try Homebrew node as fallback
 export PATH="/opt/homebrew/bin:/usr/local/bin:\${PATH}"
 
@@ -392,14 +393,7 @@ LOG_PREFIX="[update-and-restart $(date -u '+%Y-%m-%dT%H:%M:%SZ')]"
 # Best-effort secret redaction for command output that we echo to stderr.
 # npm/login flows leak Bearer tokens, _authToken=..., and registry URLs with
 # embedded basic-auth, all of which the agent log forwards to Sentry/heartbeat.
-redact_secrets() {
-  sed -E \\
-    -e 's#(Bearer )[A-Za-z0-9._-]+#\\1***REDACTED***#gi' \\
-    -e 's#(authToken[[:space:]]*[:=][[:space:]]*"?)[^"[:space:]]+#\\1***REDACTED***#gi' \\
-    -e 's#(_authToken[[:space:]]*[:=][[:space:]]*"?)[^"[:space:]]+#\\1***REDACTED***#gi' \\
-    -e 's#(X-Auth-Token:[[:space:]]*)[^[:space:]]+#\\1***REDACTED***#gi' \\
-    -e 's#(https?://)[^/:[:space:]@]+:[^@/[:space:]]+@#\\1***REDACTED***@#gi'
-}
+${REDACT_SECRETS_BASH}
 
 # 1. Unload all per-project LaunchAgent services
 for plist in "${launchAgentsDir}"/com.ai-support-agent.cli.*.plist; do
@@ -540,10 +534,7 @@ export function writeProjectServiceFiles(
     projectDir: validatedProjectDir,
     token: project.token,
     apiUrl: project.apiUrl,
-    anthropicApiKey: process.env[ENV_VARS.ANTHROPIC_API_KEY],
-    claudeCodeOauthToken: process.env[ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN],
-    codexApiKey: process.env[ENV_VARS.CODEX_API_KEY],
-    codexAccessToken: process.env[ENV_VARS.CODEX_ACCESS_TOKEN],
+    ...readAgentCredentialEnv(),
     verbose: options.verbose,
     updateScriptPath,
     logDir: projectLogDir,

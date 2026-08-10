@@ -3,10 +3,10 @@ import { execFile, type ExecFileException } from 'child_process'
 
 import WebSocket from 'ws'
 
-import { BaseWebSocketConnection } from '../base-websocket'
+import { BaseWebSocketConnection, buildAgentWsHeaders } from '../base-websocket'
 import { WS_CLOSE_CODE_AUTH_REJECTED, WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import { logger } from '../logger'
-import { buildWsUrl, getErrorMessage, isErrnoException } from '../utils'
+import { buildWsUrl, decodeBase64Utf8, getErrorMessage, isErrnoException } from '../utils'
 import { isSafeSessionId } from '../utils/safe-session-id'
 
 import type { EnvVarsProvider } from '../env-vars-filter'
@@ -165,15 +165,12 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
   }
 
   protected createWebSocket(): WebSocket {
-    // Re-send ALB sticky cookies captured on the previous handshake so a
-    // reconnect lands on the same API task (scale-out safe).
-    const cookie = this.getStickyCookieHeader()
     return new WebSocket(this.wsUrl, {
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        'X-Agent-Id': this.agentId,
-        ...(cookie ? { Cookie: cookie } : {}),
-      },
+      headers: buildAgentWsHeaders(
+        this.token,
+        this.agentId,
+        this.getStickyCookieHeader(),
+      ),
     })
   }
 
@@ -456,7 +453,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       return
     }
     try {
-      const decoded = Buffer.from(msg.data, 'base64').toString('utf-8')
+      const decoded = decodeBase64Utf8(msg.data)
       session.write(decoded)
     } catch (err: unknown) {
       logger.warn(`[terminal-ws] Invalid base64 data in stdin (session=${msg.sessionId}): ${getErrorMessage(err)}`)

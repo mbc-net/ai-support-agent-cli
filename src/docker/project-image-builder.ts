@@ -13,7 +13,7 @@ import { ApiClient } from '../api-client'
 import { DOCKER_MAX_SESSION_LOG_BYTES, DOCKER_MAX_LOG_CHUNK_BYTES } from '../constants'
 import { buildDockerEnv } from './dockerfile-generator'
 import { makeSessionId, getDockerPath } from './docker-utils'
-import { toError } from '../utils'
+import { appendWithLimit, toError } from '../utils'
 
 /**
  * Build a per-project Docker image using the given Dockerfile.
@@ -46,11 +46,9 @@ export async function buildProjectImage(
     const text = buf
     buf = ''
     if (!logTruncated) {
-      if (fullLog.length + text.length <= DOCKER_MAX_SESSION_LOG_BYTES) {
-        fullLog += text
-      } else {
-        const remaining = DOCKER_MAX_SESSION_LOG_BYTES - fullLog.length
-        fullLog += remaining > 0 ? text.slice(0, remaining) : ''
+      const appended = appendWithLimit(fullLog, text, DOCKER_MAX_SESSION_LOG_BYTES)
+      fullLog = appended.result
+      if (appended.truncated) {
         logTruncated = true
         logger.warn('[docker] Build log exceeded 2 MB limit; remaining output will not be saved to S3')
       }

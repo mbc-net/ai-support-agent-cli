@@ -1,4 +1,8 @@
-import { buildDockerRunWithLogRotate } from '../../../src/cli/service/service-template-helpers'
+import {
+  buildDockerRunWithLogRotate,
+  LOAD_NVM_BASH,
+  REDACT_SECRETS_BASH,
+} from '../../../src/cli/service/service-template-helpers'
 
 /**
  * ensureDir (used by darwin/linux/win32-service.ts for both plain and
@@ -136,5 +140,42 @@ describe('buildDockerRunWithLogRotate', () => {
       })
       expect(mock).toHaveBeenCalledWith(expect.stringContaining('$_ROT_DIR/out'))
     })
+  })
+})
+
+describe('REDACT_SECRETS_BASH', () => {
+  it('defines a redact_secrets() shell function', () => {
+    expect(REDACT_SECRETS_BASH.startsWith('redact_secrets() {')).toBe(true)
+    expect(REDACT_SECRETS_BASH.endsWith('}')).toBe(true)
+    expect(REDACT_SECRETS_BASH).toContain('sed -E')
+  })
+
+  it('covers all five secret patterns', () => {
+    expect(REDACT_SECRETS_BASH).toContain('(Bearer )')
+    expect(REDACT_SECRETS_BASH).toContain('(authToken')
+    expect(REDACT_SECRETS_BASH).toContain('(_authToken')
+    expect(REDACT_SECRETS_BASH).toContain('(X-Auth-Token:')
+    expect(REDACT_SECRETS_BASH).toContain('(https?://)')
+  })
+
+  it('replaces matches with the ***REDACTED*** marker', () => {
+    // One marker per sed -e pattern (5 total).
+    const markers = REDACT_SECRETS_BASH.match(/\*\*\*REDACTED\*\*\*/g)
+    expect(markers).toHaveLength(5)
+  })
+})
+
+describe('LOAD_NVM_BASH', () => {
+  it('exports NVM_DIR and guards the nvm.sh source', () => {
+    expect(LOAD_NVM_BASH).toContain('export NVM_DIR="${HOME}/.nvm"')
+    expect(LOAD_NVM_BASH).toContain('[ -s "${NVM_DIR}/nvm.sh" ] && source "${NVM_DIR}/nvm.sh"')
+  })
+
+  it('keeps the shellcheck disable directive', () => {
+    expect(LOAD_NVM_BASH).toContain('# shellcheck disable=SC1091')
+  })
+
+  it('is exactly the shared three-line invariant (no trailing comment/PATH)', () => {
+    expect(LOAD_NVM_BASH.split('\n')).toHaveLength(3)
   })
 })

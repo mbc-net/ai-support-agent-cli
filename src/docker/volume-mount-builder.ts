@@ -57,6 +57,18 @@ export const CODEX_CREDENTIAL_ENV_VARS = [
   ENV_VARS.CODEX_ACCESS_TOKEN,
 ] as const
 
+/**
+ * 許可リストのキーのうち値が設定されているものを `-e KEY=VALUE` として envArgs に追加する。
+ * （空文字は追加しない。docker run の資格情報パススルーで使用）
+ */
+function pushEnvPassthrough(envArgs: string[], keys: readonly string[]): void {
+  for (const key of keys) {
+    if (process.env[key]) {
+      envArgs.push('-e', `${key}=${process.env[key]}`)
+    }
+  }
+}
+
 export interface ProjectDirMapping {
   hostDir: string
   containerDir: string
@@ -259,17 +271,9 @@ export function buildProjectVolumeMounts(
     envArgs.push('-e', `${ENV_VARS.API_URL}=${containerApiUrl}`)
   }
 
-  // Pass Claude / Anthropic credential env vars if set
-  for (const key of CLAUDE_CREDENTIAL_ENV_VARS) {
-    if (process.env[key]) {
-      envArgs.push('-e', `${key}=${process.env[key]}`)
-    }
-  }
-  for (const key of CODEX_CREDENTIAL_ENV_VARS) {
-    if (process.env[key]) {
-      envArgs.push('-e', `${key}=${process.env[key]}`)
-    }
-  }
+  // Pass Claude / Anthropic and Codex credential env vars if set
+  pushEnvPassthrough(envArgs, CLAUDE_CREDENTIAL_ENV_VARS)
+  pushEnvPassthrough(envArgs, CODEX_CREDENTIAL_ENV_VARS)
 
   // Pass host timezone so container clocks match the host by default.
   const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone

@@ -12,7 +12,7 @@ import { StreamLineParser } from '../utils/stream-parser'
 import { isErrnoException, toErrorMessage } from '../utils'
 
 import { buildCleanEnv } from './claude-code-args'
-import { killWithEscalation } from './cli-process-kill'
+import { killWithEscalation, makeKillFn } from './cli-process-kill'
 import { applyEnvVarsOverride, applyPolicyContextEnv, type PolicyContext } from './cli-runner-env'
 import { resolveCodexInvocation } from './codex-command'
 import { prepareBundledCodexPluginProfile } from './plugin-dir'
@@ -145,11 +145,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
       ...(cwd ? { cwd } : {}),
     })
 
-    killFn = () => {
-      if (child.killed) return
-      logger.info(`[chat] Killing codex CLI process (pid=${child.pid})`)
-      killWithEscalation(child, 'codex')
-    }
+    killFn = makeKillFn(child, 'codex')
 
     let resultText = ''
     let sentTextLength = 0

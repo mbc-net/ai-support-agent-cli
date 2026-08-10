@@ -1,0 +1,45 @@
+# {{ ansible_managed }}
+# k3s server options (non-secret). k3s reads this automatically at start;
+# structured YAML avoids the whitespace/quoting/injection pitfalls of packing
+# flags into INSTALL_K3S_EXEC. The shared cluster token is supplied via the
+# K3S_TOKEN environment variable at install time (kept out of this file and off
+# argv); etcd-S3 credentials live in the 0600 config.yaml.d drop-in.
+#
+# SECURITY: every interpolated value is emitted via `| to_json`. JSON is a
+# subset of YAML, and to_json escapes quotes/newlines — so a hostile value such
+# as `k3s_node_taints: ["x\ndisable-agent: true"]` becomes the quoted scalar
+# "x\ndisable-agent: true" and cannot inject an extra top-level k3s option.
+{% if k3s_bootstrap == 'init' %}
+cluster-init: true
+{% else %}
+server: {{ k3s_server_url | to_json }}
+{% endif %}
+write-kubeconfig-mode: {{ k3s_kubeconfig_mode | string | to_json }}
+{% if k3s_disable | length > 0 %}
+disable:
+{% for d in k3s_disable %}
+  - {{ d | to_json }}
+{% endfor %}
+{% endif %}
+{% if k3s_node_taints | length > 0 %}
+node-taint:
+{% for t in k3s_node_taints %}
+  - {{ t | to_json }}
+{% endfor %}
+{% endif %}
+{% if (k3s_node_ip | default('') | length) > 0 %}
+node-ip: {{ k3s_node_ip | to_json }}
+{% endif %}
+{% if k3s_etcd_s3_enabled | bool %}
+etcd-s3: true
+etcd-s3-bucket: {{ k3s_etcd_s3_bucket | to_json }}
+etcd-s3-region: {{ k3s_etcd_s3_region | to_json }}
+{% if (k3s_etcd_s3_endpoint | default('') | length) > 0 %}
+etcd-s3-endpoint: {{ k3s_etcd_s3_endpoint | to_json }}
+{% endif %}
+{% if (k3s_etcd_s3_folder | default('') | length) > 0 %}
+etcd-s3-folder: {{ k3s_etcd_s3_folder | to_json }}
+{% endif %}
+etcd-snapshot-schedule-cron: {{ k3s_etcd_snapshot_schedule_cron | to_json }}
+etcd-snapshot-retention: {{ k3s_etcd_snapshot_retention | int }}
+{% endif %}
