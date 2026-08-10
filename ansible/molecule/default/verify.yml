@@ -1,0 +1,23 @@
+---
+# Verify play: assert ssh_key's observable effect inside the container.
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "verify : Read the target user's authorized_keys"
+      ansible.builtin.slurp:
+        src: /home/molecule_keyuser/.ssh/authorized_keys
+      register: verify_authorized_keys
+
+    - name: "verify : Assert the public key was installed"
+      ansible.builtin.assert:
+        that:
+          - >-
+            'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDZpjbfVmLVR7W5FXXwJ/vsaYupM2Hp4CaFktoDMJBOJ'
+            in (verify_authorized_keys.content | b64decode)
+        fail_msg: >-
+          ssh_key did not add the expected public key to
+          /home/molecule_keyuser/.ssh/authorized_keys.
+        success_msg: "ssh_key installed the public key in authorized_keys."

@@ -1,0 +1,85 @@
+---
+# Molecule "default" scenario: dynamic (converge + idempotence + verify)
+# verification of a container-safe, idempotent subset of ansible/roles/*.
+#
+# Converged role: `ssh_key`. It is fully container-safe (no kernel/block-device
+# needs), network-free, and idempotent (ansible.posix.authorized_key), so it
+# passes Molecule's strict idempotence step out of the box. It also exercises
+# the pinned `ansible.posix` collection from requirements.yml end to end.
+#
+# NOT in this scenario (see ansible/DEVELOPING.md for the full matrix + a
+# documented `os_init` idempotence finding):
+#   - os_init : converges + verifies cleanly, but is NOT idempotent as-is — its
+#               "ufw default deny/allow" tasks use a `changed_when` guard that
+#               greps for "Default incoming/outgoing policy changed", a string
+#               ufw prints UNCONDITIONALLY (verified in-container), so the second
+#               converge always reports changed. Fixing the role is out of scope
+#               for this foundation-only change; excluded per the "idempotent
+#               roles only in default" rule.
+#   - k3s (disk partitioning + gVisor), docker (docker-in-docker),
+#     gitlab_runner / github_runner / tailscale (live enrolment secrets):
+#     kernel/host/secret dependent — verify on a real VM, not in CI.
+#
+# Uses geerlingguy's systemd-enabled Ubuntu 24.04 image (a supported
+# server-setup target release: 22.04/24.04/26.04). Molecule runs with
+# ansible-core's default stdout callback (NOT the bundled callback_plugins/
+# json.py, which is only for the runtime JSON stdout path).
+#
+# The image is pinned by manifest DIGEST (not `:latest`) for reproducible CI:
+# geerlingguy/docker-ubuntu2404-ansible only publishes the moving `:latest`
+# tag (no versioned tags exist on Docker Hub), so a digest is the only way to
+# get an immutable reference. Bump this deliberately (re-resolve `:latest` and
+# paste the new digest) in a reviewed PR — never leave it tracking `:latest`.
+# Digest below = `:latest` as published 2026-08-09 (multi-arch manifest list).
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ../../requirements.yml
+
+driver:
+  name: docker
+
+platforms:
+  - name: ai-support-role-ubuntu2404
+    image: geerlingguy/docker-ubuntu2404-ansible@sha256:a92c929b640cd4e5cf73f67fd1e9d0466c58335449fdc37a889c0bb4bbf78e2e
+    # systemd needs a writable cgroup mount, the host cgroup namespace and
+    # privileged mode.
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      # Resolve `include_role: {name: ssh_key}` against the bundled roles.
+      # MOLECULE_PROJECT_DIRECTORY is the directory that contains molecule/,
+      # i.e. ansible/, so this points at ansible/roles.
+      roles_path: ${MOLECULE_PROJECT_DIRECTORY}/roles
+  inventory:
+    group_vars:
+      all:
+        # prepare.yml creates this user; converge feeds these to ssh_key.
+        ssh_key_user: molecule_keyuser
+        # Throwaway ed25519 PUBLIC key (public keys are not secret). Used only
+        # to prove the role writes authorized_keys idempotently.
+        ssh_key_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDZpjbfVmLVR7W5FXXwJ/vsaYupM2Hp4CaFktoDMJBOJ molecule-ssh-key-test"
+
+verifier:
+  name: ansible
+
+scenario:
+  # Explicit default sequence. `idempotence` is the key step: the second
+  # converge must report zero changes, so only idempotent roles belong here.
+  test_sequence:
+    - dependency
+    - destroy
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy
