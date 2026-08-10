@@ -1,0 +1,28 @@
+---
+# tailscale role defaults.
+#
+# Joins this (headless) host to a Tailscale tailnet non-interactively using an
+# auth key (tskey-auth-...). The auth key is a secret supplied as an ANSIBLE#
+# project variable; it is written to a 0600 tempfile and passed to
+# `tailscale up` via the `--auth-key=file:<path>` scheme so it never appears on
+# argv or in a shell command line. All feature flags default OFF; only the auth
+# key + a bare `tailscale up` are always applied. Override any of these via the
+# recipe's task-level `vars:` (the web snippet ships placeholders).
+
+# --- login (required secret) -------------------------------------------------
+tailscale_authkey: ""            # REQUIRED (secret, ANSIBLE# var): tskey-auth-...
+
+# --- install -----------------------------------------------------------------
+# Official installer. Pinned as an INLINE LITERAL in an assert in tasks/main.yml
+# (not overridable via recipe vars) so a recipe cannot point the installer at a
+# hostile host; this default is the value that assert checks against.
+tailscale_install_url: https://tailscale.com/install.sh
+
+# --- tailscale up feature toggles (all default OFF) --------------------------
+tailscale_hostname: ""                 # optional --hostname (default: OS hostname)
+tailscale_ssh: false                   # --ssh (Tailscale SSH)
+tailscale_advertise_routes: ""         # optional --advertise-routes CIDR(s); enables IP forwarding
+tailscale_advertise_exit_node: false   # --advertise-exit-node; enables IP forwarding
+tailscale_accept_routes: false         # --accept-routes
+tailscale_advertise_tags: ""           # optional --advertise-tags (e.g. tag:server)
+tailscale_up_timeout: 120s             # --timeout for `tailscale up`

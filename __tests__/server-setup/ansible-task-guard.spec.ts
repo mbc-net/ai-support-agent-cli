@@ -161,8 +161,9 @@ describe('validateAnsibleTasks', () => {
       'codex',
       'ai_support_agent',
       'k3s',
+      'tailscale',
     ])(
-      'include_role name=%s（許可された 11 ロール）は通過する',
+      'include_role name=%s（許可された 12 ロール）は通過する',
       (roleName) => {
         const body = `
 - name: bundled step
@@ -222,6 +223,20 @@ describe('validateAnsibleTasks', () => {
     k3s_token: "{{ K3S_TOKEN }}"
     k3s_setup_disk: false
     gvisor_enabled: true
+`
+      expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
+      expect(validateAnsibleTasks(body, resident).ok).toBe(true)
+    })
+
+    it('include_role name=tailscale は task レベル vars 付きで ecs/resident 双方で通過する', () => {
+      const body = `
+- name: Tailscale VPN参加
+  include_role:
+    name: tailscale
+  vars:
+    tailscale_authkey: "{{ MY_TAILSCALE_AUTHKEY }}"
+    tailscale_ssh: true
+    tailscale_advertise_routes: "192.168.0.0/24"
 `
       expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
       expect(validateAnsibleTasks(body, resident).ok).toBe(true)
