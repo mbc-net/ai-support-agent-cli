@@ -1144,6 +1144,67 @@ describe('runServerSetup - password authentication (authType)', () => {
   })
 })
 
+// Regression coverage for the bug where an ed25519 (OpenSSH-format) private
+// key pasted WITHOUT a trailing newline was written verbatim to the temp
+// `id_rsa` file. OpenSSH's key parser (invoked by the `ssh` binary that
+// ansible-playbook spawns) strictly rejects such a file with
+// "Load key ...: error in libcrypto", after which the connection falls back to
+// "Permission denied (publickey,password)". The store→retrieve path
+// (Textarea → JSON.stringify → KMS → JSON.parse) preserves newlines
+// losslessly, so nothing ever *added* the OpenSSH-required trailing newline —
+// the writer emitted exactly what was stored. The fix normalizes the key at the
+// write boundary: strip CR (CRLF paste) and guarantee exactly one trailing
+// "\n". Passwords (authType: 'password') are never normalized — that branch
+// does not write `id_rsa` at all (see the password describe block above).
+describe('runServerSetup - private key file newline normalization', () => {
+  // A well-formed OpenSSH-format key body with NO trailing newline.
+  const KEY_BODY = '-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE-KEY-MATERIAL\n-----END OPENSSH PRIVATE KEY-----'
+
+  async function runWithKey(privateKey: string): Promise<void> {
+    const client = makeClient({
+      getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...CREDENTIAL, privateKey }),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+    expect(result.success).toBe(true)
+  }
+
+  it('appends the OpenSSH-required trailing newline when the stored key lacks one', async () => {
+    await runWithKey(KEY_BODY) // pasted without a final newline — the reported bug
+    expect(writtenFile('id_rsa')).toBe(`${KEY_BODY}\n`)
+  })
+
+  it('normalizes CRLF line endings to LF and terminates with a single newline', async () => {
+    const crlfKey = KEY_BODY.replace(/\n/g, '\r\n') // Windows-style paste, no trailing newline
+    await runWithKey(crlfKey)
+    const written = writtenFile('id_rsa') as string
+    expect(written).not.toContain('\r')
+    expect(written).toBe(`${KEY_BODY}\n`)
+  })
+
+  it('converts lone-CR line endings to LF without joining lines (RFC 7468 PEM)', async () => {
+    const crOnlyKey = KEY_BODY.replace(/\n/g, '\r') // classic-Mac CR-only line endings
+    await runWithKey(crOnlyKey)
+    const written = writtenFile('id_rsa') as string
+    expect(written).not.toContain('\r')
+    // Lines must stay separated (not collapsed into one) — deleting bare CRs
+    // would have produced a single joined line and a corrupt key.
+    expect(written).toBe(`${KEY_BODY}\n`)
+  })
+
+  it('collapses redundant trailing newlines to exactly one', async () => {
+    await runWithKey(`${KEY_BODY}\n\n\n`)
+    expect(writtenFile('id_rsa')).toBe(`${KEY_BODY}\n`)
+  })
+
+  it('leaves a correctly-terminated key unchanged (exactly one trailing newline)', async () => {
+    await runWithKey(`${KEY_BODY}\n`)
+    expect(writtenFile('id_rsa')).toBe(`${KEY_BODY}\n`)
+  })
+})
+
 describe('runServerSetup - server setup variables (project ANSIBLE# vars)', () => {
   it('fetches variables scoped to commandId/agentId and merges them into extra-vars.json', async () => {
     const client = makeClient({

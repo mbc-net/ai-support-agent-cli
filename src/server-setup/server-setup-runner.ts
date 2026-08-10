@@ -461,6 +461,32 @@ function validateSshCredential(credential: SshExecCredential): string | null {
 }
 
 /**
+ * Normalize private-key material before it is written to the on-disk `id_rsa`
+ * file that ansible hands to the OpenSSH `ssh` client.
+ *
+ * OpenSSH's key parser is strict about framing: an OpenSSH-format key (ed25519
+ * and modern RSA) whose file lacks a trailing newline, or that carries CRLF
+ * line endings, is rejected with `Load key "...": error in libcrypto`, after
+ * which the connection falls back to `Permission denied (publickey,password)`.
+ * The store→retrieve path (web Textarea → JSON.stringify → KMS → JSON.parse)
+ * preserves newlines losslessly and never *adds* one, so a key an admin pasted
+ * without a final newline reaches this writer without one. This normalizes to
+ * LF-only line endings terminated by exactly one `\n`, regardless of how the
+ * key was pasted. Applied only to key material — a plaintext password
+ * (`authType === 'password'`) is never written to this file (see
+ * `buildInventory`'s doc comment) and must not be reshaped.
+ *
+ * `\r\n?` (not a bare `\r` delete) converts both CRLF and lone-CR line endings
+ * to LF: CR-only line endings are valid PEM per RFC 7468, so deleting bare CRs
+ * would *join* those lines and corrupt the key. Sibling util `normalizePemKey`
+ * (src/utils/pem-key.ts, used by ssh-config-setup) also guarantees a trailing
+ * newline; keep the two in sync if either is changed.
+ */
+function normalizePrivateKeyMaterial(privateKey: string): string {
+  return privateKey.replace(/\r\n?/g, '\n').replace(/\s+$/, '') + '\n'
+}
+
+/**
  * Build a minimal single-host Ansible inventory as JSON — written with a
  * `.yml` extension because plain JSON is valid YAML, so ansible-core's bundled
  * `yaml` inventory plugin (which matches by extension) parses it unambiguously.
@@ -817,7 +843,9 @@ export async function runServerSetup(
       const keyPath = path.join(tmpDir, 'id_rsa')
       if (credential.authType !== 'password') {
         // 0600: only the current user may read/write the private key.
-        writeFileSync(keyPath, credential.privateKey, { mode: 0o600 })
+        // Normalized so OpenSSH accepts it even when the stored key was pasted
+        // without a trailing newline / with CRLF — see normalizePrivateKeyMaterial.
+        writeFileSync(keyPath, normalizePrivateKeyMaterial(credential.privateKey), { mode: 0o600 })
       }
 
       // Written with a .yml extension (JSON is valid YAML) so ansible-core's
