@@ -23,7 +23,7 @@ import { isPlainObject } from '../utils/is-plain-object'
  *
  * ## `include_role` スニペット（組み込みステップ）
  * 組み込みステップ（os_init/ssh_key/docker/nvm/claude_cli/codex/ai_support_agent/
- * web_server/database/dns_tls/gitlab_runner/github_runner）は、bundled role を呼ぶ
+ * web_server/database/dns_tls/gitlab_runner/github_runner/k3s/tailscale）は、bundled role を呼ぶ
  * `include_role` タスクとして表現する。`include_role` は下記 allowlist のロールのみ
  * 許可し、role 名と
  * 許可 param キーを専用バリデータで個別検査する。ロール変数は **task レベルの `vars:`**
@@ -226,6 +226,10 @@ const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
  * `k3s` は単一ロールで OS 前提整備・ephemeral ディスク・k3s(HA/単一)・gVisor を
  * トグル変数で制御する重量ロール。破壊的なディスク操作・秘匿トークンを扱うため、
  * ロール内部で by-id/UUID 強制・冪等ガード・no_log を徹底する（roles/k3s 参照）。
+ *
+ * `tailscale` は Tailscale（WireGuard メッシュVPN）へ auth key で非対話参加する単一
+ * ロール。秘匿の auth key を 0600 一時ファイル＋`--auth-key=file:` で扱い argv に
+ * 載せない（roles/tailscale 参照）。
  */
 export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'os_init',
@@ -241,6 +245,7 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'gitlab_runner',
   'github_runner',
   'k3s',
+  'tailscale',
 ])
 
 /**
