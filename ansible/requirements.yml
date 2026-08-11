@@ -1,0 +1,26 @@
+---
+# Ansible Galaxy requirements for local development / CI of ansible/roles/*.
+#
+# These versions MUST match the production Docker image (docker/Dockerfile,
+# the `ansible-galaxy collection install` layer) so that a role validated
+# locally / in CI behaves identically at runtime. When you bump a version in
+# the Dockerfile, bump it here (and vice versa).
+#
+# ansible-core itself is NOT a Galaxy collection and is not declared here.
+# Install it into your venv with the same pip constraint the Dockerfile pins
+# for `ansible-core` (currently `>=2.16,<2.18`):
+#
+#     pip install 'ansible-core>=2.16,<2.18' ansible-lint yamllint
+#     ansible-galaxy collection install -r ansible/requirements.yml
+#
+# See ansible/DEVELOPING.md for the full workflow.
+collections:
+  # ansible.mysql.mysql_user — used by roles/database (MySQL root password).
+  - name: ansible.mysql
+    version: ">=5.0.0,<6.0.0"
+  # community.postgresql.postgresql_user — used by roles/database (postgres admin).
+  - name: community.postgresql
+    version: ">=4.0.0,<5.0.0"
+  # ansible.posix.authorized_key — used by roles/ssh_key (base MODULE_ALLOWLIST).
+  - name: ansible.posix
+    version: ">=1.5.0,<2.0.0"
