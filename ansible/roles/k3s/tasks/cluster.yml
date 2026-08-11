@@ -56,16 +56,38 @@
   when: k3s_etcd_s3_enabled | bool
 
 # --- config files ------------------------------------------------------------
-- name: "k3s : Create k3s config directories"
+# 中間ディレクトリ。ansible.builtin.file は親ディレクトリを作る際に指定モードを
+# 適用するため、明示しないと /etc/rancher が 0700 になり、配下の kubeconfig に
+# 一般ユーザーが到達できない（実機で permission denied を確認）。
+- name: "k3s : Create /etc/rancher directory"
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: /etc/rancher
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# /etc/rancher/k3s は 0755。0700 だと親ディレクトリを通過できず、k3s が
+# write-kubeconfig-mode（k3s_kubeconfig_mode）に従って kubeconfig を 0644 で
+# 書き出しても一般ユーザーが読めない（実機で `permission denied` を確認）。
+# 直下の config.yaml は 0600、秘匿ドロップインは 0700 の config.yaml.d 配下に
+# 置くため、ディレクトリを緩めても秘匿値は保護される。
+- name: "k3s : Create k3s config directory"
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# 秘匿値（etcd-S3 認証情報）のドロップイン置き場。ここは root 専用のままにする。
+- name: "k3s : Create k3s config drop-in directory (secrets)"
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/config.yaml.d
     state: directory
     owner: root
     group: root
     mode: "0700"
-  loop:
-    - /etc/rancher/k3s
-    - /etc/rancher/k3s/config.yaml.d
 
 - name: "k3s : Render /etc/rancher/k3s/config.yaml (non-secret server options)"
   ansible.builtin.template:
