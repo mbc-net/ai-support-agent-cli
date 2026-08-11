@@ -40,10 +40,16 @@ k3s_sysctl:
   fs.inotify.max_user_watches: "524288"
   net.bridge.bridge-nf-call-iptables: "1"
   net.ipv4.ip_forward: "1"
+# /etc/modules-load.d/k3s.conf で永続化し、未ロードのものだけ modprobe する。
+# nfs / dm_crypt は Longhorn の要求（longhornctl check preflight が未ロードを
+# error として報告する）。open-iscsi / nfs-common / cryptsetup を入れているのに
+# モジュールが未ロードだと、RWX ボリュームと暗号化ボリュームが使えない。
 k3s_kernel_modules:
   - overlay
   - br_netfilter
   - iscsi_tcp
+  - nfs        # Longhorn: RWX（NFS プロビジョナ）
+  - dm_crypt   # Longhorn: 暗号化ボリューム
 # Time sync service to enable (etcd is sensitive to inter-node clock skew).
 # One of: auto | systemd-timesyncd | chrony (validated by an inline allowlist in
 # tasks/common.yml). `auto` enables whichever of the two the host already has
@@ -92,6 +98,10 @@ k3s_disable:                         # k3s bundled components to disable
   - traefik
   - servicelb
 k3s_node_taints: []                  # e.g. ["workload=opensearch:NoSchedule"]
+# kubeconfig（/etc/rancher/k3s/k3s.yaml）のパーミッション。k3s 本体が
+# write-kubeconfig-mode として適用する。親ディレクトリ /etc/rancher と
+# /etc/rancher/k3s は 0755 で作成するため、"644" にすれば一般ユーザーが
+# sudo なしで kubectl を使える（0600 にすれば root 専用に絞れる）。
 k3s_kubeconfig_mode: "644"
 k3s_node_ip: ""                      # optional --node-ip
 k3s_extra_server_args: []            # any extra `k3s server` flags (list)
