@@ -101,4 +101,27 @@ describe('k3s bundled role', () => {
     )
     expect(renderTask?.['ansible.builtin.template'].mode).toBe('0600')
   })
+
+  it('k3s導入前にプライベートLANを自動検出してUFWをクラスターポートだけに限定する', () => {
+    const defaults = loadYaml('defaults', 'main.yml') as Record<string, unknown>
+    const main = readFileSync(path.join(roleDir, 'tasks', 'main.yml'), 'utf8')
+    const firewall = readFileSync(path.join(roleDir, 'tasks', 'firewall.yml'), 'utf8')
+    expect(Array.isArray(load(firewall))).toBe(true)
+
+    expect(defaults.k3s_manage_ufw).toBe(true)
+    expect(defaults.k3s_cluster_source_cidr).toBe('')
+    expect(main.indexOf('firewall.yml')).toBeLessThan(main.indexOf('cluster.yml'))
+    expect(firewall).toContain('gather_subset')
+    expect(firewall).toContain('ansible_default_ipv4')
+    expect(firewall).toContain('RFC1918')
+    expect(firewall).toContain('k3s_server_url')
+    expect(firewall).toContain('6443')
+    expect(firewall).toContain('2379:2380')
+    expect(firewall).toContain('10250')
+    expect(firewall).toContain('8472')
+    expect(defaults.k3s_pod_cidr).toBe('10.42.0.0/16')
+    expect(firewall).toContain('flannel.1')
+    expect(firewall).toContain('cni0')
+    expect(firewall).not.toContain('ufw allow 6443')
+  })
 })
