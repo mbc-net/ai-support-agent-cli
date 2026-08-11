@@ -3,9 +3,14 @@
  */
 export class ProcessManager {
   private readonly running = new Map<string, { cancel: () => void }>()
+  private readonly pendingCancellations = new Set<string>()
 
   /** プロセスを管理 Map に登録 */
   register(id: string, handle: { cancel: () => void }): void {
+    if (this.pendingCancellations.delete(id)) {
+      handle.cancel()
+      return
+    }
     this.running.set(id, handle)
   }
 
@@ -20,6 +25,13 @@ export class ProcessManager {
       this.running.delete(id)
       return true
     }
+    return false
+  }
+
+  /** 未登録なら予約し、プロセス登録直後にキャンセルする。 */
+  cancelWhenRegistered(id: string): boolean {
+    if (this.cancel(id)) return true
+    this.pendingCancellations.add(id)
     return false
   }
 
@@ -52,6 +64,10 @@ export function getProcessManager(): ProcessManager {
  */
 export function cancelProcess(commandId: string): boolean {
   return processManager.cancel(commandId)
+}
+
+export function cancelProcessWhenRegistered(commandId: string): boolean {
+  return processManager.cancelWhenRegistered(commandId)
 }
 
 /**

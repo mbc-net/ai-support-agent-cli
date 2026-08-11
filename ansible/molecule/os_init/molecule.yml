@@ -1,0 +1,84 @@
+---
+# Molecule "os_init" scenario: dynamic (converge + idempotence + verify)
+# verification of the `os_init` role.
+#
+# Converged role: `os_init`. It creates the setup user, upgrades apt packages
+# and installs + configures the ufw firewall. It is container-safe (privileged
+# systemd container with host cgroup; ufw drives iptables, available under
+# `privileged`) and — after the `changed_when` fix on its "ufw default
+# deny/allow" tasks — idempotent, so it passes Molecule's strict idempotence
+# step (the second converge reports zero changes).
+#
+# HISTORY: os_init was previously NON-idempotent — its "ufw default deny
+# incoming" / "... allow outgoing" tasks used a `changed_when` guard that
+# grepped for "Default incoming/outgoing policy changed", a string ufw prints
+# UNCONDITIONALLY, so the second converge always reported changed. The role now
+# gates those tasks on `ufw status verbose` (only applies the policy when it is
+# not already the effective default), so idempotence holds. This scenario is
+# the regression guard for that fix.
+#
+# NOT in this scenario (see ansible/DEVELOPING.md for the full matrix):
+#   - k3s (disk partitioning + gVisor), docker (docker-in-docker),
+#     gitlab_runner / github_runner / tailscale (live enrolment secrets):
+#     kernel/host/secret dependent — verify on a real VM, not in CI.
+#
+# Uses geerlingguy's systemd-enabled Ubuntu 24.04 image (a supported
+# server-setup target release: 22.04/24.04/26.04). Molecule runs with
+# ansible-core's default stdout callback (NOT the bundled callback_plugins/
+# json.py, which is only for the runtime JSON stdout path).
+#
+# The image is pinned by manifest DIGEST (not `:latest`) for reproducible CI —
+# same rationale and same digest as the `default` scenario. Bump both together
+# in a reviewed PR.
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ../../requirements.yml
+
+driver:
+  name: docker
+
+platforms:
+  - name: ai-support-role-os-init-ubuntu2404
+    image: geerlingguy/docker-ubuntu2404-ansible@sha256:a92c929b640cd4e5cf73f67fd1e9d0466c58335449fdc37a889c0bb4bbf78e2e
+    # systemd needs a writable cgroup mount, the host cgroup namespace and
+    # privileged mode. ufw (iptables) also needs privileged.
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      # Resolve `include_role: {name: os_init}` against the bundled roles.
+      # MOLECULE_PROJECT_DIRECTORY is the directory that contains molecule/,
+      # i.e. ansible/, so this points at ansible/roles.
+      roles_path: ${MOLECULE_PROJECT_DIRECTORY}/roles
+  inventory:
+    group_vars:
+      all:
+        # Distinct test value (not the role's 'appuser' default) to prove the
+        # os_init_user variable flows through to the created user; verify.yml
+        # asserts this exact account exists.
+        os_init_user: molecule_osuser
+
+verifier:
+  name: ansible
+
+scenario:
+  # Explicit default sequence. `idempotence` is the key step: the second
+  # converge must report zero changes. os_init satisfies this after the ufw
+  # `changed_when` fix.
+  test_sequence:
+    - dependency
+    - destroy
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy

@@ -27,9 +27,17 @@
     name: ufw
     state: present
 
+# `ufw status verbose` is the single source of truth for the tasks below.
+# When ufw is active it prints e.g.
+#   Status: active
+#   Default: deny (incoming), allow (outgoing), disabled (routed)
+# so we can gate the default-policy tasks on the effective policy. When ufw is
+# inactive it prints only `Status: inactive` (no Default line), so a fresh host
+# still applies both defaults (and `'inactive' in ...stdout` keeps the Enable
+# task below firing).
 - name: "os_init : Check ufw status"
   ansible.builtin.command:
-    cmd: ufw status
+    cmd: ufw status verbose
   register: os_init_ufw_status
   changed_when: false
 
@@ -41,17 +49,23 @@
   register: os_init_ufw_allow_ssh
   changed_when: "'Skipping' not in os_init_ufw_allow_ssh.stdout"
 
+# `ufw default deny incoming` prints "Default incoming policy changed to 'deny'"
+# UNCONDITIONALLY (even when already deny), so a stdout grep can never be
+# idempotent. Instead only run it when the effective default is not already
+# deny; when it runs, it did change the policy, hence `changed_when: true`.
 - name: "os_init : Set ufw default incoming policy to deny"
   ansible.builtin.command:
     cmd: ufw default deny incoming
-  register: os_init_ufw_default_incoming
-  changed_when: "'Default incoming policy changed' in os_init_ufw_default_incoming.stdout"
+  when: "'deny (incoming)' not in os_init_ufw_status.stdout"
+  changed_when: true
 
+# Same reasoning for the outgoing default (ufw prints its "changed" line
+# unconditionally): only apply when the effective default is not already allow.
 - name: "os_init : Set ufw default outgoing policy to allow"
   ansible.builtin.command:
     cmd: ufw default allow outgoing
-  register: os_init_ufw_default_outgoing
-  changed_when: "'Default outgoing policy changed' in os_init_ufw_default_outgoing.stdout"
+  when: "'allow (outgoing)' not in os_init_ufw_status.stdout"
+  changed_when: true
 
 - name: "os_init : Enable ufw"
   ansible.builtin.command:
