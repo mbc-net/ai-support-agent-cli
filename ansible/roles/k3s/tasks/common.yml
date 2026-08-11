@@ -34,20 +34,15 @@
     replace: '# \1'
   when: k3s_disable_swap | bool
 
-# --- sysctl ------------------------------------------------------------------
-- name: "k3s : Write sysctl tunables to /etc/sysctl.d/99-k3s.conf"
-  ansible.posix.sysctl:
-    name: "{{ item.key }}"
-    value: "{{ item.value }}"
-    sysctl_file: /etc/sysctl.d/99-k3s.conf
-    sysctl_set: true
-    reload: true
-    state: present
-  loop: "{{ k3s_sysctl | dict2items }}"
-  loop_control:
-    label: "{{ item.key }}"
-
 # --- kernel modules ----------------------------------------------------------
+# Load kernel modules BEFORE the sysctl task below. net.bridge.bridge-nf-call-*
+# only appear under /proc/sys/net/bridge/ once br_netfilter is loaded, so a
+# sysctl_set on those keys fails ("cannot stat .../bridge-nf-call-iptables: No
+# such file or directory") on a fresh host where br_netfilter isn't loaded yet
+# (only that item fails → "changed: yes / One or more items failed"). This is the
+# exact ordering Kubernetes' own prerequisites prescribe: modprobe overlay/
+# br_netfilter first, then apply sysctls. Loading first also turns a genuinely-
+# missing module into a clear modprobe failure instead of a confusing sysctl one.
 - name: "k3s : Persist kernel modules via /etc/modules-load.d/k3s.conf"
   ansible.builtin.copy:
     dest: /etc/modules-load.d/k3s.conf
@@ -76,6 +71,21 @@
   loop: "{{ k3s_kernel_modules }}"
   when: item not in (k3s_lsmod.stdout_lines | map('regex_replace', '^(\\S+).*$', '\\1') | list)
   changed_when: true
+
+# --- sysctl ------------------------------------------------------------------
+# Runs AFTER the kernel modules above are loaded (see the note there) so the
+# net.bridge.* tunables can be applied on a fresh host.
+- name: "k3s : Write sysctl tunables to /etc/sysctl.d/99-k3s.conf"
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-k3s.conf
+    sysctl_set: true
+    reload: true
+    state: present
+  loop: "{{ k3s_sysctl | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
 
 # --- time sync ---------------------------------------------------------------
 - name: "k3s : Ensure time sync service is installed (chrony only; timesyncd ships with the OS)"
