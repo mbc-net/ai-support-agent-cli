@@ -92,6 +92,10 @@ k3s_disable:                         # k3s bundled components to disable
   - traefik
   - servicelb
 k3s_node_taints: []                  # e.g. ["workload=opensearch:NoSchedule"]
+# kubeconfig（/etc/rancher/k3s/k3s.yaml）のパーミッション。k3s 本体が
+# write-kubeconfig-mode として適用する。親ディレクトリ /etc/rancher と
+# /etc/rancher/k3s は 0755 で作成するため、"644" にすれば一般ユーザーが
+# sudo なしで kubectl を使える（0600 にすれば root 専用に絞れる）。
 k3s_kubeconfig_mode: "644"
 k3s_node_ip: ""                      # optional --node-ip
 k3s_extra_server_args: []            # any extra `k3s server` flags (list)
