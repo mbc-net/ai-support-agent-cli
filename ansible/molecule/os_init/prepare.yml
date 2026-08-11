@@ -1,0 +1,21 @@
+---
+# Prepare play: establish preconditions that a real server-setup target host
+# already satisfies but the minimal Molecule CI image does not.
+#
+# os_init runs `ufw allow OpenSSH`, which requires the "OpenSSH" ufw application
+# profile shipped by the openssh-server package. A real target host is reached
+# over SSH (so openssh-server is present); the bare CI image is not, so install
+# it here. This lets the role exercise its real OpenSSH-allow path instead of
+# failing on a missing profile.
+- name: Prepare
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "prepare : Install openssh-server (provides the ufw OpenSSH profile)"
+      ansible.builtin.apt:
+        name: openssh-server
+        state: present
+        update_cache: true
+        cache_valid_time: 3600

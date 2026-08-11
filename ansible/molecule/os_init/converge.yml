@@ -1,0 +1,32 @@
+---
+# Converge play for the os_init scenario.
+#
+# Mirrors the *shape* of the production play that generatePlaybook()
+# (src/server-setup/server-setup-runner.ts) builds at runtime — play-level
+# `become: true`, and the `acl` precheck that lets roles hand off to an
+# unprivileged become_user.
+#
+# `gather_facts: true` here is safe (the Molecule container has passwordless
+# sudo); the production runner keeps facts off for a different reason
+# (targets may lack NOPASSWD sudo), which does not apply to this test host.
+- name: Converge
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    # Roles that hand off to an unprivileged become_user need setfacl from
+    # `acl`. os_init itself does not, but this keeps the play faithful to
+    # production and valid as the scenario grows.
+    - name: "precheck : Ensure acl (setfacl) is installed"
+      ansible.builtin.apt:
+        name: acl
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    # include_role (dynamic) matches how recipe bodies invoke roles at runtime.
+    # os_init_user comes from group_vars/all in molecule.yml.
+    - name: "Converge : os_init role"
+      ansible.builtin.include_role:
+        name: os_init
