@@ -14,7 +14,14 @@ module.exports = {
           isolatedModules: true,
         },
       },
-      collectCoverageFrom: ['src/**/*.ts', '!src/index.ts', '!src/__mocks__/**'],
+      collectCoverageFrom: [
+        'src/**/*.ts',
+        '!src/index.ts',
+        // Thin argv bootstrap (like src/index.ts): its logic lives in and is
+        // tested through server-setup-local-run.ts.
+        '!src/server-setup/server-setup-local-run.cli.ts',
+        '!src/__mocks__/**',
+      ],
       coverageThreshold: {
         global: {
           statements: 95,

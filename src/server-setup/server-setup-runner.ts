@@ -425,7 +425,7 @@ const USERNAME_RE = /^[A-Za-z0-9_-]+$/
  * exact same `HOSTNAME_RE` standard as `hostname`. `socksPort`, when present,
  * is validated as a port number the same way `port` already is.
  */
-function validateSshCredential(credential: SshExecCredential): string | null {
+export function validateSshCredential(credential: SshExecCredential): string | null {
   if (!HOSTNAME_RE.test(credential.hostname)) {
     return `SSH credential hostname is not a valid hostname/IP address: ${JSON.stringify(credential.hostname)}`
   }
@@ -752,10 +752,263 @@ export function cleanupStaleServerSetupDirs(
 }
 
 /**
+ * Fully-resolved inputs for `executeServerSetupAnsible` — everything the core
+ * ansible-execution stage needs after `runServerSetup` has finished route-mode
+ * resolution, payload validation, the JIT credential/variable fetch, and the
+ * reserved-variable-name check.
+ *
+ * This is the seam between the api-driven `server_setup_exec` orchestration
+ * (`runServerSetup`) and the API-, dispatch-, and KMS-free local dev path
+ * (`server-setup-local-run.ts`): both assemble one of these and hand it to
+ * `executeServerSetupAnsible`, so the bundled-path/known_hosts resolution, the
+ * play generation, the authoritative guard re-validation, the ansible-playbook
+ * invocation, secret redaction, and the always-run temp-dir cleanup are
+ * byte-for-byte identical between production and local runs.
+ *
+ * Note: known_hosts resolution is NOT the caller's responsibility — the core
+ * resolves it internally from `tenantCode` + `sshHostId` (see
+ * `executeServerSetupAnsible`), so both callers share the same fail-closed
+ * "never leave a private-key temp dir behind on a resolution failure" behavior.
+ */
+export interface ExecuteServerSetupAnsibleInput {
+  /** Used only in log lines to correlate this run; carries no control flow. */
+  executionId: string
+  /** The recipe body: a top-level YAML list of Ansible tasks (already guard-validated by the caller). */
+  body: string
+  /** Guard allowlist mode — must match the mode the caller validated `body` under. */
+  mode: AnsibleTaskRouteMode
+  /** SSH connection parameters (already passed through `validateSshCredential` by the caller). */
+  credential: SshExecCredential
+  /** Project (`ANSIBLE#`) variables written verbatim to `extra-vars.json`. */
+  variables: Record<string, string>
+  /** Subset of `variables` names that are secrets — drives `no_log` + post-run redaction. */
+  secretNames: string[]
+  /** Tenant code — namespaces the persistent known_hosts file (with `sshHostId`) for TOFU across runs. */
+  tenantCode: string
+  /** SSH host id — namespaces the persistent known_hosts file (with `tenantCode`) for TOFU across runs. */
+  sshHostId: string
+}
+
+/**
+ * Core ansible-execution stage shared by the api-driven `runServerSetup` and the
+ * local dev `server-setup-local-run`: resolve the bundled roles/callback-plugins
+ * paths, create the per-run temp dir, write the private key / inventory /
+ * extra-vars / generated playbook, re-validate the body with the real
+ * `secretNames`, run `ansible-playbook`, redact secrets from its output, parse
+ * per-task results, and — critically — always remove the temp directory (private
+ * key included) afterwards, whether the run succeeded or failed.
+ *
+ * The caller is responsible for everything upstream of here (route-mode
+ * resolution, payload/credential validation, and the reserved-variable-name
+ * check). known_hosts resolution is done here (from `tenantCode` + `sshHostId`)
+ * rather than by the caller, so both call sites share the identical fail-closed
+ * behavior on a resolution failure. This function also performs the
+ * authoritative guard re-validation itself (fail-closed) — it never trusts the
+ * caller to have gated the body — so the local dev path cannot bypass the task
+ * guard.
+ */
+export async function executeServerSetupAnsible(
+  input: ExecuteServerSetupAnsibleInput,
+): Promise<CommandResult> {
+  const { executionId, body, mode, credential, variables, secretNames, tenantCode, sshHostId } = input
+
+  // Resolve the bundled roles/callback-plugins paths first (a packaging error
+  // here is surfaced verbatim), then the persistent known_hosts file. Both are
+  // done before the temp dir (and therefore the private key) is created, so a
+  // resolution failure never leaves a private-key-holding temp dir behind. The
+  // order (roles/callback, then known_hosts) matches the original production
+  // sequence.
+  let rolesPath: string
+  let callbackPluginsPath: string
+  try {
+    rolesPath = resolveRolesPath()
+    callbackPluginsPath = resolveCallbackPluginsPath()
+  } catch (error) {
+    return errorResult(getErrorMessage(error))
+  }
+
+  // Persistent (not per-run) known_hosts file, namespaced by tenant + SSH host,
+  // so `StrictHostKeyChecking=accept-new` (TOFU) actually detects a host key
+  // change across runs.
+  let knownHostsPath: string
+  try {
+    knownHostsPath = resolveKnownHostsPath(tenantCode, sshHostId)
+  } catch (error) {
+    return errorResult(`Failed to resolve known_hosts file: ${getErrorMessage(error)}`)
+  }
+
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), SERVER_SETUP_TMP_PREFIX))
+  // Every exit path below assigns `result`, but keep a safe default so
+  // TypeScript's definite-assignment analysis can't leave it unset by the time
+  // `finally` reads it.
+  let result: CommandResult = errorResult('server_setup_exec: no result was produced')
+  try {
+    result = await (async (): Promise<CommandResult> => {
+      // `credential.privateKey` only holds actual key material when
+      // authType !== 'password' (see buildInventory's doc comment) — writing
+      // a plaintext password here as if it were a key file is what caused
+      // OpenSSH's "error in libcrypto" (it can't parse a password as PEM/
+      // OpenSSH key data).
+      const keyPath = path.join(tmpDir, 'id_rsa')
+      if (credential.authType !== 'password') {
+        // 0600: only the current user may read/write the private key.
+        // Normalized so OpenSSH accepts it even when the stored key was pasted
+        // without a trailing newline / with CRLF — see normalizePrivateKeyMaterial.
+        writeFileSync(keyPath, normalizePrivateKeyMaterial(credential.privateKey), { mode: 0o600 })
+      }
+
+      // Written with a .yml extension (JSON is valid YAML) so ansible-core's
+      // bundled `yaml` inventory plugin — matched by file extension — parses it
+      // unambiguously; see buildInventory's doc comment.
+      // 0600: for a password credential this file carries the plaintext
+      // password (ansible_ssh_pass) — same permission level as id_rsa/
+      // extra-vars.json alongside it.
+      const inventoryPath = path.join(tmpDir, 'inventory.yml')
+      writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath), { mode: 0o600 })
+
+      // Project (`ANSIBLE#`) variables are the entire extra-vars set now that
+      // per-step params are gone; body tasks reference them via `{{ VAR }}`.
+      const extraVarsPath = path.join(tmpDir, 'extra-vars.json')
+      // 0600: extra-vars.json may carry ANSIBLE# project secret values in
+      // plaintext — same permission level as the private key alongside it.
+      writeFileSync(extraVarsPath, JSON.stringify(variables), { mode: 0o600 })
+
+      // Re-validate the body with the *real* `secretNames` just fetched, so the
+      // normalized tasks carry accurate `no_log: true` annotations.
+      // `validatePayload` already proved the body passes the guard with an
+      // empty secret set, so a rejection here would mean the guard's own
+      // behavior is non-deterministic across calls — treated as an internal
+      // error (fail-closed) rather than silently proceeding.
+      const secretNameSet = new Set(secretNames)
+      const guardResult = validateAnsibleTasks(body, { mode, secretVarNames: secretNameSet })
+      if (!guardResult.ok || !guardResult.normalizedTasks) {
+        logger.error(
+          `[server-setup] recipe body guard re-validation failed unexpectedly: ${JSON.stringify(guardResult.violations)}`,
+        )
+        return errorResult(
+          `server_setup_exec: recipe body rejected at execution time: ${JSON.stringify(guardResult.violations)}`,
+        )
+      }
+
+      const playbookPath = path.join(tmpDir, 'generated-playbook.yml')
+      writeFileSync(playbookPath, generatePlaybook(guardResult.normalizedTasks))
+
+      const args = ['-i', inventoryPath, playbookPath, '-e', `@${extraVarsPath}`]
+
+      logger.info(
+        `[server-setup] Running ansible-playbook: executionId=${executionId} mode=${mode} tasks=${guardResult.normalizedTasks.length}`,
+      )
+      const { code, stdout: rawStdout, stderr: rawStderr, timedOut, spawnError } = await runAnsiblePlaybook(args, {
+        ...process.env,
+        ANSIBLE_STDOUT_CALLBACK: 'json',
+        // Lets the generated playbook (written to tmpDir, outside
+        // ansible/roles/) resolve the 6 bundled roles by name via `include_role`.
+        ANSIBLE_ROLES_PATH: rolesPath,
+        // Exposes the bundled `json` stdout callback (callback_plugins/json.py)
+        // to Ansible. The generated playbook runs from tmpDir, not from
+        // ansible/, so Ansible's playbook-adjacent auto-discovery can't find it;
+        // without this the run aborts with "Invalid callback for stdout
+        // specified: json".
+        ANSIBLE_CALLBACK_PLUGINS: callbackPluginsPath,
+      })
+
+      // Belt-and-suspenders redaction (see redactSecretValues's doc comment):
+      // applied to the raw stdout/stderr *before* anything else reads them.
+      // The SSH password (credential.privateKey when authType === 'password')
+      // is included unconditionally — it never appears in secretNameSet
+      // (that only covers tenant ANSIBLE# project variables) but is exactly
+      // as sensitive, and `ansible-task-guard`'s no_log annotation is a
+      // first line of defense, not the only one.
+      const secretValues = Object.entries(variables)
+        .filter(([name]) => secretNameSet.has(name))
+        .map(([, value]) => value)
+      if (credential.authType === 'password') {
+        secretValues.push(credential.privateKey)
+      }
+      const stdout = redactSecretValues(rawStdout, secretValues)
+      const stderr = redactSecretValues(rawStderr, secretValues)
+
+      if (timedOut) {
+        logger.error(
+          `[server-setup] ansible-playbook timed out after ${ANSIBLE_TIMEOUT_MS}ms: executionId=${executionId}`,
+        )
+        return errorResult(`ansible-playbook execution timed out after ${Math.floor(ANSIBLE_TIMEOUT_MS / 1000)}s`)
+      }
+
+      if (spawnError) {
+        // The process never started (e.g. `ansible-playbook` missing from PATH)
+        // — there is no task output to parse, so `stepResults` is deliberately
+        // omitted rather than reported as anything misleading.
+        logger.error(`[server-setup] Failed to start ansible-playbook: ${spawnError}`)
+        return errorResult(`Failed to start ansible-playbook: ${spawnError}`)
+      }
+
+      const { taskResults, outputUnparseable } = parseAnsibleOutput(stdout)
+
+      if (code !== 0) {
+        const detail = stderr ? stderr.substring(0, 2000) : ''
+        // Surface each failing task's own message so the reason a run failed
+        // (unsupported OS from the precheck, an unreachable host, a body task
+        // error) is never lost behind a bare exit code.
+        const failedTasks = taskResults.filter((t) => t.status === 'failed')
+        const failedDetail = failedTasks.length ? ` | ${failedTasks.map((t) => `${t.name}: ${t.message}`).join('; ')}` : ''
+        logger.error(`[server-setup] ansible-playbook exited with code ${code}`)
+        return errorResult(
+          `ansible-playbook exited with code ${code}${detail ? `: ${detail}` : ''}${failedDetail}`,
+          { stepResults: taskResults },
+        )
+      }
+
+      // Reaching here means ansible-playbook exited 0 — but a `0` exit code
+      // alone is not sufficient evidence that the tasks actually ran: a stdout
+      // callback that silently failed to load, or an ansible-core output-format
+      // change, would otherwise be reported as a quiet successResult.
+      if (outputUnparseable) {
+        logger.error(
+          `[server-setup] ansible-playbook exited 0 but stdout was ${stdout.trim() ? 'not valid JSON' : 'empty'}: executionId=${executionId}`,
+        )
+        return errorResult(
+          `ansible-playbook exited 0 but its stdout ${stdout.trim() ? 'could not be parsed as JSON' : 'was empty'} — unable to confirm the recipe actually ran (json stdout callback not loaded, or an unexpected ansible-core output format)`,
+        )
+      }
+
+      // A well-formed run always produces at least the always-tagged precheck
+      // task's output. Zero parsed tasks despite a 0 exit means the JSON stream
+      // was truncated or the callback misbehaved — fail closed rather than
+      // silently report success.
+      if (taskResults.length === 0) {
+        logger.error(
+          `[server-setup] ansible-playbook exited 0 but produced no task output: executionId=${executionId}`,
+        )
+        return errorResult(
+          'ansible-playbook exited 0 but produced no task output — treating the run as failed rather than silently reporting success',
+        )
+      }
+
+      logger.success(`[server-setup] Completed: executionId=${executionId}`)
+      return successResult({ stepResults: taskResults })
+    })()
+  } catch (error) {
+    result = errorResult(`Server setup execution failed: ${getErrorMessage(error)}`)
+  } finally {
+    // Must run on every exit path: the private key must never remain on disk
+    // after this function returns.
+    try {
+      rmSync(tmpDir, { recursive: true, force: true })
+    } catch (cleanupError) {
+      const message = getErrorMessage(cleanupError)
+      logger.error(`[server-setup] Failed to remove temp dir ${tmpDir}: ${message}`)
+      result = attachCleanupFailure(result, tmpDir)
+    }
+  }
+  return result
+}
+
+/**
  * Execute a `server_setup_exec` command: re-validate the body, fetch the SSH
  * credential and project variables, generate + run the playbook, and report
  * per-task results. The temp directory holding the private key is always
- * removed, on every exit path.
+ * removed, on every exit path (in `executeServerSetupAnsible`).
  */
 export async function runServerSetup(
   payload: ServerSetupExecPayload,
@@ -808,191 +1061,19 @@ export async function runServerSetup(
     )
   }
 
-  let rolesPath: string
-  let callbackPluginsPath: string
-  try {
-    rolesPath = resolveRolesPath()
-    callbackPluginsPath = resolveCallbackPluginsPath()
-  } catch (error) {
-    return errorResult(getErrorMessage(error))
-  }
-
-  // Persistent (not per-run) known_hosts file, namespaced by tenant + SSH host,
-  // so `StrictHostKeyChecking=accept-new` (TOFU) actually detects a host key
-  // change across runs. Resolved before the temp dir is created so a failure
-  // here never leaves a private-key-holding temp dir behind.
-  let knownHostsPath: string
-  try {
-    knownHostsPath = resolveKnownHostsPath(ctx.client.getTenantCode(), validated.sshHostId)
-  } catch (error) {
-    return errorResult(`Failed to resolve known_hosts file: ${getErrorMessage(error)}`)
-  }
-
-  const tmpDir = mkdtempSync(path.join(os.tmpdir(), SERVER_SETUP_TMP_PREFIX))
-  // Every exit path below assigns `result`, but keep a safe default so
-  // TypeScript's definite-assignment analysis can't leave it unset by the time
-  // `finally` reads it.
-  let result: CommandResult = errorResult('server_setup_exec: no result was produced')
-  try {
-    result = await (async (): Promise<CommandResult> => {
-      // `credential.privateKey` only holds actual key material when
-      // authType !== 'password' (see buildInventory's doc comment) — writing
-      // a plaintext password here as if it were a key file is what caused
-      // OpenSSH's "error in libcrypto" (it can't parse a password as PEM/
-      // OpenSSH key data).
-      const keyPath = path.join(tmpDir, 'id_rsa')
-      if (credential.authType !== 'password') {
-        // 0600: only the current user may read/write the private key.
-        // Normalized so OpenSSH accepts it even when the stored key was pasted
-        // without a trailing newline / with CRLF — see normalizePrivateKeyMaterial.
-        writeFileSync(keyPath, normalizePrivateKeyMaterial(credential.privateKey), { mode: 0o600 })
-      }
-
-      // Written with a .yml extension (JSON is valid YAML) so ansible-core's
-      // bundled `yaml` inventory plugin — matched by file extension — parses it
-      // unambiguously; see buildInventory's doc comment.
-      // 0600: for a password credential this file carries the plaintext
-      // password (ansible_ssh_pass) — same permission level as id_rsa/
-      // extra-vars.json alongside it.
-      const inventoryPath = path.join(tmpDir, 'inventory.yml')
-      writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath), { mode: 0o600 })
-
-      // Project (`ANSIBLE#`) variables are the entire extra-vars set now that
-      // per-step params are gone; body tasks reference them via `{{ VAR }}`.
-      const extraVarsPath = path.join(tmpDir, 'extra-vars.json')
-      // 0600: extra-vars.json may carry ANSIBLE# project secret values in
-      // plaintext — same permission level as the private key alongside it.
-      writeFileSync(extraVarsPath, JSON.stringify(serverSetupVariables.variables), { mode: 0o600 })
-
-      // Re-validate the body with the *real* `secretNames` just fetched, so the
-      // normalized tasks carry accurate `no_log: true` annotations.
-      // `validatePayload` already proved the body passes the guard with an
-      // empty secret set, so a rejection here would mean the guard's own
-      // behavior is non-deterministic across calls — treated as an internal
-      // error (fail-closed) rather than silently proceeding.
-      const secretNameSet = new Set(serverSetupVariables.secretNames)
-      const guardResult = validateAnsibleTasks(validated.body, { mode, secretVarNames: secretNameSet })
-      if (!guardResult.ok || !guardResult.normalizedTasks) {
-        logger.error(
-          `[server-setup] recipe body guard re-validation failed unexpectedly: ${JSON.stringify(guardResult.violations)}`,
-        )
-        return errorResult(
-          `server_setup_exec: recipe body rejected at execution time: ${JSON.stringify(guardResult.violations)}`,
-        )
-      }
-
-      const playbookPath = path.join(tmpDir, 'generated-playbook.yml')
-      writeFileSync(playbookPath, generatePlaybook(guardResult.normalizedTasks))
-
-      const args = ['-i', inventoryPath, playbookPath, '-e', `@${extraVarsPath}`]
-
-      logger.info(
-        `[server-setup] Running ansible-playbook: executionId=${validated.executionId} mode=${mode} tasks=${guardResult.normalizedTasks.length}`,
-      )
-      const { code, stdout: rawStdout, stderr: rawStderr, timedOut, spawnError } = await runAnsiblePlaybook(args, {
-        ...process.env,
-        ANSIBLE_STDOUT_CALLBACK: 'json',
-        // Lets the generated playbook (written to tmpDir, outside
-        // ansible/roles/) resolve the 6 bundled roles by name via `include_role`.
-        ANSIBLE_ROLES_PATH: rolesPath,
-        // Exposes the bundled `json` stdout callback (callback_plugins/json.py)
-        // to Ansible. The generated playbook runs from tmpDir, not from
-        // ansible/, so Ansible's playbook-adjacent auto-discovery can't find it;
-        // without this the run aborts with "Invalid callback for stdout
-        // specified: json".
-        ANSIBLE_CALLBACK_PLUGINS: callbackPluginsPath,
-      })
-
-      // Belt-and-suspenders redaction (see redactSecretValues's doc comment):
-      // applied to the raw stdout/stderr *before* anything else reads them.
-      // The SSH password (credential.privateKey when authType === 'password')
-      // is included unconditionally — it never appears in secretNameSet
-      // (that only covers tenant ANSIBLE# project variables) but is exactly
-      // as sensitive, and `ansible-task-guard`'s no_log annotation is a
-      // first line of defense, not the only one.
-      const secretValues = Object.entries(serverSetupVariables.variables)
-        .filter(([name]) => secretNameSet.has(name))
-        .map(([, value]) => value)
-      if (credential.authType === 'password') {
-        secretValues.push(credential.privateKey)
-      }
-      const stdout = redactSecretValues(rawStdout, secretValues)
-      const stderr = redactSecretValues(rawStderr, secretValues)
-
-      if (timedOut) {
-        logger.error(
-          `[server-setup] ansible-playbook timed out after ${ANSIBLE_TIMEOUT_MS}ms: executionId=${validated.executionId}`,
-        )
-        return errorResult(`ansible-playbook execution timed out after ${Math.floor(ANSIBLE_TIMEOUT_MS / 1000)}s`)
-      }
-
-      if (spawnError) {
-        // The process never started (e.g. `ansible-playbook` missing from PATH)
-        // — there is no task output to parse, so `stepResults` is deliberately
-        // omitted rather than reported as anything misleading.
-        logger.error(`[server-setup] Failed to start ansible-playbook: ${spawnError}`)
-        return errorResult(`Failed to start ansible-playbook: ${spawnError}`)
-      }
-
-      const { taskResults, outputUnparseable } = parseAnsibleOutput(stdout)
-
-      if (code !== 0) {
-        const detail = stderr ? stderr.substring(0, 2000) : ''
-        // Surface each failing task's own message so the reason a run failed
-        // (unsupported OS from the precheck, an unreachable host, a body task
-        // error) is never lost behind a bare exit code.
-        const failedTasks = taskResults.filter((t) => t.status === 'failed')
-        const failedDetail = failedTasks.length ? ` | ${failedTasks.map((t) => `${t.name}: ${t.message}`).join('; ')}` : ''
-        logger.error(`[server-setup] ansible-playbook exited with code ${code}`)
-        return errorResult(
-          `ansible-playbook exited with code ${code}${detail ? `: ${detail}` : ''}${failedDetail}`,
-          { stepResults: taskResults },
-        )
-      }
-
-      // Reaching here means ansible-playbook exited 0 — but a `0` exit code
-      // alone is not sufficient evidence that the tasks actually ran: a stdout
-      // callback that silently failed to load, or an ansible-core output-format
-      // change, would otherwise be reported as a quiet successResult.
-      if (outputUnparseable) {
-        logger.error(
-          `[server-setup] ansible-playbook exited 0 but stdout was ${stdout.trim() ? 'not valid JSON' : 'empty'}: executionId=${validated.executionId}`,
-        )
-        return errorResult(
-          `ansible-playbook exited 0 but its stdout ${stdout.trim() ? 'could not be parsed as JSON' : 'was empty'} — unable to confirm the recipe actually ran (json stdout callback not loaded, or an unexpected ansible-core output format)`,
-        )
-      }
-
-      // A well-formed run always produces at least the always-tagged precheck
-      // task's output. Zero parsed tasks despite a 0 exit means the JSON stream
-      // was truncated or the callback misbehaved — fail closed rather than
-      // silently report success.
-      if (taskResults.length === 0) {
-        logger.error(
-          `[server-setup] ansible-playbook exited 0 but produced no task output: executionId=${validated.executionId}`,
-        )
-        return errorResult(
-          'ansible-playbook exited 0 but produced no task output — treating the run as failed rather than silently reporting success',
-        )
-      }
-
-      logger.success(`[server-setup] Completed: executionId=${validated.executionId}`)
-      return successResult({ stepResults: taskResults })
-    })()
-  } catch (error) {
-    result = errorResult(`Server setup execution failed: ${getErrorMessage(error)}`)
-  } finally {
-    // Must run on every exit path: the private key must never remain on disk
-    // after this function returns.
-    try {
-      rmSync(tmpDir, { recursive: true, force: true })
-    } catch (cleanupError) {
-      const message = getErrorMessage(cleanupError)
-      logger.error(`[server-setup] Failed to remove temp dir ${tmpDir}: ${message}`)
-      result = attachCleanupFailure(result, tmpDir)
-    }
-  }
-  return result
+  // known_hosts is resolved inside `executeServerSetupAnsible` (from the tenant
+  // code + SSH host id passed below), before the temp dir is created, so a
+  // resolution failure never leaves a private-key-holding temp dir behind.
+  return executeServerSetupAnsible({
+    executionId: validated.executionId,
+    body: validated.body,
+    mode,
+    credential,
+    variables: serverSetupVariables.variables,
+    secretNames: serverSetupVariables.secretNames,
+    tenantCode: ctx.client.getTenantCode(),
+    sshHostId: validated.sshHostId,
+  })
 }
 
 /**

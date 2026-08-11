@@ -1,0 +1,114 @@
+name: Ansible Roles
+
+# Independent from ci-cd.yml (the Node/CLI pipeline). This workflow only runs
+# when the bundled Ansible content changes, and validates ansible/roles/* the
+# same way a role author does locally (see ansible/DEVELOPING.md).
+#
+# HONEST COVERAGE: the `molecule` job's `default` scenario exercises only the
+# container-safe, idempotent subset of roles (currently ssh_key). os_init
+# converges/verifies in a container but is NOT idempotent as-is (a ufw
+# `changed_when` bug — see ansible/DEVELOPING.md), so it is excluded. Roles that
+# depend on a real kernel / block devices / privileged host or on live enrolment
+# secrets — k3s (disk partitioning + gVisor), docker (docker-in-docker),
+# gitlab_runner / github_runner / tailscale (registration token / auth key) —
+# are NOT covered here and must be verified on a real VM (Multipass/Vagrant) per
+# DEVELOPING.md. "Green in a container" is not a guarantee of correctness on a
+# real host.
+
+on:
+  push:
+    branches: [develop, main, beta]
+    paths:
+      - "ansible/**"
+      - ".github/workflows/ansible-roles.yml"
+  pull_request:
+    branches: [develop, main, beta]
+    paths:
+      - "ansible/**"
+      - ".github/workflows/ansible-roles.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Match the production Docker image (docker/Dockerfile) ansible-core pin.
+  ANSIBLE_CORE_SPEC: "ansible-core>=2.16,<2.18"
+  # Pin the Python tooling to a minor-version range (==X.Y.*) so a background
+  # release cannot silently change lint rules or the molecule/driver behavior
+  # under us. Bumping these is an intentional, reviewed PR — never an implicit
+  # upgrade (same discipline as ANSIBLE_CORE_SPEC above). The pinned versions
+  # below were the current stable releases and are compatible with the
+  # ansible-core range (ansible-lint 26.6 requires ansible-core>=2.16.14,
+  # molecule 26.6 requires ansible-core>=2.15).
+  ANSIBLE_LINT_SPEC: "ansible-lint==26.6.*"
+  YAMLLINT_SPEC: "yamllint==1.38.*"
+  MOLECULE_SPEC: "molecule==26.6.*"
+  MOLECULE_DOCKER_SPEC: "molecule-plugins[docker]==26.7.*"
+  DOCKER_PY_SPEC: "docker==7.2.*"
+
+jobs:
+  static:
+    name: Static checks (yamllint / ansible-lint / syntax)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ansible-core + linters
+        run: pip install "${ANSIBLE_CORE_SPEC}" "${ANSIBLE_LINT_SPEC}" "${YAMLLINT_SPEC}"
+
+      - name: Install Galaxy collections (versions pinned in requirements.yml)
+        run: ansible-galaxy collection install -r ansible/requirements.yml
+
+      - name: yamllint
+        run: yamllint -c ansible/.yamllint ansible/roles ansible/molecule
+
+      # --offline: collections are already installed above, so skip ansible-lint's
+      # implicit Galaxy re-resolution (also makes the run network-independent).
+      - name: ansible-lint
+        run: ansible-lint --offline -c ansible/.ansible-lint ansible/roles
+
+      # Syntax-checks the converge play. NOTE: converge uses `include_role`
+      # (DYNAMIC include), so --syntax-check validates the play wrapper but does
+      # NOT descend into role task files. To statically syntax-check a role's
+      # own tasks, temporarily switch its include to a STATIC `import_role` /
+      # `import_tasks` (which --syntax-check does resolve) — the technique used
+      # to validate the k3s role's task tree offline. See DEVELOPING.md.
+      - name: ansible-playbook --syntax-check (converge)
+        env:
+          ANSIBLE_ROLES_PATH: ansible/roles
+        run: |
+          ansible-playbook --syntax-check -i "localhost," \
+            ansible/molecule/default/converge.yml
+
+  molecule:
+    name: Molecule (default scenario — container-safe roles only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # GitHub-hosted ubuntu-latest runners ship a working Docker daemon, which
+    # the docker driver needs. Runs after static checks pass.
+    needs: static
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Molecule + docker driver + ansible-core
+        run: pip install "${ANSIBLE_CORE_SPEC}" "${MOLECULE_SPEC}" "${MOLECULE_DOCKER_SPEC}" "${DOCKER_PY_SPEC}"
+
+      - name: Install Galaxy collections
+        run: ansible-galaxy collection install -r ansible/requirements.yml
+
+      - name: molecule test -s default
+        working-directory: ansible
+        run: molecule test -s default

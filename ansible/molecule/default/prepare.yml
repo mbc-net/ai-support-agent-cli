@@ -1,0 +1,20 @@
+---
+# Prepare play: establish preconditions that a real server-setup target host
+# already satisfies but the minimal Molecule CI image does not.
+#
+# The ssh_key role adds a public key to an EXISTING user's authorized_keys; it
+# does not create the user (that is os_init's job in a full run). Create the
+# target user here so the scenario tests ssh_key in isolation without dragging
+# in the (currently non-idempotent) os_init role. This mirrors a real target
+# where the login user already exists.
+- name: Prepare
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "prepare : Create the ssh_key target user"
+      ansible.builtin.user:
+        name: molecule_keyuser
+        shell: /bin/bash
+        create_home: true
