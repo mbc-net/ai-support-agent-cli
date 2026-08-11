@@ -90,48 +90,66 @@ tasks ツリー自体を構文チェックしたいときは、一時的に **�
 
 ## 2. 動的検査（Molecule / Docker）
 
-`ansible/molecule/default/` シナリオが、**コンテナで安全に緑になるロールのみ**を
-converge → idempotence → verify します。
+`ansible/molecule/*` の各シナリオが、**コンテナで安全に緑になるロールのみ**を
+1 シナリオ 1 ロールで converge → idempotence → verify します。現状のシナリオ:
+
+- `default` … `ssh_key` ロール
+- `os_init` … `os_init` ロール（ユーザー作成・apt upgrade・ufw 設定。ufw の
+  `changed_when` 冪等化後に idempotence 達成。下記「findings」参照）
+
+CI（`.github/workflows/ansible-roles.yml`）の `molecule` ジョブは両シナリオを
+matrix で回す（`molecule test -s default` と `molecule test -s os_init`）。
 
 ```bash
 # ansible/ ディレクトリから、または npm script 経由で
 npm run ansible:molecule     # = molecule test -s default（内部で cd ansible）
 
-# 直接:
+# 直接（シナリオを指定）:
 cd ansible && molecule test -s default
+cd ansible && molecule test -s os_init
 ```
 
 - プラットフォーム: `geerlingguy/docker-ubuntu2404-ansible:latest`
   （systemd 有効・`privileged` ＋ `cgroupns_mode: host` ＋
   `/sys/fs/cgroup` マウント）。
-- 既定 converge の対象は現状 **`ssh_key` のみ**。`prepare.yml` が対象ユーザーを
-  作成し、`converge.yml` が公開鍵を投入、`verify.yml` が
+- `default` シナリオの converge 対象は **`ssh_key` のみ**。`prepare.yml` が対象
+  ユーザーを作成し、`converge.yml` が公開鍵を投入、`verify.yml` が
   `authorized_keys` に鍵が入ったかを assert。`ansible.posix` コレクション
   （requirements.yml で版固定）の疎通確認も兼ねる。
+- `os_init` シナリオの converge 対象は **`os_init` のみ**。`prepare.yml` が
+  `openssh-server`（ufw の `OpenSSH` プロファイル提供元）を導入し、`converge.yml`
+  が `os_init_user: molecule_osuser` を渡して `os_init` を include、`verify.yml`
+  が「setup ユーザー存在＋`/bin/bash`＋sudo 所属」「`ufw status verbose` が
+  active・default deny (incoming)・allow (outgoing)・OpenSSH 許可」を assert。
 - `idempotence` ステップで **2 回目の converge が無変更**であることを要求するため、
-  冪等でないロールは default シナリオに入れない。
+  冪等でないロールはシナリオに入れない。
 
 > 実測（Docker ローカル実行, molecule 26.6 / ansible-core 2.17）:
-> `molecule test -s default` は **rc=0** で全通過。converge（changed=2）→
-> idempotence（**changed=0**）→ verify（assert 成功）。
+> `molecule test -s default` / `molecule test -s os_init` はいずれも **rc=0** で
+> 全通過。converge → idempotence（**changed=0**）→ verify（assert 成功）。
 
-### 既知の findings: `os_init` は現状 idempotence 非達成
+### findings: `os_init` の ufw 非冪等バグ（修正済み・CI 冪等検証対象）
 
-当初は `os_init` を既定シナリオにする想定だったが、Molecule で実行したところ
-**`os_init` は冪等でない**ことが判明した（本土台が捕捉した実バグ）。
+当初 `os_init` は Molecule で **冪等でない**ことが判明していた（本土台が捕捉した
+実バグ）。現在は修正済みで、`os_init` シナリオとして CI の idempotence 検証対象に
+含まれている。
 
-- `os_init` の「Set ufw default incoming policy to deny」/「... outgoing ...
-  allow」タスクは `changed_when: "'Default incoming policy changed' in
-  stdout"` でガードしているが、`ufw default deny incoming` は**既に deny でも
+- **症状**: `os_init` の「Set ufw default incoming policy to deny」/「... outgoing
+  ... allow」タスクは `changed_when: "'Default incoming policy changed' in
+  stdout"` でガードしていたが、`ufw default deny incoming` は**既に deny でも
   毎回**「Default incoming policy changed to 'deny'」を出力する（コンテナで実測
-  確認済み）。このためガードが常に true になり、2 回目の converge でも
-  この 2 タスクが changed になって idempotence が失敗する。
-- 本タスクは「土台の追加のみ・ロール本体/ガードのロジックは変更しない」方針の
-  ため、ここでは**ロールを修正せず**、`os_init` を既定シナリオから除外し、
-  代わりに冪等な `ssh_key` を採用した。恒久対応は os_init 側の `changed_when`
-  修正（別タスク）で行うこと。修正後は `os_init` 用シナリオを追加できる
-  （下記「新しいロール用シナリオの追加」参照。`verify` では setup ユーザー存在・
-  `ufw status` の active/OpenSSH 許可を assert すればよい）。
+  確認済み）。このためガードが常に true になり、2 回目の converge でこの 2 タスクが
+  changed になって idempotence が失敗していた。
+- **修正**: 冒頭の「Check ufw status」を `ufw status` → `ufw status verbose` に変更
+  （register `os_init_ufw_status`・`changed_when: false` は維持）。active 時の
+  `Default: deny (incoming), allow (outgoing), ...` 行を判定に使い、2 つの default
+  policy タスクを `when: "'deny (incoming)' not in ...stdout"` /
+  `when: "'allow (outgoing)' not in ...stdout"` ＋ `changed_when: true` に変更。
+  既定状態（active かつ既に deny/allow）では skip され changed にならない。
+  inactive なフレッシュホストでは verbose に Default 行が無いため両タスクが実行され
+  設定される（`Enable ufw` の `when: "'inactive' in ...stdout"` も verbose の
+  `Status: inactive` で従来どおり発火）。**OpenSSH 許可 → default-deny → enable の
+  順序・ロールの機能は不変**。
 
 ### 新しいロール用シナリオの追加
 

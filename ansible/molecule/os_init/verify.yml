@@ -1,0 +1,53 @@
+---
+# Verify play: assert os_init's observable effects inside the container.
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "verify : Look up the created setup user"
+      ansible.builtin.getent:
+        database: passwd
+        key: molecule_osuser
+
+    - name: "verify : Assert the setup user exists with a home + bash shell"
+      ansible.builtin.assert:
+        that:
+          - "'molecule_osuser' in ansible_facts.getent_passwd"
+          - "ansible_facts.getent_passwd['molecule_osuser'][5] == '/bin/bash'"
+        fail_msg: "os_init did not create the molecule_osuser account as expected."
+        success_msg: "os_init created molecule_osuser with a /bin/bash shell."
+
+    - name: "verify : Confirm the setup user is in the sudo group"
+      ansible.builtin.command:
+        cmd: id -nG molecule_osuser
+      register: verify_user_groups
+      changed_when: false
+
+    - name: "verify : Assert the setup user has sudo"
+      ansible.builtin.assert:
+        that:
+          - "'sudo' in verify_user_groups.stdout.split()"
+        fail_msg: "os_init did not add molecule_osuser to the sudo group."
+        success_msg: "os_init added molecule_osuser to the sudo group."
+
+    - name: "verify : Read ufw verbose status"
+      ansible.builtin.command:
+        cmd: ufw status verbose
+      register: verify_ufw_status
+      changed_when: false
+
+    - name: "verify : Assert ufw is active with default-deny incoming and OpenSSH allowed"
+      ansible.builtin.assert:
+        that:
+          - "'Status: active' in verify_ufw_status.stdout"
+          - "'deny (incoming)' in verify_ufw_status.stdout"
+          - "'allow (outgoing)' in verify_ufw_status.stdout"
+          - "'OpenSSH' in verify_ufw_status.stdout"
+        fail_msg: >-
+          ufw is not in the expected state (active, default deny incoming /
+          allow outgoing, OpenSSH allowed). Actual: {{ verify_ufw_status.stdout }}
+        success_msg: >-
+          ufw is active with default-deny incoming, allow outgoing and OpenSSH
+          allowed.

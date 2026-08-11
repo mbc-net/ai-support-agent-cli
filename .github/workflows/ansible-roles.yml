@@ -4,16 +4,15 @@ name: Ansible Roles
 # when the bundled Ansible content changes, and validates ansible/roles/* the
 # same way a role author does locally (see ansible/DEVELOPING.md).
 #
-# HONEST COVERAGE: the `molecule` job's `default` scenario exercises only the
-# container-safe, idempotent subset of roles (currently ssh_key). os_init
-# converges/verifies in a container but is NOT idempotent as-is (a ufw
-# `changed_when` bug — see ansible/DEVELOPING.md), so it is excluded. Roles that
-# depend on a real kernel / block devices / privileged host or on live enrolment
-# secrets — k3s (disk partitioning + gVisor), docker (docker-in-docker),
-# gitlab_runner / github_runner / tailscale (registration token / auth key) —
-# are NOT covered here and must be verified on a real VM (Multipass/Vagrant) per
-# DEVELOPING.md. "Green in a container" is not a guarantee of correctness on a
-# real host.
+# HONEST COVERAGE: the `molecule` job exercises only the container-safe,
+# idempotent roles, one per scenario (a matrix over `default` = ssh_key and
+# `os_init`). Each scenario's `idempotence` step requires a zero-change second
+# converge. Roles that depend on a real kernel / block devices / privileged host
+# or on live enrolment secrets — k3s (disk partitioning + gVisor), docker
+# (docker-in-docker), gitlab_runner / github_runner / tailscale (registration
+# token / auth key) — are NOT covered here and must be verified on a real VM
+# (Multipass/Vagrant) per DEVELOPING.md. "Green in a container" is not a
+# guarantee of correctness on a real host.
 
 on:
   push:
@@ -90,12 +89,18 @@ jobs:
             ansible/molecule/default/converge.yml
 
   molecule:
-    name: Molecule (default scenario — container-safe roles only)
+    name: Molecule (${{ matrix.scenario }} — container-safe roles only)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # GitHub-hosted ubuntu-latest runners ship a working Docker daemon, which
     # the docker driver needs. Runs after static checks pass.
     needs: static
+    strategy:
+      fail-fast: false
+      matrix:
+        # One container-safe, idempotent role per scenario. Add new scenarios
+        # here as roles gain Molecule coverage (see ansible/DEVELOPING.md).
+        scenario: [default, os_init]
     steps:
       - uses: actions/checkout@v4
 
@@ -109,6 +114,6 @@ jobs:
       - name: Install Galaxy collections
         run: ansible-galaxy collection install -r ansible/requirements.yml
 
-      - name: molecule test -s default
+      - name: molecule test -s ${{ matrix.scenario }}
         working-directory: ansible
-        run: molecule test -s default
+        run: molecule test -s ${{ matrix.scenario }}
