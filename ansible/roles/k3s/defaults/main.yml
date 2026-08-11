@@ -45,7 +45,12 @@ k3s_kernel_modules:
   - br_netfilter
   - iscsi_tcp
 # Time sync service to enable (etcd is sensitive to inter-node clock skew).
-k3s_time_sync_service: systemd-timesyncd
+# One of: auto | systemd-timesyncd | chrony (validated by an inline allowlist in
+# tasks/common.yml). `auto` enables whichever of the two the host already has
+# installed and only installs systemd-timesyncd when it has neither — the two
+# packages are mutually exclusive (`Conflicts: time-daemon`), so naming one
+# explicitly on a host running the other makes apt REMOVE the running daemon.
+k3s_time_sync_service: auto
 
 # --- disk: ephemeral SSD + bind mounts (instruction §3.2) --------------------
 # DESTRUCTIVE. Only runs when k3s_setup_disk: true. The device MUST be given by
