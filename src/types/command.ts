@@ -24,6 +24,7 @@ export type AgentCommandType =
   | 'ecs_launch'
   | 'ecs_stop'
   | 'server_setup_exec'
+  | 'server_setup_cancel'
   | 'ssh_exec'
 
 export type AgentCommandStatus =
@@ -108,6 +109,10 @@ export interface ChatCancelPayload {
   targetCommandId?: unknown
 }
 
+export interface ServerSetupCancelPayload {
+  targetCommandId?: unknown
+}
+
 export interface E2eTestPayload {
   executionId?: unknown
   testCaseId?: unknown
@@ -174,4 +179,5 @@ export type CommandDispatch =
   | { type: 'ecs_launch'; payload: EcsLaunchPayload }
   | { type: 'ecs_stop'; payload: EcsStopPayload }
   | { type: 'server_setup_exec'; payload: ServerSetupExecPayload }
+  | { type: 'server_setup_cancel'; payload: ServerSetupCancelPayload }
   | { type: 'ssh_exec'; payload: SshExecPayload }

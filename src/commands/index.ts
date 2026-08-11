@@ -9,7 +9,7 @@ import { getErrorMessage } from '../utils'
 import { executeChatCommand } from './chat-executor'
 import { executeE2eScriptFix } from './e2e-script-fix-executor'
 import { executeE2eTest } from './e2e-test-executor'
-import { cancelProcess } from './process-manager'
+import { cancelProcess, cancelProcessWhenRegistered } from './process-manager'
 import { fileDelete, fileList, fileMkdir, fileRead, fileRename, fileWrite } from './file-executor'
 import { processKill, processList } from './process-executor'
 import { executeShellCommand } from './shell-executor'
@@ -283,6 +283,16 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       client: opts.client,
       agentId: opts.agentId,
     })
+  },
+
+  server_setup_cancel: async ({ p }) => {
+    const targetCommandId = p.targetCommandId
+    if (typeof targetCommandId !== 'string' || !targetCommandId) {
+      return errorResult('targetCommandId is required for server_setup_cancel')
+    }
+    logger.info(`[server_setup_cancel] Cancelling setup process: targetCommandId=${targetCommandId}`)
+    const cancelled = cancelProcessWhenRegistered(targetCommandId)
+    return successResult({ cancelled, targetCommandId })
   },
 
   ssh_exec: async ({ p, opts }) => {

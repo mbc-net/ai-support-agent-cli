@@ -24,6 +24,7 @@
  */
 
 import { execFile } from 'child_process'
+import { getProcessManager } from '../commands/process-manager'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { dump } from 'js-yaml'
 import * as os from 'os'
@@ -575,11 +576,11 @@ function parseOptionalUidOrGid(value: string | undefined): number | undefined {
  * agent host* (e.g. via allow-listed `ansible.builtin.command`/`shell`),
  * independent of `become: true`'s escalation on the *target* host over SSH.
  */
-function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv): Promise<AnsibleRunResult> {
+function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: string): Promise<AnsibleRunResult> {
   const uid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_UID])
   const gid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_GID])
   return new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       'ansible-playbook',
       args,
       {
@@ -590,6 +591,7 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv): Promise<Ans
         ...(gid !== undefined && { gid }),
       },
       (error, stdout, stderr) => {
+        if (commandId) getProcessManager().remove(commandId)
         const stdoutStr = stdout ? stdout.toString() : ''
         const stderrStr = stderr ? stderr.toString() : ''
 
@@ -617,6 +619,11 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv): Promise<Ans
         })
       },
     )
+    if (commandId) {
+      getProcessManager().register(commandId, {
+        cancel: () => child.kill('SIGTERM'),
+      })
+    }
   })
 }
 
@@ -787,6 +794,8 @@ export interface ExecuteServerSetupAnsibleInput {
   tenantCode: string
   /** SSH host id — namespaces the persistent known_hosts file (with `tenantCode`) for TOFU across runs. */
   sshHostId: string
+  /** API work command id used to cancel the ansible child process. */
+  commandId?: string
 }
 
 /**
@@ -810,7 +819,7 @@ export interface ExecuteServerSetupAnsibleInput {
 export async function executeServerSetupAnsible(
   input: ExecuteServerSetupAnsibleInput,
 ): Promise<CommandResult> {
-  const { executionId, body, mode, credential, variables, secretNames, tenantCode, sshHostId } = input
+  const { executionId, body, mode, credential, variables, secretNames, tenantCode, sshHostId, commandId } = input
 
   // Resolve the bundled roles/callback-plugins paths first (a packaging error
   // here is surfaced verbatim), then the persistent known_hosts file. Both are
@@ -910,7 +919,7 @@ export async function executeServerSetupAnsible(
         // without this the run aborts with "Invalid callback for stdout
         // specified: json".
         ANSIBLE_CALLBACK_PLUGINS: callbackPluginsPath,
-      })
+      }, commandId)
 
       // Belt-and-suspenders redaction (see redactSecretValues's doc comment):
       // applied to the raw stdout/stderr *before* anything else reads them.
@@ -1073,6 +1082,7 @@ export async function runServerSetup(
     secretNames: serverSetupVariables.secretNames,
     tenantCode: ctx.client.getTenantCode(),
     sshHostId: validated.sshHostId,
+    commandId: ctx.commandId,
   })
 }
 
