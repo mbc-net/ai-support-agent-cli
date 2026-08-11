@@ -21,12 +21,32 @@ jest.mock('../../src/server-setup/server-setup-runner', () => ({
 
 import { executeCommand } from '../../src/commands'
 import type { ApiClient } from '../../src/api-client'
+import { getProcessManager } from '../../src/commands/process-manager'
 
 beforeEach(() => {
   jest.clearAllMocks()
 })
 
 describe('server_setup_exec dispatch', () => {
+  it('server_setup_cancel cancels the running setup command', async () => {
+    const cancel = jest.fn()
+    getProcessManager().register('cmd-1', { cancel })
+
+    const result = await executeCommand('server_setup_cancel', { targetCommandId: 'cmd-1' })
+
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ success: true, data: { cancelled: true, targetCommandId: 'cmd-1' } })
+  })
+
+  it('remembers cancellation received before the setup process is registered', async () => {
+    const cancel = jest.fn()
+
+    await executeCommand('server_setup_cancel', { targetCommandId: 'cmd-late' })
+    getProcessManager().register('cmd-late', { cancel })
+
+    expect(cancel).toHaveBeenCalledTimes(1)
+  })
+
   it('routes the payload to runServerSetup with the command context and returns its result', async () => {
     mockRunServerSetup.mockResolvedValue({ success: true, data: { stepResults: [] } })
     const client = {} as ApiClient
