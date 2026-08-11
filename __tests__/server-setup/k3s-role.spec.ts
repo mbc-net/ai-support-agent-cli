@@ -49,4 +49,12 @@ describe('k3s bundled role', () => {
     expect(Array.isArray(tasks)).toBe(true)
     expect((tasks as unknown[]).length).toBeGreaterThan(0)
   })
+
+  it('joinノードもKubernetes API上で自身がReadyになるまで成功扱いしない', () => {
+    const cluster = readFileSync(path.join(roleDir, 'tasks', 'cluster.yml'), 'utf8')
+    expect(cluster).toContain('Wait for this join node to report Ready')
+    expect(cluster).toContain('kubectl')
+    expect(cluster).toContain('jsonpath')
+    expect(cluster).toContain("== 'True'")
+  })
 })

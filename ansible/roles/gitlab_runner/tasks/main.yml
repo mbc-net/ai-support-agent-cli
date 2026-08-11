@@ -142,13 +142,17 @@
   changed_when: false
 
 - name: "gitlab_runner : Write the token into its temp file"
+  # No task-level `no_log`: `copy`'s `content` parameter is declared no_log in the
+  # module's own argument spec, so the value is redacted from the result at every
+  # verbosity (verified — it never appears, on success or failure, even at -vvv).
+  # A task-level `no_log` would add no secrecy and would replace a failure (bad
+  # path, permissions, full disk) with a bare "<task> failed".
   ansible.builtin.copy:
     content: >-
       {{ gitlab_runner_auth_token if (gitlab_runner_has_auth | bool)
          else gitlab_runner_registration_token }}
     dest: "{{ gitlab_runner_token_tempfile.path }}"
     mode: '0600'
-  no_log: true
   changed_when: true
 
 - name: "gitlab_runner : Register the runner — authentication token flow (non-interactive)"

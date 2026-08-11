@@ -99,11 +99,15 @@
   changed_when: false
 
 - name: "tailscale : Write the auth key to its 0600 temp file"
+  # No task-level `no_log`: `copy`'s `content` parameter is declared no_log in the
+  # module's own argument spec, so the value is redacted from the result at every
+  # verbosity (verified — it never appears, on success or failure, even at -vvv).
+  # A task-level `no_log` would add no secrecy and would replace a failure (bad
+  # path, permissions, full disk) with a bare "<task> failed".
   ansible.builtin.copy:
     content: "{{ tailscale_authkey }}"
     dest: "{{ tailscale_authkey_tempfile.path }}"
     mode: '0600'
-  no_log: true
   changed_when: true
 
 - name: "tailscale : Join the tailnet (tailscale up)"

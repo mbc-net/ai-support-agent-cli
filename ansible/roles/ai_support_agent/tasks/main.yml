@@ -70,9 +70,12 @@
 #      redacts the task's own registered result, not the connection
 #      layer's own verbose trace).
 # Each token is instead written via `ansible.builtin.tempfile` +
-# `copy: content:` (both `no_log: true`) to a 0600 file owned by
-# `ai_support_agent_user` — `copy`'s `content:` parameter IS correctly
-# redacted at every verbosity level — and the configure task reads it back
+# `copy: content:` to a 0600 file owned by `ai_support_agent_user` —
+# `copy`'s `content:` parameter IS correctly redacted at every verbosity
+# level by the module's own argument spec, so the copy needs no task-level
+# `no_log` for the content; it carries one only because it is looped, and a
+# looped result echoes `item` (which holds the token). The configure task
+# then reads the file back
 # via `$(cat ...)`, so the Jinja-rendered script text only ever contains a
 # file *path* (not a secret). The temp file is deleted at the end of its
 # own script and again by an unconditional cleanup task as a safety net.
@@ -195,6 +198,10 @@
   changed_when: false
 
 - name: "ai_support_agent : Write each token into its own temp file"
+  # `no_log` is needed here even though `copy`'s `content` is redacted by the
+  # module itself: a looped task echoes `item`, and `item.0` is the whole token
+  # entry. It therefore hides the failure reason too, so the next task reports
+  # which entries failed from the registered results (paths and indexes only).
   ansible.builtin.copy:
     content: "{{ item.0.token }}"
     dest: "{{ item.1.path }}"
@@ -203,8 +210,51 @@
   loop: "{{ ai_support_agent_configure_items | zip(ai_support_agent_token_tempfiles.results) | list }}"
   loop_control:
     label: "(token file, redacted)"
+  register: ai_support_agent_token_writes
+  ignore_errors: true
   no_log: true
   changed_when: true
+
+- name: "ai_support_agent : Fail if the token file write task itself failed (token-safe diagnostic)"
+  # `ignore_errors` also swallows a failure of the task as a whole (e.g. the
+  # `loop:` expression itself failing to render), and then the registered result
+  # has no `.results` at all — the per-item diagnostic below would read that as
+  # "zero failures" and skip. Catch that shape explicitly instead. The module
+  # message describes the templating/lookup error, never a token.
+  ansible.builtin.fail:
+    msg: >-
+      Writing the token files failed before any entry was processed:
+      {{ ai_support_agent_token_writes.msg | default('(no message)') }}
+  when:
+    - ai_support_agent_token_writes.results is not defined
+    - ai_support_agent_token_writes.failed | default(false)
+
+- name: "ai_support_agent : Fail if any token file could not be written (token-safe diagnostic)"
+  # Not `no_log`, so this message is delivered. It names the failing entries by
+  # project_code and reports the module's own error (a path/permission problem),
+  # never the token: the failed results are looked up by index against
+  # ai_support_agent_configure_items rather than read out of `item`.
+  vars:
+    ai_support_agent_write_failures: >-
+      {{ ai_support_agent_token_writes.results | default([])
+         | selectattr('failed', 'defined') | selectattr('failed') | list }}
+    # Results keep the loop's order, so zipping them back onto the entry list
+    # recovers each failure's project_code without touching `item`
+    # (`ansible_loop.index0` would need `loop_control: extended`, which this
+    # loop does not set).
+    ai_support_agent_write_failed_codes: >-
+      {{ ai_support_agent_token_writes.results | default([])
+         | zip(ai_support_agent_configure_items)
+         | selectattr('0.failed', 'defined') | selectattr('0.failed')
+         | map(attribute='1.project_code', default='(default project)') | list }}
+  ansible.builtin.fail:
+    msg: >-
+      {{ ai_support_agent_write_failures | length }} of
+      {{ ai_support_agent_configure_items | length }} token file(s) could not be
+      written. Failing project_code(s): {{ ai_support_agent_write_failed_codes }}.
+      First error: {{ ai_support_agent_write_failures[0].msg | default('(no message)') }}
+      (token redacted by no_log).
+  when: ai_support_agent_write_failures | length > 0
 
 - name: "ai_support_agent : Configure ai-support-agent CLI for each token (non-interactive auth)"
   ansible.builtin.shell: |

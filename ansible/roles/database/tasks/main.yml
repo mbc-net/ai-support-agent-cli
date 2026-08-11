@@ -19,9 +19,14 @@
 # password value can escape its parameter position regardless of its
 # content.
 #
-# Any task that touches a password value MUST be marked `no_log: true` so
+# A task that passes a password to a module MUST be marked `no_log: true` so
 # the value never reaches Ansible's own stdout/stderr or the JSON callback
-# output consumed by src/server-setup/server-setup-runner.ts.
+# output consumed by src/server-setup/server-setup-runner.ts — but `no_log`
+# also erases the reason the task failed (the result becomes `censored` and
+# loses `msg` entirely), so every such task registers its result and a
+# separate non-`no_log` task reports the failure. `assert` and `copy` do not
+# need `no_log` at all: an unlooped assert echoes no value, and `copy`
+# redacts `content` in its own argument spec.
 #
 # `db_type` is validated as an enum ('mysql' | 'postgresql') by
 # `ALLOWED_STEP_PARAMS`/`STEP_PARAM_ENUM_VALUES` in
