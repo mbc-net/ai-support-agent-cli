@@ -34,6 +34,10 @@
   ansible.builtin.include_tasks: common.yml
   when: k3s_setup_common | bool
 
+- name: "k3s : Detect cluster network and configure UFW"
+  ansible.builtin.include_tasks: firewall.yml
+  when: k3s_manage_ufw | bool
+
 - name: "k3s : Prepare ephemeral disk and bind mounts"
   ansible.builtin.include_tasks: disk.yml
   when: k3s_setup_disk | bool
