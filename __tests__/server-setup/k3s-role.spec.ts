@@ -57,4 +57,34 @@ describe('k3s bundled role', () => {
     expect(cluster).toContain('jsonpath')
     expect(cluster).toContain("== 'True'")
   })
+
+  it('/etc/rancher と /etc/rancher/k3s は 0755、config.yaml.d は 0700 で作成する（kubeconfig を一般ユーザーが読めるようにする）', () => {
+    const tasks = loadYaml('tasks', 'cluster.yml') as Array<Record<string, any>>
+
+    const dirTasks = tasks.filter((t) => t['ansible.builtin.file']?.state === 'directory')
+    const rancherDir = dirTasks.find(
+      (t) => t['ansible.builtin.file'].path === '/etc/rancher',
+    )
+    const configDir = dirTasks.find(
+      (t) => t['ansible.builtin.file'].path === '/etc/rancher/k3s',
+    )
+    const dropInDir = dirTasks.find(
+      (t) => t['ansible.builtin.file'].path === '/etc/rancher/k3s/config.yaml.d',
+    )
+
+    // いずれかの親ディレクトリが 0700 だと write-kubeconfig-mode: 644 が無効化され、
+    // 一般ユーザーの kubectl が permission denied になる（実機で確認済み）。
+    expect(rancherDir?.['ansible.builtin.file'].mode).toBe('0755')
+    expect(configDir?.['ansible.builtin.file'].mode).toBe('0755')
+    // 秘匿ドロップイン（etcd-S3 認証情報）は root 専用のまま維持する。
+    expect(dropInDir?.['ansible.builtin.file'].mode).toBe('0700')
+  })
+
+  it('config.yaml は 0600 のまま（ディレクトリを緩めても内容は保護される）', () => {
+    const tasks = loadYaml('tasks', 'cluster.yml') as Array<Record<string, any>>
+    const renderTask = tasks.find(
+      (t) => t['ansible.builtin.template']?.dest === '/etc/rancher/k3s/config.yaml',
+    )
+    expect(renderTask?.['ansible.builtin.template'].mode).toBe('0600')
+  })
 })
