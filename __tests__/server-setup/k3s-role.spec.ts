@@ -44,6 +44,20 @@ describe('k3s bundled role', () => {
     expect(defaults.k3s_ephemeral_disk_id ?? '').toBe('')
   })
 
+  it('defaults/main.yml が Longhorn 必須カーネルモジュール（nfs / dm_crypt）を含む', () => {
+    const defaults = loadYaml('defaults', 'main.yml') as Record<string, unknown>
+    const modules = defaults.k3s_kernel_modules as string[]
+
+    // 既存（k3s / コンテナランタイム / iSCSI）
+    expect(modules).toContain('overlay')
+    expect(modules).toContain('br_netfilter')
+    expect(modules).toContain('iscsi_tcp')
+    // Longhorn 要求。未ロードだと longhornctl check preflight が error になり、
+    // RWX / 暗号化ボリュームが使えない（実機 3 ノードで確認）。
+    expect(modules).toContain('nfs')
+    expect(modules).toContain('dm_crypt')
+  })
+
   it('tasks/main.yml がタスク列（配列）としてパースできる', () => {
     const tasks = loadYaml('tasks', 'main.yml')
     expect(Array.isArray(tasks)).toBe(true)
