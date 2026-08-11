@@ -88,14 +88,120 @@
     label: "{{ item.key }}"
 
 # --- time sync ---------------------------------------------------------------
-- name: "k3s : Ensure time sync service is installed (chrony only; timesyncd ships with the OS)"
+# systemd-timesyncd does NOT "ship with the OS": on Ubuntu it is a separate
+# package (verified on ubuntu:24.04 — `Installed: (none)`), and cloud / VPS
+# images commonly ship chrony instead. Enabling a unit that was never installed
+# fails with "Could not find the requested service systemd-timesyncd: host",
+# which is exactly how this role used to break on a fresh host.
+#
+# The two packages are mutually exclusive (both `Provides`/`Conflicts:
+# time-daemon`), so installing one makes apt REMOVE the other. That is why the
+# default `auto` enables whatever the host already has rather than forcing a
+# specific daemon: naming one explicitly is still supported, but then the swap
+# is a deliberate, declared choice.
+- name: "k3s : Validate the requested time sync service"
+  ansible.builtin.assert:
+    that:
+      - k3s_time_sync_service in ['auto', 'systemd-timesyncd', 'chrony']
+    fail_msg: >-
+      k3s_time_sync_service must be one of: auto, systemd-timesyncd, chrony
+      (got '{{ k3s_time_sync_service }}')
+    quiet: true
+
+# Ask systemd for each unit's exact load state rather than grepping
+# `list-unit-files`: that listing also prints units that only exist as a mask
+# symlink (verified — a host running chrony with timesyncd masked prints
+# "systemd-timesyncd.service masked" although the package is not installed), so a
+# substring match would pick the masked unit, let apt remove the working chrony
+# and then fail to start a masked unit. `systemctl show` returns
+# loaded / masked / not-found per unit and exits 0 even for unknown units.
+- name: "k3s : Read the systemd load state of every known time sync unit"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemctl
+      - show
+      - --property=LoadState
+      - --value
+      - "{{ item }}"
+  loop:
+    - systemd-timesyncd.service
+    - chrony.service
+    - ntpsec.service
+    - openntpd.service
+    - ntp.service
+  register: k3s_time_sync_unit_states
+  changed_when: false
+
+- name: "k3s : Map each known time sync unit to its load state"
+  ansible.builtin.set_fact:
+    k3s_time_sync_load_states: >-
+      {{ dict(k3s_time_sync_unit_states.results | map(attribute='item')
+              | zip(k3s_time_sync_unit_states.results | map(attribute='stdout') | map('trim'))) }}
+
+- name: "k3s : Fail when installing would disturb another time sync daemon"
+  # Reached only when `auto` found no usable managed daemon, i.e. the next task
+  # would install systemd-timesyncd. Every Debian/Ubuntu time daemon declares
+  # `Conflicts: time-daemon`, so that install REMOVES whatever other one is on the
+  # host — the exact surprise `auto` exists to avoid. Requiring every known unit to
+  # be `not-found` (rather than enumerating bad states) keeps this symmetric: an
+  # unmanaged daemon (ntpsec/openntpd/ntp) and a deliberately masked timesyncd or
+  # chrony are all refused, and no state slips through the gap of an enumeration.
+  # Only a host with no time daemon at all installs one; naming a service
+  # explicitly still opts into the swap.
+  ansible.builtin.assert:
+    that:
+      - >-
+        k3s_time_sync_load_states | dict2items
+        | rejectattr('value', 'equalto', 'not-found') | list | length == 0
+    fail_msg: >-
+      This host already has a time sync daemon that the k3s role would disturb:
+      installing systemd-timesyncd removes it (Conflicts: time-daemon), and a
+      masked unit would stay unstartable. Keep using it, or set
+      k3s_time_sync_service to 'systemd-timesyncd' or 'chrony' to deliberately
+      replace it. Load states: {{ k3s_time_sync_load_states }}
+    quiet: true
+  when:
+    - k3s_time_sync_service == 'auto'
+    - k3s_time_sync_load_states['systemd-timesyncd.service'] != 'loaded'
+    - k3s_time_sync_load_states['chrony.service'] != 'loaded'
+
+- name: "k3s : Resolve which time sync service to enable"
+  ansible.builtin.set_fact:
+    # auto -> the daemon already usable on the host (timesyncd preferred when both
+    # are somehow loaded); systemd-timesyncd when the host has neither. Only
+    # `loaded` counts: a masked or absent unit cannot be started.
+    k3s_time_sync_resolved: >-
+      {{
+        k3s_time_sync_service if k3s_time_sync_service != 'auto'
+        else ('systemd-timesyncd' if k3s_time_sync_load_states['systemd-timesyncd.service'] == 'loaded'
+              else ('chrony' if k3s_time_sync_load_states['chrony.service'] == 'loaded'
+                    else 'systemd-timesyncd'))
+      }}
+
+- name: "k3s : Ensure the resolved time sync service package is installed"
+  # Inline literal allowlist (NOT a defaults var — role vars are overridable from
+  # the recipe body, so a defaults-based map would be no allowlist at all): the
+  # resolved value can only ever map to one of these two package names, never to
+  # an attacker-chosen one. An unknown key raises an undefined-key error instead
+  # of installing something arbitrary.
+  # Naturally idempotent: when the unit was detected above the package is already
+  # present, so apt reports changed=0 and no daemon is swapped out.
   ansible.builtin.apt:
-    name: chrony
+    name: "{{ {'systemd-timesyncd': 'systemd-timesyncd', 'chrony': 'chrony'}[k3s_time_sync_resolved] }}"
     state: present
-  when: k3s_time_sync_service == 'chrony'
+    # Same pattern as the first task of this file: a host whose apt cache was
+    # never populated fails with "No package matching 'systemd-timesyncd' is
+    # available" (reproduced in a clean Ubuntu 24.04 container). cache_valid_time
+    # makes the refresh a no-op when it already ran earlier in the same play.
+    update_cache: true
+    cache_valid_time: 3600
 
 - name: "k3s : Enable and start the time sync service"
+  # Same inline literal allowlist as the apt task above, so this task is safe on
+  # its own instead of relying on the assert task staying in front of it: a future
+  # split/reorder cannot turn `name:` back into a raw recipe-controlled value that
+  # would start an arbitrary unit.
   ansible.builtin.systemd:
-    name: "{{ k3s_time_sync_service }}"
+    name: "{{ {'systemd-timesyncd': 'systemd-timesyncd', 'chrony': 'chrony'}[k3s_time_sync_resolved] }}"
     enabled: true
     state: started
