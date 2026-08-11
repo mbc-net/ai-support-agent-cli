@@ -1359,6 +1359,88 @@ describe('runServerSetup - secret redaction and no_log', () => {
   })
 })
 
+describe('runServerSetup - ansible verbosity is never inherited', () => {
+  const ORIGINAL_ENV = process.env
+  beforeEach(() => {
+    process.env = { ...ORIGINAL_ENV }
+  })
+  afterEach(() => {
+    process.env = ORIGINAL_ENV
+  })
+
+  // Ansible's `environment:` keyword is NOT a secret-safe channel: at -vvv the
+  // connection plugin prints the EXEC line with every environment value in
+  // cleartext, and `no_log: true` does not suppress it (verified with a real
+  // ansible-playbook run — the value appears once at -vvv and never at the
+  // default verbosity). Several bundled roles pass secrets that way (k3s's
+  // K3S_TOKEN among them), so the runner must not let a verbose setting reach
+  // ansible-playbook: the agent host's own ANSIBLE_VERBOSITY / ANSIBLE_DEBUG
+  // would otherwise be inherited through `...process.env` and turn every run
+  // into a secret-printing one.
+  //
+  // ANSIBLE_DIFF_ALWAYS is the same class of hazard for a different channel:
+  // it turns on diff output globally, and a `copy` task's diff shows the new
+  // file content — which for the roles that write a secret to a 0600 file IS
+  // the secret (verified: the value is printed once with the variable set, and
+  // not at all without it).
+  it.each(['ANSIBLE_VERBOSITY', 'ANSIBLE_DEBUG', 'ANSIBLE_DIFF_ALWAYS'])(
+    'strips %s from the environment passed to ansible-playbook',
+    async (varName) => {
+      process.env[varName] = '4'
+      const client = makeClient()
+      const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+      await flushUntilExecFileCalled()
+      resolveExecFile(0, defaultOutput())
+      await runPromise
+
+      const [, , options] = mockExecFile.mock.calls[0]
+      const env = (options as { env: NodeJS.ProcessEnv }).env
+      expect(env[varName]).toBeUndefined()
+    },
+  )
+
+  // Blocking the env vars alone is not enough: verbosity and diff are also ini
+  // settings (`[defaults] verbosity`, `[defaults] debug`, `[diff] always`), and
+  // ansible reads them from ANSIBLE_CONFIG or an ansible.cfg found in the cwd /
+  // home / /etc. The runner therefore points ANSIBLE_CONFIG at its own locked
+  // down config in the temp dir, so no inherited ini file can re-enable them.
+  it('pins ANSIBLE_CONFIG to a generated config that disables verbosity and diff', async () => {
+    process.env.ANSIBLE_CONFIG = '/somewhere/hostile/ansible.cfg'
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+
+    const tmpDir = mockMkdtempSync.mock.results[0].value as string
+    const [, , options] = mockExecFile.mock.calls[0]
+    const env = (options as { env: NodeJS.ProcessEnv }).env
+    expect(env.ANSIBLE_CONFIG).toBe(`${tmpDir}/ansible.cfg`)
+
+    const cfgCall = mockWriteFileSync.mock.calls.find((c) => String(c[0]).endsWith('ansible.cfg'))
+    expect(cfgCall).toBeDefined()
+    const cfg = String(cfgCall?.[1])
+    expect(cfg).toMatch(/^\s*verbosity\s*=\s*0\s*$/m)
+    expect(cfg).toMatch(/^\s*debug\s*=\s*False\s*$/m)
+    expect(cfg).toMatch(/^\s*\[diff\]\s*$/m)
+    expect(cfg).toMatch(/^\s*always\s*=\s*False\s*$/m)
+  })
+
+  it('still passes the callback settings the run depends on', async () => {
+    process.env.ANSIBLE_VERBOSITY = '4'
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+
+    const [, , options] = mockExecFile.mock.calls[0]
+    const env = (options as { env: NodeJS.ProcessEnv }).env
+    expect(env.ANSIBLE_STDOUT_CALLBACK).toBe('json')
+    expect(env.ANSIBLE_ROLES_PATH).toMatch(/ansible[/\\]roles$/)
+  })
+})
+
 describe('runServerSetup - opt-in non-root ansible-playbook execution', () => {
   const ORIGINAL_ENV = process.env
   beforeEach(() => {

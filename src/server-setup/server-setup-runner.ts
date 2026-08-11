@@ -893,6 +893,20 @@ export async function executeServerSetupAnsible(
       const playbookPath = path.join(tmpDir, 'generated-playbook.yml')
       writeFileSync(playbookPath, generatePlaybook(guardResult.normalizedTasks))
 
+      // Verbosity and diff are ini settings as much as they are env vars, and
+      // ansible picks up an ansible.cfg from ANSIBLE_CONFIG, the cwd, the home
+      // dir or /etc. Clearing the env vars alone would leave every one of those
+      // paths able to switch the secret-printing channels back on, so point
+      // ANSIBLE_CONFIG at a config this run owns and state the safe values
+      // explicitly. Nothing in this repo ships an ansible.cfg, and every setting
+      // the run depends on is passed as an env var (which outranks ini), so
+      // pinning the config file costs the run nothing.
+      const ansibleCfgPath = path.join(tmpDir, 'ansible.cfg')
+      writeFileSync(
+        ansibleCfgPath,
+        ['[defaults]', 'verbosity = 0', 'debug = False', '', '[diff]', 'always = False', ''].join('\n'),
+      )
+
       const args = ['-i', inventoryPath, playbookPath, '-e', `@${extraVarsPath}`]
 
       logger.info(
@@ -900,6 +914,30 @@ export async function executeServerSetupAnsible(
       )
       const { code, stdout: rawStdout, stderr: rawStderr, timedOut, spawnError } = await runAnsiblePlaybook(args, {
         ...process.env,
+        // Ansible's `environment:` keyword is not a secret-safe channel: at -vvv
+        // the connection plugin prints the EXEC line with every environment
+        // value in cleartext, and `no_log: true` does not suppress it (verified
+        // with a real run — the value appears at -vvv and never at the default
+        // verbosity). Bundled roles do pass secrets that way (k3s's K3S_TOKEN),
+        // so a verbose setting on the agent host must not reach ansible-playbook
+        // through the inherited environment above and turn every run into a
+        // secret-printing one. Overriding to undefined (rather than deleting)
+        // keeps the spread order meaningful regardless of what was inherited.
+        //
+        // ANSIBLE_DIFF_ALWAYS is the same hazard through a different channel: it
+        // turns on diff output globally, and a `copy` task's diff prints the new
+        // file content — which, for the roles that write a secret to a 0600
+        // file, is the secret itself (verified: printed once with the variable
+        // set, never without it). The `copy` module redacts its `content`
+        // parameter on its own, so the diff is the one way that value can still
+        // reach stdout.
+        ANSIBLE_VERBOSITY: undefined,
+        ANSIBLE_DEBUG: undefined,
+        ANSIBLE_DIFF_ALWAYS: undefined,
+        // Overrides any inherited ANSIBLE_CONFIG and stops ansible from picking
+        // up an ansible.cfg from the cwd / home / /etc that could set the same
+        // options through the ini layer.
+        ANSIBLE_CONFIG: ansibleCfgPath,
         ANSIBLE_STDOUT_CALLBACK: 'json',
         // Lets the generated playbook (written to tmpDir, outside
         // ansible/roles/) resolve the 6 bundled roles by name via `include_role`.

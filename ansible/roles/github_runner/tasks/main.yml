@@ -208,23 +208,31 @@
   changed_when: false
 
 - name: "github_runner : Write the minted registration token to its temp file (PAT flow)"
+  # No task-level `no_log`: `copy`'s `content` parameter is declared no_log in the
+  # module's own argument spec, so the value is redacted from the result at every
+  # verbosity (verified — it never appears, on success or failure, even at -vvv).
+  # A task-level `no_log` would add no secrecy and would replace a failure (bad
+  # path, permissions, full disk) with a bare "<task> failed".
   ansible.builtin.copy:
     content: "{{ github_runner_regtoken_resp.json.token }}"
     dest: "{{ github_runner_regtoken_tempfile.path }}"
     owner: "{{ github_runner_user | default('appuser') }}"
     mode: '0600'
-  no_log: true
   changed_when: true
   when: github_runner_has_pat | bool
 
 # --- Direct flow: use the supplied registration token as-is ---
 - name: "github_runner : Write the supplied registration token to its temp file (direct flow)"
+  # No task-level `no_log`: `copy`'s `content` parameter is declared no_log in the
+  # module's own argument spec, so the value is redacted from the result at every
+  # verbosity (verified — it never appears, on success or failure, even at -vvv).
+  # A task-level `no_log` would add no secrecy and would replace a failure (bad
+  # path, permissions, full disk) with a bare "<task> failed".
   ansible.builtin.copy:
     content: "{{ github_runner_registration_token }}"
     dest: "{{ github_runner_regtoken_tempfile.path }}"
     owner: "{{ github_runner_user | default('appuser') }}"
     mode: '0600'
-  no_log: true
   changed_when: true
   when: github_runner_has_regtoken | bool
 

@@ -40,6 +40,7 @@ interface AnsibleTask {
   ignore_errors?: boolean
   when?: unknown
   vars?: unknown
+  loop?: unknown
   block?: AnsibleTask[]
   rescue?: AnsibleTask[]
   always?: AnsibleTask[]
@@ -47,26 +48,16 @@ interface AnsibleTask {
 }
 
 /**
- * まだ失敗理由を表面化していない既知のタスク（ベースライン）。
+ * まだ失敗理由を表面化していない既知のタスク（ベースライン）。**現在は空**。
  *
- * いずれも秘匿値を 0600 の一時ファイルへ書く `copy` タスクで、失敗は権限・パス・
- * ディスク等の環境要因に限られる。実行時のリスクが低いため今回の修正対象からは
- * 外しているが、**新しい no_log タスクをここに足してはならない**。手当てを入れて
- * この一覧から消すことはよいことで、その場合は本テストがそれを検出して落ちる
- * （そのときは一覧から行を削除する）。
+ * 以前は秘匿値を 0600 一時ファイルへ書く `copy` タスク 10 件が載っていたが、
+ * `copy` の `content` はモジュールの引数仕様側で `no_log` 指定されており、タスクに
+ * `no_log` を付けなくても値は出力されない（実測: 成功・失敗・`-vvv` のいずれでも 0 回）。
+ * よってタスクレベルの `no_log` は保護に寄与せず失敗理由を隠すだけだったため削除した。
+ * ループ付きの 1 件だけは `item` そのものが出力されるため `no_log` を残し、診断タスクを
+ * 追加している。**この一覧を再び増やしてはならない。**
  */
-const KNOWN_UNSURFACED_TASKS: readonly string[] = [
-  'ai_support_agent : Write each token into its own temp file',
-  'claude_cli : Persist ANTHROPIC_API_KEY for systemd --user services',
-  'claude_cli : Persist CLAUDE_CODE_OAUTH_TOKEN for systemd --user services',
-  'codex : Write the API key into its temp file',
-  'codex : Write the OAuth access token into its temp file',
-  'github_runner : Write the minted registration token to its temp file (PAT flow)',
-  'github_runner : Write the supplied registration token to its temp file (direct flow)',
-  'gitlab_runner : Write the token into its temp file',
-  'k3s : Write etcd-S3 credentials drop-in (0600, secret)',
-  'tailscale : Write the auth key to its 0600 temp file',
-]
+const KNOWN_UNSURFACED_TASKS: readonly string[] = []
 
 /** 失敗しても運用者への診断が要らないモジュール（ローカルの変数計算のみ）。 */
 const DIAGNOSIS_EXEMPT_MODULES = ['ansible.builtin.set_fact']
@@ -240,6 +231,22 @@ describe('bundled roles: no_log タスクの失敗理由が表面化される', 
     })
   })
 
+  it('loop を持たない copy タスクに no_log を付けない（content は元から伏字化される）', () => {
+    // `copy` の `content` はモジュールの引数仕様で no_log 指定されているため、タスクに
+    // no_log を付けなくても値は出力されない（実測で確認）。付けると失敗理由だけが消える。
+    // ループ付きは別（結果に `item` が出るため no_log が実際に機能する）。
+    const hidden = files
+      .flatMap(({ file, tasks }) => tasks.map((task) => ({ file, task })))
+      .filter(
+        ({ task }) =>
+          task.no_log === true &&
+          task.loop === undefined &&
+          task['ansible.builtin.copy'] !== undefined,
+      )
+      .map(({ file, task }) => `${file}: ${task.name ?? '(no name)'}`)
+    expect(hidden).toEqual([])
+  })
+
   it('failed_when: false のタスクを .failed / .changed で診断していない（死んだ診断の防止）', () => {
     // 実測: `failed_when: false` を付けた失敗タスクの register は `.failed == False`。
     // この組み合わせは「診断タスクが一度も発火せず、失敗が成功として完走する」退行を生む。
@@ -247,6 +254,20 @@ describe('bundled roles: no_log タスクの失敗理由が表面化される', 
       .filter(({ task, siblings }) => usesUnreliableVerdict(task, consumersOf(task, siblings)))
       .map(({ name }) => name)
     expect(dead).toEqual([])
+  })
+
+  it('ループ付き no_log タスクは results 不在（タスク全体の失敗）も診断する', () => {
+    // `ignore_errors` はタスク全体の失敗も飲み込む。その場合 register に `.results` が
+    // 無く、項目単位の診断は「0件失敗」と読んで skip してしまう（実測）。この形も
+    // 明示的に捕まえる診断が必要。
+    const guard = files
+      .flatMap(({ tasks }) => tasks)
+      .find((t) =>
+        JSON.stringify(t.when ?? '').includes('ai_support_agent_token_writes.results is not defined'),
+      )
+    expect(guard).toBeDefined()
+    expect(guard?.no_log).toBeUndefined()
+    expect(JSON.stringify(guard?.when ?? '')).toContain('ai_support_agent_token_writes.failed')
   })
 
   it('ai_support_agent のトークン検証は no_log なしで案内を出せる', () => {
