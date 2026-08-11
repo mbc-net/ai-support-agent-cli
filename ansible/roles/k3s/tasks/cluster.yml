@@ -19,13 +19,18 @@
       added later would drift to a different version.
 
 - name: "k3s : Validate k3s_token is set"
+  # No `no_log` here even though the value is secret: this assert has no `loop`,
+  # so its result carries only the `that` expression text and the static
+  # fail_msg — never the value (verified with a real run). `no_log` would replace
+  # the whole result with "the output has been hidden ...", which is exactly how
+  # this task used to leave an operator who mistyped the variable name with
+  # nothing but "Validate k3s_token is set failed" and no way to see the fix.
   ansible.builtin.assert:
     that:
       - (k3s_token | default('') | trim | length) > 0
     fail_msg: >-
       k3s_token is required (the shared cluster token, same on every node).
       Reference an ANSIBLE# secret variable, e.g. k3s_token: "{{ '{{' }} K3S_TOKEN {{ '}}' }}".
-  no_log: true
 
 - name: "k3s : Validate join options when k3s_bootstrap is join"
   ansible.builtin.assert:
@@ -46,7 +51,8 @@
     fail_msg: >-
       k3s_etcd_s3_enabled=true requires k3s_etcd_s3_bucket, k3s_etcd_s3_access_key
       and k3s_etcd_s3_secret_key (reference ANSIBLE# secret variables for the keys).
-  no_log: true
+  # Same reasoning as the k3s_token assert above: no loop, so no value is echoed
+  # and `no_log` would only hide the instructions.
   when: k3s_etcd_s3_enabled | bool
 
 # --- config files ------------------------------------------------------------
