@@ -111,15 +111,39 @@
       (a list of {token, project_code?, api_url?} entries) or the legacy
       ai_support_agent_token variable.
 
+- name: "ai_support_agent : Collect token list entries whose token is empty"
+  # Aggregated here rather than asserted per item: a looped task echoes `item`
+  # itself (verified — the token printed in cleartext), so the assert below used
+  # to need `no_log: true`. But `no_log` replaces the whole result with
+  # "censored" and drops `msg`, so its fail_msg never reached the operator — a
+  # mistyped secret variable name surfaced only as "<task> failed". Reducing to
+  # the offending project_codes first lets the assert run WITHOUT `no_log`,
+  # naming what to fix while never touching a token value.
+  ansible.builtin.set_fact:
+    ai_support_agent_empty_token_entries: >-
+      {{ ai_support_agent_configure_items
+         | rejectattr('token', 'defined')
+         | map(attribute='project_code', default='(no project_code)') | list
+         + (ai_support_agent_configure_items
+            | selectattr('token', 'defined')
+            | rejectattr('token', 'string') | map(attribute='project_code', default='(no project_code)') | list)
+         + (ai_support_agent_configure_items
+            | selectattr('token', 'defined')
+            | selectattr('token', 'string')
+            | selectattr('token', 'match', '^\s*$')
+            | map(attribute='project_code', default='(no project_code)') | list) }}
+
 - name: "ai_support_agent : Validate every token list entry has a non-empty token"
+  # No `no_log`: this assert reports only project_codes, never a token.
   ansible.builtin.assert:
     that:
-      - item.token is defined and item.token is string and (item.token | trim | length > 0)
+      - ai_support_agent_empty_token_entries | length == 0
     fail_msg: >-
-      Every ai_support_agent_tokens entry must have a non-empty 'token'
-      field.
-  loop: "{{ ai_support_agent_configure_items }}"
-  no_log: true
+      Every ai_support_agent_tokens entry must have a non-empty 'token' field.
+      These entries (by project_code) have an empty or missing token:
+      {{ ai_support_agent_empty_token_entries | join(', ') }}.
+      A token is usually empty because the ANSIBLE# secret variable it
+      references does not exist under that exact name.
 
 - name: "ai_support_agent : Validate nvm role has been run for this user"
   ansible.builtin.stat:

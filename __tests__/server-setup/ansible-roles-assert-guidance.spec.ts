@@ -61,8 +61,9 @@ function assertArgsOf(task: AnsibleTask): AssertArgs | undefined {
  * 可能性が高いので、追加時に「item が本当に秘匿値を含むか」を必ず判断させる。
  */
 const LOOPED_NO_LOG_ALLOWLIST: ReadonlySet<string> = new Set([
-  // item に configure 用トークンが含まれるため、no_log なしでは平文で出力される（実測）。
-  'ai_support_agent : Validate every token list entry has a non-empty token',
+  // 現在は該当なし。ai_support_agent のトークン空チェックはループをやめて project_code を
+  // 集計する方式にしたため no_log 不要になった。ここに足す場合は「item が本当に秘匿値を
+  // 含むか」「案内を隠してでも隠すべき値か」を必ず judge すること。
 ])
 
 /** block/rescue/always にネストしたタスクも含めて平坦化する。 */

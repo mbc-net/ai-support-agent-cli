@@ -79,6 +79,12 @@
 # community.mysql.mysql_user documentation (ansible.mysql.mysql_user shares
 # the same module interface).
 - name: "database : Set MySQL root password"
+  # `no_log` is required (the password is a module parameter), but a `no_log`
+  # failure is reported as a bare "<task> failed": Ansible replaces the whole
+  # result with `censored` and drops `msg` entirely, so the runner has nothing
+  # left to show. Run to completion instead and let the next task report the
+  # reason — the same "no_log + separate diagnostic" pattern the codex /
+  # gitlab_runner / github_runner / tailscale / k3s tasks already use.
   ansible.mysql.mysql_user:
     name: root
     host: localhost
@@ -88,7 +94,35 @@
     login_user: root
     login_password: "{{ db_root_password }}"
   when: (db_type | default('')) == 'mysql' and db_root_password is defined
+  register: db_mysql_root_password_result
+  # `ignore_errors`, NOT `failed_when: false`: the latter forces the task's
+  # failure verdict to false and that verdict is what lands in the registered
+  # result, so `.failed` would read False even when the module failed and the
+  # diagnostic below would never fire (verified: a failing module registered
+  # with `failed_when: false` reports `failed=False`, with `ignore_errors: true`
+  # it reports `failed=True`). The shell-based tasks in the other roles can use
+  # `failed_when: false` because they inspect the raw `.rc` instead; a Python
+  # module has no rc.
+  ignore_errors: true
   no_log: true
+
+- name: "database : Fail if the MySQL root password could not be set (password-safe diagnostic)"
+  # Not `no_log`, so this message is actually delivered. It reports the module's
+  # own error, which describes the connection/auth problem ("Access denied ...",
+  # "unable to connect ...") and never echoes the password back — mysql_user
+  # takes the password as a parameter and does not include parameters in its
+  # error text.
+  ansible.builtin.fail:
+    msg: >-
+      Setting the MySQL root password failed. Module error:
+      {{ db_mysql_root_password_result.msg | default('(no message)') }} —
+      check that mysqld is running and reachable on
+      /var/run/mysqld/mysqld.sock, that python3-pymysql is installed, and that
+      db_root_password matches the password root already has (a re-run with a
+      different password cannot authenticate).
+  when:
+    - (db_type | default('')) == 'mysql' and db_root_password is defined
+    - db_mysql_root_password_result.failed | default(false)
 
 - name: "database : Install PostgreSQL server"
   ansible.builtin.apt:
@@ -113,9 +147,26 @@
   when: (db_type | default('')) == 'postgresql' and db_root_password is defined
 
 - name: "database : Set PostgreSQL postgres user password"
+  # Same reasoning as the MySQL task above: keep `no_log` for the parameter, but
+  # do not let it swallow the reason for the failure.
   become_user: postgres
   community.postgresql.postgresql_user:
     name: postgres
     password: "{{ db_root_password }}"
   when: (db_type | default('')) == 'postgresql' and db_root_password is defined
+  register: db_postgres_password_result
+  # See the MySQL task above for why this is `ignore_errors`, not `failed_when`.
+  ignore_errors: true
   no_log: true
+
+- name: "database : Fail if the PostgreSQL password could not be set (password-safe diagnostic)"
+  ansible.builtin.fail:
+    msg: >-
+      Setting the postgres user password failed. Module error:
+      {{ db_postgres_password_result.msg | default('(no message)') }} —
+      check that the postgresql service is running, that python3-psycopg2 is
+      installed, and that the postgres OS user can reach the local socket
+      (this task runs as become_user: postgres).
+  when:
+    - (db_type | default('')) == 'postgresql' and db_root_password is defined
+    - db_postgres_password_result.failed | default(false)
