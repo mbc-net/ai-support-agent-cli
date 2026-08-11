@@ -1,0 +1,165 @@
+---
+# tailscale role: installs Tailscale via the official installer and joins the
+# host to a tailnet non-interactively with an auth key.
+#
+# **Auth key handling (secret).** tailscale_authkey (tskey-auth-...) is written
+# to a 0600 tempfile and passed to `tailscale up` as `--auth-key=file:<path>`
+# (Tailscale reads the key from the file), so the key never appears on argv, in
+# a shell command line, or in `environment:`. The `tailscale up` task is
+# `no_log: true`; the tempfile is removed unconditionally, and a separate
+# non-no_log `fail` surfaces only the exit code (never the key) for diagnostics.
+#
+# **Shell-injection safety for non-secret inputs.** Every tenant-supplied,
+# non-secret value that reaches the `shell` task (hostname, routes, tags) is
+# passed via `environment:` and referenced as a quoted "$VAR" appended to a bash
+# array — NEVER Jinja-interpolated into the script text. The task guard
+# (src/server-setup/ansible-task-guard.ts) validates include_role var *names*
+# only, not their *values*, so a value like `tailscale_hostname: "x; rm -rf /"`
+# must not be able to break out of the script.
+#
+# **Install host is pinned.** The installer URL is checked against an INLINE
+# LITERAL (https://tailscale.com/install.sh) by an assert so a recipe cannot
+# redirect the installer even though tailscale_install_url is a role variable
+# (any role var is overridable by the recipe's include_role task-level vars).
+
+- name: "tailscale : Compute whether an auth key is configured"
+  ansible.builtin.set_fact:
+    tailscale_has_authkey: "{{ (tailscale_authkey | default('') | trim | length) > 0 }}"
+  no_log: true
+
+- name: "tailscale : Validate an auth key is configured"
+  ansible.builtin.assert:
+    that:
+      - tailscale_has_authkey | bool
+    fail_msg: >-
+      tailscale_authkey is required. Supply a Tailscale auth key (tskey-auth-...)
+      as an ANSIBLE# secret variable and reference it from the recipe.
+
+- name: "tailscale : Pin the installer URL to the official host (non-overridable check)"
+  ansible.builtin.assert:
+    that:
+      - (tailscale_install_url | default('')) == 'https://tailscale.com/install.sh'
+    fail_msg: >-
+      tailscale_install_url must be the official installer
+      (https://tailscale.com/install.sh); a recipe may not redirect it.
+
+- name: "tailscale : Check whether the tailscale binary is already present"
+  ansible.builtin.stat:
+    path: /usr/bin/tailscale
+  register: tailscale_bin
+
+- name: "tailscale : Download the official installer to a temp file"
+  ansible.builtin.get_url:
+    url: "{{ tailscale_install_url }}"
+    dest: /tmp/tailscale-install.sh
+    mode: '0755'
+    timeout: 60
+  when: not tailscale_bin.stat.exists
+
+- name: "tailscale : Run the official installer"
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - /tmp/tailscale-install.sh
+  register: tailscale_install_result
+  when: not tailscale_bin.stat.exists
+  changed_when: tailscale_install_result.rc == 0
+
+- name: "tailscale : Remove the installer temp file (runs regardless of install path)"
+  ansible.builtin.file:
+    path: /tmp/tailscale-install.sh
+    state: absent
+  changed_when: false
+
+- name: "tailscale : Ensure the tailscaled service is enabled and started"
+  ansible.builtin.systemd:
+    name: tailscaled
+    enabled: true
+    state: started
+
+- name: "tailscale : Enable IP forwarding for subnet router / exit node"
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: "1"
+    sysctl_file: /etc/sysctl.d/99-tailscale.conf
+    sysctl_set: true
+    reload: true
+  loop:
+    - net.ipv4.ip_forward
+    - net.ipv6.conf.all.forwarding
+  when: >-
+    (tailscale_advertise_routes | default('') | trim | length) > 0
+    or (tailscale_advertise_exit_node | default(false) | bool)
+
+- name: "tailscale : Create a secure temp file for the auth key"
+  ansible.builtin.tempfile:
+    state: file
+    prefix: tailscale_authkey_
+  register: tailscale_authkey_tempfile
+  changed_when: false
+
+- name: "tailscale : Write the auth key to its 0600 temp file"
+  ansible.builtin.copy:
+    content: "{{ tailscale_authkey }}"
+    dest: "{{ tailscale_authkey_tempfile.path }}"
+    mode: '0600'
+  no_log: true
+  changed_when: true
+
+- name: "tailscale : Join the tailnet (tailscale up)"
+  # The auth key is read by tailscale from the 0600 tempfile via the
+  # `--auth-key=file:` scheme — never on argv. All non-secret flags come from
+  # environment: and are referenced as quoted "$VAR" appended to a bash array,
+  # never Jinja-interpolated into the script text (shell-injection safety).
+  # failed_when:false so the cleanup + diagnostic below always run.
+  ansible.builtin.shell: |
+    set -e
+    ARGS=(--auth-key="file:$TS_KEYFILE" --timeout "$TS_TIMEOUT")
+    if [ -n "$TS_HOSTNAME" ]; then ARGS+=(--hostname "$TS_HOSTNAME"); fi
+    if [ "$TS_SSH" = "true" ]; then ARGS+=(--ssh); fi
+    if [ -n "$TS_ROUTES" ]; then ARGS+=(--advertise-routes "$TS_ROUTES"); fi
+    if [ "$TS_EXIT_NODE" = "true" ]; then ARGS+=(--advertise-exit-node); fi
+    if [ "$TS_ACCEPT_ROUTES" = "true" ]; then ARGS+=(--accept-routes); fi
+    if [ -n "$TS_TAGS" ]; then ARGS+=(--advertise-tags "$TS_TAGS"); fi
+    tailscale up "${ARGS[@]}"
+  args:
+    executable: /bin/bash
+  environment:
+    TS_KEYFILE: "{{ tailscale_authkey_tempfile.path }}"
+    TS_TIMEOUT: "{{ tailscale_up_timeout | default('120s') }}"
+    TS_HOSTNAME: "{{ tailscale_hostname | default('') }}"
+    TS_SSH: "{{ (tailscale_ssh | default(false)) | bool | lower }}"
+    TS_ROUTES: "{{ tailscale_advertise_routes | default('') }}"
+    TS_EXIT_NODE: "{{ (tailscale_advertise_exit_node | default(false)) | bool | lower }}"
+    TS_ACCEPT_ROUTES: "{{ (tailscale_accept_routes | default(false)) | bool | lower }}"
+    TS_TAGS: "{{ tailscale_advertise_tags | default('') }}"
+  register: tailscale_up_result
+  failed_when: false
+  no_log: true
+  changed_when: tailscale_up_result.rc == 0
+
+- name: "tailscale : Remove the auth key temp file (runs regardless of outcome)"
+  ansible.builtin.file:
+    path: "{{ tailscale_authkey_tempfile.path }}"
+    state: absent
+  changed_when: false
+
+- name: "tailscale : Fail if tailscale up failed (key-safe diagnostic)"
+  ansible.builtin.fail:
+    msg: >-
+      tailscale up failed (rc={{ tailscale_up_result.rc | default(1) }}). Verify
+      the auth key is valid/unexpired and (for a tagged key) that
+      tailscale_advertise_tags is set. stderr (auth key redacted):
+      {{ tailscale_up_result.stderr | default('') | regex_replace('tskey-[A-Za-z0-9-]+', 'tskey-<redacted>') }}
+  when: (tailscale_up_result.rc | default(1) | int) != 0
+
+- name: "tailscale : Note that advertised routes / exit node require admin-console approval"
+  ansible.builtin.debug:
+    msg: >-
+      tailscale up succeeded, but any advertised subnet routes / exit node are
+      NOT active until approved in the Tailscale admin console (unless an
+      auto-approver ACL is configured). Approve this node's routes/exit-node in
+      the admin console; otherwise traffic through it will not be routed.
+  when: >-
+    (tailscale_advertise_routes | default('') | trim | length) > 0
+    or (tailscale_advertise_exit_node | default(false) | bool)

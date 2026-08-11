@@ -1,0 +1,68 @@
+---
+# ansible-lint config for ansible/roles/*.
+#
+# Goal: catch real correctness / safety problems in the bundled roles without
+# failing CI on the stylistic opinions that the current 14 roles were not
+# written to satisfy. We start from the `basic` profile (syntax, deprecations,
+# obvious foot-guns) rather than `production`, which would fail the existing
+# roles wholesale on FQCN/name/var-naming opinions unrelated to correctness.
+#
+# Every entry in skip_list/warn_list has an explicit reason. Prefer moving a
+# rule from skip_list to warn_list (visible but non-fatal) over silencing it
+# entirely, and re-evaluate as roles are cleaned up. Existing role .yml is not
+# edited to satisfy lint — this config absorbs the pre-existing style.
+profile: basic
+
+exclude_paths:
+  - collections/
+  - molecule/**/collections/
+  # Custom stdout callback plugin — validated separately by its own Python
+  # tests (callback_plugins/tests/); it is not an Ansible role/playbook.
+  - callback_plugins/
+  # Kubernetes manifest consumed by the k3s role via copy/template, not an
+  # Ansible playbook — linting it as Ansible produces false positives.
+  - roles/k3s/files/
+
+# Rules downgraded to warnings (reported, non-fatal). These are real style
+# nudges we want visible for NEW roles but that the existing roles predate.
+warn_list:
+  # var-naming[no-role-prefix]: several roles read shared/handoff facts that
+  # are intentionally not prefixed with the role name (e.g. node_version,
+  # nvm_user defaults documented in the role headers). Warn, don't fail.
+  - var-naming[no-role-prefix]
+  # name[casing] / name[template]: task-name casing/format is cosmetic here;
+  # the roles use a deliberate "<role> : ..." prefix convention the runner
+  # parses, which trips ansible-lint's own casing expectations.
+  - name[casing]
+  # yaml: yamllint is run separately (.yamllint) as the authoritative YAML
+  # style gate; avoid double-failing on the same findings here.
+  - yaml
+  # partial-become[task]: several roles set `become_user:` on individual tasks
+  # (nvm/claude_cli/codex/ai_support_agent -> appuser, database -> postgres)
+  # WITHOUT a task-level `become: true`, because at runtime they run under the
+  # dynamically generated play whose play-level `become: true` supplies it
+  # (see generatePlaybook() in src/server-setup/server-setup-runner.ts). When
+  # ansible-lint inspects the roles in isolation there is no play context, so
+  # it flags this correct pattern. Keep it visible (warning) but non-fatal.
+  - partial-become[task]
+
+# Rules disabled outright, each with a concrete reason tied to how these roles
+# actually run in production (dynamically generated play, not this repo's
+# static playbook.yml).
+skip_list:
+  # command-instead-of-module / no-changed-when are handled deliberately: the
+  # roles wrap `ufw`, `nvm`, etc. in command/shell with explicit changed_when
+  # guards where a module does not exist or is unsuitable. These are reviewed
+  # in code, not lint-enforced.
+  - no-changed-when
+  # fqcn[action-core] is already satisfied (roles use ansible.builtin.*), but
+  # fqcn[canonical] can flag builtin aliases; not worth failing CI over.
+  - fqcn[canonical]
+  # role-name: role directories (os_init, ssh_key, ...) use snake_case that is
+  # valid but can trip the galaxy role-name regex; these are local roles, not
+  # Galaxy-published, so the Galaxy naming rule does not apply.
+  - role-name
+  # schema[meta]/galaxy: local roles have no meta/main.yml galaxy_info block
+  # (they are bundled, not published to Galaxy), so meta/galaxy rules are N/A.
+  - meta-no-info
+  - galaxy

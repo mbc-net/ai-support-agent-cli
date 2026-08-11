@@ -25,6 +25,11 @@
     "dist",
     "docker",
     "ansible",
+    "!ansible/molecule/**",
+    "!ansible/.ansible-lint",
+    "!ansible/.yamllint",
+    "!ansible/DEVELOPING.md",
+    "!ansible/requirements.yml",
     "!ansible/callback_plugins/tests/**",
     "playwright.subprocess.config.js",
     "LICENSE",
@@ -33,13 +38,17 @@
   ],
   "scripts": {
     "dev": "node --env-file-if-exists=.env --require ts-node/register src/index.ts",
+    "server-setup:local-run": "node --env-file-if-exists=.env --require ts-node/register src/server-setup/server-setup-local-run.cli.ts",
     "build": "tsc && cp -r src/locales dist/locales && cp -r src/plugin dist/plugin && chmod +x dist/plugin/hooks/scripts/*.sh",
     "prepublishOnly": "npm run build && npm test",
     "test": "jest",
     "test:cov": "jest --coverage",
     "test:unit": "jest --selectProjects unit",
     "test:integration": "jest --selectProjects integration",
-    "test:security": "jest --selectProjects unit --testPathPatterns security"
+    "test:security": "jest --selectProjects unit --testPathPatterns security",
+    "ansible:lint": "yamllint -c ansible/.yamllint ansible/roles ansible/molecule && ansible-lint --offline -c ansible/.ansible-lint ansible/roles",
+    "ansible:syntax": "ANSIBLE_ROLES_PATH=ansible/roles ansible-playbook --syntax-check -i localhost, ansible/molecule/default/converge.yml",
+    "ansible:molecule": "cd ansible && molecule test -s default"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch-logs": "^3.1079.0",

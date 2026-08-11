@@ -1,0 +1,57 @@
+---
+# yamllint config for ansible/ (roles/* and molecule/*).
+#
+# Tuned so the existing bundled roles pass with zero errors while still
+# catching genuinely broken YAML (syntax, duplicate keys, bad indentation).
+# Stylistic-only checks that the current roles do not follow are relaxed to
+# `warning` (non-fatal) rather than disabled outright, so new roles still get
+# nudged toward the house style without failing CI on pre-existing patterns.
+extends: default
+
+yaml-files:
+  - "*.yml"
+  - "*.yaml"
+
+ignore: |
+  collections/
+  molecule/**/collections/
+
+rules:
+  # Roles have long Jinja expressions / task names / URLs. Keep as a warning
+  # with a generous ceiling instead of a hard failure.
+  line-length:
+    max: 200
+    level: warning
+    allow-non-breakable-words: true
+
+  # Ansible files conventionally start with `---`; keep it required but do not
+  # require an explicit `...` end marker.
+  document-start:
+    present: true
+  document-end:
+    present: false
+
+  # `true`/`false` (lowercase) is the Ansible-preferred boolean form and is
+  # what the bundled roles use; enforce lowercase, do not force yes/no.
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+
+  # Comments in the roles are not always two-space separated / perfectly
+  # spaced; warn rather than fail.
+  comments:
+    min-spaces-from-content: 1
+    level: warning
+  comments-indentation:
+    level: warning
+
+  # Trailing empty lines / newline-at-eof are worth failing on (cheap to fix).
+  new-line-at-end-of-file: enable
+  trailing-spaces: enable
+
+  # 2-space indentation is the norm; allow sequences to be non-indented under
+  # their key (Ansible-common style) rather than failing.
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+    check-multi-line-strings: false
