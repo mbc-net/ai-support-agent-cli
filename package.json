@@ -48,7 +48,8 @@
     "test:security": "jest --selectProjects unit --testPathPatterns security",
     "ansible:lint": "yamllint -c ansible/.yamllint ansible/roles ansible/molecule && ansible-lint --offline -c ansible/.ansible-lint ansible/roles",
     "ansible:syntax": "ANSIBLE_ROLES_PATH=ansible/roles ansible-playbook --syntax-check -i localhost, ansible/molecule/default/converge.yml",
-    "ansible:molecule": "cd ansible && molecule test -s default"
+    "ansible:molecule": "cd ansible && molecule test -s default",
+    "ansible:molecule:os_init": "cd ansible && molecule test -s os_init"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch-logs": "^3.1079.0",

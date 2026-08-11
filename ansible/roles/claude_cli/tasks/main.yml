@@ -59,19 +59,27 @@
   when: ANTHROPIC_API_KEY is defined or claude_cli_oauth_token is defined
 
 - name: "claude_cli : Persist ANTHROPIC_API_KEY for systemd --user services"
+  # No task-level `no_log`: `copy`'s `content` parameter is declared no_log in the
+  # module's own argument spec, so the value is redacted from the result at every
+  # verbosity (verified — it never appears, on success or failure, even at -vvv).
+  # A task-level `no_log` would add no secrecy and would replace a failure (bad
+  # path, permissions, full disk) with a bare "<task> failed".
   ansible.builtin.copy:
     content: "ANTHROPIC_API_KEY={{ ANTHROPIC_API_KEY }}\n"
     dest: "/home/{{ claude_cli_user | default('appuser') }}/.config/environment.d/anthropic.conf"
     owner: "{{ claude_cli_user | default('appuser') }}"
     mode: '0600'
   when: ANTHROPIC_API_KEY is defined
-  no_log: true
 
 - name: "claude_cli : Persist CLAUDE_CODE_OAUTH_TOKEN for systemd --user services"
+  # No task-level `no_log`: `copy`'s `content` parameter is declared no_log in the
+  # module's own argument spec, so the value is redacted from the result at every
+  # verbosity (verified — it never appears, on success or failure, even at -vvv).
+  # A task-level `no_log` would add no secrecy and would replace a failure (bad
+  # path, permissions, full disk) with a bare "<task> failed".
   ansible.builtin.copy:
     content: "CLAUDE_CODE_OAUTH_TOKEN={{ claude_cli_oauth_token }}\n"
     dest: "/home/{{ claude_cli_user | default('appuser') }}/.config/environment.d/claude-oauth.conf"
     owner: "{{ claude_cli_user | default('appuser') }}"
     mode: '0600'
   when: claude_cli_oauth_token is defined
-  no_log: true
