@@ -1,0 +1,164 @@
+---
+# Detect the LAN from the default IPv4 interface, validate it fails closed,
+# then open only the ports required by k3s peers. The role never emits a broad
+# "allow from Anywhere" rule and preserves the SSH session before enabling UFW.
+
+- name: "k3s : Gather network facts for firewall auto-detection"
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - network
+
+- name: "k3s : Require a usable default IPv4 network"
+  ansible.builtin.assert:
+    that:
+      - ansible_default_ipv4.address | default('') | length > 0
+      - ansible_default_ipv4.network | default('') | length > 0
+      - ansible_default_ipv4.prefix | default('') | string | length > 0
+    fail_msg: >-
+      Could not safely detect the k3s LAN from ansible_default_ipv4. Set
+      k3s_cluster_source_cidr explicitly or fix the host's default route.
+
+- name: "k3s : Select detected or explicitly configured cluster CIDR"
+  ansible.builtin.set_fact:
+    k3s_effective_cluster_source_cidr: >-
+      {{ (k3s_cluster_source_cidr | trim) if (k3s_cluster_source_cidr | default('') | trim | length > 0)
+         else (ansible_default_ipv4.network ~ '/' ~ ansible_default_ipv4.prefix) }}
+    k3s_join_server_host: >-
+      {{ (k3s_server_url | urlsplit('hostname')) if (k3s_bootstrap | default('init')) == 'join'
+         else ansible_default_ipv4.address }}
+
+- name: "k3s : Validate inferred CIDR and cluster endpoints are private and local"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import ipaddress, socket, sys
+        network = ipaddress.ip_network(sys.argv[1], strict=False)
+        local_ip = ipaddress.ip_address(sys.argv[2])
+        pod_network = ipaddress.ip_network(sys.argv[4], strict=False)
+        rfc1918 = tuple(ipaddress.ip_network(c) for c in
+                        ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+        if network.version != 4 or not any(network.subnet_of(c) for c in rfc1918):
+            raise SystemExit("cluster source CIDR must be RFC1918 private IPv4")
+        if network.prefixlen < 16:
+            raise SystemExit("cluster source CIDR is too broad; prefix must be /16 or narrower")
+        if local_ip not in network:
+            raise SystemExit("local node IP is outside cluster source CIDR")
+        try:
+            server_ips = {ipaddress.ip_address(sys.argv[3])}
+        except ValueError:
+            server_ips = {ipaddress.ip_address(row[4][0]) for row in
+                          socket.getaddrinfo(sys.argv[3], None, socket.AF_INET)}
+        if not any(ip in network for ip in server_ips):
+            raise SystemExit("join server IP is outside cluster source CIDR")
+        if pod_network.version != 4 or not any(pod_network.subnet_of(c) for c in rfc1918):
+            raise SystemExit("pod CIDR must be RFC1918 private IPv4")
+      - "{{ k3s_effective_cluster_source_cidr }}"
+      - "{{ ansible_default_ipv4.address }}"
+      - "{{ k3s_join_server_host }}"
+      - "{{ k3s_pod_cidr }}"
+  changed_when: false
+
+- name: "k3s : Install UFW"
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+
+- name: "k3s : Read current UFW policy"
+  ansible.builtin.command:
+    argv: [ufw, status, verbose]
+  register: k3s_ufw_status
+  changed_when: false
+
+- name: "k3s : Preserve SSH before changing UFW policy"
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - allow
+      - "{{ (ansible_port | default(22) | string) ~ '/tcp' }}"
+  register: k3s_ufw_ssh
+  changed_when: "'Skipping adding existing rule' not in k3s_ufw_ssh.stdout"
+
+- name: "k3s : Set default incoming policy to deny"
+  ansible.builtin.command:
+    argv: [ufw, default, deny, incoming]
+  when: "'deny (incoming)' not in k3s_ufw_status.stdout"
+  changed_when: true
+
+- name: "k3s : Set default outgoing policy to allow"
+  ansible.builtin.command:
+    argv: [ufw, default, allow, outgoing]
+  when: "'allow (outgoing)' not in k3s_ufw_status.stdout"
+  changed_when: true
+
+- name: "k3s : Allow cluster LAN to required TCP ports"
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - allow
+      - from
+      - "{{ k3s_effective_cluster_source_cidr }}"
+      - to
+      - any
+      - port
+      - "{{ item }}"
+      - proto
+      - tcp
+  loop:
+    - "6443"
+    - "2379:2380"
+    - "10250"
+  register: k3s_ufw_tcp
+  changed_when: "'Skipping adding existing rule' not in k3s_ufw_tcp.stdout"
+
+- name: "k3s : Allow Flannel VXLAN only from cluster LAN"
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - allow
+      - from
+      - "{{ k3s_effective_cluster_source_cidr }}"
+      - to
+      - any
+      - port
+      - "8472"
+      - proto
+      - udp
+  register: k3s_ufw_flannel
+  changed_when: "'Skipping adding existing rule' not in k3s_ufw_flannel.stdout"
+
+- name: "k3s : Allow routed pod traffic only from k3s interfaces"
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - route
+      - allow
+      - in
+      - "on"
+      - "{{ item }}"
+      - from
+      - "{{ k3s_pod_cidr }}"
+  loop:
+    - cni0
+    - flannel.1
+  register: k3s_ufw_pods
+  changed_when: "'Skipping adding existing rule' not in k3s_ufw_pods.stdout"
+
+- name: "k3s : Enable UFW after all allow rules are present"
+  ansible.builtin.command:
+    argv: [ufw, --force, enable]
+  when: "'Status: inactive' in k3s_ufw_status.stdout"
+  register: k3s_ufw_enable
+  changed_when: "'Firewall is active' in k3s_ufw_enable.stdout"
+
+- name: "k3s : Preflight join server Kubernetes API connectivity"
+  ansible.builtin.uri:
+    url: "{{ k3s_server_url | regex_replace('/+$', '') }}/cacerts"
+    method: GET
+    validate_certs: false
+    return_content: false
+    status_code: 200
+    timeout: 10
+  when: (k3s_bootstrap | default('init')) == 'join'
