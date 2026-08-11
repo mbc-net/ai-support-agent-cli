@@ -191,19 +191,21 @@
   changed_when: false
   when: (k3s_bootstrap | default('init')) == 'init'
 
-- name: "k3s : Wait for k3s service to be active (join node)"
-  # No failed_when override: `systemctl is-active` exits non-zero while the
-  # service is not yet active, so if the retries are exhausted the final attempt
-  # fails and the play stops LOUDLY (a join that never comes up — crash loop,
-  # token mismatch, unreachable k3s_server_url — must not be reported as success).
-  # `is-active` output carries no secrets, so no_log is unnecessary.
+- name: "k3s : Wait for this join node to report Ready"
+  # A running systemd unit does not prove that the server joined the intended
+  # cluster. Query the configured Kubernetes API and require this exact node's
+  # Ready condition before reporting success.
   ansible.builtin.command:
     argv:
-      - systemctl
-      - is-active
-      - k3s
-  register: k3s_join_active
-  until: k3s_join_active.stdout | trim == 'active'
+      - /usr/local/bin/k3s
+      - kubectl
+      - get
+      - node
+      - "{{ ansible_hostname }}"
+      - -o
+      - "jsonpath={.status.conditions[?(@.type=='Ready')].status}"
+  register: k3s_join_ready
+  until: k3s_join_ready.rc == 0 and (k3s_join_ready.stdout | trim) == 'True'
   retries: "{{ k3s_ready_retries | int }}"
   delay: "{{ k3s_ready_delay | int }}"
   changed_when: false
