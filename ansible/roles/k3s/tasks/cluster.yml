@@ -77,8 +77,13 @@
   notify: restart k3s
 
 - name: "k3s : Write etcd-S3 credentials drop-in (0600, secret)"
+  # No task-level `no_log`: `copy`'s `content` parameter is declared no_log in the
+  # module's own argument spec, so the value is redacted from the result at every
+  # verbosity (verified — it never appears, on success or failure, even at -vvv).
+  # A task-level `no_log` would add no secrecy and would replace a failure (bad
+  # path, permissions, full disk) with a bare "<task> failed".
   # to_nice_yaml escapes values safely (a key containing quotes/newlines cannot
-  # break the file); no_log keeps the secret out of all task output.
+  # break the file).
   ansible.builtin.copy:
     dest: /etc/rancher/k3s/config.yaml.d/etcd-s3-credentials.yaml
     content: >-
@@ -87,7 +92,6 @@
     owner: root
     group: root
     mode: "0600"
-  no_log: true
   when: k3s_etcd_s3_enabled | bool
   notify: restart k3s
 

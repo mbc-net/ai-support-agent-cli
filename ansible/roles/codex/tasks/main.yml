@@ -86,13 +86,17 @@
   when: codex_api_key is defined and (codex_api_key | trim | length > 0)
 
 - name: "codex : Write the API key into its temp file"
+  # No task-level `no_log`: `copy`'s `content` parameter is declared no_log in the
+  # module's own argument spec, so the value is redacted from the result at every
+  # verbosity (verified — it never appears, on success or failure, even at -vvv).
+  # A task-level `no_log` would add no secrecy and would replace a failure (bad
+  # path, permissions, full disk) with a bare "<task> failed".
   ansible.builtin.copy:
     content: "{{ codex_api_key }}"
     dest: "{{ codex_api_key_tempfile.path }}"
     owner: "{{ codex_user | default('appuser') }}"
     mode: '0600'
   when: codex_api_key is defined and (codex_api_key | trim | length > 0)
-  no_log: true
 
 - name: "codex : Attempt API key authentication"
   ansible.builtin.shell: |
@@ -126,13 +130,17 @@
   when: codex_oauth_token is defined and (codex_oauth_token | trim | length > 0)
 
 - name: "codex : Write the OAuth access token into its temp file"
+  # No task-level `no_log`: `copy`'s `content` parameter is declared no_log in the
+  # module's own argument spec, so the value is redacted from the result at every
+  # verbosity (verified — it never appears, on success or failure, even at -vvv).
+  # A task-level `no_log` would add no secrecy and would replace a failure (bad
+  # path, permissions, full disk) with a bare "<task> failed".
   ansible.builtin.copy:
     content: "{{ codex_oauth_token }}"
     dest: "{{ codex_oauth_token_tempfile.path }}"
     owner: "{{ codex_user | default('appuser') }}"
     mode: '0600'
   when: codex_oauth_token is defined and (codex_oauth_token | trim | length > 0)
-  no_log: true
 
 - name: "codex : Attempt OAuth (Enterprise) access token authentication"
   ansible.builtin.shell: |
