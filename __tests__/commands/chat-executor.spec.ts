@@ -120,6 +120,10 @@ jest.mock('../../src/commands/file-transfer', () => ({
 describe('chat-executor', () => {
   const mockClient = {
     submitChatChunk: jest.fn().mockResolvedValue(undefined),
+    // 指名は per-command MCP 設定へ埋め込む（MCP 子プロセスが指名を名乗るため）。
+    // 既定は未指名（世代なし）。
+    getAssignmentGeneration: jest.fn().mockReturnValue(undefined),
+    getInstanceId: jest.fn().mockReturnValue('pod-a'),
   } as unknown as ApiClient
 
   const basePayload: ChatPayload = {
@@ -2857,6 +2861,47 @@ describe('chat-executor', () => {
       const env = (capturedContent as { mcpServers: { 'ai-support-agent': { env: Record<string, unknown> } } }).mcpServers['ai-support-agent'].env
       expect(env).toHaveProperty('AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID', 'cmd-mcp-knowledge-1')
       expect(env).toHaveProperty('AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID', 'agent-1')
+    })
+
+    it('should embed the assignment held for this command so the MCP child is not fenced out', async () => {
+      // update_system_knowledge grants published status from commandId, so the
+      // server fences it to the assigned replica. The MCP child only receives
+      // the env keys written here — without them every knowledge write for an
+      // assigned command is rejected with 409.
+      const { spawn } = require('child_process')
+      const baseConfigPath = writeMcpConfig(tmpDir, 'http://localhost:3030', 'tenant:tok:raw', 'TEST_01', '/path/to/server.js')
+      ;(mockClient.getAssignmentGeneration as jest.Mock).mockReturnValue(7)
+      ;(mockClient.getInstanceId as jest.Mock).mockReturnValue('pod-b')
+
+      let capturedContent: Record<string, unknown> | undefined
+      const mockProcess = createMockChildProcess()
+      spawn.mockImplementation((_cmd: string, args: string[]) => {
+        const idx = args.indexOf('--mcp-config')
+        const capturedPath = idx >= 0 ? args[idx + 1] : undefined
+        if (capturedPath) {
+          capturedContent = JSON.parse(readFileSync(capturedPath, 'utf-8'))
+        }
+        return mockProcess
+      })
+
+      const resultPromise = executeChatCommand({
+        payload: { message: 'hello', conversationId: 'conv-999' },
+        commandId: 'cmd-assigned-1',
+        client: mockClient,
+        activeChatMode: 'claude_code',
+        agentId: 'agent-1',
+        mcpConfigPath: baseConfigPath,
+      })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('response')))
+      mockProcess.emit('close', 0)
+      await resultPromise
+
+      const env = (capturedContent as { mcpServers: { 'ai-support-agent': { env: Record<string, unknown> } } }).mcpServers['ai-support-agent'].env
+      expect(env).toHaveProperty('AI_SUPPORT_AGENT_ASSIGNMENT_INSTANCE_ID', 'pod-b')
+      expect(env).toHaveProperty('AI_SUPPORT_AGENT_ASSIGNMENT_GENERATION', '7')
+      ;(mockClient.getAssignmentGeneration as jest.Mock).mockReturnValue(undefined)
     })
 
     it('should embed AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID/AGENT_ID even when the payload carries no knowledge-specific fields (values always come from the commandId/agentId already known to chat-executor, never from the payload)', async () => {
