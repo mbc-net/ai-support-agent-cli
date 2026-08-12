@@ -10,7 +10,15 @@
 # admin-docs server-setup gVisor notes.
 #
 # k3s auto-generates its containerd config; this template is the supported
-# extension point (do NOT edit the generated config directly). It inherits the
-# stock config via `{{ template "base" . }}` and only adds the runsc runtime.
+# extension point (do NOT edit the generated config directly). The first line
+# inherits the stock config via the "base" template, and this file only adds the
+# runsc runtime below.
+#
+# NEVER write a Go template action inside these comments. k3s renders this file
+# with Go's text/template, which does not understand TOML `#` comments — an
+# action in a comment IS expanded. Repeating the base-template reference here
+# emitted the stock config twice, so containerd refused to start with
+# `failed to unmarshal TOML: toml: table grpc already exists` and the node went
+# down until the template was removed.
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"

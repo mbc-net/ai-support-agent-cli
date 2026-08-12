@@ -3,8 +3,16 @@
 # gVisor (runsc) runtime handler, appended by the k3s bundled role.
 #
 # k3s auto-generates its containerd config; this template file is the supported
-# extension point (do NOT edit the generated config directly). It inherits the
-# stock config via `{{ template "base" . }}` and only adds the runsc runtime.
+# extension point (do NOT edit the generated config directly). The first line
+# inherits the stock config via the "base" template, and this file only adds the
+# runsc runtime below.
+#
+# NEVER write a Go template action inside these comments. k3s renders this file
+# with Go's text/template, which does not understand TOML `#` comments — an
+# action in a comment IS expanded. Repeating the base-template reference here
+# emitted the stock config twice, so containerd refused to start with
+# `failed to unmarshal TOML: toml: table grpc already exists` and the node went
+# down until the template was removed.
 #
 # IMPORTANT: the plugin path/quoting is version-sensitive. Newer k3s ships
 # containerd v2 and reads `config-v3.toml.tmpl` with the CRI plugin id
