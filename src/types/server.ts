@@ -1,5 +1,16 @@
 import type { AgentChatMode, AgentChatModeOverrides } from './config'
 
+/**
+ * Admission request mode for multi-replica deployments.
+ * - `initial`: first registration after process start. When the plan limit is
+ *   already reached the server evicts the oldest replica so this one can run
+ *   (a rolling update's new Pod replaces the old one).
+ * - `standby`: a re-request from a replica that was evicted. The server admits
+ *   it only when a slot is free, and never evicts on its behalf — otherwise
+ *   evicted replicas would evict each other forever.
+ */
+export type AdmissionMode = 'initial' | 'standby'
+
 export interface RegisterRequest {
   agentId: string
   hostname: string
@@ -9,9 +20,24 @@ export interface RegisterRequest {
   capabilities?: string[]
   availableChatModes?: string[]
   activeChatMode?: string
+  /** Replica identity. Omitted by single-replica deployments. */
+  instanceId?: string
+  admissionMode?: AdmissionMode
 }
 
 export type TransportMode = 'polling' | 'realtime'
+
+/** Result of the replica admission check (only present when instanceId was sent). */
+export interface AdmissionResult {
+  accepted: boolean
+  instanceId: string
+  /** Applied limit; null means unlimited. */
+  maxReplicas: number | null
+  liveReplicas: number
+  reason?: 'limit_reached'
+  /** The replica evicted to make room for this one. */
+  evictedInstanceId?: string
+}
 
 export interface RegisterResponse {
   agentId: string
@@ -22,6 +48,7 @@ export interface RegisterResponse {
   transportMode: TransportMode
   wsEnabled?: boolean
   wsUrl?: string
+  admission?: AdmissionResult
 }
 
 export interface SystemInfo {
@@ -41,6 +68,12 @@ export interface SystemInfo {
 export interface HeartbeatResponse {
   success: true
   configHash?: string
+  /**
+   * Set when this replica no longer holds a slot (it was evicted to make room
+   * for a newer replica). The agent must stop serving work and go back to
+   * standby, re-requesting admission until a slot frees up.
+   */
+  evicted?: true
 }
 
 /**

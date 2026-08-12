@@ -232,7 +232,7 @@ describe('project-config-sync', () => {
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
         tmpPath,
         expect.any(String),
-        { mode: 0o600 },
+        { mode: 0o600, flag: 'wx' },
       )
 
       // Should rename tmp to final

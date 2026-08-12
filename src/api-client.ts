@@ -2,6 +2,7 @@ import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios'
 
 import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL, ENV_VARS } from './constants'
 import { logger } from './logger'
+import { resolveInstanceId } from './replica-identity'
 import { RetryStrategy } from './retry-strategy'
 import { toErrorMessage } from './utils'
 import { bearerHeader, extractTenantCodeFromToken } from './utils/token-utils'
@@ -46,8 +47,35 @@ export class ApiClient {
   private readonly retry: RetryStrategy
   private tenantCode = ''
   private projectCode = ''
+  /** This process's replica identity (stable for the process lifetime). */
+  private readonly instanceId: string
+  /** Whether this client advertises its replica identity (see constructor). */
+  private readonly sendsReplicaIdentity: boolean
+  /**
+   * Assignment generation per command (fencing token issued by the server).
+   *
+   * Populated by getCommand and sent back on every later request for that
+   * command, so a replica whose assignment was revoked cannot write results or
+   * fetch credentials with a stale generation.
+   */
+  private readonly assignmentGenerations: Map<string, number>
 
-  constructor(apiUrl: string, token: string) {
+  /**
+   * @param options.withoutReplicaIdentity `x-agent-instance-id` ヘッダーと
+   *   register/heartbeat ボディの `instanceId` を**送らない**クライアントとして生成する。
+   *
+   *   レプリカ識別子はサーバー側で「AGENT_INSTANCE（稼働枠）を持つ稼働中レプリカ」の
+   *   証として扱われる。register を行わないクライアントがこれを送ると、
+   *   - コマンド取得はクレーム機構の要求元検証で必ず落ちて 409（ECS oneshot）
+   *   - ハートビートは `evicted` 扱いで AGENT_STATUS が一切更新されない
+   *     （ホスト側の自動更新エラー通知が消える）
+   *   という形でサイレントに壊れる。register を経由しない用途では必ず true にすること。
+   */
+  constructor(
+    apiUrl: string,
+    token: string,
+    options?: { withoutReplicaIdentity?: boolean; instanceId?: string },
+  ) {
     const parsed = new URL(apiUrl)
     if (parsed.protocol === 'http:' && parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost' && parsed.hostname !== 'host.docker.internal') {
       if (process.env[ENV_VARS.ALLOW_HTTP] === 'true') {
@@ -61,11 +89,27 @@ export class ApiClient {
 
     this.tenantCode = extractTenantCodeFromToken(token)
 
+    // 通常は自プロセスの identity を使う。明示指定は、別プロセス（再起動前の
+    // 自分自身）が取得したクレームに対して結果を確定させる場合にだけ使う。
+    // 保留結果の再送がこれに当たる（pending-result-store）。現在の instanceId で
+    // 送ると、サーバー側のフェンシングがクレーム主不一致として 409 を返し、
+    // 実行済みの結果が「恒久的な 4xx」として破棄される。
+    this.instanceId = options?.instanceId ?? resolveInstanceId()
+    this.assignmentGenerations = new Map()
+    this.sendsReplicaIdentity = !options?.withoutReplicaIdentity
+
     this.client = axios.create({
       baseURL: apiUrl,
       headers: {
         Authorization: bearerHeader(token),
         'Content-Type': 'application/json',
+        // Replica identity. The server uses it to (a) reject requests from a
+        // replica that lost its slot and (b) claim commands exclusively so a
+        // command broadcast to every replica is executed exactly once.
+        // Omitted for clients that never register (see constructor).
+        ...(this.sendsReplicaIdentity
+          ? { 'x-agent-instance-id': this.instanceId }
+          : {}),
       },
       timeout: API_REQUEST_TIMEOUT,
     })
@@ -125,11 +169,32 @@ export class ApiClient {
     })
   }
 
+  /**
+   * Read-only accessor for this process's replica identity. Callers use it to
+   * label log lines and to correlate an eviction notice with the local process.
+   */
+  getInstanceId(): string {
+    return this.instanceId
+  }
+
+  /**
+   * Register this agent.
+   *
+   * `instanceId` is always sent so the server can apply the plan's replica
+   * limit. `admissionMode` defaults to `initial`; the standby loop passes
+   * `standby` so the server admits it only into a free slot.
+   */
   async register(request: RegisterRequest): Promise<RegisterResponse> {
     logger.debug(`Registering agent: ${request.agentId}`)
     const { ipAddress, availableChatModes, activeChatMode, ...rest } = request
     return this.post<RegisterResponse>(API_ENDPOINTS.REGISTER(this.tenantCode), {
       ...rest,
+      ...(this.sendsReplicaIdentity
+        ? {
+            instanceId: this.instanceId,
+            admissionMode: request.admissionMode ?? 'initial',
+          }
+        : {}),
       version: AGENT_VERSION,
       ...(ipAddress && { ipAddress }),
       ...(availableChatModes !== undefined && { availableChatModes }),
@@ -151,6 +216,7 @@ export class ApiClient {
     logger.debug('Sending heartbeat')
     return this.post<HeartbeatResponse>(API_ENDPOINTS.HEARTBEAT(this.tenantCode), {
       agentId,
+      ...(this.sendsReplicaIdentity ? { instanceId: this.instanceId } : {}),
       timestamp: Date.now(),
       version: AGENT_VERSION,
       systemInfo,
@@ -162,6 +228,18 @@ export class ApiClient {
       ...(dockerBuildError !== undefined && { dockerBuildError }),
       ...(authRejectedTransports !== undefined && { authRejectedTransports }),
     })
+  }
+
+  /**
+   * Fetch the tenant's concurrent replica limit (`null` = unlimited).
+   *
+   * Used by `manifest` to refuse generating a Deployment that exceeds the
+   * plan before anything is written.
+   */
+  async getReplicaLimit(): Promise<{ maxReplicas: number | null }> {
+    return this.get<{ maxReplicas: number | null }>(
+      API_ENDPOINTS.REPLICA_LIMIT(this.tenantCode),
+    )
   }
 
   async getVersionInfo(channel: ReleaseChannel = 'latest'): Promise<VersionInfo> {
@@ -187,7 +265,68 @@ export class ApiClient {
   async getCommand(commandId: string, agentId: string): Promise<AgentCommand> {
     this.validateCommandId(commandId)
     logger.debug(`Fetching command: ${commandId}`)
-    return this.get<AgentCommand>(API_ENDPOINTS.COMMAND(this.tenantCode, commandId), { params: { agentId } })
+    const command = await this.get<AgentCommand>(
+      API_ENDPOINTS.COMMAND(this.tenantCode, commandId),
+      { params: { agentId } },
+    )
+    // The server assigns exactly one replica to each command and returns the
+    // assignment generation (a fencing token). Every later request for this
+    // command must carry it back, so a replica that was re-assigned away
+    // cannot write results or fetch credentials for it.
+    // 指名されている場合だけ世代を記録する（多層防御）。
+    // 未指名コマンドの世代を記録すると、結果送信時に「指名済み」として扱われ、
+    // サーバー側の条件（assignedInstanceId 一致）が成立せず 409 になり、
+    // 実行済みの結果が破棄される。サーバーは未指名コマンドの応答から指名関連
+    // フィールドを落とすが、こちら側でも条件を明示しておく。
+    const assigned = command as {
+      assignedInstanceId?: string
+      assignmentGeneration?: number
+    }
+    if (
+      typeof assigned.assignedInstanceId === 'string' &&
+      typeof assigned.assignmentGeneration === 'number'
+    ) {
+      this.assignmentGenerations.set(commandId, assigned.assignmentGeneration)
+    }
+    return command
+  }
+
+  /** Forget a command's assignment generation (call when execution ends). */
+  clearAssignment(commandId: string): void {
+    this.assignmentGenerations.delete(commandId)
+  }
+
+  /** The assignment generation currently held for a command, if any. */
+  getAssignmentGeneration(commandId: string): number | undefined {
+    return this.assignmentGenerations.get(commandId)
+  }
+
+  /**
+   * Restore an assignment generation obtained by an earlier process.
+   *
+   * Used when re-submitting a result saved before a restart: the fencing token
+   * belongs to the execution that produced the result, not to this process.
+   * Without it the request carries no generation, the server treats it as
+   * "not claiming an assignment", and the write is refused for an assigned
+   * command — silently discarding a result that was computed correctly.
+   */
+  restoreAssignment(commandId: string, generation: number): void {
+    this.assignmentGenerations.set(commandId, generation)
+  }
+
+  /**
+   * Headers carrying the assignment for a command, when we hold one.
+   *
+   * Omitted for clients that do not send a replica identity (oneshot, the
+   * host auto-updater) and for commands fetched before the server started
+   * assigning — those keep the pre-assignment behaviour.
+   */
+  private assignmentHeaders(commandId: string): Record<string, string> {
+    if (!this.sendsReplicaIdentity) return {}
+    const generation = this.assignmentGenerations.get(commandId)
+    return generation === undefined
+      ? {}
+      : { 'x-agent-assignment-generation': String(generation) }
   }
 
   async submitResult(
@@ -197,7 +336,11 @@ export class ApiClient {
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting result for command: ${commandId}`)
-    await this.postVoid(API_ENDPOINTS.COMMAND_RESULT(this.tenantCode, commandId), result, { params: { agentId } })
+    await this.postVoid(
+      API_ENDPOINTS.COMMAND_RESULT(this.tenantCode, commandId),
+      result,
+      { params: { agentId }, headers: this.assignmentHeaders(commandId) },
+    )
   }
 
   async reportConnectionStatus(
@@ -251,7 +394,10 @@ export class ApiClient {
   ): Promise<T> {
     this.validateCommandId(commandId)
     logger.debug(debugMessage)
-    return this.get<T>(endpoint, { params: { agentId } })
+    return this.get<T>(endpoint, {
+      params: { agentId },
+      headers: this.assignmentHeaders(commandId),
+    })
   }
 
   /**
@@ -348,7 +494,11 @@ export class ApiClient {
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting chat chunk ${chunk.index} (${chunk.type}) for command: ${commandId}`)
-    await this.postVoid(API_ENDPOINTS.COMMAND_CHUNKS(this.tenantCode, commandId), chunk, { params: { agentId } })
+    await this.postVoid(
+      API_ENDPOINTS.COMMAND_CHUNKS(this.tenantCode, commandId),
+      chunk,
+      { params: { agentId }, headers: this.assignmentHeaders(commandId) },
+    )
   }
 
   async submitLogChunk(params: {

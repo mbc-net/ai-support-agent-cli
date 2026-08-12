@@ -911,6 +911,8 @@ describe('VsCodeTunnelWebSocket', () => {
           headers: {
             Authorization: 'Bearer test-token',
             'X-Agent-Id': 'agent-123',
+            // Multi-replica identity (see buildAgentWsHeaders).
+            'X-Agent-Instance-Id': expect.any(String),
           },
         }),
       )
@@ -933,6 +935,7 @@ describe('VsCodeTunnelWebSocket', () => {
           headers: {
             Authorization: 'Bearer test-token',
             'X-Agent-Id': 'agent-123',
+            'X-Agent-Instance-Id': expect.any(String),
             Cookie: 'AWSALB=vscode-sticky',
           },
         }),

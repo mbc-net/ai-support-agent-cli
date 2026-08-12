@@ -200,6 +200,8 @@ describe('agent-runner', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn(),
+      getAssignmentGeneration: jest.fn(),
+      clearAssignment: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       updateToken: jest.fn(),
@@ -375,7 +377,10 @@ describe('agent-runner', () => {
       expect.objectContaining({ pollInterval: expect.any(Number), heartbeatInterval: expect.any(Number) }),
     )
     // ApiClient is created for auto-updater with first project's credentials
-    expect(MockApiClient).toHaveBeenCalledWith('http://api-a', 'token-a')
+    expect(MockApiClient).toHaveBeenCalledWith('http://api-a', 'token-a', {
+      // 自動更新用クライアントは登録しないため、レプリカ識別子を送らない。
+      withoutReplicaIdentity: true,
+    })
     expect(mockedSaveConfig).toHaveBeenCalled()
   })
 
@@ -452,7 +457,10 @@ describe('agent-runner', () => {
 
     expect(ChildProcessManager).toHaveBeenCalled()
     expect(mockForkProject).toHaveBeenCalledTimes(1)
-    expect(MockApiClient).toHaveBeenCalledWith('http://api-a', 'token-a')
+    expect(MockApiClient).toHaveBeenCalledWith('http://api-a', 'token-a', {
+      // 自動更新用クライアントは登録しないため、レプリカ識別子を送らない。
+      withoutReplicaIdentity: true,
+    })
     expect(mockedSaveConfig).toHaveBeenCalled()
   })
 
@@ -564,6 +572,8 @@ describe('agent-runner', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn(),
+      getAssignmentGeneration: jest.fn(),
+      clearAssignment: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       setTenantCode: jest.fn(),
@@ -604,6 +614,8 @@ describe('agent-runner', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn(),
+      getAssignmentGeneration: jest.fn(),
+      clearAssignment: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       setTenantCode: jest.fn(),
@@ -648,6 +660,8 @@ describe('agent-runner', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn(),
+      getAssignmentGeneration: jest.fn(),
+      clearAssignment: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       setTenantCode: jest.fn(),
@@ -1214,6 +1228,8 @@ describe('startProjectAgent', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn().mockResolvedValue(undefined),
+      getAssignmentGeneration: jest.fn(),
+      clearAssignment: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       updateToken: jest.fn(),
@@ -1530,6 +1546,8 @@ describe('startAgent tokenId-based agentId', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn(),
+      getAssignmentGeneration: jest.fn(),
+      clearAssignment: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.1', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       updateToken: jest.fn(),

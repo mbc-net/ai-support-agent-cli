@@ -21,6 +21,12 @@ export const ENV_VARS = {
   TENANT_CODE: 'AI_SUPPORT_AGENT_TENANT_CODE',
   PROJECT_CODE: 'AI_SUPPORT_AGENT_PROJECT_CODE',
   CONFIG_DIR: 'AI_SUPPORT_AGENT_CONFIG_DIR',
+  // Replica identity for multi-replica deployments (Kubernetes / ECS). When
+  // several replicas share one agent token they all register as the same
+  // logical agent, and this value distinguishes the individual processes.
+  // Generated manifests set it from the Pod name (K8s downward API) or the
+  // ECS task id. Unset = a random id is generated per process.
+  INSTANCE_ID: 'AI_SUPPORT_AGENT_INSTANCE_ID',
   IN_DOCKER: 'AI_SUPPORT_AGENT_IN_DOCKER',
   ALLOW_HTTP: 'AI_SUPPORT_AGENT_ALLOW_HTTP',
   PROJECT_DIR_MAP: 'AI_SUPPORT_AGENT_PROJECT_DIR_MAP',
@@ -232,6 +238,7 @@ export const ERR_SYNC_REPOSITORY_REQUIRES_CALLBACK = 'sync_repository command re
 export const API_ENDPOINTS = {
   REGISTER: (tenantCode: string) => `/api/${tenantCode}/agent/register`,
   HEARTBEAT: (tenantCode: string) => `/api/${tenantCode}/agent/heartbeat`,
+  REPLICA_LIMIT: (tenantCode: string) => `/api/${tenantCode}/agent/self/replica-limit`,
   COMMANDS_PENDING: (tenantCode: string) => `/api/${tenantCode}/agent/commands/pending`,
   COMMAND: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}`,
   COMMAND_RESULT: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}/result`,
@@ -488,6 +495,14 @@ export const WS_PONG_MAX_MISSED = 3
 export const REGISTER_RETRY_BASE_DELAY_MS = 1_000
 export const REGISTER_RETRY_MAX_DELAY_MS = 60_000
 export const REGISTER_AUTH_ERROR_DELAY_MS = 5 * 60 * 1000
+
+// Standby retry interval for multi-replica deployments. A replica that could
+// not claim a slot (the plan's replica limit is already satisfied) re-requests
+// admission at this interval. Kept close to the heartbeat timeout so a slot
+// left by a crashed replica is picked up promptly, without polling so often
+// that N standby replicas turn into a request flood.
+export const REPLICA_STANDBY_RETRY_DELAY_MS = 30_000
+
 
 // Docker log streaming constants shared between DockerSupervisor and project-image-builder.
 // MAX_SESSION_LOG_BYTES caps total in-memory log kept for S3 upload per session.

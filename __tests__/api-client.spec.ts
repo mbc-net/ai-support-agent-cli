@@ -467,7 +467,7 @@ describe('ApiClient', () => {
       expect(result.hostname).toBe('server.example.com')
       expect(mockInstance.get).toHaveBeenCalledWith(
         '/api/test_tenant/agent/commands/cmd-1/ssh-exec-credential',
-        { params: { agentId: 'agent-1' } },
+        { params: { agentId: 'agent-1' }, headers: {} },
       )
     })
 
@@ -515,7 +515,7 @@ describe('ApiClient', () => {
       })
       expect(mockInstance.get).toHaveBeenCalledWith(
         '/api/test_tenant/agent/commands/cmd-1/server-setup-variables',
-        { params: { agentId: 'agent-1' } },
+        { params: { agentId: 'agent-1' }, headers: {} },
       )
     })
 
@@ -640,7 +640,7 @@ describe('ApiClient', () => {
       expect(mockInstance.post).toHaveBeenCalledWith(
         '/api/test_tenant/agent/commands/cmd-1/result',
         { success: true, data: 'output' },
-        { params: { agentId: 'agent-1' } },
+        { params: { agentId: 'agent-1' }, headers: {} },
       )
     })
   })
@@ -837,7 +837,7 @@ describe('ApiClient', () => {
       expect(mockInstance.post).toHaveBeenCalledWith(
         '/api/test_tenant/agent/commands/cmd-1/chunks',
         { index: 0, type: 'delta', content: 'Hello' },
-        { params: { agentId: 'agent-1' } },
+        { params: { agentId: 'agent-1' }, headers: {} },
       )
     })
 
