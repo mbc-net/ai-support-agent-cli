@@ -530,7 +530,16 @@ async function processCommand(
         )
         return
       }
-      throw error
+      // Do NOT rethrow. The outer catch treats anything it receives as an
+      // *execution* failure and overwrites the pending file with
+      // `{success:false, error:<transport error>}` — which would destroy the
+      // real result we just persisted, making it unrecoverable even after a
+      // restart. The result is already on disk; log it and let the pending
+      // store resend it.
+      logger.error(
+        `${deps.prefix} Failed to submit the result for ${commandId}; it stays queued for resend: ${getErrorMessage(error)}`,
+      )
+      return
     }
     removePendingResult(commandId)
     logger.info(t('runner.commandDone', {
