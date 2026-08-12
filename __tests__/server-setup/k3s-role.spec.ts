@@ -266,4 +266,84 @@ describe('k3s bundled role', () => {
       expect(combined).toContain('[0-9a-f]{12}')
     })
   })
+
+  /**
+   * files/*.toml.tmpl（containerd 設定テンプレート）の静的検証。
+   *
+   * このファイルは Ansible では `copy`（`template` ではない）で配置され、
+   * **k3s 側の Go テンプレートエンジンがレンダリングする**。つまりレンダリング層が
+   * 2 つあり、Ansible 層だけを意識していると k3s 層で事故る。実際、説明コメントに
+   * 書いた `{{ template "base" . }}` が Go テンプレートに展開されて k3s 標準設定が
+   * 二重出力され、`toml: table grpc already exists` で containerd が起動不能になり、
+   * ノードが停止した（実機で発生）。
+   *
+   * jest から Go テンプレートはレンダリングできないため、ここでは
+   * 「レンダリング前のテキストが満たすべき不変条件」を固定する。
+   */
+  describe('files/*.toml.tmpl（containerd 設定テンプレート）', () => {
+    const TEMPLATES = [
+      {
+        file: 'config.toml.tmpl',
+        label: 'containerd v1 系（旧 k3s）',
+        pluginPath: '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]',
+      },
+      {
+        file: 'config-v3.toml.tmpl',
+        label: 'containerd v2 系（新 k3s・version = 3）',
+        pluginPath: "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]",
+      },
+    ]
+
+    function readTemplate(file: string): string {
+      return readFileSync(path.join(roleDir, 'files', file), 'utf8')
+    }
+
+    it.each(TEMPLATES)('$file: 1行目で base を継承し、runsc ランタイムを定義する（$label）', ({ file, pluginPath }) => {
+      const lines = readTemplate(file).split('\n')
+      // 1行目の base 継承が無いと k3s の標準設定（CNI・snapshotter 等）が丸ごと失われる。
+      expect(lines[0].trim()).toBe('{{ template "base" . }}')
+      expect(readTemplate(file)).toContain(pluginPath)
+      expect(readTemplate(file)).toContain('runtime_type = "io.containerd.runsc.v1"')
+    })
+
+    it('2つのテンプレートは TOML セクションの CRI プラグイン ID が異なる（バージョン取り違えを検出できる）', () => {
+      // 判定は TOML のセクション行（`[plugins...`）のみで行う。コメント文は互いの
+      // ファイルの ID を相互参照しているため、生の文字列一致では判別できない。
+      const sections = (file: string) =>
+        readTemplate(file)
+          .split('\n')
+          .map((l) => l.trim())
+          .filter((l) => l.startsWith('[plugins'))
+
+      expect(sections('config.toml.tmpl')).toEqual([
+        '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]',
+      ])
+      expect(sections('config-v3.toml.tmpl')).toEqual([
+        "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]",
+      ])
+    })
+
+    /**
+     * 回帰: base テンプレートの参照が 2 箇所あると、k3s 標準設定が二重に出力され
+     * `[grpc]` 等のテーブルが重複して containerd が
+     * `failed to unmarshal TOML: toml: table grpc already exists` で起動しない。
+     */
+    it.each(TEMPLATES)('$file: base テンプレートの参照はちょうど1回だけ', ({ file }) => {
+      const occurrences = readTemplate(file).match(/\{\{-?\s*template\s+"base"/g) ?? []
+      expect({ file, count: occurrences.length }).toEqual({ file, count: 1 })
+    })
+
+    /**
+     * 回帰（一般化）: Go テンプレートは TOML の `#` コメントを解釈しないため、
+     * コメント行に書いたアクションもレンダリングされる。説明目的で `{{ ... }}` を
+     * 書くと必ず事故るので、コメント行にアクションを置くこと自体を禁止する。
+     */
+    it.each(TEMPLATES)('$file: コメント行（#始まり）に Go テンプレートのアクションを含めない', ({ file }) => {
+      const offending = readTemplate(file)
+        .split('\n')
+        .map((line, i) => ({ line: i + 1, text: line }))
+        .filter(({ text }) => text.trimStart().startsWith('#') && text.includes('{{'))
+      expect({ file, offending }).toEqual({ file, offending: [] })
+    })
+  })
 })
