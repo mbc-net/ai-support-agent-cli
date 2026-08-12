@@ -18,6 +18,7 @@ import { executeCommand } from './commands'
 import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
 import { refreshChatMode, scheduleConfigSync } from './agent-config-sync'
 import { savePendingResult, removePendingResult } from './pending-result-store'
+import type { CommandResult } from './types/command'
 import { cleanupStaleAwsCredentials } from './aws-profile'
 
 export interface TransportState {
@@ -550,11 +551,22 @@ async function processCommand(
       t('runner.commandError', { prefix: deps.prefix, commandId, message }),
     )
 
+    // 成功パスと同じく、送信前に永続化する。ここで保存しないと、送信が
+    // 一時障害で失敗した場合に実行時例外の内容がサーバーへ一切届かず、
+    // コマンドは回収 cron のタイムアウトまで宙に浮く（対称性）。
+    const failureResult: CommandResult = { success: false, error: message }
+    savePendingResult(
+      commandId,
+      deps.agentId,
+      failureResult,
+      deps.apiUrl,
+      deps.token,
+      deps.tenantCode,
+      deps.client.getAssignmentGeneration(commandId),
+    )
     try {
-      await deps.client.submitResult(commandId, {
-        success: false,
-        error: message,
-      }, deps.agentId)
+      await deps.client.submitResult(commandId, failureResult, deps.agentId)
+      removePendingResult(commandId)
     } catch (submitError) {
       if (isCommandClaimedByAnotherReplica(submitError)) {
         removePendingResult(commandId)

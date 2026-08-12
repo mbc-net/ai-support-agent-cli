@@ -772,9 +772,15 @@ export class ApiClient {
     request: UpdateSystemKnowledgeRequest,
   ): Promise<UpdateSystemKnowledgeResult> {
     logger.debug(`Updating system knowledge: title="${request.title}"${request.id ? ` (revision of ${request.id})` : ''}`)
+    // commandId を根拠に published を得る経路なので、コマンド書き込みと同じく
+    // 指名（instanceId ＋ 世代）を名乗る。名乗らないと、サーバー側は指名済み
+    // コマンドに対する指名なしの要求として 409 で拒否する（fail-closed）。
     return this.post<UpdateSystemKnowledgeResult>(
       API_ENDPOINTS.AGENT_KNOWLEDGE(this.tenantCode),
       request,
+      request.commandId
+        ? { headers: this.assignmentHeaders(request.commandId) }
+        : undefined,
     )
   }
 }

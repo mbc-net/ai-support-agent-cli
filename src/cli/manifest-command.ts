@@ -138,9 +138,12 @@ export async function runK8sManifest(
     name: opts.name,
   })
   emit(manifest, opts.out, 'Kubernetes manifest')
-  if (!opts.out) return
+  // Warn on the stdout path too. Previously this returned early when `--out` was
+  // absent, so the one route that is most likely to end up in a shell history,
+  // a terminal scrollback or a CI log was the only one with no warning at all.
   logger.warn(
-    'The manifest contains the agent token. Treat it as a secret: do not commit it to a repository.',
+    'The manifest contains the agent token (base64 is an encoding, not encryption). ' +
+      'Treat it as a secret: do not commit it to a repository, and avoid piping it into CI logs.',
   )
 }
 

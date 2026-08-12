@@ -7,6 +7,7 @@ jest.mock('../../src/config-manager')
 
 import { ApiClient } from '../../src/api-client'
 import { runEcsManifest, runK8sManifest } from '../../src/cli/manifest-command'
+import { logger } from '../../src/logger'
 import { getProjectList, loadConfig } from '../../src/config-manager'
 
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>
@@ -50,6 +51,19 @@ describe('manifest command', () => {
 
       expect(writtenOutput()).toContain('replicas: 3')
       expect(writtenOutput()).toContain('kind: Deployment')
+    })
+
+    it('warns about the embedded token even when printing to stdout', async () => {
+      // stdout is the route most likely to end up in a shell history, a terminal
+      // scrollback or a CI log — it must not be the only one without a warning.
+      const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined)
+
+      await runK8sManifest({ replicas: '1' })
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('not encryption'),
+      )
+      warn.mockRestore()
     })
 
     it('defaults to a single replica', async () => {

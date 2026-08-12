@@ -155,6 +155,13 @@ export function generateK8sManifest(input: K8sManifestInput): string {
 #
 # Replicas beyond the plan limit are not rejected outright — they stay in
 # standby and take over automatically when a running replica stops.
+#
+# SECURITY: the Secret below carries the agent token. The 'data' field is base64,
+# which is an encoding, not encryption — anyone who can read this file can
+# recover the token. Do not commit it. To keep the token out of the file
+# entirely, delete the Secret block and point secretKeyRef at a Secret you create
+# out-of-band (kubectl create secret generic ... --from-literal=...) or at an
+# ExternalSecret.
 apiVersion: v1
 kind: Secret
 metadata:
