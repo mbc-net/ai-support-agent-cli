@@ -1250,6 +1250,45 @@ describe('startSubscriptionMode', () => {
   })
 
 
+  it('初回接続時にも pending コマンドを走査する（登録時の指名を取りこぼさない）', async () => {
+    // サーバーは register の時点で未指名コマンドを指名して通知するが、その通知は
+    // この接続が確立する前に流れるため、このレプリカには届かない。初回走査が
+    // 無いと、サーバー側の回収 cron（または来ないかもしれない再接続）待ちになる。
+    const mockSubscriber = {
+      connect: jest.fn().mockResolvedValue(undefined),
+      subscribe: jest.fn(),
+      onReconnect: jest.fn(),
+      onPersistentFailure: jest.fn(),
+      disconnect: jest.fn(),
+    }
+    const MockSubscriberClass = jest.fn().mockImplementation(() => mockSubscriber)
+    const getPendingCommands = jest.fn().mockResolvedValue([])
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands,
+        getCommand: jest.fn(),
+        submitResult: jest.fn(),
+        getAssignmentGeneration: jest.fn(),
+        clearAssignment: jest.fn(),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    const ctx = makeCtx(state)
+
+    await startSubscriptionMode(
+      deps,
+      state,
+      ctx,
+      MockSubscriberClass,
+      'wss://appsync.example.com',
+      'api-key-123',
+    )
+    await Promise.resolve()
+
+    expect(getPendingCommands).toHaveBeenCalled()
+  })
+
   it('should register an onPersistentFailure callback that logs an ERROR when fired', async () => {
     const { logger } = require('../src/logger')
 

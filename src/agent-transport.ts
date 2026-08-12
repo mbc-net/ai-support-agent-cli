@@ -110,6 +110,14 @@ export async function startSubscriptionMode(
     (notification) => { void handleNotification(deps, state, ctx, notification) },
   )
 
+  // Pick up commands assigned before this subscription existed.
+  //
+  // The server assigns pending commands to a replica the moment it registers and
+  // notifies them, but registration completes before this connection is up, so
+  // that notification is lost for this replica. Without an initial scan the
+  // commands wait for the server-side sweep (or a reconnect that may never come).
+  void checkPendingCommands(deps, ctx)
+
   state.subscriber.onReconnect(() => {
     logger.info(`${deps.prefix} Reconnected, checking for pending commands...`)
     void checkPendingCommands(deps, ctx)
