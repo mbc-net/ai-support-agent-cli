@@ -92,7 +92,13 @@ describe('runOneshot', () => {
     const code = await runOneshot(validEnv())
 
     expect(code).toBe(0)
-    expect(mockApiClientCtor).toHaveBeenCalledWith('https://api.example.com', SECRET_TOKEN)
+    // oneshot は稼働枠を持たないため、レプリカ識別ヘッダーを送らないクライアントを使う
+    // （送るとサーバー側のクレーム機構に巻き込まれ、コマンド取得が常に 409 になる）
+    expect(mockApiClientCtor).toHaveBeenCalledWith(
+      'https://api.example.com',
+      SECRET_TOKEN,
+      { withoutReplicaIdentity: true },
+    )
     expect(mockSetTenantCode).toHaveBeenCalledWith('mbc')
     expect(mockSetProjectCode).toHaveBeenCalledWith('MBC_01')
     expect(mockGetCommand).toHaveBeenCalledWith('cmd-123', 'ecs-agent-1')

@@ -1,7 +1,11 @@
 import type { ApiClient } from './api-client'
 import { AlertProcessor } from './alert-processor'
 import { type AppSyncSubscriber, type AppSyncNotification } from './appsync-subscriber'
-import { LOG_PAYLOAD_LIMIT, LOG_RESULT_LIMIT, NOTIFICATION_ACTION } from './constants'
+import {
+  LOG_PAYLOAD_LIMIT,
+  LOG_RESULT_LIMIT,
+  NOTIFICATION_ACTION,
+} from './constants'
 import { t } from './i18n'
 import type { TransportKind } from './ipc-types'
 import { logger } from './logger'
@@ -14,6 +18,7 @@ import { executeCommand } from './commands'
 import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
 import { refreshChatMode, scheduleConfigSync } from './agent-config-sync'
 import { savePendingResult, removePendingResult } from './pending-result-store'
+import type { CommandResult } from './types/command'
 import { cleanupStaleAwsCredentials } from './aws-profile'
 
 export interface TransportState {
@@ -21,7 +26,6 @@ export interface TransportState {
   subscriber: AppSyncSubscriber | null
   terminalWs: TerminalWebSocket | null
   vsCodeWs: VsCodeTunnelWebSocket | null
-  processing: boolean
   configSyncDebounceTimer: ReturnType<typeof setTimeout> | null
   /**
    * サーバーによる恒久的な認証拒否で停止したトランスポート（'terminal'/'vscode'）。
@@ -30,6 +34,17 @@ export interface TransportState {
    * 再起動でこの集合は空に戻る（→ サーバー側で属性が削除される）。
    */
   authRejectedTransports: Set<TransportKind>
+  /**
+   * Command IDs this process is currently executing.
+   *
+   * The server keeps a claimed command in `PENDING` until its result arrives,
+   * so `getPendingCommands` keeps returning commands we are still running, and
+   * `claimCommand` answers 200 (not 409) to the instance that already owns the
+   * claim. Without this guard the periodic sweep would start a second local
+   * execution of any command that takes longer than the sweep interval —
+   * duplicating its side effects (SSH/Ansible runs, ECS task launches).
+   */
+  inFlightCommands: Set<string>
 }
 
 export interface TransportDeps {
@@ -50,6 +65,12 @@ export interface TransportDeps {
    * 通知するために使う（ログに埋もれさせないため）。transport は拒否された接続の種別。
    */
   onAuthRejected?: (transport: TransportKind) => void
+  /**
+   * Called when a heartbeat reports that this replica lost its slot (it was
+   * evicted so a newer replica could run under the plan's replica limit).
+   * The agent must stop serving work and go back to standby.
+   */
+  onEvicted?: () => void
 }
 
 export interface CommandContext {
@@ -89,6 +110,14 @@ export async function startSubscriptionMode(
     deps.tenantCode,
     (notification) => { void handleNotification(deps, state, ctx, notification) },
   )
+
+  // Pick up commands assigned before this subscription existed.
+  //
+  // The server assigns pending commands to a replica the moment it registers and
+  // notifies them, but registration completes before this connection is up, so
+  // that notification is lost for this replica. Without an initial scan the
+  // commands wait for the server-side sweep (or a reconnect that may never come).
+  void checkPendingCommands(deps, ctx)
 
   state.subscriber.onReconnect(() => {
     logger.info(`${deps.prefix} Reconnected, checking for pending commands...`)
@@ -165,6 +194,17 @@ export function startHeartbeat(
         undefined,
         Array.from(state.authRejectedTransports),
       )
+
+      // This replica was evicted to make room for a newer one (plan replica
+      // limit). Hand control back to the agent so it stops serving work and
+      // waits for a free slot instead of keeping a half-live connection.
+      if (response && typeof response === 'object' && 'evicted' in response && response.evicted) {
+        logger.warn(
+          `${deps.prefix} ${t('runner.replicaEvicted', { instanceId: deps.client.getInstanceId() })}`,
+        )
+        deps.onEvicted?.()
+        return
+      }
 
       // Check configHash from heartbeat response (polling fallback)
       if (response && typeof response === 'object' && 'configHash' in response) {
@@ -365,6 +405,17 @@ export async function checkPendingCommands(
 }
 
 /**
+ * Whether an error means another replica already claimed this command.
+ *
+ * The API answers `GET /commands/:id` with 409 when a different replica of the
+ * same logical agent won the exclusive claim.
+ */
+function isCommandClaimedByAnotherReplica(error: unknown): boolean {
+  const status = (error as { response?: { status?: number } })?.response?.status
+  return status === 409
+}
+
+/**
  * Process a single command: fetch, execute, and submit result.
  */
 async function processCommand(
@@ -372,9 +423,35 @@ async function processCommand(
   ctx: CommandContext,
   commandId: string,
 ): Promise<void> {
-  ctx.transportState.processing = true
+  // Never run the same command twice in this process. Reached from three
+  // places — the AppSync notification, the re-claim timer, and the periodic
+  // pending sweep — and the last two can fire while the command is still
+  // running (the server keeps it PENDING until the result arrives).
+  if (ctx.transportState.inFlightCommands.has(commandId)) {
+    logger.debug(
+      `${deps.prefix} Command ${commandId} is already running in this process; skipping`,
+    )
+    return
+  }
+  ctx.transportState.inFlightCommands.add(commandId)
   try {
-    const detail = await deps.client.getCommand(commandId, deps.agentId)
+    let detail: Awaited<ReturnType<typeof deps.client.getCommand>>
+    try {
+      detail = await deps.client.getCommand(commandId, deps.agentId)
+    } catch (error) {
+      if (isCommandClaimedByAnotherReplica(error)) {
+        // Multi-replica deployments broadcast every command notification to all
+        // replicas of the same logical agent; exactly one wins the server-side
+        // claim. Losing is the normal outcome for the others, not an error — do
+        // not log at error level and do not submit a failure result (that would
+        // overwrite the winner's result with a spurious failure).
+        logger.debug(
+          `${deps.prefix} Command ${commandId} is being handled by another replica; skipping`,
+        )
+        return
+      }
+      throw error
+    }
     const trustedPayload = detail.type === 'chat' &&
       typeof detail.userId === 'string' &&
       detail.userId.startsWith('slack:')
@@ -426,8 +503,44 @@ async function processCommand(
         : undefined,
     })
     logger.debug(`${deps.prefix} Command result [${commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, LOG_RESULT_LIMIT)}`)
-    savePendingResult(commandId, deps.agentId, result, deps.apiUrl, deps.token, deps.tenantCode)
-    await deps.client.submitResult(commandId, result, deps.agentId)
+    savePendingResult(
+      commandId,
+      deps.agentId,
+      result,
+      deps.apiUrl,
+      deps.token,
+      deps.tenantCode,
+      // 再起動後の再送でフェンシングを通すため、実行時の指名世代も保存する。
+      deps.client.getAssignmentGeneration(commandId),
+    )
+    try {
+      await deps.client.submitResult(commandId, result, deps.agentId)
+    } catch (error) {
+      if (isCommandClaimedByAnotherReplica(error)) {
+        // Long-running commands can outlive our claim: if this replica is
+        // evicted and the lease expires, another replica takes the command
+        // over and re-runs it. The server fences our late result (409) to
+        // protect the new owner's result. That is the designed hand-off, not
+        // an execution error — do not log it at error level and do not retry
+        // (the retry would be fenced too), but do drop the pending file so it
+        // is not resubmitted on the next start.
+        removePendingResult(commandId)
+        logger.warn(
+          `${deps.prefix} Result for ${commandId} was rejected: the command was re-claimed by another replica`,
+        )
+        return
+      }
+      // Do NOT rethrow. The outer catch treats anything it receives as an
+      // *execution* failure and overwrites the pending file with
+      // `{success:false, error:<transport error>}` — which would destroy the
+      // real result we just persisted, making it unrecoverable even after a
+      // restart. The result is already on disk; log it and let the pending
+      // store resend it.
+      logger.error(
+        `${deps.prefix} Failed to submit the result for ${commandId}; it stays queued for resend: ${getErrorMessage(error)}`,
+      )
+      return
+    }
     removePendingResult(commandId)
     logger.info(t('runner.commandDone', {
       prefix: deps.prefix,
@@ -435,26 +548,63 @@ async function processCommand(
       result: result.success ? 'success' : 'failed',
     }))
   } catch (error) {
+    if (isCommandClaimedByAnotherReplica(error)) {
+      removePendingResult(commandId)
+      logger.warn(
+        `${deps.prefix} Command ${commandId} was re-claimed by another replica; discarding our result`,
+      )
+      return
+    }
     const message = getErrorMessage(error)
     logger.error(
       t('runner.commandError', { prefix: deps.prefix, commandId, message }),
     )
 
+    // 成功パスと同じく、送信前に永続化する。ここで保存しないと、送信が
+    // 一時障害で失敗した場合に実行時例外の内容がサーバーへ一切届かず、
+    // コマンドは回収 cron のタイムアウトまで宙に浮く（対称性）。
+    const failureResult: CommandResult = { success: false, error: message }
+    savePendingResult(
+      commandId,
+      deps.agentId,
+      failureResult,
+      deps.apiUrl,
+      deps.token,
+      deps.tenantCode,
+      deps.client.getAssignmentGeneration(commandId),
+    )
     try {
-      await deps.client.submitResult(commandId, {
-        success: false,
-        error: message,
-      }, deps.agentId)
-    } catch {
+      await deps.client.submitResult(commandId, failureResult, deps.agentId)
+      removePendingResult(commandId)
+    } catch (submitError) {
+      if (isCommandClaimedByAnotherReplica(submitError)) {
+        removePendingResult(commandId)
+        logger.warn(
+          `${deps.prefix} Failure result for ${commandId} was rejected: the command was re-claimed by another replica`,
+        )
+        return
+      }
       logger.error(t('runner.resultSendFailed', { prefix: deps.prefix }))
     }
   } finally {
-    ctx.transportState.processing = false
+    ctx.transportState.inFlightCommands.delete(commandId)
+    // 実行が終わったコマンドの世代は保持し続けない（プロセス寿命の間、
+    // 完了済みコマンドの分だけ Map が増え続ける）。
+    deps.client.clearAssignment(commandId)
   }
 }
 
 /**
  * Stop all transport resources.
+ */
+/**
+ * Stop the transport (heartbeat, subscriptions, WebSockets).
+ *
+ * `inFlightCommands` is deliberately NOT cleared: a transport restart
+ * (token update, eviction → standby) does not abort commands that are already
+ * running, and clearing the set would let the same process pick the same
+ * command up again while the first execution is still going.
+ * Each `processCommand` removes its own entry in `finally`.
  */
 export function stopTransport(state: TransportState): void {
   if (state.heartbeatTimer) clearInterval(state.heartbeatTimer)

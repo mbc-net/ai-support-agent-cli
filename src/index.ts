@@ -6,6 +6,7 @@ import { startAgent } from './agent-runner'
 import { registerAuthCommands } from './cli/auth-commands'
 import { registerEcsCommands } from './cli/ecs-publish-command'
 import { registerLogRotateCommand } from './cli/log-rotate-command'
+import { registerManifestCommands } from './cli/manifest-command'
 import { registerServiceCommands } from './cli/service-command'
 import { registerStatusCommand } from './cli/status-command'
 import { registerSetProjectDirCommand } from './commands/set-project-dir'
@@ -209,6 +210,7 @@ registerServiceCommands(program)
 registerSetProjectDirCommand(program)
 registerLogRotateCommand(program)
 registerEcsCommands(program)
+registerManifestCommands(program)
 
 // ECS container mode: AGENT_MODE=oneshot (injected via RunTask
 // containerOverrides) bypasses the CLI entirely and runs exactly one command

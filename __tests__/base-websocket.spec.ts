@@ -570,6 +570,9 @@ describe('buildAgentWsHeaders', () => {
     expect(buildAgentWsHeaders('tok', 'agent-1')).toEqual({
       Authorization: 'Bearer tok',
       'X-Agent-Id': 'agent-1',
+      // Multi-replica identity: every replica sends the same X-Agent-Id (the
+      // token's TOFU binding requires it) and is told apart by this header.
+      'X-Agent-Instance-Id': expect.any(String),
     })
   })
 
@@ -577,8 +580,15 @@ describe('buildAgentWsHeaders', () => {
     expect(buildAgentWsHeaders('tok', 'agent-1', 'AWSALB=xyz')).toEqual({
       Authorization: 'Bearer tok',
       'X-Agent-Id': 'agent-1',
+      'X-Agent-Instance-Id': expect.any(String),
       Cookie: 'AWSALB=xyz',
     })
+  })
+
+  it('sends a non-empty replica instance id', () => {
+    expect(
+      buildAgentWsHeaders('tok', 'agent-1')['X-Agent-Instance-Id'],
+    ).toMatch(/^[A-Za-z0-9._-]{1,128}$/)
   })
 
   it('omits the Cookie header when the cookie is an empty string', () => {

@@ -230,7 +230,7 @@ describe('aws-profile', () => {
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
         tmpPath,
         expect.stringContaining('[profile MBC_01-dev]'),
-        { mode: 0o600 },
+        { mode: 0o600, flag: 'wx' },
       )
       expect(mockedFs.renameSync).toHaveBeenCalledWith(tmpPath, configPath)
     })
@@ -377,7 +377,7 @@ describe('aws-profile', () => {
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
         tmpPath,
         expect.stringContaining('[MBC_01-dev]'),
-        { mode: 0o600 },
+        { mode: 0o600, flag: 'wx' },
       )
       expect(mockedFs.renameSync).toHaveBeenCalledWith(tmpPath, result)
     })

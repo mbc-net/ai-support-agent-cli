@@ -172,6 +172,22 @@ export const KNOWLEDGE_COMMAND_ID_ENV = 'AI_SUPPORT_AGENT_KNOWLEDGE_COMMAND_ID'
 export const KNOWLEDGE_AGENT_ID_ENV = 'AI_SUPPORT_AGENT_KNOWLEDGE_AGENT_ID'
 
 /**
+ * The replica identity that holds the assignment for this command.
+ *
+ * The knowledge endpoint grants `published` status based on `commandId`, so the
+ * server fences it to the assigned replica — a request without these headers is
+ * rejected with 409 for an assigned command. The MCP server runs in a *child
+ * process* that only receives the env keys listed here, so its own `ApiClient`
+ * would otherwise resolve a different instance id (HOSTNAME fallback) and have
+ * an empty in-memory generation map, and every knowledge write for an assigned
+ * command would fail.
+ */
+export const ASSIGNMENT_INSTANCE_ID_ENV = 'AI_SUPPORT_AGENT_ASSIGNMENT_INSTANCE_ID'
+
+/** The fencing token (assignment generation) for {@link ASSIGNMENT_INSTANCE_ID_ENV}. */
+export const ASSIGNMENT_GENERATION_ENV = 'AI_SUPPORT_AGENT_ASSIGNMENT_GENERATION'
+
+/**
  * MCP 設定ファイルを書き出す
  *
  * 0o600 権限で作成し、token は環境変数参照にする。
@@ -288,6 +304,12 @@ export function writeCommandMcpConfig(
   conversationId: string,
   taskId?: string,
   agentId?: string,
+  /**
+   * The assignment held for `commandId`. Passed through so the MCP child
+   * process can present the same fencing identity (see
+   * {@link ASSIGNMENT_INSTANCE_ID_ENV}).
+   */
+  assignment?: { instanceId: string; generation: number },
 ): string {
   const raw = readFileSync(baseConfigPath, 'utf-8')
   const config = JSON.parse(raw) as McpConfigFile
@@ -300,6 +322,10 @@ export function writeCommandMcpConfig(
       ...(taskId && { [TASK_ID_ENV]: taskId }),
       [KNOWLEDGE_COMMAND_ID_ENV]: commandId,
       ...(agentId && { [KNOWLEDGE_AGENT_ID_ENV]: agentId }),
+      ...(assignment && {
+        [ASSIGNMENT_INSTANCE_ID_ENV]: assignment.instanceId,
+        [ASSIGNMENT_GENERATION_ENV]: String(assignment.generation),
+      }),
     }
   }
 

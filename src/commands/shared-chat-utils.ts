@@ -234,7 +234,17 @@ export function createChunkSender(
         content,
       }, agentId)
     } catch (error) {
-      logger.warn(`[${logTag}] Failed to send chunk #${chunkIndex - 1}: ${getErrorMessage(error)}`)
+      // `done` / `error` はタスク完了・アシスタントメッセージ確定のトリガーであり、
+      // 落とすと Web 側が「応答待ち」のままハングする。delta の欠落（表示が一部
+      // 欠ける）と違って復旧手段が無いため、error レベルで記録して運用者が
+      // 検知できるようにする。
+      const isTerminal = type === 'done' || type === 'error'
+      const message = `[${logTag}] Failed to send chunk #${chunkIndex - 1} (${type}): ${getErrorMessage(error)}`
+      if (isTerminal) {
+        logger.error(message)
+      } else {
+        logger.warn(message)
+      }
     }
   }
 

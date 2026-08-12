@@ -160,7 +160,10 @@ describe('pending-result-store', () => {
 
       await submitPendingResults()
 
-      expect(MockApiClient).toHaveBeenCalledWith('http://api', 'tok')
+      // 世代を持たない保存（この呼び出しでは未指定）は識別子ごと送らない。
+      expect(MockApiClient).toHaveBeenCalledWith('http://api', 'tok', {
+        withoutReplicaIdentity: true,
+      })
       expect(mockSetTenantCode).toHaveBeenCalledWith('tenant-1')
       expect(mockSubmitResult).toHaveBeenCalledWith('cmd-1', mockResult, 'agent-1')
 
@@ -238,6 +241,159 @@ describe('pending-result-store', () => {
       // File should be kept — auth issues may be resolved after re-login
       const filePath = path.join(tempDir, 'pending-results', 'cmd-auth.json')
       expect(fs.existsSync(filePath)).toBe(true)
+    })
+  })
+
+  describe('再起動をまたいだ結果の再送', () => {
+    const mockClient = (submitResult: jest.Mock) => {
+      MockApiClient.mockImplementation(
+        () =>
+          ({ submitResult, setTenantCode: jest.fn() }) as unknown as ApiClient,
+      )
+    }
+
+    it('指名世代も保存し、再送時に復元する（フェンシングを通すため）', async () => {
+      // 世代を送らないとサーバーは「指名を名乗らない要求」として扱い、指名済み
+      // コマンドへの書き込みを 409 で拒否する。その 409 は「別レプリカに奪われた」と
+      // 解釈されて結果が破棄されるため、同一 Pod のクラッシュ→再起動という最も
+      // 典型的なケースで実行済みの結果が失われる。
+      const restoreAssignment = jest.fn()
+      MockApiClient.mockImplementation(
+        () =>
+          ({
+            submitResult: jest.fn().mockResolvedValue(undefined),
+            setTenantCode: jest.fn(),
+            restoreAssignment,
+          }) as unknown as ApiClient,
+      )
+
+      savePendingResult(
+        'cmd-1',
+        'agent-1',
+        mockResult,
+        'http://api',
+        'tok',
+        'tenant-1',
+        7,
+      )
+      const saved = JSON.parse(
+        fs.readFileSync(
+          path.join(tempDir, 'pending-results', 'cmd-1.json'),
+          'utf-8',
+        ),
+      )
+      expect(saved.assignmentGeneration).toBe(7)
+
+      await submitPendingResults()
+
+      expect(restoreAssignment).toHaveBeenCalledWith('cmd-1', 7)
+    })
+
+    it('世代を持たない旧形式のファイルでは復元を試みない', async () => {
+      const restoreAssignment = jest.fn()
+      MockApiClient.mockImplementation(
+        () =>
+          ({
+            submitResult: jest.fn().mockResolvedValue(undefined),
+            setTenantCode: jest.fn(),
+            restoreAssignment,
+          }) as unknown as ApiClient,
+      )
+
+      savePendingResult(
+        'cmd-1',
+        'agent-1',
+        mockResult,
+        'http://api',
+        'tok',
+        'tenant-1',
+      )
+
+      await submitPendingResults()
+
+      expect(restoreAssignment).not.toHaveBeenCalled()
+    })
+
+    it('保存時の instanceId を再送に使う（Pod 再作成で ID が変わっても指名先と一致させる）', async () => {
+      mockClient(jest.fn().mockResolvedValue(undefined))
+      savePendingResult(
+        'cmd-1',
+        'agent-1',
+        mockResult,
+        'http://api',
+        'tok',
+        'tenant-1',
+        3,
+      )
+      const saved = JSON.parse(
+        fs.readFileSync(
+          path.join(tempDir, 'pending-results', 'cmd-1.json'),
+          'utf-8',
+        ),
+      )
+      expect(typeof saved.instanceId).toBe('string')
+
+      await submitPendingResults()
+
+      expect(MockApiClient).toHaveBeenCalledWith('http://api', 'tok', {
+        instanceId: saved.instanceId,
+      })
+    })
+
+    it('instanceId を持たない旧形式のファイルはレプリカ識別子を送らない', async () => {
+      // 旧バージョンが書いたファイルを現在の instanceId で送ると、サーバー側の
+      // フェンシングで 409 になり実行済みの結果が捨てられる。
+      mockClient(jest.fn().mockResolvedValue(undefined))
+      const dir = path.join(tempDir, 'pending-results')
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(
+        path.join(dir, 'cmd-legacy.json'),
+        JSON.stringify({
+          commandId: 'cmd-legacy',
+          agentId: 'agent-1',
+          result: mockResult,
+          apiUrl: 'http://api',
+          token: 'tok',
+          tenantCode: 'tenant-1',
+          savedAt: new Date().toISOString(),
+        }),
+      )
+
+      await submitPendingResults()
+
+      expect(MockApiClient).toHaveBeenCalledWith('http://api', 'tok', {
+        withoutReplicaIdentity: true,
+      })
+    })
+
+    it('409（別レプリカが再実行済み）は理由が分かる警告を出して破棄する', async () => {
+      const axiosError = new axios.AxiosError(
+        'Conflict',
+        'ERR_BAD_REQUEST',
+        undefined,
+        undefined,
+        { status: 409, data: {} } as never,
+      )
+      mockClient(jest.fn().mockRejectedValue(axiosError))
+      const { logger } = require('../src/logger')
+
+      savePendingResult(
+        'cmd-1',
+        'agent-1',
+        mockResult,
+        'http://api',
+        'tok',
+        'tenant-1',
+      )
+
+      await submitPendingResults()
+
+      expect(
+        fs.existsSync(path.join(tempDir, 'pending-results', 'cmd-1.json')),
+      ).toBe(false)
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('re-claimed by another replica'),
+      )
     })
   })
 })

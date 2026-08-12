@@ -403,7 +403,11 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
 
   saveConfig({ lastConnected: nowIso() })
 
-  const client = new ApiClient(projects[0].apiUrl, projects[0].token)
+  // register を行わない通知専用クライアント（docker-runner と同じ理由で
+  // レプリカ識別子を送らない）。
+  const client = new ApiClient(projects[0].apiUrl, projects[0].token, {
+    withoutReplicaIdentity: true,
+  })
   const updater = initAutoUpdater(options, config, client, agentId, () => processManager.stopAll(), () => processManager.isAnyBusy())
 
   const configWatcher = startConfigWatcher(projects, {

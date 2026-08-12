@@ -328,6 +328,57 @@ describe('config-writer', () => {
       expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_AGENT_TOKEN).toBe('test_tenant:tokenId:rawToken')
     })
 
+    it('should embed the assignment so the MCP child can present the same fencing identity', () => {
+      // The MCP server runs in a child process that only receives the env keys
+      // listed here. Without the assignment it resolves a different instance id
+      // (HOSTNAME fallback) and holds no generation, so every knowledge write
+      // for an assigned command is fenced out with 409.
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test_tenant:tokenId:rawToken',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(
+        baseConfigPath,
+        'cmd-assigned',
+        'conv-123',
+        undefined,
+        'agent-1',
+        { instanceId: 'pod-a', generation: 3 },
+      )
+
+      const env = JSON.parse(readFileSync(commandConfigPath, 'utf-8'))
+        .mcpServers['ai-support-agent'].env
+      expect(env.AI_SUPPORT_AGENT_ASSIGNMENT_INSTANCE_ID).toBe('pod-a')
+      expect(env.AI_SUPPORT_AGENT_ASSIGNMENT_GENERATION).toBe('3')
+    })
+
+    it('should omit the assignment env for unassigned commands (oneshot / legacy clients)', () => {
+      const baseConfigPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test_tenant:tokenId:rawToken',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      const commandConfigPath = writeCommandMcpConfig(
+        baseConfigPath,
+        'cmd-unassigned',
+        'conv-123',
+        undefined,
+        'agent-1',
+      )
+
+      const env = JSON.parse(readFileSync(commandConfigPath, 'utf-8'))
+        .mcpServers['ai-support-agent'].env
+      expect(env.AI_SUPPORT_AGENT_ASSIGNMENT_INSTANCE_ID).toBeUndefined()
+      expect(env.AI_SUPPORT_AGENT_ASSIGNMENT_GENERATION).toBeUndefined()
+    })
+
     it('should embed AI_SUPPORT_TASK_ID when taskId is provided (task detail E2E tab reverse lookup)', () => {
       const baseConfigPath = writeMcpConfig(
         testDir,

@@ -20,9 +20,34 @@ export function sleep(ms: number): Promise<void> {
 }
 
 export function atomicWriteFile(filePath: string, content: string, mode = 0o600): void {
+  // Create the temp file exclusively ('wx') so `mode` is actually applied.
+  // Without the flag, `writeFileSync` only applies `mode` when it creates the
+  // file: a leftover temp file (or an attacker-planted one) would keep its old,
+  // possibly world-readable permissions while receiving secret content.
+  // A leftover temp file is removed and recreated rather than reused, so the
+  // permissions always come from `mode`.
   const tmpPath = filePath + '.tmp'
-  fs.writeFileSync(tmpPath, content, { mode })
-  fs.renameSync(tmpPath, filePath)
+  try {
+    fs.writeFileSync(tmpPath, content, { mode, flag: 'wx' })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    // 前回の失敗で残った一時ファイル。そのまま上書きすると古い権限
+    // （world-readable かもしれない）を引き継いだまま機密を書き込むことになるため、
+    // 必ず作り直す。作り直しても存在する＝競合しているので、その場合は失敗させる。
+    fs.unlinkSync(tmpPath)
+    fs.writeFileSync(tmpPath, content, { mode, flag: 'wx' })
+  }
+  try {
+    fs.renameSync(tmpPath, filePath)
+  } catch (error) {
+    // Do not leave the secret behind in a temp file if the rename fails.
+    try {
+      fs.unlinkSync(tmpPath)
+    } catch {
+      /* ignore */
+    }
+    throw error
+  }
 }
 
 /**

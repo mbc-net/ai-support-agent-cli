@@ -3,6 +3,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 import { ApiClient } from '../api-client'
 import { ENV_VARS } from '../constants'
+import {
+  ASSIGNMENT_GENERATION_ENV,
+  ASSIGNMENT_INSTANCE_ID_ENV,
+  KNOWLEDGE_COMMAND_ID_ENV,
+} from './config-writer'
 import { registerBrowserTools } from './tools/browser'
 import { registerE2eTestStepTool } from './tools/e2e-test-step'
 import { BrowserSessionManager } from './tools/browser/browser-session-manager'
@@ -67,7 +72,26 @@ export async function startMcpServer(): Promise<void> {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`)
   }
 
-  const apiClient = new ApiClient(apiUrl, token)
+  // The parent process passes the assignment it holds for this command
+  // (see ASSIGNMENT_INSTANCE_ID_ENV). Without it this child would resolve a
+  // different instance id via the HOSTNAME fallback and hold no generation, so
+  // every knowledge write for an assigned command would be fenced out (409).
+  const assignmentInstanceId = process.env[ASSIGNMENT_INSTANCE_ID_ENV]
+  const assignmentGeneration = Number(process.env[ASSIGNMENT_GENERATION_ENV])
+  const knowledgeCommandId = process.env[KNOWLEDGE_COMMAND_ID_ENV]
+  const apiClient = new ApiClient(
+    apiUrl,
+    token,
+    assignmentInstanceId ? { instanceId: assignmentInstanceId } : undefined,
+  )
+  if (
+    assignmentInstanceId &&
+    knowledgeCommandId &&
+    Number.isInteger(assignmentGeneration) &&
+    assignmentGeneration >= 1
+  ) {
+    apiClient.restoreAssignment(knowledgeCommandId, assignmentGeneration)
+  }
   if (tenantCode) {
     apiClient.setTenantCode(tenantCode)
   }
