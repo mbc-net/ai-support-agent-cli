@@ -151,24 +151,61 @@
   when: k3s_ephemeral_needs_setup | bool
   changed_when: true
 
-- name: "k3s : Read the ephemeral filesystem UUID (register in fstab by UUID)"
+# UUID の取得は 2 段構え。`blkid -L <label>` はラベル→デバイス解決の専用モードで、
+# man blkid(8) に "the -L option prints the device name rather than the token
+# content" と明記されているとおり `-s`/`-o` を無視してデバイス名を返す。1 タスクに
+# まとめると stdout が `/dev/nvme0n1p1` になり、下の `src: "UUID={{ ... }}"` が
+# `UUID=/dev/nvme0n1p1` という不正な fstab エントリになって
+# `mount: can't find UUID=/dev/nvme0n1p1` で失敗する（実機で発生）。
+- name: "k3s : Resolve the device that carries the ephemeral label"
   ansible.builtin.command:
     argv:
       - blkid
       - -L
       - "{{ k3s_ephemeral_fs_label }}"
-      - -s
-      - UUID
+  register: k3s_ephemeral_label_device
+  changed_when: false
+  # rc は下の assert で判定する。ここで素の command として落とすと
+  # 「rc=2」だけの不親切な失敗になり、どのラベルが引けなかったのかが出ない。
+  # 握り潰しではなく、直後の assert が必ず再送出する（同 :98-106 と同じ形）。
+  failed_when: false
+
+- name: "k3s : Assert the labelled device resolved to a block device path"
+  # 空のまま次段に渡すと `blkid -o value -s UUID ""` が全デバイスを走査して
+  # 無関係な UUID を拾いうるため、ここで打ち切る。'..' の排除は同ファイルの
+  # マウント先 allowlist と同じ方針（パス成分に親参照を通さない）。
+  ansible.builtin.assert:
+    that:
+      - k3s_ephemeral_label_device.rc == 0
+      - (k3s_ephemeral_label_device.stdout | trim) is match('^/dev/[A-Za-z0-9/._-]+$')
+      - "'..' not in (k3s_ephemeral_label_device.stdout | trim)"
+    fail_msg: >-
+      Could not resolve a device for filesystem label
+      {{ k3s_ephemeral_fs_label | to_json }} after setup (blkid rc={{
+      k3s_ephemeral_label_device.rc }}, stdout={{
+      k3s_ephemeral_label_device.stdout | trim | to_json }}).
+
+- name: "k3s : Read the ephemeral filesystem UUID (register in fstab by UUID)"
+  ansible.builtin.command:
+    argv:
+      - blkid
       - -o
       - value
+      - -s
+      - UUID
+      - "{{ k3s_ephemeral_label_device.stdout | trim }}"
   register: k3s_ephemeral_uuid_lookup
   changed_when: false
 
 - name: "k3s : Assert the ephemeral UUID resolved"
+  # 非空チェックだけだと、デバイスパスのような非 UUID 値が正常値として通過し、
+  # そのまま fstab に書き込まれてしまう（この不具合の二次原因）。形式まで検証する。
   ansible.builtin.assert:
     that:
-      - (k3s_ephemeral_uuid_lookup.stdout | trim | length) > 0
-    fail_msg: "Could not read the UUID of the ephemeral filesystem after setup."
+      - (k3s_ephemeral_uuid_lookup.stdout | trim) is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+    fail_msg: >-
+      Could not read a valid UUID for the ephemeral filesystem after setup
+      (got {{ k3s_ephemeral_uuid_lookup.stdout | trim | to_json }}).
 
 - name: "k3s : Mount the ephemeral filesystem by UUID and persist in fstab"
   ansible.posix.mount:
