@@ -24,6 +24,7 @@ import {
   REGISTER_AUTH_ERROR_DELAY_MS,
   REGISTER_RETRY_BASE_DELAY_MS,
   REGISTER_RETRY_MAX_DELAY_MS,
+  REPLICA_STANDBY_RETRY_DELAY_MS,
   SERVER_SETUP_CUSTOM_TASKS_CAPABILITY,
 } from './constants'
 import { calculateBackoff } from './retry-strategy'
@@ -35,7 +36,7 @@ import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import { submitPendingResults } from './pending-result-store'
 import type { TransportKind } from './ipc-types'
-import type { AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
+import type { AdmissionMode, AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
 import { getUpdateVersionFilePath } from './utils/path-utils'
@@ -74,9 +75,9 @@ export class ProjectAgent {
     subscriber: null,
     terminalWs: null,
     vsCodeWs: null,
-    processing: false,
     configSyncDebounceTimer: null,
     authRejectedTransports: new Set(),
+    inFlightCommands: new Set(),
   }
 
   private transportDeps: TransportDeps
@@ -88,6 +89,24 @@ export class ProjectAgent {
   private registerLoopCancelled = false
   private registerAttempt = 0
   private registerAbortController: AbortController | null = null
+  /** In-flight register loop, awaited by restartRegisterLoop() before restarting. */
+  private registerLoopPromise: Promise<void> | null = null
+  /** Incremented on every stop() so a deferred restart can detect a later stop. */
+  private stopGeneration = 0
+  /**
+   * Admission mode for the next register call.
+   *
+   * `'initial'` normally. Set to `'standby'` by eviction recovery: a replica
+   * that was evicted must NOT re-register as `'initial'`, because the server
+   * treats `'initial'` as "you may evict the oldest live replica" — the evicted
+   * replica would evict whoever took its slot, that one would do the same, and
+   * the two would swap forever (ping-pong). Sticky across register retries so a
+   * transient failure between eviction and re-admission cannot silently
+   * downgrade it back to `'initial'`.
+   */
+  private nextAdmissionMode: AdmissionMode = 'initial'
+  /** Resolver that cuts the standby wait short (set only while parked). */
+  private standbyWakeup: (() => void) | null = null
   // Edge-triggered logging: warn only when the failure mode changes or recovers,
   // and emit debug for the noisy intermediate retries. Patterned on Zabbix's
   // "started to fail" / "is working again" log pair.
@@ -136,6 +155,7 @@ export class ProjectAgent {
       pollInterval: this.options.pollInterval,
       heartbeatInterval: this.options.heartbeatInterval,
       onAuthRejected: this.onAuthRejected,
+      onEvicted: () => this.handleEviction(),
     }
 
     // When running inside Docker, initialize dockerCustomizationHash from the
@@ -160,14 +180,32 @@ export class ProjectAgent {
     this.isRegistering = true
     this.registerLoopCancelled = false
     this.registerAttempt = 0
-    void this.runRegisterLoop().finally(() => {
+    this.registerLoopPromise = this.runRegisterLoop().finally(() => {
       this.isRegistering = false
     })
+    void this.registerLoopPromise
   }
 
   stop(): void {
+    this.stopGeneration += 1
     this.registerLoopCancelled = true
     this.registerAbortController?.abort()
+    // Wake a parked standby wait so the register loop unwinds now instead of
+    // up to REPLICA_STANDBY_RETRY_DELAY_MS later.
+    this.wakeStandbyWait()
+    this.stopWork()
+  }
+
+  /**
+   * Stop everything this replica does on behalf of its slot: transport
+   * (AppSync subscription, WebSockets, heartbeat) and the alert polling timers.
+   *
+   * Used by both `stop()` and `handleEviction()`. Eviction previously stopped
+   * only the transport, leaving the alert timers running — a replica that had
+   * handed its slot to another one kept polling and processing alerts, which
+   * both duplicates work and contradicts "a standby replica does no work".
+   */
+  private stopWork(): void {
     if (this.alertPollingTimer) {
       clearInterval(this.alertPollingTimer)
       this.alertPollingTimer = null
@@ -179,8 +217,46 @@ export class ProjectAgent {
     stopTransport(this.transportState)
   }
 
+  /**
+   * Restart the register loop after a `stop()` issued by this class itself
+   * (token update / eviction recovery).
+   *
+   * `start()` is a no-op while `isRegistering` is true, so a bare
+   * `setImmediate(() => this.start())` silently drops the restart whenever the
+   * loop is parked on a long await — most notably the standby wait, which can
+   * hold for the full retry delay. Losing the restart leaves the agent idle
+   * forever. Waiting for the previous loop's promise guarantees the restart
+   * lands after `isRegistering` has flipped back to false.
+   *
+   * The generation check prevents this deferred restart from resurrecting the
+   * agent when a genuine external `stop()` (shutdown) arrives in the meantime.
+   */
+  private restartRegisterLoop(delayMs = 0): void {
+    const generation = this.stopGeneration
+    const previous = this.registerLoopPromise
+    void Promise.resolve(previous)
+      .catch(() => undefined)
+      .then(async () => {
+        if (delayMs > 0) {
+          // 中断可能・unref 付きの待機。素の setTimeout だと shutdown 後も
+          // タイマーがイベントループに残り、プロセスの終了を遅らせる。
+          await this.waitInterruptible(delayMs)
+        }
+        if (this.stopGeneration !== generation) {
+          logger.debug(
+            `${this.prefix} Register loop restart superseded by a later stop()`,
+          )
+          return
+        }
+        this.start()
+      })
+  }
+
   isBusy(): boolean {
-    return this.transportState.processing
+    // 実行中コマンドの有無から導出する。単一の boolean で持つと、複数コマンドを
+    // 並行実行しているときに先に終わった1件が false に戻してしまい、自動更新が
+    // 「暇だ」と判断して実行中の別コマンドごとプロセスを再起動する。
+    return this.transportState.inFlightCommands.size > 0
   }
 
   getClient(): ApiClient {
@@ -198,9 +274,10 @@ export class ProjectAgent {
     // Re-register to ensure the agent record matches the new token's identity.
     logger.info(`${this.prefix} Re-registering after token update...`)
     this.stop()
-    // Defer start() so the in-flight register loop unwinds (isRegistering -> false)
-    // before the next start() flips it back on.
-    setImmediate(() => this.start())
+    // Restart once the in-flight loop has actually unwound. A bare
+    // setImmediate would be dropped while the loop is parked on the standby
+    // wait, leaving the agent stuck in standby forever after a token update.
+    this.restartRegisterLoop()
   }
 
   async performConfigSync(): Promise<void> {
@@ -321,7 +398,23 @@ export class ProjectAgent {
   private async registerAndStart(): Promise<void> {
     await refreshChatMode(this.configSyncDeps, this.configSyncState, true)
 
-    const result = await this.performRegistration()
+    // 'standby' when recovering from an eviction (see handleEviction), 'initial'
+    // otherwise. Deliberately not reset before the call: if register throws, the
+    // retry must keep the standby intent, or the retry would re-acquire the
+    // right to evict and restart the ping-pong this flag exists to prevent.
+    let result = await this.performRegistration(this.nextAdmissionMode)
+
+    // Multi-replica deployments (Kubernetes / ECS): the plan's replica limit
+    // may already be satisfied by other replicas. Rather than crash-looping
+    // (which Kubernetes would surface as CrashLoopBackOff and which would
+    // never resolve on its own), stay alive in standby and take over the
+    // moment a slot frees up — a replica dying is exactly when a standby
+    // should step in.
+    if (result.admission && !result.admission.accepted) {
+      result = await this.waitForAdmission(result)
+      if (this.registerLoopCancelled) return
+    }
+
 
     // Submit any pending results from previous sessions
     await submitPendingResults()
@@ -340,6 +433,124 @@ export class ProjectAgent {
     }
 
     await this.startServices(result)
+
+    // Reset only after the transport is actually up. Resetting right after
+    // admission would re-arm the right to evict while startup can still fail
+    // (config sync, AppSync connect); the retry would then come back as
+    // 'initial' and evict whichever replica took the slot — the ping-pong this
+    // flag exists to prevent.
+    this.nextAdmissionMode = 'initial'
+  }
+
+  /**
+   * Wait in standby until a replica slot frees up, then return the accepted
+   * register response.
+   *
+   * Re-requests admission with `admissionMode: 'standby'`, which the server
+   * admits only into a **free** slot. It deliberately never evicts on a
+   * standby's behalf: if it did, an evicted replica would immediately evict
+   * whoever took its place and the replicas would swap forever.
+   *
+   * No transport is started while waiting, so a standby replica holds no
+   * WebSocket, receives no commands, and consumes no slot.
+   */
+  private async waitForAdmission(
+    initial: RegisterResponse,
+  ): Promise<RegisterResponse> {
+    const admission = initial.admission
+    logger.warn(
+      `${this.prefix} ${t('runner.replicaStandby', {
+        instanceId: this.client.getInstanceId(),
+        live: String(admission?.liveReplicas ?? 0),
+        max: String(admission?.maxReplicas ?? 0),
+      })}`,
+    )
+
+    let result = initial
+    while (!this.registerLoopCancelled) {
+      await this.waitBeforeStandbyRetry()
+      if (this.registerLoopCancelled) return result
+      try {
+        result = await this.performRegistration('standby')
+      } catch (error) {
+        // Transient failures must not end standby — keep waiting and retry.
+        logger.debug(
+          `${this.prefix} Standby admission request failed: ${getErrorMessage(error)}`,
+        )
+        continue
+      }
+      if (!result.admission || result.admission.accepted) {
+        logger.success(
+          `${this.prefix} ${t('runner.replicaAdmitted', {
+            instanceId: this.client.getInstanceId(),
+          })}`,
+        )
+        return result
+      }
+    }
+    return result
+  }
+
+  /**
+   * Wait before the next standby admission attempt, interruptibly.
+   *
+   * A plain `sleep()` would keep the register loop parked for the whole delay,
+   * so `stop()` (shutdown, token update) could not unwind it promptly and the
+   * follow-up restart would be dropped. `stop()` calls `wakeStandbyWait()` to
+   * cut this short.
+   */
+  private waitBeforeStandbyRetry(): Promise<void> {
+    if (this.registerLoopCancelled) {
+      return Promise.resolve()
+    }
+    return this.waitInterruptible(REPLICA_STANDBY_RETRY_DELAY_MS)
+  }
+
+  /**
+   * `stop()` で打ち切れる待機。タイマーは `unref()` してイベントループを
+   * 押さえないようにする（素の `setTimeout` はシャットダウン後もプロセスの
+   * 終了を最大で待機時間ぶん遅らせる）。
+   */
+  private waitInterruptible(delayMs: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.standbyWakeup = null
+        resolve()
+      }, delayMs)
+      timer.unref?.()
+      this.standbyWakeup = () => {
+        clearTimeout(timer)
+        this.standbyWakeup = null
+        resolve()
+      }
+    })
+  }
+
+  /** Cut a parked standby wait short (no-op when not waiting). */
+  private wakeStandbyWait(): void {
+    this.standbyWakeup?.()
+  }
+
+  /**
+   * Called when a heartbeat reports this replica was evicted (a newer replica
+   * took its slot). Stops all work and re-enters admission as a **standby**.
+   *
+   * Re-registering as `'initial'` here would break the ping-pong invariant:
+   * the server lets `'initial'` evict the oldest live replica, so this replica
+   * would immediately evict the one that just took its slot, that one would
+   * come back the same way, and the two would swap forever. `'standby'` only
+   * ever enters a free slot.
+   */
+  private handleEviction(): void {
+    if (this.registerLoopCancelled) return
+    this.nextAdmissionMode = 'standby'
+    this.stop()
+    // Back off before re-entering admission. Being evicted means another
+    // replica holds the slot, so an immediate retry cannot succeed anyway —
+    // and without a delay a server that keeps reporting `evicted` would spin
+    // the agent hot (register → immediate first heartbeat → evicted → …) with
+    // no pause between iterations.
+    this.restartRegisterLoop(REPLICA_STANDBY_RETRY_DELAY_MS)
   }
 
   /**
@@ -348,8 +559,14 @@ export class ProjectAgent {
    * registered-agent-id marker and reporting a docker-build-error if present).
    *
    * Throws on failure so the caller's retry loop can apply exponential backoff.
+   *
+   * @param admissionMode `initial` on process start (may evict the oldest
+   *   replica when the plan limit is reached); `standby` while waiting for a
+   *   free slot (never evicts).
    */
-  private async performRegistration(): Promise<RegisterResponse> {
+  private async performRegistration(
+    admissionMode: AdmissionMode = 'initial',
+  ): Promise<RegisterResponse> {
     // 'ecs_launch' advertises that this resident agent can act as the
     // launcher for ECS execution agents (RunTask/StopTask via its local AWS
     // credentials); the API's automatic launcher selection matches on it.
@@ -374,7 +591,14 @@ export class ProjectAgent {
       ],
       availableChatModes: this.configSyncState.availableChatModes,
       activeChatMode: this.configSyncState.activeChatMode,
+      admissionMode,
     })
+
+    // Rejected admission carries no agent identity to apply — return it as-is
+    // so the caller can enter standby without mutating local state.
+    if (result.admission && !result.admission.accepted) {
+      return result
+    }
 
     this.tenantCode = result.tenantCode
     if (result.projectCode && result.projectCode !== this.projectCode) {
@@ -540,6 +764,11 @@ export class ProjectAgent {
     while (!this.registerLoopCancelled) {
       try {
         await this.registerAndStart()
+        // registerAndStart() returns normally both on success and when the loop
+        // was cancelled mid-flight (token update / eviction calling stop()).
+        // Without this check a cancellation would print the recovery message,
+        // making the log claim a re-registration that never happened.
+        if (this.registerLoopCancelled) return
         // Edge-triggered recovery log: only emit when we were previously failing.
         if (this.lastRegisterError !== null) {
           logger.info(

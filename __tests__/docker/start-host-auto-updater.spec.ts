@@ -106,6 +106,10 @@ describe('startHostAutoUpdater', () => {
     expect(mockApiClientCtor).toHaveBeenCalledWith(
       'https://api.example.com',
       'test-token',
+      // 自動更新用のクライアントは登録を行わないため、レプリカ識別子を送らない。
+      // 送ると API 側で「未登録インスタンスからの heartbeat」＝退避済みとみなされ、
+      // AGENT_STATUS（updateError を含む）が一切更新されなくなる。
+      { withoutReplicaIdentity: true },
     )
   })
 

@@ -146,7 +146,10 @@ export function startHostAutoUpdater(
   const token = projects[0].token
   if (!apiUrl || !token) return undefined
 
-  const client = new ApiClient(apiUrl, token)
+  // register を行わない「自動更新エラー通知専用」クライアント。レプリカ識別子を
+  // 送るとサーバー側で稼働枠なしと判定され、ハートビートが evicted 扱いになって
+  // AGENT_STATUS（updateError 等）が一切更新されなくなる。
+  const client = new ApiClient(apiUrl, token, { withoutReplicaIdentity: true })
   const resolvedAgentId = agentId ?? config?.agentId ?? os.hostname()
 
   return startAutoUpdater(

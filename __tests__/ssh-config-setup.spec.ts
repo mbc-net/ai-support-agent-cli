@@ -111,7 +111,7 @@ describe('ssh-config-setup', () => {
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
         path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1') + '.tmp',
         creds.privateKey,
-        { mode: 0o600 },
+        { mode: 0o600, flag: 'wx' },
       )
       expect(mockedFs.renameSync).toHaveBeenCalledWith(
         path.join(FAKE_SSH_DIR, 'ai-support-agent-host-1') + '.tmp',

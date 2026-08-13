@@ -428,7 +428,20 @@ async function executeCliChatOnce(
     let commandMcpConfigPath: string | undefined
     if (!slackMarketplaceCommand && mcpConfigPath && conversationId) {
       try {
-        commandMcpConfigPath = writeCommandMcpConfig(mcpConfigPath, commandId, conversationId, taskIdStr, agentId)
+        // 指名（instanceId ＋ 世代）も渡す。MCP サーバーは子プロセスで、この env に
+        // 挙げたキーしか受け取らないため、渡さないと update_system_knowledge が
+        // 指名を名乗れず、指名済みコマンドでは必ず 409 になる。
+        const assignmentGeneration = client.getAssignmentGeneration(commandId)
+        commandMcpConfigPath = writeCommandMcpConfig(
+          mcpConfigPath,
+          commandId,
+          conversationId,
+          taskIdStr,
+          agentId,
+          assignmentGeneration === undefined
+            ? undefined
+            : { instanceId: client.getInstanceId(), generation: assignmentGeneration },
+        )
         cleanupCommandMcpConfig = (): void => {
           try {
             rmSync(commandMcpConfigPath as string, { force: true })
