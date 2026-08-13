@@ -23,7 +23,8 @@ import { isPlainObject } from '../utils/is-plain-object'
  *
  * ## `include_role` スニペット（組み込みステップ）
  * 組み込みステップ（os_init/ssh_key/docker/nvm/claude_cli/codex/ai_support_agent/
- * web_server/database/dns_tls/gitlab_runner/github_runner/k3s/tailscale）は、bundled role を呼ぶ
+ * ai_support_agent_k8s/web_server/database/dns_tls/gitlab_runner/github_runner/k3s/
+ * tailscale）は、bundled role を呼ぶ
  * `include_role` タスクとして表現する。`include_role` は下記 allowlist のロールのみ
  * 許可し、role 名と
  * 許可 param キーを専用バリデータで個別検査する。ロール変数は **task レベルの `vars:`**
@@ -230,6 +231,12 @@ const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
  * `tailscale` は Tailscale（WireGuard メッシュVPN）へ auth key で非対話参加する単一
  * ロール。秘匿の auth key を 0600 一時ファイル＋`--auth-key=file:` で扱い argv に
  * 載せない（roles/tailscale 参照）。
+ *
+ * `ai_support_agent_k8s` は kubectl/kubeconfig を持つノード上で動き、エージェントを
+ * StatefulSet としてクラスタへ配置する。ホスト常駐の `ai_support_agent` とは配送経路が
+ * 異なり、対象ホストに Node.js を導入しないため `nvm` には依存しない。エージェント
+ * トークンは 0600 一時ファイル経由で `kubectl create secret --from-file=` に渡し、argv・
+ * `environment:`・生成マニフェストのいずれにも載せない（roles/ai_support_agent_k8s 参照）。
  */
 export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'os_init',
@@ -239,6 +246,7 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'claude_cli',
   'codex',
   'ai_support_agent',
+  'ai_support_agent_k8s',
   'web_server',
   'database',
   'dns_tls',
