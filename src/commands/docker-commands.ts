@@ -5,7 +5,7 @@ import { Command } from 'commander'
 
 import { getDockerfilePath, getConfigDockerfilePath } from '../docker/dockerfile-path'
 import { loadConfig } from '../config-manager'
-import { AGENT_VERSION } from '../constants'
+import { AGENT_VERSION, CLI_FLAG_NO_IMAGE_PULL } from '../constants'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { getErrorMessage } from '../utils'
@@ -22,6 +22,38 @@ export function registerDockerCommands(program: Command): void {
       logger.info(t('docker.building'))
       buildImage(AGENT_VERSION, dockerfilePath)
       logger.success(t('docker.buildComplete', { version: AGENT_VERSION }))
+    })
+
+  program
+    .command('docker-ensure-image')
+    .description(t('cmd.dockerEnsureImage'))
+    .option('--dockerfile <path>', t('cmd.dockerBuild.dockerfile'))
+    .option(CLI_FLAG_NO_IMAGE_PULL, t('cmd.start.noImagePull'))
+    .action(async (opts: { dockerfile?: string; imagePull?: boolean }) => {
+      const { ensureImage, syncDockerfileToConfigDir, hasUnmanagedConfigDockerfile } =
+        await import('../docker/docker-runner')
+      const config = loadConfig()
+      // Sync first, exactly as runInDocker does. The service wrappers run the
+      // container directly and never reach runInDocker, so without this the
+      // config-dir Dockerfile stays at whatever version last synced it. After a
+      // CLI update that stale copy differs from the new bundle, ensureImage()
+      // would read it as "customised" and build locally forever. Syncing
+      // refreshes an unmodified copy and still leaves a genuinely customised
+      // one untouched (it only warns).
+      //
+      // Except when the config-dir Dockerfile has no sync hash beside it: the
+      // sync would treat that as a first run and overwrite it, destroying a
+      // Dockerfile the user placed there by hand. Skipping leaves it in place,
+      // and ensureImage() then builds from it instead of pulling.
+      if (config?.dockerfileSync !== false && !hasUnmanagedConfigDockerfile()) {
+        syncDockerfileToConfigDir()
+      }
+      // Same precedence as runInDocker: CLI flag > config > default (pull).
+      const dockerfilePath = opts.dockerfile ? path.resolve(opts.dockerfile) : config?.dockerfilePath
+      const allowPull = opts.imagePull !== false && config?.dockerImagePull !== 'never'
+      // ensureImage() resolves the npm-installed version itself, which is the
+      // same version the service wrapper used to decide the image was missing.
+      ensureImage(dockerfilePath, allowPull)
     })
 
   program

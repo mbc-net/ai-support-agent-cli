@@ -47,6 +47,11 @@ export interface DockerRunOptions {
   dockerfile?: string
   dockerfileSync?: boolean
   /**
+   * false to never pull the base image from the container registry (always
+   * build it locally). Overrides config.dockerImagePull.
+   */
+  imagePull?: boolean
+  /**
    * Filter to a single project. Format: "tenantCode/projectCode"
    * When set, only the matching project is started.
    */
@@ -194,7 +199,9 @@ export function runInDocker(opts: DockerRunOptions): void {
   // Resolve Dockerfile: CLI flag > config.dockerfilePath > configDir/Dockerfile > bundled default
   const customDockerfile = opts.dockerfile ?? config?.dockerfilePath
 
-  const version = ensureImage(customDockerfile)
+  // CLI flag wins over the config setting, matching dockerfileSync above.
+  const allowPull = opts.imagePull !== false && config?.dockerImagePull !== 'never'
+  const version = ensureImage(customDockerfile, allowPull)
 
   // Determine projects to run (skip entries without tenantCode)
   const allProjects = config ? getProjectList(config) : []
@@ -313,7 +320,7 @@ export {
 } from './docker-utils'
 export { validatePackageNames } from './docker-security'
 export { generateProjectDockerfile } from './dockerfile-generator'
-export { syncDockerfileToConfigDir } from './dockerfile-sync'
+export { syncDockerfileToConfigDir, isDockerfileCustomized, hasUnmanagedConfigDockerfile } from './dockerfile-sync'
 export { buildProjectImage } from './project-image-builder'
 export { buildVolumeMounts, buildEnvArgs, buildProjectVolumeMounts } from './volume-mount-builder'
 export type { ProjectDirMapping } from './volume-mount-builder'
