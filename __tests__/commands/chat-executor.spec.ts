@@ -4020,6 +4020,73 @@ describe('chat-executor', () => {
     })
   })
 
+
+  // 本番障害の回帰テスト（2026-08-14）。
+  // 本番では POST /commands/:id/chunks が IAM 権限不足で 500 を返し続けたため、
+  // done チャンクが届かず画面が「入力中」のまま固着した。にもかかわらず
+  // エージェントはコマンドを success として報告しており、サーバー側も
+  // 異常を検知できなかった。終端チャンクの配信失敗は結果に反映させる。
+  describe('終端チャンクの配信失敗（回帰）', () => {
+    it('done チャンクの送信が失敗したらコマンド結果を失敗にする', async () => {
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      // done だけが届かない状況（本番では全チャンクが 500 だったが、
+      // 終端チャンクの欠落が固着の直接原因なのでそこを再現する）。
+      ;(mockClient.submitChatChunk as jest.Mock).mockImplementation(
+        (_commandId: string, chunk: { type: string }) =>
+          chunk.type === 'done'
+            ? Promise.reject(new Error('[500] Internal server error'))
+            : Promise.resolve(undefined),
+      )
+
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-done-undelivered', client: mockClient, agentId: 'agent-1' })
+
+      await new Promise((r) => setTimeout(r, 10))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonAssistant('output text')))
+      mockProcess.emitStdout('data', Buffer.from(ndjsonResult('output text')))
+      mockProcess.emit('close', 0)
+
+      const result = await resultPromise
+
+      expect(result.success).toBe(false)
+      expect(String(result.error)).toContain('done')
+      // 配信失敗でチャット全体をリトライしてはならない。応答生成は成功しており、
+      // 再実行しても LLM 実行とツールの副作用が二重に走って課金が増えるだけ。
+      expect(spawn).toHaveBeenCalledTimes(1)
+    })
+
+    it('CLI 実行が失敗し error チャンクの送信も失敗した場合もリトライしない（複合障害）', async () => {
+      // 本番障害のようにチャンク送信 API が広範囲に 500 を返す状況では、
+      // 成功パスだけでなく catch 経路（LLM 実行自体の失敗 → error チャンク送信）でも
+      // 終端チャンクが届かない。この経路が保護から漏れると、リトライ除外が効かず
+      // LLM 実行とツールの副作用が二重に走る。
+      const { spawn } = require('child_process')
+      const mockProcess = createMockChildProcess()
+      spawn.mockReturnValue(mockProcess)
+
+      ;(mockClient.submitChatChunk as jest.Mock).mockImplementation(
+        (_commandId: string, chunk: { type: string }) =>
+          chunk.type === 'error'
+            ? Promise.reject(new Error('[500] Internal server error'))
+            : Promise.resolve(undefined),
+      )
+
+      const resultPromise = executeChatCommand({ payload: basePayload, commandId: 'cmd-error-undelivered', client: mockClient, agentId: 'agent-1' })
+
+      await new Promise((r) => setTimeout(r, 10))
+      // 終了コード 2 は通常リトライ対象（既存テスト参照）。終端チャンク未達なら
+      // リトライしてはならない。
+      mockProcess.emit('close', 2)
+
+      const result = await resultPromise
+
+      expect(result.success).toBe(false)
+      expect(String(result.error)).toContain('終端チャンク')
+      expect(spawn).toHaveBeenCalledTimes(1)
+    }, 12000)
+  })
 })
 
 // Isolated module tests for sendChunk JSON parse error paths

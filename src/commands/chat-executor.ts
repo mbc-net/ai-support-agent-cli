@@ -17,7 +17,7 @@ import { ERR_CLAUDE_AUTH_FAILED, ERR_CLAUDE_EXIT_CODE_1, ERR_CLAUDE_USAGE_LIMIT_
 import { ERR_CODEX_AUTH_INVALID, ERR_CODEX_EXIT_CODE_1, runCodex } from './codex-runner'
 import { downloadChatFiles, parseChatFiles, parseConversationFiles } from './file-transfer'
 import { getProcessManager } from './process-manager'
-import { buildPageContextNotice, combineSystemPrompts, createChunkSender, formatHistoryForClaudeCode, handleChatError, isSlackMarketplaceCommand, parseHistory, parsePageContext, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
+import { buildPageContextNotice, combineSystemPrompts, createChunkSender, formatHistoryForClaudeCode, handleChatError, isSlackMarketplaceCommand, parseHistory, parsePageContext, resolveChunkBatchConfig, sendDoneChunk, TERMINAL_CHUNK_UNDELIVERED_ERROR } from './shared-chat-utils'
 
 // Re-export for backward compatibility with existing consumers
 export { buildClaudeArgs, buildCleanEnv, _resetCleanEnvCache } from './claude-code-runner'
@@ -283,6 +283,11 @@ async function executeCliChat(
     const errorMsg = typeof result.error === 'string' ? result.error : ''
     if (errorMsg.toLowerCase().includes('cancel')) return result
     if (errorMsg.includes(ERR_CODEX_AUTH_INVALID)) return result
+    // 終端チャンクの配信失敗もリトライしない。応答生成そのものは成功しており、
+    // 失敗しているのはサーバーへの配信だけなので、再実行しても解決しない。
+    // むしろ LLM 実行とツールの副作用が丸ごと二重に走り、課金だけが増える
+    // （2026-08-14 の本番障害では全チャットがこの経路を通り得た）。
+    if (errorMsg.includes(TERMINAL_CHUNK_UNDELIVERED_ERROR)) return result
     if (isRuntimeUnavailable(mode, result)) return result
 
     lastResult = result
@@ -321,7 +326,7 @@ async function executeCliChatOnce(
 
   logger.info(`[chat] Starting chat command [${commandId}]: message="${truncateString(message, LOG_MESSAGE_LIMIT)}"`)
 
-  const { sendChunk: rawSendChunk, getChunkIndex, flush } = createChunkSender(commandId, client, agentId, 'chat', { debugLog: true, batch: resolveChunkBatchConfig() })
+  const { sendChunk: rawSendChunk, getChunkIndex, flush, hasTerminalDeliveryFailure } = createChunkSender(commandId, client, agentId, 'chat', { debugLog: true, batch: resolveChunkBatchConfig() })
 
   // tool_call チャンクを蓄積して done チャンクに含める（RDS 永続化用）
   const collectedToolCalls: Record<string, unknown>[] = []
@@ -585,6 +590,14 @@ async function executeCliChatOnce(
     cleanupGitCredentials?.()
     cleanupCommandMcpConfig?.()
 
+    // 終端チャンク（done）がサーバーへ届かなかった場合、Web は「応答待ち」を
+    // 解除できず会話が固着する。ここで成功を返すとサーバーもコマンドを正常終了と
+    // 記録してしまい、異常がどこにも残らない（2026-08-14 の本番障害）。
+    // 応答本文の生成自体は成功しているが、利用者へ届いていない以上は失敗として扱う。
+    if (hasTerminalDeliveryFailure()) {
+      return errorResult(TERMINAL_CHUNK_UNDELIVERED_ERROR)
+    }
+
     return successResult(result.text)
   } catch (error) {
     cleanupDownloads?.()
@@ -594,7 +607,18 @@ async function executeCliChatOnce(
     if (suppressRuntimeUnavailableError && isRuntimeUnavailableErrorMessage(mode, getErrorMessage(error))) {
       return errorResult(getErrorMessage(error))
     }
-    return handleChatError(error, commandId, 'chat', sendChunk)
+    const failure = await handleChatError(error, commandId, 'chat', sendChunk)
+    // error チャンク自体の配信にも失敗した場合は、その事実を結果へ載せる。
+    // 載せないとリトライ除外（TERMINAL_CHUNK_UNDELIVERED_ERROR の一致）が効かず、
+    // LLM 実行とツールの副作用が丸ごと二重に走る（チャンク送信 API が広範囲に
+    // 失敗している状況では、成功パスだけでなくこの catch 経路も同時に踏む）。
+    // 元の例外も失わないよう併記する。
+    if (hasTerminalDeliveryFailure()) {
+      return errorResult(
+        `${TERMINAL_CHUNK_UNDELIVERED_ERROR} (元のエラー: ${getErrorMessage(error)})`,
+      )
+    }
+    return failure
   }
 }
 

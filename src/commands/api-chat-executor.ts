@@ -38,14 +38,14 @@ import {
   type HistoryMessage,
   successResult,
 } from '../types'
-import { parseString, truncateString } from '../utils'
+import { getErrorMessage, parseString, truncateString } from '../utils'
 import { createActivityTimeout } from '../utils/activity-timeout'
 import { safeJsonParse } from '../utils/json-parse'
 import { StreamLineParser } from '../utils/stream-parser'
 
 import { buildReadOnlyToolSchemas, executeReadOnlyTool } from './api-tool-executor'
 import { cancelProcess, getProcessManager, _getRunningProcesses } from './process-manager'
-import { buildPageContextNotice, combineSystemPrompts, createChunkSender, handleChatError, isSlackMarketplaceCommand, parseHistory, parsePageContext, resolveChunkBatchConfig, sendDoneChunk } from './shared-chat-utils'
+import { buildPageContextNotice, combineSystemPrompts, createChunkSender, handleChatError, isSlackMarketplaceCommand, parseHistory, parsePageContext, resolveChunkBatchConfig, sendDoneChunk, TERMINAL_CHUNK_UNDELIVERED_ERROR } from './shared-chat-utils'
 
 /** 実行中の API チャットを commandId で管理（chat-executor と共有シングルトン） */
 const processManager = getProcessManager()
@@ -120,7 +120,7 @@ export async function executeApiChatCommand(
     `[api-chat] Starting API chat command [${commandId}]: message="${truncateString(message, LOG_MESSAGE_LIMIT)}"`,
   )
 
-  const { sendChunk, getChunkIndex, flush } = createChunkSender(commandId, client, agentId, 'api-chat', { batch: resolveChunkBatchConfig() })
+  const { sendChunk, getChunkIndex, flush, hasTerminalDeliveryFailure } = createChunkSender(commandId, client, agentId, 'api-chat', { batch: resolveChunkBatchConfig() })
 
   try {
     const model = config?.claudeCodeConfig?.model ?? DEFAULT_ANTHROPIC_MODEL
@@ -224,9 +224,29 @@ export async function executeApiChatCommand(
       },
       ...(toolTurnsTruncated ? { toolTurnsTruncated: true } : {}),
     })
+
+    // 終端チャンク（done）がサーバーへ届かなかった場合、Web は「応答待ち」を
+    // 解除できず会話が固着する。ここで成功を返すとサーバーもコマンドを正常終了と
+    // 記録してしまい、異常がどこにも残らない（2026-08-14 の本番障害）。
+    // 応答本文の生成自体は成功しているが、利用者へ届いていない以上は失敗として扱う。
+    if (hasTerminalDeliveryFailure()) {
+      return errorResult(TERMINAL_CHUNK_UNDELIVERED_ERROR)
+    }
+
     return successResult(fullText)
   } catch (error) {
-    return handleChatError(error, commandId, 'api-chat', sendChunk)
+    const failure = await handleChatError(error, commandId, 'api-chat', sendChunk)
+    // error チャンク自体の配信にも失敗した場合は、その事実を結果へ載せる。
+    // 載せないとリトライ除外（TERMINAL_CHUNK_UNDELIVERED_ERROR の一致）が効かず、
+    // LLM 実行とツールの副作用が丸ごと二重に走る（チャンク送信 API が広範囲に
+    // 失敗している状況では、成功パスだけでなくこの catch 経路も同時に踏む）。
+    // 元の例外も失わないよう併記する。
+    if (hasTerminalDeliveryFailure()) {
+      return errorResult(
+        `${TERMINAL_CHUNK_UNDELIVERED_ERROR} (元のエラー: ${getErrorMessage(error)})`,
+      )
+    }
+    return failure
   }
 }
 
