@@ -1,0 +1,56 @@
+---
+# ai_support_agent_k8s ロールの既定値。
+#
+# 秘匿値・環境固有の必須値（token / project）は既定を持たせず空にする。
+# ssh_key / tailscale ロールと同じ流儀で、呼び出し側が ANSIBLE# 変数から
+# 供給し、未設定は tasks/main.yml の assert が名指しで案内する。
+
+# 必須。エージェントトークン（ANSIBLE# 変数から供給する秘匿値）。
+ai_support_agent_k8s_token: ''
+
+# 必須。`tenantCode/projectCode`（例: mbc/MBC_01）。
+ai_support_agent_k8s_project: ''
+
+# レプリカ数。契約プランの上限を超えた分は起動後 standby で待機し、
+# 稼働中レプリカが停止した時点で自動的に引き継ぐ。
+ai_support_agent_k8s_replicas: 1
+
+# ワークスペースの永続化。既定はオプトイン（オフ）。
+# 有効にすると volumeClaimTemplates によりレプリカごとに専用 PVC が発行される
+# （1つの PVC を共有する構成にはしない。RWO は Multi-Attach で衝突し、RWX でも
+# 全レプリカが同じ git ワークツリーを踏み合って壊れるため）。
+ai_support_agent_k8s_persistence: false
+ai_support_agent_k8s_storage_class: longhorn
+ai_support_agent_k8s_storage_size: 20Gi
+
+# エージェントのデータディレクトリ。永続ボリュームのマウント先であり、同時に
+# AI_SUPPORT_AGENT_CONFIG_DIR としてコンテナへ渡す。
+#
+# エージェントは既定で `$HOME/.ai-support-agent/projects/<tenant>/<project>/workspace/...`
+# へ書き込む（config-manager.ts の getConfigDir / project-dir.ts の
+# getDefaultProjectDirTemplate）。無関係なパスへ PVC をマウントすると「PVC は作られる
+# が中身は空、実データは Pod 再作成で消える」という、成功したように見える無効化に
+# なるため、CONFIG_DIR をこのパスへ明示的に向ける。
+#
+# 永続化がオフでも同じ値を渡す（後から有効化しても保存先が変わらないようにするため）。
+# なお `~/.claude` 等、エージェントのデータディレクトリ外にある状態は永続化対象外。
+ai_support_agent_k8s_data_dir: /data
+
+# Kubernetes リソース名（DNS-1123 ラベル）。1クラスタに複数プロジェクトの
+# エージェントを同居させる場合は、include_role ごとに別名を与える。
+ai_support_agent_k8s_name: ai-support-agent
+ai_support_agent_k8s_namespace: ai-support-agent
+
+# コンテナイメージ。tasks/main.yml の assert が公式リポジトリに限定する
+# （許可リストは assert 内のインラインリテラルであり、この変数ではない）。
+ai_support_agent_k8s_image: ghcr.io/mbc-net/ai-support-agent-cli:latest
+
+# 接続先 API。既定は CLI の DEFAULT_API_URL（src/constants.ts）と同じ本番 API。
+ai_support_agent_k8s_api_url: https://api.ai-support-agent.com
+
+# クラスタへの接続手段。既定は k3s の標準パス。
+ai_support_agent_k8s_kubectl: /usr/local/bin/kubectl
+ai_support_agent_k8s_kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+# 適用したマニフェストの保存先（監査・再適用用。秘匿値は含まない）。
+ai_support_agent_k8s_manifest_dir: /etc/ai-support-agent/k8s
