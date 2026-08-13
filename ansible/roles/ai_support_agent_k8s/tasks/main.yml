@@ -267,6 +267,10 @@
                 args:
                   - ai-support-agent
                   - start
+                  # Commander の negated option は未指定時に opts.docker=true になるため、
+                  # これが無いとコンテナの中でさらに runInDocker() へ入り、Docker ソケット
+                  # 不在で起動に失敗する。agent CLI の CONTAINER_START_ARGV と同じ契約。
+                  - --no-docker
                   - --project
                   - {{ ai_support_agent_k8s_project | to_json }}
                 env:
