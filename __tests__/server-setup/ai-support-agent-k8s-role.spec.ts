@@ -436,8 +436,13 @@ describe('ai_support_agent_k8s bundled role', () => {
       )[0]
       const doc = renderManifest(manifestTemplate(), false) as any
       const args = doc.spec.template.spec.containers[0].args as string[]
-      expect(args[0]).toBe(bin)
-      expect(args).toContain('start')
+
+      // 先頭数要素だけの部分検証にすると、途中のフラグ欠落を見逃す。
+      // `--no-docker` が無いと、Commander の negated option により
+      // `opts.docker === true` となってコンテナの中でさらに runInDocker() へ入り、
+      // Docker ソケット不在で起動に失敗する（exit 127 が別の失敗に置き換わるだけ）。
+      // agent CLI の CONTAINER_START_ARGV と同じ契約であること。
+      expect(args).toEqual([bin, 'start', '--no-docker', '--project', 'expr-3'])
     })
 
     it('ServiceAccount トークンを自動マウントしない', () => {

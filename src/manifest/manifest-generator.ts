@@ -11,6 +11,33 @@
  */
 
 import { ENV_VARS } from '../constants'
+import { CONTAINER_START_ARGV } from '../docker/docker-args'
+
+/**
+ * Argument vector that starts the agent *inside* a container.
+ *
+ * `args` (Kubernetes) and `command` (ECS) are NOT a CLI argument list: they map
+ * to Docker's CMD and are appended to the image's ENTRYPOINT. The published
+ * image declares `ENTRYPOINT ["/entrypoint.sh"]` with no CMD, and entrypoint.sh
+ * ends in `exec "$@"`, so the first element has to be an executable. Starting
+ * with a subcommand makes the container run `exec start --project ...`, which
+ * exits 127 (`start: not found`) and lands the Pod in CrashLoopBackOff.
+ *
+ * `--no-docker` is equally required. Commander's negated option leaves
+ * `opts.docker === true` when the flag is absent, so the CLI would enter
+ * `runInDocker()` *inside* the container and abort on the missing Docker socket
+ * — trading exit 127 for a different startup failure.
+ *
+ * Both requirements are already encoded in {@link CONTAINER_START_ARGV}, which
+ * `docker-supervisor.ts` uses to launch the very same image. Reusing it here
+ * keeps one source of truth: a change to how the agent is started in a
+ * container cannot silently diverge from what the generated manifests say.
+ *
+ * The ENTRYPOINT is deliberately left in place — it registers git
+ * safe.directory entries and a passwd entry before handing over — so the fix is
+ * to prepend to the argument vector, not to override entryPoint.
+ */
+const CONTAINER_ARGV: readonly string[] = CONTAINER_START_ARGV
 
 /** Container image used when the caller does not pass one. */
 export const DEFAULT_AGENT_IMAGE = 'ghcr.io/mbc-net/ai-support-agent-cli:latest'
@@ -192,7 +219,7 @@ spec:
         - name: agent
           image: ${yamlScalar(image)}
           args:
-            - start
+${CONTAINER_ARGV.map((a) => `            - ${a}`).join('\n')}
             - --project
             - ${yamlScalar(`${input.tenantCode}/${input.projectCode}`)}
           env:
@@ -251,7 +278,11 @@ export function generateEcsManifest(input: EcsManifestInput): {
         name: 'agent',
         image,
         essential: true,
-        command: ['start', '--project', `${input.tenantCode}/${input.projectCode}`],
+        command: [
+          ...CONTAINER_ARGV,
+          '--project',
+          `${input.tenantCode}/${input.projectCode}`,
+        ],
         environment: [
           { name: ENV_VARS.API_URL, value: input.apiUrl },
           // Not set here: AI_SUPPORT_AGENT_INSTANCE_ID. The agent derives the
