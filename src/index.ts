@@ -20,6 +20,7 @@ import {
   CLI_FLAG_NO_AUTO_UPDATE,
   CLI_FLAG_NO_DOCKER,
   CLI_FLAG_NO_DOCKERFILE_SYNC,
+  CLI_FLAG_NO_IMAGE_PULL,
   ONESHOT_ENV_VARS,
 } from './constants'
 import type { ReleaseChannel } from './types'
@@ -57,6 +58,7 @@ program
   .option(CLI_FLAG_NO_DOCKER, t('cmd.start.noDocker'))
   .option('--dockerfile <path>', t('cmd.start.dockerfile'))
   .option(CLI_FLAG_NO_DOCKERFILE_SYNC, t('cmd.start.noDockerfileSync'))
+  .option(CLI_FLAG_NO_IMAGE_PULL, t('cmd.start.noImagePull'))
   .option('--project <tenantCode/projectCode>', t('cmd.start.project'))
   .action(async (opts: {
     token?: string
@@ -69,6 +71,7 @@ program
     docker: boolean
     dockerfile?: string
     dockerfileSync: boolean
+    imagePull: boolean
     project?: string
   }) => {
     if (opts.docker) {
@@ -83,6 +86,7 @@ program
         updateChannel: opts.updateChannel,
         dockerfile: opts.dockerfile,
         dockerfileSync: opts.dockerfileSync,
+        imagePull: opts.imagePull,
         project: opts.project,
       })
       return

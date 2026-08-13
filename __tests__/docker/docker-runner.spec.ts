@@ -724,7 +724,7 @@ describe('docker-runner', () => {
       resetInstalledVersionCache()
     })
 
-    it('should build image when it does not exist', () => {
+    it('should pull the published image (not build) when it does not exist and nothing is customised', () => {
       mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
         const argsArr = args as string[] | undefined
         if (argsArr && argsArr[0] === 'list') return Buffer.from(JSON.stringify({ dependencies: {} }))
@@ -734,10 +734,50 @@ describe('docker-runner', () => {
 
       ensureImage()
 
+      const pullCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'pull',
+      )
+      expect(pullCall).toBeDefined()
+      // Version comes from the installed/compile-time version resolution; only
+      // the repository is fixed here (the version-specific tag is asserted in
+      // the "newer installed version" case below).
+      expect((pullCall![1] as string[])[1]).toMatch(/^ghcr\.io\/mbc-net\/ai-support-agent-cli:/)
+      // The whole point: no local build for a stock installation.
+      const buildCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'build',
+      )
+      expect(buildCall).toBeUndefined()
+    })
+
+    it('should build when the registry pull fails (missing tag / offline)', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') return Buffer.from(JSON.stringify({ dependencies: {} }))
+        if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') throw new Error('No such image')
+        if (argsArr && argsArr[0] === 'pull') throw new Error('manifest unknown')
+        return Buffer.from('')
+      })
+
+      ensureImage()
+
       const buildCall = mockExecFileSync.mock.calls.find(
         call => (call[1] as string[])?.[0] === 'build',
       )
       expect(buildCall).toBeDefined()
+    })
+
+    it('should build without pulling when the caller opted out', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'list') return Buffer.from(JSON.stringify({ dependencies: {} }))
+        if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') throw new Error('No such image')
+        return Buffer.from('')
+      })
+
+      ensureImage(undefined, false)
+
+      expect(mockExecFileSync.mock.calls.find(call => (call[1] as string[])?.[0] === 'pull')).toBeUndefined()
+      expect(mockExecFileSync.mock.calls.find(call => (call[1] as string[])?.[0] === 'build')).toBeDefined()
     })
 
     it('should skip build when image exists', () => {
@@ -752,7 +792,7 @@ describe('docker-runner', () => {
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.imageFound'))
     })
 
-    it('should build image with newer installed version when installed version is newer', () => {
+    it('should obtain the image for the newer installed version when it is newer', () => {
       mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
         const argsArr = args as string[] | undefined
         if (argsArr && argsArr[0] === 'list') {
@@ -768,12 +808,16 @@ describe('docker-runner', () => {
       const version = ensureImage()
 
       expect(version).toBe('99.0.0')
-      const buildCall = mockExecFileSync.mock.calls.find(
-        call => (call[1] as string[])?.[0] === 'build',
+      const pullCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'pull',
       )
-      expect(buildCall).toBeDefined()
-      // Should build with the newer version tag
-      expect((buildCall![1] as string[])).toContain('ai-support-agent:99.0.0')
+      expect(pullCall).toBeDefined()
+      // Must obtain the newer version's tag, not the compile-time one
+      expect((pullCall![1] as string[])[1]).toBe('ghcr.io/mbc-net/ai-support-agent-cli:99.0.0')
+      const tagCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'tag',
+      )
+      expect((tagCall![1] as string[])).toContain('ai-support-agent:99.0.0')
     })
 
     it('should use existing image of newer installed version without rebuilding', () => {
@@ -954,14 +998,13 @@ describe('docker-runner', () => {
       expect(mockExit).toHaveBeenCalledWith(1)
     })
 
-    it('should build image when it does not exist', () => {
+    it('should pull the image when it does not exist', () => {
       mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
         const argsArr = args as string[] | undefined
         if (argsArr && argsArr[0] === 'info') return Buffer.from('')
         if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') {
           throw new Error('No such image')
         }
-        if (argsArr && argsArr[0] === 'build') return Buffer.from('')
         return Buffer.from('')
       })
 
@@ -973,16 +1016,61 @@ describe('docker-runner', () => {
 
       runInDocker({})
 
-      // Should have called docker build
-      const buildCall = mockExecFileSync.mock.calls.find(
-        call => (call[1] as string[])?.[0] === 'build',
+      const pullCall = mockExecFileSync.mock.calls.find(
+        call => (call[1] as string[])?.[0] === 'pull',
       )
-      expect(buildCall).toBeDefined()
+      expect(pullCall).toBeDefined()
+      expect(mockExecFileSync.mock.calls.find(call => (call[1] as string[])?.[0] === 'build')).toBeUndefined()
       expect(mockSpawn).toHaveBeenCalledWith(
         'docker',
         expect.arrayContaining(['run', '--rm', '-i']),
         { stdio: 'inherit' },
       )
+    })
+
+    it('should build instead of pulling when --no-image-pull is given', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'info') return Buffer.from('')
+        if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') {
+          throw new Error('No such image')
+        }
+        return Buffer.from('')
+      })
+
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+
+      // commander maps --no-image-pull to imagePull: false
+      runInDocker({ imagePull: false })
+
+      expect(mockExecFileSync.mock.calls.find(call => (call[1] as string[])?.[0] === 'pull')).toBeUndefined()
+      expect(mockExecFileSync.mock.calls.find(call => (call[1] as string[])?.[0] === 'build')).toBeDefined()
+    })
+
+    it('should build instead of pulling when config.dockerImagePull is "never"', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        if (argsArr && argsArr[0] === 'info') return Buffer.from('')
+        if (argsArr && argsArr[0] === 'image' && argsArr[1] === 'inspect') {
+          throw new Error('No such image')
+        }
+        return Buffer.from('')
+      })
+
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue({
+        agentId: 'agent-1',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        dockerImagePull: 'never',
+      })
+
+      runInDocker({})
+
+      expect(mockExecFileSync.mock.calls.find(call => (call[1] as string[])?.[0] === 'pull')).toBeUndefined()
+      expect(mockExecFileSync.mock.calls.find(call => (call[1] as string[])?.[0] === 'build')).toBeDefined()
     })
 
     it('should use -it flag when TTY is available', () => {

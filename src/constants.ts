@@ -550,6 +550,7 @@ export const NOTIFICATION_ACTION = {
 export const CLI_FLAG_VERBOSE = '--verbose'
 export const CLI_FLAG_NO_DOCKER = '--no-docker'
 export const CLI_FLAG_NO_DOCKERFILE_SYNC = '--no-dockerfile-sync'
+export const CLI_FLAG_NO_IMAGE_PULL = '--no-image-pull'
 export const CLI_FLAG_NO_AUTO_UPDATE = '--no-auto-update'
 
 // === Tailscale sidecar (SSH connectivity via a customer tailnet) ===

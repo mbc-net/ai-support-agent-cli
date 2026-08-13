@@ -114,6 +114,16 @@ describe('generateWin32WrapperScript', () => {
     expect(result).toContain('--project mbc/MBC_01')
   })
 
+  it('obtains the image via docker-ensure-image when the required version is missing', () => {
+    const result = generateWin32WrapperScript(baseOpts)
+
+    expect(result).toContain('docker image inspect "%IMAGE_TAG%"')
+    // docker-ensure-image pulls the published image when nothing is customised;
+    // docker-build here would compile the whole image on every fresh install.
+    expect(result).toContain('call ai-support-agent docker-ensure-image')
+    expect(result).toContain('ERROR: docker-ensure-image failed - cannot start container')
+  })
+
   it('does NOT add a host-user writability preflight (container runs as root here, so the Linux --user EACCES fix does not apply)', () => {
     // The Windows wrapper runs the container as root (no --user), so the Linux
     // "root-owned bind-mount source -> EACCES" failure does not apply; a preflight
