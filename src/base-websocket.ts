@@ -4,6 +4,7 @@ import WebSocket from 'ws'
 
 import { WS_HEARTBEAT_INTERVAL_MS, WS_PONG_MAX_MISSED } from './constants'
 import { logger } from './logger'
+import { resolveInstanceId } from './replica-identity'
 import { getErrorMessage } from './utils'
 import { bearerHeader } from './utils/token-utils'
 import { attemptReconnect } from './ws-reconnect'
@@ -21,6 +22,11 @@ export function buildAgentWsHeaders(
   return {
     Authorization: bearerHeader(token),
     'X-Agent-Id': agentId,
+    // Replica identity. Distinct from X-Agent-Id: every replica of one logical
+    // agent sends the same agent id (the token's TOFU binding requires it) and
+    // is told apart only by this header, which lets the server keep several
+    // live sockets per agent instead of the newest overwriting the rest.
+    'X-Agent-Instance-Id': resolveInstanceId(),
     ...(cookie ? { Cookie: cookie } : {}),
   }
 }

@@ -96,6 +96,8 @@ describe('ProjectAgent', () => {
     updateToken: jest.Mock
     setTenantCode: jest.Mock
     setProjectCode: jest.Mock
+    getInstanceId: jest.Mock
+    getReplicaLimit: jest.Mock
   }
 
   let mockSubscriber: {
@@ -118,6 +120,8 @@ describe('ProjectAgent', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn().mockResolvedValue(undefined),
+      getAssignmentGeneration: jest.fn(),
+      clearAssignment: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.2', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       reportConnectionStatus: jest.fn().mockResolvedValue(undefined),
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
@@ -125,6 +129,8 @@ describe('ProjectAgent', () => {
       updateToken: jest.fn(),
       setTenantCode: jest.fn(),
       setProjectCode: jest.fn(),
+      getInstanceId: jest.fn().mockReturnValue('pod-a'),
+      getReplicaLimit: jest.fn().mockResolvedValue({ maxReplicas: null }),
     }
     MockApiClient.mockImplementation(() => mockClient as unknown as ApiClient)
 
@@ -255,6 +261,251 @@ describe('ProjectAgent', () => {
       )
 
       agent.stop()
+    })
+
+    // === マルチレプリカ（Kubernetes / ECS）対応 ===
+    describe('replica admission', () => {
+      const accepted = {
+        agentId: 'test-id',
+        tenantCode: 'test-tenant',
+        appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+        appsyncApiKey: 'da2-testkey123',
+        transportMode: 'realtime',
+        admission: { accepted: true, instanceId: 'pod-a', maxReplicas: 2, liveReplicas: 1 },
+      }
+      const rejected = {
+        agentId: 'test-id',
+        tenantCode: 'test-tenant',
+        appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+        appsyncApiKey: 'da2-testkey123',
+        transportMode: 'realtime',
+        admission: {
+          accepted: false,
+          instanceId: 'pod-b',
+          maxReplicas: 1,
+          liveReplicas: 1,
+          reason: 'limit_reached',
+        },
+      }
+
+      it('sends admissionMode=initial on the first registration', async () => {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        expect(mockClient.register).toHaveBeenCalledWith(
+          expect.objectContaining({ admissionMode: 'initial' }),
+        )
+
+        agent.stop()
+      })
+
+      it('does not start the transport while waiting for a slot', async () => {
+        mockClient.register.mockResolvedValue(rejected)
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        // A standby replica holds no subscription and sends no heartbeat, so
+        // it consumes no slot and receives no commands.
+        expect(mockSubscriber.connect).not.toHaveBeenCalled()
+        expect(mockClient.heartbeat).not.toHaveBeenCalled()
+
+        agent.stop()
+      })
+
+      it('re-requests admission with admissionMode=standby (never evicting)', async () => {
+        mockClient.register.mockResolvedValue(rejected)
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+        mockClient.register.mockClear()
+
+        await jest.advanceTimersByTimeAsync(31_000)
+
+        // Standby re-requests must never evict; otherwise an evicted replica
+        // would evict whoever took its place and they would swap forever.
+        expect(mockClient.register).toHaveBeenCalledWith(
+          expect.objectContaining({ admissionMode: 'standby' }),
+        )
+        expect(mockClient.register).not.toHaveBeenCalledWith(
+          expect.objectContaining({ admissionMode: 'initial' }),
+        )
+
+        agent.stop()
+      })
+
+      it('starts the transport once a slot frees up', async () => {
+        mockClient.register
+          .mockResolvedValueOnce(rejected)
+          .mockResolvedValue(accepted)
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+        expect(mockSubscriber.connect).not.toHaveBeenCalled()
+
+        await jest.advanceTimersByTimeAsync(31_000)
+
+        expect(mockSubscriber.connect).toHaveBeenCalled()
+
+        agent.stop()
+      })
+
+      it('keeps waiting when a standby admission request fails transiently', async () => {
+        mockClient.register
+          .mockResolvedValueOnce(rejected)
+          .mockRejectedValueOnce(new Error('network down'))
+          .mockResolvedValue(accepted)
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        // First retry fails; standby must not abort.
+        await jest.advanceTimersByTimeAsync(31_000)
+        expect(mockSubscriber.connect).not.toHaveBeenCalled()
+
+        // Second retry succeeds.
+        await jest.advanceTimersByTimeAsync(31_000)
+        expect(mockSubscriber.connect).toHaveBeenCalled()
+
+        agent.stop()
+      })
+
+      it('stop() ends the standby wait', async () => {
+        mockClient.register.mockResolvedValue(rejected)
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+        agent.stop()
+        mockClient.register.mockClear()
+
+        await jest.advanceTimersByTimeAsync(120_000)
+
+        expect(mockClient.register).not.toHaveBeenCalled()
+      })
+
+      it('退避されたら standby で再入場する（ピンポン防止の中核不変条件）', async () => {
+        // accepted で起動 → heartbeat が evicted:true → 再登録
+        mockClient.register.mockResolvedValue(accepted)
+        mockClient.heartbeat
+          .mockResolvedValueOnce({ success: true, evicted: true })
+          .mockResolvedValue({ success: true })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+        expect(mockSubscriber.connect).toHaveBeenCalled()
+        mockClient.register.mockClear()
+
+        // heartbeat が evicted を返し handleEviction → 再登録
+        await jest.advanceTimersByTimeAsync(31_000)
+
+        // 'initial' で再登録すると、サーバーは「最古を退避してよい」と解釈するため
+        // 自分の枠を奪った相手を退避し返し、無限に入れ替わり続ける。
+        expect(mockClient.register).toHaveBeenCalled()
+        for (const call of mockClient.register.mock.calls) {
+          expect(call[0].admissionMode).toBe('standby')
+        }
+        expect(mockClient.register).not.toHaveBeenCalledWith(
+          expect.objectContaining({ admissionMode: 'initial' }),
+        )
+
+        agent.stop()
+      })
+
+      it('退避後の再入場が一時的に失敗しても standby のままリトライする', async () => {
+        mockClient.register.mockResolvedValue(accepted)
+        mockClient.heartbeat
+          .mockResolvedValueOnce({ success: true, evicted: true })
+          .mockResolvedValue({ success: true })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+        mockClient.register.mockClear()
+        // 再登録が失敗 → 登録ループのリトライでも standby を維持すること
+        mockClient.register.mockRejectedValueOnce(new Error('network down'))
+        mockClient.register.mockResolvedValue(accepted)
+
+        await jest.advanceTimersByTimeAsync(60_000)
+
+        expect(mockClient.register).toHaveBeenCalled()
+        for (const call of mockClient.register.mock.calls) {
+          expect(call[0].admissionMode).toBe('standby')
+        }
+
+        agent.stop()
+      })
+
+      it('退避時はアラートポーリングも停止する', async () => {
+        mockClient.register.mockResolvedValue(accepted)
+        // 1回目の heartbeat は正常、2回目で退避を通知する
+        mockClient.heartbeat
+          .mockResolvedValueOnce({ success: true })
+          .mockResolvedValueOnce({ success: true, evicted: true })
+          .mockResolvedValue({ success: true })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        // アラートポーリングは projectConfig.cloudwatch がある場合のみ開始されるため、
+        // ここでは実タイマーを注入し「退避時に停止されるか」だけを検証する。
+        const pollingHandle = setInterval(() => undefined, 1_000)
+        const staleHandle = setInterval(() => undefined, 1_000)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(agent as any).alertPollingTimer = pollingHandle
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(agent as any).alertStaleRecoveryTimer = staleHandle
+        const clearIntervalSpy = jest.spyOn(global, 'clearInterval')
+
+        await jest.advanceTimersByTimeAsync(31_000)
+
+        // 退避後もポーリングが動き続けると、枠を持たないレプリカがアラートを
+        // 重複処理してしまう
+        expect(clearIntervalSpy).toHaveBeenCalledWith(pollingHandle)
+        expect(clearIntervalSpy).toHaveBeenCalledWith(staleHandle)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((agent as any).alertPollingTimer).toBeNull()
+
+        clearIntervalSpy.mockRestore()
+        agent.stop()
+      })
+
+      it('standby 待機中の updateToken でも再登録が行われる', async () => {
+        mockClient.register.mockResolvedValue(rejected)
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+        mockClient.register.mockClear()
+        // 受理される状態に変えたうえでトークンを更新する
+        mockClient.register.mockResolvedValue(accepted)
+
+        agent.updateToken('mbc:tok-2:raw')
+        await jest.advanceTimersByTimeAsync(1_000)
+
+        // 中断不能な sleep のままだと start() が握り潰され、永久に standby に留まる
+        expect(mockClient.register).toHaveBeenCalled()
+
+        agent.stop()
+      })
+
+      it('starts normally when the server reports no admission (single-replica API)', async () => {
+        // A server without replica support omits `admission` entirely.
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        expect(mockSubscriber.connect).toHaveBeenCalled()
+
+        agent.stop()
+      })
     })
 
     it('should retry indefinitely on registration failure with exponential backoff', async () => {
@@ -1837,7 +2088,7 @@ describe('ProjectAgent', () => {
         expect(writeFileSync).toHaveBeenCalledWith(
           expect.stringContaining('update-version.json'),
           expect.stringContaining('0.0.2'),
-          { mode: 0o600 },
+          { mode: 0o600, flag: 'wx' },
         )
         expect(mockExit).toHaveBeenCalledWith(42)
       } finally {

@@ -467,7 +467,7 @@ describe('ApiClient', () => {
       expect(result.hostname).toBe('server.example.com')
       expect(mockInstance.get).toHaveBeenCalledWith(
         '/api/test_tenant/agent/commands/cmd-1/ssh-exec-credential',
-        { params: { agentId: 'agent-1' } },
+        { params: { agentId: 'agent-1' }, headers: {} },
       )
     })
 
@@ -515,7 +515,7 @@ describe('ApiClient', () => {
       })
       expect(mockInstance.get).toHaveBeenCalledWith(
         '/api/test_tenant/agent/commands/cmd-1/server-setup-variables',
-        { params: { agentId: 'agent-1' } },
+        { params: { agentId: 'agent-1' }, headers: {} },
       )
     })
 
@@ -640,7 +640,7 @@ describe('ApiClient', () => {
       expect(mockInstance.post).toHaveBeenCalledWith(
         '/api/test_tenant/agent/commands/cmd-1/result',
         { success: true, data: 'output' },
-        { params: { agentId: 'agent-1' } },
+        { params: { agentId: 'agent-1' }, headers: {} },
       )
     })
   })
@@ -837,7 +837,7 @@ describe('ApiClient', () => {
       expect(mockInstance.post).toHaveBeenCalledWith(
         '/api/test_tenant/agent/commands/cmd-1/chunks',
         { index: 0, type: 'delta', content: 'Hello' },
-        { params: { agentId: 'agent-1' } },
+        { params: { agentId: 'agent-1' }, headers: {} },
       )
     })
 
@@ -1608,7 +1608,8 @@ describe('ApiClient', () => {
           agentId: 'agent-1',
           callId: 'call-1',
         },
-        undefined,
+        // 指名は commandId ごとに保持する。未指名なら空ヘッダー
+        { headers: {} },
       )
     })
 
@@ -1640,7 +1641,32 @@ describe('ApiClient', () => {
           agentId: 'agent-1',
           callId: 'call-1',
         },
-        undefined,
+        // 指名は commandId ごとに保持する。未指名なら空ヘッダー
+        { headers: {} },
+      )
+    })
+
+    it('指名済みコマンド由来のナレッジ登録には指名ヘッダーを付ける（サーバー側フェンシングを通すため）', async () => {
+      // 全レプリカが同じ commandId を知っているため、サーバーは指名先本人だけを
+      // 通す。ヘッダーを付けないと 409 になり、ナレッジ登録が通らない。
+      mockInstance.post.mockResolvedValue({ data: { id: 'kn-1', status: 'published' } })
+      client.restoreAssignment('cmd-1', 3)
+
+      await client.updateSystemKnowledge({
+        title: 'Title',
+        content: 'Content',
+        category: 'faq',
+        commandId: 'cmd-1',
+      })
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/knowledge',
+        expect.anything(),
+        {
+          headers: expect.objectContaining({
+            'x-agent-assignment-generation': '3',
+          }),
+        },
       )
     })
 

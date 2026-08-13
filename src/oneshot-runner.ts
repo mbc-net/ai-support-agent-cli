@@ -99,7 +99,11 @@ export async function runOneshot(env: NodeJS.ProcessEnv = process.env): Promise<
 
   let client: ApiClient
   try {
-    client = new ApiClient(apiBaseUrl, oneshotEnv.token)
+    // oneshot は稼働枠（AGENT_INSTANCE）を持たないため、レプリカ識別ヘッダーを送らない。
+    // 送るとサーバー側のクレーム機構に巻き込まれ、コマンド取得が常に 409 になる。
+    client = new ApiClient(apiBaseUrl, oneshotEnv.token, {
+      withoutReplicaIdentity: true,
+    })
   } catch (error) {
     logger.error(`[oneshot] Failed to initialize API client: ${getErrorMessage(error)}`)
     return 1
