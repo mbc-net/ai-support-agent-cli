@@ -47,7 +47,9 @@ spec:
         - name: agent
           image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"
           args:
+            - ai-support-agent
             - start
+            - --no-docker
             - --project
             - "mbc/MBC_01"
           env:
@@ -85,7 +87,7 @@ export const TASKDEF_GOLDEN = {
       name: 'agent',
       image: 'ghcr.io/mbc-net/ai-support-agent-cli:latest',
       essential: true,
-      command: ['start', '--project', 'mbc/MBC_01'],
+      command: ['ai-support-agent', 'start', '--no-docker', '--project', 'mbc/MBC_01'],
       environment: [
         {
           name: 'AI_SUPPORT_AGENT_API_URL',

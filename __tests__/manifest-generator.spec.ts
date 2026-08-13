@@ -4,6 +4,17 @@ import {
   generateK8sManifest,
   ReplicaLimitExceededError,
 } from '../src/manifest/manifest-generator'
+import { CONTAINER_START_ARGV } from '../src/docker/docker-args'
+import { loadAll } from 'js-yaml'
+
+/**
+ * CLI の実行ファイル名。`args` / `command` の先頭はこれでなければならない。
+ * package.json の `bin` から導出する（リテラル直書きだと bin 名の変更を検出できない）。
+ */
+const CLI_BIN = Object.keys(
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  require('../package.json').bin as Record<string, string>,
+)[0]
 
 const BASE = {
   tenantCode: 'mbc',
@@ -191,10 +202,75 @@ describe('generateEcsManifest', () => {
     const parsed = JSON.parse(generateEcsManifest(ecsInput).taskDefinition)
 
     expect(parsed.containerDefinitions[0].command).toEqual([
+      CLI_BIN,
       'start',
+      '--no-docker',
       '--project',
       'mbc/MBC_01',
     ])
+  })
+})
+
+/**
+ * コンテナ起動契約の回帰テスト。
+ *
+ * `args`（Kubernetes）と `command`（ECS）は CLI の引数リストではなく、Docker の
+ * **CMD** にマップされてイメージの ENTRYPOINT に連結される引数列である。
+ * 配布イメージは `ENTRYPOINT ["/entrypoint.sh"]` のみ（CMD なし）を持ち、
+ * entrypoint.sh は末尾で `exec "$@"` するため、先頭がサブコマンド名だと
+ * `exec start --project ...` となり `start: not found`（exit 127）で
+ * CrashLoopBackOff になる（最小再現で実測）。
+ *
+ * bin 名は package.json から導出する。リテラル直書きにすると、将来 bin 名を
+ * 変えたときにこのテストが「古い名前で通り続ける」ため。
+ */
+describe('コンテナ起動契約（ENTRYPOINT に連結される引数列）', () => {
+  const ecsInput = {
+    ...BASE,
+    cluster: 'agents-cluster',
+    subnets: ['subnet-a', 'subnet-b'],
+    securityGroups: ['sg-1'],
+  }
+
+  /**
+   * 期待する起動引数列。コンテナ内でエージェントを起動する既存の契約
+   * （docker-supervisor.ts の `[...CONTAINER_START_ARGV, '--project', key]`）と
+   * 同一でなければならない。
+   *
+   * `--no-docker` は必須。Commander の negated option は未指定時に
+   * `opts.docker === true` となり（index.ts:57 で定義、:74 で分岐）、コンテナの
+   * 中でさらに `runInDocker()` へ入って `checkDockerAvailable()` が Docker
+   * ソケット不在で `exitWithError` する。実行ファイル名だけ足しても、exit 127 が
+   * 別の起動失敗に置き換わるだけで「適用しても起動しない」は解消しない。
+   */
+  const EXPECTED_ARGV = [...CONTAINER_START_ARGV, '--project', 'mbc/MBC_01']
+
+  it('Kubernetes の args がコンテナ起動契約と完全に一致する', () => {
+    const manifest = generateK8sManifest(BASE)
+    // 先頭数要素だけの部分検証にすると、途中のフラグ欠落を見逃す。
+    const deployment = loadAll(manifest).find(
+      (doc): doc is Record<string, any> =>
+        (doc as Record<string, unknown>)?.kind === 'StatefulSet' ||
+        (doc as Record<string, unknown>)?.kind === 'Deployment',
+    )
+    expect(deployment?.spec.template.spec.containers[0].args).toEqual(EXPECTED_ARGV)
+  })
+
+  it('ECS の command がコンテナ起動契約と完全に一致する', () => {
+    const parsed = JSON.parse(generateEcsManifest(ecsInput).taskDefinition)
+
+    expect(parsed.containerDefinitions[0].command).toEqual(EXPECTED_ARGV)
+  })
+
+  it('起動引数は CONTAINER_START_ARGV を単一の出所とする（契約の二重定義を防ぐ）', () => {
+    expect(CONTAINER_START_ARGV).toEqual([CLI_BIN, 'start', '--no-docker'])
+  })
+
+  it('ECS はイメージの ENTRYPOINT を上書きしない（entryPoint を設定しない）', () => {
+    // entryPoint を設定すると entrypoint.sh の初期化（git safe.directory 登録等）が
+    // 丸ごと飛ぶ。command の先頭に bin 名を置く方式はこれを前提にしている。
+    const parsed = JSON.parse(generateEcsManifest(ecsInput).taskDefinition)
+    expect(parsed.containerDefinitions[0].entryPoint).toBeUndefined()
   })
 })
 
