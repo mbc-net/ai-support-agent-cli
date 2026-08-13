@@ -56,6 +56,12 @@ export interface AgentConfig {
   defaultProjectDir?: string
   dockerfilePath?: string
   dockerfileSync?: boolean
+  /**
+   * Container image acquisition policy for the Docker mode base image.
+   * 'auto' (default): pull the published image from the registry when nothing
+   * is customised, build locally otherwise. 'never': always build locally.
+   */
+  dockerImagePull?: 'auto' | 'never'
 }
 
 /**

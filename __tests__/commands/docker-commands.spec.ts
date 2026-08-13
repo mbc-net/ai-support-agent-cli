@@ -12,11 +12,15 @@ jest.mock('../../src/utils/unified-diff')
 // Mock docker-runner for docker-build command
 jest.mock('../../src/docker/docker-runner', () => ({
   buildImage: jest.fn(),
+  ensureImage: jest.fn(),
+  syncDockerfileToConfigDir: jest.fn(),
+  hasUnmanagedConfigDockerfile: jest.fn(() => false),
 }))
 
 // Mock constants
 jest.mock('../../src/constants', () => ({
   AGENT_VERSION: '1.0.0',
+  CLI_FLAG_NO_IMAGE_PULL: '--no-image-pull',
 }))
 
 import * as fs from 'fs'
@@ -25,10 +29,18 @@ import { loadConfig } from '../../src/config-manager'
 import { logger } from '../../src/logger'
 import { computeUnifiedDiff } from '../../src/utils/unified-diff'
 import { registerDockerCommands } from '../../src/commands/docker-commands'
-import { buildImage } from '../../src/docker/docker-runner'
+import {
+  buildImage,
+  ensureImage,
+  hasUnmanagedConfigDockerfile,
+  syncDockerfileToConfigDir,
+} from '../../src/docker/docker-runner'
 import type { AgentConfig } from '../../src/types'
 
 const mockBuildImage = buildImage as jest.MockedFunction<typeof buildImage>
+const mockEnsureImage = ensureImage as jest.MockedFunction<typeof ensureImage>
+const mockSyncDockerfile = syncDockerfileToConfigDir as jest.MockedFunction<typeof syncDockerfileToConfigDir>
+const mockHasUnmanagedDockerfile = hasUnmanagedConfigDockerfile as jest.MockedFunction<typeof hasUnmanagedConfigDockerfile>
 
 const mockExistsSync = fs.existsSync as jest.MockedFunction<typeof fs.existsSync>
 const mockReadFileSync = fs.readFileSync as jest.MockedFunction<typeof fs.readFileSync>
@@ -49,6 +61,7 @@ describe('commands/docker-commands', () => {
     mockGetDockerfilePath.mockReturnValue('/bundled/docker/Dockerfile')
     mockGetConfigDockerfilePath.mockReturnValue('/config/Dockerfile')
     mockLoadConfig.mockReturnValue(null)
+    mockHasUnmanagedDockerfile.mockReturnValue(false)
   })
 
   describe('registerDockerCommands', () => {
@@ -60,6 +73,11 @@ describe('commands/docker-commands', () => {
     it('should register docker-build command on program', () => {
       const commandNames = program.commands.map((cmd) => cmd.name())
       expect(commandNames).toContain('docker-build')
+    })
+
+    it('should register docker-ensure-image command on program', () => {
+      const commandNames = program.commands.map((cmd) => cmd.name())
+      expect(commandNames).toContain('docker-ensure-image')
     })
   })
 
@@ -76,6 +94,80 @@ describe('commands/docker-commands', () => {
       await program.parseAsync(['node', 'test', 'docker-build', '--dockerfile', '/custom/Dockerfile'])
 
       expect(mockBuildImage).toHaveBeenCalledWith('1.0.0', '/custom/Dockerfile')
+    })
+  })
+
+  describe('docker-ensure-image', () => {
+    it('should pull-or-build via ensureImage with pulling allowed by default', async () => {
+      await program.parseAsync(['node', 'test', 'docker-ensure-image'])
+
+      expect(mockEnsureImage).toHaveBeenCalledWith(undefined, true)
+      // docker-build stays a forced build; this command must not call it.
+      expect(mockBuildImage).not.toHaveBeenCalled()
+    })
+
+    it('should resolve a custom dockerfile path and pass it to ensureImage', async () => {
+      await program.parseAsync(['node', 'test', 'docker-ensure-image', '--dockerfile', '/custom/Dockerfile'])
+
+      expect(mockEnsureImage).toHaveBeenCalledWith('/custom/Dockerfile', true)
+    })
+
+    it('should use config.dockerfilePath when no flag is given', async () => {
+      mockLoadConfig.mockReturnValue({ dockerfilePath: '/config/custom/Dockerfile' } as AgentConfig)
+
+      await program.parseAsync(['node', 'test', 'docker-ensure-image'])
+
+      expect(mockEnsureImage).toHaveBeenCalledWith('/config/custom/Dockerfile', true)
+    })
+
+    it('should disable pulling with --no-image-pull', async () => {
+      await program.parseAsync(['node', 'test', 'docker-ensure-image', '--no-image-pull'])
+
+      expect(mockEnsureImage).toHaveBeenCalledWith(undefined, false)
+    })
+
+    it('should sync the bundled Dockerfile before deciding, so a stale config-dir copy is not read as a customisation', async () => {
+      // REGRESSION guard: the service wrappers run the container directly and
+      // never reach runInDocker, so this command is the only place that can
+      // refresh the config-dir copy. Without the sync, every CLI update leaves
+      // a stale copy behind and the agent builds locally forever.
+      await program.parseAsync(['node', 'test', 'docker-ensure-image'])
+
+      expect(mockSyncDockerfile).toHaveBeenCalled()
+      expect(mockSyncDockerfile.mock.invocationCallOrder[0]).toBeLessThan(
+        mockEnsureImage.mock.invocationCallOrder[0],
+      )
+    })
+
+    it('should not sync over a hand-placed Dockerfile that has no sync hash', async () => {
+      // The sync treats a missing hash file as a first run and overwrites the
+      // Dockerfile unconditionally, which would destroy the user's file the
+      // first time this command runs on a service-installed host.
+      mockHasUnmanagedDockerfile.mockReturnValue(true)
+
+      await program.parseAsync(['node', 'test', 'docker-ensure-image'])
+
+      expect(mockSyncDockerfile).not.toHaveBeenCalled()
+      // The image is still ensured — ensureImage() sees the untouched file as
+      // customised and builds from it.
+      expect(mockEnsureImage).toHaveBeenCalled()
+    })
+
+    it('should honour dockerfileSync: false and skip the sync', async () => {
+      mockLoadConfig.mockReturnValue({ dockerfileSync: false } as AgentConfig)
+
+      await program.parseAsync(['node', 'test', 'docker-ensure-image'])
+
+      expect(mockSyncDockerfile).not.toHaveBeenCalled()
+      expect(mockEnsureImage).toHaveBeenCalled()
+    })
+
+    it('should disable pulling when config.dockerImagePull is "never"', async () => {
+      mockLoadConfig.mockReturnValue({ dockerImagePull: 'never' } as AgentConfig)
+
+      await program.parseAsync(['node', 'test', 'docker-ensure-image'])
+
+      expect(mockEnsureImage).toHaveBeenCalledWith(undefined, false)
     })
   })
 

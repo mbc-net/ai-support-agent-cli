@@ -53,6 +53,8 @@ ai-support-agent start
 
 That's it. The agent registers with the server, syncs project config, clones repositories, and starts listening for commands.
 
+Docker must be running: each project runs in a container by default, and the first `start` obtains the agent image (see [Run in Docker](#run-in-docker)). Add `--no-docker` to run natively on the host instead.
+
 ### Add more projects
 
 ```bash
@@ -81,11 +83,33 @@ ai-support-agent start --token <tenantCode>:<tokenId>:<rawToken> --project <tena
 
 ### Run in Docker
 
+Docker is the default: plain `ai-support-agent start` runs each project in a container, and `--no-docker` opts out into native mode.
+
 ```bash
-ai-support-agent start --docker
+ai-support-agent start              # Docker mode (default)
+ai-support-agent start --no-docker  # run natively on the host instead
 ```
 
 Project dirs, `~/.claude/`, and `~/.aws/` are auto-mounted. The container runs with your host UID/GID.
+
+**Base image.** The first run of a given version obtains `ai-support-agent:<version>`:
+
+| Situation | What happens |
+|-----------|--------------|
+| Nothing customised (default) | Pulls `ghcr.io/mbc-net/ai-support-agent-cli:<version>` — public, `linux/amd64` + `linux/arm64` — and tags it locally (~2.6 GB compressed, so minutes rather than an hour) |
+| `~/.ai-support-agent/Dockerfile` or a bundled build asset it COPYs (`entrypoint.sh`, `tmux.conf`, `bashrc-extra.sh`, `nvim/init.lua`, `starship.toml`) differs from the bundled version, or `--dockerfile` / `"dockerfilePath"` is set | Builds locally from your Dockerfile — expect tens of minutes (neovim is compiled from source, plus a rust toolchain and Playwright dependencies) |
+| `--no-image-pull`, or `"dockerImagePull": "never"` in `config.json` | Always builds locally |
+| The pull fails (offline, or the tag is not published yet) | Warns and falls back to a local build, so startup still succeeds |
+
+The published image is built by this repository's release workflow from the same `docker/Dockerfile` and the same CLI version, so for an unmodified setup pulling and building produce the same image.
+
+Once the image exists locally it is reused as-is — customising the Dockerfile afterwards does **not** trigger a rebuild. Use:
+
+```bash
+ai-support-agent docker-diff-dockerfile   # compare your Dockerfile with the bundled default
+ai-support-agent docker-build             # force a local rebuild after customising
+ai-support-agent docker-ensure-image      # obtain the image if missing (pull or build)
+```
 
 ### Run as a background service
 
@@ -179,7 +203,12 @@ Commands:
   set-auto-update    Configure auto-update (--enable | --disable | --channel)
   set-project-dir    Set project working directory
   docker-login       Login and start in Docker
-  docker-build       Build the Docker image for this version (--dockerfile <path>)
+  docker-build       Always build the Docker image for this version locally
+                     (--dockerfile <path>)
+  docker-ensure-image  Make the Docker image available: pull
+                     ghcr.io/mbc-net/ai-support-agent-cli when nothing is
+                     customised, build locally otherwise (--dockerfile <path>,
+                     --no-image-pull)
   docker-diff-dockerfile  Show diff between a Dockerfile and the bundled default
   log-rotate         Read stdin and write to a size-rotating log file
                      (used by the per-project wrapper script)
@@ -217,6 +246,12 @@ Options (install):
 --no-docker                Force native mode (skip Docker)
 --dockerfile <path>        Custom Dockerfile path (overrides config and bundled default)
 --no-dockerfile-sync       Skip writing the default Dockerfile to config dir
+--no-image-pull            Never pull the base image from the container registry;
+                           always build it locally (same as config
+                           "dockerImagePull": "never"). By default an
+                           uncustomised Dockerfile means the published
+                           ghcr.io/mbc-net/ai-support-agent-cli image is pulled
+                           instead of being rebuilt on this machine
 --project <tenantCode/projectCode>  Start only the matching project; with --token
                                     it selects the project for a direct (PAT) start
 ```
@@ -303,6 +338,7 @@ Each project gets an isolated workspace:
 | Subprocess env | Sensitive variables stripped before spawning child processes |
 | File transfer | Extension allowlist (53 types), `basename()` sanitization |
 | Git operations | Branch name validation to prevent CLI injection |
+| Container image | Pulled from `ghcr.io/mbc-net/ai-support-agent-cli`, published by this repository's release workflow, only when the Dockerfile and its build assets are unmodified; `--no-image-pull` or `"dockerImagePull": "never"` forces a local build instead |
 
 ## Development
 

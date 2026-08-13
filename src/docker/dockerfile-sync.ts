@@ -214,3 +214,76 @@ export function syncDockerfileToConfigDir(): void {
     logger.warn(t('docker.dockerfileSyncFailed', { message: getErrorMessage(err) }))
   }
 }
+
+/**
+ * True when `configDir/Dockerfile` exists but was never produced by
+ * syncDockerfileToConfigDir() (no `.dockerfile-sync-hash` alongside it) — i.e.
+ * a file the user placed there by hand.
+ *
+ * syncDockerfileToConfigDir() treats a missing hash file as "first run" and
+ * overwrites the pair unconditionally, which is fine on the `start` path (it
+ * has always done that) but would silently destroy a hand-placed Dockerfile
+ * the first time a caller that never synced before starts syncing. Callers use
+ * this to skip the sync entirely; isDockerfileCustomized() then reports the
+ * file as customised, so the image is built from it rather than pulled.
+ */
+export function hasUnmanagedConfigDockerfile(): boolean {
+  const configDir = getConfigDir()
+  try {
+    return (
+      fs.existsSync(path.join(configDir, 'Dockerfile')) &&
+      !fs.existsSync(path.join(configDir, '.dockerfile-sync-hash'))
+    )
+  } catch {
+    // Unreadable config dir — assume unmanaged so nothing gets overwritten.
+    return true
+  }
+}
+
+/**
+ * True when the image a local `docker build` would produce differs from the one
+ * the release workflow published to the registry — i.e. pulling it is not
+ * equivalent, because the user customised something in the build context.
+ *
+ * Covers the Dockerfile and every asset it COPYs (OPTIONAL_DOCKER_ASSETS:
+ * entrypoint.sh, tmux.conf, bashrc-extra.sh, nvim/init.lua, starship.toml), not
+ * just the Dockerfile: with `dockerfileSync: false` the sync that normally
+ * keeps those assets identical to the bundle never runs, so a customised
+ * tmux.conf survives and a pulled image would silently ignore it.
+ *
+ * An asset counts as customised only when its config-dir copy EXISTS and
+ * differs. A missing copy is not a customisation — there is no user content to
+ * preserve, and a local build would fail on the missing COPY source anyway, so
+ * treating it as customised would trade a working pull for a broken build.
+ *
+ * Compares bytes against the CURRENT bundle rather than consulting
+ * .dockerfile-sync-hash: with `--no-dockerfile-sync` (or after a failed sync)
+ * the stored hash can still match a config-dir copy taken from an older CLI
+ * version, and "stale" must not be mistaken for "identical to what CI built".
+ * Anything unreadable counts as customised, so the fallback is always the safe
+ * one — build locally rather than silently ignore a user's edits.
+ *
+ * This covers the config-dir copies only. An explicitly passed Dockerfile
+ * (`--dockerfile` / config.dockerfilePath) is customised by definition and is
+ * checked by the caller.
+ */
+export function isDockerfileCustomized(): boolean {
+  const configDir = getConfigDir()
+  try {
+    const contextDir = getDockerContextDir()
+    // getDockerfilePath() throws when the bundle has no Dockerfile, so this
+    // pair always has a comparable source.
+    const dockerfilePair: SyncPair = { src: getDockerfilePath(), dest: path.join(configDir, 'Dockerfile') }
+    const assetPairs: SyncPair[] = OPTIONAL_DOCKER_ASSETS.map((relPath) => ({
+      src: path.join(contextDir, relPath),
+      dest: path.join(configDir, relPath),
+    })).filter((pair) => fs.existsSync(pair.src)) // absent from this bundle — nothing to compare against
+
+    // An absent config-dir copy carries no user content (see doc comment).
+    return [dockerfilePair, ...assetPairs].some(
+      (pair) => fs.existsSync(pair.dest) && isOutOfDate(pair),
+    )
+  } catch {
+    return true
+  }
+}

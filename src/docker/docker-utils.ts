@@ -145,7 +145,7 @@ export function buildImage(version: string, customDockerfile?: string): void {
  * a running container) is skipped rather than aborting the rest.
  */
 /** Extract the most useful message from a failed execFileSync call: prefer captured stderr over the generic "Command failed: ..." message. */
-function execErrorMessage(err: unknown): string {
+export function execErrorMessage(err: unknown): string {
   const stderr = (err as { stderr?: Buffer | string } | undefined)?.stderr
   if (stderr && stderr.toString().trim().length > 0) return stderr.toString().trim()
   return toErrorMessage(err)

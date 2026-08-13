@@ -24,6 +24,14 @@ jest.mock('../../src/docker/docker-utils', () => ({
   pruneOldImages: jest.fn(),
 }))
 
+jest.mock('../../src/docker/dockerfile-sync', () => ({
+  isDockerfileCustomized: jest.fn(),
+}))
+
+jest.mock('../../src/docker/image-registry', () => ({
+  pullRegistryImage: jest.fn(),
+}))
+
 jest.mock('../../src/i18n', () => ({
   t: jest.fn((key: string) => key),
 }))
@@ -41,6 +49,8 @@ jest.mock('../../src/logger', () => ({
 import { execFileSync } from 'child_process'
 import { isValidVersion, isNewerVersion } from '../../src/utils/version'
 import { imageExists, buildImage, pruneOldImages } from '../../src/docker/docker-utils'
+import { isDockerfileCustomized } from '../../src/docker/dockerfile-sync'
+import { pullRegistryImage } from '../../src/docker/image-registry'
 import {
   getInstalledVersion,
   resetInstalledVersionCache,
@@ -54,12 +64,18 @@ const mockIsNewerVersion = isNewerVersion as jest.MockedFunction<typeof isNewerV
 const mockImageExists = imageExists as jest.MockedFunction<typeof imageExists>
 const mockBuildImage = buildImage as jest.MockedFunction<typeof buildImage>
 const mockPruneOldImages = pruneOldImages as jest.MockedFunction<typeof pruneOldImages>
+const mockIsDockerfileCustomized = isDockerfileCustomized as jest.MockedFunction<typeof isDockerfileCustomized>
+const mockPullRegistryImage = pullRegistryImage as jest.MockedFunction<typeof pullRegistryImage>
 const mockLogger = logger as jest.Mocked<typeof logger>
 
 describe('version-manager', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     resetInstalledVersionCache()
+    // Default for the pre-existing cases below: nothing is customised, but the
+    // registry has no usable image, so ensureImage() must still build locally.
+    mockIsDockerfileCustomized.mockReturnValue(false)
+    mockPullRegistryImage.mockReturnValue(false)
   })
 
   afterEach(() => {
@@ -277,6 +293,92 @@ describe('version-manager', () => {
       const version = ensureImage()
       expect(typeof version).toBe('string')
       expect(version).toBe('1.0.0')
+    })
+  })
+
+  // ------------------------------------------------------------------ ensureImage: registry pull
+  describe('ensureImage — registry pull', () => {
+    beforeEach(() => {
+      mockExecFileSync.mockImplementation(() => { throw new Error('npm list failed') })
+      mockIsNewerVersion.mockReturnValue(false)
+      mockImageExists.mockReturnValue(false)
+    })
+
+    it('pulls the published image instead of building when nothing is customised', () => {
+      mockPullRegistryImage.mockReturnValue(true)
+
+      const version = ensureImage()
+
+      expect(mockPullRegistryImage).toHaveBeenCalledWith('1.0.0')
+      expect(mockBuildImage).not.toHaveBeenCalled()
+      expect(version).toBe('1.0.0')
+    })
+
+    it('prunes old versioned images after a successful pull, exactly as after a build', () => {
+      mockPullRegistryImage.mockReturnValue(true)
+
+      ensureImage()
+
+      // Without this the pulled version replaces nothing and the superseded
+      // multi-GB tags stay on disk forever.
+      expect(mockPruneOldImages).toHaveBeenCalledWith('1.0.0')
+      expect(mockPullRegistryImage.mock.invocationCallOrder[0]).toBeLessThan(
+        mockPruneOldImages.mock.invocationCallOrder[0],
+      )
+    })
+
+    it('falls back to a local build when the pull fails (unpublished tag / offline)', () => {
+      mockPullRegistryImage.mockReturnValue(false)
+
+      const version = ensureImage()
+
+      expect(mockPullRegistryImage).toHaveBeenCalledWith('1.0.0')
+      expect(mockBuildImage).toHaveBeenCalledWith('1.0.0', undefined)
+      expect(version).toBe('1.0.0')
+    })
+
+    it('never pulls when a custom Dockerfile is given — that image is not what CI published', () => {
+      mockPullRegistryImage.mockReturnValue(true)
+
+      ensureImage('/custom/Dockerfile')
+
+      expect(mockPullRegistryImage).not.toHaveBeenCalled()
+      expect(mockBuildImage).toHaveBeenCalledWith('1.0.0', '/custom/Dockerfile')
+      expect(mockLogger.info).toHaveBeenCalledWith('docker.pullSkippedCustomDockerfile')
+    })
+
+    it('never pulls when the config-dir Dockerfile is customised', () => {
+      mockIsDockerfileCustomized.mockReturnValue(true)
+      mockPullRegistryImage.mockReturnValue(true)
+
+      ensureImage()
+
+      expect(mockPullRegistryImage).not.toHaveBeenCalled()
+      expect(mockBuildImage).toHaveBeenCalledWith('1.0.0', undefined)
+      expect(mockLogger.info).toHaveBeenCalledWith('docker.pullSkippedCustomized')
+    })
+
+    it('never pulls when the caller opted out (--no-image-pull / dockerImagePull: never)', () => {
+      mockPullRegistryImage.mockReturnValue(true)
+
+      ensureImage(undefined, false)
+
+      expect(mockPullRegistryImage).not.toHaveBeenCalled()
+      // The opt-out must not even consult the Dockerfile — it is unconditional.
+      expect(mockIsDockerfileCustomized).not.toHaveBeenCalled()
+      expect(mockBuildImage).toHaveBeenCalledWith('1.0.0', undefined)
+      expect(mockLogger.info).toHaveBeenCalledWith('docker.pullDisabled')
+    })
+
+    it('does not pull or build when the image is already present locally', () => {
+      mockImageExists.mockReturnValue(true)
+      mockPullRegistryImage.mockReturnValue(true)
+
+      ensureImage()
+
+      expect(mockPullRegistryImage).not.toHaveBeenCalled()
+      expect(mockBuildImage).not.toHaveBeenCalled()
+      expect(mockPruneOldImages).not.toHaveBeenCalled()
     })
   })
 })

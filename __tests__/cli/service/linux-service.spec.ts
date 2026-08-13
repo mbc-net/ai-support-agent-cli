@@ -367,11 +367,23 @@ describe('generateWrapperScript', () => {
     expect(result).toContain("exec '/home/user/.ai-support-agent/update-and-restart.sh'")
   })
 
-  it('should auto-build Docker image when it does not exist locally', () => {
+  it('should obtain the Docker image via docker-ensure-image when it does not exist locally', () => {
     const result = generateWrapperScript(baseOpts)
 
     expect(result).toContain('docker image inspect "$IMAGE_TAG"')
-    expect(result).toContain('ai-support-agent docker-build || { echo "ERROR: docker-build failed')
+    // docker-ensure-image pulls the published image when nothing is customised;
+    // docker-build here would compile the whole image on every fresh install.
+    expect(result).toContain('ai-support-agent docker-ensure-image || { echo "ERROR: docker-ensure-image failed')
+  })
+
+  it('should keep the rebuild marker branch on docker-build (a forced rebuild, not pull-or-skip)', () => {
+    const result = generateWrapperScript(baseOpts)
+
+    // The marker means "the customisation changed — rebuild". docker-ensure-image
+    // would no-op whenever the image tag already exists, silently ignoring it.
+    const markerBranch = result.slice(result.indexOf('REBUILD_MARKER='), result.indexOf('# Resolve the installed version'))
+    expect(markerBranch).toContain('ai-support-agent docker-build')
+    expect(markerBranch).not.toContain('docker-ensure-image')
   })
 
   it('should include ANTHROPIC_API_KEY when provided', () => {
