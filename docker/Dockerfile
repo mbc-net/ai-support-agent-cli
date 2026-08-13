@@ -380,7 +380,15 @@ RUN npm install -g \
 # `playwright install` without `--with-deps` (no apt-get on the runtime path).
 # =============================================================================
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
-RUN npx --yes playwright install-deps chromium
+# `playwright install-deps` shells out to apt-get, so it needs a package index.
+# Layer 4 ends with `rm -rf /var/lib/apt/lists/*`, so without the refresh below
+# this resolved against a wiped/skewed index: on arm64 the build failed with
+# `xvfb : Depends: xserver-common (>= ...) but it is not going to be installed`
+# / `held broken packages`. amd64 carried the same defect and only happened to
+# succeed. Retry chain matches every other apt step in this file.
+RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
+    && npx --yes playwright install-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
 
 # =============================================================================
 # Layer 6: Application packages (changes on every version bump)
