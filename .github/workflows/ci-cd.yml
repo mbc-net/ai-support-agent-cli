@@ -127,6 +127,13 @@ jobs:
     permissions:
       contents: write
       id-token: write
+    # Exposed so the image jobs reuse the exact version and channel decided here.
+    # Re-deriving them downstream would let the container tags drift from the npm
+    # dist-tags (e.g. a beta release quietly taking over `:latest`).
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel_tag: ${{ steps.release-type.outputs.tag }}
+      prerelease: ${{ steps.release-type.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -216,3 +223,143 @@ jobs:
         env:
           VERSION_API_URL: ${{ secrets.AGENT_VERSION_API_URL }}
           VERSION_API_KEY: ${{ secrets.AGENT_VERSION_API_KEY }}
+
+  # ---------------------------------------------------------------------------
+  # Container image (ghcr.io/mbc-net/ai-support-agent-cli)
+  #
+  # This is the image `manifest-generator.ts` (DEFAULT_AGENT_IMAGE) tells users to
+  # run, so it must exist for a generated Deployment to start at all.
+  #
+  # `needs: publish` is REQUIRED, not cosmetic: docker/Dockerfile installs the CLI
+  # with `npm install -g @ai-support-agent/cli@${AGENT_VERSION}`, so the version
+  # has to be on the npm registry before the image can be built.
+  #
+  # Built per-architecture on native runners and joined into one manifest list.
+  # The Dockerfile compiles neovim from source and installs a rust toolchain, so
+  # emulating arm64 under QEMU in a single job is far too slow.
+  # ---------------------------------------------------------------------------
+  publish_image:
+    name: Publish Image (${{ matrix.platform }})
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for the version to be resolvable on npm
+        # npm publish returning 200 does not mean the version is already served by
+        # every registry replica. Building immediately can fail with E404 on a
+        # version that was just published.
+        run: |
+          for i in $(seq 1 30); do
+            if npm view "@ai-support-agent/cli@${{ needs.publish.outputs.version }}" version >/dev/null 2>&1; then
+              echo "available after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::@ai-support-agent/cli@${{ needs.publish.outputs.version }} did not become available on npm"
+          exit 1
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            AGENT_VERSION=${{ needs.publish.outputs.version }}
+          provenance: false
+          outputs: type=image,name=ghcr.io/mbc-net/ai-support-agent-cli,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Save digest for the merge job
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}
+          retention-days: 1
+
+  # Joins the per-architecture images into a single multi-arch manifest list and
+  # applies the human-facing tags. `latest` only moves on a production release so
+  # a beta tag cannot take it over — mirrors the npm dist-tag logic above.
+  publish_image_manifest:
+    name: Publish Image Manifest
+    # `publish` is listed so its outputs (version / channel_tag) are reachable;
+    # `publish_image` is the actual build dependency.
+    needs: [publish, publish_image]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        env:
+          IMAGE: ghcr.io/mbc-net/ai-support-agent-cli
+          VERSION: ${{ needs.publish.outputs.version }}
+          CHANNEL_TAG: ${{ needs.publish.outputs.channel_tag }}
+        run: |
+          sources=()
+          for f in /tmp/digests/*; do
+            sources+=("${IMAGE}@$(cat "$f")")
+          done
+          if [ ${#sources[@]} -eq 0 ]; then
+            echo "::error::no per-architecture digests were produced"
+            exit 1
+          fi
+          # Immutable version tag: always published.
+          docker buildx imagetools create --tag "${IMAGE}:${VERSION}" "${sources[@]}"
+          # Moving channel tag: latest / beta / alpha, matching the npm dist-tag
+          # decided by the publish job. `latest` therefore only moves on a
+          # production release.
+          docker buildx imagetools create --tag "${IMAGE}:${CHANNEL_TAG}" "${sources[@]}"
+
+      - name: Show published image
+        env:
+          IMAGE: ghcr.io/mbc-net/ai-support-agent-cli
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: docker buildx imagetools inspect "${IMAGE}:${VERSION}"
