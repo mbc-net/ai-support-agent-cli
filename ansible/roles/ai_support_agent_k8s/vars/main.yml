@@ -1,0 +1,19 @@
+---
+# 単数指定と複数リストを1本のリストへ正規化した、ロール内部の実効値。
+#
+# `set_fact` ではなく role vars で定義するのは、set_fact のタスク結果には
+# 設定した値そのものが載り、`-vvv` 実行時にトークンが平文で出力されるため。
+# role vars は参照時に遅延評価されるだけでタスク結果を持たないため露出しない。
+#
+# 利用者が上書きする変数ではない（派生値）。tasks/main.yml の assert が
+# 単数と複数の同時指定を先に弾くため、ここでの分岐は「どちらか一方」に閉じている。
+ai_support_agent_k8s_project_specs: >-
+  {{
+    ai_support_agent_k8s_projects
+    if (ai_support_agent_k8s_projects | length > 0)
+    else [{
+      'project': ai_support_agent_k8s_project,
+      'name': ai_support_agent_k8s_name,
+      'token': ai_support_agent_k8s_token,
+    }]
+  }}

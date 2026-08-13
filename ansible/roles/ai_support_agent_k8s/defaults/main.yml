@@ -54,3 +54,25 @@ ai_support_agent_k8s_kubeconfig: /etc/rancher/k3s/k3s.yaml
 
 # 適用したマニフェストの保存先（監査・再適用用。秘匿値は含まない）。
 ai_support_agent_k8s_manifest_dir: /etc/ai-support-agent/k8s
+
+# 複数プロジェクトを1クラスタへ配置する場合のリスト。
+#
+# エントリごとに独立した StatefulSet と Secret を作る。`agentId` はトークンの
+# tokenId から導出される（src/agent-runner.ts の resolveAgentId）ため、複数
+# プロジェクトで1つのトークンを共有すると agentId が衝突し、サーバー側の TOFU
+# バインディングが "Agent ID does not match the token binding" で接続を拒否する。
+# したがって token はエントリごとに必須である。
+#
+# エントリのキー:
+#   project   必須。`tenantCode/projectCode`（例: mbc/MBC_01）
+#   name      必須。StatefulSet / Secret 名（DNS-1123 ラベル）。projectCode は
+#             MBC_01 のようにアンダースコアを含み K8s 名に使えないため、コードから
+#             機械的に導出せず明示させる
+#   token     必須。そのプロジェクト専用のトークン（ANSIBLE# 変数から供給）
+#   replicas / persistence / storage_class / storage_size
+#             任意。省略時はこのファイルのトップレベル既定値を継承する
+#
+# 単数指定（ai_support_agent_k8s_project / _token）とは排他である。両方を指定した
+# 場合は tasks/main.yml の assert が失敗する（どちらが効いているか分からない状態を
+# 作らないため）。
+ai_support_agent_k8s_projects: []
