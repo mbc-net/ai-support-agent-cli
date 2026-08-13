@@ -134,3 +134,45 @@ describe("generateEcsManifest の複数プロジェクト指定", () => {
     expect(() => generateEcsManifest(ECS_BASE)).toThrow(/at least one/i);
   });
 });
+
+describe("レビュー指摘の回帰: 単数指定の部分指定と空 name", () => {
+  const T = { tenantCode: "mbc", apiUrl: "https://api.example.com" };
+
+  it("projectCode だけ / token だけの部分指定を拒否する", () => {
+    // OR 判定だと片方だけでも「単数指定あり」となり、非null断定を通って
+    // `--project mbc/undefined` が埋め込まれたマニフェストが生成される。
+    expect(() => generateK8sManifest({ ...T, token: "tok" } as never)).toThrow(
+      /together/i,
+    );
+    expect(() =>
+      generateK8sManifest({ ...T, projectCode: "MBC_01" } as never),
+    ).toThrow(/together/i);
+  });
+
+  it("空文字の name を既定名へ黙ってフォールバックさせない", () => {
+    // web と agent でフォールバック演算子が食い違うと、同じ入力で
+    // 片方だけがマニフェストを生成してしまいパリティが崩れる。
+    expect(() =>
+      generateK8sManifest({
+        ...T,
+        projects: [{ projectCode: "MBC_01", token: "t", name: "" }],
+      }),
+    ).toThrow(InvalidManifestNameError);
+  });
+
+  it("エラークラスが実体として import できている（toThrow(undefined) 化の防止）", () => {
+    // 未定義シンボルを toThrow に渡すと Jest は「何か throw されたか」しか見ない。
+    // tsconfig が __tests__ を型検査から外しているため import ミスはビルドでも
+    // 検出されない。実体があることを直接固定する。
+    expect(InvalidManifestNameError).toBeDefined()
+    expect(typeof InvalidManifestNameError).toBe('function')
+  })
+
+  it("生成物に undefined が混入しない", () => {
+    const m = generateK8sManifest({
+      ...T,
+      projects: [{ projectCode: "MBC_01", token: "t", name: "agent-mbc01" }],
+    });
+    expect(m).not.toContain("undefined");
+  });
+});

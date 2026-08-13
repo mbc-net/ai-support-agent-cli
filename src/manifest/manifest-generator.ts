@@ -171,12 +171,30 @@ function yamlScalar(value: string): string {
  */
 const DNS_1123_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
 
-function assertDns1123Label(value: string, field: string): string {
-  if (value.length > 63 || !DNS_1123_LABEL.test(value)) {
-    throw new Error(
+/**
+ * Thrown when a Kubernetes object name is not a DNS-1123 label.
+ *
+ * A named class (rather than a bare Error) so tests can assert the failure
+ * reason. `toThrow(SomeUndefinedImport)` silently degrades to "threw
+ * anything", which lets a test pass while verifying nothing — the web side
+ * (agent-deploy-manifest.ts) already exports the same class for this reason.
+ */
+export class InvalidManifestNameError extends Error {
+  constructor(
+    readonly field: string,
+    readonly value: string,
+  ) {
+    super(
       `Invalid ${field} "${value}": must be a lowercase DNS-1123 label ` +
         '(alphanumerics and "-", starting and ending with an alphanumeric, max 63 chars)',
     )
+    this.name = 'InvalidManifestNameError'
+  }
+}
+
+function assertDns1123Label(value: string, field: string): string {
+  if (value.length > 63 || !DNS_1123_LABEL.test(value)) {
+    throw new InvalidManifestNameError(field, value)
   }
   return value
 }
@@ -209,7 +227,17 @@ export class ManifestProjectSelectionError extends Error {
  * stop matching.
  */
 function resolveProjects(input: ManifestInput): Required<ManifestProject>[] {
-  const hasSingle = input.projectCode !== undefined || input.token !== undefined
+  // OR ではなく AND で判定する。片方だけ指定を「単数指定あり」と扱うと、
+  // 非null断定（!）を通って `--project mbc/undefined` のようにテンプレートへ
+  // undefined が文字列として埋め込まれる。TypeScript は `!` の先を追跡しない。
+  const hasProjectCode = input.projectCode !== undefined
+  const hasToken = input.token !== undefined
+  if (hasProjectCode !== hasToken) {
+    throw new ManifestProjectSelectionError(
+      'projectCode and token must be specified together for a single project',
+    )
+  }
+  const hasSingle = hasProjectCode && hasToken
   const hasMulti = (input.projects?.length ?? 0) > 0
   if (hasSingle && hasMulti) {
     throw new ManifestProjectSelectionError(
