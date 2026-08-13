@@ -141,9 +141,9 @@ describe('Dockerfile content validation', () => {
           .trim()
       })
 
-      it('retries the main OS packages, neovim build deps, libclang-dev, MSSQL tools, and gh/glab final apt-get update (3 attempts, 5s/15s backoff)', () => {
+      it('retries the main OS packages, neovim build deps, libclang-dev, MSSQL tools, gh/glab final apt-get update, and Playwright browser deps (3 attempts, 5s/15s backoff)', () => {
         const occurrences = normalized.split(BARE_RETRY_CHAIN).length - 1
-        expect(occurrences).toBe(5)
+        expect(occurrences).toBe(6)
       })
 
       it('retries the GitHub/GitLab CLI keyring-refresh apt-get update while preserving the tolerant `|| true` fallback', () => {
@@ -151,10 +151,10 @@ describe('Dockerfile content validation', () => {
       })
 
       it('does not leave any apt-get update call without a retry chain', () => {
-        // 6 locations (5 bare-retry + 1 keyring-refresh) x 3 attempts (1
-        // initial + 2 retries) = 18, plus one extra
+        // 7 locations (6 bare-retry + 1 keyring-refresh) x 3 attempts (1
+        // initial + 2 retries) = 21, plus one extra
         // `--allow-insecure-repositories` fallback attempt on the pre-gh update
-        // (see the "degraded apt signature" describe below) = 19.
+        // (see the "degraded apt signature" describe below) = 22.
         // Strip comment lines first: the Dockerfile mentions "apt-get update"
         // in comments ("reduce apt-get update calls", "before apt-get update").
         const codeOnly = content
@@ -162,7 +162,76 @@ describe('Dockerfile content validation', () => {
           .filter((line) => !line.trim().startsWith('#'))
           .join('\n')
         const totalUpdateCalls = (codeOnly.match(/apt-get update\b/g) || []).length
-        expect(totalUpdateCalls).toBe(19)
+        expect(totalUpdateCalls).toBe(22)
+      })
+    })
+
+    describe('every package install refreshes the apt index in the same RUN', () => {
+      // Regression: `RUN npx --yes playwright install-deps chromium` installed
+      // OS packages without refreshing the index, several layers after
+      // `rm -rf /var/lib/apt/lists/*` had wiped it. On arm64 that resolved
+      // against a skewed index and the build died with
+      //   xvfb : Depends: xserver-common (>= 2:21.1.7-3+deb12u13) but it is not going to be installed
+      //   E: Unable to correct problems, you have held broken packages.
+      // amd64 carried the same defect and merely happened to succeed.
+      //
+      // The retry tests above only prove that the `apt-get update` calls which
+      // DO exist are retried — they cannot catch an install that never updates
+      // at all. This checks the complementary invariant.
+
+      /** RUN instructions with backslash continuations joined into one string. */
+      function runInstructions(dockerfile: string): { line: number; body: string }[] {
+        const lines = dockerfile.split('\n')
+        const runs: { line: number; body: string }[] = []
+        let current: string | null = null
+        let start = 0
+
+        lines.forEach((line, index) => {
+          if (current === null) {
+            if (!line.startsWith('RUN ')) return
+            current = line
+            start = index + 1
+          } else {
+            current += `\n${line}`
+          }
+          if (current !== null && !current.trimEnd().endsWith('\\')) {
+            runs.push({ line: start, body: current })
+            current = null
+          }
+        })
+        return runs
+      }
+
+      /**
+       * Anything that pulls OS packages. `playwright install-deps` is included
+       * because it shells out to apt-get itself — the defect this guards was
+       * invisible to a plain `apt-get install` search.
+       */
+      const INSTALLS_PACKAGES = /apt-get install|apt install|install-deps/
+
+      it('leaves no package-installing RUN without an apt-get update', () => {
+        const offenders = runInstructions(content)
+          .filter(({ body }) => INSTALLS_PACKAGES.test(body))
+          .filter(({ body }) => !body.includes('apt-get update'))
+          .map(({ line, body }) => ({
+            line,
+            instruction: body.split('\n')[0].slice(0, 80),
+          }))
+
+        expect(offenders).toEqual([])
+      })
+
+      it('installs Playwright browser dependencies behind the same retry chain as every other apt step', () => {
+        const playwrightRun = runInstructions(content).find(({ body }) =>
+          body.includes('playwright install-deps'),
+        )
+        expect(playwrightRun).toBeDefined()
+        const normalizedRun = (playwrightRun?.body ?? '')
+          .replace(/\\\r?\n/g, ' ')
+          .replace(/\s+/g, ' ')
+        expect(normalizedRun).toContain(
+          'apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)',
+        )
       })
     })
 
