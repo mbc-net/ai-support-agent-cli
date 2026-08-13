@@ -65,6 +65,119 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name`
 
+/**
+ * 複数プロジェクト指定（1プロジェクト = 1 Deployment）のゴールデン値。
+ *
+ * 単数指定と違い、この経路は Secret と Deployment の組をプロジェクト数だけ
+ * 並べる。片方のリポジトリだけ並び順や Secret 名の導出を変えると、画面から
+ * コピーしたマニフェストと CLI が出すマニフェストが黙って食い違う。
+ */
+export const K8S_MULTI_STRUCTURE_GOLDEN = `apiVersion: v1
+kind: Secret
+metadata:
+  name: agent-mbc01-token
+  namespace: default
+type: Opaque
+data:
+  AI_SUPPORT_AGENT_TOKEN: dG9r
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-mbc01
+  namespace: default
+  labels:
+    app: agent-mbc01
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-mbc01
+  template:
+    metadata:
+      labels:
+        app: agent-mbc01
+    spec:
+      containers:
+        - name: agent
+          image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"
+          args:
+            - ai-support-agent
+            - start
+            - --no-docker
+            - --project
+            - "mbc/MBC_01"
+          env:
+            - name: AI_SUPPORT_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agent-mbc01-token
+                  key: AI_SUPPORT_AGENT_TOKEN
+            - name: AI_SUPPORT_AGENT_API_URL
+              value: "https://api.example.com"
+            - name: AI_SUPPORT_AGENT_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agent-mbc02-token
+  namespace: default
+type: Opaque
+data:
+  AI_SUPPORT_AGENT_TOKEN: dG9rMg==
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-mbc02
+  namespace: default
+  labels:
+    app: agent-mbc02
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-mbc02
+  template:
+    metadata:
+      labels:
+        app: agent-mbc02
+    spec:
+      containers:
+        - name: agent
+          image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"
+          args:
+            - ai-support-agent
+            - start
+            - --no-docker
+            - --project
+            - "mbc/MBC_02"
+          env:
+            - name: AI_SUPPORT_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agent-mbc02-token
+                  key: AI_SUPPORT_AGENT_TOKEN
+            - name: AI_SUPPORT_AGENT_API_URL
+              value: "https://api.example.com"
+            - name: AI_SUPPORT_AGENT_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name`
+
+/** 複数プロジェクトのゴールデン値を生成する共通の入力 */
+export const MULTI_PARITY_INPUT = {
+  tenantCode: 'mbc',
+  apiUrl: 'https://api.example.com',
+  projects: [
+    { projectCode: 'MBC_01', token: 'tok', name: 'agent-mbc01', replicas: 2 },
+    { projectCode: 'MBC_02', token: 'tok2', name: 'agent-mbc02' },
+  ],
+}
+
 /** ゴールデン値を生成する共通の入力 */
 export const PARITY_INPUT = {
   tenantCode: 'mbc',
