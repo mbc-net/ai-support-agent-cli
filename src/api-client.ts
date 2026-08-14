@@ -23,7 +23,7 @@ import type {
   PendingAlert,
   PendingCommand,
   ProjectConfigResponse,
-  ProjectSharedFileEntry,
+  ProjectSharedFileListResponse,
   ReadSlackThreadResult,
   ReleaseChannel,
   RegisterRequest,
@@ -559,8 +559,10 @@ export class ApiClient {
    * `path` 省略時はルート直下。エージェントトークンで認証し、テナント/プロジェクトは
    * サーバー側がトークンから解決するため、他プロジェクトのファイルは構造上参照できない。
    */
-  async listProjectFiles(path?: string): Promise<ProjectSharedFileEntry[]> {
-    return this.get<ProjectSharedFileEntry[]>(
+  async listProjectFiles(
+    path?: string,
+  ): Promise<ProjectSharedFileListResponse> {
+    return this.get<ProjectSharedFileListResponse>(
       API_ENDPOINTS.PROJECT_FILES_LIST(this.tenantCode, this.projectCode),
       { params: path ? { path } : undefined },
     )
