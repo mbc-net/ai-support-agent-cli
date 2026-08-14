@@ -21,6 +21,21 @@ import {
 } from "./mcp-response";
 
 /**
+ * 1 ファイルあたりの読み取り上限（バイト）。
+ *
+ * axios はレスポンス全体をメモリにバッファリングするため、上限を設けないと
+ * 大容量ファイル（プラン上限が無制限の場合 2GB 近く）を読ませたときに
+ * エージェントプロセスが OOM で落ちる。API 側の LLM ツールと同じ 10MB とする。
+ */
+const MAX_READ_BYTES = 10 * 1024 * 1024
+
+/** 一時ファイルの権限（所有者のみ読み書き）。共有ファイルは証明書・鍵を含み得る。 */
+const TEMP_FILE_MODE = 0o600
+
+/** 一時ディレクトリの権限（所有者のみアクセス可）。 */
+const TEMP_DIR_MODE = 0o700
+
+/**
  * プロジェクト共有ファイル（S3 上の永続ストレージ）を参照する MCP ツール。
  *
  * エージェント実行マシンのローカルFS（Claude Code の Read/Glob 等）とは別で、
@@ -79,6 +94,8 @@ export function registerProjectFilesTools(
           const response = await axios.get(downloadUrl, {
             responseType: "arraybuffer",
             timeout: CONVERSATION_FILE_DOWNLOAD_TIMEOUT_MS,
+            maxContentLength: MAX_READ_BYTES,
+            maxBodyLength: MAX_READ_BYTES,
           });
           const base64 = Buffer.from(response.data as ArrayBuffer).toString(
             "base64",
@@ -90,6 +107,8 @@ export function registerProjectFilesTools(
           const response = await axios.get(downloadUrl, {
             responseType: "text",
             timeout: CONVERSATION_FILE_DOWNLOAD_TIMEOUT_MS,
+            maxContentLength: MAX_READ_BYTES,
+            maxBodyLength: MAX_READ_BYTES,
           });
           return mcpTextResponse(`File: ${filename}\n\n${response.data}`);
         }
@@ -99,9 +118,15 @@ export function registerProjectFilesTools(
         const response = await axios.get(downloadUrl, {
           responseType: "arraybuffer",
           timeout: CONVERSATION_BINARY_DOWNLOAD_TIMEOUT_MS,
+          maxContentLength: MAX_READ_BYTES,
+          maxBodyLength: MAX_READ_BYTES,
         });
+        // 共有ファイルは証明書・鍵等の機密を含み得るため、同一ホストの他ユーザーから
+        // 読めないよう所有者のみアクセス可の権限で作る（既定の umask では 0755/0644）。
         const tmpDir = path.join(os.tmpdir(), "ai-support-agent-project-files");
-        fs.mkdirSync(tmpDir, { recursive: true });
+        fs.mkdirSync(tmpDir, { recursive: true, mode: TEMP_DIR_MODE });
+        // 既存ディレクトリには mkdirSync の mode が効かないため明示的に設定する。
+        fs.chmodSync(tmpDir, TEMP_DIR_MODE);
         // ファイル名はサーバー由来だが、一時ディレクトリ外への書き出しを防ぐため
         // basename に落としてから使う（パストラバーサル対策）。
         const safeFilename = path.basename(filename);
@@ -110,6 +135,7 @@ export function registerProjectFilesTools(
         fs.writeFileSync(
           tmpFilePath,
           Buffer.from(response.data as ArrayBuffer),
+          { mode: TEMP_FILE_MODE },
         );
 
         return mcpTextResponse(
