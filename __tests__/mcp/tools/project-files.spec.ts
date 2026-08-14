@@ -214,6 +214,52 @@ describe("project-files MCP tools", () => {
       expect(savedPath).not.toContain("..");
     });
 
+    it("一時ファイルは所有者のみ読み書き可（0600）で作る", async () => {
+      const getProjectFileDownloadUrl = jest.fn().mockResolvedValue({
+        downloadUrl: "https://s3/get",
+        filename: "secret.pem",
+        contentType: "application/octet-stream",
+      });
+      mockedAxios.get.mockResolvedValue({
+        data: Buffer.from("private-key").buffer,
+      });
+      setupTools({
+        getProjectFileDownloadUrl,
+      } as unknown as Partial<ApiClient>);
+
+      const result = await readCallback({ path: "secret.pem" });
+
+      const text = result.content[0].text as string;
+      const savedPath = (
+        text.match(/Saved to: (.+)/) as RegExpMatchArray
+      )[1].trim();
+      writtenFiles.push(savedPath);
+      // 共有ファイルは証明書・鍵を含み得るため、同一ホストの他ユーザーから読めてはならない
+      expect(fs.statSync(savedPath).mode & 0o777).toBe(0o600);
+    });
+
+    it("レスポンスサイズ上限を指定して取得する（大容量ファイルでの OOM を防ぐ）", async () => {
+      const getProjectFileDownloadUrl = jest.fn().mockResolvedValue({
+        downloadUrl: "https://s3/get",
+        filename: "note.txt",
+        contentType: "text/plain",
+      });
+      mockedAxios.get.mockResolvedValue({ data: "hello" });
+      setupTools({
+        getProjectFileDownloadUrl,
+      } as unknown as Partial<ApiClient>);
+
+      await readCallback({ path: "note.txt" });
+
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        "https://s3/get",
+        expect.objectContaining({
+          maxContentLength: 10 * 1024 * 1024,
+          maxBodyLength: 10 * 1024 * 1024,
+        }),
+      );
+    });
+
     it("API エラーはエラーレスポンスとして返す（例外を投げない）", async () => {
       const getProjectFileDownloadUrl = jest
         .fn()
