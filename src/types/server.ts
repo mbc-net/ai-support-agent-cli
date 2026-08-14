@@ -85,6 +85,13 @@ export type ChatMode = 'agent' | 'builtin'
 
 export interface AgentServerConfig {
   agentEnabled: boolean
+  /**
+   * 管理画面のプロジェクト設定で「自動アップデート」が有効か。
+   *
+   * 省略（旧サーバー）と false を区別しないこと。自動アップデートは opt-in であり、
+   * 明示的な true 以外はすべて無効として扱う（auto-update-gate.ts を参照）。
+   */
+  autoUpdateEnabled?: boolean
   builtinAgentEnabled: boolean
   builtinFallbackEnabled: boolean
   externalAgentEnabled: boolean

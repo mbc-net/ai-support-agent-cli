@@ -60,6 +60,18 @@ describe('cli/status-command', () => {
       expect(output).not.toContain('status.updateChannel')
     })
 
+    it('設定が無ければ無効と表示する（既定 OFF）', () => {
+      const config: AgentConfig = {
+        agentId: 'test-agent',
+        createdAt: '2024-01-01',
+      }
+      mockedGetProjectList.mockReturnValue([])
+      const output = formatStatus(config)
+      expect(output).toContain('status.autoUpdate')
+      // 無効時はチャンネル行を出さない（有効なときだけ出す既存の表示規則に合わせる）
+      expect(output).not.toContain('status.updateChannel')
+    })
+
     it('should show auto-update enabled with channel', () => {
       const config: AgentConfig = {
         agentId: 'test-agent',

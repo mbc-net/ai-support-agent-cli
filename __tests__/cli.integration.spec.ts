@@ -167,4 +167,46 @@ describe('commander integration', () => {
     expect(captured.heartbeatInterval).toBe('60000')
     expect(captured.verbose).toBe(true)
   })
+
+  /**
+   * 自動アップデートの既定 OFF は、この commander の挙動に依存している。
+   *
+   * `--no-auto-update` だけを定義すると、commander は否定オプションの既定値として
+   * opts.autoUpdate を **true** にする。つまり「フラグ未指定」と「明示的に ON」が
+   * 区別できず、既定 OFF が成立しない。`--auto-update` を併せて定義したときだけ
+   * 未指定が undefined になり、三状態（未指定 / ON / OFF）が得られる。
+   *
+   * このテストが落ちたら、src/index.ts から --auto-update を消してはならない。
+   * 消すと全エージェントで自動アップデートが暗黙的に ON へ戻る。
+   */
+  describe('negated boolean option defaults (auto-update opt-in の前提)', () => {
+    const parseStart = (registerPositive: boolean, argv: string[]): Record<string, unknown> => {
+      let captured: Record<string, unknown> = {}
+      const program = new Command()
+        .exitOverride()
+        .configureOutput({ writeOut: () => {}, writeErr: () => {} })
+      const start = program.command('start')
+      if (registerPositive) {
+        start.option('--auto-update', 'enable auto update')
+      }
+      start
+        .option('--no-auto-update', 'disable auto update')
+        .action((opts) => { captured = opts })
+      program.parse(['node', 'test', 'start', ...argv])
+      return captured
+    }
+
+    it('--no-auto-update だけを定義すると、未指定時の既定が true になってしまう', () => {
+      expect(parseStart(false, []).autoUpdate).toBe(true)
+    })
+
+    it('--auto-update を併せて定義すると、未指定時は undefined になる', () => {
+      expect(parseStart(true, []).autoUpdate).toBeUndefined()
+    })
+
+    it('--auto-update / --no-auto-update はそれぞれ true / false を設定する', () => {
+      expect(parseStart(true, ['--auto-update']).autoUpdate).toBe(true)
+      expect(parseStart(true, ['--no-auto-update']).autoUpdate).toBe(false)
+    })
+  })
 })
