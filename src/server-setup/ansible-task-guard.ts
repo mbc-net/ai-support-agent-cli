@@ -265,6 +265,7 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'github_runner_k8s',
   'k3s',
   'tailscale',
+  'shared_file',
 ])
 
 /**
@@ -505,6 +506,67 @@ function validateIncludeRoleTaskVars(
   }
 }
 
+/** `shared_file` ロールで配布元を指定する変数名。 */
+export const SHARED_FILE_SRC_VAR = 'shared_file_src'
+
+/** `shared_file` ロールの名前。 */
+const SHARED_FILE_ROLE = 'shared_file'
+
+/**
+ * `shared_file_src` に指定できる共有ファイルの相対パス。
+ *
+ * - Jinja テンプレート（`{{ }}` / `{% %}`）を含まないこと
+ * - 相対パスであること（先頭 `/` を許さない）
+ * - `..` セグメントを含まないこと
+ *
+ * テンプレートを拒む理由は権限ではなく**決定可能性**である。エージェントは playbook を
+ * 走らせる前に body を静的に走査し、取り寄せる共有ファイルを決めてステージングする。
+ * 値が実行時にしか定まらないと、何を取り寄せればよいか分からない。
+ *
+ * `..` と絶対パスを拒むのは、ロールが `src` をステージングディレクトリからの相対パスとして
+ * 組み立てるためである。ここを抜けると、エージェント上の任意ファイル（自身のトークンや
+ * SSH 秘密鍵）を対象サーバーへ配布できてしまう。`ansible.builtin.copy` の `src` を
+ * 本体タスクで禁止しているのと同じ理由の防御であり、この検証がその代替になっている。
+ */
+export function isValidSharedFileSrc(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return false
+  if (trimmed.includes('{{') || trimmed.includes('{%')) return false
+  if (trimmed.startsWith('/')) return false
+  // 先頭・中間・末尾のいずれの `..` セグメントも拒否する（`..foo` のような
+  // 正当な名前は通す必要があるため、セグメント単位で厳密に比較する）。
+  if (trimmed.split('/').some((segment) => segment === '..')) return false
+  return true
+}
+
+/**
+ * `shared_file` ロール呼び出し固有の検証。
+ *
+ * このロールだけは、エージェントが実行前にファイルを取り寄せる必要があるため、
+ * `shared_file_src` が静的に決定できる安全な相対パスであることを保証する。
+ */
+function validateSharedFileRoleVars(
+  taskIndex: number,
+  roleName: unknown,
+  taskLevelVars: unknown,
+  violations: AnsibleTaskViolation[],
+): void {
+  if (roleName !== SHARED_FILE_ROLE) return
+
+  const src = isPlainObject(taskLevelVars)
+    ? taskLevelVars[SHARED_FILE_SRC_VAR]
+    : undefined
+  if (!isValidSharedFileSrc(src)) {
+    violations.push({
+      taskIndex,
+      key: SHARED_FILE_SRC_VAR,
+      reason:
+        'shared_file_src must be a literal relative path without ".." (no Jinja templating)',
+    })
+  }
+}
+
 /**
  * サーバーセットアップレシピ本体（Ansible タスク列 YAML）を検証する。
  *
@@ -622,6 +684,14 @@ export function validateAnsibleTasks(
         if (INCLUDE_ROLE_MODULE_KEYS.has(normalized)) {
           validateIncludeRole(taskIndex, key, task[key], violations)
           validateIncludeRoleTaskVars(taskIndex, task.vars, violations)
+          validateSharedFileRoleVars(
+            taskIndex,
+            isPlainObject(task[key])
+              ? (task[key] as Record<string, unknown>).name
+              : undefined,
+            task.vars,
+            violations,
+          )
           continue
         }
 
