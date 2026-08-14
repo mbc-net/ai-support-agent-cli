@@ -62,6 +62,12 @@ jest.mock('../../src/utils/known-hosts-store', () => ({
   resolveKnownHostsPath: (...args: unknown[]) => mockResolveKnownHostsPath(...args),
 }))
 
+const mockStageSharedFiles = jest.fn().mockResolvedValue(undefined)
+jest.mock('../../src/server-setup/shared-file-staging', () => ({
+  ...jest.requireActual('../../src/server-setup/shared-file-staging'),
+  stageSharedFiles: (...args: unknown[]) => mockStageSharedFiles(...args),
+}))
+
 import { load } from 'js-yaml'
 
 import {
@@ -651,6 +657,151 @@ describe('executeServerSetupAnsible - extracted core', () => {
     expect(mockRmSync).toHaveBeenCalled()
     // The core (not the caller) resolves known_hosts from tenantCode + sshHostId.
     expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('local', 'host-1')
+  })
+
+  describe('共有ファイルの配布（shared_file ロール）', () => {
+    const SHARED_FILE_BODY = `
+- name: place cert
+  include_role:
+    name: shared_file
+  vars:
+    shared_file_src: certs/server.pem
+    shared_file_dest: /etc/ssl/app/server.pem
+`
+
+    const fakeClient = () => ({}) as never
+
+    it('shared_file を使う body では、実行前にステージングを行う', async () => {
+      const runPromise = executeServerSetupAnsible({
+        executionId: 'exec-shared',
+        body: SHARED_FILE_BODY,
+        mode: 'resident',
+        credential,
+        variables: {},
+        secretNames: [],
+        tenantCode: 'local',
+        sshHostId: 'host-1',
+        client: fakeClient(),
+      })
+      await flushUntilExecFileCalled()
+      resolveExecFile(0, defaultOutput())
+      await runPromise
+
+      expect(mockStageSharedFiles).toHaveBeenCalledWith(
+        expect.objectContaining({ sources: ['certs/server.pem'] }),
+      )
+    })
+
+    it('ステージング先を extra-vars でロールへ渡す', async () => {
+      const runPromise = executeServerSetupAnsible({
+        executionId: 'exec-shared',
+        body: SHARED_FILE_BODY,
+        mode: 'resident',
+        credential,
+        variables: {},
+        secretNames: [],
+        tenantCode: 'local',
+        sshHostId: 'host-1',
+        client: fakeClient(),
+      })
+      await flushUntilExecFileCalled()
+      resolveExecFile(0, defaultOutput())
+      await runPromise
+
+      const extraVarsWrite = mockWriteFileSync.mock.calls.find((call) =>
+        String(call[0]).endsWith('extra-vars.json'),
+      )
+      expect(extraVarsWrite).toBeDefined()
+      const extraVars = JSON.parse(String(extraVarsWrite![1])) as Record<string, string>
+      expect(extraVars.shared_file_staging_dir).toEqual(expect.any(String))
+      expect(extraVars.shared_file_staging_dir.length).toBeGreaterThan(0)
+    })
+
+    it('テナント変数はステージング先の extra-var を上書きできない', async () => {
+      const runPromise = executeServerSetupAnsible({
+        executionId: 'exec-shared',
+        body: SHARED_FILE_BODY,
+        mode: 'resident',
+        credential,
+        // レシピ作成者が同名の ANSIBLE# 変数を作っても、配布元を差し替えられては困る。
+        variables: { shared_file_staging_dir: '/etc' },
+        secretNames: [],
+        tenantCode: 'local',
+        sshHostId: 'host-1',
+        client: fakeClient(),
+      })
+      await flushUntilExecFileCalled()
+      resolveExecFile(0, defaultOutput())
+      await runPromise
+
+      const extraVarsWrite = mockWriteFileSync.mock.calls.find((call) =>
+        String(call[0]).endsWith('extra-vars.json'),
+      )
+      const extraVars = JSON.parse(String(extraVarsWrite![1])) as Record<string, string>
+      expect(extraVars.shared_file_staging_dir).not.toBe('/etc')
+    })
+
+    it('API クライアントが無い経路で shared_file を使うと、ansible を起動せず失敗させる', async () => {
+      // ローカル実行（開発用）には共有ファイルを取り寄せる手段が無い。黙って
+      // 素通りさせると「ファイルが無い」という分かりにくい失敗になる。
+      const result = await executeServerSetupAnsible({
+        executionId: 'exec-shared',
+        body: SHARED_FILE_BODY,
+        mode: 'resident',
+        credential,
+        variables: {},
+        secretNames: [],
+        tenantCode: 'local',
+        sshHostId: 'host-1',
+      })
+
+      expect(result.success).toBe(false)
+      expect(String(result.error)).toMatch(/shared file/i)
+      expect(mockStageSharedFiles).not.toHaveBeenCalled()
+    })
+
+    it('ステージングに失敗したら、ansible を起動せず失敗させる', async () => {
+      mockStageSharedFiles.mockRejectedValueOnce(new Error('boom: quota exceeded'))
+
+      const result = await executeServerSetupAnsible({
+        executionId: 'exec-shared',
+        body: SHARED_FILE_BODY,
+        mode: 'resident',
+        credential,
+        variables: {},
+        secretNames: [],
+        tenantCode: 'local',
+        sshHostId: 'host-1',
+        client: fakeClient(),
+      })
+
+      expect(result.success).toBe(false)
+      expect(String(result.error)).toContain('boom: quota exceeded')
+    })
+
+    it('shared_file を使わない body ではステージングを行わない', async () => {
+      const runPromise = executeServerSetupAnsible({
+        executionId: 'exec-plain',
+        body: VALID_BODY,
+        mode: 'resident',
+        credential,
+        variables: {},
+        secretNames: [],
+        tenantCode: 'local',
+        sshHostId: 'host-1',
+        client: fakeClient(),
+      })
+      await flushUntilExecFileCalled()
+      resolveExecFile(0, defaultOutput())
+      await runPromise
+
+      expect(mockStageSharedFiles).not.toHaveBeenCalled()
+      const extraVarsWrite = mockWriteFileSync.mock.calls.find((call) =>
+        String(call[0]).endsWith('extra-vars.json'),
+      )
+      const extraVars = JSON.parse(String(extraVarsWrite![1])) as Record<string, string>
+      expect(extraVars.shared_file_staging_dir).toBeUndefined()
+    })
   })
 
   it('returns an error and never spawns ansible when the roles directory is missing', async () => {

@@ -184,6 +184,98 @@ describe('validateAnsibleTasks', () => {
       expect([...INCLUDE_ROLE_ALLOWED_ROLES].sort()).toEqual(actualRoleDirs)
     })
 
+    describe('shared_file ロール（共有ファイルの配布）', () => {
+      const sharedFileBody = (vars: string): string => `
+- name: copy shared file
+  ansible.builtin.include_role:
+    name: shared_file
+  vars:
+${vars}
+`
+
+      it('リテラルの src / dest を持つタスクは ecs/resident 双方で通過する', () => {
+        const body = sharedFileBody(
+          "    shared_file_src: certs/server.pem\n" +
+            "    shared_file_dest: /etc/ssl/app/server.pem\n" +
+            "    shared_file_mode: '0600'",
+        )
+        expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
+        expect(validateAnsibleTasks(body, resident).ok).toBe(true)
+      })
+
+      it('フォルダ指定（末尾スラッシュなし）も通過する', () => {
+        const body = sharedFileBody(
+          '    shared_file_src: certs\n    shared_file_dest: /etc/ssl/app/',
+        )
+        expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
+      })
+
+      it('shared_file_src に Jinja テンプレートを含むと拒否する', () => {
+        // エージェントは実行前に body を走査して取り寄せるファイルを決める。
+        // テンプレートを許すと、実行時まで何を取り寄せるべきか決定できない。
+        const body = sharedFileBody(
+          '    shared_file_src: "{{ some_var }}"\n    shared_file_dest: /etc/app/',
+        )
+        const result = validateAnsibleTasks(body, ecs)
+        expect(result.ok).toBe(false)
+        expect(
+          hasReason(result.violations, (v) => v.key === 'shared_file_src'),
+        ).toBe(true)
+      })
+
+      it('shared_file_src が絶対パスなら拒否する', () => {
+        const body = sharedFileBody(
+          '    shared_file_src: /etc/passwd\n    shared_file_dest: /tmp/x',
+        )
+        expect(validateAnsibleTasks(body, ecs).ok).toBe(false)
+      })
+
+      it('shared_file_src に .. を含むと拒否する（ステージング外への脱出）', () => {
+        const body = sharedFileBody(
+          '    shared_file_src: ../../etc/passwd\n    shared_file_dest: /tmp/x',
+        )
+        const result = validateAnsibleTasks(body, ecs)
+        expect(result.ok).toBe(false)
+        expect(
+          hasReason(result.violations, (v) => v.key === 'shared_file_src'),
+        ).toBe(true)
+      })
+
+      it('セグメント単体が .. のパスも拒否する', () => {
+        const body = sharedFileBody(
+          '    shared_file_src: certs/../../secret\n    shared_file_dest: /tmp/x',
+        )
+        expect(validateAnsibleTasks(body, ecs).ok).toBe(false)
+      })
+
+      it('shared_file_src が無いと拒否する', () => {
+        const body = sharedFileBody('    shared_file_dest: /etc/app/')
+        const result = validateAnsibleTasks(body, ecs)
+        expect(result.ok).toBe(false)
+        expect(
+          hasReason(result.violations, (v) => v.key === 'shared_file_src'),
+        ).toBe(true)
+      })
+
+      it('shared_file_src が文字列でないと拒否する', () => {
+        const body = sharedFileBody(
+          '    shared_file_src: 123\n    shared_file_dest: /etc/app/',
+        )
+        expect(validateAnsibleTasks(body, ecs).ok).toBe(false)
+      })
+
+      it('src の制約は shared_file 以外のロールには適用しない', () => {
+        const body = `
+- name: unrelated role
+  ansible.builtin.include_role:
+    name: docker
+  vars:
+    shared_file_src: "{{ anything }}"
+`
+        expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
+      })
+    })
+
     it('include_role name=gitlab_runner（task レベル vars 付き）は ecs/resident 双方で通過する', () => {
       const body = `
 - name: register gitlab runner
