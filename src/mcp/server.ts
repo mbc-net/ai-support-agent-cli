@@ -15,6 +15,7 @@ import { registerCredentialsTool } from './tools/credentials'
 import { registerDbQueryTool } from './tools/db-query'
 import { registerDbSchemasTool } from './tools/db-schemas'
 import { registerFileUploadTool } from './tools/file-upload'
+import { registerProjectFilesTools } from './tools/project-files'
 import { registerProjectInfoTool } from './tools/project-info'
 import { registerReadConversationFileTool } from './tools/read-conversation-file'
 import { registerReadSlackThreadTool } from './tools/read-slack-thread'
@@ -39,6 +40,7 @@ export function createMcpServer(apiClient: ApiClient, projectCode: string, brows
   registerFileUploadTool(server, apiClient)
   registerProjectInfoTool(server, apiClient, projectCode)
   registerReadConversationFileTool(server, apiClient)
+  registerProjectFilesTools(server, apiClient)
   registerSendSlackMessageTool(server, apiClient)
   registerSendSlackFileTool(server, apiClient)
   registerTriggerAlarmTool(server, apiClient)
