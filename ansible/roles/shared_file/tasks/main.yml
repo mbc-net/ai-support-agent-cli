@@ -1,0 +1,110 @@
+---
+# shared_file : プロジェクト共有ファイルを対象サーバーへ配置する。
+#
+# レシピ本体では `ansible.builtin.copy` の `src`（コントローラ側ローカルパス）を
+# 禁止している。許すと、レシピからエージェント自身のトークンや SSH 秘密鍵を対象
+# サーバーへ配布できてしまうためである。本ロールはその安全な代替であり、
+# 「プロジェクトの共有ファイルとしてアップロード済みのもの」だけを配布できる。
+#
+# 実体の転送はエージェントが playbook 実行前に行う（src/server-setup/shared-file-staging.ts）。
+# ここでは、取り寄せ済みのファイルを対象サーバーへ置くところだけを担う。
+
+- name: "shared_file : Validate the required variables"
+  ansible.builtin.assert:
+    that:
+      - shared_file_src | default('') | trim | length > 0
+      - shared_file_dest | default('') | trim | length > 0
+      # 配置先は絶対パスに限る。相対パスは ansible の実行ディレクトリ基準になり、
+      # どこへ置かれたのかがレシピからは読み取れなくなる。
+      - shared_file_dest is match('^/')
+    fail_msg: >-
+      shared_file_src and shared_file_dest are required. shared_file_src is a
+      path relative to the project shared files (e.g. certs/server.pem);
+      shared_file_dest must be an absolute path. Got
+      src={{ shared_file_src | default('(unset)') }},
+      dest={{ shared_file_dest | default('(unset)') }}.
+    success_msg: "shared_file variables are well-formed."
+
+- name: "shared_file : Validate the staging directory was provided by the agent"
+  # ここが空になるのは、レシピの書き方ではなくエージェント側の不具合である。
+  # 空のまま進むと src が相対パスとして解決され、コントローラの作業ディレクトリ配下の
+  # 無関係なファイルを配布しかねないので、明示的に止める。
+  ansible.builtin.assert:
+    that:
+      - shared_file_staging_dir | default('') | trim | length > 0
+      - shared_file_staging_dir is match('^/')
+    fail_msg: >-
+      shared_file_staging_dir was not provided by the agent. This is an internal
+      error: the agent stages shared files before running the playbook and passes
+      the directory via extra-vars.
+    success_msg: "Staging directory is present."
+
+- name: "shared_file : Check the staged source"
+  # エージェントが取り寄せた実体があるかを先に見る。無い状態で copy を呼ぶと
+  # 「Source ... not found」というコントローラ側のパスを含むエラーになり、
+  # 利用者からは共有ファイル側の問題だと分からない。
+  ansible.builtin.stat:
+    path: "{{ shared_file_staging_dir }}/{{ shared_file_src }}"
+  register: shared_file_staged
+  delegate_to: localhost
+  become: false
+
+- name: "shared_file : Assert the staged source exists"
+  ansible.builtin.assert:
+    that:
+      - shared_file_staged.stat.exists
+    fail_msg: >-
+      Shared file "{{ shared_file_src }}" was not staged. Check that it exists in
+      the project shared files and that the shared file feature is enabled for
+      this project.
+    success_msg: "Staged source is present."
+
+- name: "shared_file : Resolve the destination directory"
+  # `copy` は配置先の**親ディレクトリを作らない**。無ければ
+  # 「Destination directory ... does not exist」で失敗するため、先に用意する。
+  # フォルダを配る場合（src がディレクトリ）は dest 自身が配置先ディレクトリになる。
+  ansible.builtin.set_fact:
+    shared_file_dest_dir: >-
+      {{ shared_file_dest
+         if (shared_file_staged.stat.isdir or shared_file_dest.endswith('/'))
+         else (shared_file_dest | dirname) }}
+
+- name: "shared_file : Check the destination directory"
+  ansible.builtin.stat:
+    path: "{{ shared_file_dest_dir }}"
+  register: shared_file_dest_dir_stat
+
+- name: "shared_file : Create the destination directory when missing"
+  # 既存ディレクトリには触れない。`file: state=directory` は宣言的なので、
+  # 無条件に実行すると /etc/ssl のような既存ディレクトリの owner/mode まで
+  # 書き換えてしまう（配置したいのはその下のファイルであって、親ではない）。
+  ansible.builtin.file:
+    path: "{{ shared_file_dest_dir }}"
+    state: directory
+    owner: "{{ shared_file_owner }}"
+    group: "{{ shared_file_group }}"
+    mode: "{{ shared_file_directory_mode }}"
+  when: not shared_file_dest_dir_stat.stat.exists
+
+- name: "shared_file : Copy the shared file to the target"
+  # src の末尾スラッシュの有無で ansible の意味が変わる。
+  #   ディレクトリ + 末尾 "/" … 中身を dest の下へ展開する
+  #   ディレクトリ（スラッシュ無し）… ディレクトリごと dest の下へ作る
+  # フォルダ指定は「中身を配る」意味にしたいので、ディレクトリのときだけ付ける。
+  #
+  # **タスクレベルの no_log は意図的に付けない。**
+  # 配布物には秘密鍵や認証情報が含まれ得るが、`copy` は `src` で渡したファイルの
+  # 中身を出力しない。唯一それが出るのは diff 出力で、runner が生成する ansible.cfg の
+  # `[diff] always = False` と `ANSIBLE_DIFF_ALWAYS` の無効化で既に塞がれている
+  # （server-setup-runner.ts のコメント参照）。
+  # 一方 no_log を付けると、失敗時に結果全体が censored に置き換わって msg ごと消え、
+  # 運用者にはタスク名しか届かなくなる（k3s で実績のある回帰。
+  # ansible-roles-no-log-diagnostics.spec.ts が全ロールに対してこれを禁じている）。
+  # つまりここでの no_log は保護に寄与せず、原因不明の失敗を増やすだけになる。
+  ansible.builtin.copy:
+    src: "{{ shared_file_staging_dir }}/{{ shared_file_src }}{{ '/' if shared_file_staged.stat.isdir else '' }}"
+    dest: "{{ shared_file_dest }}"
+    owner: "{{ shared_file_owner }}"
+    group: "{{ shared_file_group }}"
+    mode: "{{ shared_file_mode }}"
+    directory_mode: "{{ shared_file_directory_mode }}"

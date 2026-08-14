@@ -1,0 +1,31 @@
+---
+# shared_file ロールの既定値。
+#
+# 必須値（src / dest）は既定を持たせない。既定を持たせると、指定漏れが
+# 「意図しないファイルを意図しない場所へ置く」形で成立してしまうため、
+# 空にして tasks/main.yml の assert が名指しで案内する。
+
+# 必須。プロジェクト共有ファイルのルートからの相対パス（例: certs/server.pem）。
+# ファイル・フォルダのどちらも指定でき、フォルダなら配下を再帰的に配布する。
+#
+# **リテラルでなければならない**（Jinja テンプレート不可）。エージェントは playbook を
+# 走らせる前に body を静的に走査して取り寄せるファイルを決めるため、実行時にしか
+# 値が定まらないと何を取り寄せればよいか分からない。ansible-task-guard.ts の
+# isValidSharedFileSrc がレシピ保存・実行の両方で検証する。
+shared_file_src: ''
+
+# 必須。配置先の絶対パス。
+shared_file_dest: ''
+
+# 配置先の所有者・パーミッション。
+# 既定は root:root / 0644（ディレクトリは 0755）。秘密鍵を置く場合は
+# shared_file_mode: '0600' と所有者の指定を推奨する。
+shared_file_owner: root
+shared_file_group: root
+shared_file_mode: '0644'
+shared_file_directory_mode: '0755'
+
+# エージェントが取り寄せたファイルの置き場（実行ごとの一時ディレクトリ配下）。
+# 既定は空で、runner が extra-vars で上書きする。レシピ側から指定するものではない
+# （指定してもエージェントが上書きするため効果を持たない）。
+shared_file_staging_dir: ''

@@ -25,7 +25,7 @@
 
 import { execFile } from 'child_process'
 import { getProcessManager } from '../commands/process-manager'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { dump } from 'js-yaml'
 import * as os from 'os'
 import * as path from 'path'
@@ -48,6 +48,11 @@ import { isValidPort } from '../utils/port'
 import { redactSecretValues } from '../utils/secret-redaction'
 
 import { type AnsibleTaskRouteMode, validateAnsibleTasks } from './ansible-task-guard'
+import {
+  SHARED_FILE_STAGING_DIR_VAR,
+  collectSharedFileSources,
+  stageSharedFiles,
+} from './shared-file-staging'
 
 import type { ApiClient } from '../api-client'
 
@@ -796,6 +801,12 @@ export interface ExecuteServerSetupAnsibleInput {
   sshHostId: string
   /** API work command id used to cancel the ansible child process. */
   commandId?: string
+  /**
+   * API client used to fetch the project's shared files when the body
+   * distributes them (`shared_file` role). Absent on the local dev path, where a
+   * body that needs shared files is rejected instead of silently skipped.
+   */
+  client?: ApiClient
 }
 
 /**
@@ -819,7 +830,7 @@ export interface ExecuteServerSetupAnsibleInput {
 export async function executeServerSetupAnsible(
   input: ExecuteServerSetupAnsibleInput,
 ): Promise<CommandResult> {
-  const { executionId, body, mode, credential, variables, secretNames, tenantCode, sshHostId, commandId } = input
+  const { executionId, body, mode, credential, variables, secretNames, tenantCode, sshHostId, commandId, client } = input
 
   // Resolve the bundled roles/callback-plugins paths first (a packaging error
   // here is surfaced verbatim), then the persistent known_hosts file. Both are
@@ -875,13 +886,6 @@ export async function executeServerSetupAnsible(
       const inventoryPath = path.join(tmpDir, 'inventory.yml')
       writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath), { mode: 0o600 })
 
-      // Project (`ANSIBLE#`) variables are the entire extra-vars set now that
-      // per-step params are gone; body tasks reference them via `{{ VAR }}`.
-      const extraVarsPath = path.join(tmpDir, 'extra-vars.json')
-      // 0600: extra-vars.json may carry ANSIBLE# project secret values in
-      // plaintext — same permission level as the private key alongside it.
-      writeFileSync(extraVarsPath, JSON.stringify(variables), { mode: 0o600 })
-
       // Re-validate the body with the *real* `secretNames` just fetched, so the
       // normalized tasks carry accurate `no_log: true` annotations.
       // `validatePayload` already proved the body passes the guard with an
@@ -898,6 +902,59 @@ export async function executeServerSetupAnsible(
           `server_setup_exec: recipe body rejected at execution time: ${JSON.stringify(guardResult.violations)}`,
         )
       }
+
+      // Stage the shared files the body distributes, before anything is run.
+      // `shared_file_src` is guaranteed to be a literal by the guard, so the set
+      // of files is decidable here; that is the whole reason the guard forbids
+      // templating it. Staging failures must abort the run: proceeding would
+      // hand the target server a partial set of files.
+      const sharedFileSources = collectSharedFileSources(guardResult.normalizedTasks)
+      let sharedFileStagingDir: string | undefined
+      if (sharedFileSources.length > 0) {
+        if (!client) {
+          // The local dev path has no API client and therefore no way to fetch
+          // shared files. Say so instead of letting the role fail later with a
+          // "source not found" that points at a controller-side path.
+          return errorResult(
+            'server_setup_exec: this recipe distributes shared files, which requires ' +
+              'an API-driven run (the local run has no way to fetch them)',
+          )
+        }
+        sharedFileStagingDir = path.join(tmpDir, 'shared-files')
+        mkdirSync(sharedFileStagingDir, { recursive: true, mode: 0o700 })
+        try {
+          await stageSharedFiles({
+            client,
+            sources: sharedFileSources,
+            stagingDir: sharedFileStagingDir,
+          })
+        } catch (error: unknown) {
+          return errorResult(
+            `server_setup_exec: failed to stage shared files: ${getErrorMessage(error)}`,
+          )
+        }
+      }
+
+      // Project (`ANSIBLE#`) variables are the entire extra-vars set now that
+      // per-step params are gone; body tasks reference them via `{{ VAR }}`.
+      const extraVarsPath = path.join(tmpDir, 'extra-vars.json')
+      // 0600: extra-vars.json may carry ANSIBLE# project secret values in
+      // plaintext — same permission level as the private key alongside it.
+      //
+      // The staging directory is written **after** the project variables so a
+      // tenant variable of the same name cannot redirect the role at another
+      // directory (which would turn shared-file distribution into "copy any
+      // controller-side path").
+      writeFileSync(
+        extraVarsPath,
+        JSON.stringify({
+          ...variables,
+          ...(sharedFileStagingDir
+            ? { [SHARED_FILE_STAGING_DIR_VAR]: sharedFileStagingDir }
+            : {}),
+        }),
+        { mode: 0o600 },
+      )
 
       const playbookPath = path.join(tmpDir, 'generated-playbook.yml')
       writeFileSync(playbookPath, generatePlaybook(guardResult.normalizedTasks))
@@ -1121,6 +1178,10 @@ export async function runServerSetup(
     tenantCode: ctx.client.getTenantCode(),
     sshHostId: validated.sshHostId,
     commandId: ctx.commandId,
+    // Needed only when the body distributes shared files; the core fetches them
+    // through the agent's own project-scoped API (tenant/project come from the
+    // token, so another project's files are unreachable by construction).
+    client: ctx.client,
   })
 }
 
