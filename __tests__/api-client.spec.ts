@@ -977,6 +977,69 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('listProjectFiles', () => {
+    it('should list project shared files at the root when path is omitted', async () => {
+      mockInstance.get.mockResolvedValue({ data: [] })
+
+      const result = await client.listProjectFiles()
+
+      expect(result).toEqual([])
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/projects//agent/project-files/list',
+        { params: undefined },
+      )
+    })
+
+    it('should pass the path as a query parameter', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: [
+          {
+            id: 'id-1',
+            name: 'server.pem',
+            path: 'certs/server.pem',
+            type: 'file',
+            size: 1024,
+            modified: '2026-08-01T00:00:00.000Z',
+          },
+        ],
+      })
+
+      const result = await client.listProjectFiles('certs')
+
+      expect(result).toHaveLength(1)
+      expect(result[0].path).toBe('certs/server.pem')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/projects//agent/project-files/list',
+        { params: { path: 'certs' } },
+      )
+    })
+  })
+
+  describe('getProjectFileDownloadUrl', () => {
+    it('should request a presigned download URL by path', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: {
+          downloadUrl: 'https://s3.example.com/project-files/get',
+          filename: 'server.pem',
+          contentType: 'text/plain',
+        },
+      })
+
+      const result = await client.getProjectFileDownloadUrl('certs/server.pem')
+
+      expect(result.downloadUrl).toBe(
+        'https://s3.example.com/project-files/get',
+      )
+      expect(result.filename).toBe('server.pem')
+      expect(result.contentType).toBe('text/plain')
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/projects//agent/project-files/download-url',
+        { path: 'certs/server.pem' },
+        undefined,
+      )
+    })
+  })
+
   describe('retry logic', () => {
     beforeEach(() => {
       jest.useFakeTimers()
