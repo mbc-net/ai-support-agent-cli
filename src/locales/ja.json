@@ -6,6 +6,7 @@
   "cmd.start.pollInterval": "ポーリング間隔（ms）",
   "cmd.start.heartbeatInterval": "ハートビート間隔（ms）",
   "cmd.start.verbose": "詳細ログを出力",
+  "cmd.start.autoUpdate": "自動更新を有効化（既定は無効）",
   "cmd.start.noAutoUpdate": "自動更新を無効化",
   "cmd.start.updateChannel": "更新チャネル（latest, beta, alpha）",
   "cmd.login": "ブラウザ認証でプロジェクトを登録",
