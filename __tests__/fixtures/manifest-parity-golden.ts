@@ -46,6 +46,7 @@ spec:
       containers:
         - name: agent
           image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"
+          imagePullPolicy: Always
           args:
             - ai-support-agent
             - start
@@ -101,6 +102,7 @@ spec:
       containers:
         - name: agent
           image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"
+          imagePullPolicy: Always
           args:
             - ai-support-agent
             - start
@@ -149,6 +151,7 @@ spec:
       containers:
         - name: agent
           image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"
+          imagePullPolicy: Always
           args:
             - ai-support-agent
             - start

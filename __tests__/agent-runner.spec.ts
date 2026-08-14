@@ -524,7 +524,7 @@ describe('agent-runner', () => {
     mockedLoadConfig.mockReturnValue(mockConfig)
     mockedGetProjectList.mockReturnValue(mockConfig.projects)
 
-    const promise = startAgent({ updateChannel: 'beta' })
+    const promise = startAgent({ autoUpdate: true, updateChannel: 'beta' })
     await jest.advanceTimersByTimeAsync(100)
     await promise
 
@@ -533,6 +533,8 @@ describe('agent-runner', () => {
       expect.objectContaining({ channel: 'beta' }),
       expect.any(Function),
       expect.any(Function),
+      expect.any(Function),
+      // 実行可否ゲート（毎回のチェックでサーバー設定を再評価する）
       expect.any(Function),
     )
   })
@@ -550,7 +552,7 @@ describe('agent-runner', () => {
     mockedLoadConfig.mockReturnValue(mockConfig)
     mockedGetProjectList.mockReturnValue(mockConfig.projects)
 
-    const promise = startAgent({ updateChannel: 'beta' })
+    const promise = startAgent({ autoUpdate: true, updateChannel: 'beta' })
     await jest.advanceTimersByTimeAsync(100)
     await promise
 
@@ -559,6 +561,8 @@ describe('agent-runner', () => {
       expect.objectContaining({ channel: 'beta' }),
       expect.any(Function),
       expect.any(Function),
+      expect.any(Function),
+      // 実行可否ゲート（毎回のチェックでサーバー設定を再評価する）
       expect.any(Function),
     )
   })
@@ -593,6 +597,7 @@ describe('agent-runner', () => {
     mockedLoadConfig.mockReturnValue(null)
 
     const promise = startAgent({
+      autoUpdate: true,
       token: 'cli-token',
       apiUrl: 'http://cli-api',
     })
@@ -641,7 +646,7 @@ describe('agent-runner', () => {
     mockedLoadConfig.mockReturnValue(mockConfig)
     mockedGetProjectList.mockReturnValue(mockConfig.projects)
 
-    const promise = startAgent({})
+    const promise = startAgent({ autoUpdate: true })
     await jest.advanceTimersByTimeAsync(100)
     await promise
 
@@ -688,7 +693,7 @@ describe('agent-runner', () => {
     mockedLoadConfig.mockReturnValue(mockConfig)
     mockedGetProjectList.mockReturnValue(mockConfig.projects)
 
-    const promise = startAgent({})
+    const promise = startAgent({ autoUpdate: true })
     await jest.advanceTimersByTimeAsync(100)
     await promise
 
@@ -1517,13 +1522,178 @@ describe('setupShutdownHandlers', () => {
   })
 })
 
+describe('自動アップデートの起動判定', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  const K8S_ENV = 'KUBERNETES_SERVICE_HOST'
+  let originalK8sHost: string | undefined
+
+  beforeEach(() => {
+    originalK8sHost = process.env[K8S_ENV]
+    delete process.env[K8S_ENV]
+  })
+
+  afterEach(() => {
+    if (originalK8sHost === undefined) {
+      delete process.env[K8S_ENV]
+    } else {
+      process.env[K8S_ENV] = originalK8sHost
+    }
+  })
+
+  it('単一プロジェクト起動でもローカル設定の有効化が反映される', async () => {
+    // 以前は runSingleProject が initAutoUpdater へ config を渡さず undefined 固定だったため、
+    // --token / 環境変数起動（＝コンテナ経路）ではローカル設定が一切効かなかった。
+    const { startAutoUpdater } = require('../src/auto-updater')
+    mockedLoadConfig.mockReturnValue({
+      agentId: 'agent-1',
+      createdAt: '2024-01-01',
+      autoUpdate: { enabled: true, autoRestart: true, channel: 'latest' },
+      projects: [],
+    })
+
+    const promise = startAgent({ token: 'cli-token', apiUrl: 'http://cli-api' })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startAutoUpdater).toHaveBeenCalled()
+    const gate = (startAutoUpdater as jest.Mock).mock.calls[0][5] as () => Promise<boolean>
+    // サーバー設定は取得できない（自動モック）ため、ローカル設定の有効化が効く。
+    await expect(gate()).resolves.toBe(true)
+  })
+
+  it('ローカル設定が無効なら、ゲートは実行を許可しない', async () => {
+    // タイマー自体は作る（サーバー設定を毎回読み直し、管理画面で ON にされたら
+    // 再起動なしで反映するため）。実際に更新するかどうかはゲートが決める。
+    const { startAutoUpdater } = require('../src/auto-updater')
+    mockedLoadConfig.mockReturnValue({
+      agentId: 'agent-1',
+      createdAt: '2024-01-01',
+      autoUpdate: { enabled: false, autoRestart: true, channel: 'latest' },
+      projects: [],
+    })
+
+    const promise = startAgent({ token: 'cli-token', apiUrl: 'http://cli-api' })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startAutoUpdater).toHaveBeenCalled()
+    const gate = (startAutoUpdater as jest.Mock).mock.calls[0][5] as () => Promise<boolean>
+    // サーバー設定を返さないクライアント（自動モック）なので、サーバー層は
+    // 「未設定＝無効」と判定され、ローカル設定の無効と合わせて実行されない。
+    await expect(gate()).resolves.toBe(false)
+  })
+
+  it('CLI で明示的に無効化されていればタイマーごと作らない', async () => {
+    const { startAutoUpdater } = require('../src/auto-updater')
+    mockedLoadConfig.mockReturnValue({
+      agentId: 'agent-1',
+      createdAt: '2024-01-01',
+      autoUpdate: { enabled: true, autoRestart: true, channel: 'latest' },
+      projects: [],
+    })
+
+    const promise = startAgent({
+      autoUpdate: false,
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startAutoUpdater).not.toHaveBeenCalled()
+  })
+
+  it('Kubernetes 上では、明示的に有効化されていても自動アップデートを起動しない', async () => {
+    process.env[K8S_ENV] = '10.43.0.1'
+    const { startAutoUpdater } = require('../src/auto-updater')
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      autoUpdate: true,
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(startAutoUpdater).not.toHaveBeenCalled()
+  })
+
+  it('Kubernetes 上で有効化されていた場合は、理由を警告ログに残す', async () => {
+    process.env[K8S_ENV] = '10.43.0.1'
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      autoUpdate: true,
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    const warned = (logger.warn as jest.Mock).mock.calls.map((c) => String(c[0])).join('\n')
+    expect(warned).toMatch(/Kubernetes/)
+    expect(warned).toMatch(/image tag/i)
+  })
+
+  it('Kubernetes 上でも、そもそも無効なら警告は出さない', async () => {
+    process.env[K8S_ENV] = '10.43.0.1'
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({ token: 'cli-token', apiUrl: 'http://cli-api' })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    const warned = (logger.warn as jest.Mock).mock.calls.map((c) => String(c[0])).join('\n')
+    expect(warned).not.toMatch(/Kubernetes/)
+  })
+})
+
 describe('resolveAutoUpdateConfig', () => {
   it('should use detected channel from AGENT_VERSION when no explicit channel', () => {
     const expectedChannel = detectChannelFromVersion(AGENT_VERSION)
     const result = resolveAutoUpdateConfig({})
     expect(result.channel).toBe(expectedChannel)
-    expect(result.enabled).toBe(true)
     expect(result.autoRestart).toBe(true)
+  })
+
+  it('自動アップデートは既定で無効（opt-in）', () => {
+    expect(resolveAutoUpdateConfig({}).enabled).toBe(false)
+  })
+
+  it('ローカル設定で明示的に有効化されていれば有効', () => {
+    const result = resolveAutoUpdateConfig(
+      {},
+      { autoUpdate: { enabled: true, autoRestart: true, channel: 'latest' } },
+    )
+    expect(result.enabled).toBe(true)
+  })
+
+  it('ローカル設定で明示的に無効化されていれば無効', () => {
+    const result = resolveAutoUpdateConfig(
+      {},
+      { autoUpdate: { enabled: false, autoRestart: true, channel: 'latest' } },
+    )
+    expect(result.enabled).toBe(false)
+  })
+
+  it('CLI の --auto-update はローカル設定の無効化より優先される', () => {
+    const result = resolveAutoUpdateConfig(
+      { autoUpdate: true },
+      { autoUpdate: { enabled: false, autoRestart: true, channel: 'latest' } },
+    )
+    expect(result.enabled).toBe(true)
+  })
+
+  it('CLI の --no-auto-update はローカル設定の有効化より優先される', () => {
+    const result = resolveAutoUpdateConfig(
+      { autoUpdate: false },
+      { autoUpdate: { enabled: true, autoRestart: true, channel: 'latest' } },
+    )
+    expect(result.enabled).toBe(false)
   })
 
   it('should prefer CLI updateChannel over detected channel', () => {

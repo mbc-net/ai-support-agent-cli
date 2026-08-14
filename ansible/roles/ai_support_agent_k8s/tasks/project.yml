@@ -147,6 +147,13 @@
             containers:
               - name: agent
                 image: {{ ai_support_agent_k8s_image | to_json }}
+                # 明示しないと Kubernetes の既定が効き、タグが latest 以外のときは
+                # IfNotPresent になる。:beta のような移動タグでは、タグを動かして
+                # `rollout restart` してもノード上のキャッシュを使い回すため、
+                # 更新したつもりで中身が変わらない（成功したように見える無効化）。
+                # 版固定タグでは digest が変わらないのでレイヤの再取得は起きず、
+                # マニフェスト確認ぶんのコストしか増えない。
+                imagePullPolicy: Always
                 # 公式イメージは ENTRYPOINT ["/entrypoint.sh"] のみ（CMD なし）で、
                 # entrypoint.sh は末尾で `exec "$@"` する。したがって args の先頭は
                 # **実行ファイル名**でなければならない。サブコマンド名から始めると

@@ -61,6 +61,35 @@ describe('generateK8sManifest', () => {
     expect(generateK8sManifest(BASE)).toContain('replicas: 3')
   })
 
+  it('生成する Deployment は imagePullPolicy: Always を明示する', () => {
+    // 未指定だと Kubernetes の既定が効き、タグが latest 以外のときは IfNotPresent に
+    // なる。:beta のような移動タグでは rollout restart しても中身が更新されない。
+    const deployment = loadAll(generateK8sManifest(BASE)).find(
+      (doc): doc is Record<string, any> =>
+        (doc as Record<string, unknown>)?.kind === 'Deployment',
+    )
+    expect(deployment?.spec.template.spec.containers[0].imagePullPolicy).toBe('Always')
+  })
+
+  it('複数プロジェクトでも各 Deployment に imagePullPolicy が入る', () => {
+    const manifest = generateK8sManifest({
+      tenantCode: BASE.tenantCode,
+      apiUrl: BASE.apiUrl,
+      projects: [
+        { projectCode: 'MBC_01', name: 'agent-a', token: 'tok-a', replicas: 1 },
+        { projectCode: 'MBC_02', name: 'agent-b', token: 'tok-b', replicas: 1 },
+      ],
+    })
+    const deployments = loadAll(manifest).filter(
+      (doc): doc is Record<string, any> =>
+        (doc as Record<string, unknown>)?.kind === 'Deployment',
+    )
+    expect(deployments).toHaveLength(2)
+    for (const deployment of deployments) {
+      expect(deployment.spec.template.spec.containers[0].imagePullPolicy).toBe('Always')
+    }
+  })
+
   it('puts the token in a Secret (base64) and never in args', () => {
     const manifest = generateK8sManifest(BASE)
     const encoded = Buffer.from(BASE.token, 'utf-8').toString('base64')

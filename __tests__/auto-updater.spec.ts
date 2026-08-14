@@ -71,6 +71,99 @@ describe('startAutoUpdater', () => {
     updater.stop()
   })
 
+  describe('実行可否ゲート（isUpdateAllowed）', () => {
+    it('ゲートが false を返す間はバージョン確認すら行わない', async () => {
+      const client = createMockClient()
+      const isUpdateAllowed = jest.fn().mockResolvedValue(false)
+      const updater = startAutoUpdater(
+        [client],
+        defaultConfig,
+        jest.fn(),
+        undefined,
+        undefined,
+        isUpdateAllowed,
+      )
+
+      await jest.advanceTimersByTimeAsync(30_000)
+
+      expect(isUpdateAllowed).toHaveBeenCalled()
+      expect(client.getVersionInfo).not.toHaveBeenCalled()
+
+      updater.stop()
+    })
+
+    it('ゲートが true を返せば通常どおりバージョン確認を行う', async () => {
+      const client = createMockClient()
+      const updater = startAutoUpdater(
+        [client],
+        defaultConfig,
+        jest.fn(),
+        undefined,
+        undefined,
+        jest.fn().mockResolvedValue(true),
+      )
+
+      await jest.advanceTimersByTimeAsync(30_000)
+
+      expect(client.getVersionInfo).toHaveBeenCalledWith('latest')
+
+      updater.stop()
+    })
+
+    it('ゲートはチェックのたびに評価される（設定変更が次のチェックで効く）', async () => {
+      const client = createMockClient()
+      const isUpdateAllowed = jest
+        .fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true)
+      const updater = startAutoUpdater(
+        [client],
+        defaultConfig,
+        jest.fn(),
+        undefined,
+        undefined,
+        isUpdateAllowed,
+      )
+
+      await jest.advanceTimersByTimeAsync(30_000)
+      expect(client.getVersionInfo).not.toHaveBeenCalled()
+
+      await jest.advanceTimersByTimeAsync(60 * 60 * 1000)
+      expect(client.getVersionInfo).toHaveBeenCalledTimes(1)
+
+      updater.stop()
+    })
+
+    it('ゲートが例外を投げたら実行しない（fail-closed）', async () => {
+      const client = createMockClient()
+      const updater = startAutoUpdater(
+        [client],
+        defaultConfig,
+        jest.fn(),
+        undefined,
+        undefined,
+        jest.fn().mockRejectedValue(new Error('boom')),
+      )
+
+      await jest.advanceTimersByTimeAsync(30_000)
+
+      expect(client.getVersionInfo).not.toHaveBeenCalled()
+
+      updater.stop()
+    })
+
+    it('ゲート未指定なら従来どおり実行する（後方互換）', async () => {
+      const client = createMockClient()
+      const updater = startAutoUpdater([client], defaultConfig, jest.fn())
+
+      await jest.advanceTimersByTimeAsync(30_000)
+
+      expect(client.getVersionInfo).toHaveBeenCalled()
+
+      updater.stop()
+    })
+  })
+
   it('should check periodically after initial delay', async () => {
     const client = createMockClient()
     const updater = startAutoUpdater([client], defaultConfig, jest.fn())

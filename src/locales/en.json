@@ -6,6 +6,7 @@
   "cmd.start.pollInterval": "Polling interval (ms)",
   "cmd.start.heartbeatInterval": "Heartbeat interval (ms)",
   "cmd.start.verbose": "Enable verbose logging",
+  "cmd.start.autoUpdate": "Enable automatic updates (disabled by default)",
   "cmd.start.noAutoUpdate": "Disable automatic updates",
   "cmd.start.updateChannel": "Update channel (latest, beta, alpha)",
   "cmd.login": "Register a project via browser authentication",

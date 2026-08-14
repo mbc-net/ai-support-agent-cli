@@ -557,6 +557,10 @@ export const CLI_FLAG_VERBOSE = '--verbose'
 export const CLI_FLAG_NO_DOCKER = '--no-docker'
 export const CLI_FLAG_NO_DOCKERFILE_SYNC = '--no-dockerfile-sync'
 export const CLI_FLAG_NO_IMAGE_PULL = '--no-image-pull'
+// 自動アップデートは opt-in（既定 OFF）。commander は `--no-x` だけを登録すると
+// 未指定時の opts.x を true にしてしまうため、肯定フラグを併せて登録して
+// 「未指定 / 明示 ON / 明示 OFF」の三状態を作る（cli.integration.spec.ts で実測固定）。
+export const CLI_FLAG_AUTO_UPDATE = '--auto-update'
 export const CLI_FLAG_NO_AUTO_UPDATE = '--no-auto-update'
 
 // === Tailscale sidecar (SSH connectivity via a customer tailnet) ===
