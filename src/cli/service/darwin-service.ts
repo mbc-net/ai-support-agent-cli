@@ -352,10 +352,13 @@ if [ -z "$_INSTALLED_VERSION" ]; then
 fi
 IMAGE_TAG="${opts.imageName}:\${_INSTALLED_VERSION}"
 
-# Auto-build Docker image if the required version does not exist locally
+# Obtain the Docker image if the required version does not exist locally.
+# docker-ensure-image pulls the published image when nothing is customised and
+# builds locally otherwise (or when the pull fails), so a stock install no
+# longer compiles the whole image on this machine.
 if ! docker image inspect "\$IMAGE_TAG" >/dev/null 2>&1; then
-  echo "Docker image \$IMAGE_TAG not found — building..." >&2
-  ai-support-agent docker-build || { echo "ERROR: docker-build failed — cannot start container" >&2; exit 1; }
+  echo "Docker image \$IMAGE_TAG not found — obtaining..." >&2
+  ai-support-agent docker-ensure-image || { echo "ERROR: docker-ensure-image failed — cannot start container" >&2; exit 1; }
 fi
 
 # Remove stale container if it exists (e.g. from a previous crash)

@@ -56,7 +56,7 @@ jest.mock('../../src/utils', () => ({
 
 import * as crypto from 'crypto'
 import * as fs from 'fs'
-import { syncDockerfileToConfigDir } from '../../src/docker/dockerfile-sync'
+import { hasUnmanagedConfigDockerfile, isDockerfileCustomized, syncDockerfileToConfigDir } from '../../src/docker/dockerfile-sync'
 import { getDockerfilePath } from '../../src/docker/dockerfile-path'
 import { logger } from '../../src/logger'
 
@@ -882,6 +882,158 @@ describe('dockerfile-sync', () => {
           expect.stringContaining('docker.dockerfileSyncFailed'),
         )
       })
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // isDockerfileCustomized: decides whether the published registry image is
+  // equivalent to what a local build would produce. A false negative silently
+  // discards a user's edits, so every uncertain case must answer "customised".
+  // ---------------------------------------------------------------------------
+  describe('isDockerfileCustomized', () => {
+    beforeEach(() => {
+      jest.clearAllMocks()
+    })
+
+    it('returns false when nothing has been synced yet (the bundled Dockerfile is used as-is)', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+
+      expect(isDockerfileCustomized()).toBe(false)
+      // No file comparison is needed — nothing can differ from the bundle.
+      expect(mockedFs.readFileSync).not.toHaveBeenCalled()
+    })
+
+    it('returns false when the config-dir copies are byte-identical to the bundle', () => {
+      mockedFs.existsSync.mockImplementation((p: unknown) =>
+        p === DEST_DOCKERFILE || p === SRC_ENTRYPOINT || p === DEST_ENTRYPOINT,
+      )
+      mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+        if (p === SRC_DOCKERFILE || p === DEST_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+        if (p === SRC_ENTRYPOINT || p === DEST_ENTRYPOINT) return Buffer.from(ENTRYPOINT_CONTENT)
+        throw new Error(`unexpected readFileSync: ${String(p)}`)
+      })
+
+      expect(isDockerfileCustomized()).toBe(false)
+    })
+
+    it('returns true when the config-dir Dockerfile was edited', () => {
+      mockedFs.existsSync.mockImplementation((p: unknown) => p === DEST_DOCKERFILE)
+      mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+        if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+        if (p === DEST_DOCKERFILE) return Buffer.from(CUSTOM_CONTENT)
+        throw new Error(`unexpected readFileSync: ${String(p)}`)
+      })
+
+      expect(isDockerfileCustomized()).toBe(true)
+    })
+
+    it('returns true when only entrypoint.sh was edited', () => {
+      mockedFs.existsSync.mockImplementation((p: unknown) =>
+        p === DEST_DOCKERFILE || p === SRC_ENTRYPOINT || p === DEST_ENTRYPOINT,
+      )
+      mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+        if (p === SRC_DOCKERFILE || p === DEST_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+        if (p === SRC_ENTRYPOINT) return Buffer.from(ENTRYPOINT_CONTENT)
+        if (p === DEST_ENTRYPOINT) return Buffer.from(CUSTOM_ENTRYPOINT_CONTENT)
+        throw new Error(`unexpected readFileSync: ${String(p)}`)
+      })
+
+      expect(isDockerfileCustomized()).toBe(true)
+    })
+
+    it('returns true for a config-dir copy left over from an older CLI version', () => {
+      // REGRESSION guard: .dockerfile-sync-hash would still match this copy
+      // (it was synced cleanly, just from an older bundle). Trusting the hash
+      // would pull today's registry image for a user whose local build would
+      // produce yesterday's — so the check compares against the CURRENT bundle.
+      mockedFs.existsSync.mockImplementation((p: unknown) => p === DEST_DOCKERFILE)
+      mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+        if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+        if (p === DEST_DOCKERFILE) return Buffer.from(OLD_BUNDLED_CONTENT)
+        throw new Error(`unexpected readFileSync: ${String(p)}`)
+      })
+
+      expect(isDockerfileCustomized()).toBe(true)
+    })
+
+    it('returns true when a COPYed build asset (tmux.conf) was customised', () => {
+      // REGRESSION guard: with dockerfileSync: false the sync that normally
+      // restores these assets never runs, so a customised copy survives and a
+      // pulled image would silently ignore it.
+      mockedFs.existsSync.mockImplementation((p: unknown) =>
+        p === DEST_DOCKERFILE || p === SRC_DOCKERFILE || p === SRC_TMUX_CONF || p === DEST_TMUX_CONF,
+      )
+      mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+        if (p === SRC_DOCKERFILE || p === DEST_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+        if (p === SRC_TMUX_CONF) return Buffer.from(TMUX_CONF_CONTENT)
+        if (p === DEST_TMUX_CONF) return Buffer.from('set -g status off  # my own')
+        throw new Error(`unexpected readFileSync: ${String(p)}`)
+      })
+
+      expect(isDockerfileCustomized()).toBe(true)
+    })
+
+    it('returns false when a bundled asset has no config-dir copy at all', () => {
+      // A missing copy is not a customisation: there is nothing of the user's
+      // to preserve, and a local build would fail on the missing COPY source —
+      // so treating it as customised would trade a working pull for a broken
+      // build.
+      mockedFs.existsSync.mockImplementation((p: unknown) =>
+        p === DEST_DOCKERFILE || p === SRC_DOCKERFILE || p === SRC_TMUX_CONF,
+      )
+      mockedFs.readFileSync.mockImplementation((p: unknown): Buffer => {
+        if (p === SRC_DOCKERFILE || p === DEST_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+        throw new Error(`unexpected readFileSync: ${String(p)}`)
+      })
+
+      expect(isDockerfileCustomized()).toBe(false)
+    })
+
+    it('returns true when the comparison itself fails (unreadable file, broken bundle)', () => {
+      mockedFs.existsSync.mockImplementation((p: unknown) => p === DEST_DOCKERFILE)
+      mockedFs.readFileSync.mockImplementation(() => {
+        throw new Error('EACCES')
+      })
+
+      // Fail safe: build locally rather than ignore a possible customisation.
+      expect(isDockerfileCustomized()).toBe(true)
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // hasUnmanagedConfigDockerfile: protects a hand-placed Dockerfile from being
+  // overwritten by the first sync a caller ever performs.
+  // ---------------------------------------------------------------------------
+  describe('hasUnmanagedConfigDockerfile', () => {
+    beforeEach(() => {
+      jest.clearAllMocks()
+    })
+
+    it('returns true for a Dockerfile with no sync hash beside it', () => {
+      mockedFs.existsSync.mockImplementation((p: unknown) => p === DEST_DOCKERFILE)
+
+      expect(hasUnmanagedConfigDockerfile()).toBe(true)
+    })
+
+    it('returns false once the pair was produced by a sync', () => {
+      mockedFs.existsSync.mockImplementation((p: unknown) => p === DEST_DOCKERFILE || p === HASH_FILE)
+
+      expect(hasUnmanagedConfigDockerfile()).toBe(false)
+    })
+
+    it('returns false when there is no config-dir Dockerfile yet', () => {
+      mockedFs.existsSync.mockReturnValue(false)
+
+      expect(hasUnmanagedConfigDockerfile()).toBe(false)
+    })
+
+    it('returns true when the config dir cannot be inspected', () => {
+      mockedFs.existsSync.mockImplementation(() => {
+        throw new Error('EACCES')
+      })
+
+      // Fail safe: never overwrite what we cannot inspect.
+      expect(hasUnmanagedConfigDockerfile()).toBe(true)
     })
   })
 })

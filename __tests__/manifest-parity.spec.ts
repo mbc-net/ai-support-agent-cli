@@ -1,5 +1,7 @@
 import {
+  K8S_MULTI_STRUCTURE_GOLDEN,
   K8S_STRUCTURE_GOLDEN,
+  MULTI_PARITY_INPUT,
   PARITY_INPUT,
   SERVICE_GOLDEN,
   TASKDEF_GOLDEN,
@@ -42,5 +44,11 @@ describe('マニフェスト生成規則の web とのパリティ', () => {
     })
 
     expect(JSON.parse(manifest.service)).toEqual(SERVICE_GOLDEN)
+  })
+
+  it('複数プロジェクトの K8s マニフェストがゴールデン値と一致する', () => {
+    expect(stripComments(generateK8sManifest(MULTI_PARITY_INPUT))).toBe(
+      K8S_MULTI_STRUCTURE_GOLDEN,
+    )
   })
 })

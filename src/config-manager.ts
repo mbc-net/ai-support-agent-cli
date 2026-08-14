@@ -97,6 +97,7 @@ export function saveConfig(config: Partial<AgentConfig>): void {
     defaultProjectDir: config.defaultProjectDir ?? existing?.defaultProjectDir,
     dockerfilePath: config.dockerfilePath ?? existing?.dockerfilePath,
     dockerfileSync: config.dockerfileSync ?? existing?.dockerfileSync,
+    dockerImagePull: config.dockerImagePull ?? existing?.dockerImagePull,
   }
 
   const configPath = getConfigPath()

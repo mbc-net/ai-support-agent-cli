@@ -278,6 +278,12 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/e2e-support-files`,
   FILES_UPLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/upload-url`,
   FILES_DOWNLOAD_URL: (tenantCode: string, projectCode: string) => `/api/${tenantCode}/projects/${projectCode}/agent/files/download-url`,
+  // プロジェクト共有ファイル（S3上の永続ストレージ）。エージェントは読み取りのみ可能で、
+  // 変更操作（アップロード・削除等）は Web の管理者UI（ユーザートークン経路）に限定する。
+  PROJECT_FILES_LIST: (tenantCode: string, projectCode: string) =>
+    `/api/${tenantCode}/projects/${projectCode}/agent/project-files/list`,
+  PROJECT_FILES_DOWNLOAD_URL: (tenantCode: string, projectCode: string) =>
+    `/api/${tenantCode}/projects/${projectCode}/agent/project-files/download-url`,
   E2E_EXECUTION_STATUS: (tenantCode: string, _projectCode: string, executionId: string) =>
     `/api/${tenantCode}/agent/e2e-test-executions/${executionId}/status`,
   E2E_EXECUTION_STEPS: (tenantCode: string, _projectCode: string, executionId: string) =>
@@ -550,6 +556,7 @@ export const NOTIFICATION_ACTION = {
 export const CLI_FLAG_VERBOSE = '--verbose'
 export const CLI_FLAG_NO_DOCKER = '--no-docker'
 export const CLI_FLAG_NO_DOCKERFILE_SYNC = '--no-dockerfile-sync'
+export const CLI_FLAG_NO_IMAGE_PULL = '--no-image-pull'
 export const CLI_FLAG_NO_AUTO_UPDATE = '--no-auto-update'
 
 // === Tailscale sidecar (SSH connectivity via a customer tailnet) ===
