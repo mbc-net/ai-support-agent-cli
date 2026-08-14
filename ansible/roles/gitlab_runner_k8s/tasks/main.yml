@@ -1,0 +1,477 @@
+---
+# gitlab_runner_k8s : GitLab Runner を Kubernetes クラスタへ配置する。
+#
+# 実行場所: kubectl と kubeconfig を持つノード（k3s サーバーノード等）。ホストへ
+# gitlab-runner を apt で入れる `gitlab_runner` ロールとは配送経路が異なり、対象ホストに
+# ランナーのバイナリは入らない。ランナーマネージャはクラスタ内の Deployment として動き、
+# ジョブは kubernetes executor が同じ名前空間へ Pod として起こす。
+#
+# 導入方式:
+#   k3s の helm-controller（HelmChart CRD）へ CR を渡し、GitLab 公式チャートを
+#   インストールさせる。helm バイナリをノードへ入れる必要がない。チャートの取得元
+#   （repo / チャート名）はこのファイル内のインラインリテラルであり、ロール変数では
+#   ない — 変数にするとレシピ側の task-level vars から取得元ごと差し替えでき、
+#   「公式チャートに限定する」という検証が無効化されるため。
+#
+# 秘匿値（ランナートークン）の扱い:
+#   トークンは (a) Ansible の `environment:` キーワード、(b) shell 本文への Jinja 展開、
+#   (c) 生成マニフェスト、のいずれにも載せない。(a) は `-vvv` の EXEC トレースへ平文で
+#   出力され `no_log` でも抑止できないことが既存ロールで実測されている。代わりに 0600 の
+#   一時ファイルへ `copy` の `content` で書き（モジュール自身が値を秘匿する）、
+#   `kubectl create secret --from-file=` に読ませてから `always` ブロックで必ず削除する。
+#   HelmChart CR には Secret の「名前」しか書かない（チャートの `runners.secret`）。
+#
+# なぜ空の一時ファイルも作るのか:
+#   チャートの Deployment は `runner-token` と `runner-registration-token` の両キーを
+#   projected volume で参照し、どちらにも `optional: true` を付けていない
+#   （templates/deployment.yaml）。片方でも欠けるとボリュームを射影できず Pod は
+#   ContainerCreating のまま起動しない。使わない側のキーは空文字で作る
+#   （チャート自身の secrets.yaml が `default "" | b64enc` としているのと同じ）。
+#
+# ジョブは非特権に固定する:
+#   `privileged = false` を明示し、privileged / docker-in-docker を有効化する変数は
+#   提供しない。特権コンテナはノード root と実質同等の権限を持つため、レシピ作成者が
+#   トグル1つで取得できてよいものではない。docker build が必要な場合は、特権を要しない
+#   ビルダー（kaniko / buildah --isolation=chroot 等）をジョブ側で使う。
+#   併せて `automount_service_account_token = false` でジョブ Pod への ServiceAccount
+#   トークン自動マウントも止める（ジョブ Pod が Kubernetes API へ到達する経路そのものを
+#   塞ぐ多層防御。ai_support_agent_k8s の automountServiceAccountToken: false と同方針）。
+#
+# RBAC は GitLab 公式の必要権限表に厳密に合わせる:
+#   チャートは `rbac.rules` が空だと core API group の `resources: ["*"] verbs: ["*"]`
+#   にフォールバックする（templates/role.yaml）。それを避けるために明示するが、明示する
+#   内容も広げない。ルールは docs.gitlab.com の kubernetes executor 権限表のうち、この
+#   ロールが有効化している機能に必要なものだけである。特に `configmaps` は同表に無い
+#   （ビルドスクリプトは kubelet 経由でマウントされ runner の API 権限を要しない）ため
+#   与えない。`namespaces` / `apps/deployments` / `poddisruptionbudgets` /
+#   `priorityclasses` は namespace_per_job 等の未使用機能向けなので同様に与えない。
+#
+# リソース制限は既定で設定しない（既知の制限）:
+#   runner マネージャにもジョブ Pod にも requests/limits を与えていない。CI ジョブが必要
+#   とするリソースはジョブごとに大きく異なり、ロールが既定値を押し付けると、正常なジョブが
+#   原因の分かりにくい OOMKilled で落ちるようになるため。同時実行ジョブがノードを食い潰す
+#   リスクは `gitlab_runner_k8s_concurrent`（既定 4）で間接的に抑える。厳密な上限が要る
+#   場合は runner 名前空間に LimitRange / ResourceQuota を設定して運用する。
+#
+# シェルインジェクション対策:
+#   ガード（src/server-setup/ansible-task-guard.ts）は include_role の変数「名」しか
+#   検証せず「値」は検証しない。したがって shell 本文へ展開する値はすべて、事前に
+#   アンカー付き正規表現の assert を通す（下記 Validate 系タスク）。検証していない値を
+#   shell へ渡してはならない。
+
+- name: "gitlab_runner_k8s : Compute which token flow is configured"
+  ansible.builtin.set_fact:
+    gitlab_runner_k8s_has_auth: "{{ (gitlab_runner_k8s_auth_token | default('') | trim | length) > 0 }}"
+    gitlab_runner_k8s_has_reg: "{{ (gitlab_runner_k8s_registration_token | default('') | trim | length) > 0 }}"
+  no_log: true
+
+- name: "gitlab_runner_k8s : Validate exactly one token flow is configured"
+  # 片方を優先して他方を黙って捨てると、どちらの設定で動いているのか実行ログから
+  # 分からなくなる。優先順位を作らず明示的に失敗させる（CLAUDE.md フォールバック禁止）。
+  ansible.builtin.assert:
+    that:
+      - (gitlab_runner_k8s_has_auth | bool) != (gitlab_runner_k8s_has_reg | bool)
+    fail_msg: >-
+      Exactly one of gitlab_runner_k8s_auth_token (modern glrt- authentication
+      token) or gitlab_runner_k8s_registration_token (legacy registration
+      token) must be set — not both, and not neither. Reference an ANSIBLE#
+      secret variable from the recipe.
+    success_msg: "Exactly one token flow is in use."
+
+- name: "gitlab_runner_k8s : Validate the GitLab URL"
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_url | default('') | trim | length > 0
+      - gitlab_runner_k8s_url is match('^https?://[A-Za-z0-9._~%-]+(:[0-9]+)?(/[A-Za-z0-9._~:/?#@!$&()*+,;=%-]*)?$')
+    fail_msg: >-
+      gitlab_runner_k8s_url must be an http(s) URL of the GitLab instance
+      (e.g. https://gitlab.com). Got:
+      {{ gitlab_runner_k8s_url | default('(unset)') }}
+    success_msg: "GitLab URL is well-formed."
+
+- name: "gitlab_runner_k8s : Validate Kubernetes object names are DNS-1123 labels"
+  # 名前は metadata.name・Helm リリース名・Secret 参照など複数の構造的位置へ展開され、
+  # かつ shell 本文にも入る。クォートでは救えないため、適用前に名指しで落とす。
+  # gitlab_runner_k8s_secret_name は派生値だが、shell へ展開する以上ここで検証する。
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - gitlab_runner_k8s_name | length <= 53
+      - gitlab_runner_k8s_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - gitlab_runner_k8s_namespace | length <= 63
+      - gitlab_runner_k8s_secret_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - gitlab_runner_k8s_secret_name | length <= 63
+    fail_msg: >-
+      gitlab_runner_k8s_name / _namespace must be lowercase DNS-1123 labels
+      (alphanumerics and "-", starting and ending with an alphanumeric). The
+      name is additionally limited to 53 characters so that "<name>-token"
+      stays a valid label. Got name={{ gitlab_runner_k8s_name }},
+      namespace={{ gitlab_runner_k8s_namespace }}.
+    success_msg: "Kubernetes object names are valid."
+
+- name: "gitlab_runner_k8s : Validate the chart version is pinned"
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_chart_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: >-
+      gitlab_runner_k8s_chart_version must be a pinned semantic version
+      (e.g. 0.91.2). Leaving it unset would follow the latest chart and make
+      the cluster state irreproducible across re-runs. Got:
+      {{ gitlab_runner_k8s_chart_version }}
+    success_msg: "Chart version is pinned."
+
+- name: "gitlab_runner_k8s : Validate replica and concurrency counts"
+  # 型ではなく値で比較する。ANSIBLE# 変数は文字列で渡るため `x | int == x` にすると
+  # 有効な "3" が「正の整数でない」と誤判定される（ai_support_agent_k8s と同じ理由）。
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_replicas | int >= 1
+      - gitlab_runner_k8s_replicas | int | string == gitlab_runner_k8s_replicas | string
+      - gitlab_runner_k8s_concurrent | int >= 1
+      - gitlab_runner_k8s_concurrent | int | string == gitlab_runner_k8s_concurrent | string
+    fail_msg: >-
+      gitlab_runner_k8s_replicas and gitlab_runner_k8s_concurrent must be
+      positive integers. Got replicas={{ gitlab_runner_k8s_replicas }},
+      concurrent={{ gitlab_runner_k8s_concurrent }}.
+    success_msg: "Replica and concurrency counts are valid."
+
+- name: "gitlab_runner_k8s : Validate the default job image reference"
+  # TOML の basic string へ埋め込むため、引用符・バックスラッシュ・改行を含む値を弾く。
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_job_image is match('^[A-Za-z0-9][A-Za-z0-9._:/@-]*$')
+    fail_msg: >-
+      gitlab_runner_k8s_job_image must be a container image reference
+      (e.g. alpine:latest). Got: {{ gitlab_runner_k8s_job_image }}
+    success_msg: "Default job image is well-formed."
+
+- name: "gitlab_runner_k8s : Validate cluster access paths"
+  # ここで検証した値のみを shell 本文へ展開してよい（ファイル冒頭のコメント参照）。
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_kubectl is match('^/[A-Za-z0-9._/-]+$')
+      - gitlab_runner_k8s_kubeconfig is match('^/[A-Za-z0-9._/-]+$')
+      - gitlab_runner_k8s_manifest_dir is match('^/[A-Za-z0-9._/-]+$')
+    fail_msg: >-
+      gitlab_runner_k8s_kubectl / _kubeconfig / _manifest_dir must be absolute
+      paths made of alphanumerics and ._/- only. Got
+      kubectl={{ gitlab_runner_k8s_kubectl }},
+      kubeconfig={{ gitlab_runner_k8s_kubeconfig }},
+      manifest_dir={{ gitlab_runner_k8s_manifest_dir }}.
+    success_msg: "Cluster access paths are valid."
+
+- name: "gitlab_runner_k8s : Check the kubectl binary"
+  ansible.builtin.stat:
+    path: "{{ gitlab_runner_k8s_kubectl }}"
+  register: gitlab_runner_k8s_kubectl_stat
+
+- name: "gitlab_runner_k8s : Assert kubectl is available"
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_kubectl_stat.stat.exists
+      - gitlab_runner_k8s_kubectl_stat.stat.executable | default(false)
+    fail_msg: >-
+      kubectl not found or not executable at {{ gitlab_runner_k8s_kubectl }}.
+      Run this role on a node that administers the cluster (a k3s server
+      node), or set gitlab_runner_k8s_kubectl to the correct path.
+    success_msg: "kubectl is available."
+
+- name: "gitlab_runner_k8s : Check the kubeconfig"
+  ansible.builtin.stat:
+    path: "{{ gitlab_runner_k8s_kubeconfig }}"
+  register: gitlab_runner_k8s_kubeconfig_stat
+
+- name: "gitlab_runner_k8s : Assert the kubeconfig is readable"
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_kubeconfig_stat.stat.exists
+    fail_msg: >-
+      kubeconfig not found at {{ gitlab_runner_k8s_kubeconfig }}. Set
+      gitlab_runner_k8s_kubeconfig to the cluster's kubeconfig path
+      (k3s default: /etc/rancher/k3s/k3s.yaml).
+    success_msg: "kubeconfig is present."
+
+- name: "gitlab_runner_k8s : Assert the HelmChart CRD is available"
+  # helm-controller が無いクラスタ（素の kubeadm 等）では HelmChart CR を適用しても
+  # 誰も処理せず、apply は成功するのにランナーが永久に現れない。先に落とす。
+  ansible.builtin.command:
+    argv:
+      - "{{ gitlab_runner_k8s_kubectl }}"
+      - "--kubeconfig={{ gitlab_runner_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - get
+      - crd
+      - helmcharts.helm.cattle.io
+  register: gitlab_runner_k8s_helm_crd
+  changed_when: false
+  failed_when: false
+
+- name: "gitlab_runner_k8s : Fail when the cluster has no helm-controller"
+  ansible.builtin.fail:
+    msg: >-
+      The HelmChart CRD (helmcharts.helm.cattle.io) is not present in this
+      cluster (kubectl rc={{ gitlab_runner_k8s_helm_crd.rc }}). This role
+      installs the GitLab Runner chart through k3s' helm-controller. Use a k3s
+      cluster (the k3s bundled role builds one), or install helm-controller.
+  when: gitlab_runner_k8s_helm_crd.rc != 0
+
+- name: "gitlab_runner_k8s : Ensure the target namespace exists"
+  # create --dry-run=client | apply は、存在しても失敗しない冪等な適用手順。
+  ansible.builtin.shell: >-
+    set -o pipefail &&
+    {{ gitlab_runner_k8s_kubectl }} --kubeconfig={{ gitlab_runner_k8s_kubeconfig }} --request-timeout=30s
+    create namespace {{ gitlab_runner_k8s_namespace }}
+    --dry-run=client -o yaml
+    | {{ gitlab_runner_k8s_kubectl }} --kubeconfig={{ gitlab_runner_k8s_kubeconfig }} --request-timeout=30s
+    apply -f -
+  args:
+    executable: /bin/bash
+  register: gitlab_runner_k8s_namespace_apply
+  changed_when: "'unchanged' not in gitlab_runner_k8s_namespace_apply.stdout"
+
+- name: "gitlab_runner_k8s : Ensure the manifest directory exists"
+  ansible.builtin.file:
+    path: "{{ gitlab_runner_k8s_manifest_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: "gitlab_runner_k8s : Create the runner token Secret"
+  block:
+    - name: "gitlab_runner_k8s : Create a secure temporary file for the token"
+      ansible.builtin.tempfile:
+        state: file
+        prefix: gitlab_runner_k8s_token_
+      register: gitlab_runner_k8s_token_tempfile
+      changed_when: false
+
+    - name: "gitlab_runner_k8s : Create a temporary file for the unused token key"
+      # 中身は空のまま使う（tempfile は空ファイルを 0600 で作る）。理由はファイル冒頭
+      # 「なぜ空の一時ファイルも作るのか」を参照。
+      ansible.builtin.tempfile:
+        state: file
+        prefix: gitlab_runner_k8s_empty_
+      register: gitlab_runner_k8s_empty_tempfile
+      changed_when: false
+
+    - name: "gitlab_runner_k8s : Write the token into its temporary file"
+      # `content` は copy モジュール自身が引数仕様で no_log 指定しているため、成功・
+      # 失敗・-vvv のいずれでも値は出力されない。タスクレベルの no_log は付けない
+      # （失敗理由が "task failed" に潰れるだけで秘匿に寄与しない）。
+      #
+      # `| trim` は必須。`--from-file=` はファイルの中身がそのまま Secret の値になるため、
+      # ANSIBLE# 変数へ貼り付けた際の改行や前後の空白が1文字混ざるだけで「トークンは
+      # 設定されているのに認証されない」という切り分けの難しい失敗になる。
+      ansible.builtin.copy:
+        content: >-
+          {{ (gitlab_runner_k8s_auth_token
+              if (gitlab_runner_k8s_has_auth | bool)
+              else gitlab_runner_k8s_registration_token) | trim }}
+        dest: "{{ gitlab_runner_k8s_token_tempfile.path }}"
+        mode: '0600'
+      changed_when: true
+
+    - name: "gitlab_runner_k8s : Apply the token Secret (authentication token flow)"
+      # トークンはファイル経由でのみ kubectl へ渡すため argv に現れず `ps` からも読めない。
+      # 中間の YAML（base64 トークンを含む）はパイプに流すだけでファイルにも変数にも
+      # 残さない。適用結果の stdout は "secret/x created" 等で秘匿値を含まないため
+      # no_log は付けない（付けると失敗理由が消える）。
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        {{ gitlab_runner_k8s_kubectl }} --kubeconfig={{ gitlab_runner_k8s_kubeconfig }} --request-timeout=30s
+        -n {{ gitlab_runner_k8s_namespace }}
+        create secret generic {{ gitlab_runner_k8s_secret_name }}
+        --from-file=runner-token={{ gitlab_runner_k8s_token_tempfile.path }}
+        --from-file=runner-registration-token={{ gitlab_runner_k8s_empty_tempfile.path }}
+        --dry-run=client -o yaml
+        | {{ gitlab_runner_k8s_kubectl }} --kubeconfig={{ gitlab_runner_k8s_kubeconfig }} --request-timeout=30s
+        apply -f -
+      args:
+        executable: /bin/bash
+      when: gitlab_runner_k8s_has_auth | bool
+      register: gitlab_runner_k8s_secret_apply_auth
+      changed_when: "'unchanged' not in gitlab_runner_k8s_secret_apply_auth.stdout"
+
+    - name: "gitlab_runner_k8s : Apply the token Secret (legacy registration token flow)"
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        {{ gitlab_runner_k8s_kubectl }} --kubeconfig={{ gitlab_runner_k8s_kubeconfig }} --request-timeout=30s
+        -n {{ gitlab_runner_k8s_namespace }}
+        create secret generic {{ gitlab_runner_k8s_secret_name }}
+        --from-file=runner-registration-token={{ gitlab_runner_k8s_token_tempfile.path }}
+        --from-file=runner-token={{ gitlab_runner_k8s_empty_tempfile.path }}
+        --dry-run=client -o yaml
+        | {{ gitlab_runner_k8s_kubectl }} --kubeconfig={{ gitlab_runner_k8s_kubeconfig }} --request-timeout=30s
+        apply -f -
+      args:
+        executable: /bin/bash
+      when: gitlab_runner_k8s_has_reg | bool
+      register: gitlab_runner_k8s_secret_apply_legacy
+      changed_when: "'unchanged' not in gitlab_runner_k8s_secret_apply_legacy.stdout"
+  always:
+    - name: "gitlab_runner_k8s : Remove the token temporary file"
+      ansible.builtin.file:
+        path: "{{ gitlab_runner_k8s_token_tempfile.path }}"
+        state: absent
+      when: gitlab_runner_k8s_token_tempfile.path is defined
+      changed_when: false
+
+    - name: "gitlab_runner_k8s : Remove the unused-key temporary file"
+      ansible.builtin.file:
+        path: "{{ gitlab_runner_k8s_empty_tempfile.path }}"
+        state: absent
+      when: gitlab_runner_k8s_empty_tempfile.path is defined
+      changed_when: false
+
+- name: "gitlab_runner_k8s : Write the HelmChart manifest"
+  # 秘匿値は含まない（トークンは Secret 名の参照のみ）。監査と再適用のためノード上へ残す。
+  #
+  # `runners.secret` にロールが作った Secret 名を渡す。チャート自身の Secret 生成は
+  # `if or .Values.runnerRegistrationToken .Values.runnerToken` ガードの下にあり、
+  # ここで値を渡さない限り発火しない＝ロールの Secret を上書きしない（確認済み）。
+  #
+  # `runners.config` はロールが組み立てる。生 TOML をテナントに渡せる変数は提供しない
+  # （privileged = true や hostPath マウントを差し込まれるため）。
+  ansible.builtin.copy:
+    dest: "{{ gitlab_runner_k8s_manifest_dir }}/{{ gitlab_runner_k8s_name }}.yaml"
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      apiVersion: helm.cattle.io/v1
+      kind: HelmChart
+      metadata:
+        name: {{ gitlab_runner_k8s_name | to_json }}
+        namespace: kube-system
+      spec:
+        repo: https://charts.gitlab.io
+        chart: gitlab-runner
+        version: {{ gitlab_runner_k8s_chart_version | to_json }}
+        targetNamespace: {{ gitlab_runner_k8s_namespace | to_json }}
+        createNamespace: false
+        valuesContent: |-
+          fullnameOverride: {{ gitlab_runner_k8s_name | to_json }}
+          gitlabUrl: {{ gitlab_runner_k8s_url | to_json }}
+          replicas: {{ gitlab_runner_k8s_replicas | int }}
+          concurrent: {{ gitlab_runner_k8s_concurrent | int }}
+          rbac:
+            create: true
+            clusterWideAccess: false
+            rules:
+              - resources: ["pods"]
+                verbs: ["create", "delete", "get", "list", "watch"]
+              - resources: ["pods/attach", "pods/exec"]
+                verbs: ["create", "delete", "get", "patch"]
+              - resources: ["pods/log"]
+                verbs: ["get", "list"]
+              - resources: ["secrets"]
+                verbs: ["create", "delete", "get", "update"]
+              - resources: ["services"]
+                verbs: ["create", "get"]
+              - resources: ["serviceaccounts"]
+                verbs: ["get"]
+              - resources: ["events"]
+                verbs: ["list", "watch"]
+          serviceAccount:
+            create: true
+          runners:
+            secret: {{ gitlab_runner_k8s_secret_name | to_json }}
+      {% if gitlab_runner_k8s_has_reg | bool %}
+            tags: {{ gitlab_runner_k8s_tags | to_json }}
+            runUntagged: {{ (gitlab_runner_k8s_run_untagged | bool) | to_json }}
+            locked: {{ (gitlab_runner_k8s_locked | bool) | to_json }}
+      {% endif %}
+            config: |
+              [[runners]]
+                [runners.kubernetes]
+                  namespace = {{ gitlab_runner_k8s_namespace | to_json }}
+                  image = {{ gitlab_runner_k8s_job_image | to_json }}
+                  privileged = false
+                  automount_service_account_token = false
+  register: gitlab_runner_k8s_manifest
+
+- name: "gitlab_runner_k8s : Apply the HelmChart"
+  ansible.builtin.command:
+    argv:
+      - "{{ gitlab_runner_k8s_kubectl }}"
+      - "--kubeconfig={{ gitlab_runner_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - apply
+      - -f
+      - "{{ gitlab_runner_k8s_manifest_dir }}/{{ gitlab_runner_k8s_name }}.yaml"
+  register: gitlab_runner_k8s_apply
+  changed_when: "'unchanged' not in gitlab_runner_k8s_apply.stdout"
+
+- name: "gitlab_runner_k8s : Wait for the runner manager to become ready"
+  # helm-controller はチャートを Job として適用するため、CR の apply 直後には
+  # Deployment がまだ存在しない。rollout status が「見つからない」で失敗する間は
+  # until で待ち、イメージ取得失敗やトークン不正といった本当の起動失敗を検出する。
+  ansible.builtin.command:
+    argv:
+      - "{{ gitlab_runner_k8s_kubectl }}"
+      # rollout status は --timeout=60s まで watch するため、request-timeout は
+      # それより長くする（短いと watch 自体が途中で切れて誤検知になる）。
+      - "--request-timeout=90s"
+      - "--kubeconfig={{ gitlab_runner_k8s_kubeconfig }}"
+      - -n
+      - "{{ gitlab_runner_k8s_namespace }}"
+      - rollout
+      - status
+      - "deployment/{{ gitlab_runner_k8s_name }}"
+      - --timeout=60s
+  register: gitlab_runner_k8s_rollout
+  until: gitlab_runner_k8s_rollout.rc == 0
+  retries: 10
+  delay: 15
+  changed_when: false
+
+- name: "gitlab_runner_k8s : Verify the runner actually registered with GitLab"
+  # rollout status の成功は「登録できた」ことを意味しない（実クラスタで確認済み）。
+  # チャートの readinessProbe は `pgrep gitlab.*runner` だけで、**登録をリトライ中の
+  # プロセス**にもマッチする。したがって不正なトークンでも Pod は一度 Ready になり、
+  # rollout status は成功する。その後 30 回の登録試行を使い切って初めてコンテナが落ちる
+  # （livenessProbe は initialDelay 60s・period 60s・failureThreshold 3 で、異常検知まで
+  # 数分かかる）。このゲートが無いと「セットアップは成功したのに CI ジョブが一向に
+  # 実行されない」という、原因の分かりにくい失敗になる。
+  #
+  # 判定にはチャート同梱の check-live を使う。中身は `gitlab-runner verify` で、
+  # 登録済みなら 0、未登録なら非 0 を返す。チャートバージョンはピン留めしているので
+  # パスと引数仕様も安定している。
+  #
+  # 引数の `20` は verify のタイムアウト秒数（`VERIFY_TIMEOUT=${1:-${VERIFY_TIMEOUT:-3}}`）。
+  # **既定の 3 秒のままにしてはならない**: verify は GitLab への HTTPS 往復を伴うため、
+  # VPN 経由・自己ホスト GitLab・高負荷サーバでは 3 秒を超えうる。そして check-live は
+  # タイムアウトを「判定不能」として **exit 0（成功）** に倒す。つまり既定値のままだと、
+  # トークンが無効でも毎回タイムアウトして「成功」と報告され、このゲートを入れた目的
+  # （登録できていないのに成功と報告する事故を防ぐ）がそのまま再発する。
+  #
+  # さらに `until` で「判定不能」を成功として受け入れない。20 秒の verify が 6 回
+  # （約2分）すべてタイムアウトするなら、GitLab へ到達できていない＝どのみち runner は
+  # 動かないので、成功と報告してはいけない。
+  #
+  # `exec deployment/<name>` は Deployment 配下の 1 Pod だけを対象にする。これはこの
+  # ゲートの目的には十分である: 全レプリカは同一の Secret（同一トークン）と同一の
+  # config を共有するため、このゲートが捕まえたい設定不備（トークン無効・URL 誤り・
+  # GitLab へ到達不能）はレプリカ間で同一に現れる。特定のレプリカだけが落ちる事象は
+  # 設定不備ではなくノード起因であり、Kubernetes 側が再スケジュールで扱う領分。
+  ansible.builtin.command:
+    argv:
+      - "{{ gitlab_runner_k8s_kubectl }}"
+      - "--request-timeout=60s"
+      - "--kubeconfig={{ gitlab_runner_k8s_kubeconfig }}"
+      - -n
+      - "{{ gitlab_runner_k8s_namespace }}"
+      - exec
+      - "deployment/{{ gitlab_runner_k8s_name }}"
+      - --
+      - /bin/bash
+      - /configmaps/check-live
+      - "20"
+  register: gitlab_runner_k8s_verify
+  until: >-
+    gitlab_runner_k8s_verify.rc == 0
+    and 'not a conclusive failure' not in (gitlab_runner_k8s_verify.stderr | default(''))
+  retries: 6
+  delay: 20
+  changed_when: false

@@ -23,7 +23,8 @@ import { isPlainObject } from '../utils/is-plain-object'
  *
  * ## `include_role` スニペット（組み込みステップ）
  * 組み込みステップ（os_init/ssh_key/docker/nvm/claude_cli/codex/ai_support_agent/
- * ai_support_agent_k8s/web_server/database/dns_tls/gitlab_runner/github_runner/k3s/
+ * ai_support_agent_k8s/web_server/database/dns_tls/gitlab_runner/github_runner/
+ * gitlab_runner_k8s/github_runner_k8s/k3s/
  * tailscale）は、bundled role を呼ぶ
  * `include_role` タスクとして表現する。`include_role` は下記 allowlist のロールのみ
  * 許可し、role 名と
@@ -237,6 +238,14 @@ const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
  * 異なり、対象ホストに Node.js を導入しないため `nvm` には依存しない。エージェント
  * トークンは 0600 一時ファイル経由で `kubectl create secret --from-file=` に渡し、argv・
  * `environment:`・生成マニフェストのいずれにも載せない（roles/ai_support_agent_k8s 参照）。
+ *
+ * `gitlab_runner_k8s`/`github_runner_k8s` は CI ランナーを**ホストではなくクラスタ上**へ
+ * 配置する。`ai_support_agent_k8s` と同じく kubectl/kubeconfig を持つノードで動き、
+ * トークン Secret を 0600 一時ファイル経由で作ったうえで、HelmChart CR には
+ * 「既存 Secret の名前」だけを書く（秘匿値は生成マニフェストに載らない）。チャートの
+ * 取得元（repo / OCI 参照 / チャート名）はロール内のインラインリテラルであり、レシピ側の
+ * task-level vars から差し替えできない。ジョブは非特権に固定し、privileged / dind を
+ * 有効化する変数は提供しない（roles/gitlab_runner_k8s・roles/github_runner_k8s 参照）。
  */
 export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'os_init',
@@ -252,6 +261,8 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'dns_tls',
   'gitlab_runner',
   'github_runner',
+  'gitlab_runner_k8s',
+  'github_runner_k8s',
   'k3s',
   'tailscale',
 ])

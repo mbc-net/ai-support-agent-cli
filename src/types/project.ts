@@ -398,3 +398,18 @@ export interface ProjectSharedFileEntry {
   /** 最終更新日時（ISO8601） */
   modified: string
 }
+
+/**
+ * 共有ファイル一覧のレスポンス。
+ *
+ * API は上限件数で打ち切った場合に `truncated: true` を返す。単純な配列だと
+ * 上限以降のファイルが「存在しない」ように見えるサイレント切り捨てになるため、
+ * 打ち切りの有無を明示する契約になっている。
+ */
+export interface ProjectSharedFileListResponse {
+  entries: ProjectSharedFileEntry[]
+  /** 上限件数で打ち切られたか */
+  truncated: boolean
+  /** 適用された上限件数 */
+  limit: number
+}

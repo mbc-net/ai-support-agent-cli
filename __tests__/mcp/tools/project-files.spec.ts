@@ -78,24 +78,28 @@ describe("project-files MCP tools", () => {
 
   describe("list_project_files", () => {
     it("一覧を JSON テキストとして返す", async () => {
-      const listProjectFiles = jest.fn().mockResolvedValue([
-        {
-          id: "id-1",
-          name: "server.pem",
-          path: "certs/server.pem",
-          type: "file",
-          size: 1024,
-          contentType: "text/plain",
-          modified: "2026-08-01T00:00:00.000Z",
-        },
-      ]);
+      const listProjectFiles = jest.fn().mockResolvedValue({
+        entries: [
+          {
+            id: "id-1",
+            name: "server.pem",
+            path: "certs/server.pem",
+            type: "file",
+            size: 1024,
+            contentType: "text/plain",
+            modified: "2026-08-01T00:00:00.000Z",
+          },
+        ],
+        truncated: false,
+        limit: 1000,
+      });
       setupTools({ listProjectFiles } as unknown as Partial<ApiClient>);
 
       const result = await listCallback({ path: "certs" });
 
       expect(listProjectFiles).toHaveBeenCalledWith("certs");
       const parsed = JSON.parse(result.content[0].text as string);
-      expect(parsed).toEqual([
+      expect(parsed.entries).toEqual([
         {
           name: "server.pem",
           path: "certs/server.pem",
@@ -104,15 +108,31 @@ describe("project-files MCP tools", () => {
           modified: "2026-08-01T00:00:00.000Z",
         },
       ]);
+      expect(parsed.truncated).toBeUndefined();
     });
 
     it("path 省略時は undefined を渡す（ルート一覧）", async () => {
-      const listProjectFiles = jest.fn().mockResolvedValue([]);
+      const listProjectFiles = jest
+        .fn()
+        .mockResolvedValue({ entries: [], truncated: false, limit: 1000 });
       setupTools({ listProjectFiles } as unknown as Partial<ApiClient>);
 
       await listCallback({});
 
       expect(listProjectFiles).toHaveBeenCalledWith(undefined);
+    });
+
+    it("上限で打ち切られた場合は LLM へ truncated と注記を返す（全件と誤認させない）", async () => {
+      const listProjectFiles = jest
+        .fn()
+        .mockResolvedValue({ entries: [], truncated: true, limit: 1000 });
+      setupTools({ listProjectFiles } as unknown as Partial<ApiClient>);
+
+      const result = await listCallback({});
+
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.truncated).toBe(true);
+      expect(parsed.note).toContain("1000");
     });
 
     it("API エラーはエラーレスポンスとして返す（例外を投げない）", async () => {
@@ -212,6 +232,52 @@ describe("project-files MCP tools", () => {
       expect(path.basename(savedPath)).toMatch(/^[0-9a-f]{8}_evil\.bin$/);
       expect(savedPath).toContain("ai-support-agent-project-files");
       expect(savedPath).not.toContain("..");
+    });
+
+    it("一時ファイルは所有者のみ読み書き可（0600）で作る", async () => {
+      const getProjectFileDownloadUrl = jest.fn().mockResolvedValue({
+        downloadUrl: "https://s3/get",
+        filename: "secret.pem",
+        contentType: "application/octet-stream",
+      });
+      mockedAxios.get.mockResolvedValue({
+        data: Buffer.from("private-key").buffer,
+      });
+      setupTools({
+        getProjectFileDownloadUrl,
+      } as unknown as Partial<ApiClient>);
+
+      const result = await readCallback({ path: "secret.pem" });
+
+      const text = result.content[0].text as string;
+      const savedPath = (
+        text.match(/Saved to: (.+)/) as RegExpMatchArray
+      )[1].trim();
+      writtenFiles.push(savedPath);
+      // 共有ファイルは証明書・鍵を含み得るため、同一ホストの他ユーザーから読めてはならない
+      expect(fs.statSync(savedPath).mode & 0o777).toBe(0o600);
+    });
+
+    it("レスポンスサイズ上限を指定して取得する（大容量ファイルでの OOM を防ぐ）", async () => {
+      const getProjectFileDownloadUrl = jest.fn().mockResolvedValue({
+        downloadUrl: "https://s3/get",
+        filename: "note.txt",
+        contentType: "text/plain",
+      });
+      mockedAxios.get.mockResolvedValue({ data: "hello" });
+      setupTools({
+        getProjectFileDownloadUrl,
+      } as unknown as Partial<ApiClient>);
+
+      await readCallback({ path: "note.txt" });
+
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        "https://s3/get",
+        expect.objectContaining({
+          maxContentLength: 10 * 1024 * 1024,
+          maxBodyLength: 10 * 1024 * 1024,
+        }),
+      );
     });
 
     it("API エラーはエラーレスポンスとして返す（例外を投げない）", async () => {
