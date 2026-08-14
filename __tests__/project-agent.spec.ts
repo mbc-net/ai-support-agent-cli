@@ -2009,6 +2009,54 @@ describe('ProjectAgent', () => {
   })
 
   describe('performUpdate', () => {
+    describe('自己更新が成立しない実行環境', () => {
+      const K8S_ENV = 'KUBERNETES_SERVICE_HOST'
+      let originalK8sHost: string | undefined
+
+      beforeEach(() => {
+        originalK8sHost = process.env[K8S_ENV]
+        process.env[K8S_ENV] = '10.43.0.1'
+      })
+
+      afterEach(() => {
+        if (originalK8sHost === undefined) {
+          delete process.env[K8S_ENV]
+        } else {
+          process.env[K8S_ENV] = originalK8sHost
+        }
+      })
+
+      it('Kubernetes 上では更新を実行せずエラーにする', async () => {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        await expect(agent.performUpdate()).rejects.toThrow(/Kubernetes/)
+
+        expect(mockedPerformUpdate).not.toHaveBeenCalled()
+        expect(mockedReExecProcess).not.toHaveBeenCalled()
+      })
+
+      it('エラーには代わりに何をすべきか（イメージタグの更新）を含める', async () => {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        await expect(agent.performUpdate()).rejects.toThrow(/image tag/i)
+      })
+
+      it('バージョン確認そのものを行わない（更新できないと分かっているため）', async () => {
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+        mockClient.getVersionInfo.mockClear()
+
+        await expect(agent.performUpdate()).rejects.toThrow()
+
+        expect(mockClient.getVersionInfo).not.toHaveBeenCalled()
+      })
+    })
+
     it('should update and call reExecProcess when running as standalone (no process.send)', async () => {
       const originalSend = process.send
       // Simulate standalone process (not a child process)

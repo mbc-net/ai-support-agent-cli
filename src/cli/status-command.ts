@@ -19,7 +19,10 @@ export function formatStatus(config: AgentConfig): string {
 
   // Auto-update status
   const autoUpdate = config.autoUpdate
-  if (autoUpdate && autoUpdate.enabled === false) {
+  // 自動アップデートは opt-in。ローカル設定が無い＝無効なので、明示的に true の
+  // ときだけ「有効」と表示する（未設定を有効と表示すると、実際には動かないのに
+  // 動くと誤解させる）。なお管理画面側の設定は別レイヤであり、ここには現れない。
+  if (autoUpdate?.enabled !== true) {
     lines.push(`    ${t('status.autoUpdate', { status: t('update.disabled') })}`)
   } else {
     const autoRestart = autoUpdate?.autoRestart !== false ? 'true' : 'false'

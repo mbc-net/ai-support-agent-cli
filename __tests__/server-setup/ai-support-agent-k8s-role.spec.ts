@@ -319,6 +319,20 @@ describe('ai_support_agent_k8s bundled role', () => {
       expect(mounts[0].name).toBe(templates[0].metadata.name)
     })
 
+    it('imagePullPolicy: Always を明示する', () => {
+      // 未指定だと Kubernetes の既定が効き、タグが latest 以外のときは IfNotPresent に
+      // なる。:beta のような移動タグでは `rollout restart` してもノードのキャッシュを
+      // 使い回すため、更新したつもりで中身が変わらない。版固定タグでは digest が
+      // 同じなのでレイヤの再取得は起きず、マニフェスト確認だけのコストで済む。
+      const doc = renderManifest(manifestTemplate(), false) as any
+      expect(doc.spec.template.spec.containers[0].imagePullPolicy).toBe('Always')
+    })
+
+    it('永続化オンでも imagePullPolicy は失われない', () => {
+      const doc = renderManifest(manifestTemplate(), true) as any
+      expect(doc.spec.template.spec.containers[0].imagePullPolicy).toBe('Always')
+    })
+
     it('レプリカ識別子を downward API（Pod 名）で注入する', () => {
       const doc = renderManifest(manifestTemplate(), false) as any
       const env = doc.spec.template.spec.containers[0].env as any[]

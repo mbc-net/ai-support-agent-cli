@@ -349,6 +349,12 @@ spec:
       containers:
         - name: agent
           image: ${yamlScalar(image)}
+          # 明示しないと Kubernetes の既定が効き、タグが latest 以外のときは
+          # IfNotPresent になる。:beta のような移動タグでは、タグを動かして
+          # rollout restart してもノード上のキャッシュを使い回すため、更新した
+          # つもりで中身が変わらない。版固定タグでは digest が変わらないので
+          # レイヤの再取得は起きない。
+          imagePullPolicy: Always
           args:
 ${CONTAINER_ARGV.map((a) => `            - ${a}`).join('\n')}
             - --project

@@ -10,6 +10,8 @@ import * as os from 'os'
 
 import { ApiClient } from '../api-client'
 import { type AutoUpdaterHandle, startAutoUpdater } from '../auto-updater'
+import { resolveAutoUpdateEnablement } from '../auto-update-enablement'
+import { createAutoUpdateClients, createAutoUpdateGate } from '../auto-update-gate'
 import { splitProjectRef } from '../utils/token-utils'
 import { validateUpdateChannel } from '../cli/validators'
 import {
@@ -126,12 +128,16 @@ function resolveHostAutoUpdateConfig(
     : undefined
   const detectedChannel = detectChannelFromVersion(AGENT_VERSION)
   return {
-    enabled: opts.autoUpdate !== false,
     autoRestart: true,
     channel: cliChannel ?? config?.autoUpdate?.channel ?? detectedChannel,
     ...config?.autoUpdate,
-    // CLI flags override config
-    ...(opts.autoUpdate === false && { enabled: false }),
+    // enabled はスプレッドのあとに置く（agent-runner.ts の resolveAutoUpdateConfig と同じ理由）。
+    // ここで決まるのは起動時点の土台のみ。サーバー設定は起動時には取得できないため、
+    // 実行可否は startHostAutoUpdater が渡すゲートが更新チェックのたびに評価する。
+    enabled: resolveAutoUpdateEnablement({
+      cli: opts.autoUpdate,
+      local: config?.autoUpdate?.enabled,
+    }),
     ...(cliChannel && { channel: cliChannel }),
   }
 }
@@ -144,7 +150,8 @@ export function startHostAutoUpdater(
   agentId: string | undefined,
 ): AutoUpdaterHandle | undefined {
   const autoUpdateConfig = resolveHostAutoUpdateConfig(opts, config)
-  if (!autoUpdateConfig.enabled) return undefined
+  // CLI で明示的に無効化されていればタイマーごと作らない。サーバー設定でも覆せない。
+  if (opts.autoUpdate === false) return undefined
   if (projects.length === 0) return undefined
 
   const apiUrl = projects[0].apiUrl
@@ -154,11 +161,21 @@ export function startHostAutoUpdater(
   // register を行わない「自動更新エラー通知専用」クライアント。レプリカ識別子を
   // 送るとサーバー側で稼働枠なしと判定され、ハートビートが evicted 扱いになって
   // AGENT_STATUS（updateError 等）が一切更新されなくなる。
-  const client = new ApiClient(apiUrl, token, { withoutReplicaIdentity: true })
+  //
+  // 全プロジェクトぶん作る。自動アップデートはホスト単位の操作なので、同居する
+  // プロジェクトの1つでもサーバー設定で無効なら実行してはならない。
+  // 先頭のクライアントはハートビート送信にも使う。
+  // 1つでも生成できなければ自動アップデートを諦める（createAutoUpdateClients 参照）。
+  const clients = createAutoUpdateClients(
+    projects,
+    (url, tok) => new ApiClient(url, tok, { withoutReplicaIdentity: true }),
+  )
+  if (!clients) return undefined
+  const client = clients[0]
   const resolvedAgentId = agentId ?? config?.agentId ?? os.hostname()
 
   return startAutoUpdater(
-    [client],
+    clients,
     autoUpdateConfig,
     () => supervisor.stopAll(),
     (error) => {
@@ -166,6 +183,14 @@ export function startHostAutoUpdater(
         logger.warn(`[auto-update] Failed to send error heartbeat: ${getErrorMessage(err)}`)
       })
     },
+    undefined,
+    // 実行可否は更新チェックのたびに評価する。管理画面で無効にしたとき、
+    // ホスト常駐（Docker モード）だけ止まらない、という食い違いを作らないため。
+    createAutoUpdateGate({
+      clients,
+      cli: opts.autoUpdate,
+      local: config?.autoUpdate?.enabled,
+    }),
   )
 }
 

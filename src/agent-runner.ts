@@ -1,6 +1,9 @@
 import * as os from 'os'
 
 import { type AutoUpdaterHandle, startAutoUpdater } from './auto-updater'
+import { resolveAutoUpdateEnablement } from './auto-update-enablement'
+import { createAutoUpdateClients, createAutoUpdateGate } from './auto-update-gate'
+import { describeSelfUpdateBlockReason, resolveSelfUpdateCapability } from './self-update-capability'
 import { AGENT_VERSION, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_POLL_INTERVAL, PROJECT_CODE_CLI_DIRECT, PROJECT_CODE_ENV_DEFAULT, DOCKER_UPDATE_EXIT_CODE, ENV_VARS } from './constants'
 import { getProjectList, loadConfig, saveConfig } from './config-manager'
 import { t } from './i18n'
@@ -110,35 +113,81 @@ function logMultiProjectStartup(
 function initAutoUpdater(
   options: RunnerOptions,
   config: { autoUpdate?: AutoUpdateConfig } | null | undefined,
-  client: ApiClient,
+  // 先頭のクライアントはハートビート送信にも使う。複数プロジェクトが同居する場合は
+  // 全プロジェクトぶんを渡すこと（サーバー設定は全プロジェクトで有効なときだけ
+  // 有効とみなすため。auto-update-gate.ts を参照）。
+  clients: ApiClient[],
   agentId: string,
   stopAllAgents: () => void | Promise<void>,
   isAnyAgentBusy?: () => Promise<boolean>,
 ): AutoUpdaterHandle | undefined {
+  const client = clients[0]
+  if (!client) return undefined
+
+  // CLI で明示的に無効化されていれば、サーバー設定でも覆せない。タイマー自体を作らない。
+  if (options.autoUpdate === false) return undefined
+
   const autoUpdateConfig = resolveAutoUpdateConfig(options, config)
-  if (!autoUpdateConfig.enabled) return undefined
+  const reportError = (error: string): void => {
+    void client.heartbeat(agentId, getSystemInfo(), error).catch((err) => {
+      logger.warn(`[auto-update] Failed to send error heartbeat: ${getErrorMessage(err)}`)
+    })
+  }
+
+  // 実行可否そのものは更新チェックのたびに評価する（管理画面の変更を再起動なしで
+  // 反映させるため）。ここで決めるのは「タイマーを持つかどうか」だけ。
+  const isUpdateAllowed = createAutoUpdateGate({
+    clients,
+    cli: options.autoUpdate,
+    local: config?.autoUpdate?.enabled,
+  })
+
+  // 自己更新が成立しない実行環境（Kubernetes、監督プロセスのいない PID 1）では、
+  // 設定が有効でも起動しない。走らせると npm 更新 → プロセス終了 → コンテナ再作成で
+  // イメージの版へ巻き戻る、を延々と繰り返すだけになるため。
+  const capability = resolveSelfUpdateCapability()
+  if (!capability.capable && capability.reason) {
+    const message = describeSelfUpdateBlockReason(capability.reason)
+    // 有効・無効に関わらず、なぜこの環境では動かないのかは起動時に1行残す。
+    logger.info(`[auto-update] ${message}`)
+    // 有効化されている場合だけ、警告とハートビートで管理画面にも理由を届ける。
+    // 黙って無視すると「ONにしたのに更新されない」理由が誰にも見えなくなる。
+    void isUpdateAllowed()
+      .then((allowed) => {
+        if (!allowed) return
+        logger.warn(`[auto-update] ${message}`)
+        reportError(message)
+      })
+      .catch((err: unknown) => {
+        logger.debug(`[auto-update] Could not evaluate the auto-update setting: ${getErrorMessage(err)}`)
+      })
+    return undefined
+  }
+
   return startAutoUpdater(
-    [client],
+    clients,
     autoUpdateConfig,
     stopAllAgents,
-    (error) => {
-      void client.heartbeat(agentId, getSystemInfo(), error).catch((err) => {
-        logger.warn(`[auto-update] Failed to send error heartbeat: ${getErrorMessage(err)}`)
-      })
-    },
+    reportError,
     isAnyAgentBusy,
+    isUpdateAllowed,
   )
 }
 
 export function resolveAutoUpdateConfig(options: RunnerOptions, config?: { autoUpdate?: AutoUpdateConfig } | null): AutoUpdateConfig {
   const detectedChannel = detectChannelFromVersion(AGENT_VERSION)
   return {
-    enabled: options.autoUpdate !== false,
     autoRestart: true,
     channel: options.updateChannel ?? config?.autoUpdate?.channel ?? detectedChannel,
     ...config?.autoUpdate,
-    // CLI flags override config
-    ...(options.autoUpdate === false && { enabled: false }),
+    // enabled はスプレッドのあとに置く。config.autoUpdate をそのまま展開すると
+    // ローカル設定の enabled がそのまま残り、CLI フラグと既定 OFF の優先順位が
+    // 効かなくなるため。サーバー設定は起動時点では取得できていないので
+    // ここでは渡さず、更新チェックのたびに評価する（initAutoUpdater を参照）。
+    enabled: resolveAutoUpdateEnablement({
+      cli: options.autoUpdate,
+      local: config?.autoUpdate?.enabled,
+    }),
     ...(options.updateChannel && { channel: options.updateChannel }),
   }
 }
@@ -147,6 +196,10 @@ function runSingleProject(
   project: ProjectRegistration,
   agentId: string,
   options: RunnerOptions,
+  // ローカル設定。initAutoUpdater へそのまま渡す。以前ここが undefined 固定だったため、
+  // --token / 環境変数起動（コンテナ経路）ではローカル設定の自動アップデート指定が
+  // 一切効かず、CLI フラグでしか制御できなかった。
+  config: { autoUpdate?: AutoUpdateConfig } | null | undefined,
   agentChatMode?: AgentChatMode,
   defaultProjectDir?: string,
   enableTokenWatcher = false,
@@ -156,7 +209,7 @@ function runSingleProject(
   logger.info(t('runner.starting'))
   const started = startProjectAgent(project, agentId, { pollInterval, heartbeatInterval, agentChatMode, defaultProjectDir })
 
-  const updater = initAutoUpdater(options, undefined, started.client, agentId, () => started.stop(), async () => started.agent.isBusy())
+  const updater = initAutoUpdater(options, config, [started.client], agentId, () => started.stop(), async () => started.agent.isBusy())
 
   let tokenWatcher: { stop: () => void } | undefined
   if (enableTokenWatcher) {
@@ -293,7 +346,7 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
       }),
     )
 
-    runSingleProject(project, agentId, options, config?.agentChatMode, config?.defaultProjectDir)
+    runSingleProject(project, agentId, options, config, config?.agentChatMode, config?.defaultProjectDir)
     saveConfig({ lastConnected: nowIso() })
     return
   }
@@ -326,7 +379,8 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
         apiUrl: envApiUrl,
       }
 
-      runSingleProject(project, extractTokenId(envToken) ?? os.hostname(), options)
+      // ここは `if (!config)` の内側なので、ローカル設定は存在しない（null を明示的に渡す）。
+      runSingleProject(project, extractTokenId(envToken) ?? os.hostname(), options, null)
       return
     }
 
@@ -405,10 +459,21 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
 
   // register を行わない通知専用クライアント（docker-runner と同じ理由で
   // レプリカ識別子を送らない）。
-  const client = new ApiClient(projects[0].apiUrl, projects[0].token, {
-    withoutReplicaIdentity: true,
-  })
-  const updater = initAutoUpdater(options, config, client, agentId, () => processManager.stopAll(), () => processManager.isAnyBusy())
+  //
+  // 全プロジェクトぶんを作る。自動アップデートはホスト単位の操作なので、同居する
+  // プロジェクトの1つでもサーバー設定で無効なら実行してはならない（auto-update-gate.ts）。
+  // 先頭のクライアントはハートビート送信にも使われる。
+  //
+  // 1つでも生成できなければ自動アップデートを諦める（createAutoUpdateClients 参照）。
+  // ApiClient のコンストラクタは HTTP の API URL 等で例外を投げるため、素直に map すると
+  // 設定不備のプロジェクトが1つあるだけでエージェント全体の起動が落ちる。
+  const clients = createAutoUpdateClients(
+    projects,
+    (apiUrl, token) => new ApiClient(apiUrl, token, { withoutReplicaIdentity: true }),
+  )
+  const updater = clients
+    ? initAutoUpdater(options, config, clients, agentId, () => processManager.stopAll(), () => processManager.isAnyBusy())
+    : undefined
 
   const configWatcher = startConfigWatcher(projects, {
     onTokenUpdate: (project, newToken) => {

@@ -39,6 +39,7 @@ import type { TransportKind } from './ipc-types'
 import type { AdmissionMode, AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
+import { describeSelfUpdateBlockReason, resolveSelfUpdateCapability } from './self-update-capability'
 import { getUpdateVersionFilePath } from './utils/path-utils'
 import { atomicWriteFile, getErrorMessage, isAuthenticationError, isInDocker, resolveUrlForDocker, sleep } from './utils'
 import { readMarkerFile } from './utils/marker-file'
@@ -354,6 +355,16 @@ export class ProjectAgent {
   }
 
   async performUpdate(): Promise<void> {
+    // 管理画面からの「バージョンアップ」も、自己更新が成立しない実行環境では実行しない。
+    // Kubernetes や監督プロセスのいない PID 1 で走らせると、npm 更新のあとに
+    // プロセスが終了してコンテナごと再作成され、イメージの版へ巻き戻る。
+    // 成功したように見えて何も変わらない（むしろ稼働が途切れる）ため、
+    // 代わりに何をすべきかを添えて明示的に失敗させる。
+    const capability = resolveSelfUpdateCapability()
+    if (!capability.capable && capability.reason) {
+      throw new Error(describeSelfUpdateBlockReason(capability.reason))
+    }
+
     const channel = detectChannelFromVersion(AGENT_VERSION)
     logger.info(`${this.prefix} Update requested, checking for latest version (channel: ${channel})...`)
     const versionInfo = await this.client.getVersionInfo(channel)

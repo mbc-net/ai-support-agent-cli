@@ -113,6 +113,59 @@ describe('startHostAutoUpdater', () => {
     )
   })
 
+  it('フラグ未指定・ローカル設定なしなら、ゲートは実行を許可しない（opt-in）', () => {
+    // タイマー自体は作る（サーバー設定を毎回読み直し、管理画面で ON にされたら
+    // 再起動なしで反映するため）。実際に更新するかどうかはゲートが決める。
+    const supervisor = makeSupervisor()
+    const handle = startHostAutoUpdater(
+      {},
+      null,
+      baseProjects,
+      supervisor,
+      'agent-1',
+    )
+
+    expect(handle).toBeDefined()
+    const [, config] = mockStartAutoUpdater.mock.calls[0]
+    expect(config.enabled).toBe(false)
+  })
+
+  it('ローカル設定で明示的に有効化されていれば、フラグ未指定でも起動する', () => {
+    const supervisor = makeSupervisor()
+    const handle = startHostAutoUpdater(
+      {},
+      {
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        autoUpdate: { enabled: true, autoRestart: true, channel: 'latest' },
+      } as unknown as Parameters<typeof startHostAutoUpdater>[1],
+      baseProjects,
+      supervisor,
+      'agent-1',
+    )
+
+    expect(handle).toBeDefined()
+    expect(mockStartAutoUpdater).toHaveBeenCalledTimes(1)
+  })
+
+  it('ローカル設定で無効化されていれば、チャンネル指定があっても有効にならない', () => {
+    const supervisor = makeSupervisor()
+    startHostAutoUpdater(
+      { updateChannel: 'beta' },
+      {
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        autoUpdate: { enabled: false, autoRestart: true, channel: 'latest' },
+      } as unknown as Parameters<typeof startHostAutoUpdater>[1],
+      baseProjects,
+      supervisor,
+      'agent-1',
+    )
+
+    const [, config] = mockStartAutoUpdater.mock.calls[0]
+    expect(config.enabled).toBe(false)
+  })
+
   it('returns undefined and skips startup when auto-update is disabled', () => {
     const supervisor = makeSupervisor()
     const handle = startHostAutoUpdater(
@@ -125,6 +178,48 @@ describe('startHostAutoUpdater', () => {
 
     expect(handle).toBeUndefined()
     expect(mockStartAutoUpdater).not.toHaveBeenCalled()
+  })
+
+  it('全プロジェクトぶんのクライアントを渡す（サーバー設定は全プロジェクトで評価する）', () => {
+    const supervisor = makeSupervisor()
+    startHostAutoUpdater(
+      { autoUpdate: true },
+      null,
+      [
+        ...baseProjects,
+        {
+          tenantCode: '00000001',
+          projectCode: 'PROJ_B',
+          token: 'test-token-b',
+          apiUrl: 'https://api.example.com',
+        },
+      ],
+      supervisor,
+      'agent-1',
+    )
+
+    const [clients] = mockStartAutoUpdater.mock.calls[0]
+    expect(clients).toHaveLength(2)
+  })
+
+  it('サーバー設定を評価するゲートを渡す', () => {
+    // 管理画面で無効にしたとき、ホスト常駐（Docker モード）だけ止まらない、
+    // という食い違いを作らないため。
+    const supervisor = makeSupervisor()
+    startHostAutoUpdater(
+      {},
+      {
+        agentId: 'agent-1',
+        createdAt: '2024-01-01',
+        autoUpdate: { enabled: true, autoRestart: true, channel: 'latest' },
+      } as unknown as Parameters<typeof startHostAutoUpdater>[1],
+      baseProjects,
+      supervisor,
+      'agent-1',
+    )
+
+    const call = mockStartAutoUpdater.mock.calls[0]
+    expect(typeof call[5]).toBe('function')
   })
 
   it('returns undefined when no projects are provided', () => {

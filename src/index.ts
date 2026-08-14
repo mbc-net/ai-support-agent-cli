@@ -17,6 +17,7 @@ import {
   AGENT_MODE_ONESHOT,
   AGENT_VERSION,
   CLI_FLAG_VERBOSE,
+  CLI_FLAG_AUTO_UPDATE,
   CLI_FLAG_NO_AUTO_UPDATE,
   CLI_FLAG_NO_DOCKER,
   CLI_FLAG_NO_DOCKERFILE_SYNC,
@@ -53,6 +54,7 @@ program
   .option('--poll-interval <ms>', `${t('cmd.start.pollInterval')} (deprecated)`, '3000')
   .option('--heartbeat-interval <ms>', t('cmd.start.heartbeatInterval'), '60000')
   .option(CLI_FLAG_VERBOSE, t('cmd.start.verbose'))
+  .option(CLI_FLAG_AUTO_UPDATE, t('cmd.start.autoUpdate'))
   .option(CLI_FLAG_NO_AUTO_UPDATE, t('cmd.start.noAutoUpdate'))
   .option('--update-channel <channel>', t('cmd.start.updateChannel'))
   .option(CLI_FLAG_NO_DOCKER, t('cmd.start.noDocker'))
@@ -168,7 +170,9 @@ program
     }
 
     const config = loadConfig()
-    const current = config?.autoUpdate ?? { enabled: true, autoRestart: true, channel: 'latest' as ReleaseChannel }
+    // 未設定時の土台は enabled: false。自動アップデートは opt-in であり、
+    // `--channel` だけを指定したときに暗黙で有効化されてはならない。
+    const current = config?.autoUpdate ?? { enabled: false, autoRestart: true, channel: 'latest' as ReleaseChannel }
 
     if (opts.enable && opts.disable) {
       logger.warn(t('autoUpdate.conflictFlags'))

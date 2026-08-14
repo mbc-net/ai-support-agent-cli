@@ -21,6 +21,16 @@ export interface AutoUpdaterHandle {
  * @param stopAllAgents - Function to gracefully stop all running agents
  * @param sendUpdateError - Function to report update errors via heartbeat
  * @param isAnyAgentBusy - Optional callback to check if any agent is processing a command
+ * @param isUpdateAllowed - Optional gate evaluated on every check. Returning false skips the
+ *   check entirely. Used to honour the server-side (admin UI) auto-update setting without
+ *   requiring an agent restart. Omitted = always allowed (previous behaviour).
+ *
+ * NOTE: `config.enabled` is deliberately NOT consulted here. Whether an update may run is
+ * decided per check by `isUpdateAllowed` (the server-side setting can flip between checks),
+ * and `config.enabled` only records the startup baseline from CLI flags / local config.
+ * Adding an early return on `!config.enabled` would pin the decision to startup and make the
+ * admin UI toggle require an agent restart. Callers that must never update — a CLI
+ * `--no-auto-update`, or a runtime where self-update cannot work — simply never call this.
  */
 export function startAutoUpdater(
   clients: ApiClient[],
@@ -28,6 +38,7 @@ export function startAutoUpdater(
   stopAllAgents: () => void | Promise<void>,
   sendUpdateError?: (error: string) => void,
   isAnyAgentBusy?: () => Promise<boolean>,
+  isUpdateAllowed?: () => Promise<boolean>,
 ): AutoUpdaterHandle {
   let initialTimer: ReturnType<typeof setTimeout> | null = null
   let intervalTimer: ReturnType<typeof setInterval> | null = null
@@ -47,6 +58,24 @@ export function startAutoUpdater(
       if (isInDocker()) {
         logger.debug('Auto-update skipped (running inside Docker container)')
         return
+      }
+
+      // 実行可否は毎回評価する。管理画面で自動アップデートを切り替えたとき、
+      // エージェントを再起動しなくても次のチェックから反映させるため。
+      // 評価に失敗した場合は実行しない（fail-closed）。判断できないまま
+      // プロセスを差し替える方が危険なので、素通りさせない。
+      if (isUpdateAllowed) {
+        let allowed = false
+        try {
+          allowed = await isUpdateAllowed()
+        } catch (error) {
+          logger.debug(`Auto-update skipped (gate evaluation failed): ${getErrorMessage(error)}`)
+          return
+        }
+        if (!allowed) {
+          logger.debug('Auto-update skipped (disabled by configuration)')
+          return
+        }
       }
 
       const installMethod = detectInstallMethod()
