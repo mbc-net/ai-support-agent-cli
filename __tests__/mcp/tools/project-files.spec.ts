@@ -78,24 +78,28 @@ describe("project-files MCP tools", () => {
 
   describe("list_project_files", () => {
     it("一覧を JSON テキストとして返す", async () => {
-      const listProjectFiles = jest.fn().mockResolvedValue([
-        {
-          id: "id-1",
-          name: "server.pem",
-          path: "certs/server.pem",
-          type: "file",
-          size: 1024,
-          contentType: "text/plain",
-          modified: "2026-08-01T00:00:00.000Z",
-        },
-      ]);
+      const listProjectFiles = jest.fn().mockResolvedValue({
+        entries: [
+          {
+            id: "id-1",
+            name: "server.pem",
+            path: "certs/server.pem",
+            type: "file",
+            size: 1024,
+            contentType: "text/plain",
+            modified: "2026-08-01T00:00:00.000Z",
+          },
+        ],
+        truncated: false,
+        limit: 1000,
+      });
       setupTools({ listProjectFiles } as unknown as Partial<ApiClient>);
 
       const result = await listCallback({ path: "certs" });
 
       expect(listProjectFiles).toHaveBeenCalledWith("certs");
       const parsed = JSON.parse(result.content[0].text as string);
-      expect(parsed).toEqual([
+      expect(parsed.entries).toEqual([
         {
           name: "server.pem",
           path: "certs/server.pem",
@@ -104,15 +108,31 @@ describe("project-files MCP tools", () => {
           modified: "2026-08-01T00:00:00.000Z",
         },
       ]);
+      expect(parsed.truncated).toBeUndefined();
     });
 
     it("path 省略時は undefined を渡す（ルート一覧）", async () => {
-      const listProjectFiles = jest.fn().mockResolvedValue([]);
+      const listProjectFiles = jest
+        .fn()
+        .mockResolvedValue({ entries: [], truncated: false, limit: 1000 });
       setupTools({ listProjectFiles } as unknown as Partial<ApiClient>);
 
       await listCallback({});
 
       expect(listProjectFiles).toHaveBeenCalledWith(undefined);
+    });
+
+    it("上限で打ち切られた場合は LLM へ truncated と注記を返す（全件と誤認させない）", async () => {
+      const listProjectFiles = jest
+        .fn()
+        .mockResolvedValue({ entries: [], truncated: true, limit: 1000 });
+      setupTools({ listProjectFiles } as unknown as Partial<ApiClient>);
+
+      const result = await listCallback({});
+
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.truncated).toBe(true);
+      expect(parsed.note).toContain("1000");
     });
 
     it("API エラーはエラーレスポンスとして返す（例外を投げない）", async () => {

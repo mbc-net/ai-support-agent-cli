@@ -64,16 +64,24 @@ export function registerProjectFilesTools(
     },
     async ({ path: folderPath }) =>
       withMcpErrorHandling(async () => {
-        const entries = await apiClient.listProjectFiles(folderPath);
-        return mcpJsonResponse(
-          entries.map((entry) => ({
+        const result = await apiClient.listProjectFiles(folderPath);
+        return mcpJsonResponse({
+          entries: result.entries.map((entry) => ({
             name: entry.name,
             path: entry.path,
             type: entry.type,
             size: entry.size,
             modified: entry.modified,
           })),
-        );
+          // 打ち切られた場合は明示する。伝えないと LLM が「これが全件」と誤認し、
+          // 存在するファイルを「無い」と回答してしまう。
+          ...(result.truncated
+            ? {
+                truncated: true,
+                note: `Only part of this folder is shown (limit: ${result.limit}). Narrow down by specifying a subfolder.`,
+              }
+            : {}),
+        });
       }),
   );
 
