@@ -1,0 +1,10 @@
+---
+# 派生値（利用者が上書きする変数ではない）。
+#
+# `set_fact` ではなく role vars で定義する。set_fact のタスク結果には設定した値
+# そのものが載り `-vvv` で出力されるが、role vars は参照時に遅延評価されるだけで
+# タスク結果を持たない（ai_support_agent_k8s と同じ理由）。
+
+# トークン Secret の名前。tasks/main.yml が DNS-1123 ラベルとして assert する
+# （シェル本文へ展開するため、派生値であっても値の検証を省かない）。
+gitlab_runner_k8s_secret_name: "{{ gitlab_runner_k8s_name }}-token"

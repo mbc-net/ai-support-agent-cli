@@ -1,0 +1,432 @@
+---
+# github_runner_k8s : GitHub Actions のセルフホストランナーを Kubernetes クラスタへ
+# 配置する（ARC = Actions Runner Controller の runner scale set 方式）。
+#
+# 実行場所: kubectl と kubeconfig を持つノード（k3s サーバーノード等）。ホストへ
+# ランナーの tarball を展開する `github_runner` ロールとは配送経路が異なり、対象ホストに
+# ランナーのバイナリは入らない。ジョブごとに Pod が起き、終了すると消える（ephemeral）。
+#
+# ホスト常駐版との違い（PAT の寿命）:
+#   `github_runner` は PAT から短命の登録トークンを1回ミントするだけで、PAT はホストに
+#   残らない。ARC はランナーを起こすたびに登録トークンを取り直すため、PAT はクラスタ内の
+#   Secret として置いたままになる。PAT のスコープは必要最小（repo スコープなら repo、
+#   org スコープなら admin:org）に絞ること。
+#
+# 導入方式:
+#   k3s の helm-controller（HelmChart CRD）へ CR を渡し、ARC 公式チャートを
+#   インストールさせる。ARC のチャートは OCI レジストリ（ghcr.io）でのみ配布されており、
+#   HelmChart の `chart` は helm CLI の位置引数へそのまま渡るため `oci://` 参照が使える
+#   （helm 3.8+ が解釈する）。**認証が要る private レジストリには対応しない**。
+#   チャートの取得元はこのファイル内のインラインリテラルであり、ロール変数ではない —
+#   変数にするとレシピ側の task-level vars から取得元ごと差し替えでき、「公式チャートに
+#   限定する」という検証が無効化されるため。
+#
+# 適用順序:
+#   コントローラ → CRD (autoscalingrunnersets.actions.github.com) の出現 →
+#   コントローラの Deployment が Available → スケールセット、の順で進める。CRD が無い
+#   状態でスケールセットを適用すると helm がリソースを認識できず失敗するため、
+#   この順序は入れ替えてはならない。
+#
+# 秘匿値（PAT）の扱い:
+#   PAT は (a) Ansible の `environment:` キーワード、(b) shell 本文への Jinja 展開、
+#   (c) 生成マニフェスト、のいずれにも載せない。(a) は `-vvv` の EXEC トレースへ平文で
+#   出力され `no_log` でも抑止できないことが既存ロールで実測されている。代わりに 0600 の
+#   一時ファイルへ `copy` の `content` で書き（モジュール自身が値を秘匿する）、
+#   `kubectl create secret --from-file=` に読ませてから `always` ブロックで必ず削除する。
+#   HelmChart CR には Secret の「名前」しか書かない（チャートの `githubConfigSecret` は
+#   文字列を渡すと既存 Secret 参照になる。マップで渡すとチャートが値から Secret を作り、
+#   PAT が生成マニフェスト経由でノード上に平文で残ってしまう）。
+#
+# ジョブは非特権に固定する:
+#   `containerMode` を設定しない。ARC の containerMode は dind（特権コンテナ）か
+#   kubernetes（Pod / Job / Secret を操作する Role の付与）を意味し、どちらもレシピ
+#   作成者がトグル1つで取得してよい権限ではない。containerMode 未設定のとき、チャートは
+#   RoleBinding を持たない ServiceAccount を作る（チャートの kube_mode_role.yaml が
+#   "no-permission" ServiceAccount を作る動作）。docker build が必要な場合は、特権を
+#   要しないビルダー（kaniko / buildah --isolation=chroot 等）をジョブ側で使う。
+#
+# シェルインジェクション対策:
+#   ガード（src/server-setup/ansible-task-guard.ts）は include_role の変数「名」しか
+#   検証せず「値」は検証しない。したがって shell 本文へ展開する値はすべて、事前に
+#   アンカー付き正規表現の assert を通す（下記 Validate 系タスク）。
+
+- name: "github_runner_k8s : Validate the PAT is set"
+  # 値そのものは that / fail_msg に展開しない（assert に no_log を付けると案内ごと
+  # 隠れるため、隠すのではなく「値を出さない書き方」で対処する）。
+  ansible.builtin.assert:
+    that:
+      - github_runner_k8s_pat | default('') | trim | length > 0
+    fail_msg: >-
+      github_runner_k8s_pat is required. Reference an ANSIBLE# secret variable
+      from the recipe, e.g. github_runner_k8s_pat: "{{ '{{ MY_GITHUB_PAT }}' }}".
+    success_msg: "GitHub PAT is set."
+
+- name: "github_runner_k8s : Validate the GitHub URL"
+  # repo スコープ（.../OWNER/REPO）と org スコープ（.../ORG）の両方を受ける。
+  ansible.builtin.assert:
+    that:
+      - github_runner_k8s_url | default('') | trim | length > 0
+      - github_runner_k8s_url is match('^https://github\.com/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)?$')
+    fail_msg: >-
+      github_runner_k8s_url must be https://github.com/OWNER/REPO (repository
+      scope) or https://github.com/ORG (organization scope). Got:
+      {{ github_runner_k8s_url | default('(unset)') }}
+    success_msg: "GitHub URL is well-formed."
+
+- name: "github_runner_k8s : Validate Kubernetes object names are DNS-1123 labels"
+  # 名前は metadata.name・Helm リリース名・Secret 参照・`runs-on:` のラベルなど複数の
+  # 構造的位置へ展開され、かつ shell 本文にも入る。クォートでは救えないため先に落とす。
+  # github_runner_k8s_secret_name は派生値だが、shell へ展開する以上ここで検証する。
+  ansible.builtin.assert:
+    that:
+      - github_runner_k8s_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - github_runner_k8s_name | length <= 45
+      - github_runner_k8s_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - github_runner_k8s_namespace | length <= 63
+      - github_runner_k8s_controller_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - github_runner_k8s_controller_namespace | length <= 63
+      - github_runner_k8s_secret_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - github_runner_k8s_secret_name | length <= 63
+      - github_runner_k8s_controller_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+    fail_msg: >-
+      github_runner_k8s_name / _namespace / _controller_namespace must be
+      lowercase DNS-1123 labels (alphanumerics and "-", starting and ending
+      with an alphanumeric). The scale set name is additionally limited to 45
+      characters — ARC derives longer resource names from it and Kubernetes
+      rejects those past 63. Got name={{ github_runner_k8s_name }},
+      namespace={{ github_runner_k8s_namespace }},
+      controller_namespace={{ github_runner_k8s_controller_namespace }}.
+    success_msg: "Kubernetes object names are valid."
+
+- name: "github_runner_k8s : Validate the chart version is pinned"
+  ansible.builtin.assert:
+    that:
+      - github_runner_k8s_chart_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: >-
+      github_runner_k8s_chart_version must be a pinned semantic version
+      (e.g. 0.14.2). Leaving it unset would follow the latest chart and make
+      the cluster state irreproducible across re-runs. Got:
+      {{ github_runner_k8s_chart_version }}
+    success_msg: "Chart version is pinned."
+
+- name: "github_runner_k8s : Validate the autoscaling range"
+  # 型ではなく値で比較する。ANSIBLE# 変数は文字列で渡るため `x | int == x` にすると
+  # 有効な "3" が「整数でない」と誤判定される（ai_support_agent_k8s と同じ理由）。
+  ansible.builtin.assert:
+    that:
+      - github_runner_k8s_min_runners | int >= 0
+      - github_runner_k8s_min_runners | int | string == github_runner_k8s_min_runners | string
+      - github_runner_k8s_max_runners | int >= 1
+      - github_runner_k8s_max_runners | int | string == github_runner_k8s_max_runners | string
+      - github_runner_k8s_max_runners | int >= github_runner_k8s_min_runners | int
+    fail_msg: >-
+      github_runner_k8s_min_runners must be a non-negative integer,
+      github_runner_k8s_max_runners a positive integer that is not smaller than
+      min. Got min={{ github_runner_k8s_min_runners }},
+      max={{ github_runner_k8s_max_runners }}.
+    success_msg: "Autoscaling range is valid."
+
+- name: "github_runner_k8s : Validate cluster access paths"
+  # ここで検証した値のみを shell 本文へ展開してよい（ファイル冒頭のコメント参照）。
+  ansible.builtin.assert:
+    that:
+      - github_runner_k8s_kubectl is match('^/[A-Za-z0-9._/-]+$')
+      - github_runner_k8s_kubeconfig is match('^/[A-Za-z0-9._/-]+$')
+      - github_runner_k8s_manifest_dir is match('^/[A-Za-z0-9._/-]+$')
+    fail_msg: >-
+      github_runner_k8s_kubectl / _kubeconfig / _manifest_dir must be absolute
+      paths made of alphanumerics and ._/- only. Got
+      kubectl={{ github_runner_k8s_kubectl }},
+      kubeconfig={{ github_runner_k8s_kubeconfig }},
+      manifest_dir={{ github_runner_k8s_manifest_dir }}.
+    success_msg: "Cluster access paths are valid."
+
+- name: "github_runner_k8s : Check the kubectl binary"
+  ansible.builtin.stat:
+    path: "{{ github_runner_k8s_kubectl }}"
+  register: github_runner_k8s_kubectl_stat
+
+- name: "github_runner_k8s : Assert kubectl is available"
+  ansible.builtin.assert:
+    that:
+      - github_runner_k8s_kubectl_stat.stat.exists
+      - github_runner_k8s_kubectl_stat.stat.executable | default(false)
+    fail_msg: >-
+      kubectl not found or not executable at {{ github_runner_k8s_kubectl }}.
+      Run this role on a node that administers the cluster (a k3s server
+      node), or set github_runner_k8s_kubectl to the correct path.
+    success_msg: "kubectl is available."
+
+- name: "github_runner_k8s : Check the kubeconfig"
+  ansible.builtin.stat:
+    path: "{{ github_runner_k8s_kubeconfig }}"
+  register: github_runner_k8s_kubeconfig_stat
+
+- name: "github_runner_k8s : Assert the kubeconfig is readable"
+  ansible.builtin.assert:
+    that:
+      - github_runner_k8s_kubeconfig_stat.stat.exists
+    fail_msg: >-
+      kubeconfig not found at {{ github_runner_k8s_kubeconfig }}. Set
+      github_runner_k8s_kubeconfig to the cluster's kubeconfig path
+      (k3s default: /etc/rancher/k3s/k3s.yaml).
+    success_msg: "kubeconfig is present."
+
+- name: "github_runner_k8s : Assert the HelmChart CRD is available"
+  # helm-controller が無いクラスタ（素の kubeadm 等）では HelmChart CR を適用しても
+  # 誰も処理せず、apply は成功するのにランナーが永久に現れない。先に落とす。
+  ansible.builtin.command:
+    argv:
+      - "{{ github_runner_k8s_kubectl }}"
+      - "--kubeconfig={{ github_runner_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - get
+      - crd
+      - helmcharts.helm.cattle.io
+  register: github_runner_k8s_helm_crd
+  changed_when: false
+  failed_when: false
+
+- name: "github_runner_k8s : Fail when the cluster has no helm-controller"
+  ansible.builtin.fail:
+    msg: >-
+      The HelmChart CRD (helmcharts.helm.cattle.io) is not present in this
+      cluster (kubectl rc={{ github_runner_k8s_helm_crd.rc }}). This role
+      installs the ARC charts through k3s' helm-controller. Use a k3s cluster
+      (the k3s bundled role builds one), or install helm-controller.
+  when: github_runner_k8s_helm_crd.rc != 0
+
+- name: "github_runner_k8s : Ensure the manifest directory exists"
+  ansible.builtin.file:
+    path: "{{ github_runner_k8s_manifest_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+# --- ARC コントローラ（クラスタに1つ） ---
+
+- name: "github_runner_k8s : Write the ARC controller HelmChart manifest"
+  ansible.builtin.copy:
+    dest: "{{ github_runner_k8s_manifest_dir }}/{{ github_runner_k8s_controller_name }}.yaml"
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      apiVersion: helm.cattle.io/v1
+      kind: HelmChart
+      metadata:
+        name: {{ github_runner_k8s_controller_name | to_json }}
+        namespace: kube-system
+      spec:
+        chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+        version: {{ github_runner_k8s_chart_version | to_json }}
+        targetNamespace: {{ github_runner_k8s_controller_namespace | to_json }}
+        createNamespace: true
+  when: github_runner_k8s_controller_enabled | bool
+
+- name: "github_runner_k8s : Apply the ARC controller HelmChart"
+  ansible.builtin.command:
+    argv:
+      - "{{ github_runner_k8s_kubectl }}"
+      - "--kubeconfig={{ github_runner_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - apply
+      - -f
+      - "{{ github_runner_k8s_manifest_dir }}/{{ github_runner_k8s_controller_name }}.yaml"
+  register: github_runner_k8s_controller_apply
+  changed_when: "'unchanged' not in github_runner_k8s_controller_apply.stdout"
+  when: github_runner_k8s_controller_enabled | bool
+
+- name: "github_runner_k8s : Wait for the autoscalingrunnersets.actions.github.com CRD"
+  # スケールセットのチャートは AutoscalingRunnerSet を作る。CRD が登録される前に
+  # 適用すると helm が「そんな種類のリソースは無い」で失敗するため、ここで待つ。
+  # コントローラを導入しない場合（2つ目以降のスケールセット追加）も、既に入っている
+  # ことの確認として実行する。
+  ansible.builtin.command:
+    argv:
+      - "{{ github_runner_k8s_kubectl }}"
+      - "--kubeconfig={{ github_runner_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - get
+      - crd
+      - autoscalingrunnersets.actions.github.com
+  register: github_runner_k8s_arc_crd
+  until: github_runner_k8s_arc_crd.rc == 0
+  retries: 20
+  delay: 15
+  changed_when: false
+  failed_when: false
+
+- name: "github_runner_k8s : Fail when the ARC CRD never appeared"
+  ansible.builtin.fail:
+    msg: >-
+      The ARC CRD (autoscalingrunnersets.actions.github.com) did not appear
+      (kubectl rc={{ github_runner_k8s_arc_crd.rc }}). Check the helm-controller
+      job in the kube-system namespace
+      (kubectl -n kube-system logs job/helm-install-{{ github_runner_k8s_controller_name }}).
+      A common cause is that the cluster cannot pull charts from ghcr.io.
+  when: github_runner_k8s_arc_crd.rc != 0
+
+- name: "github_runner_k8s : Wait for the ARC controller to become available"
+  # コントローラ名前空間の Deployment はコントローラ本体だけなので --all でよい。
+  # チャートのリソース名やラベルはバージョンで変わるため、名前・ラベルに依存しない。
+  ansible.builtin.command:
+    argv:
+      - "{{ github_runner_k8s_kubectl }}"
+      - "--request-timeout=90s"
+      - "--kubeconfig={{ github_runner_k8s_kubeconfig }}"
+      - -n
+      - "{{ github_runner_k8s_controller_namespace }}"
+      - wait
+      - --for=condition=Available
+      - --all
+      - deployment
+      - --timeout=60s
+  register: github_runner_k8s_controller_wait
+  until: github_runner_k8s_controller_wait.rc == 0
+  retries: 10
+  delay: 15
+  changed_when: false
+
+# --- ランナースケールセット ---
+
+- name: "github_runner_k8s : Ensure the runner namespace exists"
+  # create --dry-run=client | apply は、存在しても失敗しない冪等な適用手順。
+  ansible.builtin.shell: >-
+    set -o pipefail &&
+    {{ github_runner_k8s_kubectl }} --kubeconfig={{ github_runner_k8s_kubeconfig }} --request-timeout=30s
+    create namespace {{ github_runner_k8s_namespace }}
+    --dry-run=client -o yaml
+    | {{ github_runner_k8s_kubectl }} --kubeconfig={{ github_runner_k8s_kubeconfig }} --request-timeout=30s
+    apply -f -
+  args:
+    executable: /bin/bash
+  register: github_runner_k8s_namespace_apply
+  changed_when: "'unchanged' not in github_runner_k8s_namespace_apply.stdout"
+
+- name: "github_runner_k8s : Create the GitHub PAT Secret"
+  block:
+    - name: "github_runner_k8s : Create a secure temporary file for the PAT"
+      ansible.builtin.tempfile:
+        state: file
+        prefix: github_runner_k8s_pat_
+      register: github_runner_k8s_pat_tempfile
+      changed_when: false
+
+    - name: "github_runner_k8s : Write the PAT into its temporary file"
+      # `content` は copy モジュール自身が引数仕様で no_log 指定しているため、成功・
+      # 失敗・-vvv のいずれでも値は出力されない。タスクレベルの no_log は付けない
+      # （失敗理由が "task failed" に潰れるだけで秘匿に寄与しない）。
+      #
+      # `| trim` は必須。`--from-file=` はファイルの中身がそのまま Secret の値になるため、
+      # ANSIBLE# 変数へ貼り付けた際の改行や前後の空白が1文字混ざるだけで「PAT は設定
+      # されているのに 401」という切り分けの難しい失敗になる。
+      ansible.builtin.copy:
+        content: "{{ github_runner_k8s_pat | trim }}"
+        dest: "{{ github_runner_k8s_pat_tempfile.path }}"
+        mode: '0600'
+      changed_when: true
+
+    - name: "github_runner_k8s : Apply the GitHub config Secret"
+      # PAT はファイル経由でのみ kubectl へ渡すため argv に現れず `ps` からも読めない。
+      # 中間の YAML（base64 の PAT を含む）はパイプに流すだけでファイルにも変数にも
+      # 残さない。適用結果の stdout は "secret/x created" 等で秘匿値を含まないため
+      # no_log は付けない（付けると失敗理由が消える）。
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        {{ github_runner_k8s_kubectl }} --kubeconfig={{ github_runner_k8s_kubeconfig }} --request-timeout=30s
+        -n {{ github_runner_k8s_namespace }}
+        create secret generic {{ github_runner_k8s_secret_name }}
+        --from-file=github_token={{ github_runner_k8s_pat_tempfile.path }}
+        --dry-run=client -o yaml
+        | {{ github_runner_k8s_kubectl }} --kubeconfig={{ github_runner_k8s_kubeconfig }} --request-timeout=30s
+        apply -f -
+      args:
+        executable: /bin/bash
+      register: github_runner_k8s_secret_apply
+      changed_when: "'unchanged' not in github_runner_k8s_secret_apply.stdout"
+  always:
+    - name: "github_runner_k8s : Remove the PAT temporary file"
+      ansible.builtin.file:
+        path: "{{ github_runner_k8s_pat_tempfile.path }}"
+        state: absent
+      when: github_runner_k8s_pat_tempfile.path is defined
+      changed_when: false
+
+- name: "github_runner_k8s : Write the runner scale set HelmChart manifest"
+  # 秘匿値は含まない（PAT は Secret 名の参照のみ）。監査と再適用のためノード上へ残す。
+  #
+  # `githubConfigSecret` は文字列で渡す＝既存 Secret の参照。マップ（github_token: <値>）
+  # で渡すとチャートが値から Secret を作るため、PAT がこのマニフェスト経由でノード上に
+  # 平文で残ってしまう。
+  #
+  # `containerMode` は設定しない（ファイル冒頭「ジョブは非特権に固定する」参照）。
+  #
+  # `template.spec.automountServiceAccountToken: false` はランナー Pod から Kubernetes API
+  # へ到達する経路そのものを塞ぐ多層防御（gitlab_runner_k8s の
+  # automount_service_account_token = false と同じ方針）。containerMode 未設定なので
+  # ランナーの ServiceAccount には RoleBinding が付かないが、将来の設定ミスやチャート更新で
+  # 権限が付いた場合にトークンがそのまま読める状態を残さない。チャート既定の
+  # `template.spec.containers`（runner コンテナ）は Helm のマップ深いマージで保持される
+  # （実クラスタで生成後の AutoscalingRunnerSet を確認済み）。
+  ansible.builtin.copy:
+    dest: "{{ github_runner_k8s_manifest_dir }}/{{ github_runner_k8s_name }}.yaml"
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      apiVersion: helm.cattle.io/v1
+      kind: HelmChart
+      metadata:
+        name: {{ github_runner_k8s_name | to_json }}
+        namespace: kube-system
+      spec:
+        chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+        version: {{ github_runner_k8s_chart_version | to_json }}
+        targetNamespace: {{ github_runner_k8s_namespace | to_json }}
+        createNamespace: false
+        valuesContent: |-
+          githubConfigUrl: {{ github_runner_k8s_url | to_json }}
+          githubConfigSecret: {{ github_runner_k8s_secret_name | to_json }}
+          runnerScaleSetName: {{ github_runner_k8s_name | to_json }}
+          minRunners: {{ github_runner_k8s_min_runners | int }}
+          maxRunners: {{ github_runner_k8s_max_runners | int }}
+          template:
+            spec:
+              automountServiceAccountToken: false
+  register: github_runner_k8s_manifest
+
+- name: "github_runner_k8s : Apply the runner scale set HelmChart"
+  ansible.builtin.command:
+    argv:
+      - "{{ github_runner_k8s_kubectl }}"
+      - "--kubeconfig={{ github_runner_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - apply
+      - -f
+      - "{{ github_runner_k8s_manifest_dir }}/{{ github_runner_k8s_name }}.yaml"
+  register: github_runner_k8s_apply
+  changed_when: "'unchanged' not in github_runner_k8s_apply.stdout"
+
+- name: "github_runner_k8s : Wait for the runner scale set to be registered with GitHub"
+  # AutoscalingRunnerSet が現れただけでは「GitHub 側に登録できた」ことにならない。
+  # コントローラは登録に成功するとリスナー Pod を起こすので、それを待つ。PAT が無効・
+  # スコープ不足・URL 違いはここで初めて表面化する（helm の apply は成功してしまう）。
+  ansible.builtin.command:
+    argv:
+      - "{{ github_runner_k8s_kubectl }}"
+      - "--request-timeout=90s"
+      - "--kubeconfig={{ github_runner_k8s_kubeconfig }}"
+      - -n
+      - "{{ github_runner_k8s_controller_namespace }}"
+      - wait
+      - --for=condition=Ready
+      - pod
+      - "-l=actions.github.com/scale-set-name={{ github_runner_k8s_name }}"
+      - --timeout=60s
+  register: github_runner_k8s_listener_wait
+  until: github_runner_k8s_listener_wait.rc == 0
+  retries: 10
+  delay: 15
+  changed_when: false

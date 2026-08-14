@@ -1,0 +1,55 @@
+---
+# gitlab_runner_k8s ロールの既定値。
+#
+# 秘匿値・環境固有の必須値（トークン / URL）は既定を持たせず空にする。
+# ai_support_agent_k8s / tailscale と同じ流儀で、呼び出し側が ANSIBLE# 変数から
+# 供給し、未設定は tasks/main.yml の assert が名指しで案内する。
+
+# 必須。GitLab インスタンスの URL（例: https://gitlab.com）。
+gitlab_runner_k8s_url: ''
+
+# 認証トークン（`glrt-` 接頭辞）。GitLab の UI/API で先にランナーを作成して得る
+# 現行方式。tags / run-untagged / locked はサーバー側の設定が使われるため、
+# このフローでは下の legacy 用変数を渡しても効果がない。
+gitlab_runner_k8s_auth_token: ''
+
+# 旧「登録トークン」。register 時にランナーが作られる方式で、tags / run-untagged /
+# locked がこのとき適用される。認証トークンとは排他（両方指定・両方未指定は失敗）。
+gitlab_runner_k8s_registration_token: ''
+
+# Kubernetes リソース名（DNS-1123 ラベル）。HelmChart / Helm リリース / Secret /
+# Deployment の名前になる。1クラスタに複数の GitLab インスタンス・複数グループ用の
+# ランナーを同居させる場合は include_role ごとに別名を与える。
+gitlab_runner_k8s_name: gitlab-runner
+gitlab_runner_k8s_namespace: gitlab-runner
+
+# Helm チャートのバージョン。必ずピン留めする（未指定＝最新追従にすると、再実行の
+# たびに別バージョンが入りクラスタの状態が再現できなくなる）。
+# チャートの取得元（repo / チャート名）は変数ではなく tasks/main.yml のインライン
+# リテラルである（レシピ側 vars から差し替えられないようにするため）。
+gitlab_runner_k8s_chart_version: 0.91.2
+
+# ランナーマネージャ（ジョブを起こす側）の Pod 数。
+gitlab_runner_k8s_replicas: 1
+
+# 1つのランナーマネージャが同時に走らせるジョブ数。
+gitlab_runner_k8s_concurrent: 4
+
+# ジョブの既定コンテナイメージ（.gitlab-ci.yml で `image:` を指定しない場合に使う）。
+gitlab_runner_k8s_job_image: alpine:latest
+
+# ジョブ Pod を起こす名前空間は変数にしない。ランナー本体と同じ名前空間に固定する。
+# 別名前空間へ起こすにはチャートの `rbac.clusterWideAccess` が必要になり、Role が
+# ClusterRole へ格上げされて全名前空間の Pod / Secret を操作できてしまうため。
+#
+# 以下は登録トークン方式でのみ有効（認証トークン方式ではサーバー側の設定が使われる）。
+gitlab_runner_k8s_tags: ''
+gitlab_runner_k8s_run_untagged: true
+gitlab_runner_k8s_locked: false
+
+# クラスタへの接続手段。既定は k3s の標準パス。
+gitlab_runner_k8s_kubectl: /usr/local/bin/kubectl
+gitlab_runner_k8s_kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+# 適用したマニフェストの保存先（監査・再適用用。秘匿値は含まない）。
+gitlab_runner_k8s_manifest_dir: /etc/gitlab-runner/k8s

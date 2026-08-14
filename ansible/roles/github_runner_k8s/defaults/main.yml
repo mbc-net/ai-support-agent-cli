@@ -1,0 +1,42 @@
+---
+# github_runner_k8s ロールの既定値。
+#
+# 秘匿値・環境固有の必須値（PAT / URL）は既定を持たせず空にする。
+# ai_support_agent_k8s / tailscale と同じ流儀で、呼び出し側が ANSIBLE# 変数から
+# 供給し、未設定は tasks/main.yml の assert が名指しで案内する。
+
+# 必須。ランナーを紐づける先。
+#   リポジトリスコープ: https://github.com/OWNER/REPO
+#   Organization スコープ: https://github.com/ORG
+github_runner_k8s_url: ''
+
+# 必須。Personal Access Token。Secret のキー `github_token` として保存する。
+# ホスト常駐の github_runner ロールと違い、登録トークンの発行は ARC の
+# コントローラが継続的に行うため、PAT はクラスタ内に置いたままになる。
+github_runner_k8s_pat: ''
+
+# Kubernetes リソース名（DNS-1123 ラベル）。ランナースケールセット名になり、
+# ワークフローの `runs-on:` に書くラベルと一致する。
+github_runner_k8s_name: arc-runner-set
+github_runner_k8s_namespace: arc-runners
+
+# ARC コントローラ（クラスタに1つ）。2つ目以降のスケールセットを追加するときは
+# false にする（同名で再適用しても冪等だが、待機のぶん実行時間が延びる）。
+github_runner_k8s_controller_enabled: true
+github_runner_k8s_controller_namespace: arc-systems
+
+# ARC の Helm チャートバージョン。コントローラとスケールセットで共通のバージョンを
+# 使う（ARC はこの2つを同一バージョンで運用することを前提にしている）。必ずピン留めする。
+# チャートの取得元（OCI 参照）は変数ではなく tasks/main.yml のインラインリテラルである。
+github_runner_k8s_chart_version: 0.14.2
+
+# オートスケール範囲。min=0 ならジョブが無い間ランナー Pod は起動しない。
+github_runner_k8s_min_runners: 0
+github_runner_k8s_max_runners: 3
+
+# クラスタへの接続手段。既定は k3s の標準パス。
+github_runner_k8s_kubectl: /usr/local/bin/kubectl
+github_runner_k8s_kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+# 適用したマニフェストの保存先（監査・再適用用。秘匿値は含まない）。
+github_runner_k8s_manifest_dir: /etc/github-runner/k8s
