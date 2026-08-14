@@ -576,4 +576,81 @@ describe('shared-chat-utils', () => {
       expect(notice).toContain('sales, vip')
     })
   })
+
+  // 本番障害の回帰テスト（2026-08-14）。
+  // done / error は Web 側の「応答待ち」を解除する唯一のトリガーであり、
+  // 届かないと会話が永久に完了しない（応答生成と LLM 課金だけが起きる）。
+  // 従来はログを出すだけで呼び出し元へ一切伝わらず、コマンド結果も success の
+  // ままだったため、サーバー側も異常に気づけなかった。
+  describe('createChunkSender: 終端チャンクの配信失敗', () => {
+    const failingClient = () => ({
+      submitChatChunk: jest.fn().mockRejectedValue(new Error('Network error')),
+    }) as unknown as ApiClient
+
+    it('done の送信に失敗したら hasTerminalDeliveryFailure が true になる', async () => {
+      const sender = createChunkSender('cmd-done-fail', failingClient(), 'agent-1', 'test')
+
+      expect(sender.hasTerminalDeliveryFailure()).toBe(false)
+      await sender.sendChunk('done', '{}')
+
+      expect(sender.hasTerminalDeliveryFailure()).toBe(true)
+    })
+
+    it('error の送信に失敗したら hasTerminalDeliveryFailure が true になる', async () => {
+      const sender = createChunkSender('cmd-error-fail', failingClient(), 'agent-1', 'test')
+
+      await sender.sendChunk('error', 'boom')
+
+      expect(sender.hasTerminalDeliveryFailure()).toBe(true)
+    })
+
+    it('delta の送信失敗では true にしない（部分欠落は会話を固着させないため従来どおり継続する）', async () => {
+      const sender = createChunkSender('cmd-delta-fail', failingClient(), 'agent-1', 'test')
+
+      await sender.sendChunk('delta', 'Hello')
+
+      expect(sender.hasTerminalDeliveryFailure()).toBe(false)
+    })
+
+    it('送信成功時は false のままである', async () => {
+      const sender = createChunkSender('cmd-ok', mockClient, 'agent-1', 'test')
+
+      await sender.sendChunk('done', '{}')
+
+      expect(sender.hasTerminalDeliveryFailure()).toBe(false)
+    })
+
+    it('バッチ有効時（本番既定）でも done の送信失敗を検知する', async () => {
+      // 本番既定はバッチ有効（resolveChunkBatchConfig は env 未設定で enabled）。
+      // 非バッチ経路だけを検証していると、本番で通る経路の穴に気づけない。
+      const sender = createChunkSender('cmd-batch-fail', failingClient(), 'agent-1', 'test', {
+        batch: { enabled: true, windowMs: 10, maxBytes: 1024 },
+      })
+
+      await sender.sendChunk('delta', 'partial')
+      await sender.sendChunk('done', '{}')
+
+      expect(sender.hasTerminalDeliveryFailure()).toBe(true)
+    })
+
+    it('バッチ有効時に delta だけが失敗しても true にしない', async () => {
+      const sender = createChunkSender('cmd-batch-delta', failingClient(), 'agent-1', 'test', {
+        batch: { enabled: true, windowMs: 10, maxBytes: 1 },
+      })
+
+      // maxBytes=1 なので即 flush される（＝delta の rawSend が失敗する）
+      await sender.sendChunk('delta', 'partial')
+
+      expect(sender.hasTerminalDeliveryFailure()).toBe(false)
+    })
+
+    it('送信失敗のログに commandId を含める（並行会話から該当コマンドを特定するため）', async () => {
+      const { logger } = require('../../src/logger')
+      const sender = createChunkSender('cmd-log-id', failingClient(), 'agent-1', 'test')
+
+      await sender.sendChunk('done', '{}')
+
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('cmd-log-id'))
+    })
+  })
 })

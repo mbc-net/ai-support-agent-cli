@@ -378,3 +378,23 @@ export interface CachedProjectConfig {
     cloudwatch?: CloudwatchConfig
   }
 }
+
+/**
+ * プロジェクト共有ファイル（S3 上の永続ストレージ）のエントリ。
+ *
+ * エージェント実行マシンのローカルFS（file_list コマンド）とは別物で、
+ * プロジェクト共通の資産を指す。エージェントからは読み取りのみ可能。
+ */
+export interface ProjectSharedFileEntry {
+  id: string
+  /** 名前（パスの最終セグメント） */
+  name: string
+  /** 共有フォルダのルートからの相対パス */
+  path: string
+  type: 'file' | 'directory'
+  /** バイト数。フォルダは 0 */
+  size?: number
+  contentType?: string
+  /** 最終更新日時（ISO8601） */
+  modified: string
+}

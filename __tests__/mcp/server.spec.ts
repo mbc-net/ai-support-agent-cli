@@ -54,17 +54,20 @@ describe('MCP Server', () => {
       const mockClient = {} as ApiClient
       const server = createMcpServer(mockClient, 'TEST_01')
       expect(server).toBeDefined()
-      // 23 tools: db_query, get_db_schemas, get_credentials, file_upload, get_project_info, read_conversation_file,
+      // 25 tools: db_query, get_db_schemas, get_credentials, file_upload, get_project_info, read_conversation_file,
+      // list_project_files, read_project_file,
       // send_slack_message, send_slack_file, trigger_alarm, read_slack_thread, trigger_e2e_test,
       // update_system_knowledge,
       // browser_navigate, browser_close, browser_click, browser_fill, browser_get_text, browser_login,
       // browser_extract, browser_set_variable, browser_get_variable, browser_list_variables,
       // report_test_step
-      expect(server.tool).toHaveBeenCalledTimes(23)
+      expect(server.tool).toHaveBeenCalledTimes(25)
       expect((server.tool as jest.Mock).mock.calls.map((call) => call[0])).toContain('read_slack_thread')
       expect((server.tool as jest.Mock).mock.calls.map((call) => call[0])).toContain('trigger_e2e_test')
       expect((server.tool as jest.Mock).mock.calls.map((call) => call[0])).toContain('send_slack_file')
       expect((server.tool as jest.Mock).mock.calls.map((call) => call[0])).toContain('update_system_knowledge')
+      expect((server.tool as jest.Mock).mock.calls.map((call) => call[0])).toContain('list_project_files')
+      expect((server.tool as jest.Mock).mock.calls.map((call) => call[0])).toContain('read_project_file')
     })
   })
 

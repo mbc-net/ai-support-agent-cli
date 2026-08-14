@@ -48,19 +48,58 @@ describe('ai_support_agent_k8s bundled role', () => {
     return loadYaml('tasks', 'main.yml') as Task[]
   }
 
-  /** ネストした block/rescue/always も含めて全タスクを平坦化する。 */
-  function allTasks(): Task[] {
+  function flatten(list: Task[]): Task[] {
     const out: Task[] = []
-    const walk = (list: Task[]) => {
-      for (const task of list) {
+    const walk = (items: Task[]) => {
+      for (const task of items) {
         out.push(task)
         for (const key of ['block', 'rescue', 'always']) {
           if (Array.isArray(task[key])) walk(task[key])
         }
       }
     }
-    walk(tasks())
+    walk(list)
     return out
+  }
+
+  /**
+   * ネストした block/rescue/always も含めて、ロール全体のタスクを平坦化する。
+   *
+   * プロジェクト単位のタスク（Secret 作成・マニフェスト生成・apply・rollout）は
+   * tasks/project.yml に分離され、main.yml からは `include_tasks` + `loop` で
+   * 呼ばれる。ロールの振る舞いに関する検証は、どちらのファイルにあるかに関係なく
+   * 成立すべきなので両方を対象にする。「main.yml 側にあること」自体を主張したい
+   * テストは mainTasks() を使う。
+   */
+  function allTasks(): Task[] {
+    return [...flatten(tasks()), ...flatten(loadYaml('tasks', 'project.yml') as Task[])]
+  }
+
+  /** main.yml のみ（クラスタ単位の準備がプロジェクト毎に繰り返されないことの検証用）。 */
+  function mainTasks(): Task[] {
+    return flatten(tasks())
+  }
+
+  /** ロール全体のタスク定義を生テキストとして連結する。 */
+  function readRoleRaw(): string {
+    return readRaw('tasks', 'main.yml') + '\n' + readRaw('tasks', 'project.yml')
+  }
+
+  /**
+   * トークンを一時ファイルへ書き出す copy タスク。
+   *
+   * 複数プロジェクト対応でトークンはロール変数ではなく、ループ中のエントリ
+   * （`item.token`）から取る。単数指定も vars/main.yml で1要素のリストへ
+   * 正規化されるため、参照はこの1経路に統一されている。
+   */
+  function tokenWriterTask(): Task | undefined {
+    return allTasks().find((t) => {
+      const copy = t['ansible.builtin.copy']
+      return (
+        typeof copy?.content === 'string' &&
+        /item\.token|ai_support_agent_k8s_token(?![_A-Za-z0-9])/.test(copy.content)
+      )
+    })
   }
 
   /** StatefulSet マニフェストを書き出す copy タスクの `content` を取り出す。 */
@@ -150,7 +189,7 @@ describe('ai_support_agent_k8s bundled role', () => {
     })
 
     it('必須変数（token / project）の未設定を assert で検出する', () => {
-      const raw = readRaw('tasks', 'main.yml')
+      const raw = readRoleRaw()
       expect(raw).toContain('ai_support_agent_k8s_token')
       expect(raw).toContain('ai_support_agent_k8s_project')
       const asserts = allTasks().filter((t) => t['ansible.builtin.assert'])
@@ -167,12 +206,23 @@ describe('ai_support_agent_k8s bundled role', () => {
     })
 
     it('kubectl / kubeconfig の不在を専用の assert で案内する', () => {
-      const raw = readRaw('tasks', 'main.yml')
+      const raw = readRoleRaw()
       expect(raw).toContain('ansible.builtin.stat')
       expect(raw).toMatch(/kubectl/)
       expect(raw).toMatch(/kubeconfig/)
     })
   })
+
+  /**
+   * トークン「値」への参照。一時ファイルのパスを指す
+   * `ai_support_agent_k8s_token_tempfile.path` は秘匿値ではなく正しい受け渡し
+   * 経路そのものなので、識別子の境界で除外する。
+   *
+   * `item.token` を含めるのは必須である。複数プロジェクト対応でトークンの参照は
+   * ロール変数からループのエントリへ移った。旧変数名だけを見る検査は、新しい
+   * 参照経路で shell 本文や environment へ展開しても何も検出しない。
+   */
+  const TOKEN_VALUE_REF = /item\.token(?![_A-Za-z0-9])|ai_support_agent_k8s_token(?![_A-Za-z0-9])/
 
   describe('秘匿トークンの取り回し', () => {
     it('トークンを Ansible の environment: キーワードで渡さない', () => {
@@ -181,7 +231,9 @@ describe('ai_support_agent_k8s bundled role', () => {
       for (const task of allTasks()) {
         const env = task.environment
         if (!env) continue
-        expect(JSON.stringify(env)).not.toContain('ai_support_agent_k8s_token')
+        // 複数プロジェクト対応でトークンの参照元は `item.token` になった。
+        // 旧変数名だけを見ていると、新しい参照経路での漏洩を素通りさせる。
+        expect(JSON.stringify(env)).not.toMatch(TOKEN_VALUE_REF)
       }
     })
 
@@ -189,7 +241,6 @@ describe('ai_support_agent_k8s bundled role', () => {
       // 検出したいのはトークン「値」の展開のみ。一時ファイルのパスを指す
       // `ai_support_agent_k8s_token_tempfile.path` は秘匿値ではなく、むしろ
       // 正しい受け渡し経路そのものなので、識別子の境界で区別する。
-      const TOKEN_VALUE_REF = /ai_support_agent_k8s_token(?![_A-Za-z0-9])/
       for (const task of allTasks()) {
         const shell = task['ansible.builtin.shell']
         const command = task['ansible.builtin.command']
@@ -199,13 +250,7 @@ describe('ai_support_agent_k8s bundled role', () => {
     })
 
     it('トークンは copy の content で 0600 の一時ファイルへ書き出される', () => {
-      const writer = allTasks().find((t) => {
-        const copy = t['ansible.builtin.copy']
-        return (
-          typeof copy?.content === 'string' &&
-          copy.content.includes('ai_support_agent_k8s_token')
-        )
-      })
+      const writer = tokenWriterTask()
       expect(writer).toBeDefined()
       expect(String(writer!['ansible.builtin.copy'].mode)).toBe('0600')
       // 非ループの copy は content をモジュール自身が秘匿するため no_log を付けない
@@ -218,18 +263,12 @@ describe('ai_support_agent_k8s bundled role', () => {
       // 改行を落とすが、こちらは `--from-file=` でファイルの中身がそのまま Secret の
       // 値になる。ANSIBLE# 変数の入力に改行が1文字混ざるだけで、エージェントは
       // 「トークンは存在するのに 401」という切り分けの難しい失敗をする。
-      const writer = allTasks().find((t) => {
-        const copy = t['ansible.builtin.copy']
-        return (
-          typeof copy?.content === 'string' &&
-          copy.content.includes('ai_support_agent_k8s_token')
-        )
-      })
+      const writer = tokenWriterTask()
       expect(writer!['ansible.builtin.copy'].content).toMatch(/\|\s*trim\s*\}\}/)
     })
 
     it('一時ファイルは失敗時も必ず削除される（block/always）', () => {
-      const raw = readRaw('tasks', 'main.yml')
+      const raw = readRoleRaw()
       expect(raw).toContain('always:')
       const removal = allTasks().find(
         (t) => t['ansible.builtin.file']?.state === 'absent',
@@ -238,7 +277,7 @@ describe('ai_support_agent_k8s bundled role', () => {
     })
 
     it('Secret は create --dry-run=client | apply で冪等に適用する', () => {
-      const raw = readRaw('tasks', 'main.yml')
+      const raw = readRoleRaw()
       expect(raw).toContain('create secret generic')
       expect(raw).toContain('--dry-run=client')
       expect(raw).toContain('--from-file=')
@@ -363,7 +402,7 @@ describe('ai_support_agent_k8s bundled role', () => {
     it('レプリカ数の検証は型ではなく値で比較する（ANSIBLE#変数由来の "3" を誤って弾かない）', () => {
       // ANSIBLE# 変数は文字列で渡るため、`x | int == x` のような型込みの比較にすると
       // 有効な "3" が「must be a positive integer」で拒否される。
-      const raw = readRaw('tasks', 'main.yml')
+      const raw = readRoleRaw()
       expect(raw).not.toMatch(/ai_support_agent_k8s_replicas \| int == ai_support_agent_k8s_replicas\s*$/m)
       expect(raw).toMatch(/ai_support_agent_k8s_replicas \| int \| string ==/)
     })
@@ -372,7 +411,7 @@ describe('ai_support_agent_k8s bundled role', () => {
       // Secret を更新しても、起動済みコンテナの env（secretKeyRef 由来）は更新されず、
       // StatefulSet の Pod template も変化しないため rollout は走らない。失効した
       // トークンを差し替えて再実行しても、Pod は旧トークンで接続し続ける。
-      const raw = readRaw('tasks', 'main.yml')
+      const raw = readRoleRaw()
       expect(raw).toContain('rollout')
       expect(raw).toContain('restart')
       const restart = allTasks().find((t) => {
@@ -468,7 +507,7 @@ describe('ai_support_agent_k8s bundled role', () => {
     it('イメージの許可リストは assert 内のインラインリテラルで、role 変数にしない', () => {
       // 許可リストを role 変数にすると、レシピの task-level vars から許可リストごと
       // 上書きされて検証が無効化される（CLAUDE.md のセキュリティ規約）。
-      const raw = readRaw('tasks', 'main.yml')
+      const raw = readRoleRaw()
       expect(raw).toContain('ghcr.io/mbc-net/ai-support-agent-cli')
       const defaults = loadYaml('defaults', 'main.yml') as Record<string, unknown>
       expect(defaults.ai_support_agent_k8s_image_allowlist).toBeUndefined()
@@ -476,13 +515,149 @@ describe('ai_support_agent_k8s bundled role', () => {
     })
 
     it('namespace / name を DNS-1123 ラベルとして検証する', () => {
-      const raw = readRaw('tasks', 'main.yml')
+      const raw = readRoleRaw()
       expect(raw).toContain('a-z0-9')
     })
 
     it('project は tenantCode/projectCode の形を検証する', () => {
-      const raw = readRaw('tasks', 'main.yml')
+      const raw = readRoleRaw()
       expect(raw).toMatch(/ai_support_agent_k8s_project\b[\s\S]{0,400}match/)
+    })
+  })
+
+  /**
+   * 複数プロジェクトのデプロイ（1プロジェクト = 1 StatefulSet）。
+   *
+   * エージェントの `agentId` はトークンの `tokenId` から導出される
+   * （src/agent-runner.ts の resolveAgentId）。したがって複数プロジェクトを
+   * 1つのトークンで動かすと agentId が衝突し、サーバー側の TOFU バインディングが
+   * "Agent ID does not match the token binding" で接続を拒否する。
+   * **プロジェクトごとに独立したトークン**を持つことが構造的な要件であり、
+   * Secret も StatefulSet もプロジェクト単位に分ける。
+   */
+  describe('複数プロジェクト（ai_support_agent_k8s_projects）', () => {
+    function projectTasks(): Task[] {
+      return loadYaml('tasks', 'project.yml') as Task[]
+    }
+
+    /** project.yml 側も block/always を平坦化する。 */
+    function allProjectTasks(): Task[] {
+      const out: Task[] = []
+      const walk = (list: Task[]) => {
+        for (const task of list) {
+          out.push(task)
+          for (const key of ['block', 'rescue', 'always']) {
+            if (Array.isArray(task[key])) walk(task[key])
+          }
+        }
+      }
+      walk(projectTasks())
+      return out
+    }
+
+    it('defaults は複数プロジェクトのリストを空で定義する', () => {
+      const defaults = loadYaml('defaults', 'main.yml') as Record<string, unknown>
+      expect(defaults.ai_support_agent_k8s_projects).toEqual([])
+    })
+
+    it('単数変数と複数リストの同時指定を assert で弾く', () => {
+      // 優先順位を設けて一方を黙って無視すると、どちらの設定が効いているのか
+      // 実行ログからも分からなくなる（CLAUDE.md のフォールバック禁止ルール）。
+      // 明示的に失敗させ、利用者にどちらか一方を選ばせる。
+      const raw = readRaw('tasks', 'main.yml')
+      expect(raw).toMatch(
+        /ai_support_agent_k8s_projects[\s\S]{0,600}ai_support_agent_k8s_project\b[\s\S]{0,600}(assert|fail_msg)/,
+      )
+      const asserts = allTasks().filter((t) => t['ansible.builtin.assert'])
+      const both = asserts.find((t) =>
+        String(t['ansible.builtin.assert']?.fail_msg ?? '').includes(
+          'mutually exclusive',
+        ),
+      )
+      expect(both).toBeDefined()
+    })
+
+    it('プロジェクト単位のタスクを project.yml へ分離し、loop で回す', () => {
+      const includes = allTasks().filter((t) => t['ansible.builtin.include_tasks'])
+      const perProject = includes.find((t) => {
+        const inc = t['ansible.builtin.include_tasks']
+        const file = typeof inc === 'string' ? inc : inc?.file
+        return String(file ?? '').includes('project.yml')
+      })
+      expect(perProject).toBeDefined()
+      expect(perProject!.loop).toBeDefined()
+    })
+
+    it('loop_control.label でトークンを実行ログに出力しない', () => {
+      // include_tasks を loop で回すと、Ansible は既定で item 全体を
+      // "item={...}" として表示する。エントリにはトークンが含まれるため、
+      // label を指定しないと平文で実行ログへ出る。
+      //
+      // ここで no_log を使わないのは意図的である。no_log はタスクの失敗理由まで
+      // 潰してしまい、どのプロジェクトで何が起きたか分からなくなる。label なら
+      // 「どのプロジェクトか」を残したままトークンだけを隠せる。
+      const includes = allTasks().filter((t) => t['ansible.builtin.include_tasks'])
+      const perProject = includes.find((t) => {
+        const inc = t['ansible.builtin.include_tasks']
+        const file = typeof inc === 'string' ? inc : inc?.file
+        return String(file ?? '').includes('project.yml')
+      })
+      expect(perProject).toBeDefined()
+      const label = perProject!.loop_control?.label
+      expect(typeof label).toBe('string')
+      expect(label).not.toContain('token')
+      expect(label).toMatch(/item\./)
+    })
+
+    it('エントリごとに project / name / token の必須と形式を検証する', () => {
+      const raw = readRaw('tasks', 'project.yml')
+      // tenantCode/projectCode 形式
+      expect(raw).toMatch(/item\.project[\s\S]{0,400}match/)
+      // DNS-1123 ラベル（projectCode は MBC_01 のようにアンダースコアを含むため、
+      // 名前をコードから機械的に導出できない。エントリで明示させる）
+      expect(raw).toContain('item.name')
+      expect(raw).toMatch(/a-z0-9/)
+      expect(raw).toContain('item.token')
+    })
+
+    it('StatefulSet 名の重複をリスト全体で検出する', () => {
+      // 同じ name を2つのエントリに与えると、後から適用した StatefulSet が
+      // 先のものを黙って上書きし、片方のプロジェクトが消える。
+      const raw = readRaw('tasks', 'main.yml')
+      expect(raw).toMatch(/name[\s\S]{0,200}unique/)
+    })
+
+    it('Secret・マニフェスト・apply・rollout をプロジェクト単位で行う', () => {
+      const names = allProjectTasks().map((t) => String(t.name ?? ''))
+      expect(names.join('\n')).toMatch(/Secret/)
+      expect(names.join('\n')).toMatch(/StatefulSet/)
+      expect(names.join('\n')).toMatch(/rollout|ready|Ready/i)
+      // 生成マニフェストはエントリ固有の名前・レプリカ数を使う
+      const copyTask = allProjectTasks().find((t) => {
+        const copy = t['ansible.builtin.copy']
+        return (
+          typeof copy?.content === 'string' && copy.content.includes('StatefulSet')
+        )
+      })
+      expect(copyTask).toBeDefined()
+      const content = copyTask!['ansible.builtin.copy'].content as string
+      expect(content).toContain('item.name')
+      expect(content).toContain('item.replicas')
+      expect(content).toContain('item.project')
+    })
+
+    it('クラスタ共通の準備は main.yml 側で1度だけ行う', () => {
+      // kubectl / kubeconfig / namespace / マニフェスト保存先はクラスタ単位の
+      // 前提であり、プロジェクトごとに繰り返す必要がない。project.yml へ移すと
+      // エントリ数だけ同じ検証が走り、失敗時の出力も重複する。
+      const mainNames = mainTasks().map((t) => String(t.name ?? '')).join('\n')
+      expect(mainNames).toMatch(/kubectl/i)
+      expect(mainNames).toMatch(/kubeconfig/i)
+      expect(mainNames).toMatch(/namespace/i)
+      const projectNames = allProjectTasks()
+        .map((t) => String(t.name ?? ''))
+        .join('\n')
+      expect(projectNames).not.toMatch(/Assert kubectl is available/i)
     })
   })
 })

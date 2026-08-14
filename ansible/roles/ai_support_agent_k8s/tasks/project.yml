@@ -1,0 +1,251 @@
+---
+# ai_support_agent_k8s : プロジェクト1件分のデプロイ（Secret + StatefulSet）。
+#
+# main.yml から `include_tasks` + `loop` で1エントリずつ呼ばれる。`item` は
+# ai_support_agent_k8s_project_specs の1要素（project / name / token と、任意の
+# replicas / persistence / storage_class / storage_size）。単数指定の場合も
+# vars/main.yml が1要素のリストへ正規化するため、経路はここに一本化される。
+#
+# 呼び出し側は loop_control.label を必ず指定すること。既定では Ansible が item
+# 全体を "item={...}" として表示し、トークンが平文で実行ログへ出る。no_log では
+# なく label を使うのは、no_log がタスクの失敗理由まで潰し「どのプロジェクトで
+# 何が失敗したか」が分からなくなるため。label なら対象を残したまま値だけ隠せる。
+#
+# このファイル内で新たに `loop` を使ってはならない。`item` が上書きされ、別の
+# プロジェクトのトークンやマニフェストが混線する。
+
+- name: "ai_support_agent_k8s : Validate the project entry"
+  # プロジェクトごとに独立したトークンが要る。agentId はトークンの tokenId から
+  # 導出される（src/agent-runner.ts の resolveAgentId）ため、複数プロジェクトで
+  # 1つのトークンを共有すると agentId が衝突し、サーバー側の TOFU バインディングが
+  # "Agent ID does not match the token binding" で接続を拒否する。
+  #
+  # name をエントリで必須にするのは、projectCode が MBC_01 のようにアンダースコアを
+  # 含み、DNS-1123 ラベルへ機械的に変換すると別コードが同じ名前へ衝突しうるため。
+  ansible.builtin.assert:
+    that:
+      - item.project | default('') | length > 0
+      - item.project is match('^[a-z0-9_]+/[A-Za-z0-9_]+$')
+      - item.token | default('') | trim | length > 0
+      - item.name | default('') | length > 0
+      - item.name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - item.name | length <= 63
+    fail_msg: >-
+      Invalid entry in ai_support_agent_k8s_projects. Each entry needs
+      "project" as "<tenantCode>/<projectCode>" (e.g. mbc/MBC_01), a non-empty
+      "token" dedicated to that project, and a "name" that is a lowercase
+      DNS-1123 label (max 63 chars) used as the StatefulSet and Secret name.
+      Got project={{ item.project | default('(unset)') }},
+      name={{ item.name | default('(unset)') }},
+      token={{ 'set' if (item.token | default('') | trim | length > 0) else '(unset)' }}.
+    success_msg: "Project entry {{ item.name }} is well-formed."
+
+- name: "ai_support_agent_k8s : Validate the per-project replica count and storage"
+  # 値で比較する理由は main.yml のトップレベル検証と同じ（ANSIBLE# 変数は文字列で
+  # 渡るため、型比較にすると有効な "3" を弾いてしまう）。
+  ansible.builtin.assert:
+    that:
+      - (item.replicas | default(ai_support_agent_k8s_replicas)) | int >= 1
+      - >-
+        (item.replicas | default(ai_support_agent_k8s_replicas)) | int | string
+        == (item.replicas | default(ai_support_agent_k8s_replicas)) | string
+      - (item.storage_class | default(ai_support_agent_k8s_storage_class)) is match('^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$')
+      - (item.storage_size | default(ai_support_agent_k8s_storage_size)) is match('^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$')
+    fail_msg: >-
+      Invalid replicas/storage for project {{ item.name }}. replicas must be a
+      positive integer, storage_class a DNS-1123 name, storage_size a
+      Kubernetes quantity (e.g. 20Gi). Got
+      replicas={{ item.replicas | default(ai_support_agent_k8s_replicas) }},
+      storage_class={{ item.storage_class | default(ai_support_agent_k8s_storage_class) }},
+      storage_size={{ item.storage_size | default(ai_support_agent_k8s_storage_size) }}.
+    success_msg: "Replica count and storage for {{ item.name }} are valid."
+
+# トークンの一時ファイルは、途中のタスクが失敗しても必ず消す。
+- name: "ai_support_agent_k8s : Create the agent token Secret"
+  block:
+    - name: "ai_support_agent_k8s : Create a secure temporary file for the token"
+      ansible.builtin.tempfile:
+        state: file
+        prefix: ai_support_agent_k8s_token_
+      register: ai_support_agent_k8s_token_tempfile
+      changed_when: false
+
+    - name: "ai_support_agent_k8s : Write the token into the temporary file"
+      # `content` は copy モジュール自身が引数仕様で no_log 指定しているため、
+      # 成功・失敗・-vvv のいずれでも値は出力されない。タスクレベルの no_log は
+      # 付けない（失敗理由が "task failed" に潰れるだけで秘匿に寄与しない）。
+      #
+      # `| trim` は必須。ホスト常駐の ai_support_agent ロールは `$(cat file)` で
+      # 読むためシェルが末尾改行を落とすが、こちらは `--from-file=` でファイルの
+      # 中身がそのまま Secret の値になる。ANSIBLE# 変数へ貼り付けた際の改行や
+      # 前後の空白が1文字混ざるだけで、「トークンは設定されているのに 401」という
+      # 切り分けの難しい失敗になる。
+      ansible.builtin.copy:
+        content: "{{ item.token | trim }}"
+        dest: "{{ ai_support_agent_k8s_token_tempfile.path }}"
+        mode: '0600'
+      changed_when: true
+
+    - name: "ai_support_agent_k8s : Apply the token Secret"
+      # トークンはファイル経由でのみ kubectl へ渡す。argv には現れないため
+      # `ps` やプロセスリストからも読めない。--dry-run=client | apply で冪等。
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        {{ ai_support_agent_k8s_kubectl }} --kubeconfig={{ ai_support_agent_k8s_kubeconfig }} --request-timeout=30s
+        -n {{ ai_support_agent_k8s_namespace }}
+        create secret generic {{ item.name }}-token
+        --from-file=AI_SUPPORT_AGENT_TOKEN={{ ai_support_agent_k8s_token_tempfile.path }}
+        --dry-run=client -o yaml
+        | {{ ai_support_agent_k8s_kubectl }} --kubeconfig={{ ai_support_agent_k8s_kubeconfig }} --request-timeout=30s
+        apply -f -
+      args:
+        executable: /bin/bash
+      register: ai_support_agent_k8s_secret_apply
+      # kubectl apply は "created" / "configured" / "unchanged" を返す。常に changed に
+      # すると冪等でなくなるうえ、後段のローテーション判定にも使えなくなる。
+      changed_when: "'unchanged' not in ai_support_agent_k8s_secret_apply.stdout"
+  always:
+    - name: "ai_support_agent_k8s : Remove the token temporary file"
+      ansible.builtin.file:
+        path: "{{ ai_support_agent_k8s_token_tempfile.path }}"
+        state: absent
+      when: ai_support_agent_k8s_token_tempfile.path is defined
+      changed_when: false
+
+- name: "ai_support_agent_k8s : Write the StatefulSet manifest"
+  # 秘匿値は含まない（トークンは secretKeyRef 参照のみ）。監査と再適用のために
+  # ノード上へ残す。
+  ansible.builtin.copy:
+    dest: "{{ ai_support_agent_k8s_manifest_dir }}/{{ item.name }}.yaml"
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: {{ item.name | to_json }}
+        namespace: {{ ai_support_agent_k8s_namespace | to_json }}
+        labels:
+          app: {{ item.name | to_json }}
+      spec:
+        replicas: {{ (item.replicas | default(ai_support_agent_k8s_replicas)) | int }}
+        serviceName: {{ item.name | to_json }}
+        selector:
+          matchLabels:
+            app: {{ item.name | to_json }}
+        template:
+          metadata:
+            labels:
+              app: {{ item.name | to_json }}
+          spec:
+            # このエージェントは Kubernetes API を使わない。default ServiceAccount に
+            # RoleBinding が付いているクラスタでは、エージェントが実行する任意コマンドや
+            # 侵害された依存パッケージからクラスタ権限を悪用できてしまうため、
+            # トークンを自動マウントさせない。
+            automountServiceAccountToken: false
+            containers:
+              - name: agent
+                image: {{ ai_support_agent_k8s_image | to_json }}
+                # 公式イメージは ENTRYPOINT ["/entrypoint.sh"] のみ（CMD なし）で、
+                # entrypoint.sh は末尾で `exec "$@"` する。したがって args の先頭は
+                # **実行ファイル名**でなければならない。サブコマンド名から始めると
+                # `exec start --project ...` となり、`start` という実行ファイルは
+                # 存在しないため exit 127 で CrashLoopBackOff になる。
+                args:
+                  - ai-support-agent
+                  - start
+                  # Commander の negated option は未指定時に opts.docker=true になるため、
+                  # これが無いとコンテナの中でさらに runInDocker() へ入り、Docker ソケット
+                  # 不在で起動に失敗する。agent CLI の CONTAINER_START_ARGV と同じ契約。
+                  - --no-docker
+                  - --project
+                  - {{ item.project | to_json }}
+                env:
+                  - name: AI_SUPPORT_AGENT_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: {{ (item.name ~ '-token') | to_json }}
+                        key: AI_SUPPORT_AGENT_TOKEN
+                  - name: AI_SUPPORT_AGENT_API_URL
+                    value: {{ ai_support_agent_k8s_api_url | to_json }}
+                  - name: AI_SUPPORT_AGENT_INSTANCE_ID
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.name
+                  - name: AI_SUPPORT_AGENT_CONFIG_DIR
+                    value: {{ ai_support_agent_k8s_data_dir | to_json }}
+      {% if (item.persistence | default(ai_support_agent_k8s_persistence)) | bool %}
+                volumeMounts:
+                  - name: data
+                    mountPath: {{ ai_support_agent_k8s_data_dir | to_json }}
+      {% endif %}
+      {% if (item.persistence | default(ai_support_agent_k8s_persistence)) | bool %}
+        volumeClaimTemplates:
+          - metadata:
+              name: data
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              storageClassName: {{ (item.storage_class | default(ai_support_agent_k8s_storage_class)) | to_json }}
+              resources:
+                requests:
+                  storage: {{ (item.storage_size | default(ai_support_agent_k8s_storage_size)) | to_json }}
+      {% endif %}
+  register: ai_support_agent_k8s_manifest
+
+- name: "ai_support_agent_k8s : Apply the StatefulSet"
+  ansible.builtin.command:
+    argv:
+      - "{{ ai_support_agent_k8s_kubectl }}"
+      - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - apply
+      - -f
+      - "{{ ai_support_agent_k8s_manifest_dir }}/{{ item.name }}.yaml"
+  register: ai_support_agent_k8s_apply
+  changed_when: "'unchanged' not in ai_support_agent_k8s_apply.stdout"
+
+- name: "ai_support_agent_k8s : Restart the agent when the token Secret changed"
+  # Secret を更新しても、起動済みコンテナの環境変数（secretKeyRef 由来）は差し替わらず、
+  # StatefulSet の Pod template も変化しないためローリング更新は起きない。つまり失効した
+  # トークンを差し替えて再実行しても、Pod は旧トークンで接続し続け、rollout status は
+  # それを正常と判定してしまう。Secret が実際に変わったときだけ明示的に再起動する。
+  #
+  # 新規作成時（StatefulSet を今 apply したばかり）は Pod が新しい Secret で起動するため
+  # 再起動は不要。無条件に restart すると、初回実行のたびに余計な再作成が走る。
+  ansible.builtin.command:
+    argv:
+      - "{{ ai_support_agent_k8s_kubectl }}"
+      - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - -n
+      - "{{ ai_support_agent_k8s_namespace }}"
+      - rollout
+      - restart
+      - "statefulset/{{ item.name }}"
+  when:
+    - ai_support_agent_k8s_secret_apply.changed
+    - "'created' not in ai_support_agent_k8s_apply.stdout"
+  changed_when: true
+
+- name: "ai_support_agent_k8s : Wait for the agent to become ready"
+  # 上限を超えたレプリカは standby で待機する（プロセスは終了しない）ため Ready に
+  # なる。ここで検出したいのは「イメージが引けない」「Secret が無い」等の起動失敗。
+  ansible.builtin.command:
+    argv:
+      - "{{ ai_support_agent_k8s_kubectl }}"
+      # rollout status は --timeout=60s まで watch するため、request-timeout は
+      # それより長くする（短いと watch 自体が途中で切れて誤検知になる）。
+      - "--request-timeout=90s"
+      - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
+      - -n
+      - "{{ ai_support_agent_k8s_namespace }}"
+      - rollout
+      - status
+      - "statefulset/{{ item.name }}"
+      - --timeout=60s
+  register: ai_support_agent_k8s_rollout
+  until: ai_support_agent_k8s_rollout.rc == 0
+  retries: 10
+  delay: 15
+  changed_when: false

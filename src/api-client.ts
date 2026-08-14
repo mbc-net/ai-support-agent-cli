@@ -23,6 +23,7 @@ import type {
   PendingAlert,
   PendingCommand,
   ProjectConfigResponse,
+  ProjectSharedFileEntry,
   ReadSlackThreadResult,
   ReleaseChannel,
   RegisterRequest,
@@ -547,6 +548,43 @@ export class ApiClient {
     return this.post<{ downloadUrl: string }>(
       API_ENDPOINTS.FILES_DOWNLOAD_URL(this.tenantCode, this.projectCode),
       data,
+    )
+  }
+
+  // === プロジェクト共有ファイル（読み取り専用） ===
+
+  /**
+   * プロジェクト共有フォルダのエントリ一覧を取得する。
+   *
+   * `path` 省略時はルート直下。エージェントトークンで認証し、テナント/プロジェクトは
+   * サーバー側がトークンから解決するため、他プロジェクトのファイルは構造上参照できない。
+   */
+  async listProjectFiles(path?: string): Promise<ProjectSharedFileEntry[]> {
+    return this.get<ProjectSharedFileEntry[]>(
+      API_ENDPOINTS.PROJECT_FILES_LIST(this.tenantCode, this.projectCode),
+      { params: path ? { path } : undefined },
+    )
+  }
+
+  /**
+   * プロジェクト共有ファイルの署名付きダウンロードURLを取得する。
+   *
+   * ファイルIDではなくパスで指定する（LLM が一覧の path をそのまま使えるようにするため）。
+   */
+  async getProjectFileDownloadUrl(
+    path: string,
+  ): Promise<{ downloadUrl: string; filename: string; contentType: string }> {
+    logger.debug(`Requesting project file download URL: ${path}`)
+    return this.post<{
+      downloadUrl: string
+      filename: string
+      contentType: string
+    }>(
+      API_ENDPOINTS.PROJECT_FILES_DOWNLOAD_URL(
+        this.tenantCode,
+        this.projectCode,
+      ),
+      { path },
     )
   }
 

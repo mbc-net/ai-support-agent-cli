@@ -53,6 +53,16 @@ export function formatHistoryForClaudeCode(
  * エージェントは shell/ファイル実行権限を持つため、埋め込み先ページ由来テキストを
  * 指示として解釈しないよう明示する（英語固定・builtin 経路の PAGE_CONTEXT_GUARD_TEXT 相当）。
  */
+/**
+ * 終端チャンク（done / error）をサーバーへ配信できなかったときのコマンド結果エラー。
+ *
+ * 応答本文の生成自体は成功しているが、Web の「応答待ち」を解除する唯一のトリガーが
+ * 届いていないため、利用者から見ると会話は完了していない。サーバー側はこの失敗結果を
+ * 受けて会話を終端化する（api 側の補償経路）。
+ */
+export const TERMINAL_CHUNK_UNDELIVERED_ERROR =
+  'チャットの終端チャンク（done / error）をサーバーへ送信できませんでした。応答は生成済みですが配信されていません。'
+
 export const PAGE_CONTEXT_FRAMING =
   'You are a support assistant embedded in the web page the user is currently viewing (the embedding host page/system). ' +
   "By default, assume the user's questions are about this page — its displayed content, the system behind it, and how to operate it. " +
@@ -204,7 +214,8 @@ export function resolveChunkBatchConfig(): ChunkBatchConfig {
  * @param agentId - エージェントID
  * @param logTag - ログのプレフィックスタグ（例: "chat", "api-chat"）
  * @param options - オプション（debugLog: デバッグログ出力 / batch: バッチ送信設定）
- * @returns sendChunk（送信）・getChunkIndex（実送信数）・flush（残バッファ強制送信）
+ * @returns sendChunk（送信）・getChunkIndex（実送信数）・flush（残バッファ強制送信）・
+ *          hasTerminalDeliveryFailure（done / error の配信に失敗したか）
  */
 export function createChunkSender(
   commandId: string,
@@ -216,8 +227,12 @@ export function createChunkSender(
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>
   getChunkIndex: () => number
   flush: () => Promise<void>
+  hasTerminalDeliveryFailure: () => boolean
 } {
   let chunkIndex = 0
+  // done / error（終端チャンク）の配信に失敗したか。呼び出し元がコマンド結果へ
+  // 反映するために公開する。delta の欠落（表示が一部欠ける）は対象にしない。
+  let terminalDeliveryFailed = false
 
   // 実際に 1 チャンクを送信する（index はここで採番するため常に連続・単調）。
   const rawSend = async (
@@ -236,11 +251,20 @@ export function createChunkSender(
     } catch (error) {
       // `done` / `error` はタスク完了・アシスタントメッセージ確定のトリガーであり、
       // 落とすと Web 側が「応答待ち」のままハングする。delta の欠落（表示が一部
-      // 欠ける）と違って復旧手段が無いため、error レベルで記録して運用者が
-      // 検知できるようにする。
+      // 欠ける）と違って復旧手段が無いため、error レベルで記録する。
+      //
+      // さらに、記録するだけでは呼び出し元が成功として結果を返してしまい、
+      // サーバー側も異常に気づけない（2026-08-14 の本番障害はこの状態だった）。
+      // 終端チャンクの配信失敗はフラグに残し、呼び出し元がコマンド結果へ反映する。
+      //
+      // ここで例外を投げないのは意図的である。投げると呼び出し元の経路によっては
+      // submitResult 自体に到達せず、サーバーがコマンドの終了を一切知れなくなる。
       const isTerminal = type === 'done' || type === 'error'
-      const message = `[${logTag}] Failed to send chunk #${chunkIndex - 1} (${type}): ${getErrorMessage(error)}`
+      // commandId を必ず含める（1プロセスが複数会話を並行処理するため、
+      // これが無いと本番ログからどの会話のチャンクが失われたか特定できない）。
+      const message = `[${logTag}] Failed to send chunk #${chunkIndex - 1} (${type}) [${commandId}]: ${getErrorMessage(error)}`
       if (isTerminal) {
+        terminalDeliveryFailed = true
         logger.error(message)
       } else {
         logger.warn(message)
@@ -251,7 +275,12 @@ export function createChunkSender(
   const batch = options?.batch
   if (!batch || !batch.enabled) {
     // 後方互換: バッチ無効時は従来どおり 1 チャンク = 1 即時 POST。
-    return { sendChunk: rawSend, getChunkIndex: () => chunkIndex, flush: async () => {} }
+    return {
+      sendChunk: rawSend,
+      getChunkIndex: () => chunkIndex,
+      flush: async () => {},
+      hasTerminalDeliveryFailure: () => terminalDeliveryFailed,
+    }
   }
 
   // --- バッチ有効時 ---
@@ -299,7 +328,12 @@ export function createChunkSender(
     await flushDelta()
   }
 
-  return { sendChunk, getChunkIndex: () => chunkIndex, flush }
+  return {
+    sendChunk,
+    getChunkIndex: () => chunkIndex,
+    flush,
+    hasTerminalDeliveryFailure: () => terminalDeliveryFailed,
+  }
 }
 
 /**
