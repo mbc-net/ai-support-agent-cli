@@ -193,6 +193,11 @@ export function startHeartbeat(
         configSyncState.currentConfigHash,
         undefined,
         Array.from(state.authRejectedTransports),
+        // 共有ファイルの配置失敗を毎回報告する。復旧したら undefined になり、
+        // api 側で記録が消える（古い警告が残り続けない）。
+        // 常に配列で送る。undefined だと api へ項目自体が送られず、解消しても
+        // 保存済みの警告が消えない（api は空配列を「解消」と解釈する）。
+        { sharedFileMountErrors: configSyncState.sharedFileMountErrors ?? [] },
       )
 
       // This replica was evicted to make room for a newer one (plan replica
