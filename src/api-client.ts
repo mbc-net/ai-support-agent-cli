@@ -213,6 +213,16 @@ export class ApiClient {
     configHash?: string,
     dockerBuildError?: string,
     authRejectedTransports?: string[],
+    /**
+     * 追加の報告項目。
+     *
+     * 位置引数が既に多く、これ以上増やすと呼び出し側の可読性が落ちるため、
+     * 新規項目はこのオブジェクトへまとめる（既存の位置引数は互換のため残す）。
+     */
+    extras?: {
+      /** 共有ファイルの配置に失敗したもの（画面に警告として出す） */
+      sharedFileMountErrors?: { destPath: string; error: string }[]
+    },
   ): Promise<HeartbeatResponse | void> {
     logger.debug('Sending heartbeat')
     return this.post<HeartbeatResponse>(API_ENDPOINTS.HEARTBEAT(this.tenantCode), {
@@ -228,6 +238,9 @@ export class ApiClient {
       ...(configHash && { configHash }),
       ...(dockerBuildError !== undefined && { dockerBuildError }),
       ...(authRejectedTransports !== undefined && { authRejectedTransports }),
+      ...(extras?.sharedFileMountErrors !== undefined && {
+        sharedFileMountErrors: extras.sharedFileMountErrors,
+      }),
     })
   }
 
