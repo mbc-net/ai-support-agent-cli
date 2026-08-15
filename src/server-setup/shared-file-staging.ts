@@ -17,14 +17,11 @@
  * エージェントトークンから解決するため、他プロジェクトのファイルは構造上参照できない。
  */
 
-import { createWriteStream, mkdirSync } from 'fs'
 import * as path from 'path'
-import { pipeline } from 'stream/promises'
 
-import axios from 'axios'
-import type { Readable } from 'stream'
 
 import type { ApiClient } from '../api-client'
+import { downloadProjectFileTo } from '../project-file-download'
 import { logger } from '../logger'
 import type { ProjectSharedFileEntry } from '../types'
 import { getErrorMessage } from '../utils'
@@ -233,16 +230,9 @@ async function downloadTo(
   file: ProjectSharedFileEntry,
   stagingDir: string,
 ): Promise<void> {
-  const { downloadUrl } = await client.getProjectFileDownloadUrl(file.path)
-  const destination = path.join(stagingDir, file.path)
-  mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 })
-
-  const response = await axios.get<Readable>(downloadUrl, {
-    responseType: 'stream',
-  })
-  // 0600: 配布物には秘密鍵や認証情報を含み得る。エージェントホストの他ユーザーから
-  // 読めない状態で置き、実行後に一時ディレクトリごと削除する。
-  await pipeline(response.data, createWriteStream(destination, { mode: 0o600 }))
+  // 取得経路は project-file-download.ts に集約している（共有ファイルのエージェント内
+  // 配置と同じ実装を使い、片方だけ扱いが変わることを防ぐ）。
+  await downloadProjectFileTo(client, file.path, path.join(stagingDir, file.path))
 }
 
 /**

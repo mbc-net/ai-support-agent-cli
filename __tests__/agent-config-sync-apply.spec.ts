@@ -17,6 +17,9 @@ jest.mock('../src/mcp/config-writer', () => ({
   cleanupStaleCommandMcpConfigs: mockCleanupStaleCommandMcpConfigs,
 }))
 const mockSetupSshConfig = jest.fn()
+jest.mock('../src/shared-file-mounts', () => ({
+  applySharedFileMounts: jest.fn().mockResolvedValue([]),
+}))
 jest.mock('../src/ssh-config-setup', () => ({
   setupSshConfig: mockSetupSshConfig,
 }))
@@ -29,6 +32,7 @@ jest.mock('../src/agent-config-sync', () => {
 })
 
 import { applyProjectConfig } from '../src/agent-config-sync'
+import { applySharedFileMounts } from '../src/shared-file-mounts'
 import { writeAwsConfig } from '../src/aws-profile'
 
 const mockWriteAwsConfig = writeAwsConfig as jest.MockedFunction<typeof writeAwsConfig>
@@ -101,6 +105,131 @@ describe('applyProjectConfig - error handling branches', () => {
     })
 
     await expect(applyProjectConfig(deps, state, config)).resolves.not.toThrow()
+  })
+
+  describe('共有ファイルのエージェント内配置（sharedFileMounts）', () => {
+    const mockApply = applySharedFileMounts as jest.MockedFunction<typeof applySharedFileMounts>
+
+    it('設定が配信されていれば配置処理を呼ぶ', async () => {
+      const mounts = [{ sourcePath: 'codex/auth.json', destPath: '/root/.codex/auth.json' }]
+
+      await applyProjectConfig(makeDeps(), makeState(), makeBaseConfig({ sharedFileMounts: mounts }))
+
+      expect(mockApply).toHaveBeenCalledWith(mounts, expect.objectContaining({
+        downloadToFile: expect.any(Function),
+        configDir: expect.any(String),
+      }))
+    })
+
+    it('設定が無くても配置処理を呼ぶ（以前に配置したファイルの後始末が必要なため）', async () => {
+      // 呼ばないと、設定を削除しても・機能を無効化しても、以前に置いた認証情報が
+      // エージェント内に残り続け、失効・ローテーションが実効的に機能しない。
+      // 値をそのまま渡すこと自体が重要で、undefined（判断材料なし）と
+      // 空配列（明示的に無し）の区別は配置処理側が行う。
+      await applyProjectConfig(makeDeps(), makeState(), makeBaseConfig({}))
+
+      expect(mockApply).toHaveBeenCalledWith(
+        undefined,
+        expect.objectContaining({ configDir: expect.any(String) }),
+      )
+    })
+
+    it('キャッシュから復元した設定でも値をそのまま渡す（後始末の判断は配置処理側に委ねる）', async () => {
+      // キャッシュには sharedFileMounts が含まれないため undefined になる。
+      // ここで空配列に変換すると、通信障害のたびに配置済みの認証情報が消える。
+      await applyProjectConfig(makeDeps(), makeState(), makeBaseConfig({}), {
+        fromCache: true,
+      })
+
+      expect(mockApply).toHaveBeenCalledWith(
+        undefined,
+        expect.objectContaining({ configDir: expect.any(String) }),
+      )
+    })
+
+    it('削除できなかった配置先も state に記録して報告する', async () => {
+      mockApply.mockResolvedValue([
+        {
+          destPath: '/root/old.txt',
+          status: 'failed',
+          error: '配置後に内容が変更されているため削除しませんでした（手動で削除してください）',
+        },
+      ])
+      const state = makeState()
+
+      await applyProjectConfig(makeDeps(), state, makeBaseConfig({}))
+
+      expect(state.sharedFileMountErrors).toEqual([
+        {
+          destPath: '/root/old.txt',
+          error: '配置後に内容が変更されているため削除しませんでした（手動で削除してください）',
+        },
+      ])
+    })
+
+    it('配置に失敗してもエージェントの設定適用は続行する（起動を止めない）', async () => {
+      mockApply.mockResolvedValue([
+        { destPath: '/root/a.txt', status: 'failed', error: '403 Forbidden' },
+      ])
+
+      await expect(
+        applyProjectConfig(
+          makeDeps(),
+          makeState(),
+          makeBaseConfig({ sharedFileMounts: [{ sourcePath: 'a.txt', destPath: '/root/a.txt' }] }),
+        ),
+      ).resolves.not.toThrow()
+    })
+
+    it('失敗した配置は state に記録され、ハートビートで報告できる状態になる', async () => {
+      mockApply.mockResolvedValue([
+        { destPath: '/root/a.txt', status: 'failed', error: '403 Forbidden' },
+        { destPath: '/root/b.txt', status: 'applied' },
+      ])
+      const state = makeState()
+
+      await applyProjectConfig(
+        makeDeps(),
+        state,
+        makeBaseConfig({
+          sharedFileMounts: [
+            { sourcePath: 'a.txt', destPath: '/root/a.txt' },
+            { sourcePath: 'b.txt', destPath: '/root/b.txt' },
+          ],
+        }),
+      )
+
+      // 成功分は載せない（画面に出すのは対処が必要なものだけ）
+      expect(state.sharedFileMountErrors).toEqual([
+        { destPath: '/root/a.txt', error: '403 Forbidden' },
+      ])
+    })
+
+    it('すべて成功した場合は記録を消す（復旧後に古い警告を残さない）', async () => {
+      const state = makeState()
+      state.sharedFileMountErrors = [{ destPath: '/root/old.txt', error: 'previous' }]
+      mockApply.mockResolvedValue([{ destPath: '/root/a.txt', status: 'applied' }])
+
+      await applyProjectConfig(
+        makeDeps(),
+        state,
+        makeBaseConfig({ sharedFileMounts: [{ sourcePath: 'a.txt', destPath: '/root/a.txt' }] }),
+      )
+
+      expect(state.sharedFileMountErrors).toBeUndefined()
+    })
+
+    it('配置処理が例外を投げても設定適用を止めない', async () => {
+      mockApply.mockRejectedValue(new Error('unexpected'))
+
+      await expect(
+        applyProjectConfig(
+          makeDeps(),
+          makeState(),
+          makeBaseConfig({ sharedFileMounts: [{ sourcePath: 'a.txt', destPath: '/root/a.txt' }] }),
+        ),
+      ).resolves.not.toThrow()
+    })
   })
 
   it('should log databases when databases are configured', async () => {
