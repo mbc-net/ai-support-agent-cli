@@ -439,7 +439,22 @@ export const SSH_NO_HOST_CHECK_FLAGS = '-o StrictHostKeyChecking=no -o UserKnown
 // Child process management
 export const CHILD_PROCESS_MAX_RESTARTS = 5
 export const CHILD_PROCESS_RESTART_DELAY_MS = 5000
-export const CHILD_PROCESS_STOP_TIMEOUT_MS = 10000
+/**
+ * How long the parent waits for a forked worker to exit on its own (via the
+ * graceful 'shutdown' IPC message) before SIGKILLing it.
+ *
+ * Must comfortably exceed the forked worker's own worst-case graceful-exit
+ * chain (see `handleGracefulExit` in project-worker.ts): drain
+ * (FORK_SHUTDOWN_DRAIN_TIMEOUT_MS, 6000ms) + releaseSelf() HTTP call
+ * (AGENT_RELEASE_REQUEST_TIMEOUT_MS, 3000ms) + Sentry flush
+ * (SENTRY_FLUSH_TIMEOUT_MS, 2000ms) = 11000ms worst case. Set to that plus a
+ * ~3000ms safety margin for process.exit()/event-loop overhead, so the parent
+ * never SIGKILLs the child mid-release. See the
+ * "constant invariants" describe block in __tests__/child-process-manager.spec.ts,
+ * which asserts this relationship so it cannot silently drift out of sync
+ * again.
+ */
+export const CHILD_PROCESS_STOP_TIMEOUT_MS = 14000
 
 // Token watcher
 export const TOKEN_WATCH_INTERVAL_MS = 5000
@@ -571,6 +586,13 @@ export const SHUTDOWN_DRAIN_POLL_INTERVAL_MS = 250
 export const FORK_SHUTDOWN_DRAIN_TIMEOUT_MS = 6_000
 /** Timeout for the POST .../agent/instances/self/release call made at the end of a graceful shutdown. */
 export const AGENT_RELEASE_REQUEST_TIMEOUT_MS = 3_000
+/**
+ * Timeout passed to `Sentry.flush()` (see sentry.ts's `flushSentry`), called
+ * after releaseSelf() at the end of a forked worker's graceful exit. Named so
+ * CHILD_PROCESS_STOP_TIMEOUT_MS's invariant test can reference the real value
+ * directly instead of a hardcoded literal.
+ */
+export const SENTRY_FLUSH_TIMEOUT_MS = 2_000
 
 // Delayed restart (reboot / update / docker rebuild)
 export const DELAYED_RESTART_MS = 1_000

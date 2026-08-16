@@ -212,7 +212,16 @@ function runSingleProject(
   logger.info(t('runner.starting'))
   const started = startProjectAgent(project, agentId, { pollInterval, heartbeatInterval, agentChatMode, defaultProjectDir })
 
-  const updater = initAutoUpdater(options, config, [started.client], agentId, () => started.stop(), async () => started.agent.isBusy())
+  // Use the graceful, draining shutdown() here too — not the synchronous
+  // stop() — so an auto-update-triggered restart (self npm update) releases
+  // the replica slot the same way SIGTERM/SIGINT and the reboot/update
+  // commands do. Falling back to stop() would mean this restart path never
+  // calls releaseSelf() and always falls back to the slower ~90s
+  // heartbeat-timeout-based slot reclaim, and — if auto-updater.ts's busy-wait
+  // times out while a command is still genuinely in flight — abandons that
+  // command mid-flight, reintroducing the double-execution risk this feature
+  // exists to close.
+  const updater = initAutoUpdater(options, config, [started.client], agentId, () => started.agent.shutdown(), async () => started.agent.isBusy())
 
   let tokenWatcher: { stop: () => void } | undefined
   if (enableTokenWatcher) {

@@ -87,8 +87,16 @@ export interface CommandContext {
   transportState: TransportState
   onSetup: () => Promise<void>
   onConfigSync: () => Promise<void>
-  onReboot: () => Promise<void>
-  onUpdate: () => Promise<void>
+  /**
+   * `commandId` is the id of the 'reboot' command itself, threaded through so
+   * `ProjectAgent.performReboot()` can pass it to `shutdown({ excludeCommandId })`
+   * — without it, shutdown()'s drain would wait forever for this very command
+   * (still in `inFlightCommands` until this handler returns) to finish. See
+   * `ProjectAgent.shutdown` for the full explanation.
+   */
+  onReboot: (commandId?: string) => Promise<void>
+  /** Same self-reference concern as `onReboot` — see its doc comment. */
+  onUpdate: (commandId?: string) => Promise<void>
   onSyncRepository: (repositoryCode: string, branch?: string) => Promise<import('./repo-sync').RepoSyncResult>
 }
 

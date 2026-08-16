@@ -276,8 +276,20 @@ export class ProjectAgent {
    *    releasing while a command might still be running would be wrong) and
    *    only if this replica ever held a slot in the first place.
    * 7. Stop the transport (same as the transport-stopping half of `stop()`).
+   *
+   * `opts.excludeCommandId`: the id of the command that is *itself* triggering
+   * this shutdown (reboot/update). `processCommand` only removes a command's id
+   * from `transportState.inFlightCommands` in a `finally` block that runs after
+   * its handler (e.g. `performReboot`/`performUpdate`, which calls `shutdown()`)
+   * has returned — so the triggering command's own id is still present in
+   * `inFlightCommands` for the entire duration of this call. Without excluding
+   * it, the drain below would wait for it to disappear, which can only happen
+   * after `shutdown()` itself resolves: a deadlock that blocks for the full
+   * drain timeout on every single reboot/update. SIGTERM/SIGINT-triggered
+   * shutdowns pass no `excludeCommandId` — there is no in-flight command
+   * driving those, so this is a no-op for that path.
    */
-  async shutdown(opts?: { drainTimeoutMs?: number }): Promise<void> {
+  async shutdown(opts?: { drainTimeoutMs?: number; excludeCommandId?: string }): Promise<void> {
     if (this.shuttingDown) return
     this.shuttingDown = true
 
@@ -287,7 +299,7 @@ export class ProjectAgent {
     this.clearAlertTimers()
 
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SHUTDOWN_DRAIN_TIMEOUT_MS
-    const drainResult = await this.waitForDrain(drainTimeoutMs)
+    const drainResult = await this.waitForDrain(drainTimeoutMs, opts?.excludeCommandId)
 
     if (!drainResult.drained) {
       logger.warn(
@@ -320,19 +332,35 @@ export class ProjectAgent {
    * interruptible/unref'd-timer poll style as the standby wait
    * (`waitInterruptible`) rather than a plain `sleep()`, so the wait never
    * holds the event loop open past process exit.
+   *
+   * `excludeCommandId`, when given, does not count toward "still in flight":
+   * it is the id of the command (reboot/update) that is itself driving this
+   * shutdown, and it cannot be removed from `inFlightCommands` until this very
+   * call returns — see `shutdown`'s doc comment for why.
    */
-  private async waitForDrain(timeoutMs: number): Promise<{ drained: boolean; remaining: string[] }> {
+  private async waitForDrain(
+    timeoutMs: number,
+    excludeCommandId?: string,
+  ): Promise<{ drained: boolean; remaining: string[] }> {
+    const remainingCount = (): number => {
+      const { size } = this.transportState.inFlightCommands
+      return excludeCommandId && this.transportState.inFlightCommands.has(excludeCommandId)
+        ? size - 1
+        : size
+    }
     const deadline = Date.now() + timeoutMs
-    while (this.transportState.inFlightCommands.size > 0 && Date.now() < deadline) {
+    while (remainingCount() > 0 && Date.now() < deadline) {
       logger.debug(
         t('runner.drainWaiting', {
           prefix: this.prefix,
-          count: this.transportState.inFlightCommands.size,
+          count: remainingCount(),
         }),
       )
       await this.waitInterruptible(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
     }
-    const remaining = Array.from(this.transportState.inFlightCommands)
+    const remaining = Array.from(this.transportState.inFlightCommands).filter(
+      (id) => id !== excludeCommandId,
+    )
     return { drained: remaining.length === 0, remaining }
   }
 
@@ -383,6 +411,19 @@ export class ProjectAgent {
   }
 
   updateToken(newToken: string): void {
+    // shutdown()'s drain step deliberately keeps the transport alive while
+    // waiting for in-flight commands (heartbeats + whatever transport an
+    // in-flight command depends on). The old synchronous `stop()` this method
+    // calls below would tear that transport down out from under the drain and
+    // could re-arm `slotHeld` via a fresh register loop while the original
+    // shutdown() call is still mid-drain — directly contradicting the point of
+    // this feature. Same guard pattern as `handleEviction()`.
+    if (this.shuttingDown) {
+      logger.debug(
+        `${this.prefix} Ignoring updateToken(): shutdown already in progress`,
+      )
+      return
+    }
     this.token = newToken
     this.client.updateToken(newToken)
     this.configSyncDeps = { ...this.configSyncDeps, token: newToken }
@@ -416,9 +457,17 @@ export class ProjectAgent {
     return performSyncRepository(this.configSyncDeps, this.configSyncState, { repositoryCode, branch })
   }
 
-  async performReboot(): Promise<void> {
+  /**
+   * @param commandId The id of the 'reboot' command that triggered this call
+   *   (when invoked via the command dispatch path). Passed through to
+   *   `shutdown()` as `excludeCommandId` so the drain does not wait on this
+   *   very command's own entry in `inFlightCommands` — see `shutdown`'s doc
+   *   comment. Direct callers (e.g. tests) may omit it; `shutdown()` then
+   *   drains normally, which is a no-op when nothing is in flight.
+   */
+  async performReboot(commandId?: string): Promise<void> {
     logger.info(`${this.prefix} Reboot requested, scheduling restart...`)
-    await this.shutdown()
+    await this.shutdown({ excludeCommandId: commandId })
     setTimeout(() => {
       // In Docker mode, exit with DOCKER_RESTART_EXIT_CODE so DockerSupervisor
       // restarts only this project's container.
@@ -472,7 +521,12 @@ export class ProjectAgent {
     }, DELAYED_RESTART_MS)
   }
 
-  async performUpdate(): Promise<void> {
+  /**
+   * @param commandId The id of the 'update' command that triggered this call
+   *   (when invoked via the command dispatch path). See `performReboot`'s doc
+   *   comment — same self-reference reason for threading it into `shutdown()`.
+   */
+  async performUpdate(commandId?: string): Promise<void> {
     // 管理画面からの「バージョンアップ」も、自己更新が成立しない実行環境では実行しない。
     // Kubernetes や監督プロセスのいない PID 1 で走らせると、npm 更新のあとに
     // プロセスが終了してコンテナごと再作成され、イメージの版へ巻き戻る。
@@ -499,7 +553,7 @@ export class ProjectAgent {
       throw new Error(`Update failed: ${result.error ?? 'Unknown error'}`)
     }
     logger.success(`${this.prefix} Update to ${targetVersion} successful, restarting...`)
-    await this.shutdown()
+    await this.shutdown({ excludeCommandId: commandId })
     setTimeout(() => {
       // Inside a Docker container (spawned via `docker run`), process.send is
       // not available. Exit with DOCKER_UPDATE_EXIT_CODE so the host-side
@@ -845,8 +899,8 @@ export class ProjectAgent {
       transportState: this.transportState,
       onSetup: () => this.performSetup(),
       onConfigSync: () => this.performConfigSync(),
-      onReboot: () => this.performReboot(),
-      onUpdate: () => this.performUpdate(),
+      onReboot: (commandId?: string) => this.performReboot(commandId),
+      onUpdate: (commandId?: string) => this.performUpdate(commandId),
       onSyncRepository: (repositoryCode: string, branch?: string) => this.performSyncRepository(repositoryCode, branch),
     }
 

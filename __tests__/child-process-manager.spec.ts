@@ -1,5 +1,5 @@
 import { ChildProcessManager } from '../src/child-process-manager'
-import { CHILD_PROCESS_MAX_RESTARTS, CHILD_PROCESS_STOP_TIMEOUT_MS, FORK_SHUTDOWN_DRAIN_TIMEOUT_MS } from '../src/constants'
+import { AGENT_RELEASE_REQUEST_TIMEOUT_MS, CHILD_PROCESS_MAX_RESTARTS, CHILD_PROCESS_STOP_TIMEOUT_MS, FORK_SHUTDOWN_DRAIN_TIMEOUT_MS, SENTRY_FLUSH_TIMEOUT_MS } from '../src/constants'
 
 jest.mock('child_process', () => ({
   fork: jest.fn().mockImplementation(() => {
@@ -569,5 +569,20 @@ describe('constant invariants', () => {
     // If these ever drift apart, the worker's own drain wait would still be
     // running when the parent SIGKILLs it — abandoning the drain entirely.
     expect(FORK_SHUTDOWN_DRAIN_TIMEOUT_MS).toBeLessThan(CHILD_PROCESS_STOP_TIMEOUT_MS)
+  })
+
+  it('the full graceful-exit chain (drain + release + Sentry flush) must stay under CHILD_PROCESS_STOP_TIMEOUT_MS', () => {
+    // project-worker.ts's handleGracefulExit runs, sequentially:
+    //   await agent.shutdown({ drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })  (worst case)
+    //     -> which itself calls releaseSelf() (up to AGENT_RELEASE_REQUEST_TIMEOUT_MS)
+    //   await flushSentry()  (up to SENTRY_FLUSH_TIMEOUT_MS)
+    // The drain-alone comparison above does not account for the release call or
+    // the Sentry flush that happen *after* the drain completes — this asserts
+    // the full worst-case chain instead, so the two constants above being
+    // bumped without also bumping CHILD_PROCESS_STOP_TIMEOUT_MS is caught here,
+    // not discovered as a real restart hanging in production.
+    const worstCaseGracefulExitMs =
+      FORK_SHUTDOWN_DRAIN_TIMEOUT_MS + AGENT_RELEASE_REQUEST_TIMEOUT_MS + SENTRY_FLUSH_TIMEOUT_MS
+    expect(worstCaseGracefulExitMs).toBeLessThan(CHILD_PROCESS_STOP_TIMEOUT_MS)
   })
 })

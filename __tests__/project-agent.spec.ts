@@ -2506,6 +2506,144 @@ describe('ProjectAgent', () => {
       // flip it to false), so shutdown() released the slot normally.
       expect(mockClient.releaseSelf).toHaveBeenCalled()
     })
+
+    describe('reboot/update self-reference (excludeCommandId)', () => {
+      // A 'reboot'/'update' command's own id is added to inFlightCommands by
+      // processCommand *before* executeCommand (and therefore
+      // performReboot/performUpdate, and therefore shutdown()) runs, and can
+      // only be removed by processCommand's `finally` — which cannot run
+      // until this whole chain, including shutdown(), resolves. Without
+      // excluding the triggering command's own id from the drain, shutdown()
+      // would wait on itself forever (bounded only by the drain timeout) on
+      // every single reboot/update. These tests exercise the real dispatch
+      // path (processCommand -> executeCommand -> opts.onReboot/onUpdate ->
+      // performReboot/performUpdate -> shutdown()) rather than calling
+      // performReboot()/performUpdate() directly, so the commandId actually
+      // flows the same way it does in production.
+
+      it('a reboot command, as the only in-flight command, completes its own shutdown/release promptly (not blocked on itself)', async () => {
+        mockClient.getCommand.mockResolvedValue({ commandId: 'cmd-reboot', type: 'reboot', payload: {} })
+        mockedExecuteCommand.mockImplementation(async (type, _payload, opts) => {
+          if (type === 'reboot' && opts?.onReboot) {
+            await opts.onReboot(opts.commandId)
+          }
+          return { success: true, data: 'reboot initiated' }
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        triggerCommand('cmd-reboot')
+
+        // No poll-interval wait needed at all: the reboot command is the
+        // only thing in flight, and its own id must not count toward the
+        // drain. Advancing by 0 only flushes microtasks — if the fix were
+        // missing, this assertion would still see releaseSelf() un-called
+        // (the drain would instead be parked on a real poll-interval timer,
+        // waiting for its own id to disappear, which never happens on its
+        // own).
+        await jest.advanceTimersByTimeAsync(0)
+
+        expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+        expect(mockSubscriber.disconnect).toHaveBeenCalled()
+      })
+
+      it('an update command, as the only in-flight command, completes its own shutdown/release promptly (not blocked on itself)', async () => {
+        mockClient.getCommand.mockResolvedValue({ commandId: 'cmd-update', type: 'update', payload: {} })
+        mockedExecuteCommand.mockImplementation(async (type, _payload, opts) => {
+          if (type === 'update' && opts?.onUpdate) {
+            await opts.onUpdate(opts.commandId)
+          }
+          return { success: true, data: 'update initiated' }
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        triggerCommand('cmd-update')
+        await jest.advanceTimersByTimeAsync(0)
+
+        expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+        expect(mockSubscriber.disconnect).toHaveBeenCalled()
+      })
+
+      it('a reboot command still waits for a different, genuinely in-flight command before releasing', async () => {
+        let resolveOther: (result: { success: boolean; data: string }) => void = () => undefined
+
+        mockClient.getCommand.mockImplementation(async (commandId: string) =>
+          commandId === 'cmd-reboot'
+            ? { commandId, type: 'reboot', payload: {} }
+            : { commandId, type: 'execute_command', payload: {} },
+        )
+        mockedExecuteCommand.mockImplementation(async (type, _payload, opts) => {
+          if (type === 'reboot') {
+            if (opts?.onReboot) await opts.onReboot(opts.commandId)
+            return { success: true, data: 'reboot initiated' }
+          }
+          return new Promise((resolve) => { resolveOther = resolve })
+        })
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        // Start the genuinely unrelated command first and let it actually
+        // begin executing (its id lands in inFlightCommands).
+        triggerCommand('cmd-other')
+        await jest.advanceTimersByTimeAsync(100)
+
+        // Now the reboot command arrives. Its own id must be excluded from
+        // the drain, but cmd-other's must NOT be.
+        triggerCommand('cmd-reboot')
+        await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+
+        // Still draining: cmd-other has not finished yet.
+        expect(mockClient.releaseSelf).not.toHaveBeenCalled()
+        expect(mockSubscriber.disconnect).not.toHaveBeenCalled()
+
+        resolveOther({ success: true, data: 'ok' })
+        await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+
+        expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+        expect(mockSubscriber.disconnect).toHaveBeenCalled()
+      })
+    })
+
+    it('updateToken() during a mid-drain shutdown does not tear down the transport (shuttingDown guard)', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const resolveExec = startStuckCommand('cmd-token-update')
+      await jest.advanceTimersByTimeAsync(100)
+
+      const shutdownPromise = agent.shutdown()
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+
+      // Still mid-drain: the transport (heartbeats, subscriber) must still be up.
+      expect(mockSubscriber.disconnect).not.toHaveBeenCalled()
+
+      mockClient.register.mockClear()
+      agent.updateToken('new-token-during-drain')
+
+      // The old teardown path (stop() -> stopTransport() -> disconnect(), then
+      // restartRegisterLoop() -> a fresh register()) must NOT have fired: it
+      // would tear the transport down out from under the drain and could
+      // re-arm slotHeld while this shutdown() call is still mid-drain.
+      expect(mockSubscriber.disconnect).not.toHaveBeenCalled()
+      expect(mockClient.register).not.toHaveBeenCalled()
+      expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('Ignoring updateToken'))
+
+      resolveExec({ success: true, data: 'ok' })
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+      await shutdownPromise
+
+      // The original shutdown() completed normally afterward.
+      expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+      expect(mockSubscriber.disconnect).toHaveBeenCalled()
+    })
   })
 
   describe('register auth error', () => {
