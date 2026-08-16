@@ -369,6 +369,17 @@ ${CONTAINER_ARGV.map((a) => `            - ${a}`).join('\n')}
               value: ${yamlScalar(input.apiUrl)}
             # Replica identity. The Pod name is stable for the Pod's lifetime,
             # which is exactly the lifetime of one replica slot.
+            #
+            # NOTE: metadata.name is unique only *within this cluster*. A
+            # Deployment's Pod names already carry a random suffix, so this is
+            # safe as-is here. If you change this workload to a StatefulSet
+            # (predictable Pod names like agent-0, agent-1, ...) and run the
+            # same token in more than one cluster, Pod names can collide
+            # across clusters (e.g. "agent-0" in both) and the server would
+            # see what looks like the same replica reconnecting from two
+            # places at once. In that case, set ${ENV_VARS.INSTANCE_ID}
+            # explicitly to a value that includes the cluster name instead of
+            # relying on metadata.name.
             - name: ${ENV_VARS.INSTANCE_ID}
               valueFrom:
                 fieldRef:

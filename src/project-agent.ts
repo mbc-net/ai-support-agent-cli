@@ -36,7 +36,7 @@ import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import { submitPendingResults } from './pending-result-store'
 import type { TransportKind } from './ipc-types'
-import type { AdmissionMode, AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
+import type { AdmissionMode, AdmissionResult, AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
 import { describeSelfUpdateBlockReason, resolveSelfUpdateCapability } from './self-update-capability'
@@ -422,6 +422,7 @@ export class ProjectAgent {
     // moment a slot frees up — a replica dying is exactly when a standby
     // should step in.
     if (result.admission && !result.admission.accepted) {
+      this.logAdmissionRejectionReason(result.admission)
       result = await this.waitForAdmission(result)
       if (this.registerLoopCancelled) return
     }
@@ -451,6 +452,32 @@ export class ProjectAgent {
     // 'initial' and evict whichever replica took the slot — the ping-pong this
     // flag exists to prevent.
     this.nextAdmissionMode = 'initial'
+  }
+
+  /**
+   * Emit a one-time diagnostic warning for admission rejection reasons that
+   * need operator attention beyond the generic "waiting for a slot" log
+   * (`runner.replicaStandby`, emitted unconditionally by waitForAdmission for
+   * every rejection). Called once, before entering the standby loop — not on
+   * every standby retry — so it does not repeat on each re-request.
+   *
+   * `limit_reached` needs no extra explanation (the standby log already says
+   * exactly what it is: the plan's replica limit). `instance_id_conflict` is
+   * the case that needs a distinct, actionable log: it means another *live*
+   * process is already registered under this same instanceId, which the
+   * generic standby-wait log would otherwise make indistinguishable from an
+   * ordinary "the plan is full" wait — see the 2026-08-15 incident where
+   * identical Pod names across two Kubernetes clusters made the server treat
+   * two separate processes as one replica reconnecting.
+   */
+  private logAdmissionRejectionReason(admission: AdmissionResult): void {
+    if (admission.reason === 'instance_id_conflict') {
+      logger.warn(
+        `${this.prefix} ${t('runner.instanceIdConflict', {
+          instanceId: this.client.getInstanceId(),
+        })}`,
+      )
+    }
   }
 
   /**

@@ -2,7 +2,7 @@ import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios'
 
 import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL, ENV_VARS } from './constants'
 import { logger } from './logger'
-import { resolveInstanceId } from './replica-identity'
+import { resolveInstanceId, resolveInstanceNonce } from './replica-identity'
 import { RetryStrategy } from './retry-strategy'
 import { toErrorMessage } from './utils'
 import { bearerHeader, extractTenantCodeFromToken } from './utils/token-utils'
@@ -50,6 +50,15 @@ export class ApiClient {
   private projectCode = ''
   /** This process's replica identity (stable for the process lifetime). */
   private readonly instanceId: string
+  /**
+   * This process's replica nonce (stable for the process lifetime, distinct
+   * from instanceId — see resolveInstanceNonce). Sent alongside instanceId so
+   * the server can tell apart two processes that report the same instanceId
+   * (e.g. the same StatefulSet Pod name in two different Kubernetes
+   * clusters) and reject the second with `instance_id_conflict` instead of
+   * treating it as a reconnect of the first.
+   */
+  private readonly instanceNonce: string
   /** Whether this client advertises its replica identity (see constructor). */
   private readonly sendsReplicaIdentity: boolean
   /**
@@ -96,6 +105,7 @@ export class ApiClient {
     // 送ると、サーバー側のフェンシングがクレーム主不一致として 409 を返し、
     // 実行済みの結果が「恒久的な 4xx」として破棄される。
     this.instanceId = options?.instanceId ?? resolveInstanceId()
+    this.instanceNonce = resolveInstanceNonce()
     this.assignmentGenerations = new Map()
     this.sendsReplicaIdentity = !options?.withoutReplicaIdentity
 
@@ -193,6 +203,7 @@ export class ApiClient {
       ...(this.sendsReplicaIdentity
         ? {
             instanceId: this.instanceId,
+            instanceNonce: this.instanceNonce,
             admissionMode: request.admissionMode ?? 'initial',
           }
         : {}),
@@ -227,7 +238,9 @@ export class ApiClient {
     logger.debug('Sending heartbeat')
     return this.post<HeartbeatResponse>(API_ENDPOINTS.HEARTBEAT(this.tenantCode), {
       agentId,
-      ...(this.sendsReplicaIdentity ? { instanceId: this.instanceId } : {}),
+      ...(this.sendsReplicaIdentity
+        ? { instanceId: this.instanceId, instanceNonce: this.instanceNonce }
+        : {}),
       timestamp: Date.now(),
       version: AGENT_VERSION,
       systemInfo,

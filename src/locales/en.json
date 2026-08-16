@@ -103,6 +103,7 @@
   "runner.registerWorkingAgain": "{{prefix}} Registration is working again after {{attempts}} attempt(s)",
   "runner.replicaStandby": "Waiting for a replica slot: the plan's concurrent replica limit is reached (instanceId={{instanceId}}, live {{live}}/{{max}}). This replica starts automatically once another one stops",
   "runner.replicaAdmitted": "Replica slot acquired (instanceId={{instanceId}})",
+  "runner.instanceIdConflict": "Another process is already running with the same AI_SUPPORT_AGENT_INSTANCE_ID ({{instanceId}}). This commonly happens when the same token is deployed as a Kubernetes StatefulSet across multiple clusters, since a Pod name is only unique within its own cluster. Consider setting AI_SUPPORT_AGENT_INSTANCE_ID explicitly to a value that includes the cluster name.",
   "runner.replicaEvicted": "Handing the replica slot to a newer replica and returning to standby (instanceId={{instanceId}})",
   "runner.commandReceived": "{{prefix}} Command received: {{type}} ({{commandId}})",
   "runner.commandDone": "{{prefix}} Command completed: {{commandId}} ({{result}})",
