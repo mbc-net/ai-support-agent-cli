@@ -10,27 +10,19 @@
  * so they can be unit-tested and reused verbatim by the web UI.
  */
 
-import { ENV_VARS, SHUTDOWN_DRAIN_TIMEOUT_MS } from '../constants'
+import { ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../constants'
 import { CONTAINER_START_ARGV } from '../docker/docker-args'
 
 /**
- * Extra seconds of grace period beyond the in-flight-command drain
- * (SHUTDOWN_DRAIN_TIMEOUT_MS) budgeted for the releaseSelf() call and process
- * exit overhead at the end of a graceful shutdown. Matches the margin this
- * file used to hardcode alongside the literal `320` before it was derived
- * from the constant.
- */
-const TERMINATION_GRACE_PERIOD_MARGIN_SECONDS = 20
-
-/**
  * `terminationGracePeriodSeconds` for the generated Kubernetes Deployment.
- * Derived from SHUTDOWN_DRAIN_TIMEOUT_MS rather than a bare literal so the two
- * values cannot silently drift apart if the drain timeout is ever changed
- * without remembering to also update this file. Equals 320 with the current
+ * Derived from SHUTDOWN_DRAIN_TIMEOUT_MS (via the shared
+ * SHUTDOWN_GRACE_PERIOD_SECONDS constant in constants.ts, also used by
+ * docker-supervisor.ts's `docker stop --time`) rather than a bare literal so
+ * the two deployment modes' grace periods cannot silently drift apart from
+ * each other or from the drain timeout. Equals 320 with the current
  * constants (300s drain + 20s margin).
  */
-const TERMINATION_GRACE_PERIOD_SECONDS =
-  Math.ceil(SHUTDOWN_DRAIN_TIMEOUT_MS / 1000) + TERMINATION_GRACE_PERIOD_MARGIN_SECONDS
+const TERMINATION_GRACE_PERIOD_SECONDS = SHUTDOWN_GRACE_PERIOD_SECONDS
 
 /**
  * Argument vector that starts the agent *inside* a container.
@@ -366,7 +358,7 @@ spec:
         app: ${name}
     spec:
       # Derived from SHUTDOWN_DRAIN_TIMEOUT_MS (the in-flight-command drain)
-      # plus TERMINATION_GRACE_PERIOD_MARGIN_SECONDS for the releaseSelf()
+      # plus SHUTDOWN_GRACE_PERIOD_MARGIN_SECONDS for the releaseSelf()
       # call and process exit overhead. Without this, Kubernetes' 30s default
       # would SIGKILL the Pod mid-drain, which would abandon a still-running
       # command and let the server re-assign (and re-execute) it on another

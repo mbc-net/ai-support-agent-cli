@@ -60,7 +60,12 @@ export interface DockerRunOptions {
   project?: string
   /** Agent ID for log streaming */
   agentId?: string
-  /** Timeout in ms before forcing exit during shutdown (default 10000). Used for testing. */
+  /**
+   * Timeout in ms before forcing exit during shutdown (default: derived from
+   * SHUTDOWN_GRACE_PERIOD_SECONDS, currently 330000 — see docker-supervisor.ts's
+   * `stopAll()`/shutdown() for why it must exceed the `docker stop --time`
+   * grace period). Overridable — mainly used to keep tests fast.
+   */
   shutdownTimeoutMs?: number
 }
 

@@ -85,8 +85,15 @@ export interface CommandContext {
   configSyncState: ConfigSyncState
   configSyncDeps: ConfigSyncDeps
   transportState: TransportState
-  onSetup: () => Promise<void>
-  onConfigSync: () => Promise<void>
+  /**
+   * `commandId`, when present, is the id of the `setup`/`config_sync` command
+   * itself — threaded through so a Docker-mode config sync that detects a
+   * customization change and fires `performDockerRebuild()` can pass it to
+   * `shutdown({ excludeCommandId })`. See `ConfigSyncDeps.onDockerRebuild`'s
+   * doc comment in agent-config-sync.ts.
+   */
+  onSetup: (commandId?: string) => Promise<void>
+  onConfigSync: (commandId?: string) => Promise<void>
   /**
    * `commandId` is the id of the 'reboot' command itself, threaded through so
    * `ProjectAgent.performReboot()` can pass it to `shutdown({ excludeCommandId })`

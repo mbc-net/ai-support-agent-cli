@@ -115,17 +115,51 @@ function setupMessageHandler(): void {
 
 // ─── Disconnect handler (parent crash) ───────────────────────────
 
+/**
+ * Handle an unexpected disconnect of the parent `ChildProcessManager`
+ * process (e.g. it crashed).
+ *
+ * This is deliberately made consistent with `handleGracefulExit`'s drained
+ * exit, not left as a synchronous `agent?.stop()`. The parent being gone does
+ * NOT mean draining is pointless here — `ProjectAgent.shutdown()`'s two real
+ * dependencies are both independent of the parent process:
+ *   - `ApiClient.releaseSelf()` is a direct HTTP POST from this worker
+ *     process straight to the backend API — it never routes through the
+ *     parent or its IPC channel.
+ *   - In-flight command execution and result submission go through this
+ *     `ProjectAgent`'s own independent AppSync/WebSocket subscription,
+ *     established directly by this process — not proxied through the parent.
+ * The only things that genuinely need the parent to still be alive are the
+ * `{type:'stopped',...}` IPC message back (harmless no-op via
+ * `sendToParent()`'s existing `if (process.send)` guard when the channel is
+ * already gone) and the `drainTimeoutMs` normally supplied by the parent's
+ * `shutdown` message — unavailable here since there is no such message, so
+ * fall back to `FORK_SHUTDOWN_DRAIN_TIMEOUT_MS`, same as `handleGracefulExit`
+ * does when the field is absent. Skipping the drain here would abandon an
+ * in-flight command (letting the server re-assign and re-execute it
+ * elsewhere) and leave the replica slot unreleased until the slow ~90s
+ * heartbeat-timeout server-side reclaim, for no actual benefit — the
+ * synchronous `stop()` this replaced was based on a mistaken assumption that
+ * draining depends on the parent being reachable, which it does not.
+ *
+ * Exit code stays 1 (this is still an abnormal/unexpected termination path —
+ * only the quality of the shutdown changes, not the exit code semantics).
+ */
+async function handleParentDisconnect(): Promise<void> {
+  logger.warn(`Parent disconnected, worker ${currentProjectCode} exiting`)
+  await agent?.shutdown({ drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
+  process.exit(1)
+}
+
 function setupDisconnectHandler(): void {
   process.on('disconnect', () => {
-    // Deliberately NOT drained (unlike handleGracefulExit's shutdown/update
-    // path): the parent is gone, so there is no one left to report a drained
-    // result to, and no parent process to receive a release confirmation from.
-    // Draining here would only stall this worker's own exit for no benefit —
-    // stop synchronously and exit immediately. Do not "fix" this into
-    // consistency with the graceful path.
-    logger.warn(`Parent disconnected, worker ${currentProjectCode} exiting`)
-    agent?.stop()
-    process.exit(1)
+    // `process.on('disconnect', ...)` callbacks are not natively awaited by
+    // Node's event loop in a way that blocks process exit; dispatch the async
+    // work the same way `setupMessageHandler()` dispatches
+    // `handleGracefulExit()` (`void handleGracefulExit(...)`) so the drain
+    // actually gets a chance to run to completion — the pending promise chain
+    // keeps the event loop alive until `process.exit(1)` above is reached.
+    void handleParentDisconnect()
   })
 }
 

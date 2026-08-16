@@ -153,6 +153,7 @@ import { migrateProjectConfigDir } from '../../src/docker/project-config'
 import { DockerSupervisor } from '../../src/docker/docker-supervisor'
 import type { ProjectRegistration } from '../../src/types'
 import type { DockerRunOptions } from '../../src/docker/docker-runner'
+import { SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../src/constants'
 
 const mockSpawn = spawn as jest.MockedFunction<typeof spawn>
 const mockExistsSync = fs.existsSync as jest.MockedFunction<typeof fs.existsSync>
@@ -1148,6 +1149,35 @@ describe('DockerSupervisor', () => {
       expect(fakeChild2.kill).toHaveBeenCalledWith('SIGTERM')
 
       processOnSpy.mockRestore()
+    })
+
+    it('stops containers via `docker stop --time` derived from SHUTDOWN_GRACE_PERIOD_SECONDS when cidFile exists (not the old hardcoded 5s)', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+      // Only the --cidfile path should report as existing; the pre-startup
+      // hash-check paths (customization/built hash) must stay "false" so
+      // spawnProject() takes its normal (non-rebuild) path.
+      mockExistsSync.mockImplementation((p: fs.PathLike) => String(p).endsWith('.cid'))
+      mockReadFileSync.mockImplementation((p: fs.PathOrFileDescriptor) => {
+        if (String(p).endsWith('.cid')) return 'container-abc123'
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      mockSpawn.mockClear() // isolate the `docker stop` call from the earlier `docker run` call
+      supervisor.stopAll()
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'docker',
+        ['stop', '--time', String(SHUTDOWN_GRACE_PERIOD_SECONDS), 'container-abc123'],
+        { stdio: 'ignore' },
+      )
+      expect(SHUTDOWN_GRACE_PERIOD_SECONDS).not.toBe(5)
+      // A container we could stop gracefully via the cidfile must not also
+      // fall back to the abrupt child.kill('SIGTERM') path.
+      expect(fakeChild.kill).not.toHaveBeenCalled()
     })
 
     it('does not call kill on containers that are already closeHandled', () => {

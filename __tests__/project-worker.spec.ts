@@ -395,7 +395,16 @@ describe('project-worker', () => {
   })
 
   describe('disconnect handler', () => {
-    it('should stop agent and exit on disconnect', async () => {
+    // The parent's IPC channel being gone does not affect this worker's
+    // ability to drain in-flight commands or release its replica slot: both
+    // go straight from this worker process to the backend API
+    // (ApiClient.releaseSelf() / the worker's own AppSync subscription),
+    // independent of the parent. So the disconnect path must use the same
+    // drained shutdown() as the graceful (`shutdown`/`update` IPC message)
+    // path, not the old synchronous stop() — only the exit code (1, abnormal
+    // termination) stays different.
+    it('should gracefully shut down (drain) the agent, not just stop() it, and exit with 1 on parent disconnect', async () => {
+      const { FORK_SHUTDOWN_DRAIN_TIMEOUT_MS } = require('../src/constants')
       const worker = loadWorker()
       worker.startWorker()
 
@@ -404,9 +413,28 @@ describe('project-worker', () => {
       await flushAsync()
 
       emitProcessEvent('disconnect')
+      // process.on('disconnect', ...) is not itself awaited by Node; the
+      // handler dispatches the async shutdown via `void`, so give its promise
+      // chain a chance to resolve before asserting on it.
+      await flushAsync()
 
-      expect(mockStop).toHaveBeenCalled()
+      expect(mockStop).not.toHaveBeenCalled()
+      expect(mockShutdown).toHaveBeenCalledWith({ drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
       expect(exitSpy).toHaveBeenCalledWith(1)
+    })
+
+    it('exits with 1 even though the graceful (shutdown/update) IPC path exits with 0, to preserve abnormal-termination exit code semantics', async () => {
+      const worker = loadWorker()
+      worker.startWorker()
+
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      emitProcessEvent('disconnect')
+      await flushAsync()
+
+      expect(exitSpy).toHaveBeenCalledWith(1)
+      expect(exitSpy).not.toHaveBeenCalledWith(0)
     })
   })
 

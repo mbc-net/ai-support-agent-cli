@@ -154,7 +154,7 @@ export class ProjectAgent {
       projectCode: this.projectCode,
       localAgentChatMode,
       onDockerRebuild: isInDocker()
-        ? () => { void this.performDockerRebuild() }
+        ? (commandId?: string) => { void this.performDockerRebuild(commandId) }
         : undefined,
     }
 
@@ -440,17 +440,32 @@ export class ProjectAgent {
     this.restartRegisterLoop()
   }
 
-  async performConfigSync(): Promise<void> {
+  /**
+   * @param commandId The id of the `config_sync` command that triggered this
+   *   call, when invoked via the command dispatch path (`onConfigSync`).
+   *   Threaded through to `performDockerRebuild()` (via `onDockerRebuild`) so
+   *   its `shutdown()` call can exclude this still-in-flight command from the
+   *   drain wait — see `ConfigSyncDeps.onDockerRebuild`'s doc comment.
+   *   `undefined` for background syncs (initial startup retry loop, debounced
+   *   `config-update` notifications).
+   */
+  async performConfigSync(commandId?: string): Promise<void> {
     // ブラウザローカルポートを動的に更新（VSCode tunnel接続後に判明）
     this.configSyncDeps.browserLocalPort = this.transportState.vsCodeWs?.getBrowserLocalPort()
     // API通知の configHash はRDS同期前の古い値の可能性があるため、
     // config_update を受け取ったときは currentConfigHash をリセットして強制再同期する
     this.configSyncState.currentConfigHash = undefined
-    await performConfigSync(this.configSyncDeps, this.configSyncState)
+    await performConfigSync(this.configSyncDeps, this.configSyncState, commandId)
   }
 
-  async performSetup(): Promise<void> {
-    await performSetup(this.configSyncDeps, this.configSyncState)
+  /**
+   * @param commandId The id of the `setup` command that triggered this call.
+   *   See `performConfigSync`'s doc comment — same threading, since `setup`
+   *   performs a config sync internally and can trigger the same
+   *   `onDockerRebuild` path.
+   */
+  async performSetup(commandId?: string): Promise<void> {
+    await performSetup(this.configSyncDeps, this.configSyncState, commandId)
   }
 
   async performSyncRepository(repositoryCode: string, branch?: string): Promise<RepoSyncResult> {
@@ -483,9 +498,27 @@ export class ProjectAgent {
     }, DELAYED_RESTART_MS)
   }
 
-  async performDockerRebuild(): Promise<void> {
+  /**
+   * @param commandId The id of the `config_sync` (or `setup`) command whose
+   *   handler is still on the call stack when this fires — `performConfigSync`
+   *   / `performSetup` invoke `onDockerRebuild` synchronously from inside
+   *   `applyProjectConfig`, and `void`-call this method fire-and-forget, so
+   *   this method's own `shutdown()` call below can run before that
+   *   triggering command's handler has returned and `processCommand`
+   *   (agent-transport.ts) has removed it from `inFlightCommands` in its
+   *   `finally` block. Passed through to `shutdown()` as `excludeCommandId`
+   *   for the same self-reference reason as `performReboot`/`performUpdate` —
+   *   without it, the drain below would needlessly wait on the triggering
+   *   command's own in-flight entry (up to the full drain timeout in the
+   *   worst case) before finally giving up and proceeding anyway.
+   *   `undefined` when there is no specific triggering command (e.g. the
+   *   initial startup config sync in `registerAndStart()`, run before any
+   *   command has ever been dispatched), which `shutdown()`/`waitForDrain()`
+   *   already handle correctly.
+   */
+  async performDockerRebuild(commandId?: string): Promise<void> {
     logger.info(`${this.prefix} Docker rebuild requested, scheduling restart...`)
-    await this.shutdown()
+    await this.shutdown({ excludeCommandId: commandId })
     setTimeout(() => {
       // Inside Docker, AI_SUPPORT_AGENT_CONFIG_DIR is mounted to the per-project config dir directly.
       // All docker-related files live at the root of getConfigDir() (not in a projects sub-path).
@@ -614,6 +647,23 @@ export class ProjectAgent {
     }
     if (!this.configSyncState.currentConfigHash) {
       logger.warn(`${this.prefix} Initial config sync failed after all retries`)
+    }
+
+    // Re-check cancellation right before startServices(), mirroring the check
+    // used in the rejected/standby branch above. submitPendingResults() and the
+    // config-sync retry loop above involve real I/O with real await points; a
+    // concurrent shutdown() (SIGTERM) may have already run cancelRegisterLoop()
+    // — and, seeing slotHeld still false, correctly skipped releaseSelf() and
+    // gone on to stop the transport — while we were away. Without this check we
+    // would set slotHeld = true and start a brand-new heartbeat/subscription
+    // right as the process is exiting: the slot would never be released via
+    // releaseSelf() (falling back to the slow ~90s heartbeat-timeout reclaim)
+    // and a stray heartbeat could fire in the exit window.
+    if (this.registerLoopCancelled) {
+      logger.debug(
+        `${this.prefix} Register loop cancelled before startServices(); skipping (shutdown in progress)`,
+      )
+      return
     }
 
     await this.startServices(result)
@@ -752,15 +802,23 @@ export class ProjectAgent {
    * ever enters a free slot.
    */
   private handleEviction(): void {
+    // The slot is gone either way (the server would not have sent this
+    // notification otherwise), so record that regardless of shutdown state —
+    // shutdown()'s drain logic reads slotHeld to decide whether to call
+    // releaseSelf(), and skipping this update while shutting down would make
+    // it try to release a slot that was already evicted/reassigned
+    // server-side, producing a misleading runner.slotReleaseFailed warning
+    // for what is actually an expected, already-handled eviction.
+    this.slotHeld = false
+
     // Once shutdown() has started, heartbeats keep running through the drain
     // (see shutdown()'s step 3), so the server could still reply
     // `evicted: true` for unrelated reasons (e.g. another admin action) while
-    // this process is already on its way out. Do nothing in that case — the
-    // normal reaction (re-entering standby) must not fire on a process that is
-    // shutting down.
+    // this process is already on its way out. Do nothing further in that case
+    // — the normal reaction (re-entering standby) must not fire on a process
+    // that is shutting down.
     if (this.shuttingDown) return
     if (this.registerLoopCancelled) return
-    this.slotHeld = false
     this.nextAdmissionMode = 'standby'
     this.stop()
     // Back off before re-entering admission. Being evicted means another
@@ -897,8 +955,8 @@ export class ProjectAgent {
       configSyncState: this.configSyncState,
       configSyncDeps: this.configSyncDeps,
       transportState: this.transportState,
-      onSetup: () => this.performSetup(),
-      onConfigSync: () => this.performConfigSync(),
+      onSetup: (commandId?: string) => this.performSetup(commandId),
+      onConfigSync: (commandId?: string) => this.performConfigSync(commandId),
       onReboot: (commandId?: string) => this.performReboot(commandId),
       onUpdate: (commandId?: string) => this.performUpdate(commandId),
       onSyncRepository: (repositoryCode: string, branch?: string) => this.performSyncRepository(repositoryCode, branch),

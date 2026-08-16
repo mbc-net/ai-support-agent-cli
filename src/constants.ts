@@ -594,6 +594,26 @@ export const AGENT_RELEASE_REQUEST_TIMEOUT_MS = 3_000
  */
 export const SENTRY_FLUSH_TIMEOUT_MS = 2_000
 
+/**
+ * Extra seconds of grace period beyond the in-flight-command drain
+ * (SHUTDOWN_DRAIN_TIMEOUT_MS) budgeted for the releaseSelf() call and process
+ * exit overhead at the end of a graceful shutdown. Shared by every
+ * deployment mode that needs to derive its own stop/terminate grace period
+ * from the drain timeout — Kubernetes' `terminationGracePeriodSeconds`
+ * (manifest-generator.ts) and Docker's `docker stop --time`
+ * (docker-supervisor.ts) — so they cannot silently drift apart from each
+ * other or from SHUTDOWN_DRAIN_TIMEOUT_MS itself.
+ */
+export const SHUTDOWN_GRACE_PERIOD_MARGIN_SECONDS = 20
+/**
+ * Grace period (seconds) derived from SHUTDOWN_DRAIN_TIMEOUT_MS plus the
+ * margin above. Equals 320 with the current constants (300s drain + 20s
+ * margin). Consumers that need it in milliseconds should multiply by 1000
+ * rather than re-deriving from SHUTDOWN_DRAIN_TIMEOUT_MS separately.
+ */
+export const SHUTDOWN_GRACE_PERIOD_SECONDS =
+  Math.ceil(SHUTDOWN_DRAIN_TIMEOUT_MS / 1000) + SHUTDOWN_GRACE_PERIOD_MARGIN_SECONDS
+
 // Delayed restart (reboot / update / docker rebuild)
 export const DELAYED_RESTART_MS = 1_000
 

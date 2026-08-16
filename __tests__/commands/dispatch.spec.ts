@@ -83,6 +83,20 @@ describe('commands/dispatch', () => {
       expect(onConfigSync).toHaveBeenCalled()
     })
 
+    it('passes opts.commandId through to onConfigSync (needed by performDockerRebuild to avoid self-draining)', async () => {
+      const onConfigSync = jest.fn().mockResolvedValue(undefined)
+      const result = await executeCommand('config_sync', {}, { onConfigSync, commandId: 'cmd-config-sync-1' })
+      expect(result.success).toBe(true)
+      expect(onConfigSync).toHaveBeenCalledWith('cmd-config-sync-1')
+    })
+
+    it('passes opts.commandId through to onSetup', async () => {
+      const onSetup = jest.fn().mockResolvedValue(undefined)
+      const result = await executeCommand('setup', {}, { onSetup, commandId: 'cmd-setup-1' })
+      expect(result.success).toBe(true)
+      expect(onSetup).toHaveBeenCalledWith('cmd-setup-1')
+    })
+
     it('should return error for config_sync command without onConfigSync callback', async () => {
       const result = await executeCommand('config_sync', {})
       expect(result.success).toBe(false)

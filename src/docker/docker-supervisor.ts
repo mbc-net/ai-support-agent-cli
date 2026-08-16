@@ -24,6 +24,7 @@ import {
   DOCKER_MAX_SESSION_LOG_BYTES,
   DOCKER_RESTART_EXIT_CODE,
   DOCKER_UPDATE_EXIT_CODE,
+  SHUTDOWN_GRACE_PERIOD_SECONDS,
 } from '../constants'
 import { t } from '../i18n'
 import { logger, getProjectColor, makeLinePrefixer } from '../logger'
@@ -170,10 +171,17 @@ export class DockerSupervisor {
       const closedPromises = [...this.handles.values()].map((h) => h.closedPromise)
       this.stopAll()
       onStop?.()
+      // Must comfortably exceed the `docker stop --time` grace period used
+      // in stopAll() below — otherwise this host-side timer would force
+      // process.exit(0) while `docker stop` is still counting down toward
+      // SIGKILL, abandoning the wait for the container's flush/log-upload
+      // handshake (child.on('close') in spawnProject()) for no benefit. The
+      // extra 10s covers that flush/upload after the container actually
+      // stops.
       const shutdownTimer = setTimeout(() => {
         logger.warn('[docker] Shutdown timed out waiting for log flush; forcing exit')
         process.exit(0)
-      }, this.opts.shutdownTimeoutMs ?? 10_000)
+      }, this.opts.shutdownTimeoutMs ?? (SHUTDOWN_GRACE_PERIOD_SECONDS * 1000 + 10_000))
       void Promise.all(closedPromises).then(() => {
         clearTimeout(shutdownTimer)
         process.exit(0)
@@ -457,7 +465,16 @@ export class DockerSupervisor {
             const containerId = fs.readFileSync(handle.cidFile, 'utf-8').trim()
             /* istanbul ignore next */
             if (containerId) {
-              spawn(getDockerPath(), ['stop', '--time', '5', containerId], { stdio: 'ignore' })
+              // Derived from SHUTDOWN_GRACE_PERIOD_SECONDS (same value
+              // Kubernetes' terminationGracePeriodSeconds uses — see
+              // manifest-generator.ts) instead of a hardcoded 5 seconds.
+              // A container running an in-flight command needs the same
+              // drain budget here as in the Kubernetes deployment mode;
+              // otherwise `docker stop`'s SIGTERM-then-SIGKILL would kill
+              // the container mid-command long before ProjectAgent.shutdown()'s
+              // drain (up to SHUTDOWN_DRAIN_TIMEOUT_MS) or releaseSelf() can
+              // complete.
+              spawn(getDockerPath(), ['stop', '--time', String(SHUTDOWN_GRACE_PERIOD_SECONDS), containerId], { stdio: 'ignore' })
               stopped = true
             }
           }

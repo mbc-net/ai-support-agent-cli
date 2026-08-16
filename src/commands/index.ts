@@ -28,8 +28,16 @@ export interface ExecuteCommandOptions {
   mcpConfigPath?: string
   tenantCode?: string
   browserLocalPort?: number
-  onSetup?: () => Promise<void>
-  onConfigSync?: () => Promise<void>
+  /**
+   * `commandId` is passed through so a Docker-mode config sync/setup that
+   * detects a customization change and fires `performDockerRebuild()` can
+   * tell `shutdown()` to exclude this very command from its in-flight drain
+   * wait (it can only be removed from `inFlightCommands` after this handler
+   * returns, so waiting on it would needlessly delay the rebuild). See
+   * `ConfigSyncDeps.onDockerRebuild`'s doc comment.
+   */
+  onSetup?: (commandId?: string) => Promise<void>
+  onConfigSync?: (commandId?: string) => Promise<void>
   /**
    * `commandId` is passed through so the handler can tell `shutdown()` to
    * exclude this very command from its in-flight drain wait (it can only be
@@ -197,7 +205,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     if (!opts.onSetup) {
       return errorResult(ERR_SETUP_REQUIRES_CALLBACK)
     }
-    await opts.onSetup()
+    await opts.onSetup(opts.commandId)
     return successResult('setup completed')
   },
 
@@ -205,7 +213,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     if (!opts.onConfigSync) {
       return errorResult(ERR_CONFIG_SYNC_REQUIRES_CALLBACK)
     }
-    await opts.onConfigSync()
+    await opts.onConfigSync(opts.commandId)
     return successResult('config sync completed')
   },
 
