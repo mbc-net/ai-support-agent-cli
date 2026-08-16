@@ -117,6 +117,24 @@ describe('ApiClient', () => {
       )
     })
 
+    it('includes instanceNonce so the server can tell apart two processes reporting the same instanceId', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' },
+      })
+
+      await client.register({
+        agentId: 'test-id',
+        hostname: 'hostname',
+        os: 'darwin',
+        arch: 'arm64',
+      })
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).toHaveProperty('instanceNonce')
+      expect(typeof callArgs.instanceNonce).toBe('string')
+      expect(callArgs.instanceNonce.length).toBeGreaterThan(0)
+    })
+
     it('should include ipAddress, availableChatModes, and activeChatMode when provided', async () => {
       mockInstance.post.mockResolvedValue({
         data: { agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' },
@@ -174,6 +192,23 @@ describe('ApiClient', () => {
         expect.objectContaining({ agentId: 'test-id' }),
         undefined,
       )
+    })
+
+    it('includes instanceNonce alongside instanceId', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat('test-id', {
+        platform: 'darwin',
+        arch: 'arm64',
+        cpuUsage: 50,
+        memoryUsage: 60,
+        uptime: 1000,
+      })
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).toHaveProperty('instanceNonce')
+      expect(typeof callArgs.instanceNonce).toBe('string')
+      expect(callArgs.instanceNonce.length).toBeGreaterThan(0)
     })
   })
 

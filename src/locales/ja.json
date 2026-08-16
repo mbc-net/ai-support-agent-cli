@@ -103,6 +103,7 @@
   "runner.registerWorkingAgain": "{{prefix}} 登録が復旧しました ({{attempts}} 回の試行後)",
   "runner.replicaStandby": "契約プランの同時稼働レプリカ数の上限に達しているため待機します (instanceId={{instanceId}}, 稼働中 {{live}}/{{max}})。他のレプリカが停止すると自動的に稼働を開始します",
   "runner.replicaAdmitted": "レプリカの稼働枠を取得しました (instanceId={{instanceId}})",
+  "runner.instanceIdConflict": "同一の AI_SUPPORT_AGENT_INSTANCE_ID ({{instanceId}}) を持つ別プロセスが既に稼働中の可能性があります。同一トークンを複数の Kubernetes クラスタで StatefulSet としてデプロイした場合によく発生します（Pod 名はクラスタ内でのみ一意なため）。AI_SUPPORT_AGENT_INSTANCE_ID にクラスタ名を含む一意な値を明示的に設定することを検討してください。",
   "runner.replicaEvicted": "新しいレプリカに稼働枠を譲り、待機状態に戻ります (instanceId={{instanceId}})",
   "runner.commandReceived": "{{prefix}} コマンド受信: {{type}} ({{commandId}})",
   "runner.commandDone": "{{prefix}} コマンド完了: {{commandId}} ({{result}})",
