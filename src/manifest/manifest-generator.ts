@@ -25,6 +25,22 @@ import { CONTAINER_START_ARGV } from '../docker/docker-args'
 const TERMINATION_GRACE_PERIOD_SECONDS = SHUTDOWN_GRACE_PERIOD_SECONDS
 
 /**
+ * `stopTimeout` for the generated ECS container definition — the container-level
+ * equivalent of `TERMINATION_GRACE_PERIOD_SECONDS` above and docker-supervisor.ts's
+ * `docker stop --time`. Without it, ECS's default (the container's own
+ * `StopTimeout`, or 30s if unset) would SIGKILL the task mid-drain, abandoning a
+ * still-running command the same way an unset Kubernetes grace period would.
+ *
+ * AWS caps `stopTimeout` at 120 seconds for Fargate/EC2 launch types (values
+ * above that are rejected by the platform), so — unlike Kubernetes and Docker,
+ * which get the full SHUTDOWN_GRACE_PERIOD_SECONDS (320s) — ECS deployments get
+ * a shorter grace window. 120s is still far better than the previous
+ * unconfigured default, so the clamp is an accepted platform limitation rather
+ * than something to work around.
+ */
+const ECS_CONTAINER_STOP_TIMEOUT_SECONDS = Math.min(SHUTDOWN_GRACE_PERIOD_SECONDS, 120)
+
+/**
  * Argument vector that starts the agent *inside* a container.
  *
  * `args` (Kubernetes) and `command` (ECS) are NOT a CLI argument list: they map
@@ -446,6 +462,8 @@ export function generateEcsManifest(input: EcsManifestInput): {
         name: 'agent',
         image,
         essential: true,
+        // See ECS_CONTAINER_STOP_TIMEOUT_SECONDS above: AWS caps this at 120s.
+        stopTimeout: ECS_CONTAINER_STOP_TIMEOUT_SECONDS,
         command: [
           ...CONTAINER_ARGV,
           '--project',

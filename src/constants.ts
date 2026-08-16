@@ -436,6 +436,73 @@ export const GIT_CONFIG_TIMEOUT = 10_000
 // git-over-ssh call site — that would silently skip MITM detection.
 export const SSH_NO_HOST_CHECK_FLAGS = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
+// === Graceful shutdown drain (replica lifecycle, phase 3) ===
+// On SIGTERM/SIGINT the agent must finish any in-flight command before releasing
+// its replica slot (POST .../agent/instances/self/release) — releasing early would
+// let the server re-assign the still-running command to another replica and
+// execute it twice (duplicate SSH exec / Ansible run / etc).
+/**
+ * Max time to wait for in-flight commands to drain before giving up on a
+ * graceful release. Chosen to roughly cover CHAT_TIMEOUT (5 minutes) for
+ * in-flight chat commands. CHAT_TOOL_EXECUTION_TIMEOUT (30 minutes) can still
+ * exceed this — an accepted residual limit. Those long-running cases fall
+ * through to the existing 90-second server-side heartbeat-timeout reclaim
+ * instead of an explicit release.
+ */
+export const SHUTDOWN_DRAIN_TIMEOUT_MS = 300_000 // 5 minutes
+/** Poll interval while waiting for in-flight commands to finish draining. */
+export const SHUTDOWN_DRAIN_POLL_INTERVAL_MS = 250
+/**
+ * Drain budget for the forked multi-project-per-host path (ChildProcessManager /
+ * project-worker.ts).
+ *
+ * This used to be a separate, much smaller budget (6000ms), sized on the
+ * assumption that the forked-worker path was a niche "multiple projects on
+ * one developer host" scenario where replica-limit contention was unlikely.
+ * That assumption was wrong: `agent-runner.ts`'s `startAgent()` unconditionally
+ * uses `ChildProcessManager` (`getProjectList()` + "Always use
+ * ChildProcessManager for dynamic project management") once any local config
+ * file exists — i.e. the steady state after any project has ever been
+ * registered/configured, which persists even inside Docker/K8s containers via
+ * a mounted config dir. So this is actually the drain budget for the
+ * common/default deployment path, not a narrow one, and must give in-flight
+ * commands the same protection as the single-project (`--token`+`--apiUrl`)
+ * path. Kept as its own named constant (rather than call sites reusing
+ * SHUTDOWN_DRAIN_TIMEOUT_MS directly) purely for documentation clarity at the
+ * fork-path call sites; it must stay equal to SHUTDOWN_DRAIN_TIMEOUT_MS.
+ */
+export const FORK_SHUTDOWN_DRAIN_TIMEOUT_MS = SHUTDOWN_DRAIN_TIMEOUT_MS
+/** Timeout for the POST .../agent/instances/self/release call made at the end of a graceful shutdown. */
+export const AGENT_RELEASE_REQUEST_TIMEOUT_MS = 3_000
+/**
+ * Timeout passed to `Sentry.flush()` (see sentry.ts's `flushSentry`), called
+ * after releaseSelf() at the end of a forked worker's graceful exit. Named so
+ * CHILD_PROCESS_STOP_TIMEOUT_MS's invariant test can reference the real value
+ * directly instead of a hardcoded literal.
+ */
+export const SENTRY_FLUSH_TIMEOUT_MS = 2_000
+
+/**
+ * Extra seconds of grace period beyond the in-flight-command drain
+ * (SHUTDOWN_DRAIN_TIMEOUT_MS) budgeted for the releaseSelf() call and process
+ * exit overhead at the end of a graceful shutdown. Shared by every
+ * deployment mode that needs to derive its own stop/terminate grace period
+ * from the drain timeout — Kubernetes' `terminationGracePeriodSeconds`
+ * (manifest-generator.ts), Docker's `docker stop --time`
+ * (docker-supervisor.ts), and the forked-worker parent's
+ * `CHILD_PROCESS_STOP_TIMEOUT_MS` (below) — so they cannot silently drift
+ * apart from each other or from SHUTDOWN_DRAIN_TIMEOUT_MS itself.
+ */
+export const SHUTDOWN_GRACE_PERIOD_MARGIN_SECONDS = 20
+/**
+ * Grace period (seconds) derived from SHUTDOWN_DRAIN_TIMEOUT_MS plus the
+ * margin above. Equals 320 with the current constants (300s drain + 20s
+ * margin). Consumers that need it in milliseconds should multiply by 1000
+ * rather than re-deriving from SHUTDOWN_DRAIN_TIMEOUT_MS separately.
+ */
+export const SHUTDOWN_GRACE_PERIOD_SECONDS =
+  Math.ceil(SHUTDOWN_DRAIN_TIMEOUT_MS / 1000) + SHUTDOWN_GRACE_PERIOD_MARGIN_SECONDS
+
 // Child process management
 export const CHILD_PROCESS_MAX_RESTARTS = 5
 export const CHILD_PROCESS_RESTART_DELAY_MS = 5000
@@ -445,16 +512,19 @@ export const CHILD_PROCESS_RESTART_DELAY_MS = 5000
  *
  * Must comfortably exceed the forked worker's own worst-case graceful-exit
  * chain (see `handleGracefulExit` in project-worker.ts): drain
- * (FORK_SHUTDOWN_DRAIN_TIMEOUT_MS, 6000ms) + releaseSelf() HTTP call
- * (AGENT_RELEASE_REQUEST_TIMEOUT_MS, 3000ms) + Sentry flush
- * (SENTRY_FLUSH_TIMEOUT_MS, 2000ms) = 11000ms worst case. Set to that plus a
- * ~3000ms safety margin for process.exit()/event-loop overhead, so the parent
- * never SIGKILLs the child mid-release. See the
- * "constant invariants" describe block in __tests__/child-process-manager.spec.ts,
- * which asserts this relationship so it cannot silently drift out of sync
- * again.
+ * (FORK_SHUTDOWN_DRAIN_TIMEOUT_MS) + releaseSelf() HTTP call
+ * (AGENT_RELEASE_REQUEST_TIMEOUT_MS) + Sentry flush (SENTRY_FLUSH_TIMEOUT_MS).
+ * Derived from SHUTDOWN_GRACE_PERIOD_SECONDS (see above) — the same "drain
+ * timeout + margin" grace period already used for Kubernetes'
+ * `terminationGracePeriodSeconds` and Docker's `docker stop --time` — so this
+ * timeout cannot silently drift out of sync with those or with
+ * FORK_SHUTDOWN_DRAIN_TIMEOUT_MS. See the "constant invariants" describe
+ * block in __tests__/child-process-manager.spec.ts, which asserts the
+ * FORK_SHUTDOWN_DRAIN_TIMEOUT_MS + AGENT_RELEASE_REQUEST_TIMEOUT_MS +
+ * SENTRY_FLUSH_TIMEOUT_MS < CHILD_PROCESS_STOP_TIMEOUT_MS relationship so it
+ * cannot silently drift out of sync again.
  */
-export const CHILD_PROCESS_STOP_TIMEOUT_MS = 14000
+export const CHILD_PROCESS_STOP_TIMEOUT_MS = SHUTDOWN_GRACE_PERIOD_SECONDS * 1000
 
 // Token watcher
 export const TOKEN_WATCH_INTERVAL_MS = 5000
@@ -558,61 +628,6 @@ export const UPDATE_BUSY_WAIT_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes max wait f
 export const UPDATE_BUSY_POLL_INTERVAL_MS = 3_000          // poll every 3 seconds
 export const UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS = 30_000   // 30 seconds for forced updates
 export const BUSY_QUERY_TIMEOUT_MS = 5_000                  // 5 seconds for IPC busy query
-
-// === Graceful shutdown drain (replica lifecycle, phase 3) ===
-// On SIGTERM/SIGINT the agent must finish any in-flight command before releasing
-// its replica slot (POST .../agent/instances/self/release) — releasing early would
-// let the server re-assign the still-running command to another replica and
-// execute it twice (duplicate SSH exec / Ansible run / etc).
-/**
- * Max time to wait for in-flight commands to drain before giving up on a
- * graceful release. Chosen to roughly cover CHAT_TIMEOUT (5 minutes) for
- * in-flight chat commands. CHAT_TOOL_EXECUTION_TIMEOUT (30 minutes) can still
- * exceed this — an accepted residual limit. Those long-running cases fall
- * through to the existing 90-second server-side heartbeat-timeout reclaim
- * instead of an explicit release.
- */
-export const SHUTDOWN_DRAIN_TIMEOUT_MS = 300_000 // 5 minutes
-/** Poll interval while waiting for in-flight commands to finish draining. */
-export const SHUTDOWN_DRAIN_POLL_INTERVAL_MS = 250
-/**
- * Drain budget for the forked multi-project-per-host path (ChildProcessManager /
- * project-worker.ts), separate from and smaller than SHUTDOWN_DRAIN_TIMEOUT_MS.
- * The parent process force-kills a child that has not exited within
- * CHILD_PROCESS_STOP_TIMEOUT_MS (10s — see below), so the drain budget must
- * stay comfortably under that, leaving margin for IPC round-trip, the
- * releaseSelf() call, and process exit overhead.
- */
-export const FORK_SHUTDOWN_DRAIN_TIMEOUT_MS = 6_000
-/** Timeout for the POST .../agent/instances/self/release call made at the end of a graceful shutdown. */
-export const AGENT_RELEASE_REQUEST_TIMEOUT_MS = 3_000
-/**
- * Timeout passed to `Sentry.flush()` (see sentry.ts's `flushSentry`), called
- * after releaseSelf() at the end of a forked worker's graceful exit. Named so
- * CHILD_PROCESS_STOP_TIMEOUT_MS's invariant test can reference the real value
- * directly instead of a hardcoded literal.
- */
-export const SENTRY_FLUSH_TIMEOUT_MS = 2_000
-
-/**
- * Extra seconds of grace period beyond the in-flight-command drain
- * (SHUTDOWN_DRAIN_TIMEOUT_MS) budgeted for the releaseSelf() call and process
- * exit overhead at the end of a graceful shutdown. Shared by every
- * deployment mode that needs to derive its own stop/terminate grace period
- * from the drain timeout — Kubernetes' `terminationGracePeriodSeconds`
- * (manifest-generator.ts) and Docker's `docker stop --time`
- * (docker-supervisor.ts) — so they cannot silently drift apart from each
- * other or from SHUTDOWN_DRAIN_TIMEOUT_MS itself.
- */
-export const SHUTDOWN_GRACE_PERIOD_MARGIN_SECONDS = 20
-/**
- * Grace period (seconds) derived from SHUTDOWN_DRAIN_TIMEOUT_MS plus the
- * margin above. Equals 320 with the current constants (300s drain + 20s
- * margin). Consumers that need it in milliseconds should multiply by 1000
- * rather than re-deriving from SHUTDOWN_DRAIN_TIMEOUT_MS separately.
- */
-export const SHUTDOWN_GRACE_PERIOD_SECONDS =
-  Math.ceil(SHUTDOWN_DRAIN_TIMEOUT_MS / 1000) + SHUTDOWN_GRACE_PERIOD_MARGIN_SECONDS
 
 // Delayed restart (reboot / update / docker rebuild)
 export const DELAYED_RESTART_MS = 1_000

@@ -229,6 +229,19 @@ describe('generateEcsManifest', () => {
     expect(logOptions['awslogs-group']).toBe('/ecs/custom')
   })
 
+  it('sets a container stopTimeout clamped to the AWS 120s cap, not the full ~320s SHUTDOWN_GRACE_PERIOD_SECONDS used by Kubernetes/Docker', () => {
+    // SHUTDOWN_GRACE_PERIOD_SECONDS is 320 (300s drain + 20s margin) with the
+    // current constants — well above AWS's 120s stopTimeout cap for
+    // Fargate/EC2 launch types. Without this clamp, ECS would either reject
+    // the task definition or silently truncate the value; either way the
+    // container-level equivalent of terminationGracePeriodSeconds /
+    // `docker stop --time` must actually be present and valid.
+    const parsed = JSON.parse(generateEcsManifest(ecsInput).taskDefinition)
+    const container = parsed.containerDefinitions[0]
+
+    expect(container.stopTimeout).toBe(120)
+  })
+
   it('emits an execution role placeholder when not provided, and omits the optional task role', () => {
     // 生成物は常に Secrets Manager 参照と awslogs を使うため execution role は必須。
     // 省略すると一見正しい JSON のまま RunTask が起動時に失敗する。

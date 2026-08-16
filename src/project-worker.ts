@@ -148,6 +148,10 @@ function setupMessageHandler(): void {
 async function handleParentDisconnect(): Promise<void> {
   logger.warn(`Parent disconnected, worker ${currentProjectCode} exiting`)
   await agent?.shutdown({ drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
+  // Matches handleGracefulExit()'s pattern: flush any Sentry event captured
+  // during this worker's lifetime (e.g. via captureException elsewhere in the
+  // drain/shutdown path) before exiting, so it is not silently dropped.
+  await flushSentry()
   process.exit(1)
 }
 

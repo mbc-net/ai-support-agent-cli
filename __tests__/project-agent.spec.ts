@@ -2428,6 +2428,45 @@ describe('ProjectAgent', () => {
       expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
     })
 
+    it('joins the first in-flight shutdown() instead of resolving early: a second concurrent caller (e.g. the auto-updater racing SIGTERM) does not resolve until the first caller\'s drain/release actually completes, and the underlying drain/release logic runs only once', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const resolveExec = startStuckCommand('cmd-concurrent')
+      await jest.advanceTimersByTimeAsync(100)
+
+      // Two independent call sites (SIGTERM/SIGINT handler + auto-updater's
+      // stopAllAgents callback) both call shutdown() around the same time.
+      let p1Resolved = false
+      let p2Resolved = false
+      const p1 = agent.shutdown().then(() => { p1Resolved = true })
+      const p2 = agent.shutdown().then(() => { p2Resolved = true })
+
+      // While the command is still in flight, NEITHER caller's promise may
+      // resolve — this is the bug: the old early-return guard resolved the
+      // second caller's promise instantly, letting it proceed (e.g. the
+      // auto-updater calling reExecProcess()) while the drain of a genuinely
+      // in-flight command was still running underneath the first caller.
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS * 3)
+      expect(p1Resolved).toBe(false)
+      expect(p2Resolved).toBe(false)
+      expect(mockClient.releaseSelf).not.toHaveBeenCalled()
+
+      // Only once the in-flight command actually finishes do both callers'
+      // promises resolve, together, after the real drain/release completed.
+      resolveExec({ success: true, data: 'ok' })
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+      await Promise.all([p1, p2])
+
+      expect(p1Resolved).toBe(true)
+      expect(p2Resolved).toBe(true)
+      // The underlying drain/release logic ran exactly once — not once per
+      // caller.
+      expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+      expect(mockSubscriber.disconnect).toHaveBeenCalledTimes(1)
+    })
+
     it('logs a warning with the reason when releaseSelf() resolves but the slot was not released', async () => {
       mockClient.releaseSelf.mockResolvedValue({ released: false, reason: 'nonce_mismatch' })
 

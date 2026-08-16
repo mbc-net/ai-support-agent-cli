@@ -119,8 +119,26 @@ export class ProjectAgent {
   private alertStaleRecoveryTimer: ReturnType<typeof setInterval> | null = null
 
   // Graceful shutdown (phase 3 of the replica lifecycle plan).
-  /** Guards shutdown() against double-invocation (e.g. SIGTERM+SIGINT both firing). */
+  /**
+   * Guards shutdown() against double-invocation (e.g. SIGTERM+SIGINT both
+   * firing, or the auto-updater's stopAllAgents racing a signal handler).
+   * Kept as a plain boolean (flipped true synchronously by the first call,
+   * alongside `shutdownPromise` below) because several call sites
+   * (`handleEviction()`, `updateToken()`) only need a synchronous "is a
+   * shutdown in progress" check, not the in-flight promise itself.
+   */
   private shuttingDown = false
+  /**
+   * The in-flight `doShutdown()` promise, once a first `shutdown()` call has
+   * started one. `shutdown()` is a thin memoizing wrapper around
+   * `doShutdown()`: a second concurrent caller joins (awaits) this same
+   * promise instead of getting an instant no-op — see `shutdown()`'s doc
+   * comment for why an early-return no-op is wrong here (it would let a
+   * second caller like the auto-updater proceed as if the drain/release had
+   * already finished, while the first caller's drain of a genuinely
+   * in-flight command is still running).
+   */
+  private shutdownPromise: Promise<void> | null = null
   /**
    * Whether this replica currently holds an admitted slot. Set true once
    * startServices() begins (admission succeeded), set false again by
@@ -288,11 +306,27 @@ export class ProjectAgent {
    * drain timeout on every single reboot/update. SIGTERM/SIGINT-triggered
    * shutdowns pass no `excludeCommandId` — there is no in-flight command
    * driving those, so this is a no-op for that path.
+   *
+   * Concurrent-caller semantics: two independent call sites in
+   * `runSingleProject()` (`src/agent-runner.ts`) can both call `shutdown()`
+   * around the same time — the SIGTERM/SIGINT handler and the auto-updater's
+   * `stopAllAgents` callback. A second caller here JOINS the first caller's
+   * in-flight `doShutdown()` (awaits the same promise) rather than getting an
+   * instant no-op; otherwise the second caller would proceed (e.g. the
+   * auto-updater calling `reExecProcess()`) while the first caller's drain of
+   * a genuinely in-flight command is still running, abandoning it mid-flight.
+   * The second caller's `opts` are ignored once a shutdown is already in
+   * flight — the first caller's parameters win, since restarting the drain
+   * with different params mid-flight doesn't make sense.
    */
   async shutdown(opts?: { drainTimeoutMs?: number; excludeCommandId?: string }): Promise<void> {
-    if (this.shuttingDown) return
+    if (this.shutdownPromise) return this.shutdownPromise
     this.shuttingDown = true
+    this.shutdownPromise = this.doShutdown(opts)
+    return this.shutdownPromise
+  }
 
+  private async doShutdown(opts?: { drainTimeoutMs?: number; excludeCommandId?: string }): Promise<void> {
     this.transportState.draining = true
 
     this.cancelRegisterLoop()

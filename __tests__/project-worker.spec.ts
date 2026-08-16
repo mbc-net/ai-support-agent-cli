@@ -239,6 +239,22 @@ describe('project-worker', () => {
       expect(exitSpy).toHaveBeenCalledWith(0)
     })
 
+    it('falls back to the (now larger, SHUTDOWN_DRAIN_TIMEOUT_MS-sized) FORK_SHUTDOWN_DRAIN_TIMEOUT_MS for the update message, which never carries an explicit drainTimeoutMs', async () => {
+      const { FORK_SHUTDOWN_DRAIN_TIMEOUT_MS } = require('../src/constants')
+      expect(FORK_SHUTDOWN_DRAIN_TIMEOUT_MS).toBe(300_000)
+
+      const worker = loadWorker()
+      worker.startWorker()
+
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      emitProcessEvent('message', { type: 'update' })
+      await flushAsync()
+
+      expect(mockShutdown).toHaveBeenCalledWith({ drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
+    })
+
     it('should send error message when start fails', async () => {
       const { ProjectAgent } = require('../src/project-agent')
       ProjectAgent.mockImplementationOnce(() => {
@@ -420,6 +436,23 @@ describe('project-worker', () => {
 
       expect(mockStop).not.toHaveBeenCalled()
       expect(mockShutdown).toHaveBeenCalledWith({ drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
+      expect(exitSpy).toHaveBeenCalledWith(1)
+    })
+
+    it('flushes Sentry before exiting, matching handleGracefulExit (regression: this path used to exit without flushing, silently dropping any captured Sentry event)', async () => {
+      const { flushSentry } = require('../src/sentry')
+      const worker = loadWorker()
+      worker.startWorker()
+
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      expect(flushSentry).not.toHaveBeenCalled()
+
+      emitProcessEvent('disconnect')
+      await flushAsync()
+
+      expect(flushSentry).toHaveBeenCalled()
       expect(exitSpy).toHaveBeenCalledWith(1)
     })
 

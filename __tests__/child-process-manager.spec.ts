@@ -560,7 +560,61 @@ describe('ChildProcessManager', () => {
   })
 })
 
+describe('shutdown message drain timeout value', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  // Regression guard: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS used to be a separate,
+  // much smaller (6000ms) budget sized on the mistaken assumption that
+  // ChildProcessManager was a niche multi-project-per-host path. It is
+  // actually the default/steady-state startup path (agent-runner.ts's
+  // startAgent() unconditionally uses ChildProcessManager once a config file
+  // exists), so it must carry the same drain budget as the single-project
+  // path (SHUTDOWN_DRAIN_TIMEOUT_MS, 300000ms) — not the old 6000ms value.
+  it('sends the full SHUTDOWN_DRAIN_TIMEOUT_MS-sized drain budget (not the old 6s value) in stopProject', async () => {
+    const { SHUTDOWN_DRAIN_TIMEOUT_MS } = require('../src/constants')
+    expect(FORK_SHUTDOWN_DRAIN_TIMEOUT_MS).toBe(SHUTDOWN_DRAIN_TIMEOUT_MS)
+    expect(FORK_SHUTDOWN_DRAIN_TIMEOUT_MS).toBe(300_000)
+
+    const manager = new ChildProcessManager()
+    manager.forkProject(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api' },
+      'agent-1',
+      { pollInterval: 3000, heartbeatInterval: 30000 },
+    )
+    const child = fork.mock.results[0].value as any
+
+    const stopPromise = manager.stopProject({ tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api' })
+    expect(child.send).toHaveBeenCalledWith({ type: 'shutdown', drainTimeoutMs: 300_000 })
+    child._emit('exit', 0, null)
+    await stopPromise
+  })
+
+  it('sends the full SHUTDOWN_DRAIN_TIMEOUT_MS-sized drain budget in stopAll', async () => {
+    const manager = new ChildProcessManager()
+    manager.forkProject(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api' },
+      'agent-1',
+      { pollInterval: 3000, heartbeatInterval: 30000 },
+    )
+    const child = fork.mock.results[0].value as any
+
+    const stopPromise = manager.stopAll()
+    expect(child.send).toHaveBeenCalledWith({ type: 'shutdown', drainTimeoutMs: 300_000 })
+    child._emit('exit', 0, null)
+    await stopPromise
+  })
+})
+
 describe('constant invariants', () => {
+  it('CHILD_PROCESS_STOP_TIMEOUT_MS was raised to comfortably exceed the new (300s) fork drain budget', () => {
+    // Guards against the constant silently regressing back toward the old
+    // 14000ms value, which would no longer leave any margin over the raised
+    // FORK_SHUTDOWN_DRAIN_TIMEOUT_MS.
+    expect(CHILD_PROCESS_STOP_TIMEOUT_MS).toBe(320_000)
+  })
+
   it('FORK_SHUTDOWN_DRAIN_TIMEOUT_MS must stay under CHILD_PROCESS_STOP_TIMEOUT_MS', () => {
     // The parent force-kills a child that has not exited within
     // CHILD_PROCESS_STOP_TIMEOUT_MS, so the drain budget sent to a forked
