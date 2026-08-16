@@ -563,7 +563,7 @@ async function processCommand(
         : undefined,
     })
     logger.debug(`${deps.prefix} Command result [${commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, LOG_RESULT_LIMIT)}`)
-    savePendingResult(
+    const persisted = savePendingResult(
       commandId,
       deps.agentId,
       result,
@@ -596,8 +596,13 @@ async function processCommand(
       // real result we just persisted, making it unrecoverable even after a
       // restart. The result is already on disk; log it and let the pending
       // store resend it.
+      // Only promise a resend when the result actually made it to disk.
+      // savePendingResult returning false means there is nothing to resend, and
+      // the server will report the job as TIMEOUT once it gives up waiting.
       logger.error(
-        `${deps.prefix} Failed to submit the result for ${commandId}; it stays queued for resend: ${getErrorMessage(error)}`,
+        persisted
+          ? `${deps.prefix} Failed to submit the result for ${commandId}; it stays queued for resend: ${getErrorMessage(error)}`
+          : `${deps.prefix} Failed to submit the result for ${commandId} and it could not be persisted; the result is lost: ${getErrorMessage(error)}`,
       )
       return
     }

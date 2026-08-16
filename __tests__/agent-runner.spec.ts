@@ -90,6 +90,13 @@ jest.mock('../src/pending-result-store', () => ({
   savePendingResult: jest.fn(),
   removePendingResult: jest.fn(),
   submitPendingResults: jest.fn().mockResolvedValue(undefined),
+  // Returns a timer handle that ProjectAgent.stopWork() passes to clearInterval.
+  // A plain object is fine — clearInterval ignores non-Timeout values.
+  startPendingResultFlush: jest.fn(() => ({ unref: jest.fn() })),
+  // Re-export the real constant: project-agent imports it from this module, and a
+  // mock that omits it silently disables the double-submit guard (minAgeMs -> undefined).
+  PENDING_RESULT_MIN_RETRY_AGE_MS: jest.requireActual('../src/pending-result-store')
+    .PENDING_RESULT_MIN_RETRY_AGE_MS,
 }))
 
 const mockConfigWatcherStop = jest.fn()

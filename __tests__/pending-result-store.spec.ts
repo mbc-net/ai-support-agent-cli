@@ -8,6 +8,7 @@ import {
   removePendingResult,
   loadPendingResults,
   submitPendingResults,
+  PENDING_RESULT_STALE_THRESHOLD_MS,
 } from '../src/pending-result-store'
 import { ApiClient } from '../src/api-client'
 
@@ -104,13 +105,19 @@ describe('pending-result-store', () => {
       expect(results.map(r => r.commandId).sort()).toEqual(['cmd-1', 'cmd-2'])
     })
 
-    it('should discard stale results (older than 1 hour)', () => {
+    it('should discard stale results (older than PENDING_RESULT_STALE_THRESHOLD_MS)', () => {
+      // NOTE: the threshold was raised from 1 hour to 3 hours. At 1 hour the agent
+      // deleted the result *before* the server gave up on the command
+      // (MAX_COMMAND_EXECUTION_MS = 2 hours), which made a completed job
+      // unrecoverable and reported it as TIMEOUT. See pending-result-retry.spec.ts.
       savePendingResult('cmd-stale', 'agent-1', mockResult, 'http://api', 'tok', 'tenant-1')
 
-      // Modify savedAt to be 2 hours ago
+      // Modify savedAt to be older than the threshold
       const filePath = path.join(tempDir, 'pending-results', 'cmd-stale.json')
       const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
-      content.savedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+      content.savedAt = new Date(
+        Date.now() - PENDING_RESULT_STALE_THRESHOLD_MS - 60 * 1000,
+      ).toISOString()
       fs.writeFileSync(filePath, JSON.stringify(content))
 
       const results = loadPendingResults()

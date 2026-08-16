@@ -49,9 +49,12 @@ jobs:
         run: npx tsc --noEmit
         continue-on-error: true
 
+      # 実ゲート。continue-on-error は付けない。
+      # 447f0d0 の時点では minimatch の勧告に CJS 互換の修正版が無く、ゲート化すると
+      # CI が恒久的に赤になるため意図的に握り潰していたが、その前提は解消済み。
+      # 不変条件は __tests__/ci/security-audit-gate.spec.ts で固定している。
       - name: Security Audit (npm)
         run: npm audit --audit-level=high
-        continue-on-error: true
 
       - name: Security Scan (Trivy)
         uses: aquasecurity/trivy-action@master
