@@ -287,6 +287,69 @@ describe('ProjectAgent', () => {
           reason: 'limit_reached',
         },
       }
+      const rejectedConflict = {
+        agentId: 'test-id',
+        tenantCode: 'test-tenant',
+        appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+        appsyncApiKey: 'da2-testkey123',
+        transportMode: 'realtime',
+        admission: {
+          accepted: false,
+          instanceId: 'pod-b',
+          maxReplicas: 2,
+          liveReplicas: 2,
+          reason: 'instance_id_conflict',
+        },
+      }
+
+      it('warns once when admission is rejected with instance_id_conflict', async () => {
+        // 2026-08-15 の本番障害: 複数クラスタで同一トークンをデプロイし、
+        // Pod名（instanceId）が衝突して同一個体の再接続と誤認された。
+        // limit_reached とは異なる、原因特定に直結する警告を出す必要がある。
+        mockClient.register.mockResolvedValue(rejectedConflict)
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('runner.instanceIdConflict'),
+        )
+
+        agent.stop()
+      })
+
+      it('does not warn about instance_id_conflict when rejected for limit_reached', async () => {
+        mockClient.register.mockResolvedValue(rejected)
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+
+        expect(logger.warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('runner.instanceIdConflict'),
+        )
+
+        agent.stop()
+      })
+
+      it('logs the instance_id_conflict warning only once even across standby retries', async () => {
+        mockClient.register.mockResolvedValue(rejectedConflict)
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+        await jest.advanceTimersByTimeAsync(100)
+        await jest.advanceTimersByTimeAsync(31_000)
+        await jest.advanceTimersByTimeAsync(31_000)
+
+        const conflictWarnings = (logger.warn as jest.Mock).mock.calls.filter(
+          (call: unknown[]) =>
+            typeof call[0] === 'string' && call[0].includes('runner.instanceIdConflict'),
+        )
+        expect(conflictWarnings).toHaveLength(1)
+
+        agent.stop()
+      })
 
       it('sends admissionMode=initial on the first registration', async () => {
         const agent = new ProjectAgent(project, 'agent-1', options)
