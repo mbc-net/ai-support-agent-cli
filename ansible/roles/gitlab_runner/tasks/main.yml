@@ -71,6 +71,42 @@
       gitlab_runner_registration_token (legacy registration token) must be
       set — not both, and not neither.
 
+- name: "gitlab_runner : Validate the token format"
+  # トークンだけが未検証だったため、任意の文字列が register コマンドへ渡り、GitLab の
+  # API が 403 を返して初めて誤りが分かる状態だった。ホスト常駐版では systemd サービスが
+  # 起動していても登録されていない、という切り分けの難しい失敗になる。
+  #
+  # 実際に観測された誤設定は2つで、どちらもここで弾ける（k8s 版と同じ内容）:
+  #   1. `glpat-…` — アクセストークンを Runner 認証トークンと取り違えた。GitLab は
+  #      個人用アクセストークンもプロジェクトアクセストークンも `glpat-` 接頭辞のため
+  #      混同しやすい。認証トークンは Runner 作成画面でのみ得られ `glrt-` で始まる。
+  #   2. Runner 作成画面に表示される登録コマンド全文の貼り付け
+  #      （`gitlab-runner register  --url …  --token glrt-…`）。空白を含む点で捕捉できる。
+  #
+  # 旧登録トークンには接頭辞を強制しない（世代により形式が異なるため）。空白を含まない
+  # ことだけを縛る。`| trim` 後の値を検証するのは、ロール自身も trim 後の値を書き出す
+  # （"Write the token into its temp file"）ため、末尾改行で落とさないようにするため。
+  #
+  # 値は `fail_msg` に展開しない。`no_log` も付けない（付けると案内ごと隠れる）。
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (gitlab_runner_has_auth | bool)
+        or ((gitlab_runner_auth_token | trim) is match('^glrt-\S+$'))
+      - >-
+        not (gitlab_runner_has_reg | bool)
+        or ((gitlab_runner_registration_token | trim) is match('^\S+$'))
+    fail_msg: >-
+      The runner token is not in a valid format. gitlab_runner_auth_token must
+      be a runner *authentication* token starting with "glrt-", obtained from
+      the GitLab runner creation screen (Settings > CI/CD > Runners > New
+      runner) — NOT an access token, which starts with "glpat-". Paste only the
+      token itself: the registration command shown next to it ("gitlab-runner
+      register --url ... --token glrt-...") contains spaces and is rejected.
+      The legacy gitlab_runner_registration_token must likewise contain no
+      whitespace.
+    success_msg: "Runner token format is valid."
+
 - name: "gitlab_runner : Validate gitlab_runner_url is set"
   ansible.builtin.assert:
     that:

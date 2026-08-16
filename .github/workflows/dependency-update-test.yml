@@ -29,9 +29,13 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Run tests
+      # カバレッジ計装込みで走らせる。447f0d0 の障害
+      # （babel-plugin-istanbul -> test-exclude -> minimatch の
+      # `minimatch is not a function`）は --coverage のときだけ通る経路で起きた。
+      # 依存更新こそがその経路を壊す変更なので、この検証ジョブでは必ず通す。
+      - name: Run tests (with coverage)
         run: |
-          setsid npm test &
+          setsid npm run test:cov &
           TEST_PID=$!
           TEST_PGID=$(ps -o pgid= -p $TEST_PID | tr -d ' ')
           ( sleep 480 && kill -- -$TEST_PGID 2>/dev/null || true ) &
@@ -42,9 +46,9 @@ jobs:
           exit $EXIT_CODE
         timeout-minutes: 10
 
+      # 実ゲート（理由は ci-cd.yml の同ステップのコメントを参照）
       - name: Security audit
         run: npm audit --audit-level=high
-        continue-on-error: true
 
       - name: Check for outdated packages
         run: npm outdated || true

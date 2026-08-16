@@ -11,6 +11,7 @@ jest.mock('../src/sentry', () => ({
 // Mock ProjectAgent
 const mockStart = jest.fn()
 const mockStop = jest.fn()
+const mockShutdown = jest.fn().mockResolvedValue(undefined)
 const mockGetClient = jest.fn()
 const mockUpdateToken = jest.fn()
 const mockIsBusy = jest.fn().mockReturnValue(false)
@@ -18,6 +19,7 @@ jest.mock('../src/project-agent', () => ({
   ProjectAgent: jest.fn().mockImplementation(() => ({
     start: mockStart,
     stop: mockStop,
+    shutdown: mockShutdown,
     getClient: mockGetClient,
     updateToken: mockUpdateToken,
     isBusy: mockIsBusy,
@@ -184,7 +186,7 @@ describe('project-worker', () => {
       expect((logger.setVerbose as jest.Mock)).toHaveBeenCalledWith(true)
     })
 
-    it('should handle shutdown message', async () => {
+    it('should handle shutdown message by awaiting the graceful drain (agent.shutdown), not the synchronous stop', async () => {
       const worker = loadWorker()
       worker.startWorker()
 
@@ -192,11 +194,12 @@ describe('project-worker', () => {
       emitProcessEvent('message', startMessage)
       await flushAsync()
 
-      // Then shutdown
-      emitProcessEvent('message', { type: 'shutdown' })
+      // Then shutdown, with an explicit drain budget from the parent
+      emitProcessEvent('message', { type: 'shutdown', drainTimeoutMs: 6000 })
       await flushAsync()
 
-      expect(mockStop).toHaveBeenCalled()
+      expect(mockShutdown).toHaveBeenCalledWith({ drainTimeoutMs: 6000 })
+      expect(mockStop).not.toHaveBeenCalled()
       expect(processSendSpy).toHaveBeenCalledWith({
         type: 'stopped',
         tenantCode: 'mbc',
@@ -205,7 +208,21 @@ describe('project-worker', () => {
       expect(exitSpy).toHaveBeenCalledWith(0)
     })
 
-    it('should handle update message', async () => {
+    it('falls back to FORK_SHUTDOWN_DRAIN_TIMEOUT_MS when the shutdown message carries no drainTimeoutMs', async () => {
+      const { FORK_SHUTDOWN_DRAIN_TIMEOUT_MS } = require('../src/constants')
+      const worker = loadWorker()
+      worker.startWorker()
+
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      emitProcessEvent('message', { type: 'shutdown' })
+      await flushAsync()
+
+      expect(mockShutdown).toHaveBeenCalledWith({ drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
+    })
+
+    it('should handle update message by awaiting the graceful drain (agent.shutdown)', async () => {
       const worker = loadWorker()
       worker.startWorker()
 
@@ -217,8 +234,25 @@ describe('project-worker', () => {
       emitProcessEvent('message', { type: 'update' })
       await flushAsync()
 
-      expect(mockStop).toHaveBeenCalled()
+      expect(mockShutdown).toHaveBeenCalled()
+      expect(mockStop).not.toHaveBeenCalled()
       expect(exitSpy).toHaveBeenCalledWith(0)
+    })
+
+    it('falls back to the (now larger, SHUTDOWN_DRAIN_TIMEOUT_MS-sized) FORK_SHUTDOWN_DRAIN_TIMEOUT_MS for the update message, which never carries an explicit drainTimeoutMs', async () => {
+      const { FORK_SHUTDOWN_DRAIN_TIMEOUT_MS } = require('../src/constants')
+      expect(FORK_SHUTDOWN_DRAIN_TIMEOUT_MS).toBe(300_000)
+
+      const worker = loadWorker()
+      worker.startWorker()
+
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      emitProcessEvent('message', { type: 'update' })
+      await flushAsync()
+
+      expect(mockShutdown).toHaveBeenCalledWith({ drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
     })
 
     it('should send error message when start fails', async () => {
@@ -377,7 +411,16 @@ describe('project-worker', () => {
   })
 
   describe('disconnect handler', () => {
-    it('should stop agent and exit on disconnect', async () => {
+    // The parent's IPC channel being gone does not affect this worker's
+    // ability to drain in-flight commands or release its replica slot: both
+    // go straight from this worker process to the backend API
+    // (ApiClient.releaseSelf() / the worker's own AppSync subscription),
+    // independent of the parent. So the disconnect path must use the same
+    // drained shutdown() as the graceful (`shutdown`/`update` IPC message)
+    // path, not the old synchronous stop() — only the exit code (1, abnormal
+    // termination) stays different.
+    it('should gracefully shut down (drain) the agent, not just stop() it, and exit with 1 on parent disconnect', async () => {
+      const { FORK_SHUTDOWN_DRAIN_TIMEOUT_MS } = require('../src/constants')
       const worker = loadWorker()
       worker.startWorker()
 
@@ -386,9 +429,45 @@ describe('project-worker', () => {
       await flushAsync()
 
       emitProcessEvent('disconnect')
+      // process.on('disconnect', ...) is not itself awaited by Node; the
+      // handler dispatches the async shutdown via `void`, so give its promise
+      // chain a chance to resolve before asserting on it.
+      await flushAsync()
 
-      expect(mockStop).toHaveBeenCalled()
+      expect(mockStop).not.toHaveBeenCalled()
+      expect(mockShutdown).toHaveBeenCalledWith({ drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
       expect(exitSpy).toHaveBeenCalledWith(1)
+    })
+
+    it('flushes Sentry before exiting, matching handleGracefulExit (regression: this path used to exit without flushing, silently dropping any captured Sentry event)', async () => {
+      const { flushSentry } = require('../src/sentry')
+      const worker = loadWorker()
+      worker.startWorker()
+
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      expect(flushSentry).not.toHaveBeenCalled()
+
+      emitProcessEvent('disconnect')
+      await flushAsync()
+
+      expect(flushSentry).toHaveBeenCalled()
+      expect(exitSpy).toHaveBeenCalledWith(1)
+    })
+
+    it('exits with 1 even though the graceful (shutdown/update) IPC path exits with 0, to preserve abnormal-termination exit code semantics', async () => {
+      const worker = loadWorker()
+      worker.startWorker()
+
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      emitProcessEvent('disconnect')
+      await flushAsync()
+
+      expect(exitSpy).toHaveBeenCalledWith(1)
+      expect(exitSpy).not.toHaveBeenCalledWith(0)
     })
   })
 

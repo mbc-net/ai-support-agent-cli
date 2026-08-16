@@ -57,6 +57,26 @@ export interface AdmissionResult {
   evictedInstanceId?: string
 }
 
+/**
+ * Response of `POST .../agent/instances/self/release` (graceful shutdown drain,
+ * phase 3). Sent once the agent has finished draining its in-flight commands so
+ * the server can free the slot immediately instead of waiting for the
+ * heartbeat-timeout reclaim.
+ */
+export interface ReleaseSelfResponse {
+  released: boolean
+  reason?: 'not_found' | 'nonce_mismatch' | 'already_released'
+}
+
+/**
+ * `ApiClient.releaseSelf()` never throws — failures (including ones that never
+ * reached the server) are represented as additional `reason` values not sent by
+ * the server itself.
+ */
+export type ReleaseSelfResult =
+  | ReleaseSelfResponse
+  | { released: false; reason: 'no_replica_identity' | 'request_failed' }
+
 export interface RegisterResponse {
   agentId: string
   tenantCode: string

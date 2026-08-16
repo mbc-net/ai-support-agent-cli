@@ -1,5 +1,5 @@
 import { ChildProcessManager } from '../src/child-process-manager'
-import { CHILD_PROCESS_MAX_RESTARTS } from '../src/constants'
+import { AGENT_RELEASE_REQUEST_TIMEOUT_MS, CHILD_PROCESS_MAX_RESTARTS, CHILD_PROCESS_STOP_TIMEOUT_MS, FORK_SHUTDOWN_DRAIN_TIMEOUT_MS, SENTRY_FLUSH_TIMEOUT_MS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../src/constants'
 
 jest.mock('child_process', () => ({
   fork: jest.fn().mockImplementation(() => {
@@ -95,7 +95,7 @@ describe('ChildProcessManager', () => {
 
       const stopPromise = manager.stopProject(project)
 
-      expect(child.send).toHaveBeenCalledWith({ type: 'shutdown' })
+      expect(child.send).toHaveBeenCalledWith({ type: 'shutdown', drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
 
       // Simulate child exit
       child._emit('exit', 0, null)
@@ -149,6 +149,31 @@ describe('ChildProcessManager', () => {
       expect(manager.hasProject(project)).toBe(false)
 
       jest.useRealTimers()
+    })
+
+    it('unrefs the force-kill timer so a wedged child cannot keep the process alive', async () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value
+
+      // Intercept the real setTimeout so we can spy on .unref() being called
+      // on the specific timer stopProject() creates, without needing fake
+      // timers (which would make asserting the *real* timer object awkward).
+      const unrefSpy = jest.fn()
+      const realSetTimeout = global.setTimeout
+      const setTimeoutSpy = jest
+        .spyOn(global, 'setTimeout')
+        .mockImplementation(((handler: (...args: unknown[]) => void, timeout?: number, ...args: unknown[]) => {
+          const timer = realSetTimeout(handler, timeout, ...args)
+          timer.unref = unrefSpy.mockReturnValue(timer)
+          return timer
+        }) as unknown as typeof setTimeout)
+
+      const stopPromise = manager.stopProject(project, 100)
+      child._emit('exit', 0, null)
+      await stopPromise
+
+      expect(unrefSpy).toHaveBeenCalled()
+      setTimeoutSpy.mockRestore()
     })
   })
 
@@ -374,9 +399,39 @@ describe('ChildProcessManager', () => {
       await stopPromise
 
       // child.send should not have been called with shutdown (was connected=false)
-      expect(child.send).not.toHaveBeenCalledWith({ type: 'shutdown' })
+      expect(child.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'shutdown' }))
       expect(manager.getRunningCount()).toBe(0)
       jest.useRealTimers()
+    })
+
+    it('unrefs each force-kill timer so wedged children cannot keep the process alive', async () => {
+      manager.forkProject(project, 'agent-1', options)
+      manager.forkProject(
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        'agent-1',
+        options,
+      )
+      const children = fork.mock.results.map((r: { value: unknown }) => r.value) as Array<ReturnType<typeof fork>>
+
+      const unrefSpy = jest.fn()
+      const realSetTimeout = global.setTimeout
+      const setTimeoutSpy = jest
+        .spyOn(global, 'setTimeout')
+        .mockImplementation(((handler: (...args: unknown[]) => void, timeout?: number, ...args: unknown[]) => {
+          const timer = realSetTimeout(handler, timeout, ...args)
+          timer.unref = unrefSpy.mockReturnValue(timer)
+          return timer
+        }) as unknown as typeof setTimeout)
+
+      const stopPromise = manager.stopAll(100)
+      for (const child of children) {
+        ;(child as any)._emit('exit', 0, null)
+      }
+      await stopPromise
+
+      // Two children stopped concurrently -> two force-kill timers created.
+      expect(unrefSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
+      setTimeoutSpy.mockRestore()
     })
   })
 
@@ -557,5 +612,100 @@ describe('ChildProcessManager', () => {
 
       jest.useRealTimers()
     })
+  })
+})
+
+describe('shutdown message drain timeout value', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  // Regression guard: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS used to be a separate,
+  // much smaller (6000ms) budget sized on the mistaken assumption that
+  // ChildProcessManager was a niche multi-project-per-host path. It is
+  // actually the default/steady-state startup path (agent-runner.ts's
+  // startAgent() unconditionally uses ChildProcessManager once a config file
+  // exists), so it must carry the same drain budget as the single-project
+  // path (SHUTDOWN_DRAIN_TIMEOUT_MS, 300000ms) — not the old 6000ms value.
+  it('sends the full SHUTDOWN_DRAIN_TIMEOUT_MS-sized drain budget (not the old 6s value) in stopProject', async () => {
+    const { SHUTDOWN_DRAIN_TIMEOUT_MS } = require('../src/constants')
+    expect(FORK_SHUTDOWN_DRAIN_TIMEOUT_MS).toBe(SHUTDOWN_DRAIN_TIMEOUT_MS)
+    expect(FORK_SHUTDOWN_DRAIN_TIMEOUT_MS).toBe(300_000)
+
+    const manager = new ChildProcessManager()
+    manager.forkProject(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api' },
+      'agent-1',
+      { pollInterval: 3000, heartbeatInterval: 30000 },
+    )
+    const child = fork.mock.results[0].value as any
+
+    const stopPromise = manager.stopProject({ tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api' })
+    expect(child.send).toHaveBeenCalledWith({ type: 'shutdown', drainTimeoutMs: 300_000 })
+    child._emit('exit', 0, null)
+    await stopPromise
+  })
+
+  it('sends the full SHUTDOWN_DRAIN_TIMEOUT_MS-sized drain budget in stopAll', async () => {
+    const manager = new ChildProcessManager()
+    manager.forkProject(
+      { tenantCode: 'mbc', projectCode: 'proj-a', token: 'token-a', apiUrl: 'http://api' },
+      'agent-1',
+      { pollInterval: 3000, heartbeatInterval: 30000 },
+    )
+    const child = fork.mock.results[0].value as any
+
+    const stopPromise = manager.stopAll()
+    expect(child.send).toHaveBeenCalledWith({ type: 'shutdown', drainTimeoutMs: 300_000 })
+    child._emit('exit', 0, null)
+    await stopPromise
+  })
+})
+
+describe('constant invariants', () => {
+  it('CHILD_PROCESS_STOP_TIMEOUT_MS was raised to comfortably exceed the new (300s) fork drain budget', () => {
+    // Guards against the constant silently regressing back toward the old
+    // 14000ms value, which would no longer leave any margin over the raised
+    // FORK_SHUTDOWN_DRAIN_TIMEOUT_MS.
+    expect(CHILD_PROCESS_STOP_TIMEOUT_MS).toBe(310_000)
+  })
+
+  it('CHILD_PROCESS_STOP_TIMEOUT_MS must stay strictly under the K8s/outer-orchestrator grace period', () => {
+    // ChildProcessManager runs in the host/CLI process itself — the same
+    // process an outer orchestrator (e.g. Kubernetes) sends SIGTERM to and,
+    // after SHUTDOWN_GRACE_PERIOD_SECONDS, SIGKILLs. If this constant ever
+    // equaled or exceeded that outer deadline again, the outer SIGKILL could
+    // land while this process is still inside stopAll()/stopProject() (or
+    // its own post-loop cleanup) — abandoning that cleanup instead of
+    // letting it finish. Unlike docker-supervisor.ts's analogous timer
+    // (which bounds a separate ancestor process and deliberately adds
+    // margin ON TOP of the outer deadline), this one must leave margin
+    // BELOW it.
+    expect(CHILD_PROCESS_STOP_TIMEOUT_MS).toBeLessThan(SHUTDOWN_GRACE_PERIOD_SECONDS * 1000)
+  })
+
+  it('FORK_SHUTDOWN_DRAIN_TIMEOUT_MS must stay under CHILD_PROCESS_STOP_TIMEOUT_MS', () => {
+    // The parent force-kills a child that has not exited within
+    // CHILD_PROCESS_STOP_TIMEOUT_MS, so the drain budget sent to a forked
+    // worker (FORK_SHUTDOWN_DRAIN_TIMEOUT_MS) must leave margin under it for
+    // the IPC round-trip, the releaseSelf() call, and process exit overhead.
+    // If these ever drift apart, the worker's own drain wait would still be
+    // running when the parent SIGKILLs it — abandoning the drain entirely.
+    expect(FORK_SHUTDOWN_DRAIN_TIMEOUT_MS).toBeLessThan(CHILD_PROCESS_STOP_TIMEOUT_MS)
+  })
+
+  it('the full graceful-exit chain (drain + release + Sentry flush) must stay under CHILD_PROCESS_STOP_TIMEOUT_MS', () => {
+    // project-worker.ts's handleGracefulExit runs, sequentially:
+    //   await agent.shutdown({ drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })  (worst case)
+    //     -> which itself calls releaseSelf() (up to AGENT_RELEASE_REQUEST_TIMEOUT_MS)
+    //   await flushSentry()  (up to SENTRY_FLUSH_TIMEOUT_MS)
+    // The drain-alone comparison above does not account for the release call or
+    // the Sentry flush that happen *after* the drain completes — this asserts
+    // the full worst-case chain instead, so the two constants above being
+    // bumped without also bumping CHILD_PROCESS_STOP_TIMEOUT_MS is caught here,
+    // not discovered as a real restart hanging in production.
+    const worstCaseGracefulExitMs =
+      FORK_SHUTDOWN_DRAIN_TIMEOUT_MS + AGENT_RELEASE_REQUEST_TIMEOUT_MS + SENTRY_FLUSH_TIMEOUT_MS
+    expect(worstCaseGracefulExitMs).toBeLessThan(CHILD_PROCESS_STOP_TIMEOUT_MS)
   })
 })

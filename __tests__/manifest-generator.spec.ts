@@ -99,6 +99,17 @@ describe('generateK8sManifest', () => {
     expect(manifest).not.toContain(BASE.token)
   })
 
+  it('sets terminationGracePeriodSeconds so SIGTERM has time to drain in-flight commands before releasing the slot', () => {
+    // 5-minute drain (SHUTDOWN_DRAIN_TIMEOUT_MS) + ~20s margin for the
+    // releaseSelf() call and process exit overhead. Without this, Kubernetes'
+    // 30s default would SIGKILL the Pod mid-drain.
+    const deployment = loadAll(generateK8sManifest(BASE)).find(
+      (doc): doc is Record<string, any> =>
+        (doc as Record<string, unknown>)?.kind === 'Deployment',
+    )
+    expect(deployment?.spec.template.spec.terminationGracePeriodSeconds).toBe(320)
+  })
+
   it('binds the instance id to the Pod name via the downward API', () => {
     const manifest = generateK8sManifest(BASE)
 
@@ -216,6 +227,19 @@ describe('generateEcsManifest', () => {
       parsed.containerDefinitions[0].logConfiguration.options
     expect(logOptions['awslogs-region']).toBe('us-east-1')
     expect(logOptions['awslogs-group']).toBe('/ecs/custom')
+  })
+
+  it('sets a container stopTimeout clamped to the AWS 120s cap, not the full ~320s SHUTDOWN_GRACE_PERIOD_SECONDS used by Kubernetes/Docker', () => {
+    // SHUTDOWN_GRACE_PERIOD_SECONDS is 320 (300s drain + 20s margin) with the
+    // current constants — well above AWS's 120s stopTimeout cap for
+    // Fargate/EC2 launch types. Without this clamp, ECS would either reject
+    // the task definition or silently truncate the value; either way the
+    // container-level equivalent of terminationGracePeriodSeconds /
+    // `docker stop --time` must actually be present and valid.
+    const parsed = JSON.parse(generateEcsManifest(ecsInput).taskDefinition)
+    const container = parsed.containerDefinitions[0]
+
+    expect(container.stopTimeout).toBe(120)
   })
 
   it('emits an execution role placeholder when not provided, and omits the optional task role', () => {

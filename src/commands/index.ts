@@ -28,10 +28,24 @@ export interface ExecuteCommandOptions {
   mcpConfigPath?: string
   tenantCode?: string
   browserLocalPort?: number
-  onSetup?: () => Promise<void>
-  onConfigSync?: () => Promise<void>
-  onReboot?: () => Promise<void>
-  onUpdate?: () => Promise<void>
+  /**
+   * `commandId` is passed through so a Docker-mode config sync/setup that
+   * detects a customization change and fires `performDockerRebuild()` can
+   * tell `shutdown()` to exclude this very command from its in-flight drain
+   * wait (it can only be removed from `inFlightCommands` after this handler
+   * returns, so waiting on it would needlessly delay the rebuild). See
+   * `ConfigSyncDeps.onDockerRebuild`'s doc comment.
+   */
+  onSetup?: (commandId?: string) => Promise<void>
+  onConfigSync?: (commandId?: string) => Promise<void>
+  /**
+   * `commandId` is passed through so the handler can tell `shutdown()` to
+   * exclude this very command from its in-flight drain wait (it can only be
+   * removed from `inFlightCommands` after this handler returns, so waiting on
+   * it would deadlock). See `ProjectAgent.performReboot`/`performUpdate`.
+   */
+  onReboot?: (commandId?: string) => Promise<void>
+  onUpdate?: (commandId?: string) => Promise<void>
   onSyncRepository?: (repositoryCode: string, branch?: string) => Promise<RepoSyncResult>
   /**
    * E2E 専用のブラウザーセッションを子プロセス実行前にメインプロセスへ
@@ -191,7 +205,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     if (!opts.onSetup) {
       return errorResult(ERR_SETUP_REQUIRES_CALLBACK)
     }
-    await opts.onSetup()
+    await opts.onSetup(opts.commandId)
     return successResult('setup completed')
   },
 
@@ -199,7 +213,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     if (!opts.onConfigSync) {
       return errorResult(ERR_CONFIG_SYNC_REQUIRES_CALLBACK)
     }
-    await opts.onConfigSync()
+    await opts.onConfigSync(opts.commandId)
     return successResult('config sync completed')
   },
 
@@ -207,7 +221,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     if (!opts.onReboot) {
       return errorResult(ERR_REBOOT_REQUIRES_CALLBACK)
     }
-    await opts.onReboot()
+    await opts.onReboot(opts.commandId)
     return successResult('reboot initiated')
   },
 
@@ -215,7 +229,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     if (!opts.onUpdate) {
       return errorResult(ERR_UPDATE_REQUIRES_CALLBACK)
     }
-    await opts.onUpdate()
+    await opts.onUpdate(opts.commandId)
     return successResult('update initiated')
   },
 

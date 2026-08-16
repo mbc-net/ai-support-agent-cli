@@ -78,6 +78,49 @@
       secret variable from the recipe.
     success_msg: "Exactly one token flow is in use."
 
+- name: "gitlab_runner_k8s : Validate the token format"
+  # 他のすべての変数（URL / オブジェクト名 / チャートバージョン / レプリカ数 / ジョブ
+  # イメージ / パス）はアンカー付き正規表現で検証しているのに、トークンだけが未検証
+  # だった。トークンは検証されないまま Secret へ書かれるため、任意の文字列が通過し、
+  # GitLab の API が 403 を返して初めて誤りが分かる。それは Helm 適用と Pod 起動の後で
+  # あり、チャートの readinessProbe は `pgrep gitlab.*runner` だけで登録リトライ中の
+  # プロセスにもマッチするため rollout status すら成功する（下の検証ゲート参照）。
+  # 実環境では判明まで 14 時間・188 回の CrashLoopBackOff を要した。
+  #
+  # 実際に観測された誤設定は2つで、どちらもここで弾ける:
+  #   1. `glpat-…` — アクセストークンを Runner 認証トークンと取り違えた。GitLab は
+  #      個人用アクセストークンもプロジェクトアクセストークンも `glpat-` 接頭辞のため
+  #      混同しやすい。認証トークンは Runner 作成画面でのみ得られ `glrt-` で始まる。
+  #   2. `gitlab-runner register  --url https://gitlab.com  --token glrt-…` — Runner
+  #      作成画面に表示される登録コマンド全文の貼り付け。空白を含む点で捕捉できる。
+  #
+  # 旧登録トークンには接頭辞を強制しない（世代により形式が異なり、正当な値を誤って
+  # 弾くため）。空白を含まないことだけを縛る＝上記2番の誤りは同様に捕捉できる。
+  #
+  # `| trim` 後の値を検証する。ロール自身も trim 後の値を書き出す（下の "Write the token
+  # into its temporary file"）ため、末尾改行のような実害のない差異で落としてはならない。
+  #
+  # 値は `fail_msg` にも展開しない。ループなし assert の失敗出力に出るのは評価式の文字列と
+  # 静的な msg だけで、変数の値は出ない。`no_log` は付けない（付けると案内ごと隠れる）。
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (gitlab_runner_k8s_has_auth | bool)
+        or ((gitlab_runner_k8s_auth_token | trim) is match('^glrt-\S+$'))
+      - >-
+        not (gitlab_runner_k8s_has_reg | bool)
+        or ((gitlab_runner_k8s_registration_token | trim) is match('^\S+$'))
+    fail_msg: >-
+      The runner token is not in a valid format.
+      gitlab_runner_k8s_auth_token must be a runner *authentication* token
+      starting with "glrt-", obtained from the GitLab runner creation screen
+      (Settings > CI/CD > Runners > New runner) — NOT an access token, which
+      starts with "glpat-". Paste only the token itself: the registration
+      command shown next to it ("gitlab-runner register --url ... --token
+      glrt-...") contains spaces and is rejected. The legacy
+      gitlab_runner_k8s_registration_token must likewise contain no whitespace.
+    success_msg: "Runner token format is valid."
+
 - name: "gitlab_runner_k8s : Validate the GitLab URL"
   ansible.builtin.assert:
     that:

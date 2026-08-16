@@ -44,17 +44,37 @@ export interface ConfigSyncDeps {
   projectCode: string
   localAgentChatMode: AgentChatMode | undefined
   browserLocalPort?: number
-  /** Called when Docker customization changes (Docker mode only) */
-  onDockerRebuild?: () => void
+  /**
+   * Called when Docker customization changes (Docker mode only).
+   *
+   * `commandId`, when the config sync was itself triggered by a `config_sync`
+   * (or `setup`) command, is the id of that triggering command. Threaded
+   * through to `ProjectAgent.performDockerRebuild()` so it can pass it to
+   * `shutdown()` as `excludeCommandId` — the same self-reference reason as
+   * `performReboot`/`performUpdate`: `performDockerRebuild()` is invoked
+   * fire-and-forget from *inside* the triggering command's own still-executing
+   * handler (see `processCommand` in agent-transport.ts, which only removes
+   * the commandId from `inFlightCommands` in a `finally` block that runs after
+   * the handler — including `submitResult()` — returns), so without excluding
+   * it, `shutdown()`'s drain would needlessly wait on the triggering command's
+   * own in-flight entry until `submitResult()` finishes.
+   */
+  onDockerRebuild?: (commandId?: string) => void
 }
 
 /**
  * Perform config sync from server and update state.
  * Returns true if config was updated.
+ *
+ * @param commandId See `ConfigSyncDeps.onDockerRebuild`'s doc comment — passed
+ *   through to it (via `applyProjectConfig`) when this sync was triggered by a
+ *   `config_sync`/`setup` command. `undefined` for background syncs (initial
+ *   startup retry loop, debounced `config-update` notifications).
  */
 export async function performConfigSync(
   deps: ConfigSyncDeps,
   state: ConfigSyncState,
+  commandId?: string,
 ): Promise<boolean> {
   const result = await syncProjectConfig(
     deps.client,
@@ -63,7 +83,7 @@ export async function performConfigSync(
     deps.prefix,
   )
   if (result) {
-    await applyProjectConfig(deps, state, result.config, { fromCache: result.fromCache })
+    await applyProjectConfig(deps, state, result.config, { fromCache: result.fromCache, commandId })
     return true
   }
   return false
@@ -75,11 +95,12 @@ export async function performConfigSync(
 export async function performSetup(
   deps: ConfigSyncDeps,
   state: ConfigSyncState,
+  commandId?: string,
 ): Promise<void> {
   logger.info(`${deps.prefix} Starting setup...`)
 
   // 1. Config sync
-  await performConfigSync(deps, state)
+  await performConfigSync(deps, state, commandId)
 
   // 2. Clone/update repositories
   if (deps.projectDir && state.projectConfig?.repositories?.length) {
@@ -117,6 +138,8 @@ export interface ApplyProjectConfigOptions {
    * 直前まで適用していた envVars を保持してネットワーク断時の劣化を防ぐ。
    */
   fromCache?: boolean
+  /** See `ConfigSyncDeps.onDockerRebuild`'s doc comment. */
+  commandId?: string
 }
 
 /**
@@ -335,7 +358,7 @@ export async function applyProjectConfig(
     // This ensures containers always rebuild on startup when packages are configured.
     if (prevDockerHash !== newDockerHash && newDockerHash !== noCustomizationHash) {
       logger.info(`${deps.prefix} Docker customization changed, triggering rebuild...`)
-      deps.onDockerRebuild()
+      deps.onDockerRebuild(options.commandId)
     }
     state.dockerCustomizationHash = newDockerHash
   }

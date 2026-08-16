@@ -54,6 +54,13 @@ export async function stopAgent(): Promise<void> {
     removePidFile()
     logger.success(t('stop.stopped'))
   } else {
-    logger.warn(t('stop.timeout', { pid }))
+    // WAIT_TIMEOUT_MS intentionally stays short (10s): SIGTERM can now
+    // legitimately take up to SHUTDOWN_DRAIN_TIMEOUT_MS (~5 min) to result in
+    // actual exit while ProjectAgent.shutdown() gracefully drains an
+    // in-flight command, and this command should not block that long by
+    // default. This is a messaging fix only — nothing is actually broken
+    // when this fires; reword the message so it doesn't imply the process is
+    // stuck when it may simply still be draining.
+    logger.warn(t('stop.timeout', { pid, timeoutSeconds: WAIT_TIMEOUT_MS / 1000 }))
   }
 }

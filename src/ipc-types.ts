@@ -23,6 +23,16 @@ export interface IpcStartMessage {
 
 export interface IpcShutdownMessage {
   type: 'shutdown'
+  /**
+   * Drain budget (ms) for the graceful shutdown of the receiving worker (see
+   * `ProjectAgent.shutdown`). Sent by `ChildProcessManager` as
+   * `FORK_SHUTDOWN_DRAIN_TIMEOUT_MS`, a smaller budget than the top-level
+   * `SHUTDOWN_DRAIN_TIMEOUT_MS` because the parent force-kills a child that
+   * has not exited within `CHILD_PROCESS_STOP_TIMEOUT_MS`. Optional so older
+   * senders (and direct IPC messages in tests) still type-check; the receiver
+   * falls back to a default when absent.
+   */
+  drainTimeoutMs?: number
 }
 
 export interface IpcUpdateMessage {
