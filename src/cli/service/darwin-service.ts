@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS } from '../../constants'
+import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
 import { readAgentCredentialEnv } from './agent-credential-env'
 import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
 import type { ProjectRegistration } from '../../types'
@@ -151,6 +151,19 @@ ${programArgs}
     <key>KeepAlive</key>
     <true/>
 
+    <!--
+      Without ExitTimeOut, launchd defaults to 20s between SIGTERM and
+      SIGKILL — far shorter than the up-to-SHUTDOWN_DRAIN_TIMEOUT_MS (5
+      minute) graceful drain ProjectAgent.shutdown() can now legitimately
+      take. launchctl stop / unload / system shutdown would otherwise
+      SIGKILL the agent mid-drain, before it can finish an in-flight
+      command and release its replica slot. Derived from the same
+      SHUTDOWN_GRACE_PERIOD_SECONDS budget used for Kubernetes'
+      terminationGracePeriodSeconds and Docker's 'docker stop --time'.
+    -->
+    <key>ExitTimeOut</key>
+    <integer>${SHUTDOWN_GRACE_PERIOD_SECONDS}</integer>
+
     <key>StandardOutPath</key>
     <string>${escapeXml(getAgentOutLog(logDir))}</string>
 
@@ -193,6 +206,19 @@ export function generateProjectPlist(opts: {
 
     <key>KeepAlive</key>
     <true/>
+
+    <!--
+      Without ExitTimeOut, launchd defaults to 20s between SIGTERM and
+      SIGKILL — far shorter than the up-to-SHUTDOWN_DRAIN_TIMEOUT_MS (5
+      minute) graceful drain the in-container agent's ProjectAgent.shutdown()
+      can now legitimately take. launchctl stop / unload / system shutdown
+      would otherwise SIGKILL the wrapper (and its 'docker run' child) mid-
+      drain. Derived from the same SHUTDOWN_GRACE_PERIOD_SECONDS budget used
+      for Kubernetes' terminationGracePeriodSeconds and Docker's
+      'docker stop --time'.
+    -->
+    <key>ExitTimeOut</key>
+    <integer>${SHUTDOWN_GRACE_PERIOD_SECONDS}</integer>
 
     <!--
       The launchd plist captures the WRAPPER SCRIPT stdout/stderr only

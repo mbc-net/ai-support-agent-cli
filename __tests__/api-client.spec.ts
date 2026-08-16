@@ -1,6 +1,7 @@
 import axios from 'axios'
 
 import { ApiClient } from '../src/api-client'
+import { AGENT_RELEASE_REQUEST_TIMEOUT_MS } from '../src/constants'
 import { logger } from '../src/logger'
 import { createAxiosError } from './helpers/mock-factory'
 
@@ -209,6 +210,78 @@ describe('ApiClient', () => {
       expect(callArgs).toHaveProperty('instanceNonce')
       expect(typeof callArgs.instanceNonce).toBe('string')
       expect(callArgs.instanceNonce.length).toBeGreaterThan(0)
+    })
+  })
+
+  describe('releaseSelf', () => {
+    it('posts instanceId and instanceNonce to the self/release endpoint with the short timeout', async () => {
+      mockInstance.post.mockResolvedValue({ data: { released: true } })
+
+      const result = await client.releaseSelf()
+
+      expect(result).toEqual({ released: true })
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/instances/self/release',
+        expect.objectContaining({
+          instanceId: expect.any(String),
+          instanceNonce: expect.any(String),
+        }),
+        { timeout: AGENT_RELEASE_REQUEST_TIMEOUT_MS },
+      )
+    })
+
+    it("returns the server's reason verbatim on a non-released response (e.g. nonce_mismatch)", async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { released: false, reason: 'nonce_mismatch' },
+      })
+
+      const result = await client.releaseSelf()
+
+      expect(result).toEqual({ released: false, reason: 'nonce_mismatch' })
+    })
+
+    it('resolves to {released:false, reason:"request_failed"} instead of throwing on a network error', async () => {
+      mockInstance.post.mockRejectedValue(new Error('ECONNRESET'))
+
+      const result = await client.releaseSelf()
+
+      expect(result).toEqual({ released: false, reason: 'request_failed' })
+    })
+
+    it('resolves to {released:false, reason:"request_failed"} on a 404 (server without this endpoint yet)', async () => {
+      mockInstance.post.mockRejectedValue(createAxiosError('Not Found', 404))
+
+      const result = await client.releaseSelf()
+
+      expect(result).toEqual({ released: false, reason: 'request_failed' })
+    })
+
+    it('falls back to request_failed when the response body is malformed (missing released field)', async () => {
+      mockInstance.post.mockResolvedValue({ data: {} })
+
+      const result = await client.releaseSelf()
+
+      expect(result).toEqual({ released: false, reason: 'request_failed' })
+    })
+
+    it('does not retry — the underlying post call happens exactly once', async () => {
+      mockInstance.post.mockRejectedValue(new Error('Network Error'))
+
+      await client.releaseSelf()
+
+      expect(mockInstance.post).toHaveBeenCalledTimes(1)
+    })
+
+    it('returns {released:false, reason:"no_replica_identity"} without making any network call, for a client constructed without replica identity', async () => {
+      const noIdentityClient = new ApiClient('http://localhost:3030', 'test_tenant:tokenId:rawToken', {
+        withoutReplicaIdentity: true,
+      })
+      mockInstance.post.mockClear()
+
+      const result = await noIdentityClient.releaseSelf()
+
+      expect(result).toEqual({ released: false, reason: 'no_replica_identity' })
+      expect(mockInstance.post).not.toHaveBeenCalled()
     })
   })
 

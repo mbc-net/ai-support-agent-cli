@@ -70,7 +70,7 @@ function resolveIntervals(options: RunnerOptions): {
 }
 
 export type ShutdownTarget =
-  | { kind: 'agents'; agents: { stop: () => void }[] }
+  | { kind: 'agents'; agents: { stop: () => void | Promise<void> }[] }
   | { kind: 'processManager'; processManager: ChildProcessManager }
 
 export function setupShutdownHandlers(
@@ -88,7 +88,10 @@ export function setupShutdownHandlers(
     if (target.kind === 'processManager') {
       await target.processManager.stopAll()
     } else {
-      target.agents.forEach((a) => a.stop())
+      // Each agent's stop() may be the graceful, draining `shutdown()` (see
+      // runSingleProject's stopWithWatcher) — await it so process.exit() below
+      // never fires while a command is still in flight.
+      await Promise.all(target.agents.map((a) => a.stop()))
     }
     await flushSentry()
     logger.success(t('runner.stopped'))
@@ -209,7 +212,16 @@ function runSingleProject(
   logger.info(t('runner.starting'))
   const started = startProjectAgent(project, agentId, { pollInterval, heartbeatInterval, agentChatMode, defaultProjectDir })
 
-  const updater = initAutoUpdater(options, config, [started.client], agentId, () => started.stop(), async () => started.agent.isBusy())
+  // Use the graceful, draining shutdown() here too — not the synchronous
+  // stop() — so an auto-update-triggered restart (self npm update) releases
+  // the replica slot the same way SIGTERM/SIGINT and the reboot/update
+  // commands do. Falling back to stop() would mean this restart path never
+  // calls releaseSelf() and always falls back to the slower ~90s
+  // heartbeat-timeout-based slot reclaim, and — if auto-updater.ts's busy-wait
+  // times out while a command is still genuinely in flight — abandons that
+  // command mid-flight, reintroducing the double-execution risk this feature
+  // exists to close.
+  const updater = initAutoUpdater(options, config, [started.client], agentId, () => started.agent.shutdown(), async () => started.agent.isBusy())
 
   let tokenWatcher: { stop: () => void } | undefined
   if (enableTokenWatcher) {
@@ -225,10 +237,13 @@ function runSingleProject(
   logger.info(t('runner.startedSingle', { pollInterval, heartbeatInterval }))
   logger.info(t('runner.stopHint'))
 
-  const originalStop = started.stop
-  const stopWithWatcher = (): void => {
+  // Graceful drain on shutdown (SIGTERM/SIGINT): use shutdown() rather than the
+  // synchronous stop() so an in-flight command finishes before the replica
+  // slot is released — otherwise the server could re-assign it to another
+  // replica while this process is still executing it.
+  const stopWithWatcher = async (): Promise<void> => {
     tokenWatcher?.stop()
-    originalStop()
+    await started.agent.shutdown()
   }
   setupShutdownHandlers({ kind: 'agents', agents: [{ stop: stopWithWatcher }] }, updater)
 }
