@@ -34,7 +34,11 @@ import { t } from './i18n'
 import { logger } from './logger'
 import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
-import { submitPendingResults } from './pending-result-store'
+import {
+  PENDING_RESULT_MIN_RETRY_AGE_MS,
+  startPendingResultFlush,
+  submitPendingResults,
+} from './pending-result-store'
 import type { TransportKind } from './ipc-types'
 import type { AdmissionMode, AdmissionResult, AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
@@ -114,6 +118,23 @@ export class ProjectAgent {
   private lastRegisterError: { isAuth: boolean; message: string } | null = null
   private alertPollingTimer: ReturnType<typeof setInterval> | null = null
   private alertStaleRecoveryTimer: ReturnType<typeof setInterval> | null = null
+  /**
+   * Retries results that failed to reach the API (see `startPendingResultFlush`).
+   * Without this the retry only ran at process start, so a result orphaned by an
+   * API deployment sat on disk until the agent happened to restart.
+   */
+  private pendingResultFlushTimer: ReturnType<typeof setInterval> | null = null
+  /**
+   * Whether the unconditional start-up recovery has already run.
+   *
+   * `registerAndStart()` runs again on token update and on eviction → re-admission,
+   * and `stopTransport` deliberately does NOT clear `inFlightCommands` — commands
+   * already running survive a transport restart. So on a re-registration a result
+   * may be mid-submit on the main path, and sweeping it up unconditionally would
+   * re-introduce the parallel double-POST that PENDING_RESULT_MIN_RETRY_AGE_MS exists
+   * to prevent. Only the very first registration is guaranteed to have nothing in flight.
+   */
+  private hasRecoveredPendingResults = false
 
   constructor(
     project: ProjectRegistration,
@@ -214,6 +235,16 @@ export class ProjectAgent {
     if (this.alertStaleRecoveryTimer) {
       clearInterval(this.alertStaleRecoveryTimer)
       this.alertStaleRecoveryTimer = null
+    }
+    if (this.pendingResultFlushTimer) {
+      // NOTE: stopWork() also runs on eviction, so a replica that drops to standby
+      // stops retrying. That matches "a standby replica does no work" — the command
+      // is expected to be re-assigned and re-run by whoever holds the slot. The
+      // residual risk is a result stranded on disk until this replica is re-admitted
+      // (or, if it never is, until PENDING_RESULT_STALE_THRESHOLD_MS discards it and
+      // logs a warning).
+      clearInterval(this.pendingResultFlushTimer)
+      this.pendingResultFlushTimer = null
     }
     stopTransport(this.transportState)
   }
@@ -428,8 +459,23 @@ export class ProjectAgent {
     }
 
 
-    // Submit any pending results from previous sessions
-    await submitPendingResults()
+    // Submit any pending results from previous sessions.
+    // Only the first registration of this process can safely take every file:
+    // see hasRecoveredPendingResults.
+    await submitPendingResults(
+      this.hasRecoveredPendingResults
+        ? { minAgeMs: PENDING_RESULT_MIN_RETRY_AGE_MS }
+        : {},
+    )
+    this.hasRecoveredPendingResults = true
+
+    // ...and keep retrying while this agent runs. The agent is long-lived and does
+    // not restart when the API is deployed, so a one-shot submit at start-up loses
+    // every result orphaned by a rollover.
+    if (this.pendingResultFlushTimer) {
+      clearInterval(this.pendingResultFlushTimer)
+    }
+    this.pendingResultFlushTimer = startPendingResultFlush()
 
     // Perform initial config sync with retries
     for (let attempt = 1; attempt <= INITIAL_CONFIG_SYNC_MAX_RETRIES; attempt++) {

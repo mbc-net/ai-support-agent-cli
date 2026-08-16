@@ -44,10 +44,18 @@ jest.mock('../src/repo-sync', () => ({
 jest.mock('../src/ssh-config-setup', () => ({
   setupSshConfig: jest.fn().mockResolvedValue(undefined),
 }))
+const FLUSH_TIMER_HANDLE = { unref: jest.fn(), __pendingResultFlushTimer: true }
 jest.mock('../src/pending-result-store', () => ({
   savePendingResult: jest.fn(),
   removePendingResult: jest.fn(),
   submitPendingResults: jest.fn().mockResolvedValue(undefined),
+  // Returns a timer handle that ProjectAgent.stopWork() passes to clearInterval.
+  // A plain object is fine — clearInterval ignores non-Timeout values.
+  startPendingResultFlush: jest.fn(() => FLUSH_TIMER_HANDLE),
+  // Re-export the real constant: project-agent imports it from this module, and a
+  // mock that omits it silently disables the double-submit guard (minAgeMs -> undefined).
+  PENDING_RESULT_MIN_RETRY_AGE_MS: jest.requireActual('../src/pending-result-store')
+    .PENDING_RESULT_MIN_RETRY_AGE_MS,
 }))
 jest.mock('../src/update-checker', () => ({
   detectChannelFromVersion: jest.fn().mockReturnValue('latest'),
@@ -163,6 +171,65 @@ describe('ProjectAgent', () => {
 
       // Heartbeat should have fired
       expect(mockClient.heartbeat).toHaveBeenCalled()
+
+      agent.stop()
+    })
+
+    it('starts the pending-result flush on registration and stops it on stop()', async () => {
+      // The flush retries results orphaned by an API deployment. If the timer is
+      // never started the fix does nothing; if it is never cleared it leaks and
+      // keeps running for a replica that has handed off its slot.
+      const {
+        startPendingResultFlush,
+      } = require('../src/pending-result-store') as {
+        startPendingResultFlush: jest.Mock
+      }
+      const clearIntervalSpy = jest.spyOn(global, 'clearInterval')
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(startPendingResultFlush).toHaveBeenCalled()
+
+      agent.stop()
+
+      expect(clearIntervalSpy).toHaveBeenCalledWith(FLUSH_TIMER_HANDLE)
+      clearIntervalSpy.mockRestore()
+    })
+
+    it('only the first registration sweeps up every pending result', async () => {
+      // registerAndStart() also runs on token update and on eviction -> re-admission.
+      // stopTransport deliberately keeps inFlightCommands, so a result can be
+      // mid-submit on the main path during a re-registration. Taking every file then
+      // would re-create the parallel double-POST that the age guard exists to prevent.
+      const {
+        submitPendingResults,
+      } = require('../src/pending-result-store') as {
+        submitPendingResults: jest.Mock
+      }
+      const { PENDING_RESULT_MIN_RETRY_AGE_MS } = jest.requireActual(
+        '../src/pending-result-store',
+      ) as { PENDING_RESULT_MIN_RETRY_AGE_MS: number }
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(submitPendingResults).toHaveBeenCalledTimes(1)
+      // First pass: unconditional recovery.
+      expect(submitPendingResults.mock.calls[0][0]).toEqual({})
+
+      // Force a second registration the way a token update does.
+      agent.stop()
+      submitPendingResults.mockClear()
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      expect(submitPendingResults).toHaveBeenCalled()
+      expect(submitPendingResults.mock.calls[0][0]).toEqual({
+        minAgeMs: PENDING_RESULT_MIN_RETRY_AGE_MS,
+      })
 
       agent.stop()
     })
