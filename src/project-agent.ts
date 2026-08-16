@@ -26,6 +26,8 @@ import {
   REGISTER_RETRY_MAX_DELAY_MS,
   REPLICA_STANDBY_RETRY_DELAY_MS,
   SERVER_SETUP_CUSTOM_TASKS_CAPABILITY,
+  SHUTDOWN_DRAIN_POLL_INTERVAL_MS,
+  SHUTDOWN_DRAIN_TIMEOUT_MS,
 } from './constants'
 import { calculateBackoff } from './retry-strategy'
 import { getConfigDir } from './config-manager'
@@ -83,6 +85,7 @@ export class ProjectAgent {
     configSyncDebounceTimer: null,
     authRejectedTransports: new Set(),
     inFlightCommands: new Set(),
+    draining: false,
   }
 
   private transportDeps: TransportDeps
@@ -136,6 +139,55 @@ export class ProjectAgent {
    */
   private hasRecoveredPendingResults = false
 
+  // Graceful shutdown (phase 3 of the replica lifecycle plan).
+  /**
+   * Guards shutdown() against double-invocation (e.g. SIGTERM+SIGINT both
+   * firing, or the auto-updater's stopAllAgents racing a signal handler).
+   * Kept as a plain boolean (flipped true synchronously by the first call,
+   * alongside `shutdownPromise` below) because several call sites
+   * (`handleEviction()`, `updateToken()`) only need a synchronous "is a
+   * shutdown in progress" check, not the in-flight promise itself.
+   */
+  private shuttingDown = false
+  /**
+   * The in-flight `doShutdown()` promise, once a first `shutdown()` call has
+   * started one. `shutdown()` is a thin memoizing wrapper around
+   * `doShutdown()`: a second concurrent caller joins (awaits) this same
+   * promise instead of getting an instant no-op — see `shutdown()`'s doc
+   * comment for why an early-return no-op is wrong here (it would let a
+   * second caller like the auto-updater proceed as if the drain/release had
+   * already finished, while the first caller's drain of a genuinely
+   * in-flight command is still running).
+   */
+  private shutdownPromise: Promise<void> | null = null
+  /**
+   * Whether this replica currently holds an admitted slot. Set true as soon
+   * as `register()`/`performRegistration()` reports `admission.accepted`
+   * (i.e. as soon as the server-side truth is known — see `registerAndStart`),
+   * set false again by handleEviction(). shutdown() skips releaseSelf() when
+   * this is false — a replica that was rejected/evicted holds nothing to
+   * release.
+   */
+  private slotHeld = false
+  /**
+   * Command ids that must not count as "still in flight" for
+   * `waitForDrain()`'s purposes, because they are themselves the command
+   * driving the current shutdown (reboot/update/docker-rebuild) and cannot be
+   * removed from `transportState.inFlightCommands` until the very `shutdown()`
+   * call they triggered resolves — see `shutdown()`'s doc comment.
+   *
+   * A `Set` rather than a single captured value: `shutdown()` adds to this set
+   * *before* checking/returning the memoized `shutdownPromise`, so a caller
+   * that joins an already-in-flight shutdown (e.g. `performReboot()` calling
+   * `shutdown({ excludeCommandId })` after a plain SIGTERM-triggered
+   * `shutdown()` already started the drain) still gets its exclusion honored.
+   * A single opts-snapshot captured only by the first caller would silently
+   * discard every later caller's `excludeCommandId`, reintroducing the very
+   * self-wait deadlock this mechanism exists to prevent (see the regression
+   * this fixes).
+   */
+  private readonly excludedCommandIds = new Set<string>()
+
   constructor(
     project: ProjectRegistration,
     private readonly agentId: string,
@@ -161,7 +213,7 @@ export class ProjectAgent {
       projectCode: this.projectCode,
       localAgentChatMode,
       onDockerRebuild: isInDocker()
-        ? () => { void this.performDockerRebuild() }
+        ? (commandId?: string) => { void this.performDockerRebuild(commandId) }
         : undefined,
     }
 
@@ -209,13 +261,36 @@ export class ProjectAgent {
   }
 
   stop(): void {
+    this.cancelRegisterLoop()
+    this.stopWork()
+  }
+
+  /**
+   * Cancel the register/admission loop: mark it cancelled, abort any pending
+   * retry sleep, and wake a parked standby wait so the loop unwinds now
+   * instead of up to REPLICA_STANDBY_RETRY_DELAY_MS later.
+   *
+   * Split out of `stop()` so `shutdown()` can cancel the register loop and
+   * alert timers (see `clearAlertTimers`) up front, before draining, without
+   * also stopping the transport — the transport must keep running through the
+   * drain (heartbeats + any in-flight command's websocket dependency).
+   */
+  private cancelRegisterLoop(): void {
     this.stopGeneration += 1
     this.registerLoopCancelled = true
     this.registerAbortController?.abort()
-    // Wake a parked standby wait so the register loop unwinds now instead of
-    // up to REPLICA_STANDBY_RETRY_DELAY_MS later.
     this.wakeStandbyWait()
-    this.stopWork()
+  }
+
+  private clearAlertTimers(): void {
+    if (this.alertPollingTimer) {
+      clearInterval(this.alertPollingTimer)
+      this.alertPollingTimer = null
+    }
+    if (this.alertStaleRecoveryTimer) {
+      clearInterval(this.alertStaleRecoveryTimer)
+      this.alertStaleRecoveryTimer = null
+    }
   }
 
   /**
@@ -228,14 +303,7 @@ export class ProjectAgent {
    * both duplicates work and contradicts "a standby replica does no work".
    */
   private stopWork(): void {
-    if (this.alertPollingTimer) {
-      clearInterval(this.alertPollingTimer)
-      this.alertPollingTimer = null
-    }
-    if (this.alertStaleRecoveryTimer) {
-      clearInterval(this.alertStaleRecoveryTimer)
-      this.alertStaleRecoveryTimer = null
-    }
+    this.clearAlertTimers()
     if (this.pendingResultFlushTimer) {
       // NOTE: stopWork() also runs on eviction, so a replica that drops to standby
       // stops retrying. That matches "a standby replica does no work" — the command
@@ -247,6 +315,170 @@ export class ProjectAgent {
       this.pendingResultFlushTimer = null
     }
     stopTransport(this.transportState)
+  }
+
+  /**
+   * Gracefully shut down: drain in-flight commands, then release this
+   * replica's slot, before finally stopping the transport. Used by
+   * SIGTERM/SIGINT and by the restart paths (reboot/update/docker rebuild)
+   * instead of the synchronous `stop()`, so a command that is still executing
+   * is never abandoned mid-flight — abandoning it and releasing the slot early
+   * would let the server re-assign the command to another replica while this
+   * one is still running it, executing it twice.
+   *
+   * Order matters:
+   * 1. Guard against double-invocation (SIGTERM+SIGINT both firing).
+   * 2. Mark the transport as draining so no *new* command is accepted.
+   * 3. Cancel the register/admission loop and alert timers, but deliberately
+   *    do NOT stop the transport yet: heartbeats must keep running through the
+   *    drain (a) to keep the slot's lastHeartbeat fresh so the server does not
+   *    consider it dead mid-drain, and (b) because an in-flight command may
+   *    depend on the transport's websocket (e.g. e2e/browser-driven commands
+   *    via the VS Code tunnel) that would otherwise be yanked out from under it.
+   * 4. (handled by `handleEviction` checking `shuttingDown`) — heartbeats keep
+   *    running, so the server could still reply `evicted: true` for unrelated
+   *    reasons during the drain; that must not re-enter the standby loop while
+   *    this process is already on its way out.
+   * 5. Poll-wait for in-flight commands to drain.
+   * 6. Release the slot — but only if the drain actually completed (not timed
+   *    out: the process is going to die either way if it timed out, and
+   *    releasing while a command might still be running would be wrong) and
+   *    only if this replica ever held a slot in the first place.
+   * 7. Stop the transport (same as the transport-stopping half of `stop()`).
+   *
+   * `opts.excludeCommandId`: the id of the command that is *itself* triggering
+   * this shutdown (reboot/update). `processCommand` only removes a command's id
+   * from `transportState.inFlightCommands` in a `finally` block that runs after
+   * its handler (e.g. `performReboot`/`performUpdate`, which calls `shutdown()`)
+   * has returned — so the triggering command's own id is still present in
+   * `inFlightCommands` for the entire duration of this call. Without excluding
+   * it, the drain below would wait for it to disappear, which can only happen
+   * after `shutdown()` itself resolves: a deadlock that blocks for the full
+   * drain timeout on every single reboot/update. SIGTERM/SIGINT-triggered
+   * shutdowns pass no `excludeCommandId` — there is no in-flight command
+   * driving those, so this is a no-op for that path.
+   *
+   * `excludeCommandId` is added to the shared `excludedCommandIds` set
+   * *before* the memoization check below, not threaded through as a
+   * parameter captured only by whichever caller happens to arrive first — see
+   * `excludedCommandIds`'s doc comment for why: any caller that joins an
+   * already-in-flight shutdown must still get its own exclusion honored.
+   *
+   * Concurrent-caller semantics: two independent call sites in
+   * `runSingleProject()` (`src/agent-runner.ts`) can both call `shutdown()`
+   * around the same time — the SIGTERM/SIGINT handler and the auto-updater's
+   * `stopAllAgents` callback. A second caller here JOINS the first caller's
+   * in-flight `doShutdown()` (awaits the same promise) rather than getting an
+   * instant no-op; otherwise the second caller would proceed (e.g. the
+   * auto-updater calling `reExecProcess()`) while the first caller's drain of
+   * a genuinely in-flight command is still running, abandoning it mid-flight.
+   * The second caller's `drainTimeoutMs` is ignored once a shutdown is already
+   * in flight — the first caller's timeout wins, since restarting the drain
+   * with a different timeout mid-flight doesn't make sense. `excludeCommandId`
+   * is the one exception: it is always honored, from whichever caller
+   * supplies it, via the shared set.
+   */
+  async shutdown(opts?: { drainTimeoutMs?: number; excludeCommandId?: string }): Promise<void> {
+    if (opts?.excludeCommandId) {
+      this.excludedCommandIds.add(opts.excludeCommandId)
+    }
+    if (this.shutdownPromise) return this.shutdownPromise
+    this.shuttingDown = true
+    this.shutdownPromise = this.doShutdown(opts?.drainTimeoutMs)
+    return this.shutdownPromise
+  }
+
+  private async doShutdown(drainTimeoutMs?: number): Promise<void> {
+    this.transportState.draining = true
+    // Cancel any config-sync debounce timer that was already armed by a
+    // CONFIG_UPDATE notification received just before draining started. The
+    // `state.draining` guard in agent-transport.ts's CONFIG_UPDATE handler
+    // only prevents *new* notifications from (re)arming this timer — it does
+    // nothing for a timer that is already ticking down when draining flips
+    // true. Left uncancelled, that timer would still fire mid-drain and can
+    // trigger performConfigSync() -> (on a Docker customization change)
+    // onDockerRebuild() -> performDockerRebuild(), which joins this same
+    // shutdownPromise and then schedules its own delayed
+    // process.exit(DOCKER_RESTART_EXIT_CODE) — racing the plain SIGTERM
+    // handler's un-delayed process.exit(0) once the drain resolves. Clearing
+    // here (not only in stopTransport() at the very end of shutdown) closes
+    // that gap for the entire drain window, not just after it.
+    if (this.transportState.configSyncDebounceTimer) {
+      clearTimeout(this.transportState.configSyncDebounceTimer)
+      this.transportState.configSyncDebounceTimer = null
+    }
+
+    this.cancelRegisterLoop()
+    this.clearAlertTimers()
+
+    const drainResult = await this.waitForDrain(drainTimeoutMs ?? SHUTDOWN_DRAIN_TIMEOUT_MS)
+
+    if (!drainResult.drained) {
+      logger.warn(
+        t('runner.drainTimedOut', {
+          prefix: this.prefix,
+          commandIds: drainResult.remaining.join(', '),
+        }),
+      )
+    } else if (this.slotHeld) {
+      const result = await this.client.releaseSelf()
+      if (result.released) {
+        logger.info(t('runner.slotReleased', { prefix: this.prefix }))
+      } else {
+        logger.warn(
+          t('runner.slotReleaseFailed', {
+            prefix: this.prefix,
+            reason: result.reason ?? 'unknown',
+          }),
+        )
+      }
+    } else {
+      logger.debug(`${this.prefix} Skipping releaseSelf(): this replica never held a slot`)
+    }
+
+    stopTransport(this.transportState)
+  }
+
+  /**
+   * Poll-wait for `transportState.inFlightCommands` to drain, using the same
+   * interruptible/unref'd-timer poll style as the standby wait
+   * (`waitInterruptible`) rather than a plain `sleep()`, so the wait never
+   * holds the event loop open past process exit.
+   *
+   * Ids present in `this.excludedCommandIds` do not count toward "still in
+   * flight": each is the id of a command (reboot/update/docker-rebuild) that
+   * is itself driving a (possibly shared) shutdown, and it cannot be removed
+   * from `inFlightCommands` until that command's own `shutdown()` call
+   * returns — see `shutdown()`'s and `excludedCommandIds`'s doc comments for
+   * why. The set is read live on every poll iteration (not snapshotted at the
+   * start of the drain), so an exclusion added moments after this loop
+   * started — e.g. by a caller joining an already-in-flight shutdown — is
+   * picked up on the next iteration (within `SHUTDOWN_DRAIN_POLL_INTERVAL_MS`).
+   */
+  private async waitForDrain(
+    timeoutMs: number,
+  ): Promise<{ drained: boolean; remaining: string[] }> {
+    const remainingCount = (): number => {
+      let count = 0
+      for (const id of this.transportState.inFlightCommands) {
+        if (!this.excludedCommandIds.has(id)) count++
+      }
+      return count
+    }
+    const deadline = Date.now() + timeoutMs
+    while (remainingCount() > 0 && Date.now() < deadline) {
+      logger.debug(
+        t('runner.drainWaiting', {
+          prefix: this.prefix,
+          count: remainingCount(),
+        }),
+      )
+      await this.waitInterruptible(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+    }
+    const remaining = Array.from(this.transportState.inFlightCommands).filter(
+      (id) => !this.excludedCommandIds.has(id),
+    )
+    return { drained: remaining.length === 0, remaining }
   }
 
   /**
@@ -296,6 +528,19 @@ export class ProjectAgent {
   }
 
   updateToken(newToken: string): void {
+    // shutdown()'s drain step deliberately keeps the transport alive while
+    // waiting for in-flight commands (heartbeats + whatever transport an
+    // in-flight command depends on). The old synchronous `stop()` this method
+    // calls below would tear that transport down out from under the drain and
+    // could re-arm `slotHeld` via a fresh register loop while the original
+    // shutdown() call is still mid-drain — directly contradicting the point of
+    // this feature. Same guard pattern as `handleEviction()`.
+    if (this.shuttingDown) {
+      logger.debug(
+        `${this.prefix} Ignoring updateToken(): shutdown already in progress`,
+      )
+      return
+    }
     this.token = newToken
     this.client.updateToken(newToken)
     this.configSyncDeps = { ...this.configSyncDeps, token: newToken }
@@ -312,26 +557,49 @@ export class ProjectAgent {
     this.restartRegisterLoop()
   }
 
-  async performConfigSync(): Promise<void> {
+  /**
+   * @param commandId The id of the `config_sync` command that triggered this
+   *   call, when invoked via the command dispatch path (`onConfigSync`).
+   *   Threaded through to `performDockerRebuild()` (via `onDockerRebuild`) so
+   *   its `shutdown()` call can exclude this still-in-flight command from the
+   *   drain wait — see `ConfigSyncDeps.onDockerRebuild`'s doc comment.
+   *   `undefined` for background syncs (initial startup retry loop, debounced
+   *   `config-update` notifications).
+   */
+  async performConfigSync(commandId?: string): Promise<void> {
     // ブラウザローカルポートを動的に更新（VSCode tunnel接続後に判明）
     this.configSyncDeps.browserLocalPort = this.transportState.vsCodeWs?.getBrowserLocalPort()
     // API通知の configHash はRDS同期前の古い値の可能性があるため、
     // config_update を受け取ったときは currentConfigHash をリセットして強制再同期する
     this.configSyncState.currentConfigHash = undefined
-    await performConfigSync(this.configSyncDeps, this.configSyncState)
+    await performConfigSync(this.configSyncDeps, this.configSyncState, commandId)
   }
 
-  async performSetup(): Promise<void> {
-    await performSetup(this.configSyncDeps, this.configSyncState)
+  /**
+   * @param commandId The id of the `setup` command that triggered this call.
+   *   See `performConfigSync`'s doc comment — same threading, since `setup`
+   *   performs a config sync internally and can trigger the same
+   *   `onDockerRebuild` path.
+   */
+  async performSetup(commandId?: string): Promise<void> {
+    await performSetup(this.configSyncDeps, this.configSyncState, commandId)
   }
 
   async performSyncRepository(repositoryCode: string, branch?: string): Promise<RepoSyncResult> {
     return performSyncRepository(this.configSyncDeps, this.configSyncState, { repositoryCode, branch })
   }
 
-  async performReboot(): Promise<void> {
+  /**
+   * @param commandId The id of the 'reboot' command that triggered this call
+   *   (when invoked via the command dispatch path). Passed through to
+   *   `shutdown()` as `excludeCommandId` so the drain does not wait on this
+   *   very command's own entry in `inFlightCommands` — see `shutdown`'s doc
+   *   comment. Direct callers (e.g. tests) may omit it; `shutdown()` then
+   *   drains normally, which is a no-op when nothing is in flight.
+   */
+  async performReboot(commandId?: string): Promise<void> {
     logger.info(`${this.prefix} Reboot requested, scheduling restart...`)
-    this.stop()
+    await this.shutdown({ excludeCommandId: commandId })
     setTimeout(() => {
       // In Docker mode, exit with DOCKER_RESTART_EXIT_CODE so DockerSupervisor
       // restarts only this project's container.
@@ -347,9 +615,27 @@ export class ProjectAgent {
     }, DELAYED_RESTART_MS)
   }
 
-  async performDockerRebuild(): Promise<void> {
+  /**
+   * @param commandId The id of the `config_sync` (or `setup`) command whose
+   *   handler is still on the call stack when this fires — `performConfigSync`
+   *   / `performSetup` invoke `onDockerRebuild` synchronously from inside
+   *   `applyProjectConfig`, and `void`-call this method fire-and-forget, so
+   *   this method's own `shutdown()` call below can run before that
+   *   triggering command's handler has returned and `processCommand`
+   *   (agent-transport.ts) has removed it from `inFlightCommands` in its
+   *   `finally` block. Passed through to `shutdown()` as `excludeCommandId`
+   *   for the same self-reference reason as `performReboot`/`performUpdate` —
+   *   without it, the drain below would needlessly wait on the triggering
+   *   command's own in-flight entry (up to the full drain timeout in the
+   *   worst case) before finally giving up and proceeding anyway.
+   *   `undefined` when there is no specific triggering command (e.g. the
+   *   initial startup config sync in `registerAndStart()`, run before any
+   *   command has ever been dispatched), which `shutdown()`/`waitForDrain()`
+   *   already handle correctly.
+   */
+  async performDockerRebuild(commandId?: string): Promise<void> {
     logger.info(`${this.prefix} Docker rebuild requested, scheduling restart...`)
-    this.stop()
+    await this.shutdown({ excludeCommandId: commandId })
     setTimeout(() => {
       // Inside Docker, AI_SUPPORT_AGENT_CONFIG_DIR is mounted to the per-project config dir directly.
       // All docker-related files live at the root of getConfigDir() (not in a projects sub-path).
@@ -385,7 +671,12 @@ export class ProjectAgent {
     }, DELAYED_RESTART_MS)
   }
 
-  async performUpdate(): Promise<void> {
+  /**
+   * @param commandId The id of the 'update' command that triggered this call
+   *   (when invoked via the command dispatch path). See `performReboot`'s doc
+   *   comment — same self-reference reason for threading it into `shutdown()`.
+   */
+  async performUpdate(commandId?: string): Promise<void> {
     // 管理画面からの「バージョンアップ」も、自己更新が成立しない実行環境では実行しない。
     // Kubernetes や監督プロセスのいない PID 1 で走らせると、npm 更新のあとに
     // プロセスが終了してコンテナごと再作成され、イメージの版へ巻き戻る。
@@ -412,7 +703,7 @@ export class ProjectAgent {
       throw new Error(`Update failed: ${result.error ?? 'Unknown error'}`)
     }
     logger.success(`${this.prefix} Update to ${targetVersion} successful, restarting...`)
-    this.stop()
+    await this.shutdown({ excludeCommandId: commandId })
     setTimeout(() => {
       // Inside a Docker container (spawned via `docker run`), process.send is
       // not available. Exit with DOCKER_UPDATE_EXIT_CODE so the host-side
@@ -458,6 +749,23 @@ export class ProjectAgent {
       if (this.registerLoopCancelled) return
     }
 
+    // Admission is now known to be accepted (either the initial register()
+    // call above was accepted outright, or waitForAdmission() only returns
+    // without cancellation once a standby retry is accepted) — the server has
+    // already recorded this instance as holding the slot. Record that fact
+    // immediately, before any further I/O (submitPendingResults(), the
+    // config-sync retry loop below), rather than deferring to startServices().
+    // Those steps involve real awaits, during which a concurrent shutdown()
+    // may race in and cause an early return (see the registerLoopCancelled
+    // check right before startServices() below) before startServices() ever
+    // runs. If slotHeld were only set inside startServices(), that early
+    // return would leave slotHeld false even though the slot genuinely is
+    // held server-side — doShutdown() would then skip releaseSelf() and the
+    // slot would only be freed via the slow ~90s heartbeat-timeout reclaim,
+    // defeating the fast-release purpose of this feature. releaseSelf() is a
+    // direct HTTP call to the server, independent of local transport state,
+    // so it is correct to attempt it even if startServices() never ran.
+    this.slotHeld = true
 
     // Submit any pending results from previous sessions.
     // Only the first registration of this process can safely take every file:
@@ -488,6 +796,23 @@ export class ProjectAgent {
     }
     if (!this.configSyncState.currentConfigHash) {
       logger.warn(`${this.prefix} Initial config sync failed after all retries`)
+    }
+
+    // Re-check cancellation right before startServices(), mirroring the check
+    // used in the rejected/standby branch above. submitPendingResults() and the
+    // config-sync retry loop above involve real I/O with real await points; a
+    // concurrent shutdown() (SIGTERM) may have already run cancelRegisterLoop()
+    // while we were away — and, since `slotHeld` was already set true above (as
+    // soon as admission was confirmed accepted), doShutdown() correctly attempts
+    // releaseSelf() for the slot even though startServices() never got to run.
+    // Without this check we would go on to start a brand-new heartbeat/
+    // subscription right as the process is exiting, racing a stray heartbeat
+    // against the in-flight shutdown.
+    if (this.registerLoopCancelled) {
+      logger.debug(
+        `${this.prefix} Register loop cancelled before startServices(); skipping (shutdown in progress)`,
+      )
+      return
     }
 
     await this.startServices(result)
@@ -626,6 +951,22 @@ export class ProjectAgent {
    * ever enters a free slot.
    */
   private handleEviction(): void {
+    // The slot is gone either way (the server would not have sent this
+    // notification otherwise), so record that regardless of shutdown state —
+    // shutdown()'s drain logic reads slotHeld to decide whether to call
+    // releaseSelf(), and skipping this update while shutting down would make
+    // it try to release a slot that was already evicted/reassigned
+    // server-side, producing a misleading runner.slotReleaseFailed warning
+    // for what is actually an expected, already-handled eviction.
+    this.slotHeld = false
+
+    // Once shutdown() has started, heartbeats keep running through the drain
+    // (see shutdown()'s step 3), so the server could still reply
+    // `evicted: true` for unrelated reasons (e.g. another admin action) while
+    // this process is already on its way out. Do nothing further in that case
+    // — the normal reaction (re-entering standby) must not fire on a process
+    // that is shutting down.
+    if (this.shuttingDown) return
     if (this.registerLoopCancelled) return
     this.nextAdmissionMode = 'standby'
     this.stop()
@@ -756,14 +1097,17 @@ export class ProjectAgent {
    * longer required here.
    */
   private async startServices(result: RegisterResponse): Promise<void> {
+    // slotHeld is set in registerAndStart() as soon as admission is known to
+    // be accepted (see the comment there for why it must not wait until
+    // here), not here — avoid a second, redundant assignment point.
     const commandContext = {
       configSyncState: this.configSyncState,
       configSyncDeps: this.configSyncDeps,
       transportState: this.transportState,
-      onSetup: () => this.performSetup(),
-      onConfigSync: () => this.performConfigSync(),
-      onReboot: () => this.performReboot(),
-      onUpdate: () => this.performUpdate(),
+      onSetup: (commandId?: string) => this.performSetup(commandId),
+      onConfigSync: (commandId?: string) => this.performConfigSync(commandId),
+      onReboot: (commandId?: string) => this.performReboot(commandId),
+      onUpdate: (commandId?: string) => this.performUpdate(commandId),
       onSyncRepository: (repositoryCode: string, branch?: string) => this.performSyncRepository(repositoryCode, branch),
     }
 

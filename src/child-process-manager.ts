@@ -7,6 +7,7 @@ import {
   CHILD_PROCESS_RESTART_DELAY_MS,
   CHILD_PROCESS_STOP_TIMEOUT_MS,
   BUSY_QUERY_TIMEOUT_MS,
+  FORK_SHUTDOWN_DRAIN_TIMEOUT_MS,
 } from './constants'
 import type { ChildToParentMessage, IpcStartMessage, IpcBusyResponseMessage } from './ipc-types'
 import { isChildToParentMessage } from './ipc-types'
@@ -157,7 +158,7 @@ export class ChildProcessManager {
     if (!managed) return
 
     if (managed.child.connected) {
-      managed.child.send({ type: 'shutdown' })
+      managed.child.send({ type: 'shutdown', drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
       logger.debug(`Sent shutdown to ${key}`)
     }
 
@@ -167,6 +168,14 @@ export class ChildProcessManager {
         managed.child.kill('SIGKILL')
         resolve()
       }, timeoutMs)
+      // Do not let this force-kill timer single-handedly keep the parent
+      // process's event loop alive. Now that timeoutMs defaults to
+      // CHILD_PROCESS_STOP_TIMEOUT_MS (up to 310000ms, raised from 10s in a
+      // prior round), a non-unref'd timer here means a forked worker that
+      // never emits 'exit' (crashed IPC, wedged event loop) would block total
+      // CLI process exit for up to 310s instead of 10s. Matches the
+      // `waitInterruptible` pattern already used in project-agent.ts.
+      timer.unref?.()
 
       managed.child.once('exit', () => {
         clearTimeout(timer)
@@ -216,7 +225,7 @@ export class ChildProcessManager {
 
     for (const [key, managed] of this.processes) {
       if (managed.child.connected) {
-        managed.child.send({ type: 'shutdown' })
+        managed.child.send({ type: 'shutdown', drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
         logger.debug(`Sent shutdown to ${key}`)
       }
 
@@ -227,6 +236,10 @@ export class ChildProcessManager {
             managed.child.kill('SIGKILL')
             resolve()
           }, timeoutMs)
+          // See the matching comment in stopProject() — unref so this timer
+          // cannot single-handedly keep the parent process alive for up to
+          // 310s if a forked worker never emits 'exit'.
+          timer.unref?.()
 
           managed.child.once('exit', () => {
             clearTimeout(timer)

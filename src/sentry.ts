@@ -1,4 +1,4 @@
-import { AGENT_VERSION } from './constants'
+import { AGENT_VERSION, SENTRY_FLUSH_TIMEOUT_MS } from './constants'
 import { maskSecrets } from './logger'
 
 type SentryModule = typeof import('@sentry/node')
@@ -85,7 +85,7 @@ export function captureException(error: unknown, context?: Record<string, unknow
  */
 export async function flushSentry(): Promise<void> {
   if (!sentry) return
-  await sentry.flush(2000)
+  await sentry.flush(SENTRY_FLUSH_TIMEOUT_MS)
 }
 
 /**

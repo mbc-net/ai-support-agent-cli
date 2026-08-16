@@ -10,8 +10,35 @@
  * so they can be unit-tested and reused verbatim by the web UI.
  */
 
-import { ENV_VARS } from '../constants'
+import { ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../constants'
 import { CONTAINER_START_ARGV } from '../docker/docker-args'
+
+/**
+ * `terminationGracePeriodSeconds` for the generated Kubernetes Deployment.
+ * Derived from SHUTDOWN_DRAIN_TIMEOUT_MS (via the shared
+ * SHUTDOWN_GRACE_PERIOD_SECONDS constant in constants.ts, also used by
+ * docker-supervisor.ts's `docker stop --time`) rather than a bare literal so
+ * the two deployment modes' grace periods cannot silently drift apart from
+ * each other or from the drain timeout. Equals 320 with the current
+ * constants (300s drain + 20s margin).
+ */
+const TERMINATION_GRACE_PERIOD_SECONDS = SHUTDOWN_GRACE_PERIOD_SECONDS
+
+/**
+ * `stopTimeout` for the generated ECS container definition — the container-level
+ * equivalent of `TERMINATION_GRACE_PERIOD_SECONDS` above and docker-supervisor.ts's
+ * `docker stop --time`. Without it, ECS's default (the container's own
+ * `StopTimeout`, or 30s if unset) would SIGKILL the task mid-drain, abandoning a
+ * still-running command the same way an unset Kubernetes grace period would.
+ *
+ * AWS caps `stopTimeout` at 120 seconds for Fargate/EC2 launch types (values
+ * above that are rejected by the platform), so — unlike Kubernetes and Docker,
+ * which get the full SHUTDOWN_GRACE_PERIOD_SECONDS (320s) — ECS deployments get
+ * a shorter grace window. 120s is still far better than the previous
+ * unconfigured default, so the clamp is an accepted platform limitation rather
+ * than something to work around.
+ */
+const ECS_CONTAINER_STOP_TIMEOUT_SECONDS = Math.min(SHUTDOWN_GRACE_PERIOD_SECONDS, 120)
 
 /**
  * Argument vector that starts the agent *inside* a container.
@@ -346,6 +373,13 @@ spec:
       labels:
         app: ${name}
     spec:
+      # Derived from SHUTDOWN_DRAIN_TIMEOUT_MS (the in-flight-command drain)
+      # plus SHUTDOWN_GRACE_PERIOD_MARGIN_SECONDS for the releaseSelf()
+      # call and process exit overhead. Without this, Kubernetes' 30s default
+      # would SIGKILL the Pod mid-drain, which would abandon a still-running
+      # command and let the server re-assign (and re-execute) it on another
+      # replica before this one's slot is actually released.
+      terminationGracePeriodSeconds: ${TERMINATION_GRACE_PERIOD_SECONDS}
       containers:
         - name: agent
           image: ${yamlScalar(image)}
@@ -428,6 +462,8 @@ export function generateEcsManifest(input: EcsManifestInput): {
         name: 'agent',
         image,
         essential: true,
+        // See ECS_CONTAINER_STOP_TIMEOUT_SECONDS above: AWS caps this at 120s.
+        stopTimeout: ECS_CONTAINER_STOP_TIMEOUT_SECONDS,
         command: [
           ...CONTAINER_ARGV,
           '--project',

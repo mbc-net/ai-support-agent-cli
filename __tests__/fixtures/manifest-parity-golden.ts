@@ -43,6 +43,7 @@ spec:
       labels:
         app: ai-support-agent
     spec:
+      terminationGracePeriodSeconds: 320
       containers:
         - name: agent
           image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"
@@ -99,6 +100,7 @@ spec:
       labels:
         app: agent-mbc01
     spec:
+      terminationGracePeriodSeconds: 320
       containers:
         - name: agent
           image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"
@@ -148,6 +150,7 @@ spec:
       labels:
         app: agent-mbc02
     spec:
+      terminationGracePeriodSeconds: 320
       containers:
         - name: agent
           image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"
@@ -203,6 +206,9 @@ export const TASKDEF_GOLDEN = {
       name: 'agent',
       image: 'ghcr.io/mbc-net/ai-support-agent-cli:latest',
       essential: true,
+      // AWS caps container stopTimeout at 120s (unlike terminationGracePeriodSeconds
+      // above, which gets the full ~320s SHUTDOWN_GRACE_PERIOD_SECONDS).
+      stopTimeout: 120,
       command: ['ai-support-agent', 'start', '--no-docker', '--project', 'mbc/MBC_01'],
       environment: [
         {

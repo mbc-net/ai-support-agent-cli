@@ -140,4 +140,24 @@ describe('applyProjectConfig - Docker customization detection', () => {
 
     expect(onDockerRebuild).not.toHaveBeenCalled()
   })
+
+  it('passes options.commandId through to onDockerRebuild (needed so performDockerRebuild can exclude the triggering command from its drain wait)', async () => {
+    const onDockerRebuild = jest.fn()
+    const state = makeState({ dockerCustomizationHash: 'some-previous-hash' })
+    const deps = makeDeps({ onDockerRebuild })
+
+    await applyProjectConfig(deps, state, makeConfig({ aptPackages: ['curl'] }), { commandId: 'cmd-config-sync-1' })
+
+    expect(onDockerRebuild).toHaveBeenCalledWith('cmd-config-sync-1')
+  })
+
+  it('calls onDockerRebuild with undefined commandId when the config sync was not triggered by a command (e.g. initial startup sync)', async () => {
+    const onDockerRebuild = jest.fn()
+    const state = makeState({ dockerCustomizationHash: 'some-previous-hash' })
+    const deps = makeDeps({ onDockerRebuild })
+
+    await applyProjectConfig(deps, state, makeConfig({ aptPackages: ['curl'] }))
+
+    expect(onDockerRebuild).toHaveBeenCalledWith(undefined)
+  })
 })

@@ -85,7 +85,7 @@
   "stop.notRunning": "実行中のエージェントが見つかりません（pidファイルが存在しません: {{path}}）",
   "stop.staleProcess": "エージェントプロセス (PID: {{pid}}) はすでに終了しています。古いpidファイルを削除しました。",
   "stop.signalFailed": "PID {{pid}} への停止シグナル送信に失敗しました: {{message}}",
-  "stop.timeout": "タイムアウト: エージェントが停止しませんでした (PID: {{pid}})。プロセスがまだ実行中の可能性があります。",
+  "stop.timeout": "エージェント (PID: {{pid}}) は {{timeoutSeconds}} 秒経ってもまだ終了していません。これは必ずしも問題を示すものではありません: 実行中のコマンドがある場合、停止前にそれを正常に完了させるため最大で約5分ほどかかることがあり、完了すれば自動的に終了します。しばらく待ってから \"ai-support-agent status\" または \"ai-support-agent stop\" を再度実行して確認してください。",
 
   "runner.starting": "エージェントを起動中...",
   "runner.startedSingle": "エージェント起動完了 (poll: {{pollInterval}}ms, heartbeat: {{heartbeatInterval}}ms)",
@@ -119,6 +119,11 @@
   "runner.authError": "{{prefix}} 認証に失敗しました。トークンが無効または期限切れの可能性があります。\"ai-support-agent login\" で再認証してください。詳細: {{detail}}",
   "runner.tokenUpdated": "{{prefix}} 設定ファイルからトークンを更新しました。再認証中...",
   "runner.unexpectedError": "プロジェクトエージェントで予期しないエラー: {{message}}",
+  "runner.commandDeclinedDraining": "{{prefix}} コマンド {{commandId}} を拒否しました: このレプリカはシャットダウン中です。サーバーは自身の ack タイムアウト後に再割り当てします",
+  "runner.drainWaiting": "{{prefix}} 稼働枠を解放する前に、実行中のコマンド {{count}} 件の完了を待機しています...",
+  "runner.drainTimedOut": "{{prefix}} 実行中のコマンドのドレインがタイムアウトしました: {{commandIds}}。稼働枠は解放されませんでした。サーバー側のハートビートタイムアウトによる回収に委ねます",
+  "runner.slotReleased": "{{prefix}} レプリカの稼働枠を解放しました",
+  "runner.slotReleaseFailed": "{{prefix}} レプリカの稼働枠の解放に失敗しました: {{reason}}。サーバー側のハートビートタイムアウトによる回収に委ねます",
 
   "status.noConfig": "設定が見つかりません。\"ai-support-agent login --url <url>\" で設定してください。",
   "status.header": "設定情報:",
