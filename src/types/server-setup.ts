@@ -71,3 +71,26 @@ export interface ServerSetupTaskResult {
   changed: boolean
   message: string
 }
+
+/**
+ * One mid-run progress event sent to the API while ansible is still running.
+ *
+ * `start` events carry only the task name (its outcome is not known yet);
+ * `end` events additionally carry the same `status`/`changed`/`message` triple
+ * as {@link ServerSetupTaskResult}. The mapping from raw Ansible host results
+ * to that triple is done here in the agent (via the same `taskResultFrom` the
+ * authoritative results use) rather than in the API, so Ansible's result
+ * semantics have exactly one implementation.
+ */
+export interface ServerSetupProgressEvent {
+  /** 1-based, monotonic within a run; assigned by the Ansible callback plugin. */
+  seq: number
+  phase: 'start' | 'end'
+  name: string
+  /** `end` only. */
+  status?: ServerSetupTaskResult['status']
+  /** `end` only. */
+  changed?: boolean
+  /** `end` only. */
+  message?: string
+}

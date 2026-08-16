@@ -30,19 +30,28 @@ import { dump } from 'js-yaml'
 import * as os from 'os'
 import * as path from 'path'
 
-import { AGENT_MODE_ONESHOT, ENV_VARS, ONESHOT_ENV_VARS, TAILSCALE_SOCKS_PORT } from '../constants'
+import {
+  AGENT_MODE_ONESHOT,
+  ENV_VARS,
+  ONESHOT_ENV_VARS,
+  SERVER_SETUP_MAX_PROGRESS_MESSAGE_LENGTH,
+  SERVER_SETUP_MAX_PROGRESS_TASK_NAME_LENGTH,
+  TAILSCALE_SOCKS_PORT,
+} from '../constants'
 import { logger } from '../logger'
 import {
   type CommandResult,
   errorResult,
   isSupportedSshAuthType,
   type ServerSetupExecPayload,
+  type ServerSetupProgressEvent,
   type ServerSetupTaskResult,
   type ServerSetupVariablesResponse,
   type SshExecCredential,
   successResult,
 } from '../types'
 import { getErrorMessage, sweepStaleEntries } from '../utils'
+import { type AnsibleProgressEvent, startProgressTailer } from './progress-tailer'
 import { resolveKnownHostsPath } from '../utils/known-hosts-store'
 import { isValidPort } from '../utils/port'
 import { redactSecretValues } from '../utils/secret-redaction'
@@ -640,6 +649,66 @@ interface AnsibleJsonHostResult {
   msg?: string
 }
 
+/**
+ * Turn raw callback events into the wire form the API stores, redacting on the
+ * way.
+ *
+ * The `end` mapping goes through the same `taskResultFrom` the authoritative
+ * results use, so a task cannot be summarised one way mid-run and another way
+ * once the run finishes — Ansible's result semantics stay in one place instead
+ * of being reimplemented in the API.
+ *
+ * Redaction is applied here because progress leaves the agent *before* the
+ * run's stdout is redacted. The callback already withholds `msg` for `no_log`
+ * tasks and for anything that did not fail, but that only guards the task's own
+ * parameters: a secret can still surface in an unrelated task's failure message
+ * or be embedded in an operator-authored task name.
+ */
+/**
+ * Cut `text` down to `limit` characters, marking that it was cut.
+ *
+ * The API rejects an over-long field by failing validation for the *whole*
+ * request, and the tailer has already advanced past those events by then — so
+ * an un-truncated field does not just lose itself, it loses its entire batch
+ * silently. Truncating here keeps the batch deliverable, and the marker keeps
+ * the loss visible (the untruncated text still reaches `executionLogs` through
+ * the authoritative result).
+ */
+function truncateForApi(text: string, limit: number): string {
+  if (text.length <= limit) return text
+  const marker = '… (truncated)'
+  return text.slice(0, Math.max(0, limit - marker.length)) + marker
+}
+
+export function toProgressPayload(
+  events: AnsibleProgressEvent[],
+  secretValues: string[],
+): ServerSetupProgressEvent[] {
+  const redact = (text: string): string =>
+    secretValues.length === 0 ? text : redactSecretValues(text, secretValues)
+  return events.map((event) => {
+    // Redact *before* truncating: cutting first could split a secret so that
+    // neither half matches the redaction needle, leaking the remaining part.
+    const name = truncateForApi(
+      redact(event.name),
+      SERVER_SETUP_MAX_PROGRESS_TASK_NAME_LENGTH,
+    )
+    if (event.phase === 'start') return { seq: event.seq, phase: 'start', name }
+    const result = taskResultFrom(event.name, [event.result ?? {}])
+    return {
+      seq: event.seq,
+      phase: 'end',
+      name,
+      status: result.status,
+      changed: result.changed,
+      message: truncateForApi(
+        redact(result.message),
+        SERVER_SETUP_MAX_PROGRESS_MESSAGE_LENGTH,
+      ),
+    }
+  })
+}
+
 interface AnsibleJsonTask {
   task?: { name?: string }
   hosts?: Record<string, AnsibleJsonHostResult>
@@ -807,6 +876,13 @@ export interface ExecuteServerSetupAnsibleInput {
    * body that needs shared files is rejected instead of silently skipped.
    */
   client?: ApiClient
+  /**
+   * Sink for mid-run task progress. When omitted (the local dev path) the
+   * progress side-channel is not enabled at all, so ansible writes no progress
+   * file. Rejections are absorbed by the tailer — progress is best-effort and
+   * never affects the run's own result.
+   */
+  onProgress?: (events: ServerSetupProgressEvent[]) => Promise<void>
 }
 
 /**
@@ -830,7 +906,7 @@ export interface ExecuteServerSetupAnsibleInput {
 export async function executeServerSetupAnsible(
   input: ExecuteServerSetupAnsibleInput,
 ): Promise<CommandResult> {
-  const { executionId, body, mode, credential, variables, secretNames, tenantCode, sshHostId, commandId, client } = input
+  const { executionId, body, mode, credential, variables, secretNames, tenantCode, sshHostId, commandId, client, onProgress } = input
 
   // Resolve the bundled roles/callback-plugins paths first (a packaging error
   // here is surfaced verbatim), then the persistent known_hosts file. Both are
@@ -975,10 +1051,60 @@ export async function executeServerSetupAnsible(
 
       const args = ['-i', inventoryPath, playbookPath, '-e', `@${extraVarsPath}`]
 
+      // Belt-and-suspenders redaction (see redactSecretValues's doc comment).
+      // Resolved *before* the run rather than after it, because progress events
+      // are forwarded while ansible is still running and must be redacted on
+      // exactly the same terms as the stdout/stderr this list guards below.
+      // The SSH password (credential.privateKey when authType === 'password')
+      // is included unconditionally — it never appears in secretNameSet
+      // (that only covers tenant ANSIBLE# project variables) but is exactly
+      // as sensitive, and `ansible-task-guard`'s no_log annotation is a
+      // first line of defense, not the only one.
+      const secretValues = Object.entries(variables)
+        .filter(([name]) => secretNameSet.has(name))
+        .map(([, value]) => value)
+      if (credential.authType === 'password') {
+        secretValues.push(credential.privateKey)
+      }
+
+      // The progress side-channel exists only when someone is listening: with
+      // no sink, ansible is not told to write the file at all.
+      const progressPath = onProgress ? path.join(tmpDir, 'progress.ndjson') : undefined
+      if (progressPath) {
+        // Created up front at 0600: the callback plugin only ever opens this
+        // path in append mode, so without this it would be created at the
+        // process umask (typically 0644).
+        //
+        // On the file holding un-redacted text: a failed task's `msg` is
+        // redacted on the way *out* (see toProgressPayload) but lands here
+        // verbatim, so a secret that leaked into an unrelated task's error
+        // output is briefly on disk in plaintext. That is deliberate and adds
+        // no exposure: this same 0700 temp dir already holds `id_rsa` (the
+        // private key), `inventory.yml` (the plaintext ansible_ssh_pass for
+        // password credentials) and `extra-vars.json` (the plaintext values of
+        // every ANSIBLE# secret variable) — all at 0600, all removed together
+        // by the `finally` below on every exit path. Every secret class that
+        // could accidentally appear here is already present there directly and
+        // in full, so redacting this file would protect nothing that the
+        // adjacent files do not already expose. The callback cannot redact on
+        // its own anyway without being handed the secret values, which would
+        // mean writing them to disk to avoid writing them to disk.
+        writeFileSync(progressPath, '', { mode: 0o600 })
+      }
+      const progressTailer =
+        onProgress && progressPath
+          ? startProgressTailer({
+              filePath: progressPath,
+              onEvents: (events) => onProgress(toProgressPayload(events, secretValues)),
+            })
+          : undefined
+
       logger.info(
         `[server-setup] Running ansible-playbook: executionId=${executionId} mode=${mode} tasks=${guardResult.normalizedTasks.length}`,
       )
-      const { code, stdout: rawStdout, stderr: rawStderr, timedOut, spawnError } = await runAnsiblePlaybook(args, {
+      let runOutcome: AnsibleRunResult
+      try {
+        runOutcome = await runAnsiblePlaybook(args, {
         ...process.env,
         // Ansible's `environment:` keyword is not a secret-safe channel: at -vvv
         // the connection plugin prints the EXEC line with every environment
@@ -1014,21 +1140,22 @@ export async function executeServerSetupAnsible(
         // without this the run aborts with "Invalid callback for stdout
         // specified: json".
         ANSIBLE_CALLBACK_PLUGINS: callbackPluginsPath,
+        // Enables the NDJSON progress side-channel in the bundled `json`
+        // callback (see its PROGRESS CONTRACT). Assigned unconditionally so an
+        // inherited value can never redirect a run's progress at another path;
+        // `undefined` both clears that and leaves the channel off.
+        AI_SUPPORT_AGENT_PROGRESS_FILE: progressPath,
       }, commandId)
-
-      // Belt-and-suspenders redaction (see redactSecretValues's doc comment):
-      // applied to the raw stdout/stderr *before* anything else reads them.
-      // The SSH password (credential.privateKey when authType === 'password')
-      // is included unconditionally — it never appears in secretNameSet
-      // (that only covers tenant ANSIBLE# project variables) but is exactly
-      // as sensitive, and `ansible-task-guard`'s no_log annotation is a
-      // first line of defense, not the only one.
-      const secretValues = Object.entries(variables)
-        .filter(([name]) => secretNameSet.has(name))
-        .map(([, value]) => value)
-      if (credential.authType === 'password') {
-        secretValues.push(credential.privateKey)
+      } finally {
+        // Stop before the temp dir (and the progress file inside it) is
+        // removed. `stop()` also drains whatever ansible wrote between the
+        // last poll and its exit, so the final tasks are still reported.
+        await progressTailer?.stop()
       }
+      const { code, stdout: rawStdout, stderr: rawStderr, timedOut, spawnError } = runOutcome
+
+      // Redaction applied to the raw stdout/stderr *before* anything else
+      // reads them (see secretValues above).
       const stdout = redactSecretValues(rawStdout, secretValues)
       const stderr = redactSecretValues(rawStderr, secretValues)
 
@@ -1182,6 +1309,10 @@ export async function runServerSetup(
     // through the agent's own project-scoped API (tenant/project come from the
     // token, so another project's files are unreachable by construction).
     client: ctx.client,
+    // Mid-run progress. Only the api-driven path wires this: the local dev
+    // runner has no execution row to append to, so it leaves the channel off.
+    onProgress: (events) =>
+      ctx.client.submitServerSetupProgress(ctx.commandId, events, ctx.agentId ?? ''),
   })
 }
 
