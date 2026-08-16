@@ -387,6 +387,23 @@ export async function handleNotification(
       break
     }
     case NOTIFICATION_ACTION.CONFIG_UPDATE: {
+      // Same drain guard as processCommand/checkPendingCommands: once graceful
+      // shutdown has begun, ignore a config-update notification rather than
+      // scheduling a sync. draining=true always eventually leads to this
+      // process exiting (doShutdown() -> stopTransport() after the drain, or
+      // the timed process.exit() the various restart paths schedule), so the
+      // config change is not lost — it will simply be picked up by the next
+      // process instance's own sync on its next normal cycle. Without this
+      // guard, a config sync that detects a Docker customization change would
+      // call onDockerRebuild() -> performDockerRebuild(), which schedules its
+      // own delayed process.exit(DOCKER_RESTART_EXIT_CODE) signal; if the
+      // shutdown already in progress here exits first (no artificial delay on
+      // that path), that exit-code signal would be lost, silently dropping
+      // the customization change until the next restart.
+      if (state.draining) {
+        logger.debug(`${deps.prefix} Ignoring config-update notification: shutdown already in progress`)
+        return
+      }
       // APIがconfig-update通知を送るタイミングはRDS同期前の可能性があるため、
       // hashの比較は行わず常に再同期をスケジュールする。
       // hash比較による変更なしスキップはsyncProjectConfig側で行う。

@@ -150,6 +150,31 @@ describe('ChildProcessManager', () => {
 
       jest.useRealTimers()
     })
+
+    it('unrefs the force-kill timer so a wedged child cannot keep the process alive', async () => {
+      manager.forkProject(project, 'agent-1', options)
+      const child = fork.mock.results[0].value
+
+      // Intercept the real setTimeout so we can spy on .unref() being called
+      // on the specific timer stopProject() creates, without needing fake
+      // timers (which would make asserting the *real* timer object awkward).
+      const unrefSpy = jest.fn()
+      const realSetTimeout = global.setTimeout
+      const setTimeoutSpy = jest
+        .spyOn(global, 'setTimeout')
+        .mockImplementation(((handler: (...args: unknown[]) => void, timeout?: number, ...args: unknown[]) => {
+          const timer = realSetTimeout(handler, timeout, ...args)
+          timer.unref = unrefSpy.mockReturnValue(timer)
+          return timer
+        }) as unknown as typeof setTimeout)
+
+      const stopPromise = manager.stopProject(project, 100)
+      child._emit('exit', 0, null)
+      await stopPromise
+
+      expect(unrefSpy).toHaveBeenCalled()
+      setTimeoutSpy.mockRestore()
+    })
   })
 
   describe('sendTokenUpdate', () => {
@@ -377,6 +402,36 @@ describe('ChildProcessManager', () => {
       expect(child.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'shutdown' }))
       expect(manager.getRunningCount()).toBe(0)
       jest.useRealTimers()
+    })
+
+    it('unrefs each force-kill timer so wedged children cannot keep the process alive', async () => {
+      manager.forkProject(project, 'agent-1', options)
+      manager.forkProject(
+        { tenantCode: 'mbc', projectCode: 'proj-b', token: 'token-b', apiUrl: 'http://api-b' },
+        'agent-1',
+        options,
+      )
+      const children = fork.mock.results.map((r: { value: unknown }) => r.value) as Array<ReturnType<typeof fork>>
+
+      const unrefSpy = jest.fn()
+      const realSetTimeout = global.setTimeout
+      const setTimeoutSpy = jest
+        .spyOn(global, 'setTimeout')
+        .mockImplementation(((handler: (...args: unknown[]) => void, timeout?: number, ...args: unknown[]) => {
+          const timer = realSetTimeout(handler, timeout, ...args)
+          timer.unref = unrefSpy.mockReturnValue(timer)
+          return timer
+        }) as unknown as typeof setTimeout)
+
+      const stopPromise = manager.stopAll(100)
+      for (const child of children) {
+        ;(child as any)._emit('exit', 0, null)
+      }
+      await stopPromise
+
+      // Two children stopped concurrently -> two force-kill timers created.
+      expect(unrefSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
+      setTimeoutSpy.mockRestore()
     })
   })
 

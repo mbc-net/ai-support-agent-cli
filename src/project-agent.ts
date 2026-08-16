@@ -140,12 +140,32 @@ export class ProjectAgent {
    */
   private shutdownPromise: Promise<void> | null = null
   /**
-   * Whether this replica currently holds an admitted slot. Set true once
-   * startServices() begins (admission succeeded), set false again by
-   * handleEviction(). shutdown() skips releaseSelf() when this is false — a
-   * replica that was rejected/evicted holds nothing to release.
+   * Whether this replica currently holds an admitted slot. Set true as soon
+   * as `register()`/`performRegistration()` reports `admission.accepted`
+   * (i.e. as soon as the server-side truth is known — see `registerAndStart`),
+   * set false again by handleEviction(). shutdown() skips releaseSelf() when
+   * this is false — a replica that was rejected/evicted holds nothing to
+   * release.
    */
   private slotHeld = false
+  /**
+   * Command ids that must not count as "still in flight" for
+   * `waitForDrain()`'s purposes, because they are themselves the command
+   * driving the current shutdown (reboot/update/docker-rebuild) and cannot be
+   * removed from `transportState.inFlightCommands` until the very `shutdown()`
+   * call they triggered resolves — see `shutdown()`'s doc comment.
+   *
+   * A `Set` rather than a single captured value: `shutdown()` adds to this set
+   * *before* checking/returning the memoized `shutdownPromise`, so a caller
+   * that joins an already-in-flight shutdown (e.g. `performReboot()` calling
+   * `shutdown({ excludeCommandId })` after a plain SIGTERM-triggered
+   * `shutdown()` already started the drain) still gets its exclusion honored.
+   * A single opts-snapshot captured only by the first caller would silently
+   * discard every later caller's `excludeCommandId`, reintroducing the very
+   * self-wait deadlock this mechanism exists to prevent (see the regression
+   * this fixes).
+   */
+  private readonly excludedCommandIds = new Set<string>()
 
   constructor(
     project: ProjectRegistration,
@@ -307,6 +327,12 @@ export class ProjectAgent {
    * shutdowns pass no `excludeCommandId` — there is no in-flight command
    * driving those, so this is a no-op for that path.
    *
+   * `excludeCommandId` is added to the shared `excludedCommandIds` set
+   * *before* the memoization check below, not threaded through as a
+   * parameter captured only by whichever caller happens to arrive first — see
+   * `excludedCommandIds`'s doc comment for why: any caller that joins an
+   * already-in-flight shutdown must still get its own exclusion honored.
+   *
    * Concurrent-caller semantics: two independent call sites in
    * `runSingleProject()` (`src/agent-runner.ts`) can both call `shutdown()`
    * around the same time — the SIGTERM/SIGINT handler and the auto-updater's
@@ -315,25 +341,29 @@ export class ProjectAgent {
    * instant no-op; otherwise the second caller would proceed (e.g. the
    * auto-updater calling `reExecProcess()`) while the first caller's drain of
    * a genuinely in-flight command is still running, abandoning it mid-flight.
-   * The second caller's `opts` are ignored once a shutdown is already in
-   * flight — the first caller's parameters win, since restarting the drain
-   * with different params mid-flight doesn't make sense.
+   * The second caller's `drainTimeoutMs` is ignored once a shutdown is already
+   * in flight — the first caller's timeout wins, since restarting the drain
+   * with a different timeout mid-flight doesn't make sense. `excludeCommandId`
+   * is the one exception: it is always honored, from whichever caller
+   * supplies it, via the shared set.
    */
   async shutdown(opts?: { drainTimeoutMs?: number; excludeCommandId?: string }): Promise<void> {
+    if (opts?.excludeCommandId) {
+      this.excludedCommandIds.add(opts.excludeCommandId)
+    }
     if (this.shutdownPromise) return this.shutdownPromise
     this.shuttingDown = true
-    this.shutdownPromise = this.doShutdown(opts)
+    this.shutdownPromise = this.doShutdown(opts?.drainTimeoutMs)
     return this.shutdownPromise
   }
 
-  private async doShutdown(opts?: { drainTimeoutMs?: number; excludeCommandId?: string }): Promise<void> {
+  private async doShutdown(drainTimeoutMs?: number): Promise<void> {
     this.transportState.draining = true
 
     this.cancelRegisterLoop()
     this.clearAlertTimers()
 
-    const drainTimeoutMs = opts?.drainTimeoutMs ?? SHUTDOWN_DRAIN_TIMEOUT_MS
-    const drainResult = await this.waitForDrain(drainTimeoutMs, opts?.excludeCommandId)
+    const drainResult = await this.waitForDrain(drainTimeoutMs ?? SHUTDOWN_DRAIN_TIMEOUT_MS)
 
     if (!drainResult.drained) {
       logger.warn(
@@ -367,20 +397,25 @@ export class ProjectAgent {
    * (`waitInterruptible`) rather than a plain `sleep()`, so the wait never
    * holds the event loop open past process exit.
    *
-   * `excludeCommandId`, when given, does not count toward "still in flight":
-   * it is the id of the command (reboot/update) that is itself driving this
-   * shutdown, and it cannot be removed from `inFlightCommands` until this very
-   * call returns — see `shutdown`'s doc comment for why.
+   * Ids present in `this.excludedCommandIds` do not count toward "still in
+   * flight": each is the id of a command (reboot/update/docker-rebuild) that
+   * is itself driving a (possibly shared) shutdown, and it cannot be removed
+   * from `inFlightCommands` until that command's own `shutdown()` call
+   * returns — see `shutdown()`'s and `excludedCommandIds`'s doc comments for
+   * why. The set is read live on every poll iteration (not snapshotted at the
+   * start of the drain), so an exclusion added moments after this loop
+   * started — e.g. by a caller joining an already-in-flight shutdown — is
+   * picked up on the next iteration (within `SHUTDOWN_DRAIN_POLL_INTERVAL_MS`).
    */
   private async waitForDrain(
     timeoutMs: number,
-    excludeCommandId?: string,
   ): Promise<{ drained: boolean; remaining: string[] }> {
     const remainingCount = (): number => {
-      const { size } = this.transportState.inFlightCommands
-      return excludeCommandId && this.transportState.inFlightCommands.has(excludeCommandId)
-        ? size - 1
-        : size
+      let count = 0
+      for (const id of this.transportState.inFlightCommands) {
+        if (!this.excludedCommandIds.has(id)) count++
+      }
+      return count
     }
     const deadline = Date.now() + timeoutMs
     while (remainingCount() > 0 && Date.now() < deadline) {
@@ -393,7 +428,7 @@ export class ProjectAgent {
       await this.waitInterruptible(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
     }
     const remaining = Array.from(this.transportState.inFlightCommands).filter(
-      (id) => id !== excludeCommandId,
+      (id) => !this.excludedCommandIds.has(id),
     )
     return { drained: remaining.length === 0, remaining }
   }
@@ -666,6 +701,23 @@ export class ProjectAgent {
       if (this.registerLoopCancelled) return
     }
 
+    // Admission is now known to be accepted (either the initial register()
+    // call above was accepted outright, or waitForAdmission() only returns
+    // without cancellation once a standby retry is accepted) — the server has
+    // already recorded this instance as holding the slot. Record that fact
+    // immediately, before any further I/O (submitPendingResults(), the
+    // config-sync retry loop below), rather than deferring to startServices().
+    // Those steps involve real awaits, during which a concurrent shutdown()
+    // may race in and cause an early return (see the registerLoopCancelled
+    // check right before startServices() below) before startServices() ever
+    // runs. If slotHeld were only set inside startServices(), that early
+    // return would leave slotHeld false even though the slot genuinely is
+    // held server-side — doShutdown() would then skip releaseSelf() and the
+    // slot would only be freed via the slow ~90s heartbeat-timeout reclaim,
+    // defeating the fast-release purpose of this feature. releaseSelf() is a
+    // direct HTTP call to the server, independent of local transport state,
+    // so it is correct to attempt it even if startServices() never ran.
+    this.slotHeld = true
 
     // Submit any pending results from previous sessions
     await submitPendingResults()
@@ -687,12 +739,12 @@ export class ProjectAgent {
     // used in the rejected/standby branch above. submitPendingResults() and the
     // config-sync retry loop above involve real I/O with real await points; a
     // concurrent shutdown() (SIGTERM) may have already run cancelRegisterLoop()
-    // — and, seeing slotHeld still false, correctly skipped releaseSelf() and
-    // gone on to stop the transport — while we were away. Without this check we
-    // would set slotHeld = true and start a brand-new heartbeat/subscription
-    // right as the process is exiting: the slot would never be released via
-    // releaseSelf() (falling back to the slow ~90s heartbeat-timeout reclaim)
-    // and a stray heartbeat could fire in the exit window.
+    // while we were away — and, since `slotHeld` was already set true above (as
+    // soon as admission was confirmed accepted), doShutdown() correctly attempts
+    // releaseSelf() for the slot even though startServices() never got to run.
+    // Without this check we would go on to start a brand-new heartbeat/
+    // subscription right as the process is exiting, racing a stray heartbeat
+    // against the in-flight shutdown.
     if (this.registerLoopCancelled) {
       logger.debug(
         `${this.prefix} Register loop cancelled before startServices(); skipping (shutdown in progress)`,
@@ -982,9 +1034,9 @@ export class ProjectAgent {
    * longer required here.
    */
   private async startServices(result: RegisterResponse): Promise<void> {
-    // Admission succeeded and we are about to start heartbeating on this
-    // slot — record that shutdown() has something to release.
-    this.slotHeld = true
+    // slotHeld is set in registerAndStart() as soon as admission is known to
+    // be accepted (see the comment there for why it must not wait until
+    // here), not here — avoid a second, redundant assignment point.
     const commandContext = {
       configSyncState: this.configSyncState,
       configSyncDeps: this.configSyncDeps,

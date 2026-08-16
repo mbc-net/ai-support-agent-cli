@@ -1180,6 +1180,43 @@ describe('DockerSupervisor', () => {
       expect(fakeChild.kill).not.toHaveBeenCalled()
     })
 
+    it('does not resolve its returned promise until the spawned `docker stop` process actually exits', async () => {
+      const runChild = makeFakeChild()
+      const stopChild = makeFakeChild()
+      let callCount = 0
+      mockSpawn.mockImplementation(() => {
+        callCount++
+        return (callCount === 1 ? runChild : stopChild) as never
+      })
+      mockExistsSync.mockImplementation((p: fs.PathLike) => String(p).endsWith('.cid'))
+      mockReadFileSync.mockImplementation((p: fs.PathOrFileDescriptor) => {
+        if (String(p).endsWith('.cid')) return 'container-abc123'
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      const stopAllPromise = supervisor.stopAll()
+      let resolved = false
+      void stopAllPromise.then(() => { resolved = true })
+
+      // Flush microtasks — the promise must NOT have resolved yet: `docker
+      // stop` was only just spawned, not awaited to completion.
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(resolved).toBe(false)
+
+      // Simulate the spawned `docker stop` CLI process actually exiting
+      // (container stopped, or --time grace period elapsed and it was
+      // SIGKILLed).
+      stopChild.emit('close', 0)
+
+      await stopAllPromise
+      expect(resolved).toBe(true)
+    })
+
     it('does not call kill on containers that are already closeHandled', () => {
       const fakeChild = makeFakeChild()
       mockSpawn.mockReturnValue(fakeChild as never)

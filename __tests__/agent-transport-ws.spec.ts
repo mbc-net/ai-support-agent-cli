@@ -1759,6 +1759,44 @@ describe('handleNotification: agent-command filtering branches', () => {
     expect(state.configSyncDebounceTimer).toBe('debounce-timer')
   })
 
+  it('should ignore a config-update notification while draining (does not trigger scheduleConfigSync)', async () => {
+    // Matches the same drain guard already used by processCommand/
+    // checkPendingCommands: once ProjectAgent.shutdown() has set
+    // state.draining = true, a config-update notification must not trigger a
+    // config sync. Without this guard, a config sync that detects a Docker
+    // customization change could call onDockerRebuild() -> performDockerRebuild(),
+    // which schedules its own delayed process.exit(DOCKER_RESTART_EXIT_CODE)
+    // signal — racing against (and possibly losing to) the SIGTERM-triggered
+    // shutdown's own un-delayed process.exit(0) once the shared drain
+    // resolves, silently dropping the customization change until the next
+    // restart.
+    const { logger } = require('../src/logger')
+    const { scheduleConfigSync } = require('../src/agent-config-sync')
+    scheduleConfigSync.mockClear()
+
+    const deps = createMockDeps()
+    const state = createMockState()
+    state.draining = true
+    const ctx = makeCtx(state)
+    // Give currentConfigHash a real value first so the "must not be reset"
+    // assertion below is meaningful (the default in this file's makeCtx() is
+    // already undefined, which would make that assertion trivially true).
+    ctx.configSyncState.currentConfigHash = 'existing-hash'
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n7-draining', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: NOTIFICATION_ACTION.CONFIG_UPDATE,
+      content: {},
+    })
+
+    expect(scheduleConfigSync).not.toHaveBeenCalled()
+    // currentConfigHash must not be reset either — the whole sync attempt is
+    // skipped, not just the scheduling call.
+    expect(ctx.configSyncState.currentConfigHash).toBe('existing-hash')
+    const debugCalls = (logger.debug as jest.Mock).mock.calls.map((c: unknown[]) => String(c[0]))
+    expect(debugCalls.some((m: string) => m.includes('Ignoring config-update notification'))).toBe(true)
+  })
+
   it('should handle string content by JSON.parse', async () => {
     const { executeCommand } = require('../src/commands')
     executeCommand.mockResolvedValue({ success: true, data: 'ok' })

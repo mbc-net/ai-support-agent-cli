@@ -2467,6 +2467,67 @@ describe('ProjectAgent', () => {
       expect(mockSubscriber.disconnect).toHaveBeenCalledTimes(1)
     })
 
+    it('a plain shutdown() (SIGTERM) that wins the race first does not discard a later joining caller\'s excludeCommandId (regression: memoization previously reintroduced the self-wait deadlock)', async () => {
+      // shutdown() used to memoize on `this.shutdownPromise` with only the
+      // FIRST caller's opts ever consulted. If a plain shutdown() (e.g.
+      // SIGTERM) won the race and started the drain first, a later caller
+      // like performReboot()/performUpdate()/performDockerRebuild() joining
+      // with `{ excludeCommandId }` would have that exclusion silently
+      // discarded — reintroducing the exact self-wait deadlock class an
+      // earlier round already fixed (up to the full SHUTDOWN_DRAIN_TIMEOUT_MS
+      // hang), just via a different code path. The fix moves exclusion into
+      // a shared, live `excludedCommandIds` set that any caller can still
+      // contribute to, even after joining an already-in-flight shutdown.
+      const resolvers: Record<string, (result: { success: boolean; data: string }) => void> = {}
+      mockClient.getCommand.mockImplementation(async (commandId: string) => ({
+        commandId,
+        type: 'execute_command',
+        payload: {},
+      }))
+      mockedExecuteCommand.mockImplementation(
+        (_type, _payload, opts) =>
+          new Promise((resolve) => {
+            resolvers[opts.commandId as string] = resolve
+          }),
+      )
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      // Two commands in flight: 'cmd-other' is genuinely unrelated and must
+      // be waited on; 'cmd-reboot' stands in for a reboot/update/
+      // docker-rebuild command that is itself driving the second, joining
+      // shutdown() call below and must be excluded from the drain (it can
+      // never finish here — exactly like the real self-referencing command,
+      // which is blocked on this very shutdown() call).
+      triggerCommand('cmd-other')
+      await jest.advanceTimersByTimeAsync(50)
+      triggerCommand('cmd-reboot')
+      await jest.advanceTimersByTimeAsync(50)
+
+      expect(resolvers['cmd-other']).toBeDefined()
+      expect(resolvers['cmd-reboot']).toBeDefined()
+
+      // A plain shutdown() (as if from the SIGTERM/SIGINT handler) wins the
+      // race and starts the drain first — with NO excludeCommandId.
+      const sigtermShutdown = agent.shutdown()
+
+      // Shortly after, a second caller (as if performReboot()) joins the
+      // already-in-flight shutdown with its own excludeCommandId.
+      await jest.advanceTimersByTimeAsync(10)
+      const rebootShutdown = agent.shutdown({ excludeCommandId: 'cmd-reboot' })
+
+      // Resolving ONLY the non-excluded command must be enough for the drain
+      // to complete — 'cmd-reboot' must not count against it.
+      resolvers['cmd-other']({ success: true, data: 'ok' })
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+      await Promise.all([sigtermShutdown, rebootShutdown])
+
+      expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+      expect(mockSubscriber.disconnect).toHaveBeenCalledTimes(1)
+    })
+
     it('logs a warning with the reason when releaseSelf() resolves but the slot was not released', async () => {
       mockClient.releaseSelf.mockResolvedValue({ released: false, reason: 'nonce_mismatch' })
 
@@ -2775,13 +2836,15 @@ describe('ProjectAgent', () => {
       // no rejected/standby branch to already check registerLoopCancelled)
       // and startServices(), registerAndStart() awaits real I/O
       // (submitPendingResults(), the initial config-sync retry loop). A
-      // concurrent shutdown() (SIGTERM) can run entirely within that window:
-      // it would see slotHeld still false (nothing held yet) and correctly
-      // skip releaseSelf(), then tear down. Without a cancellation re-check
-      // right before startServices(), registerAndStart() would be unaware and
-      // set slotHeld = true / start a brand-new heartbeat and subscription
-      // right as the process is exiting.
-      it('does not start services when shutdown() cancels the register loop while registerAndStart() is awaiting I/O after a successful register()', async () => {
+      // concurrent shutdown() (SIGTERM) can run entirely within that window.
+      // `slotHeld` is set to true as soon as admission is known accepted —
+      // i.e. right after register() returns, *not* inside startServices() —
+      // because the server has already recorded the slot as held at that
+      // point. So a shutdown() racing in during this I/O window must still
+      // call releaseSelf() for that genuinely-held slot, even though
+      // startServices() (heartbeat, subscription) never gets to run because
+      // of the cancellation re-check right before it.
+      it('does not start services when shutdown() cancels the register loop while registerAndStart() is awaiting I/O after a successful register(), but still releases the slot it already holds', async () => {
         let releaseSubmit: () => void = () => undefined
         mockedSubmitPendingResults.mockImplementationOnce(
           () => new Promise<void>((resolve) => { releaseSubmit = resolve }),
@@ -2797,25 +2860,87 @@ describe('ProjectAgent', () => {
         expect(mockClient.register).toHaveBeenCalledTimes(1)
         expect(mockSubscriber.connect).not.toHaveBeenCalled()
 
+        // The default register() mock in this file carries no `admission`
+        // field at all (unrestricted / no replica limit configured), which
+        // registerAndStart() treats the same as an explicit
+        // admission.accepted === true: the server has already registered
+        // this instance as holding the slot.
+        expect((agent as unknown as { slotHeld: boolean }).slotHeld).toBe(true)
+
         // A concurrent SIGTERM arrives and completes its own shutdown while
         // registerAndStart() is still parked on submitPendingResults().
         const shutdownPromise = agent.shutdown()
         await jest.advanceTimersByTimeAsync(0)
-        expect(mockClient.releaseSelf).not.toHaveBeenCalled() // nothing was ever held
         await shutdownPromise
 
-        // Now let registerAndStart() resume. Without the fix it would barrel
-        // on into startServices() (slotHeld = true, heartbeat + subscription
-        // started) right as the process is exiting.
+        // The slot really is held server-side — doShutdown() must attempt
+        // releaseSelf() for it, not skip it with "never held a slot". Before
+        // the fix, slotHeld was only ever set inside startServices(), so this
+        // early-cancelled path left it false and releaseSelf() was
+        // incorrectly skipped, leaking the slot until the slow ~90s
+        // heartbeat-timeout reclaim.
+        expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+
+        // Now let registerAndStart() resume. Without the cancellation
+        // re-check it would barrel on into startServices() (heartbeat +
+        // subscription started) right as the process is exiting.
         releaseSubmit()
         await jest.advanceTimersByTimeAsync(options.heartbeatInterval * 2)
 
         expect(mockSubscriber.connect).not.toHaveBeenCalled()
         expect(mockSubscriber.subscribe).not.toHaveBeenCalled()
         expect(mockClient.heartbeat).not.toHaveBeenCalled()
-        expect(
-          (agent as unknown as { slotHeld: boolean }).slotHeld,
-        ).toBe(false)
+      })
+
+      // Same scenario as above, but exercising the explicit
+      // `admission: { accepted: true, ... }` response shape (multi-replica
+      // deployments with a plan replica limit configured) rather than the
+      // no-`admission`-field/no-limit shape the test above uses — this is
+      // the exact scenario the regression this test guards against was
+      // found in.
+      it('sets slotHeld immediately once an admission.accepted===true register() response arrives, before any post-registration I/O, so a concurrent shutdown() during that I/O still releases the slot', async () => {
+        mockClient.register.mockResolvedValueOnce({
+          agentId: 'test-id',
+          tenantCode: 'test-tenant',
+          appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+          appsyncApiKey: 'da2-testkey123',
+          transportMode: 'realtime',
+          admission: { accepted: true, instanceId: 'pod-a', maxReplicas: 2, liveReplicas: 1 },
+        })
+
+        let releaseSubmit: () => void = () => undefined
+        mockedSubmitPendingResults.mockImplementationOnce(
+          () => new Promise<void>((resolve) => { releaseSubmit = resolve }),
+        )
+
+        const agent = new ProjectAgent(project, 'agent-1', options)
+        agent.start()
+
+        // Let register() resolve — registerAndStart() is now parked on
+        // submitPendingResults(), before startServices() has ever run.
+        await jest.advanceTimersByTimeAsync(0)
+        expect(mockClient.register).toHaveBeenCalledTimes(1)
+        expect(mockSubscriber.connect).not.toHaveBeenCalled()
+
+        // slotHeld must already be true here — set as soon as
+        // admission.accepted was known, not deferred to startServices().
+        expect((agent as unknown as { slotHeld: boolean }).slotHeld).toBe(true)
+
+        // A concurrent SIGTERM arrives and completes its own shutdown while
+        // registerAndStart() is still parked on submitPendingResults().
+        const shutdownPromise = agent.shutdown()
+        await jest.advanceTimersByTimeAsync(0)
+        await shutdownPromise
+
+        // The accepted slot must be released, not skipped.
+        expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+
+        // startServices() itself must still never have run.
+        releaseSubmit()
+        await jest.advanceTimersByTimeAsync(options.heartbeatInterval * 2)
+        expect(mockSubscriber.connect).not.toHaveBeenCalled()
+        expect(mockSubscriber.subscribe).not.toHaveBeenCalled()
+        expect(mockClient.heartbeat).not.toHaveBeenCalled()
       })
     })
   })
