@@ -628,10 +628,80 @@ describe('DockerSupervisor', () => {
       supervisor.start([makeProject()])
 
       fakeChild.emit('close', 42)
+      // stopAll() is now awaited before installUpdateAndRestart() (Finding 7
+      // fix), adding extra microtask hops through Promise.all([]) resolution
+      // — flush generously via setImmediate rather than a fixed count of
+      // Promise.resolve() ticks.
       await Promise.resolve()
       await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
 
       expect(mockInstallUpdateAndRestart).toHaveBeenCalled()
+    })
+
+    it('awaits stopAll() before calling installUpdateAndRestart() so sibling containers finish stopping before the host restarts', async () => {
+      // Regression test for Finding 7: previously `void this.stopAll()` and
+      // `void installUpdateAndRestart(...)` fired without either being
+      // awaited, so the host could re-exec and re-spawn `docker run` for a
+      // sibling project while its old container was still mid-drain —
+      // risking a container-name conflict or duplicate concurrent execution.
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      let resolveStopAll: () => void = () => undefined
+      const stopAllSpy = jest.spyOn(DockerSupervisor.prototype, 'stopAll').mockImplementation(
+        () => new Promise((resolve) => { resolveStopAll = () => resolve(undefined) }),
+      )
+
+      try {
+        const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+        supervisor.start([makeProject()])
+
+        fakeChild.emit('close', 42) // DOCKER_UPDATE_EXIT_CODE
+        await Promise.resolve()
+        await Promise.resolve()
+
+        // stopAll() has been called but has not resolved yet — installUpdateAndRestart
+        // must not have been called until it does.
+        expect(stopAllSpy).toHaveBeenCalled()
+        expect(mockInstallUpdateAndRestart).not.toHaveBeenCalled()
+
+        resolveStopAll()
+        await Promise.resolve()
+        await Promise.resolve()
+        await new Promise((r) => setImmediate(r))
+
+        expect(mockInstallUpdateAndRestart).toHaveBeenCalled()
+      } finally {
+        stopAllSpy.mockRestore()
+      }
+    })
+
+    it('logs and proceeds to installUpdateAndRestart() when stopAll() rejects, instead of becoming an unhandled rejection', async () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const stopAllSpy = jest.spyOn(DockerSupervisor.prototype, 'stopAll')
+        .mockRejectedValue(new Error('stopAll boom'))
+
+      try {
+        const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+        supervisor.start([makeProject()])
+
+        fakeChild.emit('close', 42) // DOCKER_UPDATE_EXIT_CODE
+        await Promise.resolve()
+        await Promise.resolve()
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('stopAll() before update restart failed'),
+        )
+        expect(mockInstallUpdateAndRestart).toHaveBeenCalled()
+      } finally {
+        stopAllSpy.mockRestore()
+      }
     })
 
     it('does not trigger update restart a second time after updating flag is set', async () => {
@@ -651,9 +721,16 @@ describe('DockerSupervisor', () => {
 
       fakeChild1.emit('close', 42)
       fakeChild2.emit('close', 42)
+      // stopAll() (triggered by PROJ_A's close, which still sees PROJ_B in
+      // its handles at that point) genuinely waits for PROJ_B's container to
+      // actually exit (Finding 7 fix) before installUpdateAndRestart() is
+      // invoked — simulate that exit here.
+      fakeChild2.emit('exit', 0, 'SIGTERM')
 
       await Promise.resolve()
       await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
 
       // installUpdateAndRestart should only be called once
       expect(mockInstallUpdateAndRestart).toHaveBeenCalledTimes(1)
@@ -1212,6 +1289,38 @@ describe('DockerSupervisor', () => {
       // (container stopped, or --time grace period elapsed and it was
       // SIGKILLed).
       stopChild.emit('close', 0)
+
+      await stopAllPromise
+      expect(resolved).toBe(true)
+    })
+
+    it('does not resolve its returned promise until a container killed via the cidfile-fallback path (child.kill(SIGTERM)) actually exits', async () => {
+      // Regression test for a round-4 bug: the cidfile-fallback branch of
+      // stopAll() called handle.child.kill('SIGTERM') directly but never
+      // tracked its completion in the stopPromises collection the rest of
+      // stopAll() awaits — so the returned promise could resolve while a
+      // container stopped via this fallback path was still shutting down.
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockExistsSync.mockReturnValue(false) // no cidfile → fallback path
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      const stopAllPromise = supervisor.stopAll()
+      let resolved = false
+      void stopAllPromise.then(() => { resolved = true })
+
+      // kill() was called, but the promise must NOT resolve merely because
+      // .kill() was invoked — only once the child process itself exits.
+      expect(fakeChild.kill).toHaveBeenCalledWith('SIGTERM')
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(resolved).toBe(false)
+
+      // Simulate the killed child process actually exiting.
+      fakeChild.emit('exit', 0, 'SIGTERM')
 
       await stopAllPromise
       expect(resolved).toBe(true)

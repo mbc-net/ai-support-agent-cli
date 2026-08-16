@@ -85,7 +85,7 @@
   "stop.notRunning": "No running agent found (pid file not found: {{path}})",
   "stop.staleProcess": "Agent process (PID: {{pid}}) is no longer running. Cleaning up stale pid file.",
   "stop.signalFailed": "Failed to send stop signal to PID {{pid}}: {{message}}",
-  "stop.timeout": "Agent did not stop within timeout (PID: {{pid}}). It may still be running.",
+  "stop.timeout": "Agent (PID: {{pid}}) has not exited yet after {{timeoutSeconds}}s. This does not necessarily mean it is stuck: if it has an in-flight command, it may still be gracefully draining it before shutting down, which can take up to about 5 minutes — it will exit on its own once the drain completes. Wait a bit and run \"ai-support-agent status\" or \"ai-support-agent stop\" again to check.",
 
   "runner.starting": "Starting agent...",
   "runner.startedSingle": "Agent started (poll: {{pollInterval}}ms, heartbeat: {{heartbeatInterval}}ms)",

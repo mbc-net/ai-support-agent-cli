@@ -359,6 +359,23 @@ export class ProjectAgent {
 
   private async doShutdown(drainTimeoutMs?: number): Promise<void> {
     this.transportState.draining = true
+    // Cancel any config-sync debounce timer that was already armed by a
+    // CONFIG_UPDATE notification received just before draining started. The
+    // `state.draining` guard in agent-transport.ts's CONFIG_UPDATE handler
+    // only prevents *new* notifications from (re)arming this timer — it does
+    // nothing for a timer that is already ticking down when draining flips
+    // true. Left uncancelled, that timer would still fire mid-drain and can
+    // trigger performConfigSync() -> (on a Docker customization change)
+    // onDockerRebuild() -> performDockerRebuild(), which joins this same
+    // shutdownPromise and then schedules its own delayed
+    // process.exit(DOCKER_RESTART_EXIT_CODE) — racing the plain SIGTERM
+    // handler's un-delayed process.exit(0) once the drain resolves. Clearing
+    // here (not only in stopTransport() at the very end of shutdown) closes
+    // that gap for the entire drain window, not just after it.
+    if (this.transportState.configSyncDebounceTimer) {
+      clearTimeout(this.transportState.configSyncDebounceTimer)
+      this.transportState.configSyncDebounceTimer = null
+    }
 
     this.cancelRegisterLoop()
     this.clearAlertTimers()

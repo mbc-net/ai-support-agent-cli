@@ -1,6 +1,6 @@
 import { ApiClient } from '../src/api-client'
 import { AppSyncSubscriber } from '../src/appsync-subscriber'
-import { SHUTDOWN_DRAIN_POLL_INTERVAL_MS, SHUTDOWN_DRAIN_TIMEOUT_MS } from '../src/constants'
+import { CONFIG_SYNC_DEBOUNCE_MS, SHUTDOWN_DRAIN_POLL_INTERVAL_MS, SHUTDOWN_DRAIN_TIMEOUT_MS } from '../src/constants'
 import { writeAwsConfig } from '../src/aws-profile'
 import { executeCommand } from '../src/commands'
 import { logger } from '../src/logger'
@@ -2614,6 +2614,42 @@ describe('ProjectAgent', () => {
       expect(logger.debug).toHaveBeenCalledWith(
         expect.stringContaining('Skipping releaseSelf()'),
       )
+    })
+
+    it('cancels a config-sync debounce timer that was already armed just before shutdown() begins draining, so it does not fire mid-drain', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      // Arm the debounce timer via a CONFIG_UPDATE notification (same
+      // trigger as the 'should clear configSyncDebounceTimer on stop()' test
+      // above), then start an in-flight command BEFORE calling shutdown()
+      // so the drain does not resolve instantly — giving the pre-armed timer
+      // a real window in which it could (incorrectly) fire mid-drain.
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+      onMessage({ id: '1', table: '', pk: '', sk: '', tenantCode: '', action: 'config-update', content: { configHash: 'pending-hash' } })
+
+      const resolveExec = startStuckCommand('cmd-inflight-config')
+      await jest.advanceTimersByTimeAsync(50)
+
+      mockedSyncProjectConfig.mockClear()
+      const shutdownPromise = agent.shutdown()
+
+      // Advance well past CONFIG_SYNC_DEBOUNCE_MS while still draining (the
+      // in-flight command has not resolved yet). Before the Finding 6 fix,
+      // the CONFIG_UPDATE handler's `state.draining` guard only blocked NEW
+      // notifications from re-arming this timer — it did nothing for a timer
+      // already ticking down, so this would have fired here.
+      await jest.advanceTimersByTimeAsync(CONFIG_SYNC_DEBOUNCE_MS + 1000)
+      expect(mockedSyncProjectConfig).not.toHaveBeenCalled()
+      expect(mockClient.releaseSelf).not.toHaveBeenCalled()
+
+      resolveExec({ success: true, data: 'ok' })
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+      await shutdownPromise
+
+      // Still not fired after the drain completes and shutdown() resolves.
+      expect(mockedSyncProjectConfig).not.toHaveBeenCalled()
     })
 
     describe('reboot/update self-reference (excludeCommandId)', () => {

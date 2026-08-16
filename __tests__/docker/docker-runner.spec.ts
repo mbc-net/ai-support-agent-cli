@@ -1592,6 +1592,18 @@ describe('docker-runner', () => {
 
       // Other container (PROJ_B) should have been killed
       expect(fakeChild2.kill).toHaveBeenCalledWith('SIGTERM')
+
+      // stopAll() now genuinely waits for the killed sibling container to
+      // actually exit (Finding 7 fix) before installUpdateAndRestart() is
+      // invoked — simulate that exit here, then flush the remaining
+      // microtask/macrotask hops through stopAll() -> installUpdateAndRestart()
+      // -> performUpdate().
+      fakeChild2.emit('exit', 0, 'SIGTERM')
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
+
       // And npm install should have been triggered
       expect(mockPerformUpdate).toHaveBeenCalledWith('1.0.1', 'global')
     })
@@ -2053,8 +2065,15 @@ describe('docker-runner', () => {
       // Both containers exit with 42
       fakeChild1.emit('close', 42)
       fakeChild2.emit('close', 42)
+      // stopAll() (triggered by PROJ_A's close, which still sees PROJ_B in
+      // its handles at that point) genuinely waits for PROJ_B's container to
+      // actually exit (Finding 7 fix) before installUpdateAndRestart() is
+      // invoked — simulate that exit here.
+      fakeChild2.emit('exit', 0, 'SIGTERM')
       await Promise.resolve()
       await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((r) => setImmediate(r))
 
       // performUpdate should only have been called once (not twice)
       // due to the `this.updating` guard

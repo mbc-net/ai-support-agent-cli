@@ -435,11 +435,35 @@ export class DockerSupervisor {
       if (code === DOCKER_UPDATE_EXIT_CODE && !this.updating) {
         this.updating = true
         logger.info(`[docker] Container ${key} exited for update. Stopping all containers and rebuilding...`)
-        void this.stopAll()
-        void installUpdateAndRestart(projectConfigHostDir).catch((err) => {
-          logger.error(`[docker] Update failed: ${getErrorMessage(err)}`)
-          process.exit(1)
-        })
+        // Await stopAll() before restarting the host process. stopAll() now
+        // genuinely waits for every sibling container to actually exit (up
+        // to SHUTDOWN_GRACE_PERIOD_SECONDS via `docker stop --time`), not
+        // merely for the stop commands to be issued. installUpdateAndRestart()
+        // re-execs this host process and re-spawns `docker run` for every
+        // registered project — including any sibling whose old container
+        // might still be mid-drain of a long-running command. Firing it
+        // without awaiting stopAll() risks a container-name conflict or two
+        // live containers for the same project executing commands
+        // simultaneously — exactly the double-execution failure class this
+        // whole feature exists to prevent. `void` + an async IIFE (rather
+        // than making this event-handler callback itself `async`) keeps the
+        // error handling explicit and identical to the previous behavior.
+        void (async (): Promise<void> => {
+          try {
+            await this.stopAll()
+          } catch (err) {
+            // Errors here are logged, not fatal — proceed to
+            // installUpdateAndRestart() regardless, same as before this
+            // fix, when stopAll() failures were silently unobserved.
+            logger.warn(`[docker] stopAll() before update restart failed: ${getErrorMessage(err)}`)
+          }
+          try {
+            await installUpdateAndRestart(projectConfigHostDir)
+          } catch (err) {
+            logger.error(`[docker] Update failed: ${getErrorMessage(err)}`)
+            process.exit(1)
+          }
+        })()
         return
       }
 
@@ -513,7 +537,23 @@ export class DockerSupervisor {
           // Ignore errors — fall through to child.kill
         }
         if (!stopped) {
-          handle.child.kill('SIGTERM')
+          // Fallback path: the cidfile doesn't exist yet or couldn't be read,
+          // so there is no container id to `docker stop`. Send SIGTERM
+          // directly to the `docker run` child instead — but this path's
+          // completion must be tracked the same way the normal `docker stop`
+          // path above is, by waiting for the child process's own 'exit'
+          // event, and pushed onto the same stopPromises collection.
+          // Without this, stopAll()'s returned promise could resolve while a
+          // container stopped via this fallback is still shutting down,
+          // reintroducing the exact "resolved before the container actually
+          // exited" bug this method was rewritten to fix.
+          stopPromises.push(
+            new Promise<void>((resolve) => {
+              handle.child.once('exit', () => resolve())
+              handle.child.once('error', () => resolve())
+              handle.child.kill('SIGTERM')
+            }),
+          )
         }
       }
     }

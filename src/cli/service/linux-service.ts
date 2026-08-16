@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS } from '../../constants'
+import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
 import { readAgentCredentialEnv } from './agent-credential-env'
 import { loadConfig, getProjectList } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
@@ -274,6 +274,13 @@ Type=simple
 ExecStart=${execArgs.map(arg => (arg.includes(' ') ? `"${arg}"` : arg)).join(' ')}
 Restart=always
 RestartSec=10
+# Without TimeoutStopSec, systemd's default (commonly 90s) applies — far
+# shorter than the up-to-SHUTDOWN_DRAIN_TIMEOUT_MS (5 minute) graceful drain
+# ProjectAgent.shutdown() can now legitimately take. 'systemctl stop' /
+# system shutdown would otherwise SIGKILL the agent mid-drain. Derived from
+# the same SHUTDOWN_GRACE_PERIOD_SECONDS budget used for Kubernetes'
+# terminationGracePeriodSeconds and Docker's 'docker stop --time'.
+TimeoutStopSec=${SHUTDOWN_GRACE_PERIOD_SECONDS}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=HOME=${os.homedir()}
 StandardOutput=append:${getAgentOutLog(logDir)}
@@ -318,6 +325,14 @@ Type=simple
 ExecStart=/bin/bash ${escapedWrapper}
 Restart=always
 RestartSec=10
+# Without TimeoutStopSec, systemd's default (commonly 90s) applies — far
+# shorter than the up-to-SHUTDOWN_DRAIN_TIMEOUT_MS (5 minute) graceful drain
+# the in-container agent's ProjectAgent.shutdown() can now legitimately
+# take. 'systemctl stop' / system shutdown would otherwise SIGKILL the
+# wrapper (and its 'docker run' child) mid-drain. Derived from the same
+# SHUTDOWN_GRACE_PERIOD_SECONDS budget used for Kubernetes'
+# terminationGracePeriodSeconds and Docker's 'docker stop --time'.
+TimeoutStopSec=${SHUTDOWN_GRACE_PERIOD_SECONDS}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=HOME=${escapedHome}
 StandardOutput=append:${escapedOutLog}

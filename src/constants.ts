@@ -514,17 +514,31 @@ export const CHILD_PROCESS_RESTART_DELAY_MS = 5000
  * chain (see `handleGracefulExit` in project-worker.ts): drain
  * (FORK_SHUTDOWN_DRAIN_TIMEOUT_MS) + releaseSelf() HTTP call
  * (AGENT_RELEASE_REQUEST_TIMEOUT_MS) + Sentry flush (SENTRY_FLUSH_TIMEOUT_MS).
- * Derived from SHUTDOWN_GRACE_PERIOD_SECONDS (see above) — the same "drain
- * timeout + margin" grace period already used for Kubernetes'
- * `terminationGracePeriodSeconds` and Docker's `docker stop --time` — so this
- * timeout cannot silently drift out of sync with those or with
- * FORK_SHUTDOWN_DRAIN_TIMEOUT_MS. See the "constant invariants" describe
- * block in __tests__/child-process-manager.spec.ts, which asserts the
+ * See the "constant invariants" describe block in
+ * __tests__/child-process-manager.spec.ts, which asserts the
  * FORK_SHUTDOWN_DRAIN_TIMEOUT_MS + AGENT_RELEASE_REQUEST_TIMEOUT_MS +
  * SENTRY_FLUSH_TIMEOUT_MS < CHILD_PROCESS_STOP_TIMEOUT_MS relationship so it
  * cannot silently drift out of sync again.
+ *
+ * IMPORTANT — direction of the margin vs. SHUTDOWN_GRACE_PERIOD_SECONDS:
+ * this parent process (ChildProcessManager runs in the host/CLI process, not
+ * inside a forked child) is itself the thing an outer orchestrator sends
+ * SIGTERM to — e.g. Kubernetes sends SIGTERM to this very process and, after
+ * `terminationGracePeriodSeconds` (derived from SHUTDOWN_GRACE_PERIOD_SECONDS,
+ * see manifest-generator.ts), SIGKILLs it. If CHILD_PROCESS_STOP_TIMEOUT_MS
+ * (the point at which THIS process gives up waiting on a wedged forked
+ * worker and SIGKILLs it) were set equal to or greater than that same
+ * outer deadline, the outer SIGKILL could land while this process is still
+ * inside stopAll()/stopProject() (or its own post-loop cleanup) — abandoning
+ * that cleanup instead of letting it finish. So, unlike Docker's
+ * `docker stop --time` timer in docker-supervisor.ts (which bounds a
+ * SEPARATE, ancestor-level process's own wait and legitimately adds margin
+ * on TOP of SHUTDOWN_GRACE_PERIOD_SECONDS to outlast it), this constant must
+ * leave margin BELOW SHUTDOWN_GRACE_PERIOD_SECONDS instead: it fires 10s
+ * before the outer orchestrator's own SIGKILL deadline, so this process has
+ * a window to finish giving up on the child and exit cleanly first.
  */
-export const CHILD_PROCESS_STOP_TIMEOUT_MS = SHUTDOWN_GRACE_PERIOD_SECONDS * 1000
+export const CHILD_PROCESS_STOP_TIMEOUT_MS = SHUTDOWN_GRACE_PERIOD_SECONDS * 1000 - 10_000
 
 // Token watcher
 export const TOKEN_WATCH_INTERVAL_MS = 5000

@@ -85,7 +85,7 @@
   "stop.notRunning": "実行中のエージェントが見つかりません（pidファイルが存在しません: {{path}}）",
   "stop.staleProcess": "エージェントプロセス (PID: {{pid}}) はすでに終了しています。古いpidファイルを削除しました。",
   "stop.signalFailed": "PID {{pid}} への停止シグナル送信に失敗しました: {{message}}",
-  "stop.timeout": "タイムアウト: エージェントが停止しませんでした (PID: {{pid}})。プロセスがまだ実行中の可能性があります。",
+  "stop.timeout": "エージェント (PID: {{pid}}) は {{timeoutSeconds}} 秒経ってもまだ終了していません。これは必ずしも問題を示すものではありません: 実行中のコマンドがある場合、停止前にそれを正常に完了させるため最大で約5分ほどかかることがあり、完了すれば自動的に終了します。しばらく待ってから \"ai-support-agent status\" または \"ai-support-agent stop\" を再度実行して確認してください。",
 
   "runner.starting": "エージェントを起動中...",
   "runner.startedSingle": "エージェント起動完了 (poll: {{pollInterval}}ms, heartbeat: {{heartbeatInterval}}ms)",

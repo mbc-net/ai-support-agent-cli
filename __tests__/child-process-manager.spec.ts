@@ -1,5 +1,5 @@
 import { ChildProcessManager } from '../src/child-process-manager'
-import { AGENT_RELEASE_REQUEST_TIMEOUT_MS, CHILD_PROCESS_MAX_RESTARTS, CHILD_PROCESS_STOP_TIMEOUT_MS, FORK_SHUTDOWN_DRAIN_TIMEOUT_MS, SENTRY_FLUSH_TIMEOUT_MS } from '../src/constants'
+import { AGENT_RELEASE_REQUEST_TIMEOUT_MS, CHILD_PROCESS_MAX_RESTARTS, CHILD_PROCESS_STOP_TIMEOUT_MS, FORK_SHUTDOWN_DRAIN_TIMEOUT_MS, SENTRY_FLUSH_TIMEOUT_MS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../src/constants'
 
 jest.mock('child_process', () => ({
   fork: jest.fn().mockImplementation(() => {
@@ -667,7 +667,21 @@ describe('constant invariants', () => {
     // Guards against the constant silently regressing back toward the old
     // 14000ms value, which would no longer leave any margin over the raised
     // FORK_SHUTDOWN_DRAIN_TIMEOUT_MS.
-    expect(CHILD_PROCESS_STOP_TIMEOUT_MS).toBe(320_000)
+    expect(CHILD_PROCESS_STOP_TIMEOUT_MS).toBe(310_000)
+  })
+
+  it('CHILD_PROCESS_STOP_TIMEOUT_MS must stay strictly under the K8s/outer-orchestrator grace period', () => {
+    // ChildProcessManager runs in the host/CLI process itself — the same
+    // process an outer orchestrator (e.g. Kubernetes) sends SIGTERM to and,
+    // after SHUTDOWN_GRACE_PERIOD_SECONDS, SIGKILLs. If this constant ever
+    // equaled or exceeded that outer deadline again, the outer SIGKILL could
+    // land while this process is still inside stopAll()/stopProject() (or
+    // its own post-loop cleanup) — abandoning that cleanup instead of
+    // letting it finish. Unlike docker-supervisor.ts's analogous timer
+    // (which bounds a separate ancestor process and deliberately adds
+    // margin ON TOP of the outer deadline), this one must leave margin
+    // BELOW it.
+    expect(CHILD_PROCESS_STOP_TIMEOUT_MS).toBeLessThan(SHUTDOWN_GRACE_PERIOD_SECONDS * 1000)
   })
 
   it('FORK_SHUTDOWN_DRAIN_TIMEOUT_MS must stay under CHILD_PROCESS_STOP_TIMEOUT_MS', () => {
