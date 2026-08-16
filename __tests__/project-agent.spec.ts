@@ -1,5 +1,6 @@
 import { ApiClient } from '../src/api-client'
 import { AppSyncSubscriber } from '../src/appsync-subscriber'
+import { SHUTDOWN_DRAIN_POLL_INTERVAL_MS, SHUTDOWN_DRAIN_TIMEOUT_MS } from '../src/constants'
 import { writeAwsConfig } from '../src/aws-profile'
 import { executeCommand } from '../src/commands'
 import { logger } from '../src/logger'
@@ -98,6 +99,7 @@ describe('ProjectAgent', () => {
     setProjectCode: jest.Mock
     getInstanceId: jest.Mock
     getReplicaLimit: jest.Mock
+    releaseSelf: jest.Mock
   }
 
   let mockSubscriber: {
@@ -131,6 +133,7 @@ describe('ProjectAgent', () => {
       setProjectCode: jest.fn(),
       getInstanceId: jest.fn().mockReturnValue('pod-a'),
       getReplicaLimit: jest.fn().mockResolvedValue({ maxReplicas: null }),
+      releaseSelf: jest.fn().mockResolvedValue({ released: true }),
     }
     MockApiClient.mockImplementation(() => mockClient as unknown as ApiClient)
 
@@ -2286,6 +2289,222 @@ describe('ProjectAgent', () => {
     it('should return false when not processing a command', () => {
       const agent = new ProjectAgent(project, 'agent-1', options)
       expect(agent.isBusy()).toBe(false)
+    })
+  })
+
+  describe('graceful shutdown (drain)', () => {
+    function triggerCommand(commandId: string): void {
+      const onMessage = mockSubscriber.subscribe.mock.calls[0][1] as (notification: Record<string, unknown>) => void
+      onMessage({
+        id: `notif-${commandId}`,
+        table: 'commands',
+        pk: `CMD#${commandId}`,
+        sk: `CMD#${commandId}`,
+        tenantCode: 'test-tenant',
+        action: 'agent-command',
+        content: { commandId, type: 'execute_command', tenantCode: 'test-tenant', projectCode: 'test-proj' },
+      })
+    }
+
+    /** Starts a command whose executeCommand call never resolves on its own; returns the resolver. */
+    function startStuckCommand(commandId: string): (result: { success: boolean; data: string }) => void {
+      mockClient.getCommand.mockResolvedValue({ commandId, type: 'execute_command', payload: {} })
+      let resolveExec: (result: { success: boolean; data: string }) => void = () => undefined
+      mockedExecuteCommand.mockImplementation(
+        () => new Promise((resolve) => { resolveExec = resolve }),
+      )
+      triggerCommand(commandId)
+      return (result) => resolveExec(result)
+    }
+
+    it('waits for an in-flight command to finish before disconnecting the transport', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const resolveExec = startStuckCommand('cmd-inflight')
+      await jest.advanceTimersByTimeAsync(100)
+
+      const shutdownPromise = agent.shutdown()
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+
+      // Still draining: the command has not finished, so the transport must
+      // stay connected (both for heartbeats and in case the command depends
+      // on it).
+      expect(mockSubscriber.disconnect).not.toHaveBeenCalled()
+
+      resolveExec({ success: true, data: 'ok' })
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+      await shutdownPromise
+
+      expect(mockSubscriber.disconnect).toHaveBeenCalled()
+      expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+    })
+
+    it('declines new commands once shutdown has started', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      // draining is set synchronously before shutdown()'s first await, so a
+      // notification delivered right after calling shutdown() (without
+      // awaiting it yet) is guaranteed to see draining=true.
+      const shutdownPromise = agent.shutdown()
+      triggerCommand('cmd-declined')
+
+      await jest.advanceTimersByTimeAsync(100)
+      await shutdownPromise
+
+      expect(mockClient.getCommand).not.toHaveBeenCalledWith('cmd-declined', expect.anything())
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('runner.commandDeclinedDraining'))
+    })
+
+    it('resolves immediately when no command is in flight', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const shutdownPromise = agent.shutdown()
+      await jest.advanceTimersByTimeAsync(0)
+      await shutdownPromise
+
+      expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+      expect(mockSubscriber.disconnect).toHaveBeenCalled()
+    })
+
+    it('gives up after SHUTDOWN_DRAIN_TIMEOUT_MS and logs the remaining command id(s)', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      startStuckCommand('cmd-stuck')
+      await jest.advanceTimersByTimeAsync(100)
+
+      const shutdownPromise = agent.shutdown()
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_TIMEOUT_MS)
+      await shutdownPromise
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('runner.drainTimedOut'))
+      expect(mockClient.releaseSelf).not.toHaveBeenCalled()
+      // The transport still stops even though the drain timed out — the
+      // process is exiting either way.
+      expect(mockSubscriber.disconnect).toHaveBeenCalled()
+    })
+
+    it('calls releaseSelf() exactly once, after the drain resolves (ordering)', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const resolveExec = startStuckCommand('cmd-order')
+      await jest.advanceTimersByTimeAsync(100)
+
+      const shutdownPromise = agent.shutdown()
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+      expect(mockClient.releaseSelf).not.toHaveBeenCalled()
+
+      resolveExec({ success: true, data: 'ok' })
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+      await shutdownPromise
+
+      expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+      expect(mockClient.submitResult.mock.invocationCallOrder[0]).toBeLessThan(
+        mockClient.releaseSelf.mock.invocationCallOrder[0],
+      )
+    })
+
+    it('does not double-drain or double-release when shutdown() is invoked twice (SIGTERM+SIGINT)', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const p1 = agent.shutdown()
+      const p2 = agent.shutdown()
+      await jest.advanceTimersByTimeAsync(0)
+      await Promise.all([p1, p2])
+
+      expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+    })
+
+    it('logs a warning with the reason when releaseSelf() resolves but the slot was not released', async () => {
+      mockClient.releaseSelf.mockResolvedValue({ released: false, reason: 'nonce_mismatch' })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      await agent.shutdown()
+
+      expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('runner.slotReleaseFailed'))
+    })
+
+    it('does not call releaseSelf() when the replica never held a slot (admission rejected/standby)', async () => {
+      mockClient.register.mockResolvedValue({
+        agentId: 'test-id',
+        tenantCode: 'test-tenant',
+        appsyncUrl: 'https://example.appsync-api.ap-northeast-1.amazonaws.com/graphql',
+        appsyncApiKey: 'da2-testkey123',
+        transportMode: 'realtime',
+        admission: { accepted: false, instanceId: 'pod-b', maxReplicas: 1, liveReplicas: 1, reason: 'limit_reached' },
+      })
+
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      await agent.shutdown()
+
+      expect(mockClient.releaseSelf).not.toHaveBeenCalled()
+    })
+
+    it('keeps sending heartbeats while draining', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const resolveExec = startStuckCommand('cmd-heartbeat')
+      await jest.advanceTimersByTimeAsync(100)
+
+      mockClient.heartbeat.mockClear()
+      const shutdownPromise = agent.shutdown()
+      await jest.advanceTimersByTimeAsync(options.heartbeatInterval)
+
+      expect(mockClient.heartbeat).toHaveBeenCalled()
+      // Still draining at this point — the slot must not have been released yet.
+      expect(mockClient.releaseSelf).not.toHaveBeenCalled()
+
+      resolveExec({ success: true, data: 'ok' })
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+      await shutdownPromise
+    })
+
+    it('ignores an evicted heartbeat response while shuttingDown is true (does not re-enter standby)', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const resolveExec = startStuckCommand('cmd-evict')
+      await jest.advanceTimersByTimeAsync(100)
+
+      // Every heartbeat from here on reports eviction.
+      mockClient.heartbeat.mockResolvedValue({ success: true, evicted: true })
+      mockClient.register.mockClear()
+
+      const shutdownPromise = agent.shutdown()
+      await jest.advanceTimersByTimeAsync(options.heartbeatInterval)
+
+      // A normal (non-shutting-down) eviction reaction would call stop() and
+      // schedule a standby re-registration; neither must happen mid-shutdown.
+      expect(mockClient.register).not.toHaveBeenCalled()
+
+      resolveExec({ success: true, data: 'ok' })
+      await jest.advanceTimersByTimeAsync(SHUTDOWN_DRAIN_POLL_INTERVAL_MS)
+      await shutdownPromise
+
+      // slotHeld must still be true (handleEviction's early return did not
+      // flip it to false), so shutdown() released the slot normally.
+      expect(mockClient.releaseSelf).toHaveBeenCalled()
     })
   })
 

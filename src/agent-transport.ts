@@ -45,6 +45,14 @@ export interface TransportState {
    * duplicating its side effects (SSH/Ansible runs, ECS task launches).
    */
   inFlightCommands: Set<string>
+  /**
+   * Set by `ProjectAgent.shutdown()` once graceful shutdown has begun. New
+   * commands are declined (without being fetched/acknowledged) while this is
+   * true — see `processCommand` / `checkPendingCommands` — so the process only
+   * has to wait for commands already in flight before releasing its slot.
+   * Defaults to false.
+   */
+  draining: boolean
 }
 
 export interface TransportDeps {
@@ -394,6 +402,11 @@ export async function checkPendingCommands(
   deps: TransportDeps,
   ctx: CommandContext,
 ): Promise<void> {
+  // Same drain guard as processCommand: skip the fetch entirely once draining,
+  // rather than fetching pending commands and immediately declining each one.
+  if (ctx.transportState.draining) {
+    return
+  }
   try {
     const pending = await deps.client.getPendingCommands(deps.agentId)
     for (const cmd of pending) {
@@ -428,6 +441,16 @@ async function processCommand(
   ctx: CommandContext,
   commandId: string,
 ): Promise<void> {
+  // Graceful shutdown drain: once draining has started, decline new commands
+  // instead of fetching/acknowledging them. Deliberately does NOT fetch the
+  // command or submit a failure result — an unacknowledged command is safe to
+  // silently decline (the server re-assigns it after its own ack-timeout with
+  // no side effects), whereas acknowledging it and then failing would
+  // terminally fail a command that could have succeeded on another replica.
+  if (ctx.transportState.draining) {
+    logger.info(t('runner.commandDeclinedDraining', { prefix: deps.prefix, commandId }))
+    return
+  }
   // Never run the same command twice in this process. Reached from three
   // places — the AppSync notification, the re-claim timer, and the periodic
   // pending sweep — and the last two can fire while the command is still

@@ -1,6 +1,6 @@
 import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios'
 
-import { AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL, ENV_VARS } from './constants'
+import { AGENT_RELEASE_REQUEST_TIMEOUT_MS, AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL, ENV_VARS } from './constants'
 import { logger } from './logger'
 import { resolveInstanceId, resolveInstanceNonce } from './replica-identity'
 import { RetryStrategy } from './retry-strategy'
@@ -26,6 +26,7 @@ import type {
   ProjectSharedFileListResponse,
   ReadSlackThreadResult,
   ReleaseChannel,
+  ReleaseSelfResult,
   RegisterRequest,
   RegisterResponse,
   RepoCredentials,
@@ -267,6 +268,43 @@ export class ApiClient {
     return this.get<{ maxReplicas: number | null }>(
       API_ENDPOINTS.REPLICA_LIMIT(this.tenantCode),
     )
+  }
+
+  /**
+   * Release this replica's slot as the last step of a graceful shutdown drain
+   * (see `ProjectAgent.shutdown`). Called only after all in-flight commands
+   * have finished, so the server can hand the slot to a standby replica
+   * immediately instead of waiting for the heartbeat-timeout reclaim.
+   *
+   * Deliberately bypasses `this.retry` (RetryStrategy retries 3x with backoff —
+   * worst case ~33s — which would blow the shutdown time budget) and never
+   * throws: any failure (network, timeout, non-2xx, malformed response) is
+   * reported as `{ released: false, reason: 'request_failed' }` so the caller
+   * can log it and move on to exiting the process regardless.
+   */
+  async releaseSelf(): Promise<ReleaseSelfResult> {
+    if (!this.sendsReplicaIdentity) {
+      return { released: false, reason: 'no_replica_identity' }
+    }
+    try {
+      const { data } = await this.client.post<unknown>(
+        API_ENDPOINTS.RELEASE_INSTANCE(this.tenantCode),
+        { instanceId: this.instanceId, instanceNonce: this.instanceNonce },
+        { timeout: AGENT_RELEASE_REQUEST_TIMEOUT_MS },
+      )
+      // Only trust the response when it carries a `released` boolean — the
+      // documented contract. A `released: false` response (e.g. reason:
+      // 'nonce_mismatch') is passed through verbatim so the caller can log the
+      // real reason; anything else (missing/malformed body) falls back to
+      // 'request_failed' rather than assuming a shape the server never promised.
+      if (data && typeof data === 'object' && typeof (data as { released?: unknown }).released === 'boolean') {
+        return data as ReleaseSelfResult
+      }
+      return { released: false, reason: 'request_failed' }
+    } catch (error) {
+      logger.debug(`Failed to release replica slot: ${toErrorMessage(error)}`)
+      return { released: false, reason: 'request_failed' }
+    }
   }
 
   async getVersionInfo(channel: ReleaseChannel = 'latest'): Promise<VersionInfo> {

@@ -43,6 +43,7 @@ spec:
       labels:
         app: ai-support-agent
     spec:
+      terminationGracePeriodSeconds: 320
       containers:
         - name: agent
           image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"
@@ -99,6 +100,7 @@ spec:
       labels:
         app: agent-mbc01
     spec:
+      terminationGracePeriodSeconds: 320
       containers:
         - name: agent
           image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"
@@ -148,6 +150,7 @@ spec:
       labels:
         app: agent-mbc02
     spec:
+      terminationGracePeriodSeconds: 320
       containers:
         - name: agent
           image: "ghcr.io/mbc-net/ai-support-agent-cli:latest"

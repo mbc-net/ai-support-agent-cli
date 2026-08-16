@@ -207,6 +207,7 @@ describe('agent-runner', () => {
       updateToken: jest.fn(),
       setTenantCode: jest.fn(),
       setProjectCode: jest.fn(),
+      releaseSelf: jest.fn().mockResolvedValue({ released: true }),
     }
     MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
 

@@ -99,6 +99,17 @@ describe('generateK8sManifest', () => {
     expect(manifest).not.toContain(BASE.token)
   })
 
+  it('sets terminationGracePeriodSeconds so SIGTERM has time to drain in-flight commands before releasing the slot', () => {
+    // 5-minute drain (SHUTDOWN_DRAIN_TIMEOUT_MS) + ~20s margin for the
+    // releaseSelf() call and process exit overhead. Without this, Kubernetes'
+    // 30s default would SIGKILL the Pod mid-drain.
+    const deployment = loadAll(generateK8sManifest(BASE)).find(
+      (doc): doc is Record<string, any> =>
+        (doc as Record<string, unknown>)?.kind === 'Deployment',
+    )
+    expect(deployment?.spec.template.spec.terminationGracePeriodSeconds).toBe(320)
+  })
+
   it('binds the instance id to the Pod name via the downward API', () => {
     const manifest = generateK8sManifest(BASE)
 

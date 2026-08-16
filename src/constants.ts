@@ -239,6 +239,9 @@ export const API_ENDPOINTS = {
   REGISTER: (tenantCode: string) => `/api/${tenantCode}/agent/register`,
   HEARTBEAT: (tenantCode: string) => `/api/${tenantCode}/agent/heartbeat`,
   REPLICA_LIMIT: (tenantCode: string) => `/api/${tenantCode}/agent/self/replica-limit`,
+  // Graceful shutdown drain (phase 3): release this replica's slot so the server
+  // can admit a standby immediately, instead of waiting for the heartbeat timeout.
+  RELEASE_INSTANCE: (tenantCode: string) => `/api/${tenantCode}/agent/instances/self/release`,
   COMMANDS_PENDING: (tenantCode: string) => `/api/${tenantCode}/agent/commands/pending`,
   COMMAND: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}`,
   COMMAND_RESULT: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}/result`,
@@ -540,6 +543,34 @@ export const UPDATE_BUSY_WAIT_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes max wait f
 export const UPDATE_BUSY_POLL_INTERVAL_MS = 3_000          // poll every 3 seconds
 export const UPDATE_FORCED_BUSY_WAIT_TIMEOUT_MS = 30_000   // 30 seconds for forced updates
 export const BUSY_QUERY_TIMEOUT_MS = 5_000                  // 5 seconds for IPC busy query
+
+// === Graceful shutdown drain (replica lifecycle, phase 3) ===
+// On SIGTERM/SIGINT the agent must finish any in-flight command before releasing
+// its replica slot (POST .../agent/instances/self/release) — releasing early would
+// let the server re-assign the still-running command to another replica and
+// execute it twice (duplicate SSH exec / Ansible run / etc).
+/**
+ * Max time to wait for in-flight commands to drain before giving up on a
+ * graceful release. Chosen to roughly cover CHAT_TIMEOUT (5 minutes) for
+ * in-flight chat commands. CHAT_TOOL_EXECUTION_TIMEOUT (30 minutes) can still
+ * exceed this — an accepted residual limit. Those long-running cases fall
+ * through to the existing 90-second server-side heartbeat-timeout reclaim
+ * instead of an explicit release.
+ */
+export const SHUTDOWN_DRAIN_TIMEOUT_MS = 300_000 // 5 minutes
+/** Poll interval while waiting for in-flight commands to finish draining. */
+export const SHUTDOWN_DRAIN_POLL_INTERVAL_MS = 250
+/**
+ * Drain budget for the forked multi-project-per-host path (ChildProcessManager /
+ * project-worker.ts), separate from and smaller than SHUTDOWN_DRAIN_TIMEOUT_MS.
+ * The parent process force-kills a child that has not exited within
+ * CHILD_PROCESS_STOP_TIMEOUT_MS (10s — see below), so the drain budget must
+ * stay comfortably under that, leaving margin for IPC round-trip, the
+ * releaseSelf() call, and process exit overhead.
+ */
+export const FORK_SHUTDOWN_DRAIN_TIMEOUT_MS = 6_000
+/** Timeout for the POST .../agent/instances/self/release call made at the end of a graceful shutdown. */
+export const AGENT_RELEASE_REQUEST_TIMEOUT_MS = 3_000
 
 // Delayed restart (reboot / update / docker rebuild)
 export const DELAYED_RESTART_MS = 1_000

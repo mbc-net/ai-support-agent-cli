@@ -119,6 +119,11 @@
   "runner.authError": "{{prefix}} Authentication failed. Token may be invalid or expired. Run \"ai-support-agent login\" to re-authenticate. Detail: {{detail}}",
   "runner.tokenUpdated": "{{prefix}} Token updated from config file. Re-authenticating...",
   "runner.unexpectedError": "Unexpected error in project agent: {{message}}",
+  "runner.commandDeclinedDraining": "{{prefix}} Declining command {{commandId}}: this replica is shutting down. The server will re-assign it after its own ack-timeout",
+  "runner.drainWaiting": "{{prefix}} Waiting for {{count}} in-flight command(s) to finish before releasing the replica slot...",
+  "runner.drainTimedOut": "{{prefix}} Timed out waiting for in-flight command(s) to drain: {{commandIds}}. The replica slot was NOT released; it falls through to the server's heartbeat-timeout reclaim instead",
+  "runner.slotReleased": "{{prefix}} Replica slot released",
+  "runner.slotReleaseFailed": "{{prefix}} Failed to release replica slot: {{reason}}. It falls through to the server's heartbeat-timeout reclaim instead",
 
   "status.noConfig": "No configuration found. Run \"ai-support-agent login --url <url>\" to set up.",
   "status.header": "Configuration:",

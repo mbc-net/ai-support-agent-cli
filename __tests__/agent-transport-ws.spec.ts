@@ -91,6 +91,7 @@ function createMockState(): TransportState {
     configSyncDebounceTimer: null,
     authRejectedTransports: new Set(),
     inFlightCommands: new Set(),
+    draining: false,
   }
 }
 
@@ -1896,6 +1897,91 @@ describe('checkPendingCommands', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('Failed to check pending commands')
     )
+  })
+})
+
+describe('graceful shutdown drain: draining=true short-circuits command intake', () => {
+  function makeCtx(state: TransportState): CommandContext {
+    return {
+      configSyncState: {
+        currentConfigHash: undefined,
+        projectConfig: undefined,
+        serverConfig: null,
+        availableChatModes: [],
+        activeChatMode: undefined,
+        mcpConfigPath: undefined,
+        dockerCustomizationHash: undefined,
+      },
+      configSyncDeps: {} as any,
+      transportState: state,
+      onSetup: jest.fn(),
+      onConfigSync: jest.fn(),
+      onReboot: jest.fn(),
+      onUpdate: jest.fn(),
+      onSyncRepository: jest.fn(),
+    }
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('processCommand (via a new command notification) does not fetch/acknowledge the command and does not add it to inFlightCommands', async () => {
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands: jest.fn().mockResolvedValue([]),
+        getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
+        submitResult: jest.fn().mockResolvedValue(undefined),
+        getAssignmentGeneration: jest.fn(),
+        clearAssignment: jest.fn(),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    state.draining = true
+    const ctx = makeCtx(state)
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n1', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
+      content: {
+        commandId: 'cmd-draining',
+        agentId: 'agent-1',
+        tenantCode: 'test',
+        projectCode: 'TEST_PROJ',
+        type: 'shell',
+      },
+    })
+
+    expect(deps.client.getCommand).not.toHaveBeenCalled()
+    expect(deps.client.submitResult).not.toHaveBeenCalled()
+    expect(state.inFlightCommands.has('cmd-draining')).toBe(false)
+
+    const { logger } = require('../src/logger')
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('runner.commandDeclinedDraining'))
+  })
+
+  it('checkPendingCommands short-circuits (does not even fetch pending commands) when draining', async () => {
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands: jest.fn().mockResolvedValue([
+          { commandId: 'pending-1', type: 'shell' },
+        ]),
+        getCommand: jest.fn(),
+        submitResult: jest.fn(),
+        getAssignmentGeneration: jest.fn(),
+        clearAssignment: jest.fn(),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    state.draining = true
+    const ctx = makeCtx(state)
+
+    await checkPendingCommands(deps, ctx)
+
+    expect(deps.client.getPendingCommands).not.toHaveBeenCalled()
+    expect(deps.client.getCommand).not.toHaveBeenCalled()
   })
 })
 

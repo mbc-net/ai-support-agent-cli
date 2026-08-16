@@ -7,6 +7,7 @@ import {
   CHILD_PROCESS_RESTART_DELAY_MS,
   CHILD_PROCESS_STOP_TIMEOUT_MS,
   BUSY_QUERY_TIMEOUT_MS,
+  FORK_SHUTDOWN_DRAIN_TIMEOUT_MS,
 } from './constants'
 import type { ChildToParentMessage, IpcStartMessage, IpcBusyResponseMessage } from './ipc-types'
 import { isChildToParentMessage } from './ipc-types'
@@ -157,7 +158,7 @@ export class ChildProcessManager {
     if (!managed) return
 
     if (managed.child.connected) {
-      managed.child.send({ type: 'shutdown' })
+      managed.child.send({ type: 'shutdown', drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
       logger.debug(`Sent shutdown to ${key}`)
     }
 
@@ -216,7 +217,7 @@ export class ChildProcessManager {
 
     for (const [key, managed] of this.processes) {
       if (managed.child.connected) {
-        managed.child.send({ type: 'shutdown' })
+        managed.child.send({ type: 'shutdown', drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
         logger.debug(`Sent shutdown to ${key}`)
       }
 

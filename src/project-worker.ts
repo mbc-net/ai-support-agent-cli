@@ -1,3 +1,4 @@
+import { FORK_SHUTDOWN_DRAIN_TIMEOUT_MS } from './constants'
 import type { ChildToParentMessage, IpcStartMessage } from './ipc-types'
 import { isParentToChildMessage } from './ipc-types'
 import { logger } from './logger'
@@ -45,10 +46,29 @@ async function handleStart(msg: IpcStartMessage): Promise<void> {
   logger.info(`Worker started for [${project.tenantCode}/${project.projectCode}] agentId=${agentId} (pid=${process.pid})`)
 }
 
-async function handleGracefulExit(tenantCode: string, projectCode: string, reason: 'shutdown' | 'update'): Promise<void> {
+/**
+ * Graceful exit requested by the parent process (a 'shutdown' or 'update' IPC
+ * message). Drains any in-flight command before exiting — see
+ * `ProjectAgent.shutdown` — so the parent's own force-kill timeout
+ * (`CHILD_PROCESS_STOP_TIMEOUT_MS`) is the only hard deadline, and a command
+ * that is still running is not abandoned mid-flight (which would let the
+ * server re-assign and re-execute it elsewhere).
+ *
+ * `drainTimeoutMs` comes from the parent's `IpcShutdownMessage` (sent as
+ * `FORK_SHUTDOWN_DRAIN_TIMEOUT_MS`, see `ChildProcessManager`); falls back to
+ * that same constant here so a directly-sent message without the field (older
+ * sender, or the `update` message which does not carry one) still uses a
+ * budget that fits under the parent's force-kill timeout.
+ */
+async function handleGracefulExit(
+  tenantCode: string,
+  projectCode: string,
+  reason: 'shutdown' | 'update',
+  drainTimeoutMs?: number,
+): Promise<void> {
   const action = reason === 'shutdown' ? 'shutting down' : 'stopping for update'
   logger.info(`Worker ${tenantCode}/${projectCode} ${action}`)
-  agent?.stop()
+  await agent?.shutdown({ drainTimeoutMs: drainTimeoutMs ?? FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
   sendToParent({ type: 'stopped', tenantCode, projectCode })
   await flushSentry()
   process.exit(0)
@@ -71,7 +91,7 @@ function setupMessageHandler(): void {
         })
         break
       case 'shutdown':
-        void handleGracefulExit(currentTenantCode, currentProjectCode, 'shutdown')
+        void handleGracefulExit(currentTenantCode, currentProjectCode, 'shutdown', msg.drainTimeoutMs)
         break
       case 'update':
         void handleGracefulExit(currentTenantCode, currentProjectCode, 'update')
@@ -97,6 +117,12 @@ function setupMessageHandler(): void {
 
 function setupDisconnectHandler(): void {
   process.on('disconnect', () => {
+    // Deliberately NOT drained (unlike handleGracefulExit's shutdown/update
+    // path): the parent is gone, so there is no one left to report a drained
+    // result to, and no parent process to receive a release confirmation from.
+    // Draining here would only stall this worker's own exit for no benefit —
+    // stop synchronously and exit immediately. Do not "fix" this into
+    // consistency with the graceful path.
     logger.warn(`Parent disconnected, worker ${currentProjectCode} exiting`)
     agent?.stop()
     process.exit(1)

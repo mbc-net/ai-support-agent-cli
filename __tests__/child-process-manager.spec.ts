@@ -1,5 +1,5 @@
 import { ChildProcessManager } from '../src/child-process-manager'
-import { CHILD_PROCESS_MAX_RESTARTS } from '../src/constants'
+import { CHILD_PROCESS_MAX_RESTARTS, CHILD_PROCESS_STOP_TIMEOUT_MS, FORK_SHUTDOWN_DRAIN_TIMEOUT_MS } from '../src/constants'
 
 jest.mock('child_process', () => ({
   fork: jest.fn().mockImplementation(() => {
@@ -95,7 +95,7 @@ describe('ChildProcessManager', () => {
 
       const stopPromise = manager.stopProject(project)
 
-      expect(child.send).toHaveBeenCalledWith({ type: 'shutdown' })
+      expect(child.send).toHaveBeenCalledWith({ type: 'shutdown', drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
 
       // Simulate child exit
       child._emit('exit', 0, null)
@@ -374,7 +374,7 @@ describe('ChildProcessManager', () => {
       await stopPromise
 
       // child.send should not have been called with shutdown (was connected=false)
-      expect(child.send).not.toHaveBeenCalledWith({ type: 'shutdown' })
+      expect(child.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'shutdown' }))
       expect(manager.getRunningCount()).toBe(0)
       jest.useRealTimers()
     })
@@ -557,5 +557,17 @@ describe('ChildProcessManager', () => {
 
       jest.useRealTimers()
     })
+  })
+})
+
+describe('constant invariants', () => {
+  it('FORK_SHUTDOWN_DRAIN_TIMEOUT_MS must stay under CHILD_PROCESS_STOP_TIMEOUT_MS', () => {
+    // The parent force-kills a child that has not exited within
+    // CHILD_PROCESS_STOP_TIMEOUT_MS, so the drain budget sent to a forked
+    // worker (FORK_SHUTDOWN_DRAIN_TIMEOUT_MS) must leave margin under it for
+    // the IPC round-trip, the releaseSelf() call, and process exit overhead.
+    // If these ever drift apart, the worker's own drain wait would still be
+    // running when the parent SIGKILLs it — abandoning the drain entirely.
+    expect(FORK_SHUTDOWN_DRAIN_TIMEOUT_MS).toBeLessThan(CHILD_PROCESS_STOP_TIMEOUT_MS)
   })
 })

@@ -346,6 +346,13 @@ spec:
       labels:
         app: ${name}
     spec:
+      # 5-minute in-flight-command drain (SHUTDOWN_DRAIN_TIMEOUT_MS) plus ~20s
+      # margin for the releaseSelf() call and process exit overhead. Without
+      # this, Kubernetes' 30s default would SIGKILL the Pod mid-drain, which
+      # would abandon a still-running command and let the server re-assign
+      # (and re-execute) it on another replica before this one's slot is
+      # actually released.
+      terminationGracePeriodSeconds: 320
       containers:
         - name: agent
           image: ${yamlScalar(image)}

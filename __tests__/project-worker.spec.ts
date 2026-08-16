@@ -11,6 +11,7 @@ jest.mock('../src/sentry', () => ({
 // Mock ProjectAgent
 const mockStart = jest.fn()
 const mockStop = jest.fn()
+const mockShutdown = jest.fn().mockResolvedValue(undefined)
 const mockGetClient = jest.fn()
 const mockUpdateToken = jest.fn()
 const mockIsBusy = jest.fn().mockReturnValue(false)
@@ -18,6 +19,7 @@ jest.mock('../src/project-agent', () => ({
   ProjectAgent: jest.fn().mockImplementation(() => ({
     start: mockStart,
     stop: mockStop,
+    shutdown: mockShutdown,
     getClient: mockGetClient,
     updateToken: mockUpdateToken,
     isBusy: mockIsBusy,
@@ -184,7 +186,7 @@ describe('project-worker', () => {
       expect((logger.setVerbose as jest.Mock)).toHaveBeenCalledWith(true)
     })
 
-    it('should handle shutdown message', async () => {
+    it('should handle shutdown message by awaiting the graceful drain (agent.shutdown), not the synchronous stop', async () => {
       const worker = loadWorker()
       worker.startWorker()
 
@@ -192,11 +194,12 @@ describe('project-worker', () => {
       emitProcessEvent('message', startMessage)
       await flushAsync()
 
-      // Then shutdown
-      emitProcessEvent('message', { type: 'shutdown' })
+      // Then shutdown, with an explicit drain budget from the parent
+      emitProcessEvent('message', { type: 'shutdown', drainTimeoutMs: 6000 })
       await flushAsync()
 
-      expect(mockStop).toHaveBeenCalled()
+      expect(mockShutdown).toHaveBeenCalledWith({ drainTimeoutMs: 6000 })
+      expect(mockStop).not.toHaveBeenCalled()
       expect(processSendSpy).toHaveBeenCalledWith({
         type: 'stopped',
         tenantCode: 'mbc',
@@ -205,7 +208,21 @@ describe('project-worker', () => {
       expect(exitSpy).toHaveBeenCalledWith(0)
     })
 
-    it('should handle update message', async () => {
+    it('falls back to FORK_SHUTDOWN_DRAIN_TIMEOUT_MS when the shutdown message carries no drainTimeoutMs', async () => {
+      const { FORK_SHUTDOWN_DRAIN_TIMEOUT_MS } = require('../src/constants')
+      const worker = loadWorker()
+      worker.startWorker()
+
+      emitProcessEvent('message', startMessage)
+      await flushAsync()
+
+      emitProcessEvent('message', { type: 'shutdown' })
+      await flushAsync()
+
+      expect(mockShutdown).toHaveBeenCalledWith({ drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
+    })
+
+    it('should handle update message by awaiting the graceful drain (agent.shutdown)', async () => {
       const worker = loadWorker()
       worker.startWorker()
 
@@ -217,7 +234,8 @@ describe('project-worker', () => {
       emitProcessEvent('message', { type: 'update' })
       await flushAsync()
 
-      expect(mockStop).toHaveBeenCalled()
+      expect(mockShutdown).toHaveBeenCalled()
+      expect(mockStop).not.toHaveBeenCalled()
       expect(exitSpy).toHaveBeenCalledWith(0)
     })
 
