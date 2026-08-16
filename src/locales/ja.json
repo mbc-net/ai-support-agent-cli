@@ -85,7 +85,7 @@
   "stop.notRunning": "実行中のエージェントが見つかりません（pidファイルが存在しません: {{path}}）",
   "stop.staleProcess": "エージェントプロセス (PID: {{pid}}) はすでに終了しています。古いpidファイルを削除しました。",
   "stop.signalFailed": "PID {{pid}} への停止シグナル送信に失敗しました: {{message}}",
-  "stop.timeout": "タイムアウト: エージェントが停止しませんでした (PID: {{pid}})。プロセスがまだ実行中の可能性があります。",
+  "stop.timeout": "エージェント (PID: {{pid}}) は {{timeoutSeconds}} 秒経ってもまだ終了していません。これは必ずしも問題を示すものではありません: 実行中のコマンドがある場合、停止前にそれを正常に完了させるため最大で約5分ほどかかることがあり、完了すれば自動的に終了します。しばらく待ってから \"ai-support-agent status\" または \"ai-support-agent stop\" を再度実行して確認してください。",
 
   "runner.starting": "エージェントを起動中...",
   "runner.startedSingle": "エージェント起動完了 (poll: {{pollInterval}}ms, heartbeat: {{heartbeatInterval}}ms)",
@@ -103,6 +103,7 @@
   "runner.registerWorkingAgain": "{{prefix}} 登録が復旧しました ({{attempts}} 回の試行後)",
   "runner.replicaStandby": "契約プランの同時稼働レプリカ数の上限に達しているため待機します (instanceId={{instanceId}}, 稼働中 {{live}}/{{max}})。他のレプリカが停止すると自動的に稼働を開始します",
   "runner.replicaAdmitted": "レプリカの稼働枠を取得しました (instanceId={{instanceId}})",
+  "runner.instanceIdConflict": "同一の AI_SUPPORT_AGENT_INSTANCE_ID ({{instanceId}}) を持つ別プロセスが既に稼働中の可能性があります。同一トークンを複数の Kubernetes クラスタで StatefulSet としてデプロイした場合によく発生します（Pod 名はクラスタ内でのみ一意なため）。AI_SUPPORT_AGENT_INSTANCE_ID にクラスタ名を含む一意な値を明示的に設定することを検討してください。",
   "runner.replicaEvicted": "新しいレプリカに稼働枠を譲り、待機状態に戻ります (instanceId={{instanceId}})",
   "runner.commandReceived": "{{prefix}} コマンド受信: {{type}} ({{commandId}})",
   "runner.commandDone": "{{prefix}} コマンド完了: {{commandId}} ({{result}})",
@@ -118,6 +119,11 @@
   "runner.authError": "{{prefix}} 認証に失敗しました。トークンが無効または期限切れの可能性があります。\"ai-support-agent login\" で再認証してください。詳細: {{detail}}",
   "runner.tokenUpdated": "{{prefix}} 設定ファイルからトークンを更新しました。再認証中...",
   "runner.unexpectedError": "プロジェクトエージェントで予期しないエラー: {{message}}",
+  "runner.commandDeclinedDraining": "{{prefix}} コマンド {{commandId}} を拒否しました: このレプリカはシャットダウン中です。サーバーは自身の ack タイムアウト後に再割り当てします",
+  "runner.drainWaiting": "{{prefix}} 稼働枠を解放する前に、実行中のコマンド {{count}} 件の完了を待機しています...",
+  "runner.drainTimedOut": "{{prefix}} 実行中のコマンドのドレインがタイムアウトしました: {{commandIds}}。稼働枠は解放されませんでした。サーバー側のハートビートタイムアウトによる回収に委ねます",
+  "runner.slotReleased": "{{prefix}} レプリカの稼働枠を解放しました",
+  "runner.slotReleaseFailed": "{{prefix}} レプリカの稼働枠の解放に失敗しました: {{reason}}。サーバー側のハートビートタイムアウトによる回収に委ねます",
 
   "status.noConfig": "設定が見つかりません。\"ai-support-agent login --url <url>\" で設定してください。",
   "status.header": "設定情報:",

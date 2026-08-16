@@ -12,6 +12,7 @@ import { AppSyncSubscriber } from '../src/appsync-subscriber'
 import { AGENT_VERSION, ENV_VARS } from '../src/constants'
 import { getSystemInfo, getLocalIpAddress } from '../src/system-info'
 import { ApiClient } from '../src/api-client'
+import { ProjectAgent } from '../src/project-agent'
 import { executeCommand } from '../src/commands'
 import { loadConfig, getProjectList, saveConfig } from '../src/config-manager'
 import { logger } from '../src/logger'
@@ -89,6 +90,13 @@ jest.mock('../src/pending-result-store', () => ({
   savePendingResult: jest.fn(),
   removePendingResult: jest.fn(),
   submitPendingResults: jest.fn().mockResolvedValue(undefined),
+  // Returns a timer handle that ProjectAgent.stopWork() passes to clearInterval.
+  // A plain object is fine — clearInterval ignores non-Timeout values.
+  startPendingResultFlush: jest.fn(() => ({ unref: jest.fn() })),
+  // Re-export the real constant: project-agent imports it from this module, and a
+  // mock that omits it silently disables the double-submit guard (minAgeMs -> undefined).
+  PENDING_RESULT_MIN_RETRY_AGE_MS: jest.requireActual('../src/pending-result-store')
+    .PENDING_RESULT_MIN_RETRY_AGE_MS,
 }))
 
 const mockConfigWatcherStop = jest.fn()
@@ -207,6 +215,7 @@ describe('agent-runner', () => {
       updateToken: jest.fn(),
       setTenantCode: jest.fn(),
       setProjectCode: jest.fn(),
+      releaseSelf: jest.fn().mockResolvedValue({ released: true }),
     }
     MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
 
@@ -582,13 +591,25 @@ describe('agent-runner', () => {
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       setTenantCode: jest.fn(),
       setProjectCode: jest.fn(),
+      releaseSelf: jest.fn().mockResolvedValue({ released: true }),
     }
     MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
 
+    // The auto-update restart path must use the graceful, draining
+    // shutdown() (which — once the slot is held — calls releaseSelf()) rather
+    // than the old synchronous stop(), which never releases the slot and
+    // falls back to the slower heartbeat-timeout-based reclaim. Spy on the
+    // real shutdown() (mocked to resolve immediately) rather than asserting
+    // on releaseSelf() directly: stopAll() below fires before this test's
+    // fake-timer advance gives the register/admission flow a chance to run,
+    // so slotHeld may still be false when shutdown() is invoked — the point
+    // being verified is which method is called, not the slot's state.
+    const shutdownSpy = jest.spyOn(ProjectAgent.prototype, 'shutdown').mockResolvedValue(undefined)
+
     // Make startAutoUpdater call the callbacks to verify they work
     startAutoUpdater.mockImplementation(
-      (_clients: unknown[], _config: unknown, stopAll: () => void, sendError?: (err: string) => void) => {
-        stopAll()
+      async (_clients: unknown[], _config: unknown, stopAll: () => void | Promise<void>, sendError?: (err: string) => void) => {
+        await stopAll()
         sendError?.('test error')
         return { stop: jest.fn() }
       },
@@ -605,8 +626,10 @@ describe('agent-runner', () => {
     await promise
 
     expect(startAutoUpdater).toHaveBeenCalled()
+    expect(shutdownSpy).toHaveBeenCalled()
 
-    // Reset mock to default behavior
+    // Reset mocks to default behavior
+    shutdownSpy.mockRestore()
     startAutoUpdater.mockReturnValue({ stop: jest.fn() })
   })
 
@@ -625,12 +648,13 @@ describe('agent-runner', () => {
       getConfig: jest.fn().mockResolvedValue({ chatMode: 'agent', defaultAgentChatMode: 'claude_code' }),
       setTenantCode: jest.fn(),
       setProjectCode: jest.fn(),
+      releaseSelf: jest.fn().mockResolvedValue({ released: true }),
     }
     MockApiClient.mockImplementation(() => mockInstance as unknown as ApiClient)
 
     startAutoUpdater.mockImplementation(
-      (_clients: unknown[], _config: unknown, stopAll: () => void, sendError?: (err: string) => void) => {
-        stopAll()
+      async (_clients: unknown[], _config: unknown, stopAll: () => void | Promise<void>, sendError?: (err: string) => void) => {
+        await stopAll()
         sendError?.('test error')
         return { stop: jest.fn() }
       },
@@ -651,8 +675,14 @@ describe('agent-runner', () => {
     await promise
 
     expect(startAutoUpdater).toHaveBeenCalled()
-
-    // Reset mock to default behavior
+    // Note: config-based startup (no --token/--apiUrl) always goes through
+    // the multi-project ChildProcessManager path, even for a single project —
+    // runSingleProject (Finding 5's fix target) is only used by the direct
+    // --token/--apiUrl invocation, covered by the CLI-token variant above.
+    // This path's stopAllAgents (`() => processManager.stopAll()`) was
+    // already graceful before this fix; ChildProcessManager forwards it to
+    // the worker's own shutdown() via IPC (see project-worker.ts).
+    expect(mockStopAll).toHaveBeenCalled()
     startAutoUpdater.mockReturnValue({ stop: jest.fn() })
   })
 

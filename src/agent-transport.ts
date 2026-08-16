@@ -45,6 +45,14 @@ export interface TransportState {
    * duplicating its side effects (SSH/Ansible runs, ECS task launches).
    */
   inFlightCommands: Set<string>
+  /**
+   * Set by `ProjectAgent.shutdown()` once graceful shutdown has begun. New
+   * commands are declined (without being fetched/acknowledged) while this is
+   * true — see `processCommand` / `checkPendingCommands` — so the process only
+   * has to wait for commands already in flight before releasing its slot.
+   * Defaults to false.
+   */
+  draining: boolean
 }
 
 export interface TransportDeps {
@@ -77,10 +85,25 @@ export interface CommandContext {
   configSyncState: ConfigSyncState
   configSyncDeps: ConfigSyncDeps
   transportState: TransportState
-  onSetup: () => Promise<void>
-  onConfigSync: () => Promise<void>
-  onReboot: () => Promise<void>
-  onUpdate: () => Promise<void>
+  /**
+   * `commandId`, when present, is the id of the `setup`/`config_sync` command
+   * itself — threaded through so a Docker-mode config sync that detects a
+   * customization change and fires `performDockerRebuild()` can pass it to
+   * `shutdown({ excludeCommandId })`. See `ConfigSyncDeps.onDockerRebuild`'s
+   * doc comment in agent-config-sync.ts.
+   */
+  onSetup: (commandId?: string) => Promise<void>
+  onConfigSync: (commandId?: string) => Promise<void>
+  /**
+   * `commandId` is the id of the 'reboot' command itself, threaded through so
+   * `ProjectAgent.performReboot()` can pass it to `shutdown({ excludeCommandId })`
+   * — without it, shutdown()'s drain would wait forever for this very command
+   * (still in `inFlightCommands` until this handler returns) to finish. See
+   * `ProjectAgent.shutdown` for the full explanation.
+   */
+  onReboot: (commandId?: string) => Promise<void>
+  /** Same self-reference concern as `onReboot` — see its doc comment. */
+  onUpdate: (commandId?: string) => Promise<void>
   onSyncRepository: (repositoryCode: string, branch?: string) => Promise<import('./repo-sync').RepoSyncResult>
 }
 
@@ -193,6 +216,11 @@ export function startHeartbeat(
         configSyncState.currentConfigHash,
         undefined,
         Array.from(state.authRejectedTransports),
+        // 共有ファイルの配置失敗を毎回報告する。復旧したら undefined になり、
+        // api 側で記録が消える（古い警告が残り続けない）。
+        // 常に配列で送る。undefined だと api へ項目自体が送られず、解消しても
+        // 保存済みの警告が消えない（api は空配列を「解消」と解釈する）。
+        { sharedFileMountErrors: configSyncState.sharedFileMountErrors ?? [] },
       )
 
       // This replica was evicted to make room for a newer one (plan replica
@@ -359,6 +387,23 @@ export async function handleNotification(
       break
     }
     case NOTIFICATION_ACTION.CONFIG_UPDATE: {
+      // Same drain guard as processCommand/checkPendingCommands: once graceful
+      // shutdown has begun, ignore a config-update notification rather than
+      // scheduling a sync. draining=true always eventually leads to this
+      // process exiting (doShutdown() -> stopTransport() after the drain, or
+      // the timed process.exit() the various restart paths schedule), so the
+      // config change is not lost — it will simply be picked up by the next
+      // process instance's own sync on its next normal cycle. Without this
+      // guard, a config sync that detects a Docker customization change would
+      // call onDockerRebuild() -> performDockerRebuild(), which schedules its
+      // own delayed process.exit(DOCKER_RESTART_EXIT_CODE) signal; if the
+      // shutdown already in progress here exits first (no artificial delay on
+      // that path), that exit-code signal would be lost, silently dropping
+      // the customization change until the next restart.
+      if (state.draining) {
+        logger.debug(`${deps.prefix} Ignoring config-update notification: shutdown already in progress`)
+        return
+      }
       // APIがconfig-update通知を送るタイミングはRDS同期前の可能性があるため、
       // hashの比較は行わず常に再同期をスケジュールする。
       // hash比較による変更なしスキップはsyncProjectConfig側で行う。
@@ -389,6 +434,11 @@ export async function checkPendingCommands(
   deps: TransportDeps,
   ctx: CommandContext,
 ): Promise<void> {
+  // Same drain guard as processCommand: skip the fetch entirely once draining,
+  // rather than fetching pending commands and immediately declining each one.
+  if (ctx.transportState.draining) {
+    return
+  }
   try {
     const pending = await deps.client.getPendingCommands(deps.agentId)
     for (const cmd of pending) {
@@ -423,6 +473,16 @@ async function processCommand(
   ctx: CommandContext,
   commandId: string,
 ): Promise<void> {
+  // Graceful shutdown drain: once draining has started, decline new commands
+  // instead of fetching/acknowledging them. Deliberately does NOT fetch the
+  // command or submit a failure result — an unacknowledged command is safe to
+  // silently decline (the server re-assigns it after its own ack-timeout with
+  // no side effects), whereas acknowledging it and then failing would
+  // terminally fail a command that could have succeeded on another replica.
+  if (ctx.transportState.draining) {
+    logger.info(t('runner.commandDeclinedDraining', { prefix: deps.prefix, commandId }))
+    return
+  }
   // Never run the same command twice in this process. Reached from three
   // places — the AppSync notification, the re-claim timer, and the periodic
   // pending sweep — and the last two can fire while the command is still
@@ -503,7 +563,7 @@ async function processCommand(
         : undefined,
     })
     logger.debug(`${deps.prefix} Command result [${commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, LOG_RESULT_LIMIT)}`)
-    savePendingResult(
+    const persisted = savePendingResult(
       commandId,
       deps.agentId,
       result,
@@ -536,8 +596,13 @@ async function processCommand(
       // real result we just persisted, making it unrecoverable even after a
       // restart. The result is already on disk; log it and let the pending
       // store resend it.
+      // Only promise a resend when the result actually made it to disk.
+      // savePendingResult returning false means there is nothing to resend, and
+      // the server will report the job as TIMEOUT once it gives up waiting.
       logger.error(
-        `${deps.prefix} Failed to submit the result for ${commandId}; it stays queued for resend: ${getErrorMessage(error)}`,
+        persisted
+          ? `${deps.prefix} Failed to submit the result for ${commandId}; it stays queued for resend: ${getErrorMessage(error)}`
+          : `${deps.prefix} Failed to submit the result for ${commandId} and it could not be persisted; the result is lost: ${getErrorMessage(error)}`,
       )
       return
     }

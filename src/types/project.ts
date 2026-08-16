@@ -115,6 +115,20 @@ export interface ProjectConfigResponse {
    * `process.env` がそのまま残る。値は復号済み（secret も平文）。
    */
   envVars?: Record<string, string>
+  /**
+   * 共有ファイルをエージェント内へ配置する設定。
+   *
+   * Docker イメージだけでは賄えないプロジェクト固有のデータ・認証情報を、
+   * 指定パスへ置くために使う。起動時・設定変更時に適用するため、Pod が
+   * 作り直されても復元される。api 側は共有ファイル機能が無効なら配信しない。
+   */
+  sharedFileMounts?: {
+    sourcePath: string
+    destPath: string
+    mode?: string
+    /** 配置元ファイルのリビジョン。設定ハッシュを変えるためのもので、エージェントは解釈しない。 */
+    revision?: string
+  }[]
 }
 
 export interface DbCredentials {

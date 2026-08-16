@@ -91,6 +91,7 @@ function createMockState(): TransportState {
     configSyncDebounceTimer: null,
     authRejectedTransports: new Set(),
     inFlightCommands: new Set(),
+    draining: false,
   }
 }
 
@@ -1758,6 +1759,44 @@ describe('handleNotification: agent-command filtering branches', () => {
     expect(state.configSyncDebounceTimer).toBe('debounce-timer')
   })
 
+  it('should ignore a config-update notification while draining (does not trigger scheduleConfigSync)', async () => {
+    // Matches the same drain guard already used by processCommand/
+    // checkPendingCommands: once ProjectAgent.shutdown() has set
+    // state.draining = true, a config-update notification must not trigger a
+    // config sync. Without this guard, a config sync that detects a Docker
+    // customization change could call onDockerRebuild() -> performDockerRebuild(),
+    // which schedules its own delayed process.exit(DOCKER_RESTART_EXIT_CODE)
+    // signal — racing against (and possibly losing to) the SIGTERM-triggered
+    // shutdown's own un-delayed process.exit(0) once the shared drain
+    // resolves, silently dropping the customization change until the next
+    // restart.
+    const { logger } = require('../src/logger')
+    const { scheduleConfigSync } = require('../src/agent-config-sync')
+    scheduleConfigSync.mockClear()
+
+    const deps = createMockDeps()
+    const state = createMockState()
+    state.draining = true
+    const ctx = makeCtx(state)
+    // Give currentConfigHash a real value first so the "must not be reset"
+    // assertion below is meaningful (the default in this file's makeCtx() is
+    // already undefined, which would make that assertion trivially true).
+    ctx.configSyncState.currentConfigHash = 'existing-hash'
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n7-draining', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: NOTIFICATION_ACTION.CONFIG_UPDATE,
+      content: {},
+    })
+
+    expect(scheduleConfigSync).not.toHaveBeenCalled()
+    // currentConfigHash must not be reset either — the whole sync attempt is
+    // skipped, not just the scheduling call.
+    expect(ctx.configSyncState.currentConfigHash).toBe('existing-hash')
+    const debugCalls = (logger.debug as jest.Mock).mock.calls.map((c: unknown[]) => String(c[0]))
+    expect(debugCalls.some((m: string) => m.includes('Ignoring config-update notification'))).toBe(true)
+  })
+
   it('should handle string content by JSON.parse', async () => {
     const { executeCommand } = require('../src/commands')
     executeCommand.mockResolvedValue({ success: true, data: 'ok' })
@@ -1896,6 +1935,91 @@ describe('checkPendingCommands', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('Failed to check pending commands')
     )
+  })
+})
+
+describe('graceful shutdown drain: draining=true short-circuits command intake', () => {
+  function makeCtx(state: TransportState): CommandContext {
+    return {
+      configSyncState: {
+        currentConfigHash: undefined,
+        projectConfig: undefined,
+        serverConfig: null,
+        availableChatModes: [],
+        activeChatMode: undefined,
+        mcpConfigPath: undefined,
+        dockerCustomizationHash: undefined,
+      },
+      configSyncDeps: {} as any,
+      transportState: state,
+      onSetup: jest.fn(),
+      onConfigSync: jest.fn(),
+      onReboot: jest.fn(),
+      onUpdate: jest.fn(),
+      onSyncRepository: jest.fn(),
+    }
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('processCommand (via a new command notification) does not fetch/acknowledge the command and does not add it to inFlightCommands', async () => {
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands: jest.fn().mockResolvedValue([]),
+        getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
+        submitResult: jest.fn().mockResolvedValue(undefined),
+        getAssignmentGeneration: jest.fn(),
+        clearAssignment: jest.fn(),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    state.draining = true
+    const ctx = makeCtx(state)
+
+    await handleNotification(deps, state, ctx, {
+      id: 'n1', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
+      content: {
+        commandId: 'cmd-draining',
+        agentId: 'agent-1',
+        tenantCode: 'test',
+        projectCode: 'TEST_PROJ',
+        type: 'shell',
+      },
+    })
+
+    expect(deps.client.getCommand).not.toHaveBeenCalled()
+    expect(deps.client.submitResult).not.toHaveBeenCalled()
+    expect(state.inFlightCommands.has('cmd-draining')).toBe(false)
+
+    const { logger } = require('../src/logger')
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('runner.commandDeclinedDraining'))
+  })
+
+  it('checkPendingCommands short-circuits (does not even fetch pending commands) when draining', async () => {
+    const deps = createMockDeps({
+      client: {
+        heartbeat: jest.fn().mockResolvedValue({}),
+        getPendingCommands: jest.fn().mockResolvedValue([
+          { commandId: 'pending-1', type: 'shell' },
+        ]),
+        getCommand: jest.fn(),
+        submitResult: jest.fn(),
+        getAssignmentGeneration: jest.fn(),
+        clearAssignment: jest.fn(),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    state.draining = true
+    const ctx = makeCtx(state)
+
+    await checkPendingCommands(deps, ctx)
+
+    expect(deps.client.getPendingCommands).not.toHaveBeenCalled()
+    expect(deps.client.getCommand).not.toHaveBeenCalled()
   })
 })
 

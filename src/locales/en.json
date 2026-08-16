@@ -85,7 +85,7 @@
   "stop.notRunning": "No running agent found (pid file not found: {{path}})",
   "stop.staleProcess": "Agent process (PID: {{pid}}) is no longer running. Cleaning up stale pid file.",
   "stop.signalFailed": "Failed to send stop signal to PID {{pid}}: {{message}}",
-  "stop.timeout": "Agent did not stop within timeout (PID: {{pid}}). It may still be running.",
+  "stop.timeout": "Agent (PID: {{pid}}) has not exited yet after {{timeoutSeconds}}s. This does not necessarily mean it is stuck: if it has an in-flight command, it may still be gracefully draining it before shutting down, which can take up to about 5 minutes — it will exit on its own once the drain completes. Wait a bit and run \"ai-support-agent status\" or \"ai-support-agent stop\" again to check.",
 
   "runner.starting": "Starting agent...",
   "runner.startedSingle": "Agent started (poll: {{pollInterval}}ms, heartbeat: {{heartbeatInterval}}ms)",
@@ -103,6 +103,7 @@
   "runner.registerWorkingAgain": "{{prefix}} Registration is working again after {{attempts}} attempt(s)",
   "runner.replicaStandby": "Waiting for a replica slot: the plan's concurrent replica limit is reached (instanceId={{instanceId}}, live {{live}}/{{max}}). This replica starts automatically once another one stops",
   "runner.replicaAdmitted": "Replica slot acquired (instanceId={{instanceId}})",
+  "runner.instanceIdConflict": "Another process is already running with the same AI_SUPPORT_AGENT_INSTANCE_ID ({{instanceId}}). This commonly happens when the same token is deployed as a Kubernetes StatefulSet across multiple clusters, since a Pod name is only unique within its own cluster. Consider setting AI_SUPPORT_AGENT_INSTANCE_ID explicitly to a value that includes the cluster name.",
   "runner.replicaEvicted": "Handing the replica slot to a newer replica and returning to standby (instanceId={{instanceId}})",
   "runner.commandReceived": "{{prefix}} Command received: {{type}} ({{commandId}})",
   "runner.commandDone": "{{prefix}} Command completed: {{commandId}} ({{result}})",
@@ -118,6 +119,11 @@
   "runner.authError": "{{prefix}} Authentication failed. Token may be invalid or expired. Run \"ai-support-agent login\" to re-authenticate. Detail: {{detail}}",
   "runner.tokenUpdated": "{{prefix}} Token updated from config file. Re-authenticating...",
   "runner.unexpectedError": "Unexpected error in project agent: {{message}}",
+  "runner.commandDeclinedDraining": "{{prefix}} Declining command {{commandId}}: this replica is shutting down. The server will re-assign it after its own ack-timeout",
+  "runner.drainWaiting": "{{prefix}} Waiting for {{count}} in-flight command(s) to finish before releasing the replica slot...",
+  "runner.drainTimedOut": "{{prefix}} Timed out waiting for in-flight command(s) to drain: {{commandIds}}. The replica slot was NOT released; it falls through to the server's heartbeat-timeout reclaim instead",
+  "runner.slotReleased": "{{prefix}} Replica slot released",
+  "runner.slotReleaseFailed": "{{prefix}} Failed to release replica slot: {{reason}}. It falls through to the server's heartbeat-timeout reclaim instead",
 
   "status.noConfig": "No configuration found. Run \"ai-support-agent login --url <url>\" to set up.",
   "status.header": "Configuration:",

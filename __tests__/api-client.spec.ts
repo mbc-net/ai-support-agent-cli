@@ -1,6 +1,7 @@
 import axios from 'axios'
 
 import { ApiClient } from '../src/api-client'
+import { AGENT_RELEASE_REQUEST_TIMEOUT_MS } from '../src/constants'
 import { logger } from '../src/logger'
 import { createAxiosError } from './helpers/mock-factory'
 
@@ -117,6 +118,24 @@ describe('ApiClient', () => {
       )
     })
 
+    it('includes instanceNonce so the server can tell apart two processes reporting the same instanceId', async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' },
+      })
+
+      await client.register({
+        agentId: 'test-id',
+        hostname: 'hostname',
+        os: 'darwin',
+        arch: 'arm64',
+      })
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).toHaveProperty('instanceNonce')
+      expect(typeof callArgs.instanceNonce).toBe('string')
+      expect(callArgs.instanceNonce.length).toBeGreaterThan(0)
+    })
+
     it('should include ipAddress, availableChatModes, and activeChatMode when provided', async () => {
       mockInstance.post.mockResolvedValue({
         data: { agentId: 'test-id', appsyncUrl: '', appsyncApiKey: '' },
@@ -174,6 +193,95 @@ describe('ApiClient', () => {
         expect.objectContaining({ agentId: 'test-id' }),
         undefined,
       )
+    })
+
+    it('includes instanceNonce alongside instanceId', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat('test-id', {
+        platform: 'darwin',
+        arch: 'arm64',
+        cpuUsage: 50,
+        memoryUsage: 60,
+        uptime: 1000,
+      })
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).toHaveProperty('instanceNonce')
+      expect(typeof callArgs.instanceNonce).toBe('string')
+      expect(callArgs.instanceNonce.length).toBeGreaterThan(0)
+    })
+  })
+
+  describe('releaseSelf', () => {
+    it('posts instanceId and instanceNonce to the self/release endpoint with the short timeout', async () => {
+      mockInstance.post.mockResolvedValue({ data: { released: true } })
+
+      const result = await client.releaseSelf()
+
+      expect(result).toEqual({ released: true })
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/instances/self/release',
+        expect.objectContaining({
+          instanceId: expect.any(String),
+          instanceNonce: expect.any(String),
+        }),
+        { timeout: AGENT_RELEASE_REQUEST_TIMEOUT_MS },
+      )
+    })
+
+    it("returns the server's reason verbatim on a non-released response (e.g. nonce_mismatch)", async () => {
+      mockInstance.post.mockResolvedValue({
+        data: { released: false, reason: 'nonce_mismatch' },
+      })
+
+      const result = await client.releaseSelf()
+
+      expect(result).toEqual({ released: false, reason: 'nonce_mismatch' })
+    })
+
+    it('resolves to {released:false, reason:"request_failed"} instead of throwing on a network error', async () => {
+      mockInstance.post.mockRejectedValue(new Error('ECONNRESET'))
+
+      const result = await client.releaseSelf()
+
+      expect(result).toEqual({ released: false, reason: 'request_failed' })
+    })
+
+    it('resolves to {released:false, reason:"request_failed"} on a 404 (server without this endpoint yet)', async () => {
+      mockInstance.post.mockRejectedValue(createAxiosError('Not Found', 404))
+
+      const result = await client.releaseSelf()
+
+      expect(result).toEqual({ released: false, reason: 'request_failed' })
+    })
+
+    it('falls back to request_failed when the response body is malformed (missing released field)', async () => {
+      mockInstance.post.mockResolvedValue({ data: {} })
+
+      const result = await client.releaseSelf()
+
+      expect(result).toEqual({ released: false, reason: 'request_failed' })
+    })
+
+    it('does not retry — the underlying post call happens exactly once', async () => {
+      mockInstance.post.mockRejectedValue(new Error('Network Error'))
+
+      await client.releaseSelf()
+
+      expect(mockInstance.post).toHaveBeenCalledTimes(1)
+    })
+
+    it('returns {released:false, reason:"no_replica_identity"} without making any network call, for a client constructed without replica identity', async () => {
+      const noIdentityClient = new ApiClient('http://localhost:3030', 'test_tenant:tokenId:rawToken', {
+        withoutReplicaIdentity: true,
+      })
+      mockInstance.post.mockClear()
+
+      const result = await noIdentityClient.releaseSelf()
+
+      expect(result).toEqual({ released: false, reason: 'no_replica_identity' })
+      expect(mockInstance.post).not.toHaveBeenCalled()
     })
   })
 
@@ -845,6 +953,92 @@ describe('ApiClient', () => {
       await expect(
         client.submitChatChunk('../evil', { index: 0, type: 'delta', content: '' }, 'agent-1'),
       ).rejects.toThrow('Invalid command ID format')
+    })
+  })
+
+  describe('submitServerSetupProgress', () => {
+    it('posts progress events to the command-scoped endpoint', async () => {
+      mockInstance.post.mockResolvedValue({ data: {} })
+
+      const events = [
+        { seq: 1, phase: 'start' as const, name: 'os_init : Install' },
+        {
+          seq: 2,
+          phase: 'end' as const,
+          name: 'os_init : Install',
+          status: 'ok' as const,
+          changed: true,
+          message: 'os_init : Install completed',
+        },
+      ]
+
+      await client.submitServerSetupProgress('cmd-1', events, 'agent-1')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/commands/cmd-1/server-setup-progress',
+        { events },
+        { params: { agentId: 'agent-1' }, headers: {} },
+      )
+    })
+
+    it('splits a batch larger than the API limit into ordered requests', async () => {
+      // API 側 DTO は @ArrayMaxSize(500)。超過すると ValidationPipe が
+      // リクエスト全体を 400 で拒否し、tailer は読み取りオフセットを既に
+      // 進めているためそのバッチは永久に失われる（無言の欠落）。
+      mockInstance.post.mockResolvedValue({ data: {} })
+      const events = Array.from({ length: 501 }, (_, i) => ({
+        seq: i + 1,
+        phase: 'start' as const,
+        name: `task ${i + 1}`,
+      }))
+
+      await client.submitServerSetupProgress('cmd-1', events, 'agent-1')
+
+      expect(mockInstance.post).toHaveBeenCalledTimes(2)
+      const first = mockInstance.post.mock.calls[0][1].events
+      const second = mockInstance.post.mock.calls[1][1].events
+      expect(first).toHaveLength(500)
+      expect(second).toHaveLength(1)
+      expect(first[0].seq).toBe(1)
+      expect(second[0].seq).toBe(501)
+    })
+
+    it('does not send a later chunk once an earlier one has permanently failed', async () => {
+      // 先行チャンクが落ちた後に後続だけ送ると、欠落した区間を飛ばした進捗が
+      // 順序どおりに見えてしまう。まとめて諦める（最終結果は submitResult が正本）。
+      mockInstance.post.mockRejectedValue(new Error('boom'))
+      const events = Array.from({ length: 501 }, (_, i) => ({
+        seq: i + 1,
+        phase: 'start' as const,
+        name: `task ${i + 1}`,
+      }))
+
+      await expect(
+        client.submitServerSetupProgress('cmd-1', events, 'agent-1'),
+      ).rejects.toThrow()
+
+      // 送信されたのは1チャンク目だけ（リトライぶんは同じ内容の再送）。
+      const sentSeqs = mockInstance.post.mock.calls.flatMap(
+        (call: unknown[]) =>
+          (call[1] as { events: { seq: number }[] }).events.map((e) => e.seq),
+      )
+      expect(sentSeqs).not.toContain(501)
+    })
+
+    it('should validate commandId format', async () => {
+      await expect(
+        client.submitServerSetupProgress(
+          '../evil',
+          [{ seq: 1, phase: 'start' as const, name: 'a' }],
+          'agent-1',
+        ),
+      ).rejects.toThrow('Invalid command ID format')
+    })
+
+    it('does not call the API when there are no events', async () => {
+      await client.submitServerSetupProgress('cmd-1', [], 'agent-1')
+
+      expect(mockInstance.post).not.toHaveBeenCalled()
     })
   })
 

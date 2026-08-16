@@ -22,6 +22,16 @@ export interface RegisterRequest {
   activeChatMode?: string
   /** Replica identity. Omitted by single-replica deployments. */
   instanceId?: string
+  /**
+   * Process-lifetime nonce, distinct from `instanceId`: two processes can
+   * legitimately report the same `instanceId` (e.g. a Kubernetes StatefulSet
+   * Pod name is unique only within its own cluster, so the same token
+   * deployed to two clusters produces the same Pod name in each). The server
+   * uses the nonce to tell such processes apart and reject the second one
+   * with `admission.reason === 'instance_id_conflict'` instead of treating
+   * it as a reconnect of the first.
+   */
+  instanceNonce?: string
   admissionMode?: AdmissionMode
 }
 
@@ -34,10 +44,38 @@ export interface AdmissionResult {
   /** Applied limit; null means unlimited. */
   maxReplicas: number | null
   liveReplicas: number
-  reason?: 'limit_reached'
+  /**
+   * `limit_reached`: the plan's concurrent replica limit is already
+   * satisfied by other replicas.
+   * `instance_id_conflict`: another process is already live under this same
+   * `instanceId` (distinguished by `instanceNonce`) — most commonly the same
+   * token deployed to multiple Kubernetes clusters, whose Pod names collide
+   * because a Pod name is unique only within its own cluster.
+   */
+  reason?: 'limit_reached' | 'instance_id_conflict'
   /** The replica evicted to make room for this one. */
   evictedInstanceId?: string
 }
+
+/**
+ * Response of `POST .../agent/instances/self/release` (graceful shutdown drain,
+ * phase 3). Sent once the agent has finished draining its in-flight commands so
+ * the server can free the slot immediately instead of waiting for the
+ * heartbeat-timeout reclaim.
+ */
+export interface ReleaseSelfResponse {
+  released: boolean
+  reason?: 'not_found' | 'nonce_mismatch' | 'already_released'
+}
+
+/**
+ * `ApiClient.releaseSelf()` never throws — failures (including ones that never
+ * reached the server) are represented as additional `reason` values not sent by
+ * the server itself.
+ */
+export type ReleaseSelfResult =
+  | ReleaseSelfResponse
+  | { released: false; reason: 'no_replica_identity' | 'request_failed' }
 
 export interface RegisterResponse {
   agentId: string

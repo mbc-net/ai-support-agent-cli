@@ -1,6 +1,8 @@
 import {
   resetInstanceIdCacheForTest,
+  resetInstanceNonceCacheForTest,
   resolveInstanceId,
+  resolveInstanceNonce,
 } from '../src/replica-identity'
 
 describe('resolveInstanceId', () => {
@@ -98,5 +100,35 @@ describe('resolveInstanceId', () => {
     const b = resolveInstanceId({ HOSTNAME: 'pod#b' } as NodeJS.ProcessEnv)
 
     expect(a).not.toBe(b)
+  })
+})
+
+describe('resolveInstanceNonce', () => {
+  beforeEach(() => {
+    resetInstanceIdCacheForTest()
+    resetInstanceNonceCacheForTest()
+  })
+
+  it('プロセス内では複数回呼んでも同じ値を返す（プロセスごとに1回生成してキャッシュする）', () => {
+    const first = resolveInstanceNonce()
+    const second = resolveInstanceNonce()
+    expect(second).toBe(first)
+  })
+
+  it('resolveInstanceId の値とは独立している（instanceId とは別軸の値）', () => {
+    // 同一の Pod 名（instanceId）を名乗る複数プロセスを衝突検知するための値なので、
+    // instanceId が同じでも instanceNonce はプロセスごとに異なっていなければならない。
+    const instanceId = resolveInstanceId({
+      HOSTNAME: 'same-pod-name',
+    } as NodeJS.ProcessEnv)
+    const nonce = resolveInstanceNonce()
+    expect(nonce).not.toBe(instanceId)
+  })
+
+  it('リセット後は新しい値が生成される', () => {
+    const first = resolveInstanceNonce()
+    resetInstanceNonceCacheForTest()
+    const second = resolveInstanceNonce()
+    expect(second).not.toBe(first)
   })
 })

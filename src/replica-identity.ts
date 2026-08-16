@@ -91,3 +91,36 @@ function resolveUncached(env: NodeJS.ProcessEnv): string {
     crypto.randomUUID()
   )
 }
+
+/**
+ * Resolve this process's replica *nonce*.
+ *
+ * Distinct from {@link resolveInstanceId}: the instance id is a
+ * human-recognizable label (Pod name / ECS task id) chosen for display, and
+ * two different processes can legitimately report the *same* instanceId —
+ * e.g. the same token deployed as a Kubernetes StatefulSet in two separate
+ * clusters both produce Pod name `agent-0`. The nonce exists purely to tell
+ * such processes apart: it is a random value generated once per process
+ * start and sent on every register/heartbeat request, so the server can
+ * detect "two live processes claiming the same instanceId" (an
+ * `instance_id_conflict`) instead of silently treating the second process's
+ * requests as a reconnect of the first.
+ *
+ * Generated with `crypto.randomUUID()` and cached for the process lifetime
+ * (same rationale as `resolveInstanceId`'s cache): a fresh value on every
+ * call would make every reconnect/heartbeat look like a new process.
+ */
+export function resolveInstanceNonce(): string {
+  if (cachedInstanceNonce === null) {
+    cachedInstanceNonce = crypto.randomUUID()
+  }
+  return cachedInstanceNonce
+}
+
+/** Process-wide memo for resolveInstanceNonce. */
+let cachedInstanceNonce: string | null = null
+
+/** @internal テスト用: キャッシュを破棄する */
+export function resetInstanceNonceCacheForTest(): void {
+  cachedInstanceNonce = null
+}

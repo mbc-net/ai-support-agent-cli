@@ -24,6 +24,7 @@ import {
   DOCKER_MAX_SESSION_LOG_BYTES,
   DOCKER_RESTART_EXIT_CODE,
   DOCKER_UPDATE_EXIT_CODE,
+  SHUTDOWN_GRACE_PERIOD_SECONDS,
 } from '../constants'
 import { t } from '../i18n'
 import { logger, getProjectColor, makeLinePrefixer } from '../logger'
@@ -168,12 +169,24 @@ export class DockerSupervisor {
       removePidFile()
       logger.info(t('runner.shuttingDown'))
       const closedPromises = [...this.handles.values()].map((h) => h.closedPromise)
-      this.stopAll()
+      // Not awaited here: this handler already waits for the actual container
+      // exit via closedPromises/shutdownTimer below (resolved by the `docker
+      // run` child's own 'close' event), which is a stronger and
+      // longer-lived signal than stopAll()'s "docker stop command finished"
+      // promise.
+      void this.stopAll()
       onStop?.()
+      // Must comfortably exceed the `docker stop --time` grace period used
+      // in stopAll() below — otherwise this host-side timer would force
+      // process.exit(0) while `docker stop` is still counting down toward
+      // SIGKILL, abandoning the wait for the container's flush/log-upload
+      // handshake (child.on('close') in spawnProject()) for no benefit. The
+      // extra 10s covers that flush/upload after the container actually
+      // stops.
       const shutdownTimer = setTimeout(() => {
         logger.warn('[docker] Shutdown timed out waiting for log flush; forcing exit')
         process.exit(0)
-      }, this.opts.shutdownTimeoutMs ?? 10_000)
+      }, this.opts.shutdownTimeoutMs ?? (SHUTDOWN_GRACE_PERIOD_SECONDS * 1000 + 10_000))
       void Promise.all(closedPromises).then(() => {
         clearTimeout(shutdownTimer)
         process.exit(0)
@@ -422,11 +435,35 @@ export class DockerSupervisor {
       if (code === DOCKER_UPDATE_EXIT_CODE && !this.updating) {
         this.updating = true
         logger.info(`[docker] Container ${key} exited for update. Stopping all containers and rebuilding...`)
-        this.stopAll()
-        void installUpdateAndRestart(projectConfigHostDir).catch((err) => {
-          logger.error(`[docker] Update failed: ${getErrorMessage(err)}`)
-          process.exit(1)
-        })
+        // Await stopAll() before restarting the host process. stopAll() now
+        // genuinely waits for every sibling container to actually exit (up
+        // to SHUTDOWN_GRACE_PERIOD_SECONDS via `docker stop --time`), not
+        // merely for the stop commands to be issued. installUpdateAndRestart()
+        // re-execs this host process and re-spawns `docker run` for every
+        // registered project — including any sibling whose old container
+        // might still be mid-drain of a long-running command. Firing it
+        // without awaiting stopAll() risks a container-name conflict or two
+        // live containers for the same project executing commands
+        // simultaneously — exactly the double-execution failure class this
+        // whole feature exists to prevent. `void` + an async IIFE (rather
+        // than making this event-handler callback itself `async`) keeps the
+        // error handling explicit and identical to the previous behavior.
+        void (async (): Promise<void> => {
+          try {
+            await this.stopAll()
+          } catch (err) {
+            // Errors here are logged, not fatal — proceed to
+            // installUpdateAndRestart() regardless, same as before this
+            // fix, when stopAll() failures were silently unobserved.
+            logger.warn(`[docker] stopAll() before update restart failed: ${getErrorMessage(err)}`)
+          }
+          try {
+            await installUpdateAndRestart(projectConfigHostDir)
+          } catch (err) {
+            logger.error(`[docker] Update failed: ${getErrorMessage(err)}`)
+            process.exit(1)
+          }
+        })()
         return
       }
 
@@ -446,7 +483,27 @@ export class DockerSupervisor {
     })
   }
 
-  stopAll(): void {
+  /**
+   * Stop all running containers and resolve once every `docker stop` command
+   * this issues has actually completed (the container exited, or `docker
+   * stop`'s own `--time` grace period elapsed and it SIGKILLed the
+   * container) — not merely once the commands have been *issued*.
+   *
+   * This is `await`ed by the host-side auto-updater's `stopAllAgents`
+   * callback (`startHostAutoUpdater` in docker-runner.ts, via
+   * `auto-updater.ts`'s `await stopAllAgents()`) before it proceeds to
+   * restart/re-exec the host process. Previously this method spawned
+   * `docker stop` and returned immediately without waiting for it to finish,
+   * so the host's self-update logic would restart itself right after merely
+   * *issuing* the stop command — without knowing whether the up to
+   * `SHUTDOWN_GRACE_PERIOD_SECONDS` grace period it just requested had
+   * actually elapsed or the container had actually exited. The `docker stop`
+   * CLI command itself already blocks until the container exits (or it times
+   * out and SIGKILLs it), so awaiting the spawned process's own exit is
+   * sufficient — no separate polling is needed.
+   */
+  stopAll(): Promise<void> {
+    const stopPromises: Promise<void>[] = []
     for (const [key, handle] of this.handles) {
       if (!handle.closeHandled) {
         logger.info(`[docker] Stopping container for project: ${key}`)
@@ -457,17 +514,49 @@ export class DockerSupervisor {
             const containerId = fs.readFileSync(handle.cidFile, 'utf-8').trim()
             /* istanbul ignore next */
             if (containerId) {
-              spawn(getDockerPath(), ['stop', '--time', '5', containerId], { stdio: 'ignore' })
+              // Derived from SHUTDOWN_GRACE_PERIOD_SECONDS (same value
+              // Kubernetes' terminationGracePeriodSeconds uses — see
+              // manifest-generator.ts) instead of a hardcoded 5 seconds.
+              // A container running an in-flight command needs the same
+              // drain budget here as in the Kubernetes deployment mode;
+              // otherwise `docker stop`'s SIGTERM-then-SIGKILL would kill
+              // the container mid-command long before ProjectAgent.shutdown()'s
+              // drain (up to SHUTDOWN_DRAIN_TIMEOUT_MS) or releaseSelf() can
+              // complete.
+              const stopChild = spawn(getDockerPath(), ['stop', '--time', String(SHUTDOWN_GRACE_PERIOD_SECONDS), containerId], { stdio: 'ignore' })
               stopped = true
+              stopPromises.push(
+                new Promise<void>((resolve) => {
+                  stopChild.on('close', () => resolve())
+                  stopChild.on('error', () => resolve())
+                }),
+              )
             }
           }
         } catch /* istanbul ignore next */ {
           // Ignore errors — fall through to child.kill
         }
         if (!stopped) {
-          handle.child.kill('SIGTERM')
+          // Fallback path: the cidfile doesn't exist yet or couldn't be read,
+          // so there is no container id to `docker stop`. Send SIGTERM
+          // directly to the `docker run` child instead — but this path's
+          // completion must be tracked the same way the normal `docker stop`
+          // path above is, by waiting for the child process's own 'exit'
+          // event, and pushed onto the same stopPromises collection.
+          // Without this, stopAll()'s returned promise could resolve while a
+          // container stopped via this fallback is still shutting down,
+          // reintroducing the exact "resolved before the container actually
+          // exited" bug this method was rewritten to fix.
+          stopPromises.push(
+            new Promise<void>((resolve) => {
+              handle.child.once('exit', () => resolve())
+              handle.child.once('error', () => resolve())
+              handle.child.kill('SIGTERM')
+            }),
+          )
         }
       }
     }
+    return Promise.all(stopPromises).then(() => undefined)
   }
 }

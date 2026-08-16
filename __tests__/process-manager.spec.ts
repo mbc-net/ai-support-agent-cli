@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import type { ChildProcess } from 'child_process'
 
-import { CHILD_PROCESS_MAX_RESTARTS, CHILD_PROCESS_RESTART_DELAY_MS, CHILD_PROCESS_STOP_TIMEOUT_MS } from '../src/constants'
+import { CHILD_PROCESS_MAX_RESTARTS, CHILD_PROCESS_RESTART_DELAY_MS, CHILD_PROCESS_STOP_TIMEOUT_MS, FORK_SHUTDOWN_DRAIN_TIMEOUT_MS } from '../src/constants'
 import { ChildProcessManager } from '../src/child-process-manager'
 import { logger } from '../src/logger'
 
@@ -344,7 +344,7 @@ describe('ChildProcessManager', () => {
 
       await stopPromise
 
-      expect(mockChild.send).toHaveBeenCalledWith({ type: 'shutdown' })
+      expect(mockChild.send).toHaveBeenCalledWith({ type: 'shutdown', drainTimeoutMs: FORK_SHUTDOWN_DRAIN_TIMEOUT_MS })
       expect(manager.getRunningCount()).toBe(0)
     })
 
