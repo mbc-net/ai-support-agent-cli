@@ -266,6 +266,13 @@ export const API_ENDPOINTS = {
   // the caller.
   SERVER_SETUP_VARIABLES: (tenantCode: string, commandId: string) =>
     `/api/${tenantCode}/agent/commands/${commandId}/server-setup-variables`,
+  // Mid-run progress for a server_setup_exec command. Same commandId-scoped
+  // design as SERVER_SETUP_SSH_CREDENTIAL: the ServerSetupExecution to append
+  // to is resolved server-side from the command's payload, never supplied by
+  // the caller. Delivery is best-effort — the authoritative per-task results
+  // still arrive via COMMAND_RESULT.
+  SERVER_SETUP_PROGRESS: (tenantCode: string, commandId: string) =>
+    `/api/${tenantCode}/agent/commands/${commandId}/server-setup-progress`,
   // JIT SSH credential lookup scoped to a single ssh_exec command (see
   // admin-docs docs/specifications/ssh-tailscale-support.md). Same
   // commandId-scoped design as SERVER_SETUP_SSH_CREDENTIAL: the target host
@@ -348,6 +355,19 @@ export const AGENT_MODE_ONESHOT = 'oneshot'
  * `SERVER_SETUP_CUSTOM_TASKS_CAPABILITY`.
  */
 export const SERVER_SETUP_CUSTOM_TASKS_CAPABILITY = 'server_setup_custom_tasks'
+
+/**
+ * Limits the API enforces on a server-setup progress request
+ * (`SubmitServerSetupProgressDto` / `ServerSetupProgressEventDto` in the api
+ * repo). Mirrored here — the two repos cannot share code — and they MUST be
+ * kept in sync: `ValidationPipe` rejects the *entire* request with a 400 when
+ * any one of them is exceeded, and the tailer has already advanced its read
+ * offset by then, so an oversized batch is lost silently rather than retried.
+ * That is why the client chunks and truncates instead of sending raw.
+ */
+export const SERVER_SETUP_MAX_PROGRESS_EVENTS_PER_REQUEST = 500
+export const SERVER_SETUP_MAX_PROGRESS_TASK_NAME_LENGTH = 1000
+export const SERVER_SETUP_MAX_PROGRESS_MESSAGE_LENGTH = 10_000
 
 /** Fixed container name used in the registered ECS task definition */
 export const ECS_AGENT_CONTAINER_NAME = 'app'

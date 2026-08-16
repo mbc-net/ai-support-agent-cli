@@ -1,6 +1,6 @@
 import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios'
 
-import { AGENT_RELEASE_REQUEST_TIMEOUT_MS, AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL, ENV_VARS } from './constants'
+import { AGENT_RELEASE_REQUEST_TIMEOUT_MS, AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL, ENV_VARS, SERVER_SETUP_MAX_PROGRESS_EVENTS_PER_REQUEST } from './constants'
 import { logger } from './logger'
 import { resolveInstanceId, resolveInstanceNonce } from './replica-identity'
 import { RetryStrategy } from './retry-strategy'
@@ -32,6 +32,7 @@ import type {
   RepoCredentials,
   SendSlackFileResult,
   SendSlackMessageResult,
+  ServerSetupProgressEvent,
   ServerSetupVariablesResponse,
   SshCredentials,
   SshExecCredential,
@@ -392,6 +393,47 @@ export class ApiClient {
     return generation === undefined
       ? {}
       : { 'x-agent-assignment-generation': String(generation) }
+  }
+
+  /**
+   * Report mid-run server-setup progress for a `server_setup_exec` command.
+   *
+   * Best-effort by contract: the authoritative per-task results still arrive
+   * through {@link submitResult}, so callers treat a rejection here as a
+   * skipped update rather than a failed run. The assignment headers are sent
+   * for the same reason as on {@link submitResult} — a replica that lost the
+   * assignment must not keep writing progress for a command it no longer owns.
+   */
+  async submitServerSetupProgress(
+    commandId: string,
+    events: ServerSetupProgressEvent[],
+    agentId: string,
+  ): Promise<void> {
+    this.validateCommandId(commandId)
+    if (events.length === 0) return
+    logger.debug(
+      `Submitting ${events.length} server setup progress event(s) for command: ${commandId}`,
+    )
+    // Chunked to the API's per-request cap. Exceeding it makes ValidationPipe
+    // reject the whole request with a 400, and because the tailer has already
+    // advanced past these events they would never be retried — a long loop
+    // task or a burst after a reconnect would silently lose its progress.
+    // Sent sequentially so events cannot arrive out of order.
+    for (
+      let start = 0;
+      start < events.length;
+      start += SERVER_SETUP_MAX_PROGRESS_EVENTS_PER_REQUEST
+    ) {
+      const chunk = events.slice(
+        start,
+        start + SERVER_SETUP_MAX_PROGRESS_EVENTS_PER_REQUEST,
+      )
+      await this.postVoid(
+        API_ENDPOINTS.SERVER_SETUP_PROGRESS(this.tenantCode, commandId),
+        { events: chunk },
+        { params: { agentId }, headers: this.assignmentHeaders(commandId) },
+      )
+    }
   }
 
   async submitResult(

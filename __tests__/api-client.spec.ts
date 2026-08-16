@@ -956,6 +956,92 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('submitServerSetupProgress', () => {
+    it('posts progress events to the command-scoped endpoint', async () => {
+      mockInstance.post.mockResolvedValue({ data: {} })
+
+      const events = [
+        { seq: 1, phase: 'start' as const, name: 'os_init : Install' },
+        {
+          seq: 2,
+          phase: 'end' as const,
+          name: 'os_init : Install',
+          status: 'ok' as const,
+          changed: true,
+          message: 'os_init : Install completed',
+        },
+      ]
+
+      await client.submitServerSetupProgress('cmd-1', events, 'agent-1')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/commands/cmd-1/server-setup-progress',
+        { events },
+        { params: { agentId: 'agent-1' }, headers: {} },
+      )
+    })
+
+    it('splits a batch larger than the API limit into ordered requests', async () => {
+      // API 側 DTO は @ArrayMaxSize(500)。超過すると ValidationPipe が
+      // リクエスト全体を 400 で拒否し、tailer は読み取りオフセットを既に
+      // 進めているためそのバッチは永久に失われる（無言の欠落）。
+      mockInstance.post.mockResolvedValue({ data: {} })
+      const events = Array.from({ length: 501 }, (_, i) => ({
+        seq: i + 1,
+        phase: 'start' as const,
+        name: `task ${i + 1}`,
+      }))
+
+      await client.submitServerSetupProgress('cmd-1', events, 'agent-1')
+
+      expect(mockInstance.post).toHaveBeenCalledTimes(2)
+      const first = mockInstance.post.mock.calls[0][1].events
+      const second = mockInstance.post.mock.calls[1][1].events
+      expect(first).toHaveLength(500)
+      expect(second).toHaveLength(1)
+      expect(first[0].seq).toBe(1)
+      expect(second[0].seq).toBe(501)
+    })
+
+    it('does not send a later chunk once an earlier one has permanently failed', async () => {
+      // 先行チャンクが落ちた後に後続だけ送ると、欠落した区間を飛ばした進捗が
+      // 順序どおりに見えてしまう。まとめて諦める（最終結果は submitResult が正本）。
+      mockInstance.post.mockRejectedValue(new Error('boom'))
+      const events = Array.from({ length: 501 }, (_, i) => ({
+        seq: i + 1,
+        phase: 'start' as const,
+        name: `task ${i + 1}`,
+      }))
+
+      await expect(
+        client.submitServerSetupProgress('cmd-1', events, 'agent-1'),
+      ).rejects.toThrow()
+
+      // 送信されたのは1チャンク目だけ（リトライぶんは同じ内容の再送）。
+      const sentSeqs = mockInstance.post.mock.calls.flatMap(
+        (call: unknown[]) =>
+          (call[1] as { events: { seq: number }[] }).events.map((e) => e.seq),
+      )
+      expect(sentSeqs).not.toContain(501)
+    })
+
+    it('should validate commandId format', async () => {
+      await expect(
+        client.submitServerSetupProgress(
+          '../evil',
+          [{ seq: 1, phase: 'start' as const, name: 'a' }],
+          'agent-1',
+        ),
+      ).rejects.toThrow('Invalid command ID format')
+    })
+
+    it('does not call the API when there are no events', async () => {
+      await client.submitServerSetupProgress('cmd-1', [], 'agent-1')
+
+      expect(mockInstance.post).not.toHaveBeenCalled()
+    })
+  })
+
   describe('submitLogChunk', () => {
     it('should submit log chunk with correct parameters', async () => {
       mockInstance.post.mockResolvedValue({ data: {} })

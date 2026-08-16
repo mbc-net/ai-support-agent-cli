@@ -56,6 +56,7 @@ import { load } from 'js-yaml'
 
 import {
   cleanupStaleServerSetupDirs,
+  executeServerSetupAnsible,
   fetchServerSetupVariables,
   generatePlaybook,
   parseAnsibleOutput,
@@ -107,13 +108,20 @@ const NO_VARIABLES: ServerSetupVariablesResponse = { variables: {}, secretNames:
 
 function makeClient(
   overrides: Partial<
-    Record<'getServerSetupSshCredential' | 'getServerSetupVariables' | 'getTenantCode', jest.Mock>
+    Record<
+      | 'getServerSetupSshCredential'
+      | 'getServerSetupVariables'
+      | 'getTenantCode'
+      | 'submitServerSetupProgress',
+      jest.Mock
+    >
   > = {},
 ): ApiClient {
   return {
     getServerSetupSshCredential: overrides.getServerSetupSshCredential ?? jest.fn().mockResolvedValue(CREDENTIAL),
     getServerSetupVariables: overrides.getServerSetupVariables ?? jest.fn().mockResolvedValue(NO_VARIABLES),
     getTenantCode: overrides.getTenantCode ?? jest.fn().mockReturnValue('acme'),
+    submitServerSetupProgress: overrides.submitServerSetupProgress ?? jest.fn().mockResolvedValue(undefined),
   } as unknown as ApiClient
 }
 
@@ -1853,5 +1861,308 @@ describe('cleanupStaleServerSetupDirs', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('EACCES: permission denied'),
     )
+  })
+})
+
+/**
+ * Mid-run progress reporting.
+ *
+ * `runAnsiblePlaybook` buffers stdout until the process exits, and the bundled
+ * `json` stdout callback only emits its document at the very end, so a run used
+ * to report nothing at all until it finished. The callback now also appends
+ * NDJSON events to a side file (see ansible/callback_plugins/json.py) which the
+ * runner tails and forwards to the API while ansible is still running.
+ *
+ * The tailer's polling behavior is covered in progress-tailer.spec.ts; what is
+ * asserted here is the wiring: the file is created inside the run's temp dir and
+ * handed to ansible, its events reach the API, secrets are redacted on the way,
+ * and a failure to deliver never affects the run's own result.
+ */
+describe('runServerSetup - mid-run progress', () => {
+  function progressFilePathFromLastRun(): string {
+    const [, , options] = mockExecFile.mock.calls[mockExecFile.mock.calls.length - 1]
+    const env = (options as { env: NodeJS.ProcessEnv }).env
+    return env.AI_SUPPORT_AGENT_PROGRESS_FILE as string
+  }
+
+  function writeProgress(events: Record<string, unknown>[]): void {
+    actualFs.appendFileSync(
+      progressFilePathFromLastRun(),
+      events.map((event) => JSON.stringify(event)).join('\n') + '\n',
+    )
+  }
+
+  const SECRET_BODY = `
+- name: Configure db password
+  ansible.builtin.lineinfile:
+    path: /etc/app.conf
+    line: "password={{ DB_PASSWORD }}"
+`
+
+  // What the callback writes to the progress file...
+  const START = { seq: 1, phase: 'start', name: 'os_init : Update apt cache' }
+  const END = {
+    seq: 2,
+    phase: 'end',
+    name: 'os_init : Update apt cache',
+    host: 'target',
+    result: { changed: true, failed: false, skipped: false },
+  }
+  // ...and what the agent sends on, mapped through the same `taskResultFrom`
+  // the authoritative per-task results use.
+  const SENT_START = { seq: 1, phase: 'start', name: 'os_init : Update apt cache' }
+  const SENT_END = {
+    seq: 2,
+    phase: 'end',
+    name: 'os_init : Update apt cache',
+    status: 'ok',
+    changed: true,
+    message: 'os_init : Update apt cache completed',
+  }
+
+  it('points ansible at a progress file inside the run temp dir', async () => {
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    const tmpDir = mockMkdtempSync.mock.results[0].value as string
+    expect(progressFilePathFromLastRun()).toBe(`${tmpDir}/progress.ndjson`)
+
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+  })
+
+  it('creates the progress file with 0600 before ansible starts', async () => {
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    // 失敗タスクの msg は送信時に redaction されるが、ファイル上には素のまま
+    // 書かれ得る。隣の extra-vars.json と同じ 0600 にそろえる（親ディレクトリが
+    // 0700 でも、多層防御として権限を明示する）。
+    const progressWrite = mockWriteFileSync.mock.calls.find((c) =>
+      String(c[0]).endsWith('progress.ndjson'),
+    )
+    expect(progressWrite?.[2]).toEqual({ mode: 0o600 })
+
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+  })
+
+  it('forwards progress events written during the run to the API', async () => {
+    const submitServerSetupProgress = jest.fn().mockResolvedValue(undefined)
+    const client = makeClient({ submitServerSetupProgress })
+    const runPromise = runServerSetup(makePayload(), {
+      commandId: 'cmd-1',
+      client,
+      agentId: 'agent-42',
+    })
+    await flushUntilExecFileCalled()
+
+    writeProgress([START, END])
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    expect(submitServerSetupProgress).toHaveBeenCalledWith(
+      'cmd-1',
+      [SENT_START, SENT_END],
+      'agent-42',
+    )
+  })
+
+  it('redacts secret values that leak into a progress message', async () => {
+    const submitServerSetupProgress = jest.fn().mockResolvedValue(undefined)
+    const client = makeClient({
+      submitServerSetupProgress,
+      getServerSetupVariables: jest.fn().mockResolvedValue({
+        variables: { DB_PASSWORD: 'sup3r-s3cr3t-value' },
+        secretNames: ['DB_PASSWORD'],
+      }),
+    })
+    const runPromise = runServerSetup(makePayload({ body: SECRET_BODY }), {
+      commandId: 'cmd-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+
+    writeProgress([
+      {
+        seq: 1,
+        phase: 'end',
+        name: 'Configure db password',
+        host: 'target',
+        result: {
+          changed: false,
+          failed: true,
+          skipped: false,
+          msg: 'leaked plaintext: sup3r-s3cr3t-value',
+        },
+      },
+    ])
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+
+    const sent = JSON.stringify(submitServerSetupProgress.mock.calls[0][1])
+    expect(sent).not.toContain('sup3r-s3cr3t-value')
+    expect(sent).toContain('***')
+  })
+
+  it('redacts a secret that leaks into a progress task name', async () => {
+    const submitServerSetupProgress = jest.fn().mockResolvedValue(undefined)
+    const client = makeClient({
+      submitServerSetupProgress,
+      getServerSetupVariables: jest.fn().mockResolvedValue({
+        variables: { DB_PASSWORD: 'sup3r-s3cr3t-value' },
+        secretNames: ['DB_PASSWORD'],
+      }),
+    })
+    const runPromise = runServerSetup(makePayload({ body: SECRET_BODY }), {
+      commandId: 'cmd-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+
+    writeProgress([
+      { seq: 1, phase: 'start', name: 'echo sup3r-s3cr3t-value' },
+    ])
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+
+    const sent = JSON.stringify(submitServerSetupProgress.mock.calls[0][1])
+    expect(sent).not.toContain('sup3r-s3cr3t-value')
+  })
+
+  it('truncates an over-long failure message to the API limit', async () => {
+    // API 側 DTO は message に @MaxLength(10000)。超えると ValidationPipe が
+    // バッチ全体を 400 で拒否し、tailer はオフセットを進めているため
+    // その区間の進捗が無言で消える。apt / シェル出力は容易に超える。
+    const submitServerSetupProgress = jest.fn().mockResolvedValue(undefined)
+    const client = makeClient({ submitServerSetupProgress })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    writeProgress([
+      {
+        seq: 1,
+        phase: 'end',
+        name: 'a : noisy',
+        host: 'target',
+        result: { changed: false, failed: true, skipped: false, msg: 'x'.repeat(20000) },
+      },
+    ])
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+
+    const sent = submitServerSetupProgress.mock.calls[0][1][0]
+    expect(sent.message.length).toBeLessThanOrEqual(10000)
+    // 切り捨てたことが分かるようにする（無言で消さない）。
+    expect(sent.message).toContain('truncated')
+  })
+
+  it('truncates an over-long task name to the API limit', async () => {
+    const submitServerSetupProgress = jest.fn().mockResolvedValue(undefined)
+    const client = makeClient({ submitServerSetupProgress })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    writeProgress([{ seq: 1, phase: 'start', name: 'n'.repeat(5000) }])
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+
+    const sent = submitServerSetupProgress.mock.calls[0][1][0]
+    expect(sent.name.length).toBeLessThanOrEqual(1000)
+  })
+
+  it('leaves a normal-length message untouched', async () => {
+    const submitServerSetupProgress = jest.fn().mockResolvedValue(undefined)
+    const client = makeClient({ submitServerSetupProgress })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    writeProgress([
+      {
+        seq: 1,
+        phase: 'end',
+        name: 'a : ok',
+        host: 'target',
+        result: { changed: false, failed: true, skipped: false, msg: 'permission denied' },
+      },
+    ])
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+
+    expect(submitServerSetupProgress.mock.calls[0][1][0].message).toBe(
+      'permission denied',
+    )
+  })
+
+  it('still succeeds when progress delivery fails', async () => {
+    const submitServerSetupProgress = jest
+      .fn()
+      .mockRejectedValue(new Error('network down'))
+    const client = makeClient({ submitServerSetupProgress })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    writeProgress([START, END])
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+
+    // Progress is a convenience channel; submitResult still carries the
+    // authoritative per-task results.
+    expect(result.success).toBe(true)
+    expect(submitServerSetupProgress).toHaveBeenCalled()
+  })
+
+  it('delivers progress written after the last poll when the run ends', async () => {
+    const submitServerSetupProgress = jest.fn().mockResolvedValue(undefined)
+    const client = makeClient({ submitServerSetupProgress })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    // Written immediately before the process exits, i.e. between two polls.
+    writeProgress([END])
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+
+    expect(submitServerSetupProgress).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports progress for a failed run too', async () => {
+    const submitServerSetupProgress = jest.fn().mockResolvedValue(undefined)
+    const client = makeClient({ submitServerSetupProgress })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    writeProgress([START])
+    resolveExecFile(2, defaultOutput(), 'fatal!')
+    const result = await runPromise
+
+    expect(result.success).toBe(false)
+    expect(submitServerSetupProgress).toHaveBeenCalledWith('cmd-1', [SENT_START], '')
+  })
+
+  it('does not write a progress file when no progress sink is wired (local dev run)', async () => {
+    const client = makeClient()
+    const runPromise = executeServerSetupAnsible({
+      executionId: 'exec-1',
+      body: makePayload().body,
+      mode: 'resident',
+      credential: CREDENTIAL,
+      variables: {},
+      secretNames: [],
+      tenantCode: 'acme',
+      sshHostId: 'host-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+
+    const [, , options] = mockExecFile.mock.calls[0]
+    const env = (options as { env: NodeJS.ProcessEnv }).env
+    expect(env.AI_SUPPORT_AGENT_PROGRESS_FILE).toBeUndefined()
+
+    resolveExecFile(0, defaultOutput())
+    await runPromise
   })
 })
