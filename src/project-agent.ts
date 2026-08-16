@@ -928,7 +928,7 @@ export class ProjectAgent {
    * apart across repeated retry cycles instead of staying synchronized.
    */
   private jitteredStandbyRetryDelay(): number {
-    return Math.round(REPLICA_STANDBY_RETRY_DELAY_MS * (0.5 + Math.random() * 0.5))
+    return calculateBackoff({ baseDelayMs: REPLICA_STANDBY_RETRY_DELAY_MS, attempt: 0 })
   }
 
   /**

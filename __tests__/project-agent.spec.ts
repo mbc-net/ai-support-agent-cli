@@ -1,6 +1,11 @@
 import { ApiClient } from '../src/api-client'
 import { AppSyncSubscriber } from '../src/appsync-subscriber'
-import { CONFIG_SYNC_DEBOUNCE_MS, SHUTDOWN_DRAIN_POLL_INTERVAL_MS, SHUTDOWN_DRAIN_TIMEOUT_MS } from '../src/constants'
+import {
+  CONFIG_SYNC_DEBOUNCE_MS,
+  REPLICA_STANDBY_RETRY_DELAY_MS,
+  SHUTDOWN_DRAIN_POLL_INTERVAL_MS,
+  SHUTDOWN_DRAIN_TIMEOUT_MS,
+} from '../src/constants'
 import { writeAwsConfig } from '../src/aws-profile'
 import { executeCommand } from '../src/commands'
 import { logger } from '../src/logger'
@@ -656,8 +661,9 @@ describe('ProjectAgent', () => {
           agent.start()
           await jest.advanceTimersByTimeAsync(100)
 
-          // REPLICA_STANDBY_RETRY_DELAY_MS(30000) * (0.5 + 0 * 0.5) = 15000
-          const standbyWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === 15_000)
+          // REPLICA_STANDBY_RETRY_DELAY_MS * (0.5 + 0 * 0.5) = the [0.5x] minimum bound
+          const minJitteredDelay = Math.round(REPLICA_STANDBY_RETRY_DELAY_MS * 0.5)
+          const standbyWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === minJitteredDelay)
           expect(standbyWaitCall).toBeDefined()
 
           agent.stop()
@@ -672,11 +678,12 @@ describe('ProjectAgent', () => {
           agent.start()
           await jest.advanceTimersByTimeAsync(100)
 
-          // REPLICA_STANDBY_RETRY_DELAY_MS(30000) * (0.5 + 0.999 * 0.5) = 29985,
-          // i.e. close to but never exceeding the 30000ms reference constant.
-          const standbyWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === 29_985)
+          // REPLICA_STANDBY_RETRY_DELAY_MS * (0.5 + 0.999 * 0.5), i.e. close to but
+          // never exceeding the reference constant itself.
+          const maxJitteredDelay = Math.round(REPLICA_STANDBY_RETRY_DELAY_MS * (0.5 + 0.999 * 0.5))
+          const standbyWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === maxJitteredDelay)
           expect(standbyWaitCall).toBeDefined()
-          expect(standbyWaitCall?.[1]).toBeLessThanOrEqual(30_000)
+          expect(standbyWaitCall?.[1]).toBeLessThanOrEqual(REPLICA_STANDBY_RETRY_DELAY_MS)
 
           agent.stop()
         })
@@ -698,9 +705,9 @@ describe('ProjectAgent', () => {
           await jest.advanceTimersByTimeAsync(100)
           expect(mockSubscriber.connect).toHaveBeenCalled()
 
-          // Same minimum-bound value as the standby-retry jitter test above:
-          // 30000 * (0.5 + 0 * 0.5) = 15000.
-          const restartWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === 15_000)
+          // Same minimum-bound value as the standby-retry jitter test above.
+          const minJitteredDelay = Math.round(REPLICA_STANDBY_RETRY_DELAY_MS * 0.5)
+          const restartWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === minJitteredDelay)
           expect(restartWaitCall).toBeDefined()
 
           agent.stop()
