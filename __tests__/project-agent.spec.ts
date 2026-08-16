@@ -641,6 +641,71 @@ describe('ProjectAgent', () => {
 
         agent.stop()
       })
+
+      // Phase 4 of the replica scaling plan: jitter the standby retry poll so
+      // dozens of replicas that start at roughly the same time (rolling
+      // restart / mass deployment) don't all poll the admission lock in
+      // lockstep every 30s.
+      describe('standby retry jitter', () => {
+        it('jitters the standby retry delay to the minimum bound ([0.5x]) when Math.random returns 0', async () => {
+          jest.spyOn(global.Math, 'random').mockReturnValue(0)
+          mockClient.register.mockResolvedValue(rejected)
+          const setTimeoutSpy = jest.spyOn(global, 'setTimeout')
+
+          const agent = new ProjectAgent(project, 'agent-1', options)
+          agent.start()
+          await jest.advanceTimersByTimeAsync(100)
+
+          // REPLICA_STANDBY_RETRY_DELAY_MS(30000) * (0.5 + 0 * 0.5) = 15000
+          const standbyWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === 15_000)
+          expect(standbyWaitCall).toBeDefined()
+
+          agent.stop()
+        })
+
+        it('jitters the standby retry delay near the maximum bound ([1x]) when Math.random returns close to 1', async () => {
+          jest.spyOn(global.Math, 'random').mockReturnValue(0.999)
+          mockClient.register.mockResolvedValue(rejected)
+          const setTimeoutSpy = jest.spyOn(global, 'setTimeout')
+
+          const agent = new ProjectAgent(project, 'agent-1', options)
+          agent.start()
+          await jest.advanceTimersByTimeAsync(100)
+
+          // REPLICA_STANDBY_RETRY_DELAY_MS(30000) * (0.5 + 0.999 * 0.5) = 29985,
+          // i.e. close to but never exceeding the 30000ms reference constant.
+          const standbyWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === 29_985)
+          expect(standbyWaitCall).toBeDefined()
+          expect(standbyWaitCall?.[1]).toBeLessThanOrEqual(30_000)
+
+          agent.stop()
+        })
+
+        it('applies the same jitter to the post-eviction standby re-entry delay', async () => {
+          jest.spyOn(global.Math, 'random').mockReturnValue(0)
+          mockClient.register.mockResolvedValue(accepted)
+          // startHeartbeat() sends its first heartbeat immediately (not only on
+          // the interval), so evicting on the very first call is enough to
+          // exercise handleEviction() -> restartRegisterLoop() within the
+          // initial advance below — no need to wait a full heartbeatInterval.
+          mockClient.heartbeat
+            .mockResolvedValueOnce({ success: true, evicted: true })
+            .mockResolvedValue({ success: true })
+          const setTimeoutSpy = jest.spyOn(global, 'setTimeout')
+
+          const agent = new ProjectAgent(project, 'agent-1', options)
+          agent.start()
+          await jest.advanceTimersByTimeAsync(100)
+          expect(mockSubscriber.connect).toHaveBeenCalled()
+
+          // Same minimum-bound value as the standby-retry jitter test above:
+          // 30000 * (0.5 + 0 * 0.5) = 15000.
+          const restartWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === 15_000)
+          expect(restartWaitCall).toBeDefined()
+
+          agent.stop()
+        })
+      })
     })
 
     it('should retry indefinitely on registration failure with exponential backoff', async () => {

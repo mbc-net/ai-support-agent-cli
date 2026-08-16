@@ -912,7 +912,23 @@ export class ProjectAgent {
     if (this.registerLoopCancelled) {
       return Promise.resolve()
     }
-    return this.waitInterruptible(REPLICA_STANDBY_RETRY_DELAY_MS)
+    return this.waitInterruptible(this.jitteredStandbyRetryDelay())
+  }
+
+  /**
+   * Jittered variant of REPLICA_STANDBY_RETRY_DELAY_MS: uniformly distributed
+   * in [0.5x, 1x] of the constant (same "equal jitter" shape as
+   * `calculateBackoff()` in retry-strategy.ts, applied here to a flat retry
+   * interval rather than a growing exponential backoff).
+   *
+   * Dozens of replicas that start (and get rejected) at roughly the same
+   * moment — a Kubernetes rolling restart or mass deployment — would
+   * otherwise all poll the server's admission lock in lockstep every 30s.
+   * Jittering each replica's own next wait independently means they drift
+   * apart across repeated retry cycles instead of staying synchronized.
+   */
+  private jitteredStandbyRetryDelay(): number {
+    return Math.round(REPLICA_STANDBY_RETRY_DELAY_MS * (0.5 + Math.random() * 0.5))
   }
 
   /**
@@ -974,8 +990,10 @@ export class ProjectAgent {
     // replica holds the slot, so an immediate retry cannot succeed anyway —
     // and without a delay a server that keeps reporting `evicted` would spin
     // the agent hot (register → immediate first heartbeat → evicted → …) with
-    // no pause between iterations.
-    this.restartRegisterLoop(REPLICA_STANDBY_RETRY_DELAY_MS)
+    // no pause between iterations. Jittered (see jitteredStandbyRetryDelay())
+    // so a batch of replicas evicted together by a wave of newer registrations
+    // does not all retry admission in lockstep.
+    this.restartRegisterLoop(this.jitteredStandbyRetryDelay())
   }
 
   /**
