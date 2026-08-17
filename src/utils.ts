@@ -146,6 +146,55 @@ export function axiosResponseStatus(error: unknown): number | undefined {
   return axios.isAxiosError(error) ? error.response?.status : undefined
 }
 
+/** `stringifyForMessage` が返す文字列の最大長（超過分は truncateString で切り詰める）。 */
+const MESSAGE_VALUE_MAX_LENGTH = 500
+
+/**
+ * 任意の値を、ユーザー向けメッセージ／ログに埋め込める文字列へ変換する。
+ *
+ * テンプレートリテラルへオブジェクトをそのまま埋めると `[object Object]` に
+ * なってしまい、サーバーが構造化ボディ（バリデーションエラーの配列等）を返した
+ * ときにメッセージが無意味になる。この関数はその防止を一箇所に集約する。
+ *
+ * - 文字列はそのまま返す（既存の出力を一切変えないための後方互換）
+ * - それ以外は `JSON.stringify` で可読化し、`MESSAGE_VALUE_MAX_LENGTH` で切り詰める
+ * - 循環参照は `[Circular]` に置換して例外にしない。`JSON.stringify` 自体が
+ *   投げるケース（BigInt・throw する toJSON 等）も握って `String()` に退避する
+ *
+ * 既知の制限: 訪問済みノードを WeakSet で記録するため、循環していない「同じ
+ * オブジェクトが複数箇所に現れる」共有参照も、2 回目以降は `[Circular]` になる。
+ * 現在の呼び出し元は受信 JSON を `JSON.parse` した値のみで、`JSON.parse` は
+ * 共有参照を作らないため実際には発現しない。プロセス内で組み立てた値に対して
+ * 使う場合はこの欠落に注意すること（診断テキスト専用であり、データの復元用途に
+ * 使う関数ではない）。
+ */
+export function stringifyForMessage(value: unknown): string {
+  if (typeof value === 'string') return value
+
+  let text: string
+  try {
+    const seen = new WeakSet<object>()
+    text = JSON.stringify(value, (_key, val: unknown) => {
+      if (typeof val === 'object' && val !== null) {
+        if (seen.has(val)) return '[Circular]'
+        seen.add(val)
+      }
+      return val
+    }) ?? String(value)
+  } catch {
+    // BigInt や throw する toJSON など、JSON 化できない値のフォールバック。
+    // String() 自体が投げる／`[object Object]` になる場合は諦めてプレースホルダを返す。
+    try {
+      const fallback = String(value)
+      text = fallback === '[object Object]' ? '[unserializable value]' : fallback
+    } catch {
+      text = '[unserializable value]'
+    }
+  }
+
+  return truncateString(text, MESSAGE_VALUE_MAX_LENGTH)
+}
+
 /**
  * エラーから詳細なメッセージを抽出する。
  * AxiosError の場合はレスポンスボディの message/error フィールドとHTTPステータスコードを含める。
@@ -159,7 +208,7 @@ export function getErrorMessage(error: unknown): string {
     if (data) {
       const serverMessage = data.message ?? data.error
       if (serverMessage) {
-        return `[${status}] ${serverMessage}`
+        return `[${status}] ${stringifyForMessage(serverMessage)}`
       }
     }
 

@@ -23,6 +23,28 @@ ai_support_agent_k8s_persistence: false
 ai_support_agent_k8s_storage_class: longhorn
 ai_support_agent_k8s_storage_size: 20Gi
 
+# Pod 終了時の猶予（秒）。SIGTERM を受けたエージェントは実行中コマンドの drain
+# （SHUTDOWN_DRAIN_TIMEOUT_MS = 300 秒）を待ってからレプリカ枠を release する。
+# **明示しないと Kubernetes の既定 30 秒**で SIGKILL され、drain の途中で殺されて
+# 実行中コマンドを見捨てたまま枠が残り、サーバーが別レプリカへ再割当して二重実行する。
+#
+# 値は同じエージェントを配置する別経路と揃える: src/manifest/manifest-generator.ts の
+# TERMINATION_GRACE_PERIOD_SECONDS（= src/constants.ts の SHUTDOWN_GRACE_PERIOD_SECONDS、
+# drain 300 秒 + release と終了処理のための 20 秒）。片方だけ変えると
+# __tests__/server-setup/ai-support-agent-k8s-role.spec.ts が失敗する。
+ai_support_agent_k8s_termination_grace_period_seconds: 320
+
+# 実行中のエージェント自身の instance id。runner（src/server-setup/server-setup-runner.ts の
+# SELF_INSTANCE_ID_VAR）が extra-vars で渡す**予約変数**であり、レシピ側から指定する
+# ものではない（指定しても runner の値が必ず優先される）。
+#
+# StatefulSet の Pod 名は `<StatefulSet名>-<序数>` なので、ロールはこの値を
+# `^<item.name>-[0-9]+$`（vars/main.yml の ai_support_agent_k8s_item_is_self）と
+# 突き合わせて「このエントリは自分自身か」を判定する。序数まで検証するのは、単なる
+# 前方一致だと名前が接頭辞で重なる別プロジェクト（例: `agent` と `agent-canary`）を
+# 取り違えるため。既定の空文字は「自己ターゲットではない」（K8s 以外の実行経路）を意味する。
+ai_support_agent_k8s_self_instance_id: ''
+
 # エージェントのデータディレクトリ。永続ボリュームのマウント先であり、同時に
 # AI_SUPPORT_AGENT_CONFIG_DIR としてコンテナへ渡す。
 #

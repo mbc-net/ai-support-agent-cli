@@ -80,7 +80,11 @@ import {
   warnIfSecretsUnmasked,
   type ServerSetupLocalRunOptions,
 } from '../../src/server-setup/server-setup-local-run'
-import { executeServerSetupAnsible, SUDO_PROBE_REGISTER_VAR } from '../../src/server-setup/server-setup-runner'
+import {
+  executeServerSetupAnsible,
+  SELF_INSTANCE_ID_VAR,
+  SUDO_PROBE_REGISTER_VAR,
+} from '../../src/server-setup/server-setup-runner'
 import type { SshExecCredential } from '../../src/types'
 
 const KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE-KEY-MATERIAL\n-----END OPENSSH PRIVATE KEY-----\n'
@@ -395,7 +399,11 @@ describe('runServerSetupLocalRun - success path', () => {
 
     const extraVars = writtenFile('extra-vars.json')
     expect(extraVars).toBeDefined()
-    expect(JSON.parse(extraVars as string)).toEqual({ FOO: 'bar' })
+    // ロール向けの予約変数（実行中エージェント自身の instance id）は常に添えられる。
+    expect(JSON.parse(extraVars as string)).toEqual({
+      FOO: 'bar',
+      [SELF_INSTANCE_ID_VAR]: expect.any(String),
+    })
   })
 
   it('defaults extra-vars.json to {} when no extra-vars file is given', async () => {
@@ -404,7 +412,9 @@ describe('runServerSetupLocalRun - success path', () => {
     resolveExecFile(0, defaultOutput())
     await runPromise
 
-    expect(JSON.parse(writtenFile('extra-vars.json') as string)).toEqual({})
+    expect(JSON.parse(writtenFile('extra-vars.json') as string)).toEqual({
+      [SELF_INSTANCE_ID_VAR]: expect.any(String),
+    })
   })
 
   it('redacts secret variable values (from secretNames) out of the ansible output', async () => {

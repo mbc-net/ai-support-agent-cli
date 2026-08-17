@@ -47,6 +47,8 @@ jest.mock('../src/agent-config-sync', () => ({
 jest.mock('../src/utils', () => ({
   getErrorMessage: jest.fn((e: Error) => e.message),
   isAuthenticationError: jest.fn(() => false),
+  // Message formatting is pure and asserted on, so keep the real implementation.
+  stringifyForMessage: jest.requireActual('../src/utils').stringifyForMessage,
 }))
 
 jest.mock('../src/project-dir', () => ({
@@ -2353,6 +2355,41 @@ describe('handleNotification: null content branch (line 201)', () => {
       const infoCalls = (logger.info as jest.Mock).mock.calls.map((c: unknown[]) => String(c[0]))
       expect(infoCalls.some((m: string) => m.includes('alarm: unknown'))).toBe(true)
       expect(mockProcessAlert).toHaveBeenCalledWith('AL000999')
+    } finally {
+      AlertProcessorModule.AlertProcessor = originalClass
+    }
+  })
+
+  it('should not log [object Object] when alarmName is a structured value', async () => {
+    const { logger } = require('../src/logger')
+    const AlertProcessorModule = require('../src/alert-processor')
+    const originalClass = AlertProcessorModule.AlertProcessor
+    const mockProcessAlert = jest.fn().mockResolvedValue(undefined)
+    AlertProcessorModule.AlertProcessor = jest.fn().mockImplementation(() => ({
+      processAlert: mockProcessAlert,
+      checkPendingAlerts: jest.fn().mockResolvedValue(undefined),
+    }))
+
+    try {
+      const deps = createMockDeps()
+      const state = createMockState()
+      const ctx = makeCtx(state)
+
+      await handleNotification(deps, state, ctx, {
+        id: 'n6', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+        action: NOTIFICATION_ACTION.ALERT_CREATED,
+        content: {
+          projectCode: 'TEST_PROJ',
+          alertNumber: 'AL000998',
+          alarmName: { name: 'CPUHigh', namespace: 'AWS/EC2' },
+        },
+      })
+
+      const infoCalls = (logger.info as jest.Mock).mock.calls.map((c: unknown[]) => String(c[0]))
+      const alertLog = infoCalls.find((m: string) => m.includes('Alert received: AL000998'))
+      expect(alertLog).toBeDefined()
+      expect(alertLog).not.toContain('[object Object]')
+      expect(alertLog).toContain('CPUHigh')
     } finally {
       AlertProcessorModule.AlertProcessor = originalClass
     }

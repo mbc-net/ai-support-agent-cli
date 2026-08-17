@@ -262,3 +262,38 @@
   loop: "{{ ai_support_agent_k8s_project_specs }}"
   loop_control:
     label: "{{ item.name | default('(unnamed)') }}"
+
+# ここから下は「このプレイを実行しているエージェント自身」の配置。
+#
+# レシピが自分自身を配置対象に含む構成は正当だが、ループの途中で自 Pod を作り直す
+# 操作を行うと Ansible ごと死ぬ。実機（MBC 社内 k3s）では1番目のエントリが自分自身
+# だったため、2番目以降のプロジェクトが配置されないままサーバー側の実行が running の
+# まま滞留した。
+#
+# 「自 Pod を作り直す操作」は `rollout restart` だけではない。StatefulSet の既定
+# updateStrategy は RollingUpdate なので、`.spec.template` を変えたマニフェストの
+# `kubectl apply` も同じ結果になる。そこで自己ターゲットに対する spec 変更操作は
+# apply も含めてまとめてここまで持ち越し、他のプロジェクトの配置が全て終わってから
+# tasks/self.yml で実行する。
+- name: "ai_support_agent_k8s : Report that deploying this agent ends the run without a result"
+  # 自 Pod が置き換わると、この実行の結果はサーバーへ報告されない（プロセスが消えるため
+  # 原理的に不可能）。エラーではなく意図された動作なので、fail ではなく debug で残す。
+  ansible.builtin.debug:
+    msg: >-
+      Deploying the agent that is executing this play
+      ({{ ai_support_agent_k8s_pending_self_targets | default([]) | map(attribute='name') | join(', ') }}).
+      Applying its StatefulSet, or restarting it for a rotated token, makes
+      Kubernetes replace this Pod, so this run terminates without reporting a
+      result and the execution stays "running" until it is released with "Stop
+      execution" in the admin UI (or reclaimed by the server-side watchdog).
+      Every other project in this recipe has already been deployed. This is the
+      intended behavior, not a failure.
+  when: ai_support_agent_k8s_pending_self_targets | default([]) | length > 0
+
+- name: "ai_support_agent_k8s : Deploy the agent that is running this play (deferred)"
+  # 完了待ち（rollout status）は行わない/行えない。Pod の置き換えが受理された時点で
+  # このプロセスは終了に向かうため、待つ相手が自分自身になる（tasks/self.yml 参照）。
+  ansible.builtin.include_tasks: self.yml
+  loop: "{{ ai_support_agent_k8s_pending_self_targets | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default('(unnamed)') }}"

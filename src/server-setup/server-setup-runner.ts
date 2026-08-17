@@ -39,6 +39,7 @@ import {
   TAILSCALE_SOCKS_PORT,
 } from '../constants'
 import { logger } from '../logger'
+import { resolveInstanceId } from '../replica-identity'
 import {
   type CommandResult,
   errorResult,
@@ -207,6 +208,29 @@ const SUDO_PRECHECK_ASSERT_TASK: Record<string, unknown> = {
   become: false,
   tags: 'always',
 }
+
+/**
+ * Reserved extra-var carrying **this agent process's** replica instance id
+ * (`resolveInstanceId()`: `AI_SUPPORT_AGENT_INSTANCE_ID`, else `HOSTNAME`).
+ *
+ * The `ai_support_agent_k8s` bundled role deploys agents as StatefulSets, and a
+ * recipe may legitimately include the very agent that is executing it. Since a
+ * StatefulSet Pod is named `<StatefulSet name>-<ordinal>`, the role compares
+ * this value against each entry's `name` to recognize "this project is myself"
+ * and defers its own `kubectl rollout restart` until every other project has
+ * been deployed. Without it, the first self-targeting entry restarts this Pod
+ * mid-run: the ansible process dies with the container, the remaining projects
+ * are never deployed, and the server-side execution stays `running` because
+ * nothing is left alive to report a result (observed on the MBC k3s cluster).
+ *
+ * Written to `extra-vars.json` **after** the tenant's project (`ANSIBLE#`)
+ * variables, exactly like {@link SHARED_FILE_STAGING_DIR_VAR}: extra-vars
+ * outrank every other Ansible precedence level, so key order inside the file is
+ * the whole game — a project variable of this name must not be able to make the
+ * role believe it is looking at a different agent (which would re-enable the
+ * kill-yourself-first behavior this defends against).
+ */
+export const SELF_INSTANCE_ID_VAR = 'ai_support_agent_k8s_self_instance_id'
 
 export interface RunServerSetupContext {
   commandId: string
@@ -559,6 +583,15 @@ interface AnsibleRunResult {
   /** True when the process was killed for exceeding `ANSIBLE_TIMEOUT_MS`. */
   timedOut: boolean
   /**
+   * True when the process was killed through the `ProcessManager` (a
+   * `server_setup_cancel` stop request), as opposed to `execFile`'s own
+   * `timeout`. Node reports **both** cases as `err.killed === true`, so this
+   * flag — set by the cancel callback itself — is the only way to tell them
+   * apart; without it a stop request three seconds into a run was reported to
+   * the server as "execution timed out after 1800s".
+   */
+  cancelled: boolean
+  /**
    * Set when `ansible-playbook` itself could not be started (e.g. `ENOENT` if
    * the binary is missing, `EACCES` if it isn't executable) — as opposed to
    * starting and exiting non-zero.
@@ -594,6 +627,11 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: 
   const uid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_UID])
   const gid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_GID])
   return new Promise((resolve) => {
+    // Set by the `cancel` callback registered below (a `server_setup_cancel`
+    // stop request). Read from the execFile callback's closure to distinguish an
+    // operator-requested abort from execFile's own `timeout` firing, which Node
+    // reports identically (`killed: true` + the kill signal).
+    let cancelRequested = false
     const child = execFile(
       'ansible-playbook',
       args,
@@ -610,32 +648,47 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: 
         const stderrStr = stderr ? stderr.toString() : ''
 
         if (!error) {
-          resolve({ code: 0, stdout: stdoutStr, stderr: stderrStr, timedOut: false, spawnError: null })
+          // The playbook ran to completion. Even if a cancel arrived late, the
+          // run did succeed — reporting it as cancelled would be as untrue as
+          // the timeout message this flag exists to prevent.
+          resolve({ code: 0, stdout: stdoutStr, stderr: stderrStr, timedOut: false, cancelled: false, spawnError: null })
           return
         }
 
         const err = error as NodeJS.ErrnoException & { code?: unknown; killed?: boolean; signal?: NodeJS.Signals | null }
         // Node sets `killed: true` (with the `killSignal`, SIGTERM by default)
-        // when execFile's own `timeout` option fires.
-        const timedOut = err.killed === true
+        // both when execFile's own `timeout` option fires and when the cancel
+        // callback below kills the child. Cancellation wins when both could
+        // apply: the operator explicitly asked for the run to stop, and
+        // reporting a 30-minute timeout for a run they stopped after three
+        // seconds sends the server (and the audit trail) a false reason.
+        const cancelled = cancelRequested
+        const timedOut = !cancelled && err.killed === true
         const numericCode = typeof err.code === 'number' ? err.code : null
         // A non-numeric `code` (e.g. the string 'ENOENT'/'EACCES') combined
         // with no captured output at all means execFile failed to spawn the
         // process — as opposed to the process starting and exiting non-zero.
-        const spawnError = !timedOut && numericCode === null && !stdoutStr && !stderrStr ? getErrorMessage(error) : null
+        const spawnError =
+          !timedOut && !cancelled && numericCode === null && !stdoutStr && !stderrStr
+            ? getErrorMessage(error)
+            : null
 
         resolve({
           code: numericCode ?? 1,
           stdout: stdoutStr,
           stderr: stderrStr,
           timedOut,
+          cancelled,
           spawnError,
         })
       },
     )
     if (commandId) {
       getProcessManager().register(commandId, {
-        cancel: () => child.kill('SIGTERM'),
+        cancel: () => {
+          cancelRequested = true
+          child.kill('SIGTERM')
+        },
       })
     }
   })
@@ -1017,14 +1070,17 @@ export async function executeServerSetupAnsible(
       // 0600: extra-vars.json may carry ANSIBLE# project secret values in
       // plaintext — same permission level as the private key alongside it.
       //
-      // The staging directory is written **after** the project variables so a
-      // tenant variable of the same name cannot redirect the role at another
+      // The reserved variables below are written **after** the project variables
+      // so a tenant variable of the same name cannot redirect the staging
       // directory (which would turn shared-file distribution into "copy any
-      // controller-side path").
+      // controller-side path") nor misreport this agent's own instance id (which
+      // would let a recipe re-enable the self-restart-mid-run failure — see
+      // SELF_INSTANCE_ID_VAR).
       writeFileSync(
         extraVarsPath,
         JSON.stringify({
           ...variables,
+          [SELF_INSTANCE_ID_VAR]: resolveInstanceId(),
           ...(sharedFileStagingDir
             ? { [SHARED_FILE_STAGING_DIR_VAR]: sharedFileStagingDir }
             : {}),
@@ -1152,12 +1208,20 @@ export async function executeServerSetupAnsible(
         // last poll and its exit, so the final tasks are still reported.
         await progressTailer?.stop()
       }
-      const { code, stdout: rawStdout, stderr: rawStderr, timedOut, spawnError } = runOutcome
+      const { code, stdout: rawStdout, stderr: rawStderr, timedOut, cancelled, spawnError } = runOutcome
 
       // Redaction applied to the raw stdout/stderr *before* anything else
       // reads them (see secretValues above).
       const stdout = redactSecretValues(rawStdout, secretValues)
       const stderr = redactSecretValues(rawStderr, secretValues)
+
+      // Checked before `timedOut` (which `runAnsiblePlaybook` already suppresses
+      // for a cancelled run) so an operator-requested stop is never reported as
+      // the 30-minute hard timeout.
+      if (cancelled) {
+        logger.info(`[server-setup] ansible-playbook was cancelled on request: executionId=${executionId}`)
+        return errorResult('ansible-playbook execution was cancelled by a stop request')
+      }
 
       if (timedOut) {
         logger.error(
