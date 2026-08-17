@@ -27,7 +27,7 @@ describe('isSafeMountDestination', () => {
   const configDir = '/data/.ai-support-agent'
 
   it.each([
-    '/root/.codex/auth.json',
+    '/root/.config/app/creds.json',
     '/opt/app/config.yaml',
     '/data/app/settings.json',
     '/usr/local/share/ca-certificates/corp.crt',
@@ -52,7 +52,7 @@ describe('isSafeMountDestination', () => {
     },
   )
 
-  it.each(['', 'relative/path.txt', '/', '/root/.codex/', '/root/../etc/passwd'])(
+  it.each(['', 'relative/path.txt', '/', '/root/.config/', '/root/../etc/passwd'])(
     '不正なパスは拒否する: %s',
     (dest) => {
       expect(isSafeMountDestination(dest, configDir)).toBe(false)
@@ -123,10 +123,10 @@ describe('applySharedFileMounts', () => {
   })
 
   it('設定に従ってファイルを配置する', async () => {
-    const dest = path.join(tmpDir, 'root/.codex/auth.json')
+    const dest = path.join(tmpDir, 'root/.config/app/creds.json')
 
     const results = await applySharedFileMounts(
-      [{ sourcePath: 'codex/auth.json', destPath: dest }],
+      [{ sourcePath: 'app/creds.json', destPath: dest }],
       deps(),
     )
 
