@@ -21,6 +21,16 @@ const { writePidFile, removePidFile, readPidFile, isProcessAlive, getPidFilePath
 import { stopAgent } from '../src/commands/stop-agent'
 import { logger } from '../src/logger'
 
+/** pid-manager 内部と同じ式で現在の起動世代マーカーを計算する */
+function currentGeneration(): number {
+  return Math.round(Date.now() / 1000 - process.uptime())
+}
+
+/** 現在のホストが書いたことになる pidファイル内容を組み立てる */
+function ownHostEntry(pid: number, generation: number = currentGeneration()): string {
+  return `${os.hostname()}:${pid}:${generation}`
+}
+
 describe('pid-manager', () => {
   beforeEach(() => {
     if (fs.existsSync(TEST_CONFIG_DIR)) {
@@ -139,7 +149,7 @@ describe('stopAgent', () => {
     const targetPid = child.pid!
 
     fs.mkdirSync(TEST_CONFIG_DIR, { recursive: true })
-    fs.writeFileSync(getPidFilePath(), String(targetPid), 'utf-8')
+    fs.writeFileSync(getPidFilePath(), ownHostEntry(targetPid), 'utf-8')
 
     await stopAgent()
 
@@ -147,23 +157,95 @@ describe('stopAgent', () => {
     expect((logger.success as jest.Mock).mock.calls.length).toBeGreaterThan(0)
   })
 
-  it('should log error when process.kill throws', async () => {
-    // Write own pid so isProcessAlive returns true
+  it('should not signal a pid recorded by a different hostname', async () => {
     fs.mkdirSync(TEST_CONFIG_DIR, { recursive: true })
-    fs.writeFileSync(getPidFilePath(), String(process.pid), 'utf-8')
+    // 別ホスト（別コンテナ）が書いた記録。pid 番号は「このホストで生存している」
+    // プロセス（自分自身）を指しているが、kill してはいけない。
+    fs.writeFileSync(
+      getPidFilePath(),
+      `other-host:${process.pid}:${currentGeneration()}`,
+      'utf-8',
+    )
 
-    // Mock isProcessAlive to return true, then mock process.kill via Object.defineProperty
-    jest.spyOn(pidManager, 'isProcessAlive').mockReturnValueOnce(true)
     const originalKill = process.kill.bind(process)
-    const killSpy = jest.fn().mockImplementationOnce(() => { throw 'EPERM string error' })
+    const signals: Array<NodeJS.Signals | number | undefined> = []
+    const killSpy = jest.fn((pid: number, signal?: NodeJS.Signals | number) => {
+      signals.push(signal)
+      // 存在チェック(signal 0)だけは実行し、実シグナルは配送しない
+      if (signal === 0) return originalKill(pid, 0)
+      return true
+    })
+    Object.defineProperty(process, 'kill', { value: killSpy, configurable: true })
+    try {
+      await stopAgent()
+    } finally {
+      Object.defineProperty(process, 'kill', { value: originalKill, configurable: true })
+    }
+
+    expect(signals.filter((s) => s !== 0)).toHaveLength(0)
+    expect((logger.warn as jest.Mock).mock.calls.length).toBeGreaterThan(0)
+  })
+
+  it('should not signal a pid recorded by a previous generation of our own process', async () => {
+    fs.mkdirSync(TEST_CONFIG_DIR, { recursive: true })
+    fs.writeFileSync(getPidFilePath(), ownHostEntry(process.pid, currentGeneration() - 3600), 'utf-8')
+
+    const originalKill = process.kill.bind(process)
+    const signals: Array<NodeJS.Signals | number | undefined> = []
+    const killSpy = jest.fn((pid: number, signal?: NodeJS.Signals | number) => {
+      signals.push(signal)
+      if (signal === 0) return originalKill(pid, 0)
+      return true
+    })
+    Object.defineProperty(process, 'kill', { value: killSpy, configurable: true })
+    try {
+      await stopAgent()
+    } finally {
+      Object.defineProperty(process, 'kill', { value: originalKill, configurable: true })
+    }
+
+    expect(signals.filter((s) => s !== 0)).toHaveLength(0)
+    expect((logger.warn as jest.Mock).mock.calls.length).toBeGreaterThan(0)
+  })
+
+  it('should log error when process.kill throws', async () => {
+    // The entry must point at a pid **other than our own** so that
+    // isEntryRunning() actually reaches isProcessAlive(); an entry holding our
+    // own pid short-circuits on the generation marker and never probes the
+    // process at all. Spawn a real child so the liveness probe is genuine.
+    const { spawn } = await import('child_process')
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)'], {
+      detached: true,
+      stdio: 'ignore',
+    })
+    child.unref()
+    const targetPid = child.pid!
+
+    fs.mkdirSync(TEST_CONFIG_DIR, { recursive: true })
+    fs.writeFileSync(getPidFilePath(), ownHostEntry(targetPid), 'utf-8')
+
+    // Let the liveness probe (signal 0, issued from isProcessAlive) through so
+    // the real code path runs, and make only the SIGTERM delivery throw.
+    const originalKill = process.kill.bind(process)
+    const signals: Array<NodeJS.Signals | number | undefined> = []
+    const killSpy = jest.fn((pid: number, signal?: NodeJS.Signals | number) => {
+      signals.push(signal)
+      if (signal === 0) return originalKill(pid, 0)
+      throw 'EPERM string error'
+    })
     Object.defineProperty(process, 'kill', { value: killSpy, configurable: true })
     try {
       await stopAgent()
     } finally {
       Object.defineProperty(process, 'kill', { value: originalKill, configurable: true })
       jest.restoreAllMocks()
+      try { process.kill(targetPid, 'SIGKILL') } catch { /* ignore */ }
     }
 
+    // Proof that the intended route was taken: the liveness probe ran against
+    // the foreign pid, and SIGTERM was then attempted (and threw).
+    expect(signals).toContain(0)
+    expect(signals).toContain('SIGTERM')
     expect((logger.error as jest.Mock).mock.calls.length).toBeGreaterThan(0)
   })
 
@@ -178,7 +260,7 @@ describe('stopAgent', () => {
     const targetPid = child.pid!
 
     fs.mkdirSync(TEST_CONFIG_DIR, { recursive: true })
-    fs.writeFileSync(getPidFilePath(), String(targetPid), 'utf-8')
+    fs.writeFileSync(getPidFilePath(), ownHostEntry(targetPid), 'utf-8')
 
     // Override WAIT_TIMEOUT_MS to 400ms via jest.useFakeTimers is complex,
     // so instead spy on isProcessAlive to always return true within this test

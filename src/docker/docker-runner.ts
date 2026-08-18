@@ -209,7 +209,8 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   // 二重起動防止チェック
   if (isAlreadyRunning()) {
-    exitWithError(`Agent is already running (PID: ${readPidFile()}). Use "ai-support-agent stop" to stop it first.`)
+    const entry = readPidFile()
+    exitWithError(`Agent is already running (PID: ${entry?.pid ?? '?'}). Use "ai-support-agent stop" to stop it first.`)
     return // unreachable in production; guards against mocked process.exit in tests
   }
 

@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { AxiosError, AxiosHeaders } from 'axios'
-import { appendWithLimit, atomicWriteJson, decodeBase64Utf8, getAddressPort, axiosResponseData, axiosResponseStatus, pickPresentEnv, exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
+import { appendWithLimit, atomicWriteJson, decodeBase64Utf8, getAddressPort, axiosResponseData, axiosResponseStatus, pickPresentEnv, exitWithError, getErrorMessage, isInDocker, nowIso, parseString, parseNumber, stringifyForMessage, truncateString, validateApiUrl, atomicWriteFile, ensureDir, isAuthenticationError, isNonAuthClientError, isSsoAuthRequiredError, buildWsUrl, resolveUrlForDocker, isErrnoException, readJsonSync, sleep, sweepStaleEntries, toErrorMessage, toError, toContainerApiUrl, sanitizeNameSegment, stripTrailingSlash } from '../src/utils'
 import { ENV_VARS } from '../src/constants'
 
 describe('sanitizeNameSegment', () => {
@@ -482,6 +482,132 @@ describe('getErrorMessage (Axios detailed)', () => {
     expect(getErrorMessage('string error')).toBe('string error')
     expect(getErrorMessage(42)).toBe('42')
     expect(getErrorMessage(null)).toBe('null')
+  })
+})
+
+describe('getErrorMessage (structured response bodies)', () => {
+  const axiosErrorWithData = (status: number, data: unknown): AxiosError =>
+    new AxiosError(`Request failed with status code ${status}`, 'ERR_BAD_REQUEST', undefined, undefined, {
+      status,
+      statusText: 'Error',
+      data,
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    })
+
+  it('keeps the exact output for a string message (backward compatibility)', () => {
+    expect(getErrorMessage(axiosErrorWithData(401, { message: 'Invalid or expired token' })))
+      .toBe('[401] Invalid or expired token')
+    expect(getErrorMessage(axiosErrorWithData(403, { error: 'ACCESS_DENIED' })))
+      .toBe('[403] ACCESS_DENIED')
+  })
+
+  it('renders an object message readably instead of [object Object]', () => {
+    const message = getErrorMessage(axiosErrorWithData(422, { message: { field: 'email', constraint: 'isEmail' } }))
+    expect(message).not.toContain('[object Object]')
+    expect(message).toContain('[422]')
+    expect(message).toContain('email')
+    expect(message).toContain('isEmail')
+  })
+
+  it('renders an array of validation errors readably instead of [object Object]', () => {
+    const message = getErrorMessage(
+      axiosErrorWithData(400, { message: [{ property: 'name', errors: ['required'] }] }),
+    )
+    expect(message).not.toContain('[object Object]')
+    expect(message).toContain('name')
+    expect(message).toContain('required')
+  })
+
+  it('renders an object error field readably instead of [object Object]', () => {
+    const message = getErrorMessage(axiosErrorWithData(409, { error: { code: 'CONFLICT' } }))
+    expect(message).not.toContain('[object Object]')
+    expect(message).toContain('CONFLICT')
+  })
+
+  it('does not throw for a circular response body', () => {
+    const circular: Record<string, unknown> = { code: 'LOOP' }
+    circular.self = circular
+    expect(() => getErrorMessage(axiosErrorWithData(500, { message: circular }))).not.toThrow()
+    expect(getErrorMessage(axiosErrorWithData(500, { message: circular }))).not.toContain('[object Object]')
+  })
+})
+
+describe('stringifyForMessage', () => {
+  it('returns a string unchanged', () => {
+    expect(stringifyForMessage('plain message')).toBe('plain message')
+    expect(stringifyForMessage('')).toBe('')
+    expect(stringifyForMessage('{"already":"json"}')).toBe('{"already":"json"}')
+  })
+
+  it('serializes an object as JSON instead of [object Object]', () => {
+    expect(stringifyForMessage({ field: 'email', constraint: 'isEmail' }))
+      .toBe('{"field":"email","constraint":"isEmail"}')
+  })
+
+  it('serializes an array of objects readably', () => {
+    const result = stringifyForMessage([{ property: 'name' }, { property: 'age' }])
+    expect(result).not.toContain('[object Object]')
+    expect(result).toBe('[{"property":"name"},{"property":"age"}]')
+  })
+
+  it('serializes primitives', () => {
+    expect(stringifyForMessage(42)).toBe('42')
+    expect(stringifyForMessage(true)).toBe('true')
+    expect(stringifyForMessage(null)).toBe('null')
+    expect(stringifyForMessage(undefined)).toBe('undefined')
+  })
+
+  it('does not throw on a circular object and keeps the readable parts', () => {
+    const circular: Record<string, unknown> = { code: 'LOOP' }
+    circular.self = circular
+    let result = ''
+    expect(() => { result = stringifyForMessage(circular) }).not.toThrow()
+    expect(result).not.toContain('[object Object]')
+    expect(result).toContain('LOOP')
+  })
+
+  it('does not throw on a nested circular structure', () => {
+    const parent: Record<string, unknown> = { name: 'parent' }
+    const child: Record<string, unknown> = { name: 'child', parent }
+    parent.child = child
+    expect(() => stringifyForMessage([parent])).not.toThrow()
+    expect(stringifyForMessage([parent])).toContain('child')
+  })
+
+  it('does not throw when JSON.stringify itself throws', () => {
+    const throwing = { toJSON() { throw new Error('nope') } }
+    expect(() => stringifyForMessage(throwing)).not.toThrow()
+    expect(stringifyForMessage(throwing)).not.toContain('[object Object]')
+  })
+
+  it('does not throw when both JSON.stringify and String() throw', () => {
+    const hostile = {
+      toJSON() { throw new Error('no json') },
+      toString() { throw new Error('no string') },
+    }
+    expect(() => stringifyForMessage(hostile)).not.toThrow()
+    expect(stringifyForMessage(hostile)).toBe('[unserializable value]')
+  })
+
+  it('does not throw for a BigInt value', () => {
+    expect(() => stringifyForMessage(BigInt(10))).not.toThrow()
+    expect(stringifyForMessage(BigInt(10))).toContain('10')
+  })
+
+  it('truncates an excessively long serialized value', () => {
+    const long = stringifyForMessage({ blob: 'x'.repeat(5000) })
+    expect(long.length).toBeLessThan(1000)
+    expect(long.endsWith('...')).toBe(true)
+  })
+
+  it('does not truncate a short serialized value', () => {
+    expect(stringifyForMessage({ a: 1 })).toBe('{"a":1}')
+  })
+
+  it('does not truncate a long string input (strings pass through unchanged)', () => {
+    const input = 'y'.repeat(5000)
+    expect(stringifyForMessage(input)).toBe(input)
   })
 })
 

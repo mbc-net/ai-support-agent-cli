@@ -1,0 +1,58 @@
+---
+# ai_support_agent_k8s : 自己ターゲット1件分の、後回しにした spec 変更操作。
+#
+# 「自己ターゲット」＝ このプレイを実行しているエージェント自身の StatefulSet。
+# tasks/main.yml が全プロジェクトのループを終えたあと、project.yml が記録した
+# ai_support_agent_k8s_pending_self_targets の各エントリについて `include_tasks` +
+# `loop` で呼ばれる。
+#
+# `item` は {'name': ..., 'secret_changed': ...} の dict であり、project.yml の
+# `item`（プロジェクトエントリ）とは別物である。トークンは含まないが、呼び出し側は
+# 他のループと同じく loop_control.label を指定すること（既定の "item={...}" 表示を
+# 避け、実行ログの読み方を揃えるため）。
+#
+# ここで実行するのは「実行すると自 Pod が再作成されうる」操作だけである。
+# Secret の適用とマニフェストの書き出しはループ内で済んでいる（どちらも Pod を
+# 作り直さない）。
+#
+# rollout status（完了待ち）は**行わない**。自分の完了を自分で待つのは自己矛盾で、
+# Pod が置き換わった時点で待っているプロセス自体が消えるため、必ずタイムアウトする。
+# したがってこのファイルの実行は「途中でプロセスが消える」ことを正常系として扱う。
+
+- name: "ai_support_agent_k8s : Apply the StatefulSet for this agent (deferred)"
+  # `.spec.template` を変えるマニフェスト（例: terminationGracePeriodSeconds の追加）を
+  # 適用すると、StatefulSet の既定 updateStrategy: RollingUpdate によりこの時点で
+  # 自 Pod の再作成が始まる。だからこそプロジェクトのループ内ではなくここで実行する。
+  # ここより後に「他のプロジェクトの配置」は残っていない。
+  ansible.builtin.command:
+    argv:
+      - "{{ ai_support_agent_k8s_kubectl }}"
+      - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - apply
+      - -f
+      - "{{ ai_support_agent_k8s_manifest_dir }}/{{ item.name }}.yaml"
+  register: ai_support_agent_k8s_self_apply
+  changed_when: "'unchanged' not in ai_support_agent_k8s_self_apply.stdout"
+
+- name: "ai_support_agent_k8s : Restart this agent when the token Secret changed (deferred)"
+  # Secret を更新しても Pod template は変わらないため、上の apply だけでは新しい
+  # トークンが反映されない（起動済みコンテナの env は secretKeyRef のまま固定される）。
+  # 逆に新規作成（created）なら Pod は最初から新しい Secret で起動するので再起動は不要。
+  #
+  # 条件はループ内の非自己タスクと同じだが、判定材料はループ内で記録した
+  # item.secret_changed と、直前の**この**apply の出力を使う。
+  ansible.builtin.command:
+    argv:
+      - "{{ ai_support_agent_k8s_kubectl }}"
+      - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - -n
+      - "{{ ai_support_agent_k8s_namespace }}"
+      - rollout
+      - restart
+      - "statefulset/{{ item.name }}"
+  when:
+    - item.secret_changed | bool
+    - "'created' not in ai_support_agent_k8s_self_apply.stdout"
+  changed_when: true

@@ -975,18 +975,35 @@ describe('docker-runner', () => {
     it('should exit with error when another agent instance is already running', () => {
       const { isAlreadyRunning, readPidFile } = require('../../src/pid-manager')
       isAlreadyRunning.mockReturnValue(true)
-      readPidFile.mockReturnValue(12345)
+      // readPidFile() returns a PidEntry object, never a bare number
+      readPidFile.mockReturnValue({ hostname: 'host-a', pid: 12345, generation: 1700000000 })
 
       runInDocker({})
 
-      expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('12345'),
-      )
+      expect(logger.error).toHaveBeenCalledTimes(1)
+      const message = (logger.error as jest.Mock).mock.calls[0][0] as string
+      // The recorded numeric PID must be rendered, not the stringified object
+      expect(message).not.toContain('[object Object]')
+      expect(message).toContain('12345')
       expect(mockExit).toHaveBeenCalledWith(1)
 
       // Restore default for subsequent tests
       isAlreadyRunning.mockReturnValue(false)
       readPidFile.mockReturnValue(null)
+    })
+
+    it('should fall back to "?" for the PID when readPidFile returns null while already running', () => {
+      const { isAlreadyRunning, readPidFile } = require('../../src/pid-manager')
+      isAlreadyRunning.mockReturnValue(true)
+      readPidFile.mockReturnValue(null)
+
+      runInDocker({})
+
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('(PID: ?)'))
+      expect(mockExit).toHaveBeenCalledWith(1)
+
+      // Restore default for subsequent tests
+      isAlreadyRunning.mockReturnValue(false)
     })
 
     it('should exit with error when Docker is not available', () => {

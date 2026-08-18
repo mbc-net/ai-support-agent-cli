@@ -12,7 +12,7 @@ import { logger } from './logger'
 import { getWorkspaceDir, getReposDir, getAwsDir } from './project-dir'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
 import { TerminalWebSocket, isNodePtyAvailable } from './terminal'
-import { getErrorMessage, isAuthenticationError } from './utils'
+import { getErrorMessage, isAuthenticationError, stringifyForMessage } from './utils'
 import { VsCodeTunnelWebSocket } from './vscode'
 import { executeCommand } from './commands'
 import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
@@ -416,7 +416,8 @@ export async function handleNotification(
       const alertProjectCode = content.projectCode as string | undefined
       const alertNumber = content.alertNumber as string | undefined
       if (alertProjectCode === deps.projectCode && alertNumber) {
-        logger.info(`${deps.prefix} Alert received: ${alertNumber} (alarm: ${content.alarmName ?? 'unknown'})`)
+        const alarmName = stringifyForMessage(content.alarmName ?? 'unknown')
+        logger.info(`${deps.prefix} Alert received: ${alertNumber} (alarm: ${alarmName})`)
         const processor = new AlertProcessor(deps.client, deps.tenantCode, deps.projectCode)
         await processor.processAlert(alertNumber)
       }
