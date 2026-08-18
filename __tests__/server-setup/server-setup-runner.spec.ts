@@ -52,6 +52,8 @@ jest.mock('../../src/utils/known-hosts-store', () => ({
   resolveKnownHostsPath: (...args: unknown[]) => mockResolveKnownHostsPath(...args),
 }))
 
+import * as path from 'path'
+
 import { load } from 'js-yaml'
 
 import {
@@ -63,8 +65,14 @@ import {
   redactSecretValues,
   resolveRouteMode,
   runServerSetup,
+  SELF_INSTANCE_ID_VAR,
+  SELF_RESTART_ACK_VAR,
+  SELF_RESTART_MARKER_VAR,
   SUDO_PROBE_REGISTER_VAR,
 } from '../../src/server-setup/server-setup-runner'
+import { ENV_VARS } from '../../src/constants'
+import { cancelProcess } from '../../src/commands/process-manager'
+import { resetInstanceIdCacheForTest } from '../../src/replica-identity'
 import { logger } from '../../src/logger'
 import type { ApiClient } from '../../src/api-client'
 import type { ServerSetupExecPayload, ServerSetupVariablesResponse, SshCredentials } from '../../src/types'
@@ -573,9 +581,15 @@ describe('runServerSetup - success path', () => {
     expect(env.ANSIBLE_CALLBACK_PLUGINS).toMatch(/ansible[/\\]callback_plugins$/)
     expect((options as { timeout: number }).timeout).toBeGreaterThan(0)
 
-    // extra-vars.json = project variables only (empty here), 0600.
+    // extra-vars.json = project variables (empty here) plus the reserved
+    // variables the ai_support_agent_k8s role needs (its own instance id and the
+    // self-restart handshake paths), 0600.
     const extraVarsCall = mockWriteFileSync.mock.calls.find((c) => String(c[0]).endsWith('extra-vars.json'))
-    expect(JSON.parse(extraVarsCall?.[1] as string)).toEqual({})
+    expect(JSON.parse(extraVarsCall?.[1] as string)).toEqual({
+      [SELF_INSTANCE_ID_VAR]: expect.any(String),
+      [SELF_RESTART_MARKER_VAR]: expect.any(String),
+      [SELF_RESTART_ACK_VAR]: expect.any(String),
+    })
     expect(extraVarsCall?.[2]).toEqual({ mode: 0o600 })
 
     // generated-playbook.yml: single play with precheck + the body tasks.
@@ -931,6 +945,131 @@ describe('runServerSetup - ansible-playbook timeout', () => {
   })
 })
 
+/**
+ * 停止要求（`server_setup_cancel`）による中断は、タイムアウトと区別して報告される。
+ *
+ * 回帰対象: Node は execFile 自身の `timeout` で殺した子プロセスにも、`child.kill()`
+ * で明示的に殺した子プロセスにも同じ `killed: true` を立てる。これを唯一の判定材料に
+ * していたため、ユーザーが数秒で意図的に停止しても
+ * 「ansible-playbook execution timed out after 1800s」という事実と異なるメッセージが
+ * サーバーへ返っていた。
+ */
+describe('runServerSetup - cancellation is not a timeout', () => {
+  afterEach(() => {
+    // `mockReturnValue` は jest.clearAllMocks() では消えない（消えるのは呼び出し履歴
+    // だけ）。他のテストへ子プロセスオブジェクトが漏れないよう明示的に落とす。
+    mockExecFile.mockReset()
+  })
+
+  /** ProcessManager 経由で中断し、Node が返すのと同じ形の error でコールバックを呼ぶ。 */
+  async function runAndCancel(errorMessage: string): Promise<string> {
+    const kill = jest.fn()
+    mockExecFile.mockReturnValue({ kill })
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-cancel', client })
+    await flushUntilExecFileCalled()
+
+    // server_setup_cancel は共有シングルトンの ProcessManager を通して中断する。
+    expect(cancelProcess('cmd-cancel')).toBe(true)
+    expect(kill).toHaveBeenCalledWith('SIGTERM')
+
+    resolveExecFileWithError(
+      Object.assign(new Error(errorMessage), {
+        killed: true,
+        signal: 'SIGTERM' as const,
+      }),
+    )
+    const result = await runPromise
+    expect(result.success).toBe(false)
+    return result.success ? '' : result.error
+  }
+
+  it('reports the run as cancelled, not as a timeout', async () => {
+    const error = await runAndCancel('Command failed: ansible-playbook')
+    expect(error.toLowerCase()).not.toContain('timed out')
+    expect(error.toLowerCase()).toContain('cancel')
+  })
+
+  it('prefers cancellation over the timeout when both could apply (user intent wins)', async () => {
+    const error = await runAndCancel('Command timed out after 1800000ms')
+    expect(error.toLowerCase()).not.toContain('timed out')
+    expect(error.toLowerCase()).toContain('cancel')
+  })
+})
+
+/**
+ * 実行中エージェント自身の instance id を、予約済み extra-var として ansible へ渡す。
+ *
+ * `ai_support_agent_k8s` ロールはこれを使って「今デプロイしようとしている
+ * StatefulSet は自分自身か」を判定し、自己ターゲットの `rollout restart` を
+ * 全プロジェクトの処理が終わるまで後回しにする（自分を先に殺すと、後続の
+ * プロジェクトが配置されないまま実行が滞留する）。
+ */
+describe('runServerSetup - reserved self-instance-id extra-var', () => {
+  const INSTANCE_ID = 'ai-support-agent-mbc-0'
+  let previousInstanceId: string | undefined
+
+  beforeEach(() => {
+    previousInstanceId = process.env[ENV_VARS.INSTANCE_ID]
+    process.env[ENV_VARS.INSTANCE_ID] = INSTANCE_ID
+    // resolveInstanceId() はプロセス全体でメモ化するため、env を差し替えたら破棄する。
+    resetInstanceIdCacheForTest()
+  })
+
+  afterEach(() => {
+    if (previousInstanceId === undefined) {
+      delete process.env[ENV_VARS.INSTANCE_ID]
+    } else {
+      process.env[ENV_VARS.INSTANCE_ID] = previousInstanceId
+    }
+    resetInstanceIdCacheForTest()
+  })
+
+  async function extraVarsOfRun(client: ApiClient): Promise<Record<string, string>> {
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+    expect(result.success).toBe(true)
+    return JSON.parse(writtenFile('extra-vars.json') as string) as Record<string, string>
+  }
+
+  it("passes the running agent's instance id (resolveInstanceId)", async () => {
+    const extraVars = await extraVarsOfRun(makeClient())
+    expect(extraVars[SELF_INSTANCE_ID_VAR]).toBe(INSTANCE_ID)
+  })
+
+  it('cannot be shadowed by a project (ANSIBLE#) variable of the same name', async () => {
+    // 同名の project 変数で上書きできると、レシピ側から「自分は自分ではない」と
+    // 偽らせて自己再起動を先に走らせられる（＝この修正を無効化できる）。
+    const client = makeClient({
+      getServerSetupVariables: jest
+        .fn()
+        .mockResolvedValue({ variables: { [SELF_INSTANCE_ID_VAR]: 'someone-else-0' }, secretNames: [] }),
+    })
+    const extraVars = await extraVarsOfRun(client)
+    expect(extraVars[SELF_INSTANCE_ID_VAR]).toBe(INSTANCE_ID)
+  })
+
+  it('uses the same variable name the ai_support_agent_k8s role declares in defaults', () => {
+    // runner とロールで名前がずれると、ロールは既定値（空文字）を読み続け、
+    // 自己判定が常に false になる（＝症状が元に戻る）ため両者を突き合わせる。
+    const defaultsPath = path.join(
+      __dirname,
+      '..',
+      '..',
+      'ansible',
+      'roles',
+      'ai_support_agent_k8s',
+      'defaults',
+      'main.yml',
+    )
+    const defaults = load(actualFs.readFileSync(defaultsPath, 'utf8')) as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(defaults, SELF_INSTANCE_ID_VAR)).toBe(true)
+    expect(defaults[SELF_INSTANCE_ID_VAR]).toBe('')
+  })
+})
+
 describe('runServerSetup - ansible-playbook spawn failure', () => {
   it('surfaces the spawn error message and omits stepResults when ansible-playbook cannot start (ENOENT)', async () => {
     const client = makeClient()
@@ -1225,7 +1364,12 @@ describe('runServerSetup - server setup variables (project ANSIBLE# vars)', () =
 
     expect(result.success).toBe(true)
     expect(client.getServerSetupVariables).toHaveBeenCalledWith('cmd-1', 'agent-9')
-    expect(JSON.parse(writtenFile('extra-vars.json') as string)).toEqual({ DB_HOST: '10.0.0.5' })
+    expect(JSON.parse(writtenFile('extra-vars.json') as string)).toEqual({
+      DB_HOST: '10.0.0.5',
+      [SELF_INSTANCE_ID_VAR]: expect.any(String),
+      [SELF_RESTART_MARKER_VAR]: expect.any(String),
+      [SELF_RESTART_ACK_VAR]: expect.any(String),
+    })
   })
 
   it('returns an error and never creates a temp dir when the variables fetch fails', async () => {
@@ -2164,5 +2308,271 @@ describe('runServerSetup - mid-run progress', () => {
 
     resolveExecFile(0, defaultOutput())
     await runPromise
+  })
+})
+
+/**
+ * 自己再起動待ちの申告（awaiting self restart）。
+ *
+ * `ai_support_agent_k8s` ロールがレシピの中に「このプレイを実行しているエージェント
+ * 自身」を見つけた場合、全プロジェクトの配置を終えたあとで自分の StatefulSet を
+ * apply / restart する。その時点で Pod が置き換わるため、この実行の結果は原理的に
+ * 報告されない（サーバー側は running のまま滞留し、watchdog が回収するまで残る）。
+ *
+ * そこでロールは再起動へ進む**前**にマーカーファイルをコントローラ（＝このエージェント）
+ * 側へ置き、エージェントの ack ファイルを待つ。ここで固定するのは配線:
+ * 予約変数として両パスを extra-vars へ渡すこと、レシピから上書きできないこと、
+ * そして申告がプレイの継続より先に完了することである。
+ */
+describe('runServerSetup - awaiting-self-restart declaration', () => {
+  function extraVarsOfLastRun(): Record<string, string> {
+    return JSON.parse(writtenFile('extra-vars.json') as string) as Record<string, string>
+  }
+
+  it('passes the reserved marker / ack paths inside the run temp dir', async () => {
+    const client = makeClient()
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    const tmpDir = mockMkdtempSync.mock.results[0].value as string
+    const extraVars = extraVarsOfLastRun()
+    expect(extraVars[SELF_RESTART_MARKER_VAR]).toBe(`${tmpDir}/self-restart.marker.json`)
+    expect(extraVars[SELF_RESTART_ACK_VAR]).toBe(`${tmpDir}/self-restart.ack`)
+
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+  })
+
+  it('cannot be shadowed by project (ANSIBLE#) variables of the same name', async () => {
+    // ロールはこのパスへ `copy` する。レシピ側から差し替えられると、エージェント
+    // ホストの任意のパスへ書き込ませる手段になる。
+    const client = makeClient({
+      getServerSetupVariables: jest.fn().mockResolvedValue({
+        variables: {
+          [SELF_RESTART_MARKER_VAR]: '/etc/cron.d/pwn',
+          [SELF_RESTART_ACK_VAR]: '/etc/cron.d/pwn.ack',
+        },
+        secretNames: [],
+      }),
+    })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    const tmpDir = mockMkdtempSync.mock.results[0].value as string
+    const extraVars = extraVarsOfLastRun()
+    expect(extraVars[SELF_RESTART_MARKER_VAR]).toBe(`${tmpDir}/self-restart.marker.json`)
+    expect(extraVars[SELF_RESTART_ACK_VAR]).toBe(`${tmpDir}/self-restart.ack`)
+
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+  })
+
+  it('hands the role empty paths when nothing is watching (local dev run)', async () => {
+    // 監視していない経路で空でない値を渡すと、ロールは誰も答えない ack を待って
+    // 無駄に止まる。キー自体は必ず書く（書かないとレシピ側の同名変数が生き残る）。
+    const client = makeClient()
+    const runPromise = executeServerSetupAnsible({
+      executionId: 'exec-1',
+      body: makePayload().body,
+      mode: 'resident',
+      credential: CREDENTIAL,
+      variables: {},
+      secretNames: [],
+      tenantCode: 'acme',
+      sshHostId: 'host-1',
+      client,
+    })
+    await flushUntilExecFileCalled()
+
+    const extraVars = extraVarsOfLastRun()
+    expect(extraVars[SELF_RESTART_MARKER_VAR]).toBe('')
+    expect(extraVars[SELF_RESTART_ACK_VAR]).toBe('')
+
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+  })
+
+  it('uses the same variable names the ai_support_agent_k8s role declares in defaults', () => {
+    const defaultsPath = path.join(
+      __dirname,
+      '..',
+      '..',
+      'ansible',
+      'roles',
+      'ai_support_agent_k8s',
+      'defaults',
+      'main.yml',
+    )
+    const defaults = load(actualFs.readFileSync(defaultsPath, 'utf8')) as Record<string, unknown>
+    for (const name of [SELF_RESTART_MARKER_VAR, SELF_RESTART_ACK_VAR]) {
+      expect(Object.prototype.hasOwnProperty.call(defaults, name)).toBe(true)
+      expect(defaults[name]).toBe('')
+    }
+  })
+})
+
+describe('runServerSetup - awaiting-self-restart declaration (mid-run)', () => {
+  beforeEach(() => {
+    jest.useFakeTimers()
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  function reservedPath(name: string): string {
+    const extraVars = JSON.parse(writtenFile('extra-vars.json') as string) as Record<string, string>
+    return extraVars[name]
+  }
+
+  it('declares to the API and only then answers the role, while ansible is still running', async () => {
+    // 順序が本体: ロールは ack を待ってから自分を再起動する。ack が申告より先に
+    // 書かれると、申告が届く前に Pod が消えて機能そのものが無意味になる。
+    let releaseDeclaration: (() => void) | undefined
+    const declareServerSetupAwaitingSelfRestart = jest.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseDeclaration = resolve
+        }),
+    )
+    const client = makeClient()
+    ;(client as unknown as Record<string, unknown>).declareServerSetupAwaitingSelfRestart =
+      declareServerSetupAwaitingSelfRestart
+    const runPromise = runServerSetup(makePayload(), {
+      commandId: 'cmd-1',
+      client,
+      agentId: 'agent-42',
+    })
+    await flushUntilExecFileCalled()
+
+    // ロールが（自己ターゲットの apply へ進む直前に）置くマーカー。
+    actualFs.writeFileSync(
+      reservedPath(SELF_RESTART_MARKER_VAR),
+      JSON.stringify({ targets: ['ai-support-agent'] }),
+    )
+    await jest.advanceTimersByTimeAsync(1000)
+
+    expect(declareServerSetupAwaitingSelfRestart).toHaveBeenCalledWith('cmd-1', 'agent-42')
+    // 申告が完了するまで ack は書かれない（＝ロールは待ち続ける）。
+    expect(actualFs.existsSync(reservedPath(SELF_RESTART_ACK_VAR))).toBe(false)
+
+    releaseDeclaration!()
+    await jest.advanceTimersByTimeAsync(0)
+    expect(actualFs.existsSync(reservedPath(SELF_RESTART_ACK_VAR))).toBe(true)
+
+    // ansible はここまでずっと実行中（＝申告は再起動より前）。
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+    expect(result.success).toBe(true)
+  })
+
+  it('does not declare anything when the role never signals a self restart', async () => {
+    const declareServerSetupAwaitingSelfRestart = jest.fn().mockResolvedValue(undefined)
+    const client = makeClient()
+    ;(client as unknown as Record<string, unknown>).declareServerSetupAwaitingSelfRestart =
+      declareServerSetupAwaitingSelfRestart
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    await jest.advanceTimersByTimeAsync(5000)
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    expect(declareServerSetupAwaitingSelfRestart).not.toHaveBeenCalled()
+  })
+
+  it('still finishes the run when the declaration fails', async () => {
+    const declareServerSetupAwaitingSelfRestart = jest
+      .fn()
+      .mockRejectedValue(new Error('network down'))
+    const client = makeClient()
+    ;(client as unknown as Record<string, unknown>).declareServerSetupAwaitingSelfRestart =
+      declareServerSetupAwaitingSelfRestart
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    actualFs.writeFileSync(reservedPath(SELF_RESTART_MARKER_VAR), '{}')
+    await jest.advanceTimersByTimeAsync(1000)
+
+    // 申告に失敗しても ack は書く（ロールを待たせ続けない）。失敗は握り潰さず
+    // ログへ残る（self-restart-declaration.spec.ts が固定）。
+    expect(actualFs.existsSync(reservedPath(SELF_RESTART_ACK_VAR))).toBe(true)
+
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+    expect(result.success).toBe(true)
+    expect(allLoggedText()).toContain('network down')
+  })
+
+  /**
+   * 申告が失敗したことを**運用者が実際に見る場所**へ出す配線。
+   *
+   * エージェントのプロセスはこの直後に消えるため、標準出力のログ行は誰にも
+   * 届かない。既存の進捗イベント経路に1件流し、実行詳細のタスクログに残す。
+   */
+  it('declares failure into the execution log through the progress channel', async () => {
+    const submitServerSetupProgress = jest.fn().mockResolvedValue(undefined)
+    const declareServerSetupAwaitingSelfRestart = jest
+      .fn()
+      .mockRejectedValue(new Error('network down'))
+    const client = makeClient({ submitServerSetupProgress })
+    ;(client as unknown as Record<string, unknown>).declareServerSetupAwaitingSelfRestart =
+      declareServerSetupAwaitingSelfRestart
+    const runPromise = runServerSetup(makePayload(), {
+      commandId: 'cmd-1',
+      client,
+      agentId: 'agent-42',
+    })
+    await flushUntilExecFileCalled()
+
+    actualFs.writeFileSync(reservedPath(SELF_RESTART_MARKER_VAR), '{}')
+    await jest.advanceTimersByTimeAsync(1000)
+
+    const noticeCall = submitServerSetupProgress.mock.calls.find(
+      (call: unknown[]) =>
+        (call[1] as { status?: string }[]).some((e) => e.status === 'failed'),
+    )
+    expect(noticeCall).toBeDefined()
+    expect(noticeCall![0]).toBe('cmd-1')
+    expect(noticeCall![2]).toBe('agent-42')
+    expect(String(noticeCall![1][0].message)).toContain('network down')
+
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+    expect(result.success).toBe(true)
+  })
+
+  it('treats an unacknowledged 200 as a failed declaration', async () => {
+    // 最も起きやすい経路: HTTP は成功しているのに反映されていない。
+    const submitServerSetupProgress = jest.fn().mockResolvedValue(undefined)
+    const declareServerSetupAwaitingSelfRestart = jest
+      .fn()
+      .mockResolvedValue({ acknowledged: false, outcome: 'not_found' })
+    const client = makeClient({ submitServerSetupProgress })
+    ;(client as unknown as Record<string, unknown>).declareServerSetupAwaitingSelfRestart =
+      declareServerSetupAwaitingSelfRestart
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+
+    actualFs.writeFileSync(reservedPath(SELF_RESTART_MARKER_VAR), '{}')
+    await jest.advanceTimersByTimeAsync(1000)
+
+    const noticeCall = submitServerSetupProgress.mock.calls.find(
+      (call: unknown[]) =>
+        (call[1] as { status?: string }[]).some((e) => e.status === 'failed'),
+    )
+    expect(noticeCall).toBeDefined()
+    expect(String(noticeCall![1][0].message)).toContain('not_found')
+
+    // 失敗として扱っても ack は書く（ロールを 60 秒待たせ続けない）。
+    const ack = JSON.parse(
+      actualFs.readFileSync(reservedPath(SELF_RESTART_ACK_VAR), 'utf8') as string,
+    ) as Record<string, unknown>
+    expect(ack.declared).toBe(false)
+
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+    expect(result.success).toBe(true)
   })
 })

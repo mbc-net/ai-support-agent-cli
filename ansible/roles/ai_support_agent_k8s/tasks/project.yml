@@ -60,6 +60,53 @@
       storage_size={{ item.storage_size | default(ai_support_agent_k8s_storage_size) }}.
     success_msg: "Replica count and storage for {{ item.name }} are valid."
 
+# ローテーション判定の材料として、**適用前**の Secret の値を読み出す。
+#
+# なぜ kubectl apply の出力文言（created / configured / unchanged）で判定しないのか:
+# 実機（MBC 社内 k3s）で、Secret が当日一度も更新されていない（managedFields の最終更新は
+# 前日・resourceVersion も据え置き）実行でも changed と判定され、`rollout restart` が
+# 毎回発火した（ControllerRevision の rev2/rev3 の差分が
+# `kubectl.kubernetes.io/restartedAt` の1点のみであることを確認済み）。文言に依存した
+# 判定は当てにならないので、値そのものを突き合わせる。
+- name: "ai_support_agent_k8s : Read the current agent token Secret"
+  ansible.builtin.command:
+    argv:
+      - "{{ ai_support_agent_k8s_kubectl }}"
+      - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - -n
+      - "{{ ai_support_agent_k8s_namespace }}"
+      - get
+      - secret
+      - "{{ item.name }}-token"
+      - -o
+      - jsonpath={.data.AI_SUPPORT_AGENT_TOKEN}
+  register: ai_support_agent_k8s_secret_current
+  # Secret 不在（NotFound）は失敗ではなく「新規作成」。それ以外の失敗（クラスタ応答不能・
+  # RBAC 不足など）は次のタスクが名指しで落とす。
+  failed_when: false
+  changed_when: false
+  # stdout は Secret の値（base64）そのもの。json stdout callback はタスク結果を丸ごと
+  # 出力するため、no_log が無いと base64 のトークンが実行ログ（executionLogs）に残る
+  # ——runner の redactSecretValues は**生の値**しか照合しないため base64 は伏字にならない。
+  # no_log は出力を抑止するだけで register した値は使えるので、判定には影響しない。
+  no_log: true
+
+- name: "ai_support_agent_k8s : Fail when the current token Secret cannot be read"
+  # no_log タスクが失敗すると結果全体が censored に置き換わり失敗理由が消えるため、
+  # 判断材料（rc / stderr）だけを使って別タスクで表面化する（横断ルール:
+  # __tests__/server-setup/ansible-roles-no-log-diagnostics.spec.ts）。stdout（＝トークン）は
+  # 絶対にメッセージへ展開しない。
+  ansible.builtin.fail:
+    msg: >-
+      Could not read the current agent token Secret {{ item.name }}-token in
+      namespace {{ ai_support_agent_k8s_namespace }}
+      (rc={{ ai_support_agent_k8s_secret_current.rc }}):
+      {{ ai_support_agent_k8s_secret_current.stderr | default('') }}
+  when:
+    - ai_support_agent_k8s_secret_current.rc != 0
+    - "'NotFound' not in (ai_support_agent_k8s_secret_current.stderr | default(''))"
+
 # トークンの一時ファイルは、途中のタスクが失敗しても必ず消す。
 - name: "ai_support_agent_k8s : Create the agent token Secret"
   block:
@@ -101,9 +148,17 @@
       args:
         executable: /bin/bash
       register: ai_support_agent_k8s_secret_apply
-      # kubectl apply は "created" / "configured" / "unchanged" を返す。常に changed に
-      # すると冪等でなくなるうえ、後段のローテーション判定にも使えなくなる。
-      changed_when: "'unchanged' not in ai_support_agent_k8s_secret_apply.stdout"
+      # 適用前に読み出した値（上の Read タスク）と、いま投入したトークンを実比較して
+      # changed を決める。kubectl の出力文言に依存しないのはヘッダのコメントのとおり
+      # （実機で毎回 changed になり、再起動が毎回発火した）。
+      #
+      # 比較は base64 のまま行う。デコードを挟むと、不正データでのテンプレートエラー
+      # 経由で値がログへ出る余地を作るだけで、判定の精度は変わらない。
+      # rc != 0 は「Secret が存在しなかった」＝新規作成なので changed。
+      changed_when: >-
+        ai_support_agent_k8s_secret_current.rc != 0
+        or (ai_support_agent_k8s_secret_current.stdout | default(''))
+        != (item.token | trim | b64encode)
   always:
     - name: "ai_support_agent_k8s : Remove the token temporary file"
       ansible.builtin.file:
@@ -139,6 +194,13 @@
             labels:
               app: {{ item.name | to_json }}
           spec:
+            # SIGTERM 後、エージェントは実行中コマンドの drain を待ってからレプリカ枠を
+            # release する。明示しないと Kubernetes の既定 30 秒で SIGKILL され、drain の
+            # 途中で殺されて実行中コマンドを見捨てたまま枠が残り、サーバーが別レプリカへ
+            # 再割当して二重実行する。値は同じエージェントを配置する別経路
+            # （src/manifest/manifest-generator.ts の TERMINATION_GRACE_PERIOD_SECONDS）と
+            # 同一に揃える（defaults/main.yml のコメント参照）。
+            terminationGracePeriodSeconds: {{ ai_support_agent_k8s_termination_grace_period_seconds | int }}
             # このエージェントは Kubernetes API を使わない。default ServiceAccount に
             # RoleBinding が付いているクラスタでは、エージェントが実行する任意コマンドや
             # 侵害された依存パッケージからクラスタ権限を悪用できてしまうため、
@@ -200,59 +262,101 @@
       {% endif %}
   register: ai_support_agent_k8s_manifest
 
-- name: "ai_support_agent_k8s : Apply the StatefulSet"
-  ansible.builtin.command:
-    argv:
-      - "{{ ai_support_agent_k8s_kubectl }}"
-      - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
-      - "--request-timeout=30s"
-      - apply
-      - -f
-      - "{{ ai_support_agent_k8s_manifest_dir }}/{{ item.name }}.yaml"
-  register: ai_support_agent_k8s_apply
-  changed_when: "'unchanged' not in ai_support_agent_k8s_apply.stdout"
-
-- name: "ai_support_agent_k8s : Restart the agent when the token Secret changed"
-  # Secret を更新しても、起動済みコンテナの環境変数（secretKeyRef 由来）は差し替わらず、
-  # StatefulSet の Pod template も変化しないためローリング更新は起きない。つまり失効した
-  # トークンを差し替えて再実行しても、Pod は旧トークンで接続し続け、rollout status は
-  # それを正常と判定してしまう。Secret が実際に変わったときだけ明示的に再起動する。
+- name: "ai_support_agent_k8s : Record this project for deferred self-target handling"
+  # 自己ターゲット（このエントリがこのプレイを実行しているエージェント自身）では、
+  # ここでは名前と「Secret が変わったか」だけを記録し、クラスタへの適用は一切行わない。
+  # 実際の適用は tasks/main.yml が全プロジェクトのループを抜けたあと tasks/self.yml で
+  # 行う（下の Deploy ブロックのコメント参照）。
   #
-  # 新規作成時（StatefulSet を今 apply したばかり）は Pod が新しい Secret で起動するため
-  # 再起動は不要。無条件に restart すると、初回実行のたびに余計な再作成が走る。
-  ansible.builtin.command:
-    argv:
-      - "{{ ai_support_agent_k8s_kubectl }}"
-      - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
-      - "--request-timeout=30s"
-      - -n
-      - "{{ ai_support_agent_k8s_namespace }}"
-      - rollout
-      - restart
-      - "statefulset/{{ item.name }}"
-  when:
-    - ai_support_agent_k8s_secret_apply.changed
-    - "'created' not in ai_support_agent_k8s_apply.stdout"
-  changed_when: true
+  # 条件は「自己である」ことだけで、Secret の変更有無は問わない。後回しの apply は
+  # トークンが変わっていなくても必要である（マニフェスト側だけが変わる更新——例えば
+  # terminationGracePeriodSeconds の追加——があるため）。restart が要るかどうかは
+  # secret_changed を持ち回って tasks/self.yml 側で判断する。
+  ansible.builtin.set_fact:
+    ai_support_agent_k8s_pending_self_targets: >-
+      {{
+        (ai_support_agent_k8s_pending_self_targets | default([]))
+        + [{
+          'name': item.name,
+          'secret_changed': ai_support_agent_k8s_secret_apply.changed,
+        }]
+      }}
+  when: ai_support_agent_k8s_item_is_self | bool
 
-- name: "ai_support_agent_k8s : Wait for the agent to become ready"
-  # 上限を超えたレプリカは standby で待機する（プロセスは終了しない）ため Ready に
-  # なる。ここで検出したいのは「イメージが引けない」「Secret が無い」等の起動失敗。
-  ansible.builtin.command:
-    argv:
-      - "{{ ai_support_agent_k8s_kubectl }}"
-      # rollout status は --timeout=60s まで watch するため、request-timeout は
-      # それより長くする（短いと watch 自体が途中で切れて誤検知になる）。
-      - "--request-timeout=90s"
-      - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
-      - -n
-      - "{{ ai_support_agent_k8s_namespace }}"
-      - rollout
-      - status
-      - "statefulset/{{ item.name }}"
-      - --timeout=60s
-  register: ai_support_agent_k8s_rollout
-  until: ai_support_agent_k8s_rollout.rc == 0
-  retries: 10
-  delay: 15
-  changed_when: false
+- name: "ai_support_agent_k8s : Deploy this project (deferred entirely for the self target)"
+  # このブロックには「実行すると自 Pod が再作成されうる操作」だけを入れる。
+  #
+  # なぜ `rollout restart` だけをガードしても不十分か（レビュー指摘・CRITICAL）:
+  # StatefulSet の既定 updateStrategy は RollingUpdate であり、`.spec.template` を
+  # 変更したマニフェストを `kubectl apply` した**その瞬間**に Pod のローリング更新
+  # （＝自 Pod の再作成）が始まる。terminationGracePeriodSeconds の追加はまさに
+  # `.spec.template` の変更なので、restart に到達する前に Ansible ごとプロセスが死に、
+  # restart 側のガードは完全にすり抜ける。しかも apply の出力は "configured" としか
+  # 出ないため、実行ログからは何が起きたのか分からない。
+  #
+  # したがってガードは個々のタスクではなくこのブロックに掛ける。将来 image tag の
+  # 差し替えや resources の追加など、Pod spec を変える操作を足すときも必ずこの
+  # ブロックの中へ置くこと。__tests__/server-setup/ai-support-agent-k8s-role.spec.ts の
+  # 「自己ターゲット時、ループ内で変更系 kubectl 操作が1つも実行されない」が、
+  # ガードの外に変更系 kubectl タスクが増えたことを検出して失敗する。
+  when: not (ai_support_agent_k8s_item_is_self | bool)
+  block:
+    - name: "ai_support_agent_k8s : Apply the StatefulSet"
+      ansible.builtin.command:
+        argv:
+          - "{{ ai_support_agent_k8s_kubectl }}"
+          - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
+          - "--request-timeout=30s"
+          - apply
+          - -f
+          - "{{ ai_support_agent_k8s_manifest_dir }}/{{ item.name }}.yaml"
+      register: ai_support_agent_k8s_apply
+      changed_when: "'unchanged' not in ai_support_agent_k8s_apply.stdout"
+
+    - name: "ai_support_agent_k8s : Restart the agent when the token Secret changed"
+      # Secret を更新しても、起動済みコンテナの環境変数（secretKeyRef 由来）は差し替わらず、
+      # StatefulSet の Pod template も変化しないためローリング更新は起きない。つまり失効した
+      # トークンを差し替えて再実行しても、Pod は旧トークンで接続し続け、rollout status は
+      # それを正常と判定してしまう。Secret が実際に変わったときだけ明示的に再起動する。
+      #
+      # 新規作成時（StatefulSet を今 apply したばかり）は Pod が新しい Secret で起動するため
+      # 再起動は不要。無条件に restart すると、初回実行のたびに余計な再作成が走る。
+      ansible.builtin.command:
+        argv:
+          - "{{ ai_support_agent_k8s_kubectl }}"
+          - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
+          - "--request-timeout=30s"
+          - -n
+          - "{{ ai_support_agent_k8s_namespace }}"
+          - rollout
+          - restart
+          - "statefulset/{{ item.name }}"
+      when:
+        - ai_support_agent_k8s_secret_apply.changed
+        - "'created' not in ai_support_agent_k8s_apply.stdout"
+      changed_when: true
+
+    - name: "ai_support_agent_k8s : Wait for the agent to become ready"
+      # 上限を超えたレプリカは standby で待機する（プロセスは終了しない）ため Ready に
+      # なる。ここで検出したいのは「イメージが引けない」「Secret が無い」等の起動失敗。
+      #
+      # 自己ターゲットではこの待機を行わない（ブロックのガードで除外される）。自分の
+      # 完了を自分で待つのは自己矛盾であり、必ずタイムアウトする。
+      ansible.builtin.command:
+        argv:
+          - "{{ ai_support_agent_k8s_kubectl }}"
+          # rollout status は --timeout=60s まで watch するため、request-timeout は
+          # それより長くする（短いと watch 自体が途中で切れて誤検知になる）。
+          - "--request-timeout=90s"
+          - "--kubeconfig={{ ai_support_agent_k8s_kubeconfig }}"
+          - -n
+          - "{{ ai_support_agent_k8s_namespace }}"
+          - rollout
+          - status
+          - "statefulset/{{ item.name }}"
+          - --timeout=60s
+      register: ai_support_agent_k8s_rollout
+      until: ai_support_agent_k8s_rollout.rc == 0
+      retries: 10
+      delay: 15
+      changed_when: false

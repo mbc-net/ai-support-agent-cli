@@ -32,6 +32,7 @@ import type {
   RepoCredentials,
   SendSlackFileResult,
   SendSlackMessageResult,
+  SelfRestartDeclarationAck,
   ServerSetupProgressEvent,
   ServerSetupVariablesResponse,
   SshCredentials,
@@ -433,6 +434,52 @@ export class ApiClient {
         { events: chunk },
         { params: { agentId }, headers: this.assignmentHeaders(commandId) },
       )
+    }
+  }
+
+  /**
+   * Report that this run is about to restart the agent executing it.
+   *
+   * Rides {@link submitServerSetupProgress}'s endpoint — there is no separate
+   * one — with the `awaitingSelfRestart` latch instead of events. The execution
+   * is derived server-side from the command's payload, so no executionId /
+   * projectCode is sent from here (a client-chosen one would let a command
+   * flag someone else's execution).
+   *
+   * Idempotent server-side and one-way: only `true` carries meaning. Rejections
+   * are the caller's to absorb — see self-restart-declaration.ts, which reports
+   * the failure and lets the deployment proceed.
+   *
+   * **A 200 is not proof the declaration landed.** The api applies the flag on
+   * a best-effort path (its own exceptions are logged, not raised) and answers
+   * 200 either way, so the outcome is carried in the response body instead.
+   * This is the last answer this process will ever read — it restarts itself
+   * immediately afterwards — which is why the caller must look at it.
+   *
+   * A body-less 200 means an api that predates that field; it is read as
+   * acknowledged. Reading it as a failure would turn every run against a
+   * not-yet-deployed api into a false alarm and bury the real ones.
+   */
+  async declareServerSetupAwaitingSelfRestart(
+    commandId: string,
+    agentId: string,
+  ): Promise<SelfRestartDeclarationAck> {
+    this.validateCommandId(commandId)
+    logger.debug(`Declaring awaiting-self-restart for command: ${commandId}`)
+    const response = await this.post<
+      { awaitingSelfRestart?: SelfRestartDeclarationAck } | '' | undefined
+    >(
+      API_ENDPOINTS.SERVER_SETUP_PROGRESS(this.tenantCode, commandId),
+      { awaitingSelfRestart: true },
+      { params: { agentId }, headers: this.assignmentHeaders(commandId) },
+    )
+    const ack =
+      typeof response === 'object' && response !== null
+        ? response.awaitingSelfRestart
+        : undefined
+    return {
+      acknowledged: ack?.acknowledged !== false,
+      ...(ack?.outcome === undefined ? {} : { outcome: ack.outcome }),
     }
   }
 

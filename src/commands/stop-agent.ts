@@ -4,7 +4,13 @@
  * pidファイルから実行中エージェントのPIDを読み取り、SIGTERM を送信して正常停止させる。
  * エージェント側の shutdown ハンドラが docker stop を実行してコンテナも合わせて停止する。
  */
-import { getPidFilePath, isProcessAlive, readPidFile, removePidFile } from '../pid-manager'
+import {
+  getPidFilePath,
+  isEntryRunning,
+  isProcessAlive,
+  readPidFile,
+  removePidFile,
+} from '../pid-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { getErrorMessage, sleep } from '../utils'
@@ -32,7 +38,10 @@ export async function stopAgent(): Promise<void> {
 
   const { pid } = entry
 
-  if (!isProcessAlive(pid)) {
+  // isAlreadyRunning() と同じ判定（ホスト名一致・起動世代マーカー・プロセス生存）を通す。
+  // 生存確認だけで SIGTERM を送ると、別ホスト（別コンテナ）や前世代のプロセスが
+  // 残した記録の pid 番号に、たまたま存在する無関係なプロセスを kill しうる。
+  if (!isEntryRunning(entry)) {
     logger.warn(t('stop.staleProcess', { pid }))
     removePidFile()
     return

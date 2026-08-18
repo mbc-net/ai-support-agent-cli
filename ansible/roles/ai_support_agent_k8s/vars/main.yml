@@ -17,3 +17,34 @@ ai_support_agent_k8s_project_specs: >-
       'token': ai_support_agent_k8s_token,
     }]
   }}
+
+# 「このエントリ（item）が自分自身の StatefulSet か」を判定する Pod 名のパターン。
+#
+# StatefulSet の Pod 名は必ず `<StatefulSet名>-<序数>` である。前方一致
+# （`self_instance_id.startswith(item.name ~ '-')`）だけで判定してはならない。ある
+# StatefulSet 名が別の StatefulSet 名の真の接頭辞であるとき——例えば同じレシピに
+# `agent` と `agent-canary` が併存し、実行中のエージェントが `agent-canary-0`——
+# `item.name = "agent"` に対しても "agent-canary-0".startswith("agent-") が真になり、
+# 無関係な `agent` プロジェクトが「自己」と誤判定される。誤判定されたプロジェクトは
+# 後段の rollout status（＝イメージ取得失敗などの起動失敗検知）を飛ばされるため、
+# 実際には起動していないのに成功として報告される。序数部（数字のみ）まで検証する。
+#
+# `regex_escape` は item.name が DNS-1123 ラベルに限定されていても外さない。将来
+# 検証が緩んだときに、名前がパターンとして解釈される形の破れを作らないため。
+ai_support_agent_k8s_self_pod_name_pattern: "^{{ item.name | regex_escape }}-[0-9]+$"
+
+# 自己判定の唯一の実体。タスク側はこの変数だけを参照する（同じ式を各タスクへ複製
+# すると、片方だけ直した状態が「一部のタスクだけ自己と判定する」という一貫性のない
+# 挙動になる）。
+#
+# `is match` は Python の re.match 相当（先頭アンカー）で、パターン側が `^...$` を
+# 持つため全体一致になる。self_instance_id が未設定（空文字＝K8s 以外の実行経路）
+# なら一致せず「自己ではない」に倒れる。
+#
+# 値はテンプレート結果の文字列 "True" / "False" になるため、参照側は必ず `| bool`
+# を通すこと（"False" は非空文字列なので、素で `when:` に置くと真になる）。
+ai_support_agent_k8s_item_is_self: >-
+  {{
+    ai_support_agent_k8s_self_instance_id | default('')
+    is match(ai_support_agent_k8s_self_pod_name_pattern)
+  }}

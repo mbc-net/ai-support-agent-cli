@@ -147,6 +147,16 @@ export interface StartProgressTailerOptions {
   filePath: string
   onEvents: (events: AnsibleProgressEvent[]) => Promise<void>
   intervalMs?: number
+  /**
+   * Extra check to run on the same tick, after the batch has been delivered.
+   *
+   * The only other thing that has to be watched while ansible runs is the
+   * self-restart marker (see self-restart-declaration.ts). Piggybacking here
+   * rather than adding a second timer keeps it inside the same single-flight
+   * loop, so it can never run alongside a delivery it should be ordered
+   * against. Like `onEvents`, its rejections are absorbed.
+   */
+  onPoll?: () => Promise<void>
 }
 
 /**
@@ -162,12 +172,12 @@ export interface StartProgressTailerOptions {
 export function startProgressTailer(
   options: StartProgressTailerOptions,
 ): ProgressTailer {
-  const { filePath, onEvents, intervalMs = PROGRESS_POLL_INTERVAL_MS } = options
+  const { filePath, onEvents, intervalMs = PROGRESS_POLL_INTERVAL_MS, onPoll } = options
   const reader = new ProgressFileReader(filePath)
   let inFlight = false
   let stopped = false
 
-  const deliver = async (): Promise<void> => {
+  const deliverEvents = async (): Promise<void> => {
     const events = reader.read()
     if (events.length === 0) return
     try {
@@ -177,6 +187,22 @@ export function startProgressTailer(
       // arrives via submitResult. Losing a batch must not stop later ones.
       logger.debug(
         `[server-setup] failed to deliver ${events.length} progress event(s): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
+  }
+
+  const deliver = async (): Promise<void> => {
+    await deliverEvents()
+    if (!onPoll) return
+    try {
+      await onPoll()
+    } catch (error) {
+      // Same reasoning as above: one failing check must not end the polling
+      // that the rest of the run depends on.
+      logger.debug(
+        `[server-setup] progress poll hook failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
       )

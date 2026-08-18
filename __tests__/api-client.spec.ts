@@ -1042,6 +1042,66 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('declareServerSetupAwaitingSelfRestart', () => {
+    it('rides the progress endpoint with the latch field and no events', async () => {
+      // 相乗り先は既存の進捗エンドポイント（新規エンドポイントは無い）。
+      // executionId / projectCode は送らない（サーバーがコマンドの payload から
+      // 導出する。クライアントが指定できると他実行を書き換えられる）。
+      mockInstance.post.mockResolvedValue({ data: {} })
+
+      await client.declareServerSetupAwaitingSelfRestart('cmd-1', 'agent-1')
+
+      expect(mockInstance.post).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/commands/cmd-1/server-setup-progress',
+        { awaitingSelfRestart: true },
+        { params: { agentId: 'agent-1' }, headers: {} },
+      )
+    })
+
+    it('should validate commandId format', async () => {
+      await expect(
+        client.declareServerSetupAwaitingSelfRestart('../evil', 'agent-1'),
+      ).rejects.toThrow('Invalid command ID format')
+    })
+
+    /**
+     * 反映されたかどうかは**応答本文**で返る。HTTP 200 は「リクエストが受理された」
+     * ことしか意味せず、実行行にフラグが立った保証ではない（api 側は DB 例外を
+     * 握って 200 を返す設計のまま）。
+     */
+    describe('反映されたかどうかを応答から読む', () => {
+      it('サーバーが反映したと答えたら acknowledged=true', async () => {
+        mockInstance.post.mockResolvedValue({
+          data: { awaitingSelfRestart: { acknowledged: true, outcome: 'declared' } },
+        })
+
+        await expect(
+          client.declareServerSetupAwaitingSelfRestart('cmd-1', 'agent-1'),
+        ).resolves.toEqual({ acknowledged: true, outcome: 'declared' })
+      })
+
+      it('サーバーが反映できなかったと答えたら acknowledged=false', async () => {
+        mockInstance.post.mockResolvedValue({
+          data: { awaitingSelfRestart: { acknowledged: false, outcome: 'error' } },
+        })
+
+        await expect(
+          client.declareServerSetupAwaitingSelfRestart('cmd-1', 'agent-1'),
+        ).resolves.toEqual({ acknowledged: false, outcome: 'error' })
+      })
+
+      it('本文を返さない旧 api では acknowledged=true とみなす（後方互換）', async () => {
+        // 応答本文はこの修正で追加されたもの。未デプロイの api を相手に
+        // 「毎回申告が失敗した」と報告し始めると、本物の失敗が埋もれる。
+        mockInstance.post.mockResolvedValue({ data: '' })
+
+        await expect(
+          client.declareServerSetupAwaitingSelfRestart('cmd-1', 'agent-1'),
+        ).resolves.toEqual({ acknowledged: true })
+      })
+    })
+  })
+
   describe('submitLogChunk', () => {
     it('should submit log chunk with correct parameters', async () => {
       mockInstance.post.mockResolvedValue({ data: {} })
