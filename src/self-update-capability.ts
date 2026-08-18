@@ -22,6 +22,7 @@
  */
 
 import { ENV_VARS } from './constants'
+import { isRunningOnKubernetes } from './utils/container-runtime'
 
 /** 自己更新が成立しない理由。 */
 export type SelfUpdateBlockReason = 'kubernetes' | 'pid1-no-supervisor'
@@ -48,10 +49,9 @@ export function resolveSelfUpdateCapability(
   env: NodeJS.ProcessEnv = process.env,
   pid: number = process.pid,
 ): SelfUpdateCapability {
-  // Kubernetes は全 Pod へ KUBERNETES_SERVICE_HOST を注入する（Service 環境変数）。
-  // Pod 内で in-cluster API へ到達するための標準的な検出手段であり、
-  // automountServiceAccountToken を無効にしていても設定される。
-  if (env.KUBERNETES_SERVICE_HOST) {
+  // Kubernetes の判定は codex-runner のサンドボックス判定と共有する
+  // （`utils/container-runtime.ts`）。
+  if (isRunningOnKubernetes(env)) {
     return { capable: false, reason: 'kubernetes' }
   }
 
