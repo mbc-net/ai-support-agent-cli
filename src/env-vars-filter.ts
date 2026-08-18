@@ -8,8 +8,12 @@
  * - 非文字列・空文字値の skip も統一。
  *
  * 注意: ここで列挙する denylist は API 側
- * `src/agent/agent-env-vars.service.ts` の `DENYLIST_EXACT` /
- * `DENYLIST_PREFIX` と同期する必要がある。
+ * `src/agent/utils/env-var-name-guard.ts`（`AgentEnvVarsService` から利用）の
+ * `DENYLIST_EXACT` / `DENYLIST_PREFIX` と同期する必要がある。
+ *
+ * 補足: chat 実行経路（`commands/cli-runner-env.ts` の `applyEnvVarsOverride`）は
+ * このフィルタを通らないため、そこでは api 側 denylist が唯一の防御になる。
+ * 逆に api 側だけに項目を足すと本ファイルとの片側ドリフトになる。
  */
 
 import { logger } from './logger'
@@ -49,9 +53,28 @@ const DENYLIST_EXACT = new Set<string>([
   // agent sandbox anchors
   // ZDOTDIR: PTY の zsh sandbox 用 .zshrc を指す
   // XDG_DATA_HOME / XDG_CONFIG_HOME: code-server (VS Code) の settings.json を指す
-  'ZDOTDIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME',
+  // CODEX_HOME: Codex CLI の設定ディレクトリ (`config.toml` / MCP 設定) の探索
+  //   アンカー。任意ディレクトリを指されると攻撃者が用意した `config.toml` を
+  //   読ませられる。agent が付ける `--sandbox` フラグは `sandbox_mode` を
+  //   上書きするが、`[sandbox_workspace_write]` の writable_roots /
+  //   network_access や `[mcp_servers.*]` までは上書きしない可能性が高いため、
+  //   予防的に拒否する。正規経路は Docker 実行時の `-e CODEX_HOME=...`
+  //   (docker/volume-mount-builder.ts) 等、ホストの process.env 側であり
+  //   このフィルタは通らない
+  'ZDOTDIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'CODEX_HOME',
   // agent 内部
   'CLAUDECODE',
+  // CLI サンドボックス判定の覆し（利用者が安全機構の結論を書き換えられる）
+  // CODEX_SANDBOX_MODE: commands/codex-runner.ts の resolveCodexSandboxMode が
+  //   「明示指定」として環境由来の既定より常に優先して採用する。
+  //   `danger-full-access` を仕込まれると、コンテナ境界のないベアメタルホスト
+  //   上でも Codex のサンドボックスが外れる
+  // KUBERNETES_SERVICE_HOST: utils/container-runtime.ts の isRunningOnKubernetes
+  //   が「コンテナの中か」を判定するアンカー（サンドボックス既定値と自動更新の
+  //   抑止判定の双方に効く）。現在の実装は実 process.env のみを見るため
+  //   この経路では届かないが、「マージ済み env を渡す」実装に変わった瞬間に
+  //   静かに悪用可能になるため防御的に先回りして塞ぐ
+  'CODEX_SANDBOX_MODE', 'KUBERNETES_SERVICE_HOST',
 ])
 
 /** プレフィックス一致で拒否する env 名 */

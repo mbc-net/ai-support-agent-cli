@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 
 import { LOG_STDERR_ON_FAILURE_LIMIT } from '../../src/constants'
-import { ERR_CODEX_AUTH_INVALID, buildCodexArgs, buildCodexMcpConfigOverrides, formatCodexExitError, isCodexAuthError, redactCodexArgs, runCodex } from '../../src/commands/codex-runner'
+import { ERR_CODEX_AUTH_INVALID, _resetCodexSandboxWarning, buildCodexArgs, buildCodexMcpConfigOverrides, formatCodexExitError, isCodexAuthError, redactCodexArgs, runCodex } from '../../src/commands/codex-runner'
 import { logger } from '../../src/logger'
 import { createMockChildProcess } from '../helpers/mock-factory'
 
@@ -17,10 +17,16 @@ describe('codex-runner', () => {
   describe('buildCodexArgs', () => {
     const originalDockerValue = process.env.AI_SUPPORT_AGENT_IN_DOCKER
     const originalSandboxValue = process.env.CODEX_SANDBOX_MODE
+    const originalK8sValue = process.env.KUBERNETES_SERVICE_HOST
 
     beforeEach(() => {
       delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
       delete process.env.CODEX_SANDBOX_MODE
+      delete process.env.KUBERNETES_SERVICE_HOST
+      // サンドボックス無効の警告はプロセス寿命で1回しか出ないため、リセット
+      // しないと「先に走ったテストが1回目を消費して次のテストでは出ない」
+      // というテスト間汚染が起きる。
+      _resetCodexSandboxWarning()
     })
 
     afterEach(() => {
@@ -28,6 +34,8 @@ describe('codex-runner', () => {
       else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerValue
       if (originalSandboxValue === undefined) delete process.env.CODEX_SANDBOX_MODE
       else process.env.CODEX_SANDBOX_MODE = originalSandboxValue
+      if (originalK8sValue === undefined) delete process.env.KUBERNETES_SERVICE_HOST
+      else process.env.KUBERNETES_SERVICE_HOST = originalK8sValue
     })
 
     it('builds non-interactive JSONL args', () => {
@@ -58,6 +66,187 @@ describe('codex-runner', () => {
       const args = buildCodexArgs('hello')
 
       expect(args[args.indexOf('--sandbox') + 1]).toBe('workspace-write')
+    })
+
+    // Kubernetes の Pod は AI_SUPPORT_AGENT_IN_DOCKER を立てないため、以前は
+    // 「コンテナではない」と判定されて workspace-write（bwrap 必須）になり、
+    // CAP_SYS_ADMIN の無い Pod で `bwrap: Creating new namespace failed:
+    // Operation not permitted` になっていた。Docker と同じくコンテナ境界が
+    // あるので、同じ扱いにする。
+    it('uses danger-full-access sandbox when running on Kubernetes', () => {
+      process.env.KUBERNETES_SERVICE_HOST = '10.43.0.1'
+
+      const args = buildCodexArgs('hello')
+
+      expect(args[args.indexOf('--sandbox') + 1]).toBe('danger-full-access')
+    })
+
+    it('treats an empty KUBERNETES_SERVICE_HOST as not Kubernetes', () => {
+      process.env.KUBERNETES_SERVICE_HOST = ''
+
+      const args = buildCodexArgs('hello')
+
+      expect(args[args.indexOf('--sandbox') + 1]).toBe('workspace-write')
+    })
+
+    it('keeps the sandbox enabled when neither Docker nor Kubernetes is detected', () => {
+      const args = buildCodexArgs('hello')
+
+      expect(args[args.indexOf('--sandbox') + 1]).toBe('workspace-write')
+    })
+
+    it('allows CODEX_SANDBOX_MODE to override the Kubernetes default', () => {
+      process.env.KUBERNETES_SERVICE_HOST = '10.43.0.1'
+      process.env.CODEX_SANDBOX_MODE = 'workspace-write'
+
+      const args = buildCodexArgs('hello')
+
+      expect(args[args.indexOf('--sandbox') + 1]).toBe('workspace-write')
+    })
+
+    it('allows the sandboxMode option to override the Kubernetes default', () => {
+      process.env.KUBERNETES_SERVICE_HOST = '10.43.0.1'
+
+      const args = buildCodexArgs('hello', { sandboxMode: 'read-only' })
+
+      expect(args[args.indexOf('--sandbox') + 1]).toBe('read-only')
+    })
+
+    it('prefers the sandboxMode option over CODEX_SANDBOX_MODE', () => {
+      process.env.CODEX_SANDBOX_MODE = 'danger-full-access'
+
+      const args = buildCodexArgs('hello', { sandboxMode: 'read-only' })
+
+      expect(args[args.indexOf('--sandbox') + 1]).toBe('read-only')
+    })
+
+    it('falls back to the environment default when the configured value is invalid', () => {
+      process.env.CODEX_SANDBOX_MODE = 'bogus-mode'
+
+      expect(buildCodexArgs('hello')[buildCodexArgs('hello').indexOf('--sandbox') + 1]).toBe('workspace-write')
+
+      process.env.KUBERNETES_SERVICE_HOST = '10.43.0.1'
+
+      const k8sArgs = buildCodexArgs('hello')
+
+      expect(k8sArgs[k8sArgs.indexOf('--sandbox') + 1]).toBe('danger-full-access')
+    })
+
+    it('falls back to the environment default when sandboxMode is blank or invalid', () => {
+      process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+      expect(buildCodexArgs('hello', { sandboxMode: '   ' })[4]).toBe('danger-full-access')
+      expect(buildCodexArgs('hello', { sandboxMode: 'nope' })[4]).toBe('danger-full-access')
+    })
+
+    // codex の OS サンドボックスが外れた状態（danger-full-access）は、
+    // ワークスペース外書き込みとネットワーク制限がすべて無効になる。spawn ログは
+    // logger.debug のため --verbose 無しでは抑制され、運用者からは見えなかった。
+    describe('sandbox disable warning', () => {
+      const sandboxWarnings = (): string[] =>
+        (logger.warn as jest.Mock).mock.calls
+          .map((call) => String(call[0]))
+          .filter((message) => message.includes('danger-full-access'))
+
+      beforeEach(() => {
+        jest.clearAllMocks()
+      })
+
+      it('warns with the Kubernetes detection basis when the sandbox is disabled', () => {
+        process.env.KUBERNETES_SERVICE_HOST = '10.43.0.1'
+
+        buildCodexArgs('hello')
+
+        const warnings = sandboxWarnings()
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain('[chat]')
+        expect(warnings[0]).toContain('Kubernetes')
+        expect(warnings[0]).toContain('KUBERNETES_SERVICE_HOST')
+      })
+
+      it('warns with the Docker detection basis when the sandbox is disabled', () => {
+        process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+
+        buildCodexArgs('hello')
+
+        const warnings = sandboxWarnings()
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain('Docker')
+        expect(warnings[0]).toContain('AI_SUPPORT_AGENT_IN_DOCKER')
+      })
+
+      it('reports both runtimes when Docker and Kubernetes are detected together', () => {
+        process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+        process.env.KUBERNETES_SERVICE_HOST = '10.43.0.1'
+
+        buildCodexArgs('hello')
+
+        const warnings = sandboxWarnings()
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain('Docker')
+        expect(warnings[0]).toContain('Kubernetes')
+      })
+
+      it('warns only once per process even when codex runs repeatedly', () => {
+        process.env.KUBERNETES_SERVICE_HOST = '10.43.0.1'
+
+        buildCodexArgs('hello')
+        buildCodexArgs('hello again')
+        buildCodexArgs('hello once more')
+
+        expect(sandboxWarnings()).toHaveLength(1)
+      })
+
+      it('does not warn while the sandbox stays enabled', () => {
+        buildCodexArgs('hello')
+
+        expect(sandboxWarnings()).toHaveLength(0)
+        expect(buildCodexArgs('hello')[4]).toBe('workspace-write')
+      })
+
+      it('does not warn for an explicit sandbox mode that keeps the sandbox on', () => {
+        process.env.KUBERNETES_SERVICE_HOST = '10.43.0.1'
+        process.env.CODEX_SANDBOX_MODE = 'read-only'
+
+        buildCodexArgs('hello')
+
+        expect(sandboxWarnings()).toHaveLength(0)
+      })
+
+      // 意図的な指定と環境による自動フォールバックは、運用者が「設定を直すべきか
+      // 環境の制約か」を切り分けられるよう文言で区別する。
+      it('distinguishes an explicit CODEX_SANDBOX_MODE from the container fallback', () => {
+        process.env.CODEX_SANDBOX_MODE = 'danger-full-access'
+
+        buildCodexArgs('hello')
+
+        const warnings = sandboxWarnings()
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain('CODEX_SANDBOX_MODE')
+        expect(warnings[0]).not.toContain('detected')
+      })
+
+      it('distinguishes an explicit sandboxMode option from the container fallback', () => {
+        buildCodexArgs('hello', { sandboxMode: 'danger-full-access' })
+
+        const warnings = sandboxWarnings()
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain('sandboxMode')
+        expect(warnings[0]).not.toContain('detected')
+      })
+
+      it('warns again after _resetCodexSandboxWarning', () => {
+        process.env.KUBERNETES_SERVICE_HOST = '10.43.0.1'
+
+        buildCodexArgs('hello')
+        buildCodexArgs('hello')
+        expect(sandboxWarnings()).toHaveLength(1)
+
+        _resetCodexSandboxWarning()
+        buildCodexArgs('hello')
+
+        expect(sandboxWarnings()).toHaveLength(2)
+      })
     })
 
     it('does not pass unsupported approval flags to codex exec', () => {
