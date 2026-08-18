@@ -45,6 +45,27 @@ ai_support_agent_k8s_termination_grace_period_seconds: 320
 # 取り違えるため。既定の空文字は「自己ターゲットではない」（K8s 以外の実行経路）を意味する。
 ai_support_agent_k8s_self_instance_id: ''
 
+# 自己再起動待ちの申告に使うハンドシェイク用パス。runner（src/server-setup/
+# server-setup-runner.ts の SELF_RESTART_MARKER_VAR / SELF_RESTART_ACK_VAR）が
+# extra-vars で渡す**予約変数**であり、レシピ側から指定するものではない。
+#
+# 自己ターゲットの StatefulSet を触ると自 Pod が置き換わり、この実行の結果は
+# 報告されないまま終わる。そこで再起動へ進む**前**に marker ファイルをコントローラ
+# （＝実行中のエージェント自身）へ置き、エージェントがサーバーへ「自己再起動待ち」を
+# 申告してから書く ack ファイルを待つ。待つことで「申告 → 再起動」の順序が保証される
+# （1秒ポーリングと kubectl apply の競争にしない）。
+#
+# 既定の空文字は「誰も見ていない＝ハンドシェイクしない」を意味する（ローカル実行など
+# 進捗の監視が無い経路）。空のまま待つと、答える者がいない ack を待ち続けることになる。
+ai_support_agent_k8s_self_restart_marker_file: ''
+ai_support_agent_k8s_self_restart_ack_file: ''
+
+# ack を待つ上限（秒）。エージェント側はポーリング間隔 1 秒 + API リクエストの
+# タイムアウト（API_REQUEST_TIMEOUT = 10 秒）で応答するため十分に長い。無期限には
+# しない: エージェントが応答できない状態でも配置そのものは進めるべきで、待ち続けると
+# ansible 全体の 30 分上限を食い潰す。
+ai_support_agent_k8s_self_restart_ack_timeout_seconds: 60
+
 # エージェントのデータディレクトリ。永続ボリュームのマウント先であり、同時に
 # AI_SUPPORT_AGENT_CONFIG_DIR としてコンテナへ渡す。
 #

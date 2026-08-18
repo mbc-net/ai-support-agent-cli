@@ -290,6 +290,98 @@
       intended behavior, not a failure.
   when: ai_support_agent_k8s_pending_self_targets | default([]) | length > 0
 
+- name: "ai_support_agent_k8s : Tell the agent this run ends without a result (marker)"
+  # 自己再起動へ進む前の申告のトリガー。エージェントは kubectl / ansible の**出力文言**
+  # ではなく、この**ファイルの存在**だけを見て「自己再起動待ち」をサーバーへ申告する
+  # （文言依存の判定は毎回誤発火した実績があるため使わない）。中身は診断用で、判定には
+  # 使わない。
+  #
+  # 置き先はコントローラ（＝このプレイを実行しているエージェント自身）のファイル
+  # システムであり、対象ホストではない。プレイ全体の become: true をそのまま使うと
+  # root でローカル実行しようとするため become: false を明示する。
+  ansible.builtin.copy:
+    content: >-
+      {{ {
+        'selfInstanceId': ai_support_agent_k8s_self_instance_id,
+        'targets': ai_support_agent_k8s_pending_self_targets
+                   | default([]) | map(attribute='name') | list
+      } | to_json }}
+    dest: "{{ ai_support_agent_k8s_self_restart_marker_file }}"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+  register: ai_support_agent_k8s_self_restart_marker
+  # 申告は報告経路であって配置の一部ではない。書けなくても配置は続ける（下の debug が
+  # 失敗を表面化する）。`failed_when: false` は使わない: register の .failed まで False に
+  # なり、診断が一度も発火しない死んだコードになる
+  # （__tests__/server-setup/ansible-roles-no-log-diagnostics.spec.ts 参照）。
+  ignore_errors: true
+  when:
+    - ai_support_agent_k8s_pending_self_targets | default([]) | length > 0
+    # 予約変数が空 = 監視者がいない経路。ハンドシェイクごと行わない（誰も書かない ack を
+    # 待つだけになる）。相対パスは runner のバグ以外ではあり得ないが、その場合に
+    # カレントディレクトリ配下へ書き出さないよう絶対パスも要求する。
+    - ai_support_agent_k8s_self_restart_marker_file | default('') | trim | length > 0
+    - ai_support_agent_k8s_self_restart_ack_file | default('') | trim | length > 0
+    - ai_support_agent_k8s_self_restart_marker_file is match('^/')
+    - ai_support_agent_k8s_self_restart_ack_file is match('^/')
+
+- name: "ai_support_agent_k8s : Wait for the agent to report it before restarting itself"
+  # ここで待つことが、この機能の本体である。エージェントは申告の送信が**完了してから**
+  # ack を書く（src/server-setup/self-restart-declaration.ts）。待たずに進むと、申告が
+  # 届く前に Pod が置き換わってプロセスが消え、申告そのものが無意味になる。
+  ansible.builtin.wait_for:
+    path: "{{ ai_support_agent_k8s_self_restart_ack_file }}"
+    timeout: "{{ ai_support_agent_k8s_self_restart_ack_timeout_seconds | int }}"
+  delegate_to: localhost
+  become: false
+  register: ai_support_agent_k8s_self_restart_ack
+  # マーカーを置けなかったときに待っても、答える者はいない。
+  ignore_errors: true
+  when:
+    - not (ai_support_agent_k8s_self_restart_marker.skipped | default(false))
+    - not (ai_support_agent_k8s_self_restart_marker.failed | default(false))
+
+- name: "ai_support_agent_k8s : Read what the agent reported (ack content)"
+  # ack は**ローカル書き込み**なので、ほぼ確実に成功する。つまり「marker/wait が
+  # 失敗したか」だけを見る診断は、最も起きやすい失敗経路 — API への申告そのものが
+  # 失敗した場合（認証切れは 4xx でリトライされず数百ms で確定する）— では一度も
+  # 発火しない。エージェントは ack の**中身**に成否を書くので、それを読む。
+  #
+  # 判定材料はエージェント自身が書いた構造化された値であり、ansible / kubectl の
+  # 出力文言ではない（文言依存の判定は毎回誤発火した実績があるため使わない）。
+  ansible.builtin.slurp:
+    src: "{{ ai_support_agent_k8s_self_restart_ack_file }}"
+  delegate_to: localhost
+  become: false
+  register: ai_support_agent_k8s_self_restart_ack_content
+  # 読めなくても配置は続ける（読み取りは診断であって配置の一部ではない）。
+  # 待ちがタイムアウトして ack が無い場合もここに来るが、その場合は下の
+  # wait 失敗の条件で診断が発火する。
+  ignore_errors: true
+  when:
+    - not (ai_support_agent_k8s_self_restart_marker.skipped | default(false))
+    - not (ai_support_agent_k8s_self_restart_marker.failed | default(false))
+
+- name: "ai_support_agent_k8s : Note that the self-restart report did not get through"
+  # 申告の失敗は配置の失敗ではないので fail にしない。ただし黙って進むと、画面上は
+  # 「自己再起動待ち」が出ないまま実行が running で滞留し、原因が追えなくなる。
+  ansible.builtin.debug:
+    msg: >-
+      The agent did not report this run as awaiting a self restart
+      (marker failed={{ ai_support_agent_k8s_self_restart_marker.failed | default(false) }},
+      ack failed={{ ai_support_agent_k8s_self_restart_ack.failed | default(false) }},
+      ack content={{ ai_support_agent_k8s_self_restart_ack_content.content
+                     | default('') | b64decode | trim }}).
+      Deploying this agent anyway. The execution will stay "running" until it is
+      released with "Stop execution" in the admin UI or reclaimed by the
+      server-side watchdog.
+  when: >-
+    (ai_support_agent_k8s_self_restart_marker.failed | default(false))
+    or (ai_support_agent_k8s_self_restart_ack.failed | default(false))
+    or (ai_support_agent_k8s_self_restart_ack_content.content | default('') | b64decode
+        is search('"declared"\s*:\s*false'))
+
 - name: "ai_support_agent_k8s : Deploy the agent that is running this play (deferred)"
   # 完了待ち（rollout status）は行わない/行えない。Pod の置き換えが受理された時点で
   # このプロセスは終了に向かうため、待つ相手が自分自身になる（tasks/self.yml 参照）。

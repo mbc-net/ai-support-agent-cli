@@ -45,6 +45,7 @@ import {
   errorResult,
   isSupportedSshAuthType,
   type ServerSetupExecPayload,
+  type SelfRestartDeclarationAck,
   type ServerSetupProgressEvent,
   type ServerSetupTaskResult,
   type ServerSetupVariablesResponse,
@@ -53,6 +54,7 @@ import {
 } from '../types'
 import { getErrorMessage, sweepStaleEntries } from '../utils'
 import { type AnsibleProgressEvent, startProgressTailer } from './progress-tailer'
+import { createSelfRestartDeclarer } from './self-restart-declaration'
 import { resolveKnownHostsPath } from '../utils/known-hosts-store'
 import { isValidPort } from '../utils/port'
 import { redactSecretValues } from '../utils/secret-redaction'
@@ -231,6 +233,29 @@ const SUDO_PRECHECK_ASSERT_TASK: Record<string, unknown> = {
  * kill-yourself-first behavior this defends against).
  */
 export const SELF_INSTANCE_ID_VAR = 'ai_support_agent_k8s_self_instance_id'
+
+/**
+ * Reserved extra-vars naming the two sides of the self-restart handshake.
+ *
+ * When the `ai_support_agent_k8s` role is about to apply/restart the agent that
+ * is executing the play (tasks/self.yml), the run ends without ever reporting a
+ * result — the Pod is replaced mid-play. Before it gets there the role writes
+ * {@link SELF_RESTART_MARKER_VAR} on the controller (this agent's own
+ * filesystem) and waits for {@link SELF_RESTART_ACK_VAR} to appear; the agent
+ * declares "awaiting self restart" to the API and only then writes the ack. The
+ * wait is what makes the report happen *before* the restart rather than racing
+ * it (see self-restart-declaration.ts).
+ *
+ * Both keys are written to `extra-vars.json` **after** the tenant's project
+ * (`ANSIBLE#`) variables and are always present — empty when nothing is
+ * watching. Always-present matters twice over: extra-vars outrank every other
+ * precedence level, so an empty value both switches the handshake off (the role
+ * skips it instead of waiting for an ack nobody will write) and stops a recipe
+ * from supplying a path of its own — which would turn the role's `copy` into an
+ * arbitrary-write primitive on the agent host.
+ */
+export const SELF_RESTART_MARKER_VAR = 'ai_support_agent_k8s_self_restart_marker_file'
+export const SELF_RESTART_ACK_VAR = 'ai_support_agent_k8s_self_restart_ack_file'
 
 export interface RunServerSetupContext {
   commandId: string
@@ -936,6 +961,13 @@ export interface ExecuteServerSetupAnsibleInput {
    * never affects the run's own result.
    */
   onProgress?: (events: ServerSetupProgressEvent[]) => Promise<void>
+  /**
+   * Reports that this run is about to restart the agent executing it, so the
+   * server can show that state instead of a plain `running` that only the
+   * two-hour watchdog resolves. Wired on the api-driven path only; without it
+   * the handshake extra-vars stay empty and the role skips the handshake.
+   */
+  onAwaitingSelfRestart?: () => Promise<SelfRestartDeclarationAck | void>
 }
 
 /**
@@ -959,7 +991,7 @@ export interface ExecuteServerSetupAnsibleInput {
 export async function executeServerSetupAnsible(
   input: ExecuteServerSetupAnsibleInput,
 ): Promise<CommandResult> {
-  const { executionId, body, mode, credential, variables, secretNames, tenantCode, sshHostId, commandId, client, onProgress } = input
+  const { executionId, body, mode, credential, variables, secretNames, tenantCode, sshHostId, commandId, client, onProgress, onAwaitingSelfRestart } = input
 
   // Resolve the bundled roles/callback-plugins paths first (a packaging error
   // here is surfaced verbatim), then the persistent known_hosts file. Both are
@@ -1066,6 +1098,18 @@ export async function executeServerSetupAnsible(
 
       // Project (`ANSIBLE#`) variables are the entire extra-vars set now that
       // per-step params are gone; body tasks reference them via `{{ VAR }}`.
+      // Self-restart handshake paths. Only wired when a declaration sink exists
+      // *and* the progress tailer is running, because the marker is watched on
+      // that poll loop — handing the role a path nobody polls would make it
+      // wait out its whole ack timeout for an answer that never comes.
+      const selfRestartPaths =
+        onProgress && onAwaitingSelfRestart
+          ? {
+              markerPath: path.join(tmpDir, 'self-restart.marker.json'),
+              ackPath: path.join(tmpDir, 'self-restart.ack'),
+            }
+          : undefined
+
       const extraVarsPath = path.join(tmpDir, 'extra-vars.json')
       // 0600: extra-vars.json may carry ANSIBLE# project secret values in
       // plaintext — same permission level as the private key alongside it.
@@ -1081,6 +1125,11 @@ export async function executeServerSetupAnsible(
         JSON.stringify({
           ...variables,
           [SELF_INSTANCE_ID_VAR]: resolveInstanceId(),
+          // Written unconditionally (empty = handshake off) so a project
+          // variable of the same name can never point the role's controller-side
+          // `copy` at a path of the recipe's choosing.
+          [SELF_RESTART_MARKER_VAR]: selfRestartPaths?.markerPath ?? '',
+          [SELF_RESTART_ACK_VAR]: selfRestartPaths?.ackPath ?? '',
           ...(sharedFileStagingDir
             ? { [SHARED_FILE_STAGING_DIR_VAR]: sharedFileStagingDir }
             : {}),
@@ -1147,11 +1196,25 @@ export async function executeServerSetupAnsible(
         // mean writing them to disk to avoid writing them to disk.
         writeFileSync(progressPath, '', { mode: 0o600 })
       }
+      const selfRestartDeclarer =
+        selfRestartPaths && onAwaitingSelfRestart
+          ? createSelfRestartDeclarer({
+              ...selfRestartPaths,
+              declare: onAwaitingSelfRestart,
+              // Same channel the task progress uses, so a lost declaration
+              // shows up in the run's own task log — the only place that
+              // survives this agent being replaced moments later.
+              reportProgress: onProgress,
+            })
+          : undefined
       const progressTailer =
         onProgress && progressPath
           ? startProgressTailer({
               filePath: progressPath,
               onEvents: (events) => onProgress(toProgressPayload(events, secretValues)),
+              // Rides the progress poll rather than its own timer, so the
+              // declaration is never delivered alongside an event batch.
+              onPoll: selfRestartDeclarer ? () => selfRestartDeclarer.check() : undefined,
             })
           : undefined
 
@@ -1377,6 +1440,11 @@ export async function runServerSetup(
     // runner has no execution row to append to, so it leaves the channel off.
     onProgress: (events) =>
       ctx.client.submitServerSetupProgress(ctx.commandId, events, ctx.agentId ?? ''),
+    // Same endpoint as progress (there is no second one): the api derives the
+    // execution from the command's own payload, so nothing execution-scoped is
+    // sent from here.
+    onAwaitingSelfRestart: () =>
+      ctx.client.declareServerSetupAwaitingSelfRestart(ctx.commandId, ctx.agentId ?? ''),
   })
 }
 

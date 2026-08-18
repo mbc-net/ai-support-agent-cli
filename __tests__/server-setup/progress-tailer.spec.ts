@@ -400,3 +400,106 @@ describe('startProgressTailer', () => {
     await expect(tailer.stop()).resolves.toBeUndefined()
   })
 })
+
+/**
+ * `onPoll` piggybacks on the same loop rather than adding a second timer.
+ *
+ * The one other thing that has to be watched while ansible runs — the
+ * self-restart marker the `ai_support_agent_k8s` role drops before replacing
+ * this Pod (see self-restart-declaration.ts) — is checked on this tick so it
+ * inherits the single-flight ordering instead of racing event delivery.
+ */
+describe('startProgressTailer - onPoll', () => {
+  beforeEach(() => {
+    jest.useFakeTimers()
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  it('runs on every tick, including ticks with no new events', async () => {
+    const onEvents = jest.fn().mockResolvedValue(undefined)
+    const onPoll = jest.fn().mockResolvedValue(undefined)
+    writeFileSync(progressFile, '')
+    const tailer = startProgressTailer({
+      filePath: progressFile,
+      intervalMs: 1000,
+      onEvents,
+      onPoll,
+    })
+
+    await jest.advanceTimersByTimeAsync(3000)
+
+    expect(onEvents).not.toHaveBeenCalled()
+    expect(onPoll).toHaveBeenCalledTimes(3)
+
+    await tailer.stop()
+  })
+
+  it('does not run concurrently with an in-flight event delivery', async () => {
+    let release: (() => void) | undefined
+    const onEvents = jest.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve
+        }),
+    )
+    const onPoll = jest.fn().mockResolvedValue(undefined)
+    writeFileSync(progressFile, '')
+    const tailer = startProgressTailer({
+      filePath: progressFile,
+      intervalMs: 1000,
+      onEvents,
+      onPoll,
+    })
+
+    appendFileSync(progressFile, startEvent(1, 'a : one'))
+    await jest.advanceTimersByTimeAsync(1000)
+    expect(onEvents).toHaveBeenCalledTimes(1)
+    expect(onPoll).not.toHaveBeenCalled()
+
+    release!()
+    await jest.advanceTimersByTimeAsync(0)
+    expect(onPoll).toHaveBeenCalledTimes(1)
+
+    await tailer.stop()
+  })
+
+  it('runs once more during the final drain', async () => {
+    const onEvents = jest.fn().mockResolvedValue(undefined)
+    const onPoll = jest.fn().mockResolvedValue(undefined)
+    writeFileSync(progressFile, '')
+    const tailer = startProgressTailer({
+      filePath: progressFile,
+      intervalMs: 1000,
+      onEvents,
+      onPoll,
+    })
+
+    await tailer.stop()
+
+    expect(onPoll).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps polling after onPoll rejects', async () => {
+    const onEvents = jest.fn().mockResolvedValue(undefined)
+    const onPoll = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue(undefined)
+    writeFileSync(progressFile, '')
+    const tailer = startProgressTailer({
+      filePath: progressFile,
+      intervalMs: 1000,
+      onEvents,
+      onPoll,
+    })
+
+    await jest.advanceTimersByTimeAsync(2000)
+
+    expect(onPoll).toHaveBeenCalledTimes(2)
+
+    await tailer.stop()
+  })
+})

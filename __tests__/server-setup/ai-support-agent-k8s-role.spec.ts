@@ -1185,4 +1185,192 @@ describe('ai_support_agent_k8s bundled role', () => {
       expect(String(notice!.when)).toContain('pending_self_target')
     })
   })
+
+  /**
+   * 自己再起動へ進む前に「結果を報告できないまま終わる」ことをサーバーへ申告する
+   * ハンドシェイク。
+   *
+   * ロールはマーカーファイルをコントローラ（＝実行中のエージェント）側へ置き、
+   * エージェントが書く ack ファイルを待ってから自分の StatefulSet を触る。
+   * エージェント側の実装は src/server-setup/self-restart-declaration.ts。
+   *
+   * ここで固定するのは順序と決定性である。判定材料は**ファイルの存在**であり、
+   * kubectl / ansible の出力文言ではない（文言依存の判定は毎回誤発火した実績がある）。
+   */
+  describe('自己再起動待ちの申告（マーカー / ack ハンドシェイク）', () => {
+    const defaults = () => loadYaml('defaults', 'main.yml') as Record<string, unknown>
+
+    /** runner が extra-vars で渡す予約変数（server-setup-runner.ts の定数と一致）。 */
+    const MARKER_VAR = 'ai_support_agent_k8s_self_restart_marker_file'
+    const ACK_VAR = 'ai_support_agent_k8s_self_restart_ack_file'
+
+    const isMarkerTask = (t: Task): boolean =>
+      String(t['ansible.builtin.copy']?.dest ?? '').includes(MARKER_VAR)
+    const isWaitTask = (t: Task): boolean => t['ansible.builtin.wait_for'] !== undefined
+    const isSelfInclude = (t: Task): boolean => {
+      const inc = t['ansible.builtin.include_tasks']
+      const file = typeof inc === 'string' ? inc : inc?.file
+      return String(file ?? '').includes('self.yml')
+    }
+
+    function markerTask(): Task | undefined {
+      return mainTasks().find(isMarkerTask)
+    }
+
+    function waitTask(): Task | undefined {
+      return mainTasks().find(isWaitTask)
+    }
+
+    it('defaults は runner が渡す予約変数を空で定義する（他経路ではハンドシェイクしない）', () => {
+      // 空 = 「誰も待っていない」。ここに既定パスを入れると、監視していない経路
+      // （ローカル実行）で誰も答えない ack を待ち続ける。
+      expect(defaults()[MARKER_VAR]).toBe('')
+      expect(defaults()[ACK_VAR]).toBe('')
+    })
+
+    it('ack の待ち時間に既定値がある（無期限に待たない）', () => {
+      const timeout = Number(defaults().ai_support_agent_k8s_self_restart_ack_timeout_seconds)
+      expect(Number.isFinite(timeout)).toBe(true)
+      expect(timeout).toBeGreaterThan(0)
+    })
+
+    it('マーカーはコントローラ側（エージェント自身）へ書く', () => {
+      const task = markerTask()
+      expect(task).toBeDefined()
+      // 対象ホストではなくエージェント自身のファイルシステムに置く。プレイ全体の
+      // become: true をそのまま使うと、エージェントのプロセスユーザーではなく
+      // root でローカル実行しようとする。
+      expect(task!.delegate_to).toBe('localhost')
+      expect(task!.become).toBe(false)
+      const copy = task!['ansible.builtin.copy'] as Record<string, unknown>
+      expect(String(copy.dest)).toContain(MARKER_VAR)
+      // 中身は診断用の構造化された値（YAML/JSON 構造を壊さないよう to_json）。
+      expect(String(copy.content)).toContain('to_json')
+    })
+
+    it('マーカーは自己ターゲットが1件以上あるときだけ書く', () => {
+      const when = JSON.stringify(markerTask()!.when)
+      expect(when).toContain('pending_self_target')
+      expect(when).toContain('length > 0')
+    })
+
+    it('予約変数が未設定・相対パスならハンドシェイクごと行わない', () => {
+      // 空（＝監視者なし）で書きに行くとカレントディレクトリ配下へ書き出しかねない。
+      const when = JSON.stringify(markerTask()!.when)
+      expect(when).toContain(MARKER_VAR)
+      expect(when).toContain(ACK_VAR)
+      expect(when).toContain("match('^/')")
+    })
+
+    it('マーカーの判定材料はファイルの存在であり、コマンド出力の文言ではない', () => {
+      const when = JSON.stringify(markerTask()!.when)
+      expect(when).not.toContain('stdout')
+      expect(when).not.toContain('stderr')
+    })
+
+    it('マーカー書き出しは自己ターゲットの再起動タスクより前に位置する', () => {
+      const main = mainTasks()
+      const markerIndex = main.findIndex(isMarkerTask)
+      const selfIncludeIndex = main.findIndex(isSelfInclude)
+      expect(markerIndex).toBeGreaterThanOrEqual(0)
+      expect(selfIncludeIndex).toBeGreaterThan(markerIndex)
+      // self.yml 側は spec 変更操作しか持たない（＝マーカーより前に走る変更系が無い）。
+      const selfKubectl = flatten(loadYaml('tasks', 'self.yml') as Task[]).filter((t) =>
+        Array.isArray(t['ansible.builtin.command']?.argv),
+      )
+      expect(selfKubectl.length).toBeGreaterThan(0)
+    })
+
+    it('マーカーの直後に ack を待ち、待ってから self.yml へ進む', () => {
+      const main = mainTasks()
+      const markerIndex = main.findIndex(isMarkerTask)
+      const waitIndex = main.findIndex(isWaitTask)
+      const selfIncludeIndex = main.findIndex(isSelfInclude)
+      expect(markerIndex).toBeGreaterThanOrEqual(0)
+      expect(waitIndex).toBeGreaterThan(markerIndex)
+      expect(selfIncludeIndex).toBeGreaterThan(waitIndex)
+
+      const wait = waitTask()!['ansible.builtin.wait_for'] as Record<string, unknown>
+      expect(String(wait.path)).toContain(ACK_VAR)
+      expect(String(wait.timeout)).toContain('self_restart_ack_timeout_seconds')
+      expect(waitTask()!.delegate_to).toBe('localhost')
+      expect(waitTask()!.become).toBe(false)
+    })
+
+    it('ack を待つのはマーカーを実際に書けたときだけ', () => {
+      const when = JSON.stringify(waitTask()!.when)
+      expect(when).toContain('skipped')
+      expect(when).toContain('failed')
+    })
+
+    it('申告が届かなくてもプレイは進む（配置を報告経路の失敗で止めない）', () => {
+      // `failed_when: false` は register の .failed まで False にするため使えない
+      // （ansible-roles-no-log-diagnostics.spec.ts の「死んだ診断」不変条件）。
+      for (const task of [markerTask()!, waitTask()!]) {
+        expect(task.ignore_errors).toBe(true)
+        expect(task.failed_when).toBeUndefined()
+        expect(task.register).toBeDefined()
+      }
+    })
+
+    /**
+     * ack はローカル書き込みなので、**ほぼ確実に成功する**。したがって
+     * 「marker.failed または ack(wait).failed」だけを見る診断は、最も起きやすい
+     * 失敗経路（API 申告そのものの失敗）では一度も発火しない。
+     * ack の**中身**（成否）まで見て初めて、その経路が ansible の出力に現れる。
+     */
+    it('ack の中身を読み取ってから診断する（存在だけでは申告の成否は分からない）', () => {
+      const isAckSlurp = (t: Task): boolean =>
+        t['ansible.builtin.slurp'] !== undefined &&
+        String(
+          (t['ansible.builtin.slurp'] as Record<string, unknown>).src ?? '',
+        ).includes(ACK_VAR)
+      const slurp = mainTasks().find(isAckSlurp)
+      expect(slurp).toBeDefined()
+      expect(slurp!.delegate_to).toBe('localhost')
+      expect(slurp!.become).toBe(false)
+      expect(slurp!.register).toBeDefined()
+      // 読めなくても配置は続ける（読み取りは診断であって配置の一部ではない）。
+      expect(slurp!.ignore_errors).toBe(true)
+
+      // 位置: ack を待った後、かつ自己ターゲットの再起動より前。
+      const main = mainTasks()
+      const slurpIndex = main.findIndex(isAckSlurp)
+      expect(slurpIndex).toBeGreaterThan(main.findIndex(isWaitTask))
+      expect(main.findIndex(isSelfInclude)).toBeGreaterThan(slurpIndex)
+    })
+
+    it('診断の条件は ack の中身（declared=false）も見る', () => {
+      const notice = mainTasks().find(
+        (t) =>
+          t['ansible.builtin.debug'] !== undefined &&
+          JSON.stringify(t.when ?? '').includes('self_restart'),
+      )
+      expect(notice).toBeDefined()
+      const when = JSON.stringify(notice!.when)
+      // ack の中身を読んだ register 変数を参照していること。
+      expect(when).toContain('self_restart_ack_content')
+      // 「申告できなかった」ことを示す構造化フィールドを見ていること
+      // （ansible / kubectl の出力文言ではなく、エージェント自身が書いた値）。
+      expect(when).toContain('declared')
+    })
+
+    it('申告できなかったことは debug で表面化する（無言で握り潰さない）', () => {
+      const notice = mainTasks().find(
+        (t) =>
+          t['ansible.builtin.debug'] !== undefined &&
+          JSON.stringify(t.when ?? '').includes('self_restart'),
+      )
+      expect(notice).toBeDefined()
+      const when = JSON.stringify(notice!.when)
+      // ignore_errors + register なので .failed は信用できる（failed_when: false と違う）。
+      expect(when).toContain('.failed')
+      const msg = String(
+        (notice!['ansible.builtin.debug'] as Record<string, unknown>).msg ?? '',
+      )
+      expect(msg).toMatch(/watchdog|running/i)
+      // 申告の失敗は配置の失敗ではない。
+      expect(notice!['ansible.builtin.fail']).toBeUndefined()
+    })
+  })
 })

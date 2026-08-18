@@ -83,6 +83,8 @@ import {
 import {
   executeServerSetupAnsible,
   SELF_INSTANCE_ID_VAR,
+  SELF_RESTART_ACK_VAR,
+  SELF_RESTART_MARKER_VAR,
   SUDO_PROBE_REGISTER_VAR,
 } from '../../src/server-setup/server-setup-runner'
 import type { SshExecCredential } from '../../src/types'
@@ -399,10 +401,14 @@ describe('runServerSetupLocalRun - success path', () => {
 
     const extraVars = writtenFile('extra-vars.json')
     expect(extraVars).toBeDefined()
-    // ロール向けの予約変数（実行中エージェント自身の instance id）は常に添えられる。
+    // ロール向けの予約変数（実行中エージェント自身の instance id と、自己再起動待ちの
+    // 申告に使うハンドシェイクのパス）は常に添えられる。ローカル実行では申告を監視する
+    // 経路が無いため、ハンドシェイクのパスは空（＝ロール側で行わない）。
     expect(JSON.parse(extraVars as string)).toEqual({
       FOO: 'bar',
       [SELF_INSTANCE_ID_VAR]: expect.any(String),
+      [SELF_RESTART_MARKER_VAR]: '',
+      [SELF_RESTART_ACK_VAR]: '',
     })
   })
 
@@ -414,6 +420,8 @@ describe('runServerSetupLocalRun - success path', () => {
 
     expect(JSON.parse(writtenFile('extra-vars.json') as string)).toEqual({
       [SELF_INSTANCE_ID_VAR]: expect.any(String),
+      [SELF_RESTART_MARKER_VAR]: '',
+      [SELF_RESTART_ACK_VAR]: '',
     })
   })
 
