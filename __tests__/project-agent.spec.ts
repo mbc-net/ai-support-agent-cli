@@ -1,6 +1,11 @@
 import { ApiClient } from '../src/api-client'
 import { AppSyncSubscriber } from '../src/appsync-subscriber'
-import { CONFIG_SYNC_DEBOUNCE_MS, SHUTDOWN_DRAIN_POLL_INTERVAL_MS, SHUTDOWN_DRAIN_TIMEOUT_MS } from '../src/constants'
+import {
+  CONFIG_SYNC_DEBOUNCE_MS,
+  REPLICA_STANDBY_RETRY_DELAY_MS,
+  SHUTDOWN_DRAIN_POLL_INTERVAL_MS,
+  SHUTDOWN_DRAIN_TIMEOUT_MS,
+} from '../src/constants'
 import { writeAwsConfig } from '../src/aws-profile'
 import { executeCommand } from '../src/commands'
 import { logger } from '../src/logger'
@@ -640,6 +645,73 @@ describe('ProjectAgent', () => {
         expect(mockSubscriber.connect).toHaveBeenCalled()
 
         agent.stop()
+      })
+
+      // Phase 4 of the replica scaling plan: jitter the standby retry poll so
+      // dozens of replicas that start at roughly the same time (rolling
+      // restart / mass deployment) don't all poll the admission lock in
+      // lockstep every 30s.
+      describe('standby retry jitter', () => {
+        it('jitters the standby retry delay to the minimum bound ([0.5x]) when Math.random returns 0', async () => {
+          jest.spyOn(global.Math, 'random').mockReturnValue(0)
+          mockClient.register.mockResolvedValue(rejected)
+          const setTimeoutSpy = jest.spyOn(global, 'setTimeout')
+
+          const agent = new ProjectAgent(project, 'agent-1', options)
+          agent.start()
+          await jest.advanceTimersByTimeAsync(100)
+
+          // REPLICA_STANDBY_RETRY_DELAY_MS * (0.5 + 0 * 0.5) = the [0.5x] minimum bound
+          const minJitteredDelay = Math.round(REPLICA_STANDBY_RETRY_DELAY_MS * 0.5)
+          const standbyWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === minJitteredDelay)
+          expect(standbyWaitCall).toBeDefined()
+
+          agent.stop()
+        })
+
+        it('jitters the standby retry delay near the maximum bound ([1x]) when Math.random returns close to 1', async () => {
+          jest.spyOn(global.Math, 'random').mockReturnValue(0.999)
+          mockClient.register.mockResolvedValue(rejected)
+          const setTimeoutSpy = jest.spyOn(global, 'setTimeout')
+
+          const agent = new ProjectAgent(project, 'agent-1', options)
+          agent.start()
+          await jest.advanceTimersByTimeAsync(100)
+
+          // REPLICA_STANDBY_RETRY_DELAY_MS * (0.5 + 0.999 * 0.5), i.e. close to but
+          // never exceeding the reference constant itself.
+          const maxJitteredDelay = Math.round(REPLICA_STANDBY_RETRY_DELAY_MS * (0.5 + 0.999 * 0.5))
+          const standbyWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === maxJitteredDelay)
+          expect(standbyWaitCall).toBeDefined()
+          expect(standbyWaitCall?.[1]).toBeLessThanOrEqual(REPLICA_STANDBY_RETRY_DELAY_MS)
+
+          agent.stop()
+        })
+
+        it('applies the same jitter to the post-eviction standby re-entry delay', async () => {
+          jest.spyOn(global.Math, 'random').mockReturnValue(0)
+          mockClient.register.mockResolvedValue(accepted)
+          // startHeartbeat() sends its first heartbeat immediately (not only on
+          // the interval), so evicting on the very first call is enough to
+          // exercise handleEviction() -> restartRegisterLoop() within the
+          // initial advance below — no need to wait a full heartbeatInterval.
+          mockClient.heartbeat
+            .mockResolvedValueOnce({ success: true, evicted: true })
+            .mockResolvedValue({ success: true })
+          const setTimeoutSpy = jest.spyOn(global, 'setTimeout')
+
+          const agent = new ProjectAgent(project, 'agent-1', options)
+          agent.start()
+          await jest.advanceTimersByTimeAsync(100)
+          expect(mockSubscriber.connect).toHaveBeenCalled()
+
+          // Same minimum-bound value as the standby-retry jitter test above.
+          const minJitteredDelay = Math.round(REPLICA_STANDBY_RETRY_DELAY_MS * 0.5)
+          const restartWaitCall = setTimeoutSpy.mock.calls.find((call) => call[1] === minJitteredDelay)
+          expect(restartWaitCall).toBeDefined()
+
+          agent.stop()
+        })
       })
     })
 

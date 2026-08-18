@@ -1,9 +1,17 @@
 import { readFileSync } from 'fs'
 import * as path from 'path'
 
-import { load } from 'js-yaml'
+import { load, loadAll } from 'js-yaml'
 
-import { ENV_VARS } from '../../src/constants'
+import { ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../src/constants'
+import { generateK8sManifest } from '../../src/manifest/manifest-generator'
+
+/**
+ * runner が extra-vars で渡す予約変数名（`server-setup-runner.ts` の
+ * `SELF_INSTANCE_ID_VAR`）。ここではロール側の記述だけを見たいのでリテラルで持ち、
+ * runner 側の定数との一致は server-setup-runner.spec.ts のパリティテストが固定する。
+ */
+const SELF_INSTANCE_ID_VAR = 'ai_support_agent_k8s_self_instance_id'
 
 /**
  * ai_support_agent_k8s bundled role（agent/ansible/roles/ai_support_agent_k8s）の静的検証。
@@ -67,12 +75,17 @@ describe('ai_support_agent_k8s bundled role', () => {
    *
    * プロジェクト単位のタスク（Secret 作成・マニフェスト生成・apply・rollout）は
    * tasks/project.yml に分離され、main.yml からは `include_tasks` + `loop` で
-   * 呼ばれる。ロールの振る舞いに関する検証は、どちらのファイルにあるかに関係なく
-   * 成立すべきなので両方を対象にする。「main.yml 側にあること」自体を主張したい
-   * テストは mainTasks() を使う。
+   * 呼ばれる。自己ターゲットぶんの後回し処理は tasks/self.yml にあり、こちらも
+   * main.yml から `include_tasks` + `loop` で呼ばれる。ロールの振る舞いに関する
+   * 検証は、どのファイルにあるかに関係なく成立すべきなので3つとも対象にする。
+   * 「main.yml 側にあること」自体を主張したいテストは mainTasks() を使う。
    */
   function allTasks(): Task[] {
-    return [...flatten(tasks()), ...flatten(loadYaml('tasks', 'project.yml') as Task[])]
+    return [
+      ...flatten(tasks()),
+      ...flatten(loadYaml('tasks', 'project.yml') as Task[]),
+      ...flatten(loadYaml('tasks', 'self.yml') as Task[]),
+    ]
   }
 
   /** main.yml のみ（クラスタ単位の準備がプロジェクト毎に繰り返されないことの検証用）。 */
@@ -82,7 +95,13 @@ describe('ai_support_agent_k8s bundled role', () => {
 
   /** ロール全体のタスク定義を生テキストとして連結する。 */
   function readRoleRaw(): string {
-    return readRaw('tasks', 'main.yml') + '\n' + readRaw('tasks', 'project.yml')
+    return (
+      readRaw('tasks', 'main.yml') +
+      '\n' +
+      readRaw('tasks', 'project.yml') +
+      '\n' +
+      readRaw('tasks', 'self.yml')
+    )
   }
 
   /**
@@ -428,30 +447,44 @@ describe('ai_support_agent_k8s bundled role', () => {
       const raw = readRoleRaw()
       expect(raw).toContain('rollout')
       expect(raw).toContain('restart')
-      const restart = allTasks().find((t) => {
+      // プロジェクト単位（ループ中）の再起動タスク。tasks/self.yml に置かれた
+      // 自己ターゲット用の後回し再起動とは別物なので、ファイルで区別する。
+      const restart = flatten(loadYaml('tasks', 'project.yml') as Task[]).find((t) => {
         const argv = t['ansible.builtin.command']?.argv
-        return Array.isArray(argv) && argv.includes('restart')
+        return (
+          Array.isArray(argv) &&
+          argv.includes('restart') &&
+          argv.includes('statefulset/{{ item.name }}')
+        )
       })
       expect(restart).toBeDefined()
-      // 「when がある」だけでは `when: false` でも通ってしまう。この2条件 AND こそが
-      // 修正の核心（ローテーション時のみ再起動し、初回作成時は再起動しない）なので、
-      // 条件の中身まで固定する。
-      expect(restart!.when).toEqual([
-        expect.stringContaining('ai_support_agent_k8s_secret_apply.changed'),
-        expect.stringContaining("'created' not in"),
-      ])
+      // 「when がある」だけでは `when: false` でも通ってしまう。ローテーション時のみ
+      // 再起動し、初回作成時は再起動しない、という条件こそが修正の核心なので中身まで
+      // 固定する。3つ目の条件（自己ターゲットの除外）は自己再起動の後回しテストで扱う。
+      expect(restart!.when).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('ai_support_agent_k8s_secret_apply.changed'),
+          expect.stringContaining("'created' not in"),
+        ]),
+      )
     })
 
-    it('Secret 適用タスクは kubectl の出力から changed を判定する（毎回 changed にしない）', () => {
+    it('Secret 適用タスクの changed 判定は kubectl の出力文言に依存せず、Secret の内容比較で決める', () => {
+      // 回帰対象（実機で観測）: `changed_when: "'unchanged' not in stdout"` は、
+      // Secret が一度も更新されていない（managedFields の最終更新が前日・
+      // resourceVersion 据え置き）実行でも changed=true になり、毎回
+      // `rollout restart` が発火した。kubectl の出力文言に頼る判定は当てにならない。
       const secretApply = allTasks().find((t) => {
         const shell = t['ansible.builtin.shell']
         return typeof shell === 'string' && shell.includes('create secret generic')
       })
       expect(secretApply).toBeDefined()
       expect(secretApply!.register).toBeDefined()
-      // 「true でない」だけでは常に false でも通る。kubectl apply の出力仕様
-      //（created / configured / unchanged）に沿った判定であることを固定する。
-      expect(String(secretApply!.changed_when)).toContain("'unchanged' not in")
+      const changedWhen = String(secretApply!.changed_when)
+      expect(changedWhen).not.toContain("'unchanged' not in")
+      // 投入予定のトークンと、適用前に読み出した既存 Secret の値を突き合わせる。
+      expect(changedWhen).toContain('ai_support_agent_k8s_secret_current')
+      expect(changedWhen).toContain('item.token')
     })
 
     it('すべての kubectl 呼び出しに --request-timeout を付ける（応答不能時のハング防止）', () => {
@@ -509,9 +542,14 @@ describe('ai_support_agent_k8s bundled role', () => {
     it('kubectl apply 系タスクの changed 判定が一貫している', () => {
       // namespace だけ 'created' 判定だと、将来ラベル等を足したときに
       // 'configured' が changed=false と誤報告される。
+      //
+      // 例外は Secret の適用のみ。kubectl の出力文言による判定が実機で毎回 changed に
+      // なった（＝再起動が毎回発火した）ため、Secret だけは適用前の内容との比較で
+      // 判定する。その判定式は上のテストが別途固定している。
       for (const task of allTasks()) {
         const cw = task.changed_when
         if (typeof cw !== 'string' || !cw.includes('stdout')) continue
+        if (cw.includes('ai_support_agent_k8s_secret_current')) continue
         expect(cw).toContain("'unchanged' not in")
       }
     })
@@ -672,6 +710,667 @@ describe('ai_support_agent_k8s bundled role', () => {
         .map((t) => String(t.name ?? ''))
         .join('\n')
       expect(projectNames).not.toMatch(/Assert kubectl is available/i)
+    })
+  })
+
+  /**
+   * グレースフルシャットダウンの猶予（terminationGracePeriodSeconds）。
+   *
+   * 未指定だと Kubernetes の既定 30 秒で SIGKILL される。エージェントは SIGTERM 後、
+   * 実行中コマンドの drain（SHUTDOWN_DRAIN_TIMEOUT_MS = 300 秒）を待ってから
+   * レプリカ枠を release するため、30 秒で殺されると実行中コマンドを見捨てたまま枠が
+   * 残り、サーバーは別レプリカへ再割当して**二重実行**する。同じエージェントを配置する
+   * 別経路（`src/manifest/manifest-generator.ts`）は既にこの対策を持っており、
+   * ロール側だけ漏れていた。値がずれないよう両者を突き合わせる。
+   */
+  describe('グレースフルシャットダウンの猶予', () => {
+    const defaults = () => loadYaml('defaults', 'main.yml') as Record<string, unknown>
+
+    /** manifest-generator が生成する Deployment の Pod spec。 */
+    function generatedPodSpec(): Record<string, any> {
+      const docs = loadAll(
+        generateK8sManifest({
+          tenantCode: 'mbc',
+          projectCode: 'MBC_01',
+          token: 'mbc:tok-1:secret-raw-token',
+          apiUrl: 'https://api.example.com',
+          replicas: 1,
+        }),
+      ) as Record<string, any>[]
+      const deployment = docs.find((doc) => doc?.kind === 'Deployment')
+      expect(deployment).toBeDefined()
+      return deployment!.spec.template.spec
+    }
+
+    it('Pod spec に terminationGracePeriodSeconds を明示する（永続化 on/off の両分岐）', () => {
+      for (const persistence of [false, true]) {
+        const doc = renderManifest(manifestTemplate(), persistence) as any
+        expect(doc.spec.template.spec).toHaveProperty('terminationGracePeriodSeconds')
+      }
+    })
+
+    it('値はロール変数から取り、| int を通す（ANSIBLE# 変数の文字列でも数値になる）', () => {
+      const template = manifestTemplate()
+      expect(template).toMatch(
+        /terminationGracePeriodSeconds:\s*\{\{\s*ai_support_agent_k8s_termination_grace_period_seconds\s*\|\s*int\s*\}\}/,
+      )
+    })
+
+    it('既定値は manifest-generator と同じ値（SHUTDOWN_GRACE_PERIOD_SECONDS）である', () => {
+      // 片方だけ変更したらここが赤になる。
+      expect(defaults().ai_support_agent_k8s_termination_grace_period_seconds).toBe(
+        SHUTDOWN_GRACE_PERIOD_SECONDS,
+      )
+      expect(generatedPodSpec().terminationGracePeriodSeconds).toBe(
+        defaults().ai_support_agent_k8s_termination_grace_period_seconds,
+      )
+    })
+  })
+
+  /**
+   * トークン Secret のローテーション判定（内容比較）。
+   *
+   * 回帰対象（実機で観測）: `changed_when: "'unchanged' not in stdout"` は、Secret が
+   * 一度も更新されていない実行でも changed=true になり、`rollout restart` が毎回発火した
+   *（ControllerRevision の差分が `restartedAt` の1点のみであることを確認済み）。
+   * kubectl の出力文言に依存せず、既存 Secret の値と投入予定のトークンを実比較する。
+   */
+  describe('トークン Secret のローテーション判定', () => {
+    /** 適用前に既存 Secret を読み出すタスク。 */
+    function secretReadTask(): Task | undefined {
+      return allTasks().find((t) => {
+        const argv = t['ansible.builtin.command']?.argv
+        return (
+          Array.isArray(argv) &&
+          argv.includes('get') &&
+          argv.includes('secret') &&
+          argv.some((a: unknown) => String(a).includes('jsonpath'))
+        )
+      })
+    }
+
+    it('適用前に既存 Secret の値を kubectl get で読み出す', () => {
+      const read = secretReadTask()
+      expect(read).toBeDefined()
+      expect(read!.register).toBe('ai_support_agent_k8s_secret_current')
+      // 存在しない Secret（初回）は失敗ではなく「新規作成」として扱う。
+      expect(read!.failed_when).toBe(false)
+      expect(read!.changed_when).toBe(false)
+      const argv = read!['ansible.builtin.command'].argv as string[]
+      // 名前空間を明示しないと kubeconfig の現在の名前空間を読んでしまう。
+      expect(argv).toContain('-n')
+      expect(argv.join(' ')).toContain('--request-timeout')
+    })
+
+    it('読み出しタスクは no_log: true を持つ（base64 のトークンが実行ログ・結果に載らない）', () => {
+      // json stdout callback はタスク結果を丸ごと出力するため、no_log が無いと
+      // `.data` の base64 トークンが executionLogs に平文相当で残る（redactSecretValues
+      // は生の値しか照合しないため base64 は伏字にならない）。
+      expect(secretReadTask()!.no_log).toBe(true)
+    })
+
+    it('読み出しの失敗（NotFound 以外）は no_log でない fail で表面化する', () => {
+      // no_log タスクは失敗理由が censored に置き換わるため、横断ルール
+      //（ansible-roles-no-log-diagnostics）どおり register を検査する停止タスクを置く。
+      const surfacing = allTasks().find(
+        (t) =>
+          t['ansible.builtin.fail'] !== undefined &&
+          JSON.stringify(t.when ?? '').includes('ai_support_agent_k8s_secret_current'),
+      )
+      expect(surfacing).toBeDefined()
+      expect(surfacing!.no_log).toBeUndefined()
+      const cond = JSON.stringify(surfacing!.when)
+      expect(cond).toContain('ai_support_agent_k8s_secret_current.rc')
+      expect(cond).toContain('NotFound')
+      // 停止メッセージにトークン（stdout）を展開しない。
+      expect(
+        JSON.stringify(surfacing!['ansible.builtin.fail']),
+      ).not.toContain('stdout')
+    })
+
+    it('読み出しは Secret 適用より前に置かれる（適用後だと常に一致してしまう）', () => {
+      const flat = allTasks()
+      const readIndex = flat.findIndex(
+        (t) => t.register === 'ai_support_agent_k8s_secret_current',
+      )
+      const applyIndex = flat.findIndex((t) => {
+        const shell = t['ansible.builtin.shell']
+        return typeof shell === 'string' && shell.includes('create secret generic')
+      })
+      expect(readIndex).toBeGreaterThanOrEqual(0)
+      expect(applyIndex).toBeGreaterThan(readIndex)
+    })
+  })
+
+  /**
+   * 自己ターゲット（エージェント自身を配置対象に含むレシピ）。
+   *
+   * 回帰対象1（実機で観測）: レシピの1番目がこのエージェント自身の StatefulSet だったため、
+   * ループ1周目で `rollout restart` が発火して自 Pod が再作成され、Ansible ごと死んだ。
+   * 2番目以降のプロジェクトは配置されず、サーバー側の実行は running のまま滞留した。
+   *
+   * 回帰対象2（レビュー指摘・CRITICAL）: 自己ガードを `rollout restart` にだけ付けても
+   * 不十分である。StatefulSet の既定 updateStrategy は RollingUpdate であり、
+   * `.spec.template` を変えたマニフェスト（例: terminationGracePeriodSeconds の追加）を
+   * `kubectl apply` した時点で自 Pod のローリング更新が始まる。つまり restart に
+   * 到達する前にプロセスが死に、ガードごとすり抜けて同じ障害が再発する。
+   * apply の出力は "configured" としか出ないため、ログからは原因が分からない。
+   *
+   * 対策: 自己ターゲットでは「Pod spec を変えうる操作」をまとめて後回しにする。
+   * ループ内では記録だけを残し、全プロジェクトの処理が終わってから
+   * tasks/self.yml で apply → 必要なら restart の順に実行する。
+   */
+  describe('自己ターゲットの spec 変更操作の後回し', () => {
+    const defaults = () => loadYaml('defaults', 'main.yml') as Record<string, unknown>
+    const roleVars = () => loadYaml('vars', 'main.yml') as Record<string, unknown>
+
+    /** 自己判定を集約したロール変数（この名前でのみ参照する）。 */
+    const SELF_FLAG = 'ai_support_agent_k8s_item_is_self'
+    /** 自己判定に使う Pod 名パターンのロール変数。 */
+    const SELF_PATTERN_VAR = 'ai_support_agent_k8s_self_pod_name_pattern'
+
+    type Conditioned = { task: Task; when: string[] }
+
+    /**
+     * 実行可能タスクを、囲っている block の `when` を引き継いだ形で平坦化する。
+     *
+     * ガードを block に付けたか個々のタスクに付けたかで検証結果が変わってはいけない。
+     * Ansible は block の `when` を内側の全タスクへ AND で配るので、テストも
+     * 「実効条件」で見る。
+     */
+    function withConditions(list: Task[], inherited: string[] = []): Conditioned[] {
+      const out: Conditioned[] = []
+      for (const task of list) {
+        const own =
+          task.when === undefined
+            ? []
+            : Array.isArray(task.when)
+              ? task.when.map(String)
+              : [String(task.when)]
+        const chain = [...inherited, ...own]
+        const nested = ['block', 'rescue', 'always'].filter((k) =>
+          Array.isArray(task[k]),
+        )
+        if (nested.length > 0) {
+          for (const key of nested) {
+            out.push(...withConditions(task[key] as Task[], chain))
+          }
+          continue
+        }
+        out.push({ task, when: chain })
+      }
+      return out
+    }
+
+    function projectTasksWithConditions(): Conditioned[] {
+      return withConditions(loadYaml('tasks', 'project.yml') as Task[])
+    }
+
+    function selfTasks(): Task[] {
+      return flatten(loadYaml('tasks', 'self.yml') as Task[])
+    }
+
+    /**
+     * kubectl を起動するセグメント（`|` と `&&` で区切った単位）だけを取り出す。
+     *
+     * セグメント単位にするのは `set -o pipefail && kubectl ...` の前半を
+     * `kubectl set` と誤認しないため。1つの shell 本文が kubectl を複数回起動する
+     * （`create ... | apply -f -`）ことにも対応する。
+     */
+    function kubectlSegments(task: Task): string[] {
+      const shell = task['ansible.builtin.shell']
+      const argv = task['ansible.builtin.command']?.argv
+      const body =
+        typeof shell === 'string'
+          ? shell
+          : Array.isArray(argv)
+            ? argv.join(' ')
+            : ''
+      return body.split(/\||&&/).filter((seg) => /kubectl/.test(seg))
+    }
+
+    /**
+     * クラスタの状態を書き換える kubectl 動詞。読み取り専用の get / describe /
+     * `rollout status` は含まない。
+     *
+     * 将来 image tag の差し替え（`kubectl set image`）や `patch` を足したときにも、
+     * 下の不変条件テストが「自己ガードの外に増えた」ことを検出できるよう、
+     * Pod spec を変えうる動詞を広めに列挙する。
+     */
+    const MUTATING_VERBS = [
+      'apply',
+      'create',
+      'patch',
+      'replace',
+      'delete',
+      'scale',
+      'edit',
+      'annotate',
+      'label',
+      'set',
+      'expose',
+      'rollout restart',
+      'rollout undo',
+      'rollout pause',
+      'rollout resume',
+    ]
+
+    function isMutatingKubectlTask(task: Task): boolean {
+      return kubectlSegments(task).some((seg) =>
+        MUTATING_VERBS.some((verb) =>
+          new RegExp(`(?:^|\\s)${verb}(?:$|\\s)`).test(seg),
+        ),
+      )
+    }
+
+    /**
+     * 自己ターゲットでもループ内で実行してよい変更系 kubectl タスク（明示的許可）。
+     *
+     * トークン Secret の適用だけが該当する。Secret の更新は StatefulSet の
+     * `.spec.template` を変えないため、それ自体では Pod の再作成を起こさない
+     * （新しい値が効くのは再起動のときで、その再起動こそが後回しの対象）。
+     *
+     * ここへ追加するときは「その操作が自 Pod を作り直さない」ことを必ず確認すること。
+     */
+    const SELF_SAFE_MUTATIONS = [/Apply the token Secret/]
+
+    /** 実効条件に自己ガード（否定形）が含まれるか。 */
+    function isSelfGuarded(when: string[]): boolean {
+      return when.some((cond) =>
+        new RegExp(`not\\s*\\(?\\s*${SELF_FLAG}`).test(cond),
+      )
+    }
+
+    it('defaults は runner が渡す予約変数を空で定義する（K8s 以外の経路では自己ではない）', () => {
+      expect(defaults()[SELF_INSTANCE_ID_VAR]).toBe('')
+    })
+
+    it('自己判定は1箇所のロール変数に集約され、各タスクは式を複製しない', () => {
+      // 同じ式を3箇所へ複製すると、片方だけ直した状態が「一部のタスクだけ自己と
+      // 判定する」という一貫性のない挙動になる（今回の接頭辞衝突バグの温床）。
+      expect(typeof roleVars()[SELF_FLAG]).toBe('string')
+      const raw = readRaw('tasks', 'project.yml') + readRaw('tasks', 'self.yml')
+      expect(raw).toContain(SELF_FLAG)
+      // 生の前方一致式がタスク側に残っていない。
+      expect(raw).not.toContain('startswith')
+    })
+
+    it('自己判定のフラグは | bool を通して使う（"False" 文字列が truthy にならない）', () => {
+      // ロール変数はテンプレート結果が文字列 "True" / "False" になるため、
+      // `when: <flag>` と素で書くと "False" でも真になる。
+      const references = (readRaw('tasks', 'project.yml') + readRaw('tasks', 'self.yml'))
+        .split('\n')
+        .filter((line) => line.includes(SELF_FLAG))
+      expect(references.length).toBeGreaterThan(0)
+      for (const line of references) {
+        expect(line).toMatch(new RegExp(`${SELF_FLAG}\\s*\\|\\s*bool`))
+      }
+    })
+
+    describe('自己判定の Pod 名パターン', () => {
+      /**
+       * `ai_support_agent_k8s_self_pod_name_pattern` の Jinja 式から、item.name を
+       * 埋めた実パターンを作って JS の正規表現として評価する。
+       *
+       * `is match` は Python の `re.match`（先頭アンカー）で、パターン側が
+       * `^...$` を持つため JS の `RegExp.test` と等価に評価できる。
+       */
+      function podNamePattern(name: string): RegExp {
+        const template = String(roleVars()[SELF_PATTERN_VAR] ?? '')
+        expect(template).toContain('item.name')
+        // 検証済みの DNS-1123 ラベルしか来ないため、テストでは正規表現特殊文字を
+        // 含まない名前のみを使う（エスケープ自体は別テストで固定する）。
+        expect(name).toMatch(/^[a-z0-9-]+$/)
+        const filled = template.replace(/\{\{[^}]*\}\}/g, name)
+        return new RegExp(filled)
+      }
+
+      it('パターンは item.name を regex_escape してから埋め込む', () => {
+        expect(String(roleVars()[SELF_PATTERN_VAR] ?? '')).toMatch(
+          /item\.name\s*\|\s*regex_escape/,
+        )
+      })
+
+      it('接頭辞が衝突する別プロジェクトを自己と誤判定しない（agent と agent-canary の併存）', () => {
+        // 回帰対象（レビュー指摘・HIGH）: 前方一致だけだと
+        // "agent-canary-0".startswith("agent-") が真になり、無関係な agent
+        // プロジェクトが「自己」と誤判定される。誤判定されたプロジェクトは
+        // rollout status（起動失敗の検知）を飛ばされるため、イメージ取得失敗などが
+        // 検知されないまま成功として報告される。
+        expect(podNamePattern('agent').test('agent-canary-0')).toBe(false)
+        expect(podNamePattern('agent-canary').test('agent-canary-0')).toBe(true)
+      })
+
+      it('自己ケース（<name>-<序数>）は引き続き真になる', () => {
+        expect(podNamePattern('agent').test('agent-0')).toBe(true)
+        expect(podNamePattern('agent').test('agent-10')).toBe(true)
+        expect(podNamePattern('ai-support-agent').test('ai-support-agent-2')).toBe(true)
+      })
+
+      it('非自己ケースは偽になる（未設定・序数なし・部分一致）', () => {
+        expect(podNamePattern('agent').test('')).toBe(false)
+        expect(podNamePattern('agent').test('agent')).toBe(false)
+        expect(podNamePattern('agent').test('agent-')).toBe(false)
+        expect(podNamePattern('agent').test('agent-abc')).toBe(false)
+        expect(podNamePattern('agent').test('other-agent-0')).toBe(false)
+        expect(podNamePattern('agent').test('agent-0-extra')).toBe(false)
+      })
+    })
+
+    it('自己ターゲット時、ループ内で変更系 kubectl 操作が1つも実行されない', () => {
+      // 構造的な不変条件。将来 image tag 更新や resources 追加のような
+      // 「Pod spec を変える操作」をループ内へ足したとき、自己ガードの外にあれば
+      // ここが失敗して気づける（個別タスクに when を足し忘れる形の再発を防ぐ）。
+      const mutating = projectTasksWithConditions().filter(({ task }) =>
+        isMutatingKubectlTask(task),
+      )
+      expect(mutating.length).toBeGreaterThanOrEqual(3)
+
+      const unguarded = mutating
+        .filter(
+          ({ task }) =>
+            !SELF_SAFE_MUTATIONS.some((re) => re.test(String(task.name ?? ''))),
+        )
+        .filter(({ when }) => !isSelfGuarded(when))
+        .map(({ task }) => String(task.name ?? '(unnamed)'))
+      expect(unguarded).toEqual([])
+    })
+
+    it('許可リストの各エントリは実在のタスクに対応する（改名で免除が広がらない）', () => {
+      const names = projectTasksWithConditions()
+        .filter(({ task }) => isMutatingKubectlTask(task))
+        .map(({ task }) => String(task.name ?? ''))
+      for (const allowed of SELF_SAFE_MUTATIONS) {
+        expect(names.filter((n) => allowed.test(n))).toHaveLength(1)
+      }
+    })
+
+    it('StatefulSet の apply と rollout restart はどちらもループ内では自己ガード下にある', () => {
+      // 「apply にガードが無い」ことが今回の CRITICAL。個別に名指しでも固定する。
+      const byName = (fragment: RegExp) =>
+        projectTasksWithConditions().find(({ task }) =>
+          fragment.test(String(task.name ?? '')),
+        )
+      for (const fragment of [
+        /Apply the StatefulSet/i,
+        /Restart the agent/i,
+        /become ready/i,
+      ]) {
+        const found = byName(fragment)
+        expect(found).toBeDefined()
+        expect({ fragment: String(fragment), guarded: isSelfGuarded(found!.when) }).toEqual(
+          { fragment: String(fragment), guarded: true },
+        )
+      }
+    })
+
+    it('自己ターゲットは名前と Secret 変更有無を記録するだけにする', () => {
+      const record = flatten(loadYaml('tasks', 'project.yml') as Task[]).find(
+        (t) => t['ansible.builtin.set_fact'] !== undefined,
+      )
+      expect(record).toBeDefined()
+      const fact = record!['ansible.builtin.set_fact'] as Record<string, unknown>
+      const key = Object.keys(fact).find((k) => k.includes('pending_self_target'))
+      expect(key).toBeDefined()
+      // 後回しの apply は Secret が変わっていなくても必要（マニフェスト自体が
+      // Pod spec を変えている場合があるため）。記録の条件は「自己である」だけ。
+      expect(String(record!.when)).toContain(SELF_FLAG)
+      expect(String(record!.when)).not.toContain('secret_apply.changed')
+      // restart の要否は後回し側で判断するため、Secret の変更有無を持ち回る。
+      const value = String(fact[key!])
+      expect(value).toContain('item.name')
+      expect(value).toContain('ai_support_agent_k8s_secret_apply.changed')
+    })
+
+    it('後回し処理はプロジェクトループの後に include_tasks で実行される', () => {
+      const main = mainTasks()
+      const indexOfInclude = (needle: string) =>
+        main.findIndex((t) => {
+          const inc = t['ansible.builtin.include_tasks']
+          const file = typeof inc === 'string' ? inc : inc?.file
+          return String(file ?? '').includes(needle)
+        })
+      const loopIndex = indexOfInclude('project.yml')
+      const deferredIndex = indexOfInclude('self.yml')
+      expect(loopIndex).toBeGreaterThanOrEqual(0)
+      expect(deferredIndex).toBeGreaterThan(loopIndex)
+      // 記録したリストを回す。
+      expect(String(main[deferredIndex].loop)).toContain('pending_self_target')
+      // ループ後のタスクにもトークン漏洩対策の label を付ける（item は dict）。
+      expect(String(main[deferredIndex].loop_control?.label ?? '')).toContain('item.name')
+    })
+
+    it('後回し処理は apply → restart の順で、rollout status は行わない', () => {
+      const list = selfTasks()
+      const applyIndex = list.findIndex((t) => {
+        const argv = t['ansible.builtin.command']?.argv
+        return Array.isArray(argv) && argv.includes('apply')
+      })
+      const restartIndex = list.findIndex((t) => {
+        const argv = t['ansible.builtin.command']?.argv
+        return Array.isArray(argv) && argv.includes('restart')
+      })
+      expect(applyIndex).toBeGreaterThanOrEqual(0)
+      expect(restartIndex).toBeGreaterThan(applyIndex)
+      // 自分の完了を自分で待つのは自己矛盾（再起動が走れば待つ側が消える）。
+      for (const task of list) {
+        const argv = task['ansible.builtin.command']?.argv
+        if (!Array.isArray(argv)) continue
+        expect(argv).not.toContain('status')
+      }
+    })
+
+    it('後回しの restart は Secret が変わったとき・新規作成でないときだけ実行する', () => {
+      const restart = selfTasks().find((t) => {
+        const argv = t['ansible.builtin.command']?.argv
+        return Array.isArray(argv) && argv.includes('restart')
+      })
+      expect(restart).toBeDefined()
+      const cond = JSON.stringify(restart!.when)
+      expect(cond).toContain('secret_changed')
+      expect(cond).toContain("'created' not in")
+    })
+
+    it('自己デプロイは結果を報告できずに終わることを debug で明示し、エラーにはしない', () => {
+      const notice = mainTasks().find((t) => t['ansible.builtin.debug'] !== undefined)
+      expect(notice).toBeDefined()
+      const msg = String(
+        (notice!['ansible.builtin.debug'] as Record<string, unknown>).msg ?? '',
+      )
+      // 「結果が報告されない」ことと、実行状態の解除手段（実行停止）を伝える。
+      expect(msg).toMatch(/without reporting a result/i)
+      expect(msg).toMatch(/stop/i)
+      // 意図された動作なので fail ではない。
+      expect(notice!['ansible.builtin.fail']).toBeUndefined()
+      expect(String(notice!.when)).toContain('pending_self_target')
+    })
+  })
+
+  /**
+   * 自己再起動へ進む前に「結果を報告できないまま終わる」ことをサーバーへ申告する
+   * ハンドシェイク。
+   *
+   * ロールはマーカーファイルをコントローラ（＝実行中のエージェント）側へ置き、
+   * エージェントが書く ack ファイルを待ってから自分の StatefulSet を触る。
+   * エージェント側の実装は src/server-setup/self-restart-declaration.ts。
+   *
+   * ここで固定するのは順序と決定性である。判定材料は**ファイルの存在**であり、
+   * kubectl / ansible の出力文言ではない（文言依存の判定は毎回誤発火した実績がある）。
+   */
+  describe('自己再起動待ちの申告（マーカー / ack ハンドシェイク）', () => {
+    const defaults = () => loadYaml('defaults', 'main.yml') as Record<string, unknown>
+
+    /** runner が extra-vars で渡す予約変数（server-setup-runner.ts の定数と一致）。 */
+    const MARKER_VAR = 'ai_support_agent_k8s_self_restart_marker_file'
+    const ACK_VAR = 'ai_support_agent_k8s_self_restart_ack_file'
+
+    const isMarkerTask = (t: Task): boolean =>
+      String(t['ansible.builtin.copy']?.dest ?? '').includes(MARKER_VAR)
+    const isWaitTask = (t: Task): boolean => t['ansible.builtin.wait_for'] !== undefined
+    const isSelfInclude = (t: Task): boolean => {
+      const inc = t['ansible.builtin.include_tasks']
+      const file = typeof inc === 'string' ? inc : inc?.file
+      return String(file ?? '').includes('self.yml')
+    }
+
+    function markerTask(): Task | undefined {
+      return mainTasks().find(isMarkerTask)
+    }
+
+    function waitTask(): Task | undefined {
+      return mainTasks().find(isWaitTask)
+    }
+
+    it('defaults は runner が渡す予約変数を空で定義する（他経路ではハンドシェイクしない）', () => {
+      // 空 = 「誰も待っていない」。ここに既定パスを入れると、監視していない経路
+      // （ローカル実行）で誰も答えない ack を待ち続ける。
+      expect(defaults()[MARKER_VAR]).toBe('')
+      expect(defaults()[ACK_VAR]).toBe('')
+    })
+
+    it('ack の待ち時間に既定値がある（無期限に待たない）', () => {
+      const timeout = Number(defaults().ai_support_agent_k8s_self_restart_ack_timeout_seconds)
+      expect(Number.isFinite(timeout)).toBe(true)
+      expect(timeout).toBeGreaterThan(0)
+    })
+
+    it('マーカーはコントローラ側（エージェント自身）へ書く', () => {
+      const task = markerTask()
+      expect(task).toBeDefined()
+      // 対象ホストではなくエージェント自身のファイルシステムに置く。プレイ全体の
+      // become: true をそのまま使うと、エージェントのプロセスユーザーではなく
+      // root でローカル実行しようとする。
+      expect(task!.delegate_to).toBe('localhost')
+      expect(task!.become).toBe(false)
+      const copy = task!['ansible.builtin.copy'] as Record<string, unknown>
+      expect(String(copy.dest)).toContain(MARKER_VAR)
+      // 中身は診断用の構造化された値（YAML/JSON 構造を壊さないよう to_json）。
+      expect(String(copy.content)).toContain('to_json')
+    })
+
+    it('マーカーは自己ターゲットが1件以上あるときだけ書く', () => {
+      const when = JSON.stringify(markerTask()!.when)
+      expect(when).toContain('pending_self_target')
+      expect(when).toContain('length > 0')
+    })
+
+    it('予約変数が未設定・相対パスならハンドシェイクごと行わない', () => {
+      // 空（＝監視者なし）で書きに行くとカレントディレクトリ配下へ書き出しかねない。
+      const when = JSON.stringify(markerTask()!.when)
+      expect(when).toContain(MARKER_VAR)
+      expect(when).toContain(ACK_VAR)
+      expect(when).toContain("match('^/')")
+    })
+
+    it('マーカーの判定材料はファイルの存在であり、コマンド出力の文言ではない', () => {
+      const when = JSON.stringify(markerTask()!.when)
+      expect(when).not.toContain('stdout')
+      expect(when).not.toContain('stderr')
+    })
+
+    it('マーカー書き出しは自己ターゲットの再起動タスクより前に位置する', () => {
+      const main = mainTasks()
+      const markerIndex = main.findIndex(isMarkerTask)
+      const selfIncludeIndex = main.findIndex(isSelfInclude)
+      expect(markerIndex).toBeGreaterThanOrEqual(0)
+      expect(selfIncludeIndex).toBeGreaterThan(markerIndex)
+      // self.yml 側は spec 変更操作しか持たない（＝マーカーより前に走る変更系が無い）。
+      const selfKubectl = flatten(loadYaml('tasks', 'self.yml') as Task[]).filter((t) =>
+        Array.isArray(t['ansible.builtin.command']?.argv),
+      )
+      expect(selfKubectl.length).toBeGreaterThan(0)
+    })
+
+    it('マーカーの直後に ack を待ち、待ってから self.yml へ進む', () => {
+      const main = mainTasks()
+      const markerIndex = main.findIndex(isMarkerTask)
+      const waitIndex = main.findIndex(isWaitTask)
+      const selfIncludeIndex = main.findIndex(isSelfInclude)
+      expect(markerIndex).toBeGreaterThanOrEqual(0)
+      expect(waitIndex).toBeGreaterThan(markerIndex)
+      expect(selfIncludeIndex).toBeGreaterThan(waitIndex)
+
+      const wait = waitTask()!['ansible.builtin.wait_for'] as Record<string, unknown>
+      expect(String(wait.path)).toContain(ACK_VAR)
+      expect(String(wait.timeout)).toContain('self_restart_ack_timeout_seconds')
+      expect(waitTask()!.delegate_to).toBe('localhost')
+      expect(waitTask()!.become).toBe(false)
+    })
+
+    it('ack を待つのはマーカーを実際に書けたときだけ', () => {
+      const when = JSON.stringify(waitTask()!.when)
+      expect(when).toContain('skipped')
+      expect(when).toContain('failed')
+    })
+
+    it('申告が届かなくてもプレイは進む（配置を報告経路の失敗で止めない）', () => {
+      // `failed_when: false` は register の .failed まで False にするため使えない
+      // （ansible-roles-no-log-diagnostics.spec.ts の「死んだ診断」不変条件）。
+      for (const task of [markerTask()!, waitTask()!]) {
+        expect(task.ignore_errors).toBe(true)
+        expect(task.failed_when).toBeUndefined()
+        expect(task.register).toBeDefined()
+      }
+    })
+
+    /**
+     * ack はローカル書き込みなので、**ほぼ確実に成功する**。したがって
+     * 「marker.failed または ack(wait).failed」だけを見る診断は、最も起きやすい
+     * 失敗経路（API 申告そのものの失敗）では一度も発火しない。
+     * ack の**中身**（成否）まで見て初めて、その経路が ansible の出力に現れる。
+     */
+    it('ack の中身を読み取ってから診断する（存在だけでは申告の成否は分からない）', () => {
+      const isAckSlurp = (t: Task): boolean =>
+        t['ansible.builtin.slurp'] !== undefined &&
+        String(
+          (t['ansible.builtin.slurp'] as Record<string, unknown>).src ?? '',
+        ).includes(ACK_VAR)
+      const slurp = mainTasks().find(isAckSlurp)
+      expect(slurp).toBeDefined()
+      expect(slurp!.delegate_to).toBe('localhost')
+      expect(slurp!.become).toBe(false)
+      expect(slurp!.register).toBeDefined()
+      // 読めなくても配置は続ける（読み取りは診断であって配置の一部ではない）。
+      expect(slurp!.ignore_errors).toBe(true)
+
+      // 位置: ack を待った後、かつ自己ターゲットの再起動より前。
+      const main = mainTasks()
+      const slurpIndex = main.findIndex(isAckSlurp)
+      expect(slurpIndex).toBeGreaterThan(main.findIndex(isWaitTask))
+      expect(main.findIndex(isSelfInclude)).toBeGreaterThan(slurpIndex)
+    })
+
+    it('診断の条件は ack の中身（declared=false）も見る', () => {
+      const notice = mainTasks().find(
+        (t) =>
+          t['ansible.builtin.debug'] !== undefined &&
+          JSON.stringify(t.when ?? '').includes('self_restart'),
+      )
+      expect(notice).toBeDefined()
+      const when = JSON.stringify(notice!.when)
+      // ack の中身を読んだ register 変数を参照していること。
+      expect(when).toContain('self_restart_ack_content')
+      // 「申告できなかった」ことを示す構造化フィールドを見ていること
+      // （ansible / kubectl の出力文言ではなく、エージェント自身が書いた値）。
+      expect(when).toContain('declared')
+    })
+
+    it('申告できなかったことは debug で表面化する（無言で握り潰さない）', () => {
+      const notice = mainTasks().find(
+        (t) =>
+          t['ansible.builtin.debug'] !== undefined &&
+          JSON.stringify(t.when ?? '').includes('self_restart'),
+      )
+      expect(notice).toBeDefined()
+      const when = JSON.stringify(notice!.when)
+      // ignore_errors + register なので .failed は信用できる（failed_when: false と違う）。
+      expect(when).toContain('.failed')
+      const msg = String(
+        (notice!['ansible.builtin.debug'] as Record<string, unknown>).msg ?? '',
+      )
+      expect(msg).toMatch(/watchdog|running/i)
+      // 申告の失敗は配置の失敗ではない。
+      expect(notice!['ansible.builtin.fail']).toBeUndefined()
     })
   })
 })

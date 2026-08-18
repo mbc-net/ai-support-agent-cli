@@ -3,7 +3,7 @@ import axios from 'axios'
 import type { ApiClient } from './api-client'
 import { logger } from './logger'
 import type { ProjectConfigResponse } from './types'
-import { axiosResponseData, getErrorMessage, isSsoAuthRequiredError } from './utils'
+import { axiosResponseData, getErrorMessage, isSsoAuthRequiredError, stringifyForMessage } from './utils'
 import { buildAwsCredentialEnv } from './utils/aws-credential-env'
 
 export interface SsoAuthRequiredInfo {
@@ -42,7 +42,9 @@ function extractAwsCredentialError(error: unknown, accountName: string): Credent
       }
 
       // その他のAPIエラー（422含む）はレスポンス詳細を含める
-      const serverMessage = data.message ?? data.error ?? 'Unknown error'
+      // 構造化された body（422 のバリデーションエラー配列等）がそのまま文字列連結され
+      // `[object Object]` になるのを防ぐ
+      const serverMessage = stringifyForMessage(data.message ?? data.error ?? 'Unknown error')
       logger.debug(`[aws-cred] API error response (status=${status}): ${JSON.stringify(data)}`)
       return { errorMessage: `AWS認証情報の取得に失敗しました（${accountName}）: [${status}] ${serverMessage}` }
     }

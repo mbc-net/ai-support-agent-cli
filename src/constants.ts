@@ -369,6 +369,21 @@ export const SERVER_SETUP_MAX_PROGRESS_EVENTS_PER_REQUEST = 500
 export const SERVER_SETUP_MAX_PROGRESS_TASK_NAME_LENGTH = 1000
 export const SERVER_SETUP_MAX_PROGRESS_MESSAGE_LENGTH = 10_000
 
+/**
+ * `seq` used by the one synthetic progress event the agent writes itself: the
+ * notice that the awaiting-self-restart declaration did not get through.
+ *
+ * Deliberately far above anything the Ansible callback plugin assigns (it
+ * counts tasks from 1), because the api's idempotency key is
+ * `(executionId, seq)` and a collision would be dropped by `skipDuplicates` —
+ * silently, which is the exact failure mode this notice exists to end. Sorting
+ * last is also correct: the declaration happens just before the agent restarts
+ * itself, after every other task of the run.
+ *
+ * Must stay within PostgreSQL's `integer` range (the api column is `Int`).
+ */
+export const SERVER_SETUP_SELF_RESTART_NOTICE_SEQ = 2_000_000_000
+
 /** Fixed container name used in the registered ECS task definition */
 export const ECS_AGENT_CONTAINER_NAME = 'app'
 

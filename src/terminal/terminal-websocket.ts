@@ -6,7 +6,7 @@ import WebSocket from 'ws'
 import { BaseWebSocketConnection, buildAgentWsHeaders } from '../base-websocket'
 import { WS_CLOSE_CODE_AUTH_REJECTED, WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import { logger } from '../logger'
-import { buildWsUrl, decodeBase64Utf8, getErrorMessage, isErrnoException } from '../utils'
+import { buildWsUrl, decodeBase64Utf8, getErrorMessage, isErrnoException, stringifyForMessage } from '../utils'
 import { isSafeSessionId } from '../utils/safe-session-id'
 
 import type { EnvVarsProvider } from '../env-vars-filter'
@@ -200,7 +200,10 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       case 'error': {
         // `error` は TerminalServerMessage の公式フィールドではないが、サーバー実装が
         // message の代わりに送ってくる可能性があるため防御的に読む
-        const errMsg = msg.message ?? (msg as unknown as Record<string, unknown>).error ?? 'unknown'
+        // 形が不定なので、オブジェクトが来ても `[object Object]` にならないよう可読化する
+        const errMsg = stringifyForMessage(
+          msg.message ?? (msg as unknown as Record<string, unknown>).error ?? 'unknown',
+        )
         logger.warn(`[terminal-ws] Server error (session=${msg.sessionId ?? 'none'}): ${errMsg}`)
         break
       }

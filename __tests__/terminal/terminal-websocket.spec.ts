@@ -1,6 +1,7 @@
 import WebSocket from 'ws'
 
 import { WS_CLOSE_CODE_AUTH_REJECTED } from '../../src/constants'
+import { logger } from '../../src/logger'
 import * as wsConstants from '../../src/terminal/constants'
 import { TerminalWebSocket } from '../../src/terminal/terminal-websocket'
 import type { TerminalAgentMessage, TerminalServerMessage } from '../../src/terminal/terminal-websocket'
@@ -380,6 +381,42 @@ describe('TerminalWebSocket', () => {
     await terminalWs.connect()
     await connected
     await new Promise((r) => setTimeout(r, 50))
+  })
+
+  it('should log a structured server error readably instead of [object Object]', () => {
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    try {
+      terminalWs = createTerminalWs()
+      const handler = terminalWs as unknown as { onParsedMessage(msg: unknown): void }
+      handler.onParsedMessage({
+        type: 'error',
+        sessionId: 'sess-3',
+        message: { code: 'E_SESSION', detail: 'session limit reached' },
+      })
+
+      const warned = warnSpy.mock.calls.map((c) => String(c[0]))
+      const errorLog = warned.find((m) => m.includes('Server error'))
+      expect(errorLog).toBeDefined()
+      expect(errorLog).not.toContain('[object Object]')
+      expect(errorLog).toContain('E_SESSION')
+      expect(errorLog).toContain('session limit reached')
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('should keep a plain string server error message unchanged', () => {
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    try {
+      terminalWs = createTerminalWs()
+      const handler = terminalWs as unknown as { onParsedMessage(msg: unknown): void }
+      handler.onParsedMessage({ type: 'error', sessionId: 'sess-4', message: 'Session not found' })
+
+      const warned = warnSpy.mock.calls.map((c) => String(c[0]))
+      expect(warned).toContain('[terminal-ws] Server error (session=sess-4): Session not found')
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('should log server error with unknown fallback', async () => {

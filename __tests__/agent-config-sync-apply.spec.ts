@@ -111,7 +111,7 @@ describe('applyProjectConfig - error handling branches', () => {
     const mockApply = applySharedFileMounts as jest.MockedFunction<typeof applySharedFileMounts>
 
     it('設定が配信されていれば配置処理を呼ぶ', async () => {
-      const mounts = [{ sourcePath: 'codex/auth.json', destPath: '/root/.codex/auth.json' }]
+      const mounts = [{ sourcePath: 'app/creds.json', destPath: '/root/.config/app/creds.json' }]
 
       await applyProjectConfig(makeDeps(), makeState(), makeBaseConfig({ sharedFileMounts: mounts }))
 

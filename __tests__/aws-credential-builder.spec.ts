@@ -467,6 +467,30 @@ describe('aws-credential-builder', () => {
       expect(result.ssoAuthRequired).toEqual([])
     })
 
+    it('non-SSO 422: message が構造化オブジェクトでも [object Object] にならない', async () => {
+      const apiError = new axios.AxiosError(
+        'Request failed', 'ERR_BAD_REQUEST', undefined, undefined,
+        {
+          status: 422, statusText: 'Unprocessable Entity',
+          data: {
+            statusCode: 422,
+            message: [{ property: 'accountId', constraints: { isString: 'accountId must be a string' } }],
+          },
+          headers: {}, config: {} as never,
+        },
+      )
+      const client = {
+        getAwsCredentials: jest.fn()
+          .mockRejectedValueOnce(apiError)
+          .mockResolvedValueOnce({ accessKeyId: 'AKIA_DEV', secretAccessKey: 'secret', region: 'us-east-1' }),
+      } as unknown as ApiClient
+      const result = await buildAwsProfileCredentials(client, '/tmp/project', projectConfig)
+      expect(result.errors[0]).not.toContain('[object Object]')
+      expect(result.errors[0]).toContain('[422]')
+      expect(result.errors[0]).toContain('accountId')
+      expect(result.errors[0]).toContain('must be a string')
+    })
+
     it('non-SSO error: data.message=undefined だが data.error がある場合は data.error を使用する（line 43 branch [1]）', async () => {
       // Cover: data.message ?? data.error ?? 'Unknown error'
       // When data.message is undefined → evaluates data.error → uses data.error

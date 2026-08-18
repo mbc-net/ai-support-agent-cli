@@ -73,6 +73,26 @@ export interface ServerSetupTaskResult {
 }
 
 /**
+ * The API's answer to an awaiting-self-restart declaration.
+ *
+ * A 200 only says the request was accepted: the api applies the flag on a
+ * best-effort path and still answers 200 when it could not (a DB error, an
+ * execution that terminated in the meantime). `acknowledged` is the only thing
+ * that says the flag is actually set on the execution row — and this is the
+ * last answer this process will ever read, because it restarts itself right
+ * after.
+ */
+export interface SelfRestartDeclarationAck {
+  acknowledged: boolean
+  /**
+   * Why, in the api's own vocabulary (`declared` / `already_declared` /
+   * `not_found` / `already_terminal` / `error`). Carried through to the
+   * execution log so an operator can tell a lost declaration from a race.
+   */
+  outcome?: string
+}
+
+/**
  * One mid-run progress event sent to the API while ansible is still running.
  *
  * `start` events carry only the task name (its outcome is not known yet);
