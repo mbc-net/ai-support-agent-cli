@@ -92,8 +92,9 @@ describe('filterEnvVarsOverride', () => {
       'RUBYOPT', 'RUBYLIB',
       'LUA_PATH', 'LUA_CPATH',
       'PLAYWRIGHT_BROWSERS_PATH',
-      'ZDOTDIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME',
+      'ZDOTDIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'CODEX_HOME',
       'CLAUDECODE',
+      'CODEX_SANDBOX_MODE', 'KUBERNETES_SERVICE_HOST',
     ]
 
     it.each(denylistedExact)('rejects %s', (name) => {
@@ -194,6 +195,48 @@ describe('filterEnvVarsOverride', () => {
         ctx,
       )
       expect(result).toEqual({})
+    })
+
+    it('rejects CODEX_HOME (Codex CLI の config.toml / MCP 設定アンカー)', () => {
+      // 任意ディレクトリを指されると攻撃者が用意した config.toml を
+      // Codex に読ませられる（writable_roots / network_access / mcp_servers）。
+      const result = filterEnvVarsOverride({ CODEX_HOME: '/tmp/evil-codex' }, ctx)
+      expect(result).toEqual({})
+    })
+  })
+
+  describe('CLI サンドボックス判定の覆し (defense in depth with api)', () => {
+    it('rejects CODEX_SANDBOX_MODE (danger-full-access の仕込みを防ぐ)', () => {
+      // resolveCodexSandboxMode は「明示指定」を環境由来の既定より優先する。
+      // Web 設定から danger-full-access を仕込まれると、コンテナ境界のない
+      // ホスト上でも Codex のサンドボックスが外れる。
+      const result = filterEnvVarsOverride(
+        { CODEX_SANDBOX_MODE: 'danger-full-access' },
+        ctx,
+      )
+      expect(result).toEqual({})
+    })
+
+    it('rejects KUBERNETES_SERVICE_HOST (コンテナ内判定アンカー)', () => {
+      // isRunningOnKubernetes が「コンテナの中か」を判定するアンカー。
+      // サンドボックス既定値と自動更新の抑止判定の双方に効く。
+      const result = filterEnvVarsOverride(
+        { KUBERNETES_SERVICE_HOST: '10.43.0.1' },
+        ctx,
+      )
+      expect(result).toEqual({})
+    })
+
+    it('does NOT reject near-miss names (完全一致のみを弾く)', () => {
+      const nearMisses = {
+        CODEX_HOMES: '/workspace/codex-homes',
+        MY_CODEX_HOME: '/workspace/mine',
+        CODEX_SANDBOX_MODES: 'read-only',
+        CODEX_SANDBOX: 'read-only',
+        KUBERNETES_SERVICE_HOSTNAME: 'kubernetes.default',
+        KUBERNETES_SERVICE_PORT: '443',
+      }
+      expect(filterEnvVarsOverride({ ...nearMisses }, ctx)).toEqual(nearMisses)
     })
   })
 })

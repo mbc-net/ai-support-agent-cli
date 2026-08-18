@@ -3,13 +3,14 @@ import fs from 'fs'
 import path from 'path'
 import { spawn } from 'child_process'
 
-import { CHAT_TIMEOUT, ERR_CODEX_CLI_NOT_FOUND, LOG_DEBUG_LIMIT, LOG_STDERR_ON_FAILURE_LIMIT } from '../constants'
+import { CHAT_TIMEOUT, ENV_VARS, ERR_CODEX_CLI_NOT_FOUND, LOG_DEBUG_LIMIT, LOG_STDERR_ON_FAILURE_LIMIT } from '../constants'
 import { logger } from '../logger'
 import type { ChatChunkType } from '../types'
 import { createActivityTimeout } from '../utils/activity-timeout'
+import { isRunningOnKubernetes } from '../utils/container-runtime'
 import { collectSecretEnvValues, redactSecretValues } from '../utils/secret-redaction'
 import { StreamLineParser } from '../utils/stream-parser'
-import { isErrnoException, toErrorMessage } from '../utils'
+import { isErrnoException, isInDocker, toErrorMessage } from '../utils'
 
 import { buildCleanEnv } from './claude-code-args'
 import { killWithEscalation, makeKillFn } from './cli-process-kill'
@@ -87,10 +88,79 @@ export function buildCodexArgs(
   return args
 }
 
+/**
+ * Codex のサンドボックスモードを決める。
+ *
+ * 既定値は「コンテナの中かどうか」で決まる。Codex の `workspace-write` は同梱の
+ * bwrap で名前空間を作るため、CAP_SYS_ADMIN の無いコンテナ（containerd 既定の
+ * ケーパビリティセット）では `bwrap: Creating new namespace failed: Operation not
+ * permitted` になり、シェルコマンドが一切実行できない。コンテナ境界そのものが
+ * 隔離を担っているので、その中では Codex 側のサンドボックスを外す。
+ *
+ * Docker（`AI_SUPPORT_AGENT_IN_DOCKER=1`）と Kubernetes（`KUBERNETES_SERVICE_HOST`）
+ * を同じ扱いにする。Pod には前者が注入されないため、以前は Kubernetes だけが
+ * 「コンテナではない」と判定されて `workspace-write` に落ちていた。
+ *
+ * 明示指定（引数 → `CODEX_SANDBOX_MODE`）は環境による既定より常に優先する。
+ *
+ * `danger-full-access` に倒れた場合は warn で可視化する（`warnCodexSandboxDisabled`）。
+ */
 function resolveCodexSandboxMode(value?: string): CodexSandboxMode {
-  const configured = value?.trim() || process.env.CODEX_SANDBOX_MODE?.trim()
-  if (configured && isCodexSandboxMode(configured)) return configured
-  return process.env.AI_SUPPORT_AGENT_IN_DOCKER === '1' ? 'danger-full-access' : 'workspace-write'
+  const optionValue = value?.trim()
+  const configured = optionValue || process.env.CODEX_SANDBOX_MODE?.trim()
+  if (configured && isCodexSandboxMode(configured)) {
+    if (configured === 'danger-full-access') {
+      warnCodexSandboxDisabled(
+        `explicitly requested via ${optionValue ? 'the sandboxMode option' : 'CODEX_SANDBOX_MODE'}`,
+      )
+    }
+    return configured
+  }
+  const containerRuntime = describeContainerRuntime()
+  if (!containerRuntime) return 'workspace-write'
+  warnCodexSandboxDisabled(`container runtime detected: ${containerRuntime}`)
+  return 'danger-full-access'
+}
+
+/**
+ * サンドボックス無効化の検出根拠。Docker なのか Kubernetes なのかを運用者が
+ * 判別できるよう、判定に使った環境変数名まで含める。
+ */
+function describeContainerRuntime(): string | undefined {
+  const inDocker = isInDocker()
+  const onKubernetes = isRunningOnKubernetes()
+  if (inDocker && onKubernetes) return `Docker (${ENV_VARS.IN_DOCKER}=1) and Kubernetes (KUBERNETES_SERVICE_HOST)`
+  if (inDocker) return `Docker (${ENV_VARS.IN_DOCKER}=1)`
+  if (onKubernetes) return 'Kubernetes (KUBERNETES_SERVICE_HOST)'
+  return undefined
+}
+
+/** サンドボックス無効化の warn を出したか（プロセス寿命で1回だけ） */
+let codexSandboxDisabledWarned = false
+
+/**
+ * サンドボックス無効化を warn で可視化する。
+ *
+ * spawn ログ（`logger.debug`）には `--sandbox danger-full-access` が引数として
+ * 現れるが、既定運用（`--verbose` 無し）では抑制されるため、運用者は
+ * 「ワークスペース外書き込みとネットワーク制限がすべて外れている」ことを
+ * 知る手段が無かった。
+ *
+ * codex 実行のたびに出すとログが溢れるので、プロセス寿命で1回だけ出す。
+ */
+function warnCodexSandboxDisabled(reason: string): void {
+  if (codexSandboxDisabledWarned) return
+  codexSandboxDisabledWarned = true
+  logger.warn(
+    `[chat] Codex OS sandbox is disabled (--sandbox danger-full-access): ${reason}. ` +
+    'codex can write outside the workspace and reach the network without restriction. ' +
+    'Set CODEX_SANDBOX_MODE=workspace-write to re-enable it. (logged once per process)',
+  )
+}
+
+/** テスト用のフラグリセット */
+export function _resetCodexSandboxWarning(): void {
+  codexSandboxDisabledWarned = false
 }
 
 function isCodexSandboxMode(value: string): value is CodexSandboxMode {
