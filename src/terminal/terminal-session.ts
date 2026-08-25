@@ -279,7 +279,12 @@ export class TerminalSession {
     if (sshKeyBase64) {
       try {
         const pemContent = decodeBase64Utf8(sshKeyBase64)
-        const sshKeyPath = path.join(os.tmpdir(), `ssh-key-${sessionId}`)
+        // 秘密鍵はセッション専用の一時ディレクトリ（mkdtempSync = 0700、上で確保済み）
+        // の中に置く。`/tmp/ssh-key-<sessionId>` は sessionId が秘密値ではないため
+        // 完全に予測可能で、攻撃者が先にファイル（0666 やシンボリックリンク）を
+        // 作っておくと writeFileSync の mode は新規作成時にしか効かないため、
+        // 秘密鍵がそのモードで書かれる／リンク先へ書き出されてしまう。
+        const sshKeyPath = path.join(tmpDir, 'ssh-key')
         fs.writeFileSync(sshKeyPath, pemContent, { mode: 0o600 })
         this.sshKeyFile = sshKeyPath
         const tenantCode = this.meta?.tenantCode

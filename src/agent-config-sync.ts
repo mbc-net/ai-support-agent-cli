@@ -114,8 +114,16 @@ export async function performSetup(
       )
       const cloned = results.filter(r => r.status === 'cloned').length
       const updated = results.filter(r => r.status === 'updated').length
-      const skipped = results.filter(r => r.status === 'skipped').length
-      logger.info(`${deps.prefix} Repository sync: ${cloned} cloned, ${updated} updated, ${skipped} skipped`)
+      const skippedResults = results.filter(r => r.status === 'skipped')
+      logger.info(`${deps.prefix} Repository sync: ${cloned} cloned, ${updated} updated, ${skippedResults.length} skipped`)
+      // 件数だけだと「どのリポジトリが・なぜ落ちたか」が失われ、URL 検証エラーなのか
+      // 認証エラーなのかネットワーク断なのかを後から判別できない。個別に出す。
+      for (const skippedResult of skippedResults) {
+        logger.warn(
+          `${deps.prefix} Repository sync skipped: ${skippedResult.repositoryName} ` +
+            `(${skippedResult.repositoryCode}): ${skippedResult.error ?? 'unknown reason'}`,
+        )
+      }
     } catch (error) {
       logger.warn(`${deps.prefix} Repository sync failed: ${getErrorMessage(error)}`)
     }

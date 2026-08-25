@@ -1,10 +1,29 @@
 // fs モック: accessSync だけを差し替え、既存テストを tmux 無効環境でテストする
 // (CI の Ubuntu 環境には /usr/bin/tmux が存在するため、モックしないと tmux が起動し
 //  shell 直接起動を前提とした既存テストが壊れる)
-jest.mock('fs', () => ({
-  ...jest.requireActual<typeof import('fs')>('fs'),
-  accessSync: jest.fn(),
-}))
+//
+// writeFileSync は実装へ委譲しつつ、`mockSshKeyWriteShouldFail` が立っている間だけ
+// SSH 秘密鍵の書き込み（basename が 'ssh-key'）を失敗させる。鍵はセッション専用の
+// mkdtemp ディレクトリ配下（外から予測できないパス）に作られるため、事前に衝突用の
+// ファイルを置いて失敗させることができないため。
+let mockSshKeyWriteShouldFail = false
+jest.mock('fs', () => {
+  const actual = jest.requireActual<typeof import('fs')>('fs')
+  return {
+    ...actual,
+    accessSync: jest.fn(),
+    writeFileSync: (file: unknown, data: unknown, options?: unknown) => {
+      if (
+        mockSshKeyWriteShouldFail &&
+        typeof file === 'string' &&
+        file.endsWith('ssh-key')
+      ) {
+        throw new Error('simulated ssh key write failure')
+      }
+      return (actual.writeFileSync as unknown as (...a: unknown[]) => void)(file, data, options)
+    },
+  }
+})
 
 const FAKE_KNOWN_HOSTS_PATH = '/fake-known-hosts/acme__shared'
 const mockResolveKnownHostsPath = jest.fn().mockReturnValue(FAKE_KNOWN_HOSTS_PATH)
@@ -402,8 +421,8 @@ describe('TerminalSession', () => {
         })
 
         const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
-        // GIT_SSH_COMMAND が設定されている
-        expect(env.GIT_SSH_COMMAND).toMatch(/ssh -i .*ssh-key-test-ssh-1/)
+        // GIT_SSH_COMMAND が設定されている（鍵はセッション専用サンドボックス配下）
+        expect(env.GIT_SSH_COMMAND).toMatch(/ssh -i ".*terminal-sandbox-[^"]*\/ssh-key"/)
         expect(env.GIT_SSH_COMMAND).toContain('-o StrictHostKeyChecking=no')
         // 元の変数は PTY には渡らない
         expect(env.GIT_SSH_KEY_CONTENT_BASE64).toBeUndefined()
@@ -425,13 +444,18 @@ describe('TerminalSession', () => {
         })
 
         const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
-        const expectedPath = path.join(os.tmpdir(), `ssh-key-${sessionId}`)
-        expect(env.GIT_SSH_COMMAND).toBe(
-          `ssh -i "${expectedPath}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`,
+        expect(env.GIT_SSH_COMMAND).toMatch(
+          /^ssh -i "[^"]+\/ssh-key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=\/dev\/null$/,
         )
+        // 予測可能な /tmp/ssh-key-<sessionId> は使わない
+        expect(env.GIT_SSH_COMMAND).not.toContain(path.join(os.tmpdir(), `ssh-key-${sessionId}`))
       })
 
       it('SSH 鍵ファイルが実際に作成されている', () => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
         const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-file-content\n-----END OPENSSH PRIVATE KEY-----'
         const base64Key = Buffer.from(pemKey).toString('base64')
 
@@ -441,13 +465,18 @@ describe('TerminalSession', () => {
           },
         })
 
-        const expectedPath = path.join(os.tmpdir(), 'ssh-key-test-ssh-2')
-        expect(fs.existsSync(expectedPath)).toBe(true)
-        const content = fs.readFileSync(expectedPath, 'utf-8')
+        const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+        const keyPath = (env.GIT_SSH_COMMAND.match(/-i "([^"]+)"/) as RegExpMatchArray)[1]
+        expect(fs.existsSync(keyPath)).toBe(true)
+        const content = fs.readFileSync(keyPath, 'utf-8')
         expect(content).toBe(pemKey)
       })
 
       it('セッション終了時に SSH 鍵ファイルが削除される', (done) => {
+        const pty = require('node-pty')
+        const spawnSpy = pty.spawn as jest.Mock
+        spawnSpy.mockClear()
+
         const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-cleanup\n-----END OPENSSH PRIVATE KEY-----'
         const base64Key = Buffer.from(pemKey).toString('base64')
 
@@ -457,44 +486,28 @@ describe('TerminalSession', () => {
           },
         })
 
-        const expectedPath = path.join(os.tmpdir(), 'ssh-key-test-ssh-3')
-        expect(fs.existsSync(expectedPath)).toBe(true)
+        const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+        const keyPath = (env.GIT_SSH_COMMAND.match(/-i "([^"]+)"/) as RegExpMatchArray)[1]
+        expect(fs.existsSync(keyPath)).toBe(true)
 
         session.onExit(() => {
-          expect(fs.existsSync(expectedPath)).toBe(false)
+          expect(fs.existsSync(keyPath)).toBe(false)
           done()
         })
         session.kill()
       })
 
-      it('SSH 鍵ファイル書き込み失敗時も安全にスキップする (line 228)', () => {
+      it('SSH 鍵ファイル書き込み失敗時も安全にスキップする', () => {
         const pty = require('node-pty')
         const spawnSpy = pty.spawn as jest.Mock
         spawnSpy.mockClear()
 
-        // To force the SSH key writeFileSync to fail, we write the key to a
-        // path inside a non-existent nested directory by using a session ID
-        // that contains path separators when joined with os.tmpdir().
-        // Instead, mock os.tmpdir() to return a path that exists for sandbox
-        // creation but not for SSH key writing.
-        //
-        // Simplest reliable approach: provide a base64 value that decodes to
-        // content that triggers an fs error by making the target path a
-        // directory rather than a file.
-        const sessionId = 'test-ssh-dir-collision'
-        const sshKeyPath = path.join(os.tmpdir(), `ssh-key-${sessionId}`)
-
-        // Pre-create the ssh key path as a directory so writeFileSync fails
-        // (can't write a file where a directory exists)
-        if (!fs.existsSync(sshKeyPath)) {
-          fs.mkdirSync(sshKeyPath, { recursive: true })
-        }
-
         const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----'
         const base64Key = Buffer.from(pemKey).toString('base64')
 
+        mockSshKeyWriteShouldFail = true
         try {
-          session = new TerminalSession(sessionId, {
+          session = new TerminalSession('test-ssh-write-failure', {
             envVarsOverride: { GIT_SSH_KEY_CONTENT_BASE64: base64Key },
           })
           // Session should be created despite SSH key write failure
@@ -503,8 +516,7 @@ describe('TerminalSession', () => {
           const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
           expect(env.GIT_SSH_COMMAND).toBeUndefined()
         } finally {
-          // Clean up the directory we created as a collision trap
-          try { fs.rmSync(sshKeyPath, { recursive: true, force: true }) } catch { /* ignore */ }
+          mockSshKeyWriteShouldFail = false
         }
       })
 
@@ -765,5 +777,70 @@ describe('TerminalSession.cleanupStaleSandboxes', () => {
     } finally {
       try { fs.rmSync(otherPath, { recursive: true, force: true }) } catch { /* ignore */ }
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SSH 秘密鍵を予測可能な /tmp パスに書かない（A5）
+//
+// sessionId は秘密値ではないため /tmp/ssh-key-<sessionId> は完全に予測可能で、
+// 攻撃者が先に 0666 のファイル（あるいはシンボリックリンク）を作っておくと
+// writeFileSync の mode は新規作成時にしか効かないため秘密鍵がそのモードで
+// 書かれる／リンク先へ書き出される。セッション専用の mkdtemp(0700) 配下へ置く。
+// ---------------------------------------------------------------------------
+describe('TerminalSession SSH key placement', () => {
+  let session: TerminalSession | null = null
+
+  afterEach(() => {
+    session?.kill()
+    session = null
+  })
+
+  const startSessionWithKey = (sessionId: string): { env: Record<string, string>; keyPath: string } => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pty = require('node-pty')
+    const spawnSpy = pty.spawn as jest.Mock
+    spawnSpy.mockClear()
+
+    const pemKey = '-----BEGIN OPENSSH PRIVATE KEY-----\nplacement\n-----END OPENSSH PRIVATE KEY-----'
+    const base64Key = Buffer.from(pemKey).toString('base64')
+
+    session = new TerminalSession(sessionId, {
+      envVarsOverride: { GIT_SSH_KEY_CONTENT_BASE64: base64Key },
+    })
+
+    const env = spawnSpy.mock.calls[0][2].env as Record<string, string>
+    const keyPath = (env.GIT_SSH_COMMAND.match(/-i "([^"]+)"/) as RegExpMatchArray)[1]
+    return { env, keyPath }
+  }
+
+  it('does not write the key to the predictable /tmp/ssh-key-<sessionId> path', () => {
+    const sessionId = 'placement-predictable'
+    const { keyPath } = startSessionWithKey(sessionId)
+
+    expect(keyPath).not.toBe(path.join(os.tmpdir(), `ssh-key-${sessionId}`))
+    expect(fs.existsSync(path.join(os.tmpdir(), `ssh-key-${sessionId}`))).toBe(false)
+  })
+
+  it('writes the key inside the per-session sandbox directory (0700) with 0600', () => {
+    const { keyPath } = startSessionWithKey('placement-modes')
+
+    expect(fs.existsSync(keyPath)).toBe(true)
+    expect(fs.statSync(keyPath).mode & 0o777).toBe(0o600)
+
+    const keyDir = path.dirname(keyPath)
+    expect(path.basename(keyDir)).toMatch(/^terminal-sandbox-/)
+    expect(fs.statSync(keyDir).mode & 0o777).toBe(0o700)
+  })
+
+  it('removes the key together with the sandbox directory on kill', () => {
+    const { keyPath } = startSessionWithKey('placement-cleanup')
+    const keyDir = path.dirname(keyPath)
+
+    session!.kill()
+    session = null
+
+    expect(fs.existsSync(keyPath)).toBe(false)
+    expect(fs.existsSync(keyDir)).toBe(false)
   })
 })
