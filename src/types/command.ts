@@ -1,6 +1,7 @@
 import type { ChatPayload } from './chat'
 import type { EcsLaunchPayload, EcsStopPayload } from './ecs'
 import type { ServerSetupExecPayload } from './server-setup'
+import type { TlsCertCheckPayload } from './tls-cert'
 
 export type AgentCommandType =
   | 'execute_command'
@@ -26,6 +27,7 @@ export type AgentCommandType =
   | 'server_setup_exec'
   | 'server_setup_cancel'
   | 'ssh_exec'
+  | 'tls_cert_check'
 
 export type AgentCommandStatus =
   | 'PENDING'
@@ -181,3 +183,4 @@ export type CommandDispatch =
   | { type: 'server_setup_exec'; payload: ServerSetupExecPayload }
   | { type: 'server_setup_cancel'; payload: ServerSetupCancelPayload }
   | { type: 'ssh_exec'; payload: SshExecPayload }
+  | { type: 'tls_cert_check'; payload: TlsCertCheckPayload }

@@ -339,6 +339,26 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     }
   },
 
+  tls_cert_check: async ({ p }) => {
+    // Loaded lazily: agents that never monitor certificates should not pay the
+    // module cost. No credentials are involved — the handshake reads the
+    // public certificate and sends nothing.
+    const { buildTlsCertCheckRequest } = await import('./tls-cert-check')
+    const request = buildTlsCertCheckRequest(p)
+    if ('error' in request) return errorResult(request.error)
+
+    const { collectTlsCertificates } = await import(
+      '../tls-cert/tls-cert-collector'
+    )
+    const observations = await collectTlsCertificates(request.targets, {
+      ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+      ...(request.concurrency !== undefined
+        ? { concurrency: request.concurrency }
+        : {}),
+    })
+    return successResult({ observations })
+  },
+
   e2e_script_fix: async ({ p, opts }) => {
     if (!opts.client) {
       return errorResult(ERR_E2E_TEST_REQUIRES_CLIENT)
