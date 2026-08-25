@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 
 import { logger } from '../logger'
@@ -247,6 +247,20 @@ export function writeMcpConfig(
     mode: 0o600,
     encoding: 'utf-8',
   })
+
+  // writeFileSync の mode は新規作成時にしか効かない。旧バージョンが 0644 で
+  // 作った設定ファイル（平文トークンを含む）を是正するため明示的に chmod する
+  // （utils/claude-json-oauth-sync.ts と同じ扱い。chmod 失敗は非致命）。
+  try {
+    chmodSync(configPath, 0o600)
+  } catch (error) {
+    // 非致命（設定ファイル自体は書けている）だが、失敗すると平文トークンを含む
+    // ファイルが 0644 のまま残る。無音にすると是正できていないことを誰も知り得ない。
+    logger.warn(
+      `[mcp-config] Failed to tighten permissions on ${configPath}; ` +
+        `the file may remain world-readable: ${getErrorMessage(error)}`,
+    )
+  }
 
   return configPath
 }

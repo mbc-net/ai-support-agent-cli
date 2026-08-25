@@ -11,9 +11,10 @@
  * `src/agent/utils/env-var-name-guard.ts`（`AgentEnvVarsService` から利用）の
  * `DENYLIST_EXACT` / `DENYLIST_PREFIX` と同期する必要がある。
  *
- * 補足: chat 実行経路（`commands/cli-runner-env.ts` の `applyEnvVarsOverride`）は
- * このフィルタを通らないため、そこでは api 側 denylist が唯一の防御になる。
- * 逆に api 側だけに項目を足すと本ファイルとの片側ドリフトになる。
+ * 適用経路: terminal / vscode に加え、chat 実行経路
+ * （`commands/cli-runner-env.ts` の `applyEnvVarsOverride`）もこのフィルタを通る。
+ * したがってここへの項目追加は全経路に効く。逆に api 側だけに項目を足すと
+ * 本ファイルとの片側ドリフトになる。
  */
 
 import { logger } from './logger'

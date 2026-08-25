@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -100,6 +100,28 @@ describe('config-writer', () => {
       // 0o600 = owner read+write only
       const mode = stat.mode & 0o777
       expect(mode).toBe(0o600)
+    })
+
+    // writeFileSync の mode は新規作成時にしか効かない。旧バージョンが 0644 で
+    // 作った設定ファイル（平文トークンを含む）は、書き直しても是正されずに
+    // 同一ホストの他ユーザーから読める状態が残り続ける。
+    it('should repair the permission of a pre-existing 0644 config file', () => {
+      const expectedPath = getMcpConfigPath(testDir)
+      mkdirSync(join(testDir, '.ai-support-agent', 'mcp'), { recursive: true })
+      writeFileSync(expectedPath, '{}', { encoding: 'utf-8' })
+      chmodSync(expectedPath, 0o644)
+      expect(statSync(expectedPath).mode & 0o777).toBe(0o644)
+
+      const configPath = writeMcpConfig(
+        testDir,
+        'http://localhost:3030',
+        'test-token-123',
+        'TEST_01',
+        '/path/to/server.js',
+      )
+
+      expect(configPath).toBe(expectedPath)
+      expect(statSync(configPath).mode & 0o777).toBe(0o600)
     })
 
     it('should return the config path', () => {

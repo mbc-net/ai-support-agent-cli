@@ -1,3 +1,5 @@
+import { filterEnvVarsOverride } from '../env-vars-filter'
+
 /** Hook payload に含めるポリシー評価コンテキスト */
 export interface PolicyContext {
   tenantCode?: string
@@ -25,13 +27,22 @@ export function applyPolicyContextEnv(env: Record<string, string>, policyContext
 
 /**
  * Web 設定（CLAUDE_CODE# / ENV#）由来の env 上書きを適用する。
- * 非文字列値（null/undefined/数値等）は spawn が文字列化して "null" 等が
- * env として設定されてしまうため、防御的に typeof チェックする。
+ *
+ * terminal / vscode 経路と同じ `filterEnvVarsOverride` を通してから代入する。
+ * これにより PATH / LD_PRELOAD / NODE_OPTIONS / ZDOTDIR / CODEX_HOME /
+ * CODEX_SANDBOX_MODE 等の sandbox・ローダ関連キーが chat 経路からも
+ * 上書きできなくなる（従来は api 側 denylist だけが唯一の防御だった）。
+ *
+ * 非文字列値（null/undefined/数値等）と空文字の skip もフィルタ側が担う
+ * （spawn が文字列化して "null" 等が env に入るのを防ぐ）。
+ *
+ * `CLAUDE_CODE_OAUTH_TOKEN` はフィルタ側で明示的に許可されているため、
+ * OAuth 認証経路は従来どおり動作する。
  */
 export function applyEnvVarsOverride(env: Record<string, string>, envVarsOverride?: Record<string, string>): void {
   if (!envVarsOverride) return
-  for (const [key, value] of Object.entries(envVarsOverride)) {
-    if (typeof value !== 'string' || value === '') continue
+  const filtered = filterEnvVarsOverride(envVarsOverride, { prefix: '[chat]' })
+  for (const [key, value] of Object.entries(filtered)) {
     env[key] = value
   }
 }

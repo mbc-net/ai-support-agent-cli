@@ -2,7 +2,7 @@ import * as child_process from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 
-import { buildAuthEnv, buildCloneUrl, normalizePemKey, runGit, syncRepositories, syncRepositoryByCode } from '../src/repo-sync'
+import { buildAuthEnv, buildCloneUrl, normalizePemKey, redactUrlCredentials, runGit, syncRepositories, syncRepositoryByCode } from '../src/repo-sync'
 import type { ApiClient } from '../src/api-client'
 import type { ProjectConfigResponse } from '../src/types'
 
@@ -149,13 +149,17 @@ describe('repo-sync', () => {
       expect(result).toBe('git@github.com:org/repo.git')
     })
 
+    // scp 形式 (`git@host:path`) は許可トランスポートだが `new URL()` では
+    // パースできない。この場合は従来どおり URL をそのまま返す。
+    // 許可トランスポート外の URL は buildCloneUrl 自体が throw する
+    // （'repo-sync clone transport hardening' を参照）。
     it('should return URL unchanged if parsing fails', () => {
       const result = buildCloneUrl(
-        'not-a-valid-url',
+        'git@github.com:org/repo.git',
         'api_key',
         'token',
       )
-      expect(result).toBe('not-a-valid-url')
+      expect(result).toBe('git@github.com:org/repo.git')
     })
 
     it('should log a warning when credential embedding fails (without leaking url or secret)', () => {
@@ -166,13 +170,13 @@ describe('repo-sync', () => {
       loggerMock.warn.mockClear()
 
       const result = buildCloneUrl(
-        'not-a-valid-url',
+        'git@github.com:org/repo.git',
         'api_key',
         'super-secret-token',
       )
 
       // Behaviour preserved: original url is returned unchanged
-      expect(result).toBe('not-a-valid-url')
+      expect(result).toBe('git@github.com:org/repo.git')
 
       // A warning is emitted with the failure fact + error message only
       expect(loggerMock.warn).toHaveBeenCalledWith(
@@ -795,5 +799,190 @@ describe('repo-sync', () => {
         ),
       ).rejects.toThrow('Repository not found: non-existent-repo')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// clone URL のトランスポート制限（A2）
+//
+// `git clone 'ext::sh -c ...'` は git の ext トランスポートで任意コマンドを
+// 実行する。`new URL()` は `ext::...` のパースに成功してしまうため、
+// スキームの allowlist と `--` 区切り、`GIT_ALLOW_PROTOCOL` の三点で塞ぐ。
+// ---------------------------------------------------------------------------
+describe('repo-sync clone transport hardening', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(fs.promises.mkdir as jest.Mock).mockResolvedValue(undefined)
+    ;(child_process.execFile as unknown as jest.Mock).mockImplementation(
+      (...args: unknown[]) => {
+        const callback = args[args.length - 1]
+        if (typeof callback === 'function') {
+          callback(null, { stdout: '', stderr: '' })
+        }
+        return { on: jest.fn(), kill: jest.fn() }
+      },
+    )
+  })
+
+  describe('buildCloneUrl scheme allowlist', () => {
+    const rejected = [
+      'ext::sh -c "id > /tmp/pwn"',
+      'ext::sh -c id',
+      'file:///etc/passwd',
+      '--upload-pack=touch /tmp/pwn',
+      'not-a-valid-url',
+    ]
+
+    for (const url of rejected) {
+      it(`rejects ${JSON.stringify(url)} for api_key auth`, () => {
+        expect(() => buildCloneUrl(url, 'api_key', 'ghp_token123')).toThrow()
+      })
+
+      it(`rejects ${JSON.stringify(url)} for ssh auth`, () => {
+        expect(() => buildCloneUrl(url, 'ssh', 'ssh-key-content')).toThrow()
+      })
+    }
+
+    it('does not leak the secret in the rejection message', () => {
+      try {
+        buildCloneUrl('ext::sh -c id', 'api_key', 'super-secret-token')
+        throw new Error('should have thrown')
+      } catch (error) {
+        expect((error as Error).message).not.toContain('super-secret-token')
+      }
+    })
+
+    it('still accepts normal https/http/ssh/scp-like URLs', () => {
+      expect(buildCloneUrl('https://github.com/org/repo.git', 'api_key', 't'))
+        .toBe('https://x-access-token:t@github.com/org/repo.git')
+      expect(buildCloneUrl('http://gitlab.internal/org/repo.git', 'api_key', 't'))
+        .toBe('http://x-access-token:t@gitlab.internal/org/repo.git')
+      expect(buildCloneUrl('ssh://git@github.com/org/repo.git', 'ssh', 'k'))
+        .toBe('ssh://git@github.com/org/repo.git')
+      expect(buildCloneUrl('git@github.com:org/repo.git', 'ssh', 'k'))
+        .toBe('git@github.com:org/repo.git')
+    })
+  })
+
+  describe('runGit', () => {
+    it('always restricts the allowed git transports', async () => {
+      await runGit(['status'], { env: { FOO: 'bar' }, timeout: 100 })
+
+      const call = (child_process.execFile as unknown as jest.Mock).mock.calls[0]
+      const opts = call[2] as { env: Record<string, string> }
+      expect(opts.env.GIT_ALLOW_PROTOCOL).toBe('https:ssh:git:http')
+    })
+
+    it('cannot be overridden by a caller-supplied env', async () => {
+      await runGit(['status'], { env: { GIT_ALLOW_PROTOCOL: 'ext' }, timeout: 100 })
+
+      const call = (child_process.execFile as unknown as jest.Mock).mock.calls[0]
+      const opts = call[2] as { env: Record<string, string> }
+      expect(opts.env.GIT_ALLOW_PROTOCOL).toBe('https:ssh:git:http')
+    })
+  })
+
+  describe('clone argument separation', () => {
+    const mockClient = {
+      getRepoCredentials: jest.fn(),
+      getTenantCode: jest.fn().mockReturnValue('acme'),
+    } as unknown as ApiClient
+
+    const repositories: NonNullable<ProjectConfigResponse['repositories']> = [
+      {
+        repositoryId: 'REPO_01',
+        repositoryCode: 'my-repo',
+        repositoryName: 'my-repo',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        provider: 'github',
+        branch: 'main',
+        authMethod: 'api_key',
+      },
+    ]
+
+    it('passes `--` before the clone url so it can never be read as an option', async () => {
+      ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+        repositoryId: 'REPO_01',
+        repositoryUrl: 'https://github.com/org/repo.git',
+        authMethod: 'api_key',
+        authSecret: 'ghp_token123',
+      })
+      mockedFs.existsSync.mockReturnValue(false)
+
+      const results = await syncRepositories(mockClient, repositories, '/tmp/repos', '[TEST]')
+      expect(results[0].status).toBe('cloned')
+
+      const calls = (child_process.execFile as unknown as jest.Mock).mock.calls
+      const cloneCall = calls.find((call) => (call[1] as string[])[0] === 'clone')
+      expect(cloneCall).toBeDefined()
+      const args = cloneCall![1] as string[]
+      expect(args).toEqual([
+        'clone',
+        '--no-single-branch',
+        '--',
+        'https://x-access-token:ghp_token123@github.com/org/repo.git',
+        path.join('/tmp/repos', 'my-repo'),
+      ])
+    })
+
+    it('reports a repository with a disallowed transport as skipped instead of cloning it', async () => {
+      const hostileRepositories: NonNullable<ProjectConfigResponse['repositories']> = [
+        { ...repositories[0], repositoryUrl: 'ext::sh -c id' },
+      ]
+      ;(mockClient as unknown as { getRepoCredentials: jest.Mock }).getRepoCredentials.mockResolvedValue({
+        repositoryId: 'REPO_01',
+        repositoryUrl: 'ext::sh -c id',
+        authMethod: 'api_key',
+        authSecret: 'ghp_token123',
+      })
+      mockedFs.existsSync.mockReturnValue(false)
+
+      const results = await syncRepositories(mockClient, hostileRepositories, '/tmp/repos', '[TEST]')
+
+      expect(results).toHaveLength(1)
+      expect(results[0].status).toBe('skipped')
+      expect(results[0].error).toBeTruthy()
+
+      const calls = (child_process.execFile as unknown as jest.Mock).mock.calls
+      expect(calls.find((call) => (call[1] as string[])[0] === 'clone')).toBeUndefined()
+    })
+  })
+})
+
+// git のエラーメッセージには失敗したコマンドライン全体が入るため、
+// buildCloneUrl が埋め込んだ `https://x-access-token:<TOKEN>@host/...` がそのまま
+// RepoSyncResult.error に流れ込み、ログや API 応答に載りうる。
+// logger の maskSecrets が `token:` パターンで拾っているのは
+// 「ユーザー名リテラルがたまたま x-access-token である」ことに依存した偶然なので、
+// 発生源で URL の認証情報そのものを落とす。
+describe('redactUrlCredentials', () => {
+  it('strips credentials embedded in an https URL', () => {
+    expect(
+      redactUrlCredentials(
+        'Command failed: git clone -- https://x-access-token:ghp_SUPERSECRET@github.com/org/repo.git dest',
+      ),
+    ).not.toContain('ghp_SUPERSECRET')
+  })
+
+  it('keeps the rest of the message intact', () => {
+    const redacted = redactUrlCredentials(
+      'Command failed: git clone -- https://x-access-token:ghp_SUPERSECRET@github.com/org/repo.git dest',
+    )
+    expect(redacted).toContain('github.com/org/repo.git')
+    expect(redacted).toContain('Command failed: git clone')
+  })
+
+  it('redacts regardless of the username literal', () => {
+    for (const user of ['x-access-token', 'oauth2', 'git', 'gitlab-ci-token']) {
+      const redacted = redactUrlCredentials(
+        `fatal: could not read from https://${user}:TOPSECRETVALUE@gitlab.com/org/repo.git`,
+      )
+      expect(redacted).not.toContain('TOPSECRETVALUE')
+    }
+  })
+
+  it('leaves messages without credentials unchanged', () => {
+    const message = 'fatal: repository https://github.com/org/repo.git not found'
+    expect(redactUrlCredentials(message)).toBe(message)
   })
 })
