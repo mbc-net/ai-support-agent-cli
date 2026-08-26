@@ -42,15 +42,28 @@
 - name: "dns_tls : Validate domain is a well-formed FQDN"
   ansible.builtin.assert:
     that:
-      # Anchored (`match` = re.match, and the pattern ends in `$`) so a value
-      # with an embedded newline, space, or Caddyfile-syntax character
-      # (`{`, `}`, `#`, etc.) cannot slip through and be injected into
-      # Caddyfile.j2's generated reverse_proxy block.
-      - domain is match('^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$')
+      # Anchored with `\Z`, not `$`. `match` is re.match, and Python's `$` also
+      # matches just before a trailing newline, so `"example.com\n"` would pass
+      # a `$`-anchored pattern and be injected into Caddyfile.j2 with the rest
+      # of the line under the attacker's control. `\Z` matches only at the very
+      # end of the string.
+      - domain is match('^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}\Z')
     fail_msg: >-
       domain must be a well-formed FQDN (letters/digits/hyphens and dots
-      only): got {{ domain | to_json }}
+      only, with no trailing newline): got {{ domain | to_json }}
   when: domain is defined
+
+- name: "dns_tls : Validate acme_email is a plausible address"
+  # The value is written into the Caddyfile's global options block, so the same
+  # injection concern as `domain` applies: anything with a newline or Caddyfile
+  # syntax must not reach the template. Deliberately permissive about the local
+  # part (addresses vary) but strict about the character set and the anchors.
+  ansible.builtin.assert:
+    that:
+      - acme_email is match('^[A-Za-z0-9._%+-]+@([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}\Z')
+    fail_msg: >-
+      acme_email must be a well-formed email address: got {{ acme_email | to_json }}
+  when: acme_email | default('') | length > 0
 
 - name: "dns_tls : Generate Caddyfile"
   ansible.builtin.template:
