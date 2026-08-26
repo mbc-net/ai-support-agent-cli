@@ -239,6 +239,19 @@ const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
  * トークンは 0600 一時ファイル経由で `kubectl create secret --from-file=` に渡し、argv・
  * `environment:`・生成マニフェストのいずれにも載せない（roles/ai_support_agent_k8s 参照）。
  *
+ * `rsyslog_server`/`rsyslog_forward` は syslog の集約基盤。`rsyslog_server` は受信側で、送信元制限が
+ * 未指定なら**実行を失敗させる**（fail-closed）——`$AllowedSender` 無しの rsyslog は全世界から
+ * ログを受け付け、ログ偽造とディスク枯渇の入口になるため。`rsyslog_forward` は送信側で、ディスク
+ * アシストキューを既定で有効にする（転送先ダウン中のログが黙って消えるのを防ぐ）。どちらも設定を
+ * 配置したあと `rsyslogd -N1` で**統合後の設定**を検証し、失敗したらバックアップから復元する
+ * （roles/rsyslog_server・roles/rsyslog_forward 参照）。
+ *
+ * `zabbix_agent` は監視対象ホストへの Zabbix Agent 導入・設定。**Zabbix サーバー側へのホスト登録は
+ * 含まない**（登録が無いと、エージェントが正常稼働していても監視項目は 1 つも収集されない）。
+ * PSK は 0600 で配置し、暗号化を無効に戻したときは鍵ファイルを削除する。コンテナ化すると `/proc` が
+ * コンテナのものになり「別のマシンを監視している」状態になるため、docker 経路は提供しない
+ * （roles/zabbix_agent 参照）。
+ *
  * `gitlab_runner_k8s`/`github_runner_k8s` は CI ランナーを**ホストではなくクラスタ上**へ
  * 配置する。`ai_support_agent_k8s` と同じく kubectl/kubeconfig を持つノードで動き、
  * トークン Secret を 0600 一時ファイル経由で作ったうえで、HelmChart CR には
@@ -266,7 +279,265 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'k3s',
   'tailscale',
   'shared_file',
+  'rsyslog_server',
+  'rsyslog_forward',
+  'zabbix_agent',
 ])
+
+/**
+ * `include_role` の task レベル `vars:` でレシピが渡してよい変数名を、ロールごとに列挙したもの。
+ *
+ * **なぜ「名前が予約語でない」だけでは足りないのか。**
+ * Ansible の変数優先順位では、`include_role` に付けた task レベルの `vars:` は "include params"
+ * として扱われ、**ロール内部の `set_fact` にも `register` の結果にも勝つ**（ansible-core 2.17 で実測:
+ * ロールが実際にコマンドを実行して `register` した変数を参照しても、呼び出し側が同名を渡すと
+ * そちらの値が読まれる）。
+ *
+ * つまり allowlist が無いと、レシピはロールが計算した中間状態を丸ごと差し替えられる。実害の例:
+ *
+ * - `k3s_ephemeral_device` は by-id パスから組み立てられて `parted` / `mkfs.ext4` へ渡る。直接渡せば
+ *   ロールが安全装置としている by-id 強制を迂回して任意のブロックデバイスを破壊できる
+ * - `k3s_ephemeral_needs_setup: true` を渡せば、既存ファイルシステムがあってもパーティション操作が走る
+ * - `rsyslog_server_ufw_stale` を渡せば `ufw --force delete` の対象を指定できる（SSH ルールの削除）
+ * - ヘルスチェックが参照する `register` 結果を渡せば、実際には失敗している検証を成功に見せられる
+ *
+ * ロール側では防げない（呼び出し側が必ず勝つ）ため、ガードで名前を絞るのが唯一の対策である。
+ *
+ * **このリストの作り方。** 各ロールの `defaults/main.yml` のキーと、tasks/templates が参照する
+ * ロール接頭辞付きの変数の和集合から、**`set_fact` のキー・`register` 名・task レベル `vars:` で
+ * 計算される名前を除いたもの**。除外が要点であり、内部変数がここに混ざると防御が無効になる。
+ * agent 側のテストが実ロールから同じ手順で再計算して突き合わせるため、ロールを変更すると差分が出る。
+ *
+ * 空集合（`docker`）は「レシピから渡せる変数が無い」という意味であり、誤りではない。
+ */
+export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<string>>> = {
+  ai_support_agent: new Set([
+    'ai_support_agent_api_url',
+    'ai_support_agent_package',
+    'ai_support_agent_project_code',
+    'ai_support_agent_token',
+    'ai_support_agent_tokens',
+    'ai_support_agent_user',
+  ]),
+  ai_support_agent_k8s: new Set([
+    'ai_support_agent_k8s_api_url',
+    'ai_support_agent_k8s_data_dir',
+    'ai_support_agent_k8s_image',
+    'ai_support_agent_k8s_kubeconfig',
+    'ai_support_agent_k8s_kubectl',
+    'ai_support_agent_k8s_manifest_dir',
+    'ai_support_agent_k8s_name',
+    'ai_support_agent_k8s_namespace',
+    'ai_support_agent_k8s_persistence',
+    'ai_support_agent_k8s_project',
+    'ai_support_agent_k8s_projects',
+    'ai_support_agent_k8s_replicas',
+    'ai_support_agent_k8s_self_instance_id',
+    'ai_support_agent_k8s_self_restart_ack_file',
+    'ai_support_agent_k8s_self_restart_ack_timeout_seconds',
+    'ai_support_agent_k8s_self_restart_marker_file',
+    'ai_support_agent_k8s_storage_class',
+    'ai_support_agent_k8s_storage_size',
+    'ai_support_agent_k8s_termination_grace_period_seconds',
+    'ai_support_agent_k8s_token',
+  ]),
+  claude_cli: new Set([
+    'claude_cli_oauth_token',
+    'claude_cli_package',
+    'claude_cli_user',
+  ]),
+  codex: new Set([
+    'codex_api_key',
+    'codex_oauth_token',
+    'codex_package',
+    'codex_user',
+  ]),
+  database: new Set([
+    'db_root_password',
+    'db_type',
+  ]),
+  dns_tls: new Set([
+    'acme_email',
+    'domain',
+  ]),
+  docker: new Set<string>(),
+  github_runner: new Set([
+    'github_runner_dir',
+    'github_runner_ephemeral',
+    'github_runner_group',
+    'github_runner_labels',
+    'github_runner_name',
+    'github_runner_pat',
+    'github_runner_registration_token',
+    'github_runner_replace',
+    'github_runner_scope',
+    'github_runner_url',
+    'github_runner_user',
+    'github_runner_version',
+    'github_runner_work',
+  ]),
+  github_runner_k8s: new Set([
+    'github_runner_k8s_chart_version',
+    'github_runner_k8s_controller_enabled',
+    'github_runner_k8s_controller_namespace',
+    'github_runner_k8s_kubeconfig',
+    'github_runner_k8s_kubectl',
+    'github_runner_k8s_manifest_dir',
+    'github_runner_k8s_max_runners',
+    'github_runner_k8s_min_runners',
+    'github_runner_k8s_name',
+    'github_runner_k8s_namespace',
+    'github_runner_k8s_pat',
+    'github_runner_k8s_url',
+  ]),
+  gitlab_runner: new Set([
+    'gitlab_runner_auth_token',
+    'gitlab_runner_description',
+    'gitlab_runner_docker_image',
+    'gitlab_runner_executor',
+    'gitlab_runner_locked',
+    'gitlab_runner_registration_token',
+    'gitlab_runner_run_untagged',
+    'gitlab_runner_tag_list',
+    'gitlab_runner_url',
+  ]),
+  gitlab_runner_k8s: new Set([
+    'gitlab_runner_k8s_auth_token',
+    'gitlab_runner_k8s_chart_version',
+    'gitlab_runner_k8s_concurrent',
+    'gitlab_runner_k8s_job_image',
+    'gitlab_runner_k8s_kubeconfig',
+    'gitlab_runner_k8s_kubectl',
+    'gitlab_runner_k8s_locked',
+    'gitlab_runner_k8s_manifest_dir',
+    'gitlab_runner_k8s_name',
+    'gitlab_runner_k8s_namespace',
+    'gitlab_runner_k8s_registration_token',
+    'gitlab_runner_k8s_replicas',
+    'gitlab_runner_k8s_run_untagged',
+    'gitlab_runner_k8s_tags',
+    'gitlab_runner_k8s_url',
+  ]),
+  k3s: new Set([
+    'gvisor_enabled',
+    'k3s_bind_mounts',
+    'k3s_bootstrap',
+    'k3s_cluster_source_cidr',
+    'k3s_containerd_template_name',
+    'k3s_disable',
+    'k3s_disable_swap',
+    'k3s_enable_iscsid',
+    'k3s_ephemeral_disk_id',
+    'k3s_ephemeral_fs_label',
+    'k3s_ephemeral_mount',
+    'k3s_ephemeral_mount_opts',
+    'k3s_etcd_s3_access_key',
+    'k3s_etcd_s3_bucket',
+    'k3s_etcd_s3_enabled',
+    'k3s_etcd_s3_endpoint',
+    'k3s_etcd_s3_folder',
+    'k3s_etcd_s3_region',
+    'k3s_etcd_s3_secret_key',
+    'k3s_etcd_snapshot_retention',
+    'k3s_etcd_snapshot_schedule_cron',
+    'k3s_extra_server_args',
+    'k3s_gvisor_apply_runtimeclass',
+    'k3s_gvisor_base_url',
+    'k3s_gvisor_release',
+    'k3s_install_url',
+    'k3s_kernel_modules',
+    'k3s_kubeconfig_mode',
+    'k3s_longhorn_path',
+    'k3s_manage_ufw',
+    'k3s_node_ip',
+    'k3s_node_taints',
+    'k3s_packages',
+    'k3s_pod_cidr',
+    'k3s_ready_delay',
+    'k3s_ready_retries',
+    'k3s_server_url',
+    'k3s_setup_cluster',
+    'k3s_setup_common',
+    'k3s_setup_disk',
+    'k3s_sysctl',
+    'k3s_time_sync_service',
+    'k3s_token',
+    'k3s_version',
+  ]),
+  nvm: new Set([
+    'node_version',
+    'nvm_user',
+    'nvm_version',
+  ]),
+  os_init: new Set([
+    'os_init_user',
+  ]),
+  rsyslog_forward: new Set([
+    'rsyslog_forward_protocol',
+    'rsyslog_forward_queue_enabled',
+    'rsyslog_forward_queue_max_disk_space',
+    'rsyslog_forward_queue_save_on_shutdown',
+    'rsyslog_forward_queue_spool_directory',
+    'rsyslog_forward_resume_retry_count',
+    'rsyslog_forward_selector',
+    'rsyslog_forward_target_host',
+    'rsyslog_forward_target_port',
+  ]),
+  rsyslog_server: new Set([
+    'rsyslog_server_allow_all_senders',
+    'rsyslog_server_allowed_senders',
+    'rsyslog_server_bind_address',
+    'rsyslog_server_log_root',
+    'rsyslog_server_logrotate_compress',
+    'rsyslog_server_logrotate_days',
+    'rsyslog_server_port',
+    'rsyslog_server_tcp_enabled',
+    'rsyslog_server_udp_enabled',
+    'rsyslog_server_ufw_manage',
+  ]),
+  shared_file: new Set([
+    'shared_file_dest',
+    'shared_file_directory_mode',
+    'shared_file_group',
+    'shared_file_mode',
+    'shared_file_owner',
+    'shared_file_src',
+    'shared_file_staging_dir',
+  ]),
+  ssh_key: new Set([
+    'ssh_key_public_key',
+    'ssh_key_user',
+  ]),
+  tailscale: new Set([
+    'tailscale_accept_routes',
+    'tailscale_advertise_exit_node',
+    'tailscale_advertise_routes',
+    'tailscale_advertise_tags',
+    'tailscale_authkey',
+    'tailscale_hostname',
+    'tailscale_install_url',
+    'tailscale_ssh',
+    'tailscale_up_timeout',
+  ]),
+  web_server: new Set([
+    'web_server_type',
+  ]),
+  zabbix_agent: new Set([
+    'zabbix_agent_active_check_verify_seconds',
+    'zabbix_agent_allowed_sources',
+    'zabbix_agent_hostname',
+    'zabbix_agent_listen_port',
+    'zabbix_agent_psk',
+    'zabbix_agent_psk_identity',
+    'zabbix_agent_server',
+    'zabbix_agent_server_active',
+    'zabbix_agent_tls_accept',
+    'zabbix_agent_tls_connect',
+    'zabbix_agent_ufw_manage',
+    'zabbix_agent_variant',
+    'zabbix_agent_version',
+  ]),
+}
 
 /**
  * `include_role` のモジュール引数マッピングで許可する param キー。
@@ -282,10 +553,250 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
  * `vars` を `FORBIDDEN_TASK_KEYS` の対象から除外し、その中身を
  * {@link validateIncludeRoleTaskVars} で検証する。
  */
-const INCLUDE_ROLE_ALLOWED_PARAM_KEYS: ReadonlySet<string> = new Set([
-  'name',
-  'tasks_from',
-  'public',
+const INCLUDE_ROLE_ALLOWED_PARAM_KEYS: ReadonlySet<string> = new Set(['name'])
+
+/*
+ * `tasks_from` と `public` はレシピから使えない。どちらもかつては許可していたが、
+ * ロール内部の検証や秘匿処理を迂回する入口になるため取り下げた。
+ * 組み込みスニペットはどちらも使っていない（使用箇所ゼロ）。
+ *
+ * **`tasks_from`**: ロール内の別タスクファイルを直接実行できてしまう。ロールは
+ * 「main.yml が入力を検証し、その後で内部ファイルを include する」構成になっている
+ * ので、これは検証の迂回そのものになる。実例:
+ *
+ *   include_role: { name: zabbix_agent, tasks_from: ufw }
+ *     → main.yml の CIDR 書式検証・`0.0.0.0/0` 拒否を飛ばして ufw.yml だけを実行できる
+ *   include_role: { name: k3s, tasks_from: disk }
+ *     → 破壊的なディスク操作を、main.yml の前提チェックなしで直接呼べる
+ *
+ * ロール側で各ファイルが独立に再検証する手もあるが、ファイルを増やすたびに
+ * 検証の複製が要る設計になり、抜けたときに気づけない。入口を閉じる方が確実である。
+ *
+ * **`public`**: include したロールの変数を後続タスクへ公開する。ロールの内部派生値
+ * （`ai_support_agent_k8s_project_specs` はトークンを含む）が後続から参照できるようになり、
+ * `referencesSecretVar` は元の秘匿変数名しか追跡しないので派生名の参照には `no_log` が
+ * 付かない。秘匿値が実行ログや `stepResults[].message` に出る経路になる。
+ */
+
+/**
+ * bundled role の名前空間に属する変数名かどうか。
+ *
+ * `include_role` の `vars:` は {@link INCLUDE_ROLE_ALLOWED_VARS} で絞ったが、レシピ本体には
+ * `set_fact` タスクも書ける。そちらを素通りさせると、同じ変数へ別の入口から到達できてしまう:
+ *
+ *   - name: rsyslog_forward を include
+ *   - name: ロールが立てた実行済みフラグを戻す
+ *     ansible.builtin.set_fact: { rsyslog_forward_already_configured: false }
+ *   - name: もう一度 include   ← 二重 include の検出をすり抜ける
+ *
+ * ロールが自分の状態を持つのに使う名前空間（`<role>_...`）へは、レシピから一切書き込めない
+ * ようにする。レシピがロールへ値を渡す唯一の経路は `include_role` の `vars:` であり、
+ * そこは allowlist で公開パラメータだけに絞られている。
+ */
+function isBundledRoleNamespacedName(name: string): boolean {
+  for (const role of INCLUDE_ROLE_ALLOWED_ROLES) {
+    if (name.startsWith(`${role}_`)) return true
+  }
+  return false
+}
+
+/**
+ * 同梱ロールが内部計算に使う変数名（`set_fact` の定義名と `register` の登録名）。
+ * `ansible/roles/**\/{tasks,handlers}/*.yml` から機械的に収集したもので、
+ * agent 側の構造テストが実ロールとの一致を検査する（新しい内部変数を足したのに
+ * ここへ載せ忘れると CI が赤くなる = fail-closed）。
+ *
+ * **なぜ「書き込み禁止」だけでなく「参照禁止」も要るのか。**
+ * `include_role` の `public` を禁止したので、ロール内部の値はレシピから見えない——
+ * と考えていたが、実測ではそうならない。`register` の結果と `set_fact` の値は
+ * ロールスコープではなくホストの変数なので、`public` を指定しなくても include の
+ * あとのタスクから読める（ansible-core 2.21 で確認: ロール内で `no_log: true` を
+ * 付けて register した値を、後続の `debug` がそのまま出力した）。
+ *
+ * これが効くのは秘匿値である。例えば `github_runner` ロールは runner 登録トークンを
+ * `github_runner_regtoken_resp` に register する。レシピが
+ * `{{ github_runner_regtoken_resp.json.token }}` を出力するタスクを書いても、
+ * `referencesSecretVar` はテナントの秘匿変数名しか見ていないので `no_log` が付かず、
+ * トークンが実行ログと `stepResults[].message` に平文で残る。
+ *
+ * 参照禁止は**この実名リスト**で行い、接頭辞では行わない。接頭辞で禁止すると
+ * `database_url` のような、たまたまロール名で始まるだけのテナント変数まで巻き添えで
+ * 拒否してしまうため。書き込み側は従来どおり接頭辞でも拒否する（そちらは
+ * レシピ側に正当な用途が無い）。
+ */
+export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
+  // ai_support_agent
+  'ai_support_agent_configure_items',
+  'ai_support_agent_configure_results',
+  'ai_support_agent_empty_token_entries',
+  'ai_support_agent_install_result',
+  'ai_support_agent_linger_status',
+  'ai_support_agent_nvm_check',
+  'ai_support_agent_token_tempfiles',
+  'ai_support_agent_token_writes',
+  'ai_support_agent_uid',
+  // ai_support_agent_k8s
+  'ai_support_agent_k8s_apply',
+  'ai_support_agent_k8s_kubeconfig_stat',
+  'ai_support_agent_k8s_kubectl_stat',
+  'ai_support_agent_k8s_manifest',
+  'ai_support_agent_k8s_namespace_apply',
+  'ai_support_agent_k8s_pending_self_targets',
+  'ai_support_agent_k8s_rollout',
+  'ai_support_agent_k8s_secret_apply',
+  'ai_support_agent_k8s_secret_current',
+  'ai_support_agent_k8s_self_apply',
+  'ai_support_agent_k8s_self_restart_ack',
+  'ai_support_agent_k8s_self_restart_ack_content',
+  'ai_support_agent_k8s_self_restart_marker',
+  'ai_support_agent_k8s_token_tempfile',
+  // claude_cli
+  'claude_cli_install_result',
+  'claude_cli_nvm_check',
+  // codex
+  'codex_api_key_login_result',
+  'codex_api_key_tempfile',
+  'codex_install_result',
+  'codex_nvm_check',
+  'codex_oauth_login_result',
+  'codex_oauth_token_tempfile',
+  // database
+  'db_mysql_root_password_result',
+  'db_postgres_password_result',
+  // dns_tls
+  'dns_tls_caddyfile',
+  // github_runner
+  'github_runner_api_url',
+  'github_runner_arch',
+  'github_runner_config_result',
+  'github_runner_dir_effective',
+  'github_runner_has_pat',
+  'github_runner_has_regtoken',
+  'github_runner_latest_release',
+  'github_runner_regtoken_resp',
+  'github_runner_regtoken_tempfile',
+  'github_runner_svc_marker',
+  'github_runner_user_check',
+  'github_runner_version_resolved',
+  // github_runner_k8s
+  'github_runner_k8s_apply',
+  'github_runner_k8s_arc_crd',
+  'github_runner_k8s_controller_apply',
+  'github_runner_k8s_controller_wait',
+  'github_runner_k8s_helm_crd',
+  'github_runner_k8s_kubeconfig_stat',
+  'github_runner_k8s_kubectl_stat',
+  'github_runner_k8s_listener_wait',
+  'github_runner_k8s_manifest',
+  'github_runner_k8s_namespace_apply',
+  'github_runner_k8s_pat_tempfile',
+  'github_runner_k8s_secret_apply',
+  // gitlab_runner
+  'gitlab_runner_docker_check',
+  'gitlab_runner_has_auth',
+  'gitlab_runner_has_reg',
+  'gitlab_runner_register_auth',
+  'gitlab_runner_register_legacy',
+  'gitlab_runner_token_tempfile',
+  // gitlab_runner_k8s
+  'gitlab_runner_k8s_apply',
+  'gitlab_runner_k8s_empty_tempfile',
+  'gitlab_runner_k8s_has_auth',
+  'gitlab_runner_k8s_has_reg',
+  'gitlab_runner_k8s_helm_crd',
+  'gitlab_runner_k8s_kubeconfig_stat',
+  'gitlab_runner_k8s_kubectl_stat',
+  'gitlab_runner_k8s_manifest',
+  'gitlab_runner_k8s_namespace_apply',
+  'gitlab_runner_k8s_rollout',
+  'gitlab_runner_k8s_secret_apply_auth',
+  'gitlab_runner_k8s_secret_apply_legacy',
+  'gitlab_runner_k8s_token_tempfile',
+  'gitlab_runner_k8s_verify',
+  // k3s
+  'k3s_binary_for_gvisor',
+  'k3s_effective_cluster_source_cidr',
+  'k3s_ephemeral_device',
+  'k3s_ephemeral_label_device',
+  'k3s_ephemeral_label_lookup',
+  'k3s_ephemeral_mountpoints',
+  'k3s_ephemeral_needs_setup',
+  'k3s_ephemeral_partition',
+  'k3s_ephemeral_stat',
+  'k3s_ephemeral_uuid_lookup',
+  'k3s_gvisor_url_base',
+  'k3s_install_result',
+  'k3s_join_ready',
+  'k3s_join_server_host',
+  'k3s_lsmod',
+  'k3s_needs_install',
+  'k3s_nodes_ready',
+  'k3s_time_sync_load_states',
+  'k3s_time_sync_resolved',
+  'k3s_time_sync_unit_states',
+  'k3s_ufw_enable',
+  'k3s_ufw_flannel',
+  'k3s_ufw_pods',
+  'k3s_ufw_ssh',
+  'k3s_ufw_status',
+  'k3s_ufw_tcp',
+  'k3s_version_check',
+  // nvm
+  'nvm_install_node_result',
+  'nvm_resolved_dir',
+  // os_init
+  'os_init_ufw_allow_ssh',
+  'os_init_ufw_enable',
+  'os_init_ufw_status',
+  // rsyslog_forward
+  'rsyslog_forward_already_configured',
+  'rsyslog_forward_conf_before',
+  'rsyslog_forward_conf_result',
+  'rsyslog_forward_invocation',
+  'rsyslog_forward_is_active',
+  'rsyslog_forward_journal',
+  'rsyslog_forward_revalidate',
+  'rsyslog_forward_spool_writable',
+  'rsyslog_forward_validate',
+  // rsyslog_server
+  'rsyslog_server_conf_before',
+  'rsyslog_server_conf_result',
+  'rsyslog_server_is_active',
+  'rsyslog_server_listen_sockets',
+  'rsyslog_server_main_pid',
+  'rsyslog_server_revalidate',
+  'rsyslog_server_ufw_add',
+  'rsyslog_server_ufw_added',
+  'rsyslog_server_ufw_after_add',
+  'rsyslog_server_ufw_delete',
+  'rsyslog_server_ufw_desired',
+  'rsyslog_server_ufw_desired_patterns',
+  'rsyslog_server_ufw_stale',
+  'rsyslog_server_validate',
+  // shared_file
+  'shared_file_dest_dir',
+  'shared_file_dest_dir_stat',
+  'shared_file_staged',
+  // tailscale
+  'tailscale_authkey_tempfile',
+  'tailscale_bin',
+  'tailscale_has_authkey',
+  'tailscale_install_result',
+  'tailscale_up_result',
+  // zabbix_agent
+  'zabbix_agent_invocation',
+  'zabbix_agent_is_active',
+  'zabbix_agent_journal',
+  'zabbix_agent_other_service',
+  'zabbix_agent_psk_socket',
+  'zabbix_agent_repo_pkg',
+  'zabbix_agent_ufw_add',
+  'zabbix_agent_ufw_added',
+  'zabbix_agent_ufw_after_add',
+  'zabbix_agent_ufw_delete',
+  'zabbix_agent_ufw_desired',
+  'zabbix_agent_ufw_desired_patterns',
+  'zabbix_agent_ufw_stale',
 ])
 
 /** set_fact / register で禁止する予約語・マジック変数名（完全一致）。 */
@@ -319,13 +830,6 @@ const ALWAYS_SECRET_VAR_NAMES: ReadonlySet<string> = new Set([
 
 /** `lookup(...)` / `query(...)` / `q(...)` プラグイン参照を検出する正規表現。 */
 const LOOKUP_PLUGIN_PATTERN = /\b(lookup|query|q)\s*\(/
-
-/**
- * `include_role` の `tasks_from` に許可する文字クラス（英数・`_`・`-` のみ）。
- * `/`・`..` 等のパス区切りを禁止し、ロールディレクトリ外の任意ファイルを
- * tasks ファイルとして読み込ませる（パストラバーサル）攻撃を防ぐ。
- */
-const TASKS_FROM_ALLOWED_PATTERN = /^[A-Za-z0-9_-]+$/
 
 const SET_FACT_MODULE_KEYS: ReadonlySet<string> = new Set([
   'set_fact',
@@ -375,28 +879,65 @@ function containsLookupPluginReference(value: unknown): boolean {
  * Jinjaフィルタ付き参照（`{{ NAME | quote }}` 等）や複数変数混在の式でも検出する
  * （見落とし＝secret 平文が実行ログに残るリスクを無くす方向。誤検知は許容）。
  */
+/**
+ * タスク全体に現れる識別子を集める。
+ *
+ * **`{{ ... }}` の中だけを見てはいけない。** 最初はそう実装したが、次の 3 つが
+ * そのまま素通りすることを実測した:
+ *
+ *   - `msg: "{% set x = NAME %}{{ x }}"` … Jinja のステートメントは `{{ }}` ではない
+ *   - `debug: { var: NAME }`             … `debug` の `var` は変数名そのものを取る
+ *   - `when: NAME.foo is match('^A')`    … `when` は素の Jinja 式で波括弧を書かない
+ *
+ * Jinja が値を評価する場所を数え上げてそれぞれ対応する方針は、数え漏らした場所が
+ * そのまま穴になる。ここでは**タスクのどこかに識別子として現れたら該当**とする。
+ * 内部変数 154 個と公開パラメータ 185 個の名前の重複は 0 件であることを確認しており、
+ * 正当なレシピを巻き込まない。
+ *
+ * この関数は「ロール内部変数の参照禁止」と「秘匿値の no_log 判定」の**両方**で使う。
+ * かつては後者だけが `{{ }}` 限定の別実装を持っていて、同じ穴が片方にだけ残った。
+ */
+function collectTemplateReferencedNames(
+  task: Record<string, unknown>,
+): ReadonlySet<string> {
+  const names = new Set<string>()
+  let serialized: string
+  try {
+    serialized = JSON.stringify(task)
+  } catch {
+    return names
+  }
+  for (const identifier of serialized.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
+    names.add(identifier)
+  }
+  return names
+}
+
+/**
+ * タスクが秘匿変数を参照しているか。
+ *
+ * 走査は {@link collectTemplateReferencedNames} と**同じ方式**（タスク全体の識別子）で行う。
+ * かつてここは `{{ ... }}` の中だけを見る正規表現だった。内部変数の参照禁止側で
+ * 「`{{ }}` の中だけでは足りない」と分かって直したのに、no_log 判定であるこちらを
+ * 直さなかったため、次の 3 つが no_log なしで通っていた（実測）:
+ *
+ *   - `debug: { var: DB_PASSWORD }`          … `var` は変数名そのものを取る
+ *   - `when: DB_PASSWORD is match('^x')`     … `when` は素の Jinja 式
+ *   - `msg: "{% set x = DB_PASSWORD %}..."`  … Jinja ステートメント
+ *
+ * どれも接続パスワードやテナントの `ANSIBLE#` 秘匿変数を実行ログ・`stepResults[].message`
+ * へ平文で出す（3 番目は値そのもの、2 番目は正規表現による 1 文字ずつの読み出し）。
+ * 同じ穴を 2 箇所に持たないよう、判定は 1 つの関数に寄せる。
+ */
 function referencesSecretVar(
   task: Record<string, unknown>,
   secretVarNames: ReadonlySet<string>,
 ): boolean {
   if (secretVarNames.size === 0) return false
-  let serialized: string
-  try {
-    serialized = JSON.stringify(task)
-  } catch {
-    return false
-  }
-  for (const name of secretVarNames) {
-    const pattern = new RegExp(`\\{\\{[^}]*\\b${escapeRegExp(name)}\\b[^}]*\\}\\}`)
-    if (pattern.test(serialized)) {
-      return true
-    }
+  for (const name of collectTemplateReferencedNames(task)) {
+    if (secretVarNames.has(name)) return true
   }
   return false
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 /**
@@ -415,9 +956,7 @@ function getModuleCandidateKeys(task: Record<string, unknown>): string[] {
  * - `name` が {@link INCLUDE_ROLE_ALLOWED_ROLES} のいずれかであること。
  * - すべてのキーが {@link INCLUDE_ROLE_ALLOWED_PARAM_KEYS} に含まれること（`vars` はここに
  *   含まれない — {@link validateIncludeRoleTaskVars} 参照）。
- * - `tasks_from`（ロール内の代替タスクファイル名）が英数・`_`・`-` のみ
- *   （{@link TASKS_FROM_ALLOWED_PATTERN}）であること。`/` や `..` を含む値でロール
- *   ディレクトリ外の任意ファイルを読み込ませるパストラバーサルを防ぐ。
+ * - `tasks_from` はパラメータキーの allowlist（`name` のみ）で拒否される。
  */
 function validateIncludeRole(
   taskIndex: number,
@@ -453,22 +992,12 @@ function validateIncludeRole(
     }
   }
 
-  // tasks_from はロールディレクトリ内の代替タスクファイル名。パストラバーサルを
-  // 防ぐため、英数・`_`・`-` のみの allowlist で検証する（`/`・`..` は拒否）。
-  const tasksFrom = moduleArgs.tasks_from
-  if (tasksFrom !== undefined) {
-    if (
-      typeof tasksFrom !== 'string' ||
-      !TASKS_FROM_ALLOWED_PATTERN.test(tasksFrom)
-    ) {
-      violations.push({
-        taskIndex,
-        key: 'tasks_from',
-        reason:
-          'include_role tasks_from must match [A-Za-z0-9_-]+ (no path separators)',
-      })
-    }
-  }
+  // `tasks_from` の文字種検証はここには無い。かつては「パス区切りと `..` を含まなければ
+  // 許可」だったが、それではロール内部のタスクファイルを直接呼べてしまい、`main.yml` の
+  // 入力検証を迂回できた（理由は INCLUDE_ROLE_ALLOWED_PARAM_KEYS のコメント参照）。
+  // 現在は `name` 以外のパラメータキーを上のループが一律で拒否するため、`tasks_from` は
+  // そこで違反として記録される。文字種チェックを残しても二重報告になるだけで、
+  // 「文字種さえ妥当なら通してよい」という誤った印象を与える。
 }
 
 /**
@@ -491,16 +1020,51 @@ function validateIncludeRole(
  */
 function validateIncludeRoleTaskVars(
   taskIndex: number,
+  roleName: string | undefined,
   taskLevelVars: unknown,
   violations: AnsibleTaskViolation[],
 ): void {
-  if (!isPlainObject(taskLevelVars)) return
+  // `undefined`（vars を書いていない）だけが「vars 無し」。スカラーや配列を
+  // 素通りさせると、ガードは ok を返したのに実機の ansible-playbook が
+  // 「vars must be specified as a dictionary」で落ちる——保存時に弾く意味が消える。
+  if (taskLevelVars === undefined || taskLevelVars === null) return
+  if (!isPlainObject(taskLevelVars)) {
+    violations.push({
+      taskIndex,
+      key: 'vars',
+      reason: 'include_role task vars must be a mapping',
+    })
+    return
+  }
+  // roleName が未確定（role 名自体が不正）なら、validateIncludeRole 側で既に violation を
+  // 積んでいる。allowlist 検査へ進むと同じタスクを二重に報告するので、予約語チェックだけ行う。
+  //
+  // roleName が有効なのに allowlist にエントリが無い場合は話が別で、「公開変数ゼロ」として
+  // 全拒否する（fail-closed）。ロールを INCLUDE_ROLE_ALLOWED_ROLES に足して allowlist への
+  // 追加を忘れると、fail-open ではそのロールだけ防御が外れたまま素通りする。
+  const allowedVars =
+    roleName === undefined
+      ? undefined
+      : (INCLUDE_ROLE_ALLOWED_VARS[roleName] ?? new Set<string>())
   for (const varName of Object.keys(taskLevelVars)) {
     if (isReservedVarName(varName)) {
       violations.push({
         taskIndex,
         key: varName,
         reason: 'reserved or magic variable name in include_role vars',
+      })
+      continue
+    }
+    // エントリが無い許可済みロールは「公開変数ゼロ」として全拒否する（fail-closed）。
+    // ロールを INCLUDE_ROLE_ALLOWED_ROLES に足して allowlist への追加を忘れたとき、
+    // fail-open だとそのロールだけ防御が外れたまま素通りし、テストが無ければ誰も
+    // 気づけない。構造テストでも 1:1 を検証しているが、実装側でも倒れる向きを揃える。
+    if (allowedVars === undefined) continue
+    if (!allowedVars.has(varName)) {
+      violations.push({
+        taskIndex,
+        key: varName,
+        reason: `variable is not a public parameter of role '${roleName}'`,
       })
     }
   }
@@ -683,7 +1247,20 @@ export function validateAnsibleTasks(
         // ロール変数（task レベルの vars）は validateIncludeRoleTaskVars で別途検査する。
         if (INCLUDE_ROLE_MODULE_KEYS.has(normalized)) {
           validateIncludeRole(taskIndex, key, task[key], violations)
-          validateIncludeRoleTaskVars(taskIndex, task.vars, violations)
+          // ロール名は vars の allowlist を引くために必要。allowlist に無いロール名は
+          // validateIncludeRole が既に拒否しているので、ここでは undefined を渡して
+          // vars 側の重複報告を避ける。
+          const includeRoleName = isPlainObject(task[key])
+            ? (task[key] as Record<string, unknown>).name
+            : undefined
+          validateIncludeRoleTaskVars(
+            taskIndex,
+            typeof includeRoleName === 'string' && INCLUDE_ROLE_ALLOWED_ROLES.has(includeRoleName)
+              ? includeRoleName
+              : undefined,
+            task.vars,
+            violations,
+          )
           validateSharedFileRoleVars(
             taskIndex,
             isPlainObject(task[key])
@@ -723,28 +1300,121 @@ export function validateAnsibleTasks(
       })
     }
 
-    // 4. set_fact / register の予約語・マジック変数名チェック
+    // 4. set_fact / register の予約語・マジック変数名チェックと、
+    //    bundled role の名前空間への書き込み禁止
     for (const key of moduleCandidateKeys) {
       if (!SET_FACT_MODULE_KEYS.has(key)) continue
       const factValue = task[key]
-      if (isPlainObject(factValue)) {
+      // free-form 文字列形式（`set_fact: foo=bar`）はマッピングではないので、
+      // 下のキー検査が一度も走らない。素通りさせると予約名も role 名前空間も
+      // そのまま書けてしまうため、形式ごと拒否する。
+      if (!isPlainObject(factValue)) {
+        violations.push({
+          taskIndex,
+          key,
+          reason: 'set_fact args must be a mapping (free-form form is not allowed)',
+        })
+        continue
+      }
+      {
         for (const factName of Object.keys(factValue)) {
+          // set_fact は**キー自体**を実行時にテンプレート展開する
+          // （ansible の set_fact アクションが `k = self._templar.template(k)` を行う）。
+          // つまり `"{{ 'ansible_' ~ 'connection' }}"` のように組み立てたキーは、
+          // 静的な文字列としては予約名にも role 接頭辞にも一致しないのに、
+          // 実行時には一致する名前になる。実測でこの 2 経路と free-form 形式が
+          // 素通りすることを確認済み。静的に読めない名前は最初から書けなくする。
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(factName)) {
+            violations.push({
+              taskIndex,
+              key: factName,
+              reason: 'set_fact variable name must be a static identifier',
+            })
+            continue
+          }
           if (isReservedVarName(factName)) {
             violations.push({
               taskIndex,
               key: factName,
               reason: 'reserved or magic variable name',
             })
+          } else if (
+            isBundledRoleNamespacedName(factName) ||
+            BUNDLED_ROLE_INTERNAL_VARS.has(factName)
+          ) {
+            // 接頭辞だけでは足りない: `database` ロールは内部計算に `db_*` を使う
+            // （`db_mysql_root_password_result` など）。実名リストと OR で見る。
+            violations.push({
+              taskIndex,
+              key: factName,
+              reason: 'set_fact must not write into a bundled role namespace',
+            })
           }
         }
       }
     }
+    // 4.5. 同梱ロールの内部変数を「読む」ことも禁止する（タスク全体を走査）。
+    //
+    // `public` を禁止しても塞がらない。`register` / `set_fact` の値はロールスコープ
+    // ではなくホストの変数で、include のあとのタスクから普通に読める（実測済み）。
+    // 秘匿値を register しているロール（`github_runner` の runner 登録トークン等）が
+    // あるので、読めるままだとレシピが自分のタスクでそれを出力でき、`no_log` は
+    // 付かない（`referencesSecretVar` はテナントの秘匿変数名しか知らない）。
+    for (const name of collectTemplateReferencedNames(task)) {
+      if (BUNDLED_ROLE_INTERNAL_VARS.has(name)) {
+        violations.push({
+          taskIndex,
+          key: name,
+          reason: "must not reference a bundled role's internal variable",
+        })
+      }
+    }
+
+    // 4.6. 変数名を実行時に組み立てる参照を禁止する。
+    //
+    // 4.5 の照合は静的な識別子で行うため、名前を分割して連結されると素通りする:
+    //
+    //   {{ vars['github_runner_' ~ 'regtoken_resp'].json.token }}
+    //   {{ hostvars[inventory_hostname]['github_' ~ 'runner_regtoken_resp'] }}
+    //   debug: { var: hostvars[inventory_hostname] }   ← ホスト変数を丸ごと出す
+    //
+    // いずれも実測で素通りすることを確認した。`set_fact` のキー側は既に
+    // 「静的な識別子であること」を要求しているのに、参照側だけ動的な組み立てを
+    // 許していたのは非対称である。レシピが `vars` / `hostvars` を辿る正当な用途は
+    // 無いので、入口ごと閉じる。
+    {
+      const serializedTask = JSON.stringify(task)
+      if (
+        /\bhostvars\b/.test(serializedTask) ||
+        /"vars"\s*:\s*\[/.test(serializedTask) ||
+        /\bvars\s*\[/.test(serializedTask) ||
+        /\bgetattr\s*\(/.test(serializedTask)
+      ) {
+        violations.push({
+          taskIndex,
+          key: 'root',
+          reason:
+            'dynamic variable lookup (vars[...] / hostvars / getattr) is forbidden',
+        })
+      }
+    }
+
     const registerValue = task.register
     if (typeof registerValue === 'string' && isReservedVarName(registerValue)) {
       violations.push({
         taskIndex,
         key: 'register',
         reason: 'reserved or magic variable name',
+      })
+    } else if (
+      typeof registerValue === 'string' &&
+      (isBundledRoleNamespacedName(registerValue) ||
+        BUNDLED_ROLE_INTERNAL_VARS.has(registerValue))
+    ) {
+      violations.push({
+        taskIndex,
+        key: 'register',
+        reason: 'register must not write into a bundled role namespace',
       })
     }
   })
@@ -758,10 +1428,38 @@ export function validateAnsibleTasks(
   // 時は空集合になり得る）とは独立に常時マージする — 接続用認証情報の変数名は
   // テナント設定に関わらず常に secret 扱いする。
   const noLogVarNames = new Set([...secretVarNames, ...ALWAYS_SECRET_VAR_NAMES])
+  // 秘匿性は代入をまたいで伝播させる。
+  //
+  // `referencesSecretVar` は変数名の直接参照しか見ないので、名前を一度付け替えると
+  // それ以降は素通りする。実際に次の 2 タスクは、1 つ目にだけ no_log が付き、
+  // 2 つ目が秘匿値をそのまま実行ログへ出していた:
+  //
+  //   - set_fact: { copied: "{{ ansible_ssh_pass }}" }   ← no_log が付く
+  //   - debug:    { msg: "{{ copied }}" }                ← 付かない。平文で出る
+  //
+  // register も同じで、秘匿値を参照したコマンドの結果には秘匿値が入る。よって
+  // タスクを順に見て、秘匿名を参照したタスクが定義した名前（set_fact のキー・
+  // register 名）を秘匿集合へ足していく。以降の参照は同じ扱いになる。
+  const taintedVarNames = new Set(noLogVarNames)
   const normalizedTasks = parsed.map((rawTask) => {
     const task = { ...(rawTask as Record<string, unknown>) }
-    if (referencesSecretVar(task, noLogVarNames) && task.no_log !== true) {
-      task.no_log = true
+    if (referencesSecretVar(task, taintedVarNames)) {
+      if (task.no_log !== true) {
+        task.no_log = true
+      }
+      for (const key of Object.keys(task)) {
+        if (!SET_FACT_MODULE_KEYS.has(key)) continue
+        const factValue = task[key]
+        if (!isPlainObject(factValue)) continue
+        for (const factName of Object.keys(factValue)) {
+          if (factName === 'cacheable') continue
+          taintedVarNames.add(factName)
+        }
+      }
+      const registerName = task.register
+      if (typeof registerName === 'string' && registerName !== '') {
+        taintedVarNames.add(registerName)
+      }
     }
     return task
   })

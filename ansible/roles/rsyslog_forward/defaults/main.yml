@@ -1,0 +1,48 @@
+---
+# rsyslog_forward role defaults.
+#
+# Forwards this host's syslog to a collector (see the rsyslog_server role).
+#
+# Design doc: admin-docs docs/specifications/server-setup-monitoring-app-roles.md
+# section 4.5. The disk-assisted queue defaults are NOT free choices:
+#
+#   Without `queue.filename` rsyslog stays in pure in-memory queue mode no
+#   matter what `queue.maxDiskSpace` says, and every log line produced while
+#   the collector is unreachable is lost — silently, with nothing recording
+#   that it happened. An outage is exactly when those logs matter most.
+#   `queue.saveOnShutdown` defaults to off in rsyslog, so an ordinary restart
+#   (which this role triggers on every config change) also drops whatever is
+#   still queued.
+#
+# --- target ------------------------------------------------------------------
+rsyslog_forward_target_host: ""          # REQUIRED
+rsyslog_forward_target_port: 514
+rsyslog_forward_protocol: tcp            # tcp | udp
+# facility.priority selector deciding what gets forwarded.
+rsyslog_forward_selector: "*.*"
+
+# --- disk-assisted queue ---------------------------------------------------
+# NOTE: the queue file NAME is not configurable. It is a constant in the
+# template (`fwd-primary`). rsyslog uses it as the prefix of the on-disk spool
+# files and resumes only the queue matching the configured name on restart, so
+# changing it while the collector is down would strand the accumulated spool
+# under the old prefix — unreferenced, never drained, never reported, and the
+# run still succeeds. One forwarding action per host means nothing collides.--
+rsyslog_forward_queue_enabled: true
+# Fixed name, not derived from the destination.
+#
+# rsyslog uses this as the PREFIX of the on-disk spool files, and on restart it
+# resumes only the queue matching the configured name. If the name tracked the
+# destination, then changing the destination while the old one was unreachable
+# would leave the accumulated spool under the old prefix — unreferenced by the
+# new configuration, never drained, and never reported. The run would succeed.
+#
+# A per-destination name was there to keep two forwarding actions from sharing a
+# queue, but this role configures exactly one action per host (see tasks/main.yml),
+# so there is nothing to collide with.
+
+rsyslog_forward_queue_spool_directory: /var/spool/rsyslog
+rsyslog_forward_queue_max_disk_space: 1g
+rsyslog_forward_queue_save_on_shutdown: true
+# -1 = retry forever, so the queue drains once the collector comes back.
+rsyslog_forward_resume_retry_count: -1

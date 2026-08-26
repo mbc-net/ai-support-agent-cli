@@ -1,0 +1,290 @@
+---
+# rsyslog_forward role: forwards this host's syslog to a collector.
+#
+# Design doc: admin-docs section 4.5. Load-bearing points, restated here
+# because a future editor reads this file rather than the spec:
+#
+# 1. THE QUEUE MUST BE DISK-ASSISTED. See defaults/main.yml — `queue.filename`
+#    is what enables it; the size limit alone does nothing.
+#
+# 2. THE FRAGMENT NUMBER IS PART OF THE CONTRACT. It has to sort before any
+#    fragment containing `stop` (rsyslog_server's 10-remote-receiver.conf).
+#    Get this wrong and forwarding silently never happens: config validates,
+#    service runs, collector stays empty.
+#
+# 3. VALIDATE TWICE, ROLL BACK BY RESTORING. Same reasoning as rsyslog_server:
+#    a broken rsyslog config stops all logging on the host and the outage is
+#    not logged. Rollback restores the backup instead of deleting, because on
+#    a re-run we are overwriting a config that was working.
+#
+# 4. AN UNREACHABLE TARGET IS NOT A FAILURE. The collector is often built
+#    after the senders, and `resumeRetryCount: -1` means rsyslog retries until
+#    it appears. The health check therefore verifies that the forwarding
+#    machinery started, not that the target answers.
+
+- name: "rsyslog_forward : Validate required variables are set"
+  ansible.builtin.assert:
+    that:
+      # `is string` matters: an explicit `null` or `true` survives
+      # `default('')` unchanged and stringifies to a non-empty "None"/"True",
+      # so a length check alone would pass. (Same trap documented in the
+      # ssh_key role, verified there against a real ansible-core run.)
+      # EVERY value below reaches a root-owned rsyslog config through a template.
+      # rsyslog's config language is line-oriented, so a value containing a
+      # newline adds valid directives rather than breaking the file — a crafted
+      # selector can append `action(type="omprog" binary="...")`, which runs an
+      # external program as root. Verified by rendering this role's template
+      # with a newline in the selector: the injected action came out as a valid
+      # directive, and it would pass both the fragment `validate:` and the
+      # whole-config `rsyslogd -N1`. The task guard validates variable NAMES,
+      # not values, so these patterns are the only barrier.
+      - rsyslog_forward_target_host is defined and rsyslog_forward_target_host is string
+      - rsyslog_forward_target_host is match('^[A-Za-z0-9][A-Za-z0-9.:_-]*$')
+      - (rsyslog_forward_protocol | default('')) in ['tcp', 'udp']
+      - (rsyslog_forward_target_port | string) is match('^[0-9]+$')
+      - (rsyslog_forward_target_port | int) > 0 and (rsyslog_forward_target_port | int) < 65536
+      - rsyslog_forward_queue_enabled is boolean
+      - rsyslog_forward_queue_save_on_shutdown is boolean
+      # The selector is a facility.priority expression, nothing more.
+      - rsyslog_forward_selector is string
+      - rsyslog_forward_selector is match('^[A-Za-z0-9*,.;_-]+$')
+      # Size with an optional unit suffix, as rsyslog expects.
+      - (rsyslog_forward_queue_max_disk_space | string) is match('^[0-9]+[kKmMgG]?$')
+      # Integer, including -1 (retry forever).
+      - (rsyslog_forward_resume_retry_count | string) is match('^-?[0-9]+$')
+      # This directory is created and chowned to syslog:syslog 0700 by this
+      # role; an unconstrained value lets a recipe re-own a system directory
+      # (`/etc` would become syslog-owned and unreadable). The task guard
+      # validates variable names, not values.
+      - rsyslog_forward_queue_spool_directory is string
+      - rsyslog_forward_queue_spool_directory is match('^/var/spool/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$')
+      - "'..' not in rsyslog_forward_queue_spool_directory"
+    fail_msg: >-
+      rsyslog_forward is misconfigured.
+      rsyslog_forward_queue_spool_directory must sit under /var/spool (this role
+      creates and chowns it); rsyslog_forward_target_host is required
+      (non-empty string); rsyslog_forward_protocol must be 'tcp' or 'udp'
+      (got {{ rsyslog_forward_protocol | default('') | to_json }});
+      rsyslog_forward_target_port must be 1-65535;
+      rsyslog_forward_selector must be a
+      facility.priority expression ([A-Za-z0-9*,.;_-] only) — every one of
+      these is written verbatim into a root-owned rsyslog configuration, where
+      a newline would add directives rather than break the file.
+
+# The fragment filename is a LITERAL (08-forward.conf), not a variable.
+#
+# The number is a correctness property: /etc/rsyslog.d/*.conf are read in
+# lexical order and rsyslog's `stop` ends processing for that message, so a
+# forwarding rule placed after a stopping fragment (the rsyslog_server role's
+# 10-remote-receiver.conf) never sees the messages it should forward. Nothing
+# fails — the collector just stays empty.
+#
+# It is fixed rather than validated because a caller-settable name has a second
+# failure of its own: renaming it between runs leaves the previous fragment in
+# place, so both are loaded and every message is forwarded (and queued) twice.
+# That also passes config validation and the service check.
+
+# 断片ファイル名は固定なので、**1 ホストにつき転送先は 1 つ**である。2 回 include すると
+# 2 回目が 1 回目の設定を上書きし、最初の転送先への転送が黙って止まる（設定は検証を通り、
+# サービスも起動し、実行も成功する——転送先が空になったことに誰かが気づくまで分からない）。
+#
+# 複数の収集先へ送る構成は、1 断片へ複数 action をまとめてレンダリングする別インターフェース
+# （宛先のリストを受け取る形）が要る。本 Phase のスコープ外なので、代わりに二重 include を
+# 検出して落とす。
+#
+# 判定は「この play で既に include したか」という真偽値であり、転送先の一致を見ない。
+# 転送先が同じでも 2 回目は selector・protocol・キュー設定が違い得るので、
+# 「同じ転送先なら通す」にすると、`selector: authpriv.*` の次に `selector: kern.*` を
+# include したときに 1 回目が黙って消える（まさに防ぎたかった事象）。
+#
+# fact は play をまたがないので、別実行での再適用や転送先の変更は妨げない。
+- name: "rsyslog_forward : Fail if this play already configured forwarding on this host"
+  ansible.builtin.assert:
+    that:
+      - not (rsyslog_forward_already_configured | default(false) | bool)
+    fail_msg: >-
+      rsyslog_forward has already run against this host in this play. The role writes a single
+      fragment (/etc/rsyslog.d/08-forward.conf), so a second include would silently replace the
+      first — forwarding configured by the earlier include would stop with nothing reporting it.
+      Forwarding to more than one collector, or applying different selectors to one collector,
+      needs a list-based interface that renders several actions into one fragment; that is not
+      implemented yet. Use a single rsyslog_forward include per host.
+
+- name: "rsyslog_forward : Record that forwarding was configured in this play"
+  ansible.builtin.set_fact:
+    rsyslog_forward_already_configured: true
+
+- name: "rsyslog_forward : Install rsyslog"
+  ansible.builtin.apt:
+    name: rsyslog
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: "rsyslog_forward : Ensure the queue spool directory exists"
+  ansible.builtin.file:
+    path: "{{ rsyslog_forward_queue_spool_directory }}"
+    state: directory
+    owner: syslog
+    group: syslog
+    mode: "0700"
+  when: rsyslog_forward_queue_enabled | bool
+
+- name: "rsyslog_forward : Install and validate the forwarding configuration"
+  block:
+    - name: "rsyslog_forward : Record whether the forwarding config already exists"
+      ansible.builtin.stat:
+        path: /etc/rsyslog.d/08-forward.conf
+      register: rsyslog_forward_conf_before
+
+    - name: "rsyslog_forward : Deploy the forwarding configuration"
+      ansible.builtin.template:
+        src: forward.conf.j2
+        dest: /etc/rsyslog.d/08-forward.conf
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+        validate: "rsyslogd -N1 -f %s"
+      register: rsyslog_forward_conf_result
+      notify: Restart rsyslog
+
+    - name: "rsyslog_forward : Validate the assembled rsyslog configuration"
+      ansible.builtin.command:
+        argv: [rsyslogd, -N1]
+      register: rsyslog_forward_validate
+      changed_when: false
+  rescue:
+    - name: "rsyslog_forward : Restore the previous forwarding configuration"
+      ansible.builtin.copy:
+        src: "{{ rsyslog_forward_conf_result.backup_file }}"
+        dest: /etc/rsyslog.d/08-forward.conf
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      # `backup_file is defined`, never `changed`: template reports changed for
+      # a mode-only difference while returning no backup, and acting on that
+      # would delete a good config.
+      when: rsyslog_forward_conf_result.backup_file is defined
+
+    - name: "rsyslog_forward : Remove the forwarding configuration we just created"
+      ansible.builtin.file:
+        path: /etc/rsyslog.d/08-forward.conf
+        state: absent
+      when:
+        - rsyslog_forward_conf_result.backup_file is not defined
+        - not (rsyslog_forward_conf_before.stat.exists | default(false))
+
+    - name: "rsyslog_forward : Re-validate after rolling back"
+      ansible.builtin.command:
+        argv: [rsyslogd, -N1]
+      register: rsyslog_forward_revalidate
+      changed_when: false
+      failed_when: false
+
+    - name: "rsyslog_forward : Fail after rolling back the forwarding configuration"
+      ansible.builtin.fail:
+        msg: >-
+          The rsyslog configuration failed validation and the previous state was
+          restored (rc={{ rsyslog_forward_revalidate.rc | default('unknown') }}
+          on re-validation; a non-zero value here means the host needs manual
+          attention). Validation output:
+          {{ (rsyslog_forward_validate | default({})).stderr | default('(no output captured)') }}
+
+- name: "rsyslog_forward : Apply pending restarts before checking health"
+  ansible.builtin.meta: flush_handlers
+
+- name: "rsyslog_forward : Ensure rsyslog is enabled and running"
+  ansible.builtin.service:
+    name: rsyslog
+    state: started
+    enabled: true
+
+- name: "rsyslog_forward : Verify rsyslog is active after applying the configuration"
+  ansible.builtin.command:
+    argv: [systemctl, is-active, rsyslog]
+  register: rsyslog_forward_is_active
+  changed_when: false
+  failed_when: rsyslog_forward_is_active.stdout.strip() != 'active'
+
+- name: "rsyslog_forward : Verify the queue spool directory is writable by rsyslog"
+  ansible.builtin.command:
+    argv: [test, -w, "{{ rsyslog_forward_queue_spool_directory }}"]
+  become_user: syslog
+  register: rsyslog_forward_spool_writable
+  changed_when: false
+  failed_when: rsyslog_forward_spool_writable.rc != 0
+  when: rsyslog_forward_queue_enabled | bool
+
+# Deliberately NOT a check that the collector answers: it is normal for the
+# collector to be built after its senders, and resumeRetryCount: -1 exists
+# precisely so that this resolves itself. What we do want to catch is the
+# forwarding action failing to start at all (bad target syntax, unusable
+# spool directory).
+# Scope to THIS start of rsyslog. A wall-clock window ('1 min ago') both picks
+# up the previous run's errors on a quick re-run and misses everything when the
+# handler did not fire, so the verdict depends on timing rather than state.
+- name: "rsyslog_forward : Read the current invocation ID of the rsyslog unit"
+  ansible.builtin.command:
+    argv: [systemctl, show, -p, InvocationID, --value, rsyslog]
+  register: rsyslog_forward_invocation
+  changed_when: false
+  failed_when: false
+
+- name: "rsyslog_forward : Read the rsyslog log for the current start"
+  ansible.builtin.command:
+    argv:
+      - journalctl
+      - "_SYSTEMD_INVOCATION_ID={{ rsyslog_forward_invocation.stdout | trim }}"
+      - --no-pager
+  register: rsyslog_forward_journal
+  changed_when: false
+  failed_when: false
+  when: (rsyslog_forward_invocation.stdout | default('') | trim | length) > 0
+
+# Not being able to READ the log is different from the log being clean. Without
+# this, on any host where journald is unavailable the invocation ID comes back
+# empty, the journal read is skipped, and the initialisation check below never
+# fires — the one task that can detect a failed forwarding action disappears
+# without a word and the play reports success. (zabbix_agent has the same guard;
+# it was missing here, which is exactly the sibling-path asymmetry this project
+# keeps hitting.)
+- name: "rsyslog_forward : Fail if the rsyslog log could not be read"
+  ansible.builtin.fail:
+    msg: >-
+      Could not read rsyslog's log for its current start
+      (invocation id: {{ rsyslog_forward_invocation.stdout | default('') | trim | default('(none)', true) }},
+      journalctl rc: {{ rsyslog_forward_journal.rc | default('(not run)') }}).
+      Neither `rsyslogd -N1` nor `systemctl is-active` can detect a forwarding
+      action that failed to initialise, so reporting success without having read
+      the log would hide exactly the failure this check exists for. Ensure
+      systemd-journald is available on this host.
+  when: >-
+    (rsyslog_forward_invocation.stdout | default('') | trim | length) == 0
+    or (rsyslog_forward_journal.rc | default(1)) != 0
+
+- name: "rsyslog_forward : Fail if the forwarding action could not be initialised"
+  # Deliberately narrow. An unreachable collector is NORMAL here — collectors
+  # are routinely built after their senders, and action.resumeRetryCount: -1
+  # exists so rsyslog keeps retrying. Matching a bare 'error' would catch
+  # `omfwd: TCPSendBuf error` and `action ... suspended`, i.e. exactly the
+  # situation the design says must not fail, turning a healthy deployment red.
+  # What we want are start-up faults: a config the daemon could not parse, or a
+  # spool directory it cannot use.
+  ansible.builtin.fail:
+    msg: >-
+      rsyslog restarted but could not initialise the forwarding action. This is
+      a start-up fault (unparsable configuration or an unusable spool
+      directory), not an unreachable collector — that case is expected and is
+      handled by action.resumeRetryCount. Log for this start:
+      {{ rsyslog_forward_journal.stdout | default('(unavailable)') }}
+  vars:
+    rsyslog_forward_log: "{{ rsyslog_forward_journal.stdout | default('') | lower }}"
+  when:
+    - (rsyslog_forward_journal.rc | default(1)) == 0
+    - >-
+      'could not be opened' in rsyslog_forward_log
+      or 'error during config processing' in rsyslog_forward_log
+      or 'cannot create' in rsyslog_forward_log and 'queue' in rsyslog_forward_log
+      or 'permission denied' in rsyslog_forward_log

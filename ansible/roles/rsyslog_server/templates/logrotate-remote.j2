@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+# Managed by the ai-support-agent `rsyslog_server` role.
+{{ rsyslog_server_log_root }}/*/*.log {
+    daily
+    rotate {{ rsyslog_server_logrotate_days }}
+    missingok
+    notifempty
+{% if rsyslog_server_logrotate_compress %}
+    compress
+    delaycompress
+{% endif %}
+    sharedscripts
+    postrotate
+        /usr/lib/rsyslog/rsyslog-rotate 2>/dev/null || systemctl kill -s HUP rsyslog.service
+    endscript
+}

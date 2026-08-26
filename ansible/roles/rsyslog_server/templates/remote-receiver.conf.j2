@@ -1,0 +1,40 @@
+# {{ ansible_managed }}
+# Managed by the ai-support-agent `rsyslog_server` role. Manual edits are lost
+# on the next run.
+#
+# Loaded from /etc/rsyslog.conf via `$IncludeConfig /etc/rsyslog.d/*.conf`.
+# The 10- prefix places this BEFORE any forwarding fragment (see the
+# rsyslog_forward role, which uses 08- precisely so that it is evaluated
+# before the `stop` at the bottom of this file).
+
+{% if rsyslog_server_tcp_enabled %}
+module(load="imtcp")
+input(type="imtcp" port="{{ rsyslog_server_port }}" address="{{ rsyslog_server_bind_address }}")
+{% endif %}
+{% if rsyslog_server_udp_enabled %}
+module(load="imudp")
+input(type="imudp" port="{{ rsyslog_server_port }}" address="{{ rsyslog_server_bind_address }}")
+{% endif %}
+
+{% if not rsyslog_server_allow_all_senders %}
+# Sender restriction. Layer 2 of 3 (bind address / $AllowedSender / ufw): this
+# one still applies when ufw is absent or disabled.
+$AllowedSender TCP, {{ rsyslog_server_allowed_senders | join(', ') }}
+{% if rsyslog_server_udp_enabled %}
+$AllowedSender UDP, {{ rsyslog_server_allowed_senders | join(', ') }}
+{% endif %}
+{% endif %}
+
+# `secpath-replace` is REQUIRED on every sender-controlled property used to
+# build a path. HOSTNAME and programname both come straight off the wire and
+# can be forged; without it, a hostname containing `../` lets a sender create
+# files and directories outside {{ rsyslog_server_log_root }}.
+template(name="RemoteHostFile" type="string"
+         string="{{ rsyslog_server_log_root }}/%HOSTNAME:::secpath-replace%/%programname:::secpath-replace%.log")
+
+# Write remote messages to their own per-host file and STOP, so they are not
+# also appended to this host's local /var/log/syslog.
+if ($fromhost-ip != "127.0.0.1") then {
+    action(type="omfile" dynaFile="RemoteHostFile" dirCreateMode="0750" fileCreateMode="0640")
+    stop
+}

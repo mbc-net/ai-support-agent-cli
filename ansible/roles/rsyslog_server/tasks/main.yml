@@ -1,0 +1,291 @@
+---
+# rsyslog_server role: turns the target host into a syslog collector.
+#
+# Design doc: admin-docs docs/specifications/server-setup-monitoring-app-roles.md
+# section 4.4. The parts that are load-bearing (and the reasons they are
+# written the way they are) are repeated here, because a future editor reads
+# this file, not the spec.
+#
+# 1. FAIL-CLOSED SENDER RESTRICTION. An empty allowed-senders list is a hard
+#    error, not a warning. rsyslog without `$AllowedSender` accepts logs from
+#    anywhere: a third party can forge entries (poisoning the evidence trail
+#    an investigation depends on) or simply fill /var/log. A `debug` warning
+#    does not stop the play, so it would leave an open listener behind while
+#    still reporting success.
+#
+# 2. CONFIG IS VALIDATED TWICE. `copy`/`template` `validate:` checks the
+#    fragment on its own, which catches typos cheaply but cannot see the rest
+#    of /etc/rsyslog.d. After the file lands we run a bare `rsyslogd -N1`,
+#    which validates the WHOLE assembled config, and roll back if it fails. A
+#    broken rsyslog config stops logging entirely on this host, and the outage
+#    is not itself logged — this is the one failure mode worth two checks.
+#
+# 3. ROLLBACK RESTORES, IT DOES NOT DELETE. On a re-run we are overwriting a
+#    file that was working. Deleting it on validation failure would throw away
+#    the previous good config; the running rsyslog keeps going (the restart
+#    handler never fires), so nobody notices until the host reboots without a
+#    receiver config. `backup: true` + restore is the only correct rollback.
+#    The branch key is `backup_file is defined`, NOT `changed`: `template`
+#    reports changed for a mode/owner-only difference while returning no
+#    backup, and treating that as "it was new" deletes a good file.
+#
+# 4. UFW CONVERGENCE RUNS LAST. It runs only after the config validates, the
+#    service restarts, and the health check passes — see tasks/ufw.yml.
+
+- name: "rsyslog_server : Validate sender restriction (fail-closed)"
+  ansible.builtin.assert:
+    that:
+      - rsyslog_server_allow_all_senders is boolean
+      - rsyslog_server_ufw_manage is boolean
+      - rsyslog_server_tcp_enabled is boolean
+      - rsyslog_server_udp_enabled is boolean
+      - rsyslog_server_tcp_enabled | bool or rsyslog_server_udp_enabled | bool
+      - >-
+        (rsyslog_server_allow_all_senders | bool)
+        or ((rsyslog_server_allowed_senders | default([]) | length) > 0)
+      # EVERY value below reaches a root-owned config file through a template.
+      # rsyslog's config language is line-oriented, so a value containing a
+      # newline does not "break the file" — it adds valid directives. A crafted
+      # allowed-sender or bind address can append `action(type="omprog" ...)`,
+      # which runs an external program as root. The result parses cleanly, so
+      # both the fragment `validate:` and the whole-config `rsyslogd -N1` pass
+      # it. The task guard cannot help: it validates variable NAMES, not values.
+      # These patterns are the only thing standing between a recipe and
+      # arbitrary rsyslog configuration.
+      - rsyslog_server_bind_address is string
+      - rsyslog_server_bind_address is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - (rsyslog_server_port | string) is match('^[0-9]+$')
+      - (rsyslog_server_port | int) > 0 and (rsyslog_server_port | int) < 65536
+      - (rsyslog_server_logrotate_days | string) is match('^[0-9]+$')
+      - (rsyslog_server_logrotate_days | int) > 0
+      - rsyslog_server_logrotate_compress is boolean
+      # The log root is created and chowned by this role, so an unconstrained
+      # value lets a recipe re-own an arbitrary directory
+      # (`rsyslog_server_log_root: /etc` would chown /etc to root:adm 0750).
+      # The task guard checks variable names, not values, so the constraint has
+      # to live here.
+      - rsyslog_server_log_root is string
+      - rsyslog_server_log_root is match('^/var/log/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$')
+      - "'..' not in rsyslog_server_log_root"
+    fail_msg: >-
+      rsyslog_server is misconfigured. Requirements:
+      rsyslog_server_log_root must sit under /var/log (this role creates and
+      chowns it, so an arbitrary path would let a recipe take over a system
+      directory);
+      at least one of rsyslog_server_tcp_enabled / rsyslog_server_udp_enabled
+      must be true; rsyslog_server_allowed_senders must list at least one
+      CIDR, OR rsyslog_server_allow_all_senders must be explicitly true
+      (an empty list would accept syslog from ANY host, allowing log forgery
+      and disk exhaustion); rsyslog_server_port must be 1-65535.
+      Got allowed_senders={{ rsyslog_server_allowed_senders | default([]) | to_json }},
+      allow_all_senders={{ rsyslog_server_allow_all_senders | default(false) }}.
+
+- name: "rsyslog_server : Validate every allowed sender is an address, not free text"
+  # Mirrors the loop assert in the zabbix_agent role. Each element is written
+  # into `$AllowedSender`; an element containing a newline appends arbitrary
+  # rsyslog directives to a root-owned config (verified by rendering the
+  # template with a crafted value: the injected `action()` came out as a valid
+  # directive). Restricting the character set removes the vector entirely.
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$')
+      # 文字形だけでは 999.999.999.999/99 も 0.0.0.0/0 も通ってしまう。前者は不正
+      # アドレス、後者は「全開放」であり、送信元を絞るという目的そのものを無効にする
+      # （rsyslog の $AllowedSender も IPv4 の /0 を受け付けない）。意味で検証する。
+      - item.split('/')[0].split('.') | map('int') | select('>', 255) | list | length == 0
+      - (item.split('/') | length == 1) or ((item.split('/')[1] | int) >= 1 and (item.split('/')[1] | int) <= 32)
+    fail_msg: >-
+      rsyslog_server_allowed_senders must contain IPv4 addresses or CIDRs only
+      (got {{ item | to_json }}). Anything else is written verbatim into the
+      rsyslog configuration.
+  loop: "{{ rsyslog_server_allowed_senders | default([]) }}"
+
+- name: "rsyslog_server : Warn that an unrestricted listener was explicitly requested"
+  ansible.builtin.debug:
+    msg: >-
+      rsyslog_server_allow_all_senders is true: this host will accept syslog
+      from ANY sender. Restrict rsyslog_server_bind_address to an internal NIC
+      unless that is genuinely intended.
+  when: rsyslog_server_allow_all_senders | bool
+
+- name: "rsyslog_server : Install rsyslog"
+  ansible.builtin.apt:
+    name: rsyslog
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: "rsyslog_server : Ensure the remote log root exists"
+  ansible.builtin.file:
+    path: "{{ rsyslog_server_log_root }}"
+    state: directory
+    owner: root
+    group: adm
+    mode: "0750"
+
+# `block`/`rescue` around the config write + whole-config validation. See
+# note 3 in the header for why the rescue restores instead of deleting.
+- name: "rsyslog_server : Install and validate the receiver configuration"
+  block:
+    - name: "rsyslog_server : Record whether the receiver config already exists"
+      ansible.builtin.stat:
+        path: /etc/rsyslog.d/10-remote-receiver.conf
+      register: rsyslog_server_conf_before
+
+    - name: "rsyslog_server : Deploy the receiver configuration"
+      ansible.builtin.template:
+        src: remote-receiver.conf.j2
+        dest: /etc/rsyslog.d/10-remote-receiver.conf
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+        # Fragment-level syntax check. Cheap, catches most typos, but cannot
+        # see the rest of the assembled config — hence the whole-config check
+        # below.
+        validate: "rsyslogd -N1 -f %s"
+      register: rsyslog_server_conf_result
+      notify: Restart rsyslog
+
+    - name: "rsyslog_server : Validate the assembled rsyslog configuration"
+      ansible.builtin.command:
+        argv: [rsyslogd, -N1]
+      register: rsyslog_server_validate
+      changed_when: false
+  rescue:
+    - name: "rsyslog_server : Restore the previous receiver configuration"
+      ansible.builtin.copy:
+        src: "{{ rsyslog_server_conf_result.backup_file }}"
+        dest: /etc/rsyslog.d/10-remote-receiver.conf
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      # Only when we actually overwrote content. `changed` is NOT usable here:
+      # template reports changed for a mode-only difference and returns no
+      # backup_file, and restoring/deleting on that basis destroys a good file.
+      when: rsyslog_server_conf_result.backup_file is defined
+
+    - name: "rsyslog_server : Remove the receiver configuration we just created"
+      ansible.builtin.file:
+        path: /etc/rsyslog.d/10-remote-receiver.conf
+        state: absent
+      when:
+        - rsyslog_server_conf_result.backup_file is not defined
+        - not (rsyslog_server_conf_before.stat.exists | default(false))
+
+    - name: "rsyslog_server : Re-validate after rolling back"
+      ansible.builtin.command:
+        argv: [rsyslogd, -N1]
+      register: rsyslog_server_revalidate
+      changed_when: false
+      failed_when: false
+
+    - name: "rsyslog_server : Fail after rolling back the receiver configuration"
+      ansible.builtin.fail:
+        msg: >-
+          The rsyslog configuration failed validation and the previous state was
+          restored (rc={{ rsyslog_server_revalidate.rc | default('unknown') }}
+          on re-validation; a non-zero value here means the host needs manual
+          attention). Validation output:
+          {{ (rsyslog_server_validate | default({})).stderr | default('(no output captured)') }}
+
+- name: "rsyslog_server : Deploy the logrotate policy"
+  ansible.builtin.template:
+    src: logrotate-remote.j2
+    dest: /etc/logrotate.d/rsyslog-remote
+    owner: root
+    group: root
+    mode: "0644"
+
+# Handlers must run BEFORE the health check, otherwise we would be probing the
+# process that is still using the previous configuration.
+- name: "rsyslog_server : Apply pending restarts before checking health"
+  ansible.builtin.meta: flush_handlers
+
+- name: "rsyslog_server : Ensure rsyslog is enabled and running"
+  ansible.builtin.service:
+    name: rsyslog
+    state: started
+    enabled: true
+
+- name: "rsyslog_server : Verify rsyslog is active after applying the configuration"
+  ansible.builtin.command:
+    argv: [systemctl, is-active, rsyslog]
+  register: rsyslog_server_is_active
+  changed_when: false
+  failed_when: rsyslog_server_is_active.stdout.strip() != 'active'
+
+# `rsyslogd -N1` passing does NOT mean the listener came up: a port conflict or
+# a wrong bind address leaves rsyslog running and silently receiving nothing.
+# `wait_for` だけでは「別プロセスがそのポートを先に握っている」ケースを成功と誤判定する。
+# rsyslog は listener の bind に失敗してもデーモン自体は動き続けるので、
+# ポートに繋がること＝rsyslog が受信していること、ではない。
+# ソケットの所有プロセスが rsyslog 本体かどうかまで突き合わせる。
+- name: "rsyslog_server : Read the rsyslog main PID"
+  ansible.builtin.command:
+    argv: [systemctl, show, -p, MainPID, --value, rsyslog]
+  register: rsyslog_server_main_pid
+  changed_when: false
+
+- name: "rsyslog_server : Read the listening sockets on the configured port"
+  ansible.builtin.command:
+    argv:
+      - ss
+      - -H
+      - -lntup
+      - "sport = :{{ rsyslog_server_port }}"
+  register: rsyslog_server_listen_sockets
+  changed_when: false
+
+# プロトコルごとに独立して確認する。`ss -lntup` の出力全体に対して PID を探すと、
+# TCP と UDP の両方を有効にしたホストで **TCP だけ別プロセスに奪われた**場合に、
+# rsyslog が持つ UDP 行が条件を満たしてしまい成功と判定される。
+#
+# PID の突き合わせも部分一致にしない。`ss -p` は users:(("rsyslogd",pid=N,fd=M)) と出すので、
+# `pid=12` は `pid=123` にも部分一致する。直後の区切り（`,`）まで含めて照合する。
+- name: "rsyslog_server : Verify rsyslog owns the TCP listening socket"
+  ansible.builtin.assert:
+    that:
+      - >-
+        rsyslog_server_listen_sockets.stdout_lines
+        | select('search', '^tcp')
+        | select('search', 'pid=' ~ (rsyslog_server_main_pid.stdout | trim) ~ ',')
+        | list | length > 0
+    fail_msg: >-
+      TCP port {{ rsyslog_server_port }} is not held by the running rsyslog process
+      (main pid {{ rsyslog_server_main_pid.stdout | default('?') | trim }}). rsyslog keeps running
+      even when a listener fails to bind, so an active service — and a port that even answers —
+      does not mean this host receives syslog. Most likely another process holds the port, or the
+      bind address ({{ rsyslog_server_bind_address }}) is unusable. Sockets on this port:
+      {{ rsyslog_server_listen_sockets.stdout | default('(none)') | trim }}
+  when: rsyslog_server_tcp_enabled | bool
+
+# `wait_for` establishes a TCP connection, so it cannot verify a UDP listener
+# at all — it would pass without checking anything. Read the socket table
+# instead, filtered by the kernel on the exact port so the check cannot be
+# satisfied by a different port that merely shares a digit prefix
+# (a plain `':514' in stdout` also matches a socket on 5140).
+# UDP は `wait_for` では確認できない（接続確立の概念が無く、TCP 前提の実装なので
+# 検証せずに素通りする）。上の `ss -lntup` は UDP も含むため、プロトコルごとに
+# rsyslog 所有のソケットが存在することを確認する。
+- name: "rsyslog_server : Verify rsyslog owns a UDP socket on the configured port"
+  ansible.builtin.assert:
+    that:
+      - >-
+        rsyslog_server_listen_sockets.stdout_lines
+        | select('search', '^udp')
+        | select('search', 'pid=' ~ (rsyslog_server_main_pid.stdout | trim) ~ ',')
+        | list | length > 0
+    fail_msg: >-
+      UDP receiving is enabled but the running rsyslog process does not own a UDP socket on
+      port {{ rsyslog_server_port }}. rsyslog stays up when a listener fails to bind, so nothing
+      else reports this. Sockets on this port:
+      {{ rsyslog_server_listen_sockets.stdout | default('(none)') | trim }}
+  when: rsyslog_server_udp_enabled | bool
+
+# Firewall convergence runs last, once the service is proven healthy.
+- name: "rsyslog_server : Converge the firewall rules"
+  ansible.builtin.include_tasks: ufw.yml
+  when: rsyslog_server_ufw_manage | bool

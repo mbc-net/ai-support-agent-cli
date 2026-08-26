@@ -1,0 +1,274 @@
+---
+# Verify play: assert rsyslog_server's observable effects inside the container.
+#
+# These cases mirror the regression table in the design doc (§7.1). Each one
+# targets a failure mode that does NOT surface as a task failure — the reason
+# the role needs them checked at all.
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "verify : Read the deployed receiver configuration"
+      ansible.builtin.slurp:
+        src: /etc/rsyslog.d/10-remote-receiver.conf
+      register: rsyslog_verify_conf
+
+    - name: "verify : Decode the configuration"
+      ansible.builtin.set_fact:
+        rsyslog_verify_conf_text: "{{ rsyslog_verify_conf.content | b64decode }}"
+
+    - name: "verify : Assert path traversal protection is applied to BOTH sender-controlled fields"
+      ansible.builtin.assert:
+        that:
+          - "'%HOSTNAME:::secpath-replace%' in rsyslog_verify_conf_text"
+          - "'%programname:::secpath-replace%' in rsyslog_verify_conf_text"
+        fail_msg: >-
+          The dynamic log path is missing secpath-replace on HOSTNAME and/or
+          programname. Both come straight off the wire and can be forged; a
+          hostname containing '../' would let a sender write outside the log
+          root. Protecting only one of the two is not protection.
+
+    - name: "verify : Assert the sender restriction reached the config"
+      ansible.builtin.assert:
+        that:
+          - "'$AllowedSender' in rsyslog_verify_conf_text"
+          - "'10.99.0.0/24' in rsyslog_verify_conf_text"
+          - "'192.0.2.0/24' in rsyslog_verify_conf_text"
+        fail_msg: "The configured allowed senders did not reach $AllowedSender."
+
+    - name: "verify : Assert the whole assembled rsyslog configuration is valid"
+      ansible.builtin.command:
+        argv: [rsyslogd, -N1]
+      changed_when: false
+
+    - name: "verify : Assert rsyslog is running"
+      ansible.builtin.command:
+        argv: [systemctl, is-active, rsyslog]
+      register: rsyslog_verify_active
+      changed_when: false
+      failed_when: rsyslog_verify_active.stdout.strip() != 'active'
+
+    # A valid config does not mean the listener bound: a port clash or an
+    # unusable bind address leaves rsyslog up and receiving nothing.
+    - name: "verify : Assert the TCP listener is bound to the configured port"
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 5514
+        timeout: 10
+
+    - name: "verify : Read the UDP socket table"
+      ansible.builtin.command:
+        argv: [ss, -uln]
+      register: rsyslog_verify_udp
+      changed_when: false
+
+    - name: "verify : Assert the UDP listener is bound (wait_for cannot check UDP)"
+      ansible.builtin.assert:
+        that:
+          - "':5514' in rsyslog_verify_udp.stdout"
+        fail_msg: >-
+          No UDP socket bound to 5514. wait_for establishes a TCP connection and
+          therefore cannot verify a UDP listener at all — it would pass without
+          checking anything, which is why this reads the socket table instead.
+
+    - name: "verify : Assert the log root was created with restrictive permissions"
+      ansible.builtin.stat:
+        path: /var/log/remote
+      register: rsyslog_verify_logroot
+
+    - name: "verify : Assert the log root is a 0750 directory"
+      ansible.builtin.assert:
+        that:
+          - rsyslog_verify_logroot.stat.isdir
+          - rsyslog_verify_logroot.stat.mode == '0750'
+        fail_msg: "The remote log root is missing or world-readable."
+
+    - name: "verify : Assert the logrotate policy was installed"
+      ansible.builtin.stat:
+        path: /etc/logrotate.d/rsyslog-remote
+      register: rsyslog_verify_logrotate
+
+    - name: "verify : Assert logrotate policy exists"
+      ansible.builtin.assert:
+        that:
+          - rsyslog_verify_logrotate.stat.exists
+
+    # --- fail-closed -------------------------------------------------------
+    # The role must REFUSE to build an unrestricted listener. A `debug` warning
+    # would leave one running while still reporting success, so this asserts the
+    # run actually fails.
+    # 判定用フラグを block の外で持ち、block/rescue は「拒否されたか」を記録するだけに
+    # する。意図的な sentinel fail を同じ block に置くと、その fail まで同じ rescue が
+    # 捕捉してしまい、ロールが空リストを誤って受理しても「拒否された」と記録されて
+    # 緑のまま通る——負テストが構造上ほぼ常に成功する状態だった。
+    - name: "verify : Assume the fail-closed guard did not fire until proven"
+      ansible.builtin.set_fact:
+        rsyslog_verify_guard_fired: false
+
+    - name: "verify : Attempt a run with no senders allowed and no explicit override"
+      block:
+        - name: "verify : Include the role with an empty sender list"
+          ansible.builtin.include_role:
+            name: rsyslog_server
+          vars:
+            rsyslog_server_allowed_senders: []
+            rsyslog_server_allow_all_senders: false
+      rescue:
+        - name: "verify : Record that the run was rejected"
+          ansible.builtin.set_fact:
+            rsyslog_verify_guard_fired: true
+
+    - name: "verify : Assert the fail-closed guard rejected the run"
+      ansible.builtin.assert:
+        that:
+          - rsyslog_verify_guard_fired | bool
+        fail_msg: >-
+          rsyslog_server accepted an empty allowed-senders list without
+          rsyslog_server_allow_all_senders. That builds a listener accepting syslog from ANY
+          host, enabling log forgery and disk exhaustion. The guard must fail the run, not warn.
+        success_msg: >-
+          fail-closed guard fired as designed: an empty sender list is rejected unless
+          rsyslog_server_allow_all_senders is explicitly set.
+
+    # --- ufw convergence ---------------------------------------------------
+    - name: "verify : Enumerate the ufw rules this role owns"
+      ansible.builtin.command:
+        argv: [ufw, show, added]
+      register: rsyslog_verify_ufw
+      changed_when: false
+
+    - name: "verify : Assert the role's ufw rules cover every configured sender and protocol"
+      ansible.builtin.assert:
+        that:
+          - "'ai-support-agent:rsyslog_server' in rsyslog_verify_ufw.stdout"
+          - "'10.99.0.0/24' in rsyslog_verify_ufw.stdout"
+          - "'192.0.2.0/24' in rsyslog_verify_ufw.stdout"
+          - "'5514' in rsyslog_verify_ufw.stdout"
+        fail_msg: >-
+          The ufw rules do not match the configured senders/port. Note that
+          `ufw show added` (not `ufw status`) is used deliberately: `ufw status`
+          prints only "Status: inactive" while ufw is disabled and lists nothing.
+
+    # --- ufw の収束（削除方向）--------------------------------------------
+    # ここまでの確認はすべて「追加されたか」であり、収束のもう半分である
+    # 「不要になったものが消えるか」を見ていない。設計上いちばん危険なのは
+    # 消えない側（許可を絞ったつもりで穴が残る）なので、実際に再収束させて
+    # 確認する。レビューで CRITICAL として検出された欠陥は、まさにこの経路が
+    # 未検証だったために構造テストも Molecule も素通りしていた。
+    - name: "verify : Re-converge with one sender removed and UDP disabled"
+      ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders:
+          - 10.99.0.0/24
+        rsyslog_server_udp_enabled: false
+
+    - name: "verify : Re-enumerate the ufw rules after the narrowing re-converge"
+      ansible.builtin.command:
+        argv: [ufw, show, added]
+      register: rsyslog_verify_ufw_after
+      changed_when: false
+
+    - name: "verify : Assert the removed sender and the disabled protocol are gone"
+      ansible.builtin.assert:
+        that:
+          # 残すべきもの
+          - "'10.99.0.0/24' in rsyslog_verify_ufw_after.stdout"
+          # 消えるべきもの: allowed_senders から外した送信元
+          - >-
+            rsyslog_verify_ufw_after.stdout_lines
+            | select('search', 'ai-support-agent:rsyslog_server')
+            | select('search', '192\\.0\\.2\\.0/24')
+            | list | length == 0
+          # 消えるべきもの: 無効化したプロトコル
+          - >-
+            rsyslog_verify_ufw_after.stdout_lines
+            | select('search', 'ai-support-agent:rsyslog_server')
+            | select('search', 'proto udp')
+            | list | length == 0
+        fail_msg: >-
+          Narrowing the configuration did not remove the corresponding ufw rules.
+          The run still reports success, so the operator believes access was
+          restricted while the old sender (192.0.2.0/24) and/or the disabled UDP
+          protocol are still allowed through. This is the exact failure the
+          tuple-based stale computation exists to prevent.
+
+    # 削除方向がいちばん危ないのは、消えないことではなく**消しすぎる**ことである。
+    # prepare で置いた囮のうち1本は、このロールのマーカーを接頭辞に持つコメント
+    # （`...:rsyslog_server-backup`）を付けた 22/tcp の SSH 許可ルールで、所有権判定を
+    # 部分一致に戻すと実際に削除される（実機で再現済み）。
+    - name: "verify : Assert the decoy rules owned by nobody else were left alone"
+      ansible.builtin.assert:
+        that:
+          - >-
+            rsyslog_verify_ufw_after.stdout_lines
+            | select('search', "comment 'ai-support-agent:rsyslog_server-backup'$")
+            | list | length == 1
+          - >-
+            rsyslog_verify_ufw_after.stdout_lines
+            | select('search', "comment 'operator-ssh'$")
+            | list | length == 1
+        fail_msg: >-
+          A ufw rule that this role does not own was deleted. Ownership is decided
+          by the rule comment, so matching it as a substring makes any rule whose
+          comment merely STARTS WITH this role's marker look like this role's own —
+          and stale rules are removed with `ufw --force delete` as root. The decoy
+          removed here is an SSH allow rule.
+          Remaining rules: {{ rsyslog_verify_ufw_after.stdout_lines }}
+
+    # --- インジェクションが実行時に本当に拒否されるか ------------------------
+    # 構造テスト（__tests__/server-setup/monitoring-log-roles.spec.ts）は
+    # 「書式 assert が書かれていること」しか見えない。assert を `when: false` の
+    # 下へ移す、別のタスクで検証前の値を使う、といった変更では緑のままになる。
+    # ここでは実際に悪意ある値でロールを呼び、**ロールが失敗すること**を確かめる。
+    #
+    # 値はいずれも rsyslog の設定ファイルへそのまま書かれると効いてしまうもの:
+    #   - 改行 + `action(type="omprog" ...)` … 任意コマンドを root で実行させる
+    #   - 改行 + `$AllowedSender` … 送信元制限を上書きして全開放にする
+    #   - `0.0.0.0/0` … 文字種としては正しいが、意味として全開放
+    - name: "verify : Assume no injection payload was rejected until proven"
+      ansible.builtin.set_fact:
+        rsyslog_verify_injection_rejected: []
+
+    - name: "verify : Try to inject rsyslog directives through the sender list"
+      ansible.builtin.include_tasks: injection-case.yml
+      loop:
+        - "10.0.0.0/24\n$AllowedSender TCP, *"
+        - "10.0.0.0/24\naction(type=\"omprog\" binary=\"/tmp/pwn\")"
+        - "0.0.0.0/0"
+        - "example.com"
+      loop_control:
+        loop_var: rsyslog_injection_case
+
+    - name: "verify : Assert every injection payload was rejected"
+      ansible.builtin.assert:
+        that:
+          - rsyslog_verify_injection_rejected | length == 4
+        fail_msg: >-
+          A value that must never reach the rsyslog configuration was accepted:
+          {{ ["10.0.0.0/24\n$AllowedSender TCP, *",
+              "10.0.0.0/24\naction(type=\"omprog\" binary=\"/tmp/pwn\")",
+              "0.0.0.0/0",
+              "example.com"]
+             | reject('in', rsyslog_verify_injection_rejected) | list | to_json }}
+          (rejected {{ rsyslog_verify_injection_rejected | length }} of 4).
+          These are written verbatim into a root-owned configuration, so a newline
+          adds directives (omprog runs an arbitrary binary as root) and a /0 entry
+          turns the sender restriction off while the run still reports success.
+
+    # 収束状態をシナリオの前提へ戻す（以降のタスクが無いとしても、失敗した
+    # include のあとの ufw / 設定ファイルを中途半端なまま残さない）。
+    - name: "verify : Restore the scenario's configuration"
+      ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders:
+          - 10.99.0.0/24
+
+    # 設定のロールバック 3 分岐（新規作成→削除 / 上書き→復元 / 同一内容→無変更）。
+    # 分岐の取り違えは「正しい設定ファイルを消す」形で出るため、実際に全体検証を
+    # 失敗させて 3 通りとも通す。
+    - name: "verify : Exercise the configuration rollback branches"
+      ansible.builtin.include_tasks: rollback-cases.yml

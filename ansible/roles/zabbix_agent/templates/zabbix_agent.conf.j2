@@ -1,0 +1,35 @@
+# {{ ansible_managed }}
+# Managed by the ai-support-agent `zabbix_agent` role. Manual edits are lost on
+# the next run; put local additions in the Include directory below.
+
+PidFile=/run/zabbix/{{ 'zabbix_agent2.pid' if zabbix_agent_variant == 'agent2' else 'zabbix_agentd.pid' }}
+# LogType=system sends the agent's log to syslog/journald rather than a file.
+# The role's health check reads the journal, and with the default file logging
+# the agent's errors (ServerActive unreachable, PSK mismatch, host not
+# registered) would go to the file while the check found an empty journal and
+# reported success — a permanent false negative on the only task that can
+# detect a broken active-check configuration.
+LogType=system
+
+Server={{ zabbix_agent_server }}
+{% if zabbix_agent_server_active | trim | length > 0 %}
+ServerActive={{ zabbix_agent_server_active }}
+{% endif %}
+{% if zabbix_agent_hostname | trim | length > 0 %}
+Hostname={{ zabbix_agent_hostname }}
+{% endif %}
+ListenPort={{ zabbix_agent_listen_port }}
+
+{% if zabbix_agent_tls_connect == 'psk' or zabbix_agent_tls_accept == 'psk' %}
+# Encryption is only actually in effect because of these two directives; the
+# PSK file on its own changes nothing.
+TLSConnect={{ zabbix_agent_tls_connect }}
+TLSAccept={{ zabbix_agent_tls_accept }}
+TLSPSKIdentity={{ zabbix_agent_psk_identity }}
+TLSPSKFile=/etc/zabbix/zabbix_agent.psk
+{% else %}
+TLSConnect=unencrypted
+TLSAccept=unencrypted
+{% endif %}
+
+Include=/etc/zabbix/{{ 'zabbix_agent2.d' if zabbix_agent_variant == 'agent2' else 'zabbix_agentd.d' }}/*.conf

@@ -1,0 +1,58 @@
+---
+# zabbix_agent role defaults.
+#
+# Design doc: admin-docs docs/specifications/server-setup-monitoring-app-roles.md
+# section 4.3.
+#
+# SCOPE: this role installs and configures the agent. It does NOT register the
+# host on the Zabbix server. Without that registration (via autoregistration
+# or the Zabbix API) the agent runs, the port answers, `systemctl is-active`
+# is green — and not a single metric is collected. Registration is deliberately
+# out of scope; see the spec.
+#
+# There is no `install_method` variable. A Zabbix agent reports on the host it
+# runs on, and inside a container `/proc`, `/sys` and the filesystem are the
+# container's — so a containerised agent does not fail, it silently reports the
+# wrong machine.
+
+# --- version / flavour -------------------------------------------------------
+# LTS releases only. A monitoring foundation outliving its security updates
+# within months is not a foundation.
+zabbix_agent_version: "7.0"
+zabbix_agent_variant: agent2              # agent2 | agent
+
+# --- server association ------------------------------------------------------
+# Written to `Server=` in the agent config. A hostname is valid here.
+# NOTE: this is NOT what opens the firewall — see zabbix_agent_allowed_sources.
+zabbix_agent_server: ""                   # REQUIRED
+# Written to `ServerActive=`. Empty disables active checks.
+zabbix_agent_server_active: ""
+# Written to `Hostname=`. Empty falls back to the OS hostname. Must match the
+# host name defined on the Zabbix server for active checks / autoregistration.
+zabbix_agent_hostname: ""
+zabbix_agent_listen_port: 10050
+
+# --- encryption --------------------------------------------------------------
+# Placing a PSK file alone does not encrypt anything: TLSConnect / TLSAccept
+# are what switch the agent over. Left at 'unencrypted' the agent keeps
+# talking in the clear while looking configured.
+zabbix_agent_tls_connect: unencrypted     # unencrypted | psk  (agent -> server)
+zabbix_agent_tls_accept: unencrypted      # unencrypted | psk  (server -> agent)
+zabbix_agent_psk_identity: ""
+zabbix_agent_psk: ""                      # secret (ANSIBLE# variable)
+
+# --- firewall ----------------------------------------------------------------
+# IP / CIDR list allowed to reach the agent port. SEPARATE from
+# zabbix_agent_server on purpose: that one accepts hostnames, ufw does not, and
+# feeding a hostname to ufw fails the whole role with "Bad source address".
+# An empty list means "close the holes this role opened", NOT "leave ufw alone"
+# — that is what zabbix_agent_ufw_manage is for.
+zabbix_agent_allowed_sources: []
+zabbix_agent_ufw_manage: true
+
+# ServerActive を設定したとき、再起動後にエージェントのログを見て active check の
+# 失敗（接続不可・ホスト未登録・PSK 不一致）を検出するが、その待ち時間の上限（秒）。
+# 再起動直後は何も書かれていないことがあり、そこで1回だけ見て「エラー無し」と
+# 判定すると壊れた設定を成功として報告してしまう。ログが空でなくなるまで待ち、
+# この時間を過ぎても空ならば失敗させる。
+zabbix_agent_active_check_verify_seconds: 30

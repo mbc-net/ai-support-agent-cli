@@ -1,0 +1,46 @@
+---
+# rsyslog_server role defaults.
+#
+# Receives syslog from other hosts over TCP (and optionally UDP), splits the
+# messages into <log_root>/<hostname>/<programname>.log, and rotates them.
+#
+# See admin-docs docs/specifications/server-setup-monitoring-app-roles.md
+# section 4.4 for the design rationale behind every default here. The three
+# that are NOT free choices:
+#
+#   * `rsyslog_server_udp_enabled` defaults to false. UDP gives neither
+#     delivery guarantees nor any usable source verification.
+#   * `rsyslog_server_allowed_senders` defaults to an EMPTY list, and an empty
+#     list is a hard error unless `rsyslog_server_allow_all_senders` is set
+#     (fail-closed). rsyslog with no `$AllowedSender` accepts logs from
+#     everywhere, which allows both log forgery and disk exhaustion. The
+#     failure is silent — you only notice when the disk fills or when an
+#     investigation turns up fabricated entries — so this role refuses to
+#     build an unrestricted listener by accident.
+#   * `rsyslog_server_ufw_manage` defaults to true, and is INDEPENDENT of
+#     `rsyslog_server_allowed_senders` being empty. "no senders allowed" and
+#     "do not touch ufw" are different intents and must not share one variable.
+
+# --- listeners ---------------------------------------------------------------
+rsyslog_server_tcp_enabled: true
+rsyslog_server_udp_enabled: false
+rsyslog_server_port: 514
+# Bind address for the listeners. Narrow this to an internal/VPN NIC when the
+# host also has a public interface — it is the first of the three independent
+# layers (bind address / $AllowedSender / ufw) described in the spec.
+rsyslog_server_bind_address: "0.0.0.0"
+
+# --- sender restriction (fail-closed) ----------------------------------------
+# List of CIDRs allowed to send. MUST be non-empty unless
+# rsyslog_server_allow_all_senders is true.
+rsyslog_server_allowed_senders: []
+# Explicit, auditable acknowledgement that an unrestricted listener is wanted.
+rsyslog_server_allow_all_senders: false
+
+# --- storage -----------------------------------------------------------------
+rsyslog_server_log_root: /var/log/remote
+rsyslog_server_logrotate_days: 30
+rsyslog_server_logrotate_compress: true
+
+# --- firewall ----------------------------------------------------------------
+rsyslog_server_ufw_manage: true

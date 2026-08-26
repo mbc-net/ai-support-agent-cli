@@ -1,0 +1,57 @@
+---
+# Molecule "rsyslog_forward" scenario: converge + idempotence + verify for the
+# `rsyslog_forward` role.
+#
+# The forwarding target deliberately points at a TEST-NET-1 address (RFC 5737)
+# that never answers. That is not a limitation of the scenario — it is the
+# realistic case: collectors are routinely built after their senders, and
+# `action.resumeRetryCount: -1` exists precisely so the role tolerates it. What
+# the scenario verifies is that the forwarding machinery starts and that the
+# disk-assisted queue is genuinely in effect, which is exactly what silently
+# fails when `queue.filename` is omitted.
+#
+# Image pinned by manifest DIGEST for reproducible CI — same digest as the
+# other scenarios; bump all together in a reviewed PR.
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ../../requirements.yml
+
+driver:
+  name: docker
+
+platforms:
+  - name: ai-support-role-rsyslog-forward-ubuntu2404
+    image: geerlingguy/docker-ubuntu2404-ansible@sha256:a92c929b640cd4e5cf73f67fd1e9d0466c58335449fdc37a889c0bb4bbf78e2e
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      roles_path: ${MOLECULE_PROJECT_DIRECTORY}/roles
+  inventory:
+    group_vars:
+      all:
+        # RFC 5737 TEST-NET-1: guaranteed never to be a real host.
+        rsyslog_forward_target_host: 192.0.2.10
+        rsyslog_forward_target_port: 5514
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy
