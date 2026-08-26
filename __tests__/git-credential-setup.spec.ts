@@ -76,8 +76,8 @@ describe('git-credential-setup', () => {
       expect(script).toContain('/tmp/ssh-key-def')
       expect(script).toContain('StrictHostKeyChecking=accept-new')
       // Distinct known_hosts paths per registered host
-      expect(script).toContain('UserKnownHostsFile="/fake-known-hosts/acme__gitlab.com"')
-      expect(script).toContain('UserKnownHostsFile="/fake-known-hosts/acme__github.com"')
+      expect(script).toContain("UserKnownHostsFile='/fake-known-hosts/acme__gitlab.com'")
+      expect(script).toContain("UserKnownHostsFile='/fake-known-hosts/acme__github.com'")
       expect(script).not.toContain('StrictHostKeyChecking=no')
       expect(script).not.toContain('UserKnownHostsFile=/dev/null')
     })
@@ -99,7 +99,7 @@ describe('git-credential-setup', () => {
         '/fake-known-hosts/acme__shared',
       )
       expect(script).toContain('*)')
-      expect(script).toContain('exec ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="/fake-known-hosts/acme__shared"')
+      expect(script).toContain("exec ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile='/fake-known-hosts/acme__shared'")
     })
   })
 
@@ -114,7 +114,8 @@ describe('git-credential-setup', () => {
       expect(script).toContain('github.com')
       expect(script).toContain('org/repo.git')
       expect(script).toContain('username=x-access-token')
-      expect(script).toContain('password=ghp_token123')
+      expect(script).toContain("token0='ghp_token123'")
+      expect(script).toContain('password=$token0')
     })
 
     it('should handle multiple entries', () => {
@@ -218,7 +219,7 @@ describe('git-credential-setup', () => {
         const wrapperContent = fs.readFileSync(wrapperPath, 'utf-8')
         expect(wrapperContent).toContain('gitlab.com')
         expect(wrapperContent).toContain('StrictHostKeyChecking=accept-new')
-        expect(wrapperContent).toContain('UserKnownHostsFile="/fake-known-hosts/acme__gitlab.com"')
+        expect(wrapperContent).toContain("UserKnownHostsFile='/fake-known-hosts/acme__gitlab.com'")
       } finally {
         result.cleanup()
       }
@@ -251,8 +252,8 @@ describe('git-credential-setup', () => {
 
       try {
         const wrapperContent = fs.readFileSync(result.env.GIT_SSH_COMMAND, 'utf-8')
-        expect(wrapperContent).toContain('UserKnownHostsFile="/fake-known-hosts/acme__gitlab.com"')
-        expect(wrapperContent).toContain('UserKnownHostsFile="/fake-known-hosts/acme__github.com"')
+        expect(wrapperContent).toContain("UserKnownHostsFile='/fake-known-hosts/acme__gitlab.com'")
+        expect(wrapperContent).toContain("UserKnownHostsFile='/fake-known-hosts/acme__github.com'")
         expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'gitlab.com')
         expect(mockResolveKnownHostsPath).toHaveBeenCalledWith('acme', 'github.com')
         // Fallback bucket for the wrapper's default case
@@ -276,7 +277,7 @@ describe('git-credential-setup', () => {
       try {
         // Read wrapper to find key path
         const wrapperContent = fs.readFileSync(result.env.GIT_SSH_COMMAND, 'utf-8')
-        const keyPathMatch = wrapperContent.match(/-i "([^"]+)"/)
+        const keyPathMatch = wrapperContent.match(/-i '([^']+)'/)
         expect(keyPathMatch).toBeTruthy()
 
         const keyPath = keyPathMatch![1]
@@ -410,7 +411,7 @@ describe('git-credential-setup', () => {
 
       const wrapperPath = result.env.GIT_SSH_COMMAND
       const wrapperContent = fs.readFileSync(wrapperPath, 'utf-8')
-      const keyPathMatch = wrapperContent.match(/-i "([^"]+)"/)
+      const keyPathMatch = wrapperContent.match(/-i '([^']+)'/)
       const keyPath = keyPathMatch![1]
 
       // Files exist before cleanup
@@ -438,7 +439,7 @@ describe('git-credential-setup', () => {
 
       try {
         const wrapperContent = fs.readFileSync(result.env.GIT_SSH_COMMAND, 'utf-8')
-        const keyPathMatch = wrapperContent.match(/-i "([^"]+)"/)
+        const keyPathMatch = wrapperContent.match(/-i '([^']+)'/)
         const keyContent = fs.readFileSync(keyPathMatch![1], 'utf-8')
 
         // Key should be normalized with proper PEM format
@@ -467,7 +468,7 @@ describe('git-credential-setup', () => {
       // Manually delete files before cleanup
       const wrapperPath = result.env.GIT_SSH_COMMAND
       const wrapperContent = fs.readFileSync(wrapperPath, 'utf-8')
-      const keyPathMatch = wrapperContent.match(/-i "([^"]+)"/)
+      const keyPathMatch = wrapperContent.match(/-i '([^']+)'/)
       fs.unlinkSync(wrapperPath)
       fs.unlinkSync(keyPathMatch![1])
 
@@ -494,4 +495,343 @@ describe('git-credential-setup', () => {
       result.cleanup()
     })
   })
+})
+
+// ---------------------------------------------------------------------------
+// 生成シェルスクリプトへの注入防止（A1）
+//
+// buildCredentialHelperScript / buildSshWrapperScript は URL 由来の値
+// （host / pathPrefix）とトークン・鍵パスを /bin/sh スクリプトへ埋め込む。
+// 文字列比較だけでは「実際にシェルとして何が起きるか」を検証できないため、
+// 生成物を一時ファイルへ書き出して実際に /bin/sh で実行する。
+// ---------------------------------------------------------------------------
+describe('generated shell scripts are injection-safe', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const childProcess = require('child_process') as typeof import('child_process')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodeOs = require('os') as typeof import('os')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodePath = require('path') as typeof import('path')
+
+  let workDir: string
+
+  beforeEach(() => {
+    workDir = fs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'git-cred-shell-test-'))
+  })
+
+  afterEach(() => {
+    fs.rmSync(workDir, { recursive: true, force: true })
+  })
+
+  const writeScript = (name: string, content: string): string => {
+    const scriptPath = nodePath.join(workDir, name)
+    fs.writeFileSync(scriptPath, content, { mode: 0o700 })
+    return scriptPath
+  }
+
+  const runCredentialHelper = (script: string, stdin: string, args: string[] = ['get']): string => {
+    const scriptPath = writeScript('helper.sh', script)
+    return childProcess.execFileSync('/bin/sh', [scriptPath, ...args], {
+      input: stdin,
+      encoding: 'utf-8',
+    })
+  }
+
+  const runSshWrapper = (script: string, args: string[]): string => {
+    const scriptPath = writeScript('wrapper.sh', script)
+    const fakeBinDir = nodePath.join(workDir, 'bin')
+    fs.mkdirSync(fakeBinDir, { recursive: true })
+    fs.writeFileSync(
+      nodePath.join(fakeBinDir, 'ssh'),
+      "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+      { mode: 0o700 },
+    )
+    return childProcess.execFileSync('/bin/sh', [scriptPath, ...args], {
+      encoding: 'utf-8',
+      env: { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH ?? ''}` },
+    })
+  }
+
+  describe('buildCredentialHelperScript', () => {
+    it('returns the credentials for a matching host/path when run by /bin/sh', () => {
+      const script = buildCredentialHelperScript([
+        { host: 'github.com', pathPrefix: 'org/repo.git', token: 'ghp_token123' },
+      ])
+
+      const output = runCredentialHelper(script, 'protocol=https\nhost=github.com\npath=org/repo.git\n\n')
+
+      expect(output).toContain('protocol=https')
+      expect(output).toContain('host=github.com')
+      expect(output).toContain('username=x-access-token')
+      expect(output).toContain('password=ghp_token123')
+    })
+
+    it('does not emit credentials for a non-matching host', () => {
+      const script = buildCredentialHelperScript([
+        { host: 'github.com', pathPrefix: 'org/repo.git', token: 'ghp_token123' },
+      ])
+
+      const output = runCredentialHelper(script, 'protocol=https\nhost=evil.com\npath=org/repo.git\n\n')
+
+      expect(output).not.toContain('ghp_token123')
+    })
+
+    it('does not emit credentials for a non-matching path on a matching host', () => {
+      const script = buildCredentialHelperScript([
+        { host: 'github.com', pathPrefix: 'org/repo.git', token: 'ghp_token123' },
+      ])
+
+      const output = runCredentialHelper(script, 'protocol=https\nhost=github.com\npath=other/repo.git\n\n')
+
+      expect(output).not.toContain('ghp_token123')
+    })
+
+    it('preserves a token containing shell metacharacters verbatim', () => {
+      const token = `gh'p $(echo pwned) \`echo pwned\` "q"`
+      const script = buildCredentialHelperScript([
+        { host: 'github.com', pathPrefix: 'org/repo.git', token },
+      ])
+
+      const output = runCredentialHelper(script, 'protocol=https\nhost=github.com\npath=org/repo.git\n\n')
+
+      expect(output).toContain(`password=${token}`)
+    })
+
+    it('does not execute commands injected through pathPrefix (case pattern)', () => {
+      const marker = nodePath.join(workDir, 'pwned-path-prefix')
+      const script = buildCredentialHelperScript([
+        {
+          host: 'github.com',
+          pathPrefix: `org/repo)  ;; *) touch ${marker} ;; #`,
+          token: 'ghp_token123',
+        },
+      ])
+
+      runCredentialHelper(script, 'protocol=https\nhost=github.com\npath=org/repo.git\n\n')
+
+      expect(fs.existsSync(marker)).toBe(false)
+    })
+
+    it('does not execute commands injected through host', () => {
+      const marker = nodePath.join(workDir, 'pwned-host')
+      const script = buildCredentialHelperScript([
+        {
+          host: `github.com" ]; then touch ${marker}; fi; if [ "x" = "x`,
+          pathPrefix: 'org/repo.git',
+          token: 'ghp_token123',
+        },
+      ])
+
+      runCredentialHelper(script, 'protocol=https\nhost=github.com\npath=org/repo.git\n\n')
+
+      expect(fs.existsSync(marker)).toBe(false)
+    })
+
+    it('does not execute commands injected through the token', () => {
+      const marker = nodePath.join(workDir, 'pwned-token')
+      const script = buildCredentialHelperScript([
+        { host: 'github.com', pathPrefix: 'org/repo.git', token: `$(touch ${marker})` },
+      ])
+
+      const output = runCredentialHelper(script, 'protocol=https\nhost=github.com\npath=org/repo.git\n\n')
+
+      expect(fs.existsSync(marker)).toBe(false)
+      expect(output).toContain(`password=$(touch ${marker})`)
+    })
+  })
+
+  describe('buildSshWrapperScript', () => {
+    it('selects the registered key and known_hosts file for a matching host', () => {
+      const script = buildSshWrapperScript(
+        [{ host: 'gitlab.com', keyPath: '/tmp/ssh-key-abc', knownHostsPath: '/fake-known-hosts/acme__gitlab.com' }],
+        '/fake-known-hosts/acme__shared',
+      )
+
+      const output = runSshWrapper(script, ['git@gitlab.com', 'git-upload-pack org/repo.git'])
+      const args = output.split('\n')
+
+      expect(args).toContain('-i')
+      expect(args).toContain('/tmp/ssh-key-abc')
+      expect(args).toContain('UserKnownHostsFile=/fake-known-hosts/acme__gitlab.com')
+      expect(args).toContain('git@gitlab.com')
+      expect(args).toContain('git-upload-pack org/repo.git')
+    })
+
+    it('falls back to the shared known_hosts bucket for an unregistered host', () => {
+      const script = buildSshWrapperScript(
+        [{ host: 'gitlab.com', keyPath: '/tmp/ssh-key-abc', knownHostsPath: '/fake-known-hosts/acme__gitlab.com' }],
+        '/fake-known-hosts/acme__shared',
+      )
+
+      const output = runSshWrapper(script, ['git@github.com', 'git-upload-pack org/repo.git'])
+      const args = output.split('\n')
+
+      expect(args).toContain('UserKnownHostsFile=/fake-known-hosts/acme__shared')
+      expect(args).not.toContain('/tmp/ssh-key-abc')
+    })
+
+    it('does not execute commands injected through the host name', () => {
+      const marker = nodePath.join(workDir, 'pwned-ssh-host')
+      const script = buildSshWrapperScript(
+        [{
+          host: `gitlab.com)\n    touch ${marker}\n    ;;\n  gitlab.com`,
+          keyPath: '/tmp/ssh-key-abc',
+          knownHostsPath: '/fake-known-hosts/acme__gitlab.com',
+        }],
+        '/fake-known-hosts/acme__shared',
+      )
+
+      runSshWrapper(script, ['git@gitlab.com', 'git-upload-pack org/repo.git'])
+
+      expect(fs.existsSync(marker)).toBe(false)
+    })
+
+    it('does not execute commands injected through the key path', () => {
+      const marker = nodePath.join(workDir, 'pwned-ssh-key-path')
+      const script = buildSshWrapperScript(
+        [{
+          host: 'gitlab.com',
+          keyPath: `/tmp/key" ; touch ${marker} ; echo "`,
+          knownHostsPath: '/fake-known-hosts/acme__gitlab.com',
+        }],
+        '/fake-known-hosts/acme__shared',
+      )
+
+      runSshWrapper(script, ['git@gitlab.com', 'git-upload-pack org/repo.git'])
+
+      expect(fs.existsSync(marker)).toBe(false)
+    })
+
+    it('does not execute commands injected through the fallback known_hosts path', () => {
+      const marker = nodePath.join(workDir, 'pwned-fallback-known-hosts')
+      const script = buildSshWrapperScript(
+        [{ host: 'gitlab.com', keyPath: '/tmp/ssh-key-abc', knownHostsPath: '/fake-known-hosts/acme__gitlab.com' }],
+        `/fake-known-hosts/shared" ; touch ${marker} ; echo "`,
+      )
+
+      runSshWrapper(script, ['git@github.com', 'git-upload-pack org/repo.git'])
+
+      expect(fs.existsSync(marker)).toBe(false)
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// URL 由来値の形式検証（A1）
+//
+// extractHostFromUrl / extractPathFromUrl は正規表現で URL を切り出すだけなので
+// 任意文字を含み得る。生成スクリプトへ埋め込む前に allowlist で弾き、
+// 「取得失敗時は continue」と同じ経路（warn + skip）へ乗せる。
+// ---------------------------------------------------------------------------
+describe('buildGitCredentialEnv URL component validation', () => {
+  const mockClient = {
+    getRepoCredentials: jest.fn(),
+    getTenantCode: jest.fn().mockReturnValue('acme'),
+  } as unknown as ApiClient
+
+  const baseRepo: NonNullable<ProjectConfigResponse['repositories']>[number] = {
+    repositoryId: 'repo-1',
+    repositoryCode: 'my-repo',
+    repositoryName: 'My Repo',
+    repositoryUrl: 'https://github.com/org/my-repo.git',
+    provider: 'github',
+    branch: 'main',
+    authMethod: 'api_key',
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(mockClient.getTenantCode as jest.Mock).mockReturnValue('acme')
+  })
+
+  it('skips an HTTPS repository whose path contains shell metacharacters', async () => {
+    const url = 'git@github.com:org/repo)  ;; *) id ;; #.git'
+    ;(mockClient.getRepoCredentials as jest.Mock).mockResolvedValue({
+      repositoryId: 'repo-1',
+      repositoryUrl: url,
+      authMethod: 'api_key',
+      authSecret: 'ghp_token123',
+    } as RepoCredentials)
+
+    const result = await buildGitCredentialEnv(mockClient, [{ ...baseRepo, repositoryUrl: url }])
+
+    expect(result.env).toEqual({})
+    result.cleanup()
+  })
+
+  it('skips a repository whose host contains characters outside the allowlist', async () => {
+    const url = 'git@gitlab.com evil:org/repo.git'
+    ;(mockClient.getRepoCredentials as jest.Mock).mockResolvedValue({
+      repositoryId: 'repo-1',
+      repositoryUrl: url,
+      authMethod: 'api_key',
+      authSecret: 'ghp_token123',
+    } as RepoCredentials)
+
+    const result = await buildGitCredentialEnv(mockClient, [{ ...baseRepo, repositoryUrl: url }])
+
+    expect(result.env).toEqual({})
+    result.cleanup()
+  })
+
+  it('still sets up the credential helper for a normal HTTPS repository', async () => {
+    ;(mockClient.getRepoCredentials as jest.Mock).mockResolvedValue({
+      repositoryId: 'repo-1',
+      repositoryUrl: 'https://github.com/org/my-repo.git',
+      authMethod: 'api_key',
+      authSecret: 'ghp_token123',
+    } as RepoCredentials)
+
+    const result = await buildGitCredentialEnv(mockClient, [baseRepo])
+
+    try {
+      expect(result.env.GIT_CONFIG_COUNT).toBe('1')
+      expect(result.env.GIT_CONFIG_KEY_0).toBe('credential.helper')
+      expect(result.env.GIT_CONFIG_VALUE_0).toMatch(/^!/)
+    } finally {
+      result.cleanup()
+    }
+  })
+
+  // 正規のリポジトリ URL が誤って skip されると、そのリポジトリだけ認証情報が付かず
+  // 「private repo の clone だけ恒常的に失敗する」という分かりにくい形でしか現れない。
+  // 埋め込み時は shellQuote が完全に無害化するため、実在しうる文字は通す必要がある。
+  it.each([
+    ['percent-encoded non-ASCII path', 'https://github.com/org/%E6%97%A5%E6%9C%AC%E8%AA%9E.git'],
+    ['Bitbucket personal project (~user), HTTPS', 'https://bitbucket.example.com/scm/~jdoe/repo.git'],
+    ['Bitbucket personal project (~user), SCP form', 'git@bitbucket.example.com:~jdoe/repo.git'],
+    ['plus sign in repository name', 'https://gitlab.com/org/repo+extra.git'],
+    ['tilde and plus combined', 'https://gitlab.com/~jdoe/repo+extra.git'],
+  ])('sets up the credential helper for a legitimate URL: %s', async (_label, url) => {
+    ;(mockClient.getRepoCredentials as jest.Mock).mockResolvedValue({
+      repositoryId: 'repo-1',
+      repositoryUrl: url,
+      authMethod: 'api_key',
+      authSecret: 'ghp_token123',
+    } as RepoCredentials)
+
+    const result = await buildGitCredentialEnv(mockClient, [{ ...baseRepo, repositoryUrl: url }])
+
+    try {
+      expect(result.env.GIT_CONFIG_VALUE_0).toMatch(/^!/)
+    } finally {
+      result.cleanup()
+    }
+  })
+
+  it('still skips a repository whose URL component contains a control character', async () => {
+    const url = 'git@github.com:org/repo\n#.git'
+    ;(mockClient.getRepoCredentials as jest.Mock).mockResolvedValue({
+      repositoryId: 'repo-1',
+      repositoryUrl: url,
+      authMethod: 'api_key',
+      authSecret: 'ghp_token123',
+    } as RepoCredentials)
+
+    const result = await buildGitCredentialEnv(mockClient, [{ ...baseRepo, repositoryUrl: url }])
+
+    expect(result.env).toEqual({})
+    result.cleanup()
+  })
+
 })

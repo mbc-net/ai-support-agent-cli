@@ -28,6 +28,46 @@ function validateBranchName(branch: string): void {
 }
 
 /**
+ * `GIT_ALLOW_PROTOCOL` に渡す許可トランスポート（git が `:` 区切りで解釈する）。
+ * ここに無いトランスポート（`ext` / `file` 等）は git 自身が拒否する。
+ */
+const ALLOWED_GIT_PROTOCOLS = 'https:ssh:git:http'
+
+/** `new URL()` でパースできる URL のうち clone を許可するスキーム */
+const ALLOWED_CLONE_URL_SCHEMES = new Set(['https:', 'http:', 'ssh:'])
+
+/** scp 形式（`git@host:org/repo.git`）の判定 */
+const SCP_LIKE_URL_PATTERN = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:/
+
+/**
+ * clone 対象 URL のトランスポートを allowlist で検証する。
+ *
+ * `git clone 'ext::sh -c ...'` は ext トランスポートで任意コマンドを実行する。
+ * `new URL('ext::sh -c ...')` はパースに成功し（cannot-be-a-base URL のため
+ * username/password セッターは黙って無視される）、`toString()` は入力そのものを
+ * 返すので、URL パースの成否だけでは防げない。`--upload-pack=...` のように
+ * `new URL()` が throw する値も引数注入の余地があるため同様に弾く。
+ *
+ * 例外は `syncSingleRepository` の呼び出し元 `syncRepositories` の try/catch が
+ * 拾い、当該リポジトリを `status: 'skipped'` として報告する。
+ */
+function assertAllowedRepositoryUrl(url: string): void {
+  if (SCP_LIKE_URL_PATTERN.test(url)) return
+
+  let scheme: string
+  try {
+    scheme = new URL(url).protocol
+  } catch {
+    // 認証情報を含み得るため URL 自体はメッセージに含めない
+    throw new Error('Unsupported repository URL: could not be parsed as a URL')
+  }
+
+  if (!ALLOWED_CLONE_URL_SCHEMES.has(scheme)) {
+    throw new Error(`Unsupported repository URL scheme: ${scheme}`)
+  }
+}
+
+/**
  * Run a `git` subcommand with the auth env merged on top of process.env.
  *
  * Collapses the `execFileAsync('git', args, { [cwd,] env: { ...process.env, ...env }, timeout })`
@@ -36,13 +76,33 @@ function validateBranchName(branch: string): void {
  * timeout, so a new call site cannot accidentally drop the auth env or run
  * without a timeout.
  */
+/**
+ * URL に埋め込まれた認証情報（`scheme://user:secret@host/...`）を落とす。
+ *
+ * git のエラーメッセージには失敗したコマンドライン全体が入るため、`buildCloneUrl` が
+ * 埋め込んだ `https://x-access-token:<TOKEN>@host/...` がそのまま例外メッセージ →
+ * `RepoSyncResult.error` → ログ／API 応答へ流れ込む。logger の `maskSecrets` は
+ * `token:` パターンでこれを拾っているが、それは「ユーザー名リテラルがたまたま
+ * `x-access-token` である」ことに依存した偶然であり、`oauth2` 等に変えた瞬間に
+ * 防御の根拠が消える。発生源で落としておく。
+ */
+export function redactUrlCredentials(message: string): string {
+  return message.replace(
+    /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s@]+@/g,
+    '$1***@',
+  )
+}
+
 export async function runGit(
   args: string[],
   options: { env: Record<string, string>; timeout: number; cwd?: string },
 ): Promise<void> {
   await execFileAsync('git', args, {
     ...(options.cwd ? { cwd: options.cwd } : {}),
-    env: { ...process.env, ...options.env },
+    // GIT_ALLOW_PROTOCOL は options.env より後に置いて常に強制する。
+    // 正常系の https / ssh クローンには影響せず、`ext::` / `file::` のような
+    // 「URL がそのままコマンドになる」トランスポートだけを git 側が拒否する。
+    env: { ...process.env, ...options.env, GIT_ALLOW_PROTOCOL: ALLOWED_GIT_PROTOCOLS },
     timeout: options.timeout,
   })
 }
@@ -114,7 +174,7 @@ export async function syncRepositories(
       const result = await syncSingleRepository(client, repo, reposDir, prefix)
       results.push(result)
     } catch (error) {
-      const errorMsg = getErrorMessage(error)
+      const errorMsg = redactUrlCredentials(getErrorMessage(error))
       logger.warn(`${prefix} Repository sync failed for ${repo.repositoryName}: ${errorMsg}`)
       results.push({
         repositoryId: repo.repositoryId,
@@ -197,7 +257,8 @@ async function cloneRepository(
     validateBranchName(branch)
     const cloneUrl = buildCloneUrl(repositoryUrl, authMethod, authSecret)
     // 全ブランチを取得（サポート対象の環境に応じてブランチ切り替えが必要なため）
-    await runGit(['clone', '--no-single-branch', cloneUrl, repoDir], {
+    // `--` で URL がオプションとして解釈される余地を断つ
+    await runGit(['clone', '--no-single-branch', '--', cloneUrl, repoDir], {
       env,
       timeout: GIT_CLONE_TIMEOUT,
     })
@@ -263,6 +324,8 @@ export function buildCloneUrl(
   authMethod: string,
   authSecret: string,
 ): string {
+  assertAllowedRepositoryUrl(url)
+
   if (authMethod === 'ssh') {
     return url
   }

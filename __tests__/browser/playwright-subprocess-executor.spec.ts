@@ -1830,6 +1830,71 @@ describe('runPlaywrightSubprocess', () => {
     expect(nodeFs.existsSync(runDirFor(executionId))).toBe(false)
   })
 
+  // ------------------------------------------------------------------
+  // 実行ディレクトリ・生成ファイルのパーミッション（A6）
+  //
+  // /tmp/ai-support-e2e-<executionId> は予測可能なパス。既定の 0755/0644 では
+  // 同一ホストの他ユーザーが spec を差し替えられ（spawn 前に書き換えれば
+  // エージェント権限で任意 Node コードが走る）、シンボリックリンクを置けば
+  // 任意パスへの書き込みにも使える。
+  // ------------------------------------------------------------------
+  it('creates the run directory 0700 and every generated file 0600', async () => {
+    const executionId = uniqueExecutionId('perm-check')
+    const modes: Record<string, number> = {}
+    let runDirMode = -1
+
+    mockSpawn.mockImplementation(((_bin: string, args: string[], spawnOpts: { env?: NodeJS.ProcessEnv }) => {
+      const configFile = args[args.indexOf('--config') + 1]
+      const runDir = path.dirname(configFile)
+      runDirMode = nodeFs.statSync(runDir).mode & 0o777
+      for (const entry of nodeFs.readdirSync(runDir, { withFileTypes: true })) {
+        if (entry.isFile()) {
+          modes[entry.name] = nodeFs.statSync(path.join(runDir, entry.name)).mode & 0o777
+        }
+      }
+      const outputPath = spawnOpts?.env?.E2E_JSON_OUTPUT
+      if (outputPath) {
+        nodeFs.writeFileSync(outputPath, makePlaywrightJson([{ title: 'Test', status: 'passed' }]), 'utf-8')
+      }
+      return createMockChild(0)
+    }) as any)
+
+    const result = await runPlaywrightSubprocess({
+      script: "await page.goto('/')",
+      executionId,
+      supportFiles: [{ path: 'fixtures/data.json', content: '{}' }],
+    })
+
+    expect(result.success).toBe(true)
+    expect(runDirMode).toBe(0o700)
+    expect(modes['test.spec.ts']).toBe(0o600)
+    expect(modes['playwright.config.js']).toBe(0o600)
+    expect(modes['step-screenshot-patch.js']).toBe(0o600)
+  })
+
+  it('repairs the permissions of a pre-existing run directory', async () => {
+    const executionId = uniqueExecutionId('perm-preexisting')
+    // 攻撃者が先に world-writable なディレクトリを作っておくケース。
+    // mkdir の mode は既存ディレクトリには効かないため chmod が必要。
+    nodeFs.mkdirSync(runDirFor(executionId), { recursive: true, mode: 0o777 })
+    nodeFs.chmodSync(runDirFor(executionId), 0o777)
+
+    let runDirMode = -1
+    mockSpawn.mockImplementation(((_bin: string, args: string[], spawnOpts: { env?: NodeJS.ProcessEnv }) => {
+      const runDir = path.dirname(args[args.indexOf('--config') + 1])
+      runDirMode = nodeFs.statSync(runDir).mode & 0o777
+      const outputPath = spawnOpts?.env?.E2E_JSON_OUTPUT
+      if (outputPath) {
+        nodeFs.writeFileSync(outputPath, makePlaywrightJson([{ title: 'Test', status: 'passed' }]), 'utf-8')
+      }
+      return createMockChild(0)
+    }) as any)
+
+    await runPlaywrightSubprocess({ script: "await page.goto('/')", executionId })
+
+    expect(runDirMode).toBe(0o700)
+  })
+
   it('should clean up and rethrow when the run directory cannot be created', async () => {
     const executionId = uniqueExecutionId('mkdir-fail')
     // Pre-create a regular file where the run directory should go → mkdir fails
