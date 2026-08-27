@@ -1153,6 +1153,69 @@ describe('変数名を実行時に組み立てる参照', () => {
     ).toBe(true)
   })
 
+  // `vars` は添字アクセスに限らない。かつては `vars[` だけを見ていたため、下の 3 つは
+  // すべて素通りしていた。いずれも実機（ansible-core 2.21）で、ロールが register した
+  // 内部変数の値が実行ログへ出ることを確認している。
+  it.each([
+    ['bare', '{{ vars }}'],
+    ['dict2items', '{{ vars | dict2items }}'],
+    ['get', "{{ vars.get('github_runner_' ~ 'regtoken_resp') }}"],
+  ])('[ecs] 添字を使わない vars 参照も拒否される（%s）', (_label, expression) => {
+    const body = `
+- name: t
+  ansible.builtin.debug:
+    msg: "${expression}"
+`
+    const result = validateAnsibleTasks(body, { mode: 'ecs' })
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('dynamic variable lookup')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] 英単語としての vars は巻き添えにしない', (_label, opts) => {
+    // Jinja 式の内側に限って判定しないと、この程度の記述で全滅する。
+    const body = `
+- name: Set some vars for the web server
+  ansible.builtin.debug:
+    msg: "configuring vars now"
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  // JSON エスケープが識別子の直前に来ると、`JSON.stringify` した文字列を字句解析する
+  // 実装では先頭文字と癒着して別の名前になり、照合をすり抜けた（`\tNAME` → `tNAME`）。
+  // Jinja は `{{ }}` 内側の空白を無視するので実機ではそのまま解決される。
+  it.each(modes)('[%s] タブを前置してもロール内部変数の参照は拒否される', (_label, opts) => {
+    const body = [
+      '- name: t',
+      '  ansible.builtin.debug:',
+      '    var: "\\tgithub_runner_regtoken_resp"',
+    ].join('\n')
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) =>
+        v.reason.includes("must not reference a bundled role's internal variable"),
+      ),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] タブを前置しても秘匿変数の参照には no_log が付く', (_label, opts) => {
+    const body = [
+      '- name: oracle',
+      '  ansible.builtin.debug:',
+      '    msg: hit',
+      "  when: \"\\tDB_PASSWORD is match('^x')\"",
+    ].join('\n')
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+  })
+
   it.each(modes)('[%s] include_role の task レベル vars: は巻き添えにしない', (_label, opts) => {
     // 判定を雑に「vars という語を含む」にすると、正当な include_role が全滅する。
     const body = `

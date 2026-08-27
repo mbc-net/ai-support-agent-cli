@@ -272,3 +272,147 @@
     # 失敗させて 3 通りとも通す。
     - name: "verify : Exercise the configuration rollback branches"
       ansible.builtin.include_tasks: rollback-cases.yml
+
+    # ここから end-to-end。**ここまでのケースはすべて設定テキストとソケットの
+    # 確認であり、「実際に 1 行保存できるか」を一度も見ていない。**
+    # 実測（Ubuntu 24.04 / rsyslog 8.2312.0）で、Ubuntu 既定の
+    # $PrivDropToUser syslog により、ログルートが root 所有だと rsyslog が
+    # ホスト別ディレクトリを作れず **全メッセージを破棄する**ことを確認した。
+    # そのとき rsyslogd -N1・systemctl is-active・ソケット所有者照合はすべて
+    # 通るため、上のどのケースでも赤くならない。実際に送って保存を見るしかない。
+    #
+    # 送信元はコンテナ自身の eth0 アドレスを使う（127.0.0.1 だと設定側の
+    # `$fromhost-ip != "127.0.0.1"` に弾かれ、$AllowedSender の検証にならない）。
+    - name: "verify : Read this container's primary IPv4 address"
+      ansible.builtin.command:
+        cmd: hostname -I
+      register: rsyslog_verify_self_ip_raw
+      changed_when: false
+
+    - name: "verify : Record the sender address used for the end-to-end checks"
+      ansible.builtin.set_fact:
+        rsyslog_verify_self_ip: "{{ rsyslog_verify_self_ip_raw.stdout.split()[0] }}"
+
+    - name: "verify : Converge with this container allowed as a sender"
+      ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders:
+          - "{{ rsyslog_verify_self_ip }}/32"
+
+    - name: "verify : Clear any previously collected remote logs"
+      ansible.builtin.file:
+        path: /var/log/remote
+        state: absent
+
+    - name: "verify : Re-create the log root through the role"
+      ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders:
+          - "{{ rsyslog_verify_self_ip }}/32"
+
+    - name: "verify : Send a syslog line from an allowed sender"
+      ansible.builtin.shell:
+        # bash の /dev/tcp を使う（追加パッケージを要求しない）。RFC3164 形式。
+        cmd: >-
+          exec 3<>/dev/tcp/{{ rsyslog_verify_self_ip }}/5514
+          && printf '<14>Aug 27 03:00:00 e2ehost e2eprobe: RSYSLOG_E2E_DELIVERED\n' >&3
+          && exec 3<&-
+        executable: /bin/bash
+      changed_when: true
+
+    # ここが赤くなるとき、疑うのは設定ではなく保存側である。代表例が、ログルートを
+    # root 所有で作ってしまい、権限降格後の rsyslog（syslog:syslog）がホスト別
+    # ディレクトリを mkdir できないケース。そのとき rsyslog 自身のログに
+    # Permission denied / discarding message が出る。
+    - name: "verify : Wait for the message to be written"
+      ansible.builtin.wait_for:
+        path: /var/log/remote/e2ehost/e2eprobe.log
+        search_regex: RSYSLOG_E2E_DELIVERED
+        timeout: 20
+
+    # 逃げ先は決め打ちにする（`find` の差分で判定すると、ansible 自身が /tmp に
+    # 作る一時ファイルを拾って偽陽性になる）。hostname と programname の両方に
+    # 別々の逃げ先を仕込み、どちらか片方だけ secpath-replace を外した実装が
+    # 必ず赤くなるようにする。
+    - name: "verify : Send a forged hostname and program name containing ../"
+      ansible.builtin.shell:
+        cmd: >-
+          exec 3<>/dev/tcp/{{ rsyslog_verify_self_ip }}/5514
+          && printf '<14>Aug 27 03:00:01 ../../../../tmp/rsyslog-escape-host ../../../../tmp/rsyslog-escape-prog: RSYSLOG_E2E_TRAVERSAL\n' >&3
+          && exec 3<&-
+        executable: /bin/bash
+      changed_when: true
+
+    - name: "verify : Give rsyslog a moment to process the forged message"
+      ansible.builtin.wait_for:
+        timeout: 5
+
+    - name: "verify : Look for the escape targets the forged fields point at"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: rsyslog_verify_escape
+      loop:
+        - /tmp/rsyslog-escape-host
+        - /tmp/rsyslog-escape-prog.log
+        - /tmp/rsyslog-escape-host/rsyslog-escape-prog.log
+
+    - name: "verify : Assert nothing was written outside the log root"
+      ansible.builtin.assert:
+        that:
+          - rsyslog_verify_escape.results | selectattr('stat.exists') | list | length == 0
+        fail_msg: >-
+          A forged hostname / program name escaped the log root — secpath-replace
+          is missing on at least one of the two sender-controlled properties.
+          Created: {{ rsyslog_verify_escape.results
+                      | selectattr('stat.exists') | map(attribute='item') | list }}
+
+    # 拒否経路。許可リストから外した状態で同じ送信を行い、保存されないことを見る。
+    - name: "verify : Converge with this container NOT allowed as a sender"
+      ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders:
+          - 10.99.0.0/24
+
+    - name: "verify : Send a syslog line from a now-disallowed sender"
+      ansible.builtin.shell:
+        cmd: >-
+          exec 3<>/dev/tcp/{{ rsyslog_verify_self_ip }}/5514
+          && printf '<14>Aug 27 03:00:02 deniedhost deniedprobe: RSYSLOG_E2E_DENIED\n' >&3
+          && exec 3<&-
+        executable: /bin/bash
+      changed_when: true
+      # 接続自体が rsyslog に切られるため、書き込みが失敗し得る。それは期待どおり。
+      failed_when: false
+
+    - name: "verify : Give rsyslog a moment to reject the connection"
+      ansible.builtin.wait_for:
+        timeout: 3
+
+    - name: "verify : Enumerate the collected files after the denied send"
+      ansible.builtin.command:
+        argv: [grep, -rl, RSYSLOG_E2E_DENIED, /var/log/remote]
+      register: rsyslog_verify_denied
+      changed_when: false
+      failed_when: false
+
+    - name: "verify : Assert the disallowed sender's message was not stored"
+      ansible.builtin.assert:
+        that:
+          - rsyslog_verify_denied.stdout | trim | length == 0
+        fail_msg: >-
+          A message from a sender outside rsyslog_server_allowed_senders was
+          collected. $AllowedSender is not in effect, which makes the
+          fail-closed guard in the role meaningless: any host on the network
+          could forge logs and fill the disk. Found in:
+          {{ rsyslog_verify_denied.stdout_lines }}
+
+    - name: "verify : Restore the scenario's configuration after the end-to-end checks"
+      ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders:
+          - 10.99.0.0/24
+          - 192.0.2.0/24

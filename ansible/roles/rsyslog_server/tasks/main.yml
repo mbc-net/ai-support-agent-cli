@@ -116,11 +116,23 @@
     update_cache: true
     cache_valid_time: 3600
 
+# Owned by `syslog`, NOT root. Ubuntu's stock /etc/rsyslog.conf drops
+# privileges ($PrivDropToUser syslog / $PrivDropToGroup syslog), so the process
+# that has to mkdir <log_root>/<hostname>/ is syslog:syslog — the `adm`
+# supplementary group does not survive the drop. With a root-owned 0750 root,
+# rsyslog cannot create the per-host directory and discards EVERY remote
+# message, while `rsyslogd -N1`, `systemctl is-active` and the listening-socket
+# check below all still pass. Verified on Ubuntu 24.04 / rsyslog 8.2312.0:
+#   omfile: creating parent directories for file
+#   '/var/log/remote/<host>/<prog>.log' failed: Permission denied
+#   Could not open dynamic file ... - discarding message
+# `group: adm` is kept so operators in adm can read the collected logs, and
+# logrotate (running as root) rotates them normally under these permissions.
 - name: "rsyslog_server : Ensure the remote log root exists"
   ansible.builtin.file:
     path: "{{ rsyslog_server_log_root }}"
     state: directory
-    owner: root
+    owner: syslog
     group: adm
     mode: "0750"
 

@@ -896,21 +896,114 @@ function containsLookupPluginReference(value: unknown): boolean {
  *
  * この関数は「ロール内部変数の参照禁止」と「秘匿値の no_log 判定」の**両方**で使う。
  * かつては後者だけが `{{ }}` 限定の別実装を持っていて、同じ穴が片方にだけ残った。
+ *
+ * **走査は JSON 文字列ではなく、デコード済みの値に対して行う。** かつては
+ * `JSON.stringify(task)` を 1 本の文字列として字句解析していたが、JSON エスケープが
+ * 識別子の直前に来ると先頭文字と癒着して別の名前になった（実測）:
+ *
+ *   debug: { var: "\tgithub_runner_regtoken_resp" }
+ *     → JSON では "\tgithub_runner_regtoken_resp" となり、字句解析の結果は
+ *       `tgithub_runner_regtoken_resp`。内部変数の参照禁止に一致しない。
+ *       一方 Jinja は `{{ }}` の内側の空白を無視するので、**実機ではそのまま解決され**、
+ *       ロールが register した登録トークンの全文が実行ログへ出た。
+ *   when: "\tANSIBLE_SECRET is match('^x')"
+ *     → 同じ理由で秘匿名に一致せず `no_log` が付かない。正規表現で 1 文字ずつ
+ *       秘匿値を読み出すオラクルになる。
+ *
+ * YAML パーサが `\t` を実際のタブへ復元したあとの文字列を見れば、この癒着は起きない。
+ * 念のため JSON 側の字句解析結果も和集合に残す（名前が増える方向＝fail-closed であり、
+ * 深いネストで再帰を打ち切った場合の取りこぼしも埋める）。
  */
+const IDENTIFIER_PATTERN = /[A-Za-z_][A-Za-z0-9_]*/g
+
+/** 再帰の深さ上限。レシピ本体の YAML でこの深さに達することは無い。 */
+const MAX_VALUE_WALK_DEPTH = 64
+
 function collectTemplateReferencedNames(
   task: Record<string, unknown>,
 ): ReadonlySet<string> {
   const names = new Set<string>()
-  let serialized: string
-  try {
-    serialized = JSON.stringify(task)
-  } catch {
-    return names
+  const addIdentifiers = (text: string): void => {
+    for (const identifier of text.match(IDENTIFIER_PATTERN) ?? []) {
+      names.add(identifier)
+    }
   }
-  for (const identifier of serialized.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
-    names.add(identifier)
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > MAX_VALUE_WALK_DEPTH) return
+    if (typeof value === 'string') {
+      addIdentifiers(value)
+      return
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1)
+      return
+    }
+    if (isPlainObject(value)) {
+      for (const [key, item] of Object.entries(value)) {
+        addIdentifiers(key)
+        visit(item, depth + 1)
+      }
+    }
+  }
+  visit(task, 0)
+  try {
+    addIdentifiers(JSON.stringify(task))
+  } catch {
+    // 循環参照は YAML パース結果には現れないが、増える方向の補助なので無視でよい。
   }
   return names
+}
+
+/**
+ * 値そのものが Jinja 式として評価されるキー。
+ *
+ * `CONTROL_KEYS` に無いキーはモジュール候補として allowlist に照合され拒否されるので、
+ * レシピが書ける「波括弧なしの Jinja 式」はここに挙げたものが全てである
+ * （`changed_when` / `failed_when` はモジュール候補になるため書けない）。
+ * `var` は `debug` / `assert` が取る「変数名そのもの」で、Ansible が `{{ }}` で包む。
+ */
+const BARE_JINJA_KEYS: ReadonlySet<string> = new Set([
+  'when',
+  'until',
+  'loop',
+  'with_items',
+  'var',
+])
+
+/**
+ * Jinja が式として評価する断片だけを集める。
+ *
+ * `vars` の検出に使う。`vars` は英単語でもあるため、タスク全体の字句解析で拒否すると
+ * `- name: Set some vars` のような無害な記述まで巻き添えにする。式の内側に限れば
+ * その誤検知が消える一方、`{{ vars }}` / `{{ vars | dict2items }}` /
+ * `{{ vars.get('github_runner_' ~ 'regtoken_resp') }}` はいずれもここに入る。
+ */
+function collectJinjaExpressions(task: Record<string, unknown>): string[] {
+  const expressions: string[] = []
+  const addString = (text: string, bare: boolean): void => {
+    if (bare) expressions.push(text)
+    for (const region of text.match(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g) ?? []) {
+      expressions.push(region)
+    }
+  }
+  const visit = (value: unknown, bare: boolean, depth: number): void => {
+    if (depth > MAX_VALUE_WALK_DEPTH) return
+    if (typeof value === 'string') {
+      addString(value, bare)
+      return
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, bare, depth + 1)
+      return
+    }
+    if (isPlainObject(value)) {
+      for (const [key, item] of Object.entries(value)) {
+        visit(item, BARE_JINJA_KEYS.has(key), depth + 1)
+      }
+    }
+  }
+  visit(task, false, 0)
+  return expressions
 }
 
 /**
@@ -1382,19 +1475,29 @@ export function validateAnsibleTasks(
     // 「静的な識別子であること」を要求しているのに、参照側だけ動的な組み立てを
     // 許していたのは非対称である。レシピが `vars` / `hostvars` を辿る正当な用途は
     // 無いので、入口ごと閉じる。
+    //
+    // `vars` は添字アクセスに限らない。`{{ vars }}` をそのまま出せばホスト変数が
+    // 丸ごと出るし、`{{ vars | dict2items }}` や `{{ vars.get('github_runner_' ~
+    // 'regtoken_resp') }}` も同じ場所へ届く（いずれも実機で内部 register の値が
+    // 出ることを確認した）。添字だけを見ていたのは穴だったので、識別子として拒否する。
+    //
+    // ただし `vars` は英単語でもあり、タスク全体を字句解析して拒否すると
+    // `- name: Set some vars` まで巻き添えになる。**Jinja が式として評価する断片に
+    // 限って**判定する（`collectJinjaExpressions` 参照）。`hostvars` と `getattr(` は
+    // 英文に現れないので、従来どおりタスク全体で見る。
     {
       const serializedTask = JSON.stringify(task)
+      const jinjaExpressions = collectJinjaExpressions(task)
       if (
         /\bhostvars\b/.test(serializedTask) ||
-        /"vars"\s*:\s*\[/.test(serializedTask) ||
-        /\bvars\s*\[/.test(serializedTask) ||
-        /\bgetattr\s*\(/.test(serializedTask)
+        /\bgetattr\s*\(/.test(serializedTask) ||
+        jinjaExpressions.some((expression) => /\bvars\b/.test(expression))
       ) {
         violations.push({
           taskIndex,
           key: 'root',
           reason:
-            'dynamic variable lookup (vars[...] / hostvars / getattr) is forbidden',
+            'dynamic variable lookup (vars / hostvars / getattr) is forbidden',
         })
       }
     }

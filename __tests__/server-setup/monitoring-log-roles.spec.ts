@@ -161,6 +161,31 @@ describe('Phase 1 監視・ログ系ロール（rsyslog_server / rsyslog_forward
       expect(tpl).toContain('%programname:::secpath-replace%')
     })
 
+    it('受信ログのルートは syslog 所有で作る（root 所有だと権限降格後の rsyslog が書けない）', () => {
+      // Ubuntu 既定の /etc/rsyslog.conf は $PrivDropToUser syslog /
+      // $PrivDropToGroup syslog を指定しており、`<log_root>/<hostname>/` を
+      // mkdir するのは syslog:syslog である（adm の補助グループは降格で外れる）。
+      // root 所有の 0750 にすると rsyslog はホスト別ディレクトリを作れず、
+      // **リモートのメッセージを全件破棄する**。しかも rsyslogd -N1・
+      // systemctl is-active・ソケット所有者照合はいずれも通るため、
+      // 「起動しているのに 1 行も受け取らない」状態が成功として報告される。
+      // Ubuntu 24.04 / rsyslog 8.2312.0 で再現・修正とも実測確認済み。
+      const tasks = flatten(loadTasks('rsyslog_server'))
+      const mkLogRoot = tasks.find(
+        (t) =>
+          moduleOf(t) === 'ansible.builtin.file' &&
+          /log root/i.test(String(t.name ?? '')),
+      )
+      expect(mkLogRoot).toBeDefined()
+      const args = (mkLogRoot as Record<string, unknown>)['ansible.builtin.file'] as Record<
+        string,
+        unknown
+      >
+      expect(args.state).toBe('directory')
+      expect(args.owner).toBe('syslog')
+      expect(args.mode).toBe('0750')
+    })
+
     it('設定配置は validate 付きで、配置後に統合設定も検証する', () => {
       const raw = readRaw('rsyslog_server', 'tasks', 'main.yml')
       expect(raw).toContain('validate: "rsyslogd -N1 -f %s"')
