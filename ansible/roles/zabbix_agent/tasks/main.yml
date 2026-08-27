@@ -91,8 +91,10 @@
       zabbix_agent_ufw_manage is true — otherwise the agent runs and answers on loopback while
       the Zabbix server cannot reach it, and nothing fails. Set zabbix_agent_ufw_manage: false
       to leave ufw alone, or zabbix_agent_allow_no_sources: true to state that closing every
-      opening is what you mean. This role also targets Ubuntu only (the repository package URL
-      is built for it).
+      opening is what you mean. This role targets Ubuntu only (the repository package
+      URL is built for it), and Zabbix 6.0 has no release package for Ubuntu newer than
+      24.04 — use zabbix_agent_version: '7.0' there (measured against repo.zabbix.com on
+      2026-08-27).
 
 # Asserted together: a half-configured PSK either fails to start (agent refuses
 # a psk mode with no key) or, worse, is read as "encryption requested" by a
