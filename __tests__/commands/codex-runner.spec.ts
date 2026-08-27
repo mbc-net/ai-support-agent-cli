@@ -516,3 +516,139 @@ describe('codex-runner', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// chat 経路の env 上書きで Codex サンドボックスを外せないこと（A3）
+//
+// 従来 runCodex は「マージ済み env」から sandboxMode を読み戻していたため、
+// ENV#CODEX_SANDBOX_MODE=danger-full-access を設定するだけで、コンテナ境界の
+// 無いベアメタルホスト上でも Codex のサンドボックスが外れていた。
+// ---------------------------------------------------------------------------
+describe('runCodex sandbox mode is not attacker-controllable', () => {
+  const originalDockerValue = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+  const originalSandboxValue = process.env.CODEX_SANDBOX_MODE
+  const originalK8sValue = process.env.KUBERNETES_SERVICE_HOST
+
+  const spawnArgs = (): string[] => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawn } = require('child_process') as { spawn: jest.Mock }
+    return spawn.mock.calls[0][1] as string[]
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+    delete process.env.CODEX_SANDBOX_MODE
+    delete process.env.KUBERNETES_SERVICE_HOST
+    _resetCodexSandboxWarning()
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { _resetCleanEnvCache } = require('../../src/commands/claude-code-args') as {
+      _resetCleanEnvCache: () => void
+    }
+    _resetCleanEnvCache()
+  })
+
+  afterEach(() => {
+    if (originalDockerValue === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+    else process.env.AI_SUPPORT_AGENT_IN_DOCKER = originalDockerValue
+    if (originalSandboxValue === undefined) delete process.env.CODEX_SANDBOX_MODE
+    else process.env.CODEX_SANDBOX_MODE = originalSandboxValue
+    if (originalK8sValue === undefined) delete process.env.KUBERNETES_SERVICE_HOST
+    else process.env.KUBERNETES_SERVICE_HOST = originalK8sValue
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { _resetCleanEnvCache } = require('../../src/commands/claude-code-args') as {
+      _resetCleanEnvCache: () => void
+    }
+    _resetCleanEnvCache()
+  })
+
+  it('ignores CODEX_SANDBOX_MODE supplied through envVarsOverride', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawn } = require('child_process')
+    const mockProcess = createMockChildProcess()
+    spawn.mockReturnValue(mockProcess)
+
+    const sendChunk = jest.fn().mockResolvedValue(undefined)
+    const handle = runCodex({
+      message: 'hello',
+      sendChunk,
+      envVarsOverride: { CODEX_SANDBOX_MODE: 'danger-full-access' },
+    })
+    mockProcess.emit('close', 0)
+    await handle.result
+
+    const args = spawnArgs()
+    expect(args[args.indexOf('--sandbox') + 1]).toBe('workspace-write')
+    // 値そのものが子プロセスの env にも渡らないこと
+    const spawnEnv = (spawn.mock.calls[0][2] as { env: Record<string, string> }).env
+    expect(spawnEnv.CODEX_SANDBOX_MODE).toBeUndefined()
+  })
+
+  it('still honours the real process CODEX_SANDBOX_MODE (operator-set)', async () => {
+    process.env.CODEX_SANDBOX_MODE = 'read-only'
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawn } = require('child_process')
+    const mockProcess = createMockChildProcess()
+    spawn.mockReturnValue(mockProcess)
+
+    const sendChunk = jest.fn().mockResolvedValue(undefined)
+    const handle = runCodex({ message: 'hello', sendChunk })
+    mockProcess.emit('close', 0)
+    await handle.result
+
+    const args = spawnArgs()
+    expect(args[args.indexOf('--sandbox') + 1]).toBe('read-only')
+  })
+
+  it('still disables the sandbox inside Docker (container boundary provides isolation)', async () => {
+    process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawn } = require('child_process')
+    const mockProcess = createMockChildProcess()
+    spawn.mockReturnValue(mockProcess)
+
+    const sendChunk = jest.fn().mockResolvedValue(undefined)
+    const handle = runCodex({ message: 'hello', sendChunk })
+    mockProcess.emit('close', 0)
+    await handle.result
+
+    const args = spawnArgs()
+    expect(args[args.indexOf('--sandbox') + 1]).toBe('danger-full-access')
+  })
+
+  it('still disables the sandbox on Kubernetes', async () => {
+    process.env.KUBERNETES_SERVICE_HOST = '10.0.0.1'
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawn } = require('child_process')
+    const mockProcess = createMockChildProcess()
+    spawn.mockReturnValue(mockProcess)
+
+    const sendChunk = jest.fn().mockResolvedValue(undefined)
+    const handle = runCodex({ message: 'hello', sendChunk })
+    mockProcess.emit('close', 0)
+    await handle.result
+
+    const args = spawnArgs()
+    expect(args[args.indexOf('--sandbox') + 1]).toBe('danger-full-access')
+  })
+
+  it('still applies non-denylisted envVarsOverride entries to the child env', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawn } = require('child_process')
+    const mockProcess = createMockChildProcess()
+    spawn.mockReturnValue(mockProcess)
+
+    const sendChunk = jest.fn().mockResolvedValue(undefined)
+    const handle = runCodex({
+      message: 'hello',
+      sendChunk,
+      envVarsOverride: { OPENAI_MODEL: 'gpt-x', CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-xxx' },
+    })
+    mockProcess.emit('close', 0)
+    await handle.result
+
+    const spawnEnv = (spawn.mock.calls[0][2] as { env: Record<string, string> }).env
+    expect(spawnEnv.OPENAI_MODEL).toBe('gpt-x')
+    expect(spawnEnv.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat01-xxx')
+  })
+})

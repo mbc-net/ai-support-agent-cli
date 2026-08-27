@@ -204,7 +204,11 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
       outputLastMessagePath,
       mcpConfigPath,
       profile: bundledPluginProfile?.profileName,
-      sandboxMode: env.CODEX_SANDBOX_MODE,
+      // sandboxMode はここでは渡さない。マージ済み env（= Web 設定由来の
+      // envVarsOverride を含む）から読み戻すと、利用者がサンドボックスの
+      // 結論そのものを書き換えられてしまうため。実プロセスの
+      // `process.env.CODEX_SANDBOX_MODE`（運用者が設定するもの）は
+      // resolveCodexSandboxMode 側のフォールバックが参照する。
     })
     const args = [...codexInvocation.argsPrefix, ...codexArgs]
     logger.debug(`[chat] Spawning codex CLI: codex ${args.slice(0, -1).join(' ')}`)

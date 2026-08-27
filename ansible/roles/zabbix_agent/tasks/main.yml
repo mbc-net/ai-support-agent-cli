@@ -1,0 +1,480 @@
+---
+# zabbix_agent role: installs and configures the Zabbix agent on a monitored
+# host.
+#
+# Design doc: admin-docs section 4.3. Points worth repeating here:
+#
+# 1. THIS ROLE DOES NOT REGISTER THE HOST. Everything can succeed and still
+#    collect nothing, because collection needs the host to exist on the Zabbix
+#    server (autoregistration or the API). Nothing in this role can detect
+#    that; the recipe author has to arrange it.
+#
+# 2. PSK FILE != ENCRYPTION. TLSConnect / TLSAccept are the switch. Placing the
+#    key without them leaves the agent talking in the clear while looking
+#    configured, so the two are asserted together.
+#
+# 3. THE FIREWALL SOURCE IS ITS OWN VARIABLE. zabbix_agent_server may be a
+#    hostname (valid for `Server=`), and ufw rejects hostnames outright, so
+#    reusing it for the firewall breaks the role on perfectly valid input.
+#
+# 4. THE REPOSITORY URL IS PINNED TO AN INLINE LITERAL. Any role variable can
+#    be overridden from a recipe's task-level `vars:`, so pinning the default
+#    is not a control. The assert compares against the literal in this file.
+
+# The PSK path is written as a LITERAL at every use site — not a variable, and
+# not a `set_fact` either (a recipe's task-level `vars:` on `include_role` are
+# include params and override a role's own set_fact; verified against
+# ansible-core). The "remove the PSK when encryption is disabled" task below is
+# `file: state=absent` running as root, so a caller-controlled path there is an
+# arbitrary-file-deletion primitive: `/etc/passwd` with encryption off would be
+# enough. The task guard validates variable NAMES, not values, so a destructive
+# path taken as a variable is a way around it. Nothing here needs to be
+# configurable.
+- name: "zabbix_agent : Validate branch and required variables"
+  ansible.builtin.assert:
+    that:
+      # retries を直に決める値なので範囲を切る。未検証だと `86400` で 28800 回リトライ
+      # （delay 3 秒）＝1 日ハングする実行を作れてしまい、非数値だと黙って 1 回だけの
+      # 試行に潰れる（このロールの他の公開変数はすべて検証済みで、ここだけ抜けていた）。
+      - zabbix_agent_allow_no_sources is boolean
+      # 空の許可リスト ＋ ufw 管理 ON は、届かないエージェントを失敗せずに作る。
+      # 「開けない」ことが意図なら明示させる（rsyslog_server の allow_all_senders と同じ形）。
+      - >-
+        not (zabbix_agent_ufw_manage | bool)
+        or ((zabbix_agent_allowed_sources | default([]) | length) > 0)
+        or (zabbix_agent_allow_no_sources | bool)
+      # ダウンロード URL は `/ubuntu/` 固定で `ansible_distribution_version` を埋め込む。
+      # Debian 等で流すと 404 になり、原因を名指ししない「apt が取得できない」で落ちる。
+      - ansible_distribution == 'Ubuntu'
+      - (zabbix_agent_active_check_verify_seconds | string) is match('^[0-9]+$')
+      - >-
+        (zabbix_agent_active_check_verify_seconds | int) >= 3
+        and (zabbix_agent_active_check_verify_seconds | int) <= 600
+      - (zabbix_agent_version | default('')) in ['6.0', '7.0']
+      - (zabbix_agent_variant | default('')) in ['agent2', 'agent']
+      - (zabbix_agent_tls_connect | default('')) in ['unencrypted', 'psk']
+      - (zabbix_agent_tls_accept | default('')) in ['unencrypted', 'psk']
+      # `is string` guards the same trap the ssh_key role documents: an
+      # explicit null/true passes `default('')` untouched and stringifies to a
+      # non-empty value, so a length test alone would accept it.
+      # EVERY value below is written into /etc/zabbix/*.conf, which is
+      # line-oriented: a value containing a newline adds DIRECTIVES rather than
+      # breaking the file. `UserParameter=` is one of them, and it makes the
+      # agent run an arbitrary command whenever the matching key is queried —
+      # so an unvalidated Hostname or Server turns this role into remote command
+      # execution under the agent's account. The task guard validates variable
+      # NAMES, not values, so these patterns are the only barrier.
+      - zabbix_agent_server is defined and zabbix_agent_server is string
+      # Zabbix accepts more than a bare host name here: CIDRs (`192.168.1.0/24`),
+      # semicolon-separated HA lists (`node1;node2`), and bracketed IPv6
+      # (`[::1]:10051`) are all valid, so an over-narrow pattern would reject
+      # working configurations. What must be excluded is anything that could
+      # start a new configuration LINE — the file is line-oriented, and a
+      # newline would append directives such as `UserParameter=`.
+      - zabbix_agent_server is match('^[A-Za-z0-9][A-Za-z0-9.,;:_\\-/\\[\\]]*$')
+      - zabbix_agent_server_active is string
+      - zabbix_agent_server_active is match('^[A-Za-z0-9.,;:_\\-/\\[\\]]*$')
+      - zabbix_agent_hostname is string
+      # Zabbix host names may contain spaces (e.g. "Tokyo Web 01").
+      - zabbix_agent_hostname is match('^[A-Za-z0-9 ._-]*$')
+      - (zabbix_agent_listen_port | string) is match('^[0-9]+$')
+      - (zabbix_agent_listen_port | int) > 0 and (zabbix_agent_listen_port | int) < 65536
+      - zabbix_agent_ufw_manage is boolean
+    fail_msg: >-
+      zabbix_agent is misconfigured. zabbix_agent_version must be an LTS
+      release ('6.0' or '7.0', got {{ zabbix_agent_version | default('') | to_json }});
+      zabbix_agent_variant must be 'agent2' or 'agent';
+      zabbix_agent_tls_connect / zabbix_agent_tls_accept must be 'unencrypted'
+      or 'psk'; zabbix_agent_server is required (the Zabbix server this agent
+      accepts checks from — a hostname is fine here).
+      zabbix_agent requires zabbix_agent_allowed_sources to list at least one IP/CIDR when
+      zabbix_agent_ufw_manage is true — otherwise the agent runs and answers on loopback while
+      the Zabbix server cannot reach it, and nothing fails. Set zabbix_agent_ufw_manage: false
+      to leave ufw alone, or zabbix_agent_allow_no_sources: true to state that closing every
+      opening is what you mean. This role targets Ubuntu only (the repository package
+      URL is built for it), and Zabbix 6.0 has no release package for Ubuntu newer than
+      24.04 — use zabbix_agent_version: '7.0' there (measured against repo.zabbix.com on
+      2026-08-27).
+
+# Asserted together: a half-configured PSK either fails to start (agent refuses
+# a psk mode with no key) or, worse, is read as "encryption requested" by a
+# human while the config says otherwise.
+- name: "zabbix_agent : Validate the PSK settings are complete when encryption is enabled"
+  ansible.builtin.assert:
+    that:
+      # The identity is written into the config file (same line-oriented
+      # injection risk as above); the key goes into its own 0600 file and must
+      # be the hex string Zabbix expects (>= 32 hex digits).
+      # Neither value is echoed in the failure message.
+      - zabbix_agent_psk_identity is string
+      - zabbix_agent_psk_identity is match('^[A-Za-z0-9._:-]+$')
+      - zabbix_agent_psk is string
+      - zabbix_agent_psk is match('^[0-9a-fA-F]{32,}$')
+    fail_msg: >-
+      zabbix_agent_tls_connect / zabbix_agent_tls_accept requested 'psk', so
+      zabbix_agent_psk_identity and zabbix_agent_psk must both be set
+      zabbix_agent_psk_identity must be [A-Za-z0-9._:-] only (it is written into
+      the agent config, where a newline would add directives such as
+      UserParameter=), and zabbix_agent_psk must be at least 32 hex digits
+      (it should reference an ANSIBLE# secret variable).
+  when: zabbix_agent_tls_connect == 'psk' or zabbix_agent_tls_accept == 'psk'
+
+# `Server=` は Zabbix 自身のアプリケーション層の送信元許可リストである。`0.0.0.0/0` を
+# 書くとその許可リストが無効化され、全 IPv4 からのパッシブチェックを受け付ける。
+# ufw を管理しない構成（`zabbix_agent_ufw_manage: false`、あるいは ufw が無効なホスト）
+# では、既定の `TLSAccept=unencrypted` と相まってエージェントポートが実質全開放になる。
+#
+# `zabbix_agent_allowed_sources` は既に `/0` を意味検証で拒否しており、rsyslog_server も
+# 全許可には明示フラグを要求している。ここだけ素通りするのは非対称であり、
+# 一番効く場所（アプリ層の許可リスト）が最も緩いという逆転になっていた。
+- name: "zabbix_agent : Reject a fully-open Server= entry"
+  ansible.builtin.assert:
+    that:
+      - item | trim not in ['0.0.0.0/0', '::/0']
+    fail_msg: >-
+      zabbix_agent_server must not contain {{ item | to_json }}. `Server=` is Zabbix's own
+      allow-list for passive checks, so a /0 entry disables it entirely and the agent accepts
+      checks from any host. This role does not enable ufw, so on a host where ufw is off (or
+      zabbix_agent_ufw_manage is false) that leaves the agent port effectively open — and with
+      the default TLSAccept=unencrypted, unauthenticated. List the collectors explicitly.
+  loop: >-
+    {{ (zabbix_agent_server | default('')) | split(',') | map('split', ';') | flatten }}
+
+- name: "zabbix_agent : Validate the firewall sources are addresses, not hostnames"
+  ansible.builtin.assert:
+    that:
+      - item is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$')
+      # 文字形だけでは 999.999.999.999/99 も 0.0.0.0/0 も通ってしまう。前者は不正
+      # アドレス、後者は「全開放」であり、送信元を絞るという目的そのものを無効にする
+      # （rsyslog の $AllowedSender も IPv4 の /0 を受け付けない）。意味で検証する。
+      - item.split('/')[0].split('.') | map('int') | select('>', 255) | list | length == 0
+      - (item.split('/') | length == 1) or ((item.split('/')[1] | int) >= 1 and (item.split('/')[1] | int) <= 32)
+    fail_msg: >-
+      zabbix_agent_allowed_sources must contain IPv4 addresses or CIDRs only
+      (got {{ item | to_json }}). ufw rejects hostnames with "Bad source
+      address", which would fail this role. Note that zabbix_agent_server is a
+      DIFFERENT variable and may hold a hostname.
+  loop: "{{ zabbix_agent_allowed_sources | default([]) }}"
+
+# Deliberately NOT `ansible.builtin.setup` here. The production play disables
+# implicit fact gathering and collects facts in a precheck task run with
+# `become: false`, because the setup module inherited under the play's
+# `become: true` fails outright on any host whose SSH user lacks NOPASSWD sudo
+# ("interactive authentication is required") — see generatePlaybook() in
+# src/server-setup/server-setup-runner.ts. Re-gathering here would reintroduce
+# exactly that failure. Assert the precondition instead, so a missing fact
+# produces a message that names the cause.
+- name: "zabbix_agent : Require the OS facts the repository package URL is built from"
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution_version is defined
+    fail_msg: >-
+      ansible_distribution_version is not available. The Zabbix repository
+      package URL is built from it. The server-setup runner gathers this fact in
+      a precheck task; when running this role outside that runner, gather facts
+      with `become: false` before including it (gathering under become fails on
+      hosts without NOPASSWD sudo).
+
+# The download host is an INLINE LITERAL, and that is the whole protection.
+# Only `zabbix_agent_version` is interpolated, and it is enum-checked above.
+# There is deliberately no `zabbix_agent_repo_url` variable: a recipe's
+# task-level `vars:` on `include_role` are include params, which outrank both
+# role vars and anything this role sets, so any variable holding the host could
+# be redirected by the caller. (The guard's INCLUDE_ROLE_ALLOWED_VARS would also
+# have to be relied on; keeping the host out of the variable space means it
+# cannot be reached at all.) A previous version asserted `'https://repo.zabbix.com/'
+# in zabbix_agent_repo_url` with the variable defined in that assert's own
+# `vars:` — a tautology that could never fail and protected nothing.
+- name: "zabbix_agent : Install the Zabbix repository package"
+  ansible.builtin.apt:
+    deb: >-
+      https://repo.zabbix.com/zabbix/{{ zabbix_agent_version }}/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_{{ zabbix_agent_version }}+ubuntu{{ ansible_distribution_version }}_all.deb
+    state: present
+    # 同上。7.0 → 6.0 ではリポジトリパッケージ自体も降格になる。
+    allow_downgrade: true
+  register: zabbix_agent_repo_pkg
+
+# `state: latest` rather than `present`: with `present` an already-installed
+# agent is left alone, so pointing the role at a different LTS (6.0 -> 7.0)
+# swaps the repository and then silently keeps the old binary. The version is
+# pinned by which repository is configured above, so `latest` converges within
+# that LTS rather than tracking upstream freely.
+- name: "zabbix_agent : Install the Zabbix agent"
+  ansible.builtin.apt:
+    name: "{{ 'zabbix-agent2' if zabbix_agent_variant == 'agent2' else 'zabbix-agent' }}"
+    state: latest
+    update_cache: true
+    # zabbix_agent_version は 6.0 と 7.0 を双方向に切り替えられる公開変数だが、apt の既定は
+    # allow_downgrade: false。7.0 が入ったホストを 6.0 へ戻すとパッケージが降格できず、
+    # リポジトリだけ 6.0 を指したまま 7.0 のバイナリが残る——実行は成功するのに版が変わらない。
+    allow_downgrade: true
+  notify: Restart zabbix agent
+
+# Switching variant leaves the other flavour installed and enabled otherwise.
+# Both bind the same port, so the retired one either keeps the port and blocks
+# the new agent, or quietly keeps reporting alongside it.
+- name: "zabbix_agent : Stop and disable the other agent flavour"
+  ansible.builtin.service:
+    name: "{{ 'zabbix-agent' if zabbix_agent_variant == 'agent2' else 'zabbix-agent2' }}"
+    state: stopped
+    enabled: false
+  register: zabbix_agent_other_service
+  failed_when: false
+
+- name: "zabbix_agent : Remove the other agent flavour"
+  ansible.builtin.apt:
+    name: "{{ 'zabbix-agent' if zabbix_agent_variant == 'agent2' else 'zabbix-agent2' }}"
+    state: absent
+    purge: true
+
+- name: "zabbix_agent : Deploy the PSK file"
+  # No task-level `no_log`: `copy`'s `content` is declared no_log in the
+  # module's own argument spec and is redacted at every verbosity. Adding
+  # `no_log` here would not improve secrecy and WOULD replace a real failure
+  # (bad path, permissions, full disk) with a bare "task failed".
+  ansible.builtin.copy:
+    content: "{{ zabbix_agent_psk }}"
+    dest: /etc/zabbix/zabbix_agent.psk
+    owner: zabbix
+    group: zabbix
+    mode: "0600"
+  when: zabbix_agent_tls_connect == 'psk' or zabbix_agent_tls_accept == 'psk'
+  notify: Restart zabbix agent
+
+# Turning encryption back off must take the key with it. Otherwise a retired
+# secret sits on the host indefinitely, still readable and still able to come
+# back through a later misconfiguration or a backup.
+- name: "zabbix_agent : Remove the PSK file when encryption is disabled"
+  ansible.builtin.file:
+    path: /etc/zabbix/zabbix_agent.psk
+    state: absent
+  when:
+    - zabbix_agent_tls_connect != 'psk'
+    - zabbix_agent_tls_accept != 'psk'
+  notify: Restart zabbix agent
+
+- name: "zabbix_agent : Ensure the Include directory exists"
+  ansible.builtin.file:
+    path: "/etc/zabbix/{{ 'zabbix_agent2.d' if zabbix_agent_variant == 'agent2' else 'zabbix_agentd.d' }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "zabbix_agent : Deploy the agent configuration"
+  ansible.builtin.template:
+    src: zabbix_agent.conf.j2
+    dest: "/etc/zabbix/{{ 'zabbix_agent2.conf' if zabbix_agent_variant == 'agent2' else 'zabbix_agentd.conf' }}"
+    owner: root
+    group: zabbix
+    mode: "0640"
+  notify: Restart zabbix agent
+
+# Handlers before the health check: probing the still-running old process would
+# report success on a configuration that never took effect.
+- name: "zabbix_agent : Apply pending restarts before checking health"
+  ansible.builtin.meta: flush_handlers
+
+- name: "zabbix_agent : Ensure the agent is enabled and running"
+  ansible.builtin.service:
+    name: "{{ 'zabbix-agent2' if zabbix_agent_variant == 'agent2' else 'zabbix-agent' }}"
+    state: started
+    enabled: true
+
+- name: "zabbix_agent : Verify the agent is active"
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - "{{ 'zabbix-agent2' if zabbix_agent_variant == 'agent2' else 'zabbix-agent' }}"
+  register: zabbix_agent_is_active
+  changed_when: false
+  failed_when: zabbix_agent_is_active.stdout.strip() != 'active'
+
+# `is-active` alone is not enough: a bad Server= or an unusable PSK leaves the
+# unit running while the agent rejects every check.
+- name: "zabbix_agent : Verify the agent port is accepting connections"
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ zabbix_agent_listen_port }}"
+    timeout: 15
+  when: zabbix_agent_tls_accept == 'unencrypted'
+
+# Under PSK the agent rejects unencrypted probes, so a plain TCP connect cannot
+# confirm health — but the socket must still be BOUND. Checking that separates
+# "listening, refusing our unauthenticated probe" (fine) from "never came up"
+# (a real failure that would otherwise pass unnoticed).
+- name: "zabbix_agent : Read the agent's main PID"
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - -p
+      - MainPID
+      - --value
+      - "{{ 'zabbix-agent2' if zabbix_agent_variant == 'agent2' else 'zabbix-agent' }}"
+  register: zabbix_agent_main_pid
+  changed_when: false
+  when: zabbix_agent_tls_accept == 'psk'
+
+- name: "zabbix_agent : Read the TCP sockets bound to the agent port"
+  ansible.builtin.command:
+    argv:
+      - ss
+      - -H
+      - -tlnp
+      - "sport = :{{ zabbix_agent_listen_port }}"
+  register: zabbix_agent_psk_socket
+  changed_when: false
+  when: zabbix_agent_tls_accept == 'psk'
+
+# 「ポートが埋まっている」ではなく「このエージェントが握っている」まで見る。
+# 退役した旧 flavour や無関係なプロセスが 10050 を先に握っていると、素のポート確認は
+# 成功するのにエージェントは bind できていない——`rsyslog_server` が同じ理由で
+# MainPID との照合を入れており、こちらだけ素通りだったのは兄弟経路の非対称である。
+# PID の突き合わせは部分一致にしない（`ss -p` は `pid=N,` の形で出すので、`pid=12` は
+# `pid=123` にも当たる）。直後の `,` まで含めて照合する。
+- name: "zabbix_agent : Verify the agent port is bound under PSK"
+  ansible.builtin.assert:
+    that:
+      - >-
+        zabbix_agent_psk_socket.stdout_lines
+        | select('search', 'pid=' ~ (zabbix_agent_main_pid.stdout | default('') | trim) ~ ',')
+        | list | length > 0
+    fail_msg: >-
+      TLSAccept=psk and the running agent (main pid
+      {{ zabbix_agent_main_pid.stdout | default('?') | trim }}) does not own a TCP socket on
+      port {{ zabbix_agent_listen_port }}. The service reports active, so either the agent
+      rejected its own TLS configuration at start-up (bad PSK identity or an unreadable key
+      file), or another process holds the port. A plain connect cannot be used here because
+      the agent only answers PSK peers, so this checks socket ownership instead of the
+      response. Sockets on this port:
+      {{ zabbix_agent_psk_socket.stdout | default('(none)') | trim }}
+  when: zabbix_agent_tls_accept == 'psk'
+
+# Active checks are the other half of the agent's job and fail INDEPENDENTLY of
+# the passive port: the agent dials out to ServerActive, and a wrong address or
+# a PSK mismatch there leaves the unit active and the port answering while not
+# a single active item is collected.
+# Scope the log read to THIS start of the unit. `--since '1 min ago'` is wall
+# clock: fix a bad ServerActive and re-run within a minute and the previous
+# run's error is still inside the window, failing a configuration that is now
+# correct. systemd's invocation ID identifies the current start exactly.
+- name: "zabbix_agent : Read the current invocation ID of the agent unit"
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - -p
+      - InvocationID
+      - --value
+      - "{{ 'zabbix-agent2' if zabbix_agent_variant == 'agent2' else 'zabbix-agent' }}"
+  register: zabbix_agent_invocation
+  changed_when: false
+  failed_when: false
+  when: (zabbix_agent_server_active | trim | length) > 0
+
+# 再起動直後に1回だけ読むと、まだ何も書かれていないログを見て「エラー無し＝成功」と
+# 判定してしまう（active check は非同期に走るため、誤ったサーバー名・未登録ホスト・
+# PSK 不一致でも、その瞬間のログは空になり得る）。空のまま素通りさせず、
+# 「このプロセスが何かを書くまで」待つ。
+#
+# 待つ条件を「起動メッセージの文言」にはしない。文言は Zabbix のバージョンと
+# agent/agent2 で異なり、実機で確認できていない文字列を合格条件にすると、
+# 文言が変わった瞬間に全ホストで失敗する。ここで見るのは「このインボケーションの
+# ログが空でないこと」だけで、合否は既知の失敗シグネチャの有無で決める。
+- name: "zabbix_agent : Read the agent log for the current start"
+  ansible.builtin.command:
+    argv:
+      - journalctl
+      - "_SYSTEMD_INVOCATION_ID={{ zabbix_agent_invocation.stdout | trim }}"
+      - --no-pager
+  register: zabbix_agent_journal
+  changed_when: false
+  failed_when: false
+  # 待つのは「何か書かれるまで」ではない。エージェントは起動直後に自分の開始
+  # メッセージを出すので、その条件だと**初回の試行で成立してしまい**、
+  # ServerActive への接続を試す前のログを見て「エラー無し＝成功」と判定する。
+  # 直前の実装がまさにこれで、fail-open が残っていた。
+  #
+  # ここでは**既知の失敗シグネチャが出るまで**待つ。出れば即座に抜けて下の
+  # `fail` が拾う（速く落ちる）。出ないまま時間切れになったら、それが合格の
+  # 条件である（「この時間内に失敗の兆候が出なかった」以上のことは主張しない）。
+  # `until` が満たされないまま retries を使い切った場合でも `failed_when: false`
+  # によりプレイは止まらず、下の判定へ進む。
+  retries: "{{ ((zabbix_agent_active_check_verify_seconds | int) / 3) | round(0, 'ceil') | int }}"
+  delay: 3
+  until: >-
+    zabbix_agent_journal.rc != 0
+    or (zabbix_agent_journal.stdout | default('') | lower) is search('cannot connect to')
+    or ((zabbix_agent_journal.stdout | default('') | lower) is search('active check configuration update')
+        and (zabbix_agent_journal.stdout | default('') | lower) is search('cannot'))
+    or ((zabbix_agent_journal.stdout | default('') | lower) is search('not found')
+        and (zabbix_agent_journal.stdout | default('') | lower) is search('host'))
+    or ((zabbix_agent_journal.stdout | default('') | lower) is search('tls')
+        and ((zabbix_agent_journal.stdout | default('') | lower) is search('failed')
+             or (zabbix_agent_journal.stdout | default('') | lower) is search('error')))
+  when:
+    - (zabbix_agent_server_active | trim | length) > 0
+    - (zabbix_agent_invocation.stdout | default('') | trim | length) > 0
+
+# Not being able to READ the log is different from the log being clean, and must
+# not be reported as the latter. Without this the whole active-check
+# verification disappears silently on any host where journalctl is unavailable,
+# leaving the operator believing it passed.
+- name: "zabbix_agent : Fail if the agent log could not be read"
+  ansible.builtin.fail:
+    msg: >-
+      Could not read the agent's log for its current start
+      (invocation id: {{ zabbix_agent_invocation.stdout | default('') | trim | default('(none)', true) }},
+      journalctl rc: {{ zabbix_agent_journal.rc | default('(not run)') }}).
+      ServerActive is configured, so active checks are the only part of this
+      role's job that nothing else verifies — reporting success without having
+      checked would hide a broken configuration. Ensure systemd-journald is
+      available on this host. If the log stayed empty for
+      {{ zabbix_agent_active_check_verify_seconds }}s, the agent wrote nothing at
+      all for this start; raise zabbix_agent_active_check_verify_seconds on a slow
+      host, or check that the service actually started.
+  when:
+    - (zabbix_agent_server_active | trim | length) > 0
+    - (zabbix_agent_invocation.stdout | default('') | trim | length) == 0
+      or (zabbix_agent_journal.rc | default(1)) != 0
+      or (zabbix_agent_journal.stdout | default('') | trim | length) == 0
+
+- name: "zabbix_agent : Fail if the agent could not reach ServerActive"
+  # OR over the failure phrasings, not an AND over two fragments of one of them:
+  # the wording differs between the C agent and agent2 and between releases, and
+  # an AND that misses simply reports success. Host-not-registered is included
+  # because it produces exactly the symptom this check exists for — the agent
+  # runs, the port answers, and no item is ever collected.
+  ansible.builtin.fail:
+    msg: >-
+      The agent started but reported a problem talking to ServerActive
+      ({{ zabbix_agent_server_active }}). Active checks would collect nothing
+      while the service stays active and the passive port answers. Check the
+      address, that this host is registered on the Zabbix server, and (under
+      PSK) that the identity and key match. Log for this start:
+      {{ zabbix_agent_journal.stdout | default('(unavailable)') }}
+  vars:
+    zabbix_agent_log: "{{ zabbix_agent_journal.stdout | default('') | lower }}"
+  when:
+    - (zabbix_agent_server_active | trim | length) > 0
+    - (zabbix_agent_journal.rc | default(1)) == 0
+    - >-
+      'cannot connect to' in zabbix_agent_log
+      or 'active check configuration update' in zabbix_agent_log and 'cannot' in zabbix_agent_log
+      or 'not found' in zabbix_agent_log and 'host' in zabbix_agent_log
+      or 'tls' in zabbix_agent_log and ('failed' in zabbix_agent_log or 'error' in zabbix_agent_log)
+
+- name: "zabbix_agent : Report that host registration is still required"
+  ansible.builtin.debug:
+    msg: >-
+      The agent is installed and running. It will NOT collect anything until
+      this host exists on the Zabbix server — configure autoregistration
+      (server-side action) or create the host via the Zabbix API. Hostname
+      reported by this agent:
+      {{ zabbix_agent_hostname if (zabbix_agent_hostname | trim | length > 0) else '(OS hostname)' }}.
+
+- name: "zabbix_agent : Converge the firewall rules"
+  ansible.builtin.include_tasks: ufw.yml
+  when: zabbix_agent_ufw_manage | bool

@@ -490,6 +490,12 @@ ${httpCredentialsLine}  },
 /** Filename of the preload patch module written into the run directory. */
 const STEP_SCREENSHOT_PATCH_FILENAME = 'step-screenshot-patch.js'
 
+/** 実行ディレクトリの権限（所有者のみアクセス可） */
+const RUN_DIR_MODE = 0o700
+
+/** 実行ディレクトリに生成するファイルの権限（所有者のみ読み書き） */
+const RUN_FILE_MODE = 0o600
+
 /**
  * Preload module injected into the Playwright subprocess via
  * `NODE_OPTIONS=--require`. It monkeypatches `@playwright/test` so that after
@@ -721,26 +727,31 @@ export async function runPlaywrightSubprocess(
   const resultFile = path.join(runDir, 'result.json')
 
   try {
-    await fs.mkdir(runDir, { recursive: true })
+    // 実行ディレクトリのパスは executionId から予測できるため、同一ホストの他ユーザーが
+    // 先回りしてディレクトリを作ったり spec をシンボリックリンクに差し替えたりできないよう
+    // 所有者のみアクセス可にする。既存ディレクトリには mkdir の mode が効かないため
+    // chmod も併用する。
+    await fs.mkdir(runDir, { recursive: true, mode: RUN_DIR_MODE })
+    await fs.chmod(runDir, RUN_DIR_MODE)
 
     // Expand support files first so the spec and config (written below)
     // always win if a support file path collides with them.
     for (const file of supportFiles ?? []) {
       const dest = resolveSupportFilePath(runDir, file.path)
-      await fs.mkdir(path.dirname(dest), { recursive: true })
-      await fs.writeFile(dest, file.content, 'utf-8')
+      await fs.mkdir(path.dirname(dest), { recursive: true, mode: RUN_DIR_MODE })
+      await fs.writeFile(dest, file.content, { encoding: 'utf-8', mode: RUN_FILE_MODE })
     }
 
     // Write the test script and the per-run Playwright config
-    await fs.writeFile(specFile, script, 'utf-8')
-    await fs.writeFile(configFile, buildRunConfig(httpCredentials !== undefined), 'utf-8')
+    await fs.writeFile(specFile, script, { encoding: 'utf-8', mode: RUN_FILE_MODE })
+    await fs.writeFile(configFile, buildRunConfig(httpCredentials !== undefined), { encoding: 'utf-8', mode: RUN_FILE_MODE })
 
     // Write the harness-level step-screenshot preload module unless disabled.
     // When present, its path is injected into the child's NODE_OPTIONS below.
     let patchModulePath: string | undefined
     if (captureStepScreenshots) {
       patchModulePath = path.join(runDir, STEP_SCREENSHOT_PATCH_FILENAME)
-      await fs.writeFile(patchModulePath, STEP_SCREENSHOT_PATCH_TEMPLATE, 'utf-8')
+      await fs.writeFile(patchModulePath, STEP_SCREENSHOT_PATCH_TEMPLATE, { encoding: 'utf-8', mode: RUN_FILE_MODE })
     }
 
     // Run Playwright subprocess

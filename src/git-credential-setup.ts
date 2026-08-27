@@ -9,6 +9,7 @@ import type { ProjectConfigResponse } from './types'
 import { atomicWriteFile, getErrorMessage } from './utils'
 import { GENERAL_KNOWN_HOSTS_ID, resolveKnownHostsPath } from './utils/known-hosts-store'
 import { normalizePemKey } from './utils/pem-key'
+import { shellQuote } from './utils/shell-quote'
 import { createSecureTempFile, safeUnlink } from './utils/temp-file'
 
 export interface GitCredentialResult {
@@ -59,6 +60,30 @@ export function extractPathFromUrl(url: string): string {
 }
 
 /**
+ * 生成シェルスクリプトへ埋め込む URL 由来値（host / pathPrefix）で拒否する文字。
+ * C0 制御文字・空白（U+0000〜U+0020）と DEL。
+ *
+ * 埋め込み時の注入対策は `shellQuote` が担う（単一引用符で包み、値の中身は
+ * すべてリテラルとして扱われる）。したがってここで文字種を allowlist で絞る必要は
+ * なく、むしろ絞りすぎると **正規のリポジトリ URL を取りこぼす**：
+ *   - 非 ASCII のリポジトリ名は `new URL().pathname` が `%XX` に変換するため `%` を含む
+ *   - Bitbucket Server の個人プロジェクト規約は `~username` で `~` を含む
+ *   - リポジトリ名に `+` を含む構成もある
+ * 取りこぼすと当該リポジトリだけ認証情報が付かず、「private repo の clone が
+ * 恒常的に失敗する」という原因の分かりにくい形でしか現れない。
+ *
+ * 一方、正規のホスト名・リポジトリパスに制御文字や生の空白は現れない（URL パーサは
+ * 空白を `%20` に変換する）。これらは生成スクリプトの行構造を壊しうるため、
+ * 「URL の取得に失敗した」ケースと同じ扱い（warn + skip）にする。
+ */
+const UNSAFE_URL_COMPONENT_PATTERN = /[\u0000-\u0020\u007F]/
+
+/** URL 由来値が生成スクリプトへ埋め込める形か */
+export function isSafeUrlComponent(value: string): boolean {
+  return value.length > 0 && !UNSAFE_URL_COMPONENT_PATTERN.test(value)
+}
+
+/**
  * SSHラッパースクリプトを生成する
  * ホスト名に応じて適切なSSH鍵を選択する
  */
@@ -66,15 +91,18 @@ export function buildSshWrapperScript(
   entries: { host: string; keyPath: string; knownHostsPath: string | undefined }[],
   fallbackKnownHostsPath: string | undefined,
 ): string {
+  // host / keyPath / knownHostsPath はいずれも設定由来の値なので、シェルのメタ文字が
+  // そのまま解釈されないよう単一引用符でクォートしてから埋め込む。ホスト一致判定も
+  // `case` パターン（クォートしても glob として解釈される）ではなく `[` の文字列比較で行う。
   const cases = entries.map((entry) => {
     const hostCheckFlags = entry.knownHostsPath
-      ? `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${entry.knownHostsPath}"`
+      ? `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${shellQuote(entry.knownHostsPath)}`
       : SSH_NO_HOST_CHECK_FLAGS
-    return `  ${entry.host})\n    exec ssh -i "${entry.keyPath}" ${hostCheckFlags} "$@"\n    ;;`
+    return `if [ "$HOST" = ${shellQuote(entry.host)} ]; then\n  exec ssh -i ${shellQuote(entry.keyPath)} ${hostCheckFlags} "$@"\nfi`
   }).join('\n')
 
   const fallbackFlags = fallbackKnownHostsPath
-    ? `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${fallbackKnownHostsPath}"`
+    ? `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${shellQuote(fallbackKnownHostsPath)}`
     : SSH_NO_HOST_CHECK_FLAGS
 
   return `#!/bin/sh
@@ -99,12 +127,8 @@ for arg in "$@"; do
   esac
 done
 
-case "$HOST" in
 ${cases}
-  *)
-    exec ssh ${fallbackFlags} "$@"
-    ;;
-esac
+exec ssh ${fallbackFlags} "$@"
 `
 }
 
@@ -113,14 +137,21 @@ esac
  * stdin から protocol/host/path を読み取り、一致するリポジトリのトークンを返す
  */
 export function buildCredentialHelperScript(entries: { host: string; pathPrefix: string; token: string }[]): string {
-  const conditions = entries.map((entry) => {
-    return `  if [ "$host" = "${entry.host}" ]; then
+  // host / pathPrefix / token は設定由来の値。単一引用符でクォートしたうえで
+  // シェル変数へ代入し、`case` のパターンは変数展開（`"$prefixN"`）で参照する。
+  // `case` のパターン部分は変数を経由しない限りクォートが効かず、`)` や `;;` を
+  // 含む値でそのままスクリプトを抜け出せてしまうため。
+  // トークンの出力も `echo "...$(...)..."` ではなく `printf '%s\n'` を使う。
+  const conditions = entries.map((entry, index) => {
+    return `  if [ "$host" = ${shellQuote(entry.host)} ]; then
+    prefix${index}=${shellQuote(entry.pathPrefix)}
+    token${index}=${shellQuote(entry.token)}
     case "$path" in
-      ${entry.pathPrefix}*)
-        echo "protocol=$protocol"
-        echo "host=$host"
-        echo "username=x-access-token"
-        echo "password=${entry.token}"
+      "$prefix${index}"*)
+        printf '%s\n' "protocol=$protocol"
+        printf '%s\n' "host=$host"
+        printf '%s\n' 'username=x-access-token'
+        printf '%s\n' "password=$token${index}"
         exit 0
         ;;
     esac
@@ -178,11 +209,19 @@ export async function buildGitCredentialEnv(
         logger.warn(`[git-cred] Could not extract host from URL for repository ${repo.repositoryName}`)
         continue
       }
+      if (!isSafeUrlComponent(host)) {
+        logger.warn(`[git-cred] Host extracted from URL contains unsupported characters for repository ${repo.repositoryName}`)
+        continue
+      }
 
       if (credentials.authMethod === 'ssh') {
         await addSshEntry(credentials.authSecret, host, tenantCode, sshEntries, tempFiles)
       } else {
         const pathPrefix = extractPathFromUrl(credentials.repositoryUrl)
+        if (!isSafeUrlComponent(pathPrefix)) {
+          logger.warn(`[git-cred] Path extracted from URL contains unsupported characters for repository ${repo.repositoryName}`)
+          continue
+        }
         httpsEntries.push({ host, pathPrefix, token: credentials.authSecret })
       }
     } catch (error) {

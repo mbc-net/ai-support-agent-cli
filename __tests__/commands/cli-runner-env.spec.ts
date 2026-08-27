@@ -53,6 +53,57 @@ describe('cli-runner-env', () => {
       expect(env).toEqual({ FOO: 'new', BAR: 'baz' })
     })
 
+    // ------------------------------------------------------------------
+    // chat 実行経路も agent 側 denylist（env-vars-filter）を通す（A3）
+    //
+    // 従来 applyEnvVarsOverride は名前検証も denylist も無く env へ書き込んで
+    // いたため、terminal / vscode 経路にだけ効いていた防御を chat 経路が
+    // 素通りしていた。
+    // ------------------------------------------------------------------
+    it.each([
+      ['PATH', '/attacker/bin'],
+      ['LD_PRELOAD', '/attacker/evil.so'],
+      ['NODE_OPTIONS', '--require /attacker/evil.js'],
+      ['ZDOTDIR', '/attacker/zdotdir'],
+      ['CODEX_HOME', '/attacker/codex'],
+      ['CODEX_SANDBOX_MODE', 'danger-full-access'],
+      ['KUBERNETES_SERVICE_HOST', '10.0.0.1'],
+      ['AI_SUPPORT_TENANT_CODE', 'other-tenant'],
+      ['BASH_FUNC_x%%', '() { id; }'],
+      ['DYLD_INSERT_LIBRARIES', '/attacker/evil.dylib'],
+      ['PLAYWRIGHT_BROWSERS_PATH', '/attacker/browsers'],
+    ])('does not apply denylisted env %s', (key, value) => {
+      const env: Record<string, string> = {}
+      applyEnvVarsOverride(env, { [key]: value, SAFE: 'ok' })
+      expect(env).toEqual({ SAFE: 'ok' })
+    })
+
+    it('does not let a denylisted key overwrite an existing env value', () => {
+      const env: Record<string, string> = { PATH: '/usr/bin' }
+      applyEnvVarsOverride(env, { PATH: '/attacker/bin' })
+      expect(env.PATH).toBe('/usr/bin')
+    })
+
+    it('skips env names that do not match the API-side name pattern', () => {
+      const env: Record<string, string> = {}
+      applyEnvVarsOverride(env, { 'lower_case': 'x', '1LEADING_DIGIT': 'x', 'HAS-DASH': 'x', OK_NAME: 'ok' })
+      expect(env).toEqual({ OK_NAME: 'ok' })
+    })
+
+    // 回帰対策: CLAUDE_CODE_OAUTH_TOKEN は api 側が CLAUDE_CODE#OAUTH_TOKEN を
+    // 正規にマップして送ってくる env 名そのもの。これを弾くと OAuth 認証経路が壊れる。
+    it('still applies CLAUDE_CODE_OAUTH_TOKEN (OAuth path must keep working)', () => {
+      const env: Record<string, string> = {}
+      applyEnvVarsOverride(env, { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-xxx' })
+      expect(env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-xxx' })
+    })
+
+    it('rejects other CLAUDE_CODE_* keys', () => {
+      const env: Record<string, string> = {}
+      applyEnvVarsOverride(env, { CLAUDE_CODE_SSE_PORT: '1234' })
+      expect(env).toEqual({})
+    })
+
     it('skips empty-string and non-string values', () => {
       const env: Record<string, string> = {}
       applyEnvVarsOverride(env, {

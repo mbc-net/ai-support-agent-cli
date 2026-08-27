@@ -1,0 +1,16 @@
+---
+# The base image ships without rsyslog; install it here so `converge` measures
+# the role's own behaviour rather than a first-time package install.
+- name: Prepare
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "prepare : Install rsyslog and ufw"
+      ansible.builtin.apt:
+        name:
+          - rsyslog
+          - ufw
+        state: present
+        update_cache: true

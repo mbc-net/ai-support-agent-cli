@@ -226,6 +226,33 @@ describe('read-conversation-file tool', () => {
       expect(fs.readFileSync(tmpFilePath)).toEqual(pdfBuffer)
     })
 
+    // 会話添付は業務データ（証明書・鍵・顧客情報等）を含み得るため、共有 /tmp 上で
+    // 同一ホストの他ユーザーから読めてはならない（project-files.ts と同一方針）。
+    it('should create the temp dir 0700 and the file 0600', async () => {
+      const mockClient = {
+        getDownloadUrl: jest.fn().mockResolvedValue({
+          downloadUrl: 'https://s3.example.com/secret.pdf',
+        }),
+      } as unknown as ApiClient
+
+      setupTool(mockClient)
+      mockedAxios.get.mockResolvedValue({ data: Buffer.from('private-key') })
+
+      const result = await toolCallback({
+        fileId: 'file-secret',
+        s3Key: 'uploads/file-secret.pdf',
+        filename: 'document.pdf',
+      }) as { content: Array<{ text: string }> }
+
+      const tmpFilePath = (result.content[0].text.match(/downloaded to: (.+)/) as RegExpMatchArray)[1].trim()
+      try {
+        expect(fs.statSync(tmpFilePath).mode & 0o777).toBe(0o600)
+        expect(fs.statSync(path.dirname(tmpFilePath)).mode & 0o777).toBe(0o700)
+      } finally {
+        fs.unlinkSync(tmpFilePath)
+      }
+    })
+
     it('should download xlsx to temp file and return path', async () => {
       const mockClient = {
         getDownloadUrl: jest.fn().mockResolvedValue({

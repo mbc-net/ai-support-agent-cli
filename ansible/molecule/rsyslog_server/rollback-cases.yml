@@ -1,0 +1,174 @@
+---
+# 設定のロールバック 3 分岐を実際に通す。
+#
+# 全体検証（`rsyslogd -N1`）だけを失敗させる必要がある。断片単位の `validate:` は
+# このロールが書く断片しか見ないので、**別の断片**を壊せば「自分の断片は正しいのに
+# 全体が通らない」状況を作れる。これは分岐③そのものであり、①②の前提でもある。
+#
+# ここで検証するのは次の3つ。どれも「失敗しても壊れた状態を残さない」ための分岐で、
+# 分岐を取り違えると**正しい設定ファイルを消す**という最悪の結果になる。
+#
+#   ① 新規作成 → 検証失敗 → 作ったファイルを消す（元々無かったので戻す先が無い）
+#   ② 上書き   → 検証失敗 → バックアップから戻す
+#   ③ 内容が同一（＝バックアップが作られない）で、別断片が原因で失敗
+#      → 消しも戻しもしない。ここで「backup_file が無い＝新規作成だった」と
+#        判断すると、既存の正しいファイルを削除してしまう
+- name: "verify(rollback) : Plant a broken rsyslog fragment"
+  ansible.builtin.copy:
+    content: |
+      # 壊れた断片。全体検証だけを失敗させるために置く。
+      this is not a valid rsyslog directive {{ '{' }}
+    dest: /etc/rsyslog.d/99-molecule-broken.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+# --- 分岐①: 新規作成 → 失敗 → 削除 ---------------------------------------
+- name: "verify(rollback) : Remove the receiver config so the next run creates it"
+  ansible.builtin.file:
+    path: /etc/rsyslog.d/10-remote-receiver.conf
+    state: absent
+
+- name: "verify(rollback) : Run the role while the whole config cannot validate (new file)"
+  block:
+    - ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders:
+          - 10.99.0.0/24
+  rescue:
+    - ansible.builtin.set_fact:
+        rsyslog_rollback_new_failed: true
+
+- name: "verify(rollback) : Check the newly created file was removed"
+  ansible.builtin.stat:
+    path: /etc/rsyslog.d/10-remote-receiver.conf
+  register: rsyslog_rollback_new_stat
+
+- name: "verify(rollback) : Assert branch 1 (created then removed)"
+  ansible.builtin.assert:
+    that:
+      - rsyslog_rollback_new_failed | default(false)
+      - not rsyslog_rollback_new_stat.stat.exists
+    fail_msg: >-
+      Branch 1 failed. The role created the receiver config, the assembled
+      configuration did not validate, and the file must be removed again —
+      otherwise the next rsyslog restart (by anything, not just this role)
+      picks up a configuration the host was never able to validate.
+      run failed: {{ rsyslog_rollback_new_failed | default(false) }},
+      file still present: {{ rsyslog_rollback_new_stat.stat.exists }}
+
+# --- 分岐②: 上書き → 失敗 → 復元 ------------------------------------------
+- name: "verify(rollback) : Put a sentinel receiver config in place"
+  ansible.builtin.copy:
+    content: "# MOLECULE-SENTINEL\n"
+    dest: /etc/rsyslog.d/10-remote-receiver.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: "verify(rollback) : Run the role so it overwrites the sentinel and fails"
+  block:
+    - ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders:
+          - 10.99.0.0/24
+  rescue:
+    - ansible.builtin.set_fact:
+        rsyslog_rollback_overwrite_failed: true
+
+- name: "verify(rollback) : Read the receiver config after the failed overwrite"
+  ansible.builtin.slurp:
+    src: /etc/rsyslog.d/10-remote-receiver.conf
+  register: rsyslog_rollback_restored
+
+- name: "verify(rollback) : Assert branch 2 (overwritten then restored)"
+  ansible.builtin.assert:
+    that:
+      - rsyslog_rollback_overwrite_failed | default(false)
+      - "'MOLECULE-SENTINEL' in (rsyslog_rollback_restored.content | b64decode)"
+    fail_msg: >-
+      Branch 2 failed. The role overwrote an existing receiver config, validation
+      failed, and the previous content must come back from the backup. What is on
+      disk now: {{ rsyslog_rollback_restored.content | b64decode }}
+
+# --- 分岐③: 内容が同一 → 消しも戻しもしない -------------------------------
+# 先に壊れた断片を退けて、ロールを正常に通して「同一内容」を作る。
+- name: "verify(rollback) : Move the broken fragment aside"
+  ansible.builtin.command:
+    argv: [mv, /etc/rsyslog.d/99-molecule-broken.conf, /root/99-molecule-broken.conf]
+    removes: /etc/rsyslog.d/99-molecule-broken.conf
+
+- name: "verify(rollback) : Converge normally so the file matches what the role writes"
+  ansible.builtin.include_role:
+    name: rsyslog_server
+  vars:
+    rsyslog_server_allowed_senders:
+      - 10.99.0.0/24
+
+- name: "verify(rollback) : Put the broken fragment back"
+  ansible.builtin.command:
+    argv: [mv, /root/99-molecule-broken.conf, /etc/rsyslog.d/99-molecule-broken.conf]
+    removes: /root/99-molecule-broken.conf
+
+- name: "verify(rollback) : Run the role again with identical content"
+  block:
+    - ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders:
+          - 10.99.0.0/24
+  rescue:
+    - ansible.builtin.set_fact:
+        rsyslog_rollback_same_failed: true
+
+# 先に存在を確かめる。分岐③を取り違えた実装ではこのファイルが**消える**ため、
+# いきなり slurp すると「ファイルが無い」という読み取りエラーで落ちて、
+# 何が起きたのか（正しい設定を消した）が失敗メッセージから読み取れない。
+- name: "verify(rollback) : Check the receiver config still exists"
+  ansible.builtin.stat:
+    path: /etc/rsyslog.d/10-remote-receiver.conf
+  register: rsyslog_rollback_same_stat
+
+- name: "verify(rollback) : Assert branch 3 did not delete the file"
+  ansible.builtin.assert:
+    that:
+      - rsyslog_rollback_same_stat.stat.exists
+    fail_msg: >-
+      Branch 3 deleted a valid configuration. The content the role writes was
+      already on disk, so `template` reported no change and produced no
+      backup_file. Treating "no backup_file" as "this file is new" removes it —
+      even though the failure came from a different fragment entirely. The host
+      is left with the receiver configuration gone and the actual problem
+      untouched.
+
+- name: "verify(rollback) : Read the receiver config after the no-change failure"
+  ansible.builtin.slurp:
+    src: /etc/rsyslog.d/10-remote-receiver.conf
+  register: rsyslog_rollback_same
+
+- name: "verify(rollback) : Assert branch 3 (untouched)"
+  ansible.builtin.assert:
+    that:
+      - rsyslog_rollback_same_failed | default(false)
+      - "'$AllowedSender' in (rsyslog_rollback_same.content | b64decode)"
+      - "'MOLECULE-SENTINEL' not in (rsyslog_rollback_same.content | b64decode)"
+    fail_msg: >-
+      Branch 3 failed. The deployed content was identical to what was already on
+      disk, so `template` made no backup. If the role treats "no backup_file" as
+      "this file is new", it deletes a perfectly good configuration on the way
+      out — while the actual cause of the failure is a different fragment.
+      What is on disk now: {{ rsyslog_rollback_same.content | b64decode }}
+
+- name: "verify(rollback) : Remove the broken fragment"
+  ansible.builtin.file:
+    path: /etc/rsyslog.d/99-molecule-broken.conf
+    state: absent
+
+- name: "verify(rollback) : Restore a valid converged state"
+  ansible.builtin.include_role:
+    name: rsyslog_server
+  vars:
+    rsyslog_server_allowed_senders:
+      - 10.99.0.0/24
