@@ -228,32 +228,40 @@
     #   - 改行 + `action(type="omprog" ...)` … 任意コマンドを root で実行させる
     #   - 改行 + `$AllowedSender` … 送信元制限を上書きして全開放にする
     #   - `0.0.0.0/0` … 文字種としては正しいが、意味として全開放
+    # ペイロードは 1 箇所でだけ定義する。かつては `loop:` と `fail_msg` の Jinja 式に
+    # 同じリテラルを二重に書いていた。二重化そのものが drift の元だが、それ以上に
+    # **`fail_msg` の中でエスケープ付き引用符を含むリテラルを書いてはいけない**。
+    # `action(type=\"omprog\" …)` は YAML の折り畳みスカラーを経ると Jinja が
+    # 解析できず、ansible-core 2.16 は `fail_msg` を**assert が成功したときにも**
+    # 評価するため、防御が正しく働いているのにタスクだけが落ちた（2.21 は失敗時にしか
+    # 評価しないので通ってしまい、本番ピン 2.16 の CI で初めて出た）。
     - name: "verify : Assume no injection payload was rejected until proven"
       ansible.builtin.set_fact:
         rsyslog_verify_injection_rejected: []
+        rsyslog_verify_injection_payloads:
+          - "10.0.0.0/24\n$AllowedSender TCP, *"
+          - "10.0.0.0/24\naction(type=\"omprog\" binary=\"/tmp/pwn\")"
+          - "0.0.0.0/0"
+          - "example.com"
 
     - name: "verify : Try to inject rsyslog directives through the sender list"
       ansible.builtin.include_tasks: injection-case.yml
-      loop:
-        - "10.0.0.0/24\n$AllowedSender TCP, *"
-        - "10.0.0.0/24\naction(type=\"omprog\" binary=\"/tmp/pwn\")"
-        - "0.0.0.0/0"
-        - "example.com"
+      loop: "{{ rsyslog_verify_injection_payloads }}"
       loop_control:
         loop_var: rsyslog_injection_case
 
     - name: "verify : Assert every injection payload was rejected"
       ansible.builtin.assert:
         that:
-          - rsyslog_verify_injection_rejected | length == 4
+          - >-
+            (rsyslog_verify_injection_rejected | length)
+            == (rsyslog_verify_injection_payloads | length)
         fail_msg: >-
           A value that must never reach the rsyslog configuration was accepted:
-          {{ ["10.0.0.0/24\n$AllowedSender TCP, *",
-              "10.0.0.0/24\naction(type=\"omprog\" binary=\"/tmp/pwn\")",
-              "0.0.0.0/0",
-              "example.com"]
+          {{ rsyslog_verify_injection_payloads
              | reject('in', rsyslog_verify_injection_rejected) | list | to_json }}
-          (rejected {{ rsyslog_verify_injection_rejected | length }} of 4).
+          (rejected {{ rsyslog_verify_injection_rejected | length }} of
+          {{ rsyslog_verify_injection_payloads | length }}).
           These are written verbatim into a root-owned configuration, so a newline
           adds directives (omprog runs an arbitrary binary as root) and a /0 entry
           turns the sender restriction off while the run still reports success.
