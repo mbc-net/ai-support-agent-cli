@@ -899,7 +899,15 @@ function containsLookupPluginReference(value: unknown): boolean {
     return value.some((item) => containsLookupPluginReference(item))
   }
   if (isPlainObject(value)) {
-    return Object.values(value).some((item) => containsLookupPluginReference(item))
+    // **キーも見る。** Ansible はモジュール引数のキーもテンプレート展開し、解決できない
+    // キーは *解決後の文字列* を含むエラー（`Unsupported parameters for (…) module: <値>`）
+    // として実行ログと `stepResults[].message` に出る。値だけを見ていたため
+    //   ansible.builtin.debug: { msg: hi, "{{ lookup('file','/root/.ssh/id_ed25519') }}": 1 }
+    // が素通りし、**agent ホスト上の任意ファイル読み取り**になっていた（実測）。
+    return Object.entries(value).some(
+      ([key, item]) =>
+        containsLookupPluginReference(key) || containsLookupPluginReference(item),
+    )
   }
   return false
 }
@@ -957,6 +965,35 @@ const BARE_JINJA_LIST_ELEMENT_KEYS: ReadonlySet<string> = new Set([
   'until',
   'that',
 ])
+
+/**
+ * 素の式になるのは**位置**であって、名前ではない。
+ *
+ * `when` / `until` / `loop` / `with_items` はタスク直下でだけ制御キーとして解釈され、
+ * `var` / `that` は `debug` / `assert` のモジュール引数としてだけ式になる。
+ * 名前だけで判定していたため、ネストしたどこかに同名のキーがあるだけで
+ * その値が式として走査され、`set_fact: { var: "Bob's server" }` のような
+ * ごく普通の記述が「閉じない文字列」として拒否された（実測）。
+ */
+const TASK_LEVEL_BARE_KEYS: ReadonlySet<string> = new Set([
+  'when',
+  'until',
+  'loop',
+  'with_items',
+])
+
+const MODULE_BARE_ARG_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
+  debug: new Set(['var']),
+  assert: new Set(['that']),
+}
+
+/** モジュールキーが素の式を取る引数を持つなら、その引数名の集合を返す。 */
+function bareArgKeysForModule(key: string): ReadonlySet<string> | undefined {
+  const short = key.startsWith('ansible.builtin.')
+    ? key.slice('ansible.builtin.'.length)
+    : key
+  return MODULE_BARE_ARG_KEYS[short]
+}
 
 /**
  * タスクの入れ子が走査可能な深さに収まっているか。
@@ -1128,27 +1165,58 @@ function collectJinjaExpressions(
     if (scanned.unterminated) malformed = true
     expressions.push(...scanned.code)
   }
-  const visit = (value: unknown, key: string | undefined, depth: number): void => {
+  // `bareKeys` は「この位置で素の式になるキー名」。タスク直下では制御キー、
+  // モジュール引数の中では `debug`/`assert` の `var`/`that` だけが該当し、
+  // それ以外の階層では何も該当しない（名前だけで判定すると、ネストした同名キーの
+  // 値まで式として走査してしまう）。
+  const visit = (
+    value: unknown,
+    key: string | undefined,
+    bareKeys: ReadonlySet<string> | undefined,
+    depth: number,
+  ): void => {
     if (depth > MAX_VALUE_WALK_DEPTH) return
     if (typeof value === 'string') {
-      addString(value, key !== undefined && BARE_JINJA_KEYS.has(key))
+      addString(value, key !== undefined && bareKeys !== undefined && bareKeys.has(key))
       return
     }
     if (Array.isArray(value)) {
       // 要素まで式として扱うのは `when` / `until` / `that` だけ。`loop` の要素は
       // ただのデータで、アポストロフィを含む文字列が普通に入る。
-      const elementKey =
-        key !== undefined && BARE_JINJA_LIST_ELEMENT_KEYS.has(key) ? key : undefined
-      for (const item of value) visit(item, elementKey, depth + 1)
+      const keepBare =
+        key !== undefined &&
+        bareKeys !== undefined &&
+        bareKeys.has(key) &&
+        BARE_JINJA_LIST_ELEMENT_KEYS.has(key)
+      for (const item of value) {
+        visit(item, keepBare ? key : undefined, keepBare ? bareKeys : undefined, depth + 1)
+      }
       return
     }
     if (isPlainObject(value)) {
+      // 子が素の式になるかは、**このマッピング自身の位置**で決まる。タスク直下
+      // （key === undefined）なら制御キー、`debug` / `assert` のモジュール引数マッピング
+      // ならその引数名、それ以外の階層では何も該当しない。
+      const childBareKeys =
+        key === undefined ? TASK_LEVEL_BARE_KEYS : bareArgKeysForModule(key)
       for (const [childKey, item] of Object.entries(value)) {
-        visit(item, childKey, depth + 1)
+        // **キーも走査する。** Ansible はモジュール引数のキーもテンプレート展開し、
+        // 解決できないキーは *解決後の文字列* を含むエラーとして実行ログに出る。
+        // 値だけを見ていたため、式をキー側へ移すだけで 3 つの防御が揃って外れた（実測）:
+        //   ansible.builtin.file: { path: /tmp/x, "{{ ANSIBLE_SECRET }}": 1 }   → no_log なし
+        //   "{{ hostvars[inventory_hostname] }}": 1                             → 動的参照の禁止をすり抜け
+        //   "{{ github_runner_regtoken_resp.json.token }}": 1                   → 内部変数の参照禁止をすり抜け
+        // 旧実装（`JSON.stringify(task)` の字句解析）はキーを含んでいたので、
+        // 走査を構造化したときに落ちた回帰である。
+        //
+        // キーは「素の式」にはなり得ない（`{{ }}` を書かなければただの名前）ので、
+        // bare 扱いはしない。
+        addString(childKey, false)
+        visit(item, childKey, childBareKeys, depth + 1)
       }
     }
   }
-  visit(task, undefined, 0)
+  visit(task, undefined, undefined, 0)
   return { expressions, malformed }
 }
 
