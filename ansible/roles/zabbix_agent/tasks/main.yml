@@ -45,7 +45,11 @@
         or (zabbix_agent_allow_no_sources | bool)
       # ダウンロード URL は `/ubuntu/` 固定で `ansible_distribution_version` を埋め込む。
       # Debian 等で流すと 404 になり、原因を名指ししない「apt が取得できない」で落ちる。
-      - ansible_distribution == 'Ubuntu'
+      # `is defined` を先に見る。ファクトが無いと `ansible_distribution` の参照自体が
+      # 「'ansible_distribution' is undefined」で落ち、後段の「ファクトが要る」という
+      # 名指しの assert に到達できない（本番の runner は precheck で必ず収集するので、
+      # これが効くのは local-run など単体で流したときである）。
+      - ansible_distribution is defined and ansible_distribution == 'Ubuntu'
       - (zabbix_agent_active_check_verify_seconds | string) is match('^[0-9]+$')
       - >-
         (zabbix_agent_active_check_verify_seconds | int) >= 3
