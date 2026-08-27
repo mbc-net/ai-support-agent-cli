@@ -582,13 +582,8 @@ const INCLUDE_ROLE_ALLOWED_PARAM_KEYS: ReadonlySet<string> = new Set(['name'])
  * 付かない。秘匿値が実行ログや `stepResults[].message` に出る経路になる。
  */
 
-/** いずれかのロールの公開パラメータとして allowlist に載っている名前の集合。 */
-const ALL_PUBLIC_ROLE_VARS: ReadonlySet<string> = new Set(
-  Object.values(INCLUDE_ROLE_ALLOWED_VARS).flatMap((names) => [...names]),
-)
-
 /**
- * bundled role の名前空間に属する変数名かどうか。
+ * bundled role が内部で使う名前かどうか（`set_fact` / `register` の書き込み先の判定）。
  *
  * `include_role` の `vars:` は {@link INCLUDE_ROLE_ALLOWED_VARS} で絞ったが、レシピ本体には
  * `set_fact` タスクも書ける。そちらを素通りさせると、同じ変数へ別の入口から到達できてしまう:
@@ -598,21 +593,19 @@ const ALL_PUBLIC_ROLE_VARS: ReadonlySet<string> = new Set(
  *     ansible.builtin.set_fact: { rsyslog_forward_already_configured: false }
  *   - name: もう一度 include   ← 二重 include の検出をすり抜ける
  *
- * ロールが自分の状態を持つのに使う名前空間（`<role>_...`）へは、レシピから一切書き込めない
- * ようにする。レシピがロールへ値を渡す唯一の経路は `include_role` の `vars:` であり、
- * そこは allowlist で公開パラメータだけに絞られている。
+ * **判定は接頭辞（`<ロール名>_*`）ではなく実名リストで行う。** ロール名には `docker` /
+ * `database` / `nvm` / `codex` / `k3s` / `web_server` のような一般的な語が並ぶので、
+ * 接頭辞で弾くと `set_fact: { docker_image: nginx }` / `set_fact: { database_url: … }` /
+ * `register: docker_ps` といった、ロールと無関係なごく普通のレシピまで拒否される。
+ * ガードは保存時だけでなく実行時にも走るため、既存レシピが agent の再配布と同時に
+ * 落ち始める。読み取り側（§6.3.1）は最初からこの理由で実名リストを使っており、
+ * 書き込み側だけが接頭辞との OR になっていた。
+ *
+ * 実名リストは実ロールから機械的に導出し、構造テストが一致（載せ忘れ・残骸の両方向）を
+ * 検査するので、接頭辞を落としても取りこぼしは増えない。
  */
-function isBundledRoleNamespacedName(name: string): boolean {
-  // 公開パラメータは除く。レシピは同じ名前を `include_role` の task レベル `vars:` で
-  // 渡せるのだから、`set_fact` で先に置くのを禁じる理由が無い（どちらもロールへの入力で、
-  // allowlist が同じ名前を許している）。接頭辞だけで弾くと、`set_fact: { k3s_node_ip: … }`
-  // のような正当なレシピが allowlist と矛盾する形で拒否され、しかも実行時にも落ちる。
-  // 内部変数（`k3s_ephemeral_device` 等）は allowlist に無いので、引き続き弾かれる。
-  if (ALL_PUBLIC_ROLE_VARS.has(name)) return false
-  for (const role of INCLUDE_ROLE_ALLOWED_ROLES) {
-    if (name.startsWith(`${role}_`)) return true
-  }
-  return false
+function isBundledRoleInternalName(name: string): boolean {
+  return BUNDLED_ROLE_INTERNAL_VARS.has(name)
 }
 
 /**
@@ -813,6 +806,26 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'zabbix_agent_ufw_desired',
   'zabbix_agent_ufw_desired_patterns',
   'zabbix_agent_ufw_stale',
+  // vars/main.yml の派生値と、include_role 以外のタスクに付いた `vars:` の名前。
+  // どちらもロールが自分で計算する値であり、`set_fact` は task レベル `vars:` より
+  // 優先度が高いのでレシピから上書きできてしまう（`rsyslog_server_reserved_log_dirs`
+  // を空にされれば、予約ディレクトリの denylist ごと無効化される）。
+  'ai_support_agent_failed_items',
+  'ai_support_agent_failed_project_codes',
+  'ai_support_agent_k8s_item_is_self',
+  'ai_support_agent_k8s_project_specs',
+  'ai_support_agent_k8s_self_pod_name_pattern',
+  'ai_support_agent_write_failed_codes',
+  'ai_support_agent_write_failures',
+  'github_runner_k8s_controller_name',
+  'github_runner_k8s_secret_name',
+  'github_runner_slug',
+  'gitlab_runner_k8s_secret_name',
+  'gitlab_runner_register_rc',
+  'rsyslog_forward_log',
+  'rsyslog_forward_reserved_spool_dirs',
+  'rsyslog_server_reserved_log_dirs',
+  'zabbix_agent_log',
 ])
 
 /** set_fact / register で禁止する予約語・マジック変数名（完全一致）。 */
@@ -1481,10 +1494,7 @@ export function validateAnsibleTasks(
               key: factName,
               reason: 'reserved or magic variable name',
             })
-          } else if (
-            isBundledRoleNamespacedName(factName) ||
-            BUNDLED_ROLE_INTERNAL_VARS.has(factName)
-          ) {
+          } else if (isBundledRoleInternalName(factName)) {
             // 接頭辞だけでは足りない: `database` ロールは内部計算に `db_*` を使う
             // （`db_mysql_root_password_result` など）。実名リストと OR で見る。
             violations.push({
@@ -1536,7 +1546,12 @@ export function validateAnsibleTasks(
     // 限って**判定する（`collectJinjaExpressions` 参照）。`hostvars` と `getattr(` は
     // 英文に現れないので、こちらも式の内側で見る。
     {
-      const jinjaExpressions = collectJinjaExpressions(task)
+      // 文字列リテラルの中は変数参照ではない。除かないと
+      // `dest: "{{ base_dir ~ '/vars/main.yml' }}"` のような正当なパス組み立てが
+      // 「動的な変数参照」として拒否される（構造テスト側は既にこの除去を行っている）。
+      const jinjaExpressions = collectJinjaExpressions(task).map((expression) =>
+        expression.replace(/'[^']*'|"[^"]*"/g, ' '),
+      )
       if (
         jinjaExpressions.some(
           (expression) =>
@@ -1563,8 +1578,7 @@ export function validateAnsibleTasks(
       })
     } else if (
       typeof registerValue === 'string' &&
-      (isBundledRoleNamespacedName(registerValue) ||
-        BUNDLED_ROLE_INTERNAL_VARS.has(registerValue))
+      isBundledRoleInternalName(registerValue)
     ) {
       violations.push({
         taskIndex,
@@ -1601,6 +1615,30 @@ export function validateAnsibleTasks(
     if (referencesSecretVar(task, taintedVarNames)) {
       if (task.no_log !== true) {
         task.no_log = true
+      }
+      // **ゲート用のキーからは汚染を伝播させない。**
+      //
+      // `when` / `until` はタスクを実行するかどうかを決めるだけで、値をタスクの出力へ
+      // 入れない。`register` が受け取るのはモジュールの結果であって条件の評価結果ではない。
+      // それでも伝播させていたため、次のような「秘匿値が設定されているときだけ実行する」
+      // という普通の書き方が、以降の連鎖をまるごと見えなくしていた（実測）:
+      //
+      //   - command: /opt/app/migrate.sh
+      //     register: result
+      //     when: DB_PASSWORD is defined      ← ここだけが秘匿値への参照
+      //   - debug: { msg: "{{ result.stdout }}" }   ← no_log が付く
+      //   - command: /bin/true
+      //     when: result.rc == 0                    ← ここにも付く
+      //
+      // `no_log` はモジュールの出力も失敗理由も実行ログと `stepResults[].message` から
+      // 消すので、これは障害調査の手段を丸ごと失う。タスク自身に `no_log` を付けるのは
+      // 維持する（`when` の条件は 1 ビットのオラクルになり得る）が、汚染を広げるのは
+      // モジュール引数側が秘匿値に触れたときだけにする。
+      const taintSource = { ...task }
+      delete taintSource.when
+      delete taintSource.until
+      if (!referencesSecretVar(taintSource, taintedVarNames)) {
+        return task
       }
       for (const key of Object.keys(task)) {
         if (!SET_FACT_MODULE_KEYS.has(key)) continue

@@ -1347,6 +1347,89 @@ describe('変数名を実行時に組み立てる参照', () => {
     expect(validateAnsibleTasks(body, opts).ok).toBe(false)
   })
 
+  it.each(modes)('[%s] ロール名接頭辞と一致するだけの普通の名前は書ける', (_label, opts) => {
+    // ロール名には `docker` / `database` のような一般的な語が並ぶ。接頭辞で弾いていたため、
+    // ロールと無関係なごく普通のレシピが保存時にも実行時にも拒否されていた。
+    const body = `
+- name: a
+  ansible.builtin.set_fact:
+    docker_image: nginx
+- name: b
+  ansible.builtin.set_fact:
+    database_url: "postgres://x"
+- name: c
+  ansible.builtin.command: docker ps
+  register: docker_ps
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] ロールが計算する値は接頭辞を外しても書けない', (_label, opts) => {
+    // 実名リストは `set_fact` / `register` に加えて、タスクの `vars:` と
+    // `vars/main.yml` のキーも含む。`set_fact` は task vars より優先度が高いので、
+    // ここが抜けると予約ディレクトリの denylist を空にして無効化できる。
+    for (const name of [
+      'rsyslog_server_reserved_log_dirs',
+      'rsyslog_forward_reserved_spool_dirs',
+      'github_runner_k8s_secret_name',
+      'k3s_ephemeral_device',
+    ]) {
+      const body = `
+- name: a
+  ansible.builtin.set_fact:
+    ${name}: x
+`
+      expect(validateAnsibleTasks(body, opts).ok).toBe(false)
+    }
+  })
+
+  it.each(modes)('[%s] 文字列リテラルの vars はパス組み立てとして通す', (_label, opts) => {
+    const body = `
+- name: path
+  ansible.builtin.copy:
+    content: x
+    dest: "{{ base_dir ~ '/vars/main.yml' }}"
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] when だけの秘匿値参照は汚染を広げない', (_label, opts) => {
+    // 「秘匿値が設定されているときだけ実行する」という普通の書き方が、以降の連鎖を
+    // まるごと no_log にして障害調査の手段を奪っていた。タスク自身の no_log は維持する。
+    const body = `
+- name: gated
+  ansible.builtin.command: /opt/app/migrate.sh
+  register: result
+  when: DB_PASSWORD is defined
+- name: later
+  ansible.builtin.debug:
+    msg: "{{ result.stdout }}"
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+    expect(result.normalizedTasks?.[1].no_log).toBeUndefined()
+  })
+
+  it.each(modes)('[%s] モジュール引数が秘匿値に触れたら汚染は広がる', (_label, opts) => {
+    const body = `
+- name: uses
+  ansible.builtin.command: "echo {{ DB_PASSWORD }}"
+  register: result
+- name: later
+  ansible.builtin.debug:
+    msg: "{{ result.stdout }}"
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.normalizedTasks?.[1].no_log).toBe(true)
+  })
+
   it.each(modes)('[%s] 汚染された名前を実際に参照すれば no_log は付く', (_label, opts) => {
     const body = `
 - name: Fetch app config

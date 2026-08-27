@@ -315,6 +315,19 @@ describe('BUNDLED_ROLE_INTERNAL_VARS と実ロールの一致', () => {
         }
       }
       if (key === 'register' && typeof value === 'string') out.add(value)
+      // include_role 以外のタスクに付いた `vars:` のキーも、ロールが自分で計算する値である。
+      // `set_fact` は task レベル `vars:` より優先度が高いので、レシピから上書きできる
+      // （`rsyslog_server_reserved_log_dirs` を空にされれば denylist ごと無効化される）。
+      if (
+        key === 'vars' &&
+        value !== null &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        !('include_role' in (node as Record<string, unknown>)) &&
+        !('ansible.builtin.include_role' in (node as Record<string, unknown>))
+      ) {
+        for (const name of Object.keys(value as Record<string, unknown>)) out.add(name)
+      }
       if (value !== null && typeof value === 'object') collectNames(value, out)
     }
   }
@@ -334,10 +347,21 @@ describe('BUNDLED_ROLE_INTERNAL_VARS と実ロールの一致', () => {
         }
       }
     }
+    // `vars/main.yml` の派生値。ロール内部の計算結果であり、`set_fact` は
+    // role vars（優先度 15）より上（19）なのでレシピから上書きできてしまう。
+    // 例: `github_runner_k8s_secret_name` は shell へ展開される前にロールが書式検証している。
+    for (const role of readdirSync(rolesDir)) {
+      const varsFile = path.join(rolesDir, role, 'vars', 'main.yml')
+      if (!existsSync(varsFile)) continue
+      const doc = load(readFileSync(varsFile, 'utf8'), { schema: DEFAULT_SCHEMA })
+      if (doc !== null && typeof doc === 'object' && !Array.isArray(doc)) {
+        for (const name of Object.keys(doc as Record<string, unknown>)) found.add(name)
+      }
+    }
     return found
   }
 
-  it('ロールが内部で使う set_fact / register 名をすべて含む（載せ忘れが無い）', () => {
+  it('ロールが内部で使う名前（set_fact / register / タスクの vars / vars/main.yml）をすべて含む', () => {
     const missing = [...harvest()]
       .filter((name) => !BUNDLED_ROLE_INTERNAL_VARS.has(name))
       .sort()

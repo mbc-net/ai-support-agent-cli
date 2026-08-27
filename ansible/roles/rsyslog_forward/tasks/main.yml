@@ -84,6 +84,17 @@
       facility.priority expression ([A-Za-z0-9*,.;_-] only) — every one of
       these is written verbatim into a root-owned rsyslog configuration, where
       a newline would add directives rather than break the file.
+  vars:
+    # 予約ディレクトリ。ロールが chown する以上、既存サービスの持ち物は渡させない。
+    rsyslog_forward_reserved_spool_dirs:
+      - /var/spool
+      - /var/spool/cron
+      - /var/spool/mail
+      - /var/spool/postfix
+      - /var/spool/anacron
+      - /var/spool/at
+      - /var/spool/exim4
+      - /var/spool/cups
 
 # The fragment filename is a LITERAL (08-forward.conf), not a variable.
 #
@@ -112,17 +123,6 @@
 # include したときに 1 回目が黙って消える（まさに防ぎたかった事象）。
 #
 # fact は play をまたがないので、別実行での再適用や転送先の変更は妨げない。
-  vars:
-    # 予約ディレクトリ。ロールが chown する以上、既存サービスの持ち物は渡させない。
-    rsyslog_forward_reserved_spool_dirs:
-      - /var/spool
-      - /var/spool/cron
-      - /var/spool/mail
-      - /var/spool/postfix
-      - /var/spool/anacron
-      - /var/spool/at
-      - /var/spool/exim4
-      - /var/spool/cups
 - name: "rsyslog_forward : Fail if this play already configured forwarding on this host"
   ansible.builtin.assert:
     that:
