@@ -628,10 +628,10 @@ function isBundledRoleInternalName(name: string): boolean {
  * `referencesSecretVar` はテナントの秘匿変数名しか見ていないので `no_log` が付かず、
  * トークンが実行ログと `stepResults[].message` に平文で残る。
  *
- * 参照禁止は**この実名リスト**で行い、接頭辞では行わない。接頭辞で禁止すると
+ * 参照禁止も書き込み禁止も**この実名リスト**で行い、接頭辞では行わない。接頭辞で禁止すると
  * `database_url` のような、たまたまロール名で始まるだけのテナント変数まで巻き添えで
- * 拒否してしまうため。書き込み側は従来どおり接頭辞でも拒否する（そちらは
- * レシピ側に正当な用途が無い）。
+ * 拒否してしまうため。**書き込み側もかつては接頭辞との OR だったが、同じ理由で
+ * 実名リストへ揃えた**（{@link isBundledRoleInternalName} 参照）。
  */
 export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   // ai_support_agent
@@ -944,6 +944,21 @@ export const BARE_JINJA_KEYS: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * 上のうち、**リストの各要素も式**として扱うキー。
+ *
+ * `when` と `that` はリストで書け、その場合は要素ひとつひとつが条件式である。
+ * 一方 `loop` / `with_items` のリストは**データ**であって式ではない。区別せずに
+ * 要素まで式として走査したため、`loop: ["Bob's server"]` のような普通のリテラルが
+ * 「閉じない文字列」と判定されてタスクごと拒否されていた（実測）。
+ * 文字列で書かれた `loop: "{{ … }}"` は変わらず走査される。
+ */
+const BARE_JINJA_LIST_ELEMENT_KEYS: ReadonlySet<string> = new Set([
+  'when',
+  'until',
+  'that',
+])
+
+/**
  * タスクの入れ子が走査可能な深さに収まっているか。
  *
  * **深さ制限は fail-closed にしなければならない。** 走査側で「深すぎたら打ち切って戻る」
@@ -1120,7 +1135,11 @@ function collectJinjaExpressions(
       return
     }
     if (Array.isArray(value)) {
-      for (const item of value) visit(item, key, depth + 1)
+      // 要素まで式として扱うのは `when` / `until` / `that` だけ。`loop` の要素は
+      // ただのデータで、アポストロフィを含む文字列が普通に入る。
+      const elementKey =
+        key !== undefined && BARE_JINJA_LIST_ELEMENT_KEYS.has(key) ? key : undefined
+      for (const item of value) visit(item, elementKey, depth + 1)
       return
     }
     if (isPlainObject(value)) {
@@ -1605,8 +1624,9 @@ export function validateAnsibleTasks(
               reason: 'reserved or magic variable name',
             })
           } else if (isBundledRoleInternalName(factName)) {
-            // 接頭辞だけでは足りない: `database` ロールは内部計算に `db_*` を使う
-            // （`db_mysql_root_password_result` など）。実名リストと OR で見る。
+            // 判定は実名リストのみ。接頭辞は使わない（ロール名が一般語なので、
+            // `docker_image` のような無関係な名前まで巻き添えにする）。リストは
+            // 実ロールから機械導出し、構造テストが一致を検査する。
             violations.push({
               taskIndex,
               key: factName,
@@ -1672,8 +1692,11 @@ export function validateAnsibleTasks(
       if (
         jinjaExpressions.some(
           (expression) =>
-            /\bvars\b/.test(expression) ||
-            /\bhostvars\b/.test(expression) ||
+            // 直前が `.` のものは属性アクセスであって、Ansible の `vars` / `hostvars`
+            // ではない（`{{ my_thing.vars }}` が拒否されていた）。`_` も除くので
+            // `my_vars` のような名前にも当たらない。
+            /(^|[^.\w])vars\b/.test(expression) ||
+            /(^|[^.\w])hostvars\b/.test(expression) ||
             /\bgetattr\s*\(/.test(expression),
         )
       ) {

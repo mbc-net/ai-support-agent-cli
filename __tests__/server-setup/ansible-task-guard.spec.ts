@@ -1497,6 +1497,49 @@ describe('変数名を実行時に組み立てる参照', () => {
     ).toBe(true)
   })
 
+  it.each(modes)('[%s] loop のリスト要素は式として扱わない', (_label, opts) => {
+    // `when` / `that` のリストは条件式だが、`loop` のリストはデータである。
+    // 区別せずに要素まで式として走査したため、アポストロフィを含むリテラルが
+    // 「閉じない文字列」と判定されてタスクごと拒否されていた。
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      '    msg: "{{ item }}"',
+      '  loop:',
+      `    - "Bob's server"`,
+    ].join('\n')
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] when のリスト要素は式として扱う', (_label, opts) => {
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      '    msg: hi',
+      '  when:',
+      '    - github_runner_regtoken_resp is defined',
+    ].join('\n')
+    expect(validateAnsibleTasks(body, opts).ok).toBe(false)
+  })
+
+  it.each(modes)('[%s] 属性アクセスの .vars は動的参照ではない', (_label, opts) => {
+    const body = `
+- name: n
+  ansible.builtin.debug:
+    msg: "{{ my_thing.vars }}"
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] 素の vars は引き続き拒否する', (_label, opts) => {
+    const body = `
+- name: n
+  ansible.builtin.debug:
+    msg: "{{ vars }}"
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(false)
+  })
+
   it.each(modes)('[%s] 汚染された名前を実際に参照すれば no_log は付く', (_label, opts) => {
     const body = `
 - name: Fetch app config

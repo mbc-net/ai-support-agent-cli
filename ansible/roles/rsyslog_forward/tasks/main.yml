@@ -57,7 +57,8 @@
       # (`/etc` would become syslog-owned and unreadable). The task guard
       # validates variable names, not values.
       - rsyslog_forward_queue_spool_directory is string
-      - rsyslog_forward_queue_spool_directory is match('^/var/spool/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$')
+      # 各セグメントの先頭にドットを許さない（`/var/spool/./cron` で denylist をすり抜ける）。
+      - rsyslog_forward_queue_spool_directory is match('^/var/spool/(?!\.)[A-Za-z0-9._-]+(/(?!\.)[A-Za-z0-9._-]+)*$')
       - "'..' not in rsyslog_forward_queue_spool_directory"
       # `/var/spool/` 配下に限るだけでは足りない。`/var/spool/cron` を渡されると
       # そこが syslog:syslog 0700 になり、cron が crontab を読めなくなる。

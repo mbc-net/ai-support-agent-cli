@@ -359,6 +359,36 @@ describe('Phase 1 監視・ログ系ロール（rsyslog_server / rsyslog_forward
     })
   })
 
+  describe('パス制限（rsyslog_server / rsyslog_forward）', () => {
+    // 予約ディレクトリの denylist は文字列比較なので、`/var/log/./journal` のように
+    // **同じ実体を別の綴りで指す**パスを渡されるとすり抜ける。`/var/log/.` に至っては
+    // `/var/log` 自体を chown する。セグメント先頭のドットを正規表現で拒否して塞ぐ。
+    it.each([
+      ['rsyslog_server', 'rsyslog_server_log_root', '/var/log'],
+      ['rsyslog_forward', 'rsyslog_forward_queue_spool_directory', '/var/spool'],
+    ])('%s: パスの各セグメントが先頭ドットを許さない', (role, _varName, root) => {
+      const raw = readRaw(role, 'tasks', 'main.yml')
+      expect(raw).toContain(`^${root}/(?!\\.)[A-Za-z0-9._-]+(/(?!\\.)[A-Za-z0-9._-]+)*$`)
+      // **単一**バックスラッシュであること。YAML のプレーンスカラーはバックスラッシュを
+      // エスケープしないので、`\\\\.` と書くと正規表現としては「バックスラッシュに
+      // 続かない」という別の意味になり、`.` セグメントを素通りさせる（実際に一度そう書いた）。
+      expect(raw).not.toContain('(?!\\\\.)')
+    })
+
+    it.each([
+      ['rsyslog_server', 'rsyslog_server_reserved_log_dirs'],
+      ['rsyslog_forward', 'rsyslog_forward_reserved_spool_dirs'],
+    ])('%s: 予約ディレクトリの denylist が assert から参照されている', (role, varName) => {
+      const raw = readRaw(role, 'tasks', 'main.yml')
+      expect(raw).toContain(`not in ${varName}`)
+      const tasks = flatten(loadTasks(role))
+      const validate = tasks.find((t) => /Validate/.test(String(t.name ?? '')))
+      expect(
+        ((validate as Record<string, unknown>).vars as Record<string, unknown>)[varName],
+      ).toBeInstanceOf(Array)
+    })
+  })
+
   describe('ufw 収束（rsyslog_server / zabbix_agent）', () => {
     it('rsyslog_server: 送信元を絞らないルールは ufw の短縮形で照合する', () => {
       // 送信元を指定しないルールを追加しても、`ufw show added` は短縮形

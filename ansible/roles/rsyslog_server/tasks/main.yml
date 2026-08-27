@@ -65,7 +65,10 @@
       # The task guard checks variable names, not values, so the constraint has
       # to live here.
       - rsyslog_server_log_root is string
-      - rsyslog_server_log_root is match('^/var/log/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$')
+      # 各セグメントの先頭にドットを許さない。許すと `/var/log/./journal` や `/var/log/.` が
+      # 通り、denylist の**文字列比較をすり抜けたうえで実体は予約ディレクトリを指す**。
+      # `/var/log/.` に至っては `/var/log` 自体を chown する（実測で 3 つの assert すべてを通過）。
+      - rsyslog_server_log_root is match('^/var/log/(?!\.)[A-Za-z0-9._-]+(/(?!\.)[A-Za-z0-9._-]+)*$')
       - "'..' not in rsyslog_server_log_root"
       # `/var/log/` 配下に限るだけでは足りない。既存のシステムディレクトリを指されると、
       # このロールがそこを chown してそのサービスを壊す。`/var/log/journal` を渡されると
