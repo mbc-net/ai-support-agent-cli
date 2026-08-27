@@ -186,9 +186,15 @@ describe('Phase 1 監視・ログ系ロール（rsyslog_server / rsyslog_forward
       expect(args.mode).toBe('0750')
     })
 
-    it('設定配置は validate 付きで、配置後に統合設定も検証する', () => {
+    it('設定配置後に統合設定を検証する（断片単体の validate は使わない）', () => {
       const raw = readRaw('rsyslog_server', 'tasks', 'main.yml')
-      expect(raw).toContain('validate: "rsyslogd -N1 -f %s"')
+      // `template` の `validate:` は使えない。rsyslogd へ渡るのは Ansible の一時ファイルの
+      // パスで、Ubuntu の AppArmor プロファイルは rsyslogd の設定読み取りを
+      // /etc/rsyslog.conf と /etc/rsyslog.d/** に限定している。したがって
+      // **root でも** `could not open config file … Permission denied` になり、
+      // AppArmor が有効な素の Ubuntu ホスト＝本番では必ず失敗する
+      // （AppArmor の無い Docker Desktop では通ってしまい、偽の緑になる）。
+      expect(raw).not.toContain('validate: "rsyslogd -N1 -f %s"')
       // 断片単体の validate では他断片との組み合わせ破綻を検出できないため、
       // 引数なしの rsyslogd -N1 で /etc/rsyslog.conf 全体も検証する。
       expect(raw).toMatch(/argv: \[rsyslogd, -N1\]/)

@@ -171,7 +171,11 @@
         group: root
         mode: "0644"
         backup: true
-        validate: "rsyslogd -N1 -f %s"
+      # No `validate:` here — same reason as rsyslog_server: AppArmor confines
+      # rsyslogd's config reads to /etc/rsyslog.conf and /etc/rsyslog.d/**, so
+      # handing it Ansible's temp path fails with "Permission denied" even as
+      # root on a stock Ubuntu host. The whole-config `rsyslogd -N1` below stays
+      # inside the profile and is the check that matters.
       register: rsyslog_forward_conf_result
       notify: Restart rsyslog
 

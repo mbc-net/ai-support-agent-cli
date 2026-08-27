@@ -13,12 +13,14 @@
 #    does not stop the play, so it would leave an open listener behind while
 #    still reporting success.
 #
-# 2. CONFIG IS VALIDATED TWICE. `copy`/`template` `validate:` checks the
-#    fragment on its own, which catches typos cheaply but cannot see the rest
-#    of /etc/rsyslog.d. After the file lands we run a bare `rsyslogd -N1`,
-#    which validates the WHOLE assembled config, and roll back if it fails. A
-#    broken rsyslog config stops logging entirely on this host, and the outage
-#    is not itself logged — this is the one failure mode worth two checks.
+# 2. THE CONFIG IS VALIDATED AS A WHOLE, NOT PER FRAGMENT. After the file
+#    lands we run a bare `rsyslogd -N1`, which validates the WHOLE assembled
+#    config, and roll back if it fails. A broken rsyslog config stops logging
+#    entirely on this host, and the outage is not itself logged.
+#    `template`'s `validate:` is NOT used: it hands rsyslogd the path of
+#    Ansible's temp copy, and Ubuntu's AppArmor profile lets rsyslogd read only
+#    /etc/rsyslog.conf and /etc/rsyslog.d/**, so it is denied there even as
+#    root. See the note on the deploy task.
 #
 # 3. ROLLBACK RESTORES, IT DOES NOT DELETE. On a re-run we are overwriting a
 #    file that was working. Deleting it on validation failure would throw away
@@ -181,10 +183,23 @@
         group: root
         mode: "0644"
         backup: true
-        # Fragment-level syntax check. Cheap, catches most typos, but cannot
-        # see the rest of the assembled config — hence the whole-config check
-        # below.
-        validate: "rsyslogd -N1 -f %s"
+      # No `validate:` here, deliberately. `validate` hands rsyslogd the path of
+      # Ansible's temporary copy, and Ubuntu confines rsyslogd with AppArmor:
+      # /etc/apparmor.d/usr.sbin.rsyslogd permits reading /etc/rsyslog.conf and
+      # /etc/rsyslog.d/** and nothing else. On any host where AppArmor is
+      # enforcing — which is a stock Ubuntu host — the check dies with
+      #   rsyslogd: could not open config file '/root/.ansible/tmp/…/source':
+      #   Permission denied
+      # **even as root**, because this is a MAC denial, not a DAC one. That
+      # turns a healthy run into a failed one on every real host.
+      # (It passes under Docker Desktop, whose LinuxKit VM has no AppArmor —
+      # verifying there produced a false green.)
+      #
+      # The whole-config `rsyslogd -N1` below reads /etc/rsyslog.conf and the
+      # fragments, all inside the profile, and is the check that matters anyway:
+      # a fragment can only break the assembled configuration. A bad fragment is
+      # written and then removed or restored by the rescue block, which the
+      # Molecule rollback cases exercise.
       register: rsyslog_server_conf_result
       notify: Restart rsyslog
 
