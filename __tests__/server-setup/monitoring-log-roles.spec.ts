@@ -360,6 +360,24 @@ describe('Phase 1 監視・ログ系ロール（rsyslog_server / rsyslog_forward
   })
 
   describe('ufw 収束（rsyslog_server / zabbix_agent）', () => {
+    it('rsyslog_server: 送信元を絞らないルールは ufw の短縮形で照合する', () => {
+      // 送信元を指定しないルールを追加しても、`ufw show added` は短縮形
+      // （`ufw allow 514/tcp`）で出す（ufw 0.36.2 で実測）。長い形
+      // （`allow to any port 514 proto tcp`）のパターンだけを見ていると、
+      // allow_all_senders の構成でルールが desired と一致せず、**追加した直後に
+      // stale として削除される**。Molecule シナリオは allow_all を通らないので緑のまま。
+      const raw = readRaw('rsyslog_server', 'tasks', 'ufw.yml')
+      expect(raw).toContain(
+        "'allow ' ~ (rsyslog_server_port | string) ~ '/' ~ proto",
+      )
+      expect(raw).toContain(
+        "'allow ' ~ (rsyslog_server_port | string) ~ '/' ~ item[1]",
+      )
+      // 旧実装（長い形の決め打ち）が残っていないこと。
+      expect(raw).not.toContain("'allow to any'")
+    })
+
+
     const ufwRoles = ['rsyslog_server', 'zabbix_agent']
 
     it.each(ufwRoles)('%s: 列挙に ufw show added を使う（status は inactive で何も列挙しない）', (role) => {

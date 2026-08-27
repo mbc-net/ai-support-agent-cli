@@ -142,11 +142,52 @@ describe('INCLUDE_ROLE_ALLOWED_VARS', () => {
       if (!existsSync(dir)) continue
       for (const file of readdirSync(dir)) {
         const text = readFileSync(path.join(dir, file), 'utf8')
-        for (const m of text.matchAll(/\b([a-z][a-z0-9_]{2,})\b/g)) referenced.add(m[1])
+        // 大文字の名前も拾う。`claude_cli` の `ANTHROPIC_API_KEY` のように、ロール接頭辞を
+        // 持たない公開パラメータは実在する。小文字だけを見ていたため、この名前は
+        // 「幽霊エントリ」と誤判定される一方、allowlist から漏れていても誰も気づけなかった。
+        for (const m of text.matchAll(/\b([A-Za-z][A-Za-z0-9_]{2,})\b/g)) referenced.add(m[1])
       }
     }
     const ghosts = [...INCLUDE_ROLE_ALLOWED_VARS[role]].filter((v) => !referenced.has(v))
     expect(ghosts).toEqual([])
+  })
+
+
+  it.each(roles)('%s: ロールが読む大文字の公開パラメータが allowlist に載っている', (role) => {
+    // ロール接頭辞を持たない公開パラメータは `defaults/main.yml` に既定値を置けないことが
+    // 多く（テナントが `ANSIBLE#` 変数で渡す想定）、defaults 起点の検査では拾えない。
+    // 漏れると、そのレシピは保存時にも実行時にも拒否される。テナント変数は大文字なので
+    // （`create-config-setting.dto.ts` の `@Matches(/^[A-Z][A-Z0-9_#]{0,199}$/)`）、
+    // ロールが参照する大文字の名前は公開パラメータとみなす。
+    const referenced = new Set<string>()
+    for (const sub of ['tasks', 'templates', 'handlers']) {
+      const dir = path.join(rolesDir, role, sub)
+      if (!existsSync(dir)) continue
+      for (const file of readdirSync(dir)) {
+        const text = readFileSync(path.join(dir, file), 'utf8')
+          // コメント行はドキュメント用の例を含むので除く。
+          .split('\n')
+          .filter((line) => !line.trim().startsWith('#'))
+          .join('\n')
+        // Jinja が評価する場所だけを見る（fail_msg 中のエスケープ例を拾わないため）。
+        for (const rawRegion of text.match(/\{\{[^}]*\}\}/g) ?? []) {
+          // `{{ '{{ MY_TOKEN }}' }}` のような二重エスケープの例は対象外。
+          if (rawRegion.includes("'{{")) continue
+          // 文字列リテラルの中は英文であって変数参照ではない
+          // （`{{ 'API key login failed. ' if … }}` の `API` を拾わないため）。
+          const region = rawRegion.replace(/'[^']*'|"[^"]*"/g, ' ')
+          for (const m of region.matchAll(/\b([A-Z][A-Z0-9_]{2,})\b/g)) referenced.add(m[1])
+        }
+        for (const m of text.matchAll(/^\s*(?:when|until|that):\s*(.*)$/gm)) {
+          const expression = m[1].replace(/'[^']*'|"[^"]*"/g, ' ')
+          for (const n of expression.matchAll(/\b([A-Z][A-Z0-9_]{2,})\b/g)) referenced.add(n[1])
+        }
+      }
+    }
+    const missing = [...referenced].filter(
+      (name) => !INCLUDE_ROLE_ALLOWED_VARS[role].has(name),
+    )
+    expect(missing).toEqual([])
   })
 
   it('公開変数（defaults のキー）は allowlist に含まれる', () => {

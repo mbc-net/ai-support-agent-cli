@@ -74,10 +74,15 @@
     rsyslog_server_ufw_desired_patterns: >-
       {%- set out = [] -%}
       {%- for src, proto in rsyslog_server_ufw_desired -%}
-      {%- set head = 'allow to any' if src == 'any'
-                     else 'allow from ' ~ (src | regex_escape) ~ ' to any' -%}
-      {%- set _ = out.append('(^|\s)' ~ head ~ ' port ' ~ (rsyslog_server_port | string)
-                             ~ ' proto ' ~ proto ~ '(\s|$)') -%}
+      {#- 送信元を指定しないルールは ufw が短縮形へ正規化する。`ufw allow to any port 514
+          proto tcp` を追加しても `ufw show added` は `ufw allow 514/tcp` と出す
+          （ufw 0.36.2 で実測）。長い形のパターンだけを見ていると、allow_all_senders の
+          ルールは desired と一致せず、追加した直後に stale として削除される。 -#}
+      {%- set head = 'allow ' ~ (rsyslog_server_port | string) ~ '/' ~ proto
+                     if src == 'any'
+                     else 'allow from ' ~ (src | regex_escape) ~ ' to any port '
+                          ~ (rsyslog_server_port | string) ~ ' proto ' ~ proto -%}
+      {%- set _ = out.append('(^|\s)' ~ head ~ '(\s|$)') -%}
       {%- endfor -%}
       {{ out }}
 
@@ -109,9 +114,12 @@
   # deletes what it owns once it is no longer desired.
   when: >-
     rsyslog_server_ufw_added.stdout_lines
-    | select('search', '(^|\s)' ~ ('allow to any' if item[0] == 'any'
-                                   else 'allow from ' ~ (item[0] | regex_escape) ~ ' to any')
-             ~ ' port ' ~ (rsyslog_server_port | string) ~ ' proto ' ~ item[1] ~ '(\s|$)')
+    | select('search', '(^|\s)'
+             ~ ('allow ' ~ (rsyslog_server_port | string) ~ '/' ~ item[1]
+                if item[0] == 'any'
+                else 'allow from ' ~ (item[0] | regex_escape) ~ ' to any port '
+                     ~ (rsyslog_server_port | string) ~ ' proto ' ~ item[1])
+             ~ '(\s|$)')
     | reject('search', "comment 'ai-support-agent:rsyslog_server'$")
     | list | length == 0
   changed_when: "'Skipping adding existing rule' not in (rsyslog_server_ufw_add.stdout | default(''))"

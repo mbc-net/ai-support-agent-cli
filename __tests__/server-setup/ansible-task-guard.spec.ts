@@ -5,6 +5,9 @@ import {
   AnsibleTaskViolation,
   INCLUDE_ROLE_ALLOWED_ROLES,
   validateAnsibleTasks,
+  MODULE_ALLOWLIST,
+  RESIDENT_EXTRA_MODULE_ALLOWLIST,
+  BARE_JINJA_KEYS,
 } from '../../src/server-setup/ansible-task-guard'
 
 /**
@@ -1274,22 +1277,74 @@ describe('変数名を実行時に組み立てる参照', () => {
     ).toBe(true)
   })
 
-  it.each(modes)('[%s] 素の式を取るキーを列挙し漏らしても秘匿値は取りこぼさない', (_label, opts) => {
-    // 未知のモジュール引数が素の式だった場合の保険。文章が入るキー（name / msg 等）を
-    // 除いた文字列値は、波括弧が無くても識別子として走査する。
+  // 深さ制限は fail-closed でなければならない。打ち切って続ける実装では、深くネストした
+  // 値が秘匿値の no_log もロール内部変数の参照禁止も vars の禁止もすり抜けた（実測）。
+  it.each(modes)('[%s] 走査できない深さのタスクは拒否される（打ち切って通さない）', (_label, opts) => {
+    let nested = '"{{ DB_PASSWORD }}"'
+    for (let i = 0; i < 70; i += 1) nested = `[${nested}]`
     const body = `
-- name: unknown module parameter shape
-  ansible.builtin.command:
-    argv:
-      - echo
-      - DB_PASSWORD
+- name: leak
+  ansible.builtin.set_fact:
+    leak: ${nested}
 `
     const result = validateAnsibleTasks(body, {
       ...opts,
       secretVarNames: new Set(['DB_PASSWORD']),
     })
-    expect(result.ok).toBe(true)
-    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('nested too deeply')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] 自己参照するアンカーは例外ではなく違反になる', (_label, opts) => {
+    // 循環構造を再帰関数へ渡すと RangeError が validateAnsibleTasks の外へ飛び、
+    // 保存 API が 400 ではなく 500 になり、デプロイ前監査スクリプトは結果を出さずに落ちる。
+    const body = `
+- &a
+  ansible.builtin.debug:
+    msg: x
+    self: *a
+`
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('nested too deeply')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] ロール接頭辞を持たない公開パラメータも渡せる', (_label, opts) => {
+    // `claude_cli` は `ANTHROPIC_API_KEY` を読む（tasks/main.yml が `is defined` で分岐する）。
+    // allowlist の作り方を defaults のキーだけに寄せていたため漏れており、
+    // これを書いたレシピは保存時にも実行時にも拒否されていた。
+    const body = `
+- name: claude
+  ansible.builtin.include_role:
+    name: claude_cli
+  vars:
+    ANTHROPIC_API_KEY: "{{ MY_KEY }}"
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] 公開パラメータは set_fact で先に置いてもよい', (_label, opts) => {
+    // 同じ名前を include_role の task レベル vars で渡せるのだから、set_fact で置くのを
+    // 禁じる理由が無い。接頭辞だけで弾くと allowlist と矛盾し、実行時にも落ちる。
+    const body = `
+- name: pre
+  ansible.builtin.set_fact:
+    k3s_node_ip: 10.0.0.1
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] 内部変数は set_fact で置けないまま', (_label, opts) => {
+    const body = `
+- name: pre
+  ansible.builtin.set_fact:
+    k3s_ephemeral_device: /dev/sda
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(false)
   })
 
   it.each(modes)('[%s] 汚染された名前を実際に参照すれば no_log は付く', (_label, opts) => {
@@ -1355,4 +1410,83 @@ describe('変数名を実行時に組み立てる参照', () => {
   })
 })
 
+})
+
+describe('素の Jinja 式を取るキーの列挙', () => {
+  // `BARE_JINJA_KEYS` は「波括弧なしで Jinja 式として評価される場所」の全数である。
+  // ここが 1 つ欠けると、その場所を通る参照は 3 つの防御（秘匿値の no_log・ロール内部変数の
+  // 参照禁止・vars の禁止）をまとめてすり抜ける（実際に `assert` の `that` が欠けていた）。
+  //
+  // 評価される場所はモジュール allowlist に依存するので、**allowlist が変わったらここを
+  // 見直させる**。下の一覧は「このモジュールの引数に素の式を取るものが有るか無いか」を
+  // 理由付きで宣言したもので、モジュールを足すと必ず赤くなる。
+  const MODULES_WITH_BARE_EXPRESSION_ARGS: Readonly<Record<string, readonly string[]>> = {
+    'ansible.builtin.debug': ['var'],
+    'ansible.builtin.assert': ['that'],
+  }
+
+  /** 素の式を取る引数を持たないと確認済みのモジュール（引数はすべてテンプレート文字列）。 */
+  const MODULES_WITHOUT_BARE_EXPRESSION_ARGS: readonly string[] = [
+    'ansible.builtin.apt',
+    'ansible.builtin.apt_key',
+    'ansible.builtin.apt_repository',
+    'ansible.builtin.copy',
+    'ansible.builtin.file',
+    'ansible.builtin.user',
+    'ansible.builtin.group',
+    'ansible.builtin.service',
+    'ansible.builtin.systemd',
+    'ansible.builtin.lineinfile',
+    'ansible.builtin.blockinfile',
+    'ansible.builtin.replace',
+    'ansible.builtin.stat',
+    'ansible.builtin.get_url',
+    'ansible.builtin.command',
+    'ansible.builtin.shell',
+    'ansible.builtin.set_fact',
+    'ansible.builtin.wait_for',
+    'ansible.builtin.include_role',
+    'ansible.mysql.mysql_user',
+    'community.postgresql.postgresql_user',
+    'ansible.posix.authorized_key',
+    'ansible.builtin.meta',
+    'ansible.builtin.cron',
+    'ansible.builtin.git',
+    'ansible.builtin.hostname',
+    'ansible.builtin.mount',
+    'ansible.builtin.pip',
+    'ansible.builtin.unarchive',
+    'ansible.builtin.uri',
+    'ansible.posix.mount',
+    'ansible.posix.sysctl',
+    'community.docker.docker_container',
+    'community.docker.docker_image',
+    'community.docker.docker_network',
+    'community.general.timezone',
+  ]
+
+  it('モジュール allowlist の全要素について、素の式引数の有無が宣言されている', () => {
+    const declared = new Set([
+      ...Object.keys(MODULES_WITH_BARE_EXPRESSION_ARGS),
+      ...MODULES_WITHOUT_BARE_EXPRESSION_ARGS,
+    ])
+    const allowed = new Set([...MODULE_ALLOWLIST, ...RESIDENT_EXTRA_MODULE_ALLOWLIST])
+    const undeclared = [...allowed].filter((m) => !declared.has(m)).sort()
+    expect(undeclared).toEqual([])
+  })
+
+  it('宣言された素の式引数がすべて BARE_JINJA_KEYS に入っている', () => {
+    const needed = Object.values(MODULES_WITH_BARE_EXPRESSION_ARGS).flat()
+    for (const key of needed) {
+      expect(BARE_JINJA_KEYS.has(key)).toBe(true)
+    }
+  })
+
+  it('タスク直下の素の式キー（制御キー）も BARE_JINJA_KEYS に入っている', () => {
+    // `CONTROL_KEYS` に無いキーはモジュール候補として拒否されるので、タスク直下で
+    // 書ける素の式はこの 4 つで尽きる。
+    for (const key of ['when', 'until', 'loop', 'with_items']) {
+      expect(BARE_JINJA_KEYS.has(key)).toBe(true)
+    }
+  })
 })

@@ -67,10 +67,18 @@
       - rsyslog_server_log_root is string
       - rsyslog_server_log_root is match('^/var/log/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$')
       - "'..' not in rsyslog_server_log_root"
+      # `/var/log/` 配下に限るだけでは足りない。既存のシステムディレクトリを指されると、
+      # このロールがそこを chown してそのサービスを壊す。`/var/log/journal` を渡されると
+      # persistent journald が読めなくなり、journal を見るヘルスチェック
+      # （このロール群が依存している）まで道連れになる。
+      - >-
+        (rsyslog_server_log_root | regex_replace('/+$', ''))
+        not in rsyslog_server_reserved_log_dirs
     fail_msg: >-
       rsyslog_server is misconfigured. Requirements:
-      rsyslog_server_log_root must sit under /var/log (this role creates and
-      chowns it, so an arbitrary path would let a recipe take over a system
+      rsyslog_server_log_root must sit under /var/log and must not be one of the
+      reserved system log directories such as /var/log/journal (this role creates
+      and chowns it, so an arbitrary path would let a recipe take over a system
       directory);
       at least one of rsyslog_server_tcp_enabled / rsyslog_server_udp_enabled
       must be true; rsyslog_server_allowed_senders must list at least one
@@ -79,6 +87,23 @@
       and disk exhaustion); rsyslog_server_port must be 1-65535.
       Got allowed_senders={{ rsyslog_server_allowed_senders | default([]) | to_json }},
       allow_all_senders={{ rsyslog_server_allow_all_senders | default(false) }}.
+  vars:
+    # 予約ディレクトリ。ロールが chown する以上、既存サービスの持ち物は渡させない。
+    # レシピからは差し替えられない（include_role の task レベル vars は include params
+    # として勝つが、この名前は INCLUDE_ROLE_ALLOWED_VARS に無いのでガードが拒否する）。
+    rsyslog_server_reserved_log_dirs:
+      - /var/log
+      - /var/log/journal
+      - /var/log/audit
+      - /var/log/apt
+      - /var/log/private
+      - /var/log/sysstat
+      - /var/log/unattended-upgrades
+      - /var/log/landscape
+      - /var/log/nginx
+      - /var/log/apache2
+      - /var/log/mysql
+      - /var/log/postgresql
 
 - name: "rsyslog_server : Validate every allowed sender is an address, not free text"
   # Mirrors the loop assert in the zabbix_agent role. Each element is written

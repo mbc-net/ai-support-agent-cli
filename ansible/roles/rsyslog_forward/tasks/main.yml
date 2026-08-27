@@ -59,10 +59,24 @@
       - rsyslog_forward_queue_spool_directory is string
       - rsyslog_forward_queue_spool_directory is match('^/var/spool/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$')
       - "'..' not in rsyslog_forward_queue_spool_directory"
+      # `/var/spool/` 配下に限るだけでは足りない。`/var/spool/cron` を渡されると
+      # そこが syslog:syslog 0700 になり、cron が crontab を読めなくなる。
+      - >-
+        (rsyslog_forward_queue_spool_directory | regex_replace('/+$', ''))
+        not in rsyslog_forward_reserved_spool_dirs
+      # retries を直に決める値なので、範囲を切っておく。未検証だと
+      # `86400` で 28800 回リトライ（delay 3 秒）＝1 日ハングする実行を作れてしまい、
+      # 非数値だと黙って 1 回だけの試行に潰れる。
+      - (rsyslog_forward_journal_verify_seconds | string) is match('^[0-9]+$')
+      - >-
+        (rsyslog_forward_journal_verify_seconds | int) >= 3
+        and (rsyslog_forward_journal_verify_seconds | int) <= 600
     fail_msg: >-
       rsyslog_forward is misconfigured.
-      rsyslog_forward_queue_spool_directory must sit under /var/spool (this role
-      creates and chowns it); rsyslog_forward_target_host is required
+      rsyslog_forward_queue_spool_directory must sit under /var/spool and must not
+      be a reserved system spool directory such as /var/spool/cron (this role
+      creates and chowns it);
+      rsyslog_forward_journal_verify_seconds must be an integer between 3 and 600; rsyslog_forward_target_host is required
       (non-empty string); rsyslog_forward_protocol must be 'tcp' or 'udp'
       (got {{ rsyslog_forward_protocol | default('') | to_json }});
       rsyslog_forward_target_port must be 1-65535;
@@ -98,6 +112,17 @@
 # include したときに 1 回目が黙って消える（まさに防ぎたかった事象）。
 #
 # fact は play をまたがないので、別実行での再適用や転送先の変更は妨げない。
+  vars:
+    # 予約ディレクトリ。ロールが chown する以上、既存サービスの持ち物は渡させない。
+    rsyslog_forward_reserved_spool_dirs:
+      - /var/spool
+      - /var/spool/cron
+      - /var/spool/mail
+      - /var/spool/postfix
+      - /var/spool/anacron
+      - /var/spool/at
+      - /var/spool/exim4
+      - /var/spool/cups
 - name: "rsyslog_forward : Fail if this play already configured forwarding on this host"
   ansible.builtin.assert:
     that:

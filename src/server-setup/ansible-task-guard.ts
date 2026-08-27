@@ -143,7 +143,7 @@ const BUILTIN_SHORT_NAMES: ReadonlySet<string> = new Set([
 /**
  * カスタム Ansible タスクで使用を許可するモジュール（フルネーム）の allowlist（厳格=ecs）。
  */
-const MODULE_ALLOWLIST: ReadonlySet<string> = new Set([
+export const MODULE_ALLOWLIST: ReadonlySet<string> = new Set([
   'ansible.builtin.apt',
   'ansible.builtin.apt_key',
   'ansible.builtin.apt_repository',
@@ -179,7 +179,7 @@ const MODULE_ALLOWLIST: ReadonlySet<string> = new Set([
  * ただし denylist（危険タスクキー）・lookup 拒否・copy/template src 拒否・
  * `ansible_*` 拒否は resident でも維持する（緩和はモジュール allowlist に限定）。
  */
-const RESIDENT_EXTRA_MODULE_ALLOWLIST: ReadonlySet<string> = new Set([
+export const RESIDENT_EXTRA_MODULE_ALLOWLIST: ReadonlySet<string> = new Set([
   'ansible.builtin.uri',
   'ansible.builtin.git',
   'ansible.builtin.unarchive',
@@ -342,6 +342,12 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
     'ai_support_agent_k8s_token',
   ]),
   claude_cli: new Set([
+    // ロール接頭辞を持たないが、ロールが実際に読む公開パラメータ
+    // （`tasks/main.yml` が `ANTHROPIC_API_KEY is defined` で分岐し、
+    //  systemd --user 用の environment ファイルへ書き出す）。組み込みスニペットも
+    // コメントで案内している。allowlist から漏れていたため、これを指定した
+    // レシピは保存時にも実行時にも拒否されていた。
+    'ANTHROPIC_API_KEY',
     'claude_cli_oauth_token',
     'claude_cli_package',
     'claude_cli_user',
@@ -542,17 +548,14 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
 
 /**
  * `include_role` のモジュール引数マッピングで許可する param キー。
- * - `name`: 必須。{@link INCLUDE_ROLE_ALLOWED_ROLES} のいずれか。
- * - `tasks_from`: ロール内の代替タスクファイル名（ロールディレクトリ内に閉じる）。
- * - `public`: include したロールの変数を後続へ公開するか（真偽値）。
  *
- * **`vars` はここに含めない**: `ansible.builtin.include_role` モジュールに `vars` という
- * パラメータは存在しない（実機の `ansible-playbook --syntax-check` で
- * `[ERROR]: Invalid options for ansible.builtin.include_role: vars` になることを確認済み）。
- * ロール変数は代わりに **task レベルの `vars:`**（`include_role:` と同じインデントの
- * 兄弟キー）で渡す。`validateAnsibleTasks` 側で、include_role タスクに限り task レベルの
- * `vars` を `FORBIDDEN_TASK_KEYS` の対象から除外し、その中身を
- * {@link validateIncludeRoleTaskVars} で検証する。
+ * **`name` だけ**である。`tasks_from` と `public` はかつて許可していたが、どちらも
+ * ロール内部の検証や秘匿処理を迂回する入口になるため取り下げた（直後のブロックコメント参照）。
+ *
+ * なお `vars` はここには含まれない。`vars` は `include_role` の**モジュール引数ではなく
+ * タスクの兄弟キー**であり（モジュール引数にネストすると実機の ansible-playbook が
+ * `Invalid options for ansible.builtin.include_role: vars` で落ちる）、
+ * {@link validateIncludeRoleTaskVars} が別途検査する。
  */
 const INCLUDE_ROLE_ALLOWED_PARAM_KEYS: ReadonlySet<string> = new Set(['name'])
 
@@ -579,6 +582,11 @@ const INCLUDE_ROLE_ALLOWED_PARAM_KEYS: ReadonlySet<string> = new Set(['name'])
  * 付かない。秘匿値が実行ログや `stepResults[].message` に出る経路になる。
  */
 
+/** いずれかのロールの公開パラメータとして allowlist に載っている名前の集合。 */
+const ALL_PUBLIC_ROLE_VARS: ReadonlySet<string> = new Set(
+  Object.values(INCLUDE_ROLE_ALLOWED_VARS).flatMap((names) => [...names]),
+)
+
 /**
  * bundled role の名前空間に属する変数名かどうか。
  *
@@ -595,6 +603,12 @@ const INCLUDE_ROLE_ALLOWED_PARAM_KEYS: ReadonlySet<string> = new Set(['name'])
  * そこは allowlist で公開パラメータだけに絞られている。
  */
 function isBundledRoleNamespacedName(name: string): boolean {
+  // 公開パラメータは除く。レシピは同じ名前を `include_role` の task レベル `vars:` で
+  // 渡せるのだから、`set_fact` で先に置くのを禁じる理由が無い（どちらもロールへの入力で、
+  // allowlist が同じ名前を許している）。接頭辞だけで弾くと、`set_fact: { k3s_node_ip: … }`
+  // のような正当なレシピが allowlist と矛盾する形で拒否され、しかも実行時にも落ちる。
+  // 内部変数（`k3s_ephemeral_device` 等）は allowlist に無いので、引き続き弾かれる。
+  if (ALL_PUBLIC_ROLE_VARS.has(name)) return false
   for (const role of INCLUDE_ROLE_ALLOWED_ROLES) {
     if (name.startsWith(`${role}_`)) return true
   }
@@ -906,7 +920,7 @@ const MAX_VALUE_WALK_DEPTH = 64
  * 1 文字オラクルが作れ、`that` からロール内部変数も `vars[...]` も参照できた（実測）。
  * モジュールを allowlist へ追加するときは、その引数に素の式を取るものが無いか必ず確認する。
  */
-const BARE_JINJA_KEYS: ReadonlySet<string> = new Set([
+export const BARE_JINJA_KEYS: ReadonlySet<string> = new Set([
   'when',
   'until',
   'loop',
@@ -916,71 +930,70 @@ const BARE_JINJA_KEYS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * 人間向けの文章が入るキー。ここだけは値を丸ごと式として扱わない。
+ * タスクの入れ子が走査可能な深さに収まっているか。
  *
- * {@link collectEvaluatedStrings} は、列挙漏れに強くするために「Jinja 式として評価される
- * と分かっているキー」以外の文字列値も走査対象に含める（未知のモジュール引数が素の式を
- * 取っていても取りこぼさない＝fail-closed）。その代わり、文章が入ることが分かっている
- * キーは除く。除かないと `- name: Restart the service to pick up the new config` のような
- * 記述が、汚染された `config` を参照したものと見なされて `no_log` を貰う。
- * `no_log` はモジュールの出力も失敗理由も消すので、無関係なタスクに付くと障害調査の
- * 手段そのものが失われる。
+ * **深さ制限は fail-closed にしなければならない。** 走査側で「深すぎたら打ち切って戻る」
+ * にしていたところ、深くネストした値が**すべての検査をすり抜けた**（実測）:
  *
- * これらのキーの中でも `{{ }}` / `{% %}` の断片は変わらず走査される（文章の中に書かれた
- * 変数参照は本物の参照である）。
+ *   set_fact: { leak: [[[ … 70 段 … "{{ ANSIBLE_SECRET }}" … ]]] }
+ *   debug:    { var: leak }        ← no_log が付かず、秘匿値が実行ログへ平文で出る
+ *
+ * 同じ深さで内部変数の参照禁止も `vars` / `hostvars` の禁止も外れる。Ansible は
+ * ネストした構造も再帰的にテンプレート展開するので、値はきちんと解決される。
+ *
+ * 循環参照もここで止まる。YAML のアンカーは自分自身を参照でき（`- &a { self: *a }`）、
+ * その構造を再帰関数へ渡すと `RangeError: Maximum call stack size exceeded` が
+ * **validateAnsibleTasks の外まで飛ぶ**——保存 API は 400 ではなく 500 になり、
+ * デプロイ前監査スクリプトは結果を出さずに落ちる（実測）。深さで打ち切れば、
+ * どちらも「検証できないタスク」として拒否できる。
+ *
+ * レシピ本体の YAML がこの深さに達することは無い。
  */
-const PROSE_KEYS: ReadonlySet<string> = new Set([
-  'name',
-  'msg',
-  'fail_msg',
-  'success_msg',
-])
-
-/**
- * Jinja が式として評価する断片だけを集める。
- *
- * `vars` の検出に使う。`vars` は英単語でもあるため、タスク全体の字句解析で拒否すると
- * `- name: Set some vars` のような無害な記述まで巻き添えにする。式の内側に限れば
- * その誤検知が消える一方、`{{ vars }}` / `{{ vars | dict2items }}` /
- * `{{ vars.get('github_runner_' ~ 'regtoken_resp') }}` はいずれもここに入る。
- */
-function collectJinjaExpressions(task: Record<string, unknown>): string[] {
-  return collectEvaluatedStrings(task, { includeNonProseStrings: false })
+function exceedsWalkableDepth(value: unknown, depth = 0): boolean {
+  if (depth > MAX_VALUE_WALK_DEPTH) return true
+  if (Array.isArray(value)) {
+    return value.some((item) => exceedsWalkableDepth(item, depth + 1))
+  }
+  if (isPlainObject(value)) {
+    return Object.values(value).some((item) => exceedsWalkableDepth(item, depth + 1))
+  }
+  return false
 }
 
 /**
- * 走査対象の文字列を集める。
+ * Jinja が式として評価する断片を集める。
  *
- * `includeNonProseStrings` を立てると、{@link BARE_JINJA_KEYS} に挙げていないキーの
- * 文字列値も丸ごと対象に含める（{@link PROSE_KEYS} は除く）。素の式を取るモジュール引数を
- * 列挙し漏らしても取りこぼさないための保険であり、識別子の照合（秘匿値・ロール内部変数）
- * にはこちらを使う。
+ * 対象は `{{ ... }}` / `{% ... %}` の断片と、値そのものが式になるキー
+ * （{@link BARE_JINJA_KEYS}）の文字列全体。
  *
- * 一方 `vars` の検出には使わない。`vars` は英単語でもあるため、`copy` の `content` に
- * 書かれた文章のような「変数参照ではない文字列」まで拒否してしまう。`vars` は
- * 式として評価されると分かっている場所（`{{ }}` / `{% %}` と {@link BARE_JINJA_KEYS}）
- * だけで判定する。
+ * **文字列を丸ごと走査してはいけない。** 一度「未知のモジュール引数が素の式でも
+ * 取りこぼさないように」と、文章が入るキー以外の文字列値を全部対象にしたが、
+ * これは実測で 2 種類の実害を出した:
+ *
+ *   - `command: /opt/app/migrate.sh --result /tmp/out.json` が、汚染された `register: result`
+ *     と同じ語を含むというだけで `no_log` を貰う。`no_log` はモジュールの出力も失敗理由も
+ *     消すので、無関係なタスクの障害が追えなくなる。`result` / `config` / `status` は
+ *     register 名としてありふれている
+ *   - `copy` の `content` に書いた説明文が、たまたまロール内部変数の名前を含むだけで
+ *     「内部変数を参照した」として拒否される
+ *
+ * 名前が値へ到達する経路は Jinja だけなので、評価される場所に限るのが正しい。
+ * 列挙漏れは {@link BARE_JINJA_KEYS} 側で防ぐ——モジュール allowlist は閉じており、
+ * 素の式を取る引数を持つのは `debug`/`assert` の `var` と `assert` の `that` だけである。
+ * allowlist にモジュールを足すと構造テストが赤くなるので、そこで見直しを強制する。
  */
-function collectEvaluatedStrings(
-  task: Record<string, unknown>,
-  options: { includeNonProseStrings: boolean },
-): string[] {
+function collectJinjaExpressions(task: Record<string, unknown>): string[] {
   const expressions: string[] = []
-  const addString = (text: string, whole: boolean): void => {
-    if (whole) expressions.push(text)
+  const addString = (text: string, bare: boolean): void => {
+    if (bare) expressions.push(text)
     for (const region of text.match(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g) ?? []) {
       expressions.push(region)
     }
   }
   const visit = (value: unknown, key: string | undefined, depth: number): void => {
     if (depth > MAX_VALUE_WALK_DEPTH) return
-    const bare = key !== undefined && BARE_JINJA_KEYS.has(key)
-    const prose = key !== undefined && PROSE_KEYS.has(key)
     if (typeof value === 'string') {
-      addString(
-        value,
-        bare || (options.includeNonProseStrings && !prose),
-      )
+      addString(value, key !== undefined && BARE_JINJA_KEYS.has(key))
       return
     }
     if (Array.isArray(value)) {
@@ -1022,9 +1035,7 @@ function collectJinjaReferencedNames(
   task: Record<string, unknown>,
 ): ReadonlySet<string> {
   const names = new Set<string>()
-  for (const expression of collectEvaluatedStrings(task, {
-    includeNonProseStrings: true,
-  })) {
+  for (const expression of collectJinjaExpressions(task)) {
     for (const identifier of expression.match(IDENTIFIER_PATTERN) ?? []) {
       names.add(identifier)
     }
@@ -1334,6 +1345,19 @@ export function validateAnsibleTasks(
       return
     }
     const task = rawTask
+
+    // 走査可能な深さに収まっていない（または循環している）タスクは、以降の検査が
+    // すべて信用できないので先に落とす。打ち切って続けると、深くネストした値が
+    // 秘匿値の no_log もロール内部変数の参照禁止も vars の禁止もすり抜ける
+    // （{@link exceedsWalkableDepth} のコメント参照）。
+    if (exceedsWalkableDepth(task)) {
+      violations.push({
+        taskIndex,
+        key: 'root',
+        reason: 'task is nested too deeply (or self-referential) to validate',
+      })
+      return
+    }
 
     // include_role タスクか否かを先に判定する。task レベルの `vars` は
     // FORBIDDEN_TASK_KEYS の対象だが、include_role タスクに限り、ロール変数を渡す

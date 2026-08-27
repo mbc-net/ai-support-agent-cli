@@ -416,3 +416,73 @@
         rsyslog_server_allowed_senders:
           - 10.99.0.0/24
           - 192.0.2.0/24
+
+    # allow_all_senders の分岐は、シナリオの group_vars が明示的な送信元リストを使う都合で
+    # ここまで一度も通っていなかった。**その未通過の分岐にバグがあった**:
+    # 送信元を指定しないルールを追加しても ufw は短縮形（`ufw allow 5514/tcp`）で
+    # 記録するため、長い形（`allow to any port 5514 proto tcp`）を desired パターンに
+    # していると一致せず、追加した直後に stale として自分で削除していた。
+    # 2 回収束させて「ルールが残っていること」まで見る（1 回だけだと、追加と削除が
+    # 同じ実行内で起きても最終状態を見ないので気づけない）。
+    - name: "verify : Converge with the unrestricted-listener branch"
+      ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders: []
+        rsyslog_server_allow_all_senders: true
+
+    - name: "verify : Converge the unrestricted-listener branch a second time"
+      ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders: []
+        rsyslog_server_allow_all_senders: true
+
+    - name: "verify : Enumerate the ufw rules after the unrestricted converges"
+      ansible.builtin.command:
+        argv: [ufw, show, added]
+      register: rsyslog_verify_allow_all_rules
+      changed_when: false
+
+    - name: "verify : Assert the unrestricted rules survived and are owned by this role"
+      ansible.builtin.assert:
+        that:
+          - >-
+            rsyslog_verify_allow_all_rules.stdout_lines
+            | select('search', "(^|\s)allow 5514/tcp(\s|$)")
+            | select('search', "comment 'ai-support-agent:rsyslog_server'$")
+            | list | length == 1
+          - >-
+            rsyslog_verify_allow_all_rules.stdout_lines
+            | select('search', "(^|\s)allow 5514/udp(\s|$)")
+            | select('search', "comment 'ai-support-agent:rsyslog_server'$")
+            | list | length == 1
+        fail_msg: >-
+          With rsyslog_server_allow_all_senders the role's own ufw rules are gone after
+          converging. ufw records a rule with no source in its short form
+          (`ufw allow 5514/tcp`), so a desired-state pattern written in the long form
+          (`allow to any port 5514 proto tcp`) never matches: the rule is added and then
+          immediately removed as stale in the same run, and the run reports success.
+          Rules now present: {{ rsyslog_verify_allow_all_rules.stdout_lines }}
+
+    - name: "verify : Assert the decoy rules are still untouched after the unrestricted converges"
+      ansible.builtin.assert:
+        that:
+          - >-
+            rsyslog_verify_allow_all_rules.stdout_lines
+            | select('search', "comment 'ai-support-agent:rsyslog_server-backup'$")
+            | list | length == 1
+          - >-
+            rsyslog_verify_allow_all_rules.stdout_lines
+            | select('search', "comment 'operator-ssh'$")
+            | list | length == 1
+        fail_msg: >-
+          The unrestricted branch deleted a rule this role does not own.
+
+    - name: "verify : Restore the scenario's configuration after the unrestricted branch"
+      ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders:
+          - 10.99.0.0/24
+          - 192.0.2.0/24
