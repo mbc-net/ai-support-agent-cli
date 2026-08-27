@@ -183,8 +183,13 @@
       ansible.builtin.file:
         path: /etc/rsyslog.d/10-remote-receiver.conf
         state: absent
+      # `stat` 自身が失敗して rescue に入った場合、`rsyslog_server_conf_before` は未定義になる。
+      # `default(false)` だけで判定すると「前は存在しなかった」と読めてしまい、
+      # **元から動いていた設定ファイルを削除する**。前の状態が分からないときは削除しない
+      # （ロールバックは復元であって破棄ではない、というこのブロックの前提を守る）。
       when:
         - rsyslog_server_conf_result.backup_file is not defined
+        - rsyslog_server_conf_before.stat is defined
         - not (rsyslog_server_conf_before.stat.exists | default(false))
 
     - name: "rsyslog_server : Re-validate after rolling back"

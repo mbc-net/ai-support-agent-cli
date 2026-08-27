@@ -46,3 +46,8 @@ rsyslog_forward_queue_max_disk_space: 1g
 rsyslog_forward_queue_save_on_shutdown: true
 # -1 = retry forever, so the queue drains once the collector comes back.
 rsyslog_forward_resume_retry_count: -1
+
+# 再起動後のジャーナルが空でなくなるまで待つ上限（秒）。journald の取り込みは非同期で、
+# 再起動直後に1回だけ読むと空のことがある。空を「エラー無し＝成功」と判定すると、
+# 転送アクションの初期化失敗を検出できる唯一のタスクが黙って無効になる。
+rsyslog_forward_journal_verify_seconds: 30

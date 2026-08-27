@@ -279,28 +279,52 @@
 # confirm health — but the socket must still be BOUND. Checking that separates
 # "listening, refusing our unauthenticated probe" (fine) from "never came up"
 # (a real failure that would otherwise pass unnoticed).
+- name: "zabbix_agent : Read the agent's main PID"
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - -p
+      - MainPID
+      - --value
+      - "{{ 'zabbix-agent2' if zabbix_agent_variant == 'agent2' else 'zabbix-agent' }}"
+  register: zabbix_agent_main_pid
+  changed_when: false
+  when: zabbix_agent_tls_accept == 'psk'
+
 - name: "zabbix_agent : Read the TCP sockets bound to the agent port"
   ansible.builtin.command:
     argv:
       - ss
       - -H
-      - -tln
+      - -tlnp
       - "sport = :{{ zabbix_agent_listen_port }}"
   register: zabbix_agent_psk_socket
   changed_when: false
   when: zabbix_agent_tls_accept == 'psk'
 
+# 「ポートが埋まっている」ではなく「このエージェントが握っている」まで見る。
+# 退役した旧 flavour や無関係なプロセスが 10050 を先に握っていると、素のポート確認は
+# 成功するのにエージェントは bind できていない——`rsyslog_server` が同じ理由で
+# MainPID との照合を入れており、こちらだけ素通りだったのは兄弟経路の非対称である。
+# PID の突き合わせは部分一致にしない（`ss -p` は `pid=N,` の形で出すので、`pid=12` は
+# `pid=123` にも当たる）。直後の `,` まで含めて照合する。
 - name: "zabbix_agent : Verify the agent port is bound under PSK"
   ansible.builtin.assert:
     that:
-      - (zabbix_agent_psk_socket.stdout | trim | length) > 0
+      - >-
+        zabbix_agent_psk_socket.stdout_lines
+        | select('search', 'pid=' ~ (zabbix_agent_main_pid.stdout | default('') | trim) ~ ',')
+        | list | length > 0
     fail_msg: >-
-      TLSAccept=psk and no TCP socket is bound to port
-      {{ zabbix_agent_listen_port }}. The service reports active, so the agent
-      most likely rejected its own TLS configuration at start-up (bad PSK
-      identity or an unreadable key file). A plain connect cannot be used here
-      because the agent only answers PSK peers, so this checks the socket
-      instead of the response.
+      TLSAccept=psk and the running agent (main pid
+      {{ zabbix_agent_main_pid.stdout | default('?') | trim }}) does not own a TCP socket on
+      port {{ zabbix_agent_listen_port }}. The service reports active, so either the agent
+      rejected its own TLS configuration at start-up (bad PSK identity or an unreadable key
+      file), or another process holds the port. A plain connect cannot be used here because
+      the agent only answers PSK peers, so this checks socket ownership instead of the
+      response. Sockets on this port:
+      {{ zabbix_agent_psk_socket.stdout | default('(none)') | trim }}
   when: zabbix_agent_tls_accept == 'psk'
 
 # Active checks are the other half of the agent's job and fail INDEPENDENTLY of

@@ -172,8 +172,13 @@
       ansible.builtin.file:
         path: /etc/rsyslog.d/08-forward.conf
         state: absent
+      # `stat` 自身が失敗して rescue に入った場合、`rsyslog_forward_conf_before` は未定義になる。
+      # `default(false)` だけで判定すると「前は存在しなかった」と読めてしまい、
+      # **元から動いていた設定ファイルを削除する**。前の状態が分からないときは削除しない
+      # （ロールバックは復元であって破棄ではない、というこのブロックの前提を守る）。
       when:
         - rsyslog_forward_conf_result.backup_file is not defined
+        - rsyslog_forward_conf_before.stat is defined
         - not (rsyslog_forward_conf_before.stat.exists | default(false))
 
     - name: "rsyslog_forward : Re-validate after rolling back"
@@ -232,6 +237,20 @@
   changed_when: false
   failed_when: false
 
+# Wait for the journal to actually contain something for this start. journald
+# ingestion is asynchronous, so reading once immediately after the restart
+# routinely comes back empty — and an empty log read as "no errors" is
+# fail-open: the one task that can detect a forwarding action which failed to
+# initialise would silently find nothing and report success. rsyslog always
+# writes its start banner, so an invocation whose journal stays empty means we
+# could not observe the start at all, which the next task treats as a failure.
+# (zabbix_agent waits the same way; only the rc half of that guard was ported
+# here at first — the sibling-path asymmetry this project keeps hitting.)
+#
+# `failed_when: false` keeps the play going when the retries run out: the
+# `failed` flag is a property whose getter returns `failed_when_result` when it
+# is set, so it wins over the `failed = True` that the executor assigns after an
+# exhausted `until` loop (verified against ansible-core 2.21).
 - name: "rsyslog_forward : Read the rsyslog log for the current start"
   ansible.builtin.command:
     argv:
@@ -241,6 +260,11 @@
   register: rsyslog_forward_journal
   changed_when: false
   failed_when: false
+  retries: "{{ ((rsyslog_forward_journal_verify_seconds | int) / 3) | round(0, 'ceil') | int }}"
+  delay: 3
+  until: >-
+    rsyslog_forward_journal.rc != 0
+    or (rsyslog_forward_journal.stdout | default('') | trim | length) > 0
   when: (rsyslog_forward_invocation.stdout | default('') | trim | length) > 0
 
 # Not being able to READ the log is different from the log being clean. Without
@@ -259,10 +283,15 @@
       Neither `rsyslogd -N1` nor `systemctl is-active` can detect a forwarding
       action that failed to initialise, so reporting success without having read
       the log would hide exactly the failure this check exists for. Ensure
-      systemd-journald is available on this host.
+      systemd-journald is available on this host. If the log stayed empty for
+      {{ rsyslog_forward_journal_verify_seconds }}s, rsyslog wrote nothing at all
+      for this start (it normally logs a start banner); raise
+      rsyslog_forward_journal_verify_seconds on a slow host, or check that the
+      service actually started.
   when: >-
     (rsyslog_forward_invocation.stdout | default('') | trim | length) == 0
     or (rsyslog_forward_journal.rc | default(1)) != 0
+    or (rsyslog_forward_journal.stdout | default('') | trim | length) == 0
 
 - name: "rsyslog_forward : Fail if the forwarding action could not be initialised"
   # Deliberately narrow. An unreachable collector is NORMAL here — collectors

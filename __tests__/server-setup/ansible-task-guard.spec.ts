@@ -1226,6 +1226,72 @@ describe('変数名を実行時に組み立てる参照', () => {
     expect(result.normalizedTasks?.[1].no_log).toBeUndefined()
   })
 
+  // `assert` の `that` は素の Jinja 式のリストである。BARE_JINJA_KEYS から落ちていたため、
+  // 秘匿値の 1 文字オラクル・内部変数の参照・`vars[...]` の 3 つがまとめて素通りしていた。
+  it.each(modes)('[%s] assert の that から秘匿値を読むと no_log が付く', (_label, opts) => {
+    const body = `
+- name: oracle
+  ansible.builtin.assert:
+    that:
+      - "DB_PASSWORD is match('^a')"
+  ignore_errors: true
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+  })
+
+  it.each(modes)('[%s] assert の that からロール内部変数は参照できない', (_label, opts) => {
+    const body = `
+- name: probe
+  ansible.builtin.assert:
+    that:
+      - "github_runner_regtoken_resp.json.token is defined"
+`
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) =>
+        v.reason.includes("must not reference a bundled role's internal variable"),
+      ),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] assert の that から vars で辿ることもできない', (_label, opts) => {
+    const body = `
+- name: probe
+  ansible.builtin.assert:
+    that:
+      - "vars['github_runner_' ~ 'regtoken_resp'] is defined"
+`
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('dynamic variable lookup')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] 素の式を取るキーを列挙し漏らしても秘匿値は取りこぼさない', (_label, opts) => {
+    // 未知のモジュール引数が素の式だった場合の保険。文章が入るキー（name / msg 等）を
+    // 除いた文字列値は、波括弧が無くても識別子として走査する。
+    const body = `
+- name: unknown module parameter shape
+  ansible.builtin.command:
+    argv:
+      - echo
+      - DB_PASSWORD
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+  })
+
   it.each(modes)('[%s] 汚染された名前を実際に参照すれば no_log は付く', (_label, opts) => {
     const body = `
 - name: Fetch app config

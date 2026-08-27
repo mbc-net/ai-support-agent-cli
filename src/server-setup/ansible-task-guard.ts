@@ -473,6 +473,7 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
     'os_init_user',
   ]),
   rsyslog_forward: new Set([
+    'rsyslog_forward_journal_verify_seconds',
     'rsyslog_forward_protocol',
     'rsyslog_forward_queue_enabled',
     'rsyslog_forward_queue_max_disk_space',
@@ -787,6 +788,7 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'zabbix_agent_invocation',
   'zabbix_agent_is_active',
   'zabbix_agent_journal',
+  'zabbix_agent_main_pid',
   'zabbix_agent_other_service',
   'zabbix_agent_psk_socket',
   'zabbix_agent_repo_pkg',
@@ -879,88 +881,30 @@ function containsLookupPluginReference(value: unknown): boolean {
  * Jinjaフィルタ付き参照（`{{ NAME | quote }}` 等）や複数変数混在の式でも検出する
  * （見落とし＝secret 平文が実行ログに残るリスクを無くす方向。誤検知は許容）。
  */
-/**
- * タスク全体に現れる識別子を集める。
- *
- * **`{{ ... }}` の中だけを見てはいけない。** 最初はそう実装したが、次の 3 つが
- * そのまま素通りすることを実測した:
- *
- *   - `msg: "{% set x = NAME %}{{ x }}"` … Jinja のステートメントは `{{ }}` ではない
- *   - `debug: { var: NAME }`             … `debug` の `var` は変数名そのものを取る
- *   - `when: NAME.foo is match('^A')`    … `when` は素の Jinja 式で波括弧を書かない
- *
- * Jinja が値を評価する場所を数え上げてそれぞれ対応する方針は、数え漏らした場所が
- * そのまま穴になる。ここでは**タスクのどこかに識別子として現れたら該当**とする。
- * 内部変数 154 個と公開パラメータ 185 個の名前の重複は 0 件であることを確認しており、
- * 正当なレシピを巻き込まない。
- *
- * この関数は「ロール内部変数の参照禁止」と「秘匿値の no_log 判定」の**両方**で使う。
- * かつては後者だけが `{{ }}` 限定の別実装を持っていて、同じ穴が片方にだけ残った。
- *
- * **走査は JSON 文字列ではなく、デコード済みの値に対して行う。** かつては
- * `JSON.stringify(task)` を 1 本の文字列として字句解析していたが、JSON エスケープが
- * 識別子の直前に来ると先頭文字と癒着して別の名前になった（実測）:
- *
- *   debug: { var: "\tgithub_runner_regtoken_resp" }
- *     → JSON では "\tgithub_runner_regtoken_resp" となり、字句解析の結果は
- *       `tgithub_runner_regtoken_resp`。内部変数の参照禁止に一致しない。
- *       一方 Jinja は `{{ }}` の内側の空白を無視するので、**実機ではそのまま解決され**、
- *       ロールが register した登録トークンの全文が実行ログへ出た。
- *   when: "\tANSIBLE_SECRET is match('^x')"
- *     → 同じ理由で秘匿名に一致せず `no_log` が付かない。正規表現で 1 文字ずつ
- *       秘匿値を読み出すオラクルになる。
- *
- * YAML パーサが `\t` を実際のタブへ復元したあとの文字列を見れば、この癒着は起きない。
- * 念のため JSON 側の字句解析結果も和集合に残す（名前が増える方向＝fail-closed であり、
- * 深いネストで再帰を打ち切った場合の取りこぼしも埋める）。
- */
+/** タスク内の文字列から変数名候補を切り出すパターン。 */
 const IDENTIFIER_PATTERN = /[A-Za-z_][A-Za-z0-9_]*/g
 
 /** 再帰の深さ上限。レシピ本体の YAML でこの深さに達することは無い。 */
 const MAX_VALUE_WALK_DEPTH = 64
 
-function collectTemplateReferencedNames(
-  task: Record<string, unknown>,
-): ReadonlySet<string> {
-  const names = new Set<string>()
-  const addIdentifiers = (text: string): void => {
-    for (const identifier of text.match(IDENTIFIER_PATTERN) ?? []) {
-      names.add(identifier)
-    }
-  }
-  const visit = (value: unknown, depth: number): void => {
-    if (depth > MAX_VALUE_WALK_DEPTH) return
-    if (typeof value === 'string') {
-      addIdentifiers(value)
-      return
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item, depth + 1)
-      return
-    }
-    if (isPlainObject(value)) {
-      for (const [key, item] of Object.entries(value)) {
-        addIdentifiers(key)
-        visit(item, depth + 1)
-      }
-    }
-  }
-  visit(task, 0)
-  try {
-    addIdentifiers(JSON.stringify(task))
-  } catch {
-    // 循環参照は YAML パース結果には現れないが、増える方向の補助なので無視でよい。
-  }
-  return names
-}
-
 /**
- * 値そのものが Jinja 式として評価されるキー。
+ * 値そのものが Jinja 式として評価されるキー（波括弧を書かない場所）。
  *
- * `CONTROL_KEYS` に無いキーはモジュール候補として allowlist に照合され拒否されるので、
- * レシピが書ける「波括弧なしの Jinja 式」はここに挙げたものが全てである
- * （`changed_when` / `failed_when` はモジュール候補になるため書けない）。
- * `var` は `debug` / `assert` が取る「変数名そのもの」で、Ansible が `{{ }}` で包む。
+ * 内訳は 2 系統ある。
+ *
+ * - **制御キー**: `when` / `until` / `loop` / `with_items`。`CONTROL_KEYS` に無いキーは
+ *   モジュール候補として allowlist に照合され拒否されるので、タスク直下で書ける
+ *   波括弧なしの式はこの 4 つで尽きる（`changed_when` / `failed_when` はモジュール候補に
+ *   なるため、そもそもレシピからは書けない）
+ * - **モジュール引数**: `MODULE_ALLOWLIST` のうち、素の式を取るパラメータを持つもの。
+ *   `debug` / `assert` の `var`（変数名そのもの）と、`assert` の `that`（条件式のリスト）。
+ *   他の許可モジュールの引数はすべて「テンプレート展開される文字列」であり、変数参照には
+ *   `{{ }}` が要る
+ *
+ * **`that` を落とすと `assert` が抜け道になる。** 実際に一度落としていて、
+ * `assert: { that: ["SECRET is match('^a')"] }` ＋ `ignore_errors: true` で秘匿値の
+ * 1 文字オラクルが作れ、`that` からロール内部変数も `vars[...]` も参照できた（実測）。
+ * モジュールを allowlist へ追加するときは、その引数に素の式を取るものが無いか必ず確認する。
  */
 const BARE_JINJA_KEYS: ReadonlySet<string> = new Set([
   'when',
@@ -968,6 +912,28 @@ const BARE_JINJA_KEYS: ReadonlySet<string> = new Set([
   'loop',
   'with_items',
   'var',
+  'that',
+])
+
+/**
+ * 人間向けの文章が入るキー。ここだけは値を丸ごと式として扱わない。
+ *
+ * {@link collectEvaluatedStrings} は、列挙漏れに強くするために「Jinja 式として評価される
+ * と分かっているキー」以外の文字列値も走査対象に含める（未知のモジュール引数が素の式を
+ * 取っていても取りこぼさない＝fail-closed）。その代わり、文章が入ることが分かっている
+ * キーは除く。除かないと `- name: Restart the service to pick up the new config` のような
+ * 記述が、汚染された `config` を参照したものと見なされて `no_log` を貰う。
+ * `no_log` はモジュールの出力も失敗理由も消すので、無関係なタスクに付くと障害調査の
+ * 手段そのものが失われる。
+ *
+ * これらのキーの中でも `{{ }}` / `{% %}` の断片は変わらず走査される（文章の中に書かれた
+ * 変数参照は本物の参照である）。
+ */
+const PROSE_KEYS: ReadonlySet<string> = new Set([
+  'name',
+  'msg',
+  'fail_msg',
+  'success_msg',
 ])
 
 /**
@@ -979,30 +945,55 @@ const BARE_JINJA_KEYS: ReadonlySet<string> = new Set([
  * `{{ vars.get('github_runner_' ~ 'regtoken_resp') }}` はいずれもここに入る。
  */
 function collectJinjaExpressions(task: Record<string, unknown>): string[] {
+  return collectEvaluatedStrings(task, { includeNonProseStrings: false })
+}
+
+/**
+ * 走査対象の文字列を集める。
+ *
+ * `includeNonProseStrings` を立てると、{@link BARE_JINJA_KEYS} に挙げていないキーの
+ * 文字列値も丸ごと対象に含める（{@link PROSE_KEYS} は除く）。素の式を取るモジュール引数を
+ * 列挙し漏らしても取りこぼさないための保険であり、識別子の照合（秘匿値・ロール内部変数）
+ * にはこちらを使う。
+ *
+ * 一方 `vars` の検出には使わない。`vars` は英単語でもあるため、`copy` の `content` に
+ * 書かれた文章のような「変数参照ではない文字列」まで拒否してしまう。`vars` は
+ * 式として評価されると分かっている場所（`{{ }}` / `{% %}` と {@link BARE_JINJA_KEYS}）
+ * だけで判定する。
+ */
+function collectEvaluatedStrings(
+  task: Record<string, unknown>,
+  options: { includeNonProseStrings: boolean },
+): string[] {
   const expressions: string[] = []
-  const addString = (text: string, bare: boolean): void => {
-    if (bare) expressions.push(text)
+  const addString = (text: string, whole: boolean): void => {
+    if (whole) expressions.push(text)
     for (const region of text.match(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g) ?? []) {
       expressions.push(region)
     }
   }
-  const visit = (value: unknown, bare: boolean, depth: number): void => {
+  const visit = (value: unknown, key: string | undefined, depth: number): void => {
     if (depth > MAX_VALUE_WALK_DEPTH) return
+    const bare = key !== undefined && BARE_JINJA_KEYS.has(key)
+    const prose = key !== undefined && PROSE_KEYS.has(key)
     if (typeof value === 'string') {
-      addString(value, bare)
+      addString(
+        value,
+        bare || (options.includeNonProseStrings && !prose),
+      )
       return
     }
     if (Array.isArray(value)) {
-      for (const item of value) visit(item, bare, depth + 1)
+      for (const item of value) visit(item, key, depth + 1)
       return
     }
     if (isPlainObject(value)) {
-      for (const [key, item] of Object.entries(value)) {
-        visit(item, BARE_JINJA_KEYS.has(key), depth + 1)
+      for (const [childKey, item] of Object.entries(value)) {
+        visit(item, childKey, depth + 1)
       }
     }
   }
-  visit(task, false, 0)
+  visit(task, undefined, 0)
   return expressions
 }
 
@@ -1031,7 +1022,9 @@ function collectJinjaReferencedNames(
   task: Record<string, unknown>,
 ): ReadonlySet<string> {
   const names = new Set<string>()
-  for (const expression of collectJinjaExpressions(task)) {
+  for (const expression of collectEvaluatedStrings(task, {
+    includeNonProseStrings: true,
+  })) {
     for (const identifier of expression.match(IDENTIFIER_PATTERN) ?? []) {
       names.add(identifier)
     }
@@ -1042,7 +1035,7 @@ function collectJinjaReferencedNames(
 /**
  * タスクが秘匿変数を参照しているか。
  *
- * 走査は {@link collectTemplateReferencedNames} と**同じ方式**（タスク全体の識別子）で行う。
+ * 走査は {@link collectJinjaReferencedNames} と**同じ方式**で行う。
  * かつてここは `{{ ... }}` の中だけを見る正規表現だった。内部変数の参照禁止側で
  * 「`{{ }}` の中だけでは足りない」と分かって直したのに、no_log 判定であるこちらを
  * 直さなかったため、次の 3 つが no_log なしで通っていた（実測）:
@@ -1517,7 +1510,7 @@ export function validateAnsibleTasks(
     // ただし `vars` は英単語でもあり、タスク全体を字句解析して拒否すると
     // `- name: Set some vars` まで巻き添えになる。**Jinja が式として評価する断片に
     // 限って**判定する（`collectJinjaExpressions` 参照）。`hostvars` と `getattr(` は
-    // 英文に現れないので、従来どおりタスク全体で見る。
+    // 英文に現れないので、こちらも式の内側で見る。
     {
       const jinjaExpressions = collectJinjaExpressions(task)
       if (
