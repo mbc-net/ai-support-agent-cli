@@ -531,6 +531,7 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
   ]),
   zabbix_agent: new Set([
     'zabbix_agent_active_check_verify_seconds',
+    'zabbix_agent_allow_no_sources',
     'zabbix_agent_allowed_sources',
     'zabbix_agent_hostname',
     'zabbix_agent_listen_port',
@@ -974,10 +975,113 @@ function exceedsWalkableDepth(value: unknown, depth = 0): boolean {
 }
 
 /**
+ * Jinja の式領域を、**文字列リテラルを理解して**切り出す。
+ *
+ * **正規表現では切り出せない。** `/\{\{[\s\S]*?\}\}/` はリテラルの中身を見ないので、
+ * 閉じ記号が文字列の中にあると**そこで領域が終わったことにしてしまう**（実測）:
+ *
+ *   msg: "{{ '}}' ~ ANSIBLE_SECRET }}"
+ *     → 走査される領域は `{{ '}}` だけ。名前が視界に入らないので `no_log` が付かない。
+ *       Jinja は式全体を評価するので、実機では `}}p@ss` が出る（jinja2 で確認）。
+ *   msg: "{% set a = '%}' ~ ANSIBLE_SECRET %}{{ a }}"
+ *     → `{% %}` 形式でも同じ。
+ *
+ * この 1 つの穴で、秘匿値の `no_log`・ロール内部変数の参照禁止・`vars`/`hostvars` の禁止が
+ * **まとめて**外れる。
+ *
+ * 返す `code` は**文字列リテラルを空白へ潰した**式である。リテラルの中身は変数参照では
+ * ないので（`dest: "{{ base ~ '/vars/main.yml' }}"` の `vars` はパスの一部）、
+ * 潰した状態で判定するのが正しい。潰す処理も自前で行う——`/'[^']*'/` は
+ * Jinja のバックスラッシュエスケープ（`'a\''`）を理解せず、**探している識別子ごと
+ * 消してしまう**ことがある（これも実測）。
+ *
+ * 閉じ記号が見つからないまま終端した場合は `unterminated` を立てる。
+ * 呼び出し側はこれを違反として拒否する（検証できない式を通さない）。
+ */
+function scanJinjaRegions(text: string): { code: string[]; unterminated: boolean } {
+  const code: string[] = []
+  let unterminated = false
+  let cursor = 0
+  while (cursor < text.length) {
+    const exprAt = text.indexOf('{{', cursor)
+    const stmtAt = text.indexOf('{%', cursor)
+    if (exprAt === -1 && stmtAt === -1) break
+    const useExpr = exprAt !== -1 && (stmtAt === -1 || exprAt < stmtAt)
+    const closeToken = useExpr ? '}}' : '%}'
+    let index = (useExpr ? exprAt : stmtAt) + 2
+    let out = ''
+    let closed = false
+    while (index < text.length) {
+      const char = text[index]
+      if (char === "'" || char === '"') {
+        index = skipStringLiteral(text, index)
+        out += ' '
+        continue
+      }
+      if (text.startsWith(closeToken, index)) {
+        index += 2
+        closed = true
+        break
+      }
+      out += char
+      index += 1
+    }
+    if (!closed) {
+      unterminated = true
+      break
+    }
+    code.push(out)
+    cursor = index
+  }
+  return { code, unterminated }
+}
+
+/**
+ * `text[start]` の引用符から始まる文字列リテラルを読み飛ばし、次の位置を返す。
+ * バックスラッシュは次の 1 文字をエスケープする（Jinja の規則）。
+ * 閉じないまま終端したときは文字列長を返す（呼び出し側が unterminated として扱う）。
+ */
+function skipStringLiteral(text: string, start: number): number {
+  const quote = text[start]
+  let index = start + 1
+  while (index < text.length) {
+    if (text[index] === '\\') {
+      index += 2
+      continue
+    }
+    if (text[index] === quote) return index + 1
+    index += 1
+  }
+  return text.length
+}
+
+/** 素の式（波括弧なし）の文字列リテラルを空白へ潰す。 */
+function blankStringLiterals(text: string): { code: string; unterminated: boolean } {
+  let out = ''
+  let index = 0
+  while (index < text.length) {
+    const char = text[index]
+    if (char === "'" || char === '"') {
+      const next = skipStringLiteral(text, index)
+      if (next > text.length) return { code: out, unterminated: true }
+      if (next === text.length && text[text.length - 1] !== char) {
+        return { code: out, unterminated: true }
+      }
+      index = next
+      out += ' '
+      continue
+    }
+    out += char
+    index += 1
+  }
+  return { code: out, unterminated: false }
+}
+
+/**
  * Jinja が式として評価する断片を集める。
  *
  * 対象は `{{ ... }}` / `{% ... %}` の断片と、値そのものが式になるキー
- * （{@link BARE_JINJA_KEYS}）の文字列全体。
+ * （{@link BARE_JINJA_KEYS}）の文字列全体。いずれも文字列リテラルは潰してある。
  *
  * **文字列を丸ごと走査してはいけない。** 一度「未知のモジュール引数が素の式でも
  * 取りこぼさないように」と、文章が入るキー以外の文字列値を全部対象にしたが、
@@ -985,8 +1089,7 @@ function exceedsWalkableDepth(value: unknown, depth = 0): boolean {
  *
  *   - `command: /opt/app/migrate.sh --result /tmp/out.json` が、汚染された `register: result`
  *     と同じ語を含むというだけで `no_log` を貰う。`no_log` はモジュールの出力も失敗理由も
- *     消すので、無関係なタスクの障害が追えなくなる。`result` / `config` / `status` は
- *     register 名としてありふれている
+ *     消すので、無関係なタスクの障害が追えなくなる
  *   - `copy` の `content` に書いた説明文が、たまたまロール内部変数の名前を含むだけで
  *     「内部変数を参照した」として拒否される
  *
@@ -995,13 +1098,20 @@ function exceedsWalkableDepth(value: unknown, depth = 0): boolean {
  * 素の式を取る引数を持つのは `debug`/`assert` の `var` と `assert` の `that` だけである。
  * allowlist にモジュールを足すと構造テストが赤くなるので、そこで見直しを強制する。
  */
-function collectJinjaExpressions(task: Record<string, unknown>): string[] {
+function collectJinjaExpressions(
+  task: Record<string, unknown>,
+): { expressions: string[]; malformed: boolean } {
   const expressions: string[] = []
+  let malformed = false
   const addString = (text: string, bare: boolean): void => {
-    if (bare) expressions.push(text)
-    for (const region of text.match(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g) ?? []) {
-      expressions.push(region)
+    if (bare) {
+      const blanked = blankStringLiterals(text)
+      if (blanked.unterminated) malformed = true
+      expressions.push(blanked.code)
     }
+    const scanned = scanJinjaRegions(text)
+    if (scanned.unterminated) malformed = true
+    expressions.push(...scanned.code)
   }
   const visit = (value: unknown, key: string | undefined, depth: number): void => {
     if (depth > MAX_VALUE_WALK_DEPTH) return
@@ -1020,7 +1130,7 @@ function collectJinjaExpressions(task: Record<string, unknown>): string[] {
     }
   }
   visit(task, undefined, 0)
-  return expressions
+  return { expressions, malformed }
 }
 
 /**
@@ -1048,7 +1158,7 @@ function collectJinjaReferencedNames(
   task: Record<string, unknown>,
 ): ReadonlySet<string> {
   const names = new Set<string>()
-  for (const expression of collectJinjaExpressions(task)) {
+  for (const expression of collectJinjaExpressions(task).expressions) {
     for (const identifier of expression.match(IDENTIFIER_PATTERN) ?? []) {
       names.add(identifier)
     }
@@ -1546,12 +1656,19 @@ export function validateAnsibleTasks(
     // 限って**判定する（`collectJinjaExpressions` 参照）。`hostvars` と `getattr(` は
     // 英文に現れないので、こちらも式の内側で見る。
     {
-      // 文字列リテラルの中は変数参照ではない。除かないと
-      // `dest: "{{ base_dir ~ '/vars/main.yml' }}"` のような正当なパス組み立てが
-      // 「動的な変数参照」として拒否される（構造テスト側は既にこの除去を行っている）。
-      const jinjaExpressions = collectJinjaExpressions(task).map((expression) =>
-        expression.replace(/'[^']*'|"[^"]*"/g, ' '),
-      )
+      // リテラルの中身は {@link scanJinjaRegions} が既に空白へ潰しているので、
+      // `dest: "{{ base_dir ~ '/vars/main.yml' }}"` のような正当なパス組み立ては通る。
+      const scanned = collectJinjaExpressions(task)
+      // 閉じ記号が見つからない式は検証できない。通すと、リテラル内の閉じ記号で
+      // 走査を打ち切らせる細工（§10.1）と同じ場所に穴が残る。
+      if (scanned.malformed) {
+        violations.push({
+          taskIndex,
+          key: 'root',
+          reason: 'unterminated Jinja expression or string literal',
+        })
+      }
+      const jinjaExpressions = scanned.expressions
       if (
         jinjaExpressions.some(
           (expression) =>

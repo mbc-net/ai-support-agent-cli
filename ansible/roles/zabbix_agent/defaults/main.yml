@@ -50,6 +50,14 @@ zabbix_agent_psk: ""                      # secret (ANSIBLE# variable)
 zabbix_agent_allowed_sources: []
 zabbix_agent_ufw_manage: true
 
+# `zabbix_agent_allowed_sources` を空のままにするのは「開放しない（このロールが過去に
+# 開けた穴を閉じる）」という**指示**であり、正当な使い方である。しかし既定の組み合わせ
+# （空リスト ＋ ufw_manage: true）は、os_init が `ufw default deny incoming` を入れた
+# ホストでは「エージェントは動きポートも応答するのに Zabbix サーバーから届かない」状態を
+# **失敗せずに**作る（ヘルスチェックの wait_for は 127.0.0.1 を見るので必ず通る）。
+# そこで rsyslog_server の `allow_all_senders` と同じく、意図の明示を要求する。
+zabbix_agent_allow_no_sources: false
+
 # ServerActive を設定したとき、再起動後にエージェントのログを見て active check の
 # 失敗（接続不可・ホスト未登録・PSK 不一致）を検出するが、その待ち時間の上限（秒）。
 # 再起動直後は何も書かれていないことがあり、そこで1回だけ見て「エラー無し」と

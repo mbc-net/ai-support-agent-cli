@@ -1430,6 +1430,73 @@ describe('変数名を実行時に組み立てる参照', () => {
     expect(result.normalizedTasks?.[1].no_log).toBe(true)
   })
 
+  // Jinja のリテラルは閉じ記号を含み得る。正規表現で領域を切り出すと、そこで
+  // 走査が終わったことにされ、**3 つの防御がまとめて外れる**（実測）。
+  // jinja2 で `{{ '}}' ~ SECRET }}` が `}}p@ss` と展開されることも確認済み。
+  it.each(modes)('[%s] リテラル内の閉じ記号で走査を打ち切らせられない（秘匿値）', (_label, opts) => {
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      `    msg: "{{ '}}' ~ DB_PASSWORD }}"`,
+    ].join('\n')
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+  })
+
+  it.each(modes)('[%s] リテラル内の閉じ記号で走査を打ち切らせられない（hostvars）', (_label, opts) => {
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      `    msg: "{{ '}}' ~ hostvars[inventory_hostname] }}"`,
+    ].join('\n')
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('dynamic variable lookup')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] {% %} 形式でも同じ', (_label, opts) => {
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      `    msg: "{% set a = '%}' ~ DB_PASSWORD %}{{ a }}"`,
+    ].join('\n')
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+  })
+
+  it.each(modes)('[%s] バックスラッシュエスケープでリテラル除去を欺けない', (_label, opts) => {
+    // `/'[^']*'/` は `\'` を閉じ引用符と見なし、探している識別子ごと消してしまう。
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      `    msg: "{{ 'a\\'' ~ hostvars[inventory_hostname] ~ 'b' }}"`,
+    ].join('\n')
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+  })
+
+  it.each(modes)('[%s] 閉じない Jinja 式は検証できないものとして拒否する', (_label, opts) => {
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      '    msg: "{{ DB_PASSWORD"',
+    ].join('\n')
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('unterminated Jinja')),
+    ).toBe(true)
+  })
+
   it.each(modes)('[%s] 汚染された名前を実際に参照すれば no_log は付く', (_label, opts) => {
     const body = `
 - name: Fetch app config
