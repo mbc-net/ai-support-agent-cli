@@ -1,0 +1,5 @@
+---
+- name: Restart zabbix agent
+  ansible.builtin.service:
+    name: "{{ 'zabbix-agent2' if zabbix_agent_variant == 'agent2' else 'zabbix-agent' }}"
+    state: restarted

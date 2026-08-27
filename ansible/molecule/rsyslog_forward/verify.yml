@@ -1,0 +1,153 @@
+---
+# Verify play: assert rsyslog_forward's observable effects.
+#
+# The two cases that matter are the ones that fail silently in production:
+# a queue that is not actually disk-assisted (logs vanish during an outage,
+# with nothing recording it), and a fragment ordered after a `stop` (nothing
+# is ever forwarded, and nothing fails).
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "verify : Locate the forwarding fragment"
+      ansible.builtin.find:
+        paths: /etc/rsyslog.d
+        patterns: "*-forward.conf"
+      register: rsyslog_fwd_files
+
+    - name: "verify : Assert exactly one forwarding fragment was deployed"
+      ansible.builtin.assert:
+        that:
+          - rsyslog_fwd_files.files | length == 1
+        fail_msg: "Expected exactly one *-forward.conf fragment."
+
+    - name: "verify : Assert the fragment sorts before any stopping fragment"
+      ansible.builtin.assert:
+        that:
+          - (rsyslog_fwd_files.files[0].path | basename)[:2] | int < 10
+        fail_msg: >-
+          The forwarding fragment is numbered
+          {{ (rsyslog_fwd_files.files[0].path | basename)[:2] }}, which sorts
+          AFTER the rsyslog_server role's 10-remote-receiver.conf. That fragment
+          ends with `stop`, and a stopped message never reaches a later
+          fragment — so nothing would be forwarded, the config would still
+          validate, and the service would still run. The collector just stays
+          empty.
+
+    - name: "verify : Read the forwarding fragment"
+      ansible.builtin.slurp:
+        src: "{{ rsyslog_fwd_files.files[0].path }}"
+      register: rsyslog_fwd_conf
+
+    - name: "verify : Decode the fragment"
+      ansible.builtin.set_fact:
+        rsyslog_fwd_text: "{{ rsyslog_fwd_conf.content | b64decode }}"
+
+    - name: "verify : Assert the disk-assisted queue is fully specified"
+      ansible.builtin.assert:
+        that:
+          - "'queue.filename=\"fwd-primary\"' in rsyslog_fwd_text"
+          - "'queue.type=\"LinkedList\"' in rsyslog_fwd_text"
+          - "'queue.saveOnShutdown=\"on\"' in rsyslog_fwd_text"
+          - "'action.resumeRetryCount=\"-1\"' in rsyslog_fwd_text"
+        fail_msg: >-
+          The queue specification is incomplete. queue.filename is the setting
+          that actually enables disk-assisted mode — without it rsyslog stays on
+          an in-memory queue no matter what maxDiskSpace says, and every line
+          produced while the collector is unreachable is lost silently.
+          saveOnShutdown defaults to off, so a plain restart drops the queue too.
+
+    - name: "verify : Assert the whole assembled configuration is valid"
+      ansible.builtin.command:
+        argv: [rsyslogd, -N1]
+      changed_when: false
+
+    - name: "verify : Assert rsyslog is running"
+      ansible.builtin.command:
+        argv: [systemctl, is-active, rsyslog]
+      register: rsyslog_fwd_active
+      changed_when: false
+      failed_when: rsyslog_fwd_active.stdout.strip() != 'active'
+
+    # Proves disk-assist is in effect at RUNTIME, not merely written in the
+    # config. Grepping the config cannot tell "written" from "working".
+    #
+    # HOW THIS IS PROVEN, and why not the obvious way: a disk-assisted queue does
+    # NOT write to disk as soon as delivery fails. It keeps messages in memory
+    # until the high watermark is crossed, and only the overflow spills. Measured
+    # in this very scenario against rsyslog 8.2312.0: with the collector
+    # unreachable, 19 undeliverable messages produced no spool file at all, while
+    # 3000 produced one. So "send a few lines and look for a file" tests the
+    # watermark, not the queue, and fails on a perfectly correct role.
+    #
+    # Shutdown persistence is the deterministic probe: on stop, rsyslog spools
+    # whatever the queue still holds — but ONLY because queue.saveOnShutdown is
+    # on AND queue.filename is set. Drop either and the messages are discarded
+    # with the process. That is exactly the hazard the role defaults call out
+    # (this role restarts rsyslog on every config change), so testing it here
+    # covers the queue wiring and the restart hazard in one step.
+    - name: "verify : Emit log lines that cannot be delivered"
+      # One shell loop rather than an Ansible loop: 200 separate `logger` tasks
+      # would dominate the scenario's runtime.
+      ansible.builtin.shell:
+        cmd: for i in $(seq 1 200); do logger -t molecule-queue-probe "queued while the collector is unreachable ($i)"; done
+      changed_when: false
+
+    - name: "verify : Stop rsyslog so the queue must be persisted"
+      ansible.builtin.systemd_service:
+        name: rsyslog
+        state: stopped
+
+    - name: "verify : Look for the on-disk queue files"
+      ansible.builtin.find:
+        paths: /var/spool/rsyslog
+        patterns: "fwd-primary*"
+      register: rsyslog_fwd_spool
+
+    - name: "verify : Assert the undelivered queue survived the stop"
+      ansible.builtin.assert:
+        that:
+          # The data file(s) …
+          - rsyslog_fwd_spool.files | selectattr('path', 'search', 'fwd-primary\.[0-9]+$') | list | length > 0
+          # … and the .qi index, without which rsyslog cannot resume the queue
+          # on the next start: the data would sit on disk unreferenced.
+          - rsyslog_fwd_spool.files | selectattr('path', 'search', 'fwd-primary\.qi$') | list | length == 1
+        fail_msg: >-
+          Stopping rsyslog with an unreachable collector left no queue files under
+          /var/spool/rsyslog. The fragment names a queue.filename, so this means
+          disk-assisted mode is not actually in effect, or queue.saveOnShutdown is
+          not — the "written but not working" case a config grep cannot detect.
+          This role restarts rsyslog on every config change, so in that state each
+          run silently discards whatever had piled up during the outage.
+          Found: {{ rsyslog_fwd_spool.files | map(attribute='path') | list }}
+
+    - name: "verify : Start rsyslog again"
+      ansible.builtin.systemd_service:
+        name: rsyslog
+        state: started
+
+    # Persisting on the way down is only half of it: rsyslog resumes only the
+    # queue whose name matches the running configuration. If the name and the
+    # spool ever disagree, the file stays on disk, is never drained, is never
+    # reported, and every run still succeeds.
+    - name: "verify : Wait for rsyslog to report that it resumed the queue"
+      ansible.builtin.command:
+        argv: [grep, -c, 'queue files exist on disk, re-starting with', /var/log/syslog]
+      register: rsyslog_fwd_resume
+      changed_when: false
+      failed_when: false
+      retries: 10
+      delay: 2
+      until: rsyslog_fwd_resume.rc == 0
+
+    - name: "verify : Assert the persisted queue was picked back up"
+      ansible.builtin.assert:
+        that:
+          - rsyslog_fwd_resume.rc == 0
+        fail_msg: >-
+          rsyslog restarted but never reported re-starting from the on-disk queue,
+          so the spool written at shutdown was not adopted by the new process.
+          The messages remain on disk, referenced by nothing, and the run still
+          reports success.

@@ -1,0 +1,35 @@
+---
+# The base image ships without rsyslog; install it here so `converge` measures
+# the role's own behaviour rather than a first-time package install.
+- name: Prepare
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "prepare : Install rsyslog and ufw"
+      ansible.builtin.apt:
+        name:
+          - rsyslog
+          - ufw
+        state: present
+        update_cache: true
+
+    # 収束が「他人のルールを消さない」ことを確かめるための囮を2本置く。
+    #
+    # 1本目は、このロールの所有マーカーを**接頭辞として含む**コメントを持つ。
+    #    所有権判定を部分一致でやると、これが「自分の持ち物」と誤判定され、
+    #    不要ルールとして `ufw --force delete` される。実際にこの構成で 22/tcp の
+    #    SSH 許可が消えることを実機で再現したうえで、判定を
+    #    `comment 'MARKER'` の行末一致に変更した。囮を置かないと、部分一致へ
+    #    戻しても Molecule は緑のままになる。
+    # 2本目は完全に無関係な運用者ルール（対照）。
+    - name: "prepare : Add decoy ufw rules that this role must never delete"
+      ansible.builtin.command:
+        argv: "{{ item }}"
+      loop:
+        - [ufw, allow, from, 203.0.113.7, to, any, port, '22', proto, tcp,
+           comment, 'ai-support-agent:rsyslog_server-backup']
+        - [ufw, allow, from, 203.0.113.8, to, any, port, '22', proto, tcp,
+           comment, 'operator-ssh']
+      changed_when: true

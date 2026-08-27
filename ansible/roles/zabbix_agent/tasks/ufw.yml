@@ -1,0 +1,152 @@
+---
+# ufw convergence for zabbix_agent.
+#
+# Design doc: admin-docs section 3.6. The same four rules as rsyslog_server:
+#
+# 1. DESIRED STATE IS A TUPLE (source, port, proto), not a set of sources.
+#    Comparing sources alone leaves the old rule behind when
+#    zabbix_agent_listen_port changes.
+# 2. ADD BEFORE DELETE, so a failed add cannot leave ufw with neither rule.
+# 3. ENUMERATE WITH `ufw show added`. `ufw status` prints only
+#    "Status: inactive" while ufw is disabled and lists nothing, so it would
+#    find no stale rules to remove and they would spring back at the next
+#    `ufw enable`.
+# 4. NEVER ADOPT SOMEBODY ELSE'S RULE: re-adding an existing tuple with a
+#    different comment makes ufw overwrite that comment, after which this role
+#    would consider the rule its own and eventually delete it.
+#
+# An empty zabbix_agent_allowed_sources is a valid desired state meaning "close
+# what this role opened" — it is NOT the same as "leave ufw alone", which is
+# zabbix_agent_ufw_manage: false. This is why convergence still runs here.
+
+# The ownership marker is written as a LITERAL at every use site — it is
+# deliberately not a variable, and not a `set_fact` either.
+#
+# A recipe's task-level `vars:` on `include_role` are "include params", which
+# take precedence over a `set_fact` made inside the role. Verified against
+# ansible-core: a role that does `set_fact: marker: "ai-support-agent:demo"`
+# still sees the recipe's `vars: {marker: ""}` — the effective value was the
+# empty string. So `set_fact` is NOT a way to protect a value from the caller.
+#
+# It has to be protected, because as a caller-controlled value this marker is
+# two separate holes: set it to "" and `search('')` matches every line, so every
+# rule on the host (SSH included) counts as owned by this role and is deleted as
+# soon as the desired set is empty; set it to another owner's marker and this
+# role adopts, then deletes, their rules.
+- name: "zabbix_agent : Install ufw"
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: "zabbix_agent : Build the desired ufw rule set"
+  ansible.builtin.set_fact:
+    zabbix_agent_ufw_desired: >-
+      {{ zabbix_agent_allowed_sources | default([]) | product(['tcp']) | map('list') | list }}
+
+# Matching is done on the FULL (source, port, protocol) triple with anchored
+# patterns. Substring matching is not adequate and fails silently in the
+# dangerous direction: comparing only port+proto never notices a removed
+# source, and an unanchored `10.0.0.1` also matches `10.0.0.10` (likewise
+# `port 10050` vs `port 100500`). Both were reproduced against real Jinja
+# evaluation before this was written this way.
+- name: "zabbix_agent : Build the anchored match patterns for the desired rules"
+  ansible.builtin.set_fact:
+    zabbix_agent_ufw_desired_patterns: >-
+      {%- set out = [] -%}
+      {%- for src, proto in zabbix_agent_ufw_desired -%}
+      {%- set _ = out.append('(^|\s)allow from ' ~ (src | regex_escape) ~ ' to any port '
+                             ~ (zabbix_agent_listen_port | string) ~ ' proto ' ~ proto ~ '(\s|$)') -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: "zabbix_agent : Enumerate the ufw rules already added"
+  # `ufw show added` lists persisted rules whether ufw is active or not.
+  # `ufw status` reads the live filter state and prints only "Status: inactive"
+  # while ufw is disabled, listing nothing — stale rules would never be found
+  # and would spring back at the next `ufw enable`.
+  ansible.builtin.command:
+    argv: [ufw, show, added]
+  register: zabbix_agent_ufw_added
+  changed_when: false
+
+- name: "zabbix_agent : Add the desired ufw rules"
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['ufw', 'allow', 'from', item[0], 'to', 'any',
+         'port', zabbix_agent_listen_port | string, 'proto', item[1],
+         'comment', 'ai-support-agent:zabbix_agent']
+      }}
+  loop: "{{ zabbix_agent_ufw_desired }}"
+  register: zabbix_agent_ufw_add
+  # Leave alone a triple that already exists under somebody else's comment:
+  # re-adding it makes ufw overwrite that comment, moving the operator's rule
+  # into this role's ownership — and this role deletes what it owns once it is
+  # no longer desired.
+  when: >-
+    zabbix_agent_ufw_added.stdout_lines
+    | select('search', '(^|\s)allow from ' ~ (item[0] | regex_escape) ~ ' to any port '
+             ~ (zabbix_agent_listen_port | string) ~ ' proto ' ~ item[1] ~ '(\s|$)')
+    | reject('search', "comment 'ai-support-agent:zabbix_agent'$")
+    | list | length == 0
+  changed_when: "'Skipping adding existing rule' not in (zabbix_agent_ufw_add.stdout | default(''))"
+
+# Deletion runs only after every desired rule is in place: deleting first and
+# then failing to add would leave ufw with neither rule.
+- name: "zabbix_agent : Re-enumerate the ufw rules after adding"
+  ansible.builtin.command:
+    argv: [ufw, show, added]
+  register: zabbix_agent_ufw_after_add
+  changed_when: false
+
+# 所有権の判定は、コメント全体との一致で行う（部分一致にしない）。
+# `ufw show added` の各行は `... comment 'MARKER'` で終わる（実機で確認済み）。
+# 部分一致にすると、運用者が付けた `ai-support-agent:zabbix_agent-backup` のような
+# コメントを持つ無関係のルールまで「このロールの持ち物」と判定される。実際に
+# 部分一致版で再現したところ、22/tcp の SSH 許可ルールが stale と見なされ
+# `ufw --force delete` で消えた。よって末尾の `'` と行末 `$` まで含めて固定する。
+- name: "zabbix_agent : Compute the ufw rules this role owns but no longer wants"
+  # Owned (comment matches) AND matching none of the desired triples. Rejecting
+  # against the whole desired set covers source, port and protocol at once — an
+  # empty desired set therefore makes every owned rule stale, which is the
+  # intended meaning of an empty zabbix_agent_allowed_sources ("close the holes
+  # this role opened"), as distinct from zabbix_agent_ufw_manage: false.
+  ansible.builtin.set_fact:
+    zabbix_agent_ufw_stale: >-
+      {%- set owned = zabbix_agent_ufw_after_add.stdout_lines
+                      | select('search', "comment 'ai-support-agent:zabbix_agent'$") | list -%}
+      {%- set out = [] -%}
+      {%- for line in owned -%}
+      {%- set keep = [] -%}
+      {%- for pattern in zabbix_agent_ufw_desired_patterns -%}
+      {%- if line is search(pattern) -%}{%- set _ = keep.append(1) -%}{%- endif -%}
+      {%- endfor -%}
+      {%- if keep | length == 0 -%}{%- set _ = out.append(line) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: "zabbix_agent : Delete the stale ufw rules this role owns"
+  ansible.builtin.command:
+    # Delete by full specification, not by index from `ufw status numbered`:
+    # indexes exist only while ufw is active and shift as earlier rules go.
+    # The trailing `comment '...'` is stripped — ufw matches on the
+    # specification, and the printed token carries literal quotes.
+    argv: >-
+      {{
+        ['ufw', '--force', 'delete']
+        + (item | regex_replace('^ufw ', '') | regex_replace(" comment .*$", '')).split(' ')
+      }}
+  loop: "{{ zabbix_agent_ufw_stale | default([]) }}"
+  register: zabbix_agent_ufw_delete
+  changed_when: "'Could not delete non-existent rule' not in (zabbix_agent_ufw_delete.stdout | default(''))"
+
+- name: "zabbix_agent : Report the firewall convergence result"
+  ansible.builtin.debug:
+    msg: >-
+      ufw rules owned by this role now allow
+      {{ zabbix_agent_ufw_desired | length }} source(s) on port
+      {{ zabbix_agent_listen_port }}/tcp;
+      {{ zabbix_agent_ufw_stale | default([]) | length }} stale rule(s) removed.
+      ufw itself is not enabled by this role — that is os_init's responsibility.

@@ -1,0 +1,20 @@
+---
+# Converge play for the rsyslog_server scenario. Mirrors the shape of the
+# production play generatePlaybook() builds at runtime (play-level become,
+# acl precheck), so the scenario stays faithful as the role grows.
+- name: Converge
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: "precheck : Ensure acl (setfacl) is installed"
+      ansible.builtin.apt:
+        name: acl
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: "Converge : rsyslog_server role"
+      ansible.builtin.include_role:
+        name: rsyslog_server

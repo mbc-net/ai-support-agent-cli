@@ -1,0 +1,33 @@
+# {{ ansible_managed }}
+# Managed by the ai-support-agent `rsyslog_forward` role. Manual edits are lost
+# on the next run.
+#
+# Deliberately numbered below the rsyslog_server role's 10-remote-receiver.conf:
+# that fragment ends with `stop`, and a message that has been stopped never
+# reaches a later fragment.
+
+{% if rsyslog_forward_queue_enabled %}
+# Disk-assisted queue. `queue.filename` is what actually switches rsyslog out of
+# pure in-memory mode — without it the size limit below is inert and logs are
+# dropped whenever the collector is unreachable.
+{{ rsyslog_forward_selector }} action(
+    type="omfwd"
+    target="{{ rsyslog_forward_target_host }}"
+    port="{{ rsyslog_forward_target_port }}"
+    protocol="{{ rsyslog_forward_protocol }}"
+    queue.type="LinkedList"
+    queue.filename="fwd-primary"
+    queue.spoolDirectory="{{ rsyslog_forward_queue_spool_directory }}"
+    queue.maxDiskSpace="{{ rsyslog_forward_queue_max_disk_space }}"
+    queue.saveOnShutdown="{{ 'on' if rsyslog_forward_queue_save_on_shutdown else 'off' }}"
+    action.resumeRetryCount="{{ rsyslog_forward_resume_retry_count }}"
+)
+{% else %}
+{{ rsyslog_forward_selector }} action(
+    type="omfwd"
+    target="{{ rsyslog_forward_target_host }}"
+    port="{{ rsyslog_forward_target_port }}"
+    protocol="{{ rsyslog_forward_protocol }}"
+    action.resumeRetryCount="{{ rsyslog_forward_resume_retry_count }}"
+)
+{% endif %}
