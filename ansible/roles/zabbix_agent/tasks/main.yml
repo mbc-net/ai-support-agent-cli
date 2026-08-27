@@ -131,16 +131,6 @@
       DIFFERENT variable and may hold a hostname.
   loop: "{{ zabbix_agent_allowed_sources | default([]) }}"
 
-- name: "zabbix_agent : Pin the Zabbix repository to the official host (non-overridable check)"
-  ansible.builtin.assert:
-    that:
-      - "'https://repo.zabbix.com/' in zabbix_agent_repo_url"
-    fail_msg: >-
-      The Zabbix repository package must come from repo.zabbix.com; a recipe
-      may not redirect it.
-  vars:
-    zabbix_agent_repo_url: "https://repo.zabbix.com/zabbix/{{ zabbix_agent_version }}/ubuntu/pool/main/z/zabbix-release/"
-
 # Deliberately NOT `ansible.builtin.setup` here. The production play disables
 # implicit fact gathering and collects facts in a precheck task run with
 # `become: false`, because the setup module inherited under the play's
@@ -160,6 +150,16 @@
       with `become: false` before including it (gathering under become fails on
       hosts without NOPASSWD sudo).
 
+# The download host is an INLINE LITERAL, and that is the whole protection.
+# Only `zabbix_agent_version` is interpolated, and it is enum-checked above.
+# There is deliberately no `zabbix_agent_repo_url` variable: a recipe's
+# task-level `vars:` on `include_role` are include params, which outrank both
+# role vars and anything this role sets, so any variable holding the host could
+# be redirected by the caller. (The guard's INCLUDE_ROLE_ALLOWED_VARS would also
+# have to be relied on; keeping the host out of the variable space means it
+# cannot be reached at all.) A previous version asserted `'https://repo.zabbix.com/'
+# in zabbix_agent_repo_url` with the variable defined in that assert's own
+# `vars:` — a tautology that could never fail and protected nothing.
 - name: "zabbix_agent : Install the Zabbix repository package"
   ansible.builtin.apt:
     deb: >-

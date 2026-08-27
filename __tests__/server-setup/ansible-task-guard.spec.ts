@@ -1183,6 +1183,66 @@ describe('変数名を実行時に組み立てる参照', () => {
     expect(validateAnsibleTasks(body, opts).ok).toBe(true)
   })
 
+  it.each(modes)('[%s] 英単語としての hostvars も巻き添えにしない', (_label, opts) => {
+    // `hostvars` / `getattr(` はタスク全体で見ていたため、値へ到達し得ない
+    // ただの文章が `root` を key とする不可解な違反で拒否されていた。
+    const body = `
+- name: Print the hostvars summary
+  ansible.builtin.debug:
+    msg: hello
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] 散文にロール内部変数名が現れても拒否しない', (_label, opts) => {
+    const body = `
+- name: Document how k3s_ephemeral_device is chosen
+  ansible.builtin.debug:
+    msg: hello
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] 秘匿値の汚染が散文へ広がらない', (_label, opts) => {
+    // `register` 名は `config` / `result` のような普通の英単語になりがちで、
+    // タスク全体を字句解析していたときは、汚染名と同じ語を含むだけの無関係な
+    // タスクにも `no_log` が付いた。`no_log` はモジュールの出力も失敗理由も
+    // 消すので、サーバーセットアップの failure を追う手段そのものが失われる。
+    const body = `
+- name: Fetch app config
+  ansible.builtin.shell: "curl -H 'X-Token: {{ API_TOKEN }}' https://example.com"
+  register: config
+- name: Restart the service to pick up the new config
+  ansible.builtin.service:
+    name: app
+    state: restarted
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['API_TOKEN']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+    expect(result.normalizedTasks?.[1].no_log).toBeUndefined()
+  })
+
+  it.each(modes)('[%s] 汚染された名前を実際に参照すれば no_log は付く', (_label, opts) => {
+    const body = `
+- name: Fetch app config
+  ansible.builtin.shell: "curl -H 'X-Token: {{ API_TOKEN }}' https://example.com"
+  register: config
+- name: Show it
+  ansible.builtin.debug:
+    var: config
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['API_TOKEN']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[1].no_log).toBe(true)
+  })
+
   // JSON エスケープが識別子の直前に来ると、`JSON.stringify` した文字列を字句解析する
   // 実装では先頭文字と癒着して別の名前になり、照合をすり抜けた（`\tNAME` → `tNAME`）。
   // Jinja は `{{ }}` 内側の空白を無視するので実機ではそのまま解決される。

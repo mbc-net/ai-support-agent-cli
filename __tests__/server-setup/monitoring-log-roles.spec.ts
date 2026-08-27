@@ -328,11 +328,34 @@ describe('Phase 1 監視・ログ系ロール（rsyslog_server / rsyslog_forward
       expect(raw).toContain('sport = :{{ zabbix_agent_listen_port }}')
     })
 
-    it('リポジトリの取得元をインラインリテラルの assert で固定している', () => {
-      // ロール変数はレシピの task-level vars で上書きできるため、既定値のピン留めは
-      // 防御にならない。比較対象がこのファイル内のリテラルであることが要件。
-      const raw = readRaw('zabbix_agent', 'tasks', 'main.yml')
-      expect(raw).toContain("'https://repo.zabbix.com/' in zabbix_agent_repo_url")
+    it('リポジトリの取得元が実際のダウンロード URL のインラインリテラルである', () => {
+      // ロール変数はレシピの task-level vars（include params）で上書きできるため、
+      // 変数に入れた時点でピン留めは防御にならない。**実際に apt が読む URL** が
+      // このファイル内のリテラルであることが要件。
+      //
+      // 以前は assert 自身の `vars:` で定義した `zabbix_agent_repo_url` を検査していたが、
+      // それは決して失敗しないトートロジーで、apt タスクは無関係な別のリテラルを
+      // 使っていた（＝検査は何も守っていなかった）。ここは実物を見る。
+      const tasks = flatten(loadTasks('zabbix_agent'))
+      const installRepo = tasks.find(
+        (t) =>
+          moduleOf(t) === 'ansible.builtin.apt' &&
+          /repository package/i.test(String(t.name ?? '')),
+      )
+      expect(installRepo).toBeDefined()
+      const args = (installRepo as Record<string, unknown>)['ansible.builtin.apt'] as Record<
+        string,
+        unknown
+      >
+      expect(String(args.deb)).toMatch(/^https:\/\/repo\.zabbix\.com\//)
+      // URL 全体が変数で差し替えられないこと（補間は enum 検証済みの version のみ）。
+      expect(String(args.deb).replace(/\{\{[^}]*\}\}/g, '')).not.toMatch(/\{\{/)
+      // 変数として復活していないこと。コメント行は説明のために名前を挙げるので除く。
+      const withoutComments = readRaw('zabbix_agent', 'tasks', 'main.yml')
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('#'))
+        .join('\n')
+      expect(withoutComments).not.toContain('zabbix_agent_repo_url')
     })
   })
 

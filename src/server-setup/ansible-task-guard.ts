@@ -1007,6 +1007,39 @@ function collectJinjaExpressions(task: Record<string, unknown>): string[] {
 }
 
 /**
+ * Jinja 式の中に「変数として」現れる識別子を集める。
+ *
+ * **散文まで拾ってはいけない。** タスク全体を字句解析していたときは、値へ到達し得ない
+ * ただの文章が違反や `no_log` を引き起こした（実測）:
+ *
+ *   - `- name: Print the hostvars summary`              → 動的参照として拒否
+ *   - `- name: Document how k3s_ephemeral_device is …`  → 内部変数の参照として拒否
+ *   - `register: config` が汚染されたあとの
+ *     `- name: Restart the service to pick up the new config` → 無関係なタスクに `no_log`
+ *
+ * 最後のものが特に悪い。`no_log` が付いたタスクはモジュールの出力も失敗理由も
+ * 実行ログと `stepResults[].message` から消えるので、**サーバーセットアップの failure を
+ * 追う手段そのものが失われる**。`register` 名は `config` / `result` のような普通の英単語に
+ * なりがちで、汚染が文章へ雪だるま式に広がる。
+ *
+ * 名前が値へ到達する経路は Jinja だけなので、Jinja が式として評価する断片
+ * （{@link collectJinjaExpressions}）に限って字句解析すれば、取りこぼさずに散文を外せる。
+ * §6.3.1 が挙げた 3 つの穴（`{% %}` のステートメント・`debug` の `var`・素の `when` 式）は
+ * どれも {@link BARE_JINJA_KEYS} と `{% %}` の取り込みで覆われている。
+ */
+function collectJinjaReferencedNames(
+  task: Record<string, unknown>,
+): ReadonlySet<string> {
+  const names = new Set<string>()
+  for (const expression of collectJinjaExpressions(task)) {
+    for (const identifier of expression.match(IDENTIFIER_PATTERN) ?? []) {
+      names.add(identifier)
+    }
+  }
+  return names
+}
+
+/**
  * タスクが秘匿変数を参照しているか。
  *
  * 走査は {@link collectTemplateReferencedNames} と**同じ方式**（タスク全体の識別子）で行う。
@@ -1027,7 +1060,7 @@ function referencesSecretVar(
   secretVarNames: ReadonlySet<string>,
 ): boolean {
   if (secretVarNames.size === 0) return false
-  for (const name of collectTemplateReferencedNames(task)) {
+  for (const name of collectJinjaReferencedNames(task)) {
     if (secretVarNames.has(name)) return true
   }
   return false
@@ -1453,7 +1486,7 @@ export function validateAnsibleTasks(
     // 秘匿値を register しているロール（`github_runner` の runner 登録トークン等）が
     // あるので、読めるままだとレシピが自分のタスクでそれを出力でき、`no_log` は
     // 付かない（`referencesSecretVar` はテナントの秘匿変数名しか知らない）。
-    for (const name of collectTemplateReferencedNames(task)) {
+    for (const name of collectJinjaReferencedNames(task)) {
       if (BUNDLED_ROLE_INTERNAL_VARS.has(name)) {
         violations.push({
           taskIndex,
@@ -1486,12 +1519,14 @@ export function validateAnsibleTasks(
     // 限って**判定する（`collectJinjaExpressions` 参照）。`hostvars` と `getattr(` は
     // 英文に現れないので、従来どおりタスク全体で見る。
     {
-      const serializedTask = JSON.stringify(task)
       const jinjaExpressions = collectJinjaExpressions(task)
       if (
-        /\bhostvars\b/.test(serializedTask) ||
-        /\bgetattr\s*\(/.test(serializedTask) ||
-        jinjaExpressions.some((expression) => /\bvars\b/.test(expression))
+        jinjaExpressions.some(
+          (expression) =>
+            /\bvars\b/.test(expression) ||
+            /\bhostvars\b/.test(expression) ||
+            /\bgetattr\s*\(/.test(expression),
+        )
       ) {
         violations.push({
           taskIndex,
