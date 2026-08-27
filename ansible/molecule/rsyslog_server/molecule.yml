@@ -1,0 +1,65 @@
+---
+# Molecule "rsyslog_server" scenario: converge + idempotence + verify for the
+# `rsyslog_server` role.
+#
+# WHY THIS ROLE IS IN CI (and zabbix_server / rundeck / strapi are not): rsyslog
+# is a plain apt package driven entirely by config files, with no external
+# service to enrol against and no kernel/block-device dependency. Everything the
+# role promises — fail-closed sender restriction, path-traversal-safe dynamic
+# log paths, whole-config validation with rollback, ufw convergence — is
+# observable inside a privileged systemd container.
+#
+# The image is pinned by manifest DIGEST (not `:latest`) for reproducible CI —
+# same digest as the `default` and `os_init` scenarios. Bump all together in a
+# reviewed PR.
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ../../requirements.yml
+
+driver:
+  name: docker
+
+platforms:
+  - name: ai-support-role-rsyslog-server-ubuntu2404
+    image: geerlingguy/docker-ubuntu2404-ansible@sha256:a92c929b640cd4e5cf73f67fd1e9d0466c58335449fdc37a889c0bb4bbf78e2e
+    # systemd (rsyslog.service) needs a writable cgroup mount and the host
+    # cgroup namespace; ufw drives iptables and needs privileged.
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      roles_path: ${MOLECULE_PROJECT_DIRECTORY}/roles
+  inventory:
+    group_vars:
+      all:
+        # Deliberately NOT the role defaults: an explicit sender list proves the
+        # variable reaches $AllowedSender, and a non-default port proves the
+        # listener follows the variable rather than rsyslog's built-in 514.
+        rsyslog_server_allowed_senders:
+          - 10.99.0.0/24
+          - 192.0.2.0/24
+        rsyslog_server_port: 5514
+        rsyslog_server_tcp_enabled: true
+        rsyslog_server_udp_enabled: true
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy

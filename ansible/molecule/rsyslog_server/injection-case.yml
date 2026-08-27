@@ -1,0 +1,17 @@
+---
+# 1件のインジェクション候補値でロールを呼び、拒否されたかどうかだけを記録する。
+#
+# block に `loop:` は付けられない（"'loop' is not a valid attribute for a Block"）ため、
+# ケース1件分をこのファイルに切り出し、verify 側から `include_tasks` + `loop` で回す。
+- name: "verify : Include the role with a hostile sender list"
+  block:
+    - name: "verify : Include the role with {{ rsyslog_injection_case | to_json }}"
+      ansible.builtin.include_role:
+        name: rsyslog_server
+      vars:
+        rsyslog_server_allowed_senders: "{{ [rsyslog_injection_case] }}"
+  rescue:
+    - name: "verify : Record that the payload was rejected"
+      ansible.builtin.set_fact:
+        rsyslog_verify_injection_rejected: >-
+          {{ rsyslog_verify_injection_rejected + [rsyslog_injection_case] }}

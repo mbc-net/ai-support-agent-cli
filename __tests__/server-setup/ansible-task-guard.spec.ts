@@ -5,6 +5,9 @@ import {
   AnsibleTaskViolation,
   INCLUDE_ROLE_ALLOWED_ROLES,
   validateAnsibleTasks,
+  MODULE_ALLOWLIST,
+  RESIDENT_EXTRA_MODULE_ALLOWLIST,
+  BARE_JINJA_KEYS,
 } from '../../src/server-setup/ansible-task-guard'
 
 /**
@@ -264,7 +267,10 @@ ${vars}
         expect(validateAnsibleTasks(body, ecs).ok).toBe(false)
       })
 
-      it('src の制約は shared_file 以外のロールには適用しない', () => {
+      it('src の制約は shared_file 以外のロールには適用しないが、allowlist が別の理由で拒否する', () => {
+        // 元々の意図は「shared_file 固有の src 検証が他ロールへ波及しないこと」で、それは
+        // 今も成り立つ（reason に shared_file が現れない）。一方 INCLUDE_ROLE_ALLOWED_VARS
+        // 導入後は、docker ロールの公開変数ではない名前を渡すこと自体が拒否される。
         const body = `
 - name: unrelated role
   ansible.builtin.include_role:
@@ -272,7 +278,11 @@ ${vars}
   vars:
     shared_file_src: "{{ anything }}"
 `
-        expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
+        const result = validateAnsibleTasks(body, ecs)
+        expect(result.ok).toBe(false)
+        const reasons = result.violations.map((v) => v.reason)
+        expect(reasons).toContain("variable is not a public parameter of role 'docker'")
+        expect(reasons.some((r) => r.includes('shared_file'))).toBe(false)
       })
     })
 
@@ -361,7 +371,7 @@ ${vars}
   include_role:
     name: web_server
   vars:
-    web_server_port: 8080
+    web_server_type: nginx
 `
       expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
     })
@@ -470,13 +480,15 @@ ${vars}
         },
       )
 
-      it('vars に通常のロール変数（web_server_port 等）のみを含む include_role は許可される', () => {
+      it('vars にそのロールの公開変数のみを含む include_role は許可される', () => {
+        // 変数名は INCLUDE_ROLE_ALLOWED_VARS に載っている実在の公開変数であること。
+        // 架空の名前（かつて web_server_port を使っていた）は allowlist 導入後は
+        // 「そのロールの公開パラメータではない」として正しく拒否される。
         const body = `
 - name: bundled step
   include_role:
     name: web_server
   vars:
-    web_server_port: 8080
     web_server_type: nginx
 `
         expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
@@ -506,7 +518,7 @@ ${vars}
 
     describe('include_role.tasks_from のパストラバーサル拒否（両モード）', () => {
       it.each(['../x', '../../etc/passwd', 'sub/dir', 'a/b', 'x..y/../z'])(
-        'tasks_from=%s（パス区切り・.. を含む）は ecs/resident 双方で拒否される',
+        'tasks_from=%s（パス区切り・.. を含む）は ecs/resident 双方で拒否される（パラメータキー allowlist による）',
         (tasksFrom) => {
           const body = `
 - name: bundled step
@@ -521,9 +533,11 @@ ${vars}
               hasReason(
                 result.violations,
                 (v) =>
+                  // `tasks_from` は文字種に関わらずパラメータキーの allowlist
+                  // （`name` のみ）で拒否される。パストラバーサルはその部分集合であり、
+                  // 専用の文字種チェックはもう存在しない。
                   v.key === 'tasks_from' &&
-                  v.reason ===
-                    'include_role tasks_from must match [A-Za-z0-9_-]+ (no path separators)',
+                  v.reason === 'include_role param key is not allowed',
               ),
             ).toBe(true)
           }
@@ -546,16 +560,20 @@ ${vars}
       })
 
       it.each(['setup', 'alt_tasks', 'tasks-2', 'main'])(
-        'tasks_from=%s（英数・_・- のみ）は許可される',
+        'tasks_from=%s は文字種が妥当でも拒否される（レシピからは tasks_from 自体を使えない）',
         (tasksFrom) => {
+          // かつては「パス区切り・.. を含まなければ許可」だったが、tasks_from は
+          // ロール内部のタスクファイルを直接呼べる＝main.yml の入力検証を迂回できる
+          // 入口だったため、レシピからは一切使えないようにした。
+          // 例: {name: zabbix_agent, tasks_from: ufw} は CIDR 検証を飛ばして ufw.yml を実行できた。
           const body = `
 - name: bundled step
   include_role:
     name: os_init
     tasks_from: ${tasksFrom}
 `
-          expect(validateAnsibleTasks(body, ecs).ok).toBe(true)
-          expect(validateAnsibleTasks(body, resident).ok).toBe(true)
+          expect(validateAnsibleTasks(body, ecs).ok).toBe(false)
+          expect(validateAnsibleTasks(body, resident).ok).toBe(false)
         },
       )
     })
@@ -785,5 +803,883 @@ tasks:
         true,
       )
     })
+  })
+
+  describe('set_fact / register からロール内部へ書き込む迂回路の拒否', () => {
+    // ここに並ぶ 3 つのペイロードは、いずれも実際にガードへ流して `ok=true`
+    // （＝素通り）を確認したうえで塞いだもの。塞いだ理由を残すだけでは、将来
+    // 検査を緩めたときに気づけないので、ペイロードそのものを固定する。
+    //
+    // 根っこは「`set_fact` は**変数名（キー）も**実行時に Jinja 展開する」こと。
+    // 静的な文字列としては予約名にもロール接頭辞にも一致しない名前が、実行時には
+    // 一致する名前になる。
+
+    it.each([
+      ['ecs' as const],
+      ['resident' as const],
+    ])('%s: Jinja で組み立てたキーによる予約変数の書き込みを拒否する', (mode) => {
+      // ansible_connection を書ければ、以降の command/shell を対象ホストではなく
+      // agent 側で実行させられる——ガードが塞ぐべき接続すり替えそのもの。
+      const body = `
+- name: t
+  ansible.builtin.set_fact:
+    "{{ 'ansible_' ~ 'connection' }}": local
+`
+      const result = validateAnsibleTasks(body, { mode })
+      expect(result.ok).toBe(false)
+      expect(result.violations.map((v) => v.reason)).toContain(
+        'set_fact variable name must be a static identifier',
+      )
+    })
+
+    it.each([['ecs' as const], ['resident' as const]])(
+      '%s: Jinja で組み立てたキーによるロール名前空間への書き込みを拒否する',
+      (mode) => {
+        // rsyslog_forward の二重 include 検出フラグを戻す経路。
+        const body = `
+- name: t
+  ansible.builtin.set_fact:
+    "{{ 'rsyslog_forward_' ~ 'already_configured' }}": false
+`
+        const result = validateAnsibleTasks(body, { mode })
+        expect(result.ok).toBe(false)
+        expect(result.violations.map((v) => v.reason)).toContain(
+          'set_fact variable name must be a static identifier',
+        )
+      },
+    )
+
+    it.each([['ecs' as const], ['resident' as const]])(
+      '%s: free-form 文字列形式の set_fact を拒否する',
+      (mode) => {
+        // マッピングでないためキー検査が一度も走らず、予約名もロール名前空間も
+        // そのまま書けていた。形式ごと拒否する。
+        const body = `
+- name: t
+  ansible.builtin.set_fact: rsyslog_forward_already_configured=false
+`
+        const result = validateAnsibleTasks(body, { mode })
+        expect(result.ok).toBe(false)
+        expect(result.violations.map((v) => v.reason)).toContain(
+          'set_fact args must be a mapping (free-form form is not allowed)',
+        )
+      },
+    )
+
+    it.each([['ecs' as const], ['resident' as const]])(
+      '%s: 静的な名前でもロール名前空間への set_fact は拒否する',
+      (mode) => {
+        const body = `
+- name: t
+  ansible.builtin.set_fact:
+    rsyslog_forward_already_configured: false
+`
+        const result = validateAnsibleTasks(body, { mode })
+        expect(result.ok).toBe(false)
+        expect(result.violations.map((v) => v.reason)).toContain(
+          'set_fact must not write into a bundled role namespace',
+        )
+      },
+    )
+
+    it.each([['ecs' as const], ['resident' as const]])(
+      '%s: register でロール名前空間へ書き込むことも拒否する',
+      (mode) => {
+        // register の結果も include params と同じく参照側から見える名前なので、
+        // ロールが持つ名前を上書きできてしまう。
+        const body = `
+- name: t
+  ansible.builtin.command:
+    argv: [echo, x]
+  register: rsyslog_forward_already_configured
+`
+        const result = validateAnsibleTasks(body, { mode })
+        expect(result.ok).toBe(false)
+        expect(result.violations.map((v) => v.reason)).toContain(
+          'register must not write into a bundled role namespace',
+        )
+      },
+    )
+
+    it.each([['ecs' as const], ['resident' as const]])(
+      '%s: ロール名前空間に属さない静的な set_fact は許可する',
+      (mode) => {
+        // 絞りすぎて正当なレシピを壊していないことの確認。
+        const body = `
+- name: t
+  ansible.builtin.set_fact:
+    my_local_value: 1
+`
+        expect(validateAnsibleTasks(body, { mode }).ok).toBe(true)
+      },
+    )
+  })
+
+describe('ロール内部変数の参照と、秘匿値の派生', () => {
+  const bothModes: Array<['ecs' | 'resident', { mode: 'ecs' | 'resident' }]> = [
+    ['ecs', { mode: 'ecs' }],
+    ['resident', { mode: 'resident' }],
+  ]
+
+  // `include_role` の `public` を禁止しても、ロール内部の値はレシピから読める。
+  // register / set_fact はロールスコープではなくホストの変数だからで、
+  // ansible-core 2.21 で「ロール内で no_log 付きで register した値を、include の
+  // あとの debug がそのまま出力する」ことを実測している。
+  // `github_runner` は runner 登録トークンをこの形で register する。
+  it.each(bothModes)(
+    '[%s] ロールが register した秘匿値をレシピから参照できない',
+    (_label, opts) => {
+      const body = `
+- name: Register a runner
+  ansible.builtin.include_role:
+    name: github_runner
+- name: Leak the registration token
+  ansible.builtin.debug:
+    msg: "{{ github_runner_regtoken_resp.json.token }}"
+`
+      const result = validateAnsibleTasks(body, opts)
+      expect(result.ok).toBe(false)
+      expect(
+        hasReason(result.violations, (v) =>
+          v.reason.includes("bundled role's internal variable"),
+        ),
+      ).toBe(true)
+    },
+  )
+
+  it.each(bothModes)(
+    '[%s] 波括弧を使わない参照経路も塞ぐ（{%% %%} / debug var / when）',
+    (_label, opts) => {
+      // `{{ }}` の中だけを走査していた時点では、この 3 つがすべて素通りしていた。
+      // Jinja が値を評価する場所を数え上げる方針だと、数え漏らした場所がそのまま
+      // 穴になるため、タスク全体を走査している。
+      const bodies = [
+        `
+- name: leak via a Jinja statement
+  ansible.builtin.debug:
+    msg: "{%% set x = github_runner_regtoken_resp %%}{{ x.json.token }}"
+`,
+        `
+- name: leak via debug var (takes a bare variable name)
+  ansible.builtin.debug:
+    var: github_runner_regtoken_resp
+`,
+        `
+- name: leak via a when expression (bare Jinja, no braces)
+  ansible.builtin.debug:
+    msg: "probe"
+  when: github_runner_regtoken_resp.json.token is match('^A')
+`,
+      ]
+      for (const body of bodies) {
+        const result = validateAnsibleTasks(body, opts)
+        expect(result.ok).toBe(false)
+        expect(
+          hasReason(result.violations, (v) =>
+            v.reason.includes("bundled role's internal variable"),
+          ),
+        ).toBe(true)
+      }
+    },
+  )
+
+  it.each(bothModes)(
+    '[%s] ロール名で始まるだけのテナント変数は巻き添えにしない',
+    (_label, opts) => {
+      // `database_url` は `database` ロールの名前空間に見えるが、ロールが内部で
+      // 使う名前ではない。接頭辞で参照禁止にすると、こういう既存レシピが
+      // 一斉に動かなくなる。禁止は内部変数の実名リストで行う。
+      const body = `
+- name: Use a tenant variable
+  ansible.builtin.debug:
+    msg: "{{ database_url }}"
+`
+      const result = validateAnsibleTasks(body, opts)
+      expect(result.ok).toBe(true)
+    },
+  )
+
+  it.each(bothModes)(
+    '[%s] ロール名接頭辞を持たない内部変数（db_*）への書き込みも拒否する',
+    (_label, opts) => {
+      // `database` ロールだけは内部計算に `db_*` を使う。接頭辞ルールだけでは
+      // 素通りするため、内部変数の実名リストでも照合する。
+      const body = `
+- name: Overwrite the role's computed password result
+  ansible.builtin.set_fact:
+    db_mysql_root_password_result: "faked"
+`
+      const result = validateAnsibleTasks(body, opts)
+      expect(result.ok).toBe(false)
+      expect(
+        hasReason(result.violations, (v) =>
+          v.reason.includes('must not write into a bundled role namespace'),
+        ),
+      ).toBe(true)
+    },
+  )
+
+  it.each(bothModes)(
+    '[%s] 秘匿値を set_fact で移し替えても、以降の参照に no_log が付く',
+    (_label, opts) => {
+      const body = `
+- name: Copy the secret under another name
+  ansible.builtin.set_fact:
+    copied: "{{ ansible_ssh_pass }}"
+- name: Print the copy
+  ansible.builtin.debug:
+    msg: "{{ copied }}"
+`
+      const result = validateAnsibleTasks(body, opts)
+      expect(result.ok).toBe(true)
+      // 1つ目だけでなく2つ目にも付くこと。付かないと接続パスワードが
+      // 実行ログと stepResults[].message に平文で残る。
+      expect(result.normalizedTasks?.[0]).toMatchObject({ no_log: true })
+      expect(result.normalizedTasks?.[1]).toMatchObject({ no_log: true })
+    },
+  )
+
+  it.each(bothModes)(
+    '[%s] 秘匿値を参照したタスクの register 結果も秘匿として扱う',
+    (_label, opts) => {
+      const body = `
+- name: Run a command with the secret
+  ansible.builtin.command: "echo {{ ansible_become_pass }}"
+  register: probe
+- name: Print the captured output
+  ansible.builtin.debug:
+    msg: "{{ probe.stdout }}"
+`
+      const result = validateAnsibleTasks(body, opts)
+      expect(result.ok).toBe(true)
+      expect(result.normalizedTasks?.[1]).toMatchObject({ no_log: true })
+    },
+  )
+
+  it.each(bothModes)(
+    '[%s] 秘匿値に触れないタスクには no_log を付けない',
+    (_label, opts) => {
+      // 伝播が広がりすぎていないことの対照。すべてに no_log が付くと
+      // このテストは通るが、実行ログが何も読めなくなる。
+      const body = `
+- name: Harmless
+  ansible.builtin.debug:
+    msg: "{{ some_plain_var }}"
+`
+      const result = validateAnsibleTasks(body, opts)
+      expect(result.ok).toBe(true)
+      expect(result.normalizedTasks?.[0]).not.toMatchObject({ no_log: true })
+    },
+  )
+})
+
+
+describe('秘匿値の no_log は波括弧の有無に依存しない', () => {
+  // 内部変数の参照禁止側だけを「タスク全体の走査」に直し、no_log 判定である
+  // referencesSecretVar を `{{ }}` 限定のまま残していた。同じ穴が片方にだけ残る
+  // という、このプロジェクトで繰り返し起きている「兄弟経路の非対称」である。
+  // 判定は 1 つの関数に寄せたうえで、両方向にテストを置く。
+  const modes: Array<['ecs' | 'resident', { mode: 'ecs' | 'resident' }]> = [
+    ['ecs', { mode: 'ecs' }],
+    ['resident', { mode: 'resident' }],
+  ]
+
+  const bodies: Array<[string, string]> = [
+    [
+      'debug の var は変数名そのものを取る（波括弧なし）',
+      `
+- name: t
+  ansible.builtin.debug:
+    var: ansible_ssh_pass
+`,
+    ],
+    [
+      'when は素の Jinja 式（正規表現で 1 文字ずつ読み出せる）',
+      `
+- name: t
+  ansible.builtin.debug:
+    msg: "probe"
+  when: ansible_ssh_pass is match('^x')
+`,
+    ],
+    [
+      'Jinja ステートメントは {{ }} ではない',
+      `
+- name: t
+  ansible.builtin.debug:
+    msg: "{% set x = ansible_become_pass %}{{ x | b64encode }}"
+`,
+    ],
+  ]
+
+  it.each(modes)('[%s] 接続用の秘匿変数はどの書き方でも no_log が付く', (_label, opts) => {
+    for (const [, body] of bodies) {
+      const result = validateAnsibleTasks(body, opts)
+      expect(result.ok).toBe(true)
+      expect(result.normalizedTasks?.[0]).toMatchObject({ no_log: true })
+    }
+  })
+})
+
+describe('変数名を実行時に組み立てる参照', () => {
+  const modes: Array<['ecs' | 'resident', { mode: 'ecs' | 'resident' }]> = [
+    ['ecs', { mode: 'ecs' }],
+    ['resident', { mode: 'resident' }],
+  ]
+
+  it.each(modes)('[%s] vars[...] の連結でロール内部変数へ辿れない', (_label, opts) => {
+    // 静的な識別子で照合しているため、名前を分割して連結されると素通りする。
+    // `set_fact` のキー側は既に静的識別子を要求しているのに、参照側だけ
+    // 動的な組み立てを許していた。
+    const body = `
+- name: t
+  ansible.builtin.debug:
+    msg: "{{ vars['github_runner_' ~ 'regtoken_resp'].json.token }}"
+`
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('dynamic variable lookup')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] hostvars を丸ごと出力できない', (_label, opts) => {
+    const body = `
+- name: t
+  ansible.builtin.debug:
+    var: hostvars[inventory_hostname]
+`
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('dynamic variable lookup')),
+    ).toBe(true)
+  })
+
+  // `vars` は添字アクセスに限らない。かつては `vars[` だけを見ていたため、下の 3 つは
+  // すべて素通りしていた。いずれも実機（ansible-core 2.21）で、ロールが register した
+  // 内部変数の値が実行ログへ出ることを確認している。
+  it.each([
+    ['bare', '{{ vars }}'],
+    ['dict2items', '{{ vars | dict2items }}'],
+    ['get', "{{ vars.get('github_runner_' ~ 'regtoken_resp') }}"],
+  ])('[ecs] 添字を使わない vars 参照も拒否される（%s）', (_label, expression) => {
+    const body = `
+- name: t
+  ansible.builtin.debug:
+    msg: "${expression}"
+`
+    const result = validateAnsibleTasks(body, { mode: 'ecs' })
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('dynamic variable lookup')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] 英単語としての vars は巻き添えにしない', (_label, opts) => {
+    // Jinja 式の内側に限って判定しないと、この程度の記述で全滅する。
+    const body = `
+- name: Set some vars for the web server
+  ansible.builtin.debug:
+    msg: "configuring vars now"
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] 英単語としての hostvars も巻き添えにしない', (_label, opts) => {
+    // `hostvars` / `getattr(` はタスク全体で見ていたため、値へ到達し得ない
+    // ただの文章が `root` を key とする不可解な違反で拒否されていた。
+    const body = `
+- name: Print the hostvars summary
+  ansible.builtin.debug:
+    msg: hello
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] 散文にロール内部変数名が現れても拒否しない', (_label, opts) => {
+    const body = `
+- name: Document how k3s_ephemeral_device is chosen
+  ansible.builtin.debug:
+    msg: hello
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] 秘匿値の汚染が散文へ広がらない', (_label, opts) => {
+    // `register` 名は `config` / `result` のような普通の英単語になりがちで、
+    // タスク全体を字句解析していたときは、汚染名と同じ語を含むだけの無関係な
+    // タスクにも `no_log` が付いた。`no_log` はモジュールの出力も失敗理由も
+    // 消すので、サーバーセットアップの failure を追う手段そのものが失われる。
+    const body = `
+- name: Fetch app config
+  ansible.builtin.shell: "curl -H 'X-Token: {{ API_TOKEN }}' https://example.com"
+  register: config
+- name: Restart the service to pick up the new config
+  ansible.builtin.service:
+    name: app
+    state: restarted
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['API_TOKEN']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+    expect(result.normalizedTasks?.[1].no_log).toBeUndefined()
+  })
+
+  // `assert` の `that` は素の Jinja 式のリストである。BARE_JINJA_KEYS から落ちていたため、
+  // 秘匿値の 1 文字オラクル・内部変数の参照・`vars[...]` の 3 つがまとめて素通りしていた。
+  it.each(modes)('[%s] assert の that から秘匿値を読むと no_log が付く', (_label, opts) => {
+    const body = `
+- name: oracle
+  ansible.builtin.assert:
+    that:
+      - "DB_PASSWORD is match('^a')"
+  ignore_errors: true
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+  })
+
+  it.each(modes)('[%s] assert の that からロール内部変数は参照できない', (_label, opts) => {
+    const body = `
+- name: probe
+  ansible.builtin.assert:
+    that:
+      - "github_runner_regtoken_resp.json.token is defined"
+`
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) =>
+        v.reason.includes("must not reference a bundled role's internal variable"),
+      ),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] assert の that から vars で辿ることもできない', (_label, opts) => {
+    const body = `
+- name: probe
+  ansible.builtin.assert:
+    that:
+      - "vars['github_runner_' ~ 'regtoken_resp'] is defined"
+`
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('dynamic variable lookup')),
+    ).toBe(true)
+  })
+
+  // 深さ制限は fail-closed でなければならない。打ち切って続ける実装では、深くネストした
+  // 値が秘匿値の no_log もロール内部変数の参照禁止も vars の禁止もすり抜けた（実測）。
+  it.each(modes)('[%s] 走査できない深さのタスクは拒否される（打ち切って通さない）', (_label, opts) => {
+    let nested = '"{{ DB_PASSWORD }}"'
+    for (let i = 0; i < 70; i += 1) nested = `[${nested}]`
+    const body = `
+- name: leak
+  ansible.builtin.set_fact:
+    leak: ${nested}
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('nested too deeply')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] 自己参照するアンカーは例外ではなく違反になる', (_label, opts) => {
+    // 循環構造を再帰関数へ渡すと RangeError が validateAnsibleTasks の外へ飛び、
+    // 保存 API が 400 ではなく 500 になり、デプロイ前監査スクリプトは結果を出さずに落ちる。
+    const body = `
+- &a
+  ansible.builtin.debug:
+    msg: x
+    self: *a
+`
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('nested too deeply')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] ロール接頭辞を持たない公開パラメータも渡せる', (_label, opts) => {
+    // `claude_cli` は `ANTHROPIC_API_KEY` を読む（tasks/main.yml が `is defined` で分岐する）。
+    // allowlist の作り方を defaults のキーだけに寄せていたため漏れており、
+    // これを書いたレシピは保存時にも実行時にも拒否されていた。
+    const body = `
+- name: claude
+  ansible.builtin.include_role:
+    name: claude_cli
+  vars:
+    ANTHROPIC_API_KEY: "{{ MY_KEY }}"
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] 公開パラメータは set_fact で先に置いてもよい', (_label, opts) => {
+    // 同じ名前を include_role の task レベル vars で渡せるのだから、set_fact で置くのを
+    // 禁じる理由が無い。接頭辞だけで弾くと allowlist と矛盾し、実行時にも落ちる。
+    const body = `
+- name: pre
+  ansible.builtin.set_fact:
+    k3s_node_ip: 10.0.0.1
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] 内部変数は set_fact で置けないまま', (_label, opts) => {
+    const body = `
+- name: pre
+  ansible.builtin.set_fact:
+    k3s_ephemeral_device: /dev/sda
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(false)
+  })
+
+  it.each(modes)('[%s] ロール名接頭辞と一致するだけの普通の名前は書ける', (_label, opts) => {
+    // ロール名には `docker` / `database` のような一般的な語が並ぶ。接頭辞で弾いていたため、
+    // ロールと無関係なごく普通のレシピが保存時にも実行時にも拒否されていた。
+    const body = `
+- name: a
+  ansible.builtin.set_fact:
+    docker_image: nginx
+- name: b
+  ansible.builtin.set_fact:
+    database_url: "postgres://x"
+- name: c
+  ansible.builtin.command: docker ps
+  register: docker_ps
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] ロールが計算する値は接頭辞を外しても書けない', (_label, opts) => {
+    // 実名リストは `set_fact` / `register` に加えて、タスクの `vars:` と
+    // `vars/main.yml` のキーも含む。`set_fact` は task vars より優先度が高いので、
+    // ここが抜けると予約ディレクトリの denylist を空にして無効化できる。
+    for (const name of [
+      'rsyslog_server_reserved_log_dirs',
+      'rsyslog_forward_reserved_spool_dirs',
+      'github_runner_k8s_secret_name',
+      'k3s_ephemeral_device',
+    ]) {
+      const body = `
+- name: a
+  ansible.builtin.set_fact:
+    ${name}: x
+`
+      expect(validateAnsibleTasks(body, opts).ok).toBe(false)
+    }
+  })
+
+  it.each(modes)('[%s] 文字列リテラルの vars はパス組み立てとして通す', (_label, opts) => {
+    const body = `
+- name: path
+  ansible.builtin.copy:
+    content: x
+    dest: "{{ base_dir ~ '/vars/main.yml' }}"
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] when だけの秘匿値参照は汚染を広げない', (_label, opts) => {
+    // 「秘匿値が設定されているときだけ実行する」という普通の書き方が、以降の連鎖を
+    // まるごと no_log にして障害調査の手段を奪っていた。タスク自身の no_log は維持する。
+    const body = `
+- name: gated
+  ansible.builtin.command: /opt/app/migrate.sh
+  register: result
+  when: DB_PASSWORD is defined
+- name: later
+  ansible.builtin.debug:
+    msg: "{{ result.stdout }}"
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+    expect(result.normalizedTasks?.[1].no_log).toBeUndefined()
+  })
+
+  it.each(modes)('[%s] モジュール引数が秘匿値に触れたら汚染は広がる', (_label, opts) => {
+    const body = `
+- name: uses
+  ansible.builtin.command: "echo {{ DB_PASSWORD }}"
+  register: result
+- name: later
+  ansible.builtin.debug:
+    msg: "{{ result.stdout }}"
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.normalizedTasks?.[1].no_log).toBe(true)
+  })
+
+  // Jinja のリテラルは閉じ記号を含み得る。正規表現で領域を切り出すと、そこで
+  // 走査が終わったことにされ、**3 つの防御がまとめて外れる**（実測）。
+  // jinja2 で `{{ '}}' ~ SECRET }}` が `}}p@ss` と展開されることも確認済み。
+  it.each(modes)('[%s] リテラル内の閉じ記号で走査を打ち切らせられない（秘匿値）', (_label, opts) => {
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      `    msg: "{{ '}}' ~ DB_PASSWORD }}"`,
+    ].join('\n')
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+  })
+
+  it.each(modes)('[%s] リテラル内の閉じ記号で走査を打ち切らせられない（hostvars）', (_label, opts) => {
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      `    msg: "{{ '}}' ~ hostvars[inventory_hostname] }}"`,
+    ].join('\n')
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('dynamic variable lookup')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] {% %} 形式でも同じ', (_label, opts) => {
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      `    msg: "{% set a = '%}' ~ DB_PASSWORD %}{{ a }}"`,
+    ].join('\n')
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+  })
+
+  it.each(modes)('[%s] バックスラッシュエスケープでリテラル除去を欺けない', (_label, opts) => {
+    // `/'[^']*'/` は `\'` を閉じ引用符と見なし、探している識別子ごと消してしまう。
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      `    msg: "{{ 'a\\'' ~ hostvars[inventory_hostname] ~ 'b' }}"`,
+    ].join('\n')
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+  })
+
+  it.each(modes)('[%s] 閉じない Jinja 式は検証できないものとして拒否する', (_label, opts) => {
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      '    msg: "{{ DB_PASSWORD"',
+    ].join('\n')
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('unterminated Jinja')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] loop のリスト要素は式として扱わない', (_label, opts) => {
+    // `when` / `that` のリストは条件式だが、`loop` のリストはデータである。
+    // 区別せずに要素まで式として走査したため、アポストロフィを含むリテラルが
+    // 「閉じない文字列」と判定されてタスクごと拒否されていた。
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      '    msg: "{{ item }}"',
+      '  loop:',
+      `    - "Bob's server"`,
+    ].join('\n')
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] when のリスト要素は式として扱う', (_label, opts) => {
+    const body = [
+      '- name: n',
+      '  ansible.builtin.debug:',
+      '    msg: hi',
+      '  when:',
+      '    - github_runner_regtoken_resp is defined',
+    ].join('\n')
+    expect(validateAnsibleTasks(body, opts).ok).toBe(false)
+  })
+
+  it.each(modes)('[%s] 属性アクセスの .vars は動的参照ではない', (_label, opts) => {
+    const body = `
+- name: n
+  ansible.builtin.debug:
+    msg: "{{ my_thing.vars }}"
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+
+  it.each(modes)('[%s] 素の vars は引き続き拒否する', (_label, opts) => {
+    const body = `
+- name: n
+  ansible.builtin.debug:
+    msg: "{{ vars }}"
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(false)
+  })
+
+  it.each(modes)('[%s] 汚染された名前を実際に参照すれば no_log は付く', (_label, opts) => {
+    const body = `
+- name: Fetch app config
+  ansible.builtin.shell: "curl -H 'X-Token: {{ API_TOKEN }}' https://example.com"
+  register: config
+- name: Show it
+  ansible.builtin.debug:
+    var: config
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['API_TOKEN']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[1].no_log).toBe(true)
+  })
+
+  // JSON エスケープが識別子の直前に来ると、`JSON.stringify` した文字列を字句解析する
+  // 実装では先頭文字と癒着して別の名前になり、照合をすり抜けた（`\tNAME` → `tNAME`）。
+  // Jinja は `{{ }}` 内側の空白を無視するので実機ではそのまま解決される。
+  it.each(modes)('[%s] タブを前置してもロール内部変数の参照は拒否される', (_label, opts) => {
+    const body = [
+      '- name: t',
+      '  ansible.builtin.debug:',
+      '    var: "\\tgithub_runner_regtoken_resp"',
+    ].join('\n')
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) =>
+        v.reason.includes("must not reference a bundled role's internal variable"),
+      ),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] タブを前置しても秘匿変数の参照には no_log が付く', (_label, opts) => {
+    const body = [
+      '- name: oracle',
+      '  ansible.builtin.debug:',
+      '    msg: hit',
+      "  when: \"\\tDB_PASSWORD is match('^x')\"",
+    ].join('\n')
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+  })
+
+  it.each(modes)('[%s] include_role の task レベル vars: は巻き添えにしない', (_label, opts) => {
+    // 判定を雑に「vars という語を含む」にすると、正当な include_role が全滅する。
+    const body = `
+- name: Forward syslog
+  ansible.builtin.include_role:
+    name: rsyslog_forward
+  vars:
+    rsyslog_forward_target_host: "10.0.0.1"
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(true)
+  })
+})
+
+})
+
+describe('素の Jinja 式を取るキーの列挙', () => {
+  // `BARE_JINJA_KEYS` は「波括弧なしで Jinja 式として評価される場所」の全数である。
+  // ここが 1 つ欠けると、その場所を通る参照は 3 つの防御（秘匿値の no_log・ロール内部変数の
+  // 参照禁止・vars の禁止）をまとめてすり抜ける（実際に `assert` の `that` が欠けていた）。
+  //
+  // 評価される場所はモジュール allowlist に依存するので、**allowlist が変わったらここを
+  // 見直させる**。下の一覧は「このモジュールの引数に素の式を取るものが有るか無いか」を
+  // 理由付きで宣言したもので、モジュールを足すと必ず赤くなる。
+  const MODULES_WITH_BARE_EXPRESSION_ARGS: Readonly<Record<string, readonly string[]>> = {
+    'ansible.builtin.debug': ['var'],
+    'ansible.builtin.assert': ['that'],
+  }
+
+  /** 素の式を取る引数を持たないと確認済みのモジュール（引数はすべてテンプレート文字列）。 */
+  const MODULES_WITHOUT_BARE_EXPRESSION_ARGS: readonly string[] = [
+    'ansible.builtin.apt',
+    'ansible.builtin.apt_key',
+    'ansible.builtin.apt_repository',
+    'ansible.builtin.copy',
+    'ansible.builtin.file',
+    'ansible.builtin.user',
+    'ansible.builtin.group',
+    'ansible.builtin.service',
+    'ansible.builtin.systemd',
+    'ansible.builtin.lineinfile',
+    'ansible.builtin.blockinfile',
+    'ansible.builtin.replace',
+    'ansible.builtin.stat',
+    'ansible.builtin.get_url',
+    'ansible.builtin.command',
+    'ansible.builtin.shell',
+    'ansible.builtin.set_fact',
+    'ansible.builtin.wait_for',
+    'ansible.builtin.include_role',
+    'ansible.mysql.mysql_user',
+    'community.postgresql.postgresql_user',
+    'ansible.posix.authorized_key',
+    'ansible.builtin.meta',
+    'ansible.builtin.cron',
+    'ansible.builtin.git',
+    'ansible.builtin.hostname',
+    'ansible.builtin.mount',
+    'ansible.builtin.pip',
+    'ansible.builtin.unarchive',
+    'ansible.builtin.uri',
+    'ansible.posix.mount',
+    'ansible.posix.sysctl',
+    'community.docker.docker_container',
+    'community.docker.docker_image',
+    'community.docker.docker_network',
+    'community.general.timezone',
+  ]
+
+  it('モジュール allowlist の全要素について、素の式引数の有無が宣言されている', () => {
+    const declared = new Set([
+      ...Object.keys(MODULES_WITH_BARE_EXPRESSION_ARGS),
+      ...MODULES_WITHOUT_BARE_EXPRESSION_ARGS,
+    ])
+    const allowed = new Set([...MODULE_ALLOWLIST, ...RESIDENT_EXTRA_MODULE_ALLOWLIST])
+    const undeclared = [...allowed].filter((m) => !declared.has(m)).sort()
+    expect(undeclared).toEqual([])
+  })
+
+  it('宣言された素の式引数がすべて BARE_JINJA_KEYS に入っている', () => {
+    const needed = Object.values(MODULES_WITH_BARE_EXPRESSION_ARGS).flat()
+    for (const key of needed) {
+      expect(BARE_JINJA_KEYS.has(key)).toBe(true)
+    }
+  })
+
+  it('タスク直下の素の式キー（制御キー）も BARE_JINJA_KEYS に入っている', () => {
+    // `CONTROL_KEYS` に無いキーはモジュール候補として拒否されるので、タスク直下で
+    // 書ける素の式はこの 4 つで尽きる。
+    for (const key of ['when', 'until', 'loop', 'with_items']) {
+      expect(BARE_JINJA_KEYS.has(key)).toBe(true)
+    }
   })
 })

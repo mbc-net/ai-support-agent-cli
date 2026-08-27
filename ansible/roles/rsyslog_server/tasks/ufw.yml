@@ -1,0 +1,182 @@
+---
+# ufw convergence for rsyslog_server.
+#
+# Design doc: admin-docs section 3.6. The four rules that matter:
+#
+# 1. DESIRED STATE IS A TUPLE, not a set of sources. Comparing only the source
+#    address leaves the old rule in place when the PORT or PROTOCOL changes —
+#    turning rsyslog_server_udp_enabled back off would keep the UDP hole open.
+#
+# 2. ADD BEFORE DELETE. If we delete first and the add then fails, ufw is left
+#    with neither rule and the run reports a failure without saying how far it
+#    got. Adding first is free (ufw answers "Skipping adding existing rule"),
+#    and a failure there leaves the old rules untouched.
+#    NOTE: this guarantees ufw's rule set stays coherent. It does NOT
+#    guarantee zero downtime — by this point rsyslog already restarted onto
+#    the new port, so a failed add still means traffic is blocked.
+#
+# 3. ENUMERATE WITH `ufw show added`, NOT `ufw status`. `ufw status` reads the
+#    live filter state and prints only "Status: inactive" when ufw is
+#    disabled, listing nothing. Since we converge even while ufw is inactive
+#    (rules persist and take effect at the next `ufw enable`), `status` would
+#    find nothing to delete and silently leave stale rules to come back later.
+#
+# 4. NEVER ADOPT SOMEBODY ELSE'S RULE. Re-adding an existing rule with a
+#    different comment makes ufw overwrite that comment — the rule would then
+#    look like ours and we would delete it later. So we check for a
+#    same-tuple rule first and leave it alone if it is not already ours.
+
+# The ownership marker is written as a LITERAL at every use site — it is
+# deliberately not a variable, and not a `set_fact` either.
+#
+# A recipe's task-level `vars:` on `include_role` are "include params", which
+# take precedence over a `set_fact` made inside the role. Verified against
+# ansible-core: a role that does `set_fact: marker: "ai-support-agent:demo"`
+# still sees the recipe's `vars: {marker: ""}` — the effective value was the
+# empty string. So `set_fact` is NOT a way to protect a value from the caller.
+#
+# It has to be protected, because as a caller-controlled value this marker is
+# two separate holes: set it to "" and `search('')` matches every line, so every
+# rule on the host (SSH included) counts as owned by this role and is deleted as
+# soon as the desired set is empty; set it to another owner's marker and this
+# role adopts, then deletes, their rules.
+- name: "rsyslog_server : Install ufw"
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: "rsyslog_server : Build the desired ufw rule set"
+  ansible.builtin.set_fact:
+    rsyslog_server_ufw_desired: >-
+      {{
+        (['any'] if (rsyslog_server_allow_all_senders | bool) else (rsyslog_server_allowed_senders | default([])))
+        | product(
+            (['tcp'] if rsyslog_server_tcp_enabled | bool else [])
+            + (['udp'] if rsyslog_server_udp_enabled | bool else [])
+          )
+        | map('list')
+        | list
+      }}
+
+# Matching is done on the FULL (source, port, protocol) triple with anchored
+# patterns. Substring matching is not adequate here, and getting it wrong is
+# silent in the dangerous direction:
+#   * comparing only port+proto never notices a removed sender, so dropping a
+#     CIDR from the allow list leaves that CIDR able to connect;
+#   * an unanchored `port 514` also matches `port 5140`, and an unanchored
+#     `10.0.0.1` also matches `10.0.0.10`, so unrelated rules get treated as
+#     ours (kept when they should go, or skipped when they should be added).
+# Both were reproduced against real Jinja evaluation before this was rewritten.
+- name: "rsyslog_server : Build the anchored match patterns for the desired rules"
+  ansible.builtin.set_fact:
+    rsyslog_server_ufw_desired_patterns: >-
+      {%- set out = [] -%}
+      {%- for src, proto in rsyslog_server_ufw_desired -%}
+      {#- 送信元を指定しないルールは ufw が短縮形へ正規化する。`ufw allow to any port 514
+          proto tcp` を追加しても `ufw show added` は `ufw allow 514/tcp` と出す
+          （ufw 0.36.2 で実測）。長い形のパターンだけを見ていると、allow_all_senders の
+          ルールは desired と一致せず、追加した直後に stale として削除される。 -#}
+      {%- set head = 'allow ' ~ (rsyslog_server_port | string) ~ '/' ~ proto
+                     if src == 'any'
+                     else 'allow from ' ~ (src | regex_escape) ~ ' to any port '
+                          ~ (rsyslog_server_port | string) ~ ' proto ' ~ proto -%}
+      {%- set _ = out.append('(^|\s)' ~ head ~ '(\s|$)') -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: "rsyslog_server : Enumerate the ufw rules already added"
+  # `ufw show added` lists persisted rules whether ufw is active or not, which
+  # is what convergence-while-inactive needs: `ufw status` reads the live filter
+  # state and prints only "Status: inactive" when ufw is disabled, listing
+  # nothing — so stale rules would never be found and would come back at the
+  # next `ufw enable`.
+  ansible.builtin.command:
+    argv: [ufw, show, added]
+  register: rsyslog_server_ufw_added
+  changed_when: false
+
+- name: "rsyslog_server : Add the desired ufw rules"
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['ufw', 'allow']
+        + ([] if item[0] == 'any' else ['from', item[0]])
+        + ['to', 'any', 'port', rsyslog_server_port | string, 'proto', item[1],
+           'comment', 'ai-support-agent:rsyslog_server']
+      }}
+  loop: "{{ rsyslog_server_ufw_desired }}"
+  register: rsyslog_server_ufw_add
+  # Skip a triple that already exists under somebody else's comment. Re-adding
+  # it would make ufw overwrite that comment, which silently moves a rule the
+  # operator (or os_init/k3s) created into this role's ownership — and this role
+  # deletes what it owns once it is no longer desired.
+  when: >-
+    rsyslog_server_ufw_added.stdout_lines
+    | select('search', '(^|\s)'
+             ~ ('allow ' ~ (rsyslog_server_port | string) ~ '/' ~ item[1]
+                if item[0] == 'any'
+                else 'allow from ' ~ (item[0] | regex_escape) ~ ' to any port '
+                     ~ (rsyslog_server_port | string) ~ ' proto ' ~ item[1])
+             ~ '(\s|$)')
+    | reject('search', "comment 'ai-support-agent:rsyslog_server'$")
+    | list | length == 0
+  changed_when: "'Skipping adding existing rule' not in (rsyslog_server_ufw_add.stdout | default(''))"
+
+# Deletion happens only AFTER every desired rule is in place: if a delete ran
+# first and the add then failed, ufw would be left with neither rule.
+- name: "rsyslog_server : Re-enumerate the ufw rules after adding"
+  ansible.builtin.command:
+    argv: [ufw, show, added]
+  register: rsyslog_server_ufw_after_add
+  changed_when: false
+
+# 所有権の判定は、コメント全体との一致で行う（部分一致にしない）。
+# `ufw show added` の各行は `... comment 'MARKER'` で終わる（実機で確認済み）。
+# 部分一致にすると、運用者が付けた `ai-support-agent:rsyslog_server-backup` のような
+# コメントを持つ無関係のルールまで「このロールの持ち物」と判定される。実際に
+# 部分一致版で再現したところ、22/tcp の SSH 許可ルールが stale と見なされ
+# `ufw --force delete` で消えた。よって末尾の `'` と行末 `$` まで含めて固定する。
+- name: "rsyslog_server : Compute the ufw rules this role owns but no longer wants"
+  # Own the rule (comment matches) AND match none of the desired triples.
+  # Rejecting against the full desired set covers all three dimensions at once:
+  # a changed source, a changed port and a disabled protocol all fall out of it.
+  ansible.builtin.set_fact:
+    rsyslog_server_ufw_stale: >-
+      {%- set owned = rsyslog_server_ufw_after_add.stdout_lines
+                      | select('search', "comment 'ai-support-agent:rsyslog_server'$") | list -%}
+      {%- set out = [] -%}
+      {%- for line in owned -%}
+      {%- set keep = [] -%}
+      {%- for pattern in rsyslog_server_ufw_desired_patterns -%}
+      {%- if line is search(pattern) -%}{%- set _ = keep.append(1) -%}{%- endif -%}
+      {%- endfor -%}
+      {%- if keep | length == 0 -%}{%- set _ = out.append(line) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: "rsyslog_server : Delete the stale ufw rules this role owns"
+  ansible.builtin.command:
+    # Delete by full specification, not by the index from `ufw status numbered`:
+    # indexes exist only while ufw is active and shift as earlier rules go. The
+    # trailing `comment '...'` is stripped because ufw matches on the
+    # specification, and the printed token carries literal quotes that would
+    # otherwise become part of an argv element.
+    argv: >-
+      {{
+        ['ufw', '--force', 'delete']
+        + (item | regex_replace('^ufw ', '') | regex_replace(" comment .*$", '')).split(' ')
+      }}
+  loop: "{{ rsyslog_server_ufw_stale | default([]) }}"
+  register: rsyslog_server_ufw_delete
+  changed_when: "'Could not delete non-existent rule' not in (rsyslog_server_ufw_delete.stdout | default(''))"
+
+- name: "rsyslog_server : Report the firewall convergence result"
+  ansible.builtin.debug:
+    msg: >-
+      ufw rules owned by this role now allow
+      {{ rsyslog_server_ufw_desired | length }} (source, port, proto) tuple(s)
+      on port {{ rsyslog_server_port }};
+      {{ rsyslog_server_ufw_stale | default([]) | length }} stale rule(s) removed.
+      ufw itself is not enabled by this role — that is os_init's responsibility.

@@ -5,14 +5,22 @@ name: Ansible Roles
 # same way a role author does locally (see ansible/DEVELOPING.md).
 #
 # HONEST COVERAGE: the `molecule` job exercises only the container-safe,
-# idempotent roles, one per scenario (a matrix over `default` = ssh_key and
-# `os_init`). Each scenario's `idempotence` step requires a zero-change second
+# idempotent roles, one per scenario (a matrix over `default` = ssh_key,
+# `os_init`, `rsyslog_server` and `rsyslog_forward`). Each scenario's `idempotence` step requires a zero-change second
 # converge. Roles that depend on a real kernel / block devices / privileged host
 # or on live enrolment secrets — k3s (disk partitioning + gVisor), docker
 # (docker-in-docker), gitlab_runner / github_runner / tailscale (registration
 # token / auth key) — are NOT covered here and must be verified on a real VM
 # (Multipass/Vagrant) per DEVELOPING.md. "Green in a container" is not a
 # guarantee of correctness on a real host.
+#
+# zabbix_agent is also absent from the matrix, and that is deliberate rather
+# than an oversight: its post-restart verification reads the agent's own journal
+# for the current systemd invocation, and its value depends on a reachable
+# Zabbix server accepting active checks. In a container with no server there is
+# nothing to observe, so a scenario would assert nothing while looking green.
+# It is verified on a real VM instead (design doc
+# admin-docs/docs/specifications/server-setup-monitoring-app-roles.md section 7).
 
 on:
   push:
@@ -100,7 +108,7 @@ jobs:
       matrix:
         # One container-safe, idempotent role per scenario. Add new scenarios
         # here as roles gain Molecule coverage (see ansible/DEVELOPING.md).
-        scenario: [default, os_init]
+        scenario: [default, os_init, rsyslog_server, rsyslog_forward]
     steps:
       - uses: actions/checkout@v4
 
