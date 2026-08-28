@@ -24,7 +24,7 @@ import { isPlainObject } from '../utils/is-plain-object'
  * ## `include_role` スニペット（組み込みステップ）
  * 組み込みステップ（os_init/ssh_key/docker/nvm/claude_cli/codex/ai_support_agent/
  * ai_support_agent_k8s/web_server/database/dns_tls/gitlab_runner/github_runner/
- * gitlab_runner_k8s/github_runner_k8s/k3s/
+ * gitlab_runner_k8s/github_runner_k8s/e2e_runner_k8s/k3s/
  * tailscale）は、bundled role を呼ぶ
  * `include_role` タスクとして表現する。`include_role` は下記 allowlist のロールのみ
  * 許可し、role 名と
@@ -259,6 +259,16 @@ const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
  * 取得元（repo / OCI 参照 / チャート名）はロール内のインラインリテラルであり、レシピ側の
  * task-level vars から差し替えできない。ジョブは非特権に固定し、privileged / dind を
  * 有効化する変数は提供しない（roles/gitlab_runner_k8s・roles/github_runner_k8s 参照）。
+ *
+ * `e2e_runner_k8s` は他のロールに無いパターンを持つ: E2E(Playwright)ジョブをオンデマンド
+ * 投入できるように、専用 namespace（`e2e` prefix のインラインリテラル allowlist）・
+ * namespace 限定 Role/RoleBinding・ResourceQuota・Pod Security `baseline` ラベルを用意した
+ * うえで、長期有効な ServiceAccount トークン Secret を発行し、そこから**クラスタ管理者
+ * kubeconfig とは別の低権限 kubeconfig を生成する**。トークンの取得・decode・埋め込みは
+ * 1 回の remote shell 実行（heredoc 直接書き出し）内で完結させ、Ansible の register/
+ * set_fact にも `kubectl config set-credentials --token=` の argv にも載せない。生成先の
+ * パスは `/etc/e2e-runner/` 配下に固定し、TOCTOU 対策として既存シンボリックリンクの
+ * 存在を作成前に検知して fail する（roles/e2e_runner_k8s 参照）。
  */
 export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'os_init',
@@ -276,6 +286,7 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'github_runner',
   'gitlab_runner_k8s',
   'github_runner_k8s',
+  'e2e_runner_k8s',
   'k3s',
   'tailscale',
   'shared_file',
@@ -367,6 +378,25 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
     'domain',
   ]),
   docker: new Set<string>(),
+  e2e_runner_k8s: new Set([
+    'e2e_runner_k8s_cluster_server_url',
+    'e2e_runner_k8s_git_deploy_token',
+    'e2e_runner_k8s_kubeconfig',
+    'e2e_runner_k8s_kubectl',
+    'e2e_runner_k8s_manifest_dir',
+    'e2e_runner_k8s_namespace',
+    'e2e_runner_k8s_output_kubeconfig_path',
+    'e2e_runner_k8s_quota_cpu_limits',
+    'e2e_runner_k8s_quota_cpu_requests',
+    'e2e_runner_k8s_quota_memory_limits',
+    'e2e_runner_k8s_quota_memory_requests',
+    'e2e_runner_k8s_quota_pods',
+    'e2e_runner_k8s_role_binding_name',
+    'e2e_runner_k8s_role_name',
+    'e2e_runner_k8s_service_account_name',
+    'e2e_runner_k8s_token_secret_delay_seconds',
+    'e2e_runner_k8s_token_secret_retries',
+  ]),
   github_runner: new Set([
     'github_runner_dir',
     'github_runner_ephemeral',
@@ -674,6 +704,26 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'db_postgres_password_result',
   // dns_tls
   'dns_tls_caddyfile',
+  // e2e_runner_k8s
+  'e2e_runner_k8s_ca_stat',
+  'e2e_runner_k8s_git_secret_apply',
+  'e2e_runner_k8s_git_secret_name',
+  'e2e_runner_k8s_git_token_tempfile',
+  'e2e_runner_k8s_kubeconfig_stat',
+  'e2e_runner_k8s_kubectl_stat',
+  'e2e_runner_k8s_manifest_dir_lstat',
+  'e2e_runner_k8s_namespace_apply',
+  'e2e_runner_k8s_output_dir_lstat',
+  'e2e_runner_k8s_output_file_lstat',
+  'e2e_runner_k8s_quota_apply',
+  'e2e_runner_k8s_quota_manifest',
+  'e2e_runner_k8s_rbac_apply',
+  'e2e_runner_k8s_rbac_manifest',
+  'e2e_runner_k8s_sa_apply',
+  'e2e_runner_k8s_sa_token_apply',
+  'e2e_runner_k8s_sa_token_manifest',
+  'e2e_runner_k8s_sa_token_secret_name',
+  'e2e_runner_k8s_token_len',
   // github_runner
   'github_runner_api_url',
   'github_runner_arch',

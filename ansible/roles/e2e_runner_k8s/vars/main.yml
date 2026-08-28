@@ -1,0 +1,14 @@
+---
+# 派生値（利用者が上書きする変数ではない）。
+#
+# `set_fact` ではなく role vars で定義する。set_fact のタスク結果には設定した値
+# そのものが載り `-vvv` で出力されるが、role vars は参照時に遅延評価されるだけで
+# タスク結果を持たない（ai_support_agent_k8s / github_runner_k8s と同じ理由）。
+
+# git デプロイトークンを格納する Secret の名前。tasks/main.yml が DNS-1123 ラベルと
+# して assert する（シェル本文へ展開するため、派生値であっても値の検証を省かない）。
+e2e_runner_k8s_git_secret_name: "{{ e2e_runner_k8s_namespace }}-git-deploy-token"
+
+# ServiceAccount の長期トークンを保持する Secret の名前
+# （type: kubernetes.io/service-account-token）。
+e2e_runner_k8s_sa_token_secret_name: "{{ e2e_runner_k8s_service_account_name }}-token"

@@ -1,0 +1,660 @@
+---
+# e2e_runner_k8s : E2E(Playwright)ジョブをオンデマンドで投入できるように、
+# Kubernetes クラスタへ専用 namespace・RBAC・低権限 kubeconfig を用意する。
+#
+# 実行場所: kubectl と kubeconfig を持つノード（k3s サーバーノード等）。
+#
+# 何を作るロールで、何を作らないか:
+#   このロールは「E2E Job を都度投入できる状態」を用意するだけで、Job 自体は
+#   作らない（Job の create/delete は毎回発生する運用操作であり、他の bundled role
+#   と同様レシピが表す「クラスタの恒常的な構成」には当たらない）。ここで用意した
+#   ServiceAccount・Role・RoleBinding・専用 kubeconfig を使って、クラスタ管理者
+#   kubeconfig を経由せずに Job を投入できるようにすることが目的。
+#
+# 最小権限:
+#   ServiceAccount `e2e_runner_k8s_service_account_name` に付与する Role は
+#   `e2e_runner_k8s_namespace` 名前空間限定（ClusterRole ではない）で、
+#   jobs は get・list・watch・create・delete、pods は get・list・watch・delete
+#   （create は許可しない。Pod は Job コントローラが作る）、pods/log は get のみを
+#   許可する。ai-support-agent 等の他の namespace には一切アクセスできない。
+#
+# 秘匿値の扱い（2方向）:
+#   (a) クラスタへ**入れる**秘匿値（git デプロイトークン）: (a)-1 Ansible の
+#       `environment:` キーワード、(a)-2 shell/command 本文への Jinja 展開、
+#       (a)-3 生成マニフェスト、のいずれにも載せない。0600 の一時ファイルへ `copy` の
+#       `content` で書き（モジュール自身が値を秘匿する）、
+#       `kubectl create secret --from-file=` で読ませてから必ず削除する
+#       （roles/github_runner_k8s と同じ方針）。
+#   (b) クラスタから**取り出す**秘匿値（発行された ServiceAccount トークン）:
+#       Ansible の register/set_fact には一切載せない。token の取得・base64 decode・
+#       kubeconfig への埋め込みまでを 1 つの remote shell 実行内で完結させ、値は
+#       シェル変数としてのみ存在し、Ansible の実行結果 JSON（-vvv 含む）に出ない。
+#       完了を待つ retry では文字数のみを確認し、値そのものは登録しない。
+#
+# 既知の制約:
+#   ServiceAccount トークン Secret（type: kubernetes.io/service-account-token）は
+#   コントローラが非同期に `.data.token` を populate するため、作成直後は空になり
+#   うる。populate 完了を待たずに読むと空文字列を埋め込んだ壊れた kubeconfig ができる
+#   ため、文字数が 0 より大きくなるまで待ってから読む。
+
+- name: "e2e_runner_k8s : Validate the git deploy token is set"
+  # 値そのものは that / fail_msg に展開しない（assert に no_log を付けると案内ごと
+  # 隠れるため、隠すのではなく「値を出さない書き方」で対処する）。
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_git_deploy_token | default('') | trim | length > 0
+    fail_msg: >-
+      e2e_runner_k8s_git_deploy_token is required. Reference an ANSIBLE# secret
+      variable from the recipe, e.g. e2e_runner_k8s_git_deploy_token:
+      "{{ '{{ MY_E2E_DEPLOY_TOKEN }}' }}". A fine-grained, read-only,
+      repository-scoped GitHub PAT is recommended.
+    success_msg: "Git deploy token is set."
+
+- name: "e2e_runner_k8s : Validate Kubernetes object names are DNS-1123 labels"
+  # 名前は metadata.name・ServiceAccount 参照・RoleBinding 参照・Secret 参照など
+  # 複数の構造的位置へ展開され、かつ shell 本文にも入る。クォートでは救えないため
+  # 先に落とす。git_secret_name / sa_token_secret_name は派生値だが、shell へ展開
+  # する以上ここで検証する（github_runner_k8s と同じ理由）。
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - e2e_runner_k8s_namespace | length <= 63
+      - e2e_runner_k8s_service_account_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - e2e_runner_k8s_service_account_name | length <= 63
+      - e2e_runner_k8s_role_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - e2e_runner_k8s_role_name | length <= 63
+      - e2e_runner_k8s_role_binding_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - e2e_runner_k8s_role_binding_name | length <= 63
+      - e2e_runner_k8s_git_secret_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - e2e_runner_k8s_git_secret_name | length <= 63
+      - e2e_runner_k8s_sa_token_secret_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - e2e_runner_k8s_sa_token_secret_name | length <= 63
+    fail_msg: >-
+      e2e_runner_k8s_namespace / _service_account_name / _role_name /
+      _role_binding_name / (derived) _git_secret_name / _sa_token_secret_name
+      must be lowercase DNS-1123 labels (alphanumerics and "-", starting and
+      ending with an alphanumeric, max 63 chars). Got
+      namespace={{ e2e_runner_k8s_namespace }},
+      service_account={{ e2e_runner_k8s_service_account_name }},
+      role={{ e2e_runner_k8s_role_name }},
+      role_binding={{ e2e_runner_k8s_role_binding_name }},
+      git_secret_name={{ e2e_runner_k8s_git_secret_name }},
+      sa_token_secret_name={{ e2e_runner_k8s_sa_token_secret_name }}.
+    success_msg: "Kubernetes object names are valid."
+
+- name: "e2e_runner_k8s : Validate the namespace uses the e2e prefix"
+  # DNS-1123 形式であることは前段で検証済みだが、それだけでは recipe が
+  # `kube-system` や `ai-support-agent`（本番寄り StatefulSet 群が稼働中）のような
+  # 既存の重要 namespace を指定できてしまう。この場合、このロールが作る Role/
+  # RoleBinding がその namespace 内で jobs/pods（delete 含む）への権限を持つ
+  # ServiceAccount を作ってしまい、他ワークロードへの誤操作経路になる。
+  # denylist（将来追加される namespace を見落とす）ではなく、このロール専用の
+  # 名前空間だけを許すインラインリテラルの allowlist パターンにする
+  # （CLAUDE.md「フォールバック禁止ルール」、ai_support_agent_k8s の image allowlist
+  # と同じ方針）。
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_namespace is match('^e2e(-[a-z0-9]+)*$')
+    fail_msg: >-
+      e2e_runner_k8s_namespace must be "e2e" or "e2e-<suffix>" (lowercase
+      alphanumerics, hyphen-separated). This role must not be pointed at an
+      existing namespace (e.g. kube-system, ai-support-agent) — doing so would
+      grant its ServiceAccount job/pod delete access there. Got:
+      {{ e2e_runner_k8s_namespace }}.
+    success_msg: "Namespace uses the e2e prefix."
+
+- name: "e2e_runner_k8s : Validate the ResourceQuota values are Kubernetes quantities"
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_quota_cpu_requests is match('^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki|m)?$')
+      - e2e_runner_k8s_quota_memory_requests is match('^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$')
+      - e2e_runner_k8s_quota_cpu_limits is match('^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki|m)?$')
+      - e2e_runner_k8s_quota_memory_limits is match('^[0-9]+(\.[0-9]+)?(E|P|T|G|M|k|Ei|Pi|Ti|Gi|Mi|Ki)?$')
+      - e2e_runner_k8s_quota_pods is match('^[0-9]+$')
+    fail_msg: >-
+      e2e_runner_k8s_quota_* must be valid Kubernetes quantities (e.g. "8",
+      "16Gi"), and quota_pods must be a plain non-negative integer. Got
+      cpu_requests={{ e2e_runner_k8s_quota_cpu_requests }},
+      memory_requests={{ e2e_runner_k8s_quota_memory_requests }},
+      cpu_limits={{ e2e_runner_k8s_quota_cpu_limits }},
+      memory_limits={{ e2e_runner_k8s_quota_memory_limits }},
+      pods={{ e2e_runner_k8s_quota_pods }}.
+    success_msg: "ResourceQuota values are valid."
+
+- name: "e2e_runner_k8s : Validate cluster access paths"
+  # ここで検証した値のみを shell 本文へ展開してよい（ファイル冒頭コメント参照）。
+  #
+  # 各パスセグメントの先頭にドットを許さない（(?!\.)）＋ '..' を含まないことも別途
+  # 確認する。文字集合と絶対パス性だけでは `/etc/rancher/k3s/./k3s.yaml` のような
+  # 別綴りの同一ファイルを弾けず、下の「output kubeconfig と管理者 kubeconfig の
+  # 分離」assert が文字列比較のまま素通りしてしまう（commit 342192a
+  # "close the dot-segment path bypass" と同じ理由・同じパターン）。
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_kubectl is match('^/(?!\.)[A-Za-z0-9._-]+(/(?!\.)[A-Za-z0-9._-]+)*$')
+      - "'..' not in e2e_runner_k8s_kubectl"
+      - e2e_runner_k8s_kubeconfig is match('^/(?!\.)[A-Za-z0-9._-]+(/(?!\.)[A-Za-z0-9._-]+)*$')
+      - "'..' not in e2e_runner_k8s_kubeconfig"
+      - e2e_runner_k8s_manifest_dir is match('^/(?!\.)[A-Za-z0-9._-]+(/(?!\.)[A-Za-z0-9._-]+)*$')
+      - "'..' not in e2e_runner_k8s_manifest_dir"
+      - e2e_runner_k8s_output_kubeconfig_path is match('^/(?!\.)[A-Za-z0-9._-]+(/(?!\.)[A-Za-z0-9._-]+)*$')
+      - "'..' not in e2e_runner_k8s_output_kubeconfig_path"
+    fail_msg: >-
+      e2e_runner_k8s_kubectl / _kubeconfig / _manifest_dir /
+      _output_kubeconfig_path must be absolute paths made of alphanumerics and
+      ._- per segment (no segment may start with "." and no ".." segment is
+      allowed).
+    success_msg: "Cluster access paths are valid."
+
+- name: "e2e_runner_k8s : Validate the output kubeconfig path is confined to a fixed safe directory"
+  # output_kubeconfig_path は recipe の task-level vars から上書き可能（テナント
+  # 入力を敵対的として扱う前提）。文字集合・dot-segment 検証だけでは
+  # `/etc/cron.d/x` のような既存の重要パスを指せてしまい、後段の
+  # 「Ensure the output kubeconfig directory exists」タスクがそのパスを
+  # `mbc:mbc` へ chown してしまう。owner/group 自体は本ロール専有の固定リテラル
+  # `mbc` にして recipe から変更不能にしたが、path は環境ごとに変える正当な理由が
+  # ありうるため変数のまま残し、代わりにこのロール専用のディレクトリ配下にのみ
+  # 限定する。
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_output_kubeconfig_path is match('^/etc/e2e-runner/(?!\.)[A-Za-z0-9._-]+$')
+    fail_msg: >-
+      e2e_runner_k8s_output_kubeconfig_path must be a direct child of
+      /etc/e2e-runner/ (e.g. /etc/e2e-runner/kubeconfig). Got:
+      {{ e2e_runner_k8s_output_kubeconfig_path }}.
+    success_msg: "Output kubeconfig path is confined to a fixed safe directory."
+
+- name: "e2e_runner_k8s : Validate the output kubeconfig is not the cluster admin kubeconfig"
+  # ファイル冒頭「何を作るロールで、何を作らないか」で謳っている「専用 kubeconfig は
+  # 管理者 kubeconfig と別ファイル」という設計不変条件を、recipe の task-level vars に
+  # よる上書きに対しても runtime で保証する。一致したまま進むと、後段の
+  # "Generate the scoped kubeconfig" タスクが管理者 kubeconfig 自体に低権限
+  # ServiceAccount の user/context をマージし、current-context まで書き換えてしまう。
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_output_kubeconfig_path != e2e_runner_k8s_kubeconfig
+    fail_msg: >-
+      e2e_runner_k8s_output_kubeconfig_path must not equal
+      e2e_runner_k8s_kubeconfig. Writing the scoped ServiceAccount kubeconfig
+      to the cluster admin kubeconfig path would merge a low-privilege
+      user/context into it and switch its current-context. Got
+      output_kubeconfig_path={{ e2e_runner_k8s_output_kubeconfig_path }},
+      kubeconfig={{ e2e_runner_k8s_kubeconfig }}.
+    success_msg: "Output kubeconfig is separate from the cluster admin kubeconfig."
+
+- name: "e2e_runner_k8s : Validate the manifest directory is confined to a fixed safe directory"
+  # e2e_runner_k8s_manifest_dir も recipe の task-level vars から上書き可能。
+  # 文字集合・dot-segment 検証だけでは `/etc` や `/etc/rancher/k3s` のような既存の
+  # 重要ディレクトリを指せてしまい、直後の「Ensure the manifest directory exists」
+  # タスクがそのディレクトリを root:root 0700 に変更してしまう
+  # （output_kubeconfig_path と同じ理由・同じパターン）。
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_manifest_dir is match('^/etc/e2e-runner/(?!\.)[A-Za-z0-9._-]+$')
+    fail_msg: >-
+      e2e_runner_k8s_manifest_dir must be a direct child of /etc/e2e-runner/
+      (e.g. /etc/e2e-runner/k8s). Got: {{ e2e_runner_k8s_manifest_dir }}.
+    success_msg: "Manifest directory is confined to a fixed safe directory."
+
+- name: "e2e_runner_k8s : Validate the output kubeconfig path does not collide with the manifest directory"
+  # 両方とも独立した recipe 変数で、同じ `/etc/e2e-runner/<1階層>` という形状を持つ
+  # ため同じ値を設定できてしまう。衝突すると「Ensure the manifest directory
+  # exists」が実在ディレクトリを作った後、「Generate the scoped kubeconfig」の
+  # `cat > <path> <<EOF` がディレクトリへのリダイレクトになり `Is a directory` という
+  # 生の bash エラーで落ちる。output_kubeconfig_path != kubeconfig の assert と
+  # 同じ丁寧さで、原因を名指しして早期に落とす。
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_output_kubeconfig_path != e2e_runner_k8s_manifest_dir
+    fail_msg: >-
+      e2e_runner_k8s_output_kubeconfig_path must not equal
+      e2e_runner_k8s_manifest_dir. Writing the kubeconfig to the manifest
+      directory's path would crash "Generate the scoped kubeconfig" with a
+      raw "Is a directory" shell error. Got
+      output_kubeconfig_path={{ e2e_runner_k8s_output_kubeconfig_path }},
+      manifest_dir={{ e2e_runner_k8s_manifest_dir }}.
+    success_msg: "Output kubeconfig path does not collide with the manifest directory."
+
+- name: "e2e_runner_k8s : Validate the ServiceAccount token wait settings are bounded integers"
+  # 非数値・負数を渡すと Jinja の `int` フィルタが 0 にフォールバックしたり（retries
+  # が実質1回に潰れる）、Python の time.sleep() が負数で ValueError を出したりする
+  # （rsyslog_forward / zabbix_agent の *_verify_seconds 系と同じ検証パターン）。
+  # 上限も設けるのは、`999999999` のような値で Ansible 実行を長時間占有させたり
+  # `0` で待機を実質無効化させたりする経路を塞ぐため。
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_token_secret_retries is match('^[0-9]+$')
+      - e2e_runner_k8s_token_secret_retries | int >= 1
+      - e2e_runner_k8s_token_secret_retries | int <= 30
+      - e2e_runner_k8s_token_secret_delay_seconds is match('^[0-9]+$')
+      - e2e_runner_k8s_token_secret_delay_seconds | int >= 1
+      - e2e_runner_k8s_token_secret_delay_seconds | int <= 30
+    fail_msg: >-
+      e2e_runner_k8s_token_secret_retries / _delay_seconds must be plain
+      integers between 1 and 30 (inclusive). Got
+      retries={{ e2e_runner_k8s_token_secret_retries }},
+      delay_seconds={{ e2e_runner_k8s_token_secret_delay_seconds }}.
+    success_msg: "ServiceAccount token wait settings are valid."
+
+- name: "e2e_runner_k8s : Validate the cluster server URL"
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_cluster_server_url is match('^https://[A-Za-z0-9.-]+(:[0-9]+)?$')
+    fail_msg: >-
+      e2e_runner_k8s_cluster_server_url must be an https URL (host[:port] only,
+      no path). Got: {{ e2e_runner_k8s_cluster_server_url }}.
+    success_msg: "Cluster server URL is well-formed."
+
+- name: "e2e_runner_k8s : Check the kubectl binary"
+  ansible.builtin.stat:
+    path: "{{ e2e_runner_k8s_kubectl }}"
+  register: e2e_runner_k8s_kubectl_stat
+
+- name: "e2e_runner_k8s : Assert kubectl is available"
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_kubectl_stat.stat.exists
+      - e2e_runner_k8s_kubectl_stat.stat.executable | default(false)
+    fail_msg: >-
+      kubectl not found or not executable at {{ e2e_runner_k8s_kubectl }}. Run
+      this role on a node that administers the cluster (a k3s server node), or
+      set e2e_runner_k8s_kubectl to the correct path.
+    success_msg: "kubectl is available."
+
+- name: "e2e_runner_k8s : Check the kubeconfig"
+  ansible.builtin.stat:
+    path: "{{ e2e_runner_k8s_kubeconfig }}"
+  register: e2e_runner_k8s_kubeconfig_stat
+
+- name: "e2e_runner_k8s : Assert the kubeconfig is readable"
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_kubeconfig_stat.stat.exists
+    fail_msg: >-
+      kubeconfig not found at {{ e2e_runner_k8s_kubeconfig }}. Set
+      e2e_runner_k8s_kubeconfig to the cluster's kubeconfig path (k3s default:
+      /etc/rancher/k3s/k3s.yaml).
+    success_msg: "kubeconfig is present."
+
+- name: "e2e_runner_k8s : Check the cluster CA certificate"
+  # パスはインラインリテラル（role 変数ではない）。recipe の task-level vars から
+  # 差し替え可能にすると、任意の root 読み取り可能ファイルの中身を後段の
+  # kubeconfig 生成タスクが埋め込んで持ち出す経路になる（defaults/main.yml 参照）。
+  ansible.builtin.stat:
+    path: /var/lib/rancher/k3s/server/tls/server-ca.crt
+  register: e2e_runner_k8s_ca_stat
+
+- name: "e2e_runner_k8s : Assert the cluster CA certificate is present"
+  ansible.builtin.assert:
+    that:
+      - e2e_runner_k8s_ca_stat.stat.exists
+    fail_msg: >-
+      Cluster CA certificate not found at
+      /var/lib/rancher/k3s/server/tls/server-ca.crt. This role only supports
+      the standard k3s server CA path; it is not configurable.
+    success_msg: "Cluster CA certificate is present."
+
+- name: "e2e_runner_k8s : Ensure the target namespace exists"
+  # create --dry-run=client | apply は、存在しても失敗しない冪等な適用手順
+  # （ai_support_agent_k8s / github_runner_k8s と同じ）。
+  ansible.builtin.shell: >-
+    set -o pipefail &&
+    {{ e2e_runner_k8s_kubectl }} --kubeconfig={{ e2e_runner_k8s_kubeconfig }} --request-timeout=30s
+    create namespace {{ e2e_runner_k8s_namespace }}
+    --dry-run=client -o yaml
+    | {{ e2e_runner_k8s_kubectl }} --kubeconfig={{ e2e_runner_k8s_kubeconfig }} --request-timeout=30s
+    apply -f -
+  args:
+    executable: /bin/bash
+  register: e2e_runner_k8s_namespace_apply
+  changed_when: "'unchanged' not in e2e_runner_k8s_namespace_apply.stdout"
+
+- name: "e2e_runner_k8s : Enforce the baseline Pod Security Standard on the namespace"
+  # このロールが与える RBAC は jobs の create を許すため、Job 経由で任意の PodSpec
+  # （privileged / hostPath / hostNetwork 等）を投入できてしまう余地がある。
+  # `restricted` ではなく `baseline` にするのは、E2E ジョブ本体の実際の PodSpec
+  # 要件（特権が要らないことの確認）が未確定なため。将来 PodSpec 要件が固まったら
+  # `restricted` へ引き上げを検討する。
+  ansible.builtin.command:
+    argv:
+      - "{{ e2e_runner_k8s_kubectl }}"
+      - "--kubeconfig={{ e2e_runner_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - label
+      - namespace
+      - "{{ e2e_runner_k8s_namespace }}"
+      - "pod-security.kubernetes.io/enforce=baseline"
+      - --overwrite
+  # `kubectl label --overwrite` は値が変わっていなくても "labeled" を返すため、
+  # apply の 'unchanged' 判定に相当する比較手段がない（後段の kubeconfig 生成タスクと
+  # 同じ理由で常に「変更」として扱う）。
+  changed_when: true
+
+- name: "e2e_runner_k8s : Check the manifest directory is not a pre-existing symlink"
+  # `ansible.builtin.file` は既定で symlink を追いかけるため、この path が既に
+  # （このロールの旧版実行時や他経路で）symlink として存在していると、直後の
+  # 「Ensure the manifest directory exists」がリンク先を root:root 0700 に変更して
+  # しまう。黙って削除・上書きするのではなく、運用者に気づかせて止める
+  # （CLAUDE.md フォールバック禁止ルール）。
+  ansible.builtin.stat:
+    path: "{{ e2e_runner_k8s_manifest_dir }}"
+    follow: false
+  register: e2e_runner_k8s_manifest_dir_lstat
+
+- name: "e2e_runner_k8s : Fail if the manifest directory path is a symlink"
+  ansible.builtin.fail:
+    msg: >-
+      {{ e2e_runner_k8s_manifest_dir }} already exists as a symlink
+      (target: {{ e2e_runner_k8s_manifest_dir_lstat.stat.lnk_target | default('unknown') }}).
+      Refusing to follow it and change ownership/mode on whatever it points to.
+      Remove the symlink manually and re-run this role.
+  when: >-
+    e2e_runner_k8s_manifest_dir_lstat.stat.exists | default(false)
+    and e2e_runner_k8s_manifest_dir_lstat.stat.islnk | default(false)
+
+- name: "e2e_runner_k8s : Ensure the manifest directory exists"
+  ansible.builtin.file:
+    path: "{{ e2e_runner_k8s_manifest_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: "e2e_runner_k8s : Write the ResourceQuota manifest"
+  # 秘匿値は含まない。監査と再適用のためノード上へ残す。
+  ansible.builtin.copy:
+    dest: "{{ e2e_runner_k8s_manifest_dir }}/resourcequota.yaml"
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      apiVersion: v1
+      kind: ResourceQuota
+      metadata:
+        name: {{ (e2e_runner_k8s_namespace ~ '-quota') | to_json }}
+        namespace: {{ e2e_runner_k8s_namespace | to_json }}
+      spec:
+        hard:
+          requests.cpu: {{ e2e_runner_k8s_quota_cpu_requests | to_json }}
+          requests.memory: {{ e2e_runner_k8s_quota_memory_requests | to_json }}
+          limits.cpu: {{ e2e_runner_k8s_quota_cpu_limits | to_json }}
+          limits.memory: {{ e2e_runner_k8s_quota_memory_limits | to_json }}
+          pods: {{ e2e_runner_k8s_quota_pods | to_json }}
+  register: e2e_runner_k8s_quota_manifest
+
+- name: "e2e_runner_k8s : Apply the ResourceQuota"
+  ansible.builtin.command:
+    argv:
+      - "{{ e2e_runner_k8s_kubectl }}"
+      - "--kubeconfig={{ e2e_runner_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - apply
+      - -f
+      - "{{ e2e_runner_k8s_manifest_dir }}/resourcequota.yaml"
+  register: e2e_runner_k8s_quota_apply
+  changed_when: "'unchanged' not in e2e_runner_k8s_quota_apply.stdout"
+
+- name: "e2e_runner_k8s : Ensure the ServiceAccount exists"
+  ansible.builtin.shell: >-
+    set -o pipefail &&
+    {{ e2e_runner_k8s_kubectl }} --kubeconfig={{ e2e_runner_k8s_kubeconfig }} --request-timeout=30s
+    -n {{ e2e_runner_k8s_namespace }}
+    create serviceaccount {{ e2e_runner_k8s_service_account_name }}
+    --dry-run=client -o yaml
+    | {{ e2e_runner_k8s_kubectl }} --kubeconfig={{ e2e_runner_k8s_kubeconfig }} --request-timeout=30s
+    apply -f -
+  args:
+    executable: /bin/bash
+  register: e2e_runner_k8s_sa_apply
+  changed_when: "'unchanged' not in e2e_runner_k8s_sa_apply.stdout"
+
+- name: "e2e_runner_k8s : Write the Role/RoleBinding manifest"
+  # namespace 限定（ClusterRole ではない）。jobs/pods/pods-log 以外へは一切
+  # アクセスできない（ファイル冒頭「最小権限」参照）。秘匿値は含まない。
+  ansible.builtin.copy:
+    dest: "{{ e2e_runner_k8s_manifest_dir }}/rbac.yaml"
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: {{ e2e_runner_k8s_role_name | to_json }}
+        namespace: {{ e2e_runner_k8s_namespace | to_json }}
+      rules:
+        - apiGroups: ["batch"]
+          resources: ["jobs"]
+          verbs: ["get", "list", "watch", "create", "delete"]
+        - apiGroups: [""]
+          resources: ["pods"]
+          verbs: ["get", "list", "watch", "delete"]
+        - apiGroups: [""]
+          resources: ["pods/log"]
+          verbs: ["get"]
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: {{ e2e_runner_k8s_role_binding_name | to_json }}
+        namespace: {{ e2e_runner_k8s_namespace | to_json }}
+      subjects:
+        - kind: ServiceAccount
+          name: {{ e2e_runner_k8s_service_account_name | to_json }}
+          namespace: {{ e2e_runner_k8s_namespace | to_json }}
+      roleRef:
+        kind: Role
+        name: {{ e2e_runner_k8s_role_name | to_json }}
+        apiGroup: rbac.authorization.k8s.io
+  register: e2e_runner_k8s_rbac_manifest
+
+- name: "e2e_runner_k8s : Apply the Role/RoleBinding"
+  ansible.builtin.command:
+    argv:
+      - "{{ e2e_runner_k8s_kubectl }}"
+      - "--kubeconfig={{ e2e_runner_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - apply
+      - -f
+      - "{{ e2e_runner_k8s_manifest_dir }}/rbac.yaml"
+  register: e2e_runner_k8s_rbac_apply
+  changed_when: "'unchanged' not in e2e_runner_k8s_rbac_apply.stdout"
+
+- name: "e2e_runner_k8s : Write the ServiceAccount token Secret manifest"
+  # type: kubernetes.io/service-account-token の Secret は、値を持たない
+  # メタデータ（アノテーションで対象 ServiceAccount を指す）だけで作成でき、
+  # `.data.token` はコントローラが後から populate する。このマニフェスト自体には
+  # 秘匿値は一切含まれない。
+  ansible.builtin.copy:
+    dest: "{{ e2e_runner_k8s_manifest_dir }}/sa-token-secret.yaml"
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: {{ e2e_runner_k8s_sa_token_secret_name | to_json }}
+        namespace: {{ e2e_runner_k8s_namespace | to_json }}
+        annotations:
+          kubernetes.io/service-account.name: {{ e2e_runner_k8s_service_account_name | to_json }}
+      type: kubernetes.io/service-account-token
+  register: e2e_runner_k8s_sa_token_manifest
+
+- name: "e2e_runner_k8s : Apply the ServiceAccount token Secret"
+  ansible.builtin.command:
+    argv:
+      - "{{ e2e_runner_k8s_kubectl }}"
+      - "--kubeconfig={{ e2e_runner_k8s_kubeconfig }}"
+      - "--request-timeout=30s"
+      - apply
+      - -f
+      - "{{ e2e_runner_k8s_manifest_dir }}/sa-token-secret.yaml"
+  register: e2e_runner_k8s_sa_token_apply
+  changed_when: "'unchanged' not in e2e_runner_k8s_sa_token_apply.stdout"
+
+- name: "e2e_runner_k8s : Wait for the ServiceAccount token to be populated"
+  # populate 前に読むと空文字列が埋め込まれた壊れた kubeconfig ができるため、文字数
+  # のみを確認する（値そのものは登録しない）。
+  ansible.builtin.shell: >-
+    set -o pipefail &&
+    {{ e2e_runner_k8s_kubectl }} --kubeconfig={{ e2e_runner_k8s_kubeconfig }} --request-timeout=30s
+    -n {{ e2e_runner_k8s_namespace }}
+    get secret {{ e2e_runner_k8s_sa_token_secret_name }}
+    -o jsonpath='{.data.token}' | wc -c
+  args:
+    executable: /bin/bash
+  register: e2e_runner_k8s_token_len
+  until: e2e_runner_k8s_token_len.stdout | trim | int > 0
+  retries: "{{ e2e_runner_k8s_token_secret_retries | int }}"
+  delay: "{{ e2e_runner_k8s_token_secret_delay_seconds | int }}"
+  changed_when: false
+
+- name: "e2e_runner_k8s : Check the output kubeconfig directory is not a pre-existing symlink"
+  # ディレクトリを root:mbc 0750 にする対策は mbc による**新規**の symlink 設置は
+  # 防ぐが、それ以前に別経路でこの path が symlink として存在していた場合までは
+  # 防げない。`ansible.builtin.file` は既定で symlink を追いかけるため、事前に
+  # lstat で検知し、黙って上書きせず止める（CLAUDE.md フォールバック禁止ルール）。
+  ansible.builtin.stat:
+    path: "{{ e2e_runner_k8s_output_kubeconfig_path | dirname }}"
+    follow: false
+  register: e2e_runner_k8s_output_dir_lstat
+
+- name: "e2e_runner_k8s : Fail if the output kubeconfig directory path is a symlink"
+  ansible.builtin.fail:
+    msg: >-
+      {{ e2e_runner_k8s_output_kubeconfig_path | dirname }} already exists as a
+      symlink
+      (target: {{ e2e_runner_k8s_output_dir_lstat.stat.lnk_target | default('unknown') }}).
+      Refusing to follow it and change ownership/mode on whatever it points to.
+      Remove the symlink manually and re-run this role.
+  when: >-
+    e2e_runner_k8s_output_dir_lstat.stat.exists | default(false)
+    and e2e_runner_k8s_output_dir_lstat.stat.islnk | default(false)
+
+- name: "e2e_runner_k8s : Ensure the output kubeconfig directory exists"
+  # owner は root・group は mbc・mode 0750（mbc に書き込み権を与えない）。
+  # ディレクトリ自体を mbc 所有 0700 にすると、mbc がそこへ書き込めるため
+  # {{ output_kubeconfig_path }} の位置へ事前にシンボリックリンクを仕掛けられ、
+  # 次にこのロールが再実行されたとき、後段の「Generate the scoped kubeconfig」が
+  # リンク先（任意の既存ファイル）を書き換えてしまう TOCTOU が成立する。root 所有
+  # 0750 ならディレクトリへの書き込みは root のみに限られ、mbc は既存ファイル
+  # （kubeconfig 本体、mode 0600 owner=mbc）を読むことだけができる。
+  ansible.builtin.file:
+    path: "{{ e2e_runner_k8s_output_kubeconfig_path | dirname }}"
+    state: directory
+    owner: root
+    group: mbc
+    mode: '0750'
+
+- name: "e2e_runner_k8s : Check the output kubeconfig path itself is not a pre-existing symlink"
+  # ディレクトリ側の対策とは別に、ファイルの path 自体が既に symlink として存在
+  # している場合、後段の heredoc 書き出し（`cat > path`）はリンク先へそのまま
+  # 書き込んでしまう。
+  ansible.builtin.stat:
+    path: "{{ e2e_runner_k8s_output_kubeconfig_path }}"
+    follow: false
+  register: e2e_runner_k8s_output_file_lstat
+
+- name: "e2e_runner_k8s : Fail if the output kubeconfig path is a symlink"
+  ansible.builtin.fail:
+    msg: >-
+      {{ e2e_runner_k8s_output_kubeconfig_path }} already exists as a symlink
+      (target: {{ e2e_runner_k8s_output_file_lstat.stat.lnk_target | default('unknown') }}).
+      Refusing to write through it. Remove the symlink manually and re-run
+      this role.
+  when: >-
+    e2e_runner_k8s_output_file_lstat.stat.exists | default(false)
+    and e2e_runner_k8s_output_file_lstat.stat.islnk | default(false)
+
+- name: "e2e_runner_k8s : Generate the scoped kubeconfig"
+  # トークンの取得・decode・埋め込みを 1 回の remote shell 実行内で完結させる。
+  # 値はシェル変数 $E2E_TOKEN としてのみ存在し、Ansible の register/set_fact・
+  # 生成後にこのタスクが返す結果 JSON のいずれにも載らない（ファイル冒頭「秘匿値の
+  # 扱い (b)」参照）。
+  #
+  # `kubectl config set-credentials --token=...` は使わない: 値がそのプロセスの argv
+  # として展開され、実行中は同一ホスト上の他プロセスから `ps` で観測できてしまう
+  # （このロールが Secret 作成に `--from-literal=` ではなく `--from-file=` を使う
+  # 理由と同じ脅威モデル）。代わりに kubeconfig 全体を heredoc で直接書き出す。
+  # heredoc 内のシェル変数展開はファイルへのリダイレクト内容としてのみ存在し、
+  # どのプロセスの argv にも現れない。
+  ansible.builtin.shell: |
+    set -euo pipefail
+    E2E_TOKEN=$({{ e2e_runner_k8s_kubectl }} --kubeconfig={{ e2e_runner_k8s_kubeconfig }} --request-timeout=30s -n {{ e2e_runner_k8s_namespace }} get secret {{ e2e_runner_k8s_sa_token_secret_name }} -o jsonpath='{.data.token}' | base64 -d)
+    E2E_CA_B64=$(base64 -w0 /var/lib/rancher/k3s/server/tls/server-ca.crt)
+    umask 077
+    cat > {{ e2e_runner_k8s_output_kubeconfig_path }} <<KUBECONFIG_EOF
+    apiVersion: v1
+    kind: Config
+    clusters:
+      - name: {{ (e2e_runner_k8s_namespace ~ '-cluster') | to_json }}
+        cluster:
+          server: {{ e2e_runner_k8s_cluster_server_url | to_json }}
+          certificate-authority-data: $E2E_CA_B64
+    contexts:
+      - name: {{ e2e_runner_k8s_namespace | to_json }}
+        context:
+          cluster: {{ (e2e_runner_k8s_namespace ~ '-cluster') | to_json }}
+          user: {{ e2e_runner_k8s_service_account_name | to_json }}
+          namespace: {{ e2e_runner_k8s_namespace | to_json }}
+    current-context: {{ e2e_runner_k8s_namespace | to_json }}
+    users:
+      - name: {{ e2e_runner_k8s_service_account_name | to_json }}
+        user:
+          token: $E2E_TOKEN
+    KUBECONFIG_EOF
+  args:
+    executable: /bin/bash
+  # heredoc 経由の書き出しは差分を報告しないため、既存内容と同じでも常に「変更」
+  # として扱う（apply の 'unchanged' 判定のような比較手段がない）。
+  changed_when: true
+
+- name: "e2e_runner_k8s : Restrict the output kubeconfig permissions"
+  # owner/group はインラインリテラル `mbc`（defaults/main.yml 参照）。
+  ansible.builtin.file:
+    path: "{{ e2e_runner_k8s_output_kubeconfig_path }}"
+    owner: mbc
+    group: mbc
+    mode: '0600'
+
+- name: "e2e_runner_k8s : Create the git deploy token Secret"
+  block:
+    - name: "e2e_runner_k8s : Create a secure temporary file for the git deploy token"
+      ansible.builtin.tempfile:
+        state: file
+        prefix: e2e_runner_k8s_git_token_
+      register: e2e_runner_k8s_git_token_tempfile
+      changed_when: false
+
+    - name: "e2e_runner_k8s : Write the git deploy token into its temporary file"
+      # `content` は copy モジュール自身が引数仕様で no_log 指定しているため、成功・
+      # 失敗・-vvv のいずれでも値は出力されない。`| trim` は必須（改行混入対策、
+      # github_runner_k8s と同じ理由）。
+      ansible.builtin.copy:
+        content: "{{ e2e_runner_k8s_git_deploy_token | trim }}"
+        dest: "{{ e2e_runner_k8s_git_token_tempfile.path }}"
+        mode: '0600'
+      changed_when: true
+
+    - name: "e2e_runner_k8s : Apply the git deploy token Secret"
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        {{ e2e_runner_k8s_kubectl }} --kubeconfig={{ e2e_runner_k8s_kubeconfig }} --request-timeout=30s
+        -n {{ e2e_runner_k8s_namespace }}
+        create secret generic {{ e2e_runner_k8s_git_secret_name }}
+        --from-file=git_token={{ e2e_runner_k8s_git_token_tempfile.path }}
+        --dry-run=client -o yaml
+        | {{ e2e_runner_k8s_kubectl }} --kubeconfig={{ e2e_runner_k8s_kubeconfig }} --request-timeout=30s
+        apply -f -
+      args:
+        executable: /bin/bash
+      register: e2e_runner_k8s_git_secret_apply
+      changed_when: "'unchanged' not in e2e_runner_k8s_git_secret_apply.stdout"
+  always:
+    - name: "e2e_runner_k8s : Remove the git deploy token temporary file"
+      ansible.builtin.file:
+        path: "{{ e2e_runner_k8s_git_token_tempfile.path }}"
+        state: absent
+      when: e2e_runner_k8s_git_token_tempfile.path is defined
+      changed_when: false

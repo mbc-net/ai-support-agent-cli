@@ -1,0 +1,57 @@
+---
+# e2e_runner_k8s ロールの既定値。
+#
+# 秘匿値・環境固有の必須値（gitデプロイトークン）は既定を持たせず空にする。
+# ai_support_agent_k8s / github_runner_k8s と同じ流儀で、呼び出し側が ANSIBLE# 変数から
+# 供給し、未設定は tasks/main.yml の assert が名指しで案内する。
+
+# Kubernetes リソース名（DNS-1123 ラベル）。
+e2e_runner_k8s_namespace: e2e
+e2e_runner_k8s_service_account_name: e2e-submitter
+e2e_runner_k8s_role_name: e2e-job-runner
+e2e_runner_k8s_role_binding_name: e2e-job-runner-binding
+
+# 必須。E2E対象リポジトリを clone するための、読み取り専用スコープの Personal
+# Access Token（Fine-grained PAT を推奨）。Secret のキー `git_token` として保存する。
+e2e_runner_k8s_git_deploy_token: ''
+
+# ジョブに割り当てる名前空間全体の資源上限（ResourceQuota）。Kubernetes の
+# quantity 形式（例: "16", "32Gi"）で指定する。同一クラスタ上の他ワークロード
+# （ai-support-agent の StatefulSet 群など）を圧迫しないための歯止め。
+e2e_runner_k8s_quota_cpu_requests: '8'
+e2e_runner_k8s_quota_memory_requests: 16Gi
+e2e_runner_k8s_quota_cpu_limits: '16'
+e2e_runner_k8s_quota_memory_limits: 32Gi
+e2e_runner_k8s_quota_pods: '8'
+
+# クラスタへの接続手段。既定は k3s の標準パス。
+e2e_runner_k8s_kubectl: /usr/local/bin/kubectl
+e2e_runner_k8s_kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+# 生成する低権限 kubeconfig（e2e namespace 内の Job/Pod 操作のみ許可）の書き出し先。
+# 既定のクラスタ管理者 kubeconfig（e2e_runner_k8s_kubeconfig）とは別ファイルとして
+# 扱い、日常的なジョブ投入操作はこちらのみを使わせる。/etc/e2e-runner/ 配下限定
+# （tasks/main.yml の assert 参照）。
+#
+# 出力先の所有者・グループはこのロール専有の固定値 `mbc`（tasks/main.yml 内の
+# インラインリテラル）であり、role 変数にはしていない。recipe の task-level vars
+# から書き換え可能にすると、任意の既存パスを攻撃者指定のアカウントへ chown させる
+# 経路になるため（ai_support_agent_k8s の image allowlist と同じ「セキュリティ
+# 上重要な値はインラインリテラル」という方針）。
+e2e_runner_k8s_output_kubeconfig_path: /etc/e2e-runner/kubeconfig
+
+# クラスタサーバーURL。k3s の標準ローカルAPIサーバーアドレス。
+e2e_runner_k8s_cluster_server_url: https://127.0.0.1:6443
+
+# k3s のクラスタ CA 証明書パスは role 変数にしていない（tasks/main.yml 内の
+# インラインリテラル `/var/lib/rancher/k3s/server/tls/server-ca.crt` を直接参照）。
+# recipe の task-level vars から書き換え可能にすると、任意の root 読み取り可能な
+# ファイル（秘密鍵・他ロールの Secret 等）の中身を `--embed-certs` 相当の処理で
+# 生成 kubeconfig に埋め込ませて持ち出す経路になるため。
+
+# ServiceAccount トークン Secret がコントローラに populate されるまでの待機設定。
+e2e_runner_k8s_token_secret_retries: 10
+e2e_runner_k8s_token_secret_delay_seconds: 3
+
+# 適用したマニフェストの保存先（監査・再適用用。秘匿値は含まない）。
+e2e_runner_k8s_manifest_dir: /etc/e2e-runner/k8s
