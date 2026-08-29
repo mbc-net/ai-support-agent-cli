@@ -7,7 +7,16 @@ import { AlertProcessor } from './alert-processor'
 import { AppSyncSubscriber } from './appsync-subscriber'
 import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, performSyncRepository, refreshChatMode } from './agent-config-sync'
 import type { RepoSyncResult } from './repo-sync'
-import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, startVsCodeTunnel, stopTransport } from './agent-transport'
+import {
+  startHeartbeat,
+  startRdpWebSocket,
+  startSubscriptionMode,
+  startTerminalWebSocket,
+  startVsCodeTunnel,
+  stopTransport,
+  type TransportDeps,
+  type TransportState,
+} from './agent-transport'
 import {
   AGENT_VERSION,
   ALERT_STALE_PROCESSING_MINUTES,
@@ -82,6 +91,7 @@ export class ProjectAgent {
     subscriber: null,
     terminalWs: null,
     vsCodeWs: null,
+    rdpWs: null,
     configSyncDebounceTimer: null,
     authRejectedTransports: new Set(),
     inFlightCommands: new Set(),
@@ -1201,8 +1211,9 @@ export class ProjectAgent {
       const resolvedWsUrl = result.wsUrl ? resolveUrlForDocker(result.wsUrl) : result.wsUrl
       startTerminalWebSocket(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
       startVsCodeTunnel(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
+      startRdpWebSocket(this.transportDeps, this.transportState, resolvedWsUrl)
     } else {
-      logger.debug(`${this.prefix} Terminal/VS Code WebSocket skipped (wsEnabled=false)`)
+      logger.debug(`${this.prefix} Terminal/VS Code/RDP WebSocket skipped (wsEnabled=false)`)
     }
   }
 

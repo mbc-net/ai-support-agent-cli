@@ -10,6 +10,7 @@ import { t } from './i18n'
 import type { TransportKind } from './ipc-types'
 import { logger } from './logger'
 import { getWorkspaceDir, getReposDir, getAwsDir } from './project-dir'
+import { RdpWebSocket } from './rdp/rdp-websocket'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
 import { TerminalWebSocket, isNodePtyAvailable } from './terminal'
 import { getErrorMessage, isAuthenticationError, stringifyForMessage } from './utils'
@@ -26,6 +27,7 @@ export interface TransportState {
   subscriber: AppSyncSubscriber | null
   terminalWs: TerminalWebSocket | null
   vsCodeWs: VsCodeTunnelWebSocket | null
+  rdpWs: RdpWebSocket | null
   configSyncDebounceTimer: ReturnType<typeof setTimeout> | null
   /**
    * サーバーによる恒久的な認証拒否で停止したトランスポート（'terminal'/'vscode'）。
@@ -290,6 +292,28 @@ export function startTerminalWebSocket(
 
   state.terminalWs.connect().catch((error) => {
     logger.warn(`${deps.prefix} Terminal WebSocket connection failed: ${getErrorMessage(error)}`)
+  })
+}
+
+/**
+ * Start the Web RDP relay WebSocket connection.
+ *
+ * Gated on the same `wsEnabled` signal as the other relays. The relay is stored
+ * on the transport state so the shutdown path can close it — a relay shutdown
+ * cannot see would leave RDP logons alive on the remote hosts.
+ *
+ * @param wsUrl - WebSocket URL returned by the server (used instead of apiUrl)
+ */
+export function startRdpWebSocket(
+  deps: TransportDeps,
+  state: TransportState,
+  wsUrl?: string,
+): void {
+  const baseUrl = wsUrl ?? deps.apiUrl
+  state.rdpWs = new RdpWebSocket(baseUrl, deps.token, deps.agentId)
+
+  state.rdpWs.connect().catch((error) => {
+    logger.warn(`${deps.prefix} RDP WebSocket connection failed: ${getErrorMessage(error)}`)
   })
 }
 
@@ -677,5 +701,6 @@ export function stopTransport(state: TransportState): void {
   if (state.configSyncDebounceTimer) clearTimeout(state.configSyncDebounceTimer)
   if (state.subscriber) state.subscriber.disconnect()
   if (state.terminalWs) state.terminalWs.disconnect()
+  if (state.rdpWs) state.rdpWs.disconnect()
   if (state.vsCodeWs) state.vsCodeWs.disconnect()
 }
