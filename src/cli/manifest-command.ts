@@ -34,6 +34,15 @@ export interface ManifestCliOptions {
   out?: string
   /** Skip the server-side replica-limit check (offline manifest generation). */
   skipLimitCheck?: boolean
+  /**
+   * Add a guacd sidecar so the agent can serve Web RDP.
+   *
+   * guacd is reachable on loopback only — it has no authentication, so anything
+   * that can reach it can open an RDP connection to any host.
+   */
+  rdp?: boolean
+  /** guacd container image. */
+  guacdImage?: string
 }
 
 export interface K8sManifestCliOptions extends ManifestCliOptions {
@@ -136,6 +145,8 @@ export async function runK8sManifest(
     namespace: opts.namespace,
     image: opts.image,
     name: opts.name,
+    rdp: opts.rdp,
+    guacdImage: opts.guacdImage,
   })
   emit(manifest, opts.out, 'Kubernetes manifest')
   // Warn on the stdout path too. Previously this returned early when `--out` was
@@ -153,6 +164,8 @@ export async function runEcsManifest(
   const target = await resolveTargetAndValidate(opts)
   const { taskDefinition, service } = generateEcsManifest({
     ...target,
+    rdp: opts.rdp,
+    guacdImage: opts.guacdImage,
     cluster: opts.cluster,
     subnets: opts.subnets,
     securityGroups: opts.securityGroups,
@@ -198,6 +211,11 @@ export function registerManifestCommands(program: Command): void {
     .option('--project <tenantCode/projectCode>', 'Target project')
     .option('--out <path>', 'Write to a file instead of stdout')
     .option('--skip-limit-check', 'Do not query the plan replica limit')
+    .option(
+      '--rdp',
+      'Add a guacd sidecar so the agent can serve Web RDP (reachable on loopback only)',
+    )
+    .option('--guacd-image <image>', 'guacd container image')
     .action(async (opts: K8sManifestCliOptions) => {
       try {
         await runK8sManifest(opts)
@@ -226,6 +244,11 @@ export function registerManifestCommands(program: Command): void {
     .option('--project <tenantCode/projectCode>', 'Target project')
     .option('--out <prefix>', 'Write <prefix>.taskdef.json / <prefix>.service.json')
     .option('--skip-limit-check', 'Do not query the plan replica limit')
+    .option(
+      '--rdp',
+      'Add a guacd sidecar so the agent can serve Web RDP (reachable on loopback only)',
+    )
+    .option('--guacd-image <image>', 'guacd container image')
     .action(async (opts: EcsManifestCliOptions) => {
       try {
         await runEcsManifest(opts)
