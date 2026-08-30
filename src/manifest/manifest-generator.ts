@@ -94,6 +94,17 @@ export interface ManifestProject {
   replicas?: number
 }
 
+/**
+ * guacd の既定イメージ。
+ *
+ * 版を固定する。移動タグを使うと、プロトコルの互換性が変わったときに
+ * 再起動しただけで挙動が変わり、原因が分からなくなる。
+ */
+export const DEFAULT_GUACD_IMAGE = 'guacamole/guacd:1.5.5'
+
+/** guacd の待受ポート。 */
+export const GUACD_PORT = 4822
+
 export interface ManifestInput {
   /** Tenant code (lower_snake_case). */
   tenantCode: string
@@ -119,6 +130,18 @@ export interface ManifestInput {
    * rather than a silent precedence rule.
    */
   projects?: ManifestProject[]
+
+  /**
+   * Web RDP を有効にする。guacd をサイドカーとして同居させ、エージェントには
+   * localhost の guacd を教える。
+   *
+   * 既定は無効。有効にしない限り `GUACD_HOST` を設定しないのは、guacd が居ない
+   * のに接続先だけある状態を作らないため（エージェントは接続を試みて失敗を
+   * 繰り返す）。
+   */
+  rdp?: boolean
+  /** guacd のイメージ。既定は {@link DEFAULT_GUACD_IMAGE}。 */
+  guacdImage?: string
 }
 
 export interface K8sManifestInput extends ManifestInput {
@@ -418,10 +441,101 @@ ${CONTAINER_ARGV.map((a) => `            - ${a}`).join('\n')}
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-`
+${guacdAgentEnvYaml(input.rdp)}${guacdContainerYaml(input.rdp, input.guacdImage)}`
   })
 
   return `${header}\n${docs.join('---\n')}`
+}
+
+/**
+ * エージェントへ guacd の在り処を教える env 断片。
+ *
+ * RDP を有効にしていないときは何も出さない。guacd が居ないのに接続先だけある
+ * 状態にすると、エージェントは接続を試みて失敗を繰り返す。
+ */
+function guacdAgentEnvYaml(rdp: boolean | undefined): string {
+  if (!rdp) return ''
+  return `            - name: GUACD_HOST
+              value: "127.0.0.1"
+            - name: GUACD_PORT
+              value: "${GUACD_PORT}"
+`
+}
+
+/**
+ * guacd サイドカーの container 断片。
+ *
+ * :::danger
+ * **ポートを Pod の外へ出さない。** guacd には認証が無く、到達できる者は誰でも
+ * 任意のホストへ RDP 接続を張れる。同一 Pod の localhost に閉じ込めることが
+ * 唯一の防御線であり、`hostPort` や Service を付けてはならない。
+ * :::
+ *
+ * `livenessProbe` は付けない。Pod の再起動は全コンテナに及ぶため、guacd の不調で
+ * エージェントごと再起動され、実行中のコマンドが中断する。RDP は付加機能であり、
+ * 本体を巻き添えにしない。
+ */
+function guacdContainerYaml(
+  rdp: boolean | undefined,
+  guacdImage: string | undefined,
+): string {
+  if (!rdp) return ''
+  return `        - name: guacd
+          image: ${yamlScalar(guacdImage ?? DEFAULT_GUACD_IMAGE)}
+          imagePullPolicy: Always
+          # containerPort の宣言は情報提供のみ。hostPort は付けない（上記 danger）。
+          ports:
+            - containerPort: ${GUACD_PORT}
+              protocol: TCP
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+`
+}
+
+/**
+ * ECS の guacd サイドカー定義。
+ *
+ * :::danger
+ * **`portMappings` を付けない。** guacd には認証が無く、到達できる者は誰でも
+ * 任意のホストへ RDP 接続を張れる。awsvpc モードではタスク内の全コンテナが
+ * 同じネットワーク名前空間を共有するため、エージェントは loopback で到達できる。
+ * ポートを公開すると、その唯一の防御線が消える。
+ * :::
+ *
+ * `essential: false` にする。`true` だと guacd のクラッシュでタスク全体が停止し、
+ * 実行中のコマンドが中断する。RDP は付加機能であり、本体を巻き添えにしない。
+ */
+function buildGuacdContainerDefinition(
+  input: EcsManifestInput,
+  logGroup: string,
+  region: string,
+): Record<string, unknown> {
+  return {
+    name: 'guacd',
+    image: input.guacdImage ?? DEFAULT_GUACD_IMAGE,
+    essential: false,
+    portMappings: [],
+    logConfiguration: {
+      logDriver: 'awslogs',
+      options: {
+        'awslogs-group': logGroup,
+        'awslogs-region': region,
+        'awslogs-stream-prefix': 'guacd',
+        'awslogs-create-group': 'true',
+      },
+    },
+  }
 }
 
 export function generateEcsManifest(input: EcsManifestInput): {
@@ -474,6 +588,14 @@ export function generateEcsManifest(input: EcsManifestInput): {
           // Not set here: AI_SUPPORT_AGENT_INSTANCE_ID. The agent derives the
           // replica identity from ECS_CONTAINER_METADATA_URI_V4 (the task id),
           // which ECS injects automatically and which is unique per task.
+          // awsvpc mode puts every container in the task on one network
+          // namespace, so guacd is reachable on loopback.
+          ...(input.rdp
+            ? [
+                { name: 'GUACD_HOST', value: '127.0.0.1' },
+                { name: 'GUACD_PORT', value: String(GUACD_PORT) },
+              ]
+            : []),
         ],
         secrets: [
           {
@@ -493,6 +615,9 @@ export function generateEcsManifest(input: EcsManifestInput): {
           },
         },
       },
+      ...(input.rdp
+        ? [buildGuacdContainerDefinition(input, logGroup, region)]
+        : []),
     ],
   }
 
