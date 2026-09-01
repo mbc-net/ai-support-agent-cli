@@ -506,9 +506,11 @@ export class DockerSupervisor {
    */
   private shutdownGuacd(): void {
     if (!this.opts.rdp || this.guacdStopped) return
-    this.guacdStopped = true
     // 止め忘れると、エージェントを終了しても guacd が残り続ける。
-    stopGuacdContainer()
+    // **成功したときだけ畳む。** 試行した時点で畳むと、一時障害で止め損ねた
+    // guacd を次の終了経路が止め直せない。guacd は無認証で待ち受けるため、
+    // 残ったまま到達できる者は任意のホストへ RDP 接続を張れる。
+    this.guacdStopped = stopGuacdContainer()
   }
 
   /**

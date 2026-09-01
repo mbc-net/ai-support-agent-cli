@@ -67,6 +67,17 @@ describe('guacd の起動経路への配線', () => {
       read('src/index.ts'),
       read('src/docker/docker-runner.ts'),
     ].join('\n')
-    expect(sources).toContain('stopGuacdContainer')
+    expect(sources).toMatch(/stopGuacdContainer|createGuacdShutdownHook/)
+  })
+
+  it('★ CLI 直起動の終了処理は多重呼び出しを畳むハンドラを使う', () => {
+    // exit / SIGINT / SIGTERM の 3 箇所に同じ処理を登録しているため、
+    // 素の stopGuacdContainer を直に渡すと通常の終了で 2 回走り、
+    // 2 回目が必ず「そんなコンテナは無い」で失敗して偽の警告が出る。
+    const source = read('src/index.ts')
+
+    expect(source).toContain('createGuacdShutdownHook')
+    // 生の停止関数をハンドラとして直接登録していないこと
+    expect(source).not.toMatch(/process\.once\([^)]*,\s*stopGuacdContainer\s*\)/)
   })
 })
