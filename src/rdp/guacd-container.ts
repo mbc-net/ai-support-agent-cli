@@ -136,22 +136,101 @@ export function ensureGuacdContainer(
  * debug ログに埋めると、通常の運用では収集されず誰も気づけない。
  * :::
  */
-export function stopGuacdContainer(): void {
-  runDocker(['stop', GUACD_CONTAINER_NAME], {
+export function stopGuacdContainer(): boolean {
+  return runDocker(['stop', GUACD_CONTAINER_NAME], {
     ignoreFailure: true,
+    absentIsSettled: true,
     failureMessage: `guacd container ${GUACD_CONTAINER_NAME} could not be stopped; it may still be running and accepting RDP connections`,
   })
 }
 
+/**
+ * Create the process-exit hook that stops guacd.
+ *
+ * :::danger
+ * **The same handler is registered on several signals.** `exit`, `SIGINT` and
+ * `SIGTERM` all get it, so a normal shutdown calls it twice. Without a guard
+ * the second call always fails with "No such container" and logs the warning
+ * that says guacd may still be accepting RDP connections. A warning that fires
+ * on every clean exit trains operators to ignore it, and a real failure to stop
+ * guacd — which leaves an unauthenticated RDP relay running — is lost in it.
+ * :::
+ *
+ * :::danger
+ * **Latch on success, never on the attempt.** Registering the handler several
+ * times used to double as a retry: a first `docker stop` lost to a transient
+ * daemon error was re-issued by the next handler. Suppressing the repeat
+ * unconditionally would remove that retry and leave an unauthenticated guacd
+ * running after the agent is gone — the very state the warning in
+ * {@link stopGuacdContainer} is about.
+ * :::
+ *
+ * The state lives in the closure, not in the module, so separate hooks stay
+ * independent (a restarted supervisor is free to stop its own container).
+ */
+export function createGuacdShutdownHook(): () => void {
+  let stopped = false
+  return (): void => {
+    if (stopped) return
+    stopped = stopGuacdContainer()
+  }
+}
+
+/**
+ * Whether docker refused because the container does not exist.
+ *
+ * A missing container is the desired end state for a stop, not a failure. The
+ * shutdown hook is registered whenever `--rdp` is on, including setups where
+ * the agent never starts a container of its own (`GUACD_HOST` points at an
+ * external guacd, or Docker is unavailable). Treating that as a failure puts
+ * the "guacd may still be accepting RDP connections" warning on *every* clean
+ * exit and keeps retrying it, which is the false alarm this hook exists to
+ * remove.
+ *
+ * Matching on the message is deliberate: an unrecognised wording degrades to
+ * "failed", which warns and retries — the safe direction. For the same reason
+ * the *name* has to match: "no such container" about some other container says
+ * nothing about ours, and treating it as settled would drop both the warning
+ * and the retry while guacd is still up.
+ */
+function isAbsentContainerError(err: unknown, name: string): boolean {
+  const stderr = (err as { stderr?: unknown }).stderr
+  const text = `${String((err as Error)?.message ?? '')} ${
+    stderr instanceof Buffer ? stderr.toString() : String(stderr ?? '')
+  }`
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`no such container:?\\s*${escaped}(?![\\w.-])`, 'i').test(
+    text,
+  )
+}
+
+/**
+ * @returns whether the command reached its intended end state. With
+ *   `absentIsSettled`, "no such container" counts as reached.
+ */
 function runDocker(
   args: string[],
-  opts: { ignoreFailure?: boolean; failureMessage?: string } = {},
-): void {
+  opts: {
+    ignoreFailure?: boolean
+    absentIsSettled?: boolean
+    failureMessage?: string
+  } = {},
+): boolean {
   try {
     execFileSync(getDockerPath(), args, {
       stdio: ['ignore', 'ignore', 'pipe'],
     })
+    return true
   } catch (err) {
+    if (
+      opts.absentIsSettled &&
+      isAbsentContainerError(err, GUACD_CONTAINER_NAME)
+    ) {
+      logger.debug(
+        `[guacd] container ${GUACD_CONTAINER_NAME} is already gone; nothing to stop`,
+      )
+      return true
+    }
     if (opts.ignoreFailure) {
       // 呼び出し元が「見えないと困る」と判断した失敗は warn へ上げる。
       if (opts.failureMessage) {
@@ -161,7 +240,7 @@ function runDocker(
           `[guacd] docker ${args[0]} failed (ignored): ${String(err)}`,
         )
       }
-      return
+      return false
     }
     throw new Error(
       `Failed to start guacd (docker ${args.slice(0, 2).join(' ')}): ${String(err)}`,

@@ -103,13 +103,16 @@ program
 
     // Web RDP を使う場合、ホスト直起動にはサイドカーの仕組みが無いため
     // エージェント自身が guacd コンテナを用意する。失敗しても本体は起動する。
-    const { resolveGuacdForHost, stopGuacdContainer } = await import(
+    const { resolveGuacdForHost, createGuacdShutdownHook } = await import(
       './rdp/guacd-runtime-entry'
     )
     resolveGuacdForHost({ rdp: opts.rdp, guacdImage: opts.guacdImage })
     if (opts.rdp) {
       // 止め忘れると、エージェントを終了しても guacd が残り続ける。
-      const stop = (): void => stopGuacdContainer()
+      // 3 つのハンドラに同じ処理を登録するため、多重呼び出しを畳むフックを
+      // 使う。素の停止関数を渡すと、通常の終了で 2 回走った 2 回目が
+      // 「そんなコンテナは無い」で失敗し、偽の警告が毎回出る。
+      const stop = createGuacdShutdownHook()
       process.once('exit', stop)
       process.once('SIGINT', stop)
       process.once('SIGTERM', stop)

@@ -63,6 +63,7 @@ describe('DockerSupervisor の終了経路', () => {
   // （実際にミューテーションで素通りすることを確認した）。
 
   it('停止処理を繰り返しても guacd の停止は 1 回だけ', async () => {
+    stopGuacd.mockReturnValue(true)
     const supervisor = build(true) as unknown as {
       shutdownGuacd: () => void
       stopAll: () => Promise<void>
@@ -70,5 +71,21 @@ describe('DockerSupervisor の終了経路', () => {
     supervisor.shutdownGuacd()
     await supervisor.stopAll()
     expect(stopGuacd).toHaveBeenCalledTimes(1)
+  })
+
+  it('★ 停止に失敗したら次の終了経路で再試行する', async () => {
+    // 二重呼び出しを抑えること自体は正しいが、**成否を見ずに抑える**と
+    // 一時障害で止め損ねた guacd がそのまま残る。guacd は無認証で待ち受ける
+    // ため、エージェント終了後も到達できる者が任意のホストへ RDP を張れる。
+    stopGuacd.mockReturnValueOnce(false).mockReturnValue(true)
+    const supervisor = build(true) as unknown as {
+      shutdownGuacd: () => void
+      stopAll: () => Promise<void>
+    }
+
+    supervisor.shutdownGuacd()
+    await supervisor.stopAll()
+
+    expect(stopGuacd).toHaveBeenCalledTimes(2)
   })
 })
