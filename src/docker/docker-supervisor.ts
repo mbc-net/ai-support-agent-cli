@@ -5,6 +5,8 @@
  */
 
 import { spawn } from 'child_process'
+import { stopGuacdContainer } from '../rdp/guacd-container'
+import { buildGuacdDockerArgs } from '../rdp/guacd-runtime'
 import type { ChildProcess } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
@@ -66,6 +68,8 @@ export class DockerSupervisor {
   private projectAgentIds = new Map<string, string>()
   private sigintHandler: (() => void) | undefined
   private sigtermHandler: (() => void) | undefined
+  /** guacd を止めたか。終了経路が複数あるため二重に叩かない。 */
+  private guacdStopped = false
 
   constructor(version: string, opts: DockerRunOptions) {
     this.version = version
@@ -314,12 +318,19 @@ export class DockerSupervisor {
     const containerName = buildContainerName(project.tenantCode, project.projectCode, this.opts.agentId)
     removeStaleContainer(containerName)
     const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
+    // guacd を専用ネットワークに用意し、このコンテナを同じネットワークへ参加させる。
+    // **こちらが通常の起動経路**（プロジェクトが 1 件でもあれば runInDocker は
+    // ここへ来る）。docker-runner.ts の legacy fallback にだけ配線すると、実運用では
+    // --rdp を指定しても guacd が起動しない。RDP が無効なら空配列。
+    const guacdArgs = buildGuacdDockerArgs(this.opts)
+
     const dockerArgs = [
       'run', '--rm', '--name', containerName, '--cidfile', cidFile,
       ...buildDockerUserArgs(),
       ...mounts,
       ...buildDevMounts(),
       ...envArgs,
+      ...guacdArgs,
       imageTag,
       ...containerArgs,
     ]
@@ -476,11 +487,28 @@ export class DockerSupervisor {
       }
 
       if (this.handles.size === 0 && !this.updating) {
-        // All containers have exited cleanly
+        // All containers have exited cleanly.
+        // この経路は stopAll() を通らず直接 process.exit する。ここで止めないと、
+        // 固定名の guacd コンテナと専用ネットワークがホストに残り続ける
+        // （guacd は無認証で待ち受けるため、残すのは避ける）。
+        this.shutdownGuacd()
         this.onAllStopped?.()
         process.exit(code ?? 0)
       }
     })
+  }
+
+  /**
+   * 起動した guacd コンテナを止める。
+   *
+   * 終了経路は複数ある（`stopAll()` と「全コンテナが自然終了 → process.exit」）。
+   * どちらから来ても 1 回だけ止まるようにここへ集約する。
+   */
+  private shutdownGuacd(): void {
+    if (!this.opts.rdp || this.guacdStopped) return
+    this.guacdStopped = true
+    // 止め忘れると、エージェントを終了しても guacd が残り続ける。
+    stopGuacdContainer()
   }
 
   /**
@@ -503,6 +531,8 @@ export class DockerSupervisor {
    * sufficient — no separate polling is needed.
    */
   stopAll(): Promise<void> {
+    this.shutdownGuacd()
+
     const stopPromises: Promise<void>[] = []
     for (const [key, handle] of this.handles) {
       if (!handle.closeHandled) {

@@ -34,11 +34,17 @@ import { CONTAINER_START_ARGV, buildDockerUserArgs } from './docker-args'
 import { IMAGE_NAME, checkDockerAvailable, getDockerPath } from './docker-utils'
 import { ensureImage } from './version-manager'
 import { syncDockerfileToConfigDir } from './dockerfile-sync'
+import { stopGuacdContainer } from '../rdp/guacd-container'
+import { buildGuacdDockerArgs } from '../rdp/guacd-runtime'
 import { buildVolumeMounts, buildEnvArgs } from './volume-mount-builder'
 import { DockerSupervisor } from './docker-supervisor'
 import { installUpdateAndRestart } from './update-handler'
 
 export interface DockerRunOptions {
+  /** Web RDP を有効にし、guacd サイドカーを用意する。 */
+  rdp?: boolean
+  /** guacd のイメージ。 */
+  guacdImage?: string
   token?: string
   apiUrl?: string
   pollInterval?: number
@@ -301,11 +307,16 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   const interactive = process.stdin.isTTY ? ['-it'] : ['-i']
 
+  // guacd を専用ネットワークに用意し、エージェントを同じネットワークへ参加させる。
+  // RDP が無効なら空配列で、既存の起動には一切影響しない。
+  const guacdArgs = buildGuacdDockerArgs(opts)
+
   const dockerArgs = [
     'run', '--rm', ...interactive,
     ...buildDockerUserArgs(),
     ...mounts,
     ...envArgs,
+    ...guacdArgs,
     `${IMAGE_NAME}:${version}`,
     ...containerArgs,
   ]
@@ -330,6 +341,11 @@ export function runInDocker(opts: DockerRunOptions): void {
     if (closeHandled) return
     closeHandled = true
     isDockerRunning = false
+
+    if (opts.rdp) {
+      // 止め忘れると、エージェントを終了しても guacd が残り続ける。
+      stopGuacdContainer()
+    }
 
     if (code === DOCKER_UPDATE_EXIT_CODE) {
       logger.info('[docker] Container exited for update. Rebuilding image and restarting...')
