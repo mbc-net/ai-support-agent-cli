@@ -53,6 +53,21 @@ describe('buildGuacdDockerArgs（Docker 形態）', () => {
       expect.objectContaining({ image: 'registry/guacd:1.5.5' }),
     )
   })
+
+  it('★ guacd の用意に失敗しても投げない（プロジェクト全体を巻き添えにしない）', () => {
+    // 呼び出し元はプロジェクトのコンテナを起動する経路。ここで投げると RDP と
+    // 無関係なチャット・ターミナルまで含めてそのプロジェクトが起動しない。
+    // しかも呼び出し元の一つ（rebuildAndRestart 末尾からの再起動）は catch を
+    // 持たない fire-and-forget であり、投げた例外はプロジェクト名すら残らない
+    // unhandled rejection にしかならない。CLI 直起動（resolveGuacdForHost）が
+    // 既に同じ方針を明記している。
+    ensureGuacdContainer.mockImplementation(() => {
+      throw new Error('docker daemon is not running')
+    })
+
+    expect(() => buildGuacdDockerArgs({ rdp: true })).not.toThrow()
+    expect(buildGuacdDockerArgs({ rdp: true })).toEqual([])
+  })
 })
 
 describe('resolveGuacdForHost（CLI 直起動）', () => {

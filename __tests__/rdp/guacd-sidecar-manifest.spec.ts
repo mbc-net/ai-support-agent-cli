@@ -1,8 +1,10 @@
 import * as yaml from 'js-yaml'
 
 import {
+  DEFAULT_GUACD_IMAGE,
   generateEcsManifest,
   generateK8sManifest,
+  GUACD_LOOPBACK_COMMAND,
 } from '../../src/manifest/manifest-generator'
 
 /**
@@ -71,6 +73,21 @@ describe('generateK8sManifest — guacd サイドカー', () => {
       const env = agent.env as Record<string, unknown>[]
       expect(env).toContainEqual({ name: 'GUACD_HOST', value: '127.0.0.1' })
       expect(env).toContainEqual({ name: 'GUACD_PORT', value: '4822' })
+    })
+
+    it('★ 待受を loopback に限定する（ポートを公開しないだけでは足りない）', () => {
+      // guacamole/guacd の CMD は `guacd -b 0.0.0.0`。Pod 内のコンテナは
+      // ネットワーク名前空間を共有するため、hostPort を付けなくても
+      // **他 Pod から PodIP:4822 に到達できる**（実機で確認済み）。guacd には
+      // 認証が無いので、これは同一クラスタ内の任意のワークロードが任意の
+      // ホストへ RDP を張れる状態を意味する。
+      const guacd = containers(manifest())[1]
+      const cmdline = [
+        ...((guacd.command ?? []) as string[]),
+        ...((guacd.args ?? []) as string[]),
+      ].join(' ')
+      expect(cmdline).toContain('-b 127.0.0.1')
+      expect(cmdline).not.toContain('0.0.0.0')
     })
 
     it('★ guacd のポートを Pod 外へ公開しない', () => {
@@ -189,8 +206,44 @@ describe('generateEcsManifest — guacd サイドカー', () => {
     expect(guacd.portMappings ?? []).toEqual([])
   })
 
+  it('★ 待受を loopback に限定する（portMappings: [] は待受を制限しない）', () => {
+    // awsvpc ではタスク内の全コンテナが同じ ENI を共有するため、guacd が
+    // 0.0.0.0 で待つと**タスクの ENI アドレス経由で VPC 内から到達できる**。
+    // portMappings を空にしても待受アドレスは変わらない。
+    const guacd = definitions({ ...ECS_BASE, rdp: true })[1]
+    const cmdline = ((guacd.command ?? []) as string[]).join(' ')
+    expect(cmdline).toContain('-b 127.0.0.1')
+    expect(cmdline).not.toContain('0.0.0.0')
+  })
+
   it('guacd のログも同じロググループへ送る', () => {
     const guacd = definitions({ ...ECS_BASE, rdp: true })[1]
     expect(guacd.logConfiguration).toBeDefined()
+  })
+})
+
+describe('guacd イメージの前提', () => {
+  it('★ 起動指定が依存しているイメージのタグを固定する', () => {
+    // マニフェストは待受を loopback に絞るため、イメージの既定 CMD を
+    // `['/bin/sh','-c','...']` で丸ごと置き換えている。この形が成立するのは
+    // **このイメージに ENTRYPOINT が無い**（`command` がそのまま argv になる）
+    // ためである。ENTRYPOINT を持つイメージへ差し替えると、`/bin/sh` `-c`
+    // `<script>` が本体の引数として渡り、guacd は不正引数で終了する。
+    //
+    // 実機で確認済み（2026-08-31, guacamole/guacd:1.5.5）:
+    //   docker image inspect → Entrypoint: null
+    //   docker run <image> /bin/sh -c '... -b 127.0.0.1 ...'
+    //     → "Listening on host 127.0.0.1, port 4822" / 127.0.0.1:4822 で LISTEN
+    //
+    // **タグを上げるときは、上記 2 点を実機で取り直してからこのテストを更新すること。**
+    expect(DEFAULT_GUACD_IMAGE).toBe('guacamole/guacd:1.5.5')
+  })
+
+  it('★ 起動指定はシェル経由の形（ENTRYPOINT 無しのイメージを前提とする）', () => {
+    const command = GUACD_LOOPBACK_COMMAND
+    expect(command.slice(0, 2)).toEqual(['/bin/sh', '-c'])
+    expect(command).toHaveLength(3)
+    expect(command[2]).toContain('-b 127.0.0.1')
+    expect(command[2]).not.toContain('0.0.0.0')
   })
 })

@@ -1,6 +1,6 @@
 import { GuacdSocket } from './guacd-handshake'
 import { encodeGuacamoleInstruction } from './guacamole-protocol'
-import { RdpSession } from './rdp-session'
+import { RdpSession, RdpSessionAbortedError } from './rdp-session'
 
 /**
  * Owns the agent's live RDP sessions and turns API messages into guacd actions.
@@ -20,7 +20,22 @@ export type RdpRegistryOutbound =
   | { type: 'rdp_ready'; sessionId: string; connectionId: string }
   | { type: 'rdp_data'; sessionId: string; data: string }
   | { type: 'rdp_closed'; sessionId: string; reason: string }
-  | { type: 'error'; sessionId: string; message: string }
+  | {
+      type: 'error'
+      sessionId: string
+      message: string
+      /**
+       * セッションを畳むべきエラーか。
+       *
+       * :::danger
+       * **非致命なら必ず `fatal: false` を載せる。** 省略した場合、受け手は
+       * 安全側に倒して致命として扱い、セッションを終了させる。API はこの
+       * メッセージを加工せずブラウザへ中継する（`relayToWeb`）ため、ここで
+       * 付けた値がそのままブラウザの判断材料になる。
+       * :::
+       */
+      fatal?: boolean
+    }
 
 /** Everything the registry needs from its surroundings. */
 export interface RdpSessionRegistryOptions {
@@ -44,6 +59,23 @@ export class RdpSessionRegistry {
   private readonly sessions = new Map<string, RdpSession>()
 
   constructor(private readonly options: RdpSessionRegistryOptions) {}
+
+  /** 登録簿に居るか。API 由来のエラーの宛先判定に使う。 */
+  has(sessionId: string): boolean {
+    return this.sessions.has(sessionId)
+  }
+
+  /**
+   * 登録簿から消す。**ただし登録されているのが同じインスタンスのときだけ。**
+   *
+   * 同一 `sessionId` が再利用されたあとに先行セッションの後始末が届いても、
+   * 新しいセッションを巻き添えにしない。
+   */
+  private deleteIfCurrent(sessionId: string, session: RdpSession): void {
+    if (this.sessions.get(sessionId) === session) {
+      this.sessions.delete(sessionId)
+    }
+  }
 
   /** Number of live sessions. */
   get size(): number {
@@ -86,7 +118,20 @@ export class RdpSessionRegistry {
         })
       },
       onClosed: (reason) => {
-        this.sessions.delete(request.sessionId)
+        // **自分自身のときだけ消す・通知する。** 閉じた直後に同じ sessionId が
+        // 再利用されると、先行セッションの後始末が**新しいセッションを登録簿から
+        // 消し**、以降その ID 宛の入力・切断がすべて無視される（画面は出たままなのに
+        // 操作が効かなくなる）。通知も同じ ID を宛先にするため、消すだけでなく
+        // **送る側にも同じ判定が要る**（送ると生きている画面が切断表示になる）。
+        //
+        // ここは catch 側と対になる防御であり、**現状の呼び出しグラフでは
+        // `ours === false` に到達しない**（onClosed は finish() 経由でのみ発火し、
+        // finish() 自体が冪等なため）。テストで殺せない＝効いていることを実証
+        // できないコードである点を承知のうえで、catch 側と形を揃えて残している。
+        // 実際に到達しうるのは catch 側（rdp-websocket.spec.ts で担保）。
+        const ours = this.sessions.get(request.sessionId) === session
+        this.deleteIfCurrent(request.sessionId, session)
+        if (!ours) return
         this.options.send({
           type: 'rdp_closed',
           sessionId: request.sessionId,
@@ -117,14 +162,29 @@ export class RdpSessionRegistry {
         connectionId,
       })
     } catch (error) {
-      this.sessions.delete(request.sessionId)
+      // 実ソケットでは close() → destroy() → 'close' → ハンドシェイク reject の順で
+      // 失敗が**後から**届く。その間に ID が再利用されている可能性がある。
+      //
+      // :::danger
+      // **登録簿の持ち主が自分でなければ、消しも通知もしない。**
+      // 「既に onClosed が送った」ケースも「同じ ID を別のセッションが持っている」
+      // ケースも、ここに現れる形は同じ「自分はもう持ち主ではない」である。
+      // 中断（RdpSessionAbortedError）かどうかの判定だけでは足りない
+      // — ハンドシェイク中に close() が入ると、reject は中断ではなく
+      // 「ソケットが壊れた」という**通常のエラー**として届くため。
+      // :::
+      const ours = this.sessions.get(request.sessionId) === session
+      this.deleteIfCurrent(request.sessionId, session)
+      if (!ours) return
       // The message comes from the handshake, which never embeds parameter
       // values — but keep it to the message alone regardless.
-      this.options.send({
-        type: 'rdp_closed',
-        sessionId: request.sessionId,
-        reason: (error as Error).message,
-      })
+      if (!(error instanceof RdpSessionAbortedError)) {
+        this.options.send({
+          type: 'rdp_closed',
+          sessionId: request.sessionId,
+          reason: (error as Error).message,
+        })
+      }
     }
   }
 
@@ -141,6 +201,9 @@ export class RdpSessionRegistry {
       this.options.send({
         type: 'error',
         sessionId,
+        // guacd 接続もセッションも生きている。捨てたのは 1 フレームだけで、
+        // ここで畳むと一時的な不具合のたびに利用者から見て「切断」になる。
+        fatal: false,
         message: 'discarded a frame that was not valid base64',
       })
       return
@@ -165,12 +228,32 @@ export class RdpSessionRegistry {
     session.close(reason)
   }
 
-  /** Close every session — agent shutdown, or the API connection dropping. */
+  /**
+   * Close every session — the API connection went away, or the agent is
+   * shutting down.
+   *
+   * :::danger
+   * **RDP は一時切断をまたいで再開できない。** ターミナルは PTY を生かしたまま
+   * 猶予を置ける（`TerminalSessionManager.closeAllGracefully`）が、それが成立
+   * するのは出力をリングバッファに溜めて再接続時に再生するからである
+   * （`TerminalSession.appendScrollback`）。RDP 側に同等の仕組みは無く、
+   * `BaseWebSocketConnection.sendMessage` は WS が OPEN でなければ**黙って
+   * 捨てる**。Guacamole の命令列は差分の積み重ねで、`sync` はフレーム境界と
+   * フロー制御、`ack` は blob ストリームの結果通知であり、**どちらも欠落した
+   * 描画命令を再送させる仕組みではない**。クライアントから再描画を要求する
+   * 手段もないため、間を空けて再開すると画面は静かにずれたまま復旧しない。
+   *
+   * したがって一時切断でも即座に畳み、ブラウザには終了として提示して
+   * 張り直させる（画面側に再接続の導線がある）。生かして繋ぎ直すより、
+   * 壊れていないことが分かる状態で終わらせる方を採る。
+   * :::
+   */
   closeAll(reason: string): void {
     for (const sessionId of [...this.sessions.keys()]) {
       this.close(sessionId, reason)
     }
   }
+
 }
 
 /**

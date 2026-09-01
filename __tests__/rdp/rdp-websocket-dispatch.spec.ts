@@ -33,6 +33,7 @@ describe('RdpWebSocket message dispatch', () => {
       closeAll: jest.fn((reason: string) => {
         calls.push(`closeAll:${reason}`)
       }),
+      has: jest.fn((id: string) => id === 'sess-1'),
       size: 0,
     }
   }
@@ -95,6 +96,27 @@ describe('RdpWebSocket message dispatch', () => {
     expect(calls).toEqual([])
   })
 
+  it('★ API が知らないセッションは閉じる（孤児の guacd 接続を残さない）', () => {
+    // grace で生き延びたあと API 側のセッションが既に消えていると、以後この
+    // エージェントの送信はすべて「Session not found」で弾かれる。閉じなければ
+    // guacd 接続とリモートホスト上の RDP ログオンが誰にも見えないまま残る。
+    dispatch({
+      type: 'error',
+      sessionId: 'sess-1',
+      message: 'Session not found: sess-1',
+    } as RdpServerMessage)
+    expect(calls).toEqual(['close:sess-1:the API no longer knows this session'])
+  })
+
+  it('知らないセッション ID の Session not found では何もしない', () => {
+    dispatch({
+      type: 'error',
+      sessionId: 'other',
+      message: 'Session not found: other',
+    } as RdpServerMessage)
+    expect(calls).toEqual([])
+  })
+
   it('ignores the auth acknowledgement', () => {
     dispatch({ type: 'auth_success' } as RdpServerMessage)
     expect(calls).toEqual([])
@@ -147,9 +169,43 @@ describe('RdpWebSocket message dispatch', () => {
   })
 
   describe('teardown', () => {
-    it('★ closes every session when the API connection drops', () => {
-      ;(ws as unknown as { onDisconnect: () => void }).onDisconnect()
+    // The base class calls onDisconnect() ONLY from the public disconnect()
+    // (explicit shutdown). Real drops — ALB idle timeout, a network blip, a
+    // heartbeat false positive, an API restart — land on onWebSocketClose(),
+    // and a permanent auth rejection lands on onPermanentClose(). Wiring the
+    // teardown to onDisconnect() alone leaves guacd sockets — and the RDP
+    // logons they represent — alive through every reconnect, addressable by
+    // nobody: the API's session registry is keyed to the old connection.
+    const hook = (name: string): void => {
+      ;(ws as unknown as Record<string, () => void>)[name]()
+    }
+
+    it.each(['onWebSocketClose', 'onPermanentClose', 'onDisconnect'])(
+      '★ %s で全セッションを即座に閉じる',
+      (name) => {
+        hook(name)
+        expect(calls).toEqual(['closeAll:API connection lost'])
+      },
+    )
+
+    it('★ 一時切断でも猶予を置かない（RDP は再開できないため）', () => {
+      // ターミナルは一時切断に猶予を置けるが、それは出力をリングバッファに溜めて
+      // 再生できるから。RDP には同等の仕組みが無く、WS が OPEN でない間の送信は
+      // sendMessage が黙って捨てる。Guacamole の命令列は差分の積み重ねなので、
+      // 欠落を挟んで再開すると画面は静かに壊れたまま復旧しない。
+      const registry = (ws as unknown as { registry: Record<string, unknown> })
+        .registry
+      expect(registry.closeAllGracefully).toBeUndefined()
+
+      hook('onWebSocketClose')
       expect(calls).toEqual(['closeAll:API connection lost'])
+    })
+
+    it('★ 一時切断のフックが基底クラスの契約どおり存在する', () => {
+      // onDisconnect だけを実装しても、実際の切断経路では呼ばれない。
+      const proto = Object.getPrototypeOf(ws) as Record<string, unknown>
+      expect(typeof proto.onWebSocketClose).toBe('function')
+      expect(typeof proto.onPermanentClose).toBe('function')
     })
   })
 })

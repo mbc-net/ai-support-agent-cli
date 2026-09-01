@@ -25,24 +25,41 @@ export interface GuacdRuntimeOptions {
  * guacd を専用ネットワークに置き、エージェントのコンテナを同じネットワークへ
  * 参加させる。ポートは公開しない（ネットワーク内からのみ到達させる）。
  *
- * @returns `docker run` へ差し込む引数。RDP が無効なら空配列
+ * :::warning
+ * **失敗しても致命傷にしない**（`resolveGuacdForHost` と同じ方針）。呼び出し元は
+ * プロジェクトのコンテナを起動する経路であり、ここで投げると RDP とは無関係な
+ * チャット・ターミナルまで含めてそのプロジェクトが一切起動しなくなる。しかも
+ * 呼び出し元の一つ（`rebuildAndRestart` の末尾からの再起動）は catch を持たない
+ * fire-and-forget であり、投げた例外はプロジェクト名すら残らない
+ * unhandled rejection にしかならない。
+ * :::
+ *
+ * @returns `docker run` へ差し込む引数。RDP が無効・用意に失敗した場合は空配列
  */
 export function buildGuacdDockerArgs(options: GuacdRuntimeOptions): string[] {
   if (!options.rdp) return []
 
-  const endpoint = ensureGuacdContainer({
-    mode: 'network',
-    image: options.guacdImage,
-  })
+  try {
+    const endpoint = ensureGuacdContainer({
+      mode: 'network',
+      image: options.guacdImage,
+    })
 
-  return [
-    '--network',
-    GUACD_NETWORK_NAME,
-    '-e',
-    `GUACD_HOST=${endpoint.host}`,
-    '-e',
-    `GUACD_PORT=${endpoint.port}`,
-  ]
+    return [
+      '--network',
+      GUACD_NETWORK_NAME,
+      '-e',
+      `GUACD_HOST=${endpoint.host}`,
+      '-e',
+      `GUACD_PORT=${endpoint.port}`,
+    ]
+  } catch (error) {
+    logger.warn(
+      `[guacd] Web RDP is unavailable for this container: ${getErrorMessage(error)}. ` +
+        'The project starts without RDP; set GUACD_HOST / GUACD_PORT to point at an existing guacd.',
+    )
+    return []
+  }
 }
 
 /**

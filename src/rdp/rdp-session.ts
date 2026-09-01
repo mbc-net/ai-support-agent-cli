@@ -24,6 +24,19 @@ import {
  * value or put one in an error.
  */
 
+/**
+ * Raised when the session was closed before it could start relaying.
+ *
+ * Distinct from a handshake failure: nothing went wrong, the owner simply
+ * changed its mind. The registry treats it as a normal close.
+ */
+export class RdpSessionAbortedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RdpSessionAbortedError'
+  }
+}
+
 /** Callbacks the owner supplies. */
 export interface RdpSessionOptions {
   /** Opens the transport to guacd. Separated so tests need no real TCP. */
@@ -71,6 +84,22 @@ export class RdpSession {
   async start(): Promise<RdpSessionStartResult> {
     const socket = await this.options.connect()
     this.socket = socket
+
+    // :::danger
+    // **connect() の待機中に close() が入っていないか、ハンドシェイクの前に確かめる。**
+    // そのまま進むとリモートホスト上に RDP ログオンが作られ、`ready`（既定 30 秒の
+    // 期限）まで残る。利用者が接続を開いた直後に画面を閉じた場合がこれに当たる。
+    //
+    // 待機そのものの上限は `connectToGuacd` の接続タイムアウトが持つ。上限が
+    // 無いと、接続先が blackhole（SYN に無応答）のときこの await が OS の TCP
+    // タイムアウトまで解けず、ブラウザが諦めたあとも raw socket が残る。
+    // :::
+    if (this.closed) {
+      socket.destroy()
+      throw new RdpSessionAbortedError(
+        'session was closed before the handshake started',
+      )
+    }
 
     // performGuacdHandshake owns the socket handlers until it settles, and
     // destroys the socket itself on failure.

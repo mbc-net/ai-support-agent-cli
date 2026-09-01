@@ -105,6 +105,27 @@ export const DEFAULT_GUACD_IMAGE = 'guacamole/guacd:1.5.5'
 /** guacd の待受ポート。 */
 export const GUACD_PORT = 4822
 
+/**
+ * guacd を **loopback だけ**で待ち受けさせる起動コマンド。
+ *
+ * :::danger
+ * `guacamole/guacd` の既定 CMD は `guacd -b 0.0.0.0` である。K8s の Pod と ECS の
+ * awsvpc タスクは**コンテナ間でネットワーク名前空間を共有する**ため、`hostPort` を
+ * 付けず `portMappings` を空にしても、**Pod IP / タスク ENI の 4822 に外から
+ * 到達できる**（別コンテナからの到達を実機で確認済み）。guacd には認証が無いので、
+ * これは同一クラスタ / VPC の任意のワークロードが任意のホストへ RDP を張れる状態を
+ * 意味する。待受アドレスを絞ることが唯一の実効的な遮断である。
+ *
+ * 名前空間を共有しない Docker 形態（guacd を別コンテナで動かす）では loopback に
+ * 縛れないため、専用ネットワークによる分離で守る。
+ * :::
+ */
+export const GUACD_LOOPBACK_COMMAND = [
+  '/bin/sh',
+  '-c',
+  `/opt/guacamole/sbin/guacd -b 127.0.0.1 -L \${GUACD_LOG_LEVEL:-info} -f`,
+]
+
 export interface ManifestInput {
   /** Tenant code (lower_snake_case). */
   tenantCode: string
@@ -483,6 +504,10 @@ function guacdContainerYaml(
   return `        - name: guacd
           image: ${yamlScalar(guacdImage ?? DEFAULT_GUACD_IMAGE)}
           imagePullPolicy: Always
+          # 待受を loopback に限定する（上記 danger）。Pod 内はネットワーク名前空間を
+          # 共有するため、エージェントからは 127.0.0.1 で到達できる。
+          command:
+${GUACD_LOOPBACK_COMMAND.map((a) => `            - ${yamlScalar(a)}`).join('\n')}
           # containerPort の宣言は情報提供のみ。hostPort は付けない（上記 danger）。
           ports:
             - containerPort: ${GUACD_PORT}
@@ -525,6 +550,9 @@ function buildGuacdContainerDefinition(
     name: 'guacd',
     image: input.guacdImage ?? DEFAULT_GUACD_IMAGE,
     essential: false,
+    // 待受を loopback に限定する。awsvpc ではタスク内の全コンテナが同じ ENI を
+    // 共有するため、portMappings を空にしても待受アドレスは変わらない。
+    command: GUACD_LOOPBACK_COMMAND,
     portMappings: [],
     logConfiguration: {
       logDriver: 'awslogs',

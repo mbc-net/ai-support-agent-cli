@@ -220,6 +220,40 @@ describe('RdpSession', () => {
       expect(ctx.socket.destroyed).toBe(true)
     })
 
+    it('★ close() during connect() aborts before the handshake starts', async () => {
+      // connect() の解決を待つ間に close() が入った場合、そのままハンドシェイクへ
+      // 進むとリモートホスト上に RDP ログオンが作られ、`ready`（既定 30 秒の
+      // 期限）まで残る。利用者が接続直後に画面を閉じた場合がこれに当たる。
+      const socket = new FakeSocket()
+      // 型注釈を明示しないと、代入が Promise の executor 内でのみ行われるため
+      // TypeScript が never に絞り込んでしまう。
+      let releaseConnect: () => void = () => undefined
+      const ctx = build()
+      const session = new RdpSession({
+        connect: async () => {
+          await new Promise<void>((resolve) => {
+            releaseConnect = resolve
+          })
+          return socket
+        },
+        params,
+        onOutbound: () => undefined,
+        onClosed: () => undefined,
+        onError: () => undefined,
+      })
+
+      const promise = session.start()
+      await Promise.resolve()
+      session.close('client went away')
+      releaseConnect()
+      await promise.catch(() => undefined)
+
+      // ハンドシェイクへ進んでいない（select すら送っていない）
+      expect(socket.written).toEqual([])
+      expect(socket.destroyed).toBe(true)
+      void ctx
+    })
+
     it('★ close() during the handshake wins: the socket is destroyed, not relayed', async () => {
       // The owner (client disconnect, API teardown) decided the session is over
       // while guacd was still negotiating. Resuming the relay here would leave an
