@@ -13,6 +13,20 @@ import { GuacdSocket } from './guacd-handshake'
 /** Port guacd listens on by default. */
 export const DEFAULT_GUACD_PORT = 4822
 
+/**
+ * Upper bound on the TCP connect to guacd.
+ *
+ * :::danger
+ * **The connect must have its own deadline.** guacd sits on loopback or a
+ * sidecar, so a connect takes milliseconds; if the address blackholes (SYN with
+ * no reply) Node waits for the OS timeout — minutes on Linux, longer elsewhere.
+ * Without this bound, closing the session cannot free the socket: `RdpSession`
+ * only gets to check `closed` once `connect()` settles, so the raw socket and
+ * the pending open outlive the browser giving up.
+ * :::
+ */
+export const GUACD_CONNECT_TIMEOUT_MS = 10_000
+
 /** Wrap an existing socket. Exposed separately so tests need no real TCP. */
 export function createGuacdTcpSocket(socket: net.Socket): GuacdSocket {
   socket.setEncoding('utf8')
@@ -64,11 +78,24 @@ export function createGuacdTcpSocket(socket: net.Socket): GuacdSocket {
 export function connectToGuacd(
   host: string,
   port: number = DEFAULT_GUACD_PORT,
+  timeoutMs: number = GUACD_CONNECT_TIMEOUT_MS,
 ): Promise<GuacdSocket> {
   return new Promise<GuacdSocket>((resolve, reject) => {
     const socket = net.createConnection({ host, port })
 
+    const timer = setTimeout(() => {
+      socket.destroy()
+      reject(
+        new Error(
+          `failed to connect to guacd at ${host}:${port}: timed out after ${timeoutMs}ms`,
+        ),
+      )
+    }, timeoutMs)
+    // Do not keep the process alive for a pending connect deadline.
+    timer.unref?.()
+
     const onConnectError = (error: Error): void => {
+      clearTimeout(timer)
       socket.destroy()
       reject(
         new Error(`failed to connect to guacd at ${host}:${port}: ${error.message}`),
@@ -79,6 +106,7 @@ export function connectToGuacd(
     socket.once('connect', () => {
       // Hand the socket over only after the connect attempt settled, so the
       // connect-time error path cannot fire once the relay owns the socket.
+      clearTimeout(timer)
       socket.removeListener('error', onConnectError)
       resolve(createGuacdTcpSocket(socket))
     })

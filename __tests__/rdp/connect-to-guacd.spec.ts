@@ -4,6 +4,7 @@ import * as net from 'net'
 import {
   connectToGuacd,
   DEFAULT_GUACD_PORT,
+  GUACD_CONNECT_TIMEOUT_MS,
 } from '../../src/rdp/guacd-tcp-socket'
 
 jest.mock('net', () => ({
@@ -83,6 +84,46 @@ describe('connectToGuacd', () => {
     socket.emit('error', new Error('ECONNREFUSED'))
     await expect(promise).rejects.toThrow(/guacd at guacd:4822/)
     expect(socket.destroyed).toBe(true)
+  })
+
+  it('★ gives up on a blackholed address instead of waiting for the OS', async () => {
+    // guacd はループバックかサイドカーに居るので接続はミリ秒で終わる。SYN に
+    // 応答が返らない相手だと Node は OS の TCP タイムアウト（Linux で数分）まで
+    // 待つ。上限が無いと、ブラウザが諦めたあとも raw socket と保留中の open が
+    // 残り続ける（RdpSession は connect() が決着してからしか closed を見られない）。
+    jest.useFakeTimers()
+    try {
+      const socket = arrange()
+      const promise = connectToGuacd('blackhole', 4822, 50)
+      const settled = promise.catch((error: unknown) => (error as Error).message)
+
+      jest.advanceTimersByTime(50)
+
+      await expect(settled).resolves.toMatch(/timed out after 50ms/)
+      expect(socket.destroyed).toBe(true)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('接続が成立したらタイムアウトは発火しない', async () => {
+    jest.useFakeTimers()
+    try {
+      const socket = arrange()
+      const promise = connectToGuacd('guacd', 4822, 50)
+      socket.emit('connect')
+      await promise
+
+      jest.advanceTimersByTime(1000)
+      expect(socket.destroyed).toBe(false)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('既定のタイムアウトを持つ（上限なしにしない）', () => {
+    expect(GUACD_CONNECT_TIMEOUT_MS).toBeGreaterThan(0)
+    expect(GUACD_CONNECT_TIMEOUT_MS).toBeLessThanOrEqual(30_000)
   })
 
   it('★ stops treating errors as connect failures once connected', async () => {

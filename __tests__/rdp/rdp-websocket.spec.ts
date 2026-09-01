@@ -157,6 +157,83 @@ describe('RdpSessionRegistry', () => {
       expect(registry.size).toBe(0)
     })
 
+    it('★ 先行セッションの遅れた失敗が、同じ ID の新しいセッションを消さない', async () => {
+      // 実ソケットでは close() → destroy() → 'close' → ハンドシェイクが reject、
+      // という順で start() の失敗が**後から**届く。その間に同じ sessionId が
+      // 再利用されていると、同一性を確かめない delete が**新しいセッションを
+      // 登録簿から消す**。以降その ID 宛の入力・切断がすべて無視され、画面は
+      // 出たままなのに操作が効かなくなる。
+      const failing = registry.open({
+        sessionId: 'sess-1',
+        parameters: { hostname: '10.0.0.5' },
+        width: 1280,
+        height: 800,
+        dpi: 96,
+      })
+      await Promise.resolve()
+      const firstSocket = sockets[sockets.length - 1]
+
+      // 先行セッションのハンドシェイクを失敗させる前に、同じ ID を再利用する
+      registry.close('sess-1', 'client went away')
+      const second = await open('sess-1')
+      outbound.length = 0
+
+      // 先行セッションの失敗が遅れて届く
+      firstSocket.emit('error', ['refused', '519'])
+      await failing
+
+      expect(registry.size).toBe(1)
+      const before = second.written.length
+      registry.send('sess-1', Buffer.from('3.nop;', 'utf8').toString('base64'))
+      expect(second.written.length).toBeGreaterThan(before)
+    })
+
+    it('★ 先行セッションの遅れた失敗を、同じ ID の新しいセッションの切断として通知しない', async () => {
+      // 登録簿から消さないだけでは足りない。**通知**も同じ sessionId を宛先に
+      // するため、抑止しないとブラウザは生きているセッションに対して
+      // rdp_closed を受け取り、接続済みの画面が切断表示になる。
+      const failing = registry.open({
+        sessionId: 'sess-1',
+        parameters: { hostname: '10.0.0.5' },
+        width: 1280,
+        height: 800,
+        dpi: 96,
+      })
+      await Promise.resolve()
+      const firstSocket = sockets[sockets.length - 1]
+
+      registry.close('sess-1', 'client went away')
+      await open('sess-1')
+      outbound.length = 0
+
+      firstSocket.emit('error', ['refused', '519'])
+      await failing
+
+      expect(outbound).toEqual([])
+    })
+
+    it('★ ハンドシェイク中に閉じても rdp_closed は 1 通だけ', async () => {
+      // close() は onClosed 経由で 1 通目を送る。その後ハンドシェイクは
+      // 「ソケットが壊れた」という**中断ではない**エラーで reject するため、
+      // 種類での判定だけに頼ると 2 通目が出る。
+      const promise = registry.open({
+        sessionId: 'sess-1',
+        parameters: { hostname: '10.0.0.5' },
+        width: 1280,
+        height: 800,
+        dpi: 96,
+      })
+      await Promise.resolve()
+      const socket = sockets[sockets.length - 1]
+
+      registry.close('sess-1', 'client went away')
+      socket.fail(new Error('socket hang up'))
+      socket.emit('error', ['refused', '519'])
+      await promise
+
+      expect(outbound.filter((m) => m.type === 'rdp_closed')).toHaveLength(1)
+    })
+
     it('★ rejects a duplicate sessionId rather than orphaning the first socket', async () => {
       const first = await open('sess-1')
       outbound.length = 0
@@ -177,6 +254,25 @@ describe('RdpSessionRegistry', () => {
   })
 
   describe('relay', () => {
+    it('★ 復号できない入力フレームの通知は非致命（セッションを殺さない）', async () => {
+      // ブラウザ側はこの error を受けてもセッションを畳んではならない。
+      // guacd 接続は生きており、捨てたのは 1 フレームだけである。
+      await open()
+      outbound.length = 0
+
+      registry.send('sess-1', '!!not base64!!')
+
+      expect(outbound).toEqual([
+        {
+          type: 'error',
+          sessionId: 'sess-1',
+          fatal: false,
+          message: 'discarded a frame that was not valid base64',
+        },
+      ])
+      expect(registry.size).toBe(1)
+    })
+
     it('forwards guacd output to the API as base64', async () => {
       const socket = await open()
       outbound.length = 0

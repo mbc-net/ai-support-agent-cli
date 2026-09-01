@@ -96,12 +96,38 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
   }
 
   /**
-   * Tear every session down when the API connection drops.
+   * API 接続が失われたときのセッションの扱い。
    *
-   * Sessions cannot survive the reconnect: the API's session registry is keyed
-   * to the old connection, so nothing would ever address them again — while the
-   * RDP logons stayed alive on the remote hosts.
+   * :::danger
+   * **3 つのフックを取り違えない。** 基底クラスが `onDisconnect()` を呼ぶのは
+   * 公開 `disconnect()`（明示的なシャットダウン）からだけである。実運用の切断
+   * （ALB のアイドル切断、瞬断、ハートビートの誤検知、API の再起動）はすべて
+   * `onWebSocketClose()` に、恒久的な認証拒否は `onPermanentClose()` に来る。
+   * `onDisconnect()` だけに配線すると、再接続のたびに guacd 接続と
+   * その先の RDP ログオンが誰にも触れない形で残る。
+   *
+   * `TerminalWebSocket` は一時切断だけ猶予付き（`closeAllGracefully`）にして
+   * いるが、**RDP は同じ形にできない**。ターミナルの猶予が成立するのは出力を
+   * リングバッファに溜めて再接続時に再生するからで、RDP 側に同等の仕組みは
+   * 無く、`sendMessage` は WS が OPEN でなければ黙って捨てる。Guacamole の
+   * 命令列は差分の積み重ねで、`sync` / `ack` は欠落した描画命令の再送機構では
+   * ないため、欠落を挟んで再開すると画面は静かにずれる。3 つとも即座に畳み、
+   * ブラウザ側に張り直させる
+   * （詳細は `RdpSessionRegistry.closeAll` の danger）。
+   * :::
    */
+
+  /** 一時的な切断（再接続する）。実際の切断はほぼここに来る。 */
+  protected override onWebSocketClose(): void {
+    this.registry.closeAll('API connection lost')
+  }
+
+  /** 恒久的な認証拒否（再接続しない）。 */
+  protected override onPermanentClose(): void {
+    this.registry.closeAll('API connection lost')
+  }
+
+  /** 明示的なシャットダウン（エージェント終了時）。 */
   protected override onDisconnect(): void {
     this.registry.closeAll('API connection lost')
   }
@@ -113,6 +139,20 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
 
       case 'error':
         logger.warn(`[rdp-ws] API reported an error: ${msg.message}`)
+        // API が知らないセッションを、こちらだけが抱えている状態。grace で
+        // 生き延びたあと API 側のセッションが既に消えていた場合に起こる。
+        // 閉じなければ guacd 接続とリモートホスト上の RDP ログオンが、
+        // 誰にも見えないまま残り続ける。
+        if (
+          typeof msg.sessionId === 'string' &&
+          msg.message.startsWith('Session not found') &&
+          this.registry.has(msg.sessionId)
+        ) {
+          this.registry.close(
+            msg.sessionId,
+            'the API no longer knows this session',
+          )
+        }
         return
 
       case 'rdp_open':
