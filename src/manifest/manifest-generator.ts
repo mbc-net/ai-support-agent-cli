@@ -1,3 +1,4 @@
+import { logger } from '../logger'
 /**
  * Deployment manifest generation for multi-replica agent deployments.
  *
@@ -120,6 +121,28 @@ export const GUACD_PORT = 4822
  * 縛れないため、専用ネットワークによる分離で守る。
  * :::
  */
+/**
+ * 既定以外の guacd イメージが指定されたら警告する。
+ *
+ * :::danger
+ * **`command` の上書きは「イメージに ENTRYPOINT が無い」ことが前提。**
+ * 既定の {@link DEFAULT_GUACD_IMAGE} は実機で確認済み（`docker image inspect`
+ * の Entrypoint が null）。ENTRYPOINT を持つイメージを渡されると
+ * `/bin/sh` `-c` `<script>` が本体の引数として渡り、guacd は不正引数で終了する。
+ * サイドカーは `essential: false` なので**他機能は動き続け、Web RDP だけが
+ * 黙って使えなくなる**。気づけるように警告を残す。
+ * :::
+ */
+function warnIfGuacdImageOverridden(guacdImage?: string): void {
+  if (!guacdImage || guacdImage === DEFAULT_GUACD_IMAGE) return
+  logger.warn(
+    `[guacd] Using a custom image (${guacdImage}). The generated manifest overrides ` +
+      'the container command to bind guacd to loopback, which only works for images ' +
+      'without an ENTRYPOINT. If this image defines one, guacd will exit with invalid ' +
+      'arguments and Web RDP will be unavailable while everything else keeps running.',
+  )
+}
+
 export const GUACD_LOOPBACK_COMMAND = [
   '/bin/sh',
   '-c',
@@ -501,6 +524,7 @@ function guacdContainerYaml(
   guacdImage: string | undefined,
 ): string {
   if (!rdp) return ''
+  warnIfGuacdImageOverridden(guacdImage)
   return `        - name: guacd
           image: ${yamlScalar(guacdImage ?? DEFAULT_GUACD_IMAGE)}
           imagePullPolicy: Always
@@ -546,6 +570,7 @@ function buildGuacdContainerDefinition(
   logGroup: string,
   region: string,
 ): Record<string, unknown> {
+  warnIfGuacdImageOverridden(input.guacdImage)
   return {
     name: 'guacd',
     image: input.guacdImage ?? DEFAULT_GUACD_IMAGE,
