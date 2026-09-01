@@ -1,5 +1,7 @@
 import * as yaml from 'js-yaml'
 
+import { logger } from '../../src/logger'
+
 import {
   DEFAULT_GUACD_IMAGE,
   generateEcsManifest,
@@ -245,5 +247,47 @@ describe('guacd イメージの前提', () => {
     expect(command).toHaveLength(3)
     expect(command[2]).toContain('-b 127.0.0.1')
     expect(command[2]).not.toContain('0.0.0.0')
+  })
+})
+
+describe('★ カスタムイメージ指定時の警告', () => {
+  const ECS_BASE_FOR_WARN = {
+    ...BASE,
+    cluster: 'c1',
+    subnets: ['subnet-1'],
+    securityGroups: ['sg-1'],
+  }
+
+  /**
+   * :::danger
+   * **`command` の上書きは「イメージに ENTRYPOINT が無い」ことが前提。**
+   * 既定の `guacamole/guacd:1.5.5` は実機で確認済みだが、`--guacd-image` で
+   * ENTRYPOINT を持つイメージを指定されると `/bin/sh -c <script>` が本体の
+   * 引数として渡り、guacd は不正引数で終了する。`essential: false` のため
+   * 他機能は動き続け、**Web RDP だけが黙って使えなくなる**。
+   * :::
+   */
+  it('既定以外のイメージを指定したら警告を残す', () => {
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    try {
+      generateEcsManifest({
+        ...ECS_BASE_FOR_WARN,
+        rdp: true,
+        guacdImage: 'registry.example.com/custom-guacd:1',
+      })
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('ENTRYPOINT'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('既定のイメージでは警告を出さない', () => {
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    try {
+      generateEcsManifest({ ...ECS_BASE_FOR_WARN, rdp: true })
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
   })
 })

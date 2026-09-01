@@ -129,14 +129,23 @@ export function ensureGuacdContainer(
  *
  * 失敗しても投げない。エージェントの終了処理から呼ばれるため、ここで例外を出すと
  * 後続の後始末が走らなくなる。
+ *
+ * :::danger
+ * **止め損ねた事実は warn で残す。** guacd には認証が無く、到達できる者は誰でも
+ * 任意のホストへ RDP 接続を張れる。エージェントを終えても残り続けている状態を
+ * debug ログに埋めると、通常の運用では収集されず誰も気づけない。
+ * :::
  */
 export function stopGuacdContainer(): void {
-  runDocker(['stop', GUACD_CONTAINER_NAME], { ignoreFailure: true })
+  runDocker(['stop', GUACD_CONTAINER_NAME], {
+    ignoreFailure: true,
+    failureMessage: `guacd container ${GUACD_CONTAINER_NAME} could not be stopped; it may still be running and accepting RDP connections`,
+  })
 }
 
 function runDocker(
   args: string[],
-  opts: { ignoreFailure?: boolean } = {},
+  opts: { ignoreFailure?: boolean; failureMessage?: string } = {},
 ): void {
   try {
     execFileSync(getDockerPath(), args, {
@@ -144,7 +153,14 @@ function runDocker(
     })
   } catch (err) {
     if (opts.ignoreFailure) {
-      logger.debug(`[guacd] docker ${args[0]} failed (ignored): ${String(err)}`)
+      // 呼び出し元が「見えないと困る」と判断した失敗は warn へ上げる。
+      if (opts.failureMessage) {
+        logger.warn(`[guacd] ${opts.failureMessage}: ${String(err)}`)
+      } else {
+        logger.debug(
+          `[guacd] docker ${args[0]} failed (ignored): ${String(err)}`,
+        )
+      }
       return
     }
     throw new Error(
