@@ -288,6 +288,9 @@ export function startTerminalWebSocket(
     terminalDir,
     configSyncState ? () => configSyncState.projectConfig?.envVars : undefined,
     () => onTransportAuthRejected(deps, state, 'terminal'),
+    // Credentials for sessions that target a registered host. Fetched by the
+    // agent (never relayed by the API), just in time, per session.
+    (hostId) => deps.client.getSshCredentials(hostId),
   )
 
   state.terminalWs.connect().catch((error) => {
