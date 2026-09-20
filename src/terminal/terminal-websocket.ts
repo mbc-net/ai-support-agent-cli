@@ -16,6 +16,12 @@ import {
 } from './constants'
 import type { TerminalSession } from './terminal-session'
 import { TerminalSessionManager } from './terminal-session-manager'
+import {
+  buildRemoteShellPlan,
+  type RemoteShellPlan,
+} from './remote-shell'
+import { resolveKnownHostsPath } from '../utils/known-hosts-store'
+import type { SshCredentials } from '../types'
 
 const MIN_TERMINAL_SIZE = 1
 const MAX_TERMINAL_SIZE = 1000
@@ -84,6 +90,16 @@ export interface TerminalServerMessage {
   /** Session name for tmux_kill_session */
   name?: string
   /**
+   * Target host registered in the project's remote-connection settings
+   * (`settings.ssh.hosts[]`). When present the PTY runs an interactive
+   * connection to that host (ssh / SSM) instead of the agent's own shell.
+   *
+   * Carries **no secrets**: the agent fetches the credential itself from its
+   * credentials endpoint. The API validates existence, route and authorization
+   * before sending this.
+   */
+  remoteHost?: { hostId: string; connectionType: 'ssh' | 'ssm' }
+  /**
    * Owner (user) hash injected by the API for tmux management messages.
    * Computed API-side as sha256(auth.userId).hex.slice(0, 12) — never sent by
    * the web client. Used to filter tmux_list_sessions to the requester's own
@@ -148,6 +164,15 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     private readonly projectDir?: string,
     private readonly envVarsProvider?: EnvVarsProvider,
     private readonly onAuthRejected?: () => void,
+    /**
+     * Fetches the credential for a registered host. Injected (rather than
+     * constructing an ApiClient here) so this transport keeps one job and the
+     * fetch stays testable. Absent means remote-host sessions are refused —
+     * never downgraded to the agent's own shell.
+     */
+    private readonly sshCredentialsProvider?: (
+      hostId: string,
+    ) => Promise<SshCredentials>,
   ) {
     super({
       maxReconnectRetries: TERMINAL_WS_MAX_RECONNECT_RETRIES,
@@ -268,7 +293,80 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     this.manager.closeAll()
   }
 
-  private handleOpen(msg: TerminalServerMessage): void {
+  /**
+   * Open a session against a host registered in the project's settings.
+   *
+   * Refuses rather than degrading, in every failure mode:
+   *
+   * - no credential provider / fetch failure → error frame, no PTY
+   * - no tenant context → error frame, because the TOFU known_hosts is keyed by
+   *   tenant and the alternative is disabling host key checking
+   * - unsupported route (tailscale) → error frame (the plan builder throws)
+   *
+   * Falling back to the agent's own shell would leave the user operating the
+   * container while believing they are on the remote host.
+   */
+  private async openRemoteHostSession(
+    sessionId: string,
+    msg: TerminalServerMessage,
+  ): Promise<void> {
+    const remoteHost = msg.remoteHost
+    if (!remoteHost) return
+
+    const tenantCode = msg.meta?.tenantCode
+    if (!tenantCode) {
+      logger.warn(
+        `[terminal-ws] Refusing remote host session ${sessionId}: no tenant context for host key checking`,
+      )
+      this.send({
+        type: 'error',
+        sessionId,
+        error: 'Cannot open a remote host session without tenant context',
+      })
+      return
+    }
+
+    if (!this.sshCredentialsProvider) {
+      logger.warn(
+        `[terminal-ws] Refusing remote host session ${sessionId}: no credential provider configured`,
+      )
+      this.send({
+        type: 'error',
+        sessionId,
+        error: 'Remote host sessions are not available on this agent',
+      })
+      return
+    }
+
+    let plan: RemoteShellPlan
+    try {
+      const credentials = await this.sshCredentialsProvider(remoteHost.hostId)
+      plan = buildRemoteShellPlan(credentials, {
+        knownHostsPath: resolveKnownHostsPath(tenantCode, remoteHost.hostId),
+      })
+    } catch (error) {
+      // The message can quote credential material, so only the kind is logged
+      // and the client gets a fixed sentence.
+      logger.warn(
+        `[terminal-ws] Failed to prepare remote host session ${sessionId} (host=${remoteHost.hostId}): ${
+          (error as Error)?.name ?? typeof error
+        }`,
+      )
+      this.send({
+        type: 'error',
+        sessionId,
+        error: 'Failed to prepare the connection to the host',
+      })
+      return
+    }
+
+    this.handleOpen(msg, plan)
+  }
+
+  private handleOpen(
+    msg: TerminalServerMessage,
+    remoteShell?: RemoteShellPlan,
+  ): void {
     // API から受け取った sessionId を使用する
     const serverSessionId = msg.sessionId
     if (!serverSessionId) {
@@ -298,6 +396,19 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
     // Never falls back to spawning a new PTY (no-fallback rule).
     if (msg.resume === true) {
       this.handleResumeOpen(serverSessionId, msg)
+      return
+    }
+
+    // A session targeting a registered host needs the credential first, which
+    // is async. Everything else about the open is the same, so the remote path
+    // resolves the plan and then re-enters this method **with** the plan.
+    //
+    // The `!remoteShell` guard is what stops that re-entry from bouncing back
+    // into the async path forever: `msg.remoteHost` is still set on the second
+    // pass. Without it the two functions call each other indefinitely — no
+    // stack overflow (each hop is a microtask), just a session that never opens.
+    if (msg.remoteHost && !remoteShell) {
+      void this.openRemoteHostSession(serverSessionId, msg)
       return
     }
 
@@ -345,6 +456,7 @@ export class TerminalWebSocket extends BaseWebSocketConnection<TerminalServerMes
       envVarsOverride,
       meta: msg.meta,
       tmuxSessionName: msg.tmuxSessionName,
+      ...(remoteShell ? { remoteShell } : {}),
     })
 
     if (!session) {
