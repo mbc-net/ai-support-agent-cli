@@ -22,6 +22,8 @@ import {
   ALERT_STALE_PROCESSING_MINUTES,
   ALERT_STALE_RECOVERY_INTERVAL_MS,
   DELAYED_RESTART_MS,
+  DOCKER_BUILD_ERROR_MAX_BYTES,
+  DOCKER_MARKER_BUILD_ERROR,
   DOCKER_MARKER_BUILT_HASH,
   DOCKER_MARKER_CUSTOMIZATION_HASH,
   DOCKER_MARKER_REBUILD_NEEDED,
@@ -662,7 +664,24 @@ export class ProjectAgent {
         const npmPackages = dockerCustomization?.npmPackages ?? []
         const commands = dockerCustomization?.commands ?? []
         const timezone = dockerCustomization?.timezone
-        const dockerfileContent = generateProjectDockerfile(AGENT_VERSION, aptPackages, npmPackages, commands, timezone)
+
+        let dockerfileContent: string
+        try {
+          dockerfileContent = generateProjectDockerfile(AGENT_VERSION, aptPackages, npmPackages, commands, timezone)
+        } catch (err: unknown) {
+          // The customization itself is rejected (invalid timezone, a command
+          // containing shell metacharacters, an invalid package name). There is
+          // nothing to rebuild from, so the rebuild marker is deliberately not
+          // written — but the host supervisor restarts this container anyway on
+          // DOCKER_RESTART_EXIT_CODE and rebuilds the *previous* Dockerfile, so
+          // without the record below the container would come back up looking
+          // healthy while still running the old configuration, and the
+          // administrator would never learn that the saved customization was
+          // dropped.
+          this.recordDockerBuildError(configDir, `Dockerfile generation failed: ${getErrorMessage(err)}`)
+          process.exit(DOCKER_RESTART_EXIT_CODE)
+          return
+        }
         const dockerfilePath = path.join(configDir, 'Dockerfile')
         atomicWriteFile(dockerfilePath, dockerfileContent)
         logger.info(`${this.prefix} Project Dockerfile written: ${dockerfilePath}`)
@@ -679,6 +698,27 @@ export class ProjectAgent {
       }
       process.exit(DOCKER_RESTART_EXIT_CODE)
     }, DELAYED_RESTART_MS)
+  }
+
+  /**
+   * Record a Docker failure where the administrator can see it.
+   *
+   * This joins the existing reporting route used for `docker build` failures:
+   * the host-side DockerSupervisor writes the same file, and
+   * `performRegistration()` reads it on the next container start, reports its
+   * contents to the API as `dockerBuildError` via heartbeat, and deletes it.
+   * Truncated with the same cap the supervisor applies.
+   */
+  private recordDockerBuildError(configDir: string, message: string): void {
+    logger.error(`${this.prefix} ${message}`)
+    const truncated = message.length > DOCKER_BUILD_ERROR_MAX_BYTES
+      ? message.substring(0, DOCKER_BUILD_ERROR_MAX_BYTES) + '...(truncated)'
+      : message
+    try {
+      atomicWriteFile(path.join(configDir, DOCKER_MARKER_BUILD_ERROR), truncated)
+    } catch (err: unknown) {
+      logger.warn(`${this.prefix} Failed to write ${DOCKER_MARKER_BUILD_ERROR} file: ${getErrorMessage(err)}`)
+    }
   }
 
   /**
@@ -1079,7 +1119,7 @@ export class ProjectAgent {
         logger.warn(`${this.prefix} Failed to write ${DOCKER_MARKER_REGISTERED_AGENT_ID}: ${getErrorMessage(err)}`)
       }
 
-      const buildErrorPath = path.join(getConfigDir(), 'docker-build-error')
+      const buildErrorPath = path.join(getConfigDir(), DOCKER_MARKER_BUILD_ERROR)
       let dockerBuildError: string | undefined
       try {
         dockerBuildError = fs.readFileSync(buildErrorPath, 'utf-8').trim() || undefined

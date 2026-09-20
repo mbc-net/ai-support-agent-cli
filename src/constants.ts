@@ -663,6 +663,11 @@ export const DOCKER_MARKER_BUILT_HASH = 'docker-built-hash'
 export const DOCKER_MARKER_REBUILD_NEEDED = 'docker-rebuild-needed'
 export const DOCKER_MARKER_CUSTOMIZATION_HASH = 'docker-customization-hash'
 export const DOCKER_MARKER_REGISTERED_AGENT_ID = 'docker-registered-agent-id'
+// Failure reason recorded for the administrator: written by the host
+// DockerSupervisor when `docker build` fails, and by the in-container agent
+// when the per-project Dockerfile cannot even be generated. The next container
+// start reports it to the API as `dockerBuildError` and deletes the file.
+export const DOCKER_MARKER_BUILD_ERROR = 'docker-build-error'
 
 // Exit code used by the in-container agent to signal "update complete, rebuild image"
 // Must be distinct from 0 (clean stop) and 1 (error) to avoid false restarts on SIGINT.
