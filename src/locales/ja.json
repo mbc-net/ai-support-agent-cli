@@ -182,6 +182,8 @@
   "cmd.start.noDockerfileSync": "デフォルトDockerfileの設定ディレクトリへの書き出しをスキップ",
   "cmd.start.noImagePull": "コンテナレジストリからのイメージ取得を行わず必ずローカルでビルド",
   "cmd.start.project": "指定したプロジェクトのみ起動（形式: tenantCode/projectCode）",
+  "cmd.start.rdp": "Web RDP を有効化（guacd をローカルで用意し、ループバックのみに公開）",
+  "cmd.start.guacdImage": "guacd のコンテナイメージ",
   "cmd.dockerLogin": "Dockerコンテナ内でClaude Codeにログイン",
   "cmd.dockerBuild": "このバージョンのDockerイメージを必ずローカルでビルド",
   "cmd.dockerEnsureImage": "このバージョンのDockerイメージを用意（未カスタマイズならレジストリから取得、それ以外はビルド）",

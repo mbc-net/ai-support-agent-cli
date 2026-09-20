@@ -62,6 +62,8 @@ program
   .option(CLI_FLAG_NO_DOCKERFILE_SYNC, t('cmd.start.noDockerfileSync'))
   .option(CLI_FLAG_NO_IMAGE_PULL, t('cmd.start.noImagePull'))
   .option('--project <tenantCode/projectCode>', t('cmd.start.project'))
+  .option('--rdp', t('cmd.start.rdp'))
+  .option('--guacd-image <image>', t('cmd.start.guacdImage'))
   .action(async (opts: {
     token?: string
     apiUrl?: string
@@ -75,6 +77,8 @@ program
     dockerfileSync: boolean
     imagePull: boolean
     project?: string
+    rdp?: boolean
+    guacdImage?: string
   }) => {
     if (opts.docker) {
       const { runInDocker } = await import('./docker/docker-runner')
@@ -90,10 +94,30 @@ program
         dockerfileSync: opts.dockerfileSync,
         imagePull: opts.imagePull,
         project: opts.project,
+        rdp: opts.rdp,
+        guacdImage: opts.guacdImage,
       })
       return
     }
     const updateChannel = validateUpdateChannel(opts.updateChannel)
+
+    // Web RDP を使う場合、ホスト直起動にはサイドカーの仕組みが無いため
+    // エージェント自身が guacd コンテナを用意する。失敗しても本体は起動する。
+    const { resolveGuacdForHost, createGuacdShutdownHook } = await import(
+      './rdp/guacd-runtime-entry'
+    )
+    resolveGuacdForHost({ rdp: opts.rdp, guacdImage: opts.guacdImage })
+    if (opts.rdp) {
+      // 止め忘れると、エージェントを終了しても guacd が残り続ける。
+      // 3 つのハンドラに同じ処理を登録するため、多重呼び出しを畳むフックを
+      // 使う。素の停止関数を渡すと、通常の終了で 2 回走った 2 回目が
+      // 「そんなコンテナは無い」で失敗し、偽の警告が毎回出る。
+      const stop = createGuacdShutdownHook()
+      process.once('exit', stop)
+      process.once('SIGINT', stop)
+      process.once('SIGTERM', stop)
+    }
+
     await startAgent({
       token: opts.token,
       apiUrl: opts.apiUrl,

@@ -11,6 +11,10 @@ import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
 import { ensureClaudeJsonOAuthAccount } from '../utils/claude-json-oauth-sync'
 import { GENERAL_KNOWN_HOSTS_ID, resolveKnownHostsPath } from '../utils/known-hosts-store'
 import { shellQuote } from '../utils/shell-quote'
+import {
+  materializeRemoteShell,
+  type RemoteShellPlan,
+} from './remote-shell'
 import { decodeBase64Utf8, getErrorMessage, sweepStaleEntries } from '../utils'
 import {
   SCROLLBACK_BUFFER_MAX_BYTES,
@@ -142,6 +146,17 @@ export interface TerminalSessionOptions {
    * アタッチする。省略時は ais-{sessionId} を自動生成する。
    */
   tmuxSessionName?: string
+  /**
+   * 登録済みホストへの対話接続の実行計画（`buildRemoteShellPlan` の結果）。
+   *
+   * 指定された場合、PTY はエージェント自身のシェルではなくこの計画のスクリプトを
+   * 実行する。tmux の中で動かすため、ブラウザが切れても接続は生き、再接続で
+   * そのまま resume できる（ローカルシェルと同じ 2 状態モデル）。
+   *
+   * 秘匿値はセッション専用の一時ディレクトリ（mkdtempSync = 0700）へ 0600 で
+   * 書き出し、セッション終了時にディレクトリごと破棄する。
+   */
+  remoteShell?: RemoteShellPlan
 }
 
 export interface TerminalSessionInfo {
@@ -331,6 +346,19 @@ export class TerminalSession {
       mode: 0o700,
     })
 
+    // 登録済みホストへの対話接続。PTY が動かすのはシェルではなくこの計画の
+    // スクリプト（ssh / aws ssm start-session）。tmux の中で動かすことで、
+    // ローカルシェルと同じように再接続で resume できる。
+    let remoteCommand: string | null = null
+    if (options.remoteShell) {
+      const materialized = materializeRemoteShell(options.remoteShell, tmpDir)
+      remoteCommand = materialized.command
+      // 秘匿値（AWS 一時資格情報等）は env で渡す。コマンドラインに載せると
+      // 同じホストの全プロセスから `ps` で読める。
+      Object.assign(env, materialized.env)
+      logger.info(`[terminal:${sessionId}] remote session command prepared`)
+    }
+
     let spawnFile: string
     let spawnArgs: string[]
     if (isTmuxAvailable()) {
@@ -347,9 +375,18 @@ export class TerminalSession {
         '-s', this.tmuxSessionName,
         '-x', String(this.cols),
         '-y', String(this.rows),
+        // リモート接続では tmux のウィンドウでシェルではなく接続コマンドを動かす。
+        // 接続が終われば tmux セッションも終わり、PTY が閉じる。
+        ...(remoteCommand ? [remoteCommand] : []),
       ]
       env.SHELL = wrapperPath
       logger.debug(`[terminal:${sessionId}] tmux session: ${this.tmuxSessionName}`)
+    } else if (remoteCommand) {
+      // tmux が無い環境では resume はできないが、接続自体は成立させる
+      // （ローカルシェルの既存挙動と同じ扱い）。
+      logger.warn(`[terminal:${sessionId}] tmux not found; starting the remote session without resume support`)
+      spawnFile = remoteCommand
+      spawnArgs = []
     } else {
       logger.warn(`[terminal:${sessionId}] tmux not found; starting shell directly`)
       spawnFile = shell

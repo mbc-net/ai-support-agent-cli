@@ -137,6 +137,9 @@ describe('startTerminalWebSocket', () => {
       '/test/project/workspace',
       undefined, // envVarsProvider (configSyncState 未指定時)
       expect.any(Function), // onAuthRejected (常に heartbeat 記録用に配線される)
+      // 登録済みホストへ接続するときの資格情報取得。API 経由で秘匿値を中継せず、
+      // エージェント自身が取りに行くための注入。
+      expect.any(Function),
     )
     expect(state.terminalWs).not.toBeNull()
     expect(mockConnect).toHaveBeenCalled()
@@ -162,6 +165,9 @@ describe('startTerminalWebSocket', () => {
       'agent-1',
       '/test/project/workspace',
       undefined,
+      expect.any(Function),
+      // 登録済みホストへ接続するときの資格情報取得。API 経由で秘匿値を中継せず、
+      // エージェント自身が取りに行くための注入。
       expect.any(Function),
     )
   })
@@ -2159,6 +2165,9 @@ describe('startTerminalWebSocket: no projectDir', () => {
       deps.agentId,
       undefined,
       undefined,
+      expect.any(Function),
+      // 登録済みホストへ接続するときの資格情報取得。API 経由で秘匿値を中継せず、
+      // エージェント自身が取りに行くための注入。
       expect.any(Function),
     )
   })

@@ -60,6 +60,15 @@ jest.mock('../../src/logger', () => ({
 /** In-memory capture of everything the line-prefixer would have written. */
 const mockPrefixerWrites: string[] = []
 
+jest.mock('../../src/rdp/guacd-container', () => ({
+  ...jest.requireActual('../../src/rdp/guacd-container'),
+  ensureGuacdContainer: jest.fn().mockReturnValue({ host: 'ais-guacd', port: 4822 }),
+  stopGuacdContainer: jest.fn(),
+}))
+
+const mockStopGuacd = jest.requireMock('../../src/rdp/guacd-container')
+  .stopGuacdContainer as jest.Mock
+
 jest.mock('../../src/pid-manager', () => ({
   removePidFile: jest.fn(),
 }))
@@ -594,6 +603,38 @@ describe('DockerSupervisor', () => {
       fakeChild.emit('close', 0)
 
       expect(mockExit).toHaveBeenCalledWith(0)
+    })
+
+    it('★ 全コンテナが自然終了する経路でも guacd を止める', () => {
+      // この経路は stopAll() を通らず直接 process.exit する。止め忘れると、
+      // 固定名の guacd コンテナと専用ネットワークがホストに残り続ける
+      // （guacd は無認証で待ち受けるため、残すのは避ける）。
+      // **実際に close を発火させて確かめる。** ソース文字列の検査や
+      // ヘルパ単体の呼び出しでは、この配線が消えても気づけない。
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts({ rdp: true }))
+      supervisor.start([makeProject()])
+      mockStopGuacd.mockClear()
+
+      fakeChild.emit('close', 0)
+
+      expect(mockExit).toHaveBeenCalledWith(0)
+      expect(mockStopGuacd).toHaveBeenCalledTimes(1)
+    })
+
+    it('RDP が無効なら終了時に guacd へ触らない', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+      mockStopGuacd.mockClear()
+
+      fakeChild.emit('close', 0)
+
+      expect(mockStopGuacd).not.toHaveBeenCalled()
     })
 
     it('calls process.exit when all containers exit cleanly', () => {

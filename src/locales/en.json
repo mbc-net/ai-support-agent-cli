@@ -182,6 +182,8 @@
   "cmd.start.noDockerfileSync": "Skip writing the default Dockerfile to config dir",
   "cmd.start.noImagePull": "Never pull from the container registry; always build the image locally",
   "cmd.start.project": "Start only the matching project (format: tenantCode/projectCode)",
+  "cmd.start.rdp": "Enable Web RDP (runs guacd locally, published to loopback only)",
+  "cmd.start.guacdImage": "guacd container image",
   "cmd.dockerLogin": "Log in to Claude Code inside a Docker container",
   "cmd.dockerBuild": "Always build the Docker image for this version locally",
   "cmd.dockerEnsureImage": "Make the Docker image for this version available (pull from the registry when nothing is customised, otherwise build)",
