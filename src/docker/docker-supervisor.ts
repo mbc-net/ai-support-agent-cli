@@ -18,6 +18,7 @@ import {
   CLI_FLAG_NO_AUTO_UPDATE,
   DOCKER_BUILD_ERROR_MAX_BYTES,
   DOCKER_LOG_FLUSH_INTERVAL_MS,
+  DOCKER_MARKER_BUILD_ERROR,
   DOCKER_MARKER_BUILT_HASH,
   DOCKER_MARKER_CUSTOMIZATION_HASH,
   DOCKER_MARKER_REBUILD_NEEDED,
@@ -242,16 +243,25 @@ export class DockerSupervisor {
           if (fs.existsSync(srcHash)) {
             fs.copyFileSync(srcHash, dstHash)
           }
-          const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
-          /* istanbul ignore next */
-          if (fs.existsSync(buildErrorPath)) {
-            fs.unlinkSync(buildErrorPath)
+          // Clear a recorded failure only when this build is the rebuild the
+          // agent actually asked for (marker present). Without the marker the
+          // build ran purely because a Dockerfile happens to exist
+          // (forceIfDockerfileExists on every restart) and it rebuilt the
+          // *previous* Dockerfile — which is exactly how a container that just
+          // failed to generate a new Dockerfile comes back up. Deleting the
+          // file here would erase the reason it recorded moments ago, before
+          // the restarted container ever gets to report it to the API.
+          if (hasMarker) {
+            const buildErrorPath = path.join(projectConfigHostDir, DOCKER_MARKER_BUILD_ERROR)
+            if (fs.existsSync(buildErrorPath)) {
+              fs.unlinkSync(buildErrorPath)
+            }
           }
         } catch (err: unknown) {
           const errorMsg = getErrorMessage(err)
           logger.error(`[docker] Image build failed: ${errorMsg}`)
           logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
-          const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
+          const buildErrorPath = path.join(projectConfigHostDir, DOCKER_MARKER_BUILD_ERROR)
           const truncatedError = errorMsg.length > DOCKER_BUILD_ERROR_MAX_BYTES ? errorMsg.substring(0, DOCKER_BUILD_ERROR_MAX_BYTES) + '...(truncated)' : errorMsg
           /* istanbul ignore next */
           try {
