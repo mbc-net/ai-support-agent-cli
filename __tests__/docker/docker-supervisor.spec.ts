@@ -1807,6 +1807,67 @@ describe('DockerSupervisor', () => {
     })
   })
 
+  // ─── docker-build-error retention after a successful build ───────────────
+
+  describe('rebuildAndRestart - docker-build-error handling after a successful build', () => {
+    function arrangeExistingFiles(markerExists: boolean): { fakeChild1: ReturnType<typeof makeFakeChild> } {
+      mockExistsSync.mockReset()
+      mockReadFileSync.mockReset()
+      mockUnlinkSync.mockReset()
+
+      mockReadFileSync.mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        if (s.endsWith('docker-rebuild-needed')) return markerExists
+        return s.endsWith('Dockerfile') || s.endsWith('docker-build-error')
+      })
+
+      const fakeChild1 = makeFakeChild()
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
+      return { fakeChild1 }
+    }
+
+    it('deletes docker-build-error after a rebuild the container asked for', async () => {
+      const { fakeChild1 } = arrangeExistingFiles(true)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      expect(mockBuildProjectImage).toHaveBeenCalled()
+      expect(mockUnlinkSync).toHaveBeenCalledWith(expect.stringContaining('docker-build-error'))
+    })
+
+    it('keeps docker-build-error when no rebuild was requested (Dockerfile generation failed in the container)', async () => {
+      // No marker: the container exited with 43 without preparing a rebuild,
+      // which is what happens when generateProjectDockerfile() rejects the
+      // customization. It records the reason in docker-build-error just before
+      // exiting; rebuilding the previous Dockerfile here must not erase it,
+      // or the failure never reaches the API (dockerBuildError on the next
+      // registration) and the container silently runs the old configuration.
+      const { fakeChild1 } = arrangeExistingFiles(false)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      expect(mockBuildProjectImage).toHaveBeenCalled()
+      expect(mockUnlinkSync).not.toHaveBeenCalledWith(expect.stringContaining('docker-build-error'))
+    })
+  })
+
   // ─── submitLogChunk failure warning ──────────────────────────────────────
 
   describe('log streaming: submitLogChunk failure', () => {
