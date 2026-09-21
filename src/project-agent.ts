@@ -1251,7 +1251,7 @@ export class ProjectAgent {
       const resolvedWsUrl = result.wsUrl ? resolveUrlForDocker(result.wsUrl) : result.wsUrl
       startTerminalWebSocket(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
       startVsCodeTunnel(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
-      startRdpWebSocket(this.transportDeps, this.transportState, resolvedWsUrl)
+      startRdpWebSocket(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
     } else {
       logger.debug(`${this.prefix} Terminal/VS Code/RDP WebSocket skipped (wsEnabled=false)`)
     }

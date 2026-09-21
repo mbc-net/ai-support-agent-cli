@@ -70,6 +70,22 @@ function containerState(): 'running' | 'stopped' | 'absent' {
  * 冪等。既に稼働していれば何もしない。停止した同名コンテナが残っていれば削除して
  * から起動する（`--rm` を付けていても、ホストごと落ちた場合などに残ることがある）。
  *
+ * :::danger Idempotent across processes, not only within one
+ * `execFileSync` serialises the inspect-then-run sequence inside a single
+ * process, and nothing serialises it between processes. On a host install one
+ * OS process runs per project (`fork()` in `child-process-manager.ts`) and each
+ * resolves guacd lazily on its first `rdp_open`, so two projects connecting at
+ * the same moment both see "absent" and both issue `docker run --name`. The
+ * docker daemon serialises creation by name and refuses the loser with a name
+ * conflict — which is **evidence that guacd was started**, not a failure.
+ * Treating it as one turned a healthy guacd into a fatal `RdpUnavailableError`
+ * (the user gets no automatic retry) and a `not_applied(apply_failed)` line on
+ * the heartbeat. So the loser adopts the winner's container after confirming it
+ * is actually running. Letting the daemon arbitrate is both simpler and safer
+ * than a lock file of our own, which would still have to be reclaimed after a
+ * crash.
+ * :::
+ *
  * @throws 起動に失敗した場合。握り潰すと、エージェントは存在しない guacd へ延々と
  *   接続を試み、利用者には「RDP がつながらない」としか見えない
  */
@@ -109,18 +125,41 @@ export function ensureGuacdContainer(
   const network =
     options.mode === 'network' ? ['--network', GUACD_NETWORK_NAME] : []
 
-  runDocker([
-    'run',
-    '-d',
-    '--rm',
-    '--name',
-    GUACD_CONTAINER_NAME,
-    ...network,
-    ...publish,
-    image,
-  ])
+  let adopted = false
+  runDocker(
+    [
+      'run',
+      '-d',
+      '--rm',
+      '--name',
+      GUACD_CONTAINER_NAME,
+      ...network,
+      ...publish,
+      image,
+    ],
+    {
+      // Only a name conflict is rescued, and only once the container is
+      // confirmed running. A conflict whose container died on creation, or any
+      // other failure (missing image, dead daemon), still throws: handing back
+      // an endpoint nothing listens on is the failure mode this function's
+      // "don't swallow" rule exists to prevent.
+      rescue: (err) => {
+        if (!isNameConflictError(err, GUACD_CONTAINER_NAME)) return false
+        adopted = containerState() === 'running'
+        return adopted
+      },
+    },
+  )
 
-  logger.info(`[guacd] Started ${GUACD_CONTAINER_NAME} (${image})`)
+  if (adopted) {
+    // No `rm` and no second `run` here: the winner's container is serving the
+    // connection it was started for, and removing it would cut that session.
+    logger.info(
+      `[guacd] Adopted ${GUACD_CONTAINER_NAME}, started by another process`,
+    )
+  } else {
+    logger.info(`[guacd] Started ${GUACD_CONTAINER_NAME} (${image})`)
+  }
   return endpoint
 }
 
@@ -194,14 +233,45 @@ export function createGuacdShutdownHook(): () => void {
  * and the retry while guacd is still up.
  */
 function isAbsentContainerError(err: unknown, name: string): boolean {
+  return new RegExp(
+    `no such container:?\\s*${escapeForRegExp(name)}(?![\\w.-])`,
+    'i',
+  ).test(dockerErrorText(err))
+}
+
+/**
+ * Whether docker refused because a container of that name already exists.
+ *
+ * This is what the process that lost a cross-process race sees; see the note on
+ * {@link ensureGuacdContainer}. docker words it "Conflict. The container name
+ * "/ais-guacd" is already in use by container "<id>"", and puts it on stderr,
+ * so the message alone says only that the command failed.
+ *
+ * Matching on the message follows {@link isAbsentContainerError}: an
+ * unrecognised wording degrades to "failed", which throws — the previous
+ * behaviour, and the safe direction, because a swallowed real failure hands the
+ * caller an endpoint nothing is listening on. The *name* has to match for the
+ * same reason it does there: a conflict on some other container (say a
+ * differently named sidecar) says nothing about ours, and the boundary after
+ * the name keeps `ais-guacd` from matching `ais-guacd-sidecar`.
+ */
+function isNameConflictError(err: unknown, name: string): boolean {
+  return new RegExp(
+    `container name\\s+"?/?${escapeForRegExp(name)}(?![\\w.-])"?\\s+is already in use`,
+    'i',
+  ).test(dockerErrorText(err))
+}
+
+/** Everything docker said about a failure: `execFileSync` splits it in two. */
+function dockerErrorText(err: unknown): string {
   const stderr = (err as { stderr?: unknown }).stderr
-  const text = `${String((err as Error)?.message ?? '')} ${
+  return `${String((err as Error)?.message ?? '')} ${
     stderr instanceof Buffer ? stderr.toString() : String(stderr ?? '')
   }`
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`no such container:?\\s*${escaped}(?![\\w.-])`, 'i').test(
-    text,
-  )
+}
+
+function escapeForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 /**
@@ -214,6 +284,13 @@ function runDocker(
     ignoreFailure?: boolean
     absentIsSettled?: boolean
     failureMessage?: string
+    /**
+     * Inspects a failure the caller may be able to accept — it returns true
+     * when the intended end state was reached by other means. Given the raw
+     * error rather than the wrapped one so the caller can read docker's own
+     * wording; see {@link isNameConflictError}.
+     */
+    rescue?: (err: unknown) => boolean
   } = {},
 ): boolean {
   try {
@@ -222,6 +299,7 @@ function runDocker(
     })
     return true
   } catch (err) {
+    if (opts.rescue?.(err)) return true
     if (
       opts.absentIsSettled &&
       isAbsentContainerError(err, GUACD_CONTAINER_NAME)
