@@ -28,6 +28,18 @@ export const ENV_VARS = {
   // ECS task id. Unset = a random id is generated per process.
   INSTANCE_ID: 'AI_SUPPORT_AGENT_INSTANCE_ID',
   IN_DOCKER: 'AI_SUPPORT_AGENT_IN_DOCKER',
+  // '1' records that this process was started with `--rdp`. Set by the CLI
+  // rather than passed down as an option because the per-project workers are
+  // `fork`ed children, which inherit the environment but not the argv: putting
+  // the flag here is what makes the workers — the processes that actually relay
+  // RDP — see the operator's instruction. Composed with the project's
+  // declaration in capability/capability-resolver.ts.
+  RDP: 'AI_SUPPORT_AGENT_RDP',
+  // guacd image for the lazily-started container, from `--guacd-image`. Carried
+  // in the environment for the same fork reason as RDP above. Never settable
+  // from the Web: running an arbitrary image is exactly what the capability
+  // allowlist exists to prevent.
+  GUACD_IMAGE: 'AI_SUPPORT_AGENT_GUACD_IMAGE',
   ALLOW_HTTP: 'AI_SUPPORT_AGENT_ALLOW_HTTP',
   PROJECT_DIR_MAP: 'AI_SUPPORT_AGENT_PROJECT_DIR_MAP',
   TERMINAL_GRACE_MS: 'AI_SUPPORT_AGENT_TERMINAL_GRACE_MS',

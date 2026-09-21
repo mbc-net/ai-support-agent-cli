@@ -186,8 +186,16 @@ export async function applyProjectConfig(
   state.projectConfig = effectiveConfig
 
   // Update serverConfig from project config
+  // :::danger ここは足したフィールドを写し忘れてもコンパイルが通る
+  // `serverConfig` は `effectiveConfig.agent` からフィールドを明示的に 1 つずつ
+  // 写して組み立てている。写す先の optional なフィールドを書き忘れても `tsc` は
+  // 何も言わず、症状は「画面で設定したのにエージェントが反応しない」という形で
+  // しか出ない。新しいフィールドを足したら、ここへの写しと、それが赤になる
+  // テストの両方を必ず置くこと（`__tests__/capability/capability-config-sync.spec.ts`）。
+  // :::
   state.serverConfig = {
     agentEnabled: effectiveConfig.agent.agentEnabled,
+    capabilities: effectiveConfig.agent.capabilities,
     builtinAgentEnabled: effectiveConfig.agent.builtinAgentEnabled,
     builtinFallbackEnabled: effectiveConfig.agent.builtinFallbackEnabled,
     externalAgentEnabled: effectiveConfig.agent.externalAgentEnabled,

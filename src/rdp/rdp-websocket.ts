@@ -8,7 +8,9 @@ import {
 import { logger } from '../logger'
 import { buildWsUrl, getErrorMessage } from '../utils'
 import { isSafeSessionId } from '../utils/safe-session-id'
-import { connectToGuacd, DEFAULT_GUACD_PORT } from './guacd-tcp-socket'
+import type { GuacdEndpoint } from './guacd-container'
+import { createLazyGuacdEndpointResolver } from './guacd-runtime'
+import { connectToGuacd } from './guacd-tcp-socket'
 import {
   RdpSessionRegistry,
   type RdpRegistryOutbound,
@@ -53,12 +55,26 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
   private readonly wsUrl: string
   private readonly registry: RdpSessionRegistry
 
+  /**
+   * @param resolveGuacdEndpoint Resolves the guacd endpoint **at connection
+   *   time**, and throws when RDP is not usable here.
+   *
+   *   :::danger コンストラクタで接続先を焼き込まない
+   *   以前はここで `GUACD_HOST` / `GUACD_PORT` を読んで固定していた。そのため
+   *   画面から capability を ON にしても、エージェントを再起動するまで RDP は
+   *   使えなかった。関数として受け取り、**初回の `rdp_open` で解決する**ことで、
+   *   ホスト直起動ではプロセス再起動なしに有効化できる。
+   *
+   *   投げるのも役割のうちである。無効なまま接続を試みると、利用者には
+   *   「しばらく待たされて繋がらない」としか見えず、設定不備と障害の区別が
+   *   付かない。
+   *   :::
+   */
   constructor(
     apiUrl: string,
     private readonly token: string,
     private readonly agentId: string,
-    guacdHost = process.env.GUACD_HOST ?? '127.0.0.1',
-    guacdPort = Number(process.env.GUACD_PORT ?? DEFAULT_GUACD_PORT),
+    private readonly resolveGuacdEndpoint: () => GuacdEndpoint = createLazyGuacdEndpointResolver(),
   ) {
     super({
       maxReconnectRetries: RDP_WS_MAX_RECONNECT_RETRIES,
@@ -69,7 +85,10 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
     })
     this.wsUrl = buildWsUrl(apiUrl, '/ws/agent-rdp')
     this.registry = new RdpSessionRegistry({
-      connect: () => connectToGuacd(guacdHost, guacdPort),
+      connect: () => {
+        const endpoint = this.resolveGuacdEndpoint()
+        return connectToGuacd(endpoint.host, endpoint.port)
+      },
       send: (msg) => this.sendToApi(msg),
     })
   }
@@ -206,6 +225,30 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
       logger.warn(
         `[rdp-ws] Ignoring rdp_open with invalid dimensions for session ${msg.sessionId}`,
       )
+      return
+    }
+
+    // Resolve the endpoint **before** registering a session. Two reasons:
+    //   - a refusal (capability off, waiting on a restart/redeploy, guacd could
+    //     not be started) must reach the browser as a stated reason rather than
+    //     as a connection that hangs and eventually times out;
+    //   - the session registry must not hold an entry for a session that was
+    //     never opened.
+    try {
+      this.resolveGuacdEndpoint()
+    } catch (error) {
+      const message = getErrorMessage(error)
+      logger.warn(
+        `[rdp-ws] Refusing rdp_open for session ${msg.sessionId}: ${message}`,
+      )
+      this.sendToApi({
+        type: 'error',
+        sessionId: msg.sessionId,
+        message,
+        // 一時的なフレーム落ちではなく、この接続は成立しない。ブラウザ側は
+        // 待ち続けず終了として扱うべきなので致命として伝える。
+        fatal: true,
+      })
       return
     }
 

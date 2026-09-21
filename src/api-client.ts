@@ -8,6 +8,7 @@ import { toErrorMessage } from './utils'
 import { bearerHeader, extractTenantCodeFromToken } from './utils/token-utils'
 import type {
   AgentCommand,
+  AgentEffectiveCapability,
   AgentServerConfig,
   AwsCredentials,
   BrowserCredentials,
@@ -236,6 +237,17 @@ export class ApiClient {
     extras?: {
       /** 共有ファイルの配置に失敗したもの（画面に警告として出す） */
       sharedFileMountErrors?: { destPath: string; error: string }[]
+      /**
+       * 実効 capability。
+       *
+       * - 省略（フィールドを送らない）= **未報告**。報告できない旧エージェントを
+       *   意味し、api は既存値を保持して fail-closed に扱う
+       * - 空配列 = 報告したが有効な capability は無い（`inactive`）
+       *
+       * capability を理解しているこのバージョンは、宣言が無い場合でも必ず配列を
+       * 送ること。送らないと旧エージェントと区別できない。
+       */
+      capabilities?: AgentEffectiveCapability[]
     },
   ): Promise<HeartbeatResponse | void> {
     logger.debug('Sending heartbeat')
@@ -256,6 +268,9 @@ export class ApiClient {
       ...(authRejectedTransports !== undefined && { authRejectedTransports }),
       ...(extras?.sharedFileMountErrors !== undefined && {
         sharedFileMountErrors: extras.sharedFileMountErrors,
+      }),
+      ...(extras?.capabilities !== undefined && {
+        capabilities: extras.capabilities,
       }),
     })
   }

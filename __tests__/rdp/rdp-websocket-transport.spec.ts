@@ -97,12 +97,6 @@ describe('RdpWebSocket transport wiring', () => {
           .registry as unknown as { options: { connect: () => Promise<unknown> } }
       ).options.connect
 
-    it('defaults to loopback on the standard guacd port', async () => {
-      const ws = create()
-      await connectSeam(ws)()
-      expect(connectToGuacd).toHaveBeenCalledWith('127.0.0.1', 4822)
-    })
-
     it('★ honours GUACD_HOST / GUACD_PORT (sidecar deployments)', async () => {
       process.env.GUACD_HOST = 'guacd'
       process.env.GUACD_PORT = '14822'
@@ -111,17 +105,26 @@ describe('RdpWebSocket transport wiring', () => {
       expect(connectToGuacd).toHaveBeenCalledWith('guacd', 14822)
     })
 
-    it('explicit arguments win over the environment', async () => {
+    it('an injected resolver wins over the environment', async () => {
       process.env.GUACD_HOST = 'ignored'
       const ws = new RdpWebSocket(
         'https://api.example.com',
         'tok',
         'agent-1',
-        'explicit-host',
-        9999,
+        () => ({ host: 'explicit-host', port: 9999 }),
       )
       await connectSeam(ws)()
       expect(connectToGuacd).toHaveBeenCalledWith('explicit-host', 9999)
+    })
+
+    it('★ resolves the endpoint per connection, not once in the constructor', async () => {
+      // 接続先を構築時に焼き込むと、画面から capability を ON にしても
+      // プロセスを再起動するまで RDP が使えない。
+      const resolve = jest.fn(() => ({ host: '127.0.0.1', port: 4822 }))
+      const ws = new RdpWebSocket('https://api.example.com', 'tok', 'agent-1', resolve)
+      expect(resolve).not.toHaveBeenCalled()
+      await connectSeam(ws)()
+      expect(resolve).toHaveBeenCalledTimes(1)
     })
   })
 })

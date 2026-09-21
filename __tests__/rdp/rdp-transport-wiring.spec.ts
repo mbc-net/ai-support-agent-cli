@@ -48,6 +48,7 @@ describe('startRdpWebSocket', () => {
       'https://api.example.com',
       'tok',
       'agent-1',
+      expect.any(Function),
     )
   })
 
@@ -57,6 +58,7 @@ describe('startRdpWebSocket', () => {
       'wss://ws.example.com',
       'tok',
       'agent-1',
+      expect.any(Function),
     )
   })
 
