@@ -121,6 +121,7 @@ describe('constants', () => {
     expect(constants.DOCKER_MARKER_REBUILD_NEEDED).toBe('docker-rebuild-needed')
     expect(constants.DOCKER_MARKER_CUSTOMIZATION_HASH).toBe('docker-customization-hash')
     expect(constants.DOCKER_MARKER_REGISTERED_AGENT_ID).toBe('docker-registered-agent-id')
+    expect(constants.DOCKER_MARKER_BUILD_ERROR).toBe('docker-build-error')
 
     // Delayed restart
     expect(constants.DELAYED_RESTART_MS).toBe(1_000)
