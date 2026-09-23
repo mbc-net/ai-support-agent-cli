@@ -18,6 +18,8 @@ import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } fr
 import {
   assertProjectCodeIsSafe,
   detectInstallCollisions,
+  logPostInstallHints,
+  reportInstallCollision,
   sanitizeServiceNameSegment,
   shellQuote,
   toContainerApiUrl,
@@ -639,18 +641,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
         // exhibit BOTH at once; dedup per (label, messageKey) tuple so
         // both hints fire and the order of config rows doesn't decide
         // which one the user sees. Mirror of the Linux wrapper.
-        const messageKey = collision.isDuplicate
-          ? 'service.projectDuplicateEntry'
-          : 'service.projectUnitNameCollision'
-        const dedupKey = `${collision.name}\x00${messageKey}`
-        if (!reportedCollisionLabels.has(dedupKey)) {
-          logger.error(t(messageKey, {
-            projectCode,
-            unitName: collision.name,
-            others: collision.others.join(', '),
-          }))
-          reportedCollisionLabels.add(dedupKey)
-        }
+        reportInstallCollision(projectCode, collision, reportedCollisionLabels)
         failedCount += 1
         continue
       }
@@ -672,9 +663,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     // Hide the "now run `service start`" hint when nothing was installed —
     // misleading the user to start services that don't exist.
     if (installedCount > 0) {
-      logger.info(t('service.loadHintMulti'))
-      logger.info(t('service.logDir', { path: logDir }))
-      logger.info(t('service.noLogRotation'))
+      logPostInstallHints(logDir)
     }
 
     // Surface a summary line with counts so scripts wrapping

@@ -2,7 +2,9 @@ jest.mock('fs')
 jest.mock('../../../src/logger')
 jest.mock('../../../src/i18n', () => ({
   initI18n: jest.fn(),
-  t: (key: string, params?: Record<string, unknown>) => {
+  // jest.fn で包むのは返り値を変えるためではなく、呼び出し引数を検査するため。
+  // 実装は素の関数だったときと同一（jest.clearAllMocks は実装を残す）。
+  t: jest.fn((key: string, params?: Record<string, unknown>) => {
     if (params) {
       let result = key
       for (const [k, v] of Object.entries(params)) {
@@ -11,7 +13,7 @@ jest.mock('../../../src/i18n', () => ({
       return result
     }
     return key
-  },
+  }),
 }))
 
 import * as fs from 'fs'
@@ -19,11 +21,14 @@ import {
   assertProjectCodeIsSafe,
   detectInstallCollisions,
   isProjectCodeSafe,
+  logPostInstallHints,
+  reportInstallCollision,
   sanitizeServiceNameSegment,
   shellQuote,
   toContainerApiUrl,
   validateProjectDirForMount,
 } from '../../../src/cli/service/wrapper-helpers'
+import * as i18n from '../../../src/i18n'
 import { logger } from '../../../src/logger'
 
 const mockedFs = jest.mocked(fs)
@@ -325,5 +330,105 @@ describe('detectInstallCollisions', () => {
     const a = collisions.get('mbc/MBC_01')!
     expect(new Set(a.others)).toEqual(new Set(['mbc/MBC-01', 'mbc/mbc-01']))
     expect(a.isDuplicate).toBe(false)
+  })
+})
+
+describe('reportInstallCollision', () => {
+  const reported = () => new Set<string>()
+
+  it('uses the sanitize-collision message for a non-duplicate conflict', () => {
+    reportInstallCollision(
+      'MBC_01',
+      { name: 'agent-mbc-01', others: ['mbc/MBC-01'], isDuplicate: false },
+      reported(),
+    )
+
+    expect(logger.error).toHaveBeenCalledTimes(1)
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('service.projectUnitNameCollision'),
+    )
+  })
+
+  it('uses the duplicate-entry message when the same row is listed twice', () => {
+    reportInstallCollision(
+      'MBC_01',
+      { name: 'agent-mbc-01', others: [], isDuplicate: true },
+      reported(),
+    )
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('service.projectDuplicateEntry'),
+    )
+  })
+
+  it('logs once per (name, messageKey) tuple so an N-times-listed entry does not log N times', () => {
+    const seen = reported()
+    const collision = { name: 'agent-mbc-01', others: [], isDuplicate: true }
+
+    reportInstallCollision('MBC_01', collision, seen)
+    reportInstallCollision('MBC_01', collision, seen)
+    reportInstallCollision('MBC_01', collision, seen)
+
+    expect(logger.error).toHaveBeenCalledTimes(1)
+  })
+
+  it('still reports BOTH hints when one config exhibits a duplicate AND a sanitize-collision', () => {
+    // The dedup key must include the message key, otherwise the row order of
+    // config silently decides which of the two hints the user ever sees.
+    const seen = reported()
+
+    reportInstallCollision(
+      'MBC_01',
+      { name: 'agent-mbc-01', others: [], isDuplicate: true },
+      seen,
+    )
+    reportInstallCollision(
+      'MBC-01',
+      { name: 'agent-mbc-01', others: ['mbc/MBC_01'], isDuplicate: false },
+      seen,
+    )
+
+    expect(logger.error).toHaveBeenCalledTimes(2)
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('service.projectDuplicateEntry'),
+    )
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('service.projectUnitNameCollision'),
+    )
+  })
+
+  it('passes the projectCode, the colliding name and the other entries to t()', () => {
+    // The i18n mock in this file only substitutes '{{x}}' placeholders that are
+    // literally present in the key, so asserting on the rendered string would
+    // test the mock rather than the helper. Watch the t() arguments instead.
+    const translate = jest.mocked(i18n.t)
+
+    reportInstallCollision(
+      'MBC_01',
+      { name: 'agent-mbc-01', others: ['mbc/MBC-01', 'mbc/MBC.01'], isDuplicate: false },
+      reported(),
+    )
+
+    expect(translate).toHaveBeenCalledWith('service.projectUnitNameCollision', {
+      projectCode: 'MBC_01',
+      unitName: 'agent-mbc-01',
+      others: 'mbc/MBC-01, mbc/MBC.01',
+    })
+  })
+})
+
+describe('logPostInstallHints', () => {
+  it('emits the start hint, the log directory and the no-rotation notice', () => {
+    const translate = jest.mocked(i18n.t)
+
+    logPostInstallHints('/var/log/ai-support-agent')
+
+    expect(logger.info).toHaveBeenCalledTimes(3)
+    expect(logger.info).toHaveBeenNthCalledWith(1, 'service.loadHintMulti')
+    expect(logger.info).toHaveBeenNthCalledWith(2, 'service.logDir')
+    expect(translate).toHaveBeenCalledWith('service.logDir', {
+      path: '/var/log/ai-support-agent',
+    })
+    expect(logger.info).toHaveBeenNthCalledWith(3, 'service.noLogRotation')
   })
 })

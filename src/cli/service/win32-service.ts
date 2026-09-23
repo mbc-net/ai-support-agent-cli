@@ -25,6 +25,8 @@ import type { ProjectStatus, ServiceConfig, ServiceOptions, ServiceStatus, Servi
 import {
   assertProjectCodeIsSafe,
   detectInstallCollisions,
+  logPostInstallHints,
+  reportInstallCollision,
   sanitizeServiceNameSegment,
   toContainerApiUrl,
   validateProjectDirForMount,
@@ -387,18 +389,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
       const fqn = `${project.tenantCode}/${projectCode}`
       const collision = collisions.get(fqn)
       if (collision) {
-        const messageKey = collision.isDuplicate
-          ? 'service.projectDuplicateEntry'
-          : 'service.projectUnitNameCollision'
-        const dedupKey = `${collision.name}\x00${messageKey}`
-        if (!reportedCollisionLabels.has(dedupKey)) {
-          logger.error(t(messageKey, {
-            projectCode,
-            unitName: collision.name,
-            others: collision.others.join(', '),
-          }))
-          reportedCollisionLabels.add(dedupKey)
-        }
+        reportInstallCollision(projectCode, collision, reportedCollisionLabels)
         failedCount += 1
         continue
       }
@@ -414,9 +405,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
     }
 
     if (installedCount > 0) {
-      logger.info(t('service.loadHintMulti'))
-      logger.info(t('service.logDir', { path: logDir }))
-      logger.info(t('service.noLogRotation'))
+      logPostInstallHints(logDir)
     }
 
     if (failedCount > 0) {
