@@ -154,3 +154,51 @@ export function detectInstallCollisions(
   }
   return { names, collisions }
 }
+
+/**
+ * Log the install-time collision error for one project, deduped so an
+ * N-times-listed entry doesn't produce N identical error lines.
+ *
+ * Picks the more actionable message: literal duplicates ask the user to
+ * "remove the duplicate row"; sanitize-collisions ask them to "rename one of
+ * the projectCodes". A single config can exhibit BOTH at once (the duplicate
+ * row AND a sibling that collides); when that happens we want both hints to
+ * fire — so the dedup key is the (name, messageKey) tuple, not just the name.
+ * Otherwise the row-order of config would silently decide which hint the
+ * user sees.
+ *
+ * `reported` is owned by the caller so the dedup scope is one install run.
+ * Shared by all three platforms (linux unit names, darwin plist labels,
+ * win32 scheduled-task names) so the collision semantics cannot drift.
+ */
+export function reportInstallCollision(
+  projectCode: string,
+  collision: CollisionInfo,
+  reported: Set<string>,
+): void {
+  const messageKey = collision.isDuplicate
+    ? 'service.projectDuplicateEntry'
+    : 'service.projectUnitNameCollision'
+  const dedupKey = `${collision.name}\x00${messageKey}`
+  if (reported.has(dedupKey)) return
+  logger.error(t(messageKey, {
+    projectCode,
+    unitName: collision.name,
+    others: collision.others.join(', '),
+  }))
+  reported.add(dedupKey)
+}
+
+/**
+ * Emit the post-install hints (how to start, where the logs live, and that
+ * there is no log rotation).
+ *
+ * The caller decides WHETHER to emit them — each platform counts successful
+ * installs differently (`installedCount` vs `writtenUnits.length`) — but the
+ * lines themselves must stay identical across platforms, so they live here.
+ */
+export function logPostInstallHints(logDir: string): void {
+  logger.info(t('service.loadHintMulti'))
+  logger.info(t('service.logDir', { path: logDir }))
+  logger.info(t('service.noLogRotation'))
+}

@@ -15,6 +15,8 @@ import { getCliEntryPoint, getNodePath } from './node-paths'
 import {
   assertProjectCodeIsSafe,
   detectInstallCollisions,
+  logPostInstallHints,
+  reportInstallCollision,
   sanitizeServiceNameSegment,
   shellQuote,
   toContainerApiUrl,
@@ -827,18 +829,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
         // dedup is per (unit-name, messageKey) tuple, not just unit-name.
         // Otherwise the row-order of config would silently decide which
         // hint the user sees.
-        const messageKey = collision.isDuplicate
-          ? 'service.projectDuplicateEntry'
-          : 'service.projectUnitNameCollision'
-        const dedupKey = `${collision.name}\x00${messageKey}`
-        if (!reportedCollisionNames.has(dedupKey)) {
-          logger.error(t(messageKey, {
-            projectCode: project.projectCode,
-            unitName: collision.name,
-            others: collision.others.join(', '),
-          }))
-          reportedCollisionNames.add(dedupKey)
-        }
+        reportInstallCollision(project.projectCode, collision, reportedCollisionNames)
         failedCount += 1
         continue
       }
@@ -928,9 +919,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     // otherwise the user sees the hint to start services that don't exist,
     // followed by the failure summary at the very end.
     if (writtenUnits.length > 0) {
-      logger.info(t('service.loadHintMulti'))
-      logger.info(t('service.logDir', { path: logDir }))
-      logger.info(t('service.noLogRotation'))
+      logPostInstallHints(logDir)
     }
 
     // Surface a summary line so scripts wrapping `service install` and
