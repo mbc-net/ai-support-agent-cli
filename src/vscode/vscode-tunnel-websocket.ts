@@ -3,7 +3,7 @@ import * as path from 'node:path'
 
 import WebSocket from 'ws'
 
-import { BaseWebSocketConnection, buildAgentWsHeaders } from '../base-websocket'
+import { BaseWebSocketConnection, createAgentWebSocket } from '../base-websocket'
 import { BrowserLocalServer } from '../browser/browser-local-server'
 import { WS_CLOSE_CODE_AUTH_REJECTED, WS_RECONNECT_MAX_DELAY_MS } from '../constants'
 import type { EnvVarsProvider } from '../env-vars-filter'
@@ -314,13 +314,12 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   }
 
   protected createWebSocket(): WebSocket {
-    return new WebSocket(this.wsUrl, {
-      headers: buildAgentWsHeaders(
-        this.token,
-        this.agentId,
-        this.getStickyCookieHeader(),
-      ),
-    })
+    return createAgentWebSocket(
+      this.wsUrl,
+      this.token,
+      this.agentId,
+      this.getStickyCookieHeader(),
+    )
   }
 
   /** Promise that resolves when the browser local server has started */

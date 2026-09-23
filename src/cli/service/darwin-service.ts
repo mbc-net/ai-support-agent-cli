@@ -25,6 +25,7 @@ import {
 } from './wrapper-helpers'
 import {
   buildDockerRunWithLogRotate,
+  INSTALL_NEW_VERSION_BASH,
   LOAD_NVM_BASH,
   REDACT_SECRETS_BASH,
 } from './service-template-helpers'
@@ -437,25 +438,7 @@ VERSION_FILE="${configDir}/update-version.json"
 _INSTALL_OK=true
 if [ -f "$VERSION_FILE" ]; then
   NEW_VERSION=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$VERSION_FILE','utf-8')).version||'')}catch(e){console.log('')}" 2>/dev/null || echo "")
-  rm -f "$VERSION_FILE"
-  if [ -n "$NEW_VERSION" ]; then
-    NPM_OUTPUT=$(npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet 2>&1)
-    NPM_STATUS=$?
-    if [ "$NPM_STATUS" -ne 0 ]; then
-      echo "$LOG_PREFIX ERROR: npm install -g @ai-support-agent/cli@$NEW_VERSION failed (exit $NPM_STATUS)" >&2
-      printf '%s\\n' "$NPM_OUTPUT" | redact_secrets >&2
-      _INSTALL_OK=false
-    else
-      SI_OUTPUT=$(ai-support-agent service install 2>&1)
-      SI_STATUS=$?
-      if [ "$SI_STATUS" -ne 0 ]; then
-        echo "$LOG_PREFIX ERROR: ai-support-agent service install failed (exit $SI_STATUS)" >&2
-        printf '%s\\n' "$SI_OUTPUT" | redact_secrets >&2
-        _INSTALL_OK=false
-      fi
-    fi
-  fi
-fi
+${INSTALL_NEW_VERSION_BASH}
 
 # 3. Reload all per-project LaunchAgent services (always, even if install
 # failed) with retry + post-load verification. The shared-host mac-studio has

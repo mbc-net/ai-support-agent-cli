@@ -1,6 +1,6 @@
 import WebSocket from 'ws'
 
-import { BaseWebSocketConnection, buildAgentWsHeaders } from '../base-websocket'
+import { BaseWebSocketConnection, createAgentWebSocket } from '../base-websocket'
 import {
   WS_CLOSE_CODE_AUTH_REJECTED,
   WS_RECONNECT_MAX_DELAY_MS,
@@ -99,13 +99,12 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
   }
 
   protected createWebSocket(): WebSocket {
-    return new WebSocket(this.wsUrl, {
-      headers: buildAgentWsHeaders(
-        this.token,
-        this.agentId,
-        this.getStickyCookieHeader(),
-      ),
-    })
+    return createAgentWebSocket(
+      this.wsUrl,
+      this.token,
+      this.agentId,
+      this.getStickyCookieHeader(),
+    )
   }
 
   protected onOpen(_ws: WebSocket, resolve: (value: void) => void): void {

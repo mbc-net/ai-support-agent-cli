@@ -23,7 +23,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
-import { isSupportedSshAuthType } from '../types'
+import { isSupportedSshAuthType, unsupportedSshAuthTypeMessage } from '../types'
 import type { SshCredentials } from '../types'
 import { shellQuote } from '../utils/shell-quote'
 import { normalizePemKey } from '../utils/pem-key'
@@ -134,7 +134,7 @@ export function buildRemoteShellPlan(
   }
   // An unrecognized authType must never silently take the key path.
   if (!isSupportedSshAuthType(authType)) {
-    throw new Error(`SSH credential authType is not supported: ${JSON.stringify(authType)}`)
+    throw new Error(unsupportedSshAuthTypeMessage(authType))
   }
 
   const port = credentials.port ?? DEFAULT_SSH_PORT

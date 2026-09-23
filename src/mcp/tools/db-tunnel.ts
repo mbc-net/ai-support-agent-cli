@@ -33,7 +33,7 @@ import {
   SSH_KEEPALIVE_INTERVAL_MS,
 } from '../../constants'
 import { logger } from '../../logger'
-import { isSupportedSshAuthType, type SshCredentials } from '../../types'
+import { isSupportedSshAuthType, unsupportedSshAuthTypeMessage, type SshCredentials } from '../../types'
 import { getAddressPort } from '../../utils'
 
 /** A live SSH local port forward. Connect to `host:port`; call `close()` when done. */
@@ -65,7 +65,7 @@ export async function openSshTunnel(
   // (フォールバック禁止) — shares `isSupportedSshAuthType` with
   // ssh-executor.ts / server-setup-runner.ts.
   if (!isSupportedSshAuthType(ssh.authType)) {
-    throw new Error(`SSH credential authType is not supported: ${JSON.stringify(ssh.authType)}`)
+    throw new Error(unsupportedSshAuthTypeMessage(ssh.authType))
   }
 
   const { Client } = await import('ssh2')
