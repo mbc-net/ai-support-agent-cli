@@ -32,6 +32,40 @@ export const REDACT_SECRETS_BASH = `redact_secrets() {
  * drifting. The `\${…}` sequences are intentionally escaped so they reach the
  * generated script as literal shell parameter expansions.
  */
+/**
+ * Install the downloaded version and re-register the service.
+ *
+ * macOS and Linux ran byte-identical code here, so a fix to the install or to
+ * how its stderr is redacted could reach one platform and not the other.
+ *
+ * The `NEW_VERSION=` line that reads the version file is deliberately NOT part
+ * of this snippet: Linux passes the path through an env var so an apostrophe in
+ * HOME cannot break the JS string literal, macOS interpolates it directly.
+ * Unifying them changes behaviour, so that belongs in a fix, not here.
+ *
+ * Expects `$VERSION_FILE`, `$NEW_VERSION`, `$LOG_PREFIX`, `$_INSTALL_OK` and
+ * the `redact_secrets` function to be in scope.
+ */
+export const INSTALL_NEW_VERSION_BASH = `  rm -f "$VERSION_FILE"
+  if [ -n "$NEW_VERSION" ]; then
+    NPM_OUTPUT=$(npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet 2>&1)
+    NPM_STATUS=$?
+    if [ "$NPM_STATUS" -ne 0 ]; then
+      echo "$LOG_PREFIX ERROR: npm install -g @ai-support-agent/cli@$NEW_VERSION failed (exit $NPM_STATUS)" >&2
+      printf '%s\\n' "$NPM_OUTPUT" | redact_secrets >&2
+      _INSTALL_OK=false
+    else
+      SI_OUTPUT=$(ai-support-agent service install 2>&1)
+      SI_STATUS=$?
+      if [ "$SI_STATUS" -ne 0 ]; then
+        echo "$LOG_PREFIX ERROR: ai-support-agent service install failed (exit $SI_STATUS)" >&2
+        printf '%s\\n' "$SI_OUTPUT" | redact_secrets >&2
+        _INSTALL_OK=false
+      fi
+    fi
+  fi
+fi`
+
 export const LOAD_NVM_BASH = `export NVM_DIR="\${HOME}/.nvm"
 # shellcheck disable=SC1091
 [ -s "\${NVM_DIR}/nvm.sh" ] && source "\${NVM_DIR}/nvm.sh"`

@@ -22,6 +22,7 @@ import {
 } from './wrapper-helpers'
 import {
   buildDockerRunWithLogRotate,
+  INSTALL_NEW_VERSION_BASH,
   LOAD_NVM_BASH,
   REDACT_SECRETS_BASH,
 } from './service-template-helpers'
@@ -595,25 +596,7 @@ if [ -f "$VERSION_FILE" ]; then
   # Pass the path via env var so an apostrophe (or other JS string metachar) in
   # HOME or AI_SUPPORT_AGENT_CONFIG_DIR cannot break the JS string literal.
   NEW_VERSION=$(VERSION_FILE="$VERSION_FILE" node -e "try{console.log(JSON.parse(require('fs').readFileSync(process.env.VERSION_FILE,'utf-8')).version||'')}catch(e){console.log('')}" 2>/dev/null || echo "")
-  rm -f "$VERSION_FILE"
-  if [ -n "$NEW_VERSION" ]; then
-    NPM_OUTPUT=$(npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet 2>&1)
-    NPM_STATUS=$?
-    if [ "$NPM_STATUS" -ne 0 ]; then
-      echo "$LOG_PREFIX ERROR: npm install -g @ai-support-agent/cli@$NEW_VERSION failed (exit $NPM_STATUS)" >&2
-      printf '%s\\n' "$NPM_OUTPUT" | redact_secrets >&2
-      _INSTALL_OK=false
-    else
-      SI_OUTPUT=$(ai-support-agent service install 2>&1)
-      SI_STATUS=$?
-      if [ "$SI_STATUS" -ne 0 ]; then
-        echo "$LOG_PREFIX ERROR: ai-support-agent service install failed (exit $SI_STATUS)" >&2
-        printf '%s\\n' "$SI_OUTPUT" | redact_secrets >&2
-        _INSTALL_OK=false
-      fi
-    fi
-  fi
-fi
+${INSTALL_NEW_VERSION_BASH}
 
 # 3. Reload systemd and restart all per-project services (always, even if install failed)
 systemctl --user daemon-reload || true
