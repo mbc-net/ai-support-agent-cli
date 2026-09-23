@@ -451,6 +451,70 @@ describe('ApiClient', () => {
       expect(callArgs).toHaveProperty('authRejectedTransports', ['terminal', 'vscode'])
     })
 
+    it('★ should include an empty capabilities array when reported', async () => {
+      // 空配列は「報告したが有効な capability は無い」。フィールドごと省略すると
+      // api は「報告できない旧エージェント」(unknown) と解釈し、fail-closed で
+      // 接続導線を消してしまう。
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat(
+        'test-id',
+        { platform: 'darwin', arch: 'arm64', cpuUsage: 50, memoryUsage: 60, uptime: 1000 },
+        undefined, // updateError
+        undefined, // availableChatModes
+        undefined, // activeChatMode
+        undefined, // ipAddress
+        undefined, // configHash
+        undefined, // dockerBuildError
+        undefined, // authRejectedTransports
+        { capabilities: [] },
+      )
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).toHaveProperty('capabilities', [])
+    })
+
+    it('should include the reported capabilities verbatim', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat(
+        'test-id',
+        { platform: 'darwin', arch: 'arm64', cpuUsage: 50, memoryUsage: 60, uptime: 1000 },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          capabilities: [
+            { key: 'rdp', state: 'not_applied', reason: 'action_required_restart' },
+          ],
+        },
+      )
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).toHaveProperty('capabilities', [
+        { key: 'rdp', state: 'not_applied', reason: 'action_required_restart' },
+      ])
+    })
+
+    it('★ should omit capabilities entirely when not reported (old-agent shape)', async () => {
+      mockInstance.post.mockResolvedValue({ data: { success: true } })
+
+      await client.heartbeat('test-id', {
+        platform: 'darwin',
+        arch: 'arm64',
+        cpuUsage: 50,
+        memoryUsage: 60,
+        uptime: 1000,
+      })
+
+      const callArgs = mockInstance.post.mock.calls[0][1]
+      expect(callArgs).not.toHaveProperty('capabilities')
+    })
+
     it('should not include authRejectedTransports when not provided', async () => {
       mockInstance.post.mockResolvedValue({ data: { success: true } })
 

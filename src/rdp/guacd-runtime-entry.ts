@@ -8,5 +8,14 @@ export {
   createGuacdShutdownHook,
   stopGuacdContainer,
 } from './guacd-container'
-export { buildGuacdDockerArgs, resolveGuacdForHost } from './guacd-runtime'
-export type { GuacdRuntimeOptions } from './guacd-runtime'
+export {
+  buildGuacdDockerArgs,
+  createGuacdEndpointResolverForCapability,
+  createLazyGuacdEndpointResolver,
+  RdpUnavailableError,
+} from './guacd-runtime'
+export type {
+  CapabilityGuacdOptions,
+  GuacdRuntimeOptions,
+  LazyGuacdOptions,
+} from './guacd-runtime'

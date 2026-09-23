@@ -10,6 +10,8 @@ import { t } from './i18n'
 import type { TransportKind } from './ipc-types'
 import { logger } from './logger'
 import { getWorkspaceDir, getReposDir, getAwsDir } from './project-dir'
+import { buildCapabilityReport } from './capability/capability-report'
+import { createGuacdEndpointResolverForCapability } from './rdp/guacd-runtime'
 import { RdpWebSocket } from './rdp/rdp-websocket'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
 import { TerminalWebSocket, isNodePtyAvailable } from './terminal'
@@ -222,7 +224,15 @@ export function startHeartbeat(
         // api 側で記録が消える（古い警告が残り続けない）。
         // 常に配列で送る。undefined だと api へ項目自体が送られず、解消しても
         // 保存済みの警告が消えない（api は空配列を「解消」と解釈する）。
-        { sharedFileMountErrors: configSyncState.sharedFileMountErrors ?? [] },
+        {
+          sharedFileMountErrors: configSyncState.sharedFileMountErrors ?? [],
+          // 実効 capability。**宣言が無くても必ず配列を送る**（空配列で可）。
+          // フィールドごと省略すると、api はそれを「報告できない旧エージェント」
+          // (`unknown`) と解釈し、fail-closed で接続導線を消してしまう。
+          capabilities: buildCapabilityReport({
+            declaration: configSyncState.serverConfig?.capabilities,
+          }),
+        },
       )
 
       // This replica was evicted to make room for a newer one (plan replica
@@ -311,9 +321,22 @@ export function startRdpWebSocket(
   deps: TransportDeps,
   state: TransportState,
   wsUrl?: string,
+  configSyncState?: ConfigSyncState,
 ): void {
   const baseUrl = wsUrl ?? deps.apiUrl
-  state.rdpWs = new RdpWebSocket(baseUrl, deps.token, deps.agentId)
+  // The declaration is read through a function, not captured: the relay is
+  // created once at registration while the declaration changes on every config
+  // sync. Capturing the value here would pin whatever was delivered first, and
+  // turning the capability on from the admin UI would again require a restart —
+  // the very thing the lazy start exists to remove.
+  state.rdpWs = new RdpWebSocket(
+    baseUrl,
+    deps.token,
+    deps.agentId,
+    createGuacdEndpointResolverForCapability({
+      getDeclaration: () => configSyncState?.serverConfig?.capabilities,
+    }),
+  )
 
   state.rdpWs.connect().catch((error) => {
     logger.warn(`${deps.prefix} RDP WebSocket connection failed: ${getErrorMessage(error)}`)

@@ -17,6 +17,19 @@ export interface RegisterRequest {
   os: string
   arch: string
   ipAddress?: string
+  /**
+   * What this build of the agent can do at all: `'shell'`, `'chat'`,
+   * `'terminal'`, … It is a property of the binary, sent once at registration.
+   *
+   * :::warning Not the same thing as {@link AgentCapabilityDeclaration}
+   * The declarative capabilities added for `agentSettings.capabilities` (see
+   * {@link AGENT_CAPABILITY_KEYS}) are the opposite direction: the *server*
+   * tells the agent which optional features an administrator turned on, and the
+   * agent answers with their **effective** state
+   * ({@link AgentEffectiveCapability}) on every heartbeat. The two lists share
+   * neither their values nor their direction of travel; only the word.
+   * :::
+   */
   capabilities?: string[]
   availableChatModes?: string[]
   activeChatMode?: string
@@ -121,6 +134,103 @@ export interface HeartbeatResponse {
  */
 export type ChatMode = 'agent' | 'builtin'
 
+/**
+ * Capability keys an administrator may declare from the admin UI
+ * (`ProjectConfig.attributes.settings.agentSettings.capabilities`). Mirrors the
+ * API's own allowlist (`api/src/agent/dto/agent-config.dto.ts`); adding a key
+ * here without adding it there means it is never distributed, and vice versa.
+ *
+ * Only start-up options that are neither a bootstrap value, nor a secret, nor a
+ * statement about the execution model belong here — see
+ * `admin-docs/docs/features/agent-capabilities.md`.
+ */
+export const AGENT_CAPABILITY_KEYS = [
+  /** Web RDP relaying. OR-composed with the `--rdp` start-up flag. */
+  'rdp',
+] as const
+
+export type AgentCapabilityKey = (typeof AGENT_CAPABILITY_KEYS)[number]
+
+/**
+ * The server's declaration of which capabilities are turned on for this project.
+ *
+ * Each key is optional, and `undefined` means **not declared** — it is not the
+ * same as an explicit `false`, exactly as with `autoUpdateEnabled`. Every
+ * capability is opt-in: anything but an explicit `true` leaves the declaration
+ * side off.
+ *
+ * See the warning on {@link RegisterRequest.capabilities}: that field is a
+ * different concept that happens to share the name.
+ */
+export type AgentCapabilityDeclaration = { [K in AgentCapabilityKey]?: boolean }
+
+/**
+ * Which input turned a **reported** capability on.
+ *
+ * Deliberately has no `'none'` member: a capability that neither input enabled
+ * is not reported at all (the key is simply absent from the array, which the
+ * API renders as `inactive`). `'none'` exists only inside the resolver, as the
+ * answer to "is this effective?" — see `CapabilitySource`.
+ */
+export type ReportedCapabilitySource = 'declared' | 'flag' | 'both'
+
+/**
+ * Effective state of one capability, as reported back on every heartbeat.
+ *
+ * `active` means the capability is actually usable right now. `not_applied`
+ * means the declaration reached this agent but its runtime cannot honour it
+ * without an operator action, named by {@link reason}.
+ *
+ * "Not reported at all" carries meaning too, and the two flavours differ:
+ *
+ * - the **field** absent from the heartbeat body — an agent too old to report,
+ *   which the API renders as `unknown` and treats fail-closed;
+ * - the field present but this **key** missing from the array — reported, and
+ *   not enabled (`inactive`).
+ *
+ * An agent that understands capabilities therefore always sends the array, even
+ * when it is empty; otherwise it is indistinguishable from an old one.
+ */
+export interface AgentEffectiveCapability {
+  key: AgentCapabilityKey
+  state: 'active' | 'not_applied'
+  /**
+   * What made this capability effective: the project declaration, the start-up
+   * flag, or both.
+   *
+   * :::note optional である理由
+   * 古い api はこのフィールドを知らない。DTO のホワイトリストで黙って除去される
+   * だけで 400 にはならないため、送っても安全である。逆に新しい api は、報告して
+   * こない旧エージェントのために欠落を許容する必要がある。
+   * :::
+   *
+   * `not_applied` の項目にも載せる。「宣言したが適用できていない」のか「フラグで
+   * 指定されたが適用できていない」のかで、利用者の次の一手（画面を戻す / 起動
+   * オプションを外す）が変わるため。
+   */
+  source?: ReportedCapabilitySource
+  /** Set only when `state === 'not_applied'`. */
+  reason?:
+    | 'action_required_redeploy'
+    | 'action_required_restart'
+    | 'apply_failed'
+  /**
+   * Hash of the **declaration alone** — never of the whole delivered config.
+   * See `computeCapabilityDeclarationHash`.
+   */
+  declarationHash?: string
+  /**
+   * Short human-readable diagnostic. **Must not carry secrets**: it is stored
+   * by the API and rendered in the admin UI.
+   */
+  detail?: string
+}
+
+/** Max length the API accepts for {@link AgentEffectiveCapability.declarationHash}. */
+export const AGENT_CAPABILITY_DECLARATION_HASH_MAX_LENGTH = 64
+/** Max length the API accepts for {@link AgentEffectiveCapability.detail}. */
+export const AGENT_CAPABILITY_DETAIL_MAX_LENGTH = 500
+
 export interface AgentServerConfig {
   agentEnabled: boolean
   /**
@@ -130,6 +240,14 @@ export interface AgentServerConfig {
    * 明示的な true 以外はすべて無効として扱う（auto-update-gate.ts を参照）。
    */
   autoUpdateEnabled?: boolean
+  /**
+   * Capabilities an administrator declared for this project.
+   *
+   * **Optional on purpose**: a server that predates the feature sends nothing,
+   * and `undefined` must keep meaning "no declaration" rather than "everything
+   * off" (see {@link AgentCapabilityDeclaration}).
+   */
+  capabilities?: AgentCapabilityDeclaration
   builtinAgentEnabled: boolean
   builtinFallbackEnabled: boolean
   externalAgentEnabled: boolean

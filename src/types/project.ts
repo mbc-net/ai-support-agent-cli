@@ -1,4 +1,5 @@
 import type { AgentChatMode, AgentChatModeOverrides } from './config'
+import type { AgentCapabilityDeclaration } from './server'
 
 export interface ProjectConfigResponse {
   configHash: string
@@ -33,6 +34,13 @@ export interface ProjectConfigResponse {
       commands?: string[]
       timezone?: string
     }
+    /**
+     * Declared capabilities, as delivered on the container path
+     * (`GET /project-config`). `GET /config` carries the same value at the top
+     * level of `AgentServerConfig`; the API builds the two separately, so both
+     * have to be read or the feature works in one runtime only.
+     */
+    capabilities?: AgentCapabilityDeclaration
   }
   aws?: {
     accounts: Array<{
