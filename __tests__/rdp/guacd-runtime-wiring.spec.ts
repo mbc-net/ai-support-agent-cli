@@ -1,4 +1,8 @@
-import { buildGuacdDockerArgs, resolveGuacdForHost } from '../../src/rdp/guacd-runtime'
+import {
+  buildGuacdDockerArgs,
+  createLazyGuacdEndpointResolver,
+  RdpUnavailableError,
+} from '../../src/rdp/guacd-runtime'
 
 jest.mock('../../src/rdp/guacd-container', () => ({
   ...jest.requireActual('../../src/rdp/guacd-container'),
@@ -70,44 +74,76 @@ describe('buildGuacdDockerArgs（Docker 形態）', () => {
   })
 })
 
-describe('resolveGuacdForHost（CLI 直起動）', () => {
+describe('createLazyGuacdEndpointResolver（CLI 直起動・遅延起動）', () => {
+  /** 解決関数と、それに渡した環境変数・終了フック登録をまとめて作る。 */
+  const build = (
+    env: NodeJS.ProcessEnv = {},
+  ): {
+    resolve: () => { host: string; port: number }
+    env: NodeJS.ProcessEnv
+    registerShutdownHook: jest.Mock
+  } => {
+    const registerShutdownHook = jest.fn()
+    return {
+      resolve: createLazyGuacdEndpointResolver({ env, registerShutdownHook }),
+      env,
+      registerShutdownHook,
+    }
+  }
+
   beforeEach(() => {
     ensureGuacdContainer.mockReset()
     ensureGuacdContainer.mockReturnValue({ host: '127.0.0.1', port: 4822 })
-    delete process.env.GUACD_HOST
-    delete process.env.GUACD_PORT
   })
 
-  it('★ RDP 無効なら guacd を起動せず環境変数も設定しない', () => {
-    resolveGuacdForHost({ rdp: false })
+  it('★ 解決関数を作っただけでは guacd を起動しない', () => {
+    // 起動時にまとめて用意すると、画面から有効化してもプロセスを再起動する
+    // までは使えないままになる。
+    build()
     expect(ensureGuacdContainer).not.toHaveBeenCalled()
-    expect(process.env.GUACD_HOST).toBeUndefined()
   })
 
   it('ループバックモードで guacd を用意し環境変数を設定する', () => {
-    resolveGuacdForHost({ rdp: true })
+    const { resolve, env } = build()
+    expect(resolve()).toEqual({ host: '127.0.0.1', port: 4822 })
     expect(ensureGuacdContainer).toHaveBeenCalledWith(
       expect.objectContaining({ mode: 'loopback' }),
     )
-    expect(process.env.GUACD_HOST).toBe('127.0.0.1')
-    expect(process.env.GUACD_PORT).toBe('4822')
+    expect(env.GUACD_HOST).toBe('127.0.0.1')
+    expect(env.GUACD_PORT).toBe('4822')
   })
 
   it('★ 既に GUACD_HOST が設定されていれば尊重し、コンテナを起動しない', () => {
     // 運用側が別途 guacd を用意している場合を壊さない。
-    process.env.GUACD_HOST = 'guacd.internal'
-    process.env.GUACD_PORT = '14822'
-    resolveGuacdForHost({ rdp: true })
+    const { resolve } = build({ GUACD_HOST: 'guacd.internal', GUACD_PORT: '14822' })
+    expect(resolve()).toEqual({ host: 'guacd.internal', port: 14822 })
     expect(ensureGuacdContainer).not.toHaveBeenCalled()
-    expect(process.env.GUACD_HOST).toBe('guacd.internal')
   })
 
-  it('★ 起動に失敗しても致命傷にしない（RDP は付加機能）', () => {
+  it('★ 起動に成功したら終了フックを登録する（止め損ねると無認証の guacd が残る）', () => {
+    const { resolve, registerShutdownHook } = build()
+    resolve()
+    expect(registerShutdownHook).toHaveBeenCalledTimes(1)
+  })
+
+  it('★ CLI の --guacd-image を環境変数経由で引き渡す', () => {
+    // 中継を担うのは fork された子プロセスであり、argv は継承しない。
+    const { resolve } = build({ AI_SUPPORT_AGENT_GUACD_IMAGE: 'registry/guacd:1.5.5' })
+    resolve()
+    expect(ensureGuacdContainer).toHaveBeenCalledWith(
+      expect.objectContaining({ image: 'registry/guacd:1.5.5' }),
+    )
+  })
+
+  it('★ 起動に失敗したら明示的に投げる（黙って死んだ接続先へ繋ぎに行かない）', () => {
+    // 以前は警告だけ出して続行していたため、利用者には「しばらく待たされて
+    // 繋がらない」としか見えなかった。エージェント本体は巻き添えにしないが、
+    // その 1 件の接続要求は理由付きで断る。
     ensureGuacdContainer.mockImplementation(() => {
       throw new Error('docker not available')
     })
-    // エージェント本体（チャット・ターミナル等）まで起動できなくなるのは割に合わない。
-    expect(() => resolveGuacdForHost({ rdp: true })).not.toThrow()
-    expect(process.env.GUACD_HOST).toBeUndefined()
+    const { resolve, env } = build()
+    expect(() => resolve()).toThrow(RdpUnavailableError)
+    expect(env.GUACD_HOST).toBeUndefined()
   })
 })

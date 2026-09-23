@@ -56,25 +56,41 @@ describe('guacd の起動経路への配線', () => {
   // 実行して検証する。ソース文字列の検査では、呼び出しをヘルパへ切り出した
   // だけで落ちる一方、片方の終了経路にしか書かれていなくても通ってしまう。
 
-  it('★ CLI 直起動が resolveGuacdForHost を呼ぶ', () => {
+  it('★ CLI 直起動は --rdp の指定を後続プロセスへ残す', () => {
+    // ホスト直起動では guacd を起動時に用意しない（初回の接続要求で遅延起動する）。
+    // 代わりに「運用者が --rdp を指定した」事実だけを環境変数へ残す。実際に RDP を
+    // 中継するのはプロジェクトごとに fork された子プロセスであり、子は環境を
+    // 継承する一方で argv は受け取らない。
     const source = read('src/index.ts')
-    expect(source).toContain('resolveGuacdForHost')
+    expect(source).toMatch(/process\.env\[ENV_VARS\.RDP\]\s*=\s*'1'/)
+  })
+
+  it('★ 起動時には guacd を用意しない（遅延起動に任せる）', () => {
+    // 起動時に用意する形へ戻すと、画面から capability を ON にしても
+    // プロセスを再起動するまで RDP が使えないという、この機能が解こうと
+    // している非対称がそのまま残る。
+    const source = read('src/index.ts')
+    expect(source).not.toContain('ensureGuacdContainer')
+    expect(source).not.toContain('resolveGuacdForHost')
   })
 
   it('★ 終了処理が guacd コンテナを停止する', () => {
     // 止め忘れると、エージェントを終了しても guacd が残り続ける。
     const sources = [
-      read('src/index.ts'),
+      read('src/rdp/guacd-runtime.ts'),
       read('src/docker/docker-runner.ts'),
     ].join('\n')
     expect(sources).toMatch(/stopGuacdContainer|createGuacdShutdownHook/)
   })
 
-  it('★ CLI 直起動の終了処理は多重呼び出しを畳むハンドラを使う', () => {
+  it('★ 遅延起動の終了処理は多重呼び出しを畳むハンドラを使う', () => {
     // exit / SIGINT / SIGTERM の 3 箇所に同じ処理を登録しているため、
     // 素の stopGuacdContainer を直に渡すと通常の終了で 2 回走り、
     // 2 回目が必ず「そんなコンテナは無い」で失敗して偽の警告が出る。
-    const source = read('src/index.ts')
+    //
+    // 登録は「起動した側」＝ guacd-runtime.ts の遅延解決に移した。`--rdp` の
+    // 有無で登録していた以前の形では、宣言だけで起動した guacd が止まらない。
+    const source = read('src/rdp/guacd-runtime.ts')
 
     expect(source).toContain('createGuacdShutdownHook')
     // 生の停止関数をハンドラとして直接登録していないこと

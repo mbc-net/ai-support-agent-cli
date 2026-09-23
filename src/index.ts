@@ -22,6 +22,7 @@ import {
   CLI_FLAG_NO_DOCKER,
   CLI_FLAG_NO_DOCKERFILE_SYNC,
   CLI_FLAG_NO_IMAGE_PULL,
+  ENV_VARS,
   ONESHOT_ENV_VARS,
 } from './constants'
 import type { ReleaseChannel } from './types'
@@ -101,21 +102,21 @@ program
     }
     const updateChannel = validateUpdateChannel(opts.updateChannel)
 
-    // Web RDP を使う場合、ホスト直起動にはサイドカーの仕組みが無いため
-    // エージェント自身が guacd コンテナを用意する。失敗しても本体は起動する。
-    const { resolveGuacdForHost, createGuacdShutdownHook } = await import(
-      './rdp/guacd-runtime-entry'
-    )
-    resolveGuacdForHost({ rdp: opts.rdp, guacdImage: opts.guacdImage })
+    // Web RDP は**起動時には何も用意しない**。ホスト直起動では guacd を初回の
+    // 接続要求時に遅延起動する（`createLazyGuacdEndpointResolver`）ため、画面から
+    // capability を ON にしただけでプロセス再起動なしに使えるようになる。
+    // 終了フック（止め忘れると無認証の guacd が残る）も、実際に起動した時点で
+    // そこから登録される。
+    //
+    // ここで残すのは「運用者が --rdp を指定した」という事実だけである。環境変数に
+    // 置くのは、実際に RDP を中継するのがプロジェクトごとに fork された子プロセスで
+    // あり、子は環境を継承する一方で argv は受け取らないため
+    // （ChildProcessManager.spawnChild）。
     if (opts.rdp) {
-      // 止め忘れると、エージェントを終了しても guacd が残り続ける。
-      // 3 つのハンドラに同じ処理を登録するため、多重呼び出しを畳むフックを
-      // 使う。素の停止関数を渡すと、通常の終了で 2 回走った 2 回目が
-      // 「そんなコンテナは無い」で失敗し、偽の警告が毎回出る。
-      const stop = createGuacdShutdownHook()
-      process.once('exit', stop)
-      process.once('SIGINT', stop)
-      process.once('SIGTERM', stop)
+      process.env[ENV_VARS.RDP] = '1'
+    }
+    if (opts.guacdImage) {
+      process.env[ENV_VARS.GUACD_IMAGE] = opts.guacdImage
     }
 
     await startAgent({
