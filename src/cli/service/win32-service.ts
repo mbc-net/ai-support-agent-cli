@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS } from '../../constants'
+import { getContainerProjectDir, CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS } from '../../constants'
 import { readAgentCredentialEnv } from './agent-credential-env'
 import { loadConfig, getProjectList } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
@@ -179,7 +179,7 @@ export function generateWin32WrapperScript(opts: {
   if (opts.codexApiKey) assertCmdSafe(opts.codexApiKey, 'codexApiKey')
   if (opts.codexAccessToken) assertCmdSafe(opts.codexAccessToken, 'codexAccessToken')
 
-  const containerProjectDir = `/workspace/projects/${opts.projectCode}`
+  const containerProjectDir = getContainerProjectDir(opts.projectCode)
   // `||` (not `??`) so an empty projectDir falls back to the default; an empty
   // host path would emit `-v :/workspace/...:rw` which docker rejects.
   const hostProjectDir = opts.projectDir || path.dirname(opts.projectConfigHostDir)

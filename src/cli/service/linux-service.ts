@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
+import { getContainerProjectDir, CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
 import { readAgentCredentialEnv } from './agent-credential-env'
 import { loadConfig, getProjectList } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
@@ -411,7 +411,7 @@ export function generateWrapperScript(opts: {
   // containerProjectDir is a Linux-style absolute path inside the docker
   // container, so it's safe to hard-code with forward slashes regardless of
   // the host platform that generated the wrapper.
-  const containerProjectDir = `/workspace/projects/${opts.projectCode}`
+  const containerProjectDir = getContainerProjectDir(opts.projectCode)
   // hostProjectDir is a HOST path; the Linux wrapper is only generated on
   // Linux hosts so `path.dirname` (which equals path.posix.dirname there)
   // is correct. `||` (not `??`) — an empty `opts.projectDir` must fall

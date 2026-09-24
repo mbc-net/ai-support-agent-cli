@@ -16,6 +16,7 @@ import { ECSClient, RegisterTaskDefinitionCommand } from '@aws-sdk/client-ecs'
 import type { ContainerDefinition, MountPoint, Volume } from '@aws-sdk/client-ecs'
 
 import {
+  CONTAINER_WORKSPACE_ROOT,
   ECS_AGENT_CONTAINER_NAME,
   TAILSCALE_SIDECAR_CONTAINER_NAME,
   TAILSCALE_SIDECAR_IMAGE,
@@ -80,7 +81,7 @@ function buildAwsLogsConfig(
 }
 
 /** Writable workspace mount path (one of {@link ISOLATION_VOLUMES}). */
-const ISOLATION_WORKSPACE_PATH = '/workspace'
+const ISOLATION_WORKSPACE_PATH = CONTAINER_WORKSPACE_ROOT
 
 /** Ephemeral (Fargate scratch) volumes provisioned when `readonlyRootFilesystem` is set. */
 const ISOLATION_VOLUMES: readonly { name: string; containerPath: string }[] = [
