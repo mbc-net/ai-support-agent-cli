@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 
+import { getProjectList, loadConfig } from '../../config-manager'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { isProjectCodeSafe, validateBindMountPathSync } from '../../security'
@@ -302,4 +303,30 @@ export function prepareProjectServiceDirs(params: {
     projectConfigHostDir,
     validatedProjectDir: validateProjectDirForMount(params.projectDir),
   }
+}
+
+/**
+ * 設定から登録済みプロジェクト一覧を読み、1 件も無ければ理由をログに出して
+ * `null` を返す。
+ *
+ * linux / darwin / win32 の 3 つのインストーラが `install()` の冒頭で同じ
+ * 8 行を持っていた。「設定が無い」と「プロジェクトが 0 件」は利用者から見れば
+ * 同じ状況（何もインストールできない）なので、両方をここで空扱いに畳む。
+ *
+ * 呼び出し側は `if (!projects) return` で中断する。空配列ではなく `null` を
+ * 返すのは、**中断すべきかどうかを呼び出し側が判定し直さずに済ませる**ため。
+ * 空配列を返すと、各インストーラが再び `projects.length === 0` を書くことに
+ * なり、そのときログ出力を添え忘れれば「何も起きずに正常終了した」ように
+ * 見える。
+ */
+export function loadConfiguredProjectsOrReport(): ProjectRegistration[] | null {
+  const config = loadConfig()
+  const projects = config ? getProjectList(config) : []
+
+  if (projects.length === 0) {
+    logger.error(t('service.noProjectsConfigured'))
+    return null
+  }
+
+  return projects
 }

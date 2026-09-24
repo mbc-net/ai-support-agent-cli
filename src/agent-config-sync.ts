@@ -9,9 +9,10 @@ import { logger } from './logger'
 import { applySharedFileMounts } from './shared-file-mounts'
 import { getConfigDir } from './config-manager'
 import { downloadProjectFileTo } from './project-file-download'
-import { cleanupStaleAwsCredentials, writeAwsConfig } from './aws-profile'
+import { writeAwsConfig } from './aws-profile'
+import { sweepStaleAwsCredentials } from './aws-credential-sweep'
 import { cleanupStaleCommandMcpConfigs, writeMcpConfig } from './mcp/config-writer'
-import { getAwsDir, getReposDir, getSshDir } from './project-dir'
+import { getReposDir, getSshDir } from './project-dir'
 import { syncProjectConfig } from './project-config-sync'
 import { syncRepositories, syncRepositoryByCode } from './repo-sync'
 import type { RepoSyncResult } from './repo-sync'
@@ -232,16 +233,7 @@ export async function applyProjectConfig(
   // 異なり次回の上書きでも消えない）。config sync のたびに実行することで自己修復する
   // （cleanupStaleCommandMcpConfigs と同じ設計）。accounts が現在未設定でも過去の
   // 孤立ファイルを掃除できるよう、projectDir のみを条件にする。
-  if (deps.projectDir) {
-    try {
-      const removedCount = cleanupStaleAwsCredentials(getAwsDir(deps.projectDir))
-      if (removedCount > 0) {
-        logger.info(`${deps.prefix} Cleaned up ${removedCount} stale AWS credentials file(s)`)
-      }
-    } catch (error) {
-      logger.warn(`${deps.prefix} Failed to clean up stale AWS credentials files: ${getErrorMessage(error)}`)
-    }
-  }
+  sweepStaleAwsCredentials(deps.projectDir, deps.prefix)
 
   // Log database configuration
   if (effectiveConfig.databases?.length) {
