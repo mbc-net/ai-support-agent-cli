@@ -19,6 +19,7 @@ jest.mock('../../../src/i18n', () => ({
 import * as fs from 'fs'
 import {
   assertProjectCodeIsSafe,
+  buildWrapperScriptBaseOptions,
   detectInstallCollisions,
   isProjectCodeSafe,
   logPostInstallHints,
@@ -430,5 +431,77 @@ describe('logPostInstallHints', () => {
       path: '/var/log/ai-support-agent',
     })
     expect(logger.info).toHaveBeenNthCalledWith(3, 'service.noLogRotation')
+  })
+})
+
+describe('buildWrapperScriptBaseOptions', () => {
+  const ORIGINAL_ENV = { ...process.env }
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV }
+  })
+
+  const params = {
+    tenantCode: 'mbc',
+    projectCode: 'MBC_01',
+    projectConfigHostDir: '/home/u/.ai-support-agent/projects/mbc/MBC_01',
+    projectDir: '/home/u/work/repo',
+    project: { token: 'tok-123', apiUrl: 'https://api.example.com' },
+    verbose: true,
+  }
+
+  it('プロジェクト側の値をそのまま写す', () => {
+    const opts = buildWrapperScriptBaseOptions(params)
+
+    expect(opts).toMatchObject({
+      tenantCode: 'mbc',
+      projectCode: 'MBC_01',
+      projectConfigHostDir: params.projectConfigHostDir,
+      projectDir: params.projectDir,
+      token: 'tok-123',
+      apiUrl: 'https://api.example.com',
+      verbose: true,
+    })
+    expect(opts.imageName).toBeTruthy()
+  })
+
+  /**
+   * 認証情報の展開は 3 つのインストーラで**必ず**行われる必要がある。
+   * 1 つで書き忘れると、そのプラットフォームだけ資格情報を持たない
+   * コンテナが起動する（コンテナ自体は正常に起動するので、症状は実行時に
+   * チャットが失敗する形でしか出ない）。
+   */
+  it('環境変数からエージェント認証情報を取り込む', () => {
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test'
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'sk-ant-oat01-test'
+    process.env.CODEX_API_KEY = 'codex-key'
+    process.env.CODEX_ACCESS_TOKEN = 'codex-token'
+
+    const opts = buildWrapperScriptBaseOptions(params)
+
+    expect(opts.anthropicApiKey).toBe('sk-ant-test')
+    expect(opts.claudeCodeOauthToken).toBe('sk-ant-oat01-test')
+    expect(opts.codexApiKey).toBe('codex-key')
+    expect(opts.codexAccessToken).toBe('codex-token')
+  })
+
+  it('環境変数が無ければ認証情報は undefined（空文字にしない）', () => {
+    delete process.env.ANTHROPIC_API_KEY
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+    delete process.env.CODEX_API_KEY
+    delete process.env.CODEX_ACCESS_TOKEN
+
+    const opts = buildWrapperScriptBaseOptions(params)
+
+    expect(opts.anthropicApiKey).toBeUndefined()
+    expect(opts.claudeCodeOauthToken).toBeUndefined()
+    expect(opts.codexApiKey).toBeUndefined()
+    expect(opts.codexAccessToken).toBeUndefined()
+  })
+
+  it('projectDir 未指定はそのまま undefined で渡す', () => {
+    const opts = buildWrapperScriptBaseOptions({ ...params, projectDir: undefined })
+
+    expect(opts.projectDir).toBeUndefined()
   })
 })

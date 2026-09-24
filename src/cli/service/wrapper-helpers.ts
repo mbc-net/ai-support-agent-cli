@@ -5,7 +5,17 @@ import { logger } from '../../logger'
 import { isProjectCodeSafe, validateBindMountPathSync } from '../../security'
 import type { ProjectRegistration } from '../../types'
 import { projectKey } from '../../project-key'
-import { sanitizeNameSegment } from '../../utils'
+import { ensureDir, sanitizeNameSegment } from '../../utils'
+import {
+  getProjectConfigHostDir,
+  getProjectServiceDir,
+  getServicesDir,
+} from '../../utils/path-utils'
+import { IMAGE_NAME } from '../../docker/docker-utils'
+import {
+  type AgentCredentialEnv,
+  readAgentCredentialEnv,
+} from './agent-credential-env'
 
 // Re-export the projectCode validators that now live in `src/security.ts` so
 // existing call sites (linux-service / darwin-service) can continue to import
@@ -202,4 +212,94 @@ export function logPostInstallHints(logDir: string): void {
   logger.info(t('service.loadHintMulti'))
   logger.info(t('service.logDir', { path: logDir }))
   logger.info(t('service.noLogRotation'))
+}
+
+/**
+ * ラッパースクリプト生成に渡す、プラットフォーム共通のオプション。
+ *
+ * linux / darwin / win32 の各インストーラが同じ 9 項目を組み立てていた。
+ * 特に `...readAgentCredentialEnv()` の展開を 1 つのプラットフォームで
+ * 書き忘れると、そのプラットフォームだけ ANTHROPIC_API_KEY 等を持たない
+ * コンテナが起動する。**コンテナ自体は正常に起動する**ので、症状は実行時に
+ * チャットが失敗する形でしか出ない。
+ *
+ * `updateScriptPath` / `logDir` は win32 のラッパーが受け取らないため、
+ * 必要なプラットフォームだけが呼び出し側で足す。
+ */
+export interface WrapperScriptBaseOptions extends AgentCredentialEnv {
+  imageName: string
+  tenantCode: string
+  projectCode: string
+  projectConfigHostDir: string
+  projectDir?: string
+  token: string
+  apiUrl: string
+  verbose?: boolean
+}
+
+/**
+ * 各インストーラが `generateWrapperScript` / `generateWin32WrapperScript` に
+ * 渡す共通部分を組み立てる。
+ *
+ * 認証情報は**ここで一度だけ** `readAgentCredentialEnv()` から読む。
+ */
+export function buildWrapperScriptBaseOptions(params: {
+  tenantCode: string
+  projectCode: string
+  projectConfigHostDir: string
+  projectDir?: string
+  project: Pick<ProjectRegistration, 'token' | 'apiUrl'>
+  verbose?: boolean
+}): WrapperScriptBaseOptions {
+  return {
+    imageName: IMAGE_NAME,
+    tenantCode: params.tenantCode,
+    projectCode: params.projectCode,
+    projectConfigHostDir: params.projectConfigHostDir,
+    projectDir: params.projectDir,
+    token: params.project.token,
+    apiUrl: params.project.apiUrl,
+    ...readAgentCredentialEnv(),
+    verbose: params.verbose,
+  }
+}
+
+/**
+ * サービスファイルを書き出す前に必要なディレクトリを用意し、
+ * プロジェクトディレクトリの妥当性を検証する。
+ *
+ * 3 つのインストーラが逐語で同じ 3 手順を持っていた。特に
+ * `validateProjectDirForMount` を落とすと、空・不存在・ブロック対象
+ * （`/etc`・`~/.ssh` 等）のパスがそのまま `-v <bad>:/workspace/...:rw` として
+ * 出力され、起動失敗かホストの機密のコンテナ露出につながる。
+ *
+ * @returns 書き出し先と、マウントに使ってよいと判断されたプロジェクトディレクトリ
+ */
+export function prepareProjectServiceDirs(params: {
+  projectKey: string
+  tenantCode: string
+  projectCode: string
+  projectDir?: string
+}): {
+  projectServiceDir: string
+  projectConfigHostDir: string
+  validatedProjectDir: string | undefined
+} {
+  const projectServiceDir = getProjectServiceDir(
+    getServicesDir(),
+    params.projectKey,
+  )
+  ensureDir(projectServiceDir, 0o700)
+
+  const projectConfigHostDir = getProjectConfigHostDir(
+    params.tenantCode,
+    params.projectCode,
+  )
+  ensureDir(projectConfigHostDir, 0o700)
+
+  return {
+    projectServiceDir,
+    projectConfigHostDir,
+    validatedProjectDir: validateProjectDirForMount(params.projectDir),
+  }
 }

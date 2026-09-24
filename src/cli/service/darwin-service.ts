@@ -4,11 +4,9 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getContainerProjectDir, CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
-import { readAgentCredentialEnv } from './agent-credential-env'
 import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
 import type { ProjectRegistration } from '../../types'
 import type { ProjectStatus } from './types'
-import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { projectKey } from '../../project-key'
@@ -22,13 +20,14 @@ import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
 import {
   assertProjectCodeIsSafe,
+  buildWrapperScriptBaseOptions,
   detectInstallCollisions,
   logPostInstallHints,
+  prepareProjectServiceDirs,
   reportInstallCollision,
   sanitizeServiceNameSegment,
   shellQuote,
   toContainerApiUrl,
-  validateProjectDirForMount,
 } from './wrapper-helpers'
 import {
   buildDockerRunWithLogRotate,
@@ -39,10 +38,7 @@ import {
 import {
   getDarwinLaunchAgentsDir,
   getDarwinLogDir,
-  getProjectConfigHostDir,
   getProjectLogDir,
-  getProjectServiceDir,
-  getServicesDir,
   getUpdateScriptPath,
   getWrapperScriptPath,
   getAgentOutLog,
@@ -531,30 +527,25 @@ export function writeProjectServiceFiles(
   const launchAgentsDir = getDarwinLaunchAgentsDir()
   ensureDir(launchAgentsDir)
 
-  const servicesDir = getServicesDir()
-  const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  ensureDir(projectServiceDir, 0o700)
-
-  const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  ensureDir(projectConfigHostDir, 0o700)
-
-  // Validate project.projectDir same way the Linux wrapper does. If
-  // missing, empty, or blocked (e.g. `/etc`, `~/.ssh`), drop it so
-  // generateWrapperScript falls back to the safe default mount.
-  const validatedProjectDir = validateProjectDirForMount(project.projectDir)
+  const { projectServiceDir, projectConfigHostDir, validatedProjectDir } =
+    prepareProjectServiceDirs({
+      projectKey,
+      tenantCode,
+      projectCode,
+      projectDir: project.projectDir,
+    })
 
   const updateScriptPath = getUpdateScriptPath()
   const wrapperScriptPath = getWrapperScriptPath(projectServiceDir)
   const wrapperScript = generateWrapperScript({
-    imageName: IMAGE_NAME,
-    tenantCode,
-    projectCode,
-    projectConfigHostDir,
-    projectDir: validatedProjectDir,
-    token: project.token,
-    apiUrl: project.apiUrl,
-    ...readAgentCredentialEnv(),
-    verbose: options.verbose,
+    ...buildWrapperScriptBaseOptions({
+      tenantCode,
+      projectCode,
+      projectConfigHostDir,
+      projectDir: validatedProjectDir,
+      project,
+      verbose: options.verbose,
+    }),
     updateScriptPath,
     logDir: projectLogDir,
   })
