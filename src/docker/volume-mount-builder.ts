@@ -10,6 +10,8 @@ import * as path from 'path'
 
 import { getConfigDir, loadConfig } from '../config-manager'
 import {
+  CONTAINER_AGENT_CONFIG_DIR,
+  CONTAINER_HOME,
   CONTAINER_WORKSPACE_ROOT,
   ENV_VARS,
   getContainerProjectDir,
@@ -30,8 +32,10 @@ import { toPosixRelative } from './docker-utils'
 // service installers need it too and cli/ must not depend on docker/.
 export { CONTAINER_PROJECTS_BASE } from '../constants'
 
-/** Container-internal home directory */
-export const CONTAINER_HOME = '/home/node'
+// Re-exported so existing importers (and the spec) keep working; the
+// canonical definition moved to `constants.ts` because the three service
+// installers need it too and cli/ must not depend on docker/.
+export { CONTAINER_HOME } from '../constants'
 
 /** Passthrough environment variables from host to container */
 export const PASSTHROUGH_ENV_VARS = [
@@ -256,7 +260,7 @@ export function buildProjectVolumeMounts(
   mountCodexConfig(mounts, home)
 
   // Per-project isolated config dir — mounts to /home/node/.ai-support-agent inside container
-  const containerConfigDir = path.posix.join(CONTAINER_HOME, '.ai-support-agent')
+  const containerConfigDir = CONTAINER_AGENT_CONFIG_DIR
   fs.mkdirSync(projectConfigHostDir, { recursive: true, mode: 0o700 })
   mounts.push('-v', `${projectConfigHostDir}:${containerConfigDir}:rw`)
 

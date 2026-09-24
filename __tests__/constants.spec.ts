@@ -199,4 +199,28 @@ describe('constants', () => {
       `${constants.CONTAINER_PROJECTS_BASE}/ANY`,
     )
   })
+
+  /**
+   * The container home is what the docker volume builder mounts `~/.claude`,
+   * `~/.codex` and the project metadata dir against, and what the three
+   * generated wrapper scripts pass as `-e HOME=`. A mismatch means the agent
+   * reads a different path than the one that was mounted: the container starts
+   * fine and the files are simply not there.
+   */
+  it('should pin the container home to the image user', () => {
+    const constants = require('../src/constants')
+
+    expect(constants.CONTAINER_HOME).toBe('/home/node')
+  })
+
+  it('should derive the agent config dir from the container home', () => {
+    const constants = require('../src/constants')
+
+    expect(constants.CONTAINER_AGENT_CONFIG_DIR).toBe(
+      '/home/node/.ai-support-agent',
+    )
+    expect(constants.CONTAINER_AGENT_CONFIG_DIR).toBe(
+      `${constants.CONTAINER_HOME}/.ai-support-agent`,
+    )
+  })
 })

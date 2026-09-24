@@ -12,6 +12,10 @@ import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { projectKey } from '../../project-key'
+import {
+  CONTAINER_AGENT_CONFIG_DIR,
+  CONTAINER_HOME,
+} from '../../constants'
 import { ensureDir, getErrorMessage } from '../../utils'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
@@ -280,8 +284,8 @@ export function generateWrapperScript(opts: {
    */
   logDir?: string
 }): string {
-  const containerHome = '/home/node'
-  const containerConfigDir = `${containerHome}/.ai-support-agent`
+  const containerHome = CONTAINER_HOME
+  const containerConfigDir = CONTAINER_AGENT_CONFIG_DIR
   const homeDir = os.homedir()
   const containerApiUrl = toContainerApiUrl(opts.apiUrl)
 

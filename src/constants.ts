@@ -771,3 +771,25 @@ export const CONTAINER_PROJECTS_BASE = `${CONTAINER_WORKSPACE_ROOT}/projects`
 export function getContainerProjectDir(projectCode: string): string {
   return `${CONTAINER_PROJECTS_BASE}/${projectCode}`
 }
+
+/**
+ * Home directory of the non-root user inside the agent container.
+ *
+ * The docker volume builder mounts `~/.claude`, `~/.codex` and the project's
+ * metadata dir relative to this path, and the three service installers emit
+ * the same `-v` / `-e HOME=` flags into their generated wrapper scripts. All
+ * four have to agree with the image's user, and a mismatch means the agent
+ * reads a different path than the one that was mounted — the container starts
+ * and the files are simply not there.
+ */
+export const CONTAINER_HOME = '/home/node'
+
+/**
+ * Per-project agent config dir inside the container.
+ *
+ * The host side (`projectConfigHostDir`) is bind-mounted here and the agent is
+ * pointed at it via `AI_SUPPORT_AGENT_CONFIG_DIR`. The mount target and the
+ * env var must be the same string; they were derived separately in four
+ * places.
+ */
+export const CONTAINER_AGENT_CONFIG_DIR = `${CONTAINER_HOME}/.ai-support-agent`
