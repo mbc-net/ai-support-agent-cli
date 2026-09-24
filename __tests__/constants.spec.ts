@@ -173,4 +173,30 @@ describe('constants', () => {
     expect(constants.API_ENDPOINTS.ALERT_STATUS('tenant1', 'PROJ_01', '42')).toBe('/api/tenant1/projects/PROJ_01/alerts/42/status')
     expect(constants.API_ENDPOINTS.ISSUES('tenant1', 'PROJ_01')).toBe('/api/tenant1/projects/PROJ_01/issues')
   })
+
+  /**
+   * The container-internal paths are pinned verbatim because three otherwise
+   * independent places have to agree with the agent image's layout: the
+   * oneshot shell executor's fallback cwd, the ECS task definition's writable
+   * volume mount point, and the docker volume builder's project mount base.
+   * A mismatch produces a container that starts fine and then fails on the
+   * first write, with no compile-time signal.
+   */
+  it('should pin the container workspace paths to the agent image layout', () => {
+    const constants = require('../src/constants')
+
+    expect(constants.CONTAINER_WORKSPACE_ROOT).toBe('/workspace')
+    expect(constants.CONTAINER_PROJECTS_BASE).toBe('/workspace/projects')
+    expect(constants.getContainerProjectDir('MY_PROJ')).toBe(
+      '/workspace/projects/MY_PROJ',
+    )
+  })
+
+  it('should derive the project dir from the projects base', () => {
+    const constants = require('../src/constants')
+
+    expect(constants.getContainerProjectDir('ANY')).toBe(
+      `${constants.CONTAINER_PROJECTS_BASE}/ANY`,
+    )
+  })
 })

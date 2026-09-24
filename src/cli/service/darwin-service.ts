@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
+import { getContainerProjectDir, CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
 import { readAgentCredentialEnv } from './agent-credential-env'
 import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
 import type { ProjectRegistration } from '../../types'
@@ -290,7 +290,7 @@ export function generateWrapperScript(opts: {
   // and is pinned via AI_SUPPORT_AGENT_PROJECT_DIR_MAP so the agent does NOT
   // re-derive `<configDir>/projects/<t>/<p>` and double-nest the workspace
   // tree.
-  const containerProjectDir = `/workspace/projects/${opts.projectCode}`
+  const containerProjectDir = getContainerProjectDir(opts.projectCode)
   // `||` (not `??`) so an empty string falls back to the default; an empty
   // hostProjectDir would emit `-v :/workspace/...:rw` which docker rejects.
   const hostProjectDir = opts.projectDir || path.dirname(opts.projectConfigHostDir)

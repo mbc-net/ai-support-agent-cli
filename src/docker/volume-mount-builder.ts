@@ -9,7 +9,11 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getConfigDir, loadConfig } from '../config-manager'
-import { ENV_VARS } from '../constants'
+import {
+  CONTAINER_WORKSPACE_ROOT,
+  ENV_VARS,
+  getContainerProjectDir,
+} from '../constants'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import {
@@ -21,8 +25,11 @@ import type { ProjectRegistration } from '../types'
 import { getErrorMessage, toContainerApiUrl, stripTrailingSlash } from '../utils'
 import { toPosixRelative } from './docker-utils'
 
-/** Container-internal base path for project directories */
-export const CONTAINER_PROJECTS_BASE = '/workspace/projects'
+// Re-exported so existing importers (and the spec) can keep importing it from
+// here; the canonical definition moved to `constants.ts` because the three
+// service installers need it too and cli/ must not depend on docker/.
+export { CONTAINER_PROJECTS_BASE } from '../constants'
+
 /** Container-internal home directory */
 export const CONTAINER_HOME = '/home/node'
 
@@ -121,7 +128,7 @@ function getContainerConfigDir(hostConfigDir: string, home: string): string {
   const isUnderHome = !relativeToHome.startsWith('..')
   return isUnderHome
     ? path.posix.join(CONTAINER_HOME, toPosixRelative(relativeToHome))
-    : '/workspace/.config/ai-support-agent'
+    : `${CONTAINER_WORKSPACE_ROOT}/.config/ai-support-agent`
 }
 
 /**
@@ -168,7 +175,7 @@ export function buildVolumeMounts(): { mounts: string[]; projectMappings: Projec
           logger.warn(`[docker] Skipping blocked path for volume mount: ${project.projectDir}`)
           continue
         }
-        const containerDir = `${CONTAINER_PROJECTS_BASE}/${project.projectCode}`
+        const containerDir = getContainerProjectDir(project.projectCode)
         mounts.push('-v', `${project.projectDir}:${containerDir}:rw`)
         projectMappings.push({
           hostDir: project.projectDir,
@@ -291,7 +298,7 @@ export function buildProjectVolumeMounts(
   // so the in-container `resolveProjectDir()` does NOT fall back to
   // `${CONFIG_DIR}/projects/<t>/<p>`, which lives INSIDE the metadata
   // mount and produces a doubly nested workspace tree on disk.
-  const containerProjectDir = `${CONTAINER_PROJECTS_BASE}/${project.projectCode}`
+  const containerProjectDir = getContainerProjectDir(project.projectCode)
   const blockedPrefixes = getBlockedMountPrefixes()
   let projectDirMounted = false
   if (project.projectDir && fs.existsSync(project.projectDir)) {
