@@ -9,6 +9,7 @@ import { loadConfig, getProjectList } from '../../config-manager'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { projectKey } from '../../project-key'
 import { ensureDir, getErrorMessage } from '../../utils'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
@@ -801,7 +802,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     // tolerates) so a typo'd entry's prior unit is still protected.
     const expectedUnitNames = new Set<string>()
     for (const project of projects) {
-      const fqn = `${project.tenantCode}/${project.projectCode}`
+      const fqn = projectKey(project)
       expectedUnitNames.add(
         safeUnitNames.get(fqn) ?? getProjectUnitName(project.tenantCode, project.projectCode),
       )
@@ -815,7 +816,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
     let failedCount = 0
     for (const project of projects) {
-      const fqn = `${project.tenantCode}/${project.projectCode}`
+      const fqn = projectKey(project)
       // Refuse to install when this project shares its sanitized unit name
       // with another configured project — we can't tell which one should
       // win, and last-write would silently lose the first.

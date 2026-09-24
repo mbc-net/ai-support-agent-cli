@@ -11,6 +11,7 @@ import type { ProjectStatus } from './types'
 import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { projectKey } from '../../project-key'
 import { ensureDir, getErrorMessage } from '../../utils'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
@@ -632,7 +633,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     let failedCount = 0
     for (const project of projects) {
       const { projectCode } = project
-      const fqn = `${project.tenantCode}/${projectCode}`
+      const fqn = projectKey(project)
       const collision = collisions.get(fqn)
       if (collision) {
         // Pick the more actionable message: literal duplicates ask the
