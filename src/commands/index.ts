@@ -114,6 +114,45 @@ function resolveCommandChatMode(
   return selectedMode
 }
 
+/**
+ * デバッグログに出す payload 項目。
+ *
+ * 各ハンドラが `logger.debug(`[file_read] path=...`)` のように自前で出して
+ * いたが、ラベルはハンドラのキーと一致していなければ意味を成さない。
+ * コピー&ペーストでラベルを直し忘れても型もテストも通り、**障害調査のときに
+ * 別のコマンドの名前が付いたログを読むことになる**。
+ *
+ * ラベルは `executeCommand` が受け取った `type` から作るので、ここには
+ * 「出す項目」だけを書く。取り違えようがない。
+ *
+ * `execute_command`（ラベルが `[shell]` で値を切り詰める）と `chat_cancel`
+ * （検証を伴う）は形が違うため、従来どおりハンドラ側で出す。
+ */
+const DEBUG_LOGGED_PAYLOAD_FIELDS: Partial<
+  Record<AgentCommandType, readonly string[]>
+> = {
+  file_read: ['path'],
+  file_write: ['path'],
+  file_list: ['path'],
+  file_rename: ['oldPath', 'newPath'],
+  file_delete: ['path'],
+  file_mkdir: ['path'],
+  process_kill: ['pid'],
+}
+
+/** `[<type>] key="value" ...` の形でデバッグログを出す */
+function logPayloadFields(
+  type: AgentCommandType,
+  p: Record<string, unknown>,
+): void {
+  const fields = DEBUG_LOGGED_PAYLOAD_FIELDS[type]
+  if (!fields) return
+  const rendered = fields
+    .map((field) => `${field}="${String(p[field] ?? '')}"`)
+    .join(' ')
+  logger.debug(`[${type}] ${rendered}`)
+}
+
 const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
   execute_command: async ({ p }) => {
     const cmd = p.command
@@ -121,50 +160,21 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     return executeShellCommand(p)
   },
 
-  file_read: async ({ p, fileBaseDir }) => {
-    const path = p.path
-    logger.debug(`[file_read] path="${String(path ?? '')}"`)
-    return fileRead(p, fileBaseDir)
-  },
+  file_read: async ({ p, fileBaseDir }) => fileRead(p, fileBaseDir),
 
-  file_write: async ({ p, fileBaseDir }) => {
-    const path = p.path
-    logger.debug(`[file_write] path="${String(path ?? '')}"`)
-    return fileWrite(p, fileBaseDir)
-  },
+  file_write: async ({ p, fileBaseDir }) => fileWrite(p, fileBaseDir),
 
-  file_list: async ({ p, fileBaseDir }) => {
-    const path = p.path
-    logger.debug(`[file_list] path="${String(path ?? '')}"`)
-    return fileList(p, fileBaseDir)
-  },
+  file_list: async ({ p, fileBaseDir }) => fileList(p, fileBaseDir),
 
-  file_rename: async ({ p, fileBaseDir }) => {
-    const oldPath = p.oldPath
-    const newPath = p.newPath
-    logger.debug(`[file_rename] oldPath="${String(oldPath ?? '')}" newPath="${String(newPath ?? '')}"`)
-    return fileRename(p, fileBaseDir)
-  },
+  file_rename: async ({ p, fileBaseDir }) => fileRename(p, fileBaseDir),
 
-  file_delete: async ({ p, fileBaseDir }) => {
-    const deletePath = p.path
-    logger.debug(`[file_delete] path="${String(deletePath ?? '')}"`)
-    return fileDelete(p, fileBaseDir)
-  },
+  file_delete: async ({ p, fileBaseDir }) => fileDelete(p, fileBaseDir),
 
-  file_mkdir: async ({ p, fileBaseDir }) => {
-    const mkdirPath = p.path
-    logger.debug(`[file_mkdir] path="${String(mkdirPath ?? '')}"`)
-    return fileMkdir(p, fileBaseDir)
-  },
+  file_mkdir: async ({ p, fileBaseDir }) => fileMkdir(p, fileBaseDir),
 
   process_list: async () => processList(),
 
-  process_kill: async ({ p }) => {
-    const pid = p.pid
-    logger.debug(`[process_kill] pid=${String(pid ?? '')}`)
-    return processKill(p)
-  },
+  process_kill: async ({ p }) => processKill(p),
 
   chat: async ({ p, opts }) => {
     if (!opts.commandId || !opts.client) {
@@ -388,6 +398,7 @@ export async function executeCommand(
       logger.warn(`Unknown command type: ${type}`)
       return errorResult(`Unknown command type: ${type}`)
     }
+    logPayloadFields(type as AgentCommandType, p)
     return await handler({ p, opts, fileBaseDir })
   } catch (error) {
     const message = getErrorMessage(error)
