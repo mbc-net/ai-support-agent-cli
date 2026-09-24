@@ -4,6 +4,7 @@ import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { isProjectCodeSafe, validateBindMountPathSync } from '../../security'
 import type { ProjectRegistration } from '../../types'
+import { projectKey } from '../../project-key'
 import { sanitizeNameSegment } from '../../utils'
 
 // Re-export the projectCode validators that now live in `src/security.ts` so
@@ -130,7 +131,7 @@ export function detectInstallCollisions(
   for (const project of projects) {
     if (!isProjectCodeSafe(project.tenantCode) || !isProjectCodeSafe(project.projectCode)) continue
     const name = nameFn(project.tenantCode, project.projectCode)
-    const fqn = `${project.tenantCode}/${project.projectCode}`
+    const fqn = projectKey(project)
     names.set(fqn, name)
     const existing = nameToFqns.get(name)
     if (existing) existing.push(fqn)

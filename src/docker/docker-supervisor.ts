@@ -32,6 +32,7 @@ import {
 import { t } from '../i18n'
 import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { removePidFile } from '../pid-manager'
+import { projectKey as toProjectKey } from '../project-key'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
 import { appendWithLimit, atomicWriteFile, getErrorMessage } from '../utils'
@@ -79,7 +80,7 @@ export class DockerSupervisor {
   }
 
   private projectKey(project: ProjectRegistration): string {
-    return `${project.tenantCode}/${project.projectCode}`
+    return toProjectKey(project)
   }
 
   private getProjectAgentId(project: ProjectRegistration): string | undefined {
