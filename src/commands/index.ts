@@ -2,10 +2,11 @@ import type { ApiClient } from '../api-client'
 import { ERR_CHAT_REQUIRES_CLIENT, ERR_E2E_TEST_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_REBOOT_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, ERR_UPDATE_REQUIRES_CALLBACK, ERR_SYNC_REPOSITORY_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import { getWorkspaceDir } from '../project-dir'
-import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, type ServerSetupExecPayload, type SshExecPayload, type SyncRepositoryPayload, successResult } from '../types'
+import { type AgentChatMode, type AgentCommandType, type CommandDispatch, type CommandResult, errorResult, type ServerSetupExecPayload, type SshExecPayload, type SyncRepositoryPayload, successResult } from '../types'
 import type { RepoSyncResult } from '../repo-sync'
 import { getErrorMessage } from '../utils'
 
+import { type AgentExecutionContext, forwardAgentExecutionContext } from './agent-execution-context'
 import { executeChatCommand } from './chat-executor'
 import { executeE2eScriptFix } from './e2e-script-fix-executor'
 import { executeE2eTest } from './e2e-test-executor'
@@ -15,19 +16,15 @@ import { processKill, processList } from './process-executor'
 import { executeShellCommand } from './shell-executor'
 
 /** Options for command execution */
-export interface ExecuteCommandOptions {
+export interface ExecuteCommandOptions extends AgentExecutionContext {
   commandId?: string
   client?: ApiClient
-  serverConfig?: AgentServerConfig
-  activeChatMode?: AgentChatMode
+  /**
+   * Whether `activeChatMode` was set explicitly rather than defaulted. Only
+   * `executeCommand` itself reads it when resolving the per-command mode, so
+   * it stays out of {@link AgentExecutionContext} and is never handed down.
+   */
   activeChatModeExplicit?: boolean
-  availableChatModes?: AgentChatMode[]
-  agentId?: string
-  projectDir?: string
-  projectConfig?: ProjectConfigResponse
-  mcpConfigPath?: string
-  tenantCode?: string
-  browserLocalPort?: number
   /**
    * `commandId` is passed through so a Docker-mode config sync/setup that
    * detects a customization change and fires `performDockerRebuild()` can
@@ -179,15 +176,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       payload: p,
       commandId: opts.commandId,
       client: opts.client,
-      serverConfig: opts.serverConfig,
-      activeChatMode,
-      availableChatModes: opts.availableChatModes,
-      agentId: opts.agentId,
-      projectDir: opts.projectDir,
-      projectConfig: opts.projectConfig,
-      mcpConfigPath: opts.mcpConfigPath,
-      tenantCode: opts.tenantCode,
-      browserLocalPort: opts.browserLocalPort,
+      ...forwardAgentExecutionContext(opts, { activeChatMode }),
     })
   },
 
@@ -257,17 +246,9 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       payload: p,
       commandId: opts.commandId,
       client: opts.client,
-      serverConfig: opts.serverConfig,
-      activeChatMode,
-      availableChatModes: opts.availableChatModes,
-      agentId: opts.agentId,
-      projectDir: opts.projectDir,
-      projectConfig: opts.projectConfig,
-      mcpConfigPath: opts.mcpConfigPath,
-      tenantCode: opts.tenantCode,
-      browserLocalPort: opts.browserLocalPort,
       getOrCreateBrowserSession: opts.getOrCreateBrowserSession,
       closeBrowserSession: opts.closeBrowserSession,
+      ...forwardAgentExecutionContext(opts, { activeChatMode }),
     })
   },
 
@@ -368,17 +349,9 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     return executeE2eScriptFix({
       payload: p as { testCaseId?: unknown; message?: unknown; currentScript?: unknown },
       client: opts.client,
-      tenantCode: opts.tenantCode,
       projectCode: opts.projectConfig?.project?.projectCode,
-      agentId: opts.agentId,
       commandId: opts.commandId,
-      serverConfig: opts.serverConfig,
-      activeChatMode,
-      availableChatModes: opts.availableChatModes,
-      projectDir: opts.projectDir,
-      projectConfig: opts.projectConfig,
-      mcpConfigPath: opts.mcpConfigPath,
-      browserLocalPort: opts.browserLocalPort,
+      ...forwardAgentExecutionContext(opts, { activeChatMode }),
     })
   },
 }
