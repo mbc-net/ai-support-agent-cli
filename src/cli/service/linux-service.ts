@@ -4,9 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getContainerProjectDir, CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
-import { readAgentCredentialEnv } from './agent-credential-env'
 import { loadConfig, getProjectList } from '../../config-manager'
-import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { projectKey } from '../../project-key'
@@ -19,13 +17,14 @@ import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import {
   assertProjectCodeIsSafe,
+  buildWrapperScriptBaseOptions,
   detectInstallCollisions,
   logPostInstallHints,
+  prepareProjectServiceDirs,
   reportInstallCollision,
   sanitizeServiceNameSegment,
   shellQuote,
   toContainerApiUrl,
-  validateProjectDirForMount,
 } from './wrapper-helpers'
 import {
   buildDockerRunWithLogRotate,
@@ -43,10 +42,7 @@ import type {
 import {
   getLinuxLogDir,
   getLinuxSystemdUserDir,
-  getProjectConfigHostDir,
   getProjectLogDir,
-  getProjectServiceDir,
-  getServicesDir,
   getUpdateScriptPath,
   getWrapperScriptPath,
   getAgentOutLog,
@@ -659,35 +655,25 @@ export function writeProjectServiceFiles(
   const systemdDir = getSystemdUserDir()
   ensureDir(systemdDir)
 
-  const servicesDir = getServicesDir()
-  const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  ensureDir(projectServiceDir, 0o700)
-
-  const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  ensureDir(projectConfigHostDir, 0o700)
-
-  // Validate project.projectDir the same way buildProjectVolumeMounts does on
-  // the interactive path. If the user-supplied dir is empty, doesn't exist,
-  // or points at a blocked path (/etc, ~/.ssh, etc.), drop it and let
-  // generateWrapperScript fall back to the default mount derived from
-  // projectConfigHostDir. Without this check the wrapper would emit
-  // `-v <bad-path>:/workspace/projects/<code>:rw` unconditionally and
-  // either crash on start (empty/missing) or expose host secrets to the
-  // container (blocked prefix).
-  const validatedProjectDir = validateProjectDirForMount(project.projectDir)
+  const { projectServiceDir, projectConfigHostDir, validatedProjectDir } =
+    prepareProjectServiceDirs({
+      projectKey,
+      tenantCode,
+      projectCode,
+      projectDir: project.projectDir,
+    })
 
   const updateScriptPath = getUpdateScriptPath()
   const wrapperScriptPath = getWrapperScriptPath(projectServiceDir)
   const wrapperScript = generateWrapperScript({
-    imageName: IMAGE_NAME,
-    tenantCode,
-    projectCode,
-    projectConfigHostDir,
-    projectDir: validatedProjectDir,
-    token: project.token,
-    apiUrl: project.apiUrl,
-    ...readAgentCredentialEnv(),
-    verbose: options.verbose,
+    ...buildWrapperScriptBaseOptions({
+      tenantCode,
+      projectCode,
+      projectConfigHostDir,
+      projectDir: validatedProjectDir,
+      project,
+      verbose: options.verbose,
+    }),
     updateScriptPath,
     logDir: projectLogDir,
   })

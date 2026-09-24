@@ -4,9 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getContainerProjectDir, CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS } from '../../constants'
-import { readAgentCredentialEnv } from './agent-credential-env'
 import { loadConfig, getProjectList } from '../../config-manager'
-import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { projectKey } from '../../project-key'
@@ -17,10 +15,7 @@ import {
 import type { ProjectRegistration } from '../../types'
 import { ensureDir, getErrorMessage } from '../../utils'
 import {
-  getProjectConfigHostDir,
   getProjectLogDir,
-  getProjectServiceDir,
-  getServicesDir,
   getWin32LogDir,
   getWin32WrapperScriptPath,
 } from '../../utils/path-utils'
@@ -29,12 +24,13 @@ import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ProjectStatus, ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
 import {
   assertProjectCodeIsSafe,
+  buildWrapperScriptBaseOptions,
   detectInstallCollisions,
   logPostInstallHints,
+  prepareProjectServiceDirs,
   reportInstallCollision,
   sanitizeServiceNameSegment,
   toContainerApiUrl,
-  validateProjectDirForMount,
 } from './wrapper-helpers'
 
 export { getCliEntryPoint, getNodePath }
@@ -325,26 +321,24 @@ export function writeAndRegisterProjectTask(
   const projectLogDir = getProjectLogDir(logDir, projectKey)
   ensureDir(projectLogDir, 0o700)
 
-  const servicesDir = getServicesDir()
-  const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  ensureDir(projectServiceDir, 0o700)
-
-  const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  ensureDir(projectConfigHostDir, 0o700)
-
-  const validatedProjectDir = validateProjectDirForMount(project.projectDir)
+  const { projectServiceDir, projectConfigHostDir, validatedProjectDir } =
+    prepareProjectServiceDirs({
+      projectKey,
+      tenantCode,
+      projectCode,
+      projectDir: project.projectDir,
+    })
 
   const wrapperScriptPath = getWin32WrapperScriptPath(projectServiceDir)
   const wrapperScript = generateWin32WrapperScript({
-    imageName: IMAGE_NAME,
-    tenantCode,
-    projectCode,
-    projectConfigHostDir,
-    projectDir: validatedProjectDir,
-    token: project.token,
-    apiUrl: project.apiUrl,
-    ...readAgentCredentialEnv(),
-    verbose: options.verbose,
+    ...buildWrapperScriptBaseOptions({
+      tenantCode,
+      projectCode,
+      projectConfigHostDir,
+      projectDir: validatedProjectDir,
+      project,
+      verbose: options.verbose,
+    }),
   })
   // The wrapper holds the token in plaintext — write it owner-only.
   fs.writeFileSync(wrapperScriptPath, wrapperScript, { encoding: 'utf-8', mode: 0o700 })
