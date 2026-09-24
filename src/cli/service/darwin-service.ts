@@ -4,7 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getContainerProjectDir, CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
-import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
+import { getConfigDir } from '../../config-manager'
 import type { ProjectRegistration } from '../../types'
 import type { ProjectStatus } from './types'
 import { t } from '../../i18n'
@@ -22,6 +22,7 @@ import {
   assertProjectCodeIsSafe,
   buildWrapperScriptBaseOptions,
   detectInstallCollisions,
+  loadConfiguredProjectsOrReport,
   logPostInstallHints,
   prepareProjectServiceDirs,
   reportInstallCollision,
@@ -598,13 +599,8 @@ export function installAndStartProject(
 export class DarwinServiceStrategy implements ServiceStrategy {
   async install(options: ServiceOptions): Promise<void> {
     // Load project list from config
-    const config = loadConfig()
-    const projects = config ? getProjectList(config) : []
-
-    if (projects.length === 0) {
-      logger.error(t('service.noProjectsConfigured'))
-      return
-    }
+    const projects = loadConfiguredProjectsOrReport()
+    if (!projects) return
 
     const logDir = getLogDir()
     ensureDir(logDir)

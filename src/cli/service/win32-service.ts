@@ -26,6 +26,7 @@ import {
   assertProjectCodeIsSafe,
   buildWrapperScriptBaseOptions,
   detectInstallCollisions,
+  loadConfiguredProjectsOrReport,
   logPostInstallHints,
   prepareProjectServiceDirs,
   reportInstallCollision,
@@ -359,13 +360,8 @@ export function writeAndRegisterProjectTask(
 
 export class Win32ServiceStrategy implements ServiceStrategy {
   install(options: ServiceOptions): void {
-    const config = loadConfig()
-    const projects = config ? getProjectList(config) : []
-
-    if (projects.length === 0) {
-      logger.error(t('service.noProjectsConfigured'))
-      return
-    }
+    const projects = loadConfiguredProjectsOrReport()
+    if (!projects) return
 
     const entryPoint = getCliEntryPoint()
     if (!fs.existsSync(entryPoint)) {

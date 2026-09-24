@@ -19,6 +19,7 @@ import {
   assertProjectCodeIsSafe,
   buildWrapperScriptBaseOptions,
   detectInstallCollisions,
+  loadConfiguredProjectsOrReport,
   logPostInstallHints,
   prepareProjectServiceDirs,
   reportInstallCollision,
@@ -756,13 +757,8 @@ export function installAndStartProject(
 
 export class LinuxServiceStrategy implements ServiceStrategy {
   install(options: ServiceOptions): void {
-    const config = loadConfig()
-    const projects = config ? getProjectList(config) : []
-
-    if (projects.length === 0) {
-      logger.error(t('service.noProjectsConfigured'))
-      return
-    }
+    const projects = loadConfiguredProjectsOrReport()
+    if (!projects) return
 
     const logDir = getLogDir()
     ensureDir(logDir)
