@@ -29,7 +29,6 @@ import {
   DOCKER_MARKER_REBUILD_NEEDED,
   DOCKER_MARKER_REGISTERED_AGENT_ID,
   DOCKER_RESTART_EXIT_CODE,
-  DOCKER_UPDATE_EXIT_CODE,
   INITIAL_CONFIG_SYNC_MAX_RETRIES,
   INITIAL_CONFIG_SYNC_RETRY_DELAY_MS,
   REGISTER_AUTH_ERROR_DELAY_MS,
@@ -45,6 +44,7 @@ import { getConfigDir } from './config-manager'
 import { detectEcsLauncherCapability } from './ecs/launcher-capability'
 import { t } from './i18n'
 import { logger } from './logger'
+import { exitIfDockerUpdateRestart } from './docker-update-exit'
 import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import {
@@ -57,7 +57,6 @@ import type { AdmissionMode, AdmissionResult, AgentChatMode, ProjectRegistration
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
 import { describeSelfUpdateBlockReason, resolveSelfUpdateCapability } from './self-update-capability'
-import { getUpdateVersionFilePath } from './utils/path-utils'
 import { atomicWriteFile, getErrorMessage, isAuthenticationError, isInDocker, resolveUrlForDocker, sleep } from './utils'
 import { readMarkerFile } from './utils/marker-file'
 
@@ -758,15 +757,7 @@ export class ProjectAgent {
       // Inside a Docker container (spawned via `docker run`), process.send is
       // not available. Exit with DOCKER_UPDATE_EXIT_CODE so the host-side
       // DockerSupervisor detects the update and calls installUpdateAndRestart().
-      if (isInDocker()) {
-        try {
-          atomicWriteFile(getUpdateVersionFilePath(), JSON.stringify({ version: targetVersion }))
-        } catch (err: unknown) {
-          logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
-        }
-        process.exit(DOCKER_UPDATE_EXIT_CODE)
-        return
-      }
+      exitIfDockerUpdateRestart(targetVersion)
       // When running as a child process (forked by ChildProcessManager),
       // notify the parent runner and exit cleanly.
       if (process.send) {
