@@ -26,6 +26,7 @@ import {
   sanitizeServiceNameSegment,
   shellQuote,
   toContainerApiUrl,
+  type WrapperScriptBaseOptions,
 } from './wrapper-helpers'
 import {
   buildDockerRunWithLogRotate,
@@ -349,33 +350,23 @@ WantedBy=default.target
 }
 
 /** Generate a bash wrapper script that runs docker for one project */
-export function generateWrapperScript(opts: {
-  imageName: string
-  tenantCode: string
-  projectCode: string
-  projectConfigHostDir: string
-  projectDir?: string
-  token: string
-  apiUrl: string
-  anthropicApiKey?: string
-  claudeCodeOauthToken?: string
-  codexApiKey?: string
-  codexAccessToken?: string
-  verbose?: boolean
-  updateScriptPath: string
-  /**
-   * Per-project log directory. When set, the wrapper redirects the docker
-   * subprocess's stdout and stderr into separate `ai-support-agent
-   * log-rotate --no-tee` subprocesses, producing `agent.out.log` /
-   * `agent.err.log` (plus rotated generations `.1` … `.N`) under this
-   * directory. The systemd unit's `StandardOutput` / `StandardError`
-   * point at separate `wrapper.out.log` / `wrapper.err.log` files (NOT
-   * the rotator-owned paths) to avoid a double-write race where
-   * systemd's open fd would otherwise keep appending to a rotated
-   * generation.
-   */
-  logDir?: string
-}): string {
+export function generateWrapperScript(
+  opts: WrapperScriptBaseOptions & {
+    updateScriptPath: string
+    /**
+     * Per-project log directory. When set, the wrapper redirects the docker
+     * subprocess's stdout and stderr into separate `ai-support-agent
+     * log-rotate --no-tee` subprocesses, producing `agent.out.log` /
+     * `agent.err.log` (plus rotated generations `.1` … `.N`) under this
+     * directory. The systemd unit's `StandardOutput` / `StandardError`
+     * point at separate `wrapper.out.log` / `wrapper.err.log` files (NOT
+     * the rotator-owned paths) to avoid a double-write race where
+     * systemd's open fd would otherwise keep appending to a rotated
+     * generation.
+     */
+    logDir?: string
+  },
+): string {
   const containerHome = CONTAINER_HOME
   const containerConfigDir = CONTAINER_AGENT_CONFIG_DIR
   const homeDir = os.homedir()

@@ -32,6 +32,7 @@ import {
   reportInstallCollision,
   sanitizeServiceNameSegment,
   toContainerApiUrl,
+  type WrapperScriptBaseOptions,
 } from './wrapper-helpers'
 
 export { getCliEntryPoint, getNodePath }
@@ -151,20 +152,9 @@ function assertCmdSafe(value: string, field: string): void {
  * the installed CLI version at runtime, auto-builds the image if missing, and
  * removes any stale container before `docker run`.
  */
-export function generateWin32WrapperScript(opts: {
-  imageName: string
-  tenantCode: string
-  projectCode: string
-  projectConfigHostDir: string
-  projectDir?: string
-  token: string
-  apiUrl: string
-  anthropicApiKey?: string
-  claudeCodeOauthToken?: string
-  codexApiKey?: string
-  codexAccessToken?: string
-  verbose?: boolean
-}): string {
+export function generateWin32WrapperScript(
+  opts: WrapperScriptBaseOptions,
+): string {
   const containerHome = CONTAINER_HOME
   const containerConfigDir = CONTAINER_AGENT_CONFIG_DIR
   const homeDir = os.homedir()
