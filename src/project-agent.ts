@@ -13,6 +13,7 @@ import {
   startSubscriptionMode,
   startTerminalWebSocket,
   startVsCodeTunnel,
+  shutdownRdpRelay,
   stopTransport,
   type TransportDeps,
   type TransportState,
@@ -447,6 +448,9 @@ export class ProjectAgent {
       logger.debug(`${this.prefix} Skipping releaseSelf(): this replica never held a slot`)
     }
 
+    // RDP tunnels are torn down asynchronously (subprocesses, SSH
+    // connections); wait for that before the process is allowed to exit.
+    await shutdownRdpRelay(this.transportState)
     stopTransport(this.transportState)
   }
 

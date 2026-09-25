@@ -347,6 +347,52 @@ describe('Dockerfile content validation', () => {
       })
     })
 
+    describe('tailscale (RDP の Tailscale 経路で tailscaled をセッションごとに起動する)', () => {
+      // src/rdp/rdp-tunnel-tailscale.ts が `tailscaled` と `tailscale` を PATH から
+      // 起動する。どちらかが欠けるとハートビートで tailscale 経路を申告しない
+      // （rdp-tunnel-support.ts）。公式の静的バイナリを版固定・SHA-256 検証で入れる。
+      const normalized = (): string => content.replace(/\\\r?\n\s*/g, ' ')
+
+      it('pins TAILSCALE_VERSION to an exact version (not "latest")', () => {
+        expect(content).toMatch(/ARG TAILSCALE_VERSION=\d+\.\d+\.\d+\b/)
+      })
+
+      it('downloads the official static tarball from pkgs.tailscale.com, branching on dpkg architecture', () => {
+        expect(content).toMatch(
+          /https:\/\/pkgs\.tailscale\.com\/stable\/tailscale_\$\{TAILSCALE_VERSION\}_\$\{TAILSCALE_ARCH\}\.tgz/,
+        )
+        expect(content).toMatch(/TAILSCALE_ARCH="arm64"/)
+        expect(content).toMatch(/TAILSCALE_ARCH="amd64"/)
+      })
+
+      it('pins a SHA-256 checksum for each architecture and verifies it before extracting', () => {
+        expect(content).toMatch(/ARG TAILSCALE_SHA256_AMD64=[0-9a-f]{64}\b/)
+        expect(content).toMatch(/ARG TAILSCALE_SHA256_ARM64=[0-9a-f]{64}\b/)
+        const text = normalized()
+        expect(text).toMatch(/echo "\$\{?TAILSCALE_SHA256\}?\s+\/tmp\/tailscale\.tgz" \| sha256sum -c -/)
+        const verifyIdx = text.indexOf('/tmp/tailscale.tgz" | sha256sum -c -')
+        const extractIdx = text.indexOf('tar -xzf /tmp/tailscale.tgz')
+        expect(verifyIdx).toBeGreaterThan(-1)
+        expect(extractIdx).toBeGreaterThan(verifyIdx)
+      })
+
+      it('★ the comment describes the tailscale nc + unix socket design, not a SOCKS5 proxy', () => {
+        const start = content.indexOf('# Tailscale (tailscaled + tailscale CLI)')
+        const block = content.slice(start, content.indexOf('ARG TAILSCALE_VERSION'))
+        expect(block).toMatch(/tailscale nc/)
+        expect(block).toMatch(/unix socket/i)
+        expect(block).not.toMatch(/SOCKS5/)
+      })
+
+      it('installs both tailscaled and tailscale to /usr/local/bin and smoke-checks them', () => {
+        const text = normalized()
+        expect(text).toMatch(/\/usr\/local\/bin\/tailscaled\b/)
+        expect(text).toMatch(/\/usr\/local\/bin\/tailscale\b/)
+        expect(text).toMatch(/&& tailscaled --version\b/)
+        expect(text).toMatch(/&& tailscale version\b/)
+      })
+    })
+
     describe('lazygit binary (lazygit.nvim shells out to it)', () => {
       // lazygit.nvim (bundled in docker/nvim/init.lua) launches the `lazygit`
       // TUI as an external process — it is not an nvim plugin dependency that

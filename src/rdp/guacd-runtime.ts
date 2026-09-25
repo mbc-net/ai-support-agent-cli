@@ -61,6 +61,10 @@ export function buildGuacdDockerArgs(options: GuacdRuntimeOptions): string[] {
       `GUACD_HOST=${endpoint.host}`,
       '-e',
       `GUACD_PORT=${endpoint.port}`,
+      // RDP tunnel relay: listen on this container's ais-rdp address and admit
+      // only guacd (src/rdp/rdp-tunnel.ts). Explicit, never guessed.
+      '-e',
+      `${ENV_VARS.RDP_TUNNEL_LISTEN}=docker-network`,
     ]
   } catch (error) {
     logger.warn(

@@ -51,6 +51,13 @@ describe('buildGuacdDockerArgs（Docker 形態）', () => {
     expect(joined).toContain('GUACD_PORT=4822')
   })
 
+  it('★ RDP トンネル中継の待ち受けを docker-network と明示する', () => {
+    const args = buildGuacdDockerArgs({ rdp: true })
+    const index = args.indexOf('AI_SUPPORT_AGENT_RDP_TUNNEL_LISTEN=docker-network')
+    expect(index).toBeGreaterThan(0)
+    expect(args[index - 1]).toBe('-e')
+  })
+
   it('イメージ指定を引き渡す', () => {
     buildGuacdDockerArgs({ rdp: true, guacdImage: 'registry/guacd:1.5.5' })
     expect(ensureGuacdContainer).toHaveBeenCalledWith(

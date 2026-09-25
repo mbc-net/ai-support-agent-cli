@@ -39,13 +39,26 @@ import {
   SSM_KILL_GRACE_MS,
   SSM_PORT_POLL_INTERVAL_MS,
   SSM_PORT_PROBE_TIMEOUT_MS,
-  SSM_STDERR_MAX_BYTES,
 } from '../../constants'
 import { logger } from '../../logger'
 import type { SsmAwsCredentials } from '../../types/project'
 import { getAddressPort } from '../../utils'
 import { buildAwsCredentialEnv } from '../../utils/aws-credential-env'
+import { trackChildProcess } from '../../utils/child-process-reaper'
+import { createClosedSignal } from '../../utils/closed-signal'
+import { captureStderrTail } from '../../utils/stderr-tail'
 import type { DbTunnel, TunnelTarget } from './db-tunnel'
+
+/**
+ * An SSM port forward. Besides the `DbTunnel` shape it reports when the
+ * session-manager-plugin subprocess ends, so a long-lived user (the RDP relay)
+ * can end its session with the tunnel instead of waiting for the next dial to
+ * fail. The per-query DB path ignores it.
+ */
+export interface SsmTunnel extends DbTunnel {
+  /** Fires once when the subprocess exits after the forward was established. */
+  onClosed: (listener: (reason: string) => void) => void
+}
 
 export interface SsmTunnelParams {
   instanceId: string
@@ -96,7 +109,7 @@ function probePort(port: number): Promise<boolean> {
  * SIGKILL if it has not exited within the grace window. Resolves once the
  * process is confirmed gone (or was already gone).
  */
-function killSubprocess(child: ChildProcess): Promise<void> {
+export function killSubprocess(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) {
       resolve()
@@ -123,7 +136,7 @@ function killSubprocess(child: ChildProcess): Promise<void> {
  * Open an SSM local port forward to `target` on `instanceId`. Returns the local
  * endpoint to connect to and a `close()` that tears down the subprocess.
  */
-export async function openSsmTunnel(params: SsmTunnelParams): Promise<DbTunnel> {
+export async function openSsmTunnel(params: SsmTunnelParams): Promise<SsmTunnel> {
   const { instanceId, region, awsCredentials, target } = params
   if (!instanceId || !region) {
     throw new Error('SSM tunnel requires instanceId and region to be set')
@@ -154,21 +167,12 @@ export async function openSsmTunnel(params: SsmTunnelParams): Promise<DbTunnel> 
 
   // stdin/stdout ignored (see file-level SECURITY note); stderr piped so the
   // failure reason is available when the handshake never completes.
-  const child = spawn('aws', args, { env, stdio: ['ignore', 'ignore', 'pipe'] })
+  // Tracked so the subprocess cannot outlive the agent (child-process-reaper).
+  const child = trackChildProcess(spawn('aws', args, { env, stdio: ['ignore', 'ignore', 'pipe'] }))
 
-  // Retain only the most recent SSM_STDERR_MAX_BYTES of stderr (the tail, where
-  // the failure reason appears) so a chatty plugin cannot grow this unbounded.
-  let stderrBuf = ''
-  child.stderr?.on('data', (chunk: Buffer | string) => {
-    stderrBuf += chunk.toString()
-    if (stderrBuf.length > SSM_STDERR_MAX_BYTES) {
-      stderrBuf = stderrBuf.slice(stderrBuf.length - SSM_STDERR_MAX_BYTES)
-    }
-  })
-  const stderrTail = (): string => {
-    const trimmed = stderrBuf.trim()
-    return trimmed ? `: ${trimmed}` : ''
-  }
+  // Only the tail of stderr is retained (where the failure reason appears), so
+  // a chatty plugin cannot grow it unbounded.
+  const stderrTail = captureStderrTail(child.stderr)
 
   const timeoutMs = params.timeoutMs ?? DB_CONNECT_TIMEOUT_MS
 
@@ -205,7 +209,7 @@ export async function openSsmTunnel(params: SsmTunnelParams): Promise<DbTunnel> 
           return
         }
         if (Date.now() >= deadline) {
-          settle(new Error(`Timed out waiting for the SSM port forward on 127.0.0.1:${localPort} after ${timeoutMs}ms${stderrTail()}`))
+          settle(new Error(`Timed out waiting for the SSM port forward on ${LOCALHOST_ADDRESS}:${localPort} after ${timeoutMs}ms${stderrTail()}`))
           return
         }
         pollTimer = setTimeout(poll, SSM_PORT_POLL_INTERVAL_MS)
@@ -232,13 +236,19 @@ export async function openSsmTunnel(params: SsmTunnelParams): Promise<DbTunnel> 
     )
   })
 
+  const exited = createClosedSignal()
+  child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+    exited.close(`SSM session subprocess exited (code=${code}, signal=${signal})`)
+  })
+
   logger.debug(
-    `[db-ssm-tunnel] SSM port forward established 127.0.0.1:${localPort} -> ${target.host}:${target.port} via ${instanceId}`,
+    `[db-ssm-tunnel] SSM port forward established ${LOCALHOST_ADDRESS}:${localPort} -> ${target.host}:${target.port} via ${instanceId}`,
   )
 
   return {
     host: LOCALHOST_ADDRESS,
     port: localPort,
     close: () => killSubprocess(child),
+    onClosed: (listener) => exited.onClosed(listener),
   }
 }

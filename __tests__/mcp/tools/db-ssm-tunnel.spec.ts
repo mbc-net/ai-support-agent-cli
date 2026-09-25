@@ -250,6 +250,31 @@ describe('openSsmTunnel', () => {
     await tunnel.close()
   })
 
+  it('onClosed fires when the subprocess exits after the port forward is established', async () => {
+    const tunnel = await openSsmTunnel(params())
+    const reasons: string[] = []
+    tunnel.onClosed((reason) => reasons.push(reason))
+    lastChild.emit('exit', 255, null)
+    expect(reasons).toEqual(['SSM session subprocess exited (code=255, signal=null)'])
+  })
+
+  it('★ onClosed registered after the subprocess exited is called asynchronously (microtask), not re-entrantly', async () => {
+    const tunnel = await openSsmTunnel(params())
+    lastChild.emit('exit', 0, null)
+    const seen: string[] = []
+    tunnel.onClosed((reason) => seen.push(reason))
+    expect(seen).toEqual([])
+    await Promise.resolve()
+    expect(seen).toEqual(['SSM session subprocess exited (code=0, signal=null)'])
+  })
+
+  it('onClosed registered after the subprocess exited is called right away', async () => {
+    const tunnel = await openSsmTunnel(params())
+    lastChild.emit('exit', 0, null)
+    const reason = await new Promise<string>((resolve) => tunnel.onClosed(resolve))
+    expect(reason).toBe('SSM session subprocess exited (code=0, signal=null)')
+  })
+
   it('close() SIGTERMs the subprocess', async () => {
     const tunnel = await openSsmTunnel(params())
     await tunnel.close()

@@ -57,6 +57,7 @@ describe('generateK8sManifest — guacd サイドカー', () => {
       const agent = containers(generateK8sManifest(BASE))[0]
       const env = (agent.env as Record<string, unknown>[]).map((e) => e.name)
       expect(env).not.toContain('GUACD_HOST')
+      expect(env).not.toContain('AI_SUPPORT_AGENT_RDP_TUNNEL_LISTEN')
     })
   })
 
@@ -75,6 +76,15 @@ describe('generateK8sManifest — guacd サイドカー', () => {
       const env = agent.env as Record<string, unknown>[]
       expect(env).toContainEqual({ name: 'GUACD_HOST', value: '127.0.0.1' })
       expect(env).toContainEqual({ name: 'GUACD_PORT', value: '4822' })
+    })
+
+    it('★ RDP トンネル中継の待ち受けを loopback と明示する（Pod 内で guacd と名前空間を共有）', () => {
+      const agent = containers(manifest())[0]
+      const env = agent.env as Record<string, unknown>[]
+      expect(env).toContainEqual({
+        name: 'AI_SUPPORT_AGENT_RDP_TUNNEL_LISTEN',
+        value: 'loopback',
+      })
     })
 
     it('★ 待受を loopback に限定する（ポートを公開しないだけでは足りない）', () => {
@@ -194,6 +204,21 @@ describe('generateEcsManifest — guacd サイドカー', () => {
     const agent = definitions({ ...ECS_BASE, rdp: true })[0]
     const env = agent.environment as Record<string, unknown>[]
     expect(env).toContainEqual({ name: 'GUACD_HOST', value: '127.0.0.1' })
+  })
+
+  it('★ RDP トンネル中継の待ち受けを loopback と明示する（awsvpc で名前空間を共有）', () => {
+    const agent = definitions({ ...ECS_BASE, rdp: true })[0]
+    const env = agent.environment as Record<string, unknown>[]
+    expect(env).toContainEqual({
+      name: 'AI_SUPPORT_AGENT_RDP_TUNNEL_LISTEN',
+      value: 'loopback',
+    })
+  })
+
+  it('RDP 無効ならトンネル中継の待ち受けも設定しない', () => {
+    const agent = definitions(ECS_BASE)[0]
+    const names = (agent.environment as Record<string, unknown>[]).map((e) => e.name)
+    expect(names).not.toContain('AI_SUPPORT_AGENT_RDP_TUNNEL_LISTEN')
   })
 
   it('★ guacd を essential にしない（落ちてもタスクを止めない）', () => {
