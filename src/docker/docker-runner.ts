@@ -8,6 +8,7 @@
 import { spawn } from 'child_process'
 import * as os from 'os'
 
+import type { AgentRunOptions } from '../agent-run-options'
 import { ApiClient } from '../api-client'
 import { type AutoUpdaterHandle, startAutoUpdater } from '../auto-updater'
 import { resolveAutoUpdateEnablement } from '../auto-update-enablement'
@@ -40,18 +41,11 @@ import { buildVolumeMounts, buildEnvArgs } from './volume-mount-builder'
 import { DockerSupervisor } from './docker-supervisor'
 import { installUpdateAndRestart } from './update-handler'
 
-export interface DockerRunOptions {
+export interface DockerRunOptions extends AgentRunOptions {
   /** Web RDP を有効にし、guacd サイドカーを用意する。 */
   rdp?: boolean
   /** guacd のイメージ。 */
   guacdImage?: string
-  token?: string
-  apiUrl?: string
-  pollInterval?: number
-  heartbeatInterval?: number
-  verbose?: boolean
-  autoUpdate?: boolean
-  updateChannel?: string
   dockerfile?: string
   dockerfileSync?: boolean
   /**
@@ -59,11 +53,6 @@ export interface DockerRunOptions {
    * build it locally). Overrides config.dockerImagePull.
    */
   imagePull?: boolean
-  /**
-   * Filter to a single project. Format: "tenantCode/projectCode"
-   * When set, only the matching project is started.
-   */
-  project?: string
   /** Agent ID for log streaming */
   agentId?: string
   /**

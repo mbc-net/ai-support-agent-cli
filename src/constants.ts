@@ -40,6 +40,13 @@ export const ENV_VARS = {
   // from the Web: running an arbitrary image is exactly what the capability
   // allowlist exists to prevent.
   GUACD_IMAGE: 'AI_SUPPORT_AGENT_GUACD_IMAGE',
+  // Where the RDP tunnel relay listens for guacd (src/rdp/rdp-tunnel.ts):
+  // 'loopback' (K8s / ECS, guacd shares the network namespace; set by the
+  // generated manifests) or 'docker-network' (Docker form, set by
+  // buildGuacdDockerArgs). Unset = tunnel routes are refused and not reported.
+  // Deliberately explicit: guessing the address guacd can reach would either
+  // silently fail or open an unauthenticated relay to the wrong peers.
+  RDP_TUNNEL_LISTEN: 'AI_SUPPORT_AGENT_RDP_TUNNEL_LISTEN',
   ALLOW_HTTP: 'AI_SUPPORT_AGENT_ALLOW_HTTP',
   PROJECT_DIR_MAP: 'AI_SUPPORT_AGENT_PROJECT_DIR_MAP',
   TERMINAL_GRACE_MS: 'AI_SUPPORT_AGENT_TERMINAL_GRACE_MS',
@@ -741,3 +748,55 @@ export const TAILSCALE_SOCKS_PORT = 1055
  * logged.
  */
 export const TAILSCALE_AUTHKEY_ENV_VAR = 'TS_AUTHKEY'
+
+// === Container-internal paths (must match the agent image's layout) ===
+/**
+ * Writable workspace root inside the agent container.
+ *
+ * The agent image sets `WORKDIR /workspace`, so three independent places have
+ * to agree on this value: the oneshot shell executor's fallback cwd, the ECS
+ * task definition's writable volume mount point (required when
+ * `readonlyRootFilesystem` is set), and the docker volume builder's project
+ * mount base. They were literals in three files; changing the image's WORKDIR
+ * while missing one of them produces a container that starts fine and then
+ * fails on the first write, with no compile-time signal.
+ */
+export const CONTAINER_WORKSPACE_ROOT = '/workspace'
+
+/** Container-internal base path for project directories. */
+export const CONTAINER_PROJECTS_BASE = `${CONTAINER_WORKSPACE_ROOT}/projects`
+
+/**
+ * Container-internal directory a project's host directory is mounted at.
+ *
+ * The three service installers (linux / darwin / win32) each built this string
+ * themselves while the docker volume builder derived it from
+ * {@link CONTAINER_PROJECTS_BASE}. The generated `-v <host>:<this>:rw` flag and
+ * the mount the agent actually expects must match exactly, and a mismatch
+ * surfaces only at run time as an empty project directory.
+ */
+export function getContainerProjectDir(projectCode: string): string {
+  return `${CONTAINER_PROJECTS_BASE}/${projectCode}`
+}
+
+/**
+ * Home directory of the non-root user inside the agent container.
+ *
+ * The docker volume builder mounts `~/.claude`, `~/.codex` and the project's
+ * metadata dir relative to this path, and the three service installers emit
+ * the same `-v` / `-e HOME=` flags into their generated wrapper scripts. All
+ * four have to agree with the image's user, and a mismatch means the agent
+ * reads a different path than the one that was mounted — the container starts
+ * and the files are simply not there.
+ */
+export const CONTAINER_HOME = '/home/node'
+
+/**
+ * Per-project agent config dir inside the container.
+ *
+ * The host side (`projectConfigHostDir`) is bind-mounted here and the agent is
+ * pointed at it via `AI_SUPPORT_AGENT_CONFIG_DIR`. The mount target and the
+ * env var must be the same string; they were derived separately in four
+ * places.
+ */
+export const CONTAINER_AGENT_CONFIG_DIR = `${CONTAINER_HOME}/.ai-support-agent`

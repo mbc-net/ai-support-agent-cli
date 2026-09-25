@@ -1,10 +1,22 @@
 import * as fs from 'fs'
 
+import { getProjectList, loadConfig } from '../../config-manager'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
 import { isProjectCodeSafe, validateBindMountPathSync } from '../../security'
 import type { ProjectRegistration } from '../../types'
-import { sanitizeNameSegment } from '../../utils'
+import { projectKey } from '../../project-key'
+import { ensureDir, sanitizeNameSegment } from '../../utils'
+import {
+  getProjectConfigHostDir,
+  getProjectServiceDir,
+  getServicesDir,
+} from '../../utils/path-utils'
+import { IMAGE_NAME } from '../../docker/docker-utils'
+import {
+  type AgentCredentialEnv,
+  readAgentCredentialEnv,
+} from './agent-credential-env'
 
 // Re-export the projectCode validators that now live in `src/security.ts` so
 // existing call sites (linux-service / darwin-service) can continue to import
@@ -130,7 +142,7 @@ export function detectInstallCollisions(
   for (const project of projects) {
     if (!isProjectCodeSafe(project.tenantCode) || !isProjectCodeSafe(project.projectCode)) continue
     const name = nameFn(project.tenantCode, project.projectCode)
-    const fqn = `${project.tenantCode}/${project.projectCode}`
+    const fqn = projectKey(project)
     names.set(fqn, name)
     const existing = nameToFqns.get(name)
     if (existing) existing.push(fqn)
@@ -153,4 +165,168 @@ export function detectInstallCollisions(
     }
   }
   return { names, collisions }
+}
+
+/**
+ * Log the install-time collision error for one project, deduped so an
+ * N-times-listed entry doesn't produce N identical error lines.
+ *
+ * Picks the more actionable message: literal duplicates ask the user to
+ * "remove the duplicate row"; sanitize-collisions ask them to "rename one of
+ * the projectCodes". A single config can exhibit BOTH at once (the duplicate
+ * row AND a sibling that collides); when that happens we want both hints to
+ * fire — so the dedup key is the (name, messageKey) tuple, not just the name.
+ * Otherwise the row-order of config would silently decide which hint the
+ * user sees.
+ *
+ * `reported` is owned by the caller so the dedup scope is one install run.
+ * Shared by all three platforms (linux unit names, darwin plist labels,
+ * win32 scheduled-task names) so the collision semantics cannot drift.
+ */
+export function reportInstallCollision(
+  projectCode: string,
+  collision: CollisionInfo,
+  reported: Set<string>,
+): void {
+  const messageKey = collision.isDuplicate
+    ? 'service.projectDuplicateEntry'
+    : 'service.projectUnitNameCollision'
+  const dedupKey = `${collision.name}\x00${messageKey}`
+  if (reported.has(dedupKey)) return
+  logger.error(t(messageKey, {
+    projectCode,
+    unitName: collision.name,
+    others: collision.others.join(', '),
+  }))
+  reported.add(dedupKey)
+}
+
+/**
+ * Emit the post-install hints (how to start, where the logs live, and that
+ * there is no log rotation).
+ *
+ * The caller decides WHETHER to emit them — each platform counts successful
+ * installs differently (`installedCount` vs `writtenUnits.length`) — but the
+ * lines themselves must stay identical across platforms, so they live here.
+ */
+export function logPostInstallHints(logDir: string): void {
+  logger.info(t('service.loadHintMulti'))
+  logger.info(t('service.logDir', { path: logDir }))
+  logger.info(t('service.noLogRotation'))
+}
+
+/**
+ * ラッパースクリプト生成に渡す、プラットフォーム共通のオプション。
+ *
+ * linux / darwin / win32 の各インストーラが同じ 9 項目を組み立てていた。
+ * 特に `...readAgentCredentialEnv()` の展開を 1 つのプラットフォームで
+ * 書き忘れると、そのプラットフォームだけ ANTHROPIC_API_KEY 等を持たない
+ * コンテナが起動する。**コンテナ自体は正常に起動する**ので、症状は実行時に
+ * チャットが失敗する形でしか出ない。
+ *
+ * `updateScriptPath` / `logDir` は win32 のラッパーが受け取らないため、
+ * 必要なプラットフォームだけが呼び出し側で足す。
+ */
+export interface WrapperScriptBaseOptions extends AgentCredentialEnv {
+  imageName: string
+  tenantCode: string
+  projectCode: string
+  projectConfigHostDir: string
+  projectDir?: string
+  token: string
+  apiUrl: string
+  verbose?: boolean
+}
+
+/**
+ * 各インストーラが `generateWrapperScript` / `generateWin32WrapperScript` に
+ * 渡す共通部分を組み立てる。
+ *
+ * 認証情報は**ここで一度だけ** `readAgentCredentialEnv()` から読む。
+ */
+export function buildWrapperScriptBaseOptions(params: {
+  tenantCode: string
+  projectCode: string
+  projectConfigHostDir: string
+  projectDir?: string
+  project: Pick<ProjectRegistration, 'token' | 'apiUrl'>
+  verbose?: boolean
+}): WrapperScriptBaseOptions {
+  return {
+    imageName: IMAGE_NAME,
+    tenantCode: params.tenantCode,
+    projectCode: params.projectCode,
+    projectConfigHostDir: params.projectConfigHostDir,
+    projectDir: params.projectDir,
+    token: params.project.token,
+    apiUrl: params.project.apiUrl,
+    ...readAgentCredentialEnv(),
+    verbose: params.verbose,
+  }
+}
+
+/**
+ * サービスファイルを書き出す前に必要なディレクトリを用意し、
+ * プロジェクトディレクトリの妥当性を検証する。
+ *
+ * 3 つのインストーラが逐語で同じ 3 手順を持っていた。特に
+ * `validateProjectDirForMount` を落とすと、空・不存在・ブロック対象
+ * （`/etc`・`~/.ssh` 等）のパスがそのまま `-v <bad>:/workspace/...:rw` として
+ * 出力され、起動失敗かホストの機密のコンテナ露出につながる。
+ *
+ * @returns 書き出し先と、マウントに使ってよいと判断されたプロジェクトディレクトリ
+ */
+export function prepareProjectServiceDirs(params: {
+  projectKey: string
+  tenantCode: string
+  projectCode: string
+  projectDir?: string
+}): {
+  projectServiceDir: string
+  projectConfigHostDir: string
+  validatedProjectDir: string | undefined
+} {
+  const projectServiceDir = getProjectServiceDir(
+    getServicesDir(),
+    params.projectKey,
+  )
+  ensureDir(projectServiceDir, 0o700)
+
+  const projectConfigHostDir = getProjectConfigHostDir(
+    params.tenantCode,
+    params.projectCode,
+  )
+  ensureDir(projectConfigHostDir, 0o700)
+
+  return {
+    projectServiceDir,
+    projectConfigHostDir,
+    validatedProjectDir: validateProjectDirForMount(params.projectDir),
+  }
+}
+
+/**
+ * 設定から登録済みプロジェクト一覧を読み、1 件も無ければ理由をログに出して
+ * `null` を返す。
+ *
+ * linux / darwin / win32 の 3 つのインストーラが `install()` の冒頭で同じ
+ * 8 行を持っていた。「設定が無い」と「プロジェクトが 0 件」は利用者から見れば
+ * 同じ状況（何もインストールできない）なので、両方をここで空扱いに畳む。
+ *
+ * 呼び出し側は `if (!projects) return` で中断する。空配列ではなく `null` を
+ * 返すのは、**中断すべきかどうかを呼び出し側が判定し直さずに済ませる**ため。
+ * 空配列を返すと、各インストーラが再び `projects.length === 0` を書くことに
+ * なり、そのときログ出力を添え忘れれば「何も起きずに正常終了した」ように
+ * 見える。
+ */
+export function loadConfiguredProjectsOrReport(): ProjectRegistration[] | null {
+  const config = loadConfig()
+  const projects = config ? getProjectList(config) : []
+
+  if (projects.length === 0) {
+    logger.error(t('service.noProjectsConfigured'))
+    return null
+  }
+
+  return projects
 }

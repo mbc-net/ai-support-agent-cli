@@ -1,5 +1,6 @@
 import * as os from 'os'
 
+import type { AgentRunOptions } from './agent-run-options'
 import { type AutoUpdaterHandle, startAutoUpdater } from './auto-updater'
 import { resolveAutoUpdateEnablement } from './auto-update-enablement'
 import { createAutoUpdateClients, createAutoUpdateGate } from './auto-update-gate'
@@ -24,20 +25,12 @@ import { TerminalSession } from './terminal/terminal-session'
 
 export { extractTokenId }
 
-export interface RunnerOptions {
-  token?: string
-  apiUrl?: string
-  pollInterval?: number
-  heartbeatInterval?: number
-  verbose?: boolean
-  autoUpdate?: boolean
-  updateChannel?: ReleaseChannel
+export interface RunnerOptions extends AgentRunOptions {
   /**
-   * Filter to a single project. Format: "tenantCode/projectCode"
-   * When set, only the matching project is started.
-   * Used by DockerSupervisor to spawn one container per project.
+   * ネイティブ実行はチャンネルを `ReleaseChannel` に絞る。Docker 実行は CLI から
+   * 素の文字列を受けるため広いままで、`validateUpdateChannel()` で正規化する。
    */
-  project?: string
+  updateChannel?: ReleaseChannel
 }
 
 export function startProjectAgent(

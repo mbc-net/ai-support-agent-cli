@@ -281,6 +281,35 @@ RUN ARCH=$(dpkg --print-architecture) \
     && rm -rf /tmp/lazygit.tar.gz /tmp/lazygit-extract \
     && lazygit --version
 
+# Tailscale (tailscaled + tailscale CLI) for the Web RDP Tailscale route.
+# src/rdp/rdp-tunnel-tailscale.ts starts one userspace tailscaled per RDP
+# session (--tun=userspace-networking, in-memory state, its LocalAPI
+# unix socket inside a private 0700 temp directory) and carries each connection
+# over `tailscale nc <host> <port>` (run with --socket=<that socket>) on
+# stdin/stdout.
+# No TCP port is opened for it, nothing here runs at container start, and no
+# TUN device or extra capability is needed. The agent reports the tailscale
+# route on its heartbeat only when both binaries are on PATH
+# (rdp-tunnel-support.ts).
+# Official static tarballs, pinned and verified: the SHA-256 values match the
+# `.sha256` files published next to each tarball on pkgs.tailscale.com and were
+# cross-checked by downloading and hashing each tarball locally.
+ARG TAILSCALE_VERSION=1.102.4
+ARG TAILSCALE_SHA256_AMD64=50748df1045e60b5b695f19f4c56b0da36c019948b440fb456b6584a50f0d8b9
+ARG TAILSCALE_SHA256_ARM64=9dd1e6a592a014bbaea0103167ffe299adeda4ba14e078ce9c2895364f6c4c3f
+RUN ARCH=$(dpkg --print-architecture) \
+    && if [ "$ARCH" = "arm64" ]; then TAILSCALE_ARCH="arm64"; TAILSCALE_SHA256="$TAILSCALE_SHA256_ARM64"; else TAILSCALE_ARCH="amd64"; TAILSCALE_SHA256="$TAILSCALE_SHA256_AMD64"; fi \
+    && curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TAILSCALE_ARCH}.tgz" \
+        -o /tmp/tailscale.tgz \
+    && echo "${TAILSCALE_SHA256}  /tmp/tailscale.tgz" | sha256sum -c - \
+    && mkdir -p /tmp/tailscale-extract \
+    && tar -xzf /tmp/tailscale.tgz -C /tmp/tailscale-extract --strip-components=1 \
+    && mv /tmp/tailscale-extract/tailscaled /usr/local/bin/tailscaled \
+    && mv /tmp/tailscale-extract/tailscale /usr/local/bin/tailscale \
+    && rm -rf /tmp/tailscale.tgz /tmp/tailscale-extract \
+    && tailscaled --version \
+    && tailscale version
+
 # Apply starship/eza/bat to every interactive bash session. Debian's bash
 # sources /etc/bash.bashrc even when invoked with --rcfile (verified against
 # a real container) — unlike /etc/profile.d/*.sh, which only runs for LOGIN

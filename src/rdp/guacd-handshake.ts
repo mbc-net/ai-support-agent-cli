@@ -99,6 +99,9 @@ export interface GuacdHandshakeResult {
  */
 export const DEFAULT_HANDSHAKE_TIMEOUT_MS = 30_000
 
+/** Prefix of the protocol-version element that leads `args` (Guacamole protocol 1.1+). */
+const PROTOCOL_VERSION_PREFIX = 'VERSION_'
+
 const DEFAULT_AUDIO_MIMETYPES = ['audio/L16;rate=44100,channels=2'] as const
 const DEFAULT_VIDEO_MIMETYPES: readonly string[] = []
 const DEFAULT_IMAGE_MIMETYPES = ['image/png', 'image/jpeg', 'image/webp'] as const
@@ -206,8 +209,13 @@ export function performGuacdHandshake(
 /**
  * Send the display/codec capabilities and the positional `connect` values.
  *
- * `argNames` is guacd's `args` payload: element 0 is the protocol version and the
- * rest are parameter names.
+ * `argNames` is guacd's `args` payload. From Guacamole protocol 1.1 its first
+ * element is the protocol version (`VERSION_x_y_z`) and the rest are parameter
+ * names; the client's `connect` must then **start with the version** too.
+ * guacd 1.5.5 still answers `ready` without it, but the RDP plugin then fails
+ * to join ("Client did not return the expected number of arguments") and the
+ * session never reaches the host. A pre-1.1 server sends names only and gets
+ * values only.
  */
 function sendConnect(
   socket: GuacdSocket,
@@ -237,8 +245,10 @@ function sendConnect(
     ]),
   )
 
-  // Element 0 is the protocol version, not a parameter name.
-  const requestedNames = argNames.slice(1)
+  // The version element is answered with the same version, not looked up as
+  // a parameter.
+  const version = argNames[0]?.startsWith(PROTOCOL_VERSION_PREFIX) ? argNames[0] : undefined
+  const requestedNames = version === undefined ? argNames : argNames.slice(1)
   const values = requestedNames.map((name) =>
     // Own-property lookup only: a name like "constructor" must not resolve to
     // something off Object.prototype and end up sent to guacd.
@@ -247,5 +257,7 @@ function sendConnect(
       : '',
   )
 
-  socket.write(encodeGuacamoleInstruction('connect', values))
+  socket.write(
+    encodeGuacamoleInstruction('connect', version === undefined ? values : [version, ...values]),
+  )
 }

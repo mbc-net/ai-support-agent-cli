@@ -3,38 +3,44 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
-import { readAgentCredentialEnv } from './agent-credential-env'
-import { loadConfig, getProjectList, getConfigDir } from '../../config-manager'
+import { getContainerProjectDir, CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
+import { getConfigDir } from '../../config-manager'
 import type { ProjectRegistration } from '../../types'
 import type { ProjectStatus } from './types'
-import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { projectKey } from '../../project-key'
+import {
+  CONTAINER_AGENT_CONFIG_DIR,
+  CONTAINER_HOME,
+} from '../../constants'
 import { ensureDir, getErrorMessage } from '../../utils'
 import { escapeXml } from './escape-xml'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
 import {
   assertProjectCodeIsSafe,
+  buildWrapperScriptBaseOptions,
   detectInstallCollisions,
+  loadConfiguredProjectsOrReport,
+  logPostInstallHints,
+  prepareProjectServiceDirs,
+  reportInstallCollision,
   sanitizeServiceNameSegment,
   shellQuote,
   toContainerApiUrl,
-  validateProjectDirForMount,
+  type WrapperScriptBaseOptions,
 } from './wrapper-helpers'
 import {
   buildDockerRunWithLogRotate,
+  INSTALL_NEW_VERSION_BASH,
   LOAD_NVM_BASH,
   REDACT_SECRETS_BASH,
 } from './service-template-helpers'
 import {
   getDarwinLaunchAgentsDir,
   getDarwinLogDir,
-  getProjectConfigHostDir,
   getProjectLogDir,
-  getProjectServiceDir,
-  getServicesDir,
   getUpdateScriptPath,
   getWrapperScriptPath,
   getAgentOutLog,
@@ -249,35 +255,25 @@ export function generateProjectPlist(opts: {
 }
 
 /** Generate a bash wrapper script that runs docker for one project */
-export function generateWrapperScript(opts: {
-  imageName: string
-  tenantCode: string
-  projectCode: string
-  projectConfigHostDir: string
-  projectDir?: string
-  token: string
-  apiUrl: string
-  anthropicApiKey?: string
-  claudeCodeOauthToken?: string
-  codexApiKey?: string
-  codexAccessToken?: string
-  verbose?: boolean
-  updateScriptPath: string
-  /**
-   * Per-project log directory. When set, the wrapper redirects the docker
-   * subprocess's stdout and stderr into separate `ai-support-agent
-   * log-rotate --no-tee` subprocesses, producing `agent.out.log` /
-   * `agent.err.log` (plus rotated generations `.1` … `.N`) under this
-   * directory. The launchd plist's `StandardOutPath` / `StandardErrorPath`
-   * point at separate `wrapper.out.log` / `wrapper.err.log` files (NOT
-   * the rotator-owned paths) to avoid a double-write race where
-   * launchd's open fd would otherwise keep appending to a rotated
-   * generation.
-   */
-  logDir?: string
-}): string {
-  const containerHome = '/home/node'
-  const containerConfigDir = `${containerHome}/.ai-support-agent`
+export function generateWrapperScript(
+  opts: WrapperScriptBaseOptions & {
+    updateScriptPath: string
+    /**
+     * Per-project log directory. When set, the wrapper redirects the docker
+     * subprocess's stdout and stderr into separate `ai-support-agent
+     * log-rotate --no-tee` subprocesses, producing `agent.out.log` /
+     * `agent.err.log` (plus rotated generations `.1` … `.N`) under this
+     * directory. The launchd plist's `StandardOutPath` / `StandardErrorPath`
+     * point at separate `wrapper.out.log` / `wrapper.err.log` files (NOT
+     * the rotator-owned paths) to avoid a double-write race where
+     * launchd's open fd would otherwise keep appending to a rotated
+     * generation.
+     */
+    logDir?: string
+  },
+): string {
+  const containerHome = CONTAINER_HOME
+  const containerConfigDir = CONTAINER_AGENT_CONFIG_DIR
   const homeDir = os.homedir()
   const containerApiUrl = toContainerApiUrl(opts.apiUrl)
 
@@ -287,7 +283,7 @@ export function generateWrapperScript(opts: {
   // and is pinned via AI_SUPPORT_AGENT_PROJECT_DIR_MAP so the agent does NOT
   // re-derive `<configDir>/projects/<t>/<p>` and double-nest the workspace
   // tree.
-  const containerProjectDir = `/workspace/projects/${opts.projectCode}`
+  const containerProjectDir = getContainerProjectDir(opts.projectCode)
   // `||` (not `??`) so an empty string falls back to the default; an empty
   // hostProjectDir would emit `-v :/workspace/...:rw` which docker rejects.
   const hostProjectDir = opts.projectDir || path.dirname(opts.projectConfigHostDir)
@@ -437,25 +433,7 @@ VERSION_FILE="${configDir}/update-version.json"
 _INSTALL_OK=true
 if [ -f "$VERSION_FILE" ]; then
   NEW_VERSION=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$VERSION_FILE','utf-8')).version||'')}catch(e){console.log('')}" 2>/dev/null || echo "")
-  rm -f "$VERSION_FILE"
-  if [ -n "$NEW_VERSION" ]; then
-    NPM_OUTPUT=$(npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet 2>&1)
-    NPM_STATUS=$?
-    if [ "$NPM_STATUS" -ne 0 ]; then
-      echo "$LOG_PREFIX ERROR: npm install -g @ai-support-agent/cli@$NEW_VERSION failed (exit $NPM_STATUS)" >&2
-      printf '%s\\n' "$NPM_OUTPUT" | redact_secrets >&2
-      _INSTALL_OK=false
-    else
-      SI_OUTPUT=$(ai-support-agent service install 2>&1)
-      SI_STATUS=$?
-      if [ "$SI_STATUS" -ne 0 ]; then
-        echo "$LOG_PREFIX ERROR: ai-support-agent service install failed (exit $SI_STATUS)" >&2
-        printf '%s\\n' "$SI_OUTPUT" | redact_secrets >&2
-        _INSTALL_OK=false
-      fi
-    fi
-  fi
-fi
+${INSTALL_NEW_VERSION_BASH}
 
 # 3. Reload all per-project LaunchAgent services (always, even if install
 # failed) with retry + post-load verification. The shared-host mac-studio has
@@ -541,30 +519,25 @@ export function writeProjectServiceFiles(
   const launchAgentsDir = getDarwinLaunchAgentsDir()
   ensureDir(launchAgentsDir)
 
-  const servicesDir = getServicesDir()
-  const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  ensureDir(projectServiceDir, 0o700)
-
-  const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  ensureDir(projectConfigHostDir, 0o700)
-
-  // Validate project.projectDir same way the Linux wrapper does. If
-  // missing, empty, or blocked (e.g. `/etc`, `~/.ssh`), drop it so
-  // generateWrapperScript falls back to the safe default mount.
-  const validatedProjectDir = validateProjectDirForMount(project.projectDir)
+  const { projectServiceDir, projectConfigHostDir, validatedProjectDir } =
+    prepareProjectServiceDirs({
+      projectKey,
+      tenantCode,
+      projectCode,
+      projectDir: project.projectDir,
+    })
 
   const updateScriptPath = getUpdateScriptPath()
   const wrapperScriptPath = getWrapperScriptPath(projectServiceDir)
   const wrapperScript = generateWrapperScript({
-    imageName: IMAGE_NAME,
-    tenantCode,
-    projectCode,
-    projectConfigHostDir,
-    projectDir: validatedProjectDir,
-    token: project.token,
-    apiUrl: project.apiUrl,
-    ...readAgentCredentialEnv(),
-    verbose: options.verbose,
+    ...buildWrapperScriptBaseOptions({
+      tenantCode,
+      projectCode,
+      projectConfigHostDir,
+      projectDir: validatedProjectDir,
+      project,
+      verbose: options.verbose,
+    }),
     updateScriptPath,
     logDir: projectLogDir,
   })
@@ -617,13 +590,8 @@ export function installAndStartProject(
 export class DarwinServiceStrategy implements ServiceStrategy {
   async install(options: ServiceOptions): Promise<void> {
     // Load project list from config
-    const config = loadConfig()
-    const projects = config ? getProjectList(config) : []
-
-    if (projects.length === 0) {
-      logger.error(t('service.noProjectsConfigured'))
-      return
-    }
+    const projects = loadConfiguredProjectsOrReport()
+    if (!projects) return
 
     const logDir = getLogDir()
     ensureDir(logDir)
@@ -647,7 +615,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     let failedCount = 0
     for (const project of projects) {
       const { projectCode } = project
-      const fqn = `${project.tenantCode}/${projectCode}`
+      const fqn = projectKey(project)
       const collision = collisions.get(fqn)
       if (collision) {
         // Pick the more actionable message: literal duplicates ask the
@@ -656,18 +624,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
         // exhibit BOTH at once; dedup per (label, messageKey) tuple so
         // both hints fire and the order of config rows doesn't decide
         // which one the user sees. Mirror of the Linux wrapper.
-        const messageKey = collision.isDuplicate
-          ? 'service.projectDuplicateEntry'
-          : 'service.projectUnitNameCollision'
-        const dedupKey = `${collision.name}\x00${messageKey}`
-        if (!reportedCollisionLabels.has(dedupKey)) {
-          logger.error(t(messageKey, {
-            projectCode,
-            unitName: collision.name,
-            others: collision.others.join(', '),
-          }))
-          reportedCollisionLabels.add(dedupKey)
-        }
+        reportInstallCollision(projectCode, collision, reportedCollisionLabels)
         failedCount += 1
         continue
       }
@@ -689,9 +646,7 @@ export class DarwinServiceStrategy implements ServiceStrategy {
     // Hide the "now run `service start`" hint when nothing was installed —
     // misleading the user to start services that don't exist.
     if (installedCount > 0) {
-      logger.info(t('service.loadHintMulti'))
-      logger.info(t('service.logDir', { path: logDir }))
-      logger.info(t('service.noLogRotation'))
+      logPostInstallHints(logDir)
     }
 
     // Surface a summary line with counts so scripts wrapping

@@ -9,7 +9,7 @@ import {
 import { t } from './i18n'
 import type { TransportKind } from './ipc-types'
 import { logger } from './logger'
-import { getWorkspaceDir, getReposDir, getAwsDir } from './project-dir'
+import { getWorkspaceDir, getReposDir } from './project-dir'
 import { buildCapabilityReport } from './capability/capability-report'
 import { createGuacdEndpointResolverForCapability } from './rdp/guacd-runtime'
 import { RdpWebSocket } from './rdp/rdp-websocket'
@@ -22,7 +22,7 @@ import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
 import { refreshChatMode, scheduleConfigSync } from './agent-config-sync'
 import { savePendingResult, removePendingResult } from './pending-result-store'
 import type { CommandResult } from './types/command'
-import { cleanupStaleAwsCredentials } from './aws-profile'
+import { sweepStaleAwsCredentials } from './aws-credential-sweep'
 
 export interface TransportState {
   heartbeatTimer: ReturnType<typeof setInterval> | null
@@ -199,16 +199,7 @@ export function startHeartbeat(
       // （syncProjectConfig が hash 一致時は同期をスキップするため）。設定が長期間
       // 変化しないまま稼働し続けると掃除の機会が失われるため、heartbeat 側にも
       // 安全網としてフックする（sweepStaleEntries は冪等なので二重実行しても無害）。
-      if (deps.projectDir) {
-        try {
-          const removedCount = cleanupStaleAwsCredentials(getAwsDir(deps.projectDir))
-          if (removedCount > 0) {
-            logger.info(`${deps.prefix} Cleaned up ${removedCount} stale AWS credentials file(s)`)
-          }
-        } catch (error) {
-          logger.warn(`${deps.prefix} Failed to clean up stale AWS credentials files: ${getErrorMessage(error)}`)
-        }
-      }
+      sweepStaleAwsCredentials(deps.projectDir, deps.prefix)
 
       const response = await deps.client.heartbeat(
         deps.agentId,
@@ -708,6 +699,17 @@ async function processCommand(
     // 完了済みコマンドの分だけ Map が増え続ける）。
     deps.client.clearAssignment(commandId)
   }
+}
+
+/**
+ * Close the Web RDP relay and wait for its sessions' tunnels to be torn down.
+ *
+ * Awaited by the shutdown path before {@link stopTransport}: the tunnel
+ * teardown (killing tailscaled / the SSM plugin, ending SSH connections) is
+ * asynchronous, and exiting first would leave it half done.
+ */
+export async function shutdownRdpRelay(state: TransportState): Promise<void> {
+  if (state.rdpWs) await state.rdpWs.shutdown()
 }
 
 /**

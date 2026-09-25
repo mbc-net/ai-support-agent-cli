@@ -460,6 +460,20 @@ spec:
 ${CONTAINER_ARGV.map((a) => `            - ${a}`).join('\n')}
             - --project
             - ${yamlScalar(`${input.tenantCode}/${project.projectCode}`)}
+          # NET_RAW を外す（堅牢化）: 生ソケットを使った同一 Pod（同じネットワーク
+          # 名前空間）内の盗聴・なりすましの足場を残さない。RDP では、Pod 内の
+          # 127.0.0.1 を流れる中継の合言葉を盗み見されないことにもつながる。
+          # （ping など生ソケットを使う診断コマンドは使えなくなる。）
+          # runAsNonRoot は既存イメージの起動に関わるため付けない。
+          # allowPrivilegeEscalation: false も付けない: Codex サンドボックスの
+          # 手順で capabilities.add に "CAP_SYS_ADMIN" と書くと API 検証で拒否される
+          # （"SYS_ADMIN" との組み合わせは受理される）うえ、決めたのは NET_RAW を
+          # 外すことだけのため。
+          # web（src/lib/agent-deploy-manifest.ts）と同じ内容にすること。
+          securityContext:
+            capabilities:
+              drop:
+                - NET_RAW
           env:
             - name: ${ENV_VARS.TOKEN}
               valueFrom:
@@ -503,6 +517,10 @@ function guacdAgentEnvYaml(rdp: boolean | undefined): string {
               value: "127.0.0.1"
             - name: GUACD_PORT
               value: "${GUACD_PORT}"
+            # RDP tunnel relay listens on loopback: guacd shares the Pod's
+            # network namespace (src/rdp/rdp-tunnel.ts).
+            - name: ${ENV_VARS.RDP_TUNNEL_LISTEN}
+              value: "loopback"
 `
 }
 
@@ -579,6 +597,9 @@ function buildGuacdContainerDefinition(
     // 共有するため、portMappings を空にしても待受アドレスは変わらない。
     command: GUACD_LOOPBACK_COMMAND,
     portMappings: [],
+    // K8s の guacd サイドカーの securityContext（capabilities.drop: [ALL]）と
+    // 同じにそろえる。guacd は ALL を外しても動く（K8s で稼働実績あり）。
+    linuxParameters: { capabilities: { drop: ['ALL'] } },
     logConfiguration: {
       logDriver: 'awslogs',
       options: {
@@ -647,9 +668,16 @@ export function generateEcsManifest(input: EcsManifestInput): {
             ? [
                 { name: 'GUACD_HOST', value: '127.0.0.1' },
                 { name: 'GUACD_PORT', value: String(GUACD_PORT) },
+                // RDP tunnel relay on loopback: awsvpc shares the namespace.
+                { name: ENV_VARS.RDP_TUNNEL_LISTEN, value: 'loopback' },
               ]
             : []),
         ],
+        // NET_RAW を外す（堅牢化）: 生ソケットを使った同一タスク（awsvpc で同じ
+        // ネットワーク名前空間）内の盗聴・なりすましの足場を残さない。RDP では、
+        // タスク内の 127.0.0.1 を流れる中継の合言葉を盗み見されないことにも
+        // つながる。Fargate でも drop は使える。
+        linuxParameters: { capabilities: { drop: ['NET_RAW'] } },
         secrets: [
           {
             name: ENV_VARS.TOKEN,

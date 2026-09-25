@@ -54,6 +54,10 @@ spec:
             - --no-docker
             - --project
             - "mbc/MBC_01"
+          securityContext:
+            capabilities:
+              drop:
+                - NET_RAW
           env:
             - name: AI_SUPPORT_AGENT_TOKEN
               valueFrom:
@@ -111,6 +115,10 @@ spec:
             - --no-docker
             - --project
             - "mbc/MBC_01"
+          securityContext:
+            capabilities:
+              drop:
+                - NET_RAW
           env:
             - name: AI_SUPPORT_AGENT_TOKEN
               valueFrom:
@@ -161,6 +169,10 @@ spec:
             - --no-docker
             - --project
             - "mbc/MBC_02"
+          securityContext:
+            capabilities:
+              drop:
+                - NET_RAW
           env:
             - name: AI_SUPPORT_AGENT_TOKEN
               valueFrom:
@@ -216,6 +228,7 @@ export const TASKDEF_GOLDEN = {
           value: 'https://api.example.com',
         },
       ],
+      linuxParameters: { capabilities: { drop: ['NET_RAW'] } },
       secrets: [
         {
           name: 'AI_SUPPORT_AGENT_TOKEN',
