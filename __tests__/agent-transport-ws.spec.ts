@@ -1,4 +1,4 @@
-import { startTerminalWebSocket, startVsCodeTunnel, startHeartbeat, onTransportAuthRejected, handleNotification, startSubscriptionMode, checkPendingCommands, stopTransport, TransportDeps, TransportState, CommandContext } from '../src/agent-transport'
+import { startTerminalWebSocket, startVsCodeTunnel, startHeartbeat, onTransportAuthRejected, handleNotification, startSubscriptionMode, checkPendingCommands, stopTransport, shutdownRdpRelay, TransportDeps, TransportState, CommandContext } from '../src/agent-transport'
 import { NOTIFICATION_ACTION } from '../src/constants'
 
 // Mock all dependencies
@@ -2684,5 +2684,31 @@ describe('multi-replica behaviour', () => {
     expect(onEvicted).not.toHaveBeenCalled()
 
     stopTransport(state)
+  })
+})
+
+describe('shutdownRdpRelay', () => {
+  it('RDP 中継が無ければ何もしない', async () => {
+    await expect(shutdownRdpRelay({ rdpWs: null } as unknown as TransportState)).resolves.toBeUndefined()
+  })
+
+  it('★ RDP 中継の shutdown（セッションとトンネルの後始末）を待つ', async () => {
+    let finish: () => void = () => undefined
+    const shutdown = jest.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        }),
+    )
+    let done = false
+    const p = shutdownRdpRelay({ rdpWs: { shutdown } } as unknown as TransportState).then(() => {
+      done = true
+    })
+    await Promise.resolve()
+    expect(shutdown).toHaveBeenCalled()
+    expect(done).toBe(false)
+    finish()
+    await p
+    expect(done).toBe(true)
   })
 })

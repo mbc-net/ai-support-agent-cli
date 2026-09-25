@@ -1,6 +1,12 @@
+import { randomBytes } from 'crypto'
+
+import { logger } from '../logger'
+import { getErrorMessage } from '../utils'
 import { GuacdSocket } from './guacd-handshake'
 import { encodeGuacamoleInstruction } from './guacamole-protocol'
 import { RdpSession, RdpSessionAbortedError } from './rdp-session'
+import type { RdpTunnelHandle } from './rdp-tunnel'
+import type { RdpTunnel } from './rdp-tunnel-message'
 
 /**
  * Owns the agent's live RDP sessions and turns API messages into guacd actions.
@@ -43,6 +49,24 @@ export interface RdpSessionRegistryOptions {
   connect: () => Promise<GuacdSocket>
   /** Sends a message back to the API. */
   send: (msg: RdpRegistryOutbound) => void
+  /**
+   * Opens the tunnel and relay for a tunneled session (`rdp_open.tunnel`).
+   * Absent = this agent serves no tunnel routes, and such a session fails.
+   */
+  openTunnel?: (
+    tunnel: RdpTunnel,
+    sessionId: string,
+    relayToken: string,
+    /** The API's own `load-balance-info`, restored by the relay (see there). */
+    forwardRoutingToken?: string,
+  ) => Promise<RdpTunnelHandle>
+  /**
+   * Checks a direct connection's hostname (see `rdp-direct-target.ts`).
+   * Rejects with {@link RdpOpenRefusedError} to refuse. Absent = no check.
+   */
+  checkDirectTarget?: (hostname: string) => Promise<unknown>
+  /** Upper bound for {@link RdpSessionRegistry.closeAll}. Defaults to {@link RDP_CLOSE_ALL_TIMEOUT_MS}. */
+  closeTimeoutMs?: number
 }
 
 /** Parameters for opening a session, as received from the API. */
@@ -53,7 +77,32 @@ export interface RdpOpenRequest {
   width: number
   height: number
   dpi: number
+  /**
+   * Validated tunnel route. When present, `parameters` carries no
+   * hostname/port: the relay's address is filled in once the tunnel is up.
+   * **Carries credentials.**
+   */
+  tunnel?: RdpTunnel
 }
+
+/**
+ * The agent refuses to open this session at all (as opposed to a connection
+ * that failed). Reported with the `error` (fatal) contract — the same one used
+ * for an invalid tunnel instruction — rather than as `rdp_closed`.
+ * The message must not carry secrets: it goes to the browser as-is.
+ */
+export class RdpOpenRefusedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RdpOpenRefusedError'
+  }
+}
+
+/** Random bytes in a relay token (base64url: 32 characters). */
+const RELAY_TOKEN_BYTES = 24
+
+/** Upper bound on waiting for tunnels to close in {@link RdpSessionRegistry.closeAll}. */
+export const RDP_CLOSE_ALL_TIMEOUT_MS = 15_000
 
 export class RdpSessionRegistry {
   private readonly sessions = new Map<string, RdpSession>()
@@ -101,11 +150,16 @@ export class RdpSessionRegistry {
       return
     }
 
-    const session = new RdpSession({
-      connect: this.options.connect,
+    // A copy: for a tunneled session hostname/port are filled in below, and
+    // the caller's object must not be mutated.
+    const parameters = { ...request.parameters }
+    const tunnel = this.createConnectLifecycle(request, parameters, () => session)
+
+    const session: RdpSession = new RdpSession({
+      connect: tunnel ? tunnel.connect : this.options.connect,
       params: {
         protocol: 'rdp',
-        parameters: request.parameters,
+        parameters,
         optimalWidth: request.width,
         optimalHeight: request.height,
         optimalDpi: request.dpi,
@@ -129,6 +183,9 @@ export class RdpSessionRegistry {
         // finish() 自体が冪等なため）。テストで殺せない＝効いていることを実証
         // できないコードである点を承知のうえで、catch 側と形を揃えて残している。
         // 実際に到達しうるのは catch 側（rdp-websocket.spec.ts で担保）。
+        // セッション終了でトンネルも閉じる（持ち主かどうかに関わらず、この
+        // セッションのトンネルはこのセッションだけのもの）。
+        tunnel?.close()
         const ours = this.sessions.get(request.sessionId) === session
         this.deleteIfCurrent(request.sessionId, session)
         if (!ours) return
@@ -173,12 +230,22 @@ export class RdpSessionRegistry {
       // — ハンドシェイク中に close() が入ると、reject は中断ではなく
       // 「ソケットが壊れた」という**通常のエラー**として届くため。
       // :::
+      tunnel?.close()
       const ours = this.sessions.get(request.sessionId) === session
       this.deleteIfCurrent(request.sessionId, session)
       if (!ours) return
       // The message comes from the handshake, which never embeds parameter
       // values — but keep it to the message alone regardless.
-      if (!(error instanceof RdpSessionAbortedError)) {
+      if (error instanceof RdpOpenRefusedError) {
+        // Refused before anything was opened: same contract as an invalid
+        // tunnel instruction, so the browser shows the reason and stops.
+        this.options.send({
+          type: 'error',
+          sessionId: request.sessionId,
+          message: error.message,
+          fatal: true,
+        })
+      } else if (!(error instanceof RdpSessionAbortedError)) {
         this.options.send({
           type: 'rdp_closed',
           sessionId: request.sessionId,
@@ -186,6 +253,118 @@ export class RdpSessionRegistry {
         })
       }
     }
+  }
+
+  /**
+   * What happens before guacd is reached, for sessions that need it:
+   *
+   * - a **tunneled** session opens its tunnel and relay first and hands guacd
+   *   the relay's address;
+   * - a **direct** session has its hostname checked
+   *   (`options.checkDirectTarget`) and hands guacd the checked address.
+   *
+   * Returns `null` when neither applies (the plain connect is used as is).
+   *
+   * :::danger
+   * **直接接続へフォールバックしない。** トンネルを張れなければ `connect` が
+   * 失敗し、セッションは既存の `rdp_closed` 契約で終わる。`parameters` には
+   * 元々 hostname/port が無い（api が載せない）ので、ここで差し込まない限り
+   * guacd はどこへも繋がらない。
+   * :::
+   */
+  private createConnectLifecycle(
+    request: RdpOpenRequest,
+    parameters: Record<string, string>,
+    getSession: () => RdpSession,
+  ): { connect: () => Promise<GuacdSocket>; close: () => void } | null {
+    const route = request.tunnel
+    const checkDirectTarget = this.options.checkDirectTarget
+    if (!route && !checkDirectTarget) return null
+
+    let handle: RdpTunnelHandle | null = null
+    let closed = false
+    const closeHandle = (h: RdpTunnelHandle): void => {
+      this.trackPending(
+        h.close().catch((error: unknown) => {
+          logger.warn(
+            `[rdp] Failed to close the tunnel of session ${request.sessionId}: ${getErrorMessage(error)}`,
+          )
+        }),
+      )
+    }
+    const abortIfClosed = (what: string): void => {
+      if (closed) throw new RdpSessionAbortedError(`session was closed while ${what}`)
+    }
+
+    const connectDirect = async (check: (hostname: string) => Promise<unknown>): Promise<GuacdSocket> => {
+      const hostname = parameters.hostname
+      if (!hostname) {
+        throw new RdpOpenRefusedError('direct_target_forbidden: hostname is required')
+      }
+      await check(hostname)
+      abortIfClosed('its target was being checked')
+      // :::note 名前のまま渡す（IP に固定しない）
+      // guacd には検査した名前をそのまま渡す。解決した IP に置き換えると、
+      // FreeRDP が RDP サーバーに示すホスト名が IP になり、証明書のホスト名
+      // 検証と NLA の Kerberos（SPN）が既存の直接接続で壊れる。
+      // その代わり、検査から guacd の再解決までの間に DNS の応答が変わる
+      // （DNS リバインディング）余地は残る。この検査は多層防御であり、
+      // 他セッションの中継への入り込みそのものは中継の合言葉
+      // （rdp-relay-gate.ts）が塞ぐ。
+      // :::
+      return this.options.connect()
+    }
+
+    const connectTunnel = async (tunnel: RdpTunnel): Promise<GuacdSocket> => {
+      const openTunnel = this.options.openTunnel
+      if (!openTunnel) {
+        throw new Error('RDP tunnels are not supported by this agent')
+      }
+      // Per-session relay token: only a guacd connection carrying it gets
+      // through the relay (rdp-relay-gate.ts). Never logged.
+      const relayToken = randomBytes(RELAY_TOKEN_BYTES).toString('base64url')
+      // The API's own value (RD Connection Broker) is not lost: the relay
+      // puts it back in place of the token before the request reaches the
+      // RDP host.
+      const original = parameters['load-balance-info'] || undefined
+      const opening = openTunnel(tunnel, request.sessionId, relayToken, original)
+      // closeAll() must wait for an establishment in flight, which closes the
+      // tunnel it produced as soon as it lands (below).
+      this.trackPending(opening.catch(() => undefined))
+      const opened = await opening
+      if (closed) {
+        // Closed while the tunnel was being opened: nothing may outlive it.
+        closeHandle(opened)
+        abortIfClosed('its tunnel was being opened')
+      }
+      handle = opened
+      // Tunnel dropped → session ends (close() is idempotent).
+      opened.onClosed((reason) => getSession().close(`RDP tunnel closed: ${reason}`))
+      parameters.hostname = opened.host
+      parameters.port = String(opened.port)
+      // Overwrites any value from the API: on a tunneled session this
+      // parameter carries the relay token and nothing else.
+      parameters['load-balance-info'] = relayToken
+      return this.options.connect()
+    }
+
+    return {
+      connect: () =>
+        route ? connectTunnel(route) : connectDirect(checkDirectTarget as (h: string) => Promise<string>),
+      close: () => {
+        if (closed) return
+        closed = true
+        if (handle) closeHandle(handle)
+      },
+    }
+  }
+
+  /** Teardown work closeAll() must wait for. */
+  private readonly pending = new Set<Promise<unknown>>()
+
+  private trackPending(work: Promise<unknown>): void {
+    this.pending.add(work)
+    void work.finally(() => this.pending.delete(work))
   }
 
   /** Forward base64-encoded client input to guacd. */
@@ -248,9 +427,32 @@ export class RdpSessionRegistry {
    * 壊れていないことが分かる状態で終わらせる方を採る。
    * :::
    */
-  closeAll(reason: string): void {
+  async closeAll(reason: string): Promise<void> {
     for (const sessionId of [...this.sessions.keys()]) {
       this.close(sessionId, reason)
+    }
+    // Wait for the tunnels (subprocesses, SSH connections, relay ports) to be
+    // closed, not just asked to close — the caller may be about to exit the
+    // process. Bounded, so a tunnel that never closes cannot hold shutdown.
+    const deadline = Date.now() + (this.options.closeTimeoutMs ?? RDP_CLOSE_ALL_TIMEOUT_MS)
+    while (this.pending.size > 0) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        logger.warn(`[rdp] Gave up waiting for ${this.pending.size} RDP tunnel(s) to close`)
+        return
+      }
+      let timer: NodeJS.Timeout | undefined
+      await Promise.race([
+        Promise.allSettled([...this.pending]),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, remaining)
+          timer.unref?.()
+        }),
+      ])
+      clearTimeout(timer)
+      // Let continuations of what just settled (e.g. an establishment that
+      // now closes the tunnel it produced) register their own work.
+      await new Promise((resolve) => setImmediate(resolve))
     }
   }
 

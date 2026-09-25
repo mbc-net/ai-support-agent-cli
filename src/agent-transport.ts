@@ -702,6 +702,17 @@ async function processCommand(
 }
 
 /**
+ * Close the Web RDP relay and wait for its sessions' tunnels to be torn down.
+ *
+ * Awaited by the shutdown path before {@link stopTransport}: the tunnel
+ * teardown (killing tailscaled / the SSM plugin, ending SSH connections) is
+ * asynchronous, and exiting first would leave it half done.
+ */
+export async function shutdownRdpRelay(state: TransportState): Promise<void> {
+  if (state.rdpWs) await state.rdpWs.shutdown()
+}
+
+/**
  * Stop all transport resources.
  */
 /**

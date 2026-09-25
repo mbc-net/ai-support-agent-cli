@@ -49,15 +49,22 @@ export interface TunnelTarget {
   port: number
 }
 
+/** A connected ssh2 client. Typed structurally so callers need not import ssh2. */
+export type ConnectedSshClient = InstanceType<typeof import('ssh2').Client>
+
 /**
- * Open a plain SSH tunnel (local port forward) to `target` via the bastion
- * described by `ssh`. Returns the local endpoint to connect to and a `close()`
- * that tears down both the local listener and the SSH connection.
+ * Connect and authenticate an ssh2 client to the host described by `ssh`.
+ *
+ * Shared by the DB tunnel below and the RDP tunnel (`rdp/rdp-tunnel.ts`), so
+ * both apply the same validation, timeouts, keepalive and — above all — the
+ * same post-`ready` error handling.
+ *
+ * @param logPrefix Prefix for the post-connect error log line.
  */
-export async function openSshTunnel(
+export async function connectSshClient(
   ssh: SshCredentials,
-  target: TunnelTarget,
-): Promise<DbTunnel> {
+  logPrefix = '[db-tunnel]',
+): Promise<ConnectedSshClient> {
   if (!ssh.hostname || !ssh.username || !ssh.authType) {
     throw new Error('SSH tunnel requires hostname, username, and authType to be set')
   }
@@ -70,7 +77,7 @@ export async function openSshTunnel(
 
   const { Client } = await import('ssh2')
 
-  const conn = await new Promise<InstanceType<typeof Client>>((resolve, reject) => {
+  return new Promise<ConnectedSshClient>((resolve, reject) => {
     const client = new Client()
     // The initial 'error' handler rejects the connect promise. Once 'ready'
     // fires we must remove it and install a permanent handler, otherwise a
@@ -82,7 +89,7 @@ export async function openSshTunnel(
       client.removeListener('error', onConnectError)
       client.on('error', (err: Error) => {
         logger.error(
-          `[db-tunnel] SSH connection error after tunnel established (via ${ssh.hostId}): ${err.message}`,
+          `${logPrefix} SSH connection error after tunnel established (via ${ssh.hostId}): ${err.message}`,
         )
       })
       resolve(client)
@@ -102,6 +109,18 @@ export async function openSshTunnel(
     }
     client.connect(connectConfig)
   })
+}
+
+/**
+ * Open a plain SSH tunnel (local port forward) to `target` via the bastion
+ * described by `ssh`. Returns the local endpoint to connect to and a `close()`
+ * that tears down both the local listener and the SSH connection.
+ */
+export async function openSshTunnel(
+  ssh: SshCredentials,
+  target: TunnelTarget,
+): Promise<DbTunnel> {
+  const conn = await connectSshClient(ssh)
 
   const server = createServer((socket: Socket) => {
     conn.forwardOut(LOCALHOST_ADDRESS, 0, target.host, target.port, (err, stream) => {

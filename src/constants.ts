@@ -40,6 +40,13 @@ export const ENV_VARS = {
   // from the Web: running an arbitrary image is exactly what the capability
   // allowlist exists to prevent.
   GUACD_IMAGE: 'AI_SUPPORT_AGENT_GUACD_IMAGE',
+  // Where the RDP tunnel relay listens for guacd (src/rdp/rdp-tunnel.ts):
+  // 'loopback' (K8s / ECS, guacd shares the network namespace; set by the
+  // generated manifests) or 'docker-network' (Docker form, set by
+  // buildGuacdDockerArgs). Unset = tunnel routes are refused and not reported.
+  // Deliberately explicit: guessing the address guacd can reach would either
+  // silently fail or open an unauthenticated relay to the wrong peers.
+  RDP_TUNNEL_LISTEN: 'AI_SUPPORT_AGENT_RDP_TUNNEL_LISTEN',
   ALLOW_HTTP: 'AI_SUPPORT_AGENT_ALLOW_HTTP',
   PROJECT_DIR_MAP: 'AI_SUPPORT_AGENT_PROJECT_DIR_MAP',
   TERMINAL_GRACE_MS: 'AI_SUPPORT_AGENT_TERMINAL_GRACE_MS',
