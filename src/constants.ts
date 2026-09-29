@@ -47,6 +47,13 @@ export const ENV_VARS = {
   // Deliberately explicit: guessing the address guacd can reach would either
   // silently fail or open an unauthenticated relay to the wrong peers.
   RDP_TUNNEL_LISTEN: 'AI_SUPPORT_AGENT_RDP_TUNNEL_LISTEN',
+  // Directory shared with guacd that holds its trust store for RDP certificate
+  // verification (src/rdp/rdp-trusted-ca.ts): guacd runs with
+  // SSL_CERT_FILE=<dir>/bundle.pem and the agent rewrites bundle.pem from
+  // system-ca.pem plus the project's registered CAs. Set by the generated
+  // manifests (K8s / ECS) and buildGuacdDockerArgs (Docker form). Unset = the
+  // agent does not report `rdpTrustedCa` and refuses registered CAs.
+  RDP_TRUSTED_CA_DIR: 'AI_SUPPORT_AGENT_RDP_TRUSTED_CA_DIR',
   ALLOW_HTTP: 'AI_SUPPORT_AGENT_ALLOW_HTTP',
   PROJECT_DIR_MAP: 'AI_SUPPORT_AGENT_PROJECT_DIR_MAP',
   TERMINAL_GRACE_MS: 'AI_SUPPORT_AGENT_TERMINAL_GRACE_MS',

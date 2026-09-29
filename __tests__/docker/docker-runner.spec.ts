@@ -1045,6 +1045,49 @@ describe('docker-runner', () => {
       )
     })
 
+    it('★ legacy fallback（プロジェクト 0 件）は共有 guacd のままで、信頼 CA を申告しない', () => {
+      mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
+        const argsArr = args as string[] | undefined
+        // 共有 guacd はまだ無い
+        if (argsArr && argsArr[0] === 'inspect') throw new Error('No such object: ais-guacd')
+        return Buffer.from('')
+      })
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+
+      runInDocker({ rdp: true })
+
+      const runArgs = mockSpawn.mock.calls[0][1] as string[]
+      expect(runArgs[runArgs.indexOf('--network') + 1]).toBe('ais-rdp')
+      expect(runArgs).toContain('GUACD_HOST=ais-guacd')
+      expect(runArgs.join(' ')).not.toContain('AI_SUPPORT_AGENT_RDP_TRUSTED_CA_DIR')
+      expect(runArgs.join(' ')).not.toContain('/run/ais-rdp-ca')
+      const guacdRun = mockExecFileSync.mock.calls
+        .map((call) => call[1] as string[])
+        .find((argsArr) => argsArr[0] === 'run')
+      expect(guacdRun?.[guacdRun.indexOf('--name') + 1]).toBe('ais-guacd')
+      // 撤去処理（removeLegacySharedGuacd）に残骸と誤認させない印。
+      expect(guacdRun).toContain('ai-support-agent.rdp.layout=shared-v1')
+    })
+
+    it('★ legacy fallback も PID ファイルを書き（多重起動防止）、終了時に消す', () => {
+      const { writePidFile, removePidFile } = require('../../src/pid-manager')
+      writePidFile.mockClear()
+      removePidFile.mockClear()
+      mockExecFileSync.mockImplementation(() => Buffer.from(''))
+      const fakeChild = Object.assign(new EventEmitter(), { kill: jest.fn() })
+      mockSpawn.mockReturnValue(fakeChild as never)
+      mockLoadConfig.mockReturnValue(null)
+
+      runInDocker({})
+
+      expect(writePidFile).toHaveBeenCalledTimes(1)
+      expect(removePidFile).not.toHaveBeenCalled()
+      fakeChild.emit('close', 0)
+      expect(removePidFile).toHaveBeenCalledTimes(1)
+    })
+
     it('should build instead of pulling when --no-image-pull is given', () => {
       mockExecFileSync.mockImplementation((_cmd: unknown, args?: unknown) => {
         const argsArr = args as string[] | undefined
@@ -2170,7 +2213,10 @@ describe('docker-runner', () => {
       const handler = sigintCall![1] as () => void
       handler()
 
-      // Container close resolves closedPromise → process.exit should be called
+      // The container exits: a real ChildProcess emits 'exit' (which stopAll()'s
+      // SIGTERM fallback waits on — shutdown now waits for stopAll() too) and then
+      // 'close' (which resolves closedPromise).
+      fakeChild.emit('exit', 0)
       fakeChild.emit('close', 0)
       // Need multiple microtask ticks: close → resolveClosed → Promise.all resolves → .then callback
       for (let i = 0; i < 10; i++) await Promise.resolve()

@@ -15,6 +15,7 @@ import {
   RdpSessionRegistry,
   type RdpRegistryOutbound,
 } from './rdp-session-registry'
+import { RdpTrustedCaStore } from './rdp-trusted-ca'
 import { createRdpTunnelSupport, type RdpTunnelSupport } from './rdp-tunnel'
 import { parseRdpTunnel, type RdpTunnel } from './rdp-tunnel-message'
 
@@ -51,6 +52,12 @@ export type RdpServerMessage =
        * {@link parseRdpTunnel}. **Carries credentials.**
        */
       tunnel?: unknown
+      /**
+       * PEMs of the CAs the project registered for certificate verification.
+       * Unvalidated as received; see {@link RdpTrustedCaStore.apply}. Sent only
+       * when the connection verifies the certificate.
+       */
+      trustedCaCertificates?: unknown
     }
   | { type: 'rdp_data'; sessionId: string; data: string }
   | { type: 'rdp_resize'; sessionId: string; width: number; height: number }
@@ -84,6 +91,8 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
     private readonly resolveGuacdEndpoint: () => GuacdEndpoint = createLazyGuacdEndpointResolver(),
     /** Tunnel routes this process serves (contract 2) and how to open them. */
     private readonly tunnels: RdpTunnelSupport = createRdpTunnelSupport(),
+    /** guacd's trust store, rewritten per `rdp_open` from the registered CAs. */
+    private readonly trustedCa: RdpTrustedCaStore = new RdpTrustedCaStore(),
   ) {
     super({
       maxReconnectRetries: RDP_WS_MAX_RECONNECT_RETRIES,
@@ -108,9 +117,9 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
           relayToken,
           forwardRoutingToken,
         }),
-      // Direct connections are checked too: in the Docker form guacd is shared
-      // between projects and could otherwise be pointed at another session's
-      // relay, at loopback or at the metadata service.
+      // Direct connections are checked too: guacd could otherwise be pointed at
+      // another session's relay (another project's too, where the legacy Docker
+      // fallback shares one guacd), at loopback or at the metadata service.
       checkDirectTarget: (hostname) =>
         this.tunnels.checkDirectTarget(hostname, {
           guacdHost: this.resolveGuacdEndpoint().host,
@@ -293,6 +302,22 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
         return
       }
       tunnel = refusal
+
+      // 多層防御: トンネル経路では guacd の hostname が中継アドレスで上書きされる
+      // （RdpSessionRegistry）ため、証明書のホスト名は一致し得ず、検証を有効に
+      // すると必ず失敗する。api は接続前に同じ理由で断っているが、ここでも
+      // トンネルを開く前・信頼ストアを書き換える前に理由付きで断る。
+      // `ignore-cert` が無いのは guacd の既定（検証あり）なので同じく断る。
+      if (msg.parameters['ignore-cert'] !== 'true') {
+        const message =
+          'certificate_verify_unsupported_on_tunnel: certificate verification is not ' +
+          'supported on tunneled RDP connections (the certificate cannot match the relay address)'
+        logger.warn(
+          `[rdp-ws] Refusing rdp_open for session ${msg.sessionId}: certificate_verify_unsupported_on_tunnel`,
+        )
+        this.sendToApi({ type: 'error', sessionId: msg.sessionId, message, fatal: true })
+        return
+      }
     }
 
     // Resolve the endpoint **before** registering a session. Two reasons:
@@ -317,6 +342,26 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
         fatal: true,
       })
       return
+    }
+
+    // The trust store is rewritten before guacd is asked to connect, so the
+    // certificate check of this session already sees the project's CAs. A
+    // failure refuses the session: connecting anyway would verify against a
+    // stale set of CAs and fail with a certificate error that says nothing
+    // about the actual cause.
+    if (msg.trustedCaCertificates !== undefined) {
+      try {
+        this.trustedCa.apply(msg.trustedCaCertificates)
+      } catch (error) {
+        const message = getErrorMessage(error)
+        // Only the reason code: the message never carries a PEM, but the log
+        // line does not need the detail either.
+        logger.warn(
+          `[rdp-ws] Refusing rdp_open for session ${msg.sessionId}: ${message.split(':')[0]}`,
+        )
+        this.sendToApi({ type: 'error', sessionId: msg.sessionId, message, fatal: true })
+        return
+      }
     }
 
     // open() reports its own failures to the API and never rejects; the catch is

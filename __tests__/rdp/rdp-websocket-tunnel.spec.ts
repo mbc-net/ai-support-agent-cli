@@ -1,5 +1,6 @@
 import { RdpWebSocket, type RdpServerMessage } from '../../src/rdp/rdp-websocket'
 import type { RdpTunnelSupport } from '../../src/rdp/rdp-tunnel'
+import type { RdpTrustedCaStore } from '../../src/rdp/rdp-trusted-ca'
 
 jest.mock('../../src/logger')
 
@@ -38,7 +39,15 @@ function harness(kinds: RdpTunnelSupport['supportedKinds'] = () => ['ssh', 'ssm'
     checkDirectTarget: jest.fn(async () => '203.0.113.10'),
   }
   const resolveGuacd = jest.fn(() => ({ host: 'ais-guacd', port: 4822 }))
-  const ws = new RdpWebSocket('https://api.example.com', 'tok', 'agent-1', resolveGuacd, tunnels)
+  const trustedCa = { apply: jest.fn() } as unknown as RdpTrustedCaStore & { apply: jest.Mock }
+  const ws = new RdpWebSocket(
+    'https://api.example.com',
+    'tok',
+    'agent-1',
+    resolveGuacd,
+    tunnels,
+    trustedCa,
+  )
   const sent: Record<string, unknown>[] = []
   ;(ws as unknown as { sendMessage: (m: Record<string, unknown>) => void }).sendMessage = (m) => {
     sent.push(m)
@@ -53,19 +62,25 @@ function harness(kinds: RdpTunnelSupport['supportedKinds'] = () => ['ssh', 'ssm'
       return Promise.resolve()
     }),
   }
-  const dispatch = (tunnel: unknown): void => {
+  const dispatch = (
+    tunnel: unknown,
+    // トンネル経路は証明書検証なし（ignore-cert=true）が前提（api が保証し、agent も確かめる）。
+    parameters: Record<string, string> = { username: 'u', 'ignore-cert': 'true' },
+    extra: Record<string, unknown> = {},
+  ): void => {
     const msg = {
       type: 'rdp_open',
       sessionId: 'sess-1',
-      parameters: { username: 'u' },
+      parameters,
       width: 1280,
       height: 800,
       dpi: 96,
       tunnel,
+      ...extra,
     } as RdpServerMessage
     ;(ws as unknown as { onParsedMessage: (m: RdpServerMessage) => void }).onParsedMessage(msg)
   }
-  return { ws, tunnels, resolveGuacd, sent, opened, dispatch, realRegistry }
+  return { ws, tunnels, resolveGuacd, trustedCa, sent, opened, dispatch, realRegistry }
 }
 
 describe('RdpWebSocket — rdp_open.tunnel', () => {
@@ -178,6 +193,46 @@ describe('RdpWebSocket — rdp_open.tunnel', () => {
       tunnel: sshTunnel,
     } as RdpServerMessage)
     expect(sent[0]).toEqual(expect.objectContaining({ type: 'error', fatal: true }))
+  })
+})
+
+describe('RdpWebSocket — トンネル経路での証明書検証（多層防御）', () => {
+  // トンネル経路では guacd の hostname が中継アドレスで上書きされるため、証明書の
+  // ホスト名は一致し得ない。api は接続前に拒否しているが、agent も受け付けない。
+  it.each([
+    ['ignore-cert=false', { username: 'u', 'ignore-cert': 'false' }],
+    ['ignore-cert が無い（guacd の既定は検証あり）', { username: 'u' }],
+  ])('★ %s のトンネル接続は、トンネルを開く前・CA を反映する前に断る', (_label, parameters) => {
+    const h = harness()
+    h.dispatch(sshTunnel, parameters, { trustedCaCertificates: [] })
+    expect(h.opened).toEqual([])
+    expect(h.tunnels.open).not.toHaveBeenCalled()
+    expect(h.trustedCa.apply).not.toHaveBeenCalled()
+    expect(h.resolveGuacd).not.toHaveBeenCalled()
+    expect(h.sent).toEqual([
+      {
+        type: 'error',
+        sessionId: 'sess-1',
+        message: expect.stringMatching(/^certificate_verify_unsupported_on_tunnel: /),
+        fatal: true,
+      },
+    ])
+    expect(JSON.stringify(h.sent)).not.toContain(SSH_KEY)
+  })
+
+  it('ignore-cert=true のトンネル接続は従来どおり通す', () => {
+    const h = harness()
+    h.dispatch(sshTunnel, { username: 'u', 'ignore-cert': 'true' })
+    expect(h.sent).toEqual([])
+    expect(h.opened).toHaveLength(1)
+  })
+
+  it('★ 直接接続は証明書検証を有効にしてよい', () => {
+    const h = harness()
+    h.dispatch(undefined, { username: 'u', 'ignore-cert': 'false' }, { trustedCaCertificates: [] })
+    expect(h.sent).toEqual([])
+    expect(h.trustedCa.apply).toHaveBeenCalledWith([])
+    expect(h.opened).toHaveLength(1)
   })
 })
 

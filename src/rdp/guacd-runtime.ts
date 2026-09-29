@@ -10,10 +10,15 @@ import { getErrorMessage } from '../utils'
 import {
   createGuacdShutdownHook,
   ensureGuacdContainer,
+  ensureProjectGuacdContainer,
+  extractGuacdSystemCaBundle,
   GUACD_NETWORK_NAME,
+  invalidateProjectTrustStore,
+  resolveProjectGuacdIdentity,
   type GuacdEndpoint,
 } from './guacd-container'
 import { DEFAULT_GUACD_PORT } from './guacd-tcp-socket'
+import { RDP_TRUSTED_CA_MOUNT_PATH } from './rdp-trusted-ca'
 
 /**
  * Docker 形態と CLI 直起動での guacd の面倒見。
@@ -29,11 +34,43 @@ export interface GuacdRuntimeOptions {
   guacdImage?: string
 }
 
+/** guacd の用意に失敗したときの警告（プロジェクトは RDP 無しで起動する）。 */
+function warnRdpUnavailable(error: unknown, projectRef?: string): void {
+  const target = projectRef ? `the container of ${projectRef}` : 'this container'
+  logger.warn(
+    `[guacd] Web RDP is unavailable for ${target}: ${getErrorMessage(error)}. ` +
+      'The project starts without RDP; set GUACD_HOST / GUACD_PORT to point at an existing guacd.',
+  )
+}
+
+/** guacd への接続先とトンネル中継の待ち受けを渡す引数（Docker 形態共通）。 */
+function guacdConnectionArgs(networkName: string, endpoint: GuacdEndpoint): string[] {
+  return [
+    '--network',
+    networkName,
+    '-e',
+    `GUACD_HOST=${endpoint.host}`,
+    '-e',
+    `GUACD_PORT=${endpoint.port}`,
+    // RDP tunnel relay: listen on this container's address on guacd's network
+    // and admit only guacd (src/rdp/rdp-tunnel.ts). Explicit, never guessed.
+    '-e',
+    `${ENV_VARS.RDP_TUNNEL_LISTEN}=docker-network`,
+  ]
+}
+
 /**
- * Docker 形態: `docker run` へ追加する引数を組み立てる。
+ * Docker 形態（通常経路 = DockerSupervisor）: `docker run` へ追加する引数を組み立てる。
  *
- * guacd を専用ネットワークに置き、エージェントのコンテナを同じネットワークへ
- * 参加させる。ポートは公開しない（ネットワーク内からのみ到達させる）。
+ * guacd を**プロジェクト（とエージェント）ごとに**専用ネットワーク（`ais-rdp-<key>`）へ置き
+ * （`ais-guacd-<key>`）、エージェントのコンテナを同じネットワークへ参加させる。
+ * ポートは公開しない。プロジェクトごとに分けるのは、guacd の信頼ストア
+ * （`SSL_CERT_FILE`）が guacd プロセス単位でしか分けられず、信頼する CA は
+ * プロジェクトごとに違うため。
+ *
+ * 標準 CA バンドルを取り出せたときだけ、信頼ストアのディレクトリを rw で渡し
+ * `AI_SUPPORT_AGENT_RDP_TRUSTED_CA_DIR` を設定する（＝`rdpTrustedCa` を申告する）。
+ * 取り出せなければ RDP 自体は使える形で続け、CA は申告しない。
  *
  * :::warning
  * **失敗しても致命傷にしない**。呼び出し元はプロジェクトのコンテナを起動する経路で
@@ -45,7 +82,68 @@ export interface GuacdRuntimeOptions {
  *
  * @returns `docker run` へ差し込む引数。RDP が無効・用意に失敗した場合は空配列
  */
-export function buildGuacdDockerArgs(options: GuacdRuntimeOptions): string[] {
+export function buildGuacdDockerArgs(
+  options: GuacdRuntimeOptions,
+  project: { tenantCode: string; projectCode: string },
+  /** エージェントのコンテナ名と同じ agentId（guacd の識別子に含める）。 */
+  agentId: string | undefined,
+): string[] {
+  if (!options.rdp) return []
+
+  const id = resolveProjectGuacdIdentity(project, agentId)
+  let base: string[]
+  try {
+    const endpoint = ensureProjectGuacdContainer(id, options.guacdImage)
+    base = guacdConnectionArgs(id.networkName, endpoint)
+  } catch (error) {
+    warnRdpUnavailable(error, id.projectRef)
+    return []
+  }
+
+  try {
+    extractGuacdSystemCaBundle(id)
+  } catch (error) {
+    // fail-closed: この回はエージェントへ信頼ストアを渡さないので、以後に CA が
+    // 削除されても bundle.pem は書き直されない。稼働中の guacd が前回の登録 CA 入りの
+    // bundle.pem を読み続けないよう、信頼ストアを消してから RDP だけを渡す。
+    if (!invalidateProjectTrustStore(id)) {
+      logger.warn(
+        `[guacd] Web RDP is disabled for ${id.projectRef}: the system CA bundle could not be ` +
+          `copied out of ${id.containerName} (${getErrorMessage(error)}) and the previous trust ` +
+          'store could not be cleared, so guacd might still trust CAs that were removed.',
+      )
+      return []
+    }
+    logger.warn(
+      `[guacd] Registered RDP CAs are unavailable for ${id.projectRef}: could not copy the ` +
+        `system CA bundle out of ${id.containerName}: ${getErrorMessage(error)}. ` +
+        // 信頼ストア（bundle.pem）を消したので、guacd の SSL_CERT_FILE は存在しない
+        // ファイルを指す。検証を有効にした接続は公開 CA の証明書でも失敗し得る。
+        'RDP connections without certificate verification are unaffected; connections with ' +
+        'certificate verification enabled (including ones needing a registered CA) may fail ' +
+        'until the container is recreated with a valid CA bundle.',
+    )
+    return base
+  }
+
+  return [
+    ...base,
+    '-v',
+    `${id.caHostDir}:${RDP_TRUSTED_CA_MOUNT_PATH}:rw`,
+    '-e',
+    `${ENV_VARS.RDP_TRUSTED_CA_DIR}=${RDP_TRUSTED_CA_MOUNT_PATH}`,
+  ]
+}
+
+/**
+ * Docker 形態の legacy fallback（プロジェクト 0 件で 1 コンテナが全プロジェクトを
+ * 扱う経路）: 従来どおり共有の `ais-guacd`（`ais-rdp`）を使う。
+ *
+ * 1 つの guacd を全プロジェクトで共有するため、信頼ストアをプロジェクトで
+ * 分けられない。信頼ストアは渡さず、`rdpTrustedCa` も申告しない。
+ * 失敗しても投げない（{@link buildGuacdDockerArgs} と同じ理由）。
+ */
+export function buildSharedGuacdDockerArgs(options: GuacdRuntimeOptions): string[] {
   if (!options.rdp) return []
 
   try {
@@ -53,24 +151,9 @@ export function buildGuacdDockerArgs(options: GuacdRuntimeOptions): string[] {
       mode: 'network',
       image: options.guacdImage,
     })
-
-    return [
-      '--network',
-      GUACD_NETWORK_NAME,
-      '-e',
-      `GUACD_HOST=${endpoint.host}`,
-      '-e',
-      `GUACD_PORT=${endpoint.port}`,
-      // RDP tunnel relay: listen on this container's ais-rdp address and admit
-      // only guacd (src/rdp/rdp-tunnel.ts). Explicit, never guessed.
-      '-e',
-      `${ENV_VARS.RDP_TUNNEL_LISTEN}=docker-network`,
-    ]
+    return guacdConnectionArgs(GUACD_NETWORK_NAME, endpoint)
   } catch (error) {
-    logger.warn(
-      `[guacd] Web RDP is unavailable for this container: ${getErrorMessage(error)}. ` +
-        'The project starts without RDP; set GUACD_HOST / GUACD_PORT to point at an existing guacd.',
-    )
+    warnRdpUnavailable(error)
     return []
   }
 }

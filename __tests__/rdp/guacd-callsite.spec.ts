@@ -34,9 +34,9 @@ function stripComments(source: string): string {
 }
 
 describe('guacd の起動経路への配線', () => {
-  it('★ Docker 形態が buildGuacdDockerArgs を docker run へ差し込む', () => {
+  it('★ Docker 形態の legacy fallback が共有 guacd の引数を docker run へ差し込む', () => {
     const source = read('src/docker/docker-runner.ts')
-    expect(source).toContain('buildGuacdDockerArgs')
+    expect(source).toContain('buildSharedGuacdDockerArgs')
     // 引数を組み立てるだけで dockerArgs に入れ忘れると効かない。
     const runBlock = source.slice(source.indexOf('const dockerArgs = ['))
     expect(runBlock.slice(0, 400)).toContain('guacdArgs')
@@ -47,7 +47,7 @@ describe('guacd の起動経路への配線', () => {
     // return する。legacy fallback（プロジェクト 0 件）にしか配線していないと、
     // **通常の運用では --rdp を指定しても guacd が起動しない**。
     const source = read('src/docker/docker-supervisor.ts')
-    expect(source).toContain('buildGuacdDockerArgs')
+    expect(source).toMatch(/buildGuacdDockerArgs\(this\.opts, project, this\.opts\.agentId\)/)
     const runBlock = source.slice(source.indexOf('const dockerArgs = ['))
     expect(runBlock.slice(0, 500)).toContain('guacdArgs')
   })
