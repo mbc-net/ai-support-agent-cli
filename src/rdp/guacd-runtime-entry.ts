@@ -10,6 +10,7 @@ export {
 } from './guacd-container'
 export {
   buildGuacdDockerArgs,
+  buildSharedGuacdDockerArgs,
   createGuacdEndpointResolverForCapability,
   createLazyGuacdEndpointResolver,
   RdpUnavailableError,
