@@ -76,6 +76,18 @@ describe('ensureGuacdContainer', () => {
   })
 
   describe('ネットワークモード（Docker 形態）', () => {
+    it('★ 共有 guacd であることをラベルで示す（旧版の残骸と区別するため）', () => {
+      ensureGuacdContainer({ mode: 'network' })
+      const run = callFor('run') ?? []
+      expect(run[run.indexOf('--label') + 1]).toBe('ai-support-agent.rdp.layout=shared-v1')
+      expect(run.indexOf('--label')).toBeLessThan(run.length - 1)
+    })
+
+    it('ループバック公開モードにはラベルを付けない', () => {
+      ensureGuacdContainer({ mode: 'loopback' })
+      expect(callFor('run')).not.toContain('--label')
+    })
+
     it('ネットワーク上のホスト名を返す', () => {
       const result = ensureGuacdContainer({ mode: 'network' })
       expect(result).toEqual({ host: GUACD_CONTAINER_NAME, port: 4822 })

@@ -17,9 +17,10 @@ import type { RdpTunnelKind } from './rdp-tunnel-message'
  * Where the relay listens for guacd.
  *
  * - `loopback` — K8s / ECS: guacd is a sidecar sharing the network namespace.
- * - `docker-network` — Docker form: guacd is the `ais-guacd` container on the
- *   `ais-rdp` network; the relay listens on this container's address there
- *   and admits only guacd's address.
+ * - `docker-network` — Docker form: guacd is the project's `ais-guacd-<key>`
+ *   container on the `ais-rdp-<key>` network (`ais-guacd` on `ais-rdp` in the
+ *   legacy fallback); the relay listens on this container's address there and
+ *   admits only guacd's address.
  */
 export type RdpTunnelListenMode = 'loopback' | 'docker-network'
 

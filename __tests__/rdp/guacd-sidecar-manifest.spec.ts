@@ -147,6 +147,13 @@ describe('generateK8sManifest — guacd サイドカー', () => {
       })
     })
 
+    it('★ 非 root を kubelet が検証できるよう数値の UID/GID を明示する（イメージの USER は名前 "guacd"）', () => {
+      // runAsNonRoot だけだと、名前指定の USER を kubelet が検証できず
+      // CreateContainerConfigError になる。
+      const guacd = containers(manifest())[1]
+      expect(guacd.securityContext).toMatchObject({ runAsUser: 1000, runAsGroup: 1000 })
+    })
+
     it('複数プロジェクトでも各 Deployment にサイドカーが付く', () => {
       const multi = generateK8sManifest({
         tenantCode: 'mbc',
@@ -306,6 +313,19 @@ describe('★ カスタムイメージ指定時の警告', () => {
     }
   })
 
+  it('★ K8s では guacd が UID/GID 1000 で動くことを警告に含める', () => {
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    try {
+      generateK8sManifest({ ...BASE, rdp: true, guacdImage: 'registry.example.com/custom-guacd:1' })
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('ENTRYPOINT'))
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(/On Kubernetes, guacd runs as UID\/GID 1000/),
+      )
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('既定のイメージでは警告を出さない', () => {
     const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined)
     try {
@@ -314,5 +334,114 @@ describe('★ カスタムイメージ指定時の警告', () => {
     } finally {
       warn.mockRestore()
     }
+  })
+})
+
+describe('RDP の信頼 CA（guacd と共有する信頼ストア）', () => {
+  const CA_DIR_ENV = 'AI_SUPPORT_AGENT_RDP_TRUSTED_CA_DIR'
+  const MOUNT = '/run/ais-rdp-ca'
+
+  it('★ guacd の起動コマンドは信頼ストアに書かない（guacd は読むだけ）', () => {
+    const script = GUACD_LOOPBACK_COMMAND[2]
+    expect(script).not.toContain(MOUNT)
+    expect(script).not.toContain('ca-certificates.crt')
+    expect(script).toMatch(/^\/opt\/guacamole\/sbin\/guacd -b 127\.0\.0\.1 /)
+  })
+
+  describe('K8s', () => {
+    const podSpec = (input: Record<string, unknown> = {}): Record<string, unknown> => {
+      const spec = deployment(generateK8sManifest({ ...BASE, rdp: true, ...input })).spec as Record<string, unknown>
+      return (spec.template as Record<string, unknown>).spec as Record<string, unknown>
+    }
+
+    it('★ Pod に emptyDir の共有ボリュームを置く', () => {
+      expect(podSpec().volumes).toEqual([
+        { name: 'rdp-trusted-ca', emptyDir: { sizeLimit: '16Mi' } },
+      ])
+    })
+
+    it('★ initContainer を置かない（guacd イメージが取得できなくてもエージェントを起動させる）', () => {
+      // 標準 CA の配置はエージェント自身が起動時に行う（prepareRdpTrustedCaStore）。
+      const pod = podSpec()
+      expect(pod).not.toHaveProperty('initContainers')
+      expect(generateK8sManifest({ ...BASE, rdp: true })).not.toContain('rdp-trusted-ca-init')
+    })
+
+    it('★ guacd は SSL_CERT_FILE で bundle.pem を読み、共有ボリュームを読み取り専用でマウントする', () => {
+      const guacd = (podSpec().containers as Record<string, unknown>[])[1]
+      expect(guacd.env).toEqual([{ name: 'SSL_CERT_FILE', value: `${MOUNT}/bundle.pem` }])
+      expect(guacd.volumeMounts).toEqual([{ name: 'rdp-trusted-ca', mountPath: MOUNT, readOnly: true }])
+      expect(guacd.securityContext).toMatchObject({
+        runAsNonRoot: true,
+        runAsUser: 1000,
+        runAsGroup: 1000,
+        readOnlyRootFilesystem: true,
+      })
+    })
+
+    it('★ エージェントへ共有ディレクトリを教え、同じボリュームを書き込み可能でマウントする', () => {
+      const agent = (podSpec().containers as Record<string, unknown>[])[0]
+      expect(agent.env).toEqual(expect.arrayContaining([{ name: CA_DIR_ENV, value: MOUNT }]))
+      expect(agent.volumeMounts).toEqual([{ name: 'rdp-trusted-ca', mountPath: MOUNT }])
+    })
+
+    it('RDP 無効なら共有ボリューム・env を出さない', () => {
+      const manifest = generateK8sManifest(BASE)
+      const spec = deployment(manifest).spec as Record<string, unknown>
+      const pod = (spec.template as Record<string, unknown>).spec as Record<string, unknown>
+      expect(pod).not.toHaveProperty('volumes')
+      expect(pod).not.toHaveProperty('initContainers')
+      expect(manifest).not.toContain(CA_DIR_ENV)
+      expect(manifest).not.toContain('rdp-trusted-ca')
+    })
+  })
+
+  describe('ECS', () => {
+    const ECS_BASE = {
+      ...BASE,
+      cluster: 'c1',
+      subnets: ['subnet-1'],
+      securityGroups: ['sg-1'],
+    }
+    const taskDefinition = (rdp: boolean, extra: Record<string, unknown> = {}) =>
+      JSON.parse(generateEcsManifest({ ...ECS_BASE, rdp, ...extra }).taskDefinition) as {
+        volumes?: unknown[]
+        containerDefinitions: Record<string, unknown>[]
+      }
+    const byName = (td: ReturnType<typeof taskDefinition>, name: string) =>
+      td.containerDefinitions.find((c) => c.name === name)
+
+    it('★ 初期化コンテナを置かず、agent と guacd だけ', () => {
+      expect(taskDefinition(true).containerDefinitions.map((c) => c.name)).toEqual(['agent', 'guacd'])
+      expect(JSON.stringify(taskDefinition(true))).not.toContain('rdp-trusted-ca-init')
+    })
+
+    it('★ guacd は共有ボリュームを読み取り専用でマウントし、何も待たない', () => {
+      const guacd = byName(taskDefinition(true), 'guacd')
+      expect(guacd?.mountPoints).toEqual([
+        { sourceVolume: 'rdp-trusted-ca', containerPath: MOUNT, readOnly: true },
+      ])
+      expect(guacd?.environment).toEqual([{ name: 'SSL_CERT_FILE', value: `${MOUNT}/bundle.pem` }])
+      expect(guacd).not.toHaveProperty('dependsOn')
+    })
+
+    it('★ エージェントは共有ボリュームを書き込み可能でマウントし、共有ディレクトリを教わる（何も待たない）', () => {
+      const td = taskDefinition(true)
+      expect(td.volumes).toEqual([{ name: 'rdp-trusted-ca' }])
+      const agent = byName(td, 'agent')
+      expect(agent?.mountPoints).toEqual([
+        { sourceVolume: 'rdp-trusted-ca', containerPath: MOUNT, readOnly: false },
+      ])
+      expect(agent?.environment).toEqual(expect.arrayContaining([{ name: CA_DIR_ENV, value: MOUNT }]))
+      expect(agent).not.toHaveProperty('dependsOn')
+    })
+
+    it('RDP 無効なら共有ボリューム・env を出さない', () => {
+      const td = taskDefinition(false)
+      expect(td.containerDefinitions.map((c) => c.name)).toEqual(['agent'])
+      expect(td).not.toHaveProperty('volumes')
+      expect(td.containerDefinitions[0]).not.toHaveProperty('mountPoints')
+      expect(JSON.stringify(td)).not.toContain(CA_DIR_ENV)
+    })
   })
 })
