@@ -2,13 +2,15 @@
  * Check the target of a **direct** RDP connection (no `rdp_open.tunnel`)
  * before guacd is told to connect to it.
  *
- * :::danger 共有 guacd からの乗っ取り
- * In the Docker form one guacd (`ais-guacd`) serves every project on the host,
- * and it can reach every agent container on the `ais-rdp` network — including
- * the tunnel relays other sessions have open. A direct connection whose
- * hostname points at a relay, at loopback, at that shared network, or at a
- * link-local address (cloud metadata service) would let one project ride into
- * another's tunnel or read instance credentials. Such targets are refused.
+ * :::danger guacd 経由の乗っ取り
+ * In the Docker form guacd runs per project (`ais-guacd-<key>` on its own
+ * `ais-rdp-<key>` network); the legacy fallback still runs one `ais-guacd` on
+ * the `ais-rdp` network for every project. Either way guacd can reach the agent
+ * containers on its network — including the tunnel relays other sessions have
+ * open. A direct connection whose hostname points at a relay, at loopback, at
+ * guacd's network, or at a link-local address (cloud metadata service) would
+ * let one session ride into another's tunnel (another project's, where guacd is
+ * shared) or read instance credentials. Such targets are refused.
  * :::
  *
  * Every resolved address is checked; one forbidden address refuses the whole
@@ -41,9 +43,9 @@ export class RdpDirectTargetForbiddenError extends RdpOpenRefusedError {
 
 export interface DirectTargetDeps {
   lookupAll?: (host: string) => Promise<{ address: string; family: number }[]>
-  /** Relay listen mode; `docker-network` adds the shared guacd network to the refusals. */
+  /** Relay listen mode; `docker-network` adds guacd's Docker network to the refusals. */
   listenMode?: RdpTunnelListenMode
-  /** guacd's host, needed to find the shared network in the Docker form. */
+  /** guacd's host, needed to find guacd's network in the Docker form. */
   guacdHost?: string
   networkInterfaces?: () => NodeJS.Dict<os.NetworkInterfaceInfo[]>
   relayAddresses?: () => Iterable<string>

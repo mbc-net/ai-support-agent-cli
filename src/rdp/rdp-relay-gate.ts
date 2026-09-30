@@ -2,9 +2,10 @@
  * The relay's front door: only guacd holding this session's token gets in.
  *
  * Why a token: the relay listens where guacd can reach it — loopback in a
- * K8s Pod / ECS task, the shared `ais-rdp` network in the Docker form — and
- * anything else that can reach that address (another process in the Pod,
- * another project's session through the shared guacd) would otherwise be piped
+ * K8s Pod / ECS task, guacd's Docker network in the Docker form (per project, or
+ * the shared `ais-rdp` in the legacy fallback) — and anything else that can
+ * reach that address (another process in the Pod, another session through the
+ * same guacd — another project's, where guacd is shared) would otherwise be piped
  * straight into this session's tunnel.
  *
  * How it travels: the registry hands guacd the token as the `load-balance-info`

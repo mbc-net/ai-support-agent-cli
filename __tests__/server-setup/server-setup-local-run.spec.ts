@@ -406,6 +406,7 @@ describe('runServerSetupLocalRun - success path', () => {
     // 経路が無いため、ハンドシェイクのパスは空（＝ロール側で行わない）。
     expect(JSON.parse(extraVars as string)).toEqual({
       FOO: 'bar',
+      sentry_execution_id: 'local-run',
       [SELF_INSTANCE_ID_VAR]: expect.any(String),
       [SELF_RESTART_MARKER_VAR]: '',
       [SELF_RESTART_ACK_VAR]: '',
@@ -419,6 +420,7 @@ describe('runServerSetupLocalRun - success path', () => {
     await runPromise
 
     expect(JSON.parse(writtenFile('extra-vars.json') as string)).toEqual({
+      sentry_execution_id: 'local-run',
       [SELF_INSTANCE_ID_VAR]: expect.any(String),
       [SELF_RESTART_MARKER_VAR]: '',
       [SELF_RESTART_ACK_VAR]: '',

@@ -256,7 +256,7 @@ describe('ProjectAgent', () => {
 
       const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
       expect(payload.capabilities).toEqual([
-        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'ecs_launch',
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1', 'ecs_launch',
       ])
 
       agent.stop()
@@ -286,7 +286,7 @@ describe('ProjectAgent', () => {
 
       const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
       expect(payload.capabilities).toEqual([
-        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks',
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1',
       ])
       expect(payload.capabilities).not.toContain('ecs_launch')
 

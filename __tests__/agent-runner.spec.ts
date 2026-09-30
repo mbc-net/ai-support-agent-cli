@@ -134,6 +134,11 @@ jest.mock('../src/terminal/terminal-session', () => ({
   },
 }))
 
+jest.mock('../src/rdp/rdp-trusted-ca', () => ({
+  ...jest.requireActual('../src/rdp/rdp-trusted-ca'),
+  prepareRdpTrustedCaStore: jest.fn().mockReturnValue(false),
+}))
+
 jest.mock('../src/server-setup/server-setup-runner', () => ({
   cleanupStaleServerSetupDirs: jest.fn().mockReturnValue(0),
 }))
@@ -1065,6 +1070,39 @@ describe('agent-runner', () => {
   // (SIGKILL/OOM/crash) leaves its private-key-holding temp dir behind
   // forever, and these accumulate across the agent's long uptime until /tmp
   // runs out of space (mkdtemp then fails with ENOSPC).
+  it('★ 起動時、エージェントやワーカーを起動する（＝能力を申告する）前に RDP の信頼ストアを用意する', async () => {
+    const { prepareRdpTrustedCaStore } = require('../src/rdp/rdp-trusted-ca')
+    prepareRdpTrustedCaStore.mockClear()
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(prepareRdpTrustedCaStore).toHaveBeenCalledTimes(1)
+    expect(prepareRdpTrustedCaStore.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedLoadConfig.mock.invocationCallOrder[0],
+    )
+  })
+
+  it('RDP の信頼ストアの用意で例外が出ても起動を続ける', async () => {
+    const { prepareRdpTrustedCaStore } = require('../src/rdp/rdp-trusted-ca')
+    prepareRdpTrustedCaStore.mockImplementationOnce(() => { throw new Error('boom') })
+    mockedLoadConfig.mockReturnValue(null)
+
+    const promise = startAgent({
+      token: 'cli-token',
+      apiUrl: 'http://cli-api',
+    })
+    await jest.advanceTimersByTimeAsync(100)
+    await promise
+
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to prepare the RDP trust store: boom'))
+  })
+
   it('should call cleanupStaleServerSetupDirs on startup', async () => {
     const { cleanupStaleServerSetupDirs } = require('../src/server-setup/server-setup-runner')
     mockedLoadConfig.mockReturnValue(null)

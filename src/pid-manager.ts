@@ -33,15 +33,26 @@ import * as os from 'os'
 import * as path from 'path'
 
 import { getConfigDir } from './config-manager'
+import { ENV_VARS } from './constants'
 import { ensureDir, isErrnoException } from './utils'
 
 const PID_FILE_NAME = 'agent.pid'
+/**
+ * コンテナ内のエージェントが使う PID ファイル名。
+ *
+ * Docker 形態の legacy fallback は設定ディレクトリごとコンテナへマウントする。
+ * ホストの監督プロセス（`runInDocker`）とコンテナ内のエージェントが同じファイルを
+ * 使うと、コンテナ側がコンテナのホスト名で上書きし、ホスト側の多重起動防止が
+ * 「別ホストの記録＝stale」と判定して効かなくなる。
+ */
+const CONTAINER_PID_FILE_NAME = 'agent-container.pid'
 
 /** generation 比較の許容差（秒）。算出タイミングによる丸め誤差を吸収する */
 const GENERATION_TOLERANCE_SECONDS = 2
 
 export function getPidFilePath(): string {
-  return path.join(getConfigDir(), PID_FILE_NAME)
+  const name = process.env[ENV_VARS.IN_DOCKER] === '1' ? CONTAINER_PID_FILE_NAME : PID_FILE_NAME
+  return path.join(getConfigDir(), name)
 }
 
 /** 現在のプロセスの起動世代マーカー（プロセス開始時刻の epoch 秒）を返す */

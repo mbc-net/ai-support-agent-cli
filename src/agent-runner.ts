@@ -20,6 +20,7 @@ import { ApiClient } from './api-client'
 import { startConfigWatcher } from './config-watcher'
 import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from './pid-manager'
 import { cleanupStaleServerSetupDirs } from './server-setup/server-setup-runner'
+import { prepareRdpTrustedCaStore } from './rdp/rdp-trusted-ca'
 import { extractTokenId, resolveDirectStartTarget, splitProjectRef } from './utils/token-utils'
 import { TerminalSession } from './terminal/terminal-session'
 
@@ -289,6 +290,15 @@ export async function startAgent(options: RunnerOptions): Promise<void> {
     }
   } catch (err: unknown) {
     logger.warn(`Failed to clean up stale server-setup dirs: ${getErrorMessage(err)}`)
+  }
+
+  // K8s / ECS: guacd と共有する RDP の信頼ストアに標準 CA バンドルを置く。
+  // ワーカーの起動（＝ハートビートでの能力申告）より前に済ませ、申告
+  // （rdpTrustedCa）が実際の状態を反映するようにする。対象外の形態では何もしない。
+  try {
+    prepareRdpTrustedCaStore()
+  } catch (err: unknown) {
+    logger.warn(`Failed to prepare the RDP trust store: ${getErrorMessage(err)}`)
   }
 
   const config = loadConfig()

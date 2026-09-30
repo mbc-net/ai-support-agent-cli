@@ -1,0 +1,8 @@
+---
+- name: Validate complete Sentry role
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Import Sentry role for static validation
+      ansible.builtin.import_role:
+        name: sentry
