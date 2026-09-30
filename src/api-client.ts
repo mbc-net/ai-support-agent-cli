@@ -411,6 +411,19 @@ export class ApiClient {
       : { 'x-agent-assignment-generation': String(generation) }
   }
 
+  /** Read stop requests using the same command ownership as credential lookups. */
+  async getServerSetupControl(
+    commandId: string,
+    agentId: string,
+  ): Promise<{ stopRequested: boolean }> {
+    this.validateCommandId(commandId)
+    return this.get(API_ENDPOINTS.SERVER_SETUP_CONTROL(this.tenantCode, commandId), {
+      params: { agentId },
+      headers: this.assignmentHeaders(commandId),
+      timeout: 10_000,
+    })
+  }
+
   /**
    * Report mid-run server-setup progress for a `server_setup_exec` command.
    *

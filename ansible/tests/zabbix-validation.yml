@@ -1,0 +1,27 @@
+---
+- name: Reject malformed Zabbix inputs before package or config changes
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Exercise malformed configuration
+      ansible.builtin.include_tasks: zabbix-invalid-case.yml
+      loop:
+        - {role: zabbix_server, mode: typo}
+        - {role: zabbix_server, type: null}
+        - {role: zabbix_server, password: null}
+        - {role: zabbix_server, password: true}
+        - {role: zabbix_server, password: "bad\nLogFile=/tmp/injected"}
+        - {role: zabbix_server, host: "localhost\nDBName=injected"}
+        - {role: zabbix_server, port: true}
+        - {role: zabbix_server, version: "8.0"}
+        - {role: zabbix_web, password: null}
+        - {role: zabbix_web, password: "bad\npassword"}
+        - {role: zabbix_web, name: null}
+        - {role: zabbix_web, name: true}
+        - {role: zabbix_web, name: "zabbix.test;\n}"}
+        - {role: zabbix_web, timezone: "Asia/Tokyo\npm.max_children=9999"}
+        - {role: zabbix_web, port: "8080; arbitrary"}
+      loop_control:
+        loop_var: zabbix_validation_case

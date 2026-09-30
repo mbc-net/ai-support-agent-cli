@@ -189,7 +189,7 @@ describe('runEcsPublish', () => {
     expect(registration.displayName).toBe('My ECS Agent')
     // ECS execution agents advertise the server-setup custom-tasks capability
     // so the api will dispatch body-carrying recipes to them.
-    expect(registration.capabilities).toEqual(['server_setup_custom_tasks'])
+    expect(registration.capabilities).toEqual(['server_setup_custom_tasks', 'server_setup_sentry_v1'])
     expect(registration.ecsConfig).toMatchObject({
       imageUri: `${REPO_URI}@${DIGEST}`,
       imageTag: 'v1',

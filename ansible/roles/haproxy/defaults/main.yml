@@ -1,0 +1,5 @@
+---
+haproxy_mode: http
+haproxy_bind_address: 127.0.0.1
+haproxy_bind_port: 8080
+haproxy_backends: []

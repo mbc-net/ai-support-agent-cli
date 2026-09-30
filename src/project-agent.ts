@@ -45,6 +45,7 @@ import { getConfigDir } from './config-manager'
 import { detectEcsLauncherCapability } from './ecs/launcher-capability'
 import { t } from './i18n'
 import { logger } from './logger'
+import { SENTRY_CAPABILITY } from './server-setup/sentry-policy'
 import { exitIfDockerUpdateRestart } from './docker-update-exit'
 import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
@@ -1075,6 +1076,7 @@ export class ProjectAgent {
         // tasks) directly over SSH; the api refuses to dispatch a body-carrying
         // recipe to any agent that does not advertise this capability.
         SERVER_SETUP_CUSTOM_TASKS_CAPABILITY,
+        SENTRY_CAPABILITY,
         ...(ecsLauncher ? ['ecs_launch'] : []),
       ],
       availableChatModes: this.configSyncState.availableChatModes,
