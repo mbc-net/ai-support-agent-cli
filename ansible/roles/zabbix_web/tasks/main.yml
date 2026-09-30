@@ -1,0 +1,319 @@
+---
+- name: "zabbix_web : Validate branch and required variables"
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution | default('') == 'Ubuntu'
+      - ansible_distribution_version | default('') in ['22.04', '24.04']
+      - ansible_architecture | default('') in ['x86_64', 'aarch64']
+      - zabbix_web_install_method == 'package'
+      - zabbix_web_version in ['6.0', '7.0']
+      - zabbix_web_type in ['nginx', 'apache']
+      - zabbix_web_db_type in ['postgresql', 'mysql']
+      - zabbix_web_server_name is string and zabbix_web_server_name is match('^[A-Za-z0-9][A-Za-z0-9.-]*\Z')
+      - zabbix_web_php_timezone is string and zabbix_web_php_timezone is match('^[A-Za-z][A-Za-z0-9_+/-]*\Z')
+      - zabbix_web_db_host is string and zabbix_web_db_host is match('^[A-Za-z0-9][A-Za-z0-9.:-]*\Z')
+      - zabbix_web_zbx_server_host is string and zabbix_web_zbx_server_host is match('^[A-Za-z0-9][A-Za-z0-9.:-]*\Z')
+      - zabbix_web_db_name is string and zabbix_web_db_name is match('^[a-z][a-z0-9_]{0,62}\Z')
+      - zabbix_web_db_user is string and zabbix_web_db_user is match('^[a-z][a-z0-9_]{0,31}\Z')
+      - zabbix_web_db_password is string and zabbix_web_db_password | length > 0
+      - zabbix_web_db_password is match('^[\x20-\x7e]+\Z') and zabbix_web_db_password == zabbix_web_db_password | trim
+      - zabbix_web_db_port | string is match('^[0-9]+\Z')
+      - zabbix_web_db_port | int > 0 and zabbix_web_db_port | int < 65536
+      - zabbix_web_zbx_server_port | string is match('^[0-9]+\Z')
+      - zabbix_web_zbx_server_port | int > 0 and zabbix_web_zbx_server_port | int < 65536
+      - zabbix_web_listen_port | string is match('^[0-9]+\Z')
+      - zabbix_web_listen_port | int > 0 and zabbix_web_listen_port | int < 65536
+      - zabbix_web_type != 'apache' or zabbix_web_listen_port | int not in [80, 443]
+    fail_msg: >-
+      Zabbix Web requires Ubuntu 22.04/24.04, package, LTS 6.0/7.0,
+      nginx/apache, PostgreSQL/MySQL, a server name, a single-line printable ASCII
+      DB password and valid connection ports. Configure the DB with zabbix_server
+      first. Apache uses a dedicated Listen port; choose a free port other than 80/443.
+
+- name: "zabbix_web : Read existing frontend and server package versions"
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, '-f=${Version}\n', zabbix-frontend-php, zabbix-server-pgsql, zabbix-server-mysql]
+  register: zabbix_web_installed_version
+  changed_when: false
+  failed_when: zabbix_web_installed_version.rc not in [0, 1]
+
+- name: "zabbix_web : Reject incompatible existing LTS packages"
+  ansible.builtin.assert:
+    that:
+      - >-
+        zabbix_web_installed_version.stdout_lines | reject('equalto', '')
+        | reject('match', '^(1:)?' ~ (zabbix_web_version | regex_escape) ~ '\.')
+        | list | length == 0
+    fail_msg: >-
+      Existing Zabbix frontend/server packages use another LTS. Do not change
+      their shared repository or upgrade them through this setup. Align Web
+      with Server and use the official backed-up upgrade procedure first.
+
+- name: "zabbix_web : Install the official repository package"
+  ansible.builtin.apt:
+    deb: >-
+      https://repo.zabbix.com/zabbix/{{ zabbix_web_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}/pool/main/z/zabbix-release/zabbix-release_latest_{{ zabbix_web_version }}+ubuntu{{ ansible_distribution_version }}_all.deb
+    state: present
+  register: zabbix_web_repo_pkg
+
+- name: "zabbix_web : Converge the architecture-specific repository source"
+  ansible.builtin.copy:
+    content: |
+      Types: deb
+      URIs: https://repo.zabbix.com/zabbix/{{ zabbix_web_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}
+      Suites: {{ 'noble' if ansible_distribution_version == '24.04' else 'jammy' }}
+      Components: main
+      Signed-By: /usr/share/keyrings/zabbix.gpg
+    dest: /etc/apt/sources.list.d/zabbix.sources
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: "zabbix_web : Remove the retired legacy repository source"
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/zabbix.list
+    state: absent
+
+- name: "zabbix_web : Install the frontend, web server and PHP driver"
+  ansible.builtin.apt:
+    name:
+      - "zabbix-frontend-php=1:{{ zabbix_web_version }}.*"
+      - "{{ 'zabbix-nginx-conf' if zabbix_web_type == 'nginx' else 'zabbix-apache-conf' }}=1:{{ zabbix_web_version }}.*"
+      - "{{ 'nginx' if zabbix_web_type == 'nginx' else 'apache2' }}"
+      - "php{{ zabbix_web_php_version }}-fpm"
+      - "php{{ zabbix_web_php_version }}-cli"
+      - "php{{ zabbix_web_php_version }}-{{ 'pgsql' if zabbix_web_db_type == 'postgresql' else 'mysql' }}"
+    state: present
+    update_cache: true
+    policy_rc_d: 101
+
+- name: "zabbix_web : Disable the packaged nginx virtual host"
+  ansible.builtin.file:
+    path: /etc/nginx/conf.d/zabbix.conf
+    state: absent
+  when: zabbix_web_type == 'nginx'
+
+- name: "zabbix_web : Disable the packaged Apache alias"
+  ansible.builtin.command:
+    argv: [a2disconf, zabbix]
+  register: zabbix_web_apache_disable
+  changed_when: "'Disabling conf' in zabbix_web_apache_disable.stdout"
+  when: zabbix_web_type == 'apache'
+
+- name: "zabbix_web : Enable Apache FastCGI modules"
+  ansible.builtin.command:
+    argv: [a2enmod, proxy_fcgi, setenvif]
+  register: zabbix_web_apache_modules
+  changed_when: "'Enabling module' in zabbix_web_apache_modules.stdout"
+  when: zabbix_web_type == 'apache'
+
+- name: "zabbix_web : Validate that PHP recognizes the timezone"
+  ansible.builtin.command:
+    argv:
+      - "php{{ zabbix_web_php_version }}"
+      - -r
+      - "exit(in_array($argv[1], timezone_identifiers_list(DateTimeZone::ALL_WITH_BC), true) ? 0 : 1);"
+      - "{{ zabbix_web_php_timezone }}"
+  changed_when: false
+
+- name: "zabbix_web : Prepare frontend rollback"
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: ai-support-zabbix-web-rollback-
+  register: zabbix_web_rollback_dir
+
+- name: "zabbix_web : Update frontend settings with rollback"
+  block:
+    - name: "zabbix_web : Initialize rollback state for this invocation"
+      ansible.builtin.set_fact:
+        zabbix_web_activation_started: false
+        zabbix_web_rollback_complete: false
+
+    - name: "zabbix_web : Record existing service states"
+      ansible.builtin.service_facts:
+      register: zabbix_web_services
+
+    - name: "zabbix_web : Record existing frontend settings"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+        get_mime: false
+      loop:
+        - /etc/zabbix/web/zabbix.conf.php
+        - "/etc/php/{{ zabbix_web_php_version }}/fpm/pool.d/ai-support-zabbix.conf"
+        - "{{ '/etc/nginx/conf.d/ai-support-zabbix.conf' if zabbix_web_type == 'nginx' else '/etc/apache2/conf-enabled/ai-support-zabbix.conf' }}"
+      register: zabbix_web_rollback_files
+
+    - name: "zabbix_web : Save existing frontend settings privately"
+      ansible.builtin.copy:
+        src: "{{ item.item }}"
+        dest: "{{ zabbix_web_rollback_dir.path }}/{{ item.item | hash('sha256') }}"
+        remote_src: true
+        mode: "0600"
+      loop: "{{ zabbix_web_rollback_files.results }}"
+      when: item.stat.exists
+      diff: false
+
+    - name: "zabbix_web : Deploy the dedicated PHP-FPM pool"
+      ansible.builtin.copy:
+        content: |
+          [ai-support-zabbix]
+          user = www-data
+          group = www-data
+          listen = /run/php/ai-support-zabbix.sock
+          listen.owner = www-data
+          listen.group = www-data
+          pm = ondemand
+          pm.max_children = 10
+          pm.process_idle_timeout = 10s
+          php_admin_value[memory_limit] = 128M
+          php_admin_value[post_max_size] = 16M
+          php_admin_value[max_execution_time] = 300
+          php_admin_value[max_input_time] = 300
+          php_admin_value[date.timezone] = {{ zabbix_web_php_timezone }}
+        dest: "/etc/php/{{ zabbix_web_php_version }}/fpm/pool.d/ai-support-zabbix.conf"
+        owner: root
+        group: root
+        mode: "0644"
+      register: zabbix_web_pool
+
+    - name: "zabbix_web : Configure frontend DB and server connections"
+      ansible.builtin.copy:
+        content: |
+          <?php
+          // Managed by ai-support-agent. Encoded password is decoded by PHP;
+          // encoding prevents PHP string injection and is not encryption.
+          $DB['TYPE'] = '{{ 'POSTGRESQL' if zabbix_web_db_type == 'postgresql' else 'MYSQL' }}';
+          $DB['SERVER'] = '{{ zabbix_web_db_host }}';
+          $DB['PORT'] = '{{ zabbix_web_db_port }}';
+          $DB['DATABASE'] = '{{ zabbix_web_db_name }}';
+          $DB['USER'] = '{{ zabbix_web_db_user }}';
+          $DB['PASSWORD'] = base64_decode('{{ zabbix_web_db_password | b64encode }}');
+          $DB['SCHEMA'] = '{{ 'public' if zabbix_web_db_type == 'postgresql' else '' }}';
+          $ZBX_SERVER = '{{ zabbix_web_zbx_server_host }}';
+          $ZBX_SERVER_PORT = '{{ zabbix_web_zbx_server_port }}';
+          $ZBX_SERVER_NAME = '{{ zabbix_web_server_name }}';
+          $IMAGE_FORMAT_DEFAULT = IMAGE_FORMAT_PNG;
+        dest: /etc/zabbix/web/zabbix.conf.php
+        owner: root
+        group: www-data
+        mode: "0640"
+        validate: "php{{ zabbix_web_php_version }} -l %s"
+      diff: false
+      register: zabbix_web_frontend
+
+    - name: "zabbix_web : Deploy the independent virtual host"
+      ansible.builtin.template:
+        src: "{{ zabbix_web_type }}.conf.j2"
+        dest: "{{ '/etc/nginx/conf.d/ai-support-zabbix.conf' if zabbix_web_type == 'nginx' else '/etc/apache2/conf-enabled/ai-support-zabbix.conf' }}"
+        owner: root
+        group: root
+        mode: "0644"
+      register: zabbix_web_vhost
+
+    - name: "zabbix_web : Validate the complete web server configuration"
+      ansible.builtin.command:
+        argv: "{{ ['nginx', '-t'] if zabbix_web_type == 'nginx' else ['apache2ctl', 'configtest'] }}"
+      changed_when: false
+
+    # Explicit service tasks are rescuable; handler failures during flush_handlers
+    # must not escape the transaction or run after a caller rescues this role.
+    - name: "zabbix_web : Record activation attempt"
+      ansible.builtin.set_fact:
+        zabbix_web_activation_started: true
+
+    - name: "zabbix_web : Enable and start PHP-FPM"
+      ansible.builtin.service:
+        name: "php{{ zabbix_web_php_version }}-fpm"
+        enabled: true
+        state: started
+
+    - name: "zabbix_web : Apply changed PHP settings and clear cached frontend config"
+      ansible.builtin.service:
+        name: "php{{ zabbix_web_php_version }}-fpm"
+        state: restarted
+      when: zabbix_web_pool.changed or zabbix_web_frontend.changed
+
+    - name: "zabbix_web : Enable and start the selected web server"
+      ansible.builtin.service:
+        name: "{{ 'nginx' if zabbix_web_type == 'nginx' else 'apache2' }}"
+        enabled: true
+        state: started
+
+    - name: "zabbix_web : Apply the web configuration"
+      ansible.builtin.service:
+        name: "{{ 'nginx' if zabbix_web_type == 'nginx' else 'apache2' }}"
+        state: reloaded
+
+    - name: "zabbix_web : Verify the login page, not the setup wizard or a DB error"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ zabbix_web_listen_port }}/index.php"
+        headers:
+          Host: "{{ zabbix_web_server_name }}"
+        return_content: true
+        follow_redirects: none
+      register: zabbix_web_health
+      changed_when: false
+      retries: 10
+      delay: 3
+      until:
+        - zabbix_web_health.status | default(0) == 200
+        - "'name=\"name\"' in (zabbix_web_health.content | default(''))"
+        - "'name=\"password\"' in (zabbix_web_health.content | default(''))"
+        - "'setup.php' not in (zabbix_web_health.location | default(''))"
+
+    - name: "zabbix_web : Mark successful frontend setup"
+      ansible.builtin.set_fact:
+        zabbix_web_rollback_complete: true
+
+  rescue:
+    - name: "zabbix_web : Restore existing frontend settings"
+      ansible.builtin.copy:
+        src: "{{ zabbix_web_rollback_dir.path }}/{{ item.item | hash('sha256') }}"
+        dest: "{{ item.item }}"
+        remote_src: true
+        owner: "{{ item.stat.uid }}"
+        group: "{{ item.stat.gid }}"
+        mode: "{{ item.stat.mode }}"
+      loop: "{{ zabbix_web_rollback_files.results }}"
+      when: item.stat.exists
+      diff: false
+
+    - name: "zabbix_web : Remove newly created frontend settings"
+      ansible.builtin.file:
+        path: "{{ item.item }}"
+        state: absent
+      loop: "{{ zabbix_web_rollback_files.results }}"
+      when: not item.stat.exists
+
+    - name: "zabbix_web : Restore previous PHP-FPM service state and clear cached config"
+      ansible.builtin.service:
+        name: "php{{ zabbix_web_php_version }}-fpm"
+        state: "{{ 'restarted' if zabbix_web_services.ansible_facts.services['php' ~ zabbix_web_php_version ~ '-fpm.service'].state == 'running' else 'stopped' }}"
+        enabled: "{{ (zabbix_web_services.ansible_facts.services['php' ~ zabbix_web_php_version ~ '-fpm.service'].status == 'enabled') if zabbix_web_services.ansible_facts.services['php' ~ zabbix_web_php_version ~ '-fpm.service'].status in ['enabled', 'disabled'] else omit }}"
+      when: zabbix_web_activation_started | default(false)
+
+    - name: "zabbix_web : Restore previous web service state and loaded configuration"
+      ansible.builtin.service:
+        name: "{{ 'nginx' if zabbix_web_type == 'nginx' else 'apache2' }}"
+        state: "{{ 'reloaded' if zabbix_web_services.ansible_facts.services[('nginx' if zabbix_web_type == 'nginx' else 'apache2') ~ '.service'].state == 'running' else 'stopped' }}"
+        enabled: "{{ (zabbix_web_services.ansible_facts.services[('nginx' if zabbix_web_type == 'nginx' else 'apache2') ~ '.service'].status == 'enabled') if zabbix_web_services.ansible_facts.services[('nginx' if zabbix_web_type == 'nginx' else 'apache2') ~ '.service'].status in ['enabled', 'disabled'] else omit }}"
+      when: zabbix_web_activation_started | default(false)
+
+    - name: "zabbix_web : Mark completed rollback"
+      ansible.builtin.set_fact:
+        zabbix_web_rollback_complete: true
+
+    - name: "zabbix_web : Report frontend configuration failure"
+      ansible.builtin.fail:
+        msg: >-
+          Frontend setup failed. Previous frontend settings were restored;
+          any attempted service activation was reverted to the previous state.
+
+  always:
+    - name: "zabbix_web : Remove private rollback backups after success or completed rollback"
+      ansible.builtin.file:
+        path: "{{ zabbix_web_rollback_dir.path }}"
+        state: absent
+      when: zabbix_web_rollback_complete | default(false)
+      # Keep the root-only backup if rollback itself failed, for manual recovery.

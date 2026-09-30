@@ -96,6 +96,14 @@ jobs:
           ansible-playbook --syntax-check -i "localhost," \
             ansible/molecule/default/converge.yml
 
+      - name: Sentry supervisor unit tests
+        run: python3 ansible/tests/test_sentry_setup.py -v
+
+      - name: Sentry role syntax check
+        env:
+          ANSIBLE_ROLES_PATH: ansible/roles
+        run: ansible-playbook --syntax-check -i "localhost," ansible/tests/sentry-syntax.yml
+
   molecule:
     name: Molecule (${{ matrix.scenario }} — container-safe roles only)
     runs-on: ubuntu-latest

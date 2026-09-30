@@ -23,7 +23,7 @@
  * The relay is as unauthenticated as guacd: whoever connects to it is piped
  * straight into the customer network. Hence it listens only where guacd can
  * reach it, admits only guacd's address (127.0.0.1 on loopback, the resolved
- * `ais-guacd` address in the Docker form), dials only for a connection that
+ * guacd container's address (`ais-guacd-<key>`) in the Docker form), dials only for a connection that
  * presents this session's token in its Connection Request
  * (`rdp-relay-gate.ts`), caps concurrent connections at
  * {@link RDP_TUNNEL_MAX_CONNECTIONS} and closes with the session.
@@ -345,7 +345,8 @@ function routeLocalAddress(peer: string): Promise<string> {
  *
  * - `loopback`: guacd shares the network namespace (K8s Pod / ECS awsvpc task).
  * - `docker-network`: listen on the address this container uses to reach guacd
- *   on the `ais-rdp` network, and admit only guacd's address.
+ *   on guacd's Docker network (`ais-rdp-<key>` per project; `ais-rdp` in the
+ *   legacy fallback), and admit only guacd's address.
  */
 export async function resolveRdpRelayBinding(
   mode: RdpTunnelListenMode,

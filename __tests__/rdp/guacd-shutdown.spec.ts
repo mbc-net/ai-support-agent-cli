@@ -1,55 +1,79 @@
-import { stopGuacdContainer } from '../../src/rdp/guacd-container'
+import {
+  resolveProjectGuacdIdentity,
+  stopProjectGuacdContainer,
+} from '../../src/rdp/guacd-container'
 
 /**
  * 終了時に guacd コンテナを止めること。
  *
  * :::danger
- * **ソース文字列の検査では足りない。** `stopGuacdContainer` が import されて
+ * **ソース文字列の検査では足りない。** 停止関数が import されて
  * いるだけ、あるいは片方の終了経路にだけ書かれていても、文字列を探すテストは
  * 通ってしまう。実際に停止経路を実行して呼び出しを確認する。
  * :::
  *
  * guacd は無認証で待ち受けるため、エージェントが終わったあとも残ると、同じ
- * ホスト上の何かから使える状態が続く。
+ * ホスト上の何かから使える状態が続く。Docker 形態の guacd はプロジェクト別
+ * （`ais-guacd-<key>`）なので、止めたかどうかもプロジェクト単位で持つ。
  */
 
 jest.mock('../../src/rdp/guacd-container', () => ({
   ...jest.requireActual('../../src/rdp/guacd-container'),
-  stopGuacdContainer: jest.fn(),
+  stopProjectGuacdContainer: jest.fn(),
+  removeProjectGuacdNetwork: jest.fn().mockReturnValue(true),
+  removeProjectTrustStore: jest.fn().mockReturnValue(true),
 }))
 
-const stopGuacd = stopGuacdContainer as jest.Mock
+const stopGuacd = stopProjectGuacdContainer as jest.Mock
 
 describe('DockerSupervisor の終了経路', () => {
   beforeEach(() => {
     stopGuacd.mockReset()
   })
 
-  /** RDP 有効な supervisor を、コンテナを起動せずに組み立てる。 */
-  const build = (rdp: boolean): { stopAll: () => Promise<void> } => {
-    // 実際の spawn を避けるため、必要な内部状態だけを持つ最小の実体を作る。
+  type Supervisor = {
+    stopAll: () => Promise<void>
+    shutdownGuacd: (options: { agentsStopped: boolean }) => void
+    guacdProjects: Map<string, unknown>
+  }
+
+  /**
+   * RDP 有効な supervisor を、コンテナを起動せずに組み立てる。`guacdOf` の
+   * プロジェクトについて guacd を用意した状態（spawnProject 済み）にする。
+   */
+  const build = (rdp: boolean, guacdOf: string[] = ['mbc/P1']): Supervisor => {
     const {
       DockerSupervisor,
       // eslint-disable-next-line @typescript-eslint/no-var-requires
     } = require('../../src/docker/docker-supervisor') as {
-      DockerSupervisor: new (
-        version: string,
-        opts: Record<string, unknown>,
-      ) => {
-        stopAll: () => Promise<void>
-      }
+      DockerSupervisor: new (version: string, opts: Record<string, unknown>) => Supervisor
     }
-    return new DockerSupervisor('0.0.0-test', {
+    const supervisor = new DockerSupervisor('0.0.0-test', {
       apiUrl: 'https://api.example.com',
       agentId: 'agent-1',
       projects: [],
       rdp,
     })
+    for (const ref of guacdOf) {
+      const [tenantCode, projectCode] = ref.split('/')
+      supervisor.guacdProjects.set(ref, {
+        id: resolveProjectGuacdIdentity({ tenantCode, projectCode }, 'agent-1'),
+        containerStopped: false,
+      })
+    }
+    return supervisor
   }
 
   it('★ stopAll が guacd を止める', async () => {
+    stopGuacd.mockReturnValue(true)
     await build(true).stopAll()
     expect(stopGuacd).toHaveBeenCalledTimes(1)
+  })
+
+  it('★ stopAll は全プロジェクトの guacd を止める', async () => {
+    stopGuacd.mockReturnValue(true)
+    await build(true, ['mbc/P1', 'mbc/P2']).stopAll()
+    expect(stopGuacd.mock.calls.map((c) => c[0].projectRef)).toEqual(['mbc/P1', 'mbc/P2'])
   })
 
   it('RDP 無効なら guacd に触らない', async () => {
@@ -64,11 +88,8 @@ describe('DockerSupervisor の終了経路', () => {
 
   it('停止処理を繰り返しても guacd の停止は 1 回だけ', async () => {
     stopGuacd.mockReturnValue(true)
-    const supervisor = build(true) as unknown as {
-      shutdownGuacd: () => void
-      stopAll: () => Promise<void>
-    }
-    supervisor.shutdownGuacd()
+    const supervisor = build(true)
+    supervisor.shutdownGuacd({ agentsStopped: true })
     await supervisor.stopAll()
     expect(stopGuacd).toHaveBeenCalledTimes(1)
   })
@@ -78,12 +99,9 @@ describe('DockerSupervisor の終了経路', () => {
     // 一時障害で止め損ねた guacd がそのまま残る。guacd は無認証で待ち受ける
     // ため、エージェント終了後も到達できる者が任意のホストへ RDP を張れる。
     stopGuacd.mockReturnValueOnce(false).mockReturnValue(true)
-    const supervisor = build(true) as unknown as {
-      shutdownGuacd: () => void
-      stopAll: () => Promise<void>
-    }
+    const supervisor = build(true)
 
-    supervisor.shutdownGuacd()
+    supervisor.shutdownGuacd({ agentsStopped: true })
     await supervisor.stopAll()
 
     expect(stopGuacd).toHaveBeenCalledTimes(2)

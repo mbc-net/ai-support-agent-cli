@@ -93,6 +93,14 @@ describe('startHostAutoUpdater', () => {
     expect(typeof errorReporter).toBe('function')
   })
 
+  it('★ 自動更新の停止ではプロジェクトの RDP 信頼ストアを残す（更新後に同じものを使う）', async () => {
+    const supervisor = makeSupervisor()
+    startHostAutoUpdater({ autoUpdate: true }, null, baseProjects, supervisor, 'agent-1')
+    const stopAll = mockStartAutoUpdater.mock.calls[0][2]
+    await stopAll()
+    expect(supervisor.stopAll).toHaveBeenCalledWith({ keepTrustStores: true })
+  })
+
   it('uses the first project apiUrl/token to construct the API client', () => {
     const supervisor = makeSupervisor()
     startHostAutoUpdater(

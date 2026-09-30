@@ -1,0 +1,40 @@
+---
+# Bundled source executes on the target with JSON on stdin, never via a shell.
+# mkdir-based locking covers state capture, apt, configuration and recovery.
+- name: "haproxy : Validate and apply the configuration"
+  vars:
+    haproxy_parameters:
+      mode: "{{ haproxy_mode }}"
+      bind_address: "{{ haproxy_bind_address }}"
+      bind_port: "{{ haproxy_bind_port }}"
+      backends: "{{ haproxy_backends }}"
+  block:
+    - name: "haproxy : Validate inputs before changing the host"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - "{{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy_setup.py') }}"
+          - --validate-only
+        stdin: "{{ haproxy_parameters | to_json }}"
+      check_mode: false
+      changed_when: false
+
+    - name: "haproxy : Apply and verify the setup transaction"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - "{{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy_setup.py') }}"
+        stdin: "{{ haproxy_parameters | to_json }}"
+      register: haproxy_apply_result
+      changed_when: haproxy_apply_result.rc == 0 and ((haproxy_apply_result.stdout | from_json).changed | bool)
+      when: not ansible_check_mode
+
+    - name: "haproxy : Report backup retention warnings"
+      ansible.builtin.debug:
+        msg: "{{ (haproxy_apply_result.stdout | from_json).warnings | default([]) }}"
+      when:
+        - not ansible_check_mode
+        - haproxy_apply_result.rc == 0
+        - ((haproxy_apply_result.stdout | from_json).warnings | default([]) | length) > 0
