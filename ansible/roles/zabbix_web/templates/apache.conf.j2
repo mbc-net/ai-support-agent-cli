@@ -1,0 +1,21 @@
+# Managed by ai-support-agent. Dedicated listener and named virtual host.
+Listen {{ zabbix_web_listen_port }}
+<VirtualHost *:{{ zabbix_web_listen_port }}>
+    ServerName {{ zabbix_web_server_name }}
+    DocumentRoot /usr/share/zabbix
+    DirectoryIndex index.php
+    <Directory /usr/share/zabbix>
+        Require all granted
+        AllowOverride None
+    </Directory>
+    <DirectoryMatch "/usr/share/zabbix/(conf|include|locale|vendor)">
+        Require all denied
+    </DirectoryMatch>
+    <FilesMatch "^\.">
+        Require all denied
+    </FilesMatch>
+    <FilesMatch "\.php$">
+        SetHandler "proxy:unix:/run/php/ai-support-zabbix.sock|fcgi://localhost/"
+    </FilesMatch>
+</VirtualHost>
+

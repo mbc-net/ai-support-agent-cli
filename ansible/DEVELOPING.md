@@ -1,9 +1,9 @@
 # サーバセットアップ ロール開発ガイド
 
-`ansible/roles/*`（14ロール: `os_init` / `ssh_key` / `docker` / `nvm` /
-`claude_cli` / `codex` / `ai_support_agent` / `web_server` / `database` /
-`dns_tls` / `k3s` / `gitlab_runner` / `github_runner` / `tailscale`）を、
-API を立てずにローカルで開発・検証するための手引きです。
+Zabbix Server／管理画面の対応構成、設定、復旧、専用DBテストは
+[Zabbixセットアップガイド](ZABBIX.md)を参照してください。
+
+`ansible/roles/*`にある同梱ロールを、APIを立てずにローカルで開発・検証するための手引きです。
 
 各ロールは本番では `src/server-setup/server-setup-runner.ts` の
 `generatePlaybook()` が動的生成する play（`hosts: all` / `become: true` /

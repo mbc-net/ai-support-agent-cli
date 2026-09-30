@@ -1,0 +1,96 @@
+---
+# Isolated Ubuntu systemd host only. Run local and external DB cases separately.
+- name: Verify native Zabbix setup and coexistence
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  vars:
+    zabbix_server_version: "7.0"
+    zabbix_web_version: "{{ zabbix_server_version }}"
+    zabbix_server_db_type: postgresql
+    zabbix_server_db_host: localhost
+    zabbix_server_db_port: "{{ 5432 if zabbix_server_db_type == 'postgresql' else 3306 }}"
+    zabbix_server_db_name: zabbix
+    zabbix_server_db_user: zabbix
+    zabbix_server_db_password: "test-pa:ss'\"\\word#"
+    zabbix_web_db_password: "{{ zabbix_server_db_password }}"
+    zabbix_web_server_name: zabbix.test
+    zabbix_web_db_type: "{{ zabbix_server_db_type }}"
+    zabbix_web_db_host: "{{ zabbix_server_db_host }}"
+    zabbix_web_db_port: "{{ zabbix_server_db_port }}"
+    zabbix_web_db_name: "{{ zabbix_server_db_name }}"
+    zabbix_web_db_user: "{{ zabbix_server_db_user }}"
+  tasks:
+    - name: Install an existing nginx site
+      ansible.builtin.apt:
+        name: nginx
+        update_cache: true
+      when: zabbix_web_type | default('nginx') == 'nginx'
+
+    - name: Install an existing Apache site
+      ansible.builtin.apt:
+        name: apache2
+        update_cache: true
+      when: zabbix_web_type | default('nginx') == 'apache'
+
+    - name: Start the existing web server
+      ansible.builtin.service:
+        name: "{{ 'apache2' if zabbix_web_type | default('nginx') == 'apache' else 'nginx' }}"
+        state: started
+        enabled: true
+
+    - name: Record the existing site's response
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        return_content: true
+      register: existing_site
+
+    - name: Set up the server
+      ansible.builtin.include_role:
+        name: zabbix_server
+
+    - name: Set up the frontend
+      ansible.builtin.include_role:
+        name: zabbix_web
+
+    - name: Verify the existing site still responds
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        return_content: true
+      register: existing_site_after
+
+    - name: Require the existing site's body to remain the same
+      ansible.builtin.assert:
+        that: existing_site_after.content == existing_site.content
+
+    - name: Repeat the server setup
+      ansible.builtin.include_role:
+        name: zabbix_server
+
+    - name: Repeat the frontend setup
+      ansible.builtin.include_role:
+        name: zabbix_web
+
+    - name: Stop PHP and the web server to exercise recovery
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - "php{{ '8.1' if ansible_distribution_version == '22.04' else '8.3' }}-fpm"
+        - "{{ 'apache2' if zabbix_web_type | default('nginx') == 'apache' else 'nginx' }}"
+
+    - name: Recover stopped services
+      ansible.builtin.include_role:
+        name: zabbix_web
+
+    - name: Verify the existing site after rerun and recovery
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        return_content: true
+      register: existing_site_recovered
+
+    - name: Require the recovered existing site's body to remain the same
+      ansible.builtin.assert:
+        that: existing_site_recovered.content == existing_site.content
