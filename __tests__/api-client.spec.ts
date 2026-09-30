@@ -1020,6 +1020,16 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getServerSetupControl', () => {
+    it('reads control using the command and agent identity', async () => {
+      mockInstance.get.mockResolvedValue({data: {stopRequested: true}})
+      await expect(client.getServerSetupControl('cmd-1', 'agent-1')).resolves.toEqual({stopRequested: true})
+      expect(mockInstance.get).toHaveBeenCalledWith('/api/test_tenant/agent/commands/cmd-1/server-setup-control', {
+        params: {agentId: 'agent-1'}, headers: {}, timeout: 10_000,
+      })
+    })
+  })
+
   describe('submitServerSetupProgress', () => {
     it('posts progress events to the command-scoped endpoint', async () => {
       mockInstance.post.mockResolvedValue({ data: {} })

@@ -35,6 +35,7 @@ import { regionFromArn, parseEcrRepositoryUri } from '../ecs/aws-arn'
 import { registerTaskDefinition } from '../ecs/task-definition-registrar'
 import { t } from '../i18n'
 import { logger } from '../logger'
+import { SENTRY_CAPABILITY } from '../server-setup/sentry-policy'
 import type { ProjectRegistration } from '../types'
 import { getErrorMessage, nowIso } from '../utils'
 
@@ -187,7 +188,7 @@ export async function runEcsPublish(opts: EcsPublishCliOptions): Promise<void> {
     // ECS execution agents can run server-setup recipe bodies (custom Ansible
     // tasks) in the strict `ecs` guard mode; advertise the capability so the
     // api will dispatch body-carrying recipes to this agent.
-    capabilities: [SERVER_SETUP_CUSTOM_TASKS_CAPABILITY],
+    capabilities: [SERVER_SETUP_CUSTOM_TASKS_CAPABILITY, SENTRY_CAPABILITY],
     ecsConfig: {
       imageUri: image.imageUri,
       imageTag: image.imageTag,

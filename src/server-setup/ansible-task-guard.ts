@@ -261,6 +261,7 @@ const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
  * 有効化する変数は提供しない（roles/gitlab_runner_k8s・roles/github_runner_k8s 参照）。
  */
 export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
+  'sentry',
   'os_init',
   'ssh_key',
   'docker',
@@ -311,6 +312,9 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
  * 空集合（`docker`）は「レシピから渡せる変数が無い」という意味であり、誤りではない。
  */
 export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<string>>> = {
+  sentry: new Set(['sentry_operation', 'sentry_profile', 'sentry_domain', 'sentry_proxy_mode',
+    'sentry_admin_email', 'sentry_admin_password', 'sentry_retention_days', 'sentry_acme_email',
+    'sentry_smtp_host', 'sentry_smtp_port', 'sentry_smtp_user', 'sentry_smtp_password', 'sentry_smtp_tls', 'sentry_mail_from']),
   ai_support_agent: new Set([
     'ai_support_agent_api_url',
     'ai_support_agent_package',
@@ -606,7 +610,7 @@ const INCLUDE_ROLE_ALLOWED_PARAM_KEYS: ReadonlySet<string> = new Set(['name'])
  * 検査するので、接頭辞を落としても取りこぼしは増えない。
  */
 function isBundledRoleInternalName(name: string): boolean {
-  return BUNDLED_ROLE_INTERNAL_VARS.has(name)
+  return name === 'sentry_execution_id' || BUNDLED_ROLE_INTERNAL_VARS.has(name)
 }
 
 /**
@@ -634,6 +638,7 @@ function isBundledRoleInternalName(name: string): boolean {
  * 実名リストへ揃えた**（{@link isBundledRoleInternalName} 参照）。
  */
 export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
+  'sentry_poll',
   // ai_support_agent
   'ai_support_agent_configure_items',
   'ai_support_agent_configure_results',
@@ -852,6 +857,7 @@ const RESERVED_VAR_NAMES: ReadonlySet<string> = new Set([
  * stepResults[].message / 実行エラー文字列に露出する。
  */
 const ALWAYS_SECRET_VAR_NAMES: ReadonlySet<string> = new Set([
+  'sentry_admin_password', 'sentry_smtp_password',
   'ansible_ssh_pass',
   'ansible_password',
   'ansible_ssh_private_key_file',
