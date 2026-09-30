@@ -1,0 +1,50 @@
+---
+# Run only on a disposable Ubuntu host with HAProxy already active.
+# Tests that an apply failure reports the original diagnostic and restores config.
+- name: Verify HAProxy failure diagnostics
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read configuration before the failure
+      ansible.builtin.slurp:
+        src: /etc/haproxy/haproxy.cfg
+      register: haproxy_test_before
+
+    - name: Exercise and inspect the failure
+      block:
+        - name: Apply an unavailable local address
+          ansible.builtin.include_role:
+            name: haproxy
+          vars:
+            haproxy_mode: tcp
+            haproxy_bind_address: 192.0.2.123
+            haproxy_backends:
+              - name: app
+                address: 127.0.0.1
+                port: 9003
+
+        - name: Reject unexpected success
+          ansible.builtin.fail:
+            msg: Expected an unavailable local address to fail
+      rescue:
+        - name: Verify the original failure and completed recovery are reported
+          ansible.builtin.assert:
+            that:
+              - "'recovery=completed' in (ansible_failed_result.stderr | default(''))"
+              - "'JSONDecodeError' not in (ansible_failed_result.msg | default(''))"
+
+    - name: Read the restored configuration
+      ansible.builtin.slurp:
+        src: /etc/haproxy/haproxy.cfg
+      register: haproxy_test_after
+
+    - name: Verify the exact old configuration was restored
+      ansible.builtin.assert:
+        that:
+          - haproxy_test_before.content == haproxy_test_after.content
+
+    - name: Verify HAProxy is still active
+      ansible.builtin.command:
+        argv: [systemctl, is-active, haproxy]
+      changed_when: false

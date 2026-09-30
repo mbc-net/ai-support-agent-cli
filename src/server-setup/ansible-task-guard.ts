@@ -271,6 +271,7 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'ai_support_agent',
   'ai_support_agent_k8s',
   'web_server',
+  'haproxy',
   'database',
   'dns_tls',
   'gitlab_runner',
@@ -530,6 +531,12 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
     'tailscale_ssh',
     'tailscale_up_timeout',
   ]),
+  haproxy: new Set([
+    'haproxy_mode',
+    'haproxy_bind_address',
+    'haproxy_bind_port',
+    'haproxy_backends',
+  ]),
   web_server: new Set([
     'web_server_type',
   ]),
@@ -638,6 +645,9 @@ function isBundledRoleInternalName(name: string): boolean {
  * 実名リストへ揃えた**（{@link isBundledRoleInternalName} 参照）。
  */
 export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
+  // haproxy transaction
+  'haproxy_parameters',
+  'haproxy_apply_result',
   'sentry_poll',
   // ai_support_agent
   'ai_support_agent_configure_items',
