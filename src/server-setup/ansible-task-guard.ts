@@ -282,6 +282,7 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'rsyslog_server',
   'rsyslog_forward',
   'zabbix_agent',
+  'keycloak',
 ])
 
 /**
@@ -311,6 +312,18 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
  * 空集合（`docker`）は「レシピから渡せる変数が無い」という意味であり、誤りではない。
  */
 export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<string>>> = {
+  keycloak: new Set([
+    'keycloak_version',
+    'keycloak_postgres_version',
+    'keycloak_hostname',
+    'keycloak_http_port',
+    'keycloak_proxy_headers',
+    'keycloak_proxy_trusted_addresses',
+    'keycloak_admin_username',
+    'keycloak_admin_password',
+    'keycloak_db_password',
+    'keycloak_start_timeout',
+  ]),
   ai_support_agent: new Set([
     'ai_support_agent_api_url',
     'ai_support_agent_package',
@@ -634,6 +647,12 @@ function isBundledRoleInternalName(name: string): boolean {
  * 実名リストへ揃えた**（{@link isBundledRoleInternalName} 参照）。
  */
 export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
+  // keycloak
+  'keycloak_config_result',
+  'keycloak_db_start_result',
+  'keycloak_db_auth_result',
+  'keycloak_compose_result',
+  'keycloak_public_result',
   // ai_support_agent
   'ai_support_agent_configure_items',
   'ai_support_agent_configure_results',
