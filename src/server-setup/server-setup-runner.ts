@@ -39,6 +39,7 @@ import {
   TAILSCALE_SOCKS_PORT,
 } from '../constants'
 import { logger } from '../logger'
+import { inspectSentryTasks } from './sentry-policy'
 import { resolveInstanceId } from '../replica-identity'
 import {
   type CommandResult,
@@ -440,7 +441,18 @@ export async function fetchServerSetupVariables(
  * (the guard rejects any `hosts`/`roles`/`vars_files` element), so the play
  * here cannot be hijacked.
  */
+
+const SENTRY_SCRIPT = '/usr/local/lib/ai-support-sentry/sentry_setup.py'
+const SENTRY_PREFLIGHT_CODE = "import os,subprocess,sys; p='" + SENTRY_SCRIPT + "'; sys.exit(subprocess.call(['/usr/bin/python3',p,'preflight',sys.argv[1]]) if os.path.exists(p) else 0)"
+const SENTRY_STATE_CODE = "import os,subprocess,sys; p='" + SENTRY_SCRIPT + "'; sys.exit(subprocess.call(['/usr/bin/python3',p]+sys.argv[1:]) if os.path.exists(p) else (print('{\"settled\":true,\"phase\":\"absent\"}') or 0))"
+export function sentryPreflightTask(operation = 'install'): Record<string, unknown> {
+  return { name: 'precheck : Verify Sentry host has no unresolved operation',
+    'ansible.builtin.command': {argv: ['/usr/bin/python3', '-c', SENTRY_PREFLIGHT_CODE, operation]}, changed_when: false }
+}
+
 export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]): string {
+  const sentry = inspectSentryTasks(bodyTasks)
+  const recovery = sentry && sentry.operation !== 'install'
   const playbook: Record<string, unknown>[] = [
     {
       name: 'AI Support Agent server setup',
@@ -455,7 +467,8 @@ export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]):
         SUDO_PRECHECK_PROBE_TASK,
         SUDO_PRECHECK_ASSERT_TASK,
         PRECHECK_TASK,
-        ENSURE_ACL_TASK,
+        sentryPreflightTask(sentry?.operation),
+        ...(recovery ? [] : [ENSURE_ACL_TASK]),
         ...bodyTasks,
       ],
     },
@@ -649,7 +662,7 @@ function parseOptionalUidOrGid(value: string | undefined): number | undefined {
  * agent host* (e.g. via allow-listed `ansible.builtin.command`/`shell`),
  * independent of `become: true`'s escalation on the *target* host over SSH.
  */
-function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: string): Promise<AnsibleRunResult> {
+function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: string, timeoutMs = ANSIBLE_TIMEOUT_MS, readStopRequest?: () => Promise<boolean>): Promise<AnsibleRunResult> {
   const uid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_UID])
   const gid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_GID])
   return new Promise((resolve) => {
@@ -658,17 +671,22 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: 
     // operator-requested abort from execFile's own `timeout` firing, which Node
     // reports identically (`killed: true` + the kill signal).
     let cancelRequested = false
+    let finished = false
+    let polling = false
+    let controlTimer: NodeJS.Timeout | undefined
     const child = execFile(
       'ansible-playbook',
       args,
       {
         env,
         maxBuffer: ANSIBLE_MAX_BUFFER_BYTES,
-        timeout: ANSIBLE_TIMEOUT_MS,
+        timeout: timeoutMs,
         ...(uid !== undefined && { uid }),
         ...(gid !== undefined && { gid }),
       },
       (error, stdout, stderr) => {
+        finished = true
+        if (controlTimer) clearInterval(controlTimer)
         if (commandId) getProcessManager().remove(commandId)
         const stdoutStr = stdout ? stdout.toString() : ''
         const stderrStr = stderr ? stderr.toString() : ''
@@ -716,6 +734,24 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: 
           child.kill('SIGTERM')
         },
       })
+      if (readStopRequest && !finished) {
+        const poll = async () => {
+          if (polling || finished || cancelRequested) return
+          polling = true
+          try {
+            if (await readStopRequest() && !finished) {
+              getProcessManager().cancel(commandId)
+            }
+          } catch {
+            logger.warn('[server-setup] Stop request lookup failed; retrying')
+          } finally {
+            polling = false
+          }
+        }
+        controlTimer = setInterval(() => { void poll() }, 5_000)
+        controlTimer.unref()
+        void poll()
+      }
     }
   })
 }
@@ -961,6 +997,8 @@ export interface ExecuteServerSetupAnsibleInput {
    * file. Rejections are absorbed by the tailer — progress is best-effort and
    * never affects the run's own result.
    */
+  /** Authenticated command control, including ECS oneshot without AppSync. */
+  readStopRequest?: () => Promise<boolean>
   onProgress?: (events: ServerSetupProgressEvent[]) => Promise<void>
   /**
    * Reports that this run is about to restart the agent executing it, so the
@@ -1000,6 +1038,8 @@ export async function executeServerSetupAnsible(
   // resolution failure never leaves a private-key-holding temp dir behind. The
   // order (roles/callback, then known_hosts) matches the original production
   // sequence.
+  let sentry: ReturnType<typeof inspectSentryTasks> = null
+  let sentryReport: Record<string, unknown> = {settled: false, stopState: 'unconfirmed'}
   let rolesPath: string
   let callbackPluginsPath: string
   try {
@@ -1065,6 +1105,8 @@ export async function executeServerSetupAnsible(
         )
       }
 
+      sentry = inspectSentryTasks(guardResult.normalizedTasks)
+
       // Stage the shared files the body distributes, before anything is run.
       // `shared_file_src` is guaranteed to be a literal by the guard, so the set
       // of files is decidable here; that is the whole reason the guard forbids
@@ -1124,7 +1166,8 @@ export async function executeServerSetupAnsible(
       writeFileSync(
         extraVarsPath,
         JSON.stringify({
-          ...variables,
+          ...Object.fromEntries(Object.entries(variables).filter(([name]) => !name.startsWith('sentry_'))),
+          sentry_execution_id: executionId,
           [SELF_INSTANCE_ID_VAR]: resolveInstanceId(),
           // Written unconditionally (empty = handshake off) so a project
           // variable of the same name can never point the role's controller-side
@@ -1265,7 +1308,7 @@ export async function executeServerSetupAnsible(
         // inherited value can never redirect a run's progress at another path;
         // `undefined` both clears that and leaves the channel off.
         AI_SUPPORT_AGENT_PROGRESS_FILE: progressPath,
-      }, commandId)
+      }, commandId, sentry ? 100 * 60 * 1000 : ANSIBLE_TIMEOUT_MS, sentry ? input.readStopRequest : undefined)
       } finally {
         // Stop before the temp dir (and the progress file inside it) is
         // removed. `stop()` also drains whatever ansible wrote between the
@@ -1273,6 +1316,37 @@ export async function executeServerSetupAnsible(
         await progressTailer?.stop()
       }
       const { code, stdout: rawStdout, stderr: rawStderr, timedOut, cancelled, spawnError } = runOutcome
+
+      if (sentry) {
+        const probePath = path.join(tmpDir, 'sentry-result.yml')
+        const operation = cancelled || timedOut ? ['stop', executionId] : ['status']
+        writeFileSync(probePath, dump([{hosts: 'all', become: true, gather_facts: false, tasks: [{
+          name: 'sentry : Collect authoritative remote outcome',
+          'ansible.builtin.command': {argv: ['/usr/bin/python3', '-c', SENTRY_STATE_CODE, ...operation]},
+          changed_when: false,
+        }]}]))
+        try {
+          const probe = await runAnsiblePlaybook(['-i', inventoryPath, probePath, '-e', `@${extraVarsPath}`], {
+            ...process.env, ANSIBLE_CONFIG: ansibleCfgPath, ANSIBLE_STDOUT_CALLBACK: 'json',
+            ANSIBLE_CALLBACK_PLUGINS: callbackPluginsPath, ANSIBLE_VERBOSITY: undefined,
+            ANSIBLE_DEBUG: undefined, ANSIBLE_DIFF_ALWAYS: undefined, AI_SUPPORT_AGENT_PROGRESS_FILE: undefined,
+          }, undefined, 7 * 60 * 1000)
+          if (probe.code === 0) {
+            const parsed = JSON.parse(probe.stdout)
+            const hosts = parsed.plays?.[0]?.tasks?.[0]?.hosts ?? {}
+            const remote = Object.values(hosts)[0] as {stdout?: string, failed?: boolean, unreachable?: boolean} | undefined
+            if (remote?.stdout && !remote.failed && !remote.unreachable) {
+              const value = JSON.parse(remote.stdout)
+              if (value.run_id === executionId || sentry.operation !== 'install' || value.phase === 'absent') {
+                sentryReport = {settled: value.settled === true && !value.active,
+                  stopState: !value.active && value.stop_state === 'confirmed' ? 'confirmed' : undefined,
+                  publicationState: ['pending', 'verified'].includes(value.publication) ? value.publication : undefined,
+                  phase: value.phase, cancelled, runId: value.run_id}
+              }
+            }
+          }
+        } catch { /* fail closed: unconfirmed outcome keeps host blocked */ }
+      }
 
       // Redaction applied to the raw stdout/stderr *before* anything else
       // reads them (see secretValues above).
@@ -1289,9 +1363,9 @@ export async function executeServerSetupAnsible(
 
       if (timedOut) {
         logger.error(
-          `[server-setup] ansible-playbook timed out after ${ANSIBLE_TIMEOUT_MS}ms: executionId=${executionId}`,
+          `[server-setup] ansible-playbook timed out after ${sentry ? 100 * 60 * 1000 : ANSIBLE_TIMEOUT_MS}ms: executionId=${executionId}`,
         )
-        return errorResult(`ansible-playbook execution timed out after ${Math.floor(ANSIBLE_TIMEOUT_MS / 1000)}s`)
+        return errorResult(`ansible-playbook execution timed out after ${Math.floor((sentry ? 100 * 60 * 1000 : ANSIBLE_TIMEOUT_MS) / 1000)}s`)
       }
 
       if (spawnError) {
@@ -1359,6 +1433,10 @@ export async function executeServerSetupAnsible(
       logger.error(`[server-setup] Failed to remove temp dir ${tmpDir}: ${message}`)
       result = attachCleanupFailure(result, tmpDir)
     }
+  }
+  if (sentry) {
+    const data = typeof result.data === 'string' ? JSON.parse(result.data) : (result.data ?? {})
+    result = {...result, data: JSON.stringify({...data, sentry: sentryReport})}
   }
   return result
 }
@@ -1433,6 +1511,7 @@ export async function runServerSetup(
     tenantCode: ctx.client.getTenantCode(),
     sshHostId: validated.sshHostId,
     commandId: ctx.commandId,
+    readStopRequest: async () => (await ctx.client.getServerSetupControl(ctx.commandId, ctx.agentId ?? '')).stopRequested === true,
     // Needed only when the body distributes shared files; the core fetches them
     // through the agent's own project-scoped API (tenant/project come from the
     // token, so another project's files are unreachable by construction).
