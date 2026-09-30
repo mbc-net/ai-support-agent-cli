@@ -1,0 +1,10 @@
+---
+- name: Restart zabbix php
+  ansible.builtin.service:
+    name: "php{{ zabbix_web_php_version }}-fpm"
+    state: restarted
+
+- name: Reload zabbix web
+  ansible.builtin.service:
+    name: "{{ 'nginx' if zabbix_web_type == 'nginx' else 'apache2' }}"
+    state: reloaded

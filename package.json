@@ -26,6 +26,8 @@
     "docker",
     "ansible",
     "!ansible/molecule/**",
+    "!ansible/tests/**",
+    "!ansible/**/__pycache__/**",
     "!ansible/.ansible-lint",
     "!ansible/.yamllint",
     "!ansible/DEVELOPING.md",

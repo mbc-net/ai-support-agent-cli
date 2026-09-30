@@ -1,0 +1,2 @@
+---
+zabbix_web_php_version: "{{ '8.1' if ansible_distribution_version == '22.04' else '8.3' }}"

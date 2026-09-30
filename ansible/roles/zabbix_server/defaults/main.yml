@@ -1,0 +1,13 @@
+---
+# Ubuntu 22.04/24.04, native packages only. LTS switches require an explicit
+# backup/upgrade procedure; this role does not downgrade an existing database.
+zabbix_server_install_method: package
+zabbix_server_version: "7.0"
+zabbix_server_db_type: postgresql
+zabbix_server_db_mode: local
+zabbix_server_db_host: localhost
+zabbix_server_db_port: "{{ 5432 if zabbix_server_db_type == 'postgresql' else 3306 }}"
+zabbix_server_db_name: zabbix
+zabbix_server_db_user: zabbix
+zabbix_server_db_password: ""
+zabbix_server_listen_port: 10051

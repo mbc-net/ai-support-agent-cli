@@ -1,0 +1,77 @@
+---
+- name: "zabbix_server : Install the local DB server"
+  ansible.builtin.apt:
+    name: "{{ 'postgresql' if zabbix_server_db_type == 'postgresql' else 'mysql-server' }}"
+    state: present
+
+- name: "zabbix_server : Enable and start the local DB"
+  ansible.builtin.service:
+    name: "{{ 'postgresql' if zabbix_server_db_type == 'postgresql' else 'mysql' }}"
+    enabled: true
+    state: started
+
+- name: "zabbix_server : Provision PostgreSQL user"
+  community.postgresql.postgresql_user:
+    name: "{{ zabbix_server_db_user }}"
+    password: "{{ zabbix_server_db_password }}"
+    role_attr_flags: NOSUPERUSER,NOCREATEDB,NOCREATEROLE,NOREPLICATION
+  become_user: postgres
+  register: zabbix_server_pg_user
+  ignore_errors: true
+  no_log: true
+  when: zabbix_server_db_type == 'postgresql'
+
+- name: "zabbix_server : Fail if PostgreSQL user provisioning failed (password-safe diagnostic)"
+  ansible.builtin.fail:
+    msg: PostgreSQL user setup failed. Check the local socket, postgres OS account and psycopg2 driver.
+  when: zabbix_server_db_type == 'postgresql' and zabbix_server_pg_user.failed | default(false)
+
+- name: "zabbix_server : Create the PostgreSQL database owned by the application user"
+  community.postgresql.postgresql_db:
+    name: "{{ zabbix_server_db_name }}"
+    owner: "{{ zabbix_server_db_user }}"
+    encoding: UTF8
+    template: template0
+  become_user: postgres
+  when: zabbix_server_db_type == 'postgresql'
+
+- name: "zabbix_server : Create the MySQL database"
+  ansible.mysql.mysql_db:
+    name: "{{ zabbix_server_db_name }}"
+    encoding: utf8mb4
+    collation: utf8mb4_bin
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+  when: zabbix_server_db_type == 'mysql'
+
+- name: "zabbix_server : Provision MySQL user and grants"
+  ansible.mysql.mysql_user:
+    name: "{{ zabbix_server_db_user }}"
+    host: localhost
+    password: "{{ zabbix_server_db_password }}"
+    priv: "{{ zabbix_server_db_name }}.*:ALL"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+  register: zabbix_server_mysql_user
+  ignore_errors: true
+  no_log: true
+  when: zabbix_server_db_type == 'mysql'
+
+- name: "zabbix_server : Fail if MySQL user provisioning failed (password-safe diagnostic)"
+  ansible.builtin.fail:
+    msg: MySQL user setup failed. Check root socket authentication, grants and the PyMySQL driver.
+  when: zabbix_server_db_type == 'mysql' and zabbix_server_mysql_user.failed | default(false)
+
+- name: "zabbix_server : Remember the MySQL binary-log function setting"
+  ansible.mysql.mysql_query:
+    query: SELECT @@GLOBAL.log_bin_trust_function_creators AS log_bin_trust_function_creators
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+  register: zabbix_server_mysql_log_bin
+  when: zabbix_server_db_type == 'mysql'
+
+- name: "zabbix_server : Read the local MySQL schema state"
+  ansible.mysql.mysql_query:
+    query: SELECT COUNT(*) AS table_count FROM information_schema.tables WHERE table_schema = %(db_name)s
+    named_args:
+      db_name: "{{ zabbix_server_db_name }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+  register: zabbix_server_mysql_tables
+  when: zabbix_server_db_type == 'mysql'

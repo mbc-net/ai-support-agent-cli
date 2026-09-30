@@ -1,0 +1,15 @@
+---
+zabbix_web_install_method: package
+zabbix_web_version: "7.0"
+zabbix_web_type: nginx
+zabbix_web_server_name: ""
+zabbix_web_listen_port: 8080
+zabbix_web_php_timezone: Asia/Tokyo
+zabbix_web_zbx_server_host: localhost
+zabbix_web_zbx_server_port: 10051
+zabbix_web_db_type: ""
+zabbix_web_db_host: localhost
+zabbix_web_db_port: "{{ 5432 if zabbix_web_db_type == 'postgresql' else 3306 }}"
+zabbix_web_db_name: zabbix
+zabbix_web_db_user: zabbix
+zabbix_web_db_password: ""

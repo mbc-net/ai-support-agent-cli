@@ -1,0 +1,25 @@
+# Managed by ai-support-agent. Separate from other sites and the default vhost.
+server {
+    listen {{ zabbix_web_listen_port }};
+    server_name {{ zabbix_web_server_name }};
+    root /usr/share/zabbix;
+    index index.php;
+    client_max_body_size 16m;
+    location / {
+        try_files $uri $uri/ =404;
+    }
+    location ~ ^/(conf|include|locale|vendor)/ {
+        deny all;
+    }
+    location ~ /\. {
+        deny all;
+    }
+    location ~ \.php$ {
+        try_files $uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_pass unix:/run/php/ai-support-zabbix.sock;
+        fastcgi_read_timeout 300;
+    }
+}
+

@@ -1,0 +1,209 @@
+---
+- name: "zabbix_server : Validate branch and required variables"
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution | default('') == 'Ubuntu'
+      - ansible_distribution_version | default('') in ['22.04', '24.04']
+      - ansible_architecture | default('') in ['x86_64', 'aarch64']
+      - zabbix_server_install_method == 'package'
+      - zabbix_server_version in ['6.0', '7.0']
+      - zabbix_server_db_type in ['postgresql', 'mysql']
+      - zabbix_server_db_mode in ['local', 'external']
+      - zabbix_server_db_host is string and zabbix_server_db_host is match('^[A-Za-z0-9][A-Za-z0-9.:-]*\Z')
+      - zabbix_server_db_mode != 'local' or zabbix_server_db_host in ['localhost', '127.0.0.1']
+      - zabbix_server_db_name is string and zabbix_server_db_name is match('^[a-z][a-z0-9_]{0,62}\Z')
+      - zabbix_server_db_user is string and zabbix_server_db_user is match('^[a-z][a-z0-9_]{0,31}\Z')
+      - zabbix_server_db_user not in ['root', 'postgres']
+      - zabbix_server_db_password is string and zabbix_server_db_password | length > 0
+      - zabbix_server_db_password is match('^[\x20-\x7e]+\Z') and zabbix_server_db_password == zabbix_server_db_password | trim
+      - zabbix_server_db_port | string is match('^[0-9]+\Z')
+      - zabbix_server_db_port | int > 0 and zabbix_server_db_port | int < 65536
+      - zabbix_server_db_mode != 'local' or zabbix_server_db_port | int == (5432 if zabbix_server_db_type == 'postgresql' else 3306)
+      - zabbix_server_listen_port | string is match('^[0-9]+\Z')
+      - zabbix_server_listen_port | int > 0 and zabbix_server_listen_port | int < 65536
+    fail_msg: >-
+      Zabbix Server requires Ubuntu 22.04/24.04, package, LTS 6.0/7.0,
+      PostgreSQL/MySQL and local/external mode. Provide a dedicated DB/user,
+      a nonempty single-line printable ASCII password (no outer spaces),
+      and valid host/ports. Local DB uses localhost and the default DB port.
+      External DB/user must already exist with schema-creation grants.
+
+- name: "zabbix_server : Read an existing server package version"
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, '-f=${Version}\n', zabbix-server-pgsql, zabbix-server-mysql, zabbix-frontend-php]
+  register: zabbix_server_installed_version
+  changed_when: false
+  failed_when: zabbix_server_installed_version.rc not in [0, 1]
+
+- name: "zabbix_server : Reject unattended LTS changes"
+  ansible.builtin.assert:
+    that:
+      - >-
+        zabbix_server_installed_version.stdout_lines | reject('equalto', '')
+        | reject('match', '^(1:)?' ~ (zabbix_server_version | regex_escape) ~ '\.')
+        | list | length == 0
+    fail_msg: >-
+      Existing Zabbix packages have another LTS version. Back up the DB and
+      use the official upgrade procedure first; this setup does not change LTS.
+
+- name: "zabbix_server : Install the official repository package"
+  ansible.builtin.apt:
+    deb: >-
+      https://repo.zabbix.com/zabbix/{{ zabbix_server_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}/pool/main/z/zabbix-release/zabbix-release_latest_{{ zabbix_server_version }}+ubuntu{{ ansible_distribution_version }}_all.deb
+    state: present
+  register: zabbix_server_repo_pkg
+
+- name: "zabbix_server : Converge the architecture-specific repository source"
+  ansible.builtin.copy:
+    content: |
+      Types: deb
+      URIs: https://repo.zabbix.com/zabbix/{{ zabbix_server_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}
+      Suites: {{ 'noble' if ansible_distribution_version == '24.04' else 'jammy' }}
+      Components: main
+      Signed-By: /usr/share/keyrings/zabbix.gpg
+    dest: /etc/apt/sources.list.d/zabbix.sources
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: "zabbix_server : Remove the retired legacy repository source"
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/zabbix.list
+    state: absent
+
+- name: "zabbix_server : Install the selected server and SQL scripts"
+  ansible.builtin.apt:
+    name:
+      - "{{ 'zabbix-server-pgsql' if zabbix_server_db_type == 'postgresql' else 'zabbix-server-mysql' }}=1:{{ zabbix_server_version }}.*"
+      - "zabbix-sql-scripts=1:{{ zabbix_server_version }}.*"
+      - "{{ 'postgresql-client' if zabbix_server_db_type == 'postgresql' else 'mysql-client' }}"
+      - "{{ 'python3-psycopg2' if zabbix_server_db_type == 'postgresql' else 'python3-pymysql' }}"
+      - iproute2
+    state: present
+    update_cache: true
+    policy_rc_d: 101
+  notify: Restart zabbix server
+
+- name: "zabbix_server : Provision the local database"
+  ansible.builtin.include_tasks: local-db.yml
+  when: zabbix_server_db_mode == 'local'
+
+- name: "zabbix_server : Install the database bootstrap helper"
+  ansible.builtin.copy:
+    src: database.py
+    dest: /usr/local/lib/ai-support-zabbix-database.py
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: "zabbix_server : Initialize and verify the database"
+  block:
+    - name: "zabbix_server : Create a private credentials file"
+      ansible.builtin.tempfile:
+        state: file
+        prefix: ai-support-zabbix-db-
+      register: zabbix_server_db_credentials
+
+    - name: "zabbix_server : Write DB connection parameters"
+      ansible.builtin.copy:
+        content: >-
+          {{ {'engine': zabbix_server_db_type, 'host': zabbix_server_db_host,
+              'port': zabbix_server_db_port | int, 'database': zabbix_server_db_name,
+              'user': zabbix_server_db_user, 'password': zabbix_server_db_password,
+              'version': zabbix_server_version} | to_json }}
+        dest: "{{ zabbix_server_db_credentials.path }}"
+        mode: "0600"
+      diff: false
+
+    - name: "zabbix_server : Temporarily allow MySQL SQL functions for an empty DB"
+      ansible.mysql.mysql_variables:
+        variable: log_bin_trust_function_creators
+        value: 1
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      register: zabbix_server_mysql_trust
+      when:
+        - zabbix_server_db_mode == 'local' and zabbix_server_db_type == 'mysql'
+        - zabbix_server_mysql_tables.query_result[0][0].table_count | int == 0
+
+    - name: "zabbix_server : Import only an empty DB and verify completion"
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, /usr/local/lib/ai-support-zabbix-database.py, "{{ zabbix_server_db_credentials.path }}"]
+      register: zabbix_server_db_result
+      changed_when: "'\"changed\": true' in zabbix_server_db_result.stdout"
+      ignore_errors: true
+      no_log: true
+
+    - name: "zabbix_server : Fail if DB initialization did not complete (password-safe diagnostic)"
+      ansible.builtin.fail:
+        msg: >-
+          DB initialization failed. {{ zabbix_server_db_result.stderr | default('Check DB connectivity and grants.') }}
+      when: zabbix_server_db_result.rc | default(1) != 0
+
+  always:
+    - name: "zabbix_server : Remove DB connection parameters"
+      ansible.builtin.file:
+        path: "{{ zabbix_server_db_credentials.path }}"
+        state: absent
+      when: zabbix_server_db_credentials.path is defined
+
+    - name: "zabbix_server : Restore the original MySQL binary-log function setting"
+      ansible.mysql.mysql_variables:
+        variable: log_bin_trust_function_creators
+        value: "{{ zabbix_server_mysql_log_bin.query_result[0][0].log_bin_trust_function_creators }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      when:
+        - zabbix_server_db_mode == 'local' and zabbix_server_db_type == 'mysql'
+        - zabbix_server_mysql_log_bin.query_result is defined
+        - zabbix_server_mysql_trust.changed | default(false)
+
+- name: "zabbix_server : Configure the server"
+  ansible.builtin.copy:
+    content: |
+      # Managed by ai-support-agent. Do not edit manually.
+      LogFile=/var/log/zabbix/zabbix_server.log
+      LogFileSize=0
+      PidFile=/run/zabbix/zabbix_server.pid
+      SocketDir=/run/zabbix
+      DBHost={{ zabbix_server_db_host }}
+      DBPort={{ zabbix_server_db_port }}
+      DBName={{ zabbix_server_db_name }}
+      DBUser={{ zabbix_server_db_user }}
+      DBPassword={{ zabbix_server_db_password }}
+      {% if zabbix_server_db_type == 'postgresql' %}
+      DBSchema=public
+      {% endif %}
+      ListenPort={{ zabbix_server_listen_port }}
+      StatsAllowedIP=127.0.0.1
+      Timeout=10
+    dest: /etc/zabbix/zabbix_server.conf
+    owner: root
+    group: zabbix
+    mode: "0640"
+  diff: false
+  notify: Restart zabbix server
+
+- name: "zabbix_server : Flush server configuration changes"
+  ansible.builtin.meta: flush_handlers
+
+- name: "zabbix_server : Enable and start the server"
+  ansible.builtin.service:
+    name: zabbix-server
+    enabled: true
+    state: started
+
+- name: "zabbix_server : Install the functional readiness check"
+  ansible.builtin.copy:
+    src: ready.py
+    dest: /usr/local/lib/ai-support-zabbix-ready.py
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: "zabbix_server : Wait for the selected server to answer a statistics request"
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, /usr/local/lib/ai-support-zabbix-ready.py, "{{ zabbix_server_listen_port }}", "{{ zabbix_server_version }}"]
+  register: zabbix_server_ready
+  changed_when: false
+  retries: 20
+  delay: 3
+  until: zabbix_server_ready.rc == 0
