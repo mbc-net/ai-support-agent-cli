@@ -1,7 +1,7 @@
 # サーバセットアップ ロール開発ガイド
 
-`ansible/roles/*`（14ロール: `os_init` / `ssh_key` / `docker` / `nvm` /
-`claude_cli` / `codex` / `ai_support_agent` / `web_server` / `database` /
+`ansible/roles/*`（ロール例: `os_init` / `ssh_key` / `docker` / `nvm` /
+`claude_cli` / `codex` / `ai_support_agent` / `web_server` / `haproxy` / `database` /
 `dns_tls` / `k3s` / `gitlab_runner` / `github_runner` / `tailscale`）を、
 API を立てずにローカルで開発・検証するための手引きです。
 
@@ -232,3 +232,126 @@ npm run server-setup:local-run -- \
 `development/server-setup-role-development`（サーバセットアップ ロール開発）を
 参照してください。ロールを追加・変更したら、実装の実態に合わせて同ドキュメントを
 更新すること。
+
+
+## HAProxy ロール
+
+`haproxy` は Ubuntu 22.04 / 24.04 / 26.04 LTS の配布パッケージを使用する。
+`state: present` 相当で未導入時だけインストールし、導入済みパッケージは更新しない。
+Ansible の組み込み `command` から、同梱の `roles/haproxy/files/haproxy_setup.py` を
+対象ホストで実行する。Python 標準ライブラリだけを使用し、入力は JSON の標準入力で渡す。
+補助スクリプトは対象ホストへ常設しない。
+
+```yaml
+- name: HAProxy
+  ansible.builtin.include_role:
+    name: haproxy
+  vars:
+    haproxy_mode: http
+    haproxy_bind_address: 127.0.0.1
+    haproxy_bind_port: 8080
+    haproxy_backends:
+      - name: app1
+        address: 127.0.0.1
+        port: 9001
+      - name: app2
+        address: app2.example.com
+        port: 9001
+```
+
+| 変数 | 型・既定値 | 制約 |
+| --- | --- | --- |
+| `haproxy_mode` | string、`http` | `http` または `tcp` |
+| `haproxy_bind_address` | string、`127.0.0.1` | IPv4。外部公開には明示指定が必要 |
+| `haproxy_bind_port` | integer、`8080` | 1〜65535。文字列・booleanは拒否 |
+| `haproxy_backends` | list、`[]` | 必須、1〜256件。各要素は `name`・`address`・`port` のみ |
+
+転送先名は英字で開始する63文字以下の英数字・ハイフン・アンダースコアで、重複不可。
+転送先アドレスはIPv4またはDNS名。`ipv4@` 接頭辞でIPv4接続を強制するため、
+AAAAのみの名前は設定検証で失敗する。DNSは起動・reload時に解決し、継続的なDNS更新は行わない。
+転送先ポートも整数の1〜65535。改行や任意のHAProxyオプションの混入を拒否する。
+負荷分散はround-robin、死活監視はTCP接続確認（2秒間隔、3回失敗で除外、2回成功で復帰）。
+HTTP応答の正常性は判定しない。TLS終端、証明書管理、統計画面、IPv6は対象外。
+UFWの開放や他サービスの停止は行わない。
+
+### 設定反映・復旧
+
+`/etc/haproxy/haproxy.cfg` **全体を管理する**。シンボリックリンクの設定ファイル、
+masked等の通常のenabled/disabled以外のサービス状態は、変更前に拒否する。
+入力を検証してから `/var/lib/ai-support-agent/haproxy.lock` を原子的に作成する。
+ロックには実行ID・PID・取得時刻、変更開始後にはバックアップのパスを記録する。
+ロックを取得できない実行はホストを変更しない。
+
+ロック取得後にパッケージ・設定ファイルの有無、稼働状態、自動起動状態を記録する。
+未導入の場合、`policy-rc.d` でインストール時の自動起動を抑止し、元のpolicyを復元する。
+候補設定を `haproxy -c -f` で検証してから、root所有・0600で原子的に配置する。
+停止中なら起動、稼働中なら設定変更時だけreloadし、成功後に自動起動を有効化する。
+
+終了コード・稼働状態に加え、指定IPv4アドレス・ポートのLISTENソケットが
+HAProxyのsystemd MainPIDまたは子プロセスに属することを確認する。
+別プロセスが同じポートで待受しているだけでは成功にしない。
+reload前のワーカーPIDを記録し、新しいワーカーが指定ポートを保持するまで待つ。
+旧ワーカーだけが残る場合は失敗として復旧する。HTTPアプリケーション応答の正常性までは保証しない。
+
+失敗時、導入済み環境では元の設定内容・権限・所有者、稼働状態、自動起動状態への復旧を試みる。
+初回導入ではサービスを停止・自動起動無効にし、パッケージと診断用設定を保持する。
+元の失敗と復旧失敗を分けて報告する。パッケージ・依存関係は巻き戻さない。
+稼働中だったサービスの再起動は、旧設定の内容・権限・所有者の復元と構文検証が成功した場合だけ行う。
+設定復元に失敗した場合はサービス操作を行わず、復旧エラーが残る場合はロックを保持して手動復旧を要求する。
+SSH切断やプロセス強制終了では自動復旧を保証しない。
+外部コマンドは独立したプロセスグループで実行し、タイムアウト時はTERM・KILLで
+グループ全体の停止を試みる。systemdジョブやグループ外へ移ったプロセスの終了は
+断定できないため、タイムアウト時は自動復旧・ロック解除を行わず、状態を `interrupted` として保存する。
+復旧処理自体がタイムアウトした場合も、後続の復旧処理を停止して同じ扱いにする。
+
+### バックアップ保持と手動復旧
+
+変更が必要な場合だけ `/var/backups/ai-support-agent/haproxy/<実行ID>/` に
+`state.json`、既存設定の `haproxy.cfg`、候補設定の `candidate.cfg` を保存する。
+ディレクトリは0700、ファイルは0600。正常完了した直近5世代を保持し、整理は正常完了後だけ行う。
+`pending`・`interrupted`・`rolled_back`・`recovery_failed` は自動削除しない。解決後の整理は管理者が行う。
+変更不要の再実行では設定変更・reload・バックアップ作成は発生しない。
+
+中断時は次の手順で復旧する。
+
+1. 対象ホストでロックの `owner.json` を確認し、PIDだけでなくコマンド・取得時刻を照合する。
+   実行プロセスと子のapt処理、systemdの未完了ジョブ（`systemctl list-jobs`）が
+   終了していることを確認する。稼働中の処理が残るロックは解除しない。
+2. ロックの `transaction` が示すバックアップの `state.json` を読む。
+   パスが未記録なら変更開始前であり、設定復元は不要。
+3. `policy-state.json` がロック内に残っていればインストール中断・タイムアウトの可能性がある。
+   タイムアウト時は自動起動抑止のpolicyを保持するため、apt/dpkg処理の終了確認後に復元する。
+   `present: true` なら `policy-rc.d.original` を `/usr/sbin/policy-rc.d` に所有者・権限・
+   シンボリックリンクを保持して復元する。falseならこの処理が置いたpolicyを取り除く。
+   元のpolicyの所有者は `policy-state.json` の `uid`・`gid` に記録されるため、その値に戻す。
+4. `installed: true` なら、`config_exists: true` の場合はバックアップの設定を
+   `/etc/haproxy/haproxy.cfg` に復元し、`mode`・`uid`・`gid` をstateの値に戻す。
+   falseなら今回配置した設定を取り除く。
+5. 導入済み環境は `active: true` なら旧設定の構文を確認して `systemctl restart haproxy`、
+   falseなら `systemctl stop haproxy` を実行する。
+   `enabled` に従い `systemctl enable haproxy` または `systemctl disable haproxy` を実行する。
+   初回導入失敗なら停止・自動起動無効とし、パッケージと診断用設定は残す。
+6. 設定内容と `systemctl is-active/is-enabled haproxy` を確認して復旧結果を記録する。
+   復旧が完了してからロックディレクトリを削除する。
+
+Ansible check modeは入力検証のみ実行し、導入・設定反映は行わない。
+
+### 検証
+
+エージェントのJest `haproxy-role.spec.ts` がPythonのトランザクションテストを実行する。
+入力拒否、復旧、保持世代数、同時実行、強制終了後の記録保持を検証する。
+実通信の検証は **使い捨てのUbuntu/systemdホストでのみ** 次を実行する。
+設定ファイルとサービス状態を変更するため、運用中のホストでは実行しない。
+
+```bash
+sudo python3 __tests__/server-setup/haproxy-live.py
+```
+
+HTTP/TCP転送、複数転送先の分散、停止した転送先の除外、reload、実ポート競合時の復旧、
+再実行時の冪等性を検証する。初回導入の検証にはHAProxy未導入のホストを使用する。
+
+Ansible経由の異常系は、HAProxyが稼働する使い捨てホストで
+`__tests__/server-setup/haproxy-failure-play.yml` を実行して検証する。
+存在しないローカルアドレスへの反映失敗を発生させ、元のエラーと復旧結果の表示、
+設定内容の復元、サービスの稼働をアサートする。rootで接続するDocker検証環境では
+`-e ansible_become=false` を指定する。
