@@ -28,7 +28,7 @@
 
 import { DEFAULT_SSH_PORT, LOCALHOST_ADDRESS, TAILSCALE_SOCKS_PORT } from '../constants'
 import { logger } from '../logger'
-import { isSupportedSshAuthType, type SshExecCredential } from '../types'
+import { isSupportedSshAuthType, unsupportedSshAuthTypeMessage, type SshExecCredential } from '../types'
 import { getErrorMessage } from '../utils'
 
 /** Default timeout when the caller/payload does not specify one. */
@@ -100,7 +100,7 @@ export async function executeSshCommand(
   // server-setup-runner.ts's validateSshCredential, which guards the same
   // overloaded field for the `server_setup_exec` command.
   if (!isSupportedSshAuthType(credential.authType)) {
-    throw new Error(`SSH credential authType is not supported: ${JSON.stringify(credential.authType)}`)
+    throw new Error(unsupportedSshAuthTypeMessage(credential.authType))
   }
 
   // Resolved (and, for Tailscale, connected) before the ssh2 Client is even

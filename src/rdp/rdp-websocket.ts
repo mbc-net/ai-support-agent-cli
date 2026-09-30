@@ -1,6 +1,6 @@
 import WebSocket from 'ws'
 
-import { BaseWebSocketConnection, buildAgentWsHeaders } from '../base-websocket'
+import { BaseWebSocketConnection, createAgentWebSocket } from '../base-websocket'
 import {
   WS_CLOSE_CODE_AUTH_REJECTED,
   WS_RECONNECT_MAX_DELAY_MS,
@@ -15,6 +15,9 @@ import {
   RdpSessionRegistry,
   type RdpRegistryOutbound,
 } from './rdp-session-registry'
+import { RdpTrustedCaStore } from './rdp-trusted-ca'
+import { createRdpTunnelSupport, type RdpTunnelSupport } from './rdp-tunnel'
+import { parseRdpTunnel, type RdpTunnel } from './rdp-tunnel-message'
 
 /**
  * The agent end of the Web RDP relay.
@@ -44,6 +47,17 @@ export type RdpServerMessage =
       width: number
       height: number
       dpi: number
+      /**
+       * Tunnel route (contract 1). Unvalidated as received; see
+       * {@link parseRdpTunnel}. **Carries credentials.**
+       */
+      tunnel?: unknown
+      /**
+       * PEMs of the CAs the project registered for certificate verification.
+       * Unvalidated as received; see {@link RdpTrustedCaStore.apply}. Sent only
+       * when the connection verifies the certificate.
+       */
+      trustedCaCertificates?: unknown
     }
   | { type: 'rdp_data'; sessionId: string; data: string }
   | { type: 'rdp_resize'; sessionId: string; width: number; height: number }
@@ -75,6 +89,10 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
     private readonly token: string,
     private readonly agentId: string,
     private readonly resolveGuacdEndpoint: () => GuacdEndpoint = createLazyGuacdEndpointResolver(),
+    /** Tunnel routes this process serves (contract 2) and how to open them. */
+    private readonly tunnels: RdpTunnelSupport = createRdpTunnelSupport(),
+    /** guacd's trust store, rewritten per `rdp_open` from the registered CAs. */
+    private readonly trustedCa: RdpTrustedCaStore = new RdpTrustedCaStore(),
   ) {
     super({
       maxReconnectRetries: RDP_WS_MAX_RECONNECT_RETRIES,
@@ -90,6 +108,22 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
         return connectToGuacd(endpoint.host, endpoint.port)
       },
       send: (msg) => this.sendToApi(msg),
+      // guacd's host decides where the relay listens (Docker form), so it is
+      // resolved per session like the connect above.
+      openTunnel: (tunnel, sessionId, relayToken, forwardRoutingToken) =>
+        this.tunnels.open(tunnel, {
+          sessionId,
+          guacdHost: this.resolveGuacdEndpoint().host,
+          relayToken,
+          forwardRoutingToken,
+        }),
+      // Direct connections are checked too: guacd could otherwise be pointed at
+      // another session's relay (another project's too, where the legacy Docker
+      // fallback shares one guacd), at loopback or at the metadata service.
+      checkDirectTarget: (hostname) =>
+        this.tunnels.checkDirectTarget(hostname, {
+          guacdHost: this.resolveGuacdEndpoint().host,
+        }),
     })
   }
 
@@ -99,13 +133,12 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
   }
 
   protected createWebSocket(): WebSocket {
-    return new WebSocket(this.wsUrl, {
-      headers: buildAgentWsHeaders(
-        this.token,
-        this.agentId,
-        this.getStickyCookieHeader(),
-      ),
-    })
+    return createAgentWebSocket(
+      this.wsUrl,
+      this.token,
+      this.agentId,
+      this.getStickyCookieHeader(),
+    )
   }
 
   protected onOpen(_ws: WebSocket, resolve: (value: void) => void): void {
@@ -138,17 +171,40 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
 
   /** 一時的な切断（再接続する）。実際の切断はほぼここに来る。 */
   protected override onWebSocketClose(): void {
-    this.registry.closeAll('API connection lost')
+    this.trackClosing()
   }
 
   /** 恒久的な認証拒否（再接続しない）。 */
   protected override onPermanentClose(): void {
-    this.registry.closeAll('API connection lost')
+    this.trackClosing()
   }
 
   /** 明示的なシャットダウン（エージェント終了時）。 */
   protected override onDisconnect(): void {
-    this.registry.closeAll('API connection lost')
+    this.trackClosing()
+  }
+
+  /** The latest closeAll() in progress, for {@link shutdown} to wait on. */
+  private closing: Promise<void> = Promise.resolve()
+
+  private trackClosing(): void {
+    this.closing = Promise.resolve(this.registry.closeAll('API connection lost')).catch(
+      (error: unknown) => {
+        logger.warn(`[rdp-ws] Closing RDP sessions failed: ${getErrorMessage(error)}`)
+      },
+    )
+  }
+
+  /**
+   * Disconnect and wait until every session's tunnel is closed.
+   *
+   * Called from the agent's shutdown path: exiting before the tunnels are
+   * down would leave subprocesses (tailscaled, the SSM plugin) and remote
+   * sessions behind. closeAll() itself bounds the wait.
+   */
+  async shutdown(): Promise<void> {
+    this.disconnect()
+    await this.closing
   }
 
   protected onParsedMessage(msg: RdpServerMessage): void {
@@ -228,6 +284,42 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
       return
     }
 
+    // A tunnel route is checked before anything else happens: its shape, and
+    // whether this process serves that route at all (the same answer the
+    // heartbeat reports). Refusing here states the reason; a session that
+    // started anyway would only fail later at guacd with nothing to go on.
+    let tunnel: RdpTunnel | undefined
+    if (msg.tunnel !== undefined) {
+      const refusal = this.checkTunnel(msg.tunnel)
+      if (typeof refusal === 'string') {
+        logger.warn(`[rdp-ws] Refusing rdp_open for session ${msg.sessionId}: ${refusal}`)
+        this.sendToApi({
+          type: 'error',
+          sessionId: msg.sessionId,
+          message: refusal,
+          fatal: true,
+        })
+        return
+      }
+      tunnel = refusal
+
+      // 多層防御: トンネル経路では guacd の hostname が中継アドレスで上書きされる
+      // （RdpSessionRegistry）ため、証明書のホスト名は一致し得ず、検証を有効に
+      // すると必ず失敗する。api は接続前に同じ理由で断っているが、ここでも
+      // トンネルを開く前・信頼ストアを書き換える前に理由付きで断る。
+      // `ignore-cert` が無いのは guacd の既定（検証あり）なので同じく断る。
+      if (msg.parameters['ignore-cert'] !== 'true') {
+        const message =
+          'certificate_verify_unsupported_on_tunnel: certificate verification is not ' +
+          'supported on tunneled RDP connections (the certificate cannot match the relay address)'
+        logger.warn(
+          `[rdp-ws] Refusing rdp_open for session ${msg.sessionId}: certificate_verify_unsupported_on_tunnel`,
+        )
+        this.sendToApi({ type: 'error', sessionId: msg.sessionId, message, fatal: true })
+        return
+      }
+    }
+
     // Resolve the endpoint **before** registering a session. Two reasons:
     //   - a refusal (capability off, waiting on a restart/redeploy, guacd could
     //     not be started) must reach the browser as a stated reason rather than
@@ -252,13 +344,59 @@ export class RdpWebSocket extends BaseWebSocketConnection<RdpServerMessage> {
       return
     }
 
+    // The trust store is rewritten before guacd is asked to connect, so the
+    // certificate check of this session already sees the project's CAs. A
+    // failure refuses the session: connecting anyway would verify against a
+    // stale set of CAs and fail with a certificate error that says nothing
+    // about the actual cause.
+    if (msg.trustedCaCertificates !== undefined) {
+      try {
+        this.trustedCa.apply(msg.trustedCaCertificates)
+      } catch (error) {
+        const message = getErrorMessage(error)
+        // Only the reason code: the message never carries a PEM, but the log
+        // line does not need the detail either.
+        logger.warn(
+          `[rdp-ws] Refusing rdp_open for session ${msg.sessionId}: ${message.split(':')[0]}`,
+        )
+        this.sendToApi({ type: 'error', sessionId: msg.sessionId, message, fatal: true })
+        return
+      }
+    }
+
     // open() reports its own failures to the API and never rejects; the catch is
     // a backstop so a bug there cannot become an unhandled rejection.
-    void this.registry.open(msg).catch((error: unknown) => {
+    void this.registry.open({ ...msg, tunnel }).catch((error: unknown) => {
       logger.warn(
         `[rdp-ws] Failed to open RDP session ${msg.sessionId}: ${getErrorMessage(error)}`,
       )
     })
+  }
+
+  /**
+   * Validate a tunnel instruction and confirm this process serves its route.
+   *
+   * @returns the parsed tunnel, or the refusal message (never carrying a value
+   *   from the instruction — it goes to the browser)
+   */
+  private checkTunnel(raw: unknown): RdpTunnel | string {
+    let tunnel: RdpTunnel
+    try {
+      tunnel = parseRdpTunnel(raw)
+    } catch (error) {
+      return `rdp_tunnel_invalid: ${getErrorMessage(error)}`
+    }
+    const kinds = this.tunnels.supportedKinds()
+    if (!kinds) {
+      return (
+        'rdp_tunnel_unsupported: this agent does not relay RDP through tunnels ' +
+        '(no tunnel relay is configured for its deployment form)'
+      )
+    }
+    if (!kinds.includes(tunnel.kind)) {
+      return `rdp_tunnel_unsupported: this agent cannot open ${tunnel.kind} tunnels`
+    }
+    return tunnel
   }
 
   private sendToApi(msg: RdpRegistryOutbound): void {

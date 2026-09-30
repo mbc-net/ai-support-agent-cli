@@ -96,6 +96,22 @@ function fakeGuacdSocket(): unknown {
   }
 }
 
+/**
+ * guacd への接続は、直接接続の宛先検査（名前解決を含む非同期処理）の後に
+ * 行われる。接続先の確認はその完了を待ってから行う。
+ */
+async function eventually(assertion: () => void): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    try {
+      assertion()
+      return
+    } catch {
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+  }
+  assertion()
+}
+
 describe('guacd の遅延起動', () => {
   beforeEach(() => {
     ensureGuacdContainer.mockReset()
@@ -133,7 +149,7 @@ describe('guacd の遅延起動', () => {
     expect(h.env.GUACD_PORT).toBe('4822')
   })
 
-  it('★ GUACD_HOST が既にあれば何も起動せず、その接続先を使う', () => {
+  it('★ GUACD_HOST が既にあれば何も起動せず、その接続先を使う', async () => {
     // 運用側が別途 guacd を用意している構成を壊さない（既存方針）。
     const h = makeHarness({
       declaration: { rdp: true },
@@ -141,7 +157,7 @@ describe('guacd の遅延起動', () => {
     })
     h.open('sess-1')
     expect(ensureGuacdContainer).not.toHaveBeenCalled()
-    expect(connectToGuacd).toHaveBeenCalledWith('guacd.internal', 14822)
+    await eventually(() => expect(connectToGuacd).toHaveBeenCalledWith('guacd.internal', 14822))
   })
 
   describe('停止漏れ', () => {
@@ -229,7 +245,7 @@ describe('guacd の遅延起動', () => {
       },
     )
 
-    it('サイドカーで配線済みなら、コンテナを起こさずそのまま繋ぐ', () => {
+    it('サイドカーで配線済みなら、コンテナを起こさずそのまま繋ぐ', async () => {
       const h = makeHarness({
         declaration: { rdp: true },
         env: { KUBERNETES_SERVICE_HOST: '10.43.0.1', GUACD_HOST: '127.0.0.1' },
@@ -237,7 +253,7 @@ describe('guacd の遅延起動', () => {
       h.open('sess-1')
 
       expect(ensureGuacdContainer).not.toHaveBeenCalled()
-      expect(connectToGuacd).toHaveBeenCalledWith('127.0.0.1', 4822)
+      await eventually(() => expect(connectToGuacd).toHaveBeenCalledWith('127.0.0.1', 4822))
     })
   })
 
@@ -259,12 +275,12 @@ describe('guacd の遅延起動', () => {
       ])
     })
 
-    it('失敗は記憶せず、次の要求で再試行する（利用者の操作で復旧できる）', () => {
+    it('失敗は記憶せず、次の要求で再試行する（利用者の操作で復旧できる）', async () => {
       const h = makeHarness({ declaration: { rdp: true } })
       h.open('sess-1')
       ensureGuacdContainer.mockReturnValue({ host: '127.0.0.1', port: 4822 })
       h.open('sess-2')
-      expect(connectToGuacd).toHaveBeenCalledWith('127.0.0.1', 4822)
+      await eventually(() => expect(connectToGuacd).toHaveBeenCalledWith('127.0.0.1', 4822))
     })
   })
 })

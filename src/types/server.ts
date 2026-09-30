@@ -1,3 +1,4 @@
+import type { RdpTunnelKind } from '../rdp/rdp-tunnel-message'
 import type { AgentChatMode, AgentChatModeOverrides } from './config'
 
 /**
@@ -224,6 +225,23 @@ export interface AgentEffectiveCapability {
    * by the API and rendered in the admin UI.
    */
   detail?: string
+  /**
+   * RDP tunnel routes this agent can relay (api ⇔ agent contract 2). Only on
+   * `key === 'rdp'` with `state === 'active'`, and only when a tunnel relay is
+   * configured for this deployment form; otherwise **omitted**, which the API
+   * treats like an agent that predates the feature (tunnel routes refused).
+   * Values mirror the API's `RDP_TUNNEL_KINDS`.
+   */
+  rdpTunnels?: RdpTunnelKind[]
+  /**
+   * Whether this agent can verify RDP certificates against the project's
+   * registered CAs (`rdp_open.trustedCaCertificates`): guacd's trust store is
+   * shared with the agent. Only `true` on `key === 'rdp'` with
+   * `state === 'active'`; otherwise **omitted**, which the API treats like an
+   * agent that predates the feature (connections needing a registered CA are
+   * refused with `rdp_trusted_ca_unsupported`).
+   */
+  rdpTrustedCa?: boolean
 }
 
 /** Max length the API accepts for {@link AgentEffectiveCapability.declarationHash}. */

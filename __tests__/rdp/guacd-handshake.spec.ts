@@ -16,9 +16,15 @@ import {
  * client -> guacd  6.select,3.rdp;
  * guacd  -> client 4.args,8.VERSION,8.hostname,4.port,8.password,...;
  * client -> guacd  4.size,...; 5.audio,...; 5.video,...; 5.image,...;
- * client -> guacd  7.connect,<one value per arg guacd asked for, in order>;
+ * client -> guacd  7.connect,13.VERSION_1_5_0,<one value per arg guacd asked for, in order>;
  * guacd  -> client 5.ready,37.$id;
  * ```
+ *
+ * Guacamole protocol 1.1+: when the first `args` element is a protocol version
+ * (`VERSION_x_y_z`), the client's `connect` starts with the version it speaks —
+ * guacd counts it, and drops the connection ("Client did not return the
+ * expected number of arguments") when it is missing (observed with guacd
+ * 1.5.5). A server without a version element (pre-1.1) gets values only.
  *
  * The `connect` values are positional: guacd matches them to the names it sent in
  * `args`. Emitting them in any other order silently feeds the password into a
@@ -142,6 +148,7 @@ describe('performGuacdHandshake', () => {
         'domain',
       ])
       expect(socket.find('connect')?.args).toEqual([
+        'VERSION_1_5_0',
         '3389',
         PASSWORD,
         '10.0.0.5',
@@ -156,6 +163,7 @@ describe('performGuacdHandshake', () => {
         'password',
       ])
       expect(socket.find('connect')?.args).toEqual([
+        'VERSION_1_5_0',
         '10.0.0.5',
         '',
         PASSWORD,
@@ -164,12 +172,42 @@ describe('performGuacdHandshake', () => {
 
     it('does not leak an unrequested parameter into the connect values', async () => {
       const { socket } = await handshakeWith(['hostname'])
-      expect(socket.find('connect')?.args).toEqual(['10.0.0.5'])
+      expect(socket.find('connect')?.args).toEqual(['VERSION_1_5_0', '10.0.0.5'])
     })
 
-    it('drops the leading protocol version rather than treating it as a parameter', async () => {
+    it('★ answers the protocol version first, then one value per parameter (not the version as a parameter)', async () => {
       const { socket } = await handshakeWith(['hostname', 'port'])
+      expect(socket.find('connect')?.args).toEqual(['VERSION_1_5_0', '10.0.0.5', '3389'])
+    })
+
+    it('★ echoes whichever version guacd announced', async () => {
+      const socket = new FakeSocket()
+      const promise = performGuacdHandshake(socket, baseParams)
+      socket.emit('args', ['VERSION_1_1_0', 'hostname'])
+      socket.emit('ready', ['$c'])
+      await promise
+      expect(socket.find('connect')?.args).toEqual(['VERSION_1_1_0', '10.0.0.5'])
+    })
+
+    it('★ a pre-1.1 server (no version element) gets values only, and its first name is a parameter', async () => {
+      const socket = new FakeSocket()
+      const promise = performGuacdHandshake(socket, baseParams)
+      socket.emit('args', ['hostname', 'port'])
+      socket.emit('ready', ['$c'])
+      await promise
       expect(socket.find('connect')?.args).toEqual(['10.0.0.5', '3389'])
+    })
+
+    it('a parameter merely containing "VERSION" is not a version element', async () => {
+      const socket = new FakeSocket()
+      const promise = performGuacdHandshake(socket, {
+        ...baseParams,
+        parameters: { ...baseParams.parameters, 'my-VERSION_x': 'v' },
+      })
+      socket.emit('args', ['my-VERSION_x', 'hostname'])
+      socket.emit('ready', ['$c'])
+      await promise
+      expect(socket.find('connect')?.args).toEqual(['v', '10.0.0.5'])
     })
   })
 
@@ -330,7 +368,7 @@ describe('performGuacdHandshake', () => {
         .instructions()
         .filter((i) => i.opcode === 'connect')
       expect(connects).toHaveLength(1)
-      expect(connects[0].args).toEqual(['10.0.0.5'])
+      expect(connects[0].args).toEqual(['VERSION_1_5_0', '10.0.0.5'])
     })
 
     it('ignores data arriving after the handshake settled', async () => {

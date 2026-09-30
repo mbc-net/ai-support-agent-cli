@@ -44,6 +44,7 @@ import {
   type CommandResult,
   errorResult,
   isSupportedSshAuthType,
+  unsupportedSshAuthTypeMessage,
   type ServerSetupExecPayload,
   type SelfRestartDeclarationAck,
   type ServerSetupProgressEvent,
@@ -508,7 +509,7 @@ export function validateSshCredential(credential: SshExecCredential): string | n
   // Shared with commands/ssh-executor.ts's executeSshCommand via
   // isSupportedSshAuthType so the two guards cannot silently drift apart.
   if (!isSupportedSshAuthType(credential.authType)) {
-    return `SSH credential authType is not supported: ${JSON.stringify(credential.authType)}`
+    return unsupportedSshAuthTypeMessage(credential.authType)
   }
   if (!credential.privateKey) {
     return `SSH credential privateKey is empty for authType ${JSON.stringify(credential.authType)}`

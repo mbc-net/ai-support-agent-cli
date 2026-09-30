@@ -3,19 +3,19 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS } from '../../constants'
-import { readAgentCredentialEnv } from './agent-credential-env'
+import { getContainerProjectDir, CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS } from '../../constants'
 import { loadConfig, getProjectList } from '../../config-manager'
-import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { projectKey } from '../../project-key'
+import {
+  CONTAINER_AGENT_CONFIG_DIR,
+  CONTAINER_HOME,
+} from '../../constants'
 import type { ProjectRegistration } from '../../types'
 import { ensureDir, getErrorMessage } from '../../utils'
 import {
-  getProjectConfigHostDir,
   getProjectLogDir,
-  getProjectServiceDir,
-  getServicesDir,
   getWin32LogDir,
   getWin32WrapperScriptPath,
 } from '../../utils/path-utils'
@@ -24,10 +24,15 @@ import { getCliEntryPoint, getNodePath } from './node-paths'
 import type { ProjectStatus, ServiceConfig, ServiceOptions, ServiceStatus, ServiceStrategy } from './types'
 import {
   assertProjectCodeIsSafe,
+  buildWrapperScriptBaseOptions,
   detectInstallCollisions,
+  loadConfiguredProjectsOrReport,
+  logPostInstallHints,
+  prepareProjectServiceDirs,
+  reportInstallCollision,
   sanitizeServiceNameSegment,
   toContainerApiUrl,
-  validateProjectDirForMount,
+  type WrapperScriptBaseOptions,
 } from './wrapper-helpers'
 
 export { getCliEntryPoint, getNodePath }
@@ -147,22 +152,11 @@ function assertCmdSafe(value: string, field: string): void {
  * the installed CLI version at runtime, auto-builds the image if missing, and
  * removes any stale container before `docker run`.
  */
-export function generateWin32WrapperScript(opts: {
-  imageName: string
-  tenantCode: string
-  projectCode: string
-  projectConfigHostDir: string
-  projectDir?: string
-  token: string
-  apiUrl: string
-  anthropicApiKey?: string
-  claudeCodeOauthToken?: string
-  codexApiKey?: string
-  codexAccessToken?: string
-  verbose?: boolean
-}): string {
-  const containerHome = '/home/node'
-  const containerConfigDir = `${containerHome}/.ai-support-agent`
+export function generateWin32WrapperScript(
+  opts: WrapperScriptBaseOptions,
+): string {
+  const containerHome = CONTAINER_HOME
+  const containerConfigDir = CONTAINER_AGENT_CONFIG_DIR
   const homeDir = os.homedir()
   const containerApiUrl = toContainerApiUrl(opts.apiUrl)
 
@@ -177,7 +171,7 @@ export function generateWin32WrapperScript(opts: {
   if (opts.codexApiKey) assertCmdSafe(opts.codexApiKey, 'codexApiKey')
   if (opts.codexAccessToken) assertCmdSafe(opts.codexAccessToken, 'codexAccessToken')
 
-  const containerProjectDir = `/workspace/projects/${opts.projectCode}`
+  const containerProjectDir = getContainerProjectDir(opts.projectCode)
   // `||` (not `??`) so an empty projectDir falls back to the default; an empty
   // host path would emit `-v :/workspace/...:rw` which docker rejects.
   const hostProjectDir = opts.projectDir || path.dirname(opts.projectConfigHostDir)
@@ -318,26 +312,24 @@ export function writeAndRegisterProjectTask(
   const projectLogDir = getProjectLogDir(logDir, projectKey)
   ensureDir(projectLogDir, 0o700)
 
-  const servicesDir = getServicesDir()
-  const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  ensureDir(projectServiceDir, 0o700)
-
-  const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  ensureDir(projectConfigHostDir, 0o700)
-
-  const validatedProjectDir = validateProjectDirForMount(project.projectDir)
+  const { projectServiceDir, projectConfigHostDir, validatedProjectDir } =
+    prepareProjectServiceDirs({
+      projectKey,
+      tenantCode,
+      projectCode,
+      projectDir: project.projectDir,
+    })
 
   const wrapperScriptPath = getWin32WrapperScriptPath(projectServiceDir)
   const wrapperScript = generateWin32WrapperScript({
-    imageName: IMAGE_NAME,
-    tenantCode,
-    projectCode,
-    projectConfigHostDir,
-    projectDir: validatedProjectDir,
-    token: project.token,
-    apiUrl: project.apiUrl,
-    ...readAgentCredentialEnv(),
-    verbose: options.verbose,
+    ...buildWrapperScriptBaseOptions({
+      tenantCode,
+      projectCode,
+      projectConfigHostDir,
+      projectDir: validatedProjectDir,
+      project,
+      verbose: options.verbose,
+    }),
   })
   // The wrapper holds the token in plaintext — write it owner-only.
   fs.writeFileSync(wrapperScriptPath, wrapperScript, { encoding: 'utf-8', mode: 0o700 })
@@ -358,13 +350,8 @@ export function writeAndRegisterProjectTask(
 
 export class Win32ServiceStrategy implements ServiceStrategy {
   install(options: ServiceOptions): void {
-    const config = loadConfig()
-    const projects = config ? getProjectList(config) : []
-
-    if (projects.length === 0) {
-      logger.error(t('service.noProjectsConfigured'))
-      return
-    }
+    const projects = loadConfiguredProjectsOrReport()
+    if (!projects) return
 
     const entryPoint = getCliEntryPoint()
     if (!fs.existsSync(entryPoint)) {
@@ -384,21 +371,10 @@ export class Win32ServiceStrategy implements ServiceStrategy {
     let failedCount = 0
     for (const project of projects) {
       const { projectCode } = project
-      const fqn = `${project.tenantCode}/${projectCode}`
+      const fqn = projectKey(project)
       const collision = collisions.get(fqn)
       if (collision) {
-        const messageKey = collision.isDuplicate
-          ? 'service.projectDuplicateEntry'
-          : 'service.projectUnitNameCollision'
-        const dedupKey = `${collision.name}\x00${messageKey}`
-        if (!reportedCollisionLabels.has(dedupKey)) {
-          logger.error(t(messageKey, {
-            projectCode,
-            unitName: collision.name,
-            others: collision.others.join(', '),
-          }))
-          reportedCollisionLabels.add(dedupKey)
-        }
+        reportInstallCollision(projectCode, collision, reportedCollisionLabels)
         failedCount += 1
         continue
       }
@@ -414,9 +390,7 @@ export class Win32ServiceStrategy implements ServiceStrategy {
     }
 
     if (installedCount > 0) {
-      logger.info(t('service.loadHintMulti'))
-      logger.info(t('service.logDir', { path: logDir }))
-      logger.info(t('service.noLogRotation'))
+      logPostInstallHints(logDir)
     }
 
     if (failedCount > 0) {

@@ -5,6 +5,9 @@ import {
   type AgentCapabilityKey,
   type AgentEffectiveCapability,
 } from '../types'
+import type { RdpTunnelKind } from '../rdp/rdp-tunnel-message'
+import { resolveRdpTrustedCaDir } from '../rdp/rdp-trusted-ca'
+import { detectRdpTunnelKinds } from '../rdp/rdp-tunnel-support'
 import { getCapabilityApplyFailures } from './capability-apply-failures'
 import {
   detectAgentRuntime,
@@ -41,6 +44,16 @@ export interface CapabilityContext {
   env?: NodeJS.ProcessEnv
   /** Defaults to the process-wide record. */
   applyFailures?: Partial<Record<AgentCapabilityKey, string>>
+  /**
+   * RDP tunnel routes this process serves; `undefined` = not configured.
+   * Defaults to {@link detectRdpTunnelKinds} over `env`.
+   */
+  detectRdpTunnels?: (env: NodeJS.ProcessEnv) => RdpTunnelKind[] | undefined
+  /**
+   * Whether guacd's trust store is shared with this process. Defaults to
+   * {@link resolveRdpTrustedCaDir} over `env`.
+   */
+  detectRdpTrustedCa?: (env: NodeJS.ProcessEnv) => boolean
 }
 
 /**
@@ -98,7 +111,11 @@ export function planCapability(
   }
 }
 
-/** The heartbeat's view: {@link planCapability} plus any recorded failure. */
+/**
+ * The heartbeat's view: {@link planCapability} plus any recorded failure, plus
+ * — for an active `rdp` — the tunnel routes this process serves and whether it
+ * can trust the project's registered CAs.
+ */
 export function describeCapability(
   key: AgentCapabilityKey,
   ctx: CapabilityContext = {},
@@ -107,7 +124,7 @@ export function describeCapability(
   if (!planned) return undefined
 
   const failure = (ctx.applyFailures ?? getCapabilityApplyFailures())[key]
-  if (failure === undefined) return planned
+  if (failure === undefined) return withRdpTrustedCa(withRdpTunnels(planned, ctx), ctx)
 
   return {
     ...planned,
@@ -115,6 +132,39 @@ export function describeCapability(
     reason: 'apply_failed',
     detail: failure.slice(0, AGENT_CAPABILITY_DETAIL_MAX_LENGTH),
   }
+}
+
+/**
+ * Attach `rdpTunnels` to an active `rdp` entry (contract 2).
+ *
+ * Only for `active`: listing routes on an entry that cannot be used would let
+ * the API read "usable" into it. Omitted entirely when tunnels are not
+ * configured, so the API treats this agent like one that predates tunnels.
+ */
+function withRdpTunnels(
+  entry: AgentEffectiveCapability,
+  ctx: CapabilityContext,
+): AgentEffectiveCapability {
+  if (entry.key !== 'rdp' || entry.state !== 'active') return entry
+  const env = ctx.env ?? process.env
+  const detect = ctx.detectRdpTunnels ?? ((e: NodeJS.ProcessEnv) => detectRdpTunnelKinds({ env: e }))
+  const kinds = detect(env)
+  return kinds ? { ...entry, rdpTunnels: kinds } : entry
+}
+
+/**
+ * Attach `rdpTrustedCa: true` to an active `rdp` entry when guacd's trust store
+ * is shared with this process. Omitted otherwise, like {@link withRdpTunnels}.
+ */
+function withRdpTrustedCa(
+  entry: AgentEffectiveCapability,
+  ctx: CapabilityContext,
+): AgentEffectiveCapability {
+  if (entry.key !== 'rdp' || entry.state !== 'active') return entry
+  const env = ctx.env ?? process.env
+  const detect =
+    ctx.detectRdpTrustedCa ?? ((e: NodeJS.ProcessEnv) => resolveRdpTrustedCaDir(e) !== undefined)
+  return detect(env) ? { ...entry, rdpTrustedCa: true } : entry
 }
 
 /**

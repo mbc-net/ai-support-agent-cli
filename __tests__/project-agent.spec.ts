@@ -2527,6 +2527,39 @@ describe('ProjectAgent', () => {
       expect(mockSubscriber.disconnect).toHaveBeenCalled()
     })
 
+    it('★ waits for the RDP relay to close its sessions and tunnels before stopping the transport', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const order: string[] = []
+      let finishRdp: () => void = () => undefined
+      const rdpWs = {
+        shutdown: jest.fn(
+          () =>
+            new Promise<void>((resolve) => {
+              finishRdp = () => {
+                order.push('rdp-closed')
+                resolve()
+              }
+            }),
+        ),
+        disconnect: jest.fn(() => order.push('rdp-disconnect')),
+      }
+      ;(agent as unknown as { transportState: { rdpWs: unknown } }).transportState.rdpWs = rdpWs
+      mockSubscriber.disconnect.mockImplementation(() => {
+        order.push('transport-stopped')
+      })
+
+      const shutdownPromise = agent.shutdown()
+      await jest.advanceTimersByTimeAsync(0)
+      expect(rdpWs.shutdown).toHaveBeenCalled()
+      expect(order).not.toContain('transport-stopped')
+      finishRdp()
+      await shutdownPromise
+      expect(order.indexOf('rdp-closed')).toBeLessThan(order.indexOf('transport-stopped'))
+    })
+
     it('gives up after SHUTDOWN_DRAIN_TIMEOUT_MS and logs the remaining command id(s)', async () => {
       const agent = new ProjectAgent(project, 'agent-1', options)
       agent.start()

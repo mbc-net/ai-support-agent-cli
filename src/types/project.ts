@@ -276,6 +276,21 @@ export function isSupportedSshAuthType(authType: string): authType is SshAuthTyp
 }
 
 /**
+ * The message used when an SSH credential carries an auth type we cannot use.
+ *
+ * Four call sites reject unsupported auth types and every one of them built
+ * this string by hand, with comments at each site warning not to let the guard
+ * and the message drift apart. Keeping the message next to the guard is what
+ * those comments were asking for.
+ *
+ * Three call sites throw it; `server-setup-runner` returns it as a validation
+ * result, so this returns the string rather than an Error.
+ */
+export function unsupportedSshAuthTypeMessage(authType: unknown): string {
+  return `SSH credential authType is not supported: ${JSON.stringify(authType)}`
+}
+
+/**
  * SSH connection parameters returned by the `ssh_exec` JIT credential fetch
  * (see `ssh-credential-client.ts`). Shares the plain-SSH connection fields
  * (`PlainSshConnectionFields`) — which the `ssh_exec` path always requires — and

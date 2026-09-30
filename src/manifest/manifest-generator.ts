@@ -13,6 +13,10 @@ import { logger } from '../logger'
 
 import { ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../constants'
 import { CONTAINER_START_ARGV } from '../docker/docker-args'
+import {
+  RDP_TRUSTED_CA_BUNDLE_FILE,
+  RDP_TRUSTED_CA_MOUNT_PATH,
+} from '../rdp/rdp-trusted-ca'
 
 /**
  * `terminationGracePeriodSeconds` for the generated Kubernetes Deployment.
@@ -139,9 +143,45 @@ function warnIfGuacdImageOverridden(guacdImage?: string): void {
     `[guacd] Using a custom image (${guacdImage}). The generated manifest overrides ` +
       'the container command to bind guacd to loopback, which only works for images ' +
       'without an ENTRYPOINT. If this image defines one, guacd will exit with invalid ' +
-      'arguments and Web RDP will be unavailable while everything else keeps running.',
+      'arguments and Web RDP will be unavailable while everything else keeps running. ' +
+      `On Kubernetes, guacd runs as UID/GID ${GUACD_K8S_UID}, ` +
+      'so the image must work as that user.',
   )
 }
+
+/**
+ * K8s で guacd を動かす UID / GID。
+ *
+ * guacamole/guacd:1.5.5 は `USER guacd`（名前指定）で、`useradd --uid 1000` /
+ * `groupadd --gid 1000`（`ARG UID=1000` / `ARG GID=1000`）で作られている
+ * （`docker image history guacamole/guacd:1.5.5` で確認）。`runAsNonRoot: true`
+ * だけだと、kubelet は名前指定の USER が非 root か検証できず
+ * CreateContainerConfigError で拒否する（Pod が起動しない）。数値で明示する。
+ * イメージを上げるときは取り直すこと。カスタムイメージでもこの値が強制される
+ * （{@link warnIfGuacdImageOverridden} で伝える）。
+ */
+const GUACD_K8S_UID = 1000
+
+/**
+ * guacd と共有する信頼ストアのボリューム名（K8s の emptyDir / ECS の task volume）。
+ *
+ * guacd は `SSL_CERT_FILE` でここの `bundle.pem` を読み、エージェントは
+ * 標準バンドル（`system-ca.pem`）＋プロジェクトに登録された CA で
+ * `bundle.pem` を置き換える（src/rdp/rdp-trusted-ca.ts）。
+ */
+const RDP_TRUSTED_CA_VOLUME = 'rdp-trusted-ca'
+const GUACD_SSL_CERT_FILE = `${RDP_TRUSTED_CA_MOUNT_PATH}/${RDP_TRUSTED_CA_BUNDLE_FILE}`
+
+/*
+ * :::danger guacd に信頼ストアを書かせない
+ * 共有ボリュームは guacd に読み取り専用でマウントする。書けると、guacd が乗っ取られた
+ * とき `system-ca.pem` をエージェントの `/proc/self/environ` へのリンクに差し替える
+ * だけで、エージェントの環境変数（トークン）が `bundle.pem` 経由で guacd に漏れる。
+ * 標準バンドルの配置はエージェント自身が起動時に行う（prepareRdpTrustedCaStore）。
+ * 初期化コンテナは使わない: guacd イメージが取得できないだけでエージェントまで
+ * 起動しなくなる（RDP の付加機能で本体を巻き添えにする）。
+ * :::
+ */
 
 export const GUACD_LOOPBACK_COMMAND = [
   '/bin/sh',
@@ -460,6 +500,20 @@ spec:
 ${CONTAINER_ARGV.map((a) => `            - ${a}`).join('\n')}
             - --project
             - ${yamlScalar(`${input.tenantCode}/${project.projectCode}`)}
+          # NET_RAW を外す（堅牢化）: 生ソケットを使った同一 Pod（同じネットワーク
+          # 名前空間）内の盗聴・なりすましの足場を残さない。RDP では、Pod 内の
+          # 127.0.0.1 を流れる中継の合言葉を盗み見されないことにもつながる。
+          # （ping など生ソケットを使う診断コマンドは使えなくなる。）
+          # runAsNonRoot は既存イメージの起動に関わるため付けない。
+          # allowPrivilegeEscalation: false も付けない: Codex サンドボックスの
+          # 手順で capabilities.add に "CAP_SYS_ADMIN" と書くと API 検証で拒否される
+          # （"SYS_ADMIN" との組み合わせは受理される）うえ、決めたのは NET_RAW を
+          # 外すことだけのため。
+          # web（src/lib/agent-deploy-manifest.ts）と同じ内容にすること。
+          securityContext:
+            capabilities:
+              drop:
+                - NET_RAW
           env:
             - name: ${ENV_VARS.TOKEN}
               valueFrom:
@@ -485,7 +539,7 @@ ${CONTAINER_ARGV.map((a) => `            - ${a}`).join('\n')}
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-${guacdAgentEnvYaml(input.rdp)}${guacdContainerYaml(input.rdp, input.guacdImage)}`
+${guacdAgentEnvYaml(input.rdp)}${guacdAgentVolumeMountsYaml(input.rdp)}${guacdContainerYaml(input.rdp, input.guacdImage)}${rdpTrustedCaVolumesYaml(input.rdp)}`
   })
 
   return `${header}\n${docs.join('---\n')}`
@@ -503,8 +557,47 @@ function guacdAgentEnvYaml(rdp: boolean | undefined): string {
               value: "127.0.0.1"
             - name: GUACD_PORT
               value: "${GUACD_PORT}"
+            # RDP tunnel relay listens on loopback: guacd shares the Pod's
+            # network namespace (src/rdp/rdp-tunnel.ts).
+            - name: ${ENV_VARS.RDP_TUNNEL_LISTEN}
+              value: "loopback"
+            # guacd's trust store, shared through the ${RDP_TRUSTED_CA_VOLUME} volume
+            # (src/rdp/rdp-trusted-ca.ts).
+            - name: ${ENV_VARS.RDP_TRUSTED_CA_DIR}
+              value: "${RDP_TRUSTED_CA_MOUNT_PATH}"
 `
 }
+
+/** エージェントに guacd と共有する信頼ストアを見せる volumeMounts 断片。 */
+function guacdAgentVolumeMountsYaml(rdp: boolean | undefined): string {
+  if (!rdp) return ''
+  return `          volumeMounts:
+            - name: ${RDP_TRUSTED_CA_VOLUME}
+              mountPath: ${RDP_TRUSTED_CA_MOUNT_PATH}
+`
+}
+
+/**
+ * Pod の volumes 断片（guacd と共有する信頼ストア）。
+ *
+ * emptyDir にするのは、中身が Pod の寿命で完結する（エージェントが起動時に標準
+ * バンドルを置き、接続時に書き換え、guacd は読むだけ）ため。sizeLimit は
+ * 標準バンドル（数百 KB）＋登録 CA（最大 10 件 × 16 KB）に十分な上限。
+ */
+function rdpTrustedCaVolumesYaml(rdp: boolean | undefined): string {
+  if (!rdp) return ''
+  return `      volumes:
+        - name: ${RDP_TRUSTED_CA_VOLUME}
+          emptyDir:
+            sizeLimit: 16Mi
+`
+}
+/*
+ * 権限の確認: emptyDir は 0777（sticky bit なし）で作られる。エージェント（既定の
+ * イメージでは root）が 0644 の `system-ca.pem` / `bundle.pem` を置き、guacd
+ * （UID 1000）は読むだけ。エージェントが別の UID で動いても、0777 のディレクトリ
+ * なので書け、rename で置き換えられる。
+ */
 
 /**
  * guacd サイドカーの container 断片。
@@ -532,12 +625,24 @@ function guacdContainerYaml(
           # 共有するため、エージェントからは 127.0.0.1 で到達できる。
           command:
 ${GUACD_LOOPBACK_COMMAND.map((a) => `            - ${yamlScalar(a)}`).join('\n')}
+          # 信頼ストアは共有ボリューム上の bundle.pem（src/rdp/rdp-trusted-ca.ts）。
+          # guacd は読むだけ（読み取り専用。GUACD_LOOPBACK_COMMAND の直前の danger）。
+          env:
+            - name: SSL_CERT_FILE
+              value: "${GUACD_SSL_CERT_FILE}"
+          volumeMounts:
+            - name: ${RDP_TRUSTED_CA_VOLUME}
+              mountPath: ${RDP_TRUSTED_CA_MOUNT_PATH}
+              readOnly: true
           # containerPort の宣言は情報提供のみ。hostPort は付けない（上記 danger）。
           ports:
             - containerPort: ${GUACD_PORT}
               protocol: TCP
+          # 名前指定の USER（guacd）を kubelet は検証できないため数値で明示する（GUACD_K8S_UID）。
           securityContext:
             runAsNonRoot: true
+            runAsUser: ${GUACD_K8S_UID}
+            runAsGroup: ${GUACD_K8S_UID}
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities:
@@ -551,6 +656,21 @@ ${GUACD_LOOPBACK_COMMAND.map((a) => `            - ${yamlScalar(a)}`).join('\n')
               memory: 512Mi
 `
 }
+
+/**
+ * ECS: 信頼ストアを書き込み可能でマウントする（エージェント）。
+ *
+ * 権限の確認: Fargate のタスク内 bind mount は root:root 0755。既定のイメージでは
+ * エージェントは root で動くので書け、0644 のファイルは guacd（UID 1000）から読める。
+ */
+const RDP_TRUSTED_CA_MOUNT_POINT = {
+  sourceVolume: RDP_TRUSTED_CA_VOLUME,
+  containerPath: RDP_TRUSTED_CA_MOUNT_PATH,
+  readOnly: false,
+}
+
+/** ECS: guacd は信頼ストアを読むだけ（GUACD_LOOPBACK_COMMAND の直前の danger）。 */
+const RDP_TRUSTED_CA_READONLY_MOUNT_POINT = { ...RDP_TRUSTED_CA_MOUNT_POINT, readOnly: true }
 
 /**
  * ECS の guacd サイドカー定義。
@@ -579,6 +699,12 @@ function buildGuacdContainerDefinition(
     // 共有するため、portMappings を空にしても待受アドレスは変わらない。
     command: GUACD_LOOPBACK_COMMAND,
     portMappings: [],
+    // 信頼ストアは共有ボリューム上の bundle.pem（src/rdp/rdp-trusted-ca.ts）。
+    environment: [{ name: 'SSL_CERT_FILE', value: GUACD_SSL_CERT_FILE }],
+    mountPoints: [RDP_TRUSTED_CA_READONLY_MOUNT_POINT],
+    // K8s の guacd サイドカーの securityContext（capabilities.drop: [ALL]）と
+    // 同じにそろえる。guacd は ALL を外しても動く（K8s で稼働実績あり）。
+    linuxParameters: { capabilities: { drop: ['ALL'] } },
     logConfiguration: {
       logDriver: 'awslogs',
       options: {
@@ -624,6 +750,8 @@ export function generateEcsManifest(input: EcsManifestInput): {
       input.executionRoleArn ?? 'REPLACE_WITH_EXECUTION_ROLE_ARN',
     // task role はコンテナ自身が AWS API を呼ぶ場合のみ必要（任意）。
     ...(input.taskRoleArn && { taskRoleArn: input.taskRoleArn }),
+    // guacd と共有する信頼ストア（タスク内のエフェメラルな bind mount）。
+    ...(input.rdp && { volumes: [{ name: RDP_TRUSTED_CA_VOLUME }] }),
     containerDefinitions: [
       {
         name: 'agent',
@@ -647,9 +775,21 @@ export function generateEcsManifest(input: EcsManifestInput): {
             ? [
                 { name: 'GUACD_HOST', value: '127.0.0.1' },
                 { name: 'GUACD_PORT', value: String(GUACD_PORT) },
+                // RDP tunnel relay on loopback: awsvpc shares the namespace.
+                { name: ENV_VARS.RDP_TUNNEL_LISTEN, value: 'loopback' },
+                // guacd's trust store, shared through the task volume.
+                { name: ENV_VARS.RDP_TRUSTED_CA_DIR, value: RDP_TRUSTED_CA_MOUNT_PATH },
               ]
             : []),
         ],
+        // 標準 CA の配置はエージェント自身が起動時に行う（初期化コンテナは使わない。
+        // GUACD_LOOPBACK_COMMAND の直前の danger）。
+        ...(input.rdp && { mountPoints: [RDP_TRUSTED_CA_MOUNT_POINT] }),
+        // NET_RAW を外す（堅牢化）: 生ソケットを使った同一タスク（awsvpc で同じ
+        // ネットワーク名前空間）内の盗聴・なりすましの足場を残さない。RDP では、
+        // タスク内の 127.0.0.1 を流れる中継の合言葉を盗み見されないことにも
+        // つながる。Fargate でも drop は使える。
+        linuxParameters: { capabilities: { drop: ['NET_RAW'] } },
         secrets: [
           {
             name: ENV_VARS.TOKEN,

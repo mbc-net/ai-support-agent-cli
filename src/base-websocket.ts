@@ -14,6 +14,27 @@ import { attemptReconnect } from './ws-reconnect'
  * (terminal / vscode tunnel). Re-sends the ALB sticky cookie when present so a
  * reconnect lands on the same API task (scale-out safe).
  */
+/**
+ * Open an agent WebSocket with the standard agent headers.
+ *
+ * The terminal, RDP and VS Code tunnel sockets all opened the connection with
+ * byte-identical code. Keeping one copy means a change to how agent sockets
+ * authenticate cannot silently apply to two of the three.
+ *
+ * Callers keep their own `createWebSocket()` method and delegate here, because
+ * tests drive that method directly on an instance.
+ */
+export function createAgentWebSocket(
+  wsUrl: string,
+  token: string,
+  agentId: string,
+  cookie?: string,
+): WebSocket {
+  return new WebSocket(wsUrl, {
+    headers: buildAgentWsHeaders(token, agentId, cookie),
+  })
+}
+
 export function buildAgentWsHeaders(
   token: string,
   agentId: string,
