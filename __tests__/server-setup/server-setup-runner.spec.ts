@@ -126,6 +126,7 @@ function makeClient(
   > = {},
 ): ApiClient {
   return {
+    getServerSetupControl: jest.fn().mockResolvedValue({stopRequested: false}),
     getServerSetupSshCredential: overrides.getServerSetupSshCredential ?? jest.fn().mockResolvedValue(CREDENTIAL),
     getServerSetupVariables: overrides.getServerSetupVariables ?? jest.fn().mockResolvedValue(NO_VARIABLES),
     getTenantCode: overrides.getTenantCode ?? jest.fn().mockReturnValue('acme'),
@@ -586,6 +587,7 @@ describe('runServerSetup - success path', () => {
     // self-restart handshake paths), 0600.
     const extraVarsCall = mockWriteFileSync.mock.calls.find((c) => String(c[0]).endsWith('extra-vars.json'))
     expect(JSON.parse(extraVarsCall?.[1] as string)).toEqual({
+      sentry_execution_id: 'exec-1',
       [SELF_INSTANCE_ID_VAR]: expect.any(String),
       [SELF_RESTART_MARKER_VAR]: expect.any(String),
       [SELF_RESTART_ACK_VAR]: expect.any(String),
@@ -1366,6 +1368,7 @@ describe('runServerSetup - server setup variables (project ANSIBLE# vars)', () =
     expect(client.getServerSetupVariables).toHaveBeenCalledWith('cmd-1', 'agent-9')
     expect(JSON.parse(writtenFile('extra-vars.json') as string)).toEqual({
       DB_HOST: '10.0.0.5',
+      sentry_execution_id: 'exec-1',
       [SELF_INSTANCE_ID_VAR]: expect.any(String),
       [SELF_RESTART_MARKER_VAR]: expect.any(String),
       [SELF_RESTART_ACK_VAR]: expect.any(String),
@@ -1732,8 +1735,9 @@ describe('generatePlaybook', () => {
     expect(tasks[1].name).toBe('precheck : Probe passwordless sudo')
     expect(tasks[2].name).toBe('precheck : Verify passwordless sudo')
     expect(tasks[3].name).toBe('precheck : Verify supported OS')
-    expect(tasks[4].name).toBe('precheck : Ensure acl (setfacl) is installed')
-    expect(tasks[5].name).toBe('x')
+    expect(tasks[4].name).toBe('precheck : Verify Sentry host has no unresolved operation')
+    expect(tasks[5].name).toBe('precheck : Ensure acl (setfacl) is installed')
+    expect(tasks[6].name).toBe('x')
   })
 
   it('gathers facts explicitly without privilege escalation (become:false), so gathering does not require NOPASSWD sudo', () => {
@@ -1779,7 +1783,7 @@ describe('generatePlaybook', () => {
     const play = (loaded as Array<Record<string, unknown>>)[0]
     // 3 system precheck tasks (fact gather, sudo probe, sudo assert) + the OS
     // precheck + the acl install.
-    expect((play.tasks as unknown[]).length).toBe(5)
+    expect((play.tasks as unknown[]).length).toBe(6)
   })
 
   it('allows Ubuntu 22.04, 24.04, and 26.04 in the OS precheck (fixed allowlist, not a general ">=22.04 LTS" rule)', () => {
@@ -2574,5 +2578,156 @@ describe('runServerSetup - awaiting-self-restart declaration (mid-run)', () => {
     resolveExecFile(0, defaultOutput())
     const result = await runPromise
     expect(result.success).toBe(true)
+  })
+})
+
+
+describe('Sentry supervised execution', () => {
+  const body = (operation = 'install') => `- include_role:\n    name: sentry\n  vars:\n    sentry_operation: ${operation}\n`
+  const remoteOutput = (value: Record<string, unknown>) => JSON.stringify({
+    plays: [{tasks: [{hosts: {host: {stdout: JSON.stringify(value)}}}]}],
+  })
+  async function waitForProbe() {
+    for (let i = 0; i < 100 && mockExecFile.mock.calls.length < 2; i++) await Promise.resolve()
+    expect(mockExecFile).toHaveBeenCalledTimes(2)
+  }
+  afterEach(() => mockExecFile.mockReset())
+
+  it.each(['stop', 'diagnose', 'verify'])('does not install packages before %s', operation => {
+    const plays = load(generatePlaybook([{include_role: {name: 'sentry'}, vars: {sentry_operation: operation}}])) as Array<{tasks: Record<string, unknown>[]}>
+    expect(plays[0].tasks.some(task => 'ansible.builtin.apt' in task)).toBe(false)
+  })
+
+  it('uses bounded Sentry timeouts, trusted operation and authoritative outcome', async () => {
+    const client = makeClient({getServerSetupVariables: jest.fn().mockResolvedValue({
+      variables: {sentry_operation: 'stop', sentry_execution_id: 'other', SENTRY_DOMAIN: 'sentry.example.com'}, secretNames: [],
+    })})
+    const pending = runServerSetup(makePayload({body: body()}), {commandId: 'sentry-1', client})
+    await flushUntilExecFileCalled()
+    expect(mockExecFile.mock.calls[0][2].timeout).toBe(100 * 60 * 1000)
+    const extra = JSON.parse(writtenFile('extra-vars.json')!)
+    expect(extra.sentry_operation).toBeUndefined()
+    expect(extra.sentry_execution_id).toBe('exec-1')
+    expect(extra.SENTRY_DOMAIN).toBe('sentry.example.com')
+    resolveExecFile(0, ansibleJsonOutput([{name: 'sentry : installation'}]))
+    await waitForProbe()
+    expect(mockExecFile.mock.calls[1][2].timeout).toBe(7 * 60 * 1000)
+    resolveExecFile(0, remoteOutput({run_id: 'exec-1', phase: 'complete', settled: true, active: false, publication: 'pending'}))
+    const result = await pending
+    expect(result.success).toBe(true)
+    expect(JSON.parse(result.data as string).sentry).toMatchObject({settled: true, publicationState: 'pending'})
+  })
+
+  it('keeps an unreachable remote outcome unresolved even after local success', async () => {
+    const pending = runServerSetup(makePayload({body: body()}), {commandId: 'sentry-2', client: makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{name: 'sentry : installation'}]))
+    await waitForProbe()
+    resolveExecFile(4, '')
+    const result = await pending
+    expect(JSON.parse(result.data as string).sentry).toEqual({settled: false, stopState: 'unconfirmed'})
+  })
+
+  it.each(['stop', 'diagnose'])('preserves confirmed termination after standalone %s without allowing migration replay', async operation => {
+    const pending = runServerSetup(makePayload({body: body(operation)}), {commandId: `sentry-${operation}`, client: makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{name: 'sentry : recovery'}]))
+    await waitForProbe()
+    resolveExecFile(0, remoteOutput({run_id: 'old-install', phase: 'installing', settled: false, active: false, stop_state: 'confirmed'}))
+    const result = await pending
+    expect(result.success).toBe(true)
+    expect(JSON.parse(result.data as string).sentry).toMatchObject({settled: false, stopState: 'confirmed'})
+  })
+
+  it('does not trust an old stop marker when the installer is active again', async () => {
+    const pending = runServerSetup(makePayload({body: body('diagnose')}), {commandId: 'sentry-active', client: makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(1, ansibleJsonOutput([{name: 'sentry : recovery', failed: true}]))
+    await waitForProbe()
+    resolveExecFile(0, remoteOutput({run_id: 'old-install', phase: 'installing', settled: false, active: true, stop_state: 'confirmed'}))
+    const result = await pending
+    expect(JSON.parse(result.data as string).sentry.stopState).not.toBe('confirmed')
+  })
+
+  it('polls an ECS stop request and confirms the remote installer stopped', async () => {
+    const kill = jest.fn()
+    mockExecFile.mockReturnValue({kill})
+    const client = makeClient()
+    const control = jest.fn().mockResolvedValue({stopRequested: true})
+    Object.assign(client, {getServerSetupControl: control})
+    const pending = runServerSetup(makePayload({body: body()}), {
+      commandId: 'sentry-ecs-cancel', agentId: 'ecs-agent', client,
+    })
+    await flushUntilExecFileCalled()
+    for (let i = 0; i < 100 && !kill.mock.calls.length; i++) await Promise.resolve()
+    expect(control).toHaveBeenCalledWith('sentry-ecs-cancel', 'ecs-agent')
+    expect(kill).toHaveBeenCalledWith('SIGTERM')
+    resolveExecFileWithError(Object.assign(new Error('cancelled'), {killed: true, signal: 'SIGTERM'}))
+    await waitForProbe()
+    expect(writtenFile('sentry-result.yml')).toContain('stop')
+    resolveExecFile(0, remoteOutput({run_id: 'exec-1', phase: 'installing', settled: false, active: false, stop_state: 'confirmed'}))
+    const result = await pending
+    expect(JSON.parse(result.data as string).sentry).toMatchObject({stopState: 'confirmed', cancelled: true})
+  })
+
+  it('ignores a late stop lookup after Ansible finishes and leaves the remote probe running', async () => {
+    const kill = jest.fn()
+    mockExecFile.mockReturnValue({kill})
+    let reply!: (value: {stopRequested: boolean}) => void
+    const client = makeClient()
+    Object.assign(client, {getServerSetupControl: jest.fn().mockImplementation(() => new Promise(resolve => {reply = resolve}))})
+    const pending = runServerSetup(makePayload({body: body()}), {commandId: 'sentry-late-stop', client})
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{name: 'sentry : installation'}]))
+    await waitForProbe()
+    reply({stopRequested: true})
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+    expect(kill).not.toHaveBeenCalled()
+    resolveExecFile(0, remoteOutput({run_id: 'exec-1', phase: 'complete', settled: true, active: false}))
+    expect((await pending).success).toBe(true)
+  })
+
+  it('retries failed stop lookups without overlapping requests and stops polling at completion', async () => {
+    jest.useFakeTimers()
+    try {
+      const kill = jest.fn()
+      mockExecFile.mockReturnValue({kill})
+      let reply!: (value: {stopRequested: boolean}) => void
+      const control = jest.fn().mockRejectedValueOnce(new Error('temporary outage'))
+        .mockImplementation(() => new Promise(resolve => {reply = resolve}))
+      const client = makeClient()
+      Object.assign(client, {getServerSetupControl: control})
+      const pending = runServerSetup(makePayload({body: body()}), {commandId: 'sentry-retry-stop', client})
+      await flushUntilExecFileCalled()
+      await jest.advanceTimersByTimeAsync(5_000)
+      expect(control).toHaveBeenCalledTimes(2)
+      await jest.advanceTimersByTimeAsync(10_000)
+      expect(control).toHaveBeenCalledTimes(2)
+      reply({stopRequested: true})
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+      expect(kill).toHaveBeenCalledTimes(1)
+      resolveExecFileWithError(Object.assign(new Error('cancelled'), {killed: true}))
+      await waitForProbe()
+      await jest.advanceTimersByTimeAsync(10_000)
+      expect(control).toHaveBeenCalledTimes(2)
+      resolveExecFile(0, remoteOutput({run_id: 'exec-1', phase: 'installing', settled: false, active: false, stop_state: 'confirmed'}))
+      await pending
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('confirms remote cancellation without treating an interrupted migration as retryable', async () => {
+    mockExecFile.mockReturnValue({kill: jest.fn()})
+    const pending = runServerSetup(makePayload({body: body()}), {commandId: 'sentry-cancel', client: makeClient()})
+    await flushUntilExecFileCalled()
+    expect(cancelProcess('sentry-cancel')).toBe(true)
+    resolveExecFileWithError(Object.assign(new Error('cancelled'), {killed: true, signal: 'SIGTERM'}))
+    await waitForProbe()
+    expect(writtenFile('sentry-result.yml')).toContain('exec-1')
+    resolveExecFile(0, remoteOutput({run_id: 'exec-1', phase: 'installing', settled: false, stop_state: 'confirmed'}))
+    const result = await pending
+    expect(result.success).toBe(false)
+    expect(JSON.parse(result.data as string).sentry).toMatchObject({settled: false, stopState: 'confirmed', cancelled: true})
   })
 })

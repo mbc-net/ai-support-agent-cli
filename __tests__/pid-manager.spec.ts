@@ -59,6 +59,33 @@ describe('pid-manager', () => {
     it('should return path under configDir', () => {
       expect(getPidFilePath()).toBe(path.join(tmpDir, 'agent.pid'))
     })
+
+    describe('★ コンテナ内のエージェントはホストの監督プロセスと別の PID ファイルを使う', () => {
+      const saved = process.env.AI_SUPPORT_AGENT_IN_DOCKER
+      afterEach(() => {
+        if (saved === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        else process.env.AI_SUPPORT_AGENT_IN_DOCKER = saved
+      })
+
+      it('コンテナ内（AI_SUPPORT_AGENT_IN_DOCKER=1）は agent-container.pid', () => {
+        process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+        expect(getPidFilePath()).toBe(path.join(tmpDir, 'agent-container.pid'))
+      })
+
+      it('★ 設定ディレクトリを共有しても、コンテナ内の書き込みがホストの記録を上書きしない', () => {
+        // Docker 形態の legacy fallback は設定ディレクトリごとコンテナへマウントする。
+        // 同じファイルだとコンテナのホスト名で上書きされ、ホスト側の多重起動防止が効かない。
+        delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        writePidFile()
+        const host = readPidFile()
+        // コンテナ内のエージェントの書き込み（ホスト名はコンテナ ID、PID は 1）
+        process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
+        fs.writeFileSync(getPidFilePath(), '26890c1018aa:1:1700000000', 'utf-8')
+        delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
+        expect(readPidFile()).toEqual(host)
+        expect(isAlreadyRunning()).toBe(true)
+      })
+    })
   })
 
   describe('readPidFile', () => {

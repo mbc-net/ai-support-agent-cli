@@ -26,7 +26,7 @@ import { getProjectList, loadConfig } from '../config-manager'
 import { getSystemInfo } from '../system-info'
 import type { AutoUpdateConfig, ReleaseChannel } from '../types'
 import { detectChannelFromVersion } from '../update-checker'
-import { writePidFile, isAlreadyRunning, readPidFile } from '../pid-manager'
+import { writePidFile, removePidFile, isAlreadyRunning, readPidFile } from '../pid-manager'
 import { t } from '../i18n'
 import { logger } from '../logger'
 import { ensureClaudeJsonIntegrity } from '../utils/claude-config-validator'
@@ -36,7 +36,7 @@ import { IMAGE_NAME, checkDockerAvailable, getDockerPath } from './docker-utils'
 import { ensureImage } from './version-manager'
 import { syncDockerfileToConfigDir } from './dockerfile-sync'
 import { stopGuacdContainer } from '../rdp/guacd-container'
-import { buildGuacdDockerArgs } from '../rdp/guacd-runtime'
+import { buildSharedGuacdDockerArgs } from '../rdp/guacd-runtime'
 import { buildVolumeMounts, buildEnvArgs } from './volume-mount-builder'
 import { DockerSupervisor } from './docker-supervisor'
 import { installUpdateAndRestart } from './update-handler'
@@ -177,7 +177,8 @@ export function startHostAutoUpdater(
   return startAutoUpdater(
     clients,
     autoUpdateConfig,
-    () => supervisor.stopAll(),
+    // 更新のための停止: 更新後に同じプロジェクトが同じ RDP 信頼ストアを使うため残す。
+    () => supervisor.stopAll({ keepTrustStores: true }),
     (error) => {
       void client.heartbeat(resolvedAgentId, getSystemInfo(), error).catch((err) => {
         logger.warn(`[auto-update] Failed to send error heartbeat: ${getErrorMessage(err)}`)
@@ -298,7 +299,10 @@ export function runInDocker(opts: DockerRunOptions): void {
 
   // guacd を専用ネットワークに用意し、エージェントを同じネットワークへ参加させる。
   // RDP が無効なら空配列で、既存の起動には一切影響しない。
-  const guacdArgs = buildGuacdDockerArgs(opts)
+  // この経路は 1 コンテナが全プロジェクトを扱うため、従来どおり共有の guacd
+  // （ais-guacd on ais-rdp）を使う。信頼ストアをプロジェクトで分けられないので、
+  // 登録 CA は申告しない（通常経路の DockerSupervisor はプロジェクト別 guacd）。
+  const guacdArgs = buildSharedGuacdDockerArgs(opts)
 
   const dockerArgs = [
     'run', '--rm', ...interactive,
@@ -309,6 +313,10 @@ export function runInDocker(opts: DockerRunOptions): void {
     `${IMAGE_NAME}:${version}`,
     ...containerArgs,
   ]
+
+  // 通常経路（DockerSupervisor）と同じく PID ファイルで多重起動を防ぐ。
+  // 同じホストで 2 つ目が起動すると、共有 guacd（ais-guacd）を奪い合う。
+  writePidFile()
 
   const child = spawn(getDockerPath(), dockerArgs, {
     stdio: 'inherit',
@@ -330,6 +338,7 @@ export function runInDocker(opts: DockerRunOptions): void {
     if (closeHandled) return
     closeHandled = true
     isDockerRunning = false
+    removePidFile()
 
     if (opts.rdp) {
       // 止め忘れると、エージェントを終了しても guacd が残り続ける。
