@@ -284,6 +284,7 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'rsyslog_server',
   'rsyslog_forward',
   'zabbix_agent',
+  'keycloak',
   'zabbix_server',
   'zabbix_web',
 ])
@@ -315,6 +316,18 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
  * 空集合（`docker`）は「レシピから渡せる変数が無い」という意味であり、誤りではない。
  */
 export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<string>>> = {
+  keycloak: new Set([
+    'keycloak_version',
+    'keycloak_postgres_version',
+    'keycloak_hostname',
+    'keycloak_http_port',
+    'keycloak_proxy_headers',
+    'keycloak_proxy_trusted_addresses',
+    'keycloak_admin_username',
+    'keycloak_admin_password',
+    'keycloak_db_password',
+    'keycloak_start_timeout',
+  ]),
   sentry: new Set(['sentry_operation', 'sentry_profile', 'sentry_domain', 'sentry_proxy_mode',
     'sentry_admin_email', 'sentry_admin_password', 'sentry_retention_days', 'sentry_acme_email',
     'sentry_smtp_host', 'sentry_smtp_port', 'sentry_smtp_user', 'sentry_smtp_password', 'sentry_smtp_tls', 'sentry_mail_from']),
@@ -675,6 +688,12 @@ function isBundledRoleInternalName(name: string): boolean {
  * 実名リストへ揃えた**（{@link isBundledRoleInternalName} 参照）。
  */
 export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
+  // keycloak
+  'keycloak_config_result',
+  'keycloak_db_start_result',
+  'keycloak_db_auth_result',
+  'keycloak_compose_result',
+  'keycloak_public_result',
   // haproxy transaction
   'haproxy_parameters',
   'haproxy_apply_result',

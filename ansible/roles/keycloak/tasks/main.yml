@@ -1,0 +1,222 @@
+---
+- name: "keycloak : Validate deployment settings"
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == 'Ubuntu'
+      - ansible_distribution_version in ['22.04', '24.04']
+      - ansible_architecture in ['x86_64', 'aarch64']
+      - keycloak_version is string
+      - keycloak_version is match('^26\.[0-9]+\.[0-9]+\Z')
+      - (keycloak_version.split('.') | map('int') | list) >= [26, 7, 4]
+      - keycloak_postgres_version is string
+      - keycloak_postgres_version is match('^16\.[0-9]+\Z')
+      - keycloak_hostname is string
+      - keycloak_hostname is match('^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?\Z')
+      - keycloak_hostname.count(':') == 1 or (keycloak_hostname.rsplit(':', 1)[1] | int >= 1 and keycloak_hostname.rsplit(':', 1)[1] | int <= 65535)
+      - keycloak_http_port is integer and keycloak_http_port is not boolean
+      - keycloak_http_port >= 1024 and keycloak_http_port <= 65535
+      - keycloak_start_timeout is integer and keycloak_start_timeout is not boolean
+      - keycloak_start_timeout >= 30 and keycloak_start_timeout <= 1800
+      - keycloak_proxy_headers in ['forwarded', 'xforwarded']
+      - keycloak_proxy_trusted_addresses is sequence and keycloak_proxy_trusted_addresses is not string and keycloak_proxy_trusted_addresses is not mapping
+      - keycloak_proxy_trusted_addresses | length > 0
+      - keycloak_admin_username is string
+      - keycloak_admin_username is match('^[A-Za-z][A-Za-z0-9_.-]{0,63}\Z')
+      - keycloak_admin_password is string and keycloak_admin_password | length >= 12
+      - keycloak_db_password is string and keycloak_db_password | length >= 12
+      - keycloak_db_password is not search('[\x00-\x1f\x7f]')
+      - keycloak_admin_password is not search('[\x00-\x1f\x7f]')
+      - keycloak_db_password == keycloak_db_password | trim
+      - keycloak_admin_password == keycloak_admin_password | trim
+    fail_msg: >-
+      Keycloak requires Ubuntu 22.04/24.04 (amd64/arm64), fixed Keycloak 26.x.y (26.7.4 or newer) and
+      PostgreSQL 16.x versions, an HTTPS origin without path/query/userinfo,
+      a port from 1024 to 65535, a timeout from 30 to 1800 seconds, and an
+      existing host HTTPS proxy with forwarded or xforwarded headers.
+      Set trusted proxy IP/CIDR addresses and reference ANSIBLE# secret variables
+      for keycloak_admin_password and keycloak_db_password (at least 12 characters, no control characters or leading/trailing whitespace).
+    quiet: true
+  tags: keycloak_validate
+
+- name: "keycloak : Validate trusted proxy addresses"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - >-
+        import ipaddress,json,sys;
+        addresses=json.loads(sys.argv[1]);
+        assert all(isinstance(a,str) for a in addresses);
+        networks=[ipaddress.ip_network(a,strict=False) for a in addresses];
+        sys.exit(0 if all(n.prefixlen > 0 for n in networks) else 1)
+      - "{{ keycloak_proxy_trusted_addresses | to_json }}"
+  changed_when: false
+  tags: keycloak_validate
+
+- name: "keycloak : Install Docker Engine and Compose"
+  ansible.builtin.import_role:
+    name: docker
+  tags: keycloak_docker
+
+- name: "keycloak : Verify Compose availability"
+  ansible.builtin.command:
+    argv: [docker, compose, version]
+  changed_when: false
+
+- name: "keycloak : Create private configuration directory"
+  ansible.builtin.file:
+    path: /opt/ai-support-keycloak
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: "keycloak : Write protected Compose configuration"
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: /opt/ai-support-keycloak/compose.yml
+    owner: root
+    group: root
+    mode: '0600'
+  register: keycloak_config_result
+  diff: false
+  no_log: true
+  ignore_errors: true
+
+- name: "keycloak : Report configuration failure"
+  ansible.builtin.fail:
+    msg: >-
+      Could not write the Keycloak configuration. Check /opt/ai-support-keycloak
+      permissions and free disk space. Secret values are omitted.
+  when: keycloak_config_result.failed | default(false)
+
+- name: "keycloak : Start persistent PostgreSQL"
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --project-name
+      - ai-support-keycloak
+      - --file
+      - /opt/ai-support-keycloak/compose.yml
+      - up
+      - --detach
+      - --wait
+      - --wait-timeout
+      - "{{ keycloak_start_timeout | string }}"
+      - postgres
+  register: keycloak_db_start_result
+  changed_when: >-
+    keycloak_db_start_result.rc == 0 and
+    (keycloak_db_start_result.stderr is search('(?i)created|started|recreated'))
+  failed_when: false
+  no_log: true
+
+- name: "keycloak : Report PostgreSQL startup failure"
+  ansible.builtin.fail:
+    msg: >-
+      PostgreSQL did not become healthy. Check Docker, image availability and
+      disk space. Existing volumes are retained; do not delete them to retry.
+  when: keycloak_db_start_result.rc != 0
+
+- name: "keycloak : Verify database credentials"
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --project-name
+      - ai-support-keycloak
+      - --file
+      - /opt/ai-support-keycloak/compose.yml
+      - exec
+      - -T
+      - -e
+      - PGPASSWORD
+      - postgres
+      - psql
+      # The postgres service resolves to its network address. Loopback matches
+      # initdb's trusted local rules and would falsely accept a wrong password.
+      - --host=postgres
+      - --username=keycloak
+      - --dbname=keycloak
+      - --no-password
+      - --tuples-only
+      - --command=SELECT 1
+  environment:
+    PGPASSWORD: "{{ keycloak_db_password }}"
+  register: keycloak_db_auth_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "keycloak : Report database authentication failure"
+  ansible.builtin.fail:
+    msg: >-
+      PostgreSQL authentication failed. On an existing volume, changing
+      keycloak_db_password does not rotate the database user's password.
+      Restore the previous ANSIBLE# value or follow the password rotation
+      procedure in the Keycloak role README. Keycloak has not been recreated
+      and all database data is retained.
+  when: keycloak_db_auth_result.rc != 0
+
+- name: "keycloak : Start Keycloak and wait for readiness"
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --project-name
+      - ai-support-keycloak
+      - --file
+      - /opt/ai-support-keycloak/compose.yml
+      - up
+      - --detach
+      - --wait
+      - --wait-timeout
+      - "{{ keycloak_start_timeout | string }}"
+  register: keycloak_compose_result
+  changed_when: >-
+    keycloak_compose_result.rc == 0 and
+    (keycloak_compose_result.stderr is search('(?i)created|started|recreated'))
+  failed_when: false
+  no_log: true
+
+- name: "keycloak : Report Keycloak startup failure"
+  ansible.builtin.fail:
+    msg: >-
+      Keycloak did not become ready. Check image availability, database
+      connectivity and container status. Database volumes are retained.
+      See the role README for diagnostics; do not print docker inspect or
+      docker compose config output because these contain secret values.
+  when: keycloak_compose_result.rc != 0
+
+- name: "keycloak : Verify public HTTPS discovery endpoint"
+  ansible.builtin.uri:
+    url: "{{ keycloak_hostname }}/realms/master/.well-known/openid-configuration"
+    method: GET
+    validate_certs: true
+    follow_redirects: none
+    return_content: true
+    timeout: 10
+    status_code: 200
+  register: keycloak_public_result
+  until: >-
+    (keycloak_public_result.status | default(0)) == 200 and
+    (keycloak_public_result.json.issuer | default('')) == keycloak_hostname ~ '/realms/master'
+  retries: 5
+  delay: 5
+  changed_when: false
+  no_log: true
+  ignore_errors: true
+
+- name: "keycloak : Report public HTTPS failure"
+  ansible.builtin.fail:
+    msg: >-
+      Keycloak is running but public HTTPS discovery could not be verified.
+      Check DNS, certificate trust, the configured HTTPS reverse proxy,
+      forwarding to 127.0.0.1:keycloak_http_port, overwritten proxy headers,
+      and trusted source addresses as seen inside the Keycloak container.
+      HTTPS proxy and certificate provisioning are not part of this role.
+  when: >-
+    (keycloak_public_result.failed | default(false)) or
+    (keycloak_public_result.status | default(0)) != 200 or
+    (keycloak_public_result.json.issuer | default('')) != keycloak_hostname ~ '/realms/master'
