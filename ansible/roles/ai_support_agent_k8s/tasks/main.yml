@@ -163,6 +163,16 @@
       {{ ai_support_agent_k8s_image }}
     success_msg: "Container image is an official agent image."
 
+- name: "ai_support_agent_k8s : Validate RDP settings"
+  ansible.builtin.assert:
+    that:
+      - ai_support_agent_k8s_rdp | string | lower in ['true', 'false']
+      - ai_support_agent_k8s_guacd_image is match('^guacamole/guacd:[A-Za-z0-9._-]+\Z')
+    fail_msg: >-
+      ai_support_agent_k8s_rdp must be true or false, and
+      ai_support_agent_k8s_guacd_image must be guacamole/guacd:<tag>.
+    success_msg: "RDP settings are valid."
+
 - name: "ai_support_agent_k8s : Validate the replica count"
   ansible.builtin.assert:
     that:
