@@ -216,6 +216,15 @@
             # 侵害された依存パッケージからクラスタ権限を悪用できてしまうため、
             # トークンを自動マウントさせない。
             automountServiceAccountToken: false
+      {% if (item.rdp | default(ai_support_agent_k8s_rdp)) | bool %}
+            securityContext:
+              fsGroup: 1000
+            volumes:
+              - name: guacd-home
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 64Mi
+      {% endif %}
             containers:
               - name: agent
                 image: {{ ai_support_agent_k8s_image | to_json }}
@@ -279,6 +288,13 @@
                 ports:
                   - containerPort: 4822
                     protocol: TCP
+                env:
+                  - name: HOME
+                    value: /home/guacd
+                # FreeRDP はホームに設定と証明書を保存する。rootfs は読み取り専用のまま。
+                volumeMounts:
+                  - name: guacd-home
+                    mountPath: /home/guacd
                 securityContext:
                   runAsNonRoot: true
                   # guacd:1.5.5 の USER は名前指定。kubelet の非root検証に数値が必要。
