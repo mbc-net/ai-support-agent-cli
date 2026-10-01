@@ -48,6 +48,8 @@ class RdpManifestTests(unittest.TestCase):
                         env = {e["name"]: e.get("value") for e in containers[0]["env"]}
                         self.assertEqual("GUACD_HOST" in env, enabled)
                         self.assertEqual("volumeClaimTemplates" in doc["spec"], persistence)
+                        self.assertEqual("volumes" in pod, enabled)
+                        self.assertEqual("securityContext" in pod, enabled)
                         if enabled:
                             self.assertEqual(env["GUACD_HOST"], "127.0.0.1")
                             self.assertEqual(env["GUACD_PORT"], "4822")
@@ -55,6 +57,12 @@ class RdpManifestTests(unittest.TestCase):
                             guacd = containers[1]
                             self.assertEqual(guacd["securityContext"]["runAsUser"], 1000)
                             self.assertEqual(guacd["securityContext"]["runAsGroup"], 1000)
+                            self.assertTrue(guacd["securityContext"]["readOnlyRootFilesystem"])
+                            self.assertEqual(pod["securityContext"]["fsGroup"], 1000)
+                            self.assertEqual(guacd["volumeMounts"], [{"name": "guacd-home", "mountPath": "/home/guacd"}])
+                            self.assertEqual(pod["volumes"], [{"name": "guacd-home", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}}])
+                            self.assertIn({"name": "HOME", "value": "/home/guacd"}, guacd["env"])
+                            self.assertNotIn("guacd-home", [m["name"] for m in containers[0].get("volumeMounts", [])])
                             self.assertEqual(guacd["image"], "guacamole/guacd:1.5.5")
                             self.assertIn("-b 127.0.0.1", guacd["command"][2])
                             self.assertNotIn("hostPort", guacd["ports"][0])
