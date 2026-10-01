@@ -1,5 +1,8 @@
 # サーバセットアップ ロール開発ガイド
 
+k3sエージェントのレシピによるRDP有効化は
+[k3s / Kubernetes エージェントのRDP設定](roles/ai_support_agent_k8s/README.md)を参照してください。
+
 Zabbix Server／管理画面の対応構成、設定、復旧、専用DBテストは
 [Zabbixセットアップガイド](ZABBIX.md)を参照してください。
 

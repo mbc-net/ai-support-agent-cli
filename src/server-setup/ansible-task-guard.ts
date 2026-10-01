@@ -342,6 +342,7 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
   ai_support_agent_k8s: new Set([
     'ai_support_agent_k8s_api_url',
     'ai_support_agent_k8s_data_dir',
+    'ai_support_agent_k8s_guacd_image',
     'ai_support_agent_k8s_image',
     'ai_support_agent_k8s_kubeconfig',
     'ai_support_agent_k8s_kubectl',
@@ -351,6 +352,7 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
     'ai_support_agent_k8s_persistence',
     'ai_support_agent_k8s_project',
     'ai_support_agent_k8s_projects',
+    'ai_support_agent_k8s_rdp',
     'ai_support_agent_k8s_replicas',
     'ai_support_agent_k8s_self_instance_id',
     'ai_support_agent_k8s_self_restart_ack_file',

@@ -40,6 +40,16 @@
       token={{ 'set' if (item.token | default('') | trim | length > 0) else '(unset)' }}.
     success_msg: "Project entry {{ item.name }} is well-formed."
 
+- name: "ai_support_agent_k8s : Validate per-project RDP settings"
+  ansible.builtin.assert:
+    that:
+      - (item.rdp | default(ai_support_agent_k8s_rdp)) | string | lower in ['true', 'false']
+      - (item.guacd_image | default(ai_support_agent_k8s_guacd_image)) is match('^guacamole/guacd:[A-Za-z0-9._-]+\Z')
+    fail_msg: >-
+      Invalid RDP settings for project {{ item.name }}:
+      rdp must be true or false, and guacd_image must be guacamole/guacd:<tag>.
+    success_msg: "RDP settings for {{ item.name }} are valid."
+
 - name: "ai_support_agent_k8s : Validate the per-project replica count and storage"
   # 値で比較する理由は main.yml のトップレベル検証と同じ（ANSIBLE# 変数は文字列で
   # 渡るため、型比較にすると有効な "3" を弾いてしまう）。
@@ -244,10 +254,46 @@
                         fieldPath: metadata.name
                   - name: AI_SUPPORT_AGENT_CONFIG_DIR
                     value: {{ ai_support_agent_k8s_data_dir | to_json }}
+      {% if (item.rdp | default(ai_support_agent_k8s_rdp)) | bool %}
+                  - name: GUACD_HOST
+                    value: "127.0.0.1"
+                  - name: GUACD_PORT
+                    value: "4822"
+                  - name: AI_SUPPORT_AGENT_RDP_TUNNEL_LISTEN
+                    value: "loopback"
+      {% endif %}
       {% if (item.persistence | default(ai_support_agent_k8s_persistence)) | bool %}
                 volumeMounts:
                   - name: data
                     mountPath: {{ ai_support_agent_k8s_data_dir | to_json }}
+      {% endif %}
+      {% if (item.rdp | default(ai_support_agent_k8s_rdp)) | bool %}
+              - name: guacd
+                image: {{ (item.guacd_image | default(ai_support_agent_k8s_guacd_image)) | to_json }}
+                imagePullPolicy: Always
+                # 同一 Pod 内だけで利用する。Service / hostPort は公開しない。
+                command:
+                  - /bin/sh
+                  - -c
+                  - /opt/guacamole/sbin/guacd -b 127.0.0.1 -L ${GUACD_LOG_LEVEL:-info} -f
+                ports:
+                  - containerPort: 4822
+                    protocol: TCP
+                securityContext:
+                  runAsNonRoot: true
+                  # guacd:1.5.5 の USER は名前指定。kubelet の非root検証に数値が必要。
+                  runAsUser: 1000
+                  runAsGroup: 1000
+                  readOnlyRootFilesystem: true
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop: ["ALL"]
+                resources:
+                  requests:
+                    cpu: 100m
+                    memory: 128Mi
+                  limits:
+                    memory: 512Mi
       {% endif %}
       {% if (item.persistence | default(ai_support_agent_k8s_persistence)) | bool %}
         volumeClaimTemplates:
