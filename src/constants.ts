@@ -292,6 +292,9 @@ export const API_ENDPOINTS = {
   // the caller.
   SERVER_SETUP_VARIABLES: (tenantCode: string, commandId: string) =>
     `/api/${tenantCode}/agent/commands/${commandId}/server-setup-variables`,
+  // Read persisted stop requests for this authorized execution command.
+  SERVER_SETUP_CONTROL: (tenantCode: string, commandId: string) =>
+    `/api/${tenantCode}/agent/commands/${commandId}/server-setup-control`,
   // Mid-run progress for a server_setup_exec command. Same commandId-scoped
   // design as SERVER_SETUP_SSH_CREDENTIAL: the ServerSetupExecution to append
   // to is resolved server-side from the command's payload, never supplied by

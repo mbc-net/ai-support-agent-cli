@@ -1,0 +1,36 @@
+---
+- name: Clear the acceptance sentinel
+  ansible.builtin.set_fact:
+    zabbix_validation_accepted: false
+
+- name: Attempt setup with malformed configuration
+  block:
+    - name: Include the role with controlled invalid inputs
+      ansible.builtin.include_role:
+        name: "{{ zabbix_validation_case.role }}"
+      vars:
+        zabbix_server_db_password: "{{ zabbix_validation_case.password | default('test-password') }}"
+        zabbix_server_db_mode: "{{ zabbix_validation_case.mode | default('local') }}"
+        zabbix_server_db_type: "{{ zabbix_validation_case.type | default('postgresql') }}"
+        zabbix_server_db_host: "{{ zabbix_validation_case.host | default('localhost') }}"
+        zabbix_server_db_port: "{{ zabbix_validation_case.port | default(5432) }}"
+        zabbix_server_version: "{{ zabbix_validation_case.version | default('7.0') }}"
+        zabbix_web_db_password: "{{ zabbix_validation_case.password | default('test-password') }}"
+        zabbix_web_db_type: postgresql
+        zabbix_web_server_name: "{{ zabbix_validation_case.name | default('zabbix.test') }}"
+        zabbix_web_listen_port: "{{ zabbix_validation_case.port | default(8080) }}"
+        zabbix_web_php_timezone: "{{ zabbix_validation_case.timezone | default('Asia/Tokyo') }}"
+
+    - name: Mark unexpected acceptance
+      ansible.builtin.set_fact:
+        zabbix_validation_accepted: true
+
+  rescue:
+    - name: Require rejection by the initial validation task
+      ansible.builtin.assert:
+        that:
+          - "'Validate branch and required variables' in ansible_failed_task.name"
+
+- name: Fail if a malformed configuration was accepted
+  ansible.builtin.assert:
+    that: not zabbix_validation_accepted
