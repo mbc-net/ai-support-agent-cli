@@ -210,7 +210,7 @@ describe('INCLUDE_ROLE_ALLOWED_VARS', () => {
     it('内部変数を渡すレシピは拒否される（k3s のディスクデバイス）', () => {
       const result = validateAnsibleTasks(
         body('k3s', '    k3s_ephemeral_device: /dev/sda\n'),
-        { mode: 'ecs' },
+        { mode: 'ecs', targetOs: 'linux' },
       )
       expect(result.ok).toBe(false)
       expect(result.violations.map((v) => v.key)).toContain('k3s_ephemeral_device')
@@ -221,6 +221,7 @@ describe('INCLUDE_ROLE_ALLOWED_VARS', () => {
       expect(internal).toBeDefined()
       const result = validateAnsibleTasks(body('k3s', `    ${internal}: faked\n`), {
         mode: 'ecs',
+        targetOs: 'linux',
       })
       expect(result.ok).toBe(false)
     })
@@ -228,7 +229,7 @@ describe('INCLUDE_ROLE_ALLOWED_VARS', () => {
     it('公開変数を渡すレシピは通る', () => {
       const result = validateAnsibleTasks(
         body('k3s', "    k3s_version: v1.31.0+k3s1\n    k3s_bootstrap: init\n"),
-        { mode: 'ecs' },
+        { mode: 'ecs', targetOs: 'linux' },
       )
       expect(result.ok).toBe(true)
     })
@@ -246,7 +247,7 @@ describe('INCLUDE_ROLE_ALLOWED_VARS', () => {
       ] as const) {
         const result = validateAnsibleTasks(
           `- name: t\n  ansible.builtin.include_role:\n    name: ${role}\n    tasks_from: ${from}\n`,
-          { mode: 'ecs' },
+          { mode: 'ecs', targetOs: 'linux' },
         )
         expect(result.ok).toBe(false)
       }
@@ -258,7 +259,7 @@ describe('INCLUDE_ROLE_ALLOWED_VARS', () => {
       // 派生名の参照には no_log が付かず、実行ログに出る。
       const result = validateAnsibleTasks(
         '- name: t\n  ansible.builtin.include_role:\n    name: k3s\n    public: true\n',
-        { mode: 'ecs' },
+        { mode: 'ecs', targetOs: 'linux' },
       )
       expect(result.ok).toBe(false)
     })
@@ -270,7 +271,7 @@ describe('INCLUDE_ROLE_ALLOWED_VARS', () => {
         // 「vars must be specified as a dictionary」で落ちる。保存時に弾く意味が消える。
         const result = validateAnsibleTasks(
           `- name: t\n  ansible.builtin.include_role:\n    name: docker\n  vars: ${value}\n`,
-          { mode: 'ecs' },
+          { mode: 'ecs', targetOs: 'linux' },
         )
         expect(result.ok).toBe(false)
       },
@@ -279,6 +280,7 @@ describe('INCLUDE_ROLE_ALLOWED_VARS', () => {
     it('未知のロールは vars の検査より前に role 名で拒否される（二重報告しない）', () => {
       const result = validateAnsibleTasks(body('no_such_role', '    anything: 1\n'), {
         mode: 'ecs',
+        targetOs: 'linux',
       })
       expect(result.ok).toBe(false)
       expect(result.violations.filter((v) => v.key === 'anything')).toHaveLength(0)

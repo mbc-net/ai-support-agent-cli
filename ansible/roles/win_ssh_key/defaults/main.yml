@@ -1,0 +1,17 @@
+---
+# win_ssh_key role defaults.
+#
+# Appends OpenSSH public keys for administrators to
+# C:\ProgramData\ssh\administrators_authorized_keys on a Windows Server host.
+# Supply the keys via the recipe's task-level `vars:`, typically referencing an
+# ANSIBLE# project variable, e.g.
+#
+#     win_ssh_key_public_keys:
+#       - "{{ OPS_SSH_PUBLIC_KEY }}"
+#
+# Each entry is ONE key line (`<type> <base64> [comment]`). Options such as
+# `command="..."` / `from="..."` and multi-line values are rejected by the
+# assert in tasks/main.yml.
+
+# --- keys to append (required) -----------------------------------------------
+win_ssh_key_public_keys: []      # REQUIRED: list of OpenSSH public key lines

@@ -25,8 +25,13 @@ import { load } from 'js-yaml'
 import { type CommandResult, errorResult, isSupportedSshAuthType, type SshExecCredential } from '../types'
 import { getErrorMessage } from '../utils'
 
-import { type AnsibleTaskRouteMode } from './ansible-task-guard'
-import { executeServerSetupAnsible, SUDO_PROBE_REGISTER_VAR, validateSshCredential } from './server-setup-runner'
+import { type AnsibleTargetOs, type AnsibleTaskRouteMode } from './ansible-task-guard'
+import {
+  executeServerSetupAnsible,
+  findReservedVariableCollision,
+  validateCredentialForTargetOs,
+  validateSshCredential,
+} from './server-setup-runner'
 
 /** Default SSH port when the caller does not specify one. */
 const DEFAULT_SSH_PORT = 22
@@ -75,7 +80,17 @@ export interface ServerSetupLocalRunOptions {
   strict?: boolean
   /** Overrides the known_hosts namespace host id (default `local-host`). */
   sshHostId?: string
+  /**
+   * Target OS (`--target-os`, default `linux`). `windows` runs the Windows play
+   * and inventory exactly as a `server_setup_exec` for a Windows host would
+   * (admin-docs `server-setup-windows-openssh.md`), for manual verification
+   * against a real Windows Server.
+   */
+  targetOs?: AnsibleTargetOs
 }
+
+/** Values accepted by `--target-os`. */
+const LOCAL_RUN_TARGET_OSES: readonly AnsibleTargetOs[] = ['linux', 'windows']
 
 /**
  * Parse the recipe body YAML and assert it is a top-level list — the shape the
@@ -196,6 +211,8 @@ export function buildLocalCredential(options: ServerSetupLocalRunOptions): SshEx
     username: options.username,
     authType,
     privateKey,
+    // Same shape as the api's credential response: `os` only for Windows.
+    ...(options.targetOs === 'windows' ? { os: 'windows' as const } : {}),
   }
 }
 
@@ -249,15 +266,13 @@ export async function runServerSetupLocalRun(options: ServerSetupLocalRunOptions
       : {}
 
     // Reserved-variable-name collision check — mirror production
-    // `runServerSetup`: a project variable named exactly SUDO_PROBE_REGISTER_VAR
-    // would (extra-vars always outrank a `register`ed var in Ansible) silently
-    // shadow the sudo-probe result and corrupt the NOPASSWD precheck. Fail
+    // `runServerSetup`: a project variable named like a precheck's register
+    // target (sudo probe / win_whoami) would (extra-vars always outrank a
+    // `register`ed var in Ansible) silently shadow the probe result. Fail
     // closed with the same message instead of misbehaving.
-    if (Object.prototype.hasOwnProperty.call(variables, SUDO_PROBE_REGISTER_VAR)) {
-      throw new Error(
-        `Project variable name '${SUDO_PROBE_REGISTER_VAR}' is reserved for server setup's internal `
-        + 'passwordless-sudo precheck and cannot be used. Rename this project variable and retry.',
-      )
+    const reservedError = findReservedVariableCollision(variables)
+    if (reservedError) {
+      throw new Error(reservedError)
     }
 
     credential = buildLocalCredential(options)
@@ -269,7 +284,9 @@ export async function runServerSetupLocalRun(options: ServerSetupLocalRunOptions
   // does (HOSTNAME_RE / USERNAME_RE / isValidPort), so a bad --port (NaN /
   // out-of-range), or whitespace/injection characters in --host / --user, are
   // rejected up front here rather than surfacing as an opaque ansible failure.
-  const credentialError = validateSshCredential(credential)
+  const targetOs: AnsibleTargetOs = options.targetOs ?? 'linux'
+  // Same Windows constraints as production (public-key auth, direct SSH).
+  const credentialError = validateSshCredential(credential) ?? validateCredentialForTargetOs(credential, targetOs)
   if (credentialError) {
     return errorResult(credentialError)
   }
@@ -282,6 +299,7 @@ export async function runServerSetupLocalRun(options: ServerSetupLocalRunOptions
     executionId: 'local-run',
     body,
     mode,
+    targetOs,
     credential,
     variables,
     secretNames: options.secretNames ?? [],
@@ -340,6 +358,14 @@ export function parseLocalRunArgs(argv: readonly string[]): ServerSetupLocalRunO
       case '--strict':
         options.strict = true
         break
+      case '--target-os': {
+        const value = takeValue()
+        if (!(LOCAL_RUN_TARGET_OSES as readonly string[]).includes(value)) {
+          throw new Error(`Unsupported --target-os ${JSON.stringify(value)} (supported: ${LOCAL_RUN_TARGET_OSES.join(', ')})`)
+        }
+        options.targetOs = value as AnsibleTargetOs
+        break
+      }
       default:
         throw new Error(`Unknown argument: ${arg}`)
     }

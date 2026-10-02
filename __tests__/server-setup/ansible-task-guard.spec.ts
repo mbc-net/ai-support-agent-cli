@@ -18,8 +18,8 @@ import {
  * （CLAUDE.md「セキュリティ上重要な変更」）。
  */
 describe('validateAnsibleTasks', () => {
-  const ecs = { mode: 'ecs' as const }
-  const resident = { mode: 'resident' as const }
+  const ecs = { mode: 'ecs' as const, targetOs: 'linux' as const }
+  const resident = { mode: 'resident' as const, targetOs: 'linux' as const }
 
   const hasReason = (
     violations: AnsibleTaskViolation[],
@@ -720,6 +720,7 @@ tasks:
 `
       const result = validateAnsibleTasks(body, {
         mode: 'resident',
+        targetOs: 'linux',
         secretVarNames: new Set(['DB_PASSWORD']),
       })
       expect(result.ok).toBe(true)
@@ -736,6 +737,7 @@ tasks:
 `
       const result = validateAnsibleTasks(body, {
         mode: 'ecs',
+        targetOs: 'linux',
         secretVarNames: new Set(['SECRET_NAME']),
       })
       expect(result.ok).toBe(true)
@@ -751,6 +753,7 @@ tasks:
 `
       const result = validateAnsibleTasks(body, {
         mode: 'ecs',
+        targetOs: 'linux',
         secretVarNames: new Set(['DB_PASSWORD']),
       })
       expect(result.ok).toBe(true)
@@ -777,7 +780,7 @@ tasks:
   ansible.builtin.debug:
     msg: "${expr}"
 `
-      const result = validateAnsibleTasks(body, { mode: 'ecs' })
+      const result = validateAnsibleTasks(body, { mode: 'ecs', targetOs: 'linux' })
       expect(result.ok).toBe(true)
       const task = result.normalizedTasks?.[0] as Record<string, unknown>
       expect(task.no_log).toBe(true)
@@ -825,7 +828,7 @@ tasks:
   ansible.builtin.set_fact:
     "{{ 'ansible_' ~ 'connection' }}": local
 `
-      const result = validateAnsibleTasks(body, { mode })
+      const result = validateAnsibleTasks(body, { mode, targetOs: 'linux' })
       expect(result.ok).toBe(false)
       expect(result.violations.map((v) => v.reason)).toContain(
         'set_fact variable name must be a static identifier',
@@ -841,7 +844,7 @@ tasks:
   ansible.builtin.set_fact:
     "{{ 'rsyslog_forward_' ~ 'already_configured' }}": false
 `
-        const result = validateAnsibleTasks(body, { mode })
+        const result = validateAnsibleTasks(body, { mode, targetOs: 'linux' })
         expect(result.ok).toBe(false)
         expect(result.violations.map((v) => v.reason)).toContain(
           'set_fact variable name must be a static identifier',
@@ -858,7 +861,7 @@ tasks:
 - name: t
   ansible.builtin.set_fact: rsyslog_forward_already_configured=false
 `
-        const result = validateAnsibleTasks(body, { mode })
+        const result = validateAnsibleTasks(body, { mode, targetOs: 'linux' })
         expect(result.ok).toBe(false)
         expect(result.violations.map((v) => v.reason)).toContain(
           'set_fact args must be a mapping (free-form form is not allowed)',
@@ -874,7 +877,7 @@ tasks:
   ansible.builtin.set_fact:
     rsyslog_forward_already_configured: false
 `
-        const result = validateAnsibleTasks(body, { mode })
+        const result = validateAnsibleTasks(body, { mode, targetOs: 'linux' })
         expect(result.ok).toBe(false)
         expect(result.violations.map((v) => v.reason)).toContain(
           'set_fact must not write into a bundled role namespace',
@@ -893,7 +896,7 @@ tasks:
     argv: [echo, x]
   register: rsyslog_forward_already_configured
 `
-        const result = validateAnsibleTasks(body, { mode })
+        const result = validateAnsibleTasks(body, { mode, targetOs: 'linux' })
         expect(result.ok).toBe(false)
         expect(result.violations.map((v) => v.reason)).toContain(
           'register must not write into a bundled role namespace',
@@ -910,15 +913,15 @@ tasks:
   ansible.builtin.set_fact:
     my_local_value: 1
 `
-        expect(validateAnsibleTasks(body, { mode }).ok).toBe(true)
+        expect(validateAnsibleTasks(body, { mode, targetOs: 'linux' }).ok).toBe(true)
       },
     )
   })
 
 describe('ロール内部変数の参照と、秘匿値の派生', () => {
-  const bothModes: Array<['ecs' | 'resident', { mode: 'ecs' | 'resident' }]> = [
-    ['ecs', { mode: 'ecs' }],
-    ['resident', { mode: 'resident' }],
+  const bothModes: Array<['ecs' | 'resident', { mode: 'ecs' | 'resident'; targetOs: 'linux' }]> = [
+    ['ecs', { mode: 'ecs', targetOs: 'linux' }],
+    ['resident', { mode: 'resident', targetOs: 'linux' }],
   ]
 
   // `include_role` の `public` を禁止しても、ロール内部の値はレシピから読める。
@@ -1079,9 +1082,9 @@ describe('秘匿値の no_log は波括弧の有無に依存しない', () => {
   // referencesSecretVar を `{{ }}` 限定のまま残していた。同じ穴が片方にだけ残る
   // という、このプロジェクトで繰り返し起きている「兄弟経路の非対称」である。
   // 判定は 1 つの関数に寄せたうえで、両方向にテストを置く。
-  const modes: Array<['ecs' | 'resident', { mode: 'ecs' | 'resident' }]> = [
-    ['ecs', { mode: 'ecs' }],
-    ['resident', { mode: 'resident' }],
+  const modes: Array<['ecs' | 'resident', { mode: 'ecs' | 'resident'; targetOs: 'linux' }]> = [
+    ['ecs', { mode: 'ecs', targetOs: 'linux' }],
+    ['resident', { mode: 'resident', targetOs: 'linux' }],
   ]
 
   const bodies: Array<[string, string]> = [
@@ -1122,9 +1125,9 @@ describe('秘匿値の no_log は波括弧の有無に依存しない', () => {
 })
 
 describe('変数名を実行時に組み立てる参照', () => {
-  const modes: Array<['ecs' | 'resident', { mode: 'ecs' | 'resident' }]> = [
-    ['ecs', { mode: 'ecs' }],
-    ['resident', { mode: 'resident' }],
+  const modes: Array<['ecs' | 'resident', { mode: 'ecs' | 'resident'; targetOs: 'linux' }]> = [
+    ['ecs', { mode: 'ecs', targetOs: 'linux' }],
+    ['resident', { mode: 'resident', targetOs: 'linux' }],
   ]
 
   it.each(modes)('[%s] vars[...] の連結でロール内部変数へ辿れない', (_label, opts) => {
@@ -1169,7 +1172,7 @@ describe('変数名を実行時に組み立てる参照', () => {
   ansible.builtin.debug:
     msg: "${expression}"
 `
-    const result = validateAnsibleTasks(body, { mode: 'ecs' })
+    const result = validateAnsibleTasks(body, { mode: 'ecs', targetOs: 'linux' })
     expect(result.ok).toBe(false)
     expect(
       hasReason(result.violations, (v) => v.reason.includes('dynamic variable lookup')),
