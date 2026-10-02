@@ -5,6 +5,15 @@
  */
 
 import { spawn } from 'child_process'
+import {
+  removeLegacySharedGuacd,
+  removeProjectGuacdNetwork,
+  removeProjectTrustStore,
+  resolveProjectGuacdIdentity,
+  stopProjectGuacdContainer,
+  type ProjectGuacdIdentity,
+} from '../rdp/guacd-container'
+import { buildGuacdDockerArgs } from '../rdp/guacd-runtime'
 import type { ChildProcess } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
@@ -16,6 +25,7 @@ import {
   CLI_FLAG_NO_AUTO_UPDATE,
   DOCKER_BUILD_ERROR_MAX_BYTES,
   DOCKER_LOG_FLUSH_INTERVAL_MS,
+  DOCKER_MARKER_BUILD_ERROR,
   DOCKER_MARKER_BUILT_HASH,
   DOCKER_MARKER_CUSTOMIZATION_HASH,
   DOCKER_MARKER_REBUILD_NEEDED,
@@ -29,6 +39,7 @@ import {
 import { t } from '../i18n'
 import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { removePidFile } from '../pid-manager'
+import { projectKey as toProjectKey } from '../project-key'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
 import { appendWithLimit, atomicWriteFile, getErrorMessage } from '../utils'
@@ -42,6 +53,22 @@ import { buildProjectImage } from './project-image-builder'
 import { getProjectConfigHostDir } from '../utils/path-utils'
 import { migrateProjectConfigDir } from './project-config'
 import { installUpdateAndRestart } from './update-handler'
+
+/** stopAll() の呼び出し元ごとの違い。 */
+export interface StopAllOptions {
+  /**
+   * プロジェクトの RDP 信頼ストア（`<configDir>/rdp-trusted-ca/<key>`）を残す。
+   * 更新のための停止で指定する: 更新後に同じプロジェクトが同じ場所を使う。
+   */
+  keepTrustStores?: boolean
+}
+
+/** プロジェクト別 guacd の片付けの進み具合。 */
+interface ProjectGuacdResources {
+  id: ProjectGuacdIdentity
+  /** guacd コンテナを止め終えたか（止め直さないため）。 */
+  containerStopped: boolean
+}
 
 interface DockerContainerHandle {
   project: ProjectRegistration
@@ -66,6 +93,23 @@ export class DockerSupervisor {
   private projectAgentIds = new Map<string, string>()
   private sigintHandler: (() => void) | undefined
   private sigtermHandler: (() => void) | undefined
+  /**
+   * guacd を用意し、まだ片付け終えていないプロジェクト。キーは projectKey。
+   *
+   * Docker 形態の guacd はプロジェクト別（`ais-guacd-<key>`）なので、片付けも
+   * プロジェクト単位で持つ。**コンテナの停止とネットワークの削除が済んだとき
+   * だけ外す**: 終了経路が複数あり、一時障害で止め損ねた guacd や、エージェントが
+   * まだ接続していて消せなかったネットワークを、次の経路がやり直せるようにする。
+   */
+  private guacdProjects = new Map<string, ProjectGuacdResources>()
+  /**
+   * stopAll() が始まったこと（と信頼ストアを残すか）。
+   *
+   * ホストの自動更新は `updating` を立てずに stopAll({ keepTrustStores: true }) を呼ぶ。
+   * 止められた子の close が stopAll の完了より先に届くと、close ハンドラが通常終了と
+   * 取り違え、信頼ストアを消したり、最後のコンテナで process.exit したりする。
+   */
+  private stopping: StopAllOptions | undefined
 
   constructor(version: string, opts: DockerRunOptions) {
     this.version = version
@@ -74,7 +118,7 @@ export class DockerSupervisor {
   }
 
   private projectKey(project: ProjectRegistration): string {
-    return `${project.tenantCode}/${project.projectCode}`
+    return toProjectKey(project)
   }
 
   private getProjectAgentId(project: ProjectRegistration): string | undefined {
@@ -131,6 +175,12 @@ export class DockerSupervisor {
   start(projects: ProjectRegistration[], onStop?: () => void): void {
     this.onAllStopped = onStop
 
+    if (this.opts.rdp) {
+      // 旧版が起動した共有 guacd（ais-guacd on ais-rdp）は、プロジェクト別へ
+      // 移行したあと誰にも使われないまま無認証で待ち受け続ける。投げない。
+      removeLegacySharedGuacd()
+    }
+
     for (const project of projects) {
       // Per-project SYNCHRONOUS failures must not abort the start loop —
       // log and continue so the remaining valid projects still come up.
@@ -169,12 +219,16 @@ export class DockerSupervisor {
       removePidFile()
       logger.info(t('runner.shuttingDown'))
       const closedPromises = [...this.handles.values()].map((h) => h.closedPromise)
-      // Not awaited here: this handler already waits for the actual container
-      // exit via closedPromises/shutdownTimer below (resolved by the `docker
-      // run` child's own 'close' event), which is a stronger and
-      // longer-lived signal than stopAll()'s "docker stop command finished"
-      // promise.
-      void this.stopAll()
+      // Waited on together with closedPromises below (both bounded by
+      // shutdownTimer). closedPromises — the `docker run` child's own 'close'
+      // plus the log flush — says the containers are gone, but stopAll()
+      // resolves only after `docker stop` returns and then cleans up the
+      // per-project guacd networks and RDP trust stores. The `docker run`
+      // child usually closes first, so exiting on closedPromises alone would
+      // skip that cleanup.
+      const stopped = this.stopAll().catch((err: unknown) => {
+        logger.warn(`[docker] stopAll() during shutdown failed: ${getErrorMessage(err)}`)
+      })
       onStop?.()
       // Must comfortably exceed the `docker stop --time` grace period used
       // in stopAll() below — otherwise this host-side timer would force
@@ -187,7 +241,7 @@ export class DockerSupervisor {
         logger.warn('[docker] Shutdown timed out waiting for log flush; forcing exit')
         process.exit(0)
       }, this.opts.shutdownTimeoutMs ?? (SHUTDOWN_GRACE_PERIOD_SECONDS * 1000 + 10_000))
-      void Promise.all(closedPromises).then(() => {
+      void Promise.all([...closedPromises, stopped]).then(() => {
         clearTimeout(shutdownTimer)
         process.exit(0)
       })
@@ -238,16 +292,25 @@ export class DockerSupervisor {
           if (fs.existsSync(srcHash)) {
             fs.copyFileSync(srcHash, dstHash)
           }
-          const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
-          /* istanbul ignore next */
-          if (fs.existsSync(buildErrorPath)) {
-            fs.unlinkSync(buildErrorPath)
+          // Clear a recorded failure only when this build is the rebuild the
+          // agent actually asked for (marker present). Without the marker the
+          // build ran purely because a Dockerfile happens to exist
+          // (forceIfDockerfileExists on every restart) and it rebuilt the
+          // *previous* Dockerfile — which is exactly how a container that just
+          // failed to generate a new Dockerfile comes back up. Deleting the
+          // file here would erase the reason it recorded moments ago, before
+          // the restarted container ever gets to report it to the API.
+          if (hasMarker) {
+            const buildErrorPath = path.join(projectConfigHostDir, DOCKER_MARKER_BUILD_ERROR)
+            if (fs.existsSync(buildErrorPath)) {
+              fs.unlinkSync(buildErrorPath)
+            }
           }
         } catch (err: unknown) {
           const errorMsg = getErrorMessage(err)
           logger.error(`[docker] Image build failed: ${errorMsg}`)
           logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
-          const buildErrorPath = path.join(projectConfigHostDir, 'docker-build-error')
+          const buildErrorPath = path.join(projectConfigHostDir, DOCKER_MARKER_BUILD_ERROR)
           const truncatedError = errorMsg.length > DOCKER_BUILD_ERROR_MAX_BYTES ? errorMsg.substring(0, DOCKER_BUILD_ERROR_MAX_BYTES) + '...(truncated)' : errorMsg
           /* istanbul ignore next */
           try {
@@ -314,12 +377,30 @@ export class DockerSupervisor {
     const containerName = buildContainerName(project.tenantCode, project.projectCode, this.opts.agentId)
     removeStaleContainer(containerName)
     const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
+    // このプロジェクトの guacd を専用ネットワークに用意し、このコンテナを同じ
+    // ネットワークへ参加させる。**こちらが通常の起動経路**（プロジェクトが 1 件でも
+    // あれば runInDocker はここへ来る）。docker-runner.ts の legacy fallback にだけ
+    // 配線すると、実運用では --rdp を指定しても guacd が起動しない。RDP が無効なら空配列。
+    // agentId はコンテナ名（buildContainerName）と同じもの。同じホストで同じ
+    // プロジェクトを別エージェントが動かしても guacd を取り違えない。
+    const guacdArgs = buildGuacdDockerArgs(this.opts, project, this.opts.agentId)
+    if (this.opts.rdp) {
+      // 用意に失敗していても記録する（途中まで作られたコンテナを終了時に止める。
+      // 無ければ停止は「既に無い」で完了扱いになる）。再起動では用意し直したので
+      // 「止め終えた」印を戻す。
+      this.guacdProjects.set(key, {
+        id: resolveProjectGuacdIdentity(project, this.opts.agentId),
+        containerStopped: false,
+      })
+    }
+
     const dockerArgs = [
       'run', '--rm', '--name', containerName, '--cidfile', cidFile,
       ...buildDockerUserArgs(),
       ...mounts,
       ...buildDevMounts(),
       ...envArgs,
+      ...guacdArgs,
       imageTag,
       ...containerArgs,
     ]
@@ -432,6 +513,17 @@ export class DockerSupervisor {
       // Clean up cidfile
       try { fs.unlinkSync(handle.cidFile) } catch { /* ignore */ }
 
+      if (this.stopping && !this.updating) {
+        // stopAll() が止めた（ホストの自動更新など）。通常終了ではないので、更新・
+        // 再起動の扱いも process.exit もしない。片付けは stopAll の方針に従う。
+        // （SIGINT / SIGTERM と終了コード 42 の経路は updating を立てるので従来どおり。）
+        this.releaseProjectGuacd(key, {
+          agentsStopped: true,
+          removeTrustStores: !this.stopping.keepTrustStores,
+        })
+        return
+      }
+
       if (code === DOCKER_UPDATE_EXIT_CODE && !this.updating) {
         this.updating = true
         logger.info(`[docker] Container ${key} exited for update. Stopping all containers and rebuilding...`)
@@ -450,7 +542,8 @@ export class DockerSupervisor {
         // error handling explicit and identical to the previous behavior.
         void (async (): Promise<void> => {
           try {
-            await this.stopAll()
+            // 更新後も同じプロジェクトが同じ信頼ストアを使うため残す。
+            await this.stopAll({ keepTrustStores: true })
           } catch (err) {
             // Errors here are logged, not fatal — proceed to
             // installUpdateAndRestart() regardless, same as before this
@@ -476,11 +569,60 @@ export class DockerSupervisor {
       }
 
       if (this.handles.size === 0 && !this.updating) {
-        // All containers have exited cleanly
+        // All containers have exited cleanly.
+        // この経路は stopAll() を通らず直接 process.exit する。ここで止めないと、
+        // guacd コンテナと専用ネットワークがホストに残り続ける
+        // （guacd は無認証で待ち受けるため、残すのは避ける）。
+        this.shutdownGuacd({ agentsStopped: true, removeTrustStores: true })
         this.onAllStopped?.()
         process.exit(code ?? 0)
       }
+
+      if (!this.updating) {
+        // このプロジェクトだけが通常終了した。guacd はプロジェクト専用なので、
+        // 他のプロジェクトが動いていても止めてよい（残すと無認証で待ち受け続ける）。
+        // 更新（上の 42）と再起動（43）はここへ来ない: 再起動は spawnProject で
+        // 同じ guacd を再利用し、更新は stopAll が全プロジェクト分を止める。
+        // このプロジェクトのエージェントは終了済みなので、ネットワークと信頼ストアも片付ける。
+        this.releaseProjectGuacd(key, { agentsStopped: true, removeTrustStores: true })
+      }
     })
+  }
+
+  /**
+   * 1 プロジェクトの guacd を片付ける。
+   *
+   * - guacd コンテナはいつでも止める（無認証で待ち受けるため、先に止める）。
+   * - ネットワークと信頼ストアは、そのプロジェクトのエージェントのコンテナが
+   *   終わってから（`agentsStopped`）。接続中はネットワークを消せない。
+   * - 信頼ストアは `removeTrustStores` のときだけ消す（更新・再起動では残す）。
+   *
+   * **済んだ段階だけを記録から外す。** 途中で失敗したものは次の終了経路が
+   * やり直す（guacd は無認証で待ち受けるため、止め損ねを残さない）。
+   */
+  private releaseProjectGuacd(
+    key: string,
+    options: { agentsStopped: boolean; removeTrustStores?: boolean },
+  ): void {
+    const entry = this.guacdProjects.get(key)
+    if (!entry) return
+    if (!entry.containerStopped) entry.containerStopped = stopProjectGuacdContainer(entry.id)
+    if (!options.agentsStopped || !entry.containerStopped) return
+    if (!removeProjectGuacdNetwork(entry.id)) return
+    // 信頼ストアの削除失敗は warn 済み。待ち受けるものは無いため再試行しない。
+    if (options.removeTrustStores) removeProjectTrustStore(entry.id)
+    this.guacdProjects.delete(key)
+  }
+
+  /**
+   * 起動した全プロジェクトの guacd を片付ける。
+   *
+   * 終了経路は複数ある（`stopAll()` と「全コンテナが自然終了 → process.exit」）。
+   * どちらから来ても、片付け終えたプロジェクトは二度と叩かないようにここへ集約する。
+   */
+  private shutdownGuacd(options: { agentsStopped: boolean; removeTrustStores?: boolean }): void {
+    if (!this.opts.rdp) return
+    for (const key of [...this.guacdProjects.keys()]) this.releaseProjectGuacd(key, options)
   }
 
   /**
@@ -502,7 +644,12 @@ export class DockerSupervisor {
    * out and SIGKILLs it), so awaiting the spawned process's own exit is
    * sufficient — no separate polling is needed.
    */
-  stopAll(): Promise<void> {
+  stopAll(options: StopAllOptions = {}): Promise<void> {
+    this.stopping = { keepTrustStores: options.keepTrustStores === true }
+    // guacd は先に止める（無認証で待ち受けるため）。ネットワークと信頼ストアは
+    // エージェントのコンテナが止まってから（下の then）。
+    this.shutdownGuacd({ agentsStopped: false })
+
     const stopPromises: Promise<void>[] = []
     for (const [key, handle] of this.handles) {
       if (!handle.closeHandled) {
@@ -557,6 +704,8 @@ export class DockerSupervisor {
         }
       }
     }
-    return Promise.all(stopPromises).then(() => undefined)
+    return Promise.all(stopPromises).then(() => {
+      this.shutdownGuacd({ agentsStopped: true, removeTrustStores: !options.keepTrustStores })
+    })
   }
 }

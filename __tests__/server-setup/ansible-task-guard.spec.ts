@@ -1540,6 +1540,78 @@ describe('変数名を実行時に組み立てる参照', () => {
     expect(validateAnsibleTasks(body, opts).ok).toBe(false)
   })
 
+  // Ansible はモジュール引数の**キー**もテンプレート展開する。解決できないキーは
+  // 解決後の文字列を含むエラーとして実行ログへ出るので、キーは値と同じ危険度を持つ。
+  // 走査を構造化したときに値だけを見るようになり、3 つの防御が揃って外れた（実測）。
+  it.each(modes)('[%s] キーに置いた秘匿値にも no_log が付く', (_label, opts) => {
+    const body = `
+- name: n
+  ansible.builtin.file:
+    path: /tmp/x
+    "{{ DB_PASSWORD }}": 1
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+  })
+
+  it.each(modes)('[%s] キーに置いた hostvars も拒否する', (_label, opts) => {
+    const body = `
+- name: n
+  ansible.builtin.file:
+    path: /tmp/x
+    "{{ hostvars[inventory_hostname] }}": 1
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(false)
+  })
+
+  it.each(modes)('[%s] キーに置いたロール内部変数も拒否する', (_label, opts) => {
+    const body = `
+- name: n
+  ansible.builtin.file:
+    path: /tmp/x
+    "{{ github_runner_regtoken_resp.json.token }}": 1
+`
+    expect(validateAnsibleTasks(body, opts).ok).toBe(false)
+  })
+
+  it.each(modes)('[%s] キーに置いた lookup も拒否する（任意ファイル読み取りの入口）', (_label, opts) => {
+    const body = `
+- name: n
+  ansible.builtin.debug:
+    msg: hi
+    "{{ lookup('file','/root/.ssh/id_ed25519') }}": 1
+`
+    const result = validateAnsibleTasks(body, opts)
+    expect(result.ok).toBe(false)
+    expect(
+      hasReason(result.violations, (v) => v.reason.includes('lookup/query plugin')),
+    ).toBe(true)
+  })
+
+  it.each(modes)('[%s] 素の式は名前ではなく位置で決まる', (_label, opts) => {
+    // `var` / `that` が式になるのは `debug` / `assert` の引数としてだけ。
+    // 名前だけで判定すると、ネストした同名キーの値まで式として走査され、
+    // `set_fact: { var: "Bob's server" }` が「閉じない文字列」で拒否される。
+    const nested = [
+      '- name: n',
+      '  ansible.builtin.set_fact:',
+      `    var: "Bob's server"`,
+    ].join('\n')
+    expect(validateAnsibleTasks(nested, opts).ok).toBe(true)
+
+    // 本来の位置では引き続き式として扱う。
+    const real = `
+- name: n
+  ansible.builtin.debug:
+    var: github_runner_regtoken_resp
+`
+    expect(validateAnsibleTasks(real, opts).ok).toBe(false)
+  })
+
   it.each(modes)('[%s] 汚染された名前を実際に参照すれば no_log は付く', (_label, opts) => {
     const body = `
 - name: Fetch app config

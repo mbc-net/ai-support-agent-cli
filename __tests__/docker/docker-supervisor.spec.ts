@@ -60,6 +60,41 @@ jest.mock('../../src/logger', () => ({
 /** In-memory capture of everything the line-prefixer would have written. */
 const mockPrefixerWrites: string[] = []
 
+jest.mock('../../src/rdp/guacd-container', () => ({
+  ...jest.requireActual('../../src/rdp/guacd-container'),
+  ensureGuacdContainer: jest.fn().mockReturnValue({ host: 'ais-guacd', port: 4822 }),
+  stopGuacdContainer: jest.fn(),
+  ensureProjectGuacdContainer: jest.fn((id: { containerName: string }) => ({
+    host: id.containerName,
+    port: 4822,
+  })),
+  extractGuacdSystemCaBundle: jest.fn(),
+  stopProjectGuacdContainer: jest.fn().mockReturnValue(true),
+  removeProjectGuacdNetwork: jest.fn().mockReturnValue(true),
+  removeProjectTrustStore: jest.fn().mockReturnValue(true),
+  removeLegacySharedGuacd: jest.fn(),
+}))
+
+const guacdContainerMock = jest.requireMock('../../src/rdp/guacd-container') as {
+  stopGuacdContainer: jest.Mock
+  stopProjectGuacdContainer: jest.Mock
+  removeLegacySharedGuacd: jest.Mock
+  ensureProjectGuacdContainer: jest.Mock
+  removeProjectGuacdNetwork: jest.Mock
+  removeProjectTrustStore: jest.Mock
+  resolveProjectGuacdIdentity: typeof import('../../src/rdp/guacd-container').resolveProjectGuacdIdentity
+}
+const mockStopProjectGuacd = guacdContainerMock.stopProjectGuacdContainer
+/** 停止されたプロジェクト別 guacd の projectRef 一覧。 */
+const stoppedGuacdProjects = (): string[] =>
+  mockStopProjectGuacd.mock.calls.map((c) => (c[0] as { projectRef: string }).projectRef)
+const refsOf = (mock: jest.Mock): string[] =>
+  mock.mock.calls.map((c) => (c[0] as { projectRef: string }).projectRef)
+
+jest.mock('../../src/auto-updater', () => ({
+  startAutoUpdater: jest.fn(() => ({ stop: jest.fn() })),
+}))
+
 jest.mock('../../src/pid-manager', () => ({
   removePidFile: jest.fn(),
 }))
@@ -594,6 +629,226 @@ describe('DockerSupervisor', () => {
       fakeChild.emit('close', 0)
 
       expect(mockExit).toHaveBeenCalledWith(0)
+    })
+
+    it('★ 全コンテナが自然終了する経路でも guacd を止める', () => {
+      // この経路は stopAll() を通らず直接 process.exit する。止め忘れると、
+      // 固定名の guacd コンテナと専用ネットワークがホストに残り続ける
+      // （guacd は無認証で待ち受けるため、残すのは避ける）。
+      // **実際に close を発火させて確かめる。** ソース文字列の検査や
+      // ヘルパ単体の呼び出しでは、この配線が消えても気づけない。
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts({ rdp: true }))
+      supervisor.start([makeProject()])
+      mockStopProjectGuacd.mockClear()
+
+      fakeChild.emit('close', 0)
+
+      expect(mockExit).toHaveBeenCalledWith(0)
+      expect(stoppedGuacdProjects()).toEqual(['mbc/PROJ_A'])
+    })
+
+    it('RDP が無効なら終了時に guacd へ触らない', () => {
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+      mockStopProjectGuacd.mockClear()
+
+      fakeChild.emit('close', 0)
+
+      expect(mockStopProjectGuacd).not.toHaveBeenCalled()
+      expect(guacdContainerMock.stopGuacdContainer).not.toHaveBeenCalled()
+    })
+
+    describe('★ プロジェクト別 guacd の寿命', () => {
+      /** 2 プロジェクトを起動し、それぞれの fake child を返す。 */
+      const startTwo = (): {
+        supervisor: DockerSupervisor
+        a: ReturnType<typeof makeFakeChild>
+        b: ReturnType<typeof makeFakeChild>
+        spawned: ReturnType<typeof makeFakeChild>[]
+      } => {
+        const spawned: ReturnType<typeof makeFakeChild>[] = []
+        mockSpawn.mockImplementation(() => {
+          const child = makeFakeChild()
+          spawned.push(child)
+          return child as never
+        })
+        const supervisor = new DockerSupervisor('1.0.0', makeOpts({ rdp: true }))
+        supervisor.start([
+          makeProject({ projectCode: 'PROJ_A' }),
+          makeProject({ projectCode: 'PROJ_B' }),
+        ])
+        return { supervisor, a: spawned[0], b: spawned[1], spawned }
+      }
+
+      it('★ 起動時に旧共有 guacd の撤去を試みる（RDP 有効時のみ）', () => {
+        startTwo()
+        expect(guacdContainerMock.removeLegacySharedGuacd).toHaveBeenCalledTimes(1)
+        const order = [
+          guacdContainerMock.removeLegacySharedGuacd.mock.invocationCallOrder[0],
+          guacdContainerMock.ensureProjectGuacdContainer.mock.invocationCallOrder[0],
+        ]
+        expect(order[0]).toBeLessThan(order[1])
+      })
+
+      it('RDP 無効なら旧共有 guacd に触らない', () => {
+        mockSpawn.mockReturnValue(makeFakeChild() as never)
+        new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+        expect(guacdContainerMock.removeLegacySharedGuacd).not.toHaveBeenCalled()
+        expect(guacdContainerMock.ensureProjectGuacdContainer).not.toHaveBeenCalled()
+      })
+
+      it('★ プロジェクトごとに別の guacd を用意して docker run へ渡す', () => {
+        startTwo()
+        const names = guacdContainerMock.ensureProjectGuacdContainer.mock.calls.map(
+          (c) => (c[0] as { projectRef: string }).projectRef,
+        )
+        expect(names).toEqual(['mbc/PROJ_A', 'mbc/PROJ_B'])
+        const runArgs = mockSpawn.mock.calls[0][1] as string[]
+        expect(runArgs.join(' ')).toMatch(/--network ais-rdp-[0-9a-f]{16}/)
+        expect(runArgs.join(' ')).toContain('AI_SUPPORT_AGENT_RDP_TRUSTED_CA_DIR=/run/ais-rdp-ca')
+      })
+
+      it('★ 個別プロジェクトの通常終了で、そのプロジェクトの guacd・ネットワーク・信頼ストアだけを片付ける', () => {
+        const { a } = startTwo()
+        a.emit('close', 0)
+        expect(mockExit).not.toHaveBeenCalled()
+        expect(stoppedGuacdProjects()).toEqual(['mbc/PROJ_A'])
+        expect(refsOf(guacdContainerMock.removeProjectGuacdNetwork)).toEqual(['mbc/PROJ_A'])
+        expect(refsOf(guacdContainerMock.removeProjectTrustStore)).toEqual(['mbc/PROJ_A'])
+      })
+
+      it('★ guacd の識別子に agentId を含める（同じプロジェクトの別エージェントと衝突させない）', () => {
+        mockSpawn.mockReturnValue(makeFakeChild() as never)
+        new DockerSupervisor('1.0.0', makeOpts({ rdp: true, agentId: 'agent-x' })).start([
+          makeProject({ projectCode: 'PROJ_A' }),
+        ])
+        const expected = guacdContainerMock.resolveProjectGuacdIdentity(
+          { tenantCode: 'mbc', projectCode: 'PROJ_A' },
+          'agent-x',
+        )
+        expect(guacdContainerMock.ensureProjectGuacdContainer.mock.calls[0][0]).toEqual(expected)
+      })
+
+      it('★ 全プロジェクトが終了したら残りの guacd を止める（停止済みは再度止めない）', () => {
+        const { a, b } = startTwo()
+        a.emit('close', 0)
+        b.emit('close', 0)
+        expect(mockExit).toHaveBeenCalledWith(0)
+        expect(stoppedGuacdProjects()).toEqual(['mbc/PROJ_A', 'mbc/PROJ_B'])
+        expect(refsOf(guacdContainerMock.removeProjectTrustStore)).toEqual(['mbc/PROJ_A', 'mbc/PROJ_B'])
+      })
+
+      it('★ 止め損ねた guacd は次の終了経路で止め直す', () => {
+        mockStopProjectGuacd.mockReturnValueOnce(false)
+        const { a, b } = startTwo()
+        a.emit('close', 0)
+        b.emit('close', 0)
+        expect(stoppedGuacdProjects()).toEqual(['mbc/PROJ_A', 'mbc/PROJ_A', 'mbc/PROJ_B'])
+      })
+
+      it('★ 再起動要求（43）では止めない（再起動後に同じ guacd を再利用する）', async () => {
+        const { a, spawned } = startTwo()
+        a.emit('close', 43)
+        await Promise.resolve()
+        await Promise.resolve()
+        await new Promise((r) => setImmediate(r))
+        expect(spawned).toHaveLength(3)
+        expect(mockStopProjectGuacd).not.toHaveBeenCalled()
+        expect(guacdContainerMock.removeProjectGuacdNetwork).not.toHaveBeenCalled()
+        expect(guacdContainerMock.removeProjectTrustStore).not.toHaveBeenCalled()
+      })
+
+      it('★ 更新（42）では個別には止めず、stopAll で全プロジェクト分を止める', async () => {
+        const { a, b } = startTwo()
+        a.emit('close', 42)
+        b.emit('exit', 0, 'SIGTERM')
+        await Promise.resolve()
+        await new Promise((r) => setImmediate(r))
+        expect(stoppedGuacdProjects().sort()).toEqual(['mbc/PROJ_A', 'mbc/PROJ_B'])
+        expect(mockStopProjectGuacd).toHaveBeenCalledTimes(2)
+        // 更新後も同じ信頼ストアを使うため消さない（ネットワークは消す）。
+        expect(guacdContainerMock.removeProjectTrustStore).not.toHaveBeenCalled()
+        expect(refsOf(guacdContainerMock.removeProjectGuacdNetwork).sort()).toEqual(['mbc/PROJ_A', 'mbc/PROJ_B'])
+      })
+
+      it('★ stopAll は起動した全プロジェクトの guacd を止める', async () => {
+        const { supervisor, a, b } = startTwo()
+        const done = supervisor.stopAll()
+        a.emit('exit', 0)
+        b.emit('exit', 0)
+        await done
+        expect(stoppedGuacdProjects()).toEqual(['mbc/PROJ_A', 'mbc/PROJ_B'])
+      })
+
+      it('★ stopAll は guacd を先に止め、ネットワークと信頼ストアはエージェントの停止後に片付ける', async () => {
+        const { supervisor, a, b } = startTwo()
+        const done = supervisor.stopAll()
+        // guacd（無認証で待ち受ける）は即座に止める。
+        expect(mockStopProjectGuacd).toHaveBeenCalledTimes(2)
+        // エージェントのコンテナがまだ接続しているので、ネットワークはまだ消さない。
+        expect(guacdContainerMock.removeProjectGuacdNetwork).not.toHaveBeenCalled()
+        expect(guacdContainerMock.removeProjectTrustStore).not.toHaveBeenCalled()
+        a.emit('exit', 0)
+        b.emit('exit', 0)
+        await done
+        expect(refsOf(guacdContainerMock.removeProjectGuacdNetwork)).toEqual(['mbc/PROJ_A', 'mbc/PROJ_B'])
+        expect(refsOf(guacdContainerMock.removeProjectTrustStore)).toEqual(['mbc/PROJ_A', 'mbc/PROJ_B'])
+        expect(mockStopProjectGuacd).toHaveBeenCalledTimes(2)
+      })
+
+      it('★ ホスト自動更新: stopAll より先に close が届いても信頼ストアを消さず、exit もしない', async () => {
+        // ホストの自動更新は this.updating を立てずに stopAll({ keepTrustStores: true }) を呼ぶ。
+        // docker stop / kill で止まった子の close が stopAll の完了より先に届くと、
+        // 通常終了の経路（個別の片付け・全終了 → process.exit）に入ってしまう。
+        const { startHostAutoUpdater } = require('../../src/docker/docker-runner') as typeof import('../../src/docker/docker-runner')
+        const { startAutoUpdater } = require('../../src/auto-updater') as { startAutoUpdater: jest.Mock }
+        const { supervisor, a, b } = startTwo()
+        startHostAutoUpdater(
+          { autoUpdate: true },
+          null,
+          [makeProject({ projectCode: 'PROJ_A' }), makeProject({ projectCode: 'PROJ_B' })],
+          supervisor,
+          'agent-1',
+        )
+        const stopAllAgents = startAutoUpdater.mock.calls[0][2] as () => Promise<void>
+        const done = stopAllAgents()
+        // 実際の子プロセスは exit → close の順。close が stopAll の解決より先に届く。
+        a.emit('exit', 143)
+        a.emit('close', 143)
+        b.emit('exit', 143)
+        b.emit('close', 143)
+        await done
+        await new Promise((r) => setImmediate(r))
+        expect(guacdContainerMock.removeProjectTrustStore).not.toHaveBeenCalled()
+        expect(mockExit).not.toHaveBeenCalled()
+        // guacd とネットワークは片付ける。
+        expect(stoppedGuacdProjects().sort()).toEqual(['mbc/PROJ_A', 'mbc/PROJ_B'])
+        expect(refsOf(guacdContainerMock.removeProjectGuacdNetwork).sort()).toEqual(['mbc/PROJ_A', 'mbc/PROJ_B'])
+      })
+
+      it('★ ネットワークを消せなければ記録に残し、次の終了経路で消し直す', async () => {
+        guacdContainerMock.removeProjectGuacdNetwork.mockReturnValueOnce(false)
+        const { supervisor, a, b } = startTwo()
+        const done = supervisor.stopAll()
+        a.emit('exit', 0)
+        b.emit('exit', 0)
+        await done
+        expect(refsOf(guacdContainerMock.removeProjectGuacdNetwork)).toEqual(['mbc/PROJ_A', 'mbc/PROJ_B'])
+        expect(refsOf(guacdContainerMock.removeProjectTrustStore)).toEqual(['mbc/PROJ_B'])
+        // docker run の終了（close）が来た経路で再試行する。コンテナは止め直さない。
+        a.emit('close', 0)
+        expect(refsOf(guacdContainerMock.removeProjectGuacdNetwork)).toEqual([
+          'mbc/PROJ_A', 'mbc/PROJ_B', 'mbc/PROJ_A',
+        ])
+        expect(refsOf(guacdContainerMock.removeProjectTrustStore)).toEqual(['mbc/PROJ_B', 'mbc/PROJ_A'])
+        expect(mockStopProjectGuacd).toHaveBeenCalledTimes(2)
+      })
     })
 
     it('calls process.exit when all containers exit cleanly', () => {
@@ -1653,7 +1908,10 @@ describe('DockerSupervisor', () => {
       // Trigger shutdown — this sets updating=true and starts Promise.all(closedPromises)
       handler()
 
-      // Now close the container — this triggers resolveClosed() in the close handler chain
+      // Now the container exits — a real ChildProcess emits 'exit' (which the
+      // stopAll() fallback waits on) and then 'close' (which triggers
+      // resolveClosed() in the close handler chain).
+      fakeChild.emit('exit', 0)
       fakeChild.emit('close', 0)
 
       // Allow the microtask queue to drain (flush → saveSessionLog (empty) → resolveClosed → Promise.all → process.exit)
@@ -1663,6 +1921,73 @@ describe('DockerSupervisor', () => {
 
       // process.exit(0) should be called from the Promise.all().then() callback
       expect(mockExit).toHaveBeenCalledWith(0)
+
+      processOnSpy.mockRestore()
+    }, 10000)
+
+    it('シグナル時に stopAll() が失敗しても警告を残して exit する', async () => {
+      jest.useRealTimers()
+      const fakeChild = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild as never)
+      const stopAllSpy = jest.spyOn(DockerSupervisor.prototype, 'stopAll').mockRejectedValue(new Error('stop boom'))
+      const processOnSpy = jest.spyOn(process, 'on')
+      try {
+        const supervisor = new DockerSupervisor('1.0.0', makeOpts({ shutdownTimeoutMs: 30000 }))
+        supervisor.start([makeProject()])
+        const handler = processOnSpy.mock.calls.find((c) => c[0] === 'SIGTERM')![1] as () => void
+        handler()
+        fakeChild.emit('close', 0)
+        for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r))
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('stopAll() during shutdown failed: stop boom'))
+        expect(mockExit).toHaveBeenCalledWith(0)
+      } finally {
+        stopAllSpy.mockRestore()
+        processOnSpy.mockRestore()
+      }
+    }, 10000)
+
+    it('★ シグナル時は stopAll() の後片付け（guacd のネットワーク・信頼ストア）まで待ってから exit する', async () => {
+      // 実際の順序: エージェントのコンテナが止まると `docker run` 子の close が先に来て、
+      // `docker stop` 子の close（stopAll() の完了）はその後に来る。closedPromises だけで
+      // exit すると、stopAll() の末尾の後片付けに届かない。
+      jest.useRealTimers()
+      mockExistsSync.mockImplementation((p) => String(p).endsWith('.cid'))
+      mockReadFileSync.mockImplementation(((p: unknown) => {
+        if (String(p).endsWith('.cid')) return 'cid123'
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      }) as typeof fs.readFileSync)
+
+      const runChild = makeFakeChild()
+      const stopChild = makeFakeChild()
+      mockSpawn.mockImplementation(((_cmd: string, args: string[]) =>
+        (args[0] === 'stop' ? stopChild : runChild)) as unknown as typeof spawn)
+
+      const processOnSpy = jest.spyOn(process, 'on')
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts({ rdp: true, shutdownTimeoutMs: 30000 }))
+      supervisor.start([makeProject()])
+      const handler = processOnSpy.mock.calls.find((c) => c[0] === 'SIGTERM')![1] as () => void
+      const drain = async (): Promise<void> => {
+        for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r))
+      }
+
+      handler()
+      expect(mockSpawn).toHaveBeenCalledWith('docker', ['stop', '--time', expect.any(String), 'cid123'], { stdio: 'ignore' })
+
+      // 1. エージェントのコンテナが終了（docker run 子の close）。
+      runChild.emit('close', 0)
+      await drain()
+      expect(mockExit).not.toHaveBeenCalled()
+      expect(guacdContainerMock.removeProjectGuacdNetwork).not.toHaveBeenCalled()
+
+      // 2. docker stop が完了（stopAll() が解決し、後片付けが走る）。
+      stopChild.emit('close', 0)
+      await drain()
+      expect(refsOf(guacdContainerMock.removeProjectGuacdNetwork)).toEqual(['mbc/PROJ_A'])
+      expect(refsOf(guacdContainerMock.removeProjectTrustStore)).toEqual(['mbc/PROJ_A'])
+      expect(mockExit).toHaveBeenCalledWith(0)
+      expect(guacdContainerMock.removeProjectTrustStore.mock.invocationCallOrder[0]).toBeLessThan(
+        mockExit.mock.invocationCallOrder[0],
+      )
 
       processOnSpy.mockRestore()
     }, 10000)
@@ -1763,6 +2088,67 @@ describe('DockerSupervisor', () => {
         expect.stringContaining('docker-customization-hash'),
         expect.stringContaining('docker-built-hash'),
       )
+    })
+  })
+
+  // ─── docker-build-error retention after a successful build ───────────────
+
+  describe('rebuildAndRestart - docker-build-error handling after a successful build', () => {
+    function arrangeExistingFiles(markerExists: boolean): { fakeChild1: ReturnType<typeof makeFakeChild> } {
+      mockExistsSync.mockReset()
+      mockReadFileSync.mockReset()
+      mockUnlinkSync.mockReset()
+
+      mockReadFileSync.mockImplementation(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        if (s.endsWith('docker-rebuild-needed')) return markerExists
+        return s.endsWith('Dockerfile') || s.endsWith('docker-build-error')
+      })
+
+      const fakeChild1 = makeFakeChild()
+      const fakeChild2 = makeFakeChild()
+      let spawnCallNum = 0
+      mockSpawn.mockImplementation(() => {
+        spawnCallNum++
+        return (spawnCallNum === 1 ? fakeChild1 : fakeChild2) as never
+      })
+      return { fakeChild1 }
+    }
+
+    it('deletes docker-build-error after a rebuild the container asked for', async () => {
+      const { fakeChild1 } = arrangeExistingFiles(true)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      expect(mockBuildProjectImage).toHaveBeenCalled()
+      expect(mockUnlinkSync).toHaveBeenCalledWith(expect.stringContaining('docker-build-error'))
+    })
+
+    it('keeps docker-build-error when no rebuild was requested (Dockerfile generation failed in the container)', async () => {
+      // No marker: the container exited with 43 without preparing a rebuild,
+      // which is what happens when generateProjectDockerfile() rejects the
+      // customization. It records the reason in docker-build-error just before
+      // exiting; rebuilding the previous Dockerfile here must not erase it,
+      // or the failure never reaches the API (dockerBuildError on the next
+      // registration) and the container silently runs the old configuration.
+      const { fakeChild1 } = arrangeExistingFiles(false)
+
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      expect(mockBuildProjectImage).toHaveBeenCalled()
+      expect(mockUnlinkSync).not.toHaveBeenCalledWith(expect.stringContaining('docker-build-error'))
     })
   })
 

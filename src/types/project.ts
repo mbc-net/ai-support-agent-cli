@@ -1,4 +1,5 @@
 import type { AgentChatMode, AgentChatModeOverrides } from './config'
+import type { AgentCapabilityDeclaration } from './server'
 
 export interface ProjectConfigResponse {
   configHash: string
@@ -33,6 +34,13 @@ export interface ProjectConfigResponse {
       commands?: string[]
       timezone?: string
     }
+    /**
+     * Declared capabilities, as delivered on the container path
+     * (`GET /project-config`). `GET /config` carries the same value at the top
+     * level of `AgentServerConfig`; the API builds the two separately, so both
+     * have to be read or the feature works in one runtime only.
+     */
+    capabilities?: AgentCapabilityDeclaration
   }
   aws?: {
     accounts: Array<{
@@ -265,6 +273,21 @@ export type SshAuthType = (typeof SUPPORTED_SSH_AUTH_TYPES)[number]
 
 export function isSupportedSshAuthType(authType: string): authType is SshAuthType {
   return (SUPPORTED_SSH_AUTH_TYPES as readonly string[]).includes(authType)
+}
+
+/**
+ * The message used when an SSH credential carries an auth type we cannot use.
+ *
+ * Four call sites reject unsupported auth types and every one of them built
+ * this string by hand, with comments at each site warning not to let the guard
+ * and the message drift apart. Keeping the message next to the guard is what
+ * those comments were asking for.
+ *
+ * Three call sites throw it; `server-setup-runner` returns it as a validation
+ * result, so this returns the string rather than an Error.
+ */
+export function unsupportedSshAuthTypeMessage(authType: unknown): string {
+  return `SSH credential authType is not supported: ${JSON.stringify(authType)}`
 }
 
 /**

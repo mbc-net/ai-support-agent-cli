@@ -139,14 +139,14 @@ describe('ai_support_agent_k8s bundled role', () => {
    * **インデントと構造**の検証（永続化 on/off のどちらかだけ壊れている、という
    * 事故を検出する）。
    */
-  function renderManifest(template: string, persistence: boolean): unknown {
+  function renderManifest(template: string, persistence: boolean, rdp = false): unknown {
     const lines = template.split('\n')
     const kept: string[] = []
     let skipping = false
     for (const line of lines) {
       const trimmed = line.trim()
       if (trimmed.startsWith('{% if ')) {
-        skipping = !persistence
+        skipping = trimmed.includes('ai_support_agent_k8s_rdp') ? !rdp : !persistence
         continue
       }
       if (trimmed === '{% endif %}') {
@@ -171,6 +171,10 @@ describe('ai_support_agent_k8s bundled role', () => {
 
   describe('defaults/main.yml', () => {
     const defaults = () => loadYaml('defaults', 'main.yml') as Record<string, unknown>
+
+    it('RDP is opt-in', () => {
+      expect(defaults().ai_support_agent_k8s_rdp).toBe(false)
+    })
 
     it('秘匿値・必須値をハードコードせず空で定義する', () => {
       expect(defaults().ai_support_agent_k8s_token ?? '').toBe('')
@@ -198,6 +202,33 @@ describe('ai_support_agent_k8s bundled role', () => {
     it('永続化のストレージ既定は Longhorn である', () => {
       expect(defaults().ai_support_agent_k8s_storage_class).toBe('longhorn')
       expect(String(defaults().ai_support_agent_k8s_storage_size)).toMatch(/^\d+[GM]i$/)
+    })
+  })
+
+  describe('RDP sidecar', () => {
+    it.each([false, true])('RDP off preserves the agent-only Pod (persistence=%s)', (persistence) => {
+      const doc = renderManifest(manifestTemplate(), persistence) as any
+      expect(doc.spec.template.spec.containers.map((c: any) => c.name)).toEqual(['agent'])
+      expect(doc.spec.template.spec.containers[0].env.some((e: any) => e.name === 'GUACD_HOST')).toBe(false)
+    })
+
+    it.each([false, true])('RDP on creates a private guacd sidecar (persistence=%s)', (persistence) => {
+      const doc = renderManifest(manifestTemplate(), persistence, true) as any
+      const containers = doc.spec.template.spec.containers
+      const agent = containers.find((c: any) => c.name === 'agent')
+      const guacd = containers.find((c: any) => c.name === 'guacd')
+      expect(guacd).toBeDefined()
+      expect(agent.env).toEqual(expect.arrayContaining([
+        { name: 'GUACD_HOST', value: '127.0.0.1' },
+        { name: 'GUACD_PORT', value: '4822' },
+        { name: ENV_VARS.RDP_TUNNEL_LISTEN, value: 'loopback' },
+      ]))
+      expect(guacd.command).toEqual(['/bin/sh', '-c', expect.stringContaining('guacd -b 127.0.0.1')])
+      expect(guacd.securityContext).toMatchObject({
+        runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, readOnlyRootFilesystem: true,
+        allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] },
+      })
+      expect(guacd.ports[0].hostPort).toBeUndefined()
     })
   })
 

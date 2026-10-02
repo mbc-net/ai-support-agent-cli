@@ -561,6 +561,25 @@ describe('generateUpdateScript', () => {
     expect(result).toContain('shopt -s nullglob')
   })
 
+  // Regression: the install block lives in INSTALL_NEW_VERSION_BASH
+  // (service-template-helpers). Moving it into a template literal once
+  // double-escaped the newline, so the generated script carried
+  // `printf '%s\\\\n'` and printed a literal \\n instead of a line break —
+  // every test here passed because they only use `toContain` on other lines.
+  // Assert the exact bytes, including indentation.
+  it('emits the redaction pipeline with a real newline escape', () => {
+    const result = generateUpdateScript()
+
+    expect(result).toContain(
+      `      printf '%s\\n' "$NPM_OUTPUT" | redact_secrets >&2`,
+    )
+    expect(result).toContain(
+      `        printf '%s\\n' "$SI_OUTPUT" | redact_secrets >&2`,
+    )
+    // The double-escaped form must not appear.
+    expect(result).not.toContain(`printf '%s\\\\n'`)
+  })
+
   it('should install new version from update-version.json', () => {
     const result = generateUpdateScript()
 

@@ -1,0 +1,115 @@
+---
+- name: "sentry : Validate operation and trusted execution context"
+  ansible.builtin.assert:
+    that:
+      - sentry_operation in ['install', 'verify', 'diagnose', 'stop']
+      - sentry_execution_id is defined
+      - sentry_execution_id is match('^[A-Za-z0-9-]{1,80}\Z')
+    fail_msg: Run Sentry through server setup with a valid execution ID; operation must be install, verify, diagnose or stop.
+
+- name: "sentry : Install supervisor prerequisites"
+  ansible.builtin.apt:
+    name: [git, python3, python3-yaml, ca-certificates]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: sentry_operation == 'install'
+
+- name: "sentry : Create protected supervisor directories"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - /var/lib/ai-support-sentry
+    - /usr/local/lib/ai-support-sentry
+    - /usr/local/lib/ai-support-sentry/bin
+  when: sentry_operation == 'install'
+
+- name: "sentry : Install trusted supervisor"
+  ansible.builtin.copy:
+    src: sentry_setup.py
+    dest: /usr/local/lib/ai-support-sentry/sentry_setup.py
+    owner: root
+    group: root
+    mode: '0700'
+  when: sentry_operation == 'install'
+
+- name: "sentry : Install Docker execution attribution wrapper"
+  ansible.builtin.copy:
+    content: |
+      #!/bin/sh
+      exec /usr/bin/python3 /usr/local/lib/ai-support-sentry/sentry_setup.py docker "$@"
+    dest: /usr/local/lib/ai-support-sentry/bin/docker
+    owner: root
+    group: root
+    mode: '0700'
+  when: sentry_operation == 'install'
+
+- name: "sentry : Install standalone Compose execution attribution wrapper"
+  ansible.builtin.copy:
+    content: |
+      #!/bin/sh
+      exec /usr/bin/python3 /usr/local/lib/ai-support-sentry/sentry_setup.py docker compose "$@"
+    dest: /usr/local/lib/ai-support-sentry/bin/docker-compose
+    owner: root
+    group: root
+    mode: '0700'
+  when: sentry_operation == 'install'
+
+- name: "sentry : Write protected installation input"
+  ansible.builtin.copy:
+    content: >-
+      {{ {'profile': sentry_profile, 'domain': sentry_domain, 'proxy_mode': sentry_proxy_mode,
+      'admin_email': sentry_admin_email, 'admin_password': sentry_admin_password,
+      'retention_days': sentry_retention_days, 'acme_email': sentry_acme_email,
+      'smtp_host': sentry_smtp_host, 'smtp_port': sentry_smtp_port,
+      'smtp_user': sentry_smtp_user, 'smtp_password': sentry_smtp_password,
+      'smtp_tls': sentry_smtp_tls, 'mail_from': sentry_mail_from} | to_json }}
+    dest: /var/lib/ai-support-sentry/config.json
+    owner: root
+    group: root
+    mode: '0600'
+  diff: false
+  when: sentry_operation == 'install'
+
+- name: "sentry : Start bounded installation"
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, /usr/local/lib/ai-support-sentry/sentry_setup.py, start, "{{ sentry_execution_id }}"]
+  changed_when: true
+  when: sentry_operation == 'install'
+
+- name: "sentry : Wait for installation completion"
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, /usr/local/lib/ai-support-sentry/sentry_setup.py, status]
+  register: sentry_poll
+  changed_when: false
+  until: not (sentry_poll.stdout | from_json).active
+  retries: 790
+  delay: 5
+  when: sentry_operation == 'install'
+
+- name: "sentry : Require successful installation of this execution"
+  ansible.builtin.assert:
+    that:
+      - (sentry_poll.stdout | from_json).run_id == sentry_execution_id
+      - (sentry_poll.stdout | from_json).phase == 'complete'
+      - (sentry_poll.stdout | from_json).settled | bool
+    fail_msg: Sentry installation did not complete. Run the diagnose recipe; interrupted migrations require manual recovery.
+  when: sentry_operation == 'install'
+
+- name: "sentry : Run verification or recovery without reinstalling"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import os,subprocess,sys;
+        p='/usr/local/lib/ai-support-sentry/sentry_setup.py';
+        sys.exit(subprocess.call(['/usr/bin/python3',p,sys.argv[1]]) if os.path.exists(p)
+        else (0 if sys.argv[1] in ('diagnose','stop') else 1))
+      - "{{ sentry_operation }}"
+  changed_when: sentry_operation in ['stop', 'verify']
+  when: sentry_operation != 'install'

@@ -11,6 +11,7 @@ import { getErrorMessage, parseString, sleep, truncateString } from '../utils'
 
 import { getAutoAddDirs, getReposDir, getWorkspaceDir } from '../project-dir'
 import { ensureAllowedToolsInSettings } from '../utils/claude-settings'
+import type { AgentExecutionContext } from './agent-execution-context'
 import { executeApiChatCommand } from './api-chat-executor'
 import type { StreamJsonUsage } from './claude-code-stream'
 import { ERR_CLAUDE_AUTH_FAILED, ERR_CLAUDE_EXIT_CODE_1, ERR_CLAUDE_USAGE_LIMIT_REACHED, runClaudeCode } from './claude-code-runner'
@@ -79,19 +80,10 @@ function parseAgentChatModeOverride(value: unknown): AgentChatMode | undefined {
 }
 
 /** Options for executeChatCommand */
-export interface ExecuteChatCommandOptions {
+export interface ExecuteChatCommandOptions extends AgentExecutionContext {
   payload: ChatPayload
   commandId: string
   client: ApiClient
-  serverConfig?: AgentServerConfig
-  activeChatMode?: AgentChatMode
-  availableChatModes?: AgentChatMode[]
-  agentId?: string
-  projectDir?: string
-  projectConfig?: ProjectConfigResponse
-  mcpConfigPath?: string
-  tenantCode?: string
-  browserLocalPort?: number
 }
 
 /**

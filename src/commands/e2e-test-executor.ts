@@ -5,32 +5,21 @@ import { runPlaywrightScript, type PlaywrightRunnerResult } from '../browser/pla
 import { runPlaywrightSubprocess } from '../browser/playwright-subprocess-executor'
 import { logger } from '../logger'
 import type {
-  AgentChatMode,
-  AgentServerConfig,
   CommandResult,
   E2eBasicAuth,
   E2eSupportFile,
-  ProjectConfigResponse,
 } from '../types'
 import { errorResult, successResult } from '../types/command'
 import { getErrorMessage, parseString, toErrorMessage } from '../utils'
 
+import { type AgentExecutionContext, forwardAgentExecutionContext } from './agent-execution-context'
 import { executeChatCommand } from './chat-executor'
 
 /** Options for E2E test execution */
-export interface ExecuteE2eTestOptions {
+export interface ExecuteE2eTestOptions extends AgentExecutionContext {
   payload: Record<string, unknown>
   commandId: string
   client: ApiClient
-  serverConfig?: AgentServerConfig
-  activeChatMode?: AgentChatMode
-  availableChatModes?: AgentChatMode[]
-  agentId?: string
-  projectDir?: string
-  projectConfig?: ProjectConfigResponse
-  mcpConfigPath?: string
-  tenantCode?: string
-  browserLocalPort?: number
   /**
    * E2E 専用のブラウザーセッションを子プロセス実行前にメインプロセスへ
    * 事前登録するコールバック。未指定（VS Code トンネル未接続等）の場合は
@@ -418,7 +407,7 @@ async function executeAiMode(
     startTime: number
   },
 ): Promise<CommandResult> {
-  const { client, commandId, agentId, tenantCode } = options
+  const { client, commandId, tenantCode } = options
   const projectCode = options.projectConfig?.project?.projectCode
   const { executionId, testCaseId, scenario, targetUrl, credentialId, playwrightScript, startTime } = params
 
@@ -514,15 +503,7 @@ async function executeAiMode(
       payload: chatPayload,
       commandId,
       client: options.client,
-      serverConfig: options.serverConfig,
-      activeChatMode: options.activeChatMode,
-      availableChatModes: options.availableChatModes,
-      agentId,
-      projectDir: options.projectDir,
-      projectConfig: options.projectConfig,
-      mcpConfigPath: options.mcpConfigPath,
-      tenantCode,
-      browserLocalPort: options.browserLocalPort,
+      ...forwardAgentExecutionContext(options),
     })
   } catch (err: unknown) {
     const errorMessage = toErrorMessage(err)

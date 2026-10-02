@@ -2,10 +2,11 @@ import type { ApiClient } from '../api-client'
 import { ERR_CHAT_REQUIRES_CLIENT, ERR_E2E_TEST_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_REBOOT_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, ERR_UPDATE_REQUIRES_CALLBACK, ERR_SYNC_REPOSITORY_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import { getWorkspaceDir } from '../project-dir'
-import { type AgentChatMode, type AgentCommandType, type AgentServerConfig, type CommandDispatch, type CommandResult, errorResult, type ProjectConfigResponse, type ServerSetupExecPayload, type SshExecPayload, type SyncRepositoryPayload, successResult } from '../types'
+import { type AgentChatMode, type AgentCommandType, type CommandDispatch, type CommandResult, errorResult, type ServerSetupExecPayload, type SshExecPayload, type SyncRepositoryPayload, successResult } from '../types'
 import type { RepoSyncResult } from '../repo-sync'
 import { getErrorMessage } from '../utils'
 
+import { type AgentExecutionContext, forwardAgentExecutionContext } from './agent-execution-context'
 import { executeChatCommand } from './chat-executor'
 import { executeE2eScriptFix } from './e2e-script-fix-executor'
 import { executeE2eTest } from './e2e-test-executor'
@@ -15,19 +16,15 @@ import { processKill, processList } from './process-executor'
 import { executeShellCommand } from './shell-executor'
 
 /** Options for command execution */
-export interface ExecuteCommandOptions {
+export interface ExecuteCommandOptions extends AgentExecutionContext {
   commandId?: string
   client?: ApiClient
-  serverConfig?: AgentServerConfig
-  activeChatMode?: AgentChatMode
+  /**
+   * Whether `activeChatMode` was set explicitly rather than defaulted. Only
+   * `executeCommand` itself reads it when resolving the per-command mode, so
+   * it stays out of {@link AgentExecutionContext} and is never handed down.
+   */
   activeChatModeExplicit?: boolean
-  availableChatModes?: AgentChatMode[]
-  agentId?: string
-  projectDir?: string
-  projectConfig?: ProjectConfigResponse
-  mcpConfigPath?: string
-  tenantCode?: string
-  browserLocalPort?: number
   /**
    * `commandId` is passed through so a Docker-mode config sync/setup that
    * detects a customization change and fires `performDockerRebuild()` can
@@ -117,6 +114,45 @@ function resolveCommandChatMode(
   return selectedMode
 }
 
+/**
+ * デバッグログに出す payload 項目。
+ *
+ * 各ハンドラが `logger.debug(`[file_read] path=...`)` のように自前で出して
+ * いたが、ラベルはハンドラのキーと一致していなければ意味を成さない。
+ * コピー&ペーストでラベルを直し忘れても型もテストも通り、**障害調査のときに
+ * 別のコマンドの名前が付いたログを読むことになる**。
+ *
+ * ラベルは `executeCommand` が受け取った `type` から作るので、ここには
+ * 「出す項目」だけを書く。取り違えようがない。
+ *
+ * `execute_command`（ラベルが `[shell]` で値を切り詰める）と `chat_cancel`
+ * （検証を伴う）は形が違うため、従来どおりハンドラ側で出す。
+ */
+const DEBUG_LOGGED_PAYLOAD_FIELDS: Partial<
+  Record<AgentCommandType, readonly string[]>
+> = {
+  file_read: ['path'],
+  file_write: ['path'],
+  file_list: ['path'],
+  file_rename: ['oldPath', 'newPath'],
+  file_delete: ['path'],
+  file_mkdir: ['path'],
+  process_kill: ['pid'],
+}
+
+/** `[<type>] key="value" ...` の形でデバッグログを出す */
+function logPayloadFields(
+  type: AgentCommandType,
+  p: Record<string, unknown>,
+): void {
+  const fields = DEBUG_LOGGED_PAYLOAD_FIELDS[type]
+  if (!fields) return
+  const rendered = fields
+    .map((field) => `${field}="${String(p[field] ?? '')}"`)
+    .join(' ')
+  logger.debug(`[${type}] ${rendered}`)
+}
+
 const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
   execute_command: async ({ p }) => {
     const cmd = p.command
@@ -124,50 +160,21 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     return executeShellCommand(p)
   },
 
-  file_read: async ({ p, fileBaseDir }) => {
-    const path = p.path
-    logger.debug(`[file_read] path="${String(path ?? '')}"`)
-    return fileRead(p, fileBaseDir)
-  },
+  file_read: async ({ p, fileBaseDir }) => fileRead(p, fileBaseDir),
 
-  file_write: async ({ p, fileBaseDir }) => {
-    const path = p.path
-    logger.debug(`[file_write] path="${String(path ?? '')}"`)
-    return fileWrite(p, fileBaseDir)
-  },
+  file_write: async ({ p, fileBaseDir }) => fileWrite(p, fileBaseDir),
 
-  file_list: async ({ p, fileBaseDir }) => {
-    const path = p.path
-    logger.debug(`[file_list] path="${String(path ?? '')}"`)
-    return fileList(p, fileBaseDir)
-  },
+  file_list: async ({ p, fileBaseDir }) => fileList(p, fileBaseDir),
 
-  file_rename: async ({ p, fileBaseDir }) => {
-    const oldPath = p.oldPath
-    const newPath = p.newPath
-    logger.debug(`[file_rename] oldPath="${String(oldPath ?? '')}" newPath="${String(newPath ?? '')}"`)
-    return fileRename(p, fileBaseDir)
-  },
+  file_rename: async ({ p, fileBaseDir }) => fileRename(p, fileBaseDir),
 
-  file_delete: async ({ p, fileBaseDir }) => {
-    const deletePath = p.path
-    logger.debug(`[file_delete] path="${String(deletePath ?? '')}"`)
-    return fileDelete(p, fileBaseDir)
-  },
+  file_delete: async ({ p, fileBaseDir }) => fileDelete(p, fileBaseDir),
 
-  file_mkdir: async ({ p, fileBaseDir }) => {
-    const mkdirPath = p.path
-    logger.debug(`[file_mkdir] path="${String(mkdirPath ?? '')}"`)
-    return fileMkdir(p, fileBaseDir)
-  },
+  file_mkdir: async ({ p, fileBaseDir }) => fileMkdir(p, fileBaseDir),
 
   process_list: async () => processList(),
 
-  process_kill: async ({ p }) => {
-    const pid = p.pid
-    logger.debug(`[process_kill] pid=${String(pid ?? '')}`)
-    return processKill(p)
-  },
+  process_kill: async ({ p }) => processKill(p),
 
   chat: async ({ p, opts }) => {
     if (!opts.commandId || !opts.client) {
@@ -179,15 +186,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       payload: p,
       commandId: opts.commandId,
       client: opts.client,
-      serverConfig: opts.serverConfig,
-      activeChatMode,
-      availableChatModes: opts.availableChatModes,
-      agentId: opts.agentId,
-      projectDir: opts.projectDir,
-      projectConfig: opts.projectConfig,
-      mcpConfigPath: opts.mcpConfigPath,
-      tenantCode: opts.tenantCode,
-      browserLocalPort: opts.browserLocalPort,
+      ...forwardAgentExecutionContext(opts, { activeChatMode }),
     })
   },
 
@@ -257,17 +256,9 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       payload: p,
       commandId: opts.commandId,
       client: opts.client,
-      serverConfig: opts.serverConfig,
-      activeChatMode,
-      availableChatModes: opts.availableChatModes,
-      agentId: opts.agentId,
-      projectDir: opts.projectDir,
-      projectConfig: opts.projectConfig,
-      mcpConfigPath: opts.mcpConfigPath,
-      tenantCode: opts.tenantCode,
-      browserLocalPort: opts.browserLocalPort,
       getOrCreateBrowserSession: opts.getOrCreateBrowserSession,
       closeBrowserSession: opts.closeBrowserSession,
+      ...forwardAgentExecutionContext(opts, { activeChatMode }),
     })
   },
 
@@ -368,17 +359,9 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     return executeE2eScriptFix({
       payload: p as { testCaseId?: unknown; message?: unknown; currentScript?: unknown },
       client: opts.client,
-      tenantCode: opts.tenantCode,
       projectCode: opts.projectConfig?.project?.projectCode,
-      agentId: opts.agentId,
       commandId: opts.commandId,
-      serverConfig: opts.serverConfig,
-      activeChatMode,
-      availableChatModes: opts.availableChatModes,
-      projectDir: opts.projectDir,
-      projectConfig: opts.projectConfig,
-      mcpConfigPath: opts.mcpConfigPath,
-      browserLocalPort: opts.browserLocalPort,
+      ...forwardAgentExecutionContext(opts, { activeChatMode }),
     })
   },
 }
@@ -415,6 +398,7 @@ export async function executeCommand(
       logger.warn(`Unknown command type: ${type}`)
       return errorResult(`Unknown command type: ${type}`)
     }
+    logPayloadFields(type as AgentCommandType, p)
     return await handler({ p, opts, fileBaseDir })
   } catch (error) {
     const message = getErrorMessage(error)

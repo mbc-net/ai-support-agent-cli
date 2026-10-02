@@ -3,25 +3,34 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
-import { readAgentCredentialEnv } from './agent-credential-env'
+import { getContainerProjectDir, CLI_FLAG_VERBOSE, CLI_FLAG_NO_DOCKER, ENV_VARS, SHUTDOWN_GRACE_PERIOD_SECONDS } from '../../constants'
 import { loadConfig, getProjectList } from '../../config-manager'
-import { IMAGE_NAME } from '../../docker/docker-utils'
 import { t } from '../../i18n'
 import { logger } from '../../logger'
+import { projectKey } from '../../project-key'
+import {
+  CONTAINER_AGENT_CONFIG_DIR,
+  CONTAINER_HOME,
+} from '../../constants'
 import { ensureDir, getErrorMessage } from '../../utils'
 import type { ProjectRegistration } from '../../types'
 import { getCliEntryPoint, getNodePath } from './node-paths'
 import {
   assertProjectCodeIsSafe,
+  buildWrapperScriptBaseOptions,
   detectInstallCollisions,
+  loadConfiguredProjectsOrReport,
+  logPostInstallHints,
+  prepareProjectServiceDirs,
+  reportInstallCollision,
   sanitizeServiceNameSegment,
   shellQuote,
   toContainerApiUrl,
-  validateProjectDirForMount,
+  type WrapperScriptBaseOptions,
 } from './wrapper-helpers'
 import {
   buildDockerRunWithLogRotate,
+  INSTALL_NEW_VERSION_BASH,
   LOAD_NVM_BASH,
   REDACT_SECRETS_BASH,
 } from './service-template-helpers'
@@ -35,10 +44,7 @@ import type {
 import {
   getLinuxLogDir,
   getLinuxSystemdUserDir,
-  getProjectConfigHostDir,
   getProjectLogDir,
-  getProjectServiceDir,
-  getServicesDir,
   getUpdateScriptPath,
   getWrapperScriptPath,
   getAgentOutLog,
@@ -344,35 +350,25 @@ WantedBy=default.target
 }
 
 /** Generate a bash wrapper script that runs docker for one project */
-export function generateWrapperScript(opts: {
-  imageName: string
-  tenantCode: string
-  projectCode: string
-  projectConfigHostDir: string
-  projectDir?: string
-  token: string
-  apiUrl: string
-  anthropicApiKey?: string
-  claudeCodeOauthToken?: string
-  codexApiKey?: string
-  codexAccessToken?: string
-  verbose?: boolean
-  updateScriptPath: string
-  /**
-   * Per-project log directory. When set, the wrapper redirects the docker
-   * subprocess's stdout and stderr into separate `ai-support-agent
-   * log-rotate --no-tee` subprocesses, producing `agent.out.log` /
-   * `agent.err.log` (plus rotated generations `.1` … `.N`) under this
-   * directory. The systemd unit's `StandardOutput` / `StandardError`
-   * point at separate `wrapper.out.log` / `wrapper.err.log` files (NOT
-   * the rotator-owned paths) to avoid a double-write race where
-   * systemd's open fd would otherwise keep appending to a rotated
-   * generation.
-   */
-  logDir?: string
-}): string {
-  const containerHome = '/home/node'
-  const containerConfigDir = `${containerHome}/.ai-support-agent`
+export function generateWrapperScript(
+  opts: WrapperScriptBaseOptions & {
+    updateScriptPath: string
+    /**
+     * Per-project log directory. When set, the wrapper redirects the docker
+     * subprocess's stdout and stderr into separate `ai-support-agent
+     * log-rotate --no-tee` subprocesses, producing `agent.out.log` /
+     * `agent.err.log` (plus rotated generations `.1` … `.N`) under this
+     * directory. The systemd unit's `StandardOutput` / `StandardError`
+     * point at separate `wrapper.out.log` / `wrapper.err.log` files (NOT
+     * the rotator-owned paths) to avoid a double-write race where
+     * systemd's open fd would otherwise keep appending to a rotated
+     * generation.
+     */
+    logDir?: string
+  },
+): string {
+  const containerHome = CONTAINER_HOME
+  const containerConfigDir = CONTAINER_AGENT_CONFIG_DIR
   const homeDir = os.homedir()
   const containerApiUrl = toContainerApiUrl(opts.apiUrl)
 
@@ -408,7 +404,7 @@ export function generateWrapperScript(opts: {
   // containerProjectDir is a Linux-style absolute path inside the docker
   // container, so it's safe to hard-code with forward slashes regardless of
   // the host platform that generated the wrapper.
-  const containerProjectDir = `/workspace/projects/${opts.projectCode}`
+  const containerProjectDir = getContainerProjectDir(opts.projectCode)
   // hostProjectDir is a HOST path; the Linux wrapper is only generated on
   // Linux hosts so `path.dirname` (which equals path.posix.dirname there)
   // is correct. `||` (not `??`) — an empty `opts.projectDir` must fall
@@ -595,25 +591,7 @@ if [ -f "$VERSION_FILE" ]; then
   # Pass the path via env var so an apostrophe (or other JS string metachar) in
   # HOME or AI_SUPPORT_AGENT_CONFIG_DIR cannot break the JS string literal.
   NEW_VERSION=$(VERSION_FILE="$VERSION_FILE" node -e "try{console.log(JSON.parse(require('fs').readFileSync(process.env.VERSION_FILE,'utf-8')).version||'')}catch(e){console.log('')}" 2>/dev/null || echo "")
-  rm -f "$VERSION_FILE"
-  if [ -n "$NEW_VERSION" ]; then
-    NPM_OUTPUT=$(npm install -g "@ai-support-agent/cli@$NEW_VERSION" --quiet 2>&1)
-    NPM_STATUS=$?
-    if [ "$NPM_STATUS" -ne 0 ]; then
-      echo "$LOG_PREFIX ERROR: npm install -g @ai-support-agent/cli@$NEW_VERSION failed (exit $NPM_STATUS)" >&2
-      printf '%s\\n' "$NPM_OUTPUT" | redact_secrets >&2
-      _INSTALL_OK=false
-    else
-      SI_OUTPUT=$(ai-support-agent service install 2>&1)
-      SI_STATUS=$?
-      if [ "$SI_STATUS" -ne 0 ]; then
-        echo "$LOG_PREFIX ERROR: ai-support-agent service install failed (exit $SI_STATUS)" >&2
-        printf '%s\\n' "$SI_OUTPUT" | redact_secrets >&2
-        _INSTALL_OK=false
-      fi
-    fi
-  fi
-fi
+${INSTALL_NEW_VERSION_BASH}
 
 # 3. Reload systemd and restart all per-project services (always, even if install failed)
 systemctl --user daemon-reload || true
@@ -669,35 +647,25 @@ export function writeProjectServiceFiles(
   const systemdDir = getSystemdUserDir()
   ensureDir(systemdDir)
 
-  const servicesDir = getServicesDir()
-  const projectServiceDir = getProjectServiceDir(servicesDir, projectKey)
-  ensureDir(projectServiceDir, 0o700)
-
-  const projectConfigHostDir = getProjectConfigHostDir(tenantCode, projectCode)
-  ensureDir(projectConfigHostDir, 0o700)
-
-  // Validate project.projectDir the same way buildProjectVolumeMounts does on
-  // the interactive path. If the user-supplied dir is empty, doesn't exist,
-  // or points at a blocked path (/etc, ~/.ssh, etc.), drop it and let
-  // generateWrapperScript fall back to the default mount derived from
-  // projectConfigHostDir. Without this check the wrapper would emit
-  // `-v <bad-path>:/workspace/projects/<code>:rw` unconditionally and
-  // either crash on start (empty/missing) or expose host secrets to the
-  // container (blocked prefix).
-  const validatedProjectDir = validateProjectDirForMount(project.projectDir)
+  const { projectServiceDir, projectConfigHostDir, validatedProjectDir } =
+    prepareProjectServiceDirs({
+      projectKey,
+      tenantCode,
+      projectCode,
+      projectDir: project.projectDir,
+    })
 
   const updateScriptPath = getUpdateScriptPath()
   const wrapperScriptPath = getWrapperScriptPath(projectServiceDir)
   const wrapperScript = generateWrapperScript({
-    imageName: IMAGE_NAME,
-    tenantCode,
-    projectCode,
-    projectConfigHostDir,
-    projectDir: validatedProjectDir,
-    token: project.token,
-    apiUrl: project.apiUrl,
-    ...readAgentCredentialEnv(),
-    verbose: options.verbose,
+    ...buildWrapperScriptBaseOptions({
+      tenantCode,
+      projectCode,
+      projectConfigHostDir,
+      projectDir: validatedProjectDir,
+      project,
+      verbose: options.verbose,
+    }),
     updateScriptPath,
     logDir: projectLogDir,
   })
@@ -780,13 +748,8 @@ export function installAndStartProject(
 
 export class LinuxServiceStrategy implements ServiceStrategy {
   install(options: ServiceOptions): void {
-    const config = loadConfig()
-    const projects = config ? getProjectList(config) : []
-
-    if (projects.length === 0) {
-      logger.error(t('service.noProjectsConfigured'))
-      return
-    }
+    const projects = loadConfiguredProjectsOrReport()
+    if (!projects) return
 
     const logDir = getLogDir()
     ensureDir(logDir)
@@ -816,7 +779,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     // tolerates) so a typo'd entry's prior unit is still protected.
     const expectedUnitNames = new Set<string>()
     for (const project of projects) {
-      const fqn = `${project.tenantCode}/${project.projectCode}`
+      const fqn = projectKey(project)
       expectedUnitNames.add(
         safeUnitNames.get(fqn) ?? getProjectUnitName(project.tenantCode, project.projectCode),
       )
@@ -830,7 +793,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     const writtenUnits: Array<{ projectCode: string; unitPath: string; unitFile: string }> = []
     let failedCount = 0
     for (const project of projects) {
-      const fqn = `${project.tenantCode}/${project.projectCode}`
+      const fqn = projectKey(project)
       // Refuse to install when this project shares its sanitized unit name
       // with another configured project — we can't tell which one should
       // win, and last-write would silently lose the first.
@@ -844,18 +807,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
         // dedup is per (unit-name, messageKey) tuple, not just unit-name.
         // Otherwise the row-order of config would silently decide which
         // hint the user sees.
-        const messageKey = collision.isDuplicate
-          ? 'service.projectDuplicateEntry'
-          : 'service.projectUnitNameCollision'
-        const dedupKey = `${collision.name}\x00${messageKey}`
-        if (!reportedCollisionNames.has(dedupKey)) {
-          logger.error(t(messageKey, {
-            projectCode: project.projectCode,
-            unitName: collision.name,
-            others: collision.others.join(', '),
-          }))
-          reportedCollisionNames.add(dedupKey)
-        }
+        reportInstallCollision(project.projectCode, collision, reportedCollisionNames)
         failedCount += 1
         continue
       }
@@ -945,9 +897,7 @@ export class LinuxServiceStrategy implements ServiceStrategy {
     // otherwise the user sees the hint to start services that don't exist,
     // followed by the failure summary at the very end.
     if (writtenUnits.length > 0) {
-      logger.info(t('service.loadHintMulti'))
-      logger.info(t('service.logDir', { path: logDir }))
-      logger.info(t('service.noLogRotation'))
+      logPostInstallHints(logDir)
     }
 
     // Surface a summary line so scripts wrapping `service install` and

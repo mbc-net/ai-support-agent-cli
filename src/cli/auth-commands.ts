@@ -2,7 +2,12 @@ import { Option, type Command } from 'commander'
 
 import { ApiClient } from '../api-client'
 import { startAuthServer } from '../auth-server'
-import { DEFAULT_API_URL, DEFAULT_LOGIN_URL, PROJECT_CODE_DEFAULT } from '../constants'
+import {
+  DEFAULT_API_URL,
+  DEFAULT_LOGIN_URL,
+  ENV_VARS,
+  PROJECT_CODE_DEFAULT,
+} from '../constants'
 import {
   addProject,
 } from '../config-manager'
@@ -113,7 +118,7 @@ export function registerAuthCommands(program: Command): void {
       // token appearing in process argv, which is readable by any local user
       // via `ps`/`/proc/<pid>/cmdline` for as long as the process runs.
       new Option('--token <token>', t('cmd.configure.token'))
-        .env('AI_SUPPORT_AGENT_TOKEN')
+        .env(ENV_VARS.TOKEN)
         .makeOptionMandatory(),
     )
     .option('--api-url <url>', t('cmd.configure.apiUrl'), DEFAULT_API_URL)

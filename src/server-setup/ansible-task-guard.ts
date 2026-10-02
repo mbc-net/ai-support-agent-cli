@@ -271,6 +271,7 @@ const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
  * 存在を作成前に検知して fail する（roles/e2e_runner_k8s 参照）。
  */
 export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
+  'sentry',
   'os_init',
   'ssh_key',
   'docker',
@@ -280,6 +281,7 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'ai_support_agent',
   'ai_support_agent_k8s',
   'web_server',
+  'haproxy',
   'database',
   'dns_tls',
   'gitlab_runner',
@@ -293,6 +295,9 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'rsyslog_server',
   'rsyslog_forward',
   'zabbix_agent',
+  'keycloak',
+  'zabbix_server',
+  'zabbix_web',
 ])
 
 /**
@@ -322,6 +327,21 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
  * 空集合（`docker`）は「レシピから渡せる変数が無い」という意味であり、誤りではない。
  */
 export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<string>>> = {
+  keycloak: new Set([
+    'keycloak_version',
+    'keycloak_postgres_version',
+    'keycloak_hostname',
+    'keycloak_http_port',
+    'keycloak_proxy_headers',
+    'keycloak_proxy_trusted_addresses',
+    'keycloak_admin_username',
+    'keycloak_admin_password',
+    'keycloak_db_password',
+    'keycloak_start_timeout',
+  ]),
+  sentry: new Set(['sentry_operation', 'sentry_profile', 'sentry_domain', 'sentry_proxy_mode',
+    'sentry_admin_email', 'sentry_admin_password', 'sentry_retention_days', 'sentry_acme_email',
+    'sentry_smtp_host', 'sentry_smtp_port', 'sentry_smtp_user', 'sentry_smtp_password', 'sentry_smtp_tls', 'sentry_mail_from']),
   ai_support_agent: new Set([
     'ai_support_agent_api_url',
     'ai_support_agent_package',
@@ -333,6 +353,7 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
   ai_support_agent_k8s: new Set([
     'ai_support_agent_k8s_api_url',
     'ai_support_agent_k8s_data_dir',
+    'ai_support_agent_k8s_guacd_image',
     'ai_support_agent_k8s_image',
     'ai_support_agent_k8s_kubeconfig',
     'ai_support_agent_k8s_kubectl',
@@ -342,6 +363,7 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
     'ai_support_agent_k8s_persistence',
     'ai_support_agent_k8s_project',
     'ai_support_agent_k8s_projects',
+    'ai_support_agent_k8s_rdp',
     'ai_support_agent_k8s_replicas',
     'ai_support_agent_k8s_self_instance_id',
     'ai_support_agent_k8s_self_restart_ack_file',
@@ -556,8 +578,42 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
     'tailscale_ssh',
     'tailscale_up_timeout',
   ]),
+  haproxy: new Set([
+    'haproxy_mode',
+    'haproxy_bind_address',
+    'haproxy_bind_port',
+    'haproxy_backends',
+  ]),
   web_server: new Set([
     'web_server_type',
+  ]),
+  zabbix_server: new Set([
+    'zabbix_server_db_host',
+    'zabbix_server_db_mode',
+    'zabbix_server_db_name',
+    'zabbix_server_db_password',
+    'zabbix_server_db_port',
+    'zabbix_server_db_type',
+    'zabbix_server_db_user',
+    'zabbix_server_install_method',
+    'zabbix_server_listen_port',
+    'zabbix_server_version',
+  ]),
+  zabbix_web: new Set([
+    'zabbix_web_db_host',
+    'zabbix_web_db_name',
+    'zabbix_web_db_password',
+    'zabbix_web_db_port',
+    'zabbix_web_db_type',
+    'zabbix_web_db_user',
+    'zabbix_web_install_method',
+    'zabbix_web_listen_port',
+    'zabbix_web_php_timezone',
+    'zabbix_web_server_name',
+    'zabbix_web_type',
+    'zabbix_web_version',
+    'zabbix_web_zbx_server_host',
+    'zabbix_web_zbx_server_port',
   ]),
   zabbix_agent: new Set([
     'zabbix_agent_active_check_verify_seconds',
@@ -636,7 +692,7 @@ const INCLUDE_ROLE_ALLOWED_PARAM_KEYS: ReadonlySet<string> = new Set(['name'])
  * 検査するので、接頭辞を落としても取りこぼしは増えない。
  */
 function isBundledRoleInternalName(name: string): boolean {
-  return BUNDLED_ROLE_INTERNAL_VARS.has(name)
+  return name === 'sentry_execution_id' || BUNDLED_ROLE_INTERNAL_VARS.has(name)
 }
 
 /**
@@ -664,6 +720,16 @@ function isBundledRoleInternalName(name: string): boolean {
  * 実名リストへ揃えた**（{@link isBundledRoleInternalName} 参照）。
  */
 export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
+  // keycloak
+  'keycloak_config_result',
+  'keycloak_db_start_result',
+  'keycloak_db_auth_result',
+  'keycloak_compose_result',
+  'keycloak_public_result',
+  // haproxy transaction
+  'haproxy_parameters',
+  'haproxy_apply_result',
+  'sentry_poll',
   // ai_support_agent
   'ai_support_agent_configure_items',
   'ai_support_agent_configure_results',
@@ -877,6 +943,30 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'rsyslog_forward_reserved_spool_dirs',
   'rsyslog_server_reserved_log_dirs',
   'zabbix_agent_log',
+  'zabbix_server_db_credentials',
+  'zabbix_server_db_result',
+  'zabbix_server_installed_version',
+  'zabbix_server_mysql_log_bin',
+  'zabbix_server_mysql_tables',
+  'zabbix_server_mysql_trust',
+  'zabbix_server_mysql_user',
+  'zabbix_server_pg_user',
+  'zabbix_server_ready',
+  'zabbix_server_repo_pkg',
+  'zabbix_web_apache_disable',
+  'zabbix_web_apache_modules',
+  'zabbix_web_health',
+  'zabbix_web_installed_version',
+  'zabbix_web_php_version',
+  'zabbix_web_repo_pkg',
+  'zabbix_web_vhost',
+  'zabbix_web_rollback_dir',
+  'zabbix_web_rollback_files',
+  'zabbix_web_activation_started',
+  'zabbix_web_rollback_complete',
+  'zabbix_web_services',
+  'zabbix_web_pool',
+  'zabbix_web_frontend',
 ])
 
 /** set_fact / register で禁止する予約語・マジック変数名（完全一致）。 */
@@ -902,6 +992,7 @@ const RESERVED_VAR_NAMES: ReadonlySet<string> = new Set([
  * stepResults[].message / 実行エラー文字列に露出する。
  */
 const ALWAYS_SECRET_VAR_NAMES: ReadonlySet<string> = new Set([
+  'sentry_admin_password', 'sentry_smtp_password',
   'ansible_ssh_pass',
   'ansible_password',
   'ansible_ssh_private_key_file',
@@ -949,7 +1040,15 @@ function containsLookupPluginReference(value: unknown): boolean {
     return value.some((item) => containsLookupPluginReference(item))
   }
   if (isPlainObject(value)) {
-    return Object.values(value).some((item) => containsLookupPluginReference(item))
+    // **キーも見る。** Ansible はモジュール引数のキーもテンプレート展開し、解決できない
+    // キーは *解決後の文字列* を含むエラー（`Unsupported parameters for (…) module: <値>`）
+    // として実行ログと `stepResults[].message` に出る。値だけを見ていたため
+    //   ansible.builtin.debug: { msg: hi, "{{ lookup('file','/root/.ssh/id_ed25519') }}": 1 }
+    // が素通りし、**agent ホスト上の任意ファイル読み取り**になっていた（実測）。
+    return Object.entries(value).some(
+      ([key, item]) =>
+        containsLookupPluginReference(key) || containsLookupPluginReference(item),
+    )
   }
   return false
 }
@@ -1007,6 +1106,35 @@ const BARE_JINJA_LIST_ELEMENT_KEYS: ReadonlySet<string> = new Set([
   'until',
   'that',
 ])
+
+/**
+ * 素の式になるのは**位置**であって、名前ではない。
+ *
+ * `when` / `until` / `loop` / `with_items` はタスク直下でだけ制御キーとして解釈され、
+ * `var` / `that` は `debug` / `assert` のモジュール引数としてだけ式になる。
+ * 名前だけで判定していたため、ネストしたどこかに同名のキーがあるだけで
+ * その値が式として走査され、`set_fact: { var: "Bob's server" }` のような
+ * ごく普通の記述が「閉じない文字列」として拒否された（実測）。
+ */
+const TASK_LEVEL_BARE_KEYS: ReadonlySet<string> = new Set([
+  'when',
+  'until',
+  'loop',
+  'with_items',
+])
+
+const MODULE_BARE_ARG_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
+  debug: new Set(['var']),
+  assert: new Set(['that']),
+}
+
+/** モジュールキーが素の式を取る引数を持つなら、その引数名の集合を返す。 */
+function bareArgKeysForModule(key: string): ReadonlySet<string> | undefined {
+  const short = key.startsWith('ansible.builtin.')
+    ? key.slice('ansible.builtin.'.length)
+    : key
+  return MODULE_BARE_ARG_KEYS[short]
+}
 
 /**
  * タスクの入れ子が走査可能な深さに収まっているか。
@@ -1178,27 +1306,58 @@ function collectJinjaExpressions(
     if (scanned.unterminated) malformed = true
     expressions.push(...scanned.code)
   }
-  const visit = (value: unknown, key: string | undefined, depth: number): void => {
+  // `bareKeys` は「この位置で素の式になるキー名」。タスク直下では制御キー、
+  // モジュール引数の中では `debug`/`assert` の `var`/`that` だけが該当し、
+  // それ以外の階層では何も該当しない（名前だけで判定すると、ネストした同名キーの
+  // 値まで式として走査してしまう）。
+  const visit = (
+    value: unknown,
+    key: string | undefined,
+    bareKeys: ReadonlySet<string> | undefined,
+    depth: number,
+  ): void => {
     if (depth > MAX_VALUE_WALK_DEPTH) return
     if (typeof value === 'string') {
-      addString(value, key !== undefined && BARE_JINJA_KEYS.has(key))
+      addString(value, key !== undefined && bareKeys !== undefined && bareKeys.has(key))
       return
     }
     if (Array.isArray(value)) {
       // 要素まで式として扱うのは `when` / `until` / `that` だけ。`loop` の要素は
       // ただのデータで、アポストロフィを含む文字列が普通に入る。
-      const elementKey =
-        key !== undefined && BARE_JINJA_LIST_ELEMENT_KEYS.has(key) ? key : undefined
-      for (const item of value) visit(item, elementKey, depth + 1)
+      const keepBare =
+        key !== undefined &&
+        bareKeys !== undefined &&
+        bareKeys.has(key) &&
+        BARE_JINJA_LIST_ELEMENT_KEYS.has(key)
+      for (const item of value) {
+        visit(item, keepBare ? key : undefined, keepBare ? bareKeys : undefined, depth + 1)
+      }
       return
     }
     if (isPlainObject(value)) {
+      // 子が素の式になるかは、**このマッピング自身の位置**で決まる。タスク直下
+      // （key === undefined）なら制御キー、`debug` / `assert` のモジュール引数マッピング
+      // ならその引数名、それ以外の階層では何も該当しない。
+      const childBareKeys =
+        key === undefined ? TASK_LEVEL_BARE_KEYS : bareArgKeysForModule(key)
       for (const [childKey, item] of Object.entries(value)) {
-        visit(item, childKey, depth + 1)
+        // **キーも走査する。** Ansible はモジュール引数のキーもテンプレート展開し、
+        // 解決できないキーは *解決後の文字列* を含むエラーとして実行ログに出る。
+        // 値だけを見ていたため、式をキー側へ移すだけで 3 つの防御が揃って外れた（実測）:
+        //   ansible.builtin.file: { path: /tmp/x, "{{ ANSIBLE_SECRET }}": 1 }   → no_log なし
+        //   "{{ hostvars[inventory_hostname] }}": 1                             → 動的参照の禁止をすり抜け
+        //   "{{ github_runner_regtoken_resp.json.token }}": 1                   → 内部変数の参照禁止をすり抜け
+        // 旧実装（`JSON.stringify(task)` の字句解析）はキーを含んでいたので、
+        // 走査を構造化したときに落ちた回帰である。
+        //
+        // キーは「素の式」にはなり得ない（`{{ }}` を書かなければただの名前）ので、
+        // bare 扱いはしない。
+        addString(childKey, false)
+        visit(item, childKey, childBareKeys, depth + 1)
       }
     }
   }
-  visit(task, undefined, 0)
+  visit(task, undefined, undefined, 0)
   return { expressions, malformed }
 }
 

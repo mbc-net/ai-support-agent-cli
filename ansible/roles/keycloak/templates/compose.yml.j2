@@ -1,0 +1,56 @@
+# Managed by the Keycloak bundled role. Contains secrets; keep mode 0600.
+services:
+  postgres:
+    image: "postgres:{{ keycloak_postgres_version }}"
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: {{ keycloak_db_password | replace('$', '$$') | to_json }}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [database]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  keycloak:
+    image: "quay.io/keycloak/keycloak:{{ keycloak_version }}"
+    command: [start]
+    restart: unless-stopped
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KCRAW_DB_PASSWORD: {{ keycloak_db_password | replace('$', '$$') | to_json }}
+      KC_BOOTSTRAP_ADMIN_USERNAME: {{ keycloak_admin_username | to_json }}
+      KCRAW_BOOTSTRAP_ADMIN_PASSWORD: {{ keycloak_admin_password | replace('$', '$$') | to_json }}
+      KC_HOSTNAME: {{ keycloak_hostname | to_json }}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: {{ keycloak_proxy_headers | to_json }}
+      KC_PROXY_TRUSTED_ADDRESSES: {{ keycloak_proxy_trusted_addresses | join(',') | to_json }}
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    ports:
+      - "127.0.0.1:{{ keycloak_http_port }}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [frontend, database]
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -ec
+        - "{ printf 'HEAD /health/ready HTTP/1.0\\r\\n\\r\\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/localhost/9000"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+volumes:
+  postgres-data:
+networks:
+  frontend:
+  database:
+    internal: true

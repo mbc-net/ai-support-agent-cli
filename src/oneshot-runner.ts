@@ -12,7 +12,7 @@
 
 import { ApiClient } from './api-client'
 import { executeCommand } from './commands'
-import { ONESHOT_ENV_VARS } from './constants'
+import { CONTAINER_WORKSPACE_ROOT, ONESHOT_ENV_VARS } from './constants'
 import { logger } from './logger'
 import { type AgentCommand, type AgentCommandType, type CommandResult, errorResult } from './types'
 import { getErrorMessage } from './utils'
@@ -42,7 +42,7 @@ const ONESHOT_SUPPORTED_COMMAND_TYPES: ReadonlySet<AgentCommandType> = new Set<A
  * sets WORKDIR /workspace; fall back to that when the shell executor would
  * otherwise default to an undefined cwd.
  */
-const ONESHOT_DEFAULT_CWD = '/workspace'
+const ONESHOT_DEFAULT_CWD = CONTAINER_WORKSPACE_ROOT
 
 const REQUIRED_ENV_KEYS = [
   ONESHOT_ENV_VARS.COMMAND_ID,

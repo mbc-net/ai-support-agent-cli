@@ -7,10 +7,11 @@
 
 import type { ApiClient } from '../api-client'
 import { logger } from '../logger'
-import type { AgentChatMode, AgentServerConfig, CommandResult, ProjectConfigResponse } from '../types'
+import type { CommandResult } from '../types'
 import { errorResult, successResult } from '../types/command'
 import { parseString, toErrorMessage } from '../utils'
 
+import { type AgentExecutionContext, forwardAgentExecutionContext } from './agent-execution-context'
 import { executeChatCommand } from './chat-executor'
 
 export interface E2eScriptFixPayload {
@@ -19,20 +20,11 @@ export interface E2eScriptFixPayload {
   currentScript?: unknown
 }
 
-export interface ExecuteE2eScriptFixOptions {
+export interface ExecuteE2eScriptFixOptions extends AgentExecutionContext {
   payload: E2eScriptFixPayload
   client: ApiClient
-  tenantCode?: string
   projectCode?: string
-  agentId?: string
   commandId?: string
-  serverConfig?: AgentServerConfig
-  activeChatMode?: AgentChatMode
-  availableChatModes?: AgentChatMode[]
-  projectDir?: string
-  projectConfig?: ProjectConfigResponse
-  mcpConfigPath?: string
-  browserLocalPort?: number
 }
 
 /**
@@ -88,7 +80,7 @@ export function extractScriptFromResponse(response: string): string | null {
 export async function executeE2eScriptFix(
   options: ExecuteE2eScriptFixOptions,
 ): Promise<CommandResult> {
-  const { payload, client, tenantCode, agentId } = options
+  const { payload, client, tenantCode } = options
   const projectCode =
     options.projectCode ?? options.projectConfig?.project?.projectCode
 
@@ -118,15 +110,7 @@ export async function executeE2eScriptFix(
       payload: { message: prompt },
       commandId,
       client,
-      serverConfig: options.serverConfig,
-      activeChatMode: options.activeChatMode,
-      availableChatModes: options.availableChatModes,
-      agentId,
-      projectDir: options.projectDir,
-      projectConfig: options.projectConfig,
-      mcpConfigPath: options.mcpConfigPath,
-      tenantCode,
-      browserLocalPort: options.browserLocalPort,
+      ...forwardAgentExecutionContext(options),
     })
   } catch (err: unknown) {
     const errorMessage = toErrorMessage(err)

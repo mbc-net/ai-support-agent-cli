@@ -7,18 +7,29 @@ import { AlertProcessor } from './alert-processor'
 import { AppSyncSubscriber } from './appsync-subscriber'
 import { type ConfigSyncDeps, type ConfigSyncState, performConfigSync, performSetup, performSyncRepository, refreshChatMode } from './agent-config-sync'
 import type { RepoSyncResult } from './repo-sync'
-import { type TransportDeps, type TransportState, startSubscriptionMode, startHeartbeat, startTerminalWebSocket, startVsCodeTunnel, stopTransport } from './agent-transport'
+import {
+  startHeartbeat,
+  startRdpWebSocket,
+  startSubscriptionMode,
+  startTerminalWebSocket,
+  startVsCodeTunnel,
+  shutdownRdpRelay,
+  stopTransport,
+  type TransportDeps,
+  type TransportState,
+} from './agent-transport'
 import {
   AGENT_VERSION,
   ALERT_STALE_PROCESSING_MINUTES,
   ALERT_STALE_RECOVERY_INTERVAL_MS,
   DELAYED_RESTART_MS,
+  DOCKER_BUILD_ERROR_MAX_BYTES,
+  DOCKER_MARKER_BUILD_ERROR,
   DOCKER_MARKER_BUILT_HASH,
   DOCKER_MARKER_CUSTOMIZATION_HASH,
   DOCKER_MARKER_REBUILD_NEEDED,
   DOCKER_MARKER_REGISTERED_AGENT_ID,
   DOCKER_RESTART_EXIT_CODE,
-  DOCKER_UPDATE_EXIT_CODE,
   INITIAL_CONFIG_SYNC_MAX_RETRIES,
   INITIAL_CONFIG_SYNC_RETRY_DELAY_MS,
   REGISTER_AUTH_ERROR_DELAY_MS,
@@ -34,6 +45,8 @@ import { getConfigDir } from './config-manager'
 import { detectEcsLauncherCapability } from './ecs/launcher-capability'
 import { t } from './i18n'
 import { logger } from './logger'
+import { SENTRY_CAPABILITY } from './server-setup/sentry-policy'
+import { exitIfDockerUpdateRestart } from './docker-update-exit'
 import { initProjectDir } from './project-dir'
 import { getLocalIpAddress } from './system-info'
 import {
@@ -46,7 +59,6 @@ import type { AdmissionMode, AdmissionResult, AgentChatMode, ProjectRegistration
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
 import { describeSelfUpdateBlockReason, resolveSelfUpdateCapability } from './self-update-capability'
-import { getUpdateVersionFilePath } from './utils/path-utils'
 import { atomicWriteFile, getErrorMessage, isAuthenticationError, isInDocker, resolveUrlForDocker, sleep } from './utils'
 import { readMarkerFile } from './utils/marker-file'
 
@@ -82,6 +94,7 @@ export class ProjectAgent {
     subscriber: null,
     terminalWs: null,
     vsCodeWs: null,
+    rdpWs: null,
     configSyncDebounceTimer: null,
     authRejectedTransports: new Set(),
     inFlightCommands: new Set(),
@@ -436,6 +449,9 @@ export class ProjectAgent {
       logger.debug(`${this.prefix} Skipping releaseSelf(): this replica never held a slot`)
     }
 
+    // RDP tunnels are torn down asynchronously (subprocesses, SSH
+    // connections); wait for that before the process is allowed to exit.
+    await shutdownRdpRelay(this.transportState)
     stopTransport(this.transportState)
   }
 
@@ -652,7 +668,24 @@ export class ProjectAgent {
         const npmPackages = dockerCustomization?.npmPackages ?? []
         const commands = dockerCustomization?.commands ?? []
         const timezone = dockerCustomization?.timezone
-        const dockerfileContent = generateProjectDockerfile(AGENT_VERSION, aptPackages, npmPackages, commands, timezone)
+
+        let dockerfileContent: string
+        try {
+          dockerfileContent = generateProjectDockerfile(AGENT_VERSION, aptPackages, npmPackages, commands, timezone)
+        } catch (err: unknown) {
+          // The customization itself is rejected (invalid timezone, a command
+          // containing shell metacharacters, an invalid package name). There is
+          // nothing to rebuild from, so the rebuild marker is deliberately not
+          // written — but the host supervisor restarts this container anyway on
+          // DOCKER_RESTART_EXIT_CODE and rebuilds the *previous* Dockerfile, so
+          // without the record below the container would come back up looking
+          // healthy while still running the old configuration, and the
+          // administrator would never learn that the saved customization was
+          // dropped.
+          this.recordDockerBuildError(configDir, `Dockerfile generation failed: ${getErrorMessage(err)}`)
+          process.exit(DOCKER_RESTART_EXIT_CODE)
+          return
+        }
         const dockerfilePath = path.join(configDir, 'Dockerfile')
         atomicWriteFile(dockerfilePath, dockerfileContent)
         logger.info(`${this.prefix} Project Dockerfile written: ${dockerfilePath}`)
@@ -669,6 +702,27 @@ export class ProjectAgent {
       }
       process.exit(DOCKER_RESTART_EXIT_CODE)
     }, DELAYED_RESTART_MS)
+  }
+
+  /**
+   * Record a Docker failure where the administrator can see it.
+   *
+   * This joins the existing reporting route used for `docker build` failures:
+   * the host-side DockerSupervisor writes the same file, and
+   * `performRegistration()` reads it on the next container start, reports its
+   * contents to the API as `dockerBuildError` via heartbeat, and deletes it.
+   * Truncated with the same cap the supervisor applies.
+   */
+  private recordDockerBuildError(configDir: string, message: string): void {
+    logger.error(`${this.prefix} ${message}`)
+    const truncated = message.length > DOCKER_BUILD_ERROR_MAX_BYTES
+      ? message.substring(0, DOCKER_BUILD_ERROR_MAX_BYTES) + '...(truncated)'
+      : message
+    try {
+      atomicWriteFile(path.join(configDir, DOCKER_MARKER_BUILD_ERROR), truncated)
+    } catch (err: unknown) {
+      logger.warn(`${this.prefix} Failed to write ${DOCKER_MARKER_BUILD_ERROR} file: ${getErrorMessage(err)}`)
+    }
   }
 
   /**
@@ -708,15 +762,7 @@ export class ProjectAgent {
       // Inside a Docker container (spawned via `docker run`), process.send is
       // not available. Exit with DOCKER_UPDATE_EXIT_CODE so the host-side
       // DockerSupervisor detects the update and calls installUpdateAndRestart().
-      if (isInDocker()) {
-        try {
-          atomicWriteFile(getUpdateVersionFilePath(), JSON.stringify({ version: targetVersion }))
-        } catch (err: unknown) {
-          logger.warn(`[update] Failed to write update-version.json: ${getErrorMessage(err)}`)
-        }
-        process.exit(DOCKER_UPDATE_EXIT_CODE)
-        return
-      }
+      exitIfDockerUpdateRestart(targetVersion)
       // When running as a child process (forked by ChildProcessManager),
       // notify the parent runner and exit cleanly.
       if (process.send) {
@@ -1030,6 +1076,7 @@ export class ProjectAgent {
         // tasks) directly over SSH; the api refuses to dispatch a body-carrying
         // recipe to any agent that does not advertise this capability.
         SERVER_SETUP_CUSTOM_TASKS_CAPABILITY,
+        SENTRY_CAPABILITY,
         ...(ecsLauncher ? ['ecs_launch'] : []),
       ],
       availableChatModes: this.configSyncState.availableChatModes,
@@ -1069,7 +1116,7 @@ export class ProjectAgent {
         logger.warn(`${this.prefix} Failed to write ${DOCKER_MARKER_REGISTERED_AGENT_ID}: ${getErrorMessage(err)}`)
       }
 
-      const buildErrorPath = path.join(getConfigDir(), 'docker-build-error')
+      const buildErrorPath = path.join(getConfigDir(), DOCKER_MARKER_BUILD_ERROR)
       let dockerBuildError: string | undefined
       try {
         dockerBuildError = fs.readFileSync(buildErrorPath, 'utf-8').trim() || undefined
@@ -1201,8 +1248,9 @@ export class ProjectAgent {
       const resolvedWsUrl = result.wsUrl ? resolveUrlForDocker(result.wsUrl) : result.wsUrl
       startTerminalWebSocket(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
       startVsCodeTunnel(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
+      startRdpWebSocket(this.transportDeps, this.transportState, resolvedWsUrl, this.configSyncState)
     } else {
-      logger.debug(`${this.prefix} Terminal/VS Code WebSocket skipped (wsEnabled=false)`)
+      logger.debug(`${this.prefix} Terminal/VS Code/RDP WebSocket skipped (wsEnabled=false)`)
     }
   }
 

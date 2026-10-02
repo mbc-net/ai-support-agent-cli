@@ -256,7 +256,7 @@ describe('ProjectAgent', () => {
 
       const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
       expect(payload.capabilities).toEqual([
-        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'ecs_launch',
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1', 'ecs_launch',
       ])
 
       agent.stop()
@@ -286,7 +286,7 @@ describe('ProjectAgent', () => {
 
       const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
       expect(payload.capabilities).toEqual([
-        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks',
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1',
       ])
       expect(payload.capabilities).not.toContain('ecs_launch')
 
@@ -494,26 +494,40 @@ describe('ProjectAgent', () => {
         agent.stop()
       })
 
-      it('keeps waiting when a standby admission request fails transiently', async () => {
-        mockClient.register
-          .mockResolvedValueOnce(rejected)
-          .mockRejectedValueOnce(new Error('network down'))
-          .mockResolvedValue(accepted)
+      // The standby wait is jittered to [0.5x, 1x] of
+      // REPLICA_STANDBY_RETRY_DELAY_MS (calculateBackoff), so pin Math.random
+      // and drive the clock by the resulting delay. Advancing a hardcoded
+      // 31_000 assumed exactly one retry per step, which only held at the upper
+      // end of the jitter: two short waits fit in one step, the second retry was
+      // accepted, and connect() ran before the assertion.
+      it.each([
+        ['minimum', 0, REPLICA_STANDBY_RETRY_DELAY_MS * 0.5],
+        ['maximum', 1, REPLICA_STANDBY_RETRY_DELAY_MS],
+      ])(
+        'keeps waiting when a standby admission request fails transiently (jitter %s)',
+        async (_label, randomValue, retryDelayMs) => {
+          jest.spyOn(Math, 'random').mockReturnValue(randomValue)
+          mockClient.register
+            .mockResolvedValueOnce(rejected)
+            .mockRejectedValueOnce(new Error('network down'))
+            .mockResolvedValue(accepted)
 
-        const agent = new ProjectAgent(project, 'agent-1', options)
-        agent.start()
-        await jest.advanceTimersByTimeAsync(100)
+          const agent = new ProjectAgent(project, 'agent-1', options)
+          agent.start()
+          await jest.advanceTimersByTimeAsync(100)
 
-        // First retry fails; standby must not abort.
-        await jest.advanceTimersByTimeAsync(31_000)
-        expect(mockSubscriber.connect).not.toHaveBeenCalled()
+          // Advance by exactly one wait so exactly one retry runs per step.
+          // First retry fails; standby must not abort.
+          await jest.advanceTimersByTimeAsync(retryDelayMs)
+          expect(mockSubscriber.connect).not.toHaveBeenCalled()
 
-        // Second retry succeeds.
-        await jest.advanceTimersByTimeAsync(31_000)
-        expect(mockSubscriber.connect).toHaveBeenCalled()
+          // Second retry succeeds.
+          await jest.advanceTimersByTimeAsync(retryDelayMs)
+          expect(mockSubscriber.connect).toHaveBeenCalled()
 
-        agent.stop()
-      })
+          agent.stop()
+        },
+      )
 
       it('stop() ends the standby wait', async () => {
         mockClient.register.mockResolvedValue(rejected)
@@ -2511,6 +2525,39 @@ describe('ProjectAgent', () => {
 
       expect(mockClient.releaseSelf).toHaveBeenCalledTimes(1)
       expect(mockSubscriber.disconnect).toHaveBeenCalled()
+    })
+
+    it('★ waits for the RDP relay to close its sessions and tunnels before stopping the transport', async () => {
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+      await jest.advanceTimersByTimeAsync(100)
+
+      const order: string[] = []
+      let finishRdp: () => void = () => undefined
+      const rdpWs = {
+        shutdown: jest.fn(
+          () =>
+            new Promise<void>((resolve) => {
+              finishRdp = () => {
+                order.push('rdp-closed')
+                resolve()
+              }
+            }),
+        ),
+        disconnect: jest.fn(() => order.push('rdp-disconnect')),
+      }
+      ;(agent as unknown as { transportState: { rdpWs: unknown } }).transportState.rdpWs = rdpWs
+      mockSubscriber.disconnect.mockImplementation(() => {
+        order.push('transport-stopped')
+      })
+
+      const shutdownPromise = agent.shutdown()
+      await jest.advanceTimersByTimeAsync(0)
+      expect(rdpWs.shutdown).toHaveBeenCalled()
+      expect(order).not.toContain('transport-stopped')
+      finishRdp()
+      await shutdownPromise
+      expect(order.indexOf('rdp-closed')).toBeLessThan(order.indexOf('transport-stopped'))
     })
 
     it('gives up after SHUTDOWN_DRAIN_TIMEOUT_MS and logs the remaining command id(s)', async () => {

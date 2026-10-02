@@ -22,6 +22,7 @@ import {
   CLI_FLAG_NO_DOCKER,
   CLI_FLAG_NO_DOCKERFILE_SYNC,
   CLI_FLAG_NO_IMAGE_PULL,
+  ENV_VARS,
   ONESHOT_ENV_VARS,
 } from './constants'
 import type { ReleaseChannel } from './types'
@@ -62,6 +63,8 @@ program
   .option(CLI_FLAG_NO_DOCKERFILE_SYNC, t('cmd.start.noDockerfileSync'))
   .option(CLI_FLAG_NO_IMAGE_PULL, t('cmd.start.noImagePull'))
   .option('--project <tenantCode/projectCode>', t('cmd.start.project'))
+  .option('--rdp', t('cmd.start.rdp'))
+  .option('--guacd-image <image>', t('cmd.start.guacdImage'))
   .action(async (opts: {
     token?: string
     apiUrl?: string
@@ -75,6 +78,8 @@ program
     dockerfileSync: boolean
     imagePull: boolean
     project?: string
+    rdp?: boolean
+    guacdImage?: string
   }) => {
     if (opts.docker) {
       const { runInDocker } = await import('./docker/docker-runner')
@@ -90,10 +95,30 @@ program
         dockerfileSync: opts.dockerfileSync,
         imagePull: opts.imagePull,
         project: opts.project,
+        rdp: opts.rdp,
+        guacdImage: opts.guacdImage,
       })
       return
     }
     const updateChannel = validateUpdateChannel(opts.updateChannel)
+
+    // Web RDP は**起動時には何も用意しない**。ホスト直起動では guacd を初回の
+    // 接続要求時に遅延起動する（`createLazyGuacdEndpointResolver`）ため、画面から
+    // capability を ON にしただけでプロセス再起動なしに使えるようになる。
+    // 終了フック（止め忘れると無認証の guacd が残る）も、実際に起動した時点で
+    // そこから登録される。
+    //
+    // ここで残すのは「運用者が --rdp を指定した」という事実だけである。環境変数に
+    // 置くのは、実際に RDP を中継するのがプロジェクトごとに fork された子プロセスで
+    // あり、子は環境を継承する一方で argv は受け取らないため
+    // （ChildProcessManager.spawnChild）。
+    if (opts.rdp) {
+      process.env[ENV_VARS.RDP] = '1'
+    }
+    if (opts.guacdImage) {
+      process.env[ENV_VARS.GUACD_IMAGE] = opts.guacdImage
+    }
+
     await startAgent({
       token: opts.token,
       apiUrl: opts.apiUrl,

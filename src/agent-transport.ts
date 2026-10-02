@@ -9,7 +9,10 @@ import {
 import { t } from './i18n'
 import type { TransportKind } from './ipc-types'
 import { logger } from './logger'
-import { getWorkspaceDir, getReposDir, getAwsDir } from './project-dir'
+import { getWorkspaceDir, getReposDir } from './project-dir'
+import { buildCapabilityReport } from './capability/capability-report'
+import { createGuacdEndpointResolverForCapability } from './rdp/guacd-runtime'
+import { RdpWebSocket } from './rdp/rdp-websocket'
 import { getSystemInfo, getLocalIpAddress } from './system-info'
 import { TerminalWebSocket, isNodePtyAvailable } from './terminal'
 import { getErrorMessage, isAuthenticationError, stringifyForMessage } from './utils'
@@ -19,13 +22,14 @@ import type { ConfigSyncState, ConfigSyncDeps } from './agent-config-sync'
 import { refreshChatMode, scheduleConfigSync } from './agent-config-sync'
 import { savePendingResult, removePendingResult } from './pending-result-store'
 import type { CommandResult } from './types/command'
-import { cleanupStaleAwsCredentials } from './aws-profile'
+import { sweepStaleAwsCredentials } from './aws-credential-sweep'
 
 export interface TransportState {
   heartbeatTimer: ReturnType<typeof setInterval> | null
   subscriber: AppSyncSubscriber | null
   terminalWs: TerminalWebSocket | null
   vsCodeWs: VsCodeTunnelWebSocket | null
+  rdpWs: RdpWebSocket | null
   configSyncDebounceTimer: ReturnType<typeof setTimeout> | null
   /**
    * サーバーによる恒久的な認証拒否で停止したトランスポート（'terminal'/'vscode'）。
@@ -195,16 +199,7 @@ export function startHeartbeat(
       // （syncProjectConfig が hash 一致時は同期をスキップするため）。設定が長期間
       // 変化しないまま稼働し続けると掃除の機会が失われるため、heartbeat 側にも
       // 安全網としてフックする（sweepStaleEntries は冪等なので二重実行しても無害）。
-      if (deps.projectDir) {
-        try {
-          const removedCount = cleanupStaleAwsCredentials(getAwsDir(deps.projectDir))
-          if (removedCount > 0) {
-            logger.info(`${deps.prefix} Cleaned up ${removedCount} stale AWS credentials file(s)`)
-          }
-        } catch (error) {
-          logger.warn(`${deps.prefix} Failed to clean up stale AWS credentials files: ${getErrorMessage(error)}`)
-        }
-      }
+      sweepStaleAwsCredentials(deps.projectDir, deps.prefix)
 
       const response = await deps.client.heartbeat(
         deps.agentId,
@@ -220,7 +215,15 @@ export function startHeartbeat(
         // api 側で記録が消える（古い警告が残り続けない）。
         // 常に配列で送る。undefined だと api へ項目自体が送られず、解消しても
         // 保存済みの警告が消えない（api は空配列を「解消」と解釈する）。
-        { sharedFileMountErrors: configSyncState.sharedFileMountErrors ?? [] },
+        {
+          sharedFileMountErrors: configSyncState.sharedFileMountErrors ?? [],
+          // 実効 capability。**宣言が無くても必ず配列を送る**（空配列で可）。
+          // フィールドごと省略すると、api はそれを「報告できない旧エージェント」
+          // (`unknown`) と解釈し、fail-closed で接続導線を消してしまう。
+          capabilities: buildCapabilityReport({
+            declaration: configSyncState.serverConfig?.capabilities,
+          }),
+        },
       )
 
       // This replica was evicted to make room for a newer one (plan replica
@@ -286,10 +289,48 @@ export function startTerminalWebSocket(
     terminalDir,
     configSyncState ? () => configSyncState.projectConfig?.envVars : undefined,
     () => onTransportAuthRejected(deps, state, 'terminal'),
+    // Credentials for sessions that target a registered host. Fetched by the
+    // agent (never relayed by the API), just in time, per session.
+    (hostId) => deps.client.getSshCredentials(hostId),
   )
 
   state.terminalWs.connect().catch((error) => {
     logger.warn(`${deps.prefix} Terminal WebSocket connection failed: ${getErrorMessage(error)}`)
+  })
+}
+
+/**
+ * Start the Web RDP relay WebSocket connection.
+ *
+ * Gated on the same `wsEnabled` signal as the other relays. The relay is stored
+ * on the transport state so the shutdown path can close it — a relay shutdown
+ * cannot see would leave RDP logons alive on the remote hosts.
+ *
+ * @param wsUrl - WebSocket URL returned by the server (used instead of apiUrl)
+ */
+export function startRdpWebSocket(
+  deps: TransportDeps,
+  state: TransportState,
+  wsUrl?: string,
+  configSyncState?: ConfigSyncState,
+): void {
+  const baseUrl = wsUrl ?? deps.apiUrl
+  // The declaration is read through a function, not captured: the relay is
+  // created once at registration while the declaration changes on every config
+  // sync. Capturing the value here would pin whatever was delivered first, and
+  // turning the capability on from the admin UI would again require a restart —
+  // the very thing the lazy start exists to remove.
+  state.rdpWs = new RdpWebSocket(
+    baseUrl,
+    deps.token,
+    deps.agentId,
+    createGuacdEndpointResolverForCapability({
+      getDeclaration: () => configSyncState?.serverConfig?.capabilities,
+    }),
+  )
+
+  state.rdpWs.connect().catch((error) => {
+    logger.warn(`${deps.prefix} RDP WebSocket connection failed: ${getErrorMessage(error)}`)
   })
 }
 
@@ -661,6 +702,17 @@ async function processCommand(
 }
 
 /**
+ * Close the Web RDP relay and wait for its sessions' tunnels to be torn down.
+ *
+ * Awaited by the shutdown path before {@link stopTransport}: the tunnel
+ * teardown (killing tailscaled / the SSM plugin, ending SSH connections) is
+ * asynchronous, and exiting first would leave it half done.
+ */
+export async function shutdownRdpRelay(state: TransportState): Promise<void> {
+  if (state.rdpWs) await state.rdpWs.shutdown()
+}
+
+/**
  * Stop all transport resources.
  */
 /**
@@ -677,5 +729,6 @@ export function stopTransport(state: TransportState): void {
   if (state.configSyncDebounceTimer) clearTimeout(state.configSyncDebounceTimer)
   if (state.subscriber) state.subscriber.disconnect()
   if (state.terminalWs) state.terminalWs.disconnect()
+  if (state.rdpWs) state.rdpWs.disconnect()
   if (state.vsCodeWs) state.vsCodeWs.disconnect()
 }

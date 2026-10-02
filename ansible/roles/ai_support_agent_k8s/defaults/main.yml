@@ -15,6 +15,11 @@ ai_support_agent_k8s_project: ''
 # 稼働中レプリカが停止した時点で自動的に引き継ぐ。
 ai_support_agent_k8s_replicas: 1
 
+# Web RDP はオプトイン。同一 Pod の loopback 上に guacd を配置する。
+# 既定イメージは amd64。ARM64 ノードへの配置には対応イメージが必要。
+ai_support_agent_k8s_rdp: false
+ai_support_agent_k8s_guacd_image: guacamole/guacd:1.5.5
+
 # ワークスペースの永続化。既定はオプトイン（オフ）。
 # 有効にすると volumeClaimTemplates によりレプリカごとに専用 PVC が発行される
 # （1つの PVC を共有する構成にはしない。RWO は Multi-Attach で衝突し、RWX でも
@@ -112,7 +117,7 @@ ai_support_agent_k8s_manifest_dir: /etc/ai-support-agent/k8s
 #             MBC_01 のようにアンダースコアを含み K8s 名に使えないため、コードから
 #             機械的に導出せず明示させる
 #   token     必須。そのプロジェクト専用のトークン（ANSIBLE# 変数から供給）
-#   replicas / persistence / storage_class / storage_size
+#   replicas / persistence / storage_class / storage_size / rdp / guacd_image
 #             任意。省略時はこのファイルのトップレベル既定値を継承する
 #
 # 単数指定（ai_support_agent_k8s_project / _token）とは排他である。両方を指定した

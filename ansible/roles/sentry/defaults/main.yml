@@ -1,0 +1,15 @@
+---
+sentry_operation: install
+sentry_profile: errors-only
+sentry_domain: ''
+sentry_proxy_mode: external
+sentry_admin_email: ''
+sentry_admin_password: ''
+sentry_retention_days: 30
+sentry_acme_email: ''
+sentry_smtp_host: ''
+sentry_smtp_port: 587
+sentry_smtp_user: ''
+sentry_smtp_password: ''
+sentry_smtp_tls: true
+sentry_mail_from: ''
