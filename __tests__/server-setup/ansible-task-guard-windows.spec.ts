@@ -673,3 +673,216 @@ describe('parseWindowsGuardData（JSON の形の検査。壊れていたら読�
     expect(() => parseWindowsGuardData(input)).toThrow(/windows-guard\.json/)
   })
 })
+
+/**
+ * Linux 側の共通の検査（agent#856: 文字列形式の制限・`_` で始まる引数キーの拒否・
+ * 引数キーの Jinja 拒否・Jinja 判定の `{#` / raw / `#jinja2:`）が Windows 経路にも効くこと。
+ * 文字列形式を許可するモジュールは OS ごとに選ぶ（Linux: command / shell、
+ * Windows: win_command / win_shell）。`_raw_params` は文字列形式を許可するモジュールだけで認める
+ * （win_command / win_shell は windows-guard.json の引数 allowlist にも `_raw_params` を持つ）。
+ */
+describe('Windows: 共通の検査（文字列形式・内部引数キー・キーの Jinja・Jinja 判定）', () => {
+  const INTERNAL_REASON = expect.stringContaining('internal module arguments')
+  const KEY_JINJA_REASON = 'module argument names must not contain Jinja templates'
+  const FREE_FORM_MODULES = ['ansible.windows.win_command', 'ansible.windows.win_shell']
+  const NON_FREE_FORM_RULE_MODULES = Object.keys(WINDOWS_MODULE_RULES).filter(
+    (m) => !FREE_FORM_MODULES.includes(m),
+  )
+
+  describe('文字列形式を許可するモジュールは OS ごとに選ばれる', () => {
+    it('文字列形式を許可する Windows のモジュールは win_command / win_shell だけ（前提の固定）', () => {
+      expect(
+        Object.entries(WINDOWS_MODULE_RULES)
+          .filter(([, rule]) => rule.freeForm)
+          .map(([m]) => m)
+          .sort(),
+      ).toEqual(FREE_FORM_MODULES)
+    })
+
+    describe.each(MODES)('mode=%s', (mode) => {
+      it.each(['ansible.builtin.command', 'ansible.builtin.shell', 'command', 'shell'])(
+        'Windows で %s（Linux の文字列形式モジュール）は文字列形式でもマッピングでも通らない',
+        (moduleName) => {
+          for (const args of ['whoami', { cmd: 'whoami' }]) {
+            const result = win([{ [moduleName]: args }], mode)
+            expect(result.ok).toBe(false)
+            expect(result.violations).toContainEqual(
+              expect.objectContaining({ key: moduleName, reason: 'module not in allowlist' }),
+            )
+          }
+        },
+      )
+
+      it.each(FREE_FORM_MODULES)(
+        'Linux で %s（Windows の文字列形式モジュール）は文字列形式でも通らない',
+        (moduleName) => {
+          const result = run([{ [moduleName]: 'whoami' }], 'linux', mode)
+          expect(result.ok).toBe(false)
+          expect(result.violations).toContainEqual(
+            expect.objectContaining({ key: moduleName, reason: 'module not in allowlist' }),
+          )
+        },
+      )
+
+      it.each([
+        ['ansible.builtin.debug', 'var=SOME_VAR'],
+        ['ansible.builtin.assert', 'that="1 == 1"'],
+        ['ansible.builtin.fail', 'msg=stop'],
+      ])(
+        'Windows でもコントローラだけで動く %s の文字列形式（k=v）は拒否する',
+        (moduleName, args) => {
+          const result = win([{ [moduleName]: args }], mode)
+          expect(result.ok).toBe(false)
+          expect(result.violations).toEqual([
+            expect.objectContaining({
+              key: moduleName,
+              reason: expect.stringContaining('only allowed for win_command / win_shell'),
+            }),
+          ])
+        },
+      )
+
+      it('Windows でコントローラだけで動くモジュールの引数がリストなら拒否する', () => {
+        const result = win([{ 'ansible.builtin.debug': ['x'] }], mode)
+        expect(result.ok).toBe(false)
+        expect(result.violations).toContainEqual(
+          expect.objectContaining({ key: 'ansible.builtin.debug' }),
+        )
+      })
+
+      it('文字列形式を拒否した理由は 1 件だけ（重ねて報告しない）', () => {
+        const result = win([{ 'ansible.windows.win_file': 'path=C:\\fake state=absent' }], mode)
+        expect(result.violations).toEqual([
+          expect.objectContaining({
+            key: 'ansible.windows.win_file',
+            reason: expect.stringContaining('only allowed for win_command / win_shell'),
+          }),
+        ])
+      })
+    })
+  })
+
+  describe('`_` で始まる引数キー', () => {
+    it.each(FREE_FORM_MODULES)('%s のマッピングに書いた _raw_params は通る（Linux の command / shell と同じ扱い）', (moduleName) => {
+      const result = win([{ [moduleName]: { _raw_params: 'whoami', chdir: 'C:\\fake' } }])
+      expect(result.violations).toEqual([])
+      expect(result.ok).toBe(true)
+    })
+
+    it.each(
+      FREE_FORM_MODULES.flatMap((m) =>
+        ['_variable_params', '_uses_shell', '_ansible_check_mode', '_anything'].map((k) => [m, k]),
+      ),
+    )('%s の %s は内部引数として拒否する（1 件だけ報告）', (moduleName, argKey) => {
+      const result = win([{ [moduleName]: { cmd: 'whoami', [argKey]: "{{ {'chdir': 'C:\\\\fake'} }}" } }])
+      expect(result.ok).toBe(false)
+      expect(result.violations).toEqual([
+        expect.objectContaining({ key: argKey, reason: INTERNAL_REASON }),
+      ])
+    })
+
+    it.each(
+      NON_FREE_FORM_RULE_MODULES.flatMap((m) => ['_raw_params', '_variable_params'].map((k) => [m, k])),
+    )('%s の %s は内部引数として拒否する（引数 allowlist と重ねて報告しない）', (moduleName, argKey) => {
+      const result = win([{ [moduleName]: { [argKey]: "{{ {'src': '/fake/controller/path'} }}" } }])
+      expect(result.ok).toBe(false)
+      expect(result.violations).toEqual([
+        expect.objectContaining({ key: argKey, reason: INTERNAL_REASON }),
+      ])
+    })
+
+    it.each([
+      ['ansible.builtin.debug', '_raw_params'],
+      ['ansible.builtin.debug', '_variable_params'],
+      ['ansible.builtin.assert', '_raw_params'],
+      ['ansible.builtin.fail', '_variable_params'],
+    ])('Windows でもコントローラだけで動く %s の %s は拒否する', (moduleName, argKey) => {
+      const result = win([{ [moduleName]: { [argKey]: "{{ {'msg': 'x'} }}" } }])
+      expect(result.ok).toBe(false)
+      expect(result.violations).toContainEqual(
+        expect.objectContaining({ key: argKey, reason: INTERNAL_REASON }),
+      )
+    })
+
+    it('Windows でも set_fact の _variable_params は拒否する', () => {
+      const result = win([{ 'ansible.builtin.set_fact': { _variable_params: "{{ {'a': 1} }}" } }])
+      expect(result.ok).toBe(false)
+      expect(result.violations).toContainEqual(
+        expect.objectContaining({ key: '_variable_params' }),
+      )
+    })
+  })
+
+  describe('引数キーの Jinja', () => {
+    it.each([
+      ['ansible.windows.win_file', "{{ 'path' }}"],
+      ['ansible.windows.win_file', 'pa{# c #}th'],
+      ['ansible.windows.win_file', '{% if true %}path{% endif %}'],
+      ['ansible.windows.win_command', "{{ 'cmd' }}"],
+      ['ansible.windows.win_get_url', "{{ 'url' }}"],
+      ['ansible.builtin.debug', "{{ 'msg' }}"],
+    ])('%s のキー %s は拒否する（1 件だけ報告）', (moduleName, argKey) => {
+      const result = win([{ [moduleName]: { [argKey]: 'C:\\fake' } }])
+      expect(result.ok).toBe(false)
+      expect(result.violations).toEqual([
+        expect.objectContaining({ key: argKey, reason: KEY_JINJA_REASON }),
+      ])
+    })
+  })
+
+  describe('Jinja 判定（{# / raw / #jinja2:）と値の制約の整合', () => {
+    it('接頭辞のあとに置いた Jinja コメントは接頭辞の制約を変えないので通る', () => {
+      const result = win([
+        { 'ansible.windows.win_get_url': { url: 'https://example.invalid/{# c #}a.msi', dest: 'C:\\fake' } },
+      ])
+      expect(result.violations).toEqual([])
+    })
+
+    it('接頭辞に一致しても閉じない {# は検証できないので拒否する', () => {
+      const result = win([
+        { 'ansible.windows.win_get_url': { url: 'https://example.invalid/a{#', dest: 'C:\\fake' } },
+      ])
+      expect(result.ok).toBe(false)
+      expect(result.violations).toContainEqual(
+        expect.objectContaining({ key: 'root', reason: expect.stringContaining('unterminated') }),
+      )
+    })
+
+    it('接頭辞に一致しても raw ブロックは拒否する', () => {
+      const result = win([
+        {
+          'ansible.windows.win_package': {
+            path: 'C:\\fake\\{% raw %}{{ x }}{% endraw %}.msi',
+            state: 'present',
+          },
+        },
+      ])
+      expect(result.ok).toBe(false)
+      expect(result.violations).toContainEqual(
+        expect.objectContaining({ key: 'root', reason: expect.stringContaining('raw') }),
+      )
+    })
+
+    it('win_shell の文字列形式でも #jinja2: ヘッダは拒否する', () => {
+      const body = [
+        '- ansible.windows.win_shell: |',
+        "    #jinja2:variable_start_string:'[[', variable_end_string:']]'",
+        '    echo [[ SOME_VAR ]]',
+        '',
+      ].join('\n')
+      const result = validateAnsibleTasks(body, { mode: 'ecs', targetOs: 'windows' })
+      expect(result.ok).toBe(false)
+      expect(result.violations).toContainEqual(
+        expect.objectContaining({ key: 'root', reason: expect.stringContaining('#jinja2:') }),
+      )
+    })
+
+    it('win_command の文字列形式でも閉じない {# は拒否する', () => {
+      const result = win([{ 'ansible.windows.win_command': 'cmd.exe /c echo {# x' }])
+      expect(result.ok).toBe(false)
+      expect(result.violations).toContainEqual(
+        expect.objectContaining({ key: 'root', reason: expect.stringContaining('unterminated') }),
+      )
+    })
+  })
+})

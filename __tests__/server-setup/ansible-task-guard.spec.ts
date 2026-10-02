@@ -226,6 +226,18 @@ ${vars}
         ).toBe(true)
       })
 
+      it('shared_file_src に Jinja コメント {# #} を含むと拒否する', () => {
+        // コメントは実行時に除去されるので、`.{# x #}./` は `../` になり、静的な `..` 検査をすり抜ける。
+        const body = sharedFileBody(
+          '    shared_file_src: ".{# x #}./.{# x #}./etc/passwd"\n    shared_file_dest: /tmp/x',
+        )
+        const result = validateAnsibleTasks(body, ecs)
+        expect(result.ok).toBe(false)
+        expect(
+          hasReason(result.violations, (v) => v.key === 'shared_file_src'),
+        ).toBe(true)
+      })
+
       it('shared_file_src が絶対パスなら拒否する', () => {
         const body = sharedFileBody(
           '    shared_file_src: /etc/passwd\n    shared_file_dest: /tmp/x',
@@ -710,6 +722,108 @@ tasks:
     })
   })
 
+  /**
+   * 走査とテンプレートエンジンの解釈をずらせる構文は、正当な用途がほぼ無いので fail-closed で拒否する。
+   *
+   * - `{% raw %}`: 中身は式として評価されないが、ガードの走査は raw を知らないので、
+   *   raw 内の `{{ '` を文字列リテラルの開始と誤認し、後続の本物の式がリテラルに隠れる
+   *   （ansible-core 2.17 で `{{ 'p@ssa'b` が出力されることを確認）。
+   * - `#jinja2:`: Ansible の Templar は文字列が `#jinja2:` で始まると区切り記号を上書きする
+   *   （`_create_overlay` の `data.startswith(JINJA2_OVERRIDE)`）。`[[ SECRET ]]` のような
+   *   ガードが知らない区切りで式を書ける。先頭に無くても、set_fact で組み立てた値が
+   *   参照時に再テンプレートされるとヘッダとして解釈される（ansible-core 2.17 で確認）ので、
+   *   文字列中のどこにあっても拒否する。
+   */
+  describe('走査をずらす Jinja 構文（raw ブロック・#jinja2: ヘッダ）の拒否', () => {
+    const modes: Array<['ecs' | 'resident', { mode: 'ecs' | 'resident'; targetOs: 'linux' }]> = [
+      ['ecs', ecs],
+      ['resident', resident],
+    ]
+    const secretOpts = (opts: { mode: 'ecs' | 'resident'; targetOs: 'linux' }) => ({
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+
+    it.each(modes)('[%s] raw ブロックで走査をずらして秘匿値を隠すタスクは拒否される', (_label, opts) => {
+      const body = `
+- name: hide a secret behind a raw block
+  ansible.builtin.debug:
+    msg: >-
+      {% raw %}{{ '{% endraw %}{% set x = DB_PASSWORD ~ 'a\\'b' %}{{ x }}
+`
+      expect(validateAnsibleTasks(body, secretOpts(opts)).ok).toBe(false)
+    })
+
+    it.each([
+      ['{% raw %}', '"{% raw %}x{% endraw %}"'],
+      ['{%- raw -%}', '"{%- raw -%}x{%- endraw -%}"'],
+      ['{%+ raw %}', '"{%+ raw %}x{% endraw %}"'],
+      ['{%raw%}（空白なし）', '"{%raw%}x{%endraw%}"'],
+      ['{%<TAB>raw %}', '"{%\\traw %}x{% endraw %}"'],
+      ['キーに raw ブロック', null],
+    ])('raw ブロックの開始 %s を含むタスクは拒否される', (_label, value) => {
+      const body =
+        value === null
+          ? `
+- name: raw in a key
+  ansible.builtin.file:
+    path: /tmp/x
+    "{% raw %}mode{% endraw %}": "0644"
+`
+          : `
+- name: raw block
+  ansible.builtin.debug:
+    msg: ${value}
+`
+      const result = validateAnsibleTasks(body, resident)
+      expect(result.ok).toBe(false)
+      expect(hasReason(result.violations, (v) => v.reason.includes('raw'))).toBe(true)
+    })
+
+    it.each(modes)('[%s] 先頭に #jinja2: ヘッダを持つ文字列は拒否される', (_label, opts) => {
+      const body = `
+- name: override delimiters
+  ansible.builtin.debug:
+    msg: |-
+      #jinja2:variable_start_string:'[[',variable_end_string:']]'
+      [[ DB_PASSWORD ]]
+`
+      const result = validateAnsibleTasks(body, secretOpts(opts))
+      expect(result.ok).toBe(false)
+      expect(hasReason(result.violations, (v) => v.reason.includes('#jinja2:'))).toBe(true)
+    })
+
+    it('set_fact の式の中で組み立てた #jinja2: ヘッダも拒否される（参照時に再テンプレートされる）', () => {
+      const body = `
+- name: build an override header at runtime
+  ansible.builtin.set_fact:
+    built: |-
+      {{ "#jinja2:variable_start_string:'[[',variable_end_string:']]'
+      [[ DB_PASSWORD ]]" }}
+`
+      const result = validateAnsibleTasks(body, secretOpts(resident))
+      expect(result.ok).toBe(false)
+      expect(hasReason(result.violations, (v) => v.reason.includes('#jinja2:'))).toBe(true)
+    })
+
+    it.each([
+      ['raw という語', '"raw data"'],
+      ['jinja2 という語', '"use jinja2"'],
+      ['コロン無しの #jinja2', '"see #jinja2 docs"'],
+      ['raw で始まる変数名の式', '"{{ raw_value }}"'],
+      ['raw で始まる変数を使う文', '"{% if rawmode %}x{% endif %}"'],
+    ])('%s を普通の文字列として含むだけなら許可される', (_label, value) => {
+      const body = `
+- name: plain words
+  ansible.builtin.debug:
+    msg: ${value}
+`
+      const result = validateAnsibleTasks(body, resident)
+      expect(result.violations).toEqual([])
+      expect(result.ok).toBe(true)
+    })
+  })
+
   describe('secret変数参照タスクへの no_log 付与', () => {
     it('secretVarNames を {{ }} 参照するタスクには no_log: true が付与されて返る', () => {
       const body = `
@@ -743,6 +857,42 @@ tasks:
       expect(result.ok).toBe(true)
       const task = result.normalizedTasks?.[0] as Record<string, unknown>
       expect(task.no_log).toBe(true)
+    })
+
+    it('Jinja コメント {# #} 内の引用符で走査をずらしても no_log が付与される', () => {
+      // Jinja はコメントを `#}` まで読み飛ばすので、コメント内の `{{ '` は式にならない。
+      // コメントを知らない走査だと、コメント内の `'` から文字列リテラルが始まったと誤認し、
+      // 本物の式の `DB_PASSWORD` がリテラルの中に隠れる（ansible-core 2.17 で値が出力されることを確認）。
+      // `{{ }}` の中では Ansible がバックスラッシュを二重化するので、`{% set %}` を使う形が実際に通る。
+      const body = `
+- name: Configure db password
+  ansible.builtin.debug:
+    msg: >-
+      {# {{ ' #}{% set x = DB_PASSWORD ~ 'a\\'b' %}{{ x }}
+`
+      const result = validateAnsibleTasks(body, {
+        mode: 'resident',
+        targetOs: 'linux',
+        secretVarNames: new Set(['DB_PASSWORD']),
+      })
+      expect(result.ok).toBe(true)
+      const task = result.normalizedTasks?.[0] as Record<string, unknown>
+      expect(task.no_log).toBe(true)
+    })
+
+    it('閉じていない Jinja コメント {# は検証できないので拒否される', () => {
+      // Jinja ではテンプレート全体が構文エラーになる（Missing end of comment tag）。
+      const body = `
+- name: Unterminated comment
+  ansible.builtin.debug:
+    msg: "{# {{ DB_PASSWORD }}"
+`
+      const result = validateAnsibleTasks(body, {
+        mode: 'resident',
+        targetOs: 'linux',
+        secretVarNames: new Set(['DB_PASSWORD']),
+      })
+      expect(result.ok).toBe(false)
     })
 
     it('secret変数を参照しないタスクには no_log が付与されない', () => {
@@ -939,6 +1089,25 @@ describe('ロール内部変数の参照と、秘匿値の派生', () => {
 - name: Leak the registration token
   ansible.builtin.debug:
     msg: "{{ github_runner_regtoken_resp.json.token }}"
+`
+      const result = validateAnsibleTasks(body, opts)
+      expect(result.ok).toBe(false)
+      expect(
+        hasReason(result.violations, (v) =>
+          v.reason.includes("bundled role's internal variable"),
+        ),
+      ).toBe(true)
+    },
+  )
+
+  it.each(bothModes)(
+    '[%s] Jinja コメント {# #} 内の引用符で走査をずらしても内部変数の参照を塞ぐ',
+    (_label, opts) => {
+      const body = `
+- name: Leak the registration token via a comment
+  ansible.builtin.debug:
+    msg: >-
+      {# {{ ' #}{% set x = github_runner_regtoken_resp.json.token ~ 'a\\'b' %}{{ x }}
 `
       const result = validateAnsibleTasks(body, opts)
       expect(result.ok).toBe(false)
@@ -1543,10 +1712,30 @@ describe('変数名を実行時に組み立てる参照', () => {
     expect(validateAnsibleTasks(body, opts).ok).toBe(false)
   })
 
-  // Ansible はモジュール引数の**キー**もテンプレート展開する。解決できないキーは
+  // モジュール引数の**キー**がテンプレート展開されるかはモジュール・版によって異なり得る
+  // （ansible-core 2.17.14 では copy / unarchive / uri のキーは展開されず、debug のキーの lookup は
+  // 実行された。いずれも実測）ので、展開される場合も想定する。展開されて解決できないキーは
   // 解決後の文字列を含むエラーとして実行ログへ出るので、キーは値と同じ危険度を持つ。
   // 走査を構造化したときに値だけを見るようになり、3 つの防御が揃って外れた（実測）。
+  // モジュール引数の直下のキーに Jinja を書くこと自体は、多層防御として拒否するようになった
+  // （ansible-task-guard-controller-src.spec.ts の (e) 参照）。キーの走査による no_log 付与は
+  // 入れ子のマッピング（ここでは debug の msg）のキーで引き続き検証する。
   it.each(modes)('[%s] キーに置いた秘匿値にも no_log が付く', (_label, opts) => {
+    const body = `
+- name: n
+  ansible.builtin.debug:
+    msg:
+      "{{ DB_PASSWORD }}": 1
+`
+    const result = validateAnsibleTasks(body, {
+      ...opts,
+      secretVarNames: new Set(['DB_PASSWORD']),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+  })
+
+  it.each(modes)('[%s] モジュール引数の直下のキーに置いた秘匿値は、キーの Jinja として拒否する', (_label, opts) => {
     const body = `
 - name: n
   ansible.builtin.file:
@@ -1557,8 +1746,10 @@ describe('変数名を実行時に組み立てる参照', () => {
       ...opts,
       secretVarNames: new Set(['DB_PASSWORD']),
     })
-    expect(result.ok).toBe(true)
-    expect(result.normalizedTasks?.[0].no_log).toBe(true)
+    expect(result.ok).toBe(false)
+    expect(
+      result.violations.some((v) => v.taskIndex === 0 && v.key === '{{ DB_PASSWORD }}'),
+    ).toBe(true)
   })
 
   it.each(modes)('[%s] キーに置いた hostvars も拒否する', (_label, opts) => {

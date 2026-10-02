@@ -231,6 +231,129 @@ const RESIDENT_EXTRA_SHORT_NAMES: ReadonlySet<string> = new Set([
 /** `copy` モジュールの正規化後キー名（`src` パラメータ拒否チェックに使用）。 */
 const COPY_MODULE_KEY = 'ansible.builtin.copy'
 
+/**
+ * モジュール引数を文字列（free-form）形式で書くことを許可するモジュール（正規化後キー名）。
+ *
+ * Ansible（`ModuleArgsParser`）はモジュール引数が文字列のとき `parse_kv` で
+ * `k=v k2=v2` をマッピングへ展開して実行する（文字列全体が `"{{ x }}"` なら
+ * `_variable_params` として実行時に変数の中身をマッピングとして使う）。つまり
+ * `copy: src=/path dest=/x` は `copy: { src: /path, dest: /x }` と同じ動作をするのに、
+ * このガードのマッピング前提の検査（copy の `src` 拒否、unarchive/uri の `remote_src`
+ * 要求、`debug.var` / `assert.that` の素の式に対する no_log 付与など）は一度も走らない。
+ * 文字列形式が本来の書き方である command / shell（`check_raw` でコマンド文字列として
+ * 扱われる）だけを許可し、それ以外は形式ごと拒否する。
+ */
+const FREE_FORM_ARGS_MODULE_KEYS: ReadonlySet<string> = new Set([
+  'ansible.builtin.command',
+  'ansible.builtin.shell',
+])
+
+/**
+ * モジュール引数のマッピングに書いた Ansible の内部引数（`_` で始まるキー）を拒否すべきか。
+ *
+ * ansible-core 2.17 の `parsing/mod_args.py`（`ModuleArgsParser.parse`）は、モジュール引数が
+ * マッピングでも `_raw_params` があり、モジュールが raw-param モジュール（command / shell /
+ * set_fact / include_* など）でなく、値がテンプレートなら、それを `_variable_params` に移す。
+ * `playbook/task.py` の `_post_validate_args` は `_variable_params` を実行時に辞書へ展開して
+ * 引数へマージする。つまり
+ *
+ *   ansible.builtin.copy: { dest: /tmp/x, _raw_params: "{{ {'src': '/path/on/controller'} }}" }
+ *
+ * は実行時にコントローラ側の `src` を持つ copy になる（2.17.14 で実測。`_variable_params` を
+ * 直接書いても同じ）。copy の `src` 拒否・unarchive/uri の `remote_src` 要求・`debug.var` の
+ * 走査など、マッピングのキーを見る静的な検査がすべて素通りする。`_ansible_*` 等の他の内部引数も
+ * レシピから書く正当な用途は無いので、`_` で始まるキーはまとめて拒否する。
+ *
+ * 例外は文字列形式を許可するモジュール（`freeFormModuleKeys`。Linux は command / shell、
+ * Windows は win_command / win_shell。{@link freeFormArgsModuleKeysFor} 参照）の `_raw_params`
+ * だけ（文字列形式の本来の展開先で、コマンド文字列として扱われる）。Windows の 2 つは
+ * `windows-guard.json` の引数 allowlist にも `_raw_params` を持つので、両方の検査で同じ扱いになる。
+ * set_fact は raw-param モジュールなので `_raw_params` は移されないが、
+ * `_variable_params` は同じくマージされ、予約名・ロール名前空間の検査を経ずに任意の変数を
+ * 書ける（2.17.14 で実測）。set_fact では変数名として `_` 始まりを使い得るので、
+ * {@link isAnsibleInternalArgName} の内部引数名だけを拒否する。
+ */
+function isForbiddenInternalModuleArgKey(
+  normalizedModule: string,
+  argKey: string,
+  freeFormModuleKeys: ReadonlySet<string>,
+): boolean {
+  if (!argKey.startsWith('_')) return false
+  return !(argKey === '_raw_params' && freeFormModuleKeys.has(normalizedModule))
+}
+
+/** Ansible がモジュール引数として内部で扱う名前（set_fact の変数名として拒否する対象）。 */
+function isAnsibleInternalArgName(name: string): boolean {
+  return (
+    name === '_raw_params' ||
+    name === '_variable_params' ||
+    name === '_uses_shell' ||
+    name.startsWith('_ansible_')
+  )
+}
+
+/**
+ * `src` を Ansible コントローラ側のローカルファイルとして読むモジュール（正規化後キー名）。
+ *
+ * どちらも既定では `src` をコントローラ（常駐 agent ホスト）上のパスとして解決し、
+ * 対象ホストへ転送する（unarchive は展開、uri は `src` をリクエストボディとして送信）。
+ * `remote_src: true` のときだけ対象ホスト側のファイルを読む。コントローラ上のファイルを
+ * レシピ経由で持ち出せないよう、`src` を使うなら `remote_src: true` を必須にする。
+ * uri は `src` が無くても form-multipart の `body` の `filename` をコントローラから読むので、
+ * その経路も `remote_src: true` を必須にする（{@link uriBodyFormatMayBeMultipart} 参照）。
+ */
+const CONTROLLER_SRC_MODULE_KEYS: ReadonlySet<string> = new Set([
+  'ansible.builtin.unarchive',
+  'ansible.builtin.uri',
+])
+
+/** `ansible.builtin.uri` の正規化後キー名（form-multipart 経路の検査に使用）。 */
+const URI_MODULE_KEY = 'ansible.builtin.uri'
+
+/**
+ * `remote_src` 違反の理由に付ける共通の指示。`yes` や `"true"` は Ansible では真になり得るが、
+ * 判定を Ansible の真偽値変換規則に依存させないため、ガードは YAML の真偽値 `true` だけを認める。
+ */
+const REMOTE_SRC_TRUE_HINT =
+  'set remote_src to the boolean true (yes or "true" are not accepted)'
+
+/**
+ * 文字列が Jinja のテンプレート区切り（`{{` / `{%` / `{#`）を含むか。
+ *
+ * Ansible の `is_possibly_template` が見るのは `variable_start_string`（`{{`）・
+ * `block_start_string`（`{%`）・`comment_start_string`（`{#`）の 3 種類で、どれか 1 つでも
+ * 含めば値はテンプレート展開される。コメント区切りも素通りの文字列ではない: コメントは
+ * 実行時に除去されるので、`"form-{# c #}multipart"` は `form-multipart` に、
+ * `"s{# x #}rc"` は `src` になる（ansible-core 2.17 の `Templar.template` で実測）。
+ * `{#` を見落とすと、静的な値の比較（form-multipart 判定・キー名・`..` 検査）をすり抜ける。
+ */
+function containsJinjaDelimiter(value: string): boolean {
+  return value.includes('{{') || value.includes('{%') || value.includes('{#')
+}
+
+/**
+ * uri の `body_format` が、コントローラ側ファイルを読む form-multipart 経路に
+ * なり得るかを判定する。
+ *
+ * ansible-core 2.17 の uri action plugin は `remote_src` が真でないとき、`src` が無くても
+ * `body_format == 'form-multipart'` なら `body` の各フィールドの `filename` を
+ * コントローラ上のパスとして読み、対象ホストへ転送する。モジュール引数の値は実行前に
+ * テンプレート展開されるので、Jinja を含む値は実行時に form-multipart になり得る。
+ * 安全と静的に言えるのは「Jinja を含まない、form-multipart 以外の文字列」だけで、
+ * それ以外（form-multipart そのもの・Jinja を含む・null 以外の非文字列）はすべて危険側に倒す。
+ * `body_format` が無い場合の既定値は `raw` なので安全。値が null（YAML の `body_format:` /
+ * `body_format: null`）も安全: action plugin は `self._task.args.get('body_format', 'raw')` で
+ * 取って `== 'form-multipart'` と比べるだけなので、None は multipart 経路に入らない。
+ */
+function uriBodyFormatMayBeMultipart(moduleArgs: Record<string, unknown>): boolean {
+  if (!Object.prototype.hasOwnProperty.call(moduleArgs, 'body_format')) return false
+  const bodyFormat = moduleArgs.body_format
+  if (bodyFormat === null) return false
+  if (typeof bodyFormat !== 'string') return true
+  if (containsJinjaDelimiter(bodyFormat)) return true
+  return bodyFormat === 'form-multipart'
+}
+
 /** `include_role` の正規化後キー名の集合。 */
 const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
   'include_role',
@@ -1201,6 +1324,22 @@ export const WINDOWS_MODULE_RULES: Readonly<Record<string, WindowsModuleRule>> =
 export const ROLE_TARGET_OS: Readonly<Record<string, AnsibleTargetOs>> =
   WINDOWS_GUARD.roleTargetOs
 
+/**
+ * Windows でモジュール引数を文字列（free-form）形式で書くことを許可するモジュール
+ * （`windows-guard.json` の `freeForm: true`。win_command / win_shell）。
+ * Linux の {@link FREE_FORM_ARGS_MODULE_KEYS} に対応する。
+ */
+const WINDOWS_FREE_FORM_ARGS_MODULE_KEYS: ReadonlySet<string> = new Set(
+  Object.entries(WINDOWS_MODULE_RULES)
+    .filter(([, rule]) => rule.freeForm)
+    .map(([moduleName]) => moduleName),
+)
+
+/** targetOs に応じた「文字列形式を許可するモジュール」を返す。 */
+function freeFormArgsModuleKeysFor(targetOs: AnsibleTargetOs): ReadonlySet<string> {
+  return targetOs === 'windows' ? WINDOWS_FREE_FORM_ARGS_MODULE_KEYS : FREE_FORM_ARGS_MODULE_KEYS
+}
+
 /** mode / targetOs に応じた実効モジュール allowlist を返す。 */
 function moduleAllowlistFor(
   mode: AnsibleTaskRouteMode,
@@ -1215,46 +1354,38 @@ function moduleAllowlistFor(
 /**
  * Windows のモジュールの引数を `windows-guard.json` のルールで検査する。
  *
- * JSON で表せない検査はここにある:
- * - 引数の形: `null`（引数なし）は可。文字列（フリーフォーム）は `freeForm: true` の
- *   モジュール（win_command / win_shell）だけ可。ほかのモジュールの文字列形式は Ansible が
- *   `k=v` を引数へ展開する（`win_copy: src=/etc/shadow dest=C:\x`）ので、引数の allowlist を
- *   迂回できる。拒否する。マッピング・null・文字列以外も拒否する。
+ * 引数の形（マッピング・null・文字列形式）は呼び出し側（`validateAnsibleTasks`）が
+ * Linux と共通の検査で先に判定している:
+ * - `null`（引数なし）は可。文字列（フリーフォーム）は `freeForm: true` のモジュール
+ *   （win_command / win_shell。{@link WINDOWS_FREE_FORM_ARGS_MODULE_KEYS}）だけ可。ほかの
+ *   モジュールの文字列形式は Ansible が `k=v` を引数へ展開する（`win_copy: src=/etc/shadow dest=C:\x`）
+ *   ので、引数の allowlist を迂回できる。拒否する。マッピング・null・文字列以外も拒否する。
  * - フリーフォームの文字列から Ansible が取り出す `k=v` は `creates` / `removes` / `chdir` /
  *   `executable` / `warn` / `stdin` / `stdin_add_newline` / `strip_empty_ends` に限られ
  *   （ansible-core の `parse_kv(check_raw=True)`）、いずれも対象ホスト側の引数である。
- * - `argConstraints` の値は文字列であることを要求する（リスト等で正規表現の検査を迂回させない）。
- *   Jinja だけの値（`url: "{{ installer_url }}"`）は接頭辞の検査を通らないので拒否される。
+ * - `_` で始まるキー・Jinja を含むキーも呼び出し側が拒否済みで、`reportedArgKeys` に入る。
+ *   ここでは重ねて報告しない（win_command / win_shell の `_raw_params` は両方の検査で許可）。
+ *
+ * ここで行うのは、マッピングの各キーの allowlist 照合と `argConstraints` の値の検査。
+ * `argConstraints` の値は文字列であることを要求する（リスト等で正規表現の検査を迂回させない）。
+ * Jinja だけの値（`url: "{{ installer_url }}"`）は接頭辞の検査を通らないので拒否される。
  *
  * コントローラだけで動く `ansible.builtin.*`（ルールを持たないもの）はここでは検査しない
  * （Linux と同じ既存の検査だけを受ける）。
  */
 function validateWindowsModuleArgs(
   taskIndex: number,
-  key: string,
   moduleName: string,
   moduleArgs: unknown,
+  reportedArgKeys: ReadonlySet<string>,
   violations: AnsibleTaskViolation[],
 ): void {
   if (!Object.prototype.hasOwnProperty.call(WINDOWS_MODULE_RULES, moduleName)) return
   const rule = WINDOWS_MODULE_RULES[moduleName]
-  if (moduleArgs === null || moduleArgs === undefined) return
-  if (typeof moduleArgs === 'string') {
-    if (!rule.freeForm) {
-      violations.push({
-        taskIndex,
-        key,
-        reason:
-          'module args must be a mapping (the free-form string form is only allowed for win_command / win_shell)',
-      })
-    }
-    return
-  }
-  if (!isPlainObject(moduleArgs)) {
-    violations.push({ taskIndex, key, reason: 'module args must be a mapping' })
-    return
-  }
+  // null / 許可された文字列形式は検査する引数を持たない（形の拒否は呼び出し側で済んでいる）。
+  if (!isPlainObject(moduleArgs)) return
   for (const [argName, value] of Object.entries(moduleArgs)) {
+    if (reportedArgKeys.has(argName)) continue
     if (!rule.args.has(argName)) {
       const deniedReason = rule.deniedArgs.get(argName)
       violations.push({
@@ -1292,9 +1423,12 @@ function containsLookupPluginReference(value: unknown): boolean {
     return value.some((item) => containsLookupPluginReference(item))
   }
   if (isPlainObject(value)) {
-    // **キーも見る。** Ansible はモジュール引数のキーもテンプレート展開し、解決できない
-    // キーは *解決後の文字列* を含むエラー（`Unsupported parameters for (…) module: <値>`）
-    // として実行ログと `stepResults[].message` に出る。値だけを見ていたため
+    // **キーも見る。** モジュール引数のキーがテンプレート展開されるかはモジュール・版によって
+    // 異なり得る（ansible-core 2.17.14 では copy / unarchive / uri のキーは展開されなかったが、
+    // debug のキーに置いた lookup は実行された。いずれも実測）ので、展開される場合も想定して防ぐ。
+    // 展開されたキーが解決できないと、*解決後の文字列* を含むエラー
+    // （`Unsupported parameters for (…) module: <値>`）として実行ログと
+    // `stepResults[].message` に出る。値だけを見ていたため
     //   ansible.builtin.debug: { msg: hi, "{{ lookup('file','/root/.ssh/id_ed25519') }}": 1 }
     // が素通りし、**agent ホスト上の任意ファイル読み取り**になっていた（実測）。
     return Object.entries(value).some(
@@ -1420,6 +1554,50 @@ function exceedsWalkableDepth(value: unknown, depth = 0): boolean {
 }
 
 /**
+ * Jinja の raw ブロックの開始（`{% raw %}` / `{%- raw` / `{%+ raw`。`{%` と `raw` の間の空白は任意）。
+ *
+ * raw の中身は式として評価されないが、{@link scanJinjaRegions} は raw を解釈しない。
+ * そのため raw 内の `{{ '` を式と文字列リテラルの開始と誤認し、後続の本物の式が
+ * リテラルの中に隠れる:
+ *
+ *   msg: >-
+ *     {% raw %}{{ '{% endraw %}{% set x = SECRET ~ 'a\'b' %}{{ x }}
+ *
+ * ansible-core 2.17 でこれは `{{ 'p@ssa'b` を出力する（SECRET の値が出る）。
+ * レシピで raw を使う正当な用途はほぼ無いので、解釈を合わせるのではなく拒否する（fail-closed）。
+ * Jinja の構文どおり小文字の `raw` だけを対象にし、`raw_value` のような識別子は除く。
+ *
+ * 断片から組み立てた値の再テンプレートによる回避は、静的検査の既知の限界として扱う
+ * （{@link ANSIBLE_JINJA2_OVERRIDE_HEADER} 参照）。
+ */
+const JINJA_RAW_BLOCK_START_PATTERN = /\{%[-+]?\s*raw(?![A-Za-z0-9_])/
+
+/**
+ * Ansible のテンプレート区切り上書きヘッダ。
+ *
+ * ansible-core 2.17 の `ansible/template/__init__.py` の `_create_overlay` は、文字列が
+ * `#jinja2:` で**始まる**とき、その 1 行を `key:value` の並びとして Jinja 環境へ上書きする
+ * （`variable_start_string:'[['` 等）。上書き後はガードが知らない区切り（`[[ SECRET ]]`）で
+ * 式を書けるので、秘匿値の `no_log`・内部変数の参照禁止・動的参照の禁止がまとめて外れる。
+ *
+ * 判定は「先頭」ではなく「どこにあっても」とする。Ansible は set_fact などで保存した値を
+ * 参照時に再テンプレートするので、式の文字列リテラルとして組み立てたヘッダ
+ * （`"{{ \"#jinja2:...\n[[ SECRET ]]\" }}"`）が、参照時には先頭のヘッダとして解釈される
+ * （ansible-core 2.17 で SECRET の値が出力されることを確認）。
+ *
+ * **静的検査の既知の限界**: 区切り記号や `#jinja2:` ヘッダを set_fact 等で断片から組み立てると
+ * （`"{{ '{' ~ '{ SECRET }' ~ '}' }}"`。空コメントで分割したヘッダ `#{##}jinja2:` も、
+ * set_fact でコメントが除去されると `#jinja2:` になり、参照時にヘッダとして解釈される）、
+ * 参照時の再テンプレートで評価され、no_log の自動付与・
+ * 内部変数の参照禁止はすり抜けられる（ansible-core 2.17.14 で実測）。この拒否は字面に現れる
+ * 形だけを塞ぐ。no_log の自動付与は作成者の不注意への対策であり、悪意ある作成者は対象ホスト
+ * 経由でも秘匿値を出せる。一方、コントローラのファイル持ち出し経路（copy / unarchive / uri の
+ * `src`・uri の form-multipart・`_raw_params` / `_variable_params`）はこの限界の対象外で、
+ * モジュール引数の構造（キーと値の形）を静的に検査して塞いでいる。
+ */
+const ANSIBLE_JINJA2_OVERRIDE_HEADER = '#jinja2:'
+
+/**
  * Jinja の式領域を、**文字列リテラルを理解して**切り出す。
  *
  * **正規表現では切り出せない。** `/\{\{[\s\S]*?\}\}/` はリテラルの中身を見ないので、
@@ -1440,7 +1618,9 @@ function exceedsWalkableDepth(value: unknown, depth = 0): boolean {
  * Jinja のバックスラッシュエスケープ（`'a\''`）を理解せず、**探している識別子ごと
  * 消してしまう**ことがある（これも実測）。
  *
- * 閉じ記号が見つからないまま終端した場合は `unterminated` を立てる。
+ * コメント `{# ... #}` は Jinja と同じく最初の `#}` まで読み飛ばし、式として扱わない。
+ *
+ * 閉じ記号が見つからないまま終端した場合は `unterminated` を立てる（閉じないコメントも同じ）。
  * 呼び出し側はこれを違反として拒否する（検証できない式を通さない）。
  */
 function scanJinjaRegions(text: string): { code: string[]; unterminated: boolean } {
@@ -1450,7 +1630,28 @@ function scanJinjaRegions(text: string): { code: string[]; unterminated: boolean
   while (cursor < text.length) {
     const exprAt = text.indexOf('{{', cursor)
     const stmtAt = text.indexOf('{%', cursor)
-    if (exprAt === -1 && stmtAt === -1) break
+    const commentAt = text.indexOf('{#', cursor)
+    if (exprAt === -1 && stmtAt === -1 && commentAt === -1) break
+    // コメントが式・文より先に始まるなら、Jinja と同じく最初の `#}` まで読み飛ばす。
+    // コメントの中身は評価されないので式として扱わない。逆に読み飛ばさないと、
+    // コメント内の `{{ '` を式と文字列リテラルの開始と誤認し、後続の本物の式
+    // （`{# {{ ' #}{% set x = SECRET ~ 'a\'b' %}{{ x }}` の `SECRET`）がリテラルの中に隠れる
+    // （ansible-core 2.17 で SECRET の値が出力されることを確認。`{{ }}` の中では Ansible が
+    // バックスラッシュを二重化するので、`{% %}` の中で `\'` を使う形が実際に通る）。
+    if (
+      commentAt !== -1 &&
+      (exprAt === -1 || commentAt < exprAt) &&
+      (stmtAt === -1 || commentAt < stmtAt)
+    ) {
+      const commentEnd = text.indexOf('#}', commentAt + 2)
+      if (commentEnd === -1) {
+        // Jinja では "Missing end of comment tag" の構文エラーになる。検証できない入力として拒否する。
+        unterminated = true
+        break
+      }
+      cursor = commentEnd + 2
+      continue
+    }
     const useExpr = exprAt !== -1 && (stmtAt === -1 || exprAt < stmtAt)
     const closeToken = useExpr ? '}}' : '%}'
     let index = (useExpr ? exprAt : stmtAt) + 2
@@ -1545,10 +1746,19 @@ function blankStringLiterals(text: string): { code: string; unterminated: boolea
  */
 function collectJinjaExpressions(
   task: Record<string, unknown>,
-): { expressions: string[]; malformed: boolean } {
+): {
+  expressions: string[]
+  malformed: boolean
+  rawBlock: boolean
+  delimiterOverride: boolean
+} {
   const expressions: string[] = []
   let malformed = false
+  let rawBlock = false
+  let delimiterOverride = false
   const addString = (text: string, bare: boolean): void => {
+    if (JINJA_RAW_BLOCK_START_PATTERN.test(text)) rawBlock = true
+    if (text.includes(ANSIBLE_JINJA2_OVERRIDE_HEADER)) delimiterOverride = true
     if (bare) {
       const blanked = blankStringLiterals(text)
       if (blanked.unterminated) malformed = true
@@ -1593,7 +1803,9 @@ function collectJinjaExpressions(
       const childBareKeys =
         key === undefined ? TASK_LEVEL_BARE_KEYS : bareArgKeysForModule(key)
       for (const [childKey, item] of Object.entries(value)) {
-        // **キーも走査する。** Ansible はモジュール引数のキーもテンプレート展開し、
+        // **キーも走査する。** モジュール引数のキーがテンプレート展開されるかはモジュール・版に
+        // よって異なり得る（2.17.14 では copy / unarchive / uri のキーは展開されず、debug のキーの
+        // lookup は実行された。いずれも実測）ので、展開される場合も想定して防ぐ。展開されて
         // 解決できないキーは *解決後の文字列* を含むエラーとして実行ログに出る。
         // 値だけを見ていたため、式をキー側へ移すだけで 3 つの防御が揃って外れた（実測）:
         //   ansible.builtin.file: { path: /tmp/x, "{{ ANSIBLE_SECRET }}": 1 }   → no_log なし
@@ -1610,7 +1822,7 @@ function collectJinjaExpressions(
     }
   }
   visit(task, undefined, undefined, 0)
-  return { expressions, malformed }
+  return { expressions, malformed, rawBlock, delimiterOverride }
 }
 
 /**
@@ -1825,7 +2037,8 @@ const SHARED_FILE_ROLE = 'shared_file'
 /**
  * `shared_file_src` に指定できる共有ファイルの相対パス。
  *
- * - Jinja テンプレート（`{{ }}` / `{% %}`）を含まないこと
+ * - Jinja テンプレート（`{{ }}` / `{% %}` / `{# #}`）を含まないこと。コメント `{# #}` も
+ *   実行時に除去されて値が変わる（`.{# x #}./` は `../` になり `..` 検査をすり抜ける）
  * - 相対パスであること（先頭 `/` を許さない）
  * - `..` セグメントを含まないこと
  *
@@ -1842,7 +2055,7 @@ export function isValidSharedFileSrc(value: unknown): value is string {
   if (typeof value !== 'string') return false
   const trimmed = value.trim()
   if (trimmed.length === 0) return false
-  if (trimmed.includes('{{') || trimmed.includes('{%')) return false
+  if (containsJinjaDelimiter(trimmed)) return false
   if (trimmed.startsWith('/')) return false
   // 先頭・中間・末尾のいずれの `..` セグメントも拒否する（`..foo` のような
   // 正当な名前は通す必要があるため、セグメント単位で厳密に比較する）。
@@ -2048,20 +2261,122 @@ export function validateAnsibleTasks(
           continue
         }
 
+        const moduleArgs = task[key]
+        // 文字列形式を許可するモジュールは OS ごとに異なる
+        // （Linux: command / shell、Windows: win_command / win_shell）。
+        const freeFormModuleKeys = freeFormArgsModuleKeysFor(targetOs)
+
+        // モジュール引数の形の検査。以降の src 検査と、no_log 判定（`debug.var` /
+        // `assert.that` を素の式として走査する）、Windows の引数 allowlist は
+        // すべて引数がマッピングであることを前提にしている。Ansible は文字列の引数を
+        // parse_kv で k=v に展開して実行するため、文字列のまま通すとこれらの検査を
+        // 丸ごとすり抜ける（{@link FREE_FORM_ARGS_MODULE_KEYS} 参照）。
+        // - null（`ansible.builtin.debug:` のように引数なし）は検査対象の値を持たないので許可。
+        // - set_fact は 4. で文字列形式を含む非マッピングを専用の理由で拒否するので、
+        //   重複報告にならないようここでは扱わない。
+        // - リスト・数値・真偽値は Ansible 側でも "unexpected parameter type in action" で
+        //   パースエラーになるが、ガードの検査対象外の形を通さないためここで拒否する。
+        if (
+          moduleArgs !== null &&
+          !isPlainObject(moduleArgs) &&
+          !SET_FACT_MODULE_KEYS.has(normalized) &&
+          !(typeof moduleArgs === 'string' && freeFormModuleKeys.has(normalized))
+        ) {
+          violations.push({
+            taskIndex,
+            key,
+            reason:
+              targetOs === 'windows'
+                ? 'module args must be a mapping (the free-form string form is only allowed for win_command / win_shell)'
+                : 'module args must be a mapping (the free-form string form is only allowed for command/shell)',
+          })
+          continue
+        }
+
+        // モジュール引数のキーに Jinja を書くことを拒否する（多層防御）。
+        // キーがテンプレート展開されるかはモジュール・版によって異なり得る（ansible-core 2.17.14
+        // では copy / unarchive / uri のキーは展開されなかったが、debug のキーに置いた lookup は
+        // 実行された。いずれも実測）ので、両方を想定して防ぐ。展開されると `"{{ 'src' }}"` のような
+        // キーが実行時に `src` になり、以降の `'src' in moduleArgs` 等の静的な検査を
+        // すり抜ける。キーを Jinja で書く正当な用途は無いので、入口で閉じる。
+        // set_fact は 4. でキーを静的な識別子に限っているので、重複報告を避けてここでは扱わない
+        // （include_role は上で専用バリデータへ分岐済み）。
+        // ここで報告したキーは、Windows の引数 allowlist で重ねて報告しない。
+        const reportedArgKeys = new Set<string>()
+        if (isPlainObject(moduleArgs) && !SET_FACT_MODULE_KEYS.has(normalized)) {
+          for (const argKey of Object.keys(moduleArgs)) {
+            // Ansible の内部引数（`_raw_params` / `_variable_params` / `_ansible_*` 等）は、
+            // 実行時に引数マッピングへ展開・マージされ得るので書かせない
+            // （{@link isForbiddenInternalModuleArgKey} 参照）。
+            if (isForbiddenInternalModuleArgKey(normalized, argKey, freeFormModuleKeys)) {
+              reportedArgKeys.add(argKey)
+              violations.push({
+                taskIndex,
+                key: argKey,
+                reason:
+                  "Ansible internal module arguments (keys starting with '_', such as " +
+                  '_raw_params / _variable_params) are forbidden',
+              })
+              continue
+            }
+            if (containsJinjaDelimiter(argKey)) {
+              reportedArgKeys.add(argKey)
+              violations.push({
+                taskIndex,
+                key: argKey,
+                reason: 'module argument names must not contain Jinja templates',
+              })
+            }
+          }
+        }
+
         // Windows のモジュールは引数の allowlist と値の制約で検査する。
+        // 以降の copy / unarchive / uri の検査は Linux のモジュール専用。
         if (targetOs === 'windows') {
-          validateWindowsModuleArgs(taskIndex, key, normalized, task[key], violations)
+          validateWindowsModuleArgs(
+            taskIndex,
+            normalized,
+            moduleArgs,
+            reportedArgKeys,
+            violations,
+          )
           continue
         }
 
         // copy は src（コントローラ側ローカルファイルパス）を拒否し content + dest に限定する。
         if (normalized === COPY_MODULE_KEY) {
-          const moduleArgs = task[key]
           if (isPlainObject(moduleArgs) && 'src' in moduleArgs) {
             violations.push({
               taskIndex,
               key: 'src',
               reason: 'copy module must use content, not a controller-local src path',
+            })
+          }
+        }
+
+        // unarchive / uri の src は remote_src: true のときだけ許可する
+        // （{@link CONTROLLER_SRC_MODULE_KEYS} 参照）。真偽値 true そのものに限るのは、
+        // `"{{ v }}"` は実行時に false になり得て静的に判定できず、`"true"` / `yes` を
+        // 受け入れると判定が Ansible の真偽値変換規則に依存するため。
+        if (
+          CONTROLLER_SRC_MODULE_KEYS.has(normalized) &&
+          isPlainObject(moduleArgs) &&
+          moduleArgs.remote_src !== true
+        ) {
+          if ('src' in moduleArgs) {
+            violations.push({
+              taskIndex,
+              key: 'src',
+              reason: `${normalized} reads src from the controller unless remote_src is true; ${REMOTE_SRC_TRUE_HINT}`,
+            })
+          } else if (normalized === URI_MODULE_KEY && uriBodyFormatMayBeMultipart(moduleArgs)) {
+            // src が無くても form-multipart なら body の filename をコントローラから読む
+            // （{@link uriBodyFormatMayBeMultipart} 参照）。src があるときは action plugin が
+            // src 経路だけを通るので、上の src 違反 1 件で足りる（どちらも remote_src: true で解消）。
+            violations.push({
+              taskIndex,
+              key: 'body_format',
+              reason: `${normalized} with body_format form-multipart (or a templated / non-string body_format) reads body filenames from the controller unless remote_src is true; ${REMOTE_SRC_TRUE_HINT}`,
             })
           }
         }
@@ -2109,7 +2424,17 @@ export function validateAnsibleTasks(
             })
             continue
           }
-          if (isReservedVarName(factName)) {
+          if (isAnsibleInternalArgName(factName)) {
+            // `_variable_params` は実行時に辞書へ展開されて変数としてマージされるので、
+            // 下の予約名・ロール名前空間の検査を経ずに任意の名前を書ける（2.17.14 で実測）。
+            violations.push({
+              taskIndex,
+              key: factName,
+              reason:
+                'set_fact must not use Ansible internal argument names ' +
+                '(_raw_params / _variable_params / _ansible_*)',
+            })
+          } else if (isReservedVarName(factName)) {
             violations.push({
               taskIndex,
               key: factName,
@@ -2177,7 +2502,23 @@ export function validateAnsibleTasks(
         violations.push({
           taskIndex,
           key: 'root',
-          reason: 'unterminated Jinja expression or string literal',
+          reason:
+            "unterminated Jinja expression, string literal, or Jinja comment ({#); " +
+            "to write a literal {# (e.g. shell ${#var}), write {{ '{' }}# instead",
+        })
+      }
+      if (scanned.rawBlock) {
+        violations.push({
+          taskIndex,
+          key: 'root',
+          reason: 'Jinja raw blocks ({% raw %}) are forbidden',
+        })
+      }
+      if (scanned.delimiterOverride) {
+        violations.push({
+          taskIndex,
+          key: 'root',
+          reason: 'the Jinja delimiter override header (#jinja2:) is forbidden',
         })
       }
       const jinjaExpressions = scanned.expressions
