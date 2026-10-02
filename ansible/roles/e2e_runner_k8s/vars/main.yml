@@ -10,5 +10,7 @@
 e2e_runner_k8s_git_secret_name: "{{ e2e_runner_k8s_namespace }}-git-deploy-token"
 
 # ServiceAccount の長期トークンを保持する Secret の名前
-# （type: kubernetes.io/service-account-token）。
+# （type: kubernetes.io/service-account-token）。トークンは無期限で、ロール再実行時も
+# この Secret を再利用する。回転はこの Secret を削除してからロールを再実行する
+# （tasks/main.yml 冒頭「設計上の残余リスク (2)」参照）。
 e2e_runner_k8s_sa_token_secret_name: "{{ e2e_runner_k8s_service_account_name }}-token"

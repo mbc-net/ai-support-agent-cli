@@ -16,7 +16,38 @@
 #   `e2e_runner_k8s_namespace` 名前空間限定（ClusterRole ではない）で、
 #   jobs は get・list・watch・create・delete、pods は get・list・watch・delete
 #   （create は許可しない。Pod は Job コントローラが作る）、pods/log は get のみを
-#   許可する。ai-support-agent 等の他の namespace には一切アクセスできない。
+#   許可する。Kubernetes API の権限としては ai-support-agent 等の他の namespace の
+#   オブジェクトを読み書きできない。
+#
+# ネットワーク分離（API 権限とは別の話）:
+#   namespace に NetworkPolicy を置き、**受信だけ**を既定拒否する（podSelector: {}・
+#   policyTypes: [Ingress]・ingress 規則なし）。他 namespace の Pod から E2E Job の
+#   Pod へは到達できない。一方、**送信は制限しない**: E2E はテスト対象アプリの URL と
+#   git ホストへ到達する必要があるため、Job の Pod からクラスタ内の他 namespace の
+#   Service を含む任意の宛先へ接続できる。k3s は組み込みの network policy
+#   コントローラ（kube-router 由来）で NetworkPolicy を強制する（`--disable-network-policy`
+#   で起動したクラスタでは強制されない）。
+#
+# 資源の既定値:
+#   ResourceQuota が requests/limits の cpu・memory を縛るため、resources を書かない
+#   Pod は admission で拒否され、Job は FailedCreate になる（submitter は events を
+#   読めないので原因にも辿り着けない）。同じ namespace に LimitRange を置き、Container
+#   単位の既定 requests/limits を与える（値はタスク内のリテラル。理由は該当タスク参照）。
+#
+# 設計上の残余リスク（受け入れ済み・運用で抑える）:
+#   (1) git デプロイトークンは kubeconfig 保持者が読み出せる。jobs create + pods/log
+#       get があれば、同じ namespace の Secret（`<namespace>-git-deploy-token`）を
+#       マウント／環境変数にした Job を作り、値を出力させてログで読めるため。E2E Job
+#       自身が clone にこの Secret を使う以上、RBAC では塞げない。PAT は対象リポジトリ
+#       限定・読み取り専用（GitLab なら read_repository、GitHub なら Fine-grained の
+#       Contents: Read-only）の最小スコープで発行すること。
+#   (2) ServiceAccount トークンは無期限で、回転の仕組みを持たない。トークン Secret
+#       （type: kubernetes.io/service-account-token）はロール再実行時も既存のものを
+#       再利用する。回転するには、管理者 kubeconfig で
+#       `kubectl -n <namespace> delete secret <service_account_name>-token` を実行して
+#       旧トークンを失効させ、このロールを再実行する（Secret の再作成で新トークンが
+#       発行され、kubeconfig も新トークンで書き直される）。旧 kubeconfig の配布先が
+#       あれば差し替えること。
 #
 # 秘匿値の扱い（2方向）:
 #   (a) クラスタへ**入れる**秘匿値（git デプロイトークン）: (a)-1 Ansible の
@@ -200,8 +231,8 @@
   # 両方とも独立した recipe 変数で、同じ `/etc/e2e-runner/<1階層>` という形状を持つ
   # ため同じ値を設定できてしまう。衝突すると「Ensure the manifest directory
   # exists」が実在ディレクトリを作った後、「Generate the scoped kubeconfig」の
-  # `cat > <path> <<EOF` がディレクトリへのリダイレクトになり `Is a directory` という
-  # 生の bash エラーで落ちる。output_kubeconfig_path != kubeconfig の assert と
+  # `mv -f -T <tmp> <path>` がディレクトリを上書きできず `cannot overwrite directory`
+  # という生のシェルエラーで落ちる。output_kubeconfig_path != kubeconfig の assert と
   # 同じ丁寧さで、原因を名指しして早期に落とす。
   ansible.builtin.assert:
     that:
@@ -210,7 +241,7 @@
       e2e_runner_k8s_output_kubeconfig_path must not equal
       e2e_runner_k8s_manifest_dir. Writing the kubeconfig to the manifest
       directory's path would crash "Generate the scoped kubeconfig" with a
-      raw "Is a directory" shell error. Got
+      raw "cannot overwrite directory" shell error. Got
       output_kubeconfig_path={{ e2e_runner_k8s_output_kubeconfig_path }},
       manifest_dir={{ e2e_runner_k8s_manifest_dir }}.
     success_msg: "Output kubeconfig path does not collide with the manifest directory."
@@ -294,6 +325,32 @@
       the standard k3s server CA path; it is not configurable.
     success_msg: "Cluster CA certificate is present."
 
+- name: "e2e_runner_k8s : Validate the mbc account exists"
+  # 出力 kubeconfig とそのディレクトリの owner/group はインラインリテラル `mbc`
+  # （defaults/main.yml 参照）。アカウントが無いと、namespace・RBAC・トークンまで
+  # 作り終えた後段の chown で初めて落ち、クラスタに半端な状態が残る。何か作る前に
+  # 確かめ、getent の素の失敗文言ではなく原因を名指しして止める。
+  # register は使わない（getent の結果は fact に入るだけで、ガードの内部変数一覧に
+  # 載せる名前を増やさない）。
+  block:
+    - name: "e2e_runner_k8s : Look up the mbc account"
+      ansible.builtin.getent:
+        database: passwd
+        key: mbc
+    - name: "e2e_runner_k8s : Look up the mbc group"
+      # group: mbc も使う（kubeconfig ディレクトリは root:mbc 0750）。
+      ansible.builtin.getent:
+        database: group
+        key: mbc
+  rescue:
+    - name: "e2e_runner_k8s : Fail because the mbc account does not exist"
+      ansible.builtin.fail:
+        msg: >-
+          The local user or group "mbc" was not found (getent passwd/group mbc
+          failed). This role makes the scoped kubeconfig owned by mbc:mbc and
+          its directory root:mbc; create the mbc user and group on this node
+          first, then re-run. Nothing has been created in the cluster yet.
+
 - name: "e2e_runner_k8s : Ensure the target namespace exists"
   # create --dry-run=client | apply は、存在しても失敗しない冪等な適用手順
   # （ai_support_agent_k8s / github_runner_k8s と同じ）。
@@ -325,10 +382,42 @@
       - "{{ e2e_runner_k8s_namespace }}"
       - "pod-security.kubernetes.io/enforce=baseline"
       - --overwrite
-  # `kubectl label --overwrite` は値が変わっていなくても "labeled" を返すため、
-  # apply の 'unchanged' 判定に相当する比較手段がない（後段の kubeconfig 生成タスクと
-  # 同じ理由で常に「変更」として扱う）。
-  changed_when: true
+  # `kubectl label --overwrite` は値が変わらないとき `namespace/<name> not labeled` を、
+  # 変わったときだけ `namespace/<name> labeled` を出力する（kubectl の
+  # updateDataChangeMsg）。これで変更の有無を判定する。
+  # register は新設せず、直前の namespace apply の名前を流用する（ガードの内部変数一覧
+  # BUNDLED_ROLE_INTERNAL_VARS を増やさないため。apply 側の結果はその changed_when
+  # 評価後どこからも参照しないので、上書きしても影響しない）。
+  register: e2e_runner_k8s_namespace_apply
+  changed_when: "'not labeled' not in e2e_runner_k8s_namespace_apply.stdout"
+
+- name: "e2e_runner_k8s : Check the output kubeconfig directory is not a pre-existing symlink"
+  # ディレクトリを root:mbc 0750 にする対策は mbc による**新規**の symlink 設置は
+  # 防ぐが、それ以前に別経路でこの path が symlink として存在していた場合までは
+  # 防げない。`ansible.builtin.file` は既定で symlink を追いかけるため、事前に
+  # lstat で検知し、黙って上書きせず止める（CLAUDE.md フォールバック禁止ルール）。
+  #
+  # manifest_dir と output_kubeconfig_path はどちらも /etc/e2e-runner の直下に限定
+  # されている（前段の assert 参照）ので、この path は manifest_dir の親でもある。
+  # 直後の「Ensure the manifest directory exists」は親を暗黙に辿って作るため、親が
+  # symlink のままだとリンク先の配下にディレクトリを作ってしまう。だからマニフェスト
+  # ディレクトリの作成より**前**に検査する（register は従来の名前を流用する）。
+  ansible.builtin.stat:
+    path: "{{ e2e_runner_k8s_output_kubeconfig_path | dirname }}"
+    follow: false
+  register: e2e_runner_k8s_output_dir_lstat
+
+- name: "e2e_runner_k8s : Fail if the output kubeconfig directory path is a symlink"
+  ansible.builtin.fail:
+    msg: >-
+      {{ e2e_runner_k8s_output_kubeconfig_path | dirname }} already exists as a
+      symlink
+      (target: {{ e2e_runner_k8s_output_dir_lstat.stat.lnk_target | default('unknown') }}).
+      Refusing to follow it and change ownership/mode on whatever it points to.
+      Remove the symlink manually and re-run this role.
+  when: >-
+    e2e_runner_k8s_output_dir_lstat.stat.exists | default(false)
+    and e2e_runner_k8s_output_dir_lstat.stat.islnk | default(false)
 
 - name: "e2e_runner_k8s : Check the manifest directory is not a pre-existing symlink"
   # `ansible.builtin.file` は既定で symlink を追いかけるため、この path が既に
@@ -360,10 +449,33 @@
     group: root
     mode: '0700'
 
-- name: "e2e_runner_k8s : Write the ResourceQuota manifest"
+- name: "e2e_runner_k8s : Write the namespace guardrails manifest (ResourceQuota / LimitRange / NetworkPolicy)"
   # 秘匿値は含まない。監査と再適用のためノード上へ残す。
+  #
+  # 3 つを 1 ファイル・1 回の apply にまとめるのは、どれも「namespace に掛ける恒常的な
+  # 歯止め」で一緒に変わるものだから、かつ register 名（ガードの内部変数一覧
+  # BUNDLED_ROLE_INTERNAL_VARS に載せる名前）を増やさないため。register 名が
+  # `_quota_` のままなのは後者の理由（ResourceQuota だけを書いていた頃の名前）。
+  #
+  # LimitRange（type: Container の既定 requests/limits）:
+  #   ResourceQuota が requests/limits の cpu・memory を縛る namespace では、resources を
+  #   書かない Pod は admission で拒否され Job が FailedCreate になる。submitter は
+  #   events を読めないので原因にも辿り着けない。既定値をここで与える。
+  #   値はレシピ変数にせずリテラルで固定する（公開変数を増やすとガードの許可リストにも
+  #   同じ追加が要り、既定値と quota の整合を recipe ごとに崩せるようになるため）。
+  #   既定の ResourceQuota（requests 8 CPU / 16Gi・limits 16 CPU / 32Gi・pods 8）に対し、
+  #   既定値どおりの Pod を pods 上限の 8 個並べても requests 4 CPU / 8Gi・limits
+  #   16 CPU / 32Gi で収まる控えめな値にしている（Playwright + Chromium 1 本に十分な
+  #   上限 4Gi）。init container は本体と同時には動かないため quota 上は max で数え
+  #   られるが、本体に sidecar を足すと 1 Pod あたりの既定値はその分だけ増える。
+  #   recipe が quota をこれより小さく上書きした場合や、より大きな資源が要る Job は、
+  #   Job 側で resources を明示すること（明示値が LimitRange の既定値より優先される）。
+  #   requests を既定 limit（2 CPU / 4Gi）より大きくする場合は limits も併記すること
+  #   （requests だけだと既定 limit が付いて requests > limits となり、Pod が拒否される）。
+  #
+  # NetworkPolicy（受信を既定拒否、送信は無制限）: ファイル冒頭「ネットワーク分離」参照。
   ansible.builtin.copy:
-    dest: "{{ e2e_runner_k8s_manifest_dir }}/resourcequota.yaml"
+    dest: "{{ e2e_runner_k8s_manifest_dir }}/namespace-guardrails.yaml"
     owner: root
     group: root
     mode: '0600'
@@ -380,9 +492,34 @@
           limits.cpu: {{ e2e_runner_k8s_quota_cpu_limits | to_json }}
           limits.memory: {{ e2e_runner_k8s_quota_memory_limits | to_json }}
           pods: {{ e2e_runner_k8s_quota_pods | to_json }}
+      ---
+      apiVersion: v1
+      kind: LimitRange
+      metadata:
+        name: {{ (e2e_runner_k8s_namespace ~ '-defaults') | to_json }}
+        namespace: {{ e2e_runner_k8s_namespace | to_json }}
+      spec:
+        limits:
+          - type: Container
+            default:
+              cpu: "2"
+              memory: 4Gi
+            defaultRequest:
+              cpu: 500m
+              memory: 1Gi
+      ---
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: {{ (e2e_runner_k8s_namespace ~ '-deny-ingress') | to_json }}
+        namespace: {{ e2e_runner_k8s_namespace | to_json }}
+      spec:
+        podSelector: {}
+        policyTypes:
+          - Ingress
   register: e2e_runner_k8s_quota_manifest
 
-- name: "e2e_runner_k8s : Apply the ResourceQuota"
+- name: "e2e_runner_k8s : Apply the namespace guardrails (ResourceQuota / LimitRange / NetworkPolicy)"
   ansible.builtin.command:
     argv:
       - "{{ e2e_runner_k8s_kubectl }}"
@@ -390,9 +527,16 @@
       - "--request-timeout=30s"
       - apply
       - -f
-      - "{{ e2e_runner_k8s_manifest_dir }}/resourcequota.yaml"
+      - "{{ e2e_runner_k8s_manifest_dir }}/namespace-guardrails.yaml"
   register: e2e_runner_k8s_quota_apply
-  changed_when: "'unchanged' not in e2e_runner_k8s_quota_apply.stdout"
+  # 1 ファイルに複数オブジェクトがあるため、`'unchanged' not in stdout` だと 1 つでも
+  # unchanged があれば他が configured/created でも「変更なし」と報告してしまう。
+  # 出力 1 行（= 1 オブジェクト）ごとに判定する。
+  changed_when: >-
+    e2e_runner_k8s_quota_apply.stdout_lines
+    | reject('search', ' unchanged$')
+    | list
+    | length > 0
 
 - name: "e2e_runner_k8s : Ensure the ServiceAccount exists"
   ansible.builtin.shell: >-
@@ -458,7 +602,14 @@
       - -f
       - "{{ e2e_runner_k8s_manifest_dir }}/rbac.yaml"
   register: e2e_runner_k8s_rbac_apply
-  changed_when: "'unchanged' not in e2e_runner_k8s_rbac_apply.stdout"
+  # Role と RoleBinding の 2 オブジェクトを 1 回で apply するため、guardrails の apply と
+  # 同じく出力 1 行（= 1 オブジェクト）ごとに判定する（Role が unchanged・RoleBinding
+  # だけ configured の場合に「変更なし」と誤報告しないため）。
+  changed_when: >-
+    e2e_runner_k8s_rbac_apply.stdout_lines
+    | reject('search', ' unchanged$')
+    | list
+    | length > 0
 
 - name: "e2e_runner_k8s : Write the ServiceAccount token Secret manifest"
   # type: kubernetes.io/service-account-token の Secret は、値を持たない
@@ -510,29 +661,10 @@
   delay: "{{ e2e_runner_k8s_token_secret_delay_seconds | int }}"
   changed_when: false
 
-- name: "e2e_runner_k8s : Check the output kubeconfig directory is not a pre-existing symlink"
-  # ディレクトリを root:mbc 0750 にする対策は mbc による**新規**の symlink 設置は
-  # 防ぐが、それ以前に別経路でこの path が symlink として存在していた場合までは
-  # 防げない。`ansible.builtin.file` は既定で symlink を追いかけるため、事前に
-  # lstat で検知し、黙って上書きせず止める（CLAUDE.md フォールバック禁止ルール）。
-  ansible.builtin.stat:
-    path: "{{ e2e_runner_k8s_output_kubeconfig_path | dirname }}"
-    follow: false
-  register: e2e_runner_k8s_output_dir_lstat
-
-- name: "e2e_runner_k8s : Fail if the output kubeconfig directory path is a symlink"
-  ansible.builtin.fail:
-    msg: >-
-      {{ e2e_runner_k8s_output_kubeconfig_path | dirname }} already exists as a
-      symlink
-      (target: {{ e2e_runner_k8s_output_dir_lstat.stat.lnk_target | default('unknown') }}).
-      Refusing to follow it and change ownership/mode on whatever it points to.
-      Remove the symlink manually and re-run this role.
-  when: >-
-    e2e_runner_k8s_output_dir_lstat.stat.exists | default(false)
-    and e2e_runner_k8s_output_dir_lstat.stat.islnk | default(false)
-
 - name: "e2e_runner_k8s : Ensure the output kubeconfig directory exists"
+  # このディレクトリが symlink でないことは「Ensure the manifest directory exists」
+  # より前に検査済み（「Check the output kubeconfig directory is not a pre-existing
+  # symlink」参照）。
   # owner は root・group は mbc・mode 0750（mbc に書き込み権を与えない）。
   # ディレクトリ自体を mbc 所有 0700 にすると、mbc がそこへ書き込めるため
   # {{ output_kubeconfig_path }} の位置へ事前にシンボリックリンクを仕掛けられ、
@@ -549,8 +681,10 @@
 
 - name: "e2e_runner_k8s : Check the output kubeconfig path itself is not a pre-existing symlink"
   # ディレクトリ側の対策とは別に、ファイルの path 自体が既に symlink として存在
-  # している場合、後段の heredoc 書き出し（`cat > path`）はリンク先へそのまま
-  # 書き込んでしまう。
+  # している場合を検知する。kubeconfig 本体は一時ファイル→`mv` で置換するため
+  # リンク先へは書かないが、後段の「Restrict the output kubeconfig permissions」
+  # （`ansible.builtin.file` は既定で symlink を追う）がリンク先を mbc へ chown して
+  # しまう。黙って置き換えず運用者に気づかせて止める。
   ansible.builtin.stat:
     path: "{{ e2e_runner_k8s_output_kubeconfig_path }}"
     follow: false
@@ -579,12 +713,23 @@
   # 理由と同じ脅威モデル）。代わりに kubeconfig 全体を heredoc で直接書き出す。
   # heredoc 内のシェル変数展開はファイルへのリダイレクト内容としてのみ存在し、
   # どのプロセスの argv にも現れない。
+  #
+  # 書き出しは同じディレクトリの一時ファイル（mktemp: 0600・root 所有）へ行い、
+  # owner/mode を整えてから `mv` で置換する。出力先へ直接 `cat >` すると、書いている
+  # 途中（または失敗時）に切り詰められた・書きかけの kubeconfig を利用者が読みうる。
+  # rename は同一ファイルシステム内で原子的で、出力先が symlink でもリンク自体を
+  # 置き換える（リンク先へは書かない）。ディレクトリは root:mbc 0750 で mbc は
+  # 書き込めないため、一時ファイル名を先回りされることもない。`-T` は出力先が
+  # ディレクトリだった場合に中へ移動せず失敗させるため。一時ファイルはトークンを
+  # 含むので、失敗時も trap で必ず消す。
   ansible.builtin.shell: |
     set -euo pipefail
     E2E_TOKEN=$({{ e2e_runner_k8s_kubectl }} --kubeconfig={{ e2e_runner_k8s_kubeconfig }} --request-timeout=30s -n {{ e2e_runner_k8s_namespace }} get secret {{ e2e_runner_k8s_sa_token_secret_name }} -o jsonpath='{.data.token}' | base64 -d)
     E2E_CA_B64=$(base64 -w0 /var/lib/rancher/k3s/server/tls/server-ca.crt)
     umask 077
-    cat > {{ e2e_runner_k8s_output_kubeconfig_path }} <<KUBECONFIG_EOF
+    E2E_TMP=$(mktemp "{{ e2e_runner_k8s_output_kubeconfig_path }}.XXXXXX")
+    trap 'rm -f "$E2E_TMP"' EXIT
+    cat > "$E2E_TMP" <<KUBECONFIG_EOF
     apiVersion: v1
     kind: Config
     clusters:
@@ -604,6 +749,11 @@
         user:
           token: $E2E_TOKEN
     KUBECONFIG_EOF
+    # owner/group はインラインリテラル `mbc`（defaults/main.yml 参照）。置換の瞬間から
+    # 最終的な所有者・権限になるよう mv の前に整える（後段タスクでも同じ値を強制する）。
+    chown mbc:mbc "$E2E_TMP"
+    chmod 0600 "$E2E_TMP"
+    mv -f -T "$E2E_TMP" "{{ e2e_runner_k8s_output_kubeconfig_path }}"
   args:
     executable: /bin/bash
   # heredoc 経由の書き出しは差分を報告しないため、既存内容と同じでも常に「変更」
@@ -631,10 +781,14 @@
       # `content` は copy モジュール自身が引数仕様で no_log 指定しているため、成功・
       # 失敗・-vvv のいずれでも値は出力されない。`| trim` は必須（改行混入対策、
       # github_runner_k8s と同じ理由）。
+      #
+      # `diff: false`: `--diff` 付きで実行されると copy は書き込み前後の内容を差分として
+      # 出力する（content の no_log とは別経路）。トークンを差分に出さない。
       ansible.builtin.copy:
         content: "{{ e2e_runner_k8s_git_deploy_token | trim }}"
         dest: "{{ e2e_runner_k8s_git_token_tempfile.path }}"
         mode: '0600'
+      diff: false
       changed_when: true
 
     - name: "e2e_runner_k8s : Apply the git deploy token Secret"

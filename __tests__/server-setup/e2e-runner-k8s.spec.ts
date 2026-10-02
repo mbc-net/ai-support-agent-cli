@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from 'fs'
 import * as path from 'path'
 
-import { DEFAULT_SCHEMA, load } from 'js-yaml'
+import { DEFAULT_SCHEMA, load, loadAll } from 'js-yaml'
 
 /**
  * E2E(Playwright)ジョブをオンデマンドで投入できるようにする bundled role
@@ -26,6 +26,11 @@ import { DEFAULT_SCHEMA, load } from 'js-yaml'
  *   8. Kubernetes オブジェクト名を DNS-1123 ラベルとして assert する
  *   9. 秘匿値が `environment:` にも生成マニフェストにも載らない
  *  10. 出力 kubeconfig はクラスタ管理者 kubeconfig と別ファイルである
+ *  11. namespace に LimitRange（既定 requests/limits）と、受信を既定拒否する
+ *      NetworkPolicy を置く。LimitRange の値はレシピ変数ではなくリテラルで、
+ *      ResourceQuota の既定値の中に収まる
+ *  12. kubeconfig は同一ディレクトリの一時ファイルへ書いてから mv で置換する
+ *  13. クラスタへ何か作る前に mbc アカウントの存在を確かめる
  */
 const ROLE = 'e2e_runner_k8s'
 const rolesDir = path.join(__dirname, '..', '..', 'ansible', 'roles')
@@ -70,12 +75,50 @@ const stringArg = (task: AnsibleTask, module: string): string | undefined => {
   return undefined
 }
 
+/** changed_when 等の式を、YAML の折り返し・インデント差に左右されず完全一致で比べるために空白を正規化する。 */
+const normalizeExpr = (value: unknown): string => String(value).replace(/\s+/g, ' ').trim()
+
+const PER_LINE_CHANGED_WHEN = (register: string): string =>
+  `${register}.stdout_lines | reject('search', ' unchanged$') | list | length > 0`
+
 const copyContent = (task: AnsibleTask): string | undefined => {
   const args = moduleArgs(task, 'copy')
   if (typeof args !== 'object' || args === null) return undefined
   const content = (args as Record<string, unknown>).content
   return typeof content === 'string' ? content : undefined
 }
+
+/**
+ * copy タスクが書き出す Kubernetes マニフェストを文書単位でパースする。
+ * `{{ ... }}`（Jinja 展開）は YAML では flow mapping の開始と解釈されるため、固定の
+ * 文字列へ置き換えてから読む（名前・namespace 等の展開値はここでは検査しない）。
+ */
+const manifestDocs = (): Record<string, unknown>[] =>
+  parseTasks()
+    .map(copyContent)
+    .filter((c): c is string => !!c)
+    .filter((c) => /^kind:/m.test(c))
+    .flatMap((c) =>
+      loadAll(c.replace(/\{\{[^}]*\}\}/g, '"__jinja__"'), undefined, { schema: DEFAULT_SCHEMA }),
+    )
+    .filter((d): d is Record<string, unknown> => typeof d === 'object' && d !== null)
+
+/** Kubernetes の CPU quantity（"500m" / "2"）をコア数へ換算する。 */
+const cpuCores = (q: unknown): number => {
+  const v = String(q)
+  return v.endsWith('m') ? Number(v.slice(0, -1)) / 1000 : Number(v)
+}
+
+/** Kubernetes の memory quantity（"512Mi" / "4Gi"）を MiB へ換算する。 */
+const memoryMi = (q: unknown): number => {
+  const v = String(q)
+  if (v.endsWith('Gi')) return Number(v.slice(0, -2)) * 1024
+  if (v.endsWith('Mi')) return Number(v.slice(0, -2))
+  throw new Error(`unsupported memory quantity in test: ${v}`)
+}
+
+const taskIndex = (tasks: AnsibleTask[], fragment: string): number =>
+  tasks.findIndex((t) => (t.name ?? '').includes(fragment))
 
 describe('e2e_runner_k8s bundled role', () => {
   it('tasks/main.yml と defaults/main.yml を持つ', () => {
@@ -173,15 +216,158 @@ describe('e2e_runner_k8s bundled role', () => {
     expect(rbacManifest).not.toContain('kind: ClusterRole')
     expect(rbacManifest).not.toContain('"*"')
     expect(rbacManifest).not.toMatch(/verbs:\s*\[\s*"\*"\s*\]/)
+  })
 
-    // jobs/pods/pods-log 以外のリソースへはアクセスできない。
-    const resourceLines = (rbacManifest ?? '')
-      .split('\n')
-      .filter((l) => l.trim().startsWith('resources:'))
-    expect(resourceLines.length).toBeGreaterThan(0)
-    for (const line of resourceLines) {
-      expect(line).toMatch(/\["(jobs|pods|pods\/log)"\]/)
+  it('Role のルールを (apiGroups, resources, verbs) の完全一致で固定する（権限の黙った拡張を防ぐ）', () => {
+    // resources 行だけを見ると、verbs への update/patch や pods への create の追加を
+    // 検出できない。ルールを丸ごと固定する。
+    const roles = manifestDocs().filter((d) => d.kind === 'Role')
+    expect(roles).toHaveLength(1)
+    expect(roles[0].rules).toEqual([
+      {
+        apiGroups: ['batch'],
+        resources: ['jobs'],
+        verbs: ['get', 'list', 'watch', 'create', 'delete'],
+      },
+      { apiGroups: [''], resources: ['pods'], verbs: ['get', 'list', 'watch', 'delete'] },
+      { apiGroups: [''], resources: ['pods/log'], verbs: ['get'] },
+    ])
+  })
+
+  it('namespace に LimitRange を置き、resources 未指定の Job でも Pod が作られる（ResourceQuota との対）', () => {
+    // ResourceQuota が requests/limits の cpu・memory を縛る namespace では、resources を
+    // 書かない Pod は admission で拒否され Job は FailedCreate になる。submitter は
+    // events を読めないので原因にも辿り着けない。既定値を LimitRange で与える。
+    const limitRanges = manifestDocs().filter((d) => d.kind === 'LimitRange')
+    expect(limitRanges).toHaveLength(1)
+    const spec = limitRanges[0].spec as { limits: Record<string, unknown>[] }
+    expect(spec.limits).toHaveLength(1)
+    const container = spec.limits[0] as {
+      type: string
+      default: Record<string, string>
+      defaultRequest: Record<string, string>
     }
+    expect(container.type).toBe('Container')
+    expect(container.default).toEqual({ cpu: '2', memory: '4Gi' })
+    expect(container.defaultRequest).toEqual({ cpu: '500m', memory: '1Gi' })
+
+    // defaultRequest <= default（逆だと LimitRange 自体が admission で拒否される）。
+    expect(cpuCores(container.defaultRequest.cpu)).toBeLessThanOrEqual(
+      cpuCores(container.default.cpu),
+    )
+    expect(memoryMi(container.defaultRequest.memory)).toBeLessThanOrEqual(
+      memoryMi(container.default.memory),
+    )
+
+    // 既定値どおりの Pod を quota の pods 上限まで並べても ResourceQuota に収まる。
+    const defaults = load(readDefaults(), { schema: DEFAULT_SCHEMA }) as Record<string, unknown>
+    const pods = Number(defaults.e2e_runner_k8s_quota_pods)
+    expect(pods).toBeGreaterThan(0)
+    expect(pods * cpuCores(container.default.cpu)).toBeLessThanOrEqual(
+      cpuCores(defaults.e2e_runner_k8s_quota_cpu_limits),
+    )
+    expect(pods * memoryMi(container.default.memory)).toBeLessThanOrEqual(
+      memoryMi(defaults.e2e_runner_k8s_quota_memory_limits),
+    )
+    expect(pods * cpuCores(container.defaultRequest.cpu)).toBeLessThanOrEqual(
+      cpuCores(defaults.e2e_runner_k8s_quota_cpu_requests),
+    )
+    expect(pods * memoryMi(container.defaultRequest.memory)).toBeLessThanOrEqual(
+      memoryMi(defaults.e2e_runner_k8s_quota_memory_requests),
+    )
+  })
+
+  it('LimitRange の値はレシピ変数にしない（公開変数を増やさない）', () => {
+    const manifests = parseTasks()
+      .map(copyContent)
+      .filter((c): c is string => !!c)
+    const limitRangeDoc = manifests
+      .flatMap((c) => c.split(/^---$/m))
+      .find((d) => /^kind: LimitRange$/m.test(d))
+    expect(limitRangeDoc).toBeDefined()
+    const specPart = limitRangeDoc!.slice(limitRangeDoc!.indexOf('spec:'))
+    expect(specPart).not.toContain('{{')
+
+    // defaults/main.yml の公開変数は増えていない（ガードの INCLUDE_ROLE_ALLOWED_VARS と同じ集合）。
+    const defaults = load(readDefaults(), { schema: DEFAULT_SCHEMA }) as Record<string, unknown>
+    expect(Object.keys(defaults).sort()).toEqual(
+      [
+        'e2e_runner_k8s_cluster_server_url',
+        'e2e_runner_k8s_git_deploy_token',
+        'e2e_runner_k8s_kubeconfig',
+        'e2e_runner_k8s_kubectl',
+        'e2e_runner_k8s_manifest_dir',
+        'e2e_runner_k8s_namespace',
+        'e2e_runner_k8s_output_kubeconfig_path',
+        'e2e_runner_k8s_quota_cpu_limits',
+        'e2e_runner_k8s_quota_cpu_requests',
+        'e2e_runner_k8s_quota_memory_limits',
+        'e2e_runner_k8s_quota_memory_requests',
+        'e2e_runner_k8s_quota_pods',
+        'e2e_runner_k8s_role_binding_name',
+        'e2e_runner_k8s_role_name',
+        'e2e_runner_k8s_service_account_name',
+        'e2e_runner_k8s_token_secret_delay_seconds',
+        'e2e_runner_k8s_token_secret_retries',
+      ].sort(),
+    )
+  })
+
+  it('namespace に受信を既定拒否する NetworkPolicy を置き、送信は制限しない', () => {
+    // E2E はアプリ URL・git へ到達する必要があるため egress は塞がない。受信だけを
+    // 全 Pod（podSelector: {}）について拒否する。
+    const policies = manifestDocs().filter((d) => d.kind === 'NetworkPolicy')
+    expect(policies).toHaveLength(1)
+    expect(policies[0].apiVersion).toBe('networking.k8s.io/v1')
+    const spec = policies[0].spec as Record<string, unknown>
+    expect(spec.podSelector).toEqual({})
+    expect(spec.policyTypes).toEqual(['Ingress'])
+    expect(spec).not.toHaveProperty('ingress')
+    expect(spec).not.toHaveProperty('egress')
+  })
+
+  it('LimitRange / NetworkPolicy を実際に apply し、複数オブジェクトの変更を行単位で判定する', () => {
+    const tasks = parseTasks()
+    const writeTask = tasks.find((t) => {
+      const c = copyContent(t) ?? ''
+      return c.includes('kind: LimitRange') && c.includes('kind: NetworkPolicy')
+    })
+    expect(writeTask).toBeDefined()
+    const dest = String((moduleArgs(writeTask!, 'copy') as Record<string, unknown>).dest)
+
+    const applyTask = tasks.find((t) => {
+      const argv = (moduleArgs(t, 'command') as Record<string, unknown> | undefined)?.argv
+      return Array.isArray(argv) && argv.includes('apply') && argv.includes(dest)
+    })
+    expect(applyTask).toBeDefined()
+    // 1 ファイルに複数オブジェクトがある場合、`'unchanged' not in stdout` は 1 つでも
+    // unchanged があれば「変更なし」と誤報告する。行ごとに判定する。
+    // 部分一致だと `select` への取り違えや `length > 0` の欠落を見逃すため、式全体を固定する。
+    expect(applyTask!.register).toBe('e2e_runner_k8s_quota_apply')
+    expect(normalizeExpr(applyTask!.changed_when)).toBe(
+      PER_LINE_CHANGED_WHEN('e2e_runner_k8s_quota_apply'),
+    )
+  })
+
+  it('Role / RoleBinding を 1 回で apply し、複数オブジェクトの変更を行単位で判定する', () => {
+    const tasks = parseTasks()
+    const writeTask = tasks.find((t) => {
+      const c = copyContent(t) ?? ''
+      return c.includes('kind: Role\n') && c.includes('kind: RoleBinding')
+    })
+    expect(writeTask).toBeDefined()
+    const dest = String((moduleArgs(writeTask!, 'copy') as Record<string, unknown>).dest)
+
+    const applyTask = tasks.find((t) => {
+      const argv = (moduleArgs(t, 'command') as Record<string, unknown> | undefined)?.argv
+      return Array.isArray(argv) && argv.includes('apply') && argv.includes(dest)
+    })
+    expect(applyTask).toBeDefined()
+    // Role が unchanged・RoleBinding だけ configured の場合に「変更なし」と誤報告しない。
+    expect(applyTask!.register).toBe('e2e_runner_k8s_rbac_apply')
+    expect(normalizeExpr(applyTask!.changed_when)).toBe(
+      PER_LINE_CHANGED_WHEN('e2e_runner_k8s_rbac_apply'),
+    )
   })
 
   it('kubectl / kubeconfig / CA 証明書の存在を assert する', () => {
@@ -378,6 +564,28 @@ describe('e2e_runner_k8s bundled role', () => {
     expect(argvText).toContain('--overwrite')
   })
 
+  it('PSS ラベル付与は値が変わらないとき（kubectl が "not labeled" を出す）に変更扱いしない', () => {
+    // `kubectl label --overwrite` は値が同じだと `namespace/<name> not labeled` を出力し、
+    // 変わったときだけ `namespace/<name> labeled` を出す。常に changed にしない。
+    // register は新設せず、直前の namespace apply の register 名を流用する
+    // （ガードの BUNDLED_ROLE_INTERNAL_VARS を増やさないため。apply 側の結果は
+    // その changed_when 評価後に参照されない）。
+    const tasks = parseTasks()
+    const labelTask = tasks.find((t) => (t.name ?? '').includes('Pod Security Standard'))
+    expect(labelTask).toBeDefined()
+    expect(labelTask!.register).toBe('e2e_runner_k8s_namespace_apply')
+    expect(normalizeExpr(labelTask!.changed_when)).toBe(
+      "'not labeled' not in e2e_runner_k8s_namespace_apply.stdout",
+    )
+    // 流用する register 名は、label タスクより後で参照されてはならない（上書きされた
+    // 値を apply の結果として誤読させない）。
+    const idxLabel = tasks.indexOf(labelTask!)
+    const laterRefs = tasks
+      .slice(idxLabel + 1)
+      .filter((t) => JSON.stringify(t).includes('e2e_runner_k8s_namespace_apply'))
+    expect(laterRefs).toEqual([])
+  })
+
   it('ServiceAccount トークンを kubectl のコマンドライン引数（argv）として渡さない（ps 経由の露出防止）', () => {
     // `kubectl config set-credentials --token=$VAR` は値がそのプロセスの argv として
     // 展開され、実行中は同一ホスト上の他プロセスから ps で観測できてしまう
@@ -524,5 +732,121 @@ describe('e2e_runner_k8s bundled role', () => {
     expect((moduleArgs(tasks[idxFileCheck], 'stat') as Record<string, unknown>).follow).toBe(false)
     expect(String(tasks[idxDirFail].when)).toContain('islnk')
     expect(String(tasks[idxFileFail].when)).toContain('islnk')
+  })
+
+  it('親ディレクトリ /etc/e2e-runner の symlink 検査はマニフェストディレクトリの作成より前に行う', () => {
+    // manifest_dir と output_kubeconfig_path はどちらも /etc/e2e-runner の直下に限定
+    // されている（assert 参照）ため、output_kubeconfig_path | dirname は manifest_dir の
+    // 親でもある。親が symlink のまま manifest_dir を作ると、リンク先の配下に
+    // root:root 0700 のディレクトリを作ってしまう。
+    const tasks = parseTasks()
+    const idxDirCheck = taskIndex(tasks, 'output kubeconfig directory is not a pre-existing symlink')
+    const idxDirFail = taskIndex(tasks, 'Fail if the output kubeconfig directory path is a symlink')
+    const idxEnsureManifestDir = taskIndex(tasks, 'Ensure the manifest directory exists')
+    expect(idxDirCheck).toBeGreaterThanOrEqual(0)
+    expect(idxEnsureManifestDir).toBeGreaterThanOrEqual(0)
+    expect(idxDirCheck).toBeLessThan(idxEnsureManifestDir)
+    expect(idxDirFail).toBeLessThan(idxEnsureManifestDir)
+
+    const statArgs = moduleArgs(tasks[idxDirCheck], 'stat') as Record<string, unknown>
+    expect(statArgs.path).toBe('{{ e2e_runner_k8s_output_kubeconfig_path | dirname }}')
+    expect(statArgs.follow).toBe(false)
+  })
+
+  it('git デプロイトークンを書く copy は diff: false（--diff 実行時に差分として値を出さない）', () => {
+    const tokenCopy = parseTasks().find((t) =>
+      (copyContent(t) ?? '').includes('e2e_runner_k8s_git_deploy_token'),
+    )
+    expect(tokenCopy).toBeDefined()
+    expect(tokenCopy!.diff).toBe(false)
+  })
+
+  it('kubeconfig は同じディレクトリの一時ファイルへ書いてから mv -T で原子的に置換する', () => {
+    const kubeconfigGenTask = parseTasks().find((t) =>
+      (t.name ?? '').includes('Generate the scoped kubeconfig'),
+    )
+    expect(kubeconfigGenTask).toBeDefined()
+    const script = stringArg(kubeconfigGenTask!, 'shell') ?? ''
+
+    // 出力先へ直接リダイレクトしない（書きかけの kubeconfig を利用者に見せない）。
+    expect(script).not.toMatch(/cat\s*>\s*\{\{\s*e2e_runner_k8s_output_kubeconfig_path/)
+    // 一時ファイルは出力先と同じディレクトリ（root 専用 0750 / mbc は書き込めない）に作る。
+    expect(script).toMatch(/mktemp\s+"\{\{ e2e_runner_k8s_output_kubeconfig_path \}\}\.XXXXXX"/)
+    expect(script).toMatch(/cat\s*>\s*"\$E2E_TMP"\s*<<KUBECONFIG_EOF/)
+    // 失敗時に一時ファイル（トークンを含む）を残さない。
+    expect(script).toMatch(/trap\s+'rm -f "\$E2E_TMP"'\s+EXIT/)
+    // -T: 出力先がディレクトリでも中へ移動せず失敗させる。
+    expect(script).toMatch(/mv -f -T "\$E2E_TMP" "\{\{ e2e_runner_k8s_output_kubeconfig_path \}\}"/)
+    const idxCat = script.search(/cat\s*>\s*"\$E2E_TMP"/)
+    const idxMv = script.indexOf('mv -f -T')
+    expect(idxCat).toBeGreaterThanOrEqual(0)
+    expect(idxMv).toBeGreaterThan(idxCat)
+
+    // 順序の不変条件:
+    //  - umask 077 を mktemp より前に置く（一時ファイルを最初から他者に読めなくする）
+    //  - trap を書き込み（cat >）より前に置く（書き込み途中の失敗でもトークン入りの
+    //    一時ファイルを残さない）
+    //  - chown / chmod を mv より前に置く（置換の瞬間から最終の所有者・権限にする。
+    //    後ろにあると、root 所有のまま公開される窓ができる／mv 後の失敗で権限が整わない）
+    const idxUmask = script.search(/^umask 077$/m)
+    const idxMktemp = script.indexOf('mktemp ')
+    const idxTrap = script.search(/^trap /m)
+    const idxChown = script.search(/^chown mbc:mbc "\$E2E_TMP"$/m)
+    const idxChmod = script.search(/^chmod 0600 "\$E2E_TMP"$/m)
+    expect(idxUmask).toBeGreaterThanOrEqual(0)
+    expect(idxUmask).toBeLessThan(idxMktemp)
+    expect(idxTrap).toBeGreaterThanOrEqual(0)
+    expect(idxTrap).toBeLessThan(idxCat)
+    expect(idxChown).toBeGreaterThan(idxCat)
+    expect(idxChmod).toBeGreaterThan(idxCat)
+    expect(idxChown).toBeLessThan(idxMv)
+    expect(idxChmod).toBeLessThan(idxMv)
+
+    // トークンを argv / register に載せない不変条件は維持する。
+    expect(kubeconfigGenTask!.register).toBeUndefined()
+    expect(script).not.toContain('--token')
+  })
+
+  it('クラスタへ何か作る前に mbc アカウントの存在を確かめ、無ければ名指しで止める', () => {
+    const tasks = parseTasks()
+    const idxLookup = tasks.findIndex((t) => {
+      const args = moduleArgs(t, 'getent')
+      if (typeof args !== 'object' || args === null) return false
+      const record = args as Record<string, unknown>
+      return record.database === 'passwd' && record.key === 'mbc'
+    })
+    expect(idxLookup).toBeGreaterThanOrEqual(0)
+
+    // getent の素の失敗文言ではなく、rescue で原因を名指しする。
+    const top = load(readTasks(), { schema: DEFAULT_SCHEMA }) as AnsibleTask[]
+    const guardBlock = top.find((t) =>
+      flatten(t.block).some((child) => moduleArgs(child, 'getent') !== undefined),
+    )
+    expect(guardBlock).toBeDefined()
+    const rescueFail = flatten(guardBlock!.rescue).find(
+      (t) => moduleArgs(t, 'fail') !== undefined,
+    )
+    expect(rescueFail).toBeDefined()
+    expect(JSON.stringify(moduleArgs(rescueFail!, 'fail'))).toContain('mbc')
+
+    // 最初のクラスタ操作（namespace 作成）より前。
+    const idxFirstClusterOp = tasks.findIndex((t) =>
+      (stringArg(t, 'shell') ?? '').includes('create namespace'),
+    )
+    expect(idxFirstClusterOp).toBeGreaterThanOrEqual(0)
+    expect(idxLookup).toBeLessThan(idxFirstClusterOp)
+  })
+
+  it('設計上の残余リスク（デプロイトークンの読み出し・SA トークンの回転手順）をロールに明記する', () => {
+    const header = readTasks().split('\n- name:')[0]
+    // jobs create + pods/log get で同 namespace の Secret をマウントした Job を作れば
+    // デプロイトークンは読み出せる。PAT を最小スコープにする前提を書く。
+    expect(header).toContain('read_repository')
+    // 冒頭の「他 namespace には一切アクセスできない」は API 権限の話でしかなかった。
+    expect(header).not.toContain('一切アクセスできない')
+    expect(header).toContain('NetworkPolicy')
+    // 無期限の SA トークンの回転手順。
+    expect(header).toContain('回転')
+    expect(readDefaults()).toContain('read_repository')
   })
 })

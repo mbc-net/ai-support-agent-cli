@@ -13,6 +13,12 @@ e2e_runner_k8s_role_binding_name: e2e-job-runner-binding
 
 # 必須。E2E対象リポジトリを clone するための、読み取り専用スコープの Personal
 # Access Token（Fine-grained PAT を推奨）。Secret のキー `git_token` として保存する。
+#
+# 最小スコープが前提: 生成する kubeconfig の保持者は、この Secret をマウントした Job を
+# 作ってログへ出力させれば平文を読み出せる（RBAC では塞げない。tasks/main.yml 冒頭
+# 「設計上の残余リスク」参照）。対象リポジトリ限定・読み取り専用（GitLab なら
+# read_repository、GitHub なら Fine-grained PAT の Contents: Read-only）で発行し、
+# 書き込み権や他リポジトリへの権限を持つトークンを渡さないこと。
 e2e_runner_k8s_git_deploy_token: ''
 
 # ジョブに割り当てる名前空間全体の資源上限（ResourceQuota）。Kubernetes の
