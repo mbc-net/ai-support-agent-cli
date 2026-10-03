@@ -101,6 +101,12 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # with a changed module interface (e.g. mysql_user/postgresql_user/
 # authorized_key parameter shape) that the bundled roles weren't validated
 # against.
+# `ansible.windows` / `community.windows` are needed for server setup on
+# Windows hosts over OpenSSH (admin-docs server-setup-windows-openssh.md §5.6).
+# Pinned to exact versions — the same ones as `collections` in
+# src/server-setup/windows-guard.json, whose per-module argument allowlists were
+# surveyed against them (checked by __tests__/server-setup/ansible-collections-sync.spec.ts).
+# Both require ansible-core >=2.16, so the ansible-core pin above is unchanged.
 # Installed to /usr/share/ansible/collections — one of ansible-core's default
 # collection search paths regardless of the runtime user's $HOME — so the
 # collections are found no matter which UID the container ultimately runs as
@@ -109,6 +115,8 @@ RUN ansible-galaxy collection install \
     'ansible.mysql:>=5.0.0,<6.0.0' \
     'community.postgresql:>=4.0.0,<5.0.0' \
     'ansible.posix:>=1.5.0,<2.0.0' \
+    'ansible.windows:3.8.0' \
+    'community.windows:3.3.0' \
     -p /usr/share/ansible/collections \
     && chmod -R a+rX /usr/share/ansible/collections
 

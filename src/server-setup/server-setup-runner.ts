@@ -61,8 +61,14 @@ import { resolveKnownHostsPath } from '../utils/known-hosts-store'
 import { isValidPort } from '../utils/port'
 import { redactSecretValues } from '../utils/secret-redaction'
 
-import { type AnsibleTaskRouteMode, validateAnsibleTasks } from './ansible-task-guard'
 import {
+  type AnsibleTargetOs,
+  type AnsibleTaskRouteMode,
+  validateAnsibleTasks,
+  WINDOWS_COLLECTION_VERSIONS,
+} from './ansible-task-guard'
+import {
+  SHARED_FILE_ROLE_NAME,
   SHARED_FILE_STAGING_DIR_VAR,
   collectSharedFileSources,
   stageSharedFiles,
@@ -83,6 +89,20 @@ const ANSIBLE_MAX_BUFFER_BYTES = 20 * 1024 * 1024
  * role in one run.
  */
 const ANSIBLE_TIMEOUT_MS = 30 * 60 * 1000
+
+/**
+ * Hard cap for runs that include a long-running role: `sentry` (install /
+ * migration) or `win_updates` (Windows Update plus reboots). Kept inside the
+ * api's two-hour stale-execution / command-assignment thresholds — see
+ * admin-docs `server-setup-windows-openssh.md` §5.5 before changing it.
+ */
+const ANSIBLE_LONG_RUNNING_TIMEOUT_MS = 100 * 60 * 1000
+
+/** Roles whose presence raises the hard cap to {@link ANSIBLE_LONG_RUNNING_TIMEOUT_MS}. */
+const LONG_RUNNING_ROLES: ReadonlySet<string> = new Set(['sentry', 'win_updates'])
+
+/** Task keys whose value is a nested task list (`block` / `rescue` / `always`). */
+const NESTED_TASK_LIST_KEYS = ['block', 'rescue', 'always'] as const
 
 /**
  * System-generated OS precheck task, prepended to every generated play (before
@@ -214,6 +234,83 @@ const SUDO_PRECHECK_ASSERT_TASK: Record<string, unknown> = {
 }
 
 /**
+ * `register` name for {@link WIN_WHOAMI_PROBE_TASK}'s result. Namespaced for the
+ * same reason as {@link SUDO_PROBE_REGISTER_VAR}: extra-vars always outrank a
+ * `register`ed variable, so a project (`ANSIBLE#`) variable of this name would
+ * silently replace the probe result. Such a variable is rejected up front
+ * (`runServerSetup` / the local runner), whatever the target OS.
+ */
+export const WIN_WHOAMI_REGISTER_VAR = '__ai_support_agent_server_setup_win_whoami'
+
+/**
+ * Windows OS precheck (replaces the Ubuntu `PRECHECK_TASK`). Windows Server
+ * 2019 / 2022 / 2025 are identified by the build number, the third field of
+ * `ansible_distribution_version` (P0 measured `10.0.20348.0` on Server 2022;
+ * `ansible_distribution` is English even on the Japanese edition, so the
+ * product name is not used). Build 17763 is shared with Windows 10 1809
+ * (client), so `ansible_os_installation_type` must also be `Server` or
+ * `Server Core` (P0 measured `Server` on Server 2022, admin-docs
+ * `server-setup-windows-openssh.md` §10; `Server Core` is admitted because it
+ * is common on servers and runs OpenSSH the same way, but was not measured in
+ * P0). Placed right after fact gathering so a non-Windows host fails here
+ * with a clear message instead of in `win_whoami`.
+ */
+const WINDOWS_PRECHECK_TASK: Record<string, unknown> = {
+  name: 'precheck : Verify supported OS',
+  'ansible.builtin.fail': {
+    msg:
+      'Unsupported OS: {{ ansible_distribution | default(\'unknown\') }} {{ ansible_distribution_version | default(\'\') }} '
+      + '(installation type: {{ ansible_os_installation_type | default(\'unknown\') }}). '
+      + 'Only Windows Server 2019/2022/2025 (build 17763/20348/26100, installation type Server or Server Core) are supported by server setup '
+      + 'execution on Windows hosts; client editions are not supported.',
+  },
+  when:
+    "ansible_os_family != 'Windows' or "
+    + "(ansible_os_installation_type | default('')) not in ['Server', 'Server Core'] or "
+    + "((ansible_distribution_version | default('')).split('.') | length) < 3 or "
+    + "(ansible_distribution_version | default('')).split('.')[2] not in ['17763', '20348', '26100']",
+  tags: 'always',
+}
+
+/**
+ * Reads the connection user's token. Windows plays run with `become: false`
+ * (an administrator logging in with a key gets an already-elevated session —
+ * confirmed in P0 for both the built-in Administrator and another local
+ * administrator), so this replaces the Linux NOPASSWD-sudo probe.
+ */
+const WIN_WHOAMI_PROBE_TASK: Record<string, unknown> = {
+  name: 'precheck : Inspect the connection user token',
+  'ansible.windows.win_whoami': {},
+  changed_when: false,
+  register: WIN_WHOAMI_REGISTER_VAR,
+  tags: 'always',
+}
+
+/**
+ * Fails the play unless the token has the Administrators group
+ * (S-1-5-32-544) Enabled and a High Mandatory Level label (S-1-16-12288) —
+ * the state P0 observed for administrator key logins. A filtered (UAC) token
+ * carries Administrators as deny-only and a Medium label, and would fail here.
+ */
+const WIN_ELEVATION_ASSERT_TASK: Record<string, unknown> = {
+  name: 'precheck : Verify the connection user is an elevated administrator',
+  'ansible.builtin.assert': {
+    that: [
+      `${WIN_WHOAMI_REGISTER_VAR}.groups | selectattr('sid', 'equalto', 'S-1-5-32-544') | selectattr('attributes', 'contains', 'Enabled') | list | length > 0`,
+      `${WIN_WHOAMI_REGISTER_VAR}.label.sid == 'S-1-16-12288'`,
+    ],
+    fail_msg:
+      "Server setup on Windows requires the SSH user '{{ ansible_user }}' to log in as an elevated local "
+      + 'administrator (Administrators group enabled, High Mandatory Level) on {{ inventory_hostname }}. '
+      + 'Add the user to the local Administrators group, register its public key in '
+      + 'C:\\ProgramData\\ssh\\administrators_authorized_keys, and keep the default '
+      + '"Match Group administrators" block in sshd_config.',
+    quiet: true,
+  },
+  tags: 'always',
+}
+
+/**
  * Reserved extra-var carrying **this agent process's** replica instance id
  * (`resolveInstanceId()`: `AI_SUPPORT_AGENT_INSTANCE_ID`, else `HOSTNAME`).
  *
@@ -269,6 +366,22 @@ interface ValidatedServerSetupPayload {
   executionId: string
   sshHostId: string
   body: string
+}
+
+/**
+ * Resolve the target OS of a `server_setup_exec` payload. The api sends
+ * `targetOs` only for Windows hosts, so an absent value is Linux (this also
+ * keeps payloads from older api builds working). An explicit `'linux'` is
+ * accepted as well. Anything else returns `null` and the caller rejects the
+ * run — an unknown OS must never fall back to Linux (フォールバック禁止).
+ */
+export function resolveTargetOs(
+  payload?: Pick<ServerSetupExecPayload, 'targetOs'> | null,
+): AnsibleTargetOs | null {
+  const targetOs: unknown = payload?.targetOs
+  if (targetOs === undefined) return 'linux'
+  if (targetOs === 'linux' || targetOs === 'windows') return targetOs
+  return null
 }
 
 /**
@@ -328,6 +441,7 @@ export function resolveRouteMode(
 function validatePayload(
   p: ServerSetupExecPayload,
   mode: AnsibleTaskRouteMode,
+  targetOs: AnsibleTargetOs,
 ): ValidatedServerSetupPayload | string {
   const executionId = typeof p?.executionId === 'string' && p.executionId ? p.executionId : null
   if (!executionId) return 'executionId is required for server_setup_exec'
@@ -345,7 +459,7 @@ function validatePayload(
   // dispatch path that forgot to call it. This is the *authoritative*
   // re-validation — rejecting here, before any SSH credential fetch or temp dir
   // creation, exactly like every other malformed-payload check above.
-  const guardResult = validateAnsibleTasks(body, { mode })
+  const guardResult = validateAnsibleTasks(body, { mode, targetOs })
   if (!guardResult.ok) {
     return `server_setup_exec: recipe body rejected: ${JSON.stringify(guardResult.violations)}`
   }
@@ -450,7 +564,35 @@ export function sentryPreflightTask(operation = 'install'): Record<string, unkno
     'ansible.builtin.command': {argv: ['/usr/bin/python3', '-c', SENTRY_PREFLIGHT_CODE, operation]}, changed_when: false }
 }
 
-export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]): string {
+/**
+ * Windows play (admin-docs `server-setup-windows-openssh.md` §5.4): `become:
+ * false`, the same explicit fact gathering, then the Windows OS precheck and
+ * the elevated-administrator check — no sudo probe, no Ubuntu precheck, no
+ * Sentry preflight (it needs `/usr/bin/python3`) and no `acl` install.
+ */
+function generateWindowsPlaybook(bodyTasks: readonly Record<string, unknown>[]): string {
+  return dump([
+    {
+      name: 'AI Support Agent server setup',
+      hosts: 'all',
+      become: false,
+      gather_facts: false,
+      tasks: [
+        GATHER_FACTS_TASK,
+        WINDOWS_PRECHECK_TASK,
+        WIN_WHOAMI_PROBE_TASK,
+        WIN_ELEVATION_ASSERT_TASK,
+        ...bodyTasks,
+      ],
+    },
+  ])
+}
+
+export function generatePlaybook(
+  bodyTasks: readonly Record<string, unknown>[],
+  targetOs: AnsibleTargetOs = 'linux',
+): string {
+  if (targetOs === 'windows') return generateWindowsPlaybook(bodyTasks)
   const sentry = inspectSentryTasks(bodyTasks)
   const recovery = sentry && sentry.operation !== 'install'
   const playbook: Record<string, unknown>[] = [
@@ -476,6 +618,39 @@ export function generatePlaybook(bodyTasks: readonly Record<string, unknown>[]):
   return dump(playbook)
 }
 
+/** Names of every role included by `tasks`, including those nested in `block`/`rescue`/`always`. */
+function collectIncludedRoleNames(tasks: readonly unknown[], into: Set<string> = new Set()): Set<string> {
+  for (const item of tasks) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) continue
+    const task = item as Record<string, unknown>
+    const role = task['ansible.builtin.include_role'] ?? task.include_role
+    if (role !== null && typeof role === 'object' && typeof (role as { name?: unknown }).name === 'string') {
+      into.add((role as { name: string }).name)
+    }
+    for (const key of NESTED_TASK_LIST_KEYS) {
+      const nested = task[key]
+      if (Array.isArray(nested)) collectIncludedRoleNames(nested, into)
+    }
+  }
+  return into
+}
+
+/**
+ * Hard wall-clock cap for the `ansible-playbook` run: 100 minutes when the
+ * body includes the `sentry` or `win_updates` role, otherwise 30 minutes.
+ *
+ * Only the cap is decided here. Sentry's own handling (stop-request polling,
+ * the post-run remote probe) stays keyed on `inspectSentryTasks`, because the
+ * probe assumes `/usr/bin/python3` on a Linux host and must never run for
+ * `win_updates`.
+ */
+export function resolveAnsibleTimeoutMs(tasks: readonly unknown[]): number {
+  for (const role of collectIncludedRoleNames(tasks)) {
+    if (LONG_RUNNING_ROLES.has(role)) return ANSIBLE_LONG_RUNNING_TIMEOUT_MS
+  }
+  return ANSIBLE_TIMEOUT_MS
+}
+
 // redactSecretValues moved to ../utils/secret-redaction (shared by claude-code-runner.ts /
 // codex-runner.ts). Re-exported here (see import above) so existing imports from this
 // module keep working.
@@ -487,8 +662,13 @@ export { redactSecretValues }
  * (mis)parsed as an extra inventory variable assignment.
  */
 const HOSTNAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/
-/** Portable username: letters/digits/underscore/hyphen only. */
-const USERNAME_RE = /^[A-Za-z0-9_-]+$/
+/**
+ * Portable username: letters/digits/underscore/dot/hyphen, not starting with
+ * `-` (could be read as an option) or `.`. The dot admits the common Windows
+ * `john.doe` form; the value only ever becomes `ansible_user`, which Ansible
+ * passes to ssh as an argv `-o User=...` (never through a shell).
+ */
+const USERNAME_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/
 
 
 /**
@@ -539,6 +719,48 @@ export function validateSshCredential(credential: SshExecCredential): string | n
 }
 
 /**
+ * Cross-check a fetched SSH credential against the target OS the run was
+ * dispatched for (admin-docs `server-setup-windows-openssh.md` §4 ⑧ / §5.2).
+ *
+ * - The credential's `os` (absent = Linux) must equal `targetOs`. The api
+ *   decides `targetOs` at dispatch time, but the credential is read later, so
+ *   a host whose OS setting changed in between (TOCTOU) is caught here.
+ * - Windows hosts are supported over direct SSH with public-key auth only:
+ *   `authType` must be `privateKey`, and the credential must carry **no**
+ *   `connectionType` key at all — the api puts it in the response only for
+ *   Tailscale and SSM routes.
+ *
+ * Returns a user-facing reason, or `null` when the credential fits.
+ */
+export function validateCredentialForTargetOs(
+  credential: SshExecCredential,
+  targetOs: AnsibleTargetOs,
+): string | null {
+  const rawOs: unknown = credential.os
+  if (rawOs !== undefined && rawOs !== 'linux' && rawOs !== 'windows') {
+    return `SSH credential os is not supported: ${JSON.stringify(rawOs)} (expected "windows" or no value for Linux)`
+  }
+  const hostOs: AnsibleTargetOs = rawOs ?? 'linux'
+  if (hostOs !== targetOs) {
+    return `Target OS mismatch: this run was dispatched for target OS '${targetOs}', but SSH host `
+      + `'${credential.hostId}' is now configured as '${hostOs}'. The host's OS setting may have changed `
+      + 'after the run was started; check the host and recipe OS settings and start the run again.'
+  }
+  if (targetOs !== 'windows') return null
+  if (credential.authType !== 'privateKey') {
+    return `Server setup on Windows hosts requires public-key authentication, but SSH host `
+      + `'${credential.hostId}' uses authType ${JSON.stringify(credential.authType)}. Switch the host to `
+      + 'private key authentication and register the public key in C:\\ProgramData\\ssh\\administrators_authorized_keys.'
+  }
+  if (Object.prototype.hasOwnProperty.call(credential, 'connectionType')) {
+    return 'Server setup on Windows hosts supports only a direct SSH connection, but the credential for SSH host '
+      + `'${credential.hostId}' carries connectionType ${JSON.stringify(credential.connectionType)} `
+      + '(Tailscale / SSM routes are not supported for Windows). Change the host to a direct SSH connection.'
+  }
+  return null
+}
+
+/**
  * Normalize private-key material before it is written to the on-disk `id_rsa`
  * file that ansible hands to the OpenSSH `ssh` client.
  *
@@ -564,6 +786,12 @@ function normalizePrivateKeyMaterial(privateKey: string): string {
   return privateKey.replace(/\r\n?/g, '\n').replace(/\s+$/, '') + '\n'
 }
 
+/** Inventory variables added for Windows hosts (admin-docs `server-setup-windows-openssh.md` §5.3). */
+const WINDOWS_CONNECTION_VARS = {
+  ansible_connection: 'ssh',
+  ansible_shell_type: 'powershell',
+} as const
+
 /**
  * Build a minimal single-host Ansible inventory as JSON — written with a
  * `.yml` extension because plain JSON is valid YAML, so ansible-core's bundled
@@ -587,7 +815,12 @@ function normalizePrivateKeyMaterial(privateKey: string): string {
  * `ansible_ssh_private_key_file` entirely — `keyPath` is only meaningful, and
  * only written to disk by the caller, in the key case.
  */
-function buildInventory(credential: SshExecCredential, keyPath: string, knownHostsPath: string): string {
+function buildInventory(
+  credential: SshExecCredential,
+  keyPath: string,
+  knownHostsPath: string,
+  targetOs: AnsibleTargetOs,
+): string {
   const isTailscale = credential.connectionType === 'tailscale'
   const ansibleHost = isTailscale ? (credential.tailnetHostname as string) : credential.hostname
   const socksPort = credential.socksPort ?? TAILSCALE_SOCKS_PORT
@@ -607,11 +840,141 @@ function buildInventory(credential: SshExecCredential, keyPath: string, knownHos
           ansible_user: credential.username,
           ...authVars,
           ansible_ssh_common_args: commonArgs,
+          // Windows OpenSSH with PowerShell as the default shell (a host
+          // prerequisite). Fixed by the agent; `ansible_*` stays reserved in
+          // the guard, so a recipe cannot change it.
+          ...(targetOs === 'windows' ? WINDOWS_CONNECTION_VARS : {}),
         },
       },
     },
   }
   return JSON.stringify(inventory)
+}
+
+/**
+ * Reject project variables that collide with a generated precheck's `register`
+ * target ({@link SUDO_PROBE_REGISTER_VAR} / {@link WIN_WHOAMI_REGISTER_VAR}).
+ * Extra-vars always outrank a `register`ed variable, so such a variable would
+ * silently replace the probe result. Checked for both OSes so a variable that
+ * is harmless today does not start breaking runs when the host's OS changes.
+ *
+ * @returns a user-facing reason, or `null` when there is no collision.
+ */
+export function findReservedVariableCollision(variables: Record<string, string>): string | null {
+  if (Object.prototype.hasOwnProperty.call(variables, SUDO_PROBE_REGISTER_VAR)) {
+    return `Project variable name '${SUDO_PROBE_REGISTER_VAR}' is reserved for server setup's internal `
+      + 'passwordless-sudo precheck and cannot be used. Rename this project variable and retry.'
+  }
+  if (Object.prototype.hasOwnProperty.call(variables, WIN_WHOAMI_REGISTER_VAR)) {
+    return `Project variable name '${WIN_WHOAMI_REGISTER_VAR}' is reserved for server setup's internal `
+      + 'Windows administrator precheck and cannot be used. Rename this project variable and retry.'
+  }
+  return null
+}
+
+/** Upper bound for the `ansible-galaxy collection list` pre-flight. */
+const ANSIBLE_GALAXY_LIST_TIMEOUT_MS = 2 * 60 * 1000
+
+/**
+ * `ansible-galaxy collection install` command pinning the Windows collections.
+ * `force` is needed to replace an already-installed different version
+ * (without it ansible-galaxy keeps the installed one).
+ */
+function windowsCollectionInstallHint(force = false): string {
+  const specs = Object.entries(WINDOWS_COLLECTION_VERSIONS).map(([name, version]) => `${name}:${version}`)
+  return `ansible-galaxy collection install ${force ? '--force ' : ''}${specs.join(' ')}`
+}
+
+/**
+ * Verify that the Windows collections (`ansible.windows` / `community.windows`,
+ * pinned in windows-guard.json) are installed on this agent host, using
+ * `ansible-galaxy collection list --format json` with the run's environment.
+ * A missing collection, or an installed version different from the pin (or
+ * one that reports no version), fails the run with the install command to use:
+ * the guard's argument allowlists were surveyed against the pinned versions,
+ * so a play on another version is not covered by them. Every copy in every
+ * collections path is checked: the listing's order is not the load order, so
+ * any non-pinned copy fails the run.
+ *
+ * @returns a user-facing reason, or `null` when both collections are present.
+ */
+function checkWindowsCollections(env: NodeJS.ProcessEnv): Promise<string | null> {
+  const uid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_UID])
+  const gid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_GID])
+  const failure = (detail: string): string =>
+    `Failed to verify the Ansible collections required for Windows hosts (ansible-galaxy collection list): ${detail}. `
+    + `The Docker image includes them; a --no-docker agent must install them with: ${windowsCollectionInstallHint()}`
+  return new Promise((resolve) => {
+    execFile(
+      'ansible-galaxy',
+      ['collection', 'list', '--format', 'json'],
+      {
+        env,
+        maxBuffer: ANSIBLE_MAX_BUFFER_BYTES,
+        timeout: ANSIBLE_GALAXY_LIST_TIMEOUT_MS,
+        ...(uid !== undefined && { uid }),
+        ...(gid !== undefined && { gid }),
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const detail = String(stderr ?? '').trim().substring(0, 500) || getErrorMessage(error)
+          resolve(failure(detail))
+          return
+        }
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(String(stdout))
+        } catch {
+          resolve(failure('its output could not be parsed as JSON'))
+          return
+        }
+        // { "<collections path>": { "<namespace.name>": { "version": "x.y.z" } } }.
+        // The key order is NOT the load order: ansible-galaxy merges the search
+        // paths through a set and sorts them by path name (ansible-core
+        // cli/galaxy.py). So every copy of a pinned collection, in any path,
+        // must be the pinned version — whichever copy ansible-playbook loads.
+        const copies = new Map<string, Array<{ dir: string; version: string }>>()
+        if (parsed !== null && typeof parsed === 'object') {
+          for (const [collectionsPath, collections] of Object.entries(parsed as Record<string, unknown>)) {
+            if (collections === null || typeof collections !== 'object' || Array.isArray(collections)) continue
+            for (const [name, info] of Object.entries(collections as Record<string, unknown>)) {
+              const version = (info as { version?: unknown } | null)?.version
+              const list = copies.get(name) ?? []
+              list.push({
+                dir: `${collectionsPath}/${name.split('.').join('/')}`,
+                version: typeof version === 'string' ? version : 'unknown',
+              })
+              copies.set(name, list)
+            }
+          }
+        }
+        const missing = Object.keys(WINDOWS_COLLECTION_VERSIONS).filter((name) => !copies.has(name))
+        if (missing.length > 0) {
+          resolve(
+            `Windows server setup requires the Ansible collection(s) ${missing.join(', ')}, which are not installed `
+            + `on this agent host. The Docker image includes them; a --no-docker agent must install them with: ${windowsCollectionInstallHint()}`,
+          )
+          return
+        }
+        const mismatched = Object.entries(WINDOWS_COLLECTION_VERSIONS).flatMap(([name, pinned]) =>
+          (copies.get(name) ?? [])
+            .filter((copy) => copy.version !== pinned)
+            .map((copy) => `${name} ${copy.version} at ${copy.dir} (requires ${pinned})`),
+        )
+        if (mismatched.length > 0) {
+          resolve(
+            `Windows server setup requires the pinned Ansible collection versions in every collections path, but this `
+            + `agent host has ${mismatched.join(', ')}. The Windows task guard was validated against the pinned versions `
+            + `only, and ansible-playbook may load any of the installed copies. Remove the copies that are not the pinned `
+            + `version (delete the directories listed above), then install the pinned versions with: `
+            + `${windowsCollectionInstallHint(true)}`,
+          )
+          return
+        }
+        resolve(null)
+      },
+    )
+  })
 }
 
 interface AnsibleRunResult {
@@ -973,6 +1336,13 @@ export interface ExecuteServerSetupAnsibleInput {
   body: string
   /** Guard allowlist mode — must match the mode the caller validated `body` under. */
   mode: AnsibleTaskRouteMode
+  /**
+   * Target OS — selects the guard allowlist, the generated play and the
+   * inventory shape. Required: a missing/unknown value fails the run rather
+   * than defaulting to Linux. The caller must already have checked the
+   * credential against it (`validateCredentialForTargetOs`).
+   */
+  targetOs: AnsibleTargetOs
   /** SSH connection parameters (already passed through `validateSshCredential` by the caller). */
   credential: SshExecCredential
   /** Project (`ANSIBLE#`) variables written verbatim to `extra-vars.json`. */
@@ -1030,7 +1400,13 @@ export interface ExecuteServerSetupAnsibleInput {
 export async function executeServerSetupAnsible(
   input: ExecuteServerSetupAnsibleInput,
 ): Promise<CommandResult> {
-  const { executionId, body, mode, credential, variables, secretNames, tenantCode, sshHostId, commandId, client, onProgress, onAwaitingSelfRestart } = input
+  const { executionId, body, mode, targetOs, credential, variables, secretNames, tenantCode, sshHostId, commandId, client, onProgress, onAwaitingSelfRestart } = input
+
+  // Fail closed before anything touches the disk: an absent/unknown OS must
+  // never silently become a Linux run.
+  if (targetOs !== 'linux' && targetOs !== 'windows') {
+    return errorResult(`server_setup_exec: targetOs must be "linux" or "windows" (got ${JSON.stringify(targetOs)})`)
+  }
 
   // Resolve the bundled roles/callback-plugins paths first (a packaging error
   // here is surfaced verbatim), then the persistent known_hosts file. Both are
@@ -1086,7 +1462,7 @@ export async function executeServerSetupAnsible(
       // password (ansible_ssh_pass) — same permission level as id_rsa/
       // extra-vars.json alongside it.
       const inventoryPath = path.join(tmpDir, 'inventory.yml')
-      writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath), { mode: 0o600 })
+      writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath, targetOs), { mode: 0o600 })
 
       // Re-validate the body with the *real* `secretNames` just fetched, so the
       // normalized tasks carry accurate `no_log: true` annotations.
@@ -1095,7 +1471,7 @@ export async function executeServerSetupAnsible(
       // behavior is non-deterministic across calls — treated as an internal
       // error (fail-closed) rather than silently proceeding.
       const secretNameSet = new Set(secretNames)
-      const guardResult = validateAnsibleTasks(body, { mode, secretVarNames: secretNameSet })
+      const guardResult = validateAnsibleTasks(body, { mode, targetOs, secretVarNames: secretNameSet })
       if (!guardResult.ok || !guardResult.normalizedTasks) {
         logger.error(
           `[server-setup] recipe body guard re-validation failed unexpectedly: ${JSON.stringify(guardResult.violations)}`,
@@ -1105,14 +1481,28 @@ export async function executeServerSetupAnsible(
         )
       }
 
-      sentry = inspectSentryTasks(guardResult.normalizedTasks)
+      const sentryInspection = inspectSentryTasks(guardResult.normalizedTasks)
+      const sharedFileSources = collectSharedFileSources(guardResult.normalizedTasks)
+      if (targetOs === 'windows') {
+        // The guard already rejects these Linux-only roles for Windows
+        // (ROLE_TARGET_OS). Checked again here so the shared-file staging and
+        // the Sentry supervision (stop polling + a `/usr/bin/python3` probe)
+        // can never run against a Windows host even if the guard data drifts.
+        if (sentryInspection) {
+          return errorResult('server_setup_exec: the Sentry roles are not supported on Windows hosts')
+        }
+        if (sharedFileSources.length > 0) {
+          return errorResult(`server_setup_exec: the ${SHARED_FILE_ROLE_NAME} role is not supported on Windows hosts`)
+        }
+      }
+      sentry = sentryInspection
+      const timeoutMs = resolveAnsibleTimeoutMs(guardResult.normalizedTasks)
 
       // Stage the shared files the body distributes, before anything is run.
       // `shared_file_src` is guaranteed to be a literal by the guard, so the set
       // of files is decidable here; that is the whole reason the guard forbids
       // templating it. Staging failures must abort the run: proceeding would
       // hand the target server a partial set of files.
-      const sharedFileSources = collectSharedFileSources(guardResult.normalizedTasks)
       let sharedFileStagingDir: string | undefined
       if (sharedFileSources.length > 0) {
         if (!client) {
@@ -1182,7 +1572,7 @@ export async function executeServerSetupAnsible(
       )
 
       const playbookPath = path.join(tmpDir, 'generated-playbook.yml')
-      writeFileSync(playbookPath, generatePlaybook(guardResult.normalizedTasks))
+      writeFileSync(playbookPath, generatePlaybook(guardResult.normalizedTasks, targetOs))
 
       // Verbosity and diff are ini settings as much as they are env vars, and
       // ansible picks up an ansible.cfg from ANSIBLE_CONFIG, the cwd, the home
@@ -1197,6 +1587,16 @@ export async function executeServerSetupAnsible(
         ansibleCfgPath,
         ['[defaults]', 'verbosity = 0', 'debug = False', '', '[diff]', 'always = False', ''].join('\n'),
       )
+
+      // Windows needs the ansible.windows / community.windows collections. The
+      // Docker image ships them, but a `--no-docker` agent may not have them:
+      // fail with an actionable message instead of an opaque "couldn't
+      // resolve module" from ansible-playbook. Uses the run's own ansible.cfg
+      // so it sees the same collection paths as the playbook run.
+      if (targetOs === 'windows') {
+        const collectionError = await checkWindowsCollections({ ...process.env, ANSIBLE_CONFIG: ansibleCfgPath })
+        if (collectionError) return errorResult(collectionError)
+      }
 
       const args = ['-i', inventoryPath, playbookPath, '-e', `@${extraVarsPath}`]
 
@@ -1263,7 +1663,7 @@ export async function executeServerSetupAnsible(
           : undefined
 
       logger.info(
-        `[server-setup] Running ansible-playbook: executionId=${executionId} mode=${mode} tasks=${guardResult.normalizedTasks.length}`,
+        `[server-setup] Running ansible-playbook: executionId=${executionId} mode=${mode} targetOs=${targetOs} tasks=${guardResult.normalizedTasks.length}`,
       )
       let runOutcome: AnsibleRunResult
       try {
@@ -1308,7 +1708,7 @@ export async function executeServerSetupAnsible(
         // inherited value can never redirect a run's progress at another path;
         // `undefined` both clears that and leaves the channel off.
         AI_SUPPORT_AGENT_PROGRESS_FILE: progressPath,
-      }, commandId, sentry ? 100 * 60 * 1000 : ANSIBLE_TIMEOUT_MS, sentry ? input.readStopRequest : undefined)
+      }, commandId, timeoutMs, sentry ? input.readStopRequest : undefined)
       } finally {
         // Stop before the temp dir (and the progress file inside it) is
         // removed. `stop()` also drains whatever ansible wrote between the
@@ -1363,9 +1763,9 @@ export async function executeServerSetupAnsible(
 
       if (timedOut) {
         logger.error(
-          `[server-setup] ansible-playbook timed out after ${sentry ? 100 * 60 * 1000 : ANSIBLE_TIMEOUT_MS}ms: executionId=${executionId}`,
+          `[server-setup] ansible-playbook timed out after ${timeoutMs}ms: executionId=${executionId}`,
         )
-        return errorResult(`ansible-playbook execution timed out after ${Math.floor((sentry ? 100 * 60 * 1000 : ANSIBLE_TIMEOUT_MS) / 1000)}s`)
+        return errorResult(`ansible-playbook execution timed out after ${Math.floor(timeoutMs / 1000)}s`)
       }
 
       if (spawnError) {
@@ -1452,7 +1852,13 @@ export async function runServerSetup(
   ctx: RunServerSetupContext,
 ): Promise<CommandResult> {
   const mode = resolveRouteMode(payload)
-  const validated = validatePayload(payload, mode)
+  const targetOs = resolveTargetOs(payload)
+  if (targetOs === null) {
+    return errorResult(
+      `server_setup_exec: unsupported targetOs ${JSON.stringify(payload?.targetOs)} (expected "windows" or no value for Linux)`,
+    )
+  }
+  const validated = validatePayload(payload, mode, targetOs)
   if (typeof validated === 'string') {
     return errorResult(validated)
   }
@@ -1477,7 +1883,7 @@ export async function runServerSetup(
   }
   const credential: SshExecCredential = credentialSettled.value
 
-  const credentialError = validateSshCredential(credential)
+  const credentialError = validateSshCredential(credential) ?? validateCredentialForTargetOs(credential, targetOs)
   if (credentialError) {
     return errorResult(credentialError)
   }
@@ -1491,11 +1897,9 @@ export async function runServerSetup(
   // order, so a project variable that happened to share SUDO_PROBE_REGISTER_VAR's
   // name would silently shadow the sudo probe's result. Fail closed with a
   // clear message instead of letting the precheck misbehave.
-  if (Object.prototype.hasOwnProperty.call(serverSetupVariables.variables, SUDO_PROBE_REGISTER_VAR)) {
-    return errorResult(
-      `Project variable name '${SUDO_PROBE_REGISTER_VAR}' is reserved for server setup's internal `
-      + 'passwordless-sudo precheck and cannot be used. Rename this project variable and retry.',
-    )
+  const reservedError = findReservedVariableCollision(serverSetupVariables.variables)
+  if (reservedError) {
+    return errorResult(reservedError)
   }
 
   // known_hosts is resolved inside `executeServerSetupAnsible` (from the tenant
@@ -1505,6 +1909,7 @@ export async function runServerSetup(
     executionId: validated.executionId,
     body: validated.body,
     mode,
+    targetOs,
     credential,
     variables: serverSetupVariables.variables,
     secretNames: serverSetupVariables.secretNames,

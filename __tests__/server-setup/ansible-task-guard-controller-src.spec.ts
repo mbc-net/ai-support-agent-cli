@@ -19,8 +19,8 @@ import {
  * 対象タスクは先頭に無害なタスクを 1 つ置いて index 1 にし、taskIndex の検査を有効にする。
  */
 describe('コントローラ側ファイルの持ち出し経路（文字列形式・unarchive/uri の src）', () => {
-  const ecs = { mode: 'ecs' as const }
-  const resident = { mode: 'resident' as const }
+  const ecs = { mode: 'ecs' as const, targetOs: 'linux' as const }
+  const resident = { mode: 'resident' as const, targetOs: 'linux' as const }
   type Opts = typeof ecs | typeof resident
 
   /** 対象タスクの前に置く無害なタスク（対象を taskIndex 1 にするため）。 */

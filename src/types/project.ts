@@ -316,6 +316,13 @@ export function unsupportedSshAuthTypeMessage(authType: unknown): string {
  * directly and must never log it.
  */
 export interface SshExecCredential extends SshCredentialCommon, PlainSshConnectionFields {
+  /**
+   * Host OS from the host settings, present only for Windows hosts (absent
+   * means Linux). `server_setup_exec` compares it with the payload's
+   * `targetOs` to detect an OS change after dispatch (admin-docs
+   * `server-setup-windows-openssh.md` §5.2).
+   */
+  os?: 'windows'
   connectionType?: 'ssh' | 'tailscale'
   tailnetHostname?: string
   socksPort?: number

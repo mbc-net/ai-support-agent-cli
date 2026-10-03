@@ -18,8 +18,8 @@ import {
  * 「拒否される（ok:false）」か、no_log 系は「拒否されるか no_log が付く」のどちらか。
  */
 describe('モジュール引数の文字列（free-form）形式の検証', () => {
-  const ecs = { mode: 'ecs' as const }
-  const resident = { mode: 'resident' as const }
+  const ecs = { mode: 'ecs' as const, targetOs: 'linux' as const }
+  const resident = { mode: 'resident' as const, targetOs: 'linux' as const }
 
   const hasReason = (
     violations: AnsibleTaskViolation[],
@@ -29,7 +29,7 @@ describe('モジュール引数の文字列（free-form）形式の検証', () =
   describe('copy の src（コントローラ側ファイル読み取り）は文字列形式でも拒否されるべき', () => {
     // マッピング形式（`copy: { src: ... }`）は既存テストで拒否される。
     // 文字列形式は `isPlainObject(moduleArgs)` ガードを満たさず、src 検査が一度も走らない。
-    const bodies: Array<[string, string, { mode: 'ecs' | 'resident' }]> = [
+    const bodies: Array<[string, string, { mode: 'ecs' | 'resident'; targetOs: 'linux' }]> = [
       [
         'FQCN k=v 形式・ecs',
         `- name: copy via kv\n  ansible.builtin.copy: src=/some/controller/path dest=/tmp/x`,
@@ -78,6 +78,7 @@ describe('モジュール引数の文字列（free-form）形式の検証', () =
       const body = `- name: dump secret\n  ansible.builtin.debug: var=DB_PASSWORD`
       const result = validateAnsibleTasks(body, {
         mode: 'ecs',
+        targetOs: 'linux',
         secretVarNames: new Set(['DB_PASSWORD']),
       })
       const task = (result.normalizedTasks ?? [])[0] as
@@ -90,6 +91,7 @@ describe('モジュール引数の文字列（free-form）形式の検証', () =
       const body = `- name: oracle\n  ansible.builtin.assert: that="DB_PASSWORD is match('^a')"`
       const result = validateAnsibleTasks(body, {
         mode: 'ecs',
+        targetOs: 'linux',
         secretVarNames: new Set(['DB_PASSWORD']),
       })
       const task = (result.normalizedTasks ?? [])[0] as

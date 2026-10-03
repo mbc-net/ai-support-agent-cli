@@ -3,6 +3,8 @@ import { DEFAULT_SCHEMA, load } from 'js-yaml'
 import { toErrorMessage } from '../utils'
 import { isPlainObject } from '../utils/is-plain-object'
 
+import windowsGuardJson from './windows-guard.json'
+
 /**
  * サーバーセットアップレシピ本体（`body` = Ansible タスク列 YAML）の静的検証ガード。
  *
@@ -36,14 +38,34 @@ import { isPlainObject } from '../utils/is-plain-object'
  * `FORBIDDEN_TASK_KEYS` の対象から除外し、中身は他タスクの `vars`（禁止のまま）と同じ
  * 予約語・マジック変数名チェックを適用する。
  *
- * 設計: admin-docs/docs/specifications/git-artifact-platform.md
+ * ## 対象 OS（`targetOs`）
+ * - `linux`: 上記の allowlist（`MODULE_ALLOWLIST` 等）で検証する。Windows のモジュールは
+ *   allowlist に無いので拒否される。
+ * - `windows`: モジュールの allowlist を `windows-guard.json` の Windows 用に切り替え、
+ *   さらにモジュールごとの**引数の allowlist** と値の制約で検査する
+ *   （{@link validateWindowsModuleArgs}）。`ecs` / `resident` で差は設けない。
+ * - `include_role` は両 OS とも、ロールと OS の対応表（{@link ROLE_TARGET_OS}）で OS が
+ *   一致するロールだけを許可する。
+ * - denylist・lookup 拒否・`ansible_*` 予約・`become*` の扱いは OS に関係なく同じ。
+ *
+ * 設計: admin-docs/docs/specifications/git-artifact-platform.md /
+ * admin-docs/docs/specifications/server-setup-windows-openssh.md §6
  */
 
 export type AnsibleTaskRouteMode = 'resident' | 'ecs'
 
+/** レシピの対象 OS。 */
+export type AnsibleTargetOs = 'linux' | 'windows'
+
 export interface ValidateAnsibleTasksOptions {
   /** 実行経路。`ecs`=厳格、`resident`=モジュール allowlist 寛容化。 */
   mode: AnsibleTaskRouteMode
+  /**
+   * レシピの対象 OS。モジュールの allowlist と include_role できるロールを選ぶ。
+   * **必須**（省略可能にすると、呼び出し元の渡し忘れが Linux 扱いで黙って通るため。
+   * 渡し忘れはコンパイルで検出し、実行時に不正な値が来たら全体を拒否する）。
+   */
+  targetOs: AnsibleTargetOs
   /**
    * この検証呼び出し時点で「secretとして扱うべき」変数名の集合
    * （api保存時は空集合でよい。no_log付与はagent実行時に行う）。
@@ -242,15 +264,22 @@ const FREE_FORM_ARGS_MODULE_KEYS: ReadonlySet<string> = new Set([
  * 走査など、マッピングのキーを見る静的な検査がすべて素通りする。`_ansible_*` 等の他の内部引数も
  * レシピから書く正当な用途は無いので、`_` で始まるキーはまとめて拒否する。
  *
- * 例外は command / shell の `_raw_params` だけ（文字列形式の本来の展開先で、コマンド文字列として
- * 扱われる）。set_fact は raw-param モジュールなので `_raw_params` は移されないが、
+ * 例外は文字列形式を許可するモジュール（`freeFormModuleKeys`。Linux は command / shell、
+ * Windows は win_command / win_shell。{@link freeFormArgsModuleKeysFor} 参照）の `_raw_params`
+ * だけ（文字列形式の本来の展開先で、コマンド文字列として扱われる）。Windows の 2 つは
+ * `windows-guard.json` の引数 allowlist にも `_raw_params` を持つので、両方の検査で同じ扱いになる。
+ * set_fact は raw-param モジュールなので `_raw_params` は移されないが、
  * `_variable_params` は同じくマージされ、予約名・ロール名前空間の検査を経ずに任意の変数を
  * 書ける（2.17.14 で実測）。set_fact では変数名として `_` 始まりを使い得るので、
  * {@link isAnsibleInternalArgName} の内部引数名だけを拒否する。
  */
-function isForbiddenInternalModuleArgKey(normalizedModule: string, argKey: string): boolean {
+function isForbiddenInternalModuleArgKey(
+  normalizedModule: string,
+  argKey: string,
+  freeFormModuleKeys: ReadonlySet<string>,
+): boolean {
   if (!argKey.startsWith('_')) return false
-  return !(argKey === '_raw_params' && FREE_FORM_ARGS_MODULE_KEYS.has(normalizedModule))
+  return !(argKey === '_raw_params' && freeFormModuleKeys.has(normalizedModule))
 }
 
 /** Ansible がモジュール引数として内部で扱う名前（set_fact の変数名として拒否する対象）。 */
@@ -414,6 +443,10 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
   'keycloak',
   'zabbix_server',
   'zabbix_web',
+  // Windows（targetOs: 'windows'）専用。OS の対応は windows-guard.json の roleTargetOs。
+  'win_ssh_key',
+  'win_os_init',
+  'win_updates',
 ])
 
 /**
@@ -702,6 +735,21 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
   ]),
   web_server: new Set([
     'web_server_type',
+  ]),
+  win_os_init: new Set([
+    'win_os_init_firewall_enabled',
+    'win_os_init_firewall_rules',
+    'win_os_init_hostname',
+    'win_os_init_hostname_enabled',
+    'win_os_init_timezone',
+    'win_os_init_timezone_enabled',
+  ]),
+  win_ssh_key: new Set([
+    'win_ssh_key_public_keys',
+  ]),
+  win_updates: new Set([
+    'win_updates_category_names',
+    'win_updates_reboot',
   ]),
   zabbix_server: new Set([
     'zabbix_server_db_host',
@@ -1024,6 +1072,13 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'tailscale_has_authkey',
   'tailscale_install_result',
   'tailscale_up_result',
+  // win_os_init
+  'win_os_init_hostname_result',
+  'win_os_init_sshd_listen_ports',
+  // win_ssh_key
+  'win_ssh_key_dir_stat',
+  // win_updates
+  'win_updates_result',
   // zabbix_agent
   'zabbix_agent_invocation',
   'zabbix_agent_is_active',
@@ -1136,10 +1191,222 @@ function normalizeModuleKey(key: string, mode: AnsibleTaskRouteMode): string {
   return key
 }
 
-/** mode に応じた実効モジュール allowlist を返す。 */
-function moduleAllowlistFor(mode: AnsibleTaskRouteMode): ReadonlySet<string> {
+/** 引数の値の制約（`windows-guard.json` の `argConstraints` の1件）。 */
+export interface WindowsArgConstraint {
+  regex: RegExp
+  description: string
+}
+
+/** Windows のモジュール1つ分の引数ルール（`windows-guard.json` の `modules` の1件）。 */
+export interface WindowsModuleRule {
+  /** 文字列形式（フリーフォーム）を認めるか。 */
+  freeForm: boolean
+  /** 許可する引数（エイリアスを含む）。一覧外は拒否する。 */
+  args: ReadonlySet<string>
+  /** 明示的に拒否する引数と理由（違反の理由の表示用。判定は `args` で行う）。 */
+  deniedArgs: ReadonlyMap<string, string>
+  /** 許可引数の値の制約。 */
+  argConstraints: ReadonlyMap<string, WindowsArgConstraint>
+}
+
+export interface WindowsGuardData {
+  collections: Readonly<Record<string, string>>
+  /** Windows で使えるモジュール（`controllerOnlyModules` と `modules` のキーの和）。 */
+  moduleAllowlist: ReadonlySet<string>
+  modules: Readonly<Record<string, WindowsModuleRule>>
+  roleTargetOs: Readonly<Record<string, AnsibleTargetOs>>
+}
+
+function guardDataError(message: string): Error {
+  return new Error(`windows-guard.json is malformed: ${message}`)
+}
+
+function parseStringArray(value: unknown, where: string): string[] {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) {
+    throw guardDataError(`${where} must be an array of strings`)
+  }
+  return value as string[]
+}
+
+function parseStringRecord(value: unknown, where: string): Record<string, string> {
+  if (!isPlainObject(value) || !Object.values(value).every((v) => typeof v === 'string')) {
+    throw guardDataError(`${where} must be an object of strings`)
+  }
+  return value as Record<string, string>
+}
+
+function parseWindowsModuleRule(moduleName: string, raw: unknown): WindowsModuleRule {
+  const where = `modules["${moduleName}"]`
+  if (!isPlainObject(raw)) throw guardDataError(`${where} must be an object`)
+  const args = new Set(parseStringArray(raw.args, `${where}.args`))
+  if (raw.freeForm !== undefined && typeof raw.freeForm !== 'boolean') {
+    throw guardDataError(`${where}.freeForm must be a boolean`)
+  }
+  const deniedArgs = new Map(
+    Object.entries(parseStringRecord(raw.deniedArgs ?? {}, `${where}.deniedArgs`)),
+  )
+  for (const arg of deniedArgs.keys()) {
+    if (args.has(arg)) throw guardDataError(`${where}: "${arg}" is both allowed and denied`)
+  }
+  if (raw.argConstraints !== undefined && !isPlainObject(raw.argConstraints)) {
+    throw guardDataError(`${where}.argConstraints must be an object`)
+  }
+  const argConstraints = new Map<string, WindowsArgConstraint>()
+  for (const [arg, constraint] of Object.entries(raw.argConstraints ?? {})) {
+    const cwhere = `${where}.argConstraints["${arg}"]`
+    if (!args.has(arg)) throw guardDataError(`${cwhere} constrains an argument that is not allowed`)
+    if (
+      !isPlainObject(constraint) ||
+      typeof constraint.pattern !== 'string' ||
+      (constraint.flags !== undefined && typeof constraint.flags !== 'string') ||
+      typeof constraint.description !== 'string'
+    ) {
+      throw guardDataError(`${cwhere} must have string pattern / description (and optional string flags)`)
+    }
+    let regex: RegExp
+    try {
+      regex = new RegExp(constraint.pattern, constraint.flags as string | undefined)
+    } catch (error) {
+      throw guardDataError(`${cwhere}.pattern is not a valid regular expression: ${toErrorMessage(error)}`)
+    }
+    argConstraints.set(arg, { regex, description: constraint.description })
+  }
+  return { freeForm: raw.freeForm === true, args, deniedArgs, argConstraints }
+}
+
+/**
+ * `windows-guard.json` の中身を検査して、ガードが使う形に変換する。
+ * 形が崩れていたら例外を投げる（モジュール読み込み時に失敗させる＝ fail-closed。
+ * 崩れた JSON を部分的に読んで一部の検査だけが外れる状態を作らない）。
+ */
+export function parseWindowsGuardData(raw: unknown): WindowsGuardData {
+  if (!isPlainObject(raw)) throw guardDataError('root must be an object')
+  const collections = parseStringRecord(raw.collections, 'collections')
+  const controllerOnlyModules = parseStringArray(raw.controllerOnlyModules, 'controllerOnlyModules')
+  if (!isPlainObject(raw.modules)) throw guardDataError('modules must be an object')
+  const modules: Record<string, WindowsModuleRule> = {}
+  for (const [moduleName, rule] of Object.entries(raw.modules)) {
+    modules[moduleName] = parseWindowsModuleRule(moduleName, rule)
+  }
+  if (!isPlainObject(raw.roleTargetOs)) throw guardDataError('roleTargetOs must be an object')
+  const roleTargetOs: Record<string, AnsibleTargetOs> = {}
+  for (const [role, os] of Object.entries(raw.roleTargetOs)) {
+    if (os !== 'linux' && os !== 'windows') {
+      throw guardDataError(`roleTargetOs["${role}"] must be "linux" or "windows"`)
+    }
+    roleTargetOs[role] = os
+  }
+  return {
+    collections,
+    moduleAllowlist: new Set([...controllerOnlyModules, ...Object.keys(modules)]),
+    modules,
+    roleTargetOs,
+  }
+}
+
+const WINDOWS_GUARD: WindowsGuardData = parseWindowsGuardData(windowsGuardJson)
+
+/** `windows-guard.json` を作った固定版のコレクション（`ansible.windows` / `community.windows`）。 */
+export const WINDOWS_COLLECTION_VERSIONS: Readonly<Record<string, string>> =
+  WINDOWS_GUARD.collections
+
+/** `targetOs: 'windows'` のモジュール allowlist（FQCN のみ。`ecs` / `resident` 共通）。 */
+export const WINDOWS_MODULE_ALLOWLIST: ReadonlySet<string> = WINDOWS_GUARD.moduleAllowlist
+
+/** Windows のモジュールごとの引数ルール。 */
+export const WINDOWS_MODULE_RULES: Readonly<Record<string, WindowsModuleRule>> =
+  WINDOWS_GUARD.modules
+
+/**
+ * include_role できるロールと、その対象 OS。`ansible/roles/` のディレクトリ・
+ * {@link INCLUDE_ROLE_ALLOWED_ROLES} と 1:1（構造テストで固定）。表に無いロールは拒否する。
+ */
+export const ROLE_TARGET_OS: Readonly<Record<string, AnsibleTargetOs>> =
+  WINDOWS_GUARD.roleTargetOs
+
+/**
+ * Windows でモジュール引数を文字列（free-form）形式で書くことを許可するモジュール
+ * （`windows-guard.json` の `freeForm: true`。win_command / win_shell）。
+ * Linux の {@link FREE_FORM_ARGS_MODULE_KEYS} に対応する。
+ */
+const WINDOWS_FREE_FORM_ARGS_MODULE_KEYS: ReadonlySet<string> = new Set(
+  Object.entries(WINDOWS_MODULE_RULES)
+    .filter(([, rule]) => rule.freeForm)
+    .map(([moduleName]) => moduleName),
+)
+
+/** targetOs に応じた「文字列形式を許可するモジュール」を返す。 */
+function freeFormArgsModuleKeysFor(targetOs: AnsibleTargetOs): ReadonlySet<string> {
+  return targetOs === 'windows' ? WINDOWS_FREE_FORM_ARGS_MODULE_KEYS : FREE_FORM_ARGS_MODULE_KEYS
+}
+
+/** mode / targetOs に応じた実効モジュール allowlist を返す。 */
+function moduleAllowlistFor(
+  mode: AnsibleTaskRouteMode,
+  targetOs: AnsibleTargetOs,
+): ReadonlySet<string> {
+  // Windows は ecs / resident で差を設けない（resident 限定のモジュールは Windows には無い）。
+  if (targetOs === 'windows') return WINDOWS_MODULE_ALLOWLIST
   if (mode !== 'resident') return MODULE_ALLOWLIST
   return new Set<string>([...MODULE_ALLOWLIST, ...RESIDENT_EXTRA_MODULE_ALLOWLIST])
+}
+
+/**
+ * Windows のモジュールの引数を `windows-guard.json` のルールで検査する。
+ *
+ * 引数の形（マッピング・null・文字列形式）は呼び出し側（`validateAnsibleTasks`）が
+ * Linux と共通の検査で先に判定している:
+ * - `null`（引数なし）は可。文字列（フリーフォーム）は `freeForm: true` のモジュール
+ *   （win_command / win_shell。{@link WINDOWS_FREE_FORM_ARGS_MODULE_KEYS}）だけ可。ほかの
+ *   モジュールの文字列形式は Ansible が `k=v` を引数へ展開する（`win_copy: src=/etc/shadow dest=C:\x`）
+ *   ので、引数の allowlist を迂回できる。拒否する。マッピング・null・文字列以外も拒否する。
+ * - フリーフォームの文字列から Ansible が取り出す `k=v` は `creates` / `removes` / `chdir` /
+ *   `executable` / `warn` / `stdin` / `stdin_add_newline` / `strip_empty_ends` に限られ
+ *   （ansible-core の `parse_kv(check_raw=True)`）、いずれも対象ホスト側の引数である。
+ * - `_` で始まるキー・Jinja を含むキーも呼び出し側が拒否済みで、`reportedArgKeys` に入る。
+ *   ここでは重ねて報告しない（win_command / win_shell の `_raw_params` は両方の検査で許可）。
+ *
+ * ここで行うのは、マッピングの各キーの allowlist 照合と `argConstraints` の値の検査。
+ * `argConstraints` の値は文字列であることを要求する（リスト等で正規表現の検査を迂回させない）。
+ * Jinja だけの値（`url: "{{ installer_url }}"`）は接頭辞の検査を通らないので拒否される。
+ *
+ * コントローラだけで動く `ansible.builtin.*`（ルールを持たないもの）はここでは検査しない
+ * （Linux と同じ既存の検査だけを受ける）。
+ */
+function validateWindowsModuleArgs(
+  taskIndex: number,
+  moduleName: string,
+  moduleArgs: unknown,
+  reportedArgKeys: ReadonlySet<string>,
+  violations: AnsibleTaskViolation[],
+): void {
+  if (!Object.prototype.hasOwnProperty.call(WINDOWS_MODULE_RULES, moduleName)) return
+  const rule = WINDOWS_MODULE_RULES[moduleName]
+  // null / 許可された文字列形式は検査する引数を持たない（形の拒否は呼び出し側で済んでいる）。
+  if (!isPlainObject(moduleArgs)) return
+  for (const [argName, value] of Object.entries(moduleArgs)) {
+    if (reportedArgKeys.has(argName)) continue
+    if (!rule.args.has(argName)) {
+      const deniedReason = rule.deniedArgs.get(argName)
+      violations.push({
+        taskIndex,
+        key: argName,
+        reason:
+          deniedReason === undefined
+            ? `argument is not allowed for ${moduleName}`
+            : `argument is not allowed for ${moduleName}: ${deniedReason}`,
+      })
+      continue
+    }
+    const constraint = rule.argConstraints.get(argName)
+    if (constraint && (typeof value !== 'string' || !constraint.regex.test(value))) {
+      violations.push({
+        taskIndex,
+        key: argName,
+        reason: `argument value is not allowed for ${moduleName}: ${constraint.description}`,
+      })
+    }
+  }
 }
 
 /** 予約語・マジック変数名かどうかを判定する（`ansible_` プレフィックス or 完全一致）。 */
@@ -1632,6 +1899,7 @@ function getModuleCandidateKeys(task: Record<string, unknown>): string[] {
  * `include_role` タスクのモジュール引数を検証する。
  * - 引数はマッピングであること。
  * - `name` が {@link INCLUDE_ROLE_ALLOWED_ROLES} のいずれかであること。
+ * - `name` のロールの対象 OS（{@link ROLE_TARGET_OS}）が `targetOs` と一致すること。
  * - すべてのキーが {@link INCLUDE_ROLE_ALLOWED_PARAM_KEYS} に含まれること（`vars` はここに
  *   含まれない — {@link validateIncludeRoleTaskVars} 参照）。
  * - `tasks_from` はパラメータキーの allowlist（`name` のみ）で拒否される。
@@ -1640,6 +1908,7 @@ function validateIncludeRole(
   taskIndex: number,
   moduleKey: string,
   moduleArgs: unknown,
+  targetOs: AnsibleTargetOs,
   violations: AnsibleTaskViolation[],
 ): void {
   if (!isPlainObject(moduleArgs)) {
@@ -1657,6 +1926,17 @@ function validateIncludeRole(
       taskIndex,
       key: 'name',
       reason: 'include_role name is not one of the allowed bundled roles',
+    })
+  } else if (
+    // 対応表に無いロール（hasOwnProperty が偽）も、OS が一致しないロールも拒否する
+    // （fail-closed）。接頭辞（`win_`）では判定せず、表で明示する。
+    !Object.prototype.hasOwnProperty.call(ROLE_TARGET_OS, roleName) ||
+    ROLE_TARGET_OS[roleName] !== targetOs
+  ) {
+    violations.push({
+      taskIndex,
+      key: 'name',
+      reason: `include_role role '${roleName}' does not support target OS '${targetOs}'`,
     })
   }
 
@@ -1815,6 +2095,7 @@ function validateSharedFileRoleVars(
  *
  * @param body テナントadminが入力したタスク YAML（トップレベルはタスクの配列）
  * @param opts.mode 実行経路（`ecs`=厳格 / `resident`=寛容）
+ * @param opts.targetOs 対象 OS（`linux` / `windows`）。それ以外の値は全体を拒否する
  * @param opts.secretVarNames secretとして扱う変数名（no_log 付与判定用。api保存時は空でよい）
  */
 export function validateAnsibleTasks(
@@ -1822,8 +2103,19 @@ export function validateAnsibleTasks(
   opts: ValidateAnsibleTasksOptions,
 ): AnsibleTaskValidationResult {
   const mode = opts.mode
+  const targetOs = opts.targetOs
+  // 型では必須だが、JS からの呼び出しや型を外した値で未指定・不正値が来ることはある。
+  // 既定値（linux）へ倒すと渡し忘れが黙って通るので、全体を拒否する。
+  if (targetOs !== 'linux' && targetOs !== 'windows') {
+    return {
+      ok: false,
+      violations: [
+        { taskIndex: -1, key: 'targetOs', reason: 'targetOs must be "linux" or "windows"' },
+      ],
+    }
+  }
   const secretVarNames = opts.secretVarNames ?? new Set<string>()
-  const allowlist = moduleAllowlistFor(mode)
+  const allowlist = moduleAllowlistFor(mode, targetOs)
 
   let parsed: unknown
   try {
@@ -1938,7 +2230,7 @@ export function validateAnsibleTasks(
         // include_role は専用バリデータで検査する（allowlist ロール限定 + param キー allowlist）。
         // ロール変数（task レベルの vars）は validateIncludeRoleTaskVars で別途検査する。
         if (INCLUDE_ROLE_MODULE_KEYS.has(normalized)) {
-          validateIncludeRole(taskIndex, key, task[key], violations)
+          validateIncludeRole(taskIndex, key, task[key], targetOs, violations)
           // ロール名は vars の allowlist を引くために必要。allowlist に無いロール名は
           // validateIncludeRole が既に拒否しているので、ここでは undefined を渡して
           // vars 側の重複報告を避ける。
@@ -1970,12 +2262,15 @@ export function validateAnsibleTasks(
         }
 
         const moduleArgs = task[key]
+        // 文字列形式を許可するモジュールは OS ごとに異なる
+        // （Linux: command / shell、Windows: win_command / win_shell）。
+        const freeFormModuleKeys = freeFormArgsModuleKeysFor(targetOs)
 
         // モジュール引数の形の検査。以降の src 検査と、no_log 判定（`debug.var` /
-        // `assert.that` を素の式として走査する）はすべて引数がマッピングであることを
-        // 前提にしている。Ansible は文字列の引数を parse_kv で k=v に展開して実行する
-        // ため、文字列のまま通すとこれらの検査を丸ごとすり抜ける
-        // （{@link FREE_FORM_ARGS_MODULE_KEYS} 参照）。
+        // `assert.that` を素の式として走査する）、Windows の引数 allowlist は
+        // すべて引数がマッピングであることを前提にしている。Ansible は文字列の引数を
+        // parse_kv で k=v に展開して実行するため、文字列のまま通すとこれらの検査を
+        // 丸ごとすり抜ける（{@link FREE_FORM_ARGS_MODULE_KEYS} 参照）。
         // - null（`ansible.builtin.debug:` のように引数なし）は検査対象の値を持たないので許可。
         // - set_fact は 4. で文字列形式を含む非マッピングを専用の理由で拒否するので、
         //   重複報告にならないようここでは扱わない。
@@ -1985,13 +2280,15 @@ export function validateAnsibleTasks(
           moduleArgs !== null &&
           !isPlainObject(moduleArgs) &&
           !SET_FACT_MODULE_KEYS.has(normalized) &&
-          !(typeof moduleArgs === 'string' && FREE_FORM_ARGS_MODULE_KEYS.has(normalized))
+          !(typeof moduleArgs === 'string' && freeFormModuleKeys.has(normalized))
         ) {
           violations.push({
             taskIndex,
             key,
             reason:
-              'module args must be a mapping (the free-form string form is only allowed for command/shell)',
+              targetOs === 'windows'
+                ? 'module args must be a mapping (the free-form string form is only allowed for win_command / win_shell)'
+                : 'module args must be a mapping (the free-form string form is only allowed for command/shell)',
           })
           continue
         }
@@ -2004,12 +2301,15 @@ export function validateAnsibleTasks(
         // すり抜ける。キーを Jinja で書く正当な用途は無いので、入口で閉じる。
         // set_fact は 4. でキーを静的な識別子に限っているので、重複報告を避けてここでは扱わない
         // （include_role は上で専用バリデータへ分岐済み）。
+        // ここで報告したキーは、Windows の引数 allowlist で重ねて報告しない。
+        const reportedArgKeys = new Set<string>()
         if (isPlainObject(moduleArgs) && !SET_FACT_MODULE_KEYS.has(normalized)) {
           for (const argKey of Object.keys(moduleArgs)) {
             // Ansible の内部引数（`_raw_params` / `_variable_params` / `_ansible_*` 等）は、
             // 実行時に引数マッピングへ展開・マージされ得るので書かせない
             // （{@link isForbiddenInternalModuleArgKey} 参照）。
-            if (isForbiddenInternalModuleArgKey(normalized, argKey)) {
+            if (isForbiddenInternalModuleArgKey(normalized, argKey, freeFormModuleKeys)) {
+              reportedArgKeys.add(argKey)
               violations.push({
                 taskIndex,
                 key: argKey,
@@ -2020,6 +2320,7 @@ export function validateAnsibleTasks(
               continue
             }
             if (containsJinjaDelimiter(argKey)) {
+              reportedArgKeys.add(argKey)
               violations.push({
                 taskIndex,
                 key: argKey,
@@ -2027,6 +2328,19 @@ export function validateAnsibleTasks(
               })
             }
           }
+        }
+
+        // Windows のモジュールは引数の allowlist と値の制約で検査する。
+        // 以降の copy / unarchive / uri の検査は Linux のモジュール専用。
+        if (targetOs === 'windows') {
+          validateWindowsModuleArgs(
+            taskIndex,
+            normalized,
+            moduleArgs,
+            reportedArgKeys,
+            violations,
+          )
+          continue
         }
 
         // copy は src（コントローラ側ローカルファイルパス）を拒否し content + dest に限定する。
