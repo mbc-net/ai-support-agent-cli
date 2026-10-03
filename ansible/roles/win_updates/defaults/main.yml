@@ -1,0 +1,21 @@
+---
+# win_updates role defaults.
+#
+# Installs Windows Updates from the given categories. Kept separate from
+# win_os_init because it can take a long time: a run that includes this role
+# gets the longer ansible hard-kill limit (100 minutes, same as Sentry) instead
+# of the usual 30 — the runner decides that from the role NAME `win_updates`
+# (design §5.5). Updates that need longer than that should be split across
+# several runs (e.g. one category per recipe).
+
+# Category names as accepted by ansible.windows.win_updates (case-insensitive,
+# e.g. "SecurityUpdates" or "Security Updates"; "*" = all categories).
+win_updates_category_names:
+  - CriticalUpdates
+  - SecurityUpdates
+  - UpdateRollups
+
+# Reboot automatically when an update requires it, then continue installing the
+# remaining updates after the reboot. When false, the role reports that a
+# reboot is pending but does not reboot.
+win_updates_reboot: false

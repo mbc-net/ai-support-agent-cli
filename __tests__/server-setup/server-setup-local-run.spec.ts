@@ -86,6 +86,7 @@ import {
   SELF_RESTART_ACK_VAR,
   SELF_RESTART_MARKER_VAR,
   SUDO_PROBE_REGISTER_VAR,
+  WIN_WHOAMI_REGISTER_VAR,
 } from '../../src/server-setup/server-setup-runner'
 import type { SshExecCredential } from '../../src/types'
 
@@ -307,6 +308,7 @@ describe('parseLocalRunArgs', () => {
       '--key', 'k',
       '--ssh-host-id', 'host-x',
       '--strict',
+      '--target-os', 'windows',
     ])
     expect(opts).toEqual({
       bodyPath: 'b.yml',
@@ -319,6 +321,7 @@ describe('parseLocalRunArgs', () => {
       privateKeyPath: 'k',
       sshHostId: 'host-x',
       strict: true,
+      targetOs: 'windows',
     })
   })
 
@@ -663,6 +666,7 @@ describe('executeServerSetupAnsible - extracted core', () => {
       executionId: 'exec-direct',
       body: VALID_BODY,
       mode: 'resident',
+      targetOs: 'linux',
       credential,
       variables: {},
       secretNames: [],
@@ -696,6 +700,7 @@ describe('executeServerSetupAnsible - extracted core', () => {
         executionId: 'exec-shared',
         body: SHARED_FILE_BODY,
         mode: 'resident',
+        targetOs: 'linux',
         credential,
         variables: {},
         secretNames: [],
@@ -717,6 +722,7 @@ describe('executeServerSetupAnsible - extracted core', () => {
         executionId: 'exec-shared',
         body: SHARED_FILE_BODY,
         mode: 'resident',
+        targetOs: 'linux',
         credential,
         variables: {},
         secretNames: [],
@@ -742,6 +748,7 @@ describe('executeServerSetupAnsible - extracted core', () => {
         executionId: 'exec-shared',
         body: SHARED_FILE_BODY,
         mode: 'resident',
+        targetOs: 'linux',
         credential,
         // レシピ作成者が同名の ANSIBLE# 変数を作っても、配布元を差し替えられては困る。
         variables: { shared_file_staging_dir: '/etc' },
@@ -768,6 +775,7 @@ describe('executeServerSetupAnsible - extracted core', () => {
         executionId: 'exec-shared',
         body: SHARED_FILE_BODY,
         mode: 'resident',
+        targetOs: 'linux',
         credential,
         variables: {},
         secretNames: [],
@@ -787,6 +795,7 @@ describe('executeServerSetupAnsible - extracted core', () => {
         executionId: 'exec-shared',
         body: SHARED_FILE_BODY,
         mode: 'resident',
+        targetOs: 'linux',
         credential,
         variables: {},
         secretNames: [],
@@ -804,6 +813,7 @@ describe('executeServerSetupAnsible - extracted core', () => {
         executionId: 'exec-plain',
         body: VALID_BODY,
         mode: 'resident',
+        targetOs: 'linux',
         credential,
         variables: {},
         secretNames: [],
@@ -830,6 +840,7 @@ describe('executeServerSetupAnsible - extracted core', () => {
       executionId: 'exec-direct',
       body: VALID_BODY,
       mode: 'resident',
+      targetOs: 'linux',
       credential,
       variables: {},
       secretNames: [],
@@ -851,6 +862,7 @@ describe('executeServerSetupAnsible - extracted core', () => {
       executionId: 'exec-direct',
       body: VALID_BODY,
       mode: 'resident',
+      targetOs: 'linux',
       credential,
       variables: {},
       secretNames: [],
@@ -869,6 +881,7 @@ describe('executeServerSetupAnsible - extracted core', () => {
       executionId: 'exec-direct',
       body: VALID_BODY,
       mode: 'resident',
+      targetOs: 'linux',
       credential: { ...credential, authType: 'password', privateKey: 'the-password' },
       variables: {},
       secretNames: [],
@@ -883,5 +896,132 @@ describe('executeServerSetupAnsible - extracted core', () => {
     expect(writtenFile('id_rsa')).toBeUndefined()
     const inventory = writtenFile('inventory.yml')
     expect(JSON.parse(inventory as string).target.hosts['203.0.113.10'].ansible_ssh_pass).toBe('the-password')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// --target-os (Windows OpenSSH support, admin-docs server-setup-windows-openssh.md)
+// ---------------------------------------------------------------------------
+
+const WINDOWS_BODY = `
+- name: Create work dir
+  ansible.windows.win_file:
+    path: 'C:\\temp\\work'
+    state: directory
+`
+
+function galaxyListOutput(): string {
+  return JSON.stringify({
+    '/usr/share/ansible/collections/ansible_collections': {
+      'ansible.windows': { version: '3.8.0' },
+      'community.windows': { version: '3.3.0' },
+    },
+  })
+}
+
+async function flushUntilExecFileCalledTimes(n: number): Promise<void> {
+  for (let i = 0; i < 200 && mockExecFile.mock.calls.length < n; i++) {
+    await Promise.resolve()
+  }
+}
+
+describe('parseLocalRunArgs - --target-os', () => {
+  it.each(['linux', 'windows'])('accepts %s', (os) => {
+    expect(parseLocalRunArgs(['--target-os', os])).toEqual({ targetOs: os })
+  })
+
+  it('leaves targetOs unset when the flag is omitted (linux is the default)', () => {
+    expect(parseLocalRunArgs(['--host', 'h'])).toEqual({ hostname: 'h' })
+  })
+
+  it.each(['Windows', 'macos', ''])('rejects the unsupported value %p', (os) => {
+    expect(() => parseLocalRunArgs(['--target-os', os])).toThrow(
+      `Unsupported --target-os ${JSON.stringify(os)} (supported: linux, windows)`,
+    )
+  })
+
+  it('throws when --target-os is missing its value', () => {
+    expect(() => parseLocalRunArgs(['--target-os'])).toThrow('Missing value for --target-os')
+  })
+})
+
+describe('buildLocalCredential - targetOs', () => {
+  it('omits os for linux (credential shape unchanged from before Windows support)', () => {
+    expect(buildLocalCredential(baseOptions())).not.toHaveProperty('os')
+    expect(buildLocalCredential(baseOptions({ targetOs: 'linux' }))).not.toHaveProperty('os')
+  })
+
+  it('sets os: windows for --target-os windows, like the api credential response', () => {
+    expect(buildLocalCredential(baseOptions({ targetOs: 'windows' })).os).toBe('windows')
+  })
+})
+
+describe('runServerSetupLocalRun - windows', () => {
+  beforeEach(() => {
+    virtualFiles['recipe.yml'] = WINDOWS_BODY
+  })
+
+  it('runs the Windows play (become:false) with a PowerShell inventory after the collection check', async () => {
+    const runPromise = runServerSetupLocalRun(baseOptions({ targetOs: 'windows', username: 'Administrator' }))
+    await flushUntilExecFileCalledTimes(1)
+    expect(mockExecFile.mock.calls[0][0]).toBe('ansible-galaxy')
+    resolveExecFile(0, galaxyListOutput())
+    await flushUntilExecFileCalledTimes(2)
+    expect(mockExecFile.mock.calls[1][0]).toBe('ansible-playbook')
+    resolveExecFile(0, ansibleJsonOutput([{ name: 'Create work dir', changed: true }]))
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    const inventory = JSON.parse(writtenFile('inventory.yml') as string)
+    const hostVars = inventory.target.hosts['203.0.113.10']
+    expect(hostVars.ansible_connection).toBe('ssh')
+    expect(hostVars.ansible_shell_type).toBe('powershell')
+    const play = (load(writtenFile('generated-playbook.yml') as string) as Array<Record<string, unknown>>)[0]
+    expect(play.become).toBe(false)
+  })
+
+  it('rejects a Linux body under --target-os windows (Windows guard), before spawning anything', async () => {
+    virtualFiles['recipe.yml'] = VALID_BODY
+    const result = await runServerSetupLocalRun(baseOptions({ targetOs: 'windows' }))
+
+    expect(result.success).toBe(false)
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+
+  it('rejects password auth for Windows before creating a temp dir', async () => {
+    const result = await runServerSetupLocalRun(baseOptions({ targetOs: 'windows', authType: 'password' }))
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('public-key')
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+
+  it('rejects an extra-var named like the internal win_whoami register target', async () => {
+    virtualFiles['vars.json'] = JSON.stringify({ [WIN_WHOAMI_REGISTER_VAR]: 'x' })
+    const result = await runServerSetupLocalRun(baseOptions({ targetOs: 'windows', extraVarsPath: '/tmp/vars.json' }))
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain(WIN_WHOAMI_REGISTER_VAR)
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+})
+
+describe('executeServerSetupAnsible - targetOs is required (fail-closed)', () => {
+  it('rejects a run whose targetOs is missing instead of assuming linux', async () => {
+    const result = await executeServerSetupAnsible({
+      executionId: 'exec-no-os',
+      body: VALID_BODY,
+      mode: 'resident',
+      credential: buildLocalCredential(baseOptions()),
+      variables: {},
+      secretNames: [],
+      tenantCode: 'local',
+      sshHostId: 'host-1',
+    } as unknown as Parameters<typeof executeServerSetupAnsible>[0])
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('targetOs')
+    expect(mockExecFile).not.toHaveBeenCalled()
   })
 })

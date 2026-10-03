@@ -1,0 +1,151 @@
+---
+# win_ssh_key role: appends SSH public keys for administrators on a Windows
+# Server host that runs the built-in OpenSSH Server (design:
+# admin-docs/docs/specifications/server-setup-windows-openssh.md §2 / §7).
+#
+# Members of the local Administrators group do NOT read ~\.ssh\authorized_keys:
+# the default `Match Group administrators` block in sshd_config points them at
+# C:\ProgramData\ssh\administrators_authorized_keys. sshd silently IGNORES that
+# file when its ACL grants access to anyone but Administrators and SYSTEM, so
+# the ACL is part of "the key works", not a hardening extra.
+#
+# Invariants (fixed by __tests__/server-setup/windows-roles.spec.ts):
+#
+# - APPEND ONLY. Keys are added with win_lineinfile (no regex / backrefs /
+#   insertbefore), never replaced or removed. This play itself logs in with a
+#   key from this file; replacing the file could drop that key and lock the
+#   agent (and every operator) out of the host.
+# - The ACL is rebuilt from SIDs (S-1-5-32-544 = BUILTIN\Administrators,
+#   S-1-5-18 = NT AUTHORITY\SYSTEM), never from group names, which are
+#   localized on e.g. Japanese Windows ("Administrators" still resolves there,
+#   but "SYSTEM" / other built-ins do not consistently).
+# - The ACL step runs in `always:`. win_lineinfile writes through a temp file
+#   and Copy-Item; whatever that does to the DACL, the file must not be left
+#   with an ACL that makes sshd ignore it (that would also be a lockout).
+#
+# No task here handles a secret (public keys are not secret), so no task uses
+# no_log: failure messages stay visible to the recipe author.
+
+# The key format check is the only safety net: the value is written verbatim as
+# a line of the key file. `fullmatch` (not `match`) so a trailing newline does
+# not slip past `$`; the comment is limited to printable ASCII ([ -~]) so CR /
+# LF / TAB cannot inject a second line or an options field. Requiring the line
+# to START with a known key type rejects the authorized_keys options prefix
+# (`command="..."`, `from="..."`, `environment=...`).
+- name: "win_ssh_key : Validate win_ssh_key_public_keys"
+  ansible.builtin.assert:
+    that:
+      - win_ssh_key_public_keys is defined
+      - win_ssh_key_public_keys is sequence and win_ssh_key_public_keys is not string and win_ssh_key_public_keys is not mapping
+      - win_ssh_key_public_keys | length > 0
+      - win_ssh_key_public_keys | select('string') | list | length == win_ssh_key_public_keys | length
+      - win_ssh_key_public_keys | reject('regex', '(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh[.]com|sk-ecdsa-sha2-nistp256@openssh[.]com) AAAA[A-Za-z0-9+/]+={0,3}( [ -~]*)?', match_type='fullmatch') | list | length == 0
+    fail_msg: >-
+      win_ssh_key_public_keys must be a non-empty list of OpenSSH public key
+      lines, one key per entry, each of the form "<type> <base64> [comment]"
+      (type: ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256/384/521,
+      sk-ssh-ed25519@openssh.com or sk-ecdsa-sha2-nistp256@openssh.com; the
+      comment may contain printable ASCII only). Leading options such as
+      command="..." or from="..." and line breaks are not allowed. Pass the
+      list via the recipe's include_role vars, each entry referencing an
+      ANSIBLE# project variable that holds one key.
+
+# Prerequisite §2 of the design: OpenSSH Server is installed, which creates
+# C:\ProgramData\ssh. Check it explicitly so a host without sshd fails with an
+# actionable message instead of a generic "path not found" from win_lineinfile.
+- name: "win_ssh_key : Check C:\\ProgramData\\ssh exists"
+  ansible.windows.win_stat:
+    path: C:\ProgramData\ssh
+  register: win_ssh_key_dir_stat
+
+- name: "win_ssh_key : Require OpenSSH Server's data directory"
+  ansible.builtin.assert:
+    that:
+      - win_ssh_key_dir_stat.stat.exists
+      - win_ssh_key_dir_stat.stat.isdir
+    fail_msg: >-
+      C:\ProgramData\ssh does not exist on the target host. Install and start
+      OpenSSH Server first (Add-WindowsCapability -Online -Name
+      OpenSSH.Server~~~~0.0.1.0; Set-Service sshd -StartupType Automatic;
+      Start-Service sshd), as described in the server setup prerequisites.
+
+- name: "win_ssh_key : Append keys and restrict the key file ACL"
+  block:
+    # Rebuild the ACL BEFORE appending too (same script as the `always:` step,
+    # shared through the YAML anchor). Observed on Windows Server 2022
+    # (Japanese): a key file whose DACL is SYSTEM-only still works for key
+    # login (sshd reads it as SYSTEM), but the administrator running this play
+    # cannot read it, so win_lineinfile failed and only the `always:` step
+    # fixed the ACL — the run needed a second attempt. The script does nothing
+    # when the file does not exist yet (the append creates it).
+    - name: "win_ssh_key : Restrict administrators_authorized_keys to Administrators and SYSTEM before appending"
+      ansible.windows.win_powershell:
+        parameters:
+          Path: C:\ProgramData\ssh\administrators_authorized_keys
+        script: &win_ssh_key_acl_script |
+          param([Parameter(Mandatory = $true)][string]$Path)
+          $ErrorActionPreference = 'Stop'
+
+          $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+          if ($null -eq $item) {
+              # No file yet (the append below creates it), or the append failed
+              # before creating it: nothing to fix.
+              $Ansible.Changed = $false
+              return
+          }
+
+          $desired = @('S-1-5-32-544', 'S-1-5-18')
+          $fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
+          $allow = [System.Security.AccessControl.AccessControlType]::Allow
+
+          $current = $item.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+          $rules = @($current.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+          $compliant = $current.AreAccessRulesProtected -and ($rules.Count -eq $desired.Count)
+          if ($compliant) {
+              foreach ($rule in $rules) {
+                  if ($rule.IsInherited -or
+                      $rule.AccessControlType -ne $allow -or
+                      $rule.FileSystemRights -ne $fullControl -or
+                      $desired -notcontains $rule.IdentityReference.Value) {
+                      $compliant = $false
+                  }
+              }
+              $distinct = @($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+              if ($distinct.Count -ne $desired.Count) { $compliant = $false }
+          }
+          if ($compliant) {
+              $Ansible.Changed = $false
+              return
+          }
+
+          $acl = New-Object System.Security.AccessControl.FileSecurity
+          $acl.SetAccessRuleProtection($true, $false)
+          foreach ($sid in $desired) {
+              $identity = New-Object System.Security.Principal.SecurityIdentifier($sid)
+              $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($identity, $fullControl, $allow)))
+          }
+          $item.SetAccessControl($acl)
+          $Ansible.Changed = $true
+
+    # `create: true` creates the file (UTF-8 without BOM) when it is missing.
+    # On an existing file win_lineinfile auto-detects and keeps its encoding.
+    - name: "win_ssh_key : Append public key to administrators_authorized_keys"
+      community.windows.win_lineinfile:
+        path: C:\ProgramData\ssh\administrators_authorized_keys
+        line: "{{ item }}"
+        state: present
+        create: true
+      loop: "{{ win_ssh_key_public_keys }}"
+
+  always:
+    # Rebuild the DACL as exactly: inheritance disabled (protected, inherited
+    # ACEs dropped) + FullControl for Administrators and SYSTEM, both by SID.
+    # Reads/writes only the Access section (GetAccessControl('Access') and a
+    # fresh FileSecurity), so the owner is left untouched — Set-Acl would try to
+    # write the owner too and can fail with "not allowed to be the owner".
+    # Idempotent: reports changed only when the current DACL differs.
+    - name: "win_ssh_key : Restrict administrators_authorized_keys to Administrators and SYSTEM"
+      ansible.windows.win_powershell:
+        parameters:
+          Path: C:\ProgramData\ssh\administrators_authorized_keys
+        script: *win_ssh_key_acl_script

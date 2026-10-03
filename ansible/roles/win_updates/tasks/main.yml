@@ -1,0 +1,55 @@
+---
+# win_updates role: installs Windows Updates on a Windows Server host and,
+# when allowed, reboots as needed (design:
+# admin-docs/docs/specifications/server-setup-windows-openssh.md §5.5 / §7).
+#
+# The ansible.windows.win_updates MODULE is rejected by the task guard when a
+# recipe uses it directly; it is reachable only through this role. That keeps
+# the runner's execution time limit decision to a single role name: a run that
+# includes `win_updates` gets 100 minutes instead of 30, so an update/reboot
+# cycle is not killed half-way. Do not move this module into another role.
+#
+# The recipe controls only the categories and whether a reboot is allowed;
+# everything else (state, reboot timeout, retries) stays at the module's
+# defaults.
+
+- name: "win_updates : Validate settings"
+  ansible.builtin.assert:
+    that:
+      - win_updates_category_names is defined
+      - win_updates_category_names is sequence
+      - win_updates_category_names is not string and win_updates_category_names is not mapping
+      - win_updates_category_names | length > 0
+      - win_updates_category_names | select('string') | list | length == win_updates_category_names | length
+      - win_updates_category_names | reject('regex', '[A-Za-z][A-Za-z ]*|[*]', match_type='fullmatch') | list | length == 0
+      - win_updates_reboot is defined and win_updates_reboot is boolean
+    fail_msg: >-
+      win_updates_category_names must be a non-empty list of Windows Update
+      category names (letters and spaces, e.g. SecurityUpdates or "Security
+      Updates", or "*" for all categories), and win_updates_reboot must be true
+      or false.
+
+- name: "win_updates : Install Windows Updates"
+  ansible.windows.win_updates:
+    category_names: "{{ win_updates_category_names }}"
+    reboot: "{{ win_updates_reboot | bool }}"
+    state: installed
+  register: win_updates_result
+
+- name: "win_updates : Report the result"
+  ansible.builtin.debug:
+    msg: >-
+      installed={{ win_updates_result.installed_update_count | default(0) }}
+      failed={{ win_updates_result.failed_update_count | default(0) }}
+      reboot_required={{ win_updates_result.reboot_required | default(false) }}
+      rebooted={{ win_updates_result.rebooted | default(false) }}
+
+- name: "win_updates : Fail when an update did not install"
+  ansible.builtin.assert:
+    that:
+      - (win_updates_result.failed_update_count | default(0) | int) == 0
+    fail_msg: >-
+      One or more Windows Updates failed to install (see the "Install Windows
+      Updates" result for the update titles). Re-run the step; with
+      win_updates_reboot false, a pending reboot can also block the
+      installation.

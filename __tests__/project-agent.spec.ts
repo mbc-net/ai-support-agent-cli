@@ -256,7 +256,7 @@ describe('ProjectAgent', () => {
 
       const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
       expect(payload.capabilities).toEqual([
-        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1', 'ecs_launch',
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1', 'server_setup_windows_openssh_v1', 'ecs_launch',
       ])
 
       agent.stop()
@@ -277,6 +277,21 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
+    it('should always advertise the server_setup_windows_openssh_v1 capability', async () => {
+      // The api requires this before dispatching a server-setup run to a
+      // Windows host (admin-docs server-setup-windows-openssh.md §5.1).
+      mockDetectEcsLauncherCapability.mockResolvedValue(false)
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
+      expect(payload.capabilities).toContain('server_setup_windows_openssh_v1')
+
+      agent.stop()
+    })
+
     it('should not advertise ecs_launch when AWS credentials are not resolvable', async () => {
       mockDetectEcsLauncherCapability.mockResolvedValue(false)
       const agent = new ProjectAgent(project, 'agent-1', options)
@@ -286,7 +301,7 @@ describe('ProjectAgent', () => {
 
       const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
       expect(payload.capabilities).toEqual([
-        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1',
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1', 'server_setup_windows_openssh_v1',
       ])
       expect(payload.capabilities).not.toContain('ecs_launch')
 
