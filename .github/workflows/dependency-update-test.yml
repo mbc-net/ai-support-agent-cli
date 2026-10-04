@@ -48,7 +48,7 @@ jobs:
 
       # 実ゲート（理由は ci-cd.yml の同ステップのコメントを参照）
       - name: Security audit
-        run: npm audit --audit-level=high
+        run: node .github/scripts/npm-audit-gate.js --audit-level=high
 
       - name: Check for outdated packages
         run: npm outdated || true
