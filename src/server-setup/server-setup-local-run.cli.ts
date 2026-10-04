@@ -13,7 +13,11 @@
  *     --host 203.0.113.10 --user ubuntu --key ./id_rsa \
  *     [--port 22] [--auth-type privateKey|password] \
  *     [--extra-vars ./vars.json] [--secret-names A,B] [--ssh-host-id my-host] \
- *     [--strict]
+ *     [--strict] [--target-os linux|windows]
+ *
+ * `--target-os windows` runs the Windows play / PowerShell inventory used for
+ * Windows hosts (public-key auth only; needs the ansible.windows and
+ * community.windows collections on this machine).
  *
  * The SSH private key / password is supplied ONLY via `--key <path>` (a file) —
  * there is deliberately no inline flag, so the secret never appears in argv

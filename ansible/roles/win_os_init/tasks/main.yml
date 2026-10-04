@@ -1,0 +1,243 @@
+---
+# win_os_init role: time zone, host name and Windows Defender Firewall on a
+# Windows Server host (design:
+# admin-docs/docs/specifications/server-setup-windows-openssh.md §7).
+#
+# Each item is gated by its own toggle (all default OFF, see
+# defaults/main.yml), so a recipe changes only what it explicitly asks for.
+# Local user creation is NOT part of the MVP (no way yet to pass a password
+# without leaving it in the recipe body).
+#
+# Invariants (fixed by __tests__/server-setup/windows-roles.spec.ts):
+#
+# - Firewall: the inbound SSH allow rule opens
+#   both ansible_port and every TCP port the sshd service listens on
+#   (de-duplicated, in ascending numeric order) — they differ behind NAT / port
+#   forwarding — and is applied BEFORE any recipe rule and BEFORE the
+#   firewall is switched on with inbound=block — the same ordering guard as the
+#   Linux os_init role's ufw tasks. The port is taken from the connection
+#   itself, not from a recipe variable, so a recipe cannot get it wrong and cut
+#   its own session.
+# - Impact of enabling the firewall: inbound defaults to BLOCK on every profile,
+#   so apart from SSH (the rule above) any inbound traffic without an existing
+#   enabled allow rule is cut off — e.g. RDP (3389), WinRM (5985/5986), ICMP.
+#   A host whose firewall was off, or that has no RDP allow rule, stops being
+#   reachable over RDP. A recipe that keeps using RDP must add an allow rule to
+#   win_os_init_firewall_rules, e.g. {name: rdp, localport: "3389"}.
+#   ICMP (ping) cannot be re-allowed by this role; configure it manually if
+#   needed.
+#   protocol is tcp or udp only (any cannot carry ports on Windows) and
+#   localport is required: a rule without ports allows all inbound traffic and
+#   defeats inbound=block, so the rule validation rejects it.
+# - Recipe rules are ALLOW rules only (action is a literal here, never read from
+#   the entry) and cannot reuse the SSH rule's name (compared ignoring case and
+#   surrounding whitespace). Windows Firewall gives
+#   block rules precedence over allow rules, so a block rule covering the SSH
+#   port would lock the agent out even with the SSH allow rule in place.
+# - Nothing disables the firewall or removes a rule.
+# - The host-name reboot is the LAST task, so every other item is applied
+#   before the host goes down.
+#
+# Module names: win_timezone / win_firewall live in ansible.windows (the
+# community.windows names are deprecated redirects); win_firewall_rule lives in
+# community.windows (ansible.windows 3.8.0 / community.windows 3.3.0).
+
+# --- input validation (before any change) ------------------------------------
+
+- name: "win_os_init : Validate time zone settings"
+  ansible.builtin.assert:
+    that:
+      - win_os_init_timezone is defined and win_os_init_timezone is string
+      - win_os_init_timezone | trim | length > 0
+    fail_msg: >-
+      win_os_init_timezone must be a non-empty Windows time zone ID (e.g.
+      "Tokyo Standard Time"; list them with `tzutil /l` on the host) when
+      win_os_init_timezone_enabled is true.
+  when: win_os_init_timezone_enabled | bool
+
+# NetBIOS rules: 1-15 characters, letters / digits / hyphens, no leading or
+# trailing hyphen, not digits only. Win32 rejects a longer name only at
+# rename time with a less helpful message.
+- name: "win_os_init : Validate host name"
+  ansible.builtin.assert:
+    that:
+      - win_os_init_hostname is defined and win_os_init_hostname is string
+      - win_os_init_hostname is regex('[A-Za-z0-9]([A-Za-z0-9-]{0,13}[A-Za-z0-9])?', match_type='fullmatch')
+      - win_os_init_hostname is not regex('^[0-9]+$')
+    fail_msg: >-
+      win_os_init_hostname must be set when win_os_init_hostname_enabled is
+      true, and must be a valid NetBIOS computer name: 1-15 characters of
+      letters, digits and hyphens, not starting or ending with a hyphen, and
+      not made of digits only.
+  when: win_os_init_hostname_enabled | bool
+
+- name: "win_os_init : Validate win_os_init_firewall_rules is a list"
+  ansible.builtin.assert:
+    that:
+      - win_os_init_firewall_rules is sequence
+      - win_os_init_firewall_rules is not string and win_os_init_firewall_rules is not mapping
+    fail_msg: >-
+      win_os_init_firewall_rules must be a list of rule mappings (use [] for
+      none).
+  when: win_os_init_firewall_enabled | bool
+
+# The rules are not secret, so the loop's item output is fine (no no_log).
+#
+# The reserved SSH rule name is compared case-insensitively and ignoring
+# surrounding whitespace: win_firewall_rule finds the rule to update with
+# PowerShell's `$_.Name -eq $name`, which ignores case, so a recipe rule named
+# "AI-Support-Agent OpenSSH Server (SSHD)" would otherwise rewrite the SSH
+# rule's localport right before the firewall is switched to inbound=block.
+# Both lower and upper are compared because neither alone covers every case
+# fold (e.g. "ſ" (U+017F) upper-cases to "S" but stays as is in lower).
+- name: "win_os_init : Validate each firewall rule"
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.keys() | list | difference(['name', 'description', 'direction', 'protocol', 'localport', 'remoteport', 'localip', 'remoteip']) | length == 0
+      - item.name is defined and item.name is string and (item.name | trim | length > 0)
+      - (item.name | trim | lower) != ('ai-support-agent OpenSSH Server (sshd)' | lower)
+      - (item.name | trim | upper) != ('ai-support-agent OpenSSH Server (sshd)' | upper)
+      - item.direction | default('in') in ['in', 'out']
+      - item.protocol | default('tcp') in ['tcp', 'udp']
+      - item.localport is defined and item.localport is not none
+      - (item.localport | string) is regex('[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*', match_type='fullmatch')
+      # Numeric range checks, evaluated only after the format check above
+      # passed (assert stops at the first false condition): each port is
+      # 1-65535 and a range a-b has a <= b. A single port p is treated as p-p.
+      # Windows would otherwise reject these only when the rule is created,
+      # i.e. after the time zone and the SSH rule were already changed.
+      - (((item.localport | string).split(',') | map('regex_replace', '^([0-9]+)$', '\\1-\\1') | map('split', '-') | map('map', 'int') | map('list') | list) | flatten | min) >= 1
+      - (((item.localport | string).split(',') | map('regex_replace', '^([0-9]+)$', '\\1-\\1') | map('split', '-') | map('map', 'int') | map('list') | list) | flatten | max) <= 65535
+      - (((item.localport | string).split(',') | map('regex_replace', '^([0-9]+)$', '\\1-\\1') | map('split', '-') | map('map', 'int') | map('list') | list) | map('sort') | list) == ((item.localport | string).split(',') | map('regex_replace', '^([0-9]+)$', '\\1-\\1') | map('split', '-') | map('map', 'int') | map('list') | list)
+    fail_msg: >-
+      Each win_os_init_firewall_rules entry must be a mapping with a non-empty
+      name, a localport made of port numbers (1-65535), ranges (a-b with
+      a <= b) and commas (e.g. "8000-8010,9000"; a rule without ports would allow all inbound
+      traffic), and only these keys: name, localport, description, direction
+      (in|out), protocol (tcp|udp; any is not supported), remoteport, localip,
+      remoteip. Rules are always ALLOW rules (action / state / enabled cannot
+      be set), and the name "ai-support-agent OpenSSH Server (sshd)" (in any
+      letter case) is reserved for the SSH rule this role manages.
+  loop: "{{ win_os_init_firewall_rules }}"
+  when: win_os_init_firewall_enabled | bool
+
+# --- time zone ----------------------------------------------------------------
+
+- name: "win_os_init : Set time zone"
+  ansible.windows.win_timezone:
+    timezone: "{{ win_os_init_timezone }}"
+  when: win_os_init_timezone_enabled | bool
+
+# --- firewall -----------------------------------------------------------------
+# --- Ordering guard: SSH must be allowed before anything below adds rules or
+# --- switches the firewall on with a default-block inbound policy.
+
+# Behind NAT / port forwarding, ansible_port (the port the agent connects to)
+# is not the port sshd listens on, and a host without an enabled built-in
+# OpenSSH-Server-In-TCP rule would be cut off by inbound=block below. So the
+# SSH rule opens BOTH ansible_port and every TCP port the sshd service listens
+# on. Only the service's own process is looked at: before OpenSSH 9.8 every
+# session is also an sshd.exe, so matching by process name would pick up an
+# operator's remote forward (ssh -R) listener as well.
+# The script is a literal (no recipe variable is templated into it) and only
+# reads; it throws when sshd or its listening ports cannot be found, and the
+# assert below rejects anything that is not a list of port numbers — either
+# way the play stops before the firewall is switched on (fail-closed).
+# Get-NetTCPConnection needs Windows Server 2012+ (2019+ is the supported set).
+- name: "win_os_init : Find the TCP ports the sshd service listens on"
+  ansible.windows.win_powershell:
+    script: |
+      $ErrorActionPreference = 'Stop'
+      $Ansible.Changed = $false
+      $servicePid = (Get-CimInstance -ClassName Win32_Service -Filter "Name='sshd'").ProcessId
+      if ($servicePid -eq $null -or $servicePid -eq 0) { throw 'The sshd service is not installed or not running on this host.' }
+      $ports = @(
+        Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+          Where-Object { $_.OwningProcess -eq $servicePid } |
+          ForEach-Object { [int]$_.LocalPort } |
+          Sort-Object -Unique
+      )
+      if ($ports.Count -eq 0) { throw 'sshd is not listening on any TCP port.' }
+      $Ansible.Result = ($ports -join ',')
+  register: win_os_init_sshd_listen_ports
+  changed_when: false
+  when: win_os_init_firewall_enabled | bool
+
+- name: "win_os_init : Validate the sshd listening ports"
+  ansible.builtin.assert:
+    that:
+      - win_os_init_sshd_listen_ports.result is string
+      - win_os_init_sshd_listen_ports.result is regex('[0-9]+(,[0-9]+)*', match_type='fullmatch')
+    fail_msg: >-
+      Could not determine the TCP ports sshd listens on, so the firewall is not
+      enabled (it could cut off the SSH connection). Check that the OpenSSH
+      Server service (sshd) is running on the host.
+  when: win_os_init_firewall_enabled | bool
+
+- name: "win_os_init : Allow inbound SSH on the connection port and the sshd listening ports"
+  community.windows.win_firewall_rule:
+    name: ai-support-agent OpenSSH Server (sshd)
+    description: Managed by the ai-support-agent server setup (win_os_init). Keeps the SSH ports used by the agent and sshd open.
+    direction: in
+    action: allow
+    protocol: tcp
+    # De-duplicated and sorted numerically, so the value is stable even if
+    # Windows normalizes LocalPorts (otherwise the task could report changed on
+    # every run). The listening ports are already validated as digits and commas.
+    localport: "{{ ([ansible_port | default(22)] + win_os_init_sshd_listen_ports.result.split(',')) | map('int') | unique | sort | map('string') | join(',') }}"
+    profiles:
+      - domain
+      - private
+      - public
+    enabled: true
+    state: present
+  when: win_os_init_firewall_enabled | bool
+
+- name: "win_os_init : Add firewall allow rules"
+  community.windows.win_firewall_rule:
+    name: "{{ item.name }}"
+    description: "{{ item.description | default(omit) }}"
+    direction: "{{ item.direction | default('in') }}"
+    protocol: "{{ item.protocol | default('tcp') }}"
+    localport: "{{ item.localport | default(omit) }}"
+    remoteport: "{{ item.remoteport | default(omit) }}"
+    localip: "{{ item.localip | default(omit) }}"
+    remoteip: "{{ item.remoteip | default(omit) }}"
+    action: allow
+    profiles:
+      - domain
+      - private
+      - public
+    enabled: true
+    state: present
+  loop: "{{ win_os_init_firewall_rules }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: win_os_init_firewall_enabled | bool
+
+- name: "win_os_init : Enable Windows Defender Firewall (inbound block, outbound allow)"
+  ansible.windows.win_firewall:
+    profiles:
+      - Domain
+      - Private
+      - Public
+    state: enabled
+    inbound_action: block
+    outbound_action: allow
+  when: win_os_init_firewall_enabled | bool
+
+# --- host name (last: the rename needs a reboot) ------------------------------
+
+- name: "win_os_init : Set host name"
+  ansible.windows.win_hostname:
+    name: "{{ win_os_init_hostname }}"
+  register: win_os_init_hostname_result
+  when: win_os_init_hostname_enabled | bool
+
+# win_reboot waits for the host to come back and re-connects over the same SSH
+# connection (verified in the P0 PoC: later tasks succeed after the reboot).
+- name: "win_os_init : Reboot to apply the new host name"
+  ansible.windows.win_reboot:
+    msg: Rebooting to apply the new host name (ai-support-agent server setup, win_os_init)
+  when: win_os_init_hostname_enabled | bool and win_os_init_hostname_result.reboot_required

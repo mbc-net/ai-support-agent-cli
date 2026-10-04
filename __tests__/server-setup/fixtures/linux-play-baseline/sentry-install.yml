@@ -1,0 +1,60 @@
+- name: AI Support Agent server setup
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: 'precheck : Gather facts (no privilege escalation)'
+      ansible.builtin.setup: {}
+      become: false
+      tags: always
+    - name: 'precheck : Probe passwordless sudo'
+      ansible.builtin.command:
+        cmd: sudo -n true
+      become: false
+      changed_when: false
+      failed_when: false
+      register: __ai_support_agent_server_setup_sudo_probe
+      tags: always
+    - name: 'precheck : Verify passwordless sudo'
+      ansible.builtin.fail:
+        msg: >-
+          Passwordless (NOPASSWD) sudo is required for server setup, but the SSH
+          user '{{ ansible_user }}' cannot escalate without a password on {{
+          inventory_hostname }}. Grant NOPASSWD sudo to this user (e.g. a
+          sudoers entry) and retry. Server setup does not support password-based
+          sudo.
+      when: __ai_support_agent_server_setup_sudo_probe.rc | default(1) != 0
+      become: false
+      tags: always
+    - name: 'precheck : Verify supported OS'
+      ansible.builtin.fail:
+        msg: >-
+          Unsupported OS: {{ ansible_distribution }} {{
+          ansible_distribution_version }}. Only Ubuntu 22.04/24.04/26.04 LTS are
+          supported by server setup execution.
+      when: >-
+        ansible_distribution != 'Ubuntu' or ansible_distribution_version not in
+        ['22.04', '24.04', '26.04']
+      tags: always
+    - name: 'precheck : Verify Sentry host has no unresolved operation'
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - '-c'
+          - >-
+            import os,subprocess,sys;
+            p='/usr/local/lib/ai-support-sentry/sentry_setup.py';
+            sys.exit(subprocess.call(['/usr/bin/python3',p,'preflight',sys.argv[1]])
+            if os.path.exists(p) else 0)
+          - install
+      changed_when: false
+    - name: 'precheck : Ensure acl (setfacl) is installed'
+      ansible.builtin.apt:
+        name: acl
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      tags: always
+    - name: 'sentry : install'
+      include_role:
+        name: sentry

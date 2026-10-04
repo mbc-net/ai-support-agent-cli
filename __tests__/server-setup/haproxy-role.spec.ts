@@ -18,7 +18,7 @@ describe('HAProxy setup', () => {
       - name: app
         address: 127.0.0.1
         port: 9001
-`, { mode: 'ecs' })
+`, { mode: 'ecs', targetOs: 'linux' })
     expect(result.ok).toBe(true)
   })
   it('rejects overriding internal transaction results', () => {
@@ -27,6 +27,6 @@ describe('HAProxy setup', () => {
     name: haproxy
   vars:
     haproxy_apply_result: { stdout: '{"changed":false}' }
-`, { mode: 'ecs' }).ok).toBe(false)
+`, { mode: 'ecs', targetOs: 'linux' }).ok).toBe(false)
   })
 })

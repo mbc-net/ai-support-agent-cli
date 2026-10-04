@@ -63,12 +63,16 @@ import {
   generatePlaybook,
   parseAnsibleOutput,
   redactSecretValues,
+  resolveAnsibleTimeoutMs,
   resolveRouteMode,
+  resolveTargetOs,
   runServerSetup,
   SELF_INSTANCE_ID_VAR,
   SELF_RESTART_ACK_VAR,
   SELF_RESTART_MARKER_VAR,
   SUDO_PROBE_REGISTER_VAR,
+  validateCredentialForTargetOs,
+  WIN_WHOAMI_REGISTER_VAR,
 } from '../../src/server-setup/server-setup-runner'
 import { ENV_VARS } from '../../src/constants'
 import { cancelProcess } from '../../src/commands/process-manager'
@@ -2297,6 +2301,7 @@ describe('runServerSetup - mid-run progress', () => {
       executionId: 'exec-1',
       body: makePayload().body,
       mode: 'resident',
+      targetOs: 'linux',
       credential: CREDENTIAL,
       variables: {},
       secretNames: [],
@@ -2379,6 +2384,7 @@ describe('runServerSetup - awaiting-self-restart declaration', () => {
       executionId: 'exec-1',
       body: makePayload().body,
       mode: 'resident',
+      targetOs: 'linux',
       credential: CREDENTIAL,
       variables: {},
       secretNames: [],
@@ -2729,5 +2735,659 @@ describe('Sentry supervised execution', () => {
     const result = await pending
     expect(result.success).toBe(false)
     expect(JSON.parse(result.data as string).sentry).toMatchObject({settled: false, stopState: 'confirmed', cancelled: true})
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Windows (OpenSSH) support — admin-docs specifications/server-setup-windows-openssh.md §5
+// ---------------------------------------------------------------------------
+
+const WINDOWS_BODY = `
+- name: Create work dir
+  ansible.windows.win_file:
+    path: 'C:\\temp\\work'
+    state: directory
+`
+
+const WINDOWS_CREDENTIAL = {
+  hostId: 'host-1',
+  hostname: '203.0.113.20',
+  port: 22,
+  username: 'Administrator',
+  authType: 'privateKey',
+  privateKey: PRIVATE_KEY,
+  os: 'windows' as const,
+}
+
+/** `ansible-galaxy collection list --format json` output with both pinned Windows collections. */
+function galaxyListOutput(collections: Record<string, string> = { 'ansible.windows': '3.8.0', 'community.windows': '3.3.0' }): string {
+  return JSON.stringify({
+    '/usr/share/ansible/collections/ansible_collections': Object.fromEntries(
+      Object.entries(collections).map(([name, version]) => [name, { version }]),
+    ),
+  })
+}
+
+async function flushUntilExecFileCalledTimes(n: number): Promise<void> {
+  for (let i = 0; i < 200 && mockExecFile.mock.calls.length < n; i++) {
+    await Promise.resolve()
+  }
+}
+
+function windowsPayload(overrides: Partial<ServerSetupExecPayload> = {}): ServerSetupExecPayload {
+  return makePayload({ body: WINDOWS_BODY, targetOs: 'windows', dispatchMode: 'resident_agent', ...overrides })
+}
+
+function windowsClient(credential: Record<string, unknown> = WINDOWS_CREDENTIAL, variables: ServerSetupVariablesResponse = NO_VARIABLES): ApiClient {
+  return makeClient({
+    getServerSetupSshCredential: jest.fn().mockResolvedValue(credential),
+    getServerSetupVariables: jest.fn().mockResolvedValue(variables),
+  })
+}
+
+/** Drives a Windows run: answers the collection check, then the playbook run. */
+async function runWindows(
+  payload: ServerSetupExecPayload = windowsPayload(),
+  client: ApiClient = windowsClient(),
+): Promise<Awaited<ReturnType<typeof runServerSetup>>> {
+  const runPromise = runServerSetup(payload, { commandId: 'cmd-win', client })
+  await flushUntilExecFileCalledTimes(1)
+  resolveExecFile(0, galaxyListOutput())
+  await flushUntilExecFileCalledTimes(2)
+  resolveExecFile(0, ansibleJsonOutput([{ name: 'Create work dir', changed: true }]))
+  return runPromise
+}
+
+describe('resolveTargetOs', () => {
+  it('resolves an absent targetOs to linux (payloads from api builds that predate Windows support)', () => {
+    expect(resolveTargetOs({})).toBe('linux')
+    expect(resolveTargetOs(undefined)).toBe('linux')
+    expect(resolveTargetOs(null)).toBe('linux')
+  })
+
+  it.each(['linux', 'windows'] as const)('accepts %s', (os) => {
+    expect(resolveTargetOs({ targetOs: os as 'windows' })).toBe(os)
+  })
+
+  it.each(['Windows', 'macos', '', 1, null, {}])('rejects the unknown value %p', (value) => {
+    expect(resolveTargetOs({ targetOs: value as unknown as 'windows' })).toBeNull()
+  })
+})
+
+describe('runServerSetup - targetOs payload validation', () => {
+  it('rejects an unknown targetOs before any credential fetch', async () => {
+    const client = makeClient()
+    const result = await runServerSetup(
+      makePayload({ targetOs: 'macos' as unknown as 'windows' }),
+      { commandId: 'cmd-1', client },
+    )
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('targetOs')
+      expect(result.error).toContain('"macos"')
+    }
+    expect(client.getServerSetupSshCredential).not.toHaveBeenCalled()
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+
+  it('validates a Windows payload with the Windows guard (a Linux role is rejected before any credential fetch)', async () => {
+    const client = windowsClient()
+    const result = await runServerSetup(windowsPayload({ body: DEFAULT_BODY }), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('server_setup_exec: recipe body rejected')
+    expect(client.getServerSetupSshCredential).not.toHaveBeenCalled()
+  })
+
+  it('validates a Linux payload with the Linux guard (a Windows module is rejected)', async () => {
+    const client = makeClient()
+    const result = await runServerSetup(makePayload({ body: WINDOWS_BODY }), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('module not in allowlist')
+    expect(client.getServerSetupSshCredential).not.toHaveBeenCalled()
+  })
+
+  it('passes the resolved targetOs to the execution-time guard re-validation', async () => {
+    const guard = jest.requireActual('../../src/server-setup/ansible-task-guard') as typeof import('../../src/server-setup/ansible-task-guard')
+    const spy = jest.spyOn(guard, 'validateAnsibleTasks')
+    try {
+      const result = await runWindows()
+      expect(result.success).toBe(true)
+      expect(spy).toHaveBeenCalledTimes(2)
+      for (const call of spy.mock.calls) {
+        expect(call[1]).toMatchObject({ targetOs: 'windows', mode: 'resident' })
+      }
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
+describe('runServerSetup - credential OS check (TOCTOU)', () => {
+  it.each([
+    ['the payload is windows but the host is now linux (no os)', windowsPayload(), { ...WINDOWS_CREDENTIAL, os: undefined }, ["dispatched for target OS 'windows'", "configured as 'linux'"]],
+    ['the payload is linux but the host is now windows', makePayload(), WINDOWS_CREDENTIAL, ["dispatched for target OS 'linux'", "configured as 'windows'"]],
+  ])('fails when %s', async (_label, payload, credential, expected) => {
+    const client = windowsClient(credential)
+    const result = await runServerSetup(payload, { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      for (const text of expected) expect(result.error).toContain(text)
+      expect(result.error).toContain('host-1')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unknown os value in the credential', async () => {
+    const client = windowsClient({ ...WINDOWS_CREDENTIAL, os: 'macos' })
+    const result = await runServerSetup(windowsPayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('"macos"')
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+
+  it('rejects a Windows host using password authentication', async () => {
+    const client = windowsClient({ ...WINDOWS_CREDENTIAL, authType: 'password', privateKey: 'pw' })
+    const result = await runServerSetup(windowsPayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('public-key')
+      expect(result.error).toContain('"password"')
+      expect(result.error).not.toContain('pw"')
+    }
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['ssh', { connectionType: 'ssh' }],
+    ['tailscale', { connectionType: 'tailscale', tailnetHostname: 'win.tailnet.ts.net' }],
+    ['ssm', { connectionType: 'ssm' }],
+    ['undefined-valued key', { connectionType: undefined }],
+  ])('rejects a Windows credential that carries a connectionType key (%s)', async (_label, extra) => {
+    const client = windowsClient({ ...WINDOWS_CREDENTIAL, ...extra })
+    const result = await runServerSetup(windowsPayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('connectionType')
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+
+  it('accepts a Linux credential with an explicit os: linux', async () => {
+    const client = makeClient({ getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...CREDENTIAL, os: 'linux' }) })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, defaultOutput())
+    expect((await runPromise).success).toBe(true)
+  })
+
+  it('validateCredentialForTargetOs returns null for a matching Windows key credential', () => {
+    expect(validateCredentialForTargetOs(WINDOWS_CREDENTIAL, 'windows')).toBeNull()
+    expect(validateCredentialForTargetOs(CREDENTIAL, 'linux')).toBeNull()
+  })
+})
+
+describe('runServerSetup - username validation (USERNAME_RE)', () => {
+  it.each(['john.doe', 'svc_admin', 'Administrator', '_x', 'a-b.c'])('accepts %s', async (username) => {
+    const client = makeClient({ getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...CREDENTIAL, username }) })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, defaultOutput())
+    const result = await runPromise
+
+    expect(result.success).toBe(true)
+    const inventory = JSON.parse(writtenFile('inventory.yml') as string)
+    expect(inventory.target.hosts[CREDENTIAL.hostname].ansible_user).toBe(username)
+  })
+
+  it.each(['-oProxyCommand=x', '-x', '.hidden', 'a b', 'DOMAIN\\user', 'user@corp.example'])('rejects %s', async (username) => {
+    const client = makeClient({ getServerSetupSshCredential: jest.fn().mockResolvedValue({ ...CREDENTIAL, username }) })
+    const result = await runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('username')
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+})
+
+describe('Linux output is byte-identical to the pre-Windows implementation', () => {
+  const fixture = (name: string): string =>
+    actualFs.readFileSync(path.join(__dirname, 'fixtures', 'linux-play-baseline', name), 'utf8')
+
+  it.each([
+    ['plain.yml', [{ name: 'x', 'ansible.builtin.debug': { msg: 'hi' } }]],
+    ['sentry-install.yml', [{ name: 'sentry : install', include_role: { name: 'sentry' } }]],
+    ['sentry-recovery.yml', [{ name: 'sentry : verify', include_role: { name: 'sentry' }, vars: { sentry_operation: 'verify' } }]],
+  ] as Array<[string, Record<string, unknown>[]]>)('generatePlaybook (%s) — default and explicit linux', (file, body) => {
+    expect(generatePlaybook(body)).toBe(fixture(file))
+    expect(generatePlaybook(body, 'linux')).toBe(fixture(file))
+  })
+
+  async function linuxInventory(credential: Record<string, unknown>): Promise<{ inventory: string; tmpDir: string }> {
+    const client = makeClient({ getServerSetupSshCredential: jest.fn().mockResolvedValue(credential) })
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, defaultOutput())
+    expect((await runPromise).success).toBe(true)
+    return { inventory: writtenFile('inventory.yml') as string, tmpDir: mockMkdtempSync.mock.results[0].value as string }
+  }
+
+  it('key credential inventory', async () => {
+    const { inventory, tmpDir } = await linuxInventory(CREDENTIAL)
+    expect(inventory).toBe(
+      '{"target":{"hosts":{"203.0.113.10":{"ansible_host":"203.0.113.10","ansible_port":22,"ansible_user":"ubuntu",'
+      + `"ansible_ssh_private_key_file":"${tmpDir}/id_rsa",`
+      + `"ansible_ssh_common_args":"-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${KNOWN_HOSTS_PATH}"}}}}`,
+    )
+  })
+
+  it('password credential inventory', async () => {
+    const { inventory } = await linuxInventory({ ...CREDENTIAL, authType: 'password', privateKey: 'pw' })
+    expect(inventory).toBe(
+      '{"target":{"hosts":{"203.0.113.10":{"ansible_host":"203.0.113.10","ansible_port":22,"ansible_user":"ubuntu",'
+      + '"ansible_ssh_pass":"pw",'
+      + `"ansible_ssh_common_args":"-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${KNOWN_HOSTS_PATH}"}}}}`,
+    )
+  })
+
+  it('tailscale credential inventory', async () => {
+    const { inventory, tmpDir } = await linuxInventory({ ...CREDENTIAL, connectionType: 'tailscale', tailnetHostname: 'h.ts.net' })
+    expect(inventory).toBe(
+      '{"target":{"hosts":{"203.0.113.10":{"ansible_host":"h.ts.net","ansible_port":22,"ansible_user":"ubuntu",'
+      + `"ansible_ssh_private_key_file":"${tmpDir}/id_rsa",`
+      + `"ansible_ssh_common_args":"-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${KNOWN_HOSTS_PATH} -o ProxyCommand=\\"nc -X 5 -x 127.0.0.1:1055 %h %p\\""}}}}`,
+    )
+  })
+})
+
+describe('generatePlaybook - windows', () => {
+  const body = [{ name: 'Create work dir', 'ansible.windows.win_file': { path: 'C:\\temp', state: 'directory' } }]
+
+  function windowsPlay(tasks: Record<string, unknown>[] = body): { play: Record<string, unknown>; tasks: Record<string, unknown>[] } {
+    const play = (load(generatePlaybook(tasks, 'windows')) as Array<Record<string, unknown>>)[0]
+    return { play, tasks: play.tasks as Record<string, unknown>[] }
+  }
+
+  it('uses become:false at play level and keeps hosts/gather_facts fixed', () => {
+    const { play } = windowsPlay()
+    expect(play.hosts).toBe('all')
+    expect(play.become).toBe(false)
+    expect(play.gather_facts).toBe(false)
+  })
+
+  it('has no sudo probe/assert, no Ubuntu precheck, no Sentry preflight, no acl install', () => {
+    const yaml = generatePlaybook(body, 'windows')
+    expect(yaml).not.toContain('sudo')
+    expect(yaml).not.toContain(SUDO_PROBE_REGISTER_VAR)
+    expect(yaml).not.toContain('Ubuntu')
+    expect(yaml).not.toContain('/usr/bin/python3')
+    expect(yaml).not.toContain('Sentry')
+    expect(yaml).not.toContain('ansible.builtin.apt')
+    expect(yaml).not.toContain('acl')
+    expect(yaml).not.toContain('ansible.builtin.command')
+  })
+
+  it('orders: fact gathering, OS precheck, win_whoami probe, elevation assert, then the body', () => {
+    const { tasks } = windowsPlay()
+    expect(tasks.map((t) => t.name)).toEqual([
+      'precheck : Gather facts (no privilege escalation)',
+      'precheck : Verify supported OS',
+      'precheck : Inspect the connection user token',
+      'precheck : Verify the connection user is an elevated administrator',
+      'Create work dir',
+    ])
+    expect(tasks[0]['ansible.builtin.setup']).toEqual({})
+    for (const t of tasks.slice(0, 4)) expect(t.tags).toBe('always')
+  })
+
+  it('checks the Windows family, the Server installation type and the 2019/2022/2025 build numbers (third field of ansible_distribution_version)', () => {
+    const precheck = windowsPlay().tasks[1]
+    expect(precheck['ansible.builtin.fail']).toBeDefined()
+    const msg = String((precheck['ansible.builtin.fail'] as { msg: string }).msg)
+    expect(msg).toContain('Windows Server 2019/2022/2025')
+    // Build 17763 is shared with Windows 10 1809 (client), so the build number
+    // alone would admit a client edition: the installation type must be
+    // Server or Server Core.
+    expect(msg).toContain('client editions are not supported')
+    expect(msg).toContain('{{ ansible_os_installation_type | default(\'unknown\') }}')
+    expect(String(precheck.when)).toContain("(ansible_os_installation_type | default('')) not in ['Server', 'Server Core']")
+    expect(msg).toContain('installation type Server or Server Core')
+    expect(precheck.when).toBe(
+      "ansible_os_family != 'Windows' or "
+      + "(ansible_os_installation_type | default('')) not in ['Server', 'Server Core'] or "
+      + "((ansible_distribution_version | default('')).split('.') | length) < 3 or "
+      + "(ansible_distribution_version | default('')).split('.')[2] not in ['17763', '20348', '26100']",
+    )
+  })
+
+  it('asserts Administrators (S-1-5-32-544) is Enabled and the token is High Mandatory Level (S-1-16-12288)', () => {
+    const { tasks } = windowsPlay()
+    const probe = tasks[2]
+    expect(probe['ansible.windows.win_whoami']).toEqual({})
+    expect(probe.register).toBe(WIN_WHOAMI_REGISTER_VAR)
+    expect(probe.changed_when).toBe(false)
+
+    const assertTask = tasks[3]['ansible.builtin.assert'] as { that: string[]; fail_msg: string; quiet: boolean }
+    expect(assertTask.that).toEqual([
+      `${WIN_WHOAMI_REGISTER_VAR}.groups | selectattr('sid', 'equalto', 'S-1-5-32-544') | selectattr('attributes', 'contains', 'Enabled') | list | length > 0`,
+      `${WIN_WHOAMI_REGISTER_VAR}.label.sid == 'S-1-16-12288'`,
+    ])
+    expect(assertTask.quiet).toBe(true)
+    expect(assertTask.fail_msg).toContain('Administrators')
+    expect(assertTask.fail_msg).toContain('administrators_authorized_keys')
+  })
+
+  it('omits the Sentry preflight even if a sentry role somehow reached the play', () => {
+    const yaml = generatePlaybook([{ name: 'sentry : install', include_role: { name: 'sentry' } }], 'windows')
+    expect(yaml).not.toContain('Verify Sentry host')
+  })
+})
+
+describe('resolveAnsibleTimeoutMs', () => {
+  const MIN = 60 * 1000
+  it.each([
+    ['no tasks', [], 30 * MIN],
+    ['plain module tasks', [{ 'ansible.windows.win_file': { path: 'C:\\x' } }], 30 * MIN],
+    ['an unrelated role', [{ include_role: { name: 'docker' } }], 30 * MIN],
+    ['the sentry role', [{ include_role: { name: 'sentry' } }], 100 * MIN],
+    ['the win_updates role (short form)', [{ include_role: { name: 'win_updates' } }], 100 * MIN],
+    ['the win_updates role (FQCN include_role)', [{ 'ansible.builtin.include_role': { name: 'win_updates' } }], 100 * MIN],
+    ['win_updates nested in a block', [{ block: [{ include_role: { name: 'win_updates' } }] }], 100 * MIN],
+    ['a role merely named like win_updates_x', [{ include_role: { name: 'win_updates_x' } }], 30 * MIN],
+  ] as Array<[string, Record<string, unknown>[], number]>)('%s', (_label, tasks, expected) => {
+    expect(resolveAnsibleTimeoutMs(tasks)).toBe(expected)
+  })
+})
+
+describe('runServerSetup - windows', () => {
+  it('writes an inventory with ansible_connection: ssh and ansible_shell_type: powershell', async () => {
+    const result = await runWindows()
+    expect(result.success).toBe(true)
+    const tmpDir = mockMkdtempSync.mock.results[0].value as string
+    expect(writtenFile('inventory.yml')).toBe(
+      '{"target":{"hosts":{"203.0.113.20":{"ansible_host":"203.0.113.20","ansible_port":22,"ansible_user":"Administrator",'
+      + `"ansible_ssh_private_key_file":"${tmpDir}/id_rsa",`
+      + `"ansible_ssh_common_args":"-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${KNOWN_HOSTS_PATH}",`
+      + '"ansible_connection":"ssh","ansible_shell_type":"powershell"}}}}',
+    )
+  })
+
+  it('generates the Windows play and runs it with the 30-minute cap', async () => {
+    const result = await runWindows()
+    expect(result.success).toBe(true)
+    const play = (load(writtenFile('generated-playbook.yml') as string) as Array<Record<string, unknown>>)[0]
+    expect(play.become).toBe(false)
+    const [cmd, , options] = mockExecFile.mock.calls[1]
+    expect(cmd).toBe('ansible-playbook')
+    expect((options as { timeout: number }).timeout).toBe(30 * 60 * 1000)
+  })
+
+  it('checks the Windows collections with ansible-galaxy before running the playbook', async () => {
+    await runWindows()
+    const [cmd, args, options] = mockExecFile.mock.calls[0]
+    expect(cmd).toBe('ansible-galaxy')
+    expect(args).toEqual(['collection', 'list', '--format', 'json'])
+    expect((options as { env: NodeJS.ProcessEnv }).env.ANSIBLE_CONFIG).toMatch(/ansible\.cfg$/)
+  })
+
+  it('does not run the collection check for Linux', async () => {
+    const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-1', client: makeClient() })
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, defaultOutput())
+    await runPromise
+    expect(mockExecFile).toHaveBeenCalledTimes(1)
+    expect(mockExecFile.mock.calls[0][0]).toBe('ansible-playbook')
+  })
+
+  it.each([
+    ['ansible.windows missing', { 'community.windows': '3.3.0' }, 'ansible.windows'],
+    ['community.windows missing', { 'ansible.windows': '3.8.0' }, 'community.windows'],
+    ['nothing installed', {}, 'ansible.windows'],
+  ])('fails with an actionable error when %s, without running ansible-playbook', async (_label, installed, missing) => {
+    const runPromise = runServerSetup(windowsPayload(), { commandId: 'cmd-win', client: windowsClient() })
+    await flushUntilExecFileCalledTimes(1)
+    resolveExecFile(0, galaxyListOutput(installed))
+    const result = await runPromise
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain(missing)
+      expect(result.error).toContain('ansible-galaxy collection install')
+      expect(result.error).toContain('ansible.windows:3.8.0')
+      expect(result.error).toContain('community.windows:3.3.0')
+    }
+    expect(mockExecFile).toHaveBeenCalledTimes(1)
+    const tmpDir = mockMkdtempSync.mock.results[0].value as string
+    expect(actualFs.existsSync(tmpDir)).toBe(false)
+  })
+
+  // The guard's per-module argument allowlists were surveyed against the pinned
+  // versions, so a different installed version fails the run (with the
+  // command that installs the pinned versions) instead of running a play the
+  // allowlists were never checked against.
+  it.each([
+    ['ansible.windows newer', { 'ansible.windows': '3.9.0', 'community.windows': '3.3.0' }, ['ansible.windows 3.9.0']],
+    ['community.windows older', { 'ansible.windows': '3.8.0', 'community.windows': '3.2.0' }, ['community.windows 3.2.0']],
+    ['both differ', { 'ansible.windows': '2.5.0', 'community.windows': '4.0.0' }, ['ansible.windows 2.5.0', 'community.windows 4.0.0']],
+  ])('fails without running ansible-playbook when the installed version differs from the pinned one (%s)', async (_label, installed, reported) => {
+    const runPromise = runServerSetup(windowsPayload(), { commandId: 'cmd-win', client: windowsClient() })
+    await flushUntilExecFileCalledTimes(1)
+    resolveExecFile(0, galaxyListOutput(installed))
+    const result = await runPromise
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      for (const text of reported) expect(result.error).toContain(text)
+      expect(result.error).toContain('ansible-galaxy collection install --force ansible.windows:3.8.0 community.windows:3.3.0')
+    }
+    expect(mockExecFile).toHaveBeenCalledTimes(1)
+    const tmpDir = mockMkdtempSync.mock.results[0].value as string
+    expect(actualFs.existsSync(tmpDir)).toBe(false)
+  })
+
+  it('does not report a collection whose version matches the pin', async () => {
+    const runPromise = runServerSetup(windowsPayload(), { commandId: 'cmd-win', client: windowsClient() })
+    await flushUntilExecFileCalledTimes(1)
+    resolveExecFile(0, galaxyListOutput({ 'ansible.windows': '3.9.0', 'community.windows': '3.3.0' }))
+    const result = await runPromise
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).not.toContain('community.windows 3.3.0')
+  })
+
+  it.each([
+    ['ansible-galaxy exits non-zero', 1, 'boom'],
+    ['ansible-galaxy prints non-JSON', 0, 'not json'],
+  ])('fails when %s', async (_label, code, stdout) => {
+    const runPromise = runServerSetup(windowsPayload(), { commandId: 'cmd-win', client: windowsClient() })
+    await flushUntilExecFileCalledTimes(1)
+    resolveExecFile(code, stdout, 'galaxy stderr')
+    const result = await runPromise
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('ansible-galaxy collection list')
+    expect(mockExecFile).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a project variable named like the win_whoami register target', async () => {
+    const client = windowsClient(WINDOWS_CREDENTIAL, { variables: { [WIN_WHOAMI_REGISTER_VAR]: 'x' }, secretNames: [] })
+    const result = await runServerSetup(windowsPayload(), { commandId: 'cmd-1', client })
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain(WIN_WHOAMI_REGISTER_VAR)
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+
+  // The guard already rejects shared_file and the Sentry roles for Windows
+  // (ROLE_TARGET_OS = linux). These tests bypass the guard to prove the runner
+  // never reaches the Linux-only shared-file staging or Sentry post-probe for
+  // Windows on its own.
+  describe('Linux-only stages are unreachable even if the guard let them through', () => {
+    const guard = jest.requireActual('../../src/server-setup/ansible-task-guard') as typeof import('../../src/server-setup/ansible-task-guard')
+    let spy: jest.SpyInstance
+
+    function letThrough(tasks: Record<string, unknown>[]): void {
+      spy = jest.spyOn(guard, 'validateAnsibleTasks').mockReturnValue({ ok: true, violations: [], normalizedTasks: tasks } as ReturnType<typeof guard.validateAnsibleTasks>)
+    }
+    afterEach(() => spy.mockRestore())
+
+    it('does not stage shared files', async () => {
+      letThrough([{ name: 'files', include_role: { name: 'shared_file' }, vars: { shared_file_src: 'a.txt' } }])
+      const client = windowsClient()
+      const listProjectFiles = jest.fn()
+      ;(client as unknown as Record<string, unknown>).listProjectFiles = listProjectFiles
+      const result = await runServerSetup(windowsPayload(), { commandId: 'cmd-1', client })
+
+      expect(result.success).toBe(false)
+      if (!result.success) expect(result.error).toContain('not supported on Windows')
+      expect(listProjectFiles).not.toHaveBeenCalled()
+      expect(mockExecFile).not.toHaveBeenCalled()
+    })
+
+    it('does not run the Sentry supervision (no stop polling, no post-probe, no sentry report)', async () => {
+      letThrough([{ name: 'sentry : install', include_role: { name: 'sentry' } }])
+      const result = await runServerSetup(windowsPayload(), { commandId: 'cmd-1', client: windowsClient() })
+
+      expect(result.success).toBe(false)
+      if (!result.success) expect(result.error).toContain('not supported on Windows')
+      expect(mockExecFile).not.toHaveBeenCalled()
+      expect(String(result.data ?? '')).not.toContain('sentry')
+    })
+  })
+})
+
+describe('runServerSetup - windows collection check (output shapes)', () => {
+  async function runWithGalaxyStdout(stdout: string): Promise<Awaited<ReturnType<typeof runServerSetup>>> {
+    const runPromise = runServerSetup(windowsPayload(), { commandId: 'cmd-win', client: windowsClient() })
+    await flushUntilExecFileCalledTimes(1)
+    resolveExecFile(0, stdout)
+    await flushUntilExecFileCalledTimes(2)
+    if (mockExecFile.mock.calls.length >= 2) resolveExecFile(0, ansibleJsonOutput([{ name: 'Create work dir' }]))
+    return runPromise
+  }
+
+  // `ansible-galaxy collection list --format json` merges the search paths
+  // through a Python set and sorts the result by path name (ansible-core
+  // cli/galaxy.py), so the key order is NOT the order ansible-playbook loads
+  // collections in. The check must therefore not depend on it: every copy of a
+  // pinned collection, in any path, has to be the pinned version.
+  const HOME_PATH = '/home/agent/.ansible/collections/ansible_collections'
+  const SYSTEM_PATH = '/usr/share/ansible/collections/ansible_collections'
+
+  it('passes when every copy in every path is the pinned version, skipping non-object entries', async () => {
+    const result = await runWithGalaxyStdout(JSON.stringify({
+      '/broken': null,
+      '/list': ['x'],
+      [HOME_PATH]: {
+        'ansible.windows': { version: '3.8.0' },
+        'community.windows': { version: '3.3.0' },
+      },
+      [SYSTEM_PATH]: {
+        'ansible.windows': { version: '3.8.0' },
+        'ansible.posix': { version: '1.0.0' },
+      },
+    }))
+
+    expect(result.success).toBe(true)
+    expect(mockExecFile).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ['the pinned copy is listed first', [HOME_PATH, SYSTEM_PATH]],
+    ['the pinned copy is listed last', [SYSTEM_PATH, HOME_PATH]],
+  ])('fails when another path has a different version, whatever the listing order (%s)', async (_label, order) => {
+    const byPath: Record<string, Record<string, { version: string }>> = {
+      [HOME_PATH]: { 'ansible.windows': { version: '3.8.0' }, 'community.windows': { version: '3.3.0' } },
+      [SYSTEM_PATH]: { 'ansible.windows': { version: '3.9.0' } },
+    }
+    const result = await runWithGalaxyStdout(JSON.stringify(Object.fromEntries(order.map((p) => [p, byPath[p]]))))
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain(`ansible.windows 3.9.0 at ${SYSTEM_PATH}/ansible/windows (requires 3.8.0)`)
+      // The pinned copy is not reported.
+      expect(result.error).not.toContain(`${HOME_PATH}/ansible/windows`)
+      expect(result.error).not.toContain(`${HOME_PATH}/community/windows`)
+      expect(result.error).toContain('Remove the copies that are not the pinned version')
+      expect(result.error).toContain('ansible-galaxy collection install --force ansible.windows:3.8.0 community.windows:3.3.0')
+    }
+    expect(mockExecFile).toHaveBeenCalledTimes(1)
+  })
+
+  it('lists every non-pinned copy across paths (different and unknown versions)', async () => {
+    const result = await runWithGalaxyStdout(JSON.stringify({
+      [HOME_PATH]: { 'ansible.windows': { version: '3.9.0' }, 'community.windows': { version: '3.3.0' } },
+      [SYSTEM_PATH]: { 'ansible.windows': { version: '3.7.0' }, 'community.windows': {} },
+    }))
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain(`ansible.windows 3.9.0 at ${HOME_PATH}/ansible/windows (requires 3.8.0)`)
+      expect(result.error).toContain(`ansible.windows 3.7.0 at ${SYSTEM_PATH}/ansible/windows (requires 3.8.0)`)
+      expect(result.error).toContain(`community.windows unknown at ${SYSTEM_PATH}/community/windows (requires 3.3.0)`)
+      expect(result.error).not.toContain(`${HOME_PATH}/community/windows`)
+    }
+    expect(mockExecFile).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails when an installed collection reports no version (it cannot be matched against the pin)', async () => {
+    const result = await runWithGalaxyStdout(JSON.stringify({
+      '/p': { 'ansible.windows': {}, 'community.windows': null },
+    }))
+
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error).toContain('ansible.windows unknown')
+      expect(result.error).toContain('community.windows unknown')
+      expect(result.error).toContain('ansible-galaxy collection install --force')
+    }
+    expect(mockExecFile).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['null', '[]'])('reports both collections missing when the output is %s', async (stdout) => {
+    const result = await runWithGalaxyStdout(stdout)
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('ansible.windows, community.windows')
+  })
+
+  it('falls back to the spawn error message when ansible-galaxy writes nothing to stderr', async () => {
+    const runPromise = runServerSetup(windowsPayload(), { commandId: 'cmd-win', client: windowsClient() })
+    await flushUntilExecFileCalledTimes(1)
+    resolveExecFileWithError(Object.assign(new Error('spawn ansible-galaxy ENOENT'), { code: 'ENOENT' }))
+    const result = await runPromise
+
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('spawn ansible-galaxy ENOENT')
+  })
+
+  describe('opt-in non-root execution', () => {
+    const ORIGINAL_ENV = process.env
+    beforeEach(() => {
+      process.env = { ...ORIGINAL_ENV }
+    })
+    afterEach(() => {
+      process.env = ORIGINAL_ENV
+    })
+
+    it('runs ansible-galaxy under the same uid/gid as ansible-playbook', async () => {
+      process.env.AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID = '1500'
+      process.env.AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_GID = '1600'
+      await runWindows()
+
+      const [, , galaxyOptions] = mockExecFile.mock.calls[0]
+      expect(galaxyOptions).toMatchObject({ uid: 1500, gid: 1600 })
+    })
+  })
+})
+
+describe('resolveAnsibleTimeoutMs - malformed entries', () => {
+  it('ignores non-task entries and role specs without a string name', () => {
+    expect(resolveAnsibleTimeoutMs([null, 'x', ['y'], { include_role: null }, { include_role: { name: 1 } }])).toBe(30 * 60 * 1000)
   })
 })

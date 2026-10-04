@@ -56,6 +56,7 @@ import {
 } from './pending-result-store'
 import type { TransportKind } from './ipc-types'
 import type { AdmissionMode, AdmissionResult, AgentChatMode, ProjectRegistration, RegisterResponse } from './types'
+import { SERVER_SETUP_WINDOWS_OPENSSH_CAPABILITY } from './types'
 import { generateProjectDockerfile } from './docker/docker-runner'
 import { detectChannelFromVersion, detectInstallMethod, isNewerVersion, performUpdate, reExecProcess } from './update-checker'
 import { describeSelfUpdateBlockReason, resolveSelfUpdateCapability } from './self-update-capability'
@@ -1077,6 +1078,9 @@ export class ProjectAgent {
         // recipe to any agent that does not advertise this capability.
         SERVER_SETUP_CUSTOM_TASKS_CAPABILITY,
         SENTRY_CAPABILITY,
+        // Can run server-setup recipes against Windows hosts over OpenSSH; the
+        // api requires this before dispatching a Windows run.
+        SERVER_SETUP_WINDOWS_OPENSSH_CAPABILITY,
         ...(ecsLauncher ? ['ecs_launch'] : []),
       ],
       availableChatModes: this.configSyncState.availableChatModes,

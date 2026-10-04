@@ -52,9 +52,21 @@ jobs:
       # 実ゲート。continue-on-error は付けない。
       # 447f0d0 の時点では minimatch の勧告に CJS 互換の修正版が無く、ゲート化すると
       # CI が恒久的に赤になるため意図的に握り潰していたが、その前提は解消済み。
+      # npm audit には勧告単位の除外が無いため、.github/scripts/npm-audit-gate.js が
+      # `npm audit --json` を解釈して判定する。修正版のない勧告に限り
+      # .github/npm-audit-exclusions.json へ「GHSA ID＋パッケージ名＋理由＋期限(expires)」で
+      # 期限付き除外を登録できる。期限切れの除外・どの勧告にも一致しない除外・
+      # 除外されていない high 以上の勧告はいずれも失敗になる（ゲート自体は外さない）。
+      # 除外の前提（修正版が未公開・dev 依存のみ）は reason の記述に頼らず機械的に検査する:
+      #   - `npm view <pkg> versions --json` の安定版のうち、range 内の最古版より新しく range 外の版が
+      #     1 つでもあれば（＝修正版公開済み。保守ラインの修正版も含む）失敗。range がどの安定版にも
+      #     一致しなければ検証不能として失敗。
+      #     npm の fixAvailable は修正版の無い braces でも true を返すため使わない
+      #   - 除外した勧告が `npm audit --omit=dev --json` にも現れたら（＝本番依存に到達）失敗
+      #   - いずれも照会・解釈に失敗したら失敗（fail closed）
       # 不変条件は __tests__/ci/security-audit-gate.spec.ts で固定している。
       - name: Security Audit (npm)
-        run: npm audit --audit-level=high
+        run: node .github/scripts/npm-audit-gate.js --audit-level=high
 
       - name: Security Scan (Trivy)
         uses: aquasecurity/trivy-action@master

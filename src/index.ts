@@ -4,6 +4,7 @@ import { Command } from 'commander'
 
 import { startAgent } from './agent-runner'
 import { registerAuthCommands } from './cli/auth-commands'
+import { registerVaultCommands } from './cli/vault-commands'
 import { registerEcsCommands } from './cli/ecs-publish-command'
 import { registerLogRotateCommand } from './cli/log-rotate-command'
 import { registerManifestCommands } from './cli/manifest-command'
@@ -140,6 +141,7 @@ program
   })
 
 registerAuthCommands(program)
+registerVaultCommands(program)
 
 program
   .command('remove-project')
