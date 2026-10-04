@@ -160,6 +160,7 @@ export async function runOneshot(env: NodeJS.ProcessEnv = process.env): Promise<
     client,
     agentId,
     tenantCode,
+    projectCode,
   })
 
   const submitted = await submit(result)
