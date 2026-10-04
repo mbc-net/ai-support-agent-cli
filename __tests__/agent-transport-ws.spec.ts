@@ -796,6 +796,13 @@ describe('processCommand の実行中判定（inFlightCommands から導出）',
       }),
       expect.anything(),
     )
+    // The agent's own tenant/project (deps) are handed to the executors, so
+    // e2e_test can persist results without depending on a config sync.
+    expect(executeCommand).toHaveBeenCalledWith(
+      'chat',
+      expect.anything(),
+      expect.objectContaining({ tenantCode: 'test', projectCode: 'TEST_PROJ' }),
+    )
   })
 
   it('should reset processing=false even when command execution throws', async () => {
