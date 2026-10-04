@@ -92,6 +92,7 @@
     "aws-sdk-client-mock": "^4.1.0",
     "jest": "^30.0.0",
     "jest-junit": "^17.0.0",
+    "semver": "^7.7.4",
     "smol-toml": "^1.7.0",
     "ts-jest": "^29.0.0",
     "ts-node": "^10.9.0",
