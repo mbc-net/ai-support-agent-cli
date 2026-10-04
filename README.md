@@ -358,3 +358,8 @@ Requires Node.js >= 20. `node-pty` is an optional dependency for terminal/PTY se
 ## License
 
 [MIT](LICENSE)
+
+
+## 環境設定・秘密情報Vault
+
+`auth login/logout` と `env check/run/pull` で承認済み環境設定を利用できます。 導入・権限・運用制約は [環境Vaultガイド](../admin-docs/docs/architecture/environment-vault.md) を参照してください。
