@@ -1,0 +1,8 @@
+[
+  {
+    "id": "GHSA-vfj7-8cjw-p6xm",
+    "package": "braces",
+    "reason": "修正版なし（first_patched_version が null）。jest@30 → @jest/core → micromatch@4.0.8 → braces を経由する dev 依存のみで、配布物（dist）には含まれない。上流で修正版が出たら依存を更新し、この除外を削除する。",
+    "expires": "2026-11-30"
+  }
+]

@@ -1,0 +1,43 @@
+---
+# win_os_init role defaults.
+#
+# Basic OS settings for a Windows Server host. Every item is OFF by default and
+# is applied only when the recipe turns its toggle on via the task-level
+# `vars:` of the include_role step. Creating local users is intentionally NOT
+# part of this role in the MVP (design §7): it needs a way to pass a password
+# without leaving it in the recipe body.
+
+# --- time zone ---------------------------------------------------------------
+win_os_init_timezone_enabled: false
+win_os_init_timezone: Tokyo Standard Time   # Windows time zone ID (tzutil /l)
+
+# --- host name (the host is rebooted when the name changes) ------------------
+win_os_init_hostname_enabled: false
+win_os_init_hostname: ""                    # REQUIRED when enabled: NetBIOS name, max 15 chars
+
+# --- Windows Defender Firewall -----------------------------------------------
+# When enabled, the role first allows inbound TCP for SSH on
+# both ansible_port and every TCP port the sshd service listens on
+# (de-duplicated, in ascending numeric order) — the port this very play is
+# connected through and the one sshd uses differ behind NAT / port
+# forwarding — then adds the rules below, then makes sure the firewall is on for all profiles with
+# inbound=block / outbound=allow. Rules are ALLOW rules only; each entry may
+# set: name (required), localport (required: port numbers 1-65535, ranges
+# a-b with a <= b, and commas, e.g. "8000-8010,9000"), description, direction (in|out, default in),
+# protocol (tcp|udp, default tcp), remoteport, localip, remoteip.
+# Example: [{name: https, localport: "443"}]
+#
+# IMPACT: enabling this sets the default inbound action to BLOCK on every
+# profile (Domain / Private / Public). Apart from SSH (the rule this role adds),
+# any inbound traffic not covered by an existing enabled allow rule is cut off —
+# e.g. RDP (3389), WinRM (5985/5986), ICMP (ping). A host whose firewall was off,
+# or that has no allow rule for RDP, stops being reachable over RDP. To keep
+# using RDP (or another TCP / UDP service), add an allow rule here, e.g.
+# [{name: rdp, localport: "3389"}].
+# ICMP (ping) cannot be re-allowed by this role; configure it manually if
+# needed.
+# protocol is tcp or udp only (any cannot carry ports on Windows) and localport
+# is required: a rule without ports allows all inbound traffic and defeats the
+# block policy, so the rule validation rejects it.
+win_os_init_firewall_enabled: false
+win_os_init_firewall_rules: []
