@@ -359,7 +359,6 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     return executeE2eScriptFix({
       payload: p as { testCaseId?: unknown; message?: unknown; currentScript?: unknown },
       client: opts.client,
-      projectCode: opts.projectConfig?.project?.projectCode,
       commandId: opts.commandId,
       ...forwardAgentExecutionContext(opts, { activeChatMode }),
     })

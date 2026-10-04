@@ -363,3 +363,32 @@ Requires Node.js >= 20. `node-pty` is an optional dependency for terminal/PTY se
 ## 環境設定・秘密情報Vault
 
 `auth login/logout` と `env check/run/pull` で承認済み環境設定を利用できます。 導入・権限・運用制約は [環境Vaultガイド](../admin-docs/docs/architecture/environment-vault.md) を参照してください。
+
+### `.env`を使うローカル開発（日本語）
+
+Vault対応API・Webを導入してVaultを有効化し、管理画面で `local` の設定リリースを承認・有効化します。利用者にはファイル出力用の `export` 権限を付与してください。
+
+開発プロジェクトの `.ai-support/env.yaml` に接続先と識別子を設定します。秘密値はここへ書きません。
+
+```yaml
+version: 1
+apiUrl: https://api.example.test
+tenant: example
+project: support
+profiles:
+  local:
+    service: api
+    environment: local
+    required: [DATABASE_URL]
+```
+
+`.gitignore` に `.env.local` を追加し、プロジェクトのルートで実行します。URLと識別子は実際の環境に置き換えてください。
+
+```sh
+ai-support-agent auth login --url https://app.example.test --profile local --purpose export
+# ブラウザーでログインし、設定取得を許可します。
+ai-support-agent env pull --profile local --output .env.local
+ai-support-agent auth logout --profile local --purpose export
+```
+
+`.env` が必要な場合はGitignoreの指定と出力先を両方変更します。既存ファイルへの上書きはしません。ファイルを作らず開発する場合は `run` 権限を付与し、`--purpose export` を付けずにログインして `ai-support-agent env run --profile local -- npm run dev` を実行します。

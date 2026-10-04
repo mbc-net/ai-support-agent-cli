@@ -26,6 +26,7 @@ describe('forwardAgentExecutionContext', () => {
     projectConfig: { project: { projectCode: 'MBC_01' } },
     mcpConfigPath: '/tmp/mcp.json',
     tenantCode: 'mbc',
+    projectCode: 'OWN_PROJECT',
     browserLocalPort: 19222,
   } as unknown as Required<AgentExecutionContext>
 

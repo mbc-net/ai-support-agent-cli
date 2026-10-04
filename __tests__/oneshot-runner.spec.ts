@@ -110,6 +110,9 @@ describe('runOneshot', () => {
         commandId: 'cmd-123',
         agentId: 'ecs-agent-1',
         tenantCode: 'mbc',
+        // e2e_test persists under the agent's own project; it must not depend
+        // on a config sync (which oneshot never performs).
+        projectCode: 'MBC_01',
       }),
     )
     expect(mockSubmitResult).toHaveBeenCalledWith(
