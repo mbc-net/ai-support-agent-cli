@@ -52,6 +52,7 @@
     "ansible:molecule:os_init": "cd ansible && molecule test -s os_init"
   },
   "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
     "@aws-sdk/client-cloudwatch-logs": "^3.1079.0",
     "@aws-sdk/client-ecr": "^3.1079.0",
     "@aws-sdk/client-ecs": "^3.1079.0",
@@ -59,6 +60,8 @@
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@openai/codex": "^0.142.5",
     "@sentry/node": "^10.40.0",
+    "@smithy/protocol-http": "^5.6.2",
+    "@smithy/signature-v4": "^5.7.4",
     "axios": "^1.13.0",
     "commander": "^14.0.0",
     "js-yaml": "^4.3.0",

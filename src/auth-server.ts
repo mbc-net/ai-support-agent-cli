@@ -11,6 +11,8 @@ export interface AuthResult {
   apiUrl?: string
   tenantCode?: string
   projectCode?: string
+  vaultPublicKey?: string
+  expiresAt?: number
 }
 
 export function startAuthServer(port?: number, allowedOrigin?: string): Promise<{
@@ -88,6 +90,8 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
                 apiUrl: parseString(data.apiUrl) ?? undefined,
                 tenantCode: parseString(data.tenantCode) ?? undefined,
                 projectCode: parseString(data.projectCode) ?? undefined,
+                ...(typeof data.vaultPublicKey === 'string' ? { vaultPublicKey: data.vaultPublicKey } : {}),
+                ...(typeof data.expiresAt === 'number' ? { expiresAt: data.expiresAt } : {}),
               })
             }
           } catch {
