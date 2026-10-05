@@ -4,6 +4,8 @@ import { open, lstat, realpath, unlink, readFile, writeFile, rename } from 'fs/p
 import { dirname, resolve } from 'path'
 import { promisify } from 'util'
 
+export const VAULT_CLOCK_SKEW_MS = 30000
+
 export interface VaultScope { tenantCode: string; projectCode: string; serviceCode: string; environment: string }
 export interface LeaseClaims extends VaultScope { id: string; subject: string; releaseId: string; digest: string; issuedAt: number; expiresAt: number }
 export interface Variable { name: string; secret: boolean; type?: string; required?: boolean }
@@ -25,7 +27,7 @@ export function verifyLease(token: string, publicKey: string, scope: VaultScope,
     const key = createPublicKey(publicKey)
     if (key.asymmetricKeyType !== 'ed25519' || !payload || !signature || extra || !verify(null, Buffer.from(payload), key, Buffer.from(signature, 'base64url'))) throw new Error()
     const claims = JSON.parse(Buffer.from(payload, 'base64url').toString()) as LeaseClaims
-    if (claims.subject !== subject || claims.releaseId !== releaseId || claims.digest !== digest || !Number.isFinite(claims.expiresAt) || !Number.isFinite(claims.issuedAt) || claims.expiresAt <= Date.now() || claims.issuedAt > Date.now() + 30000 || claims.expiresAt - claims.issuedAt > 3600000 || (['tenantCode', 'projectCode', 'serviceCode', 'environment'] as const).some(k => claims[k] !== scope[k])) throw new Error()
+    if (claims.subject !== subject || claims.releaseId !== releaseId || claims.digest !== digest || !Number.isFinite(claims.expiresAt) || !Number.isFinite(claims.issuedAt) || claims.expiresAt <= Date.now() || claims.issuedAt > Date.now() + VAULT_CLOCK_SKEW_MS || claims.expiresAt - claims.issuedAt > 3600000 || (['tenantCode', 'projectCode', 'serviceCode', 'environment'] as const).some(k => claims[k] !== scope[k])) throw new Error()
     return claims
   } catch { throw new Error('Invalid, mismatched or expired vault lease') }
 }

@@ -7,6 +7,7 @@ import { parseString } from './utils'
 import { sendJson } from './utils/http-response'
 
 export interface AuthResult {
+  vaultPurpose?: string
   token: string
   apiUrl?: string
   tenantCode?: string
@@ -87,6 +88,7 @@ export function startAuthServer(port?: number, allowedOrigin?: string): Promise<
             if (callbackResolve) {
               callbackResolve({
                 token,
+                vaultPurpose: parseString(data.vaultPurpose) ?? undefined,
                 apiUrl: parseString(data.apiUrl) ?? undefined,
                 tenantCode: parseString(data.tenantCode) ?? undefined,
                 projectCode: parseString(data.projectCode) ?? undefined,
