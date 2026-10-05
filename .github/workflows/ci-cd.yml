@@ -133,6 +133,40 @@ jobs:
       - name: Run json callback no_log censorship tests
         run: python3 ansible/callback_plugins/tests/test_json_callback.py -v
 
+  # ---------------------------------------------------------------------------
+  # Channel locks (release channels: latest / beta / alpha)
+  #
+  # The workflow-level concurrency group is per ref, so runs of DIFFERENT tags
+  # are not serialized. Every update of a channel therefore runs under its own
+  # per-channel job-level lock (cancel-in-progress: false), one per thing moved:
+  #   release-channel-npm-<ch>     publish           npm dist-tag <ch>: decided by
+  #                                                  npm-publish-tag.js and written by
+  #                                                  `npm publish --tag`; only ever moves
+  #                                                  forward (an older release never
+  #                                                  takes the channel)
+  #   release-channel-image-<ch>   move_channel_tag  GHCR :<ch>, reconciled to npm's holder
+  #   release-channel-notify-<ch>  notify_version    API "latest version", reconciled to
+  #                                                  npm's holder
+  # npm's holder H is the single source of truth and is monotonic, so the two
+  # downstream jobs only ever converge to it (npm-channel-target.js).
+  #
+  # Cancellation: a concurrency group keeps one running + ONE pending job; a
+  # newly queued job cancels the pending one.
+  #   - downstream jobs: harmless, every job reconciles to npm's current holder
+  #     (see the comments on notify_version / move_channel_tag);
+  #   - publish: the cancelled release is NOT published, its downstream jobs are
+  #     skipped, and a cancelled job alone does not make the run fail, so no
+  #     failure notification would go out. report_publish_cancelled therefore
+  #     runs exactly when publish ended "cancelled" and fails the run with an
+  #     ::error:: naming the tag. Re-run it ("Re-run all jobs"): safe because
+  #     publish is idempotent (gitHead check -> skip) and the dist-tag decision
+  #     is monotonic.
+  #   All registry reads that decide anything (the published check, the publish
+  #   dist-tag decision and both downstream holder reads) use the uncached
+  #   endpoints in .github/scripts/npm-dist-tags.js (/<pkg>/<version> and
+  #   /-/package/<pkg>/dist-tags), never the `npm view` packument, which the CDN
+  #   caches for up to 300 s. So a re-run right after a publish sees it.
+  # ---------------------------------------------------------------------------
   publish:
     name: Publish
     needs: unit_tests
@@ -142,6 +176,14 @@ jobs:
     permissions:
       contents: write
       id-token: write
+    # Per-channel lock around npm's channel dist-tag (see the "Channel locks"
+    # comment above). Evaluated before any step runs, so the channel is derived
+    # from the tag name with the same rule as the "Determine release type" step
+    # (contains() is case-insensitive; that step matches case-insensitively too
+    # and fails if the two ever disagree).
+    concurrency:
+      group: release-channel-npm-${{ contains(github.ref_name, 'beta') && 'beta' || (contains(github.ref_name, 'alpha') && 'alpha' || 'latest') }}
+      cancel-in-progress: false
     # Exposed so the image jobs reuse the exact version and channel decided here.
     # Re-deriving them downstream would let the container tags drift from the npm
     # dist-tags (e.g. a beta release quietly taking over `:latest`).
@@ -149,6 +191,13 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       channel_tag: ${{ steps.release-type.outputs.tag }}
       prerelease: ${{ steps.release-type.outputs.prerelease }}
+      # Deliberately NOTHING about which version the channel should hold: "Re-run
+      # failed jobs" does not re-run this (successful) job and reuses its old
+      # outputs, so such a value would be stale on a re-run after a newer release.
+      # version / channel_tag are derived from the tag name alone, so reusing them
+      # on a re-run is safe. notify_version and move_channel_tag resolve the
+      # channel's target from npm themselves, under a per-channel lock
+      # (.github/scripts/npm-channel-target.js).
     steps:
       - uses: actions/checkout@v4
         with:
@@ -176,28 +225,77 @@ jobs:
       - name: Update package.json version
         run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
 
+      # LOCK_CHANNEL is the job's concurrency group expression, verbatim. If this
+      # classification and the lock ever disagreed, the job would hold another
+      # channel's lock while publishing to this one, so that fails here.
       - name: Determine release type
         id: release-type
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          LOCK_CHANNEL: ${{ contains(github.ref_name, 'beta') && 'beta' || (contains(github.ref_name, 'alpha') && 'alpha' || 'latest') }}
         run: |
-          if [[ "${{ steps.version.outputs.version }}" == *"beta"* ]]; then
-            echo "tag=beta" >> $GITHUB_OUTPUT
-            echo "prerelease=true" >> $GITHUB_OUTPUT
-          elif [[ "${{ steps.version.outputs.version }}" == *"alpha"* ]]; then
-            echo "tag=alpha" >> $GITHUB_OUTPUT
-            echo "prerelease=true" >> $GITHUB_OUTPUT
+          shopt -s nocasematch
+          if [[ "$VERSION" == *beta* ]]; then
+            tag=beta prerelease=true
+          elif [[ "$VERSION" == *alpha* ]]; then
+            tag=alpha prerelease=true
           else
-            echo "tag=latest" >> $GITHUB_OUTPUT
-            echo "prerelease=false" >> $GITHUB_OUTPUT
+            tag=latest prerelease=false
           fi
+          if [[ "$tag" != "$LOCK_CHANNEL" ]]; then
+            echo "::error::release type '$tag' does not match the channel lock '$LOCK_CHANNEL'"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
-      - name: Publish to npm (Pre-release)
-        if: steps.release-type.outputs.prerelease == 'true'
-        run: npm publish --access public --ignore-scripts --tag ${{ steps.release-type.outputs.tag }}
-        timeout-minutes: 5
+      # Makes the publish job re-runnable. npm can never overwrite a published
+      # version (E403), so after a run that published but failed in a later step,
+      # a re-run used to fail here forever. The script reads the uncached
+      # per-version manifest (GET registry.npmjs.org/<pkg>/<version>, not the
+      # CDN-cached `npm view` packument, so a re-run within 300 s of the publish
+      # still sees it) and compares its `gitHead` with $GITHUB_SHA: npm records
+      # the checkout's HEAD as gitHead on publish, and
+      # `npm version --no-git-tag-version` above does not move HEAD, so a match
+      # proves the version came from this very commit.
+      #   200, same commit -> skip=true (re-run; the publish steps are skipped)
+      #   404              -> skip=false (publish)
+      #   200 with another/missing gitHead, any other status, bad body,
+      #   timeout or connection error -> the step fails
+      - name: Check whether this version is already on npm
+        id: published
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: node .github/scripts/npm-version-published.js --package=@ai-support-agent/cli --version="$VERSION"
 
-      - name: Publish to npm (Production)
-        if: steps.release-type.outputs.prerelease == 'false'
-        run: npm publish --access public --ignore-scripts
+      # Monotonic channel: decides the dist-tag npm publish attaches, under this
+      # job's channel lock (.github/scripts/npm-publish-tag.js). With P = npm's
+      # current dist-tags[channel] (read uncached) and V = this version:
+      #   not yet published: P missing or P < V -> publish_tag=<channel>
+      #                      P > V -> publish_tag=superseded-<channel> (an older
+      #                      release never takes the channel)
+      #   re-run (skip=true): P >= V -> ok; P missing or P < V -> fail with the
+      #                      manual `npm dist-tag add` command (the channel was
+      #                      changed outside this workflow)
+      # Runs on re-runs too (no `if`). Lookup/parse/semver errors fail the job
+      # before anything is published. semver comes from `npm ci` above (pinned
+      # in package-lock.json).
+      - name: Decide the npm dist-tag (monotonic channel)
+        id: npm-tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CHANNEL: ${{ steps.release-type.outputs.tag }}
+          PUBLISHED: ${{ steps.published.outputs.skip }}
+        run: node .github/scripts/npm-publish-tag.js --package=@ai-support-agent/cli --version="$VERSION" --channel="$CHANNEL" --published="$PUBLISHED"
+
+      # Never `--tag <channel>` directly: only the locked decision above may move
+      # the channel. `:?` refuses an empty tag (npm would default to `latest`).
+      # Auth: OIDC trusted publishing (id-token: write + setup-node registry-url).
+      - name: Publish to npm
+        if: steps.published.outputs.skip != 'true'
+        env:
+          PUBLISH_TAG: ${{ steps.npm-tag.outputs.publish_tag }}
+        run: npm publish --access public --ignore-scripts --tag "${PUBLISH_TAG:?publish_tag was not decided}"
         timeout-minutes: 5
 
       - name: Create GitHub Release
@@ -217,27 +315,99 @@ jobs:
             ```
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Notify API of new version
-        if: success()
+  # Makes a cancelled publish loud (see "Channel locks" above). The publish lock
+  # keeps one running + ONE pending job, so a third queued tag of the same channel
+  # cancels the pending one: that release is never published, its downstream jobs
+  # are skipped, and the run would otherwise not count as failed.
+  # `always()` (not `!cancelled()`): this job must run even though a job it needs
+  # was cancelled, and how cancelled() evaluates when only a needed job (not the
+  # run) was cancelled is not something to rely on; missing this report is worse
+  # than a redundant one. Consequence: when a user cancels the whole run while
+  # publish is in progress or queued, this job also runs and prints the same
+  # error; that is acceptable (the run is cancelled anyway and the advice to
+  # re-run still holds). A publish that hit its timeout-minutes may also end as
+  # "cancelled" and is reported the same way.
+  report_publish_cancelled:
+    name: Report cancelled publish
+    needs: publish
+    if: always() && startsWith(github.ref, 'refs/tags/') && needs.publish.result == 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Fail the run because publish was cancelled
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          if [ -z "$VERSION_API_URL" ] || [ -z "$VERSION_API_KEY" ]; then
-            echo "::warning::AGENT_VERSION_API_URL or AGENT_VERSION_API_KEY is not set. Skipping version notification."
-            exit 0
-          fi
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT "$VERSION_API_URL/api/agent/version" \
-            -H "Content-Type: application/json" \
-            -H "X-API-Key: $VERSION_API_KEY" \
-            -d "{\"channel\":\"${{ steps.release-type.outputs.tag }}\",\"latestVersion\":\"${{ steps.version.outputs.version }}\"}")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          echo "Response: $BODY (HTTP $HTTP_CODE)"
-          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-            echo "::error::Version notification failed with HTTP $HTTP_CODE"
-            exit 1
-          fi
+          echo "::error::publish for ${TAG} was cancelled, so ${TAG} was NOT published (no npm version, GitHub Release, image or API notification). Most likely it was superseded while waiting for the release-channel lock (a newer tag of the same channel queued behind it), or the run was cancelled or timed out."
+          echo "::error::Re-run this run for ${TAG} with \"Re-run all jobs\". That is safe: publish skips a version already published from this commit (gitHead check) and the channel dist-tag only moves forward (an older release never takes the channel)."
+          exit 1
+
+  # Tells the API the current version per channel. Deliberately a separate job:
+  # in v0.5.15-beta.0 this request (then the last step of `publish`) got HTTP 403
+  # from the API's CloudFront geo restriction because the GitHub-hosted runner's
+  # egress IP was geolocated outside the allowed countries. That failed `publish`
+  # after npm and the GitHub Release had already been published, so the image
+  # jobs were skipped and a re-run could not get past `npm publish`.
+  # As its own job, a notify failure no longer blocks the image jobs (they do not
+  # need this job), and "Re-run failed jobs" re-runs only this job, on a fresh
+  # runner (and usually a different egress IP).
+  #
+  # Channel lock + reconciliation (see "Channel locks" above; same design as
+  # move_channel_tag): runs of different tags are not serialized by the workflow
+  # group; an older tag's re-run could check the channel, a newer release could
+  # then notify, and the older run's notification would land last. So:
+  #   - job-level concurrency per channel serializes check->send across all runs;
+  #   - the value sent is NOT this run's version but the version npm's dist-tag
+  #     currently names (H >= this version, re-resolved before every attempt by
+  #     notify-version.js), i.e. idempotent convergence to npm's truth.
+  # A concurrency group keeps one running + one pending job and a newly queued
+  # job CANCELS the pending one (cancel-in-progress: false only protects the
+  # running one). That is harmless here: every job sends npm's current holder,
+  # so the job that runs last sends the right value, and the newest release's own
+  # job always runs after its dist-tag exists (it waits for propagation).
+  # Residual: if the job holding the lock fails, the API keeps its previous value
+  # until the next run in this group (or a re-run of the failed job).
+  notify_version:
+    name: Notify API of new version
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    # The resolution may wait up to ~5 min for the dist-tag to propagate, plus up
+    # to 3 requests of 30s and 40s of backoff.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    concurrency:
+      group: release-channel-notify-${{ needs.publish.outputs.channel_tag }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # notify-version.js resolves the target (npm-channel-target.js) before each
+      # attempt and PUTs it to /api/agent/version, retrying connection errors,
+      # 5xx, 429 and 403 (geo/WAF) and failing fast on other 4xx.
+      # semver: installed at the exact version pinned in package-lock.json, alone
+      # (no full `npm ci`), into a temp prefix outside the checkout and exposed via
+      # NODE_PATH, so the comparison is deterministic and no project deps or
+      # install scripts run in this job.
+      - name: Notify API of the channel's current version
         env:
           VERSION_API_URL: ${{ secrets.AGENT_VERSION_API_URL }}
           VERSION_API_KEY: ${{ secrets.AGENT_VERSION_API_KEY }}
+          VERSION: ${{ needs.publish.outputs.version }}
+          CHANNEL: ${{ needs.publish.outputs.channel_tag }}
+          NODE_PATH: ${{ runner.temp }}/channel-check/node_modules
+        run: |
+          npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/channel-check" semver@7.7.4
+          node .github/scripts/notify-version.js --package=@ai-support-agent/cli --version="$VERSION" --channel="$CHANNEL"
 
   # ---------------------------------------------------------------------------
   # Container image (ghcr.io/mbc-net/ai-support-agent-cli)
@@ -248,6 +418,9 @@ jobs:
   # `needs: publish` is REQUIRED, not cosmetic: docker/Dockerfile installs the CLI
   # with `npm install -g @ai-support-agent/cli@${AGENT_VERSION}`, so the version
   # has to be on the npm registry before the image can be built.
+  #
+  # The image jobs must NOT need `notify_version`: a failed API notification
+  # (e.g. a CloudFront geo block) must not keep the image from being published.
   #
   # Built per-architecture on native runners and joined into one manifest list.
   # The Dockerfile compiles neovim from source and installs a rust toolchain, so
@@ -324,11 +497,11 @@ jobs:
           retention-days: 1
 
   # Joins the per-architecture images into a single multi-arch manifest list and
-  # applies the human-facing tags. `latest` only moves on a production release so
-  # a beta tag cannot take it over — mirrors the npm dist-tag logic above.
+  # publishes the immutable version tag only. The moving channel tag
+  # (latest/beta/alpha) is move_channel_tag's job.
   publish_image_manifest:
     name: Publish Image Manifest
-    # `publish` is listed so its outputs (version / channel_tag) are reachable;
+    # `publish` is listed so its outputs (version) are reachable;
     # `publish_image` is the actual build dependency.
     needs: [publish, publish_image]
     if: startsWith(github.ref, 'refs/tags/')
@@ -352,11 +525,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create manifest list and push
+      # Immutable version tag: always published (also on a re-run of an old tag).
+      - name: Create manifest list and push version tag
         env:
           IMAGE: ghcr.io/mbc-net/ai-support-agent-cli
           VERSION: ${{ needs.publish.outputs.version }}
-          CHANNEL_TAG: ${{ needs.publish.outputs.channel_tag }}
         run: |
           sources=()
           for f in /tmp/digests/*; do
@@ -366,15 +539,104 @@ jobs:
             echo "::error::no per-architecture digests were produced"
             exit 1
           fi
-          # Immutable version tag: always published.
           docker buildx imagetools create --tag "${IMAGE}:${VERSION}" "${sources[@]}"
-          # Moving channel tag: latest / beta / alpha, matching the npm dist-tag
-          # decided by the publish job. `latest` therefore only moves on a
-          # production release.
-          docker buildx imagetools create --tag "${IMAGE}:${CHANNEL_TAG}" "${sources[@]}"
 
       - name: Show published image
         env:
           IMAGE: ghcr.io/mbc-net/ai-support-agent-cli
           VERSION: ${{ needs.publish.outputs.version }}
         run: docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+
+  # Points the moving channel tag (latest / beta / alpha, matching the npm
+  # dist-tag chosen by the publish job, so `latest` only moves on a production
+  # release) at the image of the version npm's dist-tag currently names.
+  #
+  # Channel lock + reconciliation (see "Channel locks" above): the workflow-level
+  # concurrency group is per ref, so runs of DIFFERENT tags are not serialized.
+  # An older tag's re-run could
+  # check "the channel is still mine", a newer release could then move npm and
+  # `:latest`, and the older run's tag update would land last and roll `:latest`
+  # back (default k8s manifests pull `:latest` with imagePullPolicy Always ->
+  # downgrade on restart). So:
+  #   - job-level concurrency per channel serializes resolve->move across runs;
+  #   - the tag is pointed at ${IMAGE}:<H>, H = npm's current dist-tag holder
+  #     (>= this run's version; waits for propagation after a fresh publish), never
+  #     at "this run's version": idempotent convergence to npm's truth.
+  # A concurrency group keeps one running + one pending job and a newly queued
+  # job CANCELS the pending one (cancel-in-progress: false only protects the
+  # running one). That is harmless: every job reconciles to npm's current holder,
+  # so the job that runs last in the group sets the right value, and the newest
+  # release's own job always runs after its version tag exists (it needs
+  # publish_image_manifest). If H's image is not published yet (H's release is
+  # still building), this job leaves the tag alone and H's own run reconciles it.
+  # Residual: if the job holding the lock fails, the channel tag keeps its
+  # previous value until the next run in this group (or a re-run of the failed job).
+  move_channel_tag:
+    name: Move image channel tag
+    needs: [publish, publish_image_manifest]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    # The resolution may wait up to ~5 min for the dist-tag to propagate.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: release-channel-image-${{ needs.publish.outputs.channel_tag }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Resolves H (see npm-channel-target.js): npm dist-tags[CHANNEL] once it is
+      # >= VERSION. Fails (rather than guessing) on lookup errors or when the
+      # dist-tag has not caught up after ~5 min.
+      # semver: installed at the exact version pinned in package-lock.json, alone
+      # (no full `npm ci`), into a temp prefix outside the checkout and exposed via
+      # NODE_PATH, so the comparison is deterministic and no project deps or
+      # install scripts run in this job.
+      - name: Resolve the channel's target version from npm
+        id: target
+        env:
+          VERSION: ${{ needs.publish.outputs.version }}
+          CHANNEL: ${{ needs.publish.outputs.channel_tag }}
+          NODE_PATH: ${{ runner.temp }}/channel-check/node_modules
+        run: |
+          npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/channel-check" semver@7.7.4
+          node .github/scripts/npm-channel-target.js --package=@ai-support-agent/cli --version="$VERSION" --channel="$CHANNEL"
+
+      # Copies the target's version tag (an already published multi-arch manifest
+      # list) to the channel tag. Only "not found" (buildx prints
+      # "ERROR: <ref>: not found") means "H's image is not published yet"; any
+      # other inspect error (auth, network, registry) fails the job.
+      - name: Point the channel tag at the target's image
+        env:
+          IMAGE: ghcr.io/mbc-net/ai-support-agent-cli
+          CHANNEL_TAG: ${{ needs.publish.outputs.channel_tag }}
+          TARGET: ${{ steps.target.outputs.target }}
+        run: |
+          if ! inspect_out=$(docker buildx imagetools inspect "${IMAGE}:${TARGET}" 2>&1); then
+            if grep -qF "${IMAGE}:${TARGET}: not found" <<<"$inspect_out"; then
+              echo "::notice::${IMAGE}:${TARGET} is not published yet (its release is still building); left ${IMAGE}:${CHANNEL_TAG} unchanged. That release's own run will move it."
+              exit 0
+            fi
+            echo "$inspect_out"
+            echo "::error::could not inspect ${IMAGE}:${TARGET}"
+            exit 1
+          fi
+          docker buildx imagetools create --tag "${IMAGE}:${CHANNEL_TAG}" "${IMAGE}:${TARGET}"
+          docker buildx imagetools inspect "${IMAGE}:${CHANNEL_TAG}"
