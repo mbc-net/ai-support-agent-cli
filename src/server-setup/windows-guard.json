@@ -1,0 +1,196 @@
+{
+  "$comment": [
+    "ansible-task-guard の Windows 部分とロールの OS 対応表（設計: admin-docs/docs/specifications/server-setup-windows-openssh.md §6）。",
+    "正本は agent（このファイル）。api は写しを持ち、固定版の @ai-support-agent/cli の dist/server-setup/windows-guard.json と照合する。",
+    "modules: Windows で許可するモジュール（FQCN のみ）と、モジュールごとの許可引数（args。一覧外の引数は拒否）。",
+    "args は collections に書いた固定版の ansible-doc の options（エイリアスを含む）から、対象ホスト上で完結する引数だけを選んだもの。",
+    "deniedArgs は拒否する引数とその理由（拒否の判定は args に無いことで行う。deniedArgs は理由の表示と、構造テストでの重なり検査に使う）。",
+    "argConstraints は許可引数の値の制約（文字列で、pattern に一致すること）。JSON で表せない検査は ansible-task-guard.ts の validateWindowsModuleArgs にある。",
+    "freeForm: true のモジュールだけ文字列形式（win_command: cmd.exe /c ...）を認める。ほかのモジュールの文字列形式は k=v として引数に展開されるので拒否する。",
+    "controllerOnlyModules: コントローラだけで動き、OS に関係なく使える ansible.builtin のモジュール（引数の検査は Linux と同じ既存の検査のみ）。",
+    "roleTargetOs: include_role できるロールと、そのロールが対象とする OS。ansible/roles/ のディレクトリと 1:1。表に無いロールは拒否する。"
+  ],
+  "collections": {
+    "ansible.windows": "3.8.0",
+    "community.windows": "3.3.0"
+  },
+  "controllerOnlyModules": [
+    "ansible.builtin.debug",
+    "ansible.builtin.assert",
+    "ansible.builtin.set_fact",
+    "ansible.builtin.fail"
+  ],
+  "modules": {
+    "ansible.windows.win_command": {
+      "freeForm": true,
+      "args": ["_raw_params", "argv", "chdir", "cmd", "creates", "output_encoding_override", "removes", "stdin"]
+    },
+    "ansible.windows.win_shell": {
+      "freeForm": true,
+      "args": ["cmd", "_raw_params", "chdir", "creates", "executable", "no_profile", "output_encoding_override", "removes", "stdin"]
+    },
+    "ansible.windows.win_powershell": {
+      "args": ["arguments", "chdir", "creates", "depth", "error_action", "executable", "parameters", "removes", "script"],
+      "deniedArgs": {
+        "path": "reads a script file on the controller unless remote_src is true (controller-side path)",
+        "remote_src": "switches path between the controller and the target (controller-side path)",
+        "sensitive_parameters": "passes credentials (PSCredential / SecureString); credential arguments are not allowed in the MVP"
+      }
+    },
+    "ansible.windows.win_copy": {
+      "args": ["content", "dest", "force", "backup"],
+      "deniedArgs": {
+        "src": "reads a file on the controller (controller-side path)",
+        "remote_src": "switches src between the controller and the target (controller-side path)",
+        "local_follow": "follows links in the controller-side src tree (controller-side path)",
+        "decrypt": "vault-decrypts the controller-side src (controller-side path)"
+      }
+    },
+    "ansible.windows.win_file": {
+      "args": ["access_time", "access_time_format", "modification_time", "modification_time_format", "path", "dest", "name", "state"]
+    },
+    "ansible.windows.win_stat": {
+      "args": ["checksum_algorithm", "follow", "get_checksum", "get_size", "path", "dest", "name"]
+    },
+    "ansible.windows.win_get_url": {
+      "args": ["checksum", "checksum_algorithm", "checksum_url", "dest", "follow_redirects", "force", "headers", "http_agent", "maximum_redirection", "proxy_url", "url", "url_method", "method", "url_timeout", "timeout", "use_proxy", "validate_certs"],
+      "deniedArgs": {
+        "url_username": "credential arguments are not allowed in the MVP",
+        "url_password": "credential arguments are not allowed in the MVP",
+        "client_cert": "credential arguments are not allowed in the MVP",
+        "client_cert_password": "credential arguments are not allowed in the MVP",
+        "proxy_username": "credential arguments are not allowed in the MVP",
+        "proxy_password": "credential arguments are not allowed in the MVP",
+        "use_default_credential": "sends the logged-on user's credential; credential arguments are not allowed in the MVP",
+        "proxy_use_default_credential": "sends the logged-on user's credential; credential arguments are not allowed in the MVP",
+        "force_basic_auth": "only meaningful with credential arguments, which are not allowed in the MVP"
+      },
+      "argConstraints": {
+        "url": { "pattern": "^https?://", "flags": "i", "description": "must be a literal http:// or https:// URL" },
+        "checksum_url": { "pattern": "^https?://", "flags": "i", "description": "must be a literal http:// or https:// URL" },
+        "proxy_url": { "pattern": "^https?://", "flags": "i", "description": "must be a literal http:// or https:// URL" }
+      }
+    },
+    "ansible.windows.win_acl": {
+      "args": ["follow", "inherit", "path", "propagation", "rights", "state", "type", "user"]
+    },
+    "ansible.windows.win_acl_inheritance": {
+      "args": ["path", "reorganize", "state"]
+    },
+    "ansible.windows.win_owner": {
+      "args": ["path", "recurse", "user"]
+    },
+    "ansible.windows.win_service": {
+      "args": ["dependencies", "dependency_action", "description", "desktop_interact", "display_name", "error_control", "failure_actions", "failure_actions_on_non_crash_failure", "failure_command", "failure_reboot_msg", "failure_reset_period_sec", "failure_reset_period", "force_dependent_services", "load_order_group", "name", "path", "pre_shutdown_timeout_ms", "pre_shutdown_timeout", "required_privileges", "service_type", "sid_info", "start_mode", "state", "username"],
+      "deniedArgs": {
+        "password": "credential arguments are not allowed in the MVP",
+        "update_password": "only meaningful with password (a credential argument), which is not allowed in the MVP"
+      }
+    },
+    "ansible.windows.win_regedit": {
+      "args": ["data", "delete_key", "hive", "name", "entry", "value", "path", "key", "state", "type", "datatype"]
+    },
+    "ansible.windows.win_reg_stat": {
+      "args": ["name", "entry", "value", "property", "path", "key"]
+    },
+    "ansible.windows.win_user": {
+      "args": ["account_disabled", "account_expires", "account_locked", "description", "fullname", "groups", "groups_action", "home_directory", "login_script", "name", "password_expired", "password_never_expires", "profile", "state", "user_cannot_change_password"],
+      "deniedArgs": {
+        "password": "credential arguments are not allowed in the MVP (creating users with a password is a later stage)",
+        "update_password": "only meaningful with password (a credential argument), which is not allowed in the MVP"
+      }
+    },
+    "ansible.windows.win_group": {
+      "args": ["description", "members", "name", "state"]
+    },
+    "ansible.windows.win_group_membership": {
+      "args": ["members", "name", "state"]
+    },
+    "ansible.windows.win_feature": {
+      "args": ["include_management_tools", "include_sub_features", "name", "source", "state"]
+    },
+    "ansible.windows.win_optional_feature": {
+      "args": ["include_parent", "name", "source", "state"]
+    },
+    "ansible.windows.win_package": {
+      "args": ["arguments", "chdir", "checksum", "checksum_algorithm", "creates_path", "creates_service", "creates_version", "expected_return_code", "follow_redirects", "headers", "http_agent", "log_path", "maximum_redirection", "path", "product_id", "provider", "proxy_url", "state", "url_method", "url_timeout", "use_proxy", "validate_certs", "verify_signature", "wait_for_children"],
+      "deniedArgs": {
+        "url_username": "credential arguments are not allowed in the MVP",
+        "url_password": "credential arguments are not allowed in the MVP",
+        "client_cert": "credential arguments are not allowed in the MVP",
+        "client_cert_password": "credential arguments are not allowed in the MVP",
+        "proxy_username": "credential arguments are not allowed in the MVP",
+        "proxy_password": "credential arguments are not allowed in the MVP",
+        "use_default_credential": "sends the logged-on user's credential; credential arguments are not allowed in the MVP",
+        "proxy_use_default_credential": "sends the logged-on user's credential; credential arguments are not allowed in the MVP",
+        "force_basic_auth": "only meaningful with credential arguments, which are not allowed in the MVP"
+      },
+      "argConstraints": {
+        "path": { "pattern": "^(https?://|[A-Za-z]:\\\\)", "flags": "i", "description": "must be a literal http(s):// URL or an absolute path on the target host such as C:\\ (UNC paths are not allowed)" },
+        "proxy_url": { "pattern": "^https?://", "flags": "i", "description": "must be a literal http:// or https:// URL" }
+      }
+    },
+    "ansible.windows.win_reboot": {
+      "args": ["boot_time_command", "connect_timeout", "connect_timeout_sec", "msg", "post_reboot_delay", "post_reboot_delay_sec", "pre_reboot_delay", "pre_reboot_delay_sec", "reboot_timeout", "reboot_timeout_sec", "test_command"]
+    },
+    "ansible.windows.win_path": {
+      "args": ["elements", "name", "scope", "state"]
+    },
+    "ansible.windows.win_environment": {
+      "args": ["level", "name", "state", "value", "variables"]
+    },
+    "ansible.windows.win_hostname": {
+      "args": ["name"]
+    },
+    "ansible.windows.win_whoami": {
+      "args": []
+    },
+    "ansible.windows.win_wait_for": {
+      "args": ["connect_timeout", "delay", "exclude_hosts", "host", "path", "port", "regex", "search_regex", "regexp", "sleep", "state", "timeout"]
+    },
+    "ansible.windows.win_timezone": {
+      "args": ["timezone"]
+    },
+    "ansible.windows.win_firewall": {
+      "args": ["inbound_action", "outbound_action", "profiles", "state"]
+    },
+    "community.windows.win_firewall_rule": {
+      "args": ["action", "description", "direction", "enabled", "enable", "group", "icmp_type_code", "localip", "localport", "name", "profiles", "profile", "program", "protocol", "remoteip", "remoteport", "service", "state"]
+    },
+    "community.windows.win_lineinfile": {
+      "args": ["backrefs", "backup", "create", "encoding", "insertafter", "insertbefore", "line", "newline", "path", "dest", "destfile", "name", "regex", "regexp", "state", "validate"]
+    }
+  },
+  "roleTargetOs": {
+    "ai_support_agent": "linux",
+    "ai_support_agent_k8s": "linux",
+    "claude_cli": "linux",
+    "codex": "linux",
+    "database": "linux",
+    "dns_tls": "linux",
+    "docker": "linux",
+    "e2e_runner_k8s": "linux",
+    "github_runner": "linux",
+    "github_runner_k8s": "linux",
+    "gitlab_runner": "linux",
+    "gitlab_runner_k8s": "linux",
+    "haproxy": "linux",
+    "k3s": "linux",
+    "keycloak": "linux",
+    "nvm": "linux",
+    "os_init": "linux",
+    "rsyslog_forward": "linux",
+    "rsyslog_server": "linux",
+    "sentry": "linux",
+    "shared_file": "linux",
+    "ssh_key": "linux",
+    "tailscale": "linux",
+    "web_server": "linux",
+    "win_os_init": "windows",
+    "win_ssh_key": "windows",
+    "win_updates": "windows",
+    "zabbix_agent": "linux",
+    "zabbix_server": "linux",
+    "zabbix_web": "linux"
+  }
+}

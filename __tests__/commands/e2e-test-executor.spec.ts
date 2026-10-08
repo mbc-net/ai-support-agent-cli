@@ -5,6 +5,7 @@ import type { PlaywrightRunnerResult } from '../../src/browser/playwright-test-r
 import * as browserScriptExecutor from '../../src/browser/browser-script-executor'
 import * as playwrightSubprocessExecutor from '../../src/browser/playwright-subprocess-executor'
 import { logger } from '../../src/logger'
+import { AxiosError, AxiosHeaders } from 'axios'
 
 // Mock the chat executor
 jest.mock('../../src/commands/chat-executor', () => ({
@@ -52,6 +53,10 @@ describe('e2e-test-executor', () => {
     client: mockClient,
     agentId: 'agent-1',
     tenantCode: 'mbc',
+    // The agent's own project (transport deps / oneshot env) — the value
+    // e2e_test persists under. projectConfig is config-synced and only used
+    // for chat context.
+    projectCode: 'MBC_01',
     projectConfig: {
       project: { projectCode: 'MBC_01' },
     } as any,
@@ -302,33 +307,6 @@ describe('e2e-test-executor', () => {
     )
     expect(loudCall).toBeDefined()
     errorSpy.mockRestore()
-  })
-
-  it('should handle missing tenantCode gracefully in status reporting', async () => {
-    const options = { ...baseOptions, tenantCode: undefined }
-    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
-      success: true,
-      data: 'Done',
-    })
-
-    const result = await executeE2eTest(options)
-
-    expect(result.success).toBe(true)
-    // Should not throw, just warn
-    expect(mockClient.updateE2eExecutionStatus).not.toHaveBeenCalled()
-  })
-
-  it('should handle missing projectCode gracefully in status reporting', async () => {
-    const options = { ...baseOptions, projectConfig: undefined }
-    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
-      success: true,
-      data: 'Done',
-    })
-
-    const result = await executeE2eTest(options)
-
-    expect(result.success).toBe(true)
-    expect(mockClient.updateE2eExecutionStatus).not.toHaveBeenCalled()
   })
 
   it('should default executionMethod to ai when not specified', async () => {
@@ -1213,6 +1191,10 @@ describe('e2e-test-executor', () => {
     })
     expect((finalCall![3] as Record<string, unknown>).totalSteps).not.toBe(0)
     expect((finalCall![3] as Record<string, unknown>).errorMessage).toMatch(/timed out/i)
+    // Recovered failures are a real test outcome, but the run was cut short by
+    // the timeout, so the evidence is incomplete even though every step
+    // report persisted.
+    expect(finalCall![3]).toMatchObject({ testOutcome: 'failed', evidenceStatus: 'incomplete' })
   })
 
   it('should report an error status (not failed) when the subprocess times out with NO recoverable partial results', async () => {
@@ -1252,6 +1234,9 @@ describe('e2e-test-executor', () => {
     // No partial evidence → surface as error (true failure to produce results),
     // still carrying the timeout as the cause.
     expect((finalCall![3] as Record<string, unknown>).status).toBe('error')
+    // Design 9.3 row 5: no test outcome at all, evidence incomplete.
+    expect(finalCall![3]).not.toHaveProperty('testOutcome')
+    expect(finalCall![3]).toMatchObject({ evidenceStatus: 'incomplete' })
     expect((finalCall![3] as Record<string, unknown>).errorMessage).toMatch(/timed out/i)
   })
 
@@ -1316,37 +1301,663 @@ describe('e2e-test-executor', () => {
     errorSpy.mockRestore()
   })
 
-  it('should keep the final errorMessage undefined on a passed run even if a step report fails', async () => {
-    // A passing run has no "true cause" steps to lose; the existing
-    // success → undefined errorMessage contract must not be broken.
+  // Design 9.3 / phase A2: a passing test whose per-step evidence failed to
+  // persist must NOT be reported as "passed" (dev: 3/3 step reports rejected
+  // with HTTP 413, yet the run showed "passed 3/3" with empty evidence).
+  const http413 = (): AxiosError =>
+    new AxiosError(
+      'Request failed with status code 413',
+      'ERR_BAD_REQUEST',
+      undefined,
+      undefined,
+      {
+        status: 413,
+        statusText: 'Payload Too Large',
+        data: { message: 'request entity too large' },
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      },
+    )
+
+  const findFinalStatusCall = (): Record<string, unknown> | undefined => {
+    const call = mockClient.updateE2eExecutionStatus.mock.calls.find((c: unknown[]) =>
+      ['passed', 'failed', 'error'].includes(String((c[3] as Record<string, unknown>).status)),
+    )
+    return call ? (call[3] as Record<string, unknown>) : undefined
+  }
+
+  const playwrightOptions = (): ExecuteE2eTestOptions => ({
+    ...baseOptions,
+    payload: {
+      ...baseOptions.payload,
+      playwrightScript: "await page.goto('/')",
+      executionMethod: 'playwright',
+    },
+  })
+
+  it('should report error (not passed) when the test passed but every step report failed to persist', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 3,
+      passedTests: 3,
+      failedTests: 0,
+      steps: [
+        { title: 'step A', status: 'passed', duration: 10, screenshotBase64: 'AAAA' },
+        { title: 'step B', status: 'passed', duration: 10, screenshotBase64: 'BBBB' },
+        { title: 'step C', status: 'passed', duration: 10, screenshotBase64: 'CCCC' },
+      ],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockRejectedValue(http413())
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const result = await executeE2eTest(playwrightOptions())
+
+    // Every step was attempted (no early abort on the first failure).
+    expect(mockClient.reportE2eTestStep).toHaveBeenCalledTimes(3)
+
+    // Exactly one final status report, and it is error — never passed.
+    const finalCalls = mockClient.updateE2eExecutionStatus.mock.calls.filter((c: unknown[]) =>
+      ['passed', 'failed', 'error'].includes(String((c[3] as Record<string, unknown>).status)),
+    )
+    expect(finalCalls).toHaveLength(1)
+    const final = findFinalStatusCall()!
+    expect(final.status).toBe('error')
+    const msg = String(final.errorMessage)
+    expect(msg).toContain('3/3 step report(s) failed to persist')
+    // The first failure's reason carries the HTTP status (not just "Error").
+    expect(msg).toContain('[413] request entity too large')
+    // Test aggregates still reflect the test outcome itself.
+    expect(final).toMatchObject({ totalSteps: 3, passedSteps: 3, failedSteps: 0 })
+    // Design 9.3: status=error / testOutcome=passed / evidenceStatus=incomplete.
+    expect(final).toMatchObject({ testOutcome: 'passed', evidenceStatus: 'incomplete' })
+
+    // Each failed step report is logged at ERROR with the HTTP status.
+    const stepLogs = errorSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes('Failed to report playwright step'))
+    expect(stepLogs).toHaveLength(3)
+    expect(stepLogs[0]).toContain('step=1')
+    expect(stepLogs[0]).toContain('[413]')
+
+    // Return value is consistent with the reported status and test counts.
+    expect(result.success).toBe(true)
+    expect(result.data).toMatchObject({
+      executionId: 'exec-1',
+      status: 'error',
+      passedTests: 3,
+      failedTests: 0,
+      totalTests: 3,
+    })
+    errorSpy.mockRestore()
+  })
+
+  it('should report error with the partial count and FIRST failure reason when only some step reports fail on a passed test', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 3,
+      passedTests: 3,
+      failedTests: 0,
+      steps: [
+        { title: 'step A', status: 'passed' },
+        { title: 'step B', status: 'passed' },
+        { title: 'step C', status: 'passed' },
+      ],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(http413())
+      .mockRejectedValueOnce(new Error('socket hang up'))
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const result = await executeE2eTest(playwrightOptions())
+
+    const final = findFinalStatusCall()!
+    expect(final.status).toBe('error')
+    const msg = String(final.errorMessage)
+    expect(msg).toContain('2/3 step report(s) failed to persist')
+    expect(msg).toContain('[413] request entity too large')
+    expect(msg).not.toContain('socket hang up')
+    expect(result.data).toMatchObject({ status: 'error' })
+    errorSpy.mockRestore()
+  })
+
+  it('should report passed with no errorMessage when the test passed and every step report persisted', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 2,
+      passedTests: 2,
+      failedTests: 0,
+      steps: [
+        { title: 'step A', status: 'passed' },
+        { title: 'step B', status: 'passed' },
+      ],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const result = await executeE2eTest(playwrightOptions())
+
+    expect(mockClient.reportE2eTestStep).toHaveBeenCalledTimes(2)
+    const final = findFinalStatusCall()!
+    expect(final.status).toBe('passed')
+    expect(final).not.toHaveProperty('errorMessage')
+    expect(final).toMatchObject({ totalSteps: 2, passedSteps: 2, failedSteps: 0 })
+    expect(final).toMatchObject({ testOutcome: 'passed' })
+    // Never 'complete' from the agent (reserved for the API's manifest check).
+    expect(final).not.toHaveProperty('evidenceStatus')
+    expect(result.data).toMatchObject({ status: 'passed', passedTests: 2, totalTests: 2 })
+    expect(errorSpy).not.toHaveBeenCalled()
+    errorSpy.mockRestore()
+  })
+
+  it('should keep status failed (not error) and append the note when a failed test also has step report failures', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      totalTests: 2,
+      passedTests: 1,
+      failedTests: 1,
+      steps: [
+        { title: 'step A', status: 'passed' },
+        { title: 'step B', status: 'failed', error: 'expect(received).toBe(expected)' },
+      ],
+      errorOutput: '1 failed',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockRejectedValue(http413())
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const result = await executeE2eTest(playwrightOptions())
+
+    const final = findFinalStatusCall()!
+    expect(final.status).toBe('failed')
+    // Existing contract: the failure output comes first, the note is appended.
+    expect(final.errorMessage).toBe(
+      '1 failed (2/2 step report(s) failed to persist; first failure: [413] request entity too large)',
+    )
+    expect(final).toMatchObject({ testOutcome: 'failed', evidenceStatus: 'incomplete' })
+    expect(final).toMatchObject({ totalSteps: 2, passedSteps: 1, failedSteps: 1 })
+    expect(result.data).toMatchObject({ status: 'failed', passedTests: 1, failedTests: 1 })
+    errorSpy.mockRestore()
+  })
+
+  it('should note the step-report failure count in the completion log when the status becomes error', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 2,
+      passedTests: 2,
+      failedTests: 0,
+      steps: [
+        { title: 'step A', status: 'passed' },
+        { title: 'step B', status: 'passed' },
+      ],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockRejectedValue(http413())
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+    const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {})
+
+    await executeE2eTest(playwrightOptions())
+
+    const completionLog = infoSpy.mock.calls
+      .map((c) => String(c[0]))
+      .find((m) => m.includes('Playwright subprocess completed'))
+    expect(completionLog).toContain('status=error')
+    expect(completionLog).toContain('2/2 step report(s) failed to persist')
+    errorSpy.mockRestore()
+    infoSpy.mockRestore()
+  })
+
+  it('should not append a step-report note to the completion log when every step report persisted', async () => {
     ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
       success: true,
       totalTests: 1,
       passedTests: 1,
       failedTests: 0,
-      steps: [{ title: 'ok step', status: 'passed', duration: 10 }],
+      steps: [{ title: 'step A', status: 'passed' }],
     })
     mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
-    mockClient.reportE2eTestStep.mockRejectedValue(new Error('transient'))
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+    const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {})
+
+    await executeE2eTest(playwrightOptions())
+
+    const completionLog = infoSpy.mock.calls
+      .map((c) => String(c[0]))
+      .find((m) => m.includes('Playwright subprocess completed'))
+    expect(completionLog).toContain('status=passed')
+    expect(completionLog).not.toContain('step report')
+    infoSpy.mockRestore()
+  })
+
+  it('should bound the first step-report failure reason (non-Axios error) in both the log and the aggregate errorMessage', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [{ title: 'step A', status: 'passed' }],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    const hugeReason = 'x'.repeat(5000)
+    mockClient.reportE2eTestStep.mockRejectedValue(new Error(hugeReason))
     const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
 
-    const options: ExecuteE2eTestOptions = {
-      ...baseOptions,
-      payload: {
-        ...baseOptions.payload,
-        playwrightScript: "await page.goto('/')",
-        executionMethod: 'playwright',
-      },
-    }
+    const result = await executeE2eTest(playwrightOptions())
 
-    await executeE2eTest(options)
-
-    const passedCall = mockClient.updateE2eExecutionStatus.mock.calls.find(
-      (c: unknown[]) => (c[3] as Record<string, unknown>).status === 'passed',
-    )
-    expect(passedCall).toBeDefined()
-    expect(passedCall![3]).not.toHaveProperty('errorMessage')
+    const final = findFinalStatusCall()!
+    expect(final.status).toBe('error')
+    const msg = String(final.errorMessage)
+    expect(msg).not.toContain(hugeReason)
+    // Hard limit: marker included, the reason is at most 500 chars.
+    expect(msg).toContain(`(first failure: ${'x'.repeat(497)}...)`)
+    expect(msg).not.toContain('x'.repeat(498))
+    expect(msg.length).toBeLessThan(700)
+    const stepLog = errorSpy.mock.calls
+      .map((c) => String(c[0]))
+      .find((m) => m.includes('Failed to report playwright step'))
+    expect(stepLog).toBeDefined()
+    expect(stepLog).toContain(`: ${'x'.repeat(497)}...`)
+    expect(stepLog!.endsWith(`: ${'x'.repeat(497)}...`)).toBe(true)
+    expect(stepLog).not.toContain('x'.repeat(498))
+    expect(result.data).toMatchObject({ errorMessage: msg })
     errorSpy.mockRestore()
+  })
+
+  it('should bound an unbounded Playwright stderr in the status report, the returned data and the logs', async () => {
+    const hugeStderr = 'E'.repeat(3 * 1024 * 1024)
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      totalTests: 1,
+      passedTests: 0,
+      failedTests: 1,
+      steps: [{ title: 'step A', status: 'failed', error: 'boom' }],
+      errorOutput: hugeStderr,
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockRejectedValue(http413())
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+    const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {})
+
+    const result = await executeE2eTest(playwrightOptions())
+
+    const final = findFinalStatusCall()!
+    const sent = String(final.errorMessage)
+    // Only the stderr part is cut, keeping its TAIL behind a marker; the
+    // step-report note survives intact and the whole stays within 4000.
+    const note = ' (1/1 step report(s) failed to persist; first failure: [413] request entity too large)'
+    const marker = '[...truncated] '
+    expect(sent).toBe(`${marker}${'E'.repeat(4000 - note.length - marker.length)}${note}`)
+    expect(sent).toHaveLength(4000)
+    expect((result.data as Record<string, unknown>).errorMessage).toBe(sent)
+    expect(final).toMatchObject({ status: 'failed', testOutcome: 'failed', evidenceStatus: 'incomplete' })
+    const allLogs = [...errorSpy.mock.calls, ...infoSpy.mock.calls].map((c) => String(c[0]))
+    expect(allLogs.every((m) => m.length < 5000)).toBe(true)
+    errorSpy.mockRestore()
+    infoSpy.mockRestore()
+  })
+
+  it('should keep the tail of the stderr (where the failure is) when truncating', async () => {
+    const stderr = `HEAD-${'x'.repeat(10_000)}-TAIL: Error: expect(locator).toBeVisible() failed`
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      totalTests: 1,
+      passedTests: 0,
+      failedTests: 1,
+      steps: [{ title: 'step A', status: 'failed', error: 'boom' }],
+      errorOutput: stderr,
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    await executeE2eTest(playwrightOptions())
+
+    const sent = String(findFinalStatusCall()!.errorMessage)
+    expect(sent).toHaveLength(4000)
+    expect(sent.startsWith('[...truncated] ')).toBe(true)
+    expect(sent).not.toContain('HEAD-')
+    expect(sent.endsWith('-TAIL: Error: expect(locator).toBeVisible() failed')).toBe(true)
+  })
+
+  it('should report error with no testOutcome and evidenceStatus=incomplete when a failed run produced no test results (non-timeout)', async () => {
+    // e.g. the JSON reporter output was missing/unparsable: success=false, no
+    // steps, not a timeout. Nothing ran to a result → execution error.
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      timedOut: false,
+      totalTests: 0,
+      passedTests: 0,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const result = await executeE2eTest(playwrightOptions())
+
+    expect(mockClient.reportE2eTestStep).not.toHaveBeenCalled()
+    const final = findFinalStatusCall()!
+    expect(final.status).toBe('error')
+    expect(final).not.toHaveProperty('testOutcome')
+    expect(final).toMatchObject({ evidenceStatus: 'incomplete' })
+    expect(final.errorMessage).toBe('Playwright subprocess produced no test results')
+    expect(result.data).toMatchObject({ status: 'error' })
+  })
+
+  it('should keep the subprocess stderr as the cause when a failed run produced no test results', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      totalTests: 0,
+      passedTests: 0,
+      failedTests: 0,
+      steps: [],
+      errorOutput: 'SyntaxError: Unexpected token in spec',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    await executeE2eTest(playwrightOptions())
+
+    const final = findFinalStatusCall()!
+    expect(final).toMatchObject({
+      status: 'error',
+      evidenceStatus: 'incomplete',
+      errorMessage: 'SyntaxError: Unexpected token in spec',
+    })
+    expect(final).not.toHaveProperty('testOutcome')
+  })
+
+  it('should bound the errorMessage of script mode at the shared reporting choke point (tail kept)', async () => {
+    const stderr = `HEAD-${'s'.repeat(2 * 1024 * 1024)}-TAIL`
+    ;(playwrightTestRunner.runPlaywrightScript as jest.Mock).mockResolvedValue({
+      success: false,
+      passed: 0,
+      failed: 1,
+      totalSteps: 1,
+      steps: [],
+      errorOutput: stderr,
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    await executeE2eTest({
+      ...baseOptions,
+      payload: { ...baseOptions.payload, playwrightScript: "await page.goto('/')", executionMethod: 'script' },
+    })
+
+    const sent = String(findFinalStatusCall()!.errorMessage)
+    expect(sent).toHaveLength(4000)
+    expect(sent.startsWith('[...truncated] ')).toBe(true)
+    expect(sent.endsWith('-TAIL')).toBe(true)
+  })
+
+  it('should bound the errorMessage of AI mode at the shared reporting choke point', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({
+      success: false,
+      error: `HEAD-${'a'.repeat(1024 * 1024)}-TAIL`,
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    await executeE2eTest(baseOptions)
+
+    const sent = String(findFinalStatusCall()!.errorMessage)
+    expect(sent.length).toBeLessThanOrEqual(4000)
+    expect(sent.startsWith('[...truncated] ')).toBe(true)
+    expect(sent.endsWith('-TAIL')).toBe(true)
+  })
+
+  it('should run and persist under the agent\'s own projectCode even when projectConfig has not been synced', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [{ title: 'step A', status: 'passed' }],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const result = await executeE2eTest({ ...playwrightOptions(), projectConfig: undefined })
+
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalled()
+    expect(mockClient.reportE2eTestStep).toHaveBeenCalledWith('mbc', 'MBC_01', 'exec-1', expect.anything())
+    expect(mockClient.getE2eSupportFiles).toHaveBeenCalledWith('mbc', 'MBC_01')
+    expect(findFinalStatusCall()).toMatchObject({ status: 'passed' })
+    expect(mockClient.updateE2eExecutionStatus.mock.calls.every((c: unknown[]) => c[1] === 'MBC_01')).toBe(true)
+    expect(result).toMatchObject({ success: true, data: { status: 'passed' } })
+  })
+
+  it('should use the agent\'s own projectCode over a differing config-synced projectConfig (single source)', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [{ title: 'step A', status: 'passed' }],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    await executeE2eTest({
+      ...playwrightOptions(),
+      projectConfig: { project: { projectCode: 'STALE_SYNCED' } } as any,
+    })
+
+    const usedProjects = [
+      ...mockClient.updateE2eExecutionStatus.mock.calls,
+      ...mockClient.reportE2eTestStep.mock.calls,
+    ].map((c: unknown[]) => c[1])
+    expect(usedProjects.length).toBeGreaterThan(0)
+    expect(new Set(usedProjects)).toEqual(new Set(['MBC_01']))
+  })
+
+  it('should keep the leading timeout note (and the step-report note) when truncating a long stderr after a timeout', async () => {
+    const timeoutNote = 'Playwright subprocess timed out after 120000ms (partial results recovered)'
+    const stderr = `${timeoutNote}\nHEAD-${'t'.repeat(50_000)}-TAIL: last error line`
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      timedOut: true,
+      totalTests: 2,
+      passedTests: 1,
+      failedTests: 1,
+      steps: [
+        { title: 'step A', status: 'passed' },
+        { title: 'step B', status: 'failed', error: 'boom' },
+      ],
+      errorOutput: stderr,
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValueOnce(undefined).mockRejectedValueOnce(http413())
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const result = await executeE2eTest(playwrightOptions())
+
+    const final = findFinalStatusCall()!
+    const sent = String(final.errorMessage)
+    const note = ' (1/2 step report(s) failed to persist; first failure: [413] request entity too large)'
+    expect(sent).toHaveLength(4000)
+    // Cause first, then the truncated stderr's tail, then the step-report note.
+    expect(sent.startsWith(`${timeoutNote}\n[...truncated] `)).toBe(true)
+    expect(sent).not.toContain('HEAD-')
+    expect(sent.endsWith(`-TAIL: last error line${note}`)).toBe(true)
+    expect(final).toMatchObject({ status: 'failed', testOutcome: 'failed', evidenceStatus: 'incomplete' })
+    expect((result.data as Record<string, unknown>).errorMessage).toBe(sent)
+    errorSpy.mockRestore()
+  })
+
+  it('should keep every leading timeout note line (SIGKILL force-resolve) when truncating', async () => {
+    const notes = [
+      'Playwright subprocess timed out after 120000ms',
+      'Playwright subprocess timed out after 120000ms and did not exit after SIGKILL',
+    ].join('\n')
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: false,
+      timedOut: true,
+      totalTests: 0,
+      passedTests: 0,
+      failedTests: 0,
+      steps: [],
+      errorOutput: `${notes}\n${'k'.repeat(20_000)}-END`,
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    await executeE2eTest(playwrightOptions())
+
+    const final = findFinalStatusCall()!
+    const sent = String(final.errorMessage)
+    expect(sent).toHaveLength(4000)
+    expect(sent.startsWith(`${notes}\n[...truncated] `)).toBe(true)
+    expect(sent.endsWith('-END')).toBe(true)
+    expect(final).toMatchObject({ status: 'error', evidenceStatus: 'incomplete' })
+  })
+
+  it('should keep AI mode chat policyContext on the config-synced project while persisting under the agent\'s own projectCode', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({ success: true, data: 'Done' })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+
+    await executeE2eTest({
+      ...baseOptions,
+      projectConfig: { project: { projectCode: 'SYNCED_PROJ' } } as any,
+    })
+
+    // Chat context: same source as executeChatCommand (redesigned in phase F).
+    const chatArgs = (chatExecutor.executeChatCommand as jest.Mock).mock.calls[0]
+    expect(JSON.stringify(chatArgs)).toContain('"policyContext":{"tenantCode":"mbc","projectCode":"SYNCED_PROJ"')
+    // Persistence: always the agent's own project.
+    expect(mockClient.updateE2eExecutionStatus.mock.calls.length).toBeGreaterThan(0)
+    expect(mockClient.updateE2eExecutionStatus.mock.calls.every((c: unknown[]) => c[1] === 'MBC_01')).toBe(true)
+  })
+
+  it('should report passed with no step reports when the run succeeded with zero steps', async () => {
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 0,
+      passedTests: 0,
+      failedTests: 0,
+      steps: [],
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const result = await executeE2eTest(playwrightOptions())
+
+    expect(mockClient.reportE2eTestStep).not.toHaveBeenCalled()
+    const final = findFinalStatusCall()!
+    expect(final.status).toBe('passed')
+    expect(final).not.toHaveProperty('errorMessage')
+    expect(final).toMatchObject({ totalSteps: 0, passedSteps: 0, failedSteps: 0 })
+    expect(result.data).toMatchObject({ status: 'passed', totalTests: 0 })
+    expect(result.data).not.toHaveProperty('errorMessage')
+  })
+
+  it('should treat success as authoritative (passed) even if timedOut is also set', async () => {
+    // Current contract: `success` wins over `timedOut`. The subprocess executor
+    // is not expected to produce this combination; this pins the behavior.
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      timedOut: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [],
+      errorOutput: 'Playwright subprocess timed out after 120000ms',
+    })
+    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+
+    const result = await executeE2eTest(playwrightOptions())
+
+    const final = findFinalStatusCall()!
+    expect(final.status).toBe('passed')
+    expect(final).not.toHaveProperty('errorMessage')
+    expect(result.data).toMatchObject({ status: 'passed' })
+  })
+
+  it('should log the final status report failure at error level and still return the computed status', async () => {
+    // Pins current behavior: when the final status report itself fails, the
+    // failure is logged loudly but the returned status is the computed one (the
+    // API-side execution may remain "running"; recovery is the API's job — A5).
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+      success: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      steps: [{ title: 'step A', status: 'passed' }],
+    })
+    mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+    mockClient.updateE2eExecutionStatus.mockImplementation(
+      async (_t: string, _p: string, _e: string, body: Record<string, unknown>) => {
+        if (body.status !== 'running') throw http413()
+      },
+    )
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const result = await executeE2eTest(playwrightOptions())
+
+    const statusLog = errorSpy.mock.calls
+      .map((c) => String(c[0]))
+      .find((m) => m.includes('Failed to report execution status (status=passed)'))
+    expect(statusLog).toBeDefined()
+    expect(statusLog).toContain('[413]')
+    expect(result.success).toBe(true)
+    expect(result.data).toMatchObject({ status: 'passed' })
+    errorSpy.mockRestore()
+  })
+
+  // tenantCode/projectCode are required to persist anything (running/final
+  // status, step evidence). Without them no mode may run the test, and the
+  // result must never be "passed" — it is an error result returned up front.
+  describe.each([
+    ['ai', {}],
+    ['script', { playwrightScript: "await page.goto('/')" }],
+    ['playwright', { playwrightScript: "await page.goto('/')" }],
+  ] as const)('missing tenantCode/projectCode (%s mode)', (executionMethod, extraPayload) => {
+    it.each([
+      ['tenantCode', { tenantCode: undefined }],
+      ['projectCode', { projectCode: undefined }],
+      ['projectCode (empty)', { projectCode: '' }],
+    ] as const)('should refuse to run and return an error result when %s is missing', async (_label, override) => {
+      // If execution were to start, every runner would report success.
+      ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValue({ success: true, data: 'Done' })
+      ;(playwrightTestRunner.runPlaywrightScript as jest.Mock).mockResolvedValue({
+        success: true, totalTests: 1, passedTests: 1, failedTests: 0, steps: [],
+      })
+      ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
+        success: true, totalTests: 1, passedTests: 1, failedTests: 0, steps: [{ title: 's', status: 'passed' }],
+      })
+      mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
+      mockClient.reportE2eTestStep.mockResolvedValue(undefined)
+      const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+
+      const result = await executeE2eTest({
+        ...baseOptions,
+        ...override,
+        payload: { ...baseOptions.payload, executionMethod, ...extraPayload },
+      })
+
+      expect(result.success).toBe(false)
+      expect(result).toMatchObject({
+        error: 'tenantCode/projectCode is not set; E2E results cannot be reported',
+        data: { executionId: 'exec-1', status: 'error' },
+      })
+      // Nothing started: no runner, no API calls at all.
+      expect(chatExecutor.executeChatCommand).not.toHaveBeenCalled()
+      expect(playwrightTestRunner.runPlaywrightScript).not.toHaveBeenCalled()
+      expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).not.toHaveBeenCalled()
+      expect(mockClient.updateE2eExecutionStatus).not.toHaveBeenCalled()
+      expect(mockClient.reportE2eTestStep).not.toHaveBeenCalled()
+      expect(mockClient.getE2eSupportFiles).not.toHaveBeenCalled()
+      // Logged exactly once at error level, and no duplicate "skipping" warn.
+      const errLogs = errorSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((m) => m.includes('tenantCode/projectCode'))
+      expect(errLogs).toHaveLength(1)
+      expect(errLogs[0]).toContain('exec-1')
+      expect(warnSpy.mock.calls.map((c) => String(c[0])).some((m) => m.includes('tenantCode/projectCode'))).toBe(false)
+      errorSpy.mockRestore()
+      warnSpy.mockRestore()
+    })
   })
 
   it('should pass the resolved targetUrl as baseUrl to runPlaywrightSubprocess', async () => {
@@ -1900,64 +2511,6 @@ describe('e2e-test-executor', () => {
     warnSpy.mockRestore()
   })
 
-  it('should skip fetching support files when tenantCode is missing', async () => {
-    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
-      success: true,
-      totalTests: 1,
-      passedTests: 1,
-      failedTests: 0,
-      steps: [],
-    })
-    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
-
-    const options: ExecuteE2eTestOptions = {
-      ...baseOptions,
-      tenantCode: undefined,
-      payload: {
-        ...baseOptions.payload,
-        playwrightScript: "await page.goto('/')",
-        executionMethod: 'playwright',
-      },
-    }
-
-    const result = await executeE2eTest(options)
-
-    expect(result.success).toBe(true)
-    expect(mockClient.getE2eSupportFiles).not.toHaveBeenCalled()
-    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
-      expect.objectContaining({ supportFiles: [] }),
-    )
-  })
-
-  it('should skip fetching support files when projectCode is missing', async () => {
-    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
-      success: true,
-      totalTests: 1,
-      passedTests: 1,
-      failedTests: 0,
-      steps: [],
-    })
-    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
-
-    const options: ExecuteE2eTestOptions = {
-      ...baseOptions,
-      projectConfig: undefined,
-      payload: {
-        ...baseOptions.payload,
-        playwrightScript: "await page.goto('/')",
-        executionMethod: 'playwright',
-      },
-    }
-
-    const result = await executeE2eTest(options)
-
-    expect(result.success).toBe(true)
-    expect(mockClient.getE2eSupportFiles).not.toHaveBeenCalled()
-    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
-      expect.objectContaining({ supportFiles: [] }),
-    )
-  })
-
   it('should handle step report failure gracefully in playwright mode', async () => {
     ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
       success: true,
@@ -1980,31 +2533,6 @@ describe('e2e-test-executor', () => {
 
     const result = await executeE2eTest(options)
     expect(result.success).toBe(true)
-  })
-
-  it('should skip step reporting when tenantCode is missing in playwright mode', async () => {
-    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
-      success: true,
-      totalTests: 1,
-      passedTests: 1,
-      failedTests: 0,
-      steps: [{ title: 'Step 1', status: 'passed' }],
-    })
-    mockClient.updateE2eExecutionStatus.mockResolvedValue(undefined)
-
-    const options: ExecuteE2eTestOptions = {
-      ...baseOptions,
-      tenantCode: undefined,
-      payload: {
-        ...baseOptions.payload,
-        playwrightScript: "await page.goto('/')",
-        executionMethod: 'playwright',
-      },
-    }
-
-    const result = await executeE2eTest(options)
-    expect(result.success).toBe(true)
-    expect(mockClient.reportE2eTestStep).not.toHaveBeenCalled()
   })
 
   it('should use fallback error message when errorOutput is absent in failed playwright run', async () => {

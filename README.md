@@ -358,3 +358,57 @@ Requires Node.js >= 20. `node-pty` is an optional dependency for terminal/PTY se
 ## License
 
 [MIT](LICENSE)
+
+
+## 環境設定・秘密情報Vault
+
+`auth login/logout` と `env check/run/pull` で承認済み環境設定を利用できます。 導入・権限・運用制約は [環境Vaultガイド](../admin-docs/docs/architecture/environment-vault.md) を参照してください。
+
+### `.env`を使うローカル開発（日本語）
+
+Vault対応API・Webを導入してVaultを有効化し、管理画面で `local` の設定リリースを承認・有効化します。利用者にはファイル出力用の `export` 権限を付与してください。
+
+開発プロジェクトの `.ai-support/env.yaml` に接続先と識別子を設定します。秘密値はここへ書きません。
+
+```yaml
+version: 1
+apiUrl: https://api.example.test
+tenant: example
+project: support
+profiles:
+  local:
+    service: api
+    environment: local
+    required: [DATABASE_URL]
+```
+
+`.gitignore` に `.env.local` を追加し、プロジェクトのルートで実行します。URLと識別子は実際の環境に置き換えてください。
+
+```sh
+ai-support-agent auth login --url https://app.example.test --profile local --purpose export
+# ブラウザーでログインし、設定取得を許可します。
+ai-support-agent env pull --profile local --output .env.local
+ai-support-agent auth logout --profile local --purpose export
+```
+
+`.env` が必要な場合はGitignoreの指定と出力先を両方変更します。既存ファイルへの上書きはしません。ファイルを作らず開発する場合は `run` 権限を付与し、`--purpose export` を付けずにログインして `ai-support-agent env run --profile local -- npm run dev` を実行します。
+
+### Vaultの設定編集とセッション時間
+
+`auth login --purpose edit --session-duration 8h` で編集用ログインを行い、
+`env add LOG_LEVEL --value debug`／`env set LOG_LEVEL --value info` で未承認の候補を作成します。
+複数変更は前の候補IDを `--from` へ指定します。秘密値は `--secret` の非表示入力、または
+`--secret --stdin` を使用します。秘密値を `--value` に渡すことは禁止しています。
+標準入力の末尾改行は保持し、除去する場合のみ `--strip-final-newline` を指定してください。
+
+`env diff --release <ID>` → `env approve --release <ID>` → 各配布先への
+`env stage --release <ID> --target <ID>` → `env activate --release <ID> --expected-active <現在のID>`
+の順で反映します。承認はapprove、配布・有効化はdeploy用途で別にログインします。
+初回有効化の `--expected-active` は `none`、localではstageを省略できます。
+本番では変更参加者による自己承認を拒否します。
+
+localの実行・管理と開発／テストの管理セッションは最大8時間、exportと本番管理は最大1時間です。
+管理者の設定により短くなることがあります。期限内はOS資格情報ストアのセッションを再利用し、
+自動更新はしません。実行用リースは別管理のままです。
+通信切断後は表示されたIDを `env status --operation-id <ID> --purpose <用途>` で確認し、
+同じ要求を再送する場合だけ同じ `--operation-id` を使用します。再送可能期間は24時間です。

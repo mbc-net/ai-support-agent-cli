@@ -27,6 +27,13 @@ export interface AgentExecutionContext {
   projectConfig?: ProjectConfigResponse
   mcpConfigPath?: string
   tenantCode?: string
+  /**
+   * The project this agent itself is bound to (agent-transport's
+   * `deps.projectCode`, oneshot's env). Unlike `projectConfig` it does not
+   * depend on a successful config sync, so commands that must persist results
+   * under the project (e2e_test) use this — never `projectConfig` as a fallback.
+   */
+  projectCode?: string
   browserLocalPort?: number
 }
 
@@ -52,6 +59,7 @@ export function forwardAgentExecutionContext(
     projectConfig: source.projectConfig,
     mcpConfigPath: source.mcpConfigPath,
     tenantCode: source.tenantCode,
+    projectCode: source.projectCode,
     browserLocalPort: source.browserLocalPort,
     ...overrides,
   }

@@ -58,7 +58,23 @@ export interface ServerSetupExecPayload {
   sshHostId: string
   body: string
   dispatchMode?: ServerSetupDispatchMode
+  /**
+   * Target OS of the host, decided by the api from the host settings and sent
+   * only for Windows hosts. Absent means Linux (payloads from api builds that
+   * predate Windows support). The agent resolves it with `resolveTargetOs`
+   * (an unknown value is rejected) and cross-checks it against the SSH
+   * credential's `os` after fetching it (see admin-docs
+   * `docs/specifications/server-setup-windows-openssh.md` §5.2).
+   */
+  targetOs?: 'windows'
 }
+
+/**
+ * Capability a resident agent advertises when it can run server-setup recipes
+ * against Windows hosts over OpenSSH. The api requires it before dispatching a
+ * Windows run (admin-docs `server-setup-windows-openssh.md` §5.1).
+ */
+export const SERVER_SETUP_WINDOWS_OPENSSH_CAPABILITY = 'server_setup_windows_openssh_v1'
 
 /**
  * Result of a single Ansible task, parsed from the `ansible-playbook` JSON

@@ -193,6 +193,100 @@ multipass exec role-test -- sudo bash -c 'apt-get update && apt-get install -y p
 # play を流す（本番同等の play 形状は次節の local-run が最も手軽）
 ```
 
+### Windows ロール（`win_ssh_key` / `win_os_init` / `win_updates`）の実機検証
+
+Linux の Docker では Windows を動かせないため、Molecule の対象外です。EC2 の
+Windows Server に OpenSSH Server を入れ、次節の `server-setup:local-run` を
+`--target-os windows` で実行して手動検証します（設計:
+admin-docs `specifications/server-setup-windows-openssh`。前提条件は §2、P0 の手順は §10）。
+jest（`__tests__/server-setup/windows-roles.spec.ts`）が固定しているのは静的な不変条件だけです。
+
+1. **コレクションを入れる**（`ansible.windows` 3.8.0 / `community.windows` 3.3.0。
+   `src/server-setup/windows-guard.json` の `collections` と同じ版）。別の版が既に入っていても
+   固定版に入れ替わるよう `--force` を付ける（runner のエラーメッセージが案内するコマンドと同じ）:
+
+   ```bash
+   ansible-galaxy collection install --force ansible.windows:3.8.0 community.windows:3.3.0
+   ```
+
+   固定版と違う版がどのコレクションパスに入っていても、Windows の実行は ansible-playbook の前に失敗する
+   （ガードの引数 allowlist は固定版の仕様から作っているため）。
+
+2. **EC2 を起動する**。AMI は Windows Server 2019 / 2022 / 2025（日本語版も確認する。
+   例: `Windows_Server-2022-Japanese-Full-Base-*`）、`t3.large` 程度。セキュリティグループは
+   22/tcp を**自分の IP だけ**に開く。ユーザーデータで OpenSSH Server の導入・
+   `DefaultShell` を PowerShell に・公開鍵の配置（ACL は SID 指定で Administrators と SYSTEM のみ）を行う:
+
+   ```powershell
+   <powershell>
+   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+   Set-Service -Name sshd -StartupType Automatic
+   Start-Service sshd
+   New-ItemProperty -Path "HKLM:\SOFTWARE\OpenSSH" -Name DefaultShell `
+     -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force
+   Set-Content -Path C:\ProgramData\ssh\administrators_authorized_keys -Value '<公開鍵1行>' -Encoding ascii
+   icacls.exe C:\ProgramData\ssh\administrators_authorized_keys /inheritance:r /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"
+   if (-not (Get-NetFirewallRule -Name OpenSSH-Server-In-TCP -ErrorAction SilentlyContinue)) {
+     New-NetFirewallRule -Name OpenSSH-Server-In-TCP -DisplayName 'OpenSSH Server (sshd)' `
+       -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+   }
+   </powershell>
+   ```
+
+   sshd が応答するまで起動後 1 分弱かかる（P0 実測で約 45 秒）。
+
+3. **レシピ body を用意して実行する**（ユーザーはビルトインの `Administrator`。
+   ビルトイン以外のローカル管理者でも同じ結果になることを P0 で確認済み）:
+
+   ```yaml
+   # recipe-windows.yml
+   - name: 鍵を追加
+     ansible.builtin.include_role:
+       name: win_ssh_key
+     vars:
+       win_ssh_key_public_keys:
+         - "{{ SECOND_PUBLIC_KEY }}"
+   - name: OS 初期設定
+     ansible.builtin.include_role:
+       name: win_os_init
+     vars:
+       win_os_init_timezone_enabled: true
+       win_os_init_timezone: Tokyo Standard Time
+       win_os_init_firewall_enabled: true
+       win_os_init_firewall_rules:
+         - name: https
+           localport: "443"
+       win_os_init_hostname_enabled: true
+       win_os_init_hostname: WIN-ROLE-TEST
+   - name: Windows Update
+     ansible.builtin.include_role:
+       name: win_updates
+     vars:
+       win_updates_category_names: [SecurityUpdates]
+       win_updates_reboot: true
+   ```
+
+   ```bash
+   echo '{"SECOND_PUBLIC_KEY":"ssh-ed25519 AAAA... second"}' > ./vars.json
+   npm run server-setup:local-run -- \
+     --body ./recipe-windows.yml --target-os windows \
+     --host <EC2 のパブリック IP> --user Administrator --key ./id_ed25519 \
+     --extra-vars ./vars.json
+   ```
+
+4. **確認する**（SSH で入って PowerShell で確認。2 回目の実行も必ず行う）
+
+   | ロール | 確認すること |
+   |--------|--------------|
+   | `win_ssh_key` | 既存の鍵の行が残り、新しい鍵が末尾に追加されている。`icacls C:\ProgramData\ssh\administrators_authorized_keys` が `BUILTIN\Administrators:(F)` と `NT AUTHORITY\SYSTEM:(F)` だけで、継承（`(I)`）が無い。新しい鍵でもログインできる。2 回目の実行で `changed` にならない |
+   | `win_os_init` | `tzutil /g` が指定のタイムゾーン。`Get-NetFirewallRule -DisplayName 'ai-support-agent OpenSSH Server (sshd)'` が受信・許可・TCP 22 で有効。`Get-NetFirewallProfile` が全プロファイルで `Enabled=True`。ファイアウォール有効化の後も SSH が切れない。ホスト名が変わり、再起動を挟んで後続のステップ（`win_updates`）が成功する。2 回目の実行で再起動しない |
+   | `win_updates` | 指定カテゴリの更新が入り（`installed=` の件数）、必要なら再起動して続行する。実行のハードキルが 100 分になっている（runner のログ）。`win_updates_reboot: false` では再起動せず `reboot_required=` が表示される |
+
+   不正な値（改行を含む鍵・`command="..."` 付きの鍵・16 文字のホスト名・`action` を含む
+   ファイアウォール規則など）は、対象ホストを変更する前に assert で止まることも確認する。
+
+5. **後片付け**: インスタンスとセキュリティグループを削除する。
+
 ---
 
 ## 4. 本番パリティのローカル実行（`server-setup:local-run`）
@@ -223,6 +317,7 @@ npm run server-setup:local-run -- \
 | `--secret-names <A,B>` | extra-vars のうち秘匿扱いにする名前（`no_log` ＋出力マスキング） |
 | `--ssh-host-id <id>` | known_hosts 名前空間の host id（既定 `local-host`） |
 | `--strict` | 厳格な `ecs` allowlist で検証（既定は寛容な `resident`） |
+| `--target-os <linux\|windows>` | 対象 OS（既定 `linux`）。`windows` は Windows ホスト用の play・インベントリ（PowerShell）で実行する。公開鍵認証のみ。`ansible.windows` / `community.windows` が要る |
 
 終了コードは成功で 0 / 失敗で 1。詳細・最新のフラグは必ず上記の実装ファイルを
 参照すること（この表は憶測で増やさない）。

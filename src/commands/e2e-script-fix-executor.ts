@@ -23,7 +23,6 @@ export interface E2eScriptFixPayload {
 export interface ExecuteE2eScriptFixOptions extends AgentExecutionContext {
   payload: E2eScriptFixPayload
   client: ApiClient
-  projectCode?: string
   commandId?: string
 }
 
