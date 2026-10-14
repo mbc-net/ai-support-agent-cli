@@ -147,12 +147,22 @@
 - name: "zabbix_agent : Validate the firewall sources are addresses, not hostnames"
   ansible.builtin.assert:
     that:
+      - item is string
       - item is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$')
       # 文字形だけでは 999.999.999.999/99 も 0.0.0.0/0 も通ってしまう。前者は不正
       # アドレス、後者は「全開放」であり、送信元を絞るという目的そのものを無効にする
       # （rsyslog の $AllowedSender も IPv4 の /0 を受け付けない）。意味で検証する。
       - item.split('/')[0].split('.') | map('int') | select('>', 255) | list | length == 0
       - (item.split('/') | length == 1) or ((item.split('/')[1] | int) >= 1 and (item.split('/')[1] | int) <= 32)
+      # ホストビット付き CIDR（例 10.0.0.5/24）は拒否する。ufw は 10.0.0.0/24 に正規化して
+      # 保存するため、書いた範囲と開く範囲が食い違う（tasks/ufw.yml 冒頭のコメント参照）。
+      - >-
+        (item.split('/') | length == 1)
+        or ((item.split('/')[0].split('.')[0] | int) * 16777216
+            + (item.split('/')[0].split('.')[1] | int) * 65536
+            + (item.split('/')[0].split('.')[2] | int) * 256
+            + (item.split('/')[0].split('.')[3] | int))
+           % (2 ** (32 - (item.split('/')[1] | int))) == 0
     fail_msg: >-
       zabbix_agent_allowed_sources must contain IPv4 addresses or CIDRs only
       (got {{ item | to_json }}). ufw rejects hostnames with "Bad source

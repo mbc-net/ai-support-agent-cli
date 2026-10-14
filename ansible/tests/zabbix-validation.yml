@@ -23,5 +23,62 @@
         - {role: zabbix_web, name: "zabbix.test;\n}"}
         - {role: zabbix_web, timezone: "Asia/Tokyo\npm.max_children=9999"}
         - {role: zabbix_web, port: "8080; arbitrary"}
+        # ufw 許可元（設計書 §3.6.1）。いずれも先頭の Validate assert で落ちること。
+        - {role: zabbix_server, sources: [zabbix.example.com]}
+        - {role: zabbix_server, sources: [0.0.0.0/0]}
+        - {role: zabbix_server, sources: [10.0.0.1/33]}
+        - {role: zabbix_server, sources: [999.1.1.1]}
+        - {role: zabbix_server, sources: [010.0.0.1]}
+        - {role: zabbix_server, sources: "10.0.0.0/24"}
+        - {role: zabbix_server, sources: null}
+        - {role: zabbix_server, sources: [null]}
+        - {role: zabbix_server, sources: {a: 10.0.0.0/24}}
+        - {role: zabbix_server, sources: [10.0.0.5/24]}
+        - {role: zabbix_server, sources: [192.168.0.20/32, 172.16.1.0/12]}
+        - {role: zabbix_server, sources: ["10.0.0.0/24\n"]}
+        - {role: zabbix_server, ufw_manage: "yes"}
+        - {role: zabbix_server, allow_no_sources: "yes"}
+        - {role: zabbix_server, sources: [], allow_no_sources: false}
+        - {role: zabbix_web, sources: [zabbix.example.com]}
+        - {role: zabbix_web, sources: [0.0.0.0/0]}
+        - {role: zabbix_web, sources: "10.0.0.0/24"}
+        - {role: zabbix_web, sources: null}
+        - {role: zabbix_web, sources: [10.0.0.5/24]}
+        - {role: zabbix_web, ufw_manage: "yes"}
+        - {role: zabbix_web, allow_no_sources: "yes"}
+        - {role: zabbix_web, sources: [], allow_no_sources: false}
+        # 管理者パスワード（設計書 §4.2）。いずれも先頭の Validate assert で落ちること。
+        - {role: zabbix_web, admin_password: zabbix, expect: "zabbix_web_admin_password | length == 0 or"}
+        - {role: zabbix_web, admin_password: Abcdef1, expect: "zabbix_web_admin_password | length == 0 or"}
+        - {role: zabbix_web, admin_password: "Abcdefgh1Abcdefgh1Abcdefgh1Abcdefgh1Abcdefgh1Abcdefgh1Abcdefgh1Abcdefgh1X", expect: "zabbix_web_admin_password | length == 0 or"}
+        - {role: zabbix_web, admin_password: "Abcdefgh\nij", expect: "zabbix_web_admin_password | length == 0 or"}
+        - {role: zabbix_web, literal_null: admin_password, expect: zabbix_web_admin_password is string}
+        - {role: zabbix_web, admin_password: true, expect: zabbix_web_admin_password is string}
+        - {role: zabbix_web, admin_password: " Abcdefgh1", expect: "zabbix_web_admin_password | length == 0 or"}
+        - {role: zabbix_web, admin_password: "Abcdefgh1 ", expect: "zabbix_web_admin_password | length == 0 or"}
+        - {role: zabbix_web, literal_null: previous_password, expect: zabbix_web_admin_previous_password is string}
+        - {role: zabbix_web, admin_password: Abcdefgh1, previous_password: "prev\nious", expect: zabbix_web_admin_previous_password is match}
+        # ハウスキーピング（設計書 §4.2）
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_unknown: 1d}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {db_extension: timescaledb}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {compression_availability: "1"}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_audit: 23h}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_audit: 9126d}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_history: 59m}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {compress_older: 6d}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_events_mode: true}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_events_mode: 2}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_audit: true}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_audit: "{$HK_AUDIT}"}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_audit: 1y}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_audit: 1 d}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_audit: -1}, expect: zabbix_web_housekeeping_invalid}
+        - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: [hk_audit], expect: zabbix_web_housekeeping is mapping}
+        - {role: zabbix_web, housekeeping: {hk_audit: 31d}, expect: "zabbix_web_housekeeping | length == 0 or zabbix_web_admin_password | length > 0"}
+        # TimescaleDB（設計書 §4.1）。いずれも先頭の Validate assert で落ちること。
+        - {role: zabbix_server, type: mysql, port: 3306, timescaledb: true, expect: "not zabbix_server_db_timescaledb or zabbix_server_db_type == 'postgresql'"}
+        - {role: zabbix_server, timescaledb: "true", expect: zabbix_server_db_timescaledb is boolean}
+        - {role: zabbix_server, timescaledb: "yes", expect: zabbix_server_db_timescaledb is boolean}
+        - {role: zabbix_server, literal_null: timescaledb, expect: zabbix_server_db_timescaledb is boolean}
       loop_control:
         loop_var: zabbix_validation_case

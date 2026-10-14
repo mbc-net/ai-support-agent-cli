@@ -752,29 +752,39 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
     'win_updates_reboot',
   ]),
   zabbix_server: new Set([
+    'zabbix_server_allow_no_sources',
+    'zabbix_server_allowed_sources',
     'zabbix_server_db_host',
     'zabbix_server_db_mode',
     'zabbix_server_db_name',
     'zabbix_server_db_password',
     'zabbix_server_db_port',
+    'zabbix_server_db_timescaledb',
     'zabbix_server_db_type',
     'zabbix_server_db_user',
     'zabbix_server_install_method',
     'zabbix_server_listen_port',
+    'zabbix_server_ufw_manage',
     'zabbix_server_version',
   ]),
   zabbix_web: new Set([
+    'zabbix_web_admin_password',
+    'zabbix_web_admin_previous_password',
+    'zabbix_web_allow_no_sources',
+    'zabbix_web_allowed_sources',
     'zabbix_web_db_host',
     'zabbix_web_db_name',
     'zabbix_web_db_password',
     'zabbix_web_db_port',
     'zabbix_web_db_type',
     'zabbix_web_db_user',
+    'zabbix_web_housekeeping',
     'zabbix_web_install_method',
     'zabbix_web_listen_port',
     'zabbix_web_php_timezone',
     'zabbix_web_server_name',
     'zabbix_web_type',
+    'zabbix_web_ufw_manage',
     'zabbix_web_version',
     'zabbix_web_zbx_server_host',
     'zabbix_web_zbx_server_port',
@@ -1094,6 +1104,43 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'zabbix_agent_ufw_desired',
   'zabbix_agent_ufw_desired_patterns',
   'zabbix_agent_ufw_stale',
+  // zabbix_server（tasks/ufw.yml と、main.yml の Validate assert の task vars）
+  'zabbix_server_ufw_add',
+  'zabbix_server_ufw_added',
+  'zabbix_server_ufw_after_add',
+  'zabbix_server_ufw_delete',
+  'zabbix_server_ufw_desired',
+  'zabbix_server_ufw_desired_patterns',
+  'zabbix_server_ufw_host_bit_sources',
+  'zabbix_server_ufw_stale',
+  // zabbix_server の TimescaleDB（main.yml の `database.py --plan` と tasks/timescaledb.yml）。
+  // db_plan は既存 DB に対する不正な指定の検出と拡張作成の要否、ts_pending / pg_ready は
+  // PostgreSQL の再起動判定、ts_version / ts_candidates / ts_installed は apt pin する版、
+  // ts_key は鍵指紋の照合に使う。書き換えられるとこれらの検査を迂回できる。
+  'zabbix_server_db_plan',
+  'zabbix_server_pg_major',
+  'zabbix_server_pg_ready',
+  'zabbix_server_ts_candidates',
+  'zabbix_server_ts_installed',
+  'zabbix_server_ts_key',
+  'zabbix_server_ts_pending',
+  'zabbix_server_ts_preload',
+  'zabbix_server_ts_version',
+  // zabbix_web（tasks/ufw.yml と、main.yml の Validate assert の task vars）
+  'zabbix_web_ufw_add',
+  'zabbix_web_ufw_added',
+  'zabbix_web_ufw_after_add',
+  'zabbix_web_ufw_delete',
+  'zabbix_web_ufw_desired',
+  'zabbix_web_ufw_desired_patterns',
+  'zabbix_web_ufw_host_bit_sources',
+  'zabbix_web_ufw_stale',
+  // zabbix_web の管理者パスワード・ハウスキーピング（tasks/api.yml と、main.yml の Validate
+  // assert の task vars）。api_credentials はパスワードを含む一時ファイルを指し、api_result は
+  // パスワード変更の成否判定に使う。housekeeping_invalid は検証結果そのもの。
+  'zabbix_web_api_credentials',
+  'zabbix_web_api_result',
+  'zabbix_web_housekeeping_invalid',
   // vars/main.yml の派生値と、include_role 以外のタスクに付いた `vars:` の名前。
   // どちらもロールが自分で計算する値であり、`set_fact` は task レベル `vars:` より
   // 優先度が高いのでレシピから上書きできてしまう（`rsyslog_server_reserved_log_dirs`
@@ -1164,6 +1211,7 @@ const RESERVED_VAR_NAMES: ReadonlySet<string> = new Set([
  */
 const ALWAYS_SECRET_VAR_NAMES: ReadonlySet<string> = new Set([
   'sentry_admin_password', 'sentry_smtp_password',
+  'zabbix_web_admin_password', 'zabbix_web_admin_previous_password',
   'ansible_ssh_pass',
   'ansible_password',
   'ansible_ssh_private_key_file',

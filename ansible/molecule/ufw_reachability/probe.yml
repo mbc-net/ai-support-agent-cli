@@ -1,0 +1,40 @@
+---
+# Opens a TCP connection from this client to every port in ufwr_ports on the
+# target and requires the outcome `ufwr_probe_expect` for all of them:
+#   connected  the handshake completed (the listener answered)
+#   timeout    nothing came back within 3 s (ufw dropped the SYN)
+# A refused connection ("error: ... refused") never matches either: it means
+# the packet got through but no listener was there, which would make a
+# `timeout` expectation pass for the wrong reason elsewhere.
+- name: "probe({{ ufwr_probe_label }}) : Connect to each target port"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import socket, sys
+        s = socket.socket()
+        s.settimeout(3)
+        try:
+            s.connect((sys.argv[1], int(sys.argv[2])))
+            print('connected')
+        except socket.timeout:
+            print('timeout')
+        except OSError as error:
+            print('error: %s' % error)
+      - "{{ ufwr_target_ip }}"
+      - "{{ item.port }}"
+  loop: "{{ ufwr_ports }}"
+  loop_control:
+    label: "{{ item.port }} ({{ item.role }})"
+  register: ufwr_probe
+  changed_when: false
+
+- name: "probe({{ ufwr_probe_label }}) : Require {{ ufwr_probe_expect }} on every port"
+  ansible.builtin.assert:
+    that: ufwr_probe.results | rejectattr('stdout', 'equalto', ufwr_probe_expect) | list | length == 0
+    fail_msg: >-
+      From {{ inventory_hostname }} expected {{ ufwr_probe_expect }} on every port, got
+      {{ ufwr_probe.results | map(attribute='item.port') | zip(ufwr_probe.results | map(attribute='stdout')) | list }}
+    success_msg: >-
+      {{ inventory_hostname }}: {{ ufwr_probe.results | map(attribute='item.port') | zip(ufwr_probe.results | map(attribute='stdout')) | list }}

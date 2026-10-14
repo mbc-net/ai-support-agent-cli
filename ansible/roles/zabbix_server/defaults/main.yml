@@ -11,3 +11,31 @@ zabbix_server_db_name: zabbix
 zabbix_server_db_user: zabbix
 zabbix_server_db_password: ""
 zabbix_server_listen_port: 10051
+
+# ufw で zabbix_server_listen_port（既定 10051/tcp）へ許可する送信元の IPv4 / CIDR リスト。
+# 接続元はアクティブチェックを送る Agent・Zabbix Web フロントエンド・Proxy（別ホスト構成のとき）。
+# ホスト名は ufw が受け付けないため不可。`/32` は付けても付けなくてもよい（ufw は
+# `a.b.c.d/32` を `a.b.c.d` として保存するため、ロールが `/32` を取り除いてから照合する）。
+# ホストビットが立った CIDR（例 10.0.0.5/24）は拒否する（10.0.0.0/24 と書くこと）。
+# 空リストは「このロールが開けたルールをすべて閉じる」であり、「ufw に触れない」ではない
+# （それは zabbix_server_ufw_manage: false）。
+zabbix_server_allowed_sources: []
+zabbix_server_ufw_manage: true
+# 空リスト ＋ ufw_manage: true を失敗させないための明示フラグ。zabbix_agent（既定 false）と
+# 既定が逆なのは既存レシピとの互換のため。zabbix_server はもともと ufw に触れず、ポート開放は
+# レシピ作成者が別途行う前提だった。既定を false にすると、変数を 1 つも足していない既存
+# レシピが次回の実行で失敗する（既存 API への必須フィールド追加と同じ破壊的変更）。
+# そのため既定は true とし、空リストのときは「10051 はこのロールでは開放されていない」と
+# 毎回 debug で警告する。新規レシピは false を明示して厳格にすること。
+zabbix_server_allow_no_sources: true
+
+# true なら新規構築（空 DB への初期投入）時に history / trends を TimescaleDB の
+# ハイパーテーブルで構築する（設計書 §4.1「TimescaleDB」）。PostgreSQL のみ。
+# - データが入った通常 DB で true にすると失敗する（PostgreSQL の設定変更・再起動より前に止める）。
+#   既存 DB の移行は ZABBIX.md の手動手順で行う。
+# - TimescaleDB 化済みの DB で false にすると失敗する（解除はこのロールの対象外）。
+# - local: Timescale の APT リポジトリから Community 版を導入し、shared_preload_libraries に
+#   timescaledb を足す。初回は PostgreSQL が再起動される（同じホストの他の DB も一時停止する）。
+# - external: DB サーバーには触れない。DBA が Community 版の拡張を事前に作成しておくこと。
+# TimescaleDB の版はロール内のリテラルで範囲を固定しており、変数では変えられない。
+zabbix_server_db_timescaledb: false
