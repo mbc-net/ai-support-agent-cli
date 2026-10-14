@@ -1,0 +1,60 @@
+---
+# Install ufw, plant rules that the roles must never touch, and ENABLE ufw.
+#
+# ufw is enabled on purpose: on a real host os_init has already enabled it, and
+# a scenario that only ever converges against a disabled ufw is not testing the
+# state the roles run in. The molecule driver talks to the container through
+# `docker exec`, so default-deny incoming does not cut the connection.
+- name: Prepare
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "prepare : Install ufw"
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+        update_cache: true
+
+    # Decoys. Each role's convergence must leave all of them in place:
+    #   * a plain SSH allow rule (what os_init / an operator would have);
+    #   * one rule per role whose comment STARTS WITH that role's ownership
+    #     marker — a substring ownership check would treat it as the role's own
+    #     and delete it;
+    #   * an unrelated operator rule.
+    - name: "prepare : Add decoy ufw rules that no role may delete"
+      ansible.builtin.command:
+        argv: "{{ item }}"
+      loop:
+        - [ufw, allow, 22/tcp]
+        - [ufw, allow, from, 203.0.113.7, to, any, port, '22', proto, tcp,
+           comment, 'ai-support-agent:zabbix_agent-backup']
+        - [ufw, allow, from, 203.0.113.9, to, any, port, '22', proto, tcp,
+           comment, 'ai-support-agent:rsyslog_server-backup']
+        - [ufw, allow, from, 203.0.113.10, to, any, port, '22', proto, tcp,
+           comment, 'ai-support-agent:zabbix_server-backup']
+        - [ufw, allow, from, 203.0.113.11, to, any, port, '22', proto, tcp,
+           comment, 'ai-support-agent:zabbix_web-backup']
+        - [ufw, allow, from, 203.0.113.8, to, any, port, '22', proto, tcp,
+           comment, 'operator-ssh']
+      changed_when: true
+
+    - name: "prepare : Enable ufw"
+      ansible.builtin.command:
+        argv: [ufw, --force, enable]
+      changed_when: true
+
+    - name: "prepare : Read the ufw status"
+      ansible.builtin.command:
+        argv: [ufw, status]
+      register: ufwc_prepare_status
+      changed_when: false
+
+    - name: "prepare : Assert ufw is active"
+      ansible.builtin.assert:
+        that:
+          - "'Status: active' in ufwc_prepare_status.stdout"
+        fail_msg: >-
+          ufw could not be enabled in the container (is it privileged?).
+          Got: {{ ufwc_prepare_status.stdout }}

@@ -1,0 +1,383 @@
+---
+# Verify the ufw convergence of each role by its REAL effect on an ENABLED ufw.
+#
+# Each case runs `<role>` with `tasks_from: ufw` (or, for `*-converged`, only
+# inspects the state left by converge.yml) and then compares `ufw show added`
+# against exact expected lines. Expected lines are written the way ufw stores
+# them — `192.168.0.20/32` is stored as `192.168.0.20` — because that stored
+# rule is what has to survive; the test must not paper over the normalisation.
+#
+# Case fields:
+#   id / description  identification in the report
+#   run               false = only inspect the current state (default true)
+#   sources           the role's allow list for this run
+#   port              listen port for this run (zabbix_server / zabbix_web
+#                     cases only; defaults to 10051 / 8080)
+#   expect            converge (default) | reject
+#                     reject = the run must fail at a "<role> : Validate ..."
+#                     assert, and ufw must be left exactly as it was
+#   present           exact `ufw show added` lines that must exist afterwards
+#   absent            regexes that must match no line afterwards
+#
+# The decoy rules from prepare.yml are checked after EVERY case.
+#
+# Cases run in order and build on each other's ufw state.
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    ufwc_decoy_lines:
+      - "ufw allow 22/tcp"
+      - "ufw allow from 203.0.113.7 to any port 22 proto tcp comment 'ai-support-agent:zabbix_agent-backup'"
+      - "ufw allow from 203.0.113.9 to any port 22 proto tcp comment 'ai-support-agent:rsyslog_server-backup'"
+      - "ufw allow from 203.0.113.10 to any port 22 proto tcp comment 'ai-support-agent:zabbix_server-backup'"
+      - "ufw allow from 203.0.113.11 to any port 22 proto tcp comment 'ai-support-agent:zabbix_web-backup'"
+      - "ufw allow from 203.0.113.8 to any port 22 proto tcp comment 'operator-ssh'"
+
+    ufwc_zabbix_cases:
+      - id: zabbix-converged
+        description: "state after converge with ['192.168.0.20/32', '10.0.0.0/24'] — the /32 rule must still be there"
+        run: false
+        present:
+          - "ufw allow from 192.168.0.20 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+          - "ufw allow from 10.0.0.0/24 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+      - id: zabbix-rerun-mixed
+        description: "re-run with the same /32 + CIDR list keeps both rules"
+        sources: [192.168.0.20/32, 10.0.0.0/24]
+        present:
+          - "ufw allow from 192.168.0.20 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+          - "ufw allow from 10.0.0.0/24 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+      - id: zabbix-slash32-only
+        description: "a single /32 source is kept, the removed CIDR is closed"
+        sources: [192.168.0.20/32]
+        present:
+          - "ufw allow from 192.168.0.20 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+        absent:
+          - 'from 10\.0\.0\.0/24 to any port 10050 proto tcp comment ''ai-support-agent:zabbix_agent''$'
+      - id: zabbix-plain-ip-and-cidr
+        description: "plain IP (no /32) + CIDR are kept, the dropped /32 source is closed"
+        sources: [192.168.0.21, 10.0.0.0/24]
+        present:
+          - "ufw allow from 192.168.0.21 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+          - "ufw allow from 10.0.0.0/24 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+        absent:
+          - 'from 192\.168\.0\.20(/32)? to any port 10050 proto tcp comment ''ai-support-agent:zabbix_agent''$'
+
+    ufwc_rsyslog_cases:
+      - id: rsyslog-converged
+        description: "state after converge with ['192.168.0.30/32', '10.0.1.0/24'] (tcp + udp) — the /32 rules must still be there"
+        run: false
+        present:
+          - "ufw allow from 192.168.0.30 to any port 5514 proto tcp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 192.168.0.30 to any port 5514 proto udp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 10.0.1.0/24 to any port 5514 proto tcp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 10.0.1.0/24 to any port 5514 proto udp comment 'ai-support-agent:rsyslog_server'"
+      - id: rsyslog-rerun-mixed
+        description: "re-run with the same /32 + CIDR list keeps all four rules"
+        sources: [192.168.0.30/32, 10.0.1.0/24]
+        present:
+          - "ufw allow from 192.168.0.30 to any port 5514 proto tcp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 192.168.0.30 to any port 5514 proto udp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 10.0.1.0/24 to any port 5514 proto tcp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 10.0.1.0/24 to any port 5514 proto udp comment 'ai-support-agent:rsyslog_server'"
+      - id: rsyslog-slash32-only
+        description: "a single /32 sender is kept, the removed CIDR is closed"
+        sources: [192.168.0.30/32]
+        present:
+          - "ufw allow from 192.168.0.30 to any port 5514 proto tcp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 192.168.0.30 to any port 5514 proto udp comment 'ai-support-agent:rsyslog_server'"
+        absent:
+          - 'from 10\.0\.1\.0/24 to any port 5514 proto (tcp|udp) comment ''ai-support-agent:rsyslog_server''$'
+      - id: rsyslog-plain-ip-and-cidr
+        description: "plain IP (no /32) + CIDR are kept, the dropped /32 sender is closed"
+        sources: [192.168.0.31, 10.0.1.0/24]
+        present:
+          - "ufw allow from 192.168.0.31 to any port 5514 proto tcp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 192.168.0.31 to any port 5514 proto udp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 10.0.1.0/24 to any port 5514 proto tcp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 10.0.1.0/24 to any port 5514 proto udp comment 'ai-support-agent:rsyslog_server'"
+        absent:
+          - 'from 192\.168\.0\.30(/32)? to any port 5514 proto (tcp|udp) comment ''ai-support-agent:rsyslog_server''$'
+
+    ufwc_server_cases:
+      - id: server-converged
+        description: "state after converge with ['192.168.0.40/32', '10.0.2.0/24'] — the /32 rule must still be there"
+        run: false
+        present:
+          - "ufw allow from 192.168.0.40 to any port 10051 proto tcp comment 'ai-support-agent:zabbix_server'"
+          - "ufw allow from 10.0.2.0/24 to any port 10051 proto tcp comment 'ai-support-agent:zabbix_server'"
+      - id: server-rerun-mixed
+        description: "re-run with the same /32 + CIDR list keeps both rules"
+        sources: [192.168.0.40/32, 10.0.2.0/24]
+        present:
+          - "ufw allow from 192.168.0.40 to any port 10051 proto tcp comment 'ai-support-agent:zabbix_server'"
+          - "ufw allow from 10.0.2.0/24 to any port 10051 proto tcp comment 'ai-support-agent:zabbix_server'"
+      - id: server-port-change
+        description: "changing the listen port to 10052 opens it and closes the rules on 10051"
+        port: 10052
+        sources: [192.168.0.40/32, 10.0.2.0/24]
+        present:
+          - "ufw allow from 192.168.0.40 to any port 10052 proto tcp comment 'ai-support-agent:zabbix_server'"
+          - "ufw allow from 10.0.2.0/24 to any port 10052 proto tcp comment 'ai-support-agent:zabbix_server'"
+        absent:
+          - 'to any port 10051 proto tcp comment ''ai-support-agent:zabbix_server''$'
+      - id: server-port-back
+        description: "back on 10051 with a single plain IP: only that rule remains for this role"
+        sources: [192.168.0.41]
+        present:
+          - "ufw allow from 192.168.0.41 to any port 10051 proto tcp comment 'ai-support-agent:zabbix_server'"
+        absent:
+          - 'to any port 10052 proto tcp comment ''ai-support-agent:zabbix_server''$'
+          - 'from 192\.168\.0\.40(/32)? to any port 10051 proto tcp comment ''ai-support-agent:zabbix_server''$'
+          - 'from 10\.0\.2\.0/24 to any port 10051 proto tcp comment ''ai-support-agent:zabbix_server''$'
+
+    ufwc_web_cases:
+      - id: web-converged
+        description: "state after converge with ['192.168.0.50/32', '10.0.3.0/24'] — the /32 rule must still be there"
+        run: false
+        present:
+          - "ufw allow from 192.168.0.50 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+          - "ufw allow from 10.0.3.0/24 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+      - id: web-rerun-mixed
+        description: "re-run with the same /32 + CIDR list keeps both rules"
+        sources: [192.168.0.50/32, 10.0.3.0/24]
+        present:
+          - "ufw allow from 192.168.0.50 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+          - "ufw allow from 10.0.3.0/24 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+      - id: web-port-change
+        description: "changing the listen port to 8081 opens it and closes the rules on 8080"
+        port: 8081
+        sources: [192.168.0.50/32, 10.0.3.0/24]
+        present:
+          - "ufw allow from 192.168.0.50 to any port 8081 proto tcp comment 'ai-support-agent:zabbix_web'"
+          - "ufw allow from 10.0.3.0/24 to any port 8081 proto tcp comment 'ai-support-agent:zabbix_web'"
+        absent:
+          - 'to any port 8080 proto tcp comment ''ai-support-agent:zabbix_web''$'
+      - id: web-port-back
+        description: "back on 8080 with a single plain IP: only that rule remains for this role"
+        sources: [192.168.0.51]
+        present:
+          - "ufw allow from 192.168.0.51 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+        absent:
+          - 'to any port 8081 proto tcp comment ''ai-support-agent:zabbix_web''$'
+          - 'from 192\.168\.0\.50(/32)? to any port 8080 proto tcp comment ''ai-support-agent:zabbix_web''$'
+          - 'from 10\.0\.3\.0/24 to any port 8080 proto tcp comment ''ai-support-agent:zabbix_web''$'
+
+    # Empty lists ("close what this role opened") and the cross-role check: each
+    # role must remove only rules carrying its own exact marker.
+    ufwc_close_cases:
+      - role: zabbix_server
+        id: all-roles-coexist
+        description: "zabbix_agent / rsyslog_server / zabbix_server / zabbix_web rules on one host do not remove each other"
+        run: false
+        present:
+          - "ufw allow from 192.168.0.21 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+          - "ufw allow from 192.168.0.31 to any port 5514 proto tcp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 192.168.0.31 to any port 5514 proto udp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 10.0.1.0/24 to any port 5514 proto tcp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 10.0.1.0/24 to any port 5514 proto udp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 192.168.0.41 to any port 10051 proto tcp comment 'ai-support-agent:zabbix_server'"
+          - "ufw allow from 192.168.0.51 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+      - role: zabbix_agent
+        id: zabbix-empty
+        description: "empty list removes every zabbix_agent rule and nothing else (rsyslog_server's rules stay)"
+        sources: []
+        absent:
+          - "comment 'ai-support-agent:zabbix_agent'$"
+        present:
+          - "ufw allow from 192.168.0.31 to any port 5514 proto tcp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 192.168.0.31 to any port 5514 proto udp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 10.0.1.0/24 to any port 5514 proto tcp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 10.0.1.0/24 to any port 5514 proto udp comment 'ai-support-agent:rsyslog_server'"
+          - "ufw allow from 192.168.0.41 to any port 10051 proto tcp comment 'ai-support-agent:zabbix_server'"
+          - "ufw allow from 192.168.0.51 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+      - role: zabbix_agent
+        id: zabbix-plain-ip-only
+        description: "a single plain IP opens exactly that rule again"
+        sources: [192.168.0.21]
+        present:
+          - "ufw allow from 192.168.0.21 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+      - role: rsyslog_server
+        id: rsyslog-empty
+        description: "empty list removes every rsyslog_server rule and nothing else (zabbix_agent's rule stays)"
+        sources: []
+        absent:
+          - "comment 'ai-support-agent:rsyslog_server'$"
+        present:
+          - "ufw allow from 192.168.0.21 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+          - "ufw allow from 192.168.0.41 to any port 10051 proto tcp comment 'ai-support-agent:zabbix_server'"
+          - "ufw allow from 192.168.0.51 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+      - role: zabbix_server
+        id: server-empty
+        description: "empty list removes every zabbix_server rule and nothing else (zabbix_agent / zabbix_web rules stay)"
+        sources: []
+        absent:
+          - "comment 'ai-support-agent:zabbix_server'$"
+        present:
+          - "ufw allow from 192.168.0.21 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+          - "ufw allow from 192.168.0.51 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+      - role: zabbix_web
+        id: web-empty
+        description: "empty list removes every zabbix_web rule and nothing else (zabbix_agent's rule stays)"
+        sources: []
+        absent:
+          - "comment 'ai-support-agent:zabbix_web'$"
+        present:
+          - "ufw allow from 192.168.0.21 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+      - role: zabbix_server
+        id: server-plain-ip-only
+        description: "a single plain IP opens exactly that zabbix_server rule again"
+        sources: [192.168.0.41]
+        present:
+          - "ufw allow from 192.168.0.41 to any port 10051 proto tcp comment 'ai-support-agent:zabbix_server'"
+      - role: zabbix_web
+        id: web-plain-ip-only
+        description: "a single plain IP opens exactly that zabbix_web rule again"
+        sources: [192.168.0.51]
+        present:
+          - "ufw allow from 192.168.0.51 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+
+    # A CIDR with host bits set is not what ufw stores (10.0.0.5/24 becomes
+    # 10.0.0.0/24), so the role cannot reason about it. Designed behaviour: the
+    # role's Validate assert rejects it BEFORE any ufw change. Today it is added,
+    # immediately judged stale and deleted, and the run reports success.
+    ufwc_reject_cases:
+      - role: zabbix_agent
+        id: zabbix-host-bits
+        description: "10.0.0.5/24 (host bits set) is rejected by a Validate assert"
+        expect: reject
+        sources: [10.0.0.5/24]
+        present:
+          - "ufw allow from 192.168.0.21 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+      - role: zabbix_agent
+        id: zabbix-host-bits-mixed
+        description: "a valid IP next to 10.0.0.5/24 is not applied either — validation precedes any change"
+        expect: reject
+        sources: [192.168.0.22, 10.0.0.5/24]
+        present:
+          - "ufw allow from 192.168.0.21 to any port 10050 proto tcp comment 'ai-support-agent:zabbix_agent'"
+        absent:
+          - 'from 192\.168\.0\.22 to any port 10050 '
+      - role: rsyslog_server
+        id: rsyslog-host-bits
+        description: "10.0.1.5/24 (host bits set) is rejected by a Validate assert"
+        expect: reject
+        sources: [10.0.1.5/24]
+      - role: rsyslog_server
+        id: rsyslog-host-bits-mixed
+        description: "a valid IP next to 10.0.1.5/24 is not applied either — validation precedes any change"
+        expect: reject
+        sources: [192.168.0.32, 10.0.1.5/24]
+        absent:
+          - 'from 192\.168\.0\.32 to any port 5514 '
+      - role: zabbix_server
+        id: server-host-bits
+        description: "10.0.2.5/24 (host bits set) is rejected by a Validate assert"
+        expect: reject
+        sources: [10.0.2.5/24]
+        present:
+          - "ufw allow from 192.168.0.41 to any port 10051 proto tcp comment 'ai-support-agent:zabbix_server'"
+      - role: zabbix_server
+        id: server-host-bits-mixed
+        description: "a valid IP next to 10.0.2.5/24 is not applied either — validation precedes any change"
+        expect: reject
+        sources: [192.168.0.42, 10.0.2.5/24]
+        present:
+          - "ufw allow from 192.168.0.41 to any port 10051 proto tcp comment 'ai-support-agent:zabbix_server'"
+        absent:
+          - 'from 192\.168\.0\.42 to any port 10051 '
+      - role: zabbix_web
+        id: web-host-bits
+        description: "10.0.3.5/24 (host bits set) is rejected by a Validate assert"
+        expect: reject
+        sources: [10.0.3.5/24]
+        present:
+          - "ufw allow from 192.168.0.51 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+      - role: zabbix_web
+        id: web-host-bits-mixed
+        description: "a valid IP next to 10.0.3.5/24 is not applied either — validation precedes any change"
+        expect: reject
+        sources: [192.168.0.52, 10.0.3.5/24]
+        present:
+          - "ufw allow from 192.168.0.51 to any port 8080 proto tcp comment 'ai-support-agent:zabbix_web'"
+        absent:
+          - 'from 192\.168\.0\.52 to any port 8080 '
+
+  tasks:
+    - name: "verify : Start with no recorded results"
+      ansible.builtin.set_fact:
+        ufwc_results: []
+        ufwc_failures: []
+
+    - name: "verify : Read the ufw status"
+      ansible.builtin.command:
+        argv: [ufw, status]
+      register: ufwc_status
+      changed_when: false
+
+    - name: "verify : Assert ufw is still active (the cases are meaningless otherwise)"
+      ansible.builtin.assert:
+        that:
+          - "'Status: active' in ufwc_status.stdout"
+
+    - name: "verify : zabbix_agent cases"
+      ansible.builtin.include_tasks: zabbix_agent-case.yml
+      loop: "{{ ufwc_zabbix_cases }}"
+      loop_control:
+        loop_var: ufwc_case
+        label: "{{ ufwc_case.id }}"
+
+    - name: "verify : rsyslog_server cases"
+      ansible.builtin.include_tasks: rsyslog_server-case.yml
+      loop: "{{ ufwc_rsyslog_cases }}"
+      loop_control:
+        loop_var: ufwc_case
+        label: "{{ ufwc_case.id }}"
+
+    - name: "verify : zabbix_server cases"
+      ansible.builtin.include_tasks: zabbix_server-case.yml
+      loop: "{{ ufwc_server_cases }}"
+      loop_control:
+        loop_var: ufwc_case
+        label: "{{ ufwc_case.id }}"
+
+    - name: "verify : zabbix_web cases"
+      ansible.builtin.include_tasks: zabbix_web-case.yml
+      loop: "{{ ufwc_web_cases }}"
+      loop_control:
+        loop_var: ufwc_case
+        label: "{{ ufwc_case.id }}"
+
+    - name: "verify : Empty-list and cross-role cases"
+      ansible.builtin.include_tasks: "{{ ufwc_case.role }}-case.yml"
+      loop: "{{ ufwc_close_cases }}"
+      loop_control:
+        loop_var: ufwc_case
+        label: "{{ ufwc_case.id }}"
+
+    - name: "verify : Host-bit CIDR rejection cases"
+      ansible.builtin.include_tasks: "{{ ufwc_case.role }}-case.yml"
+      loop: "{{ ufwc_reject_cases }}"
+      loop_control:
+        loop_var: ufwc_case
+        label: "{{ ufwc_case.id }}"
+
+    - name: "verify : Summarise the case results"
+      ansible.builtin.debug:
+        msg: "{{ ufwc_results | map(attribute='id') | zip(ufwc_results | map(attribute='ok')) | map('join', '=') | list }}"
+
+    - name: "verify : Assert every case passed"
+      ansible.builtin.assert:
+        that:
+          - ufwc_failures | length == 0
+          # Guard against a loop that silently ran nothing.
+          - >-
+            (ufwc_results | length)
+            == (ufwc_zabbix_cases | length) + (ufwc_rsyslog_cases | length)
+               + (ufwc_server_cases | length) + (ufwc_web_cases | length)
+               + (ufwc_close_cases | length) + (ufwc_reject_cases | length)
+        fail_msg: >-
+          {{ ufwc_failures | length }} ufw convergence case(s) failed:
+          {{ ufwc_failures | to_json }}

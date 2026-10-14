@@ -1,0 +1,114 @@
+---
+# Molecule "ufw_reachability" scenario: proves that the ufw rules the roles add
+# actually let an allowed host IN and keep everybody else OUT, by opening real
+# TCP connections across a Docker network.
+#
+# `ufw_convergence` judges the rules by `ufw show added`. That catches the
+# normalisation defect (a `/32` rule added and deleted again in the same run),
+# but only as text. This scenario checks the effect the defect had in practice:
+# the agent / server / frontend port was unreachable from a host listed as
+# `a.b.c.d/32`, while the run reported success.
+#
+# TOPOLOGY (one user-defined network, fixed addresses so the allow lists can
+# name the clients):
+#   target  10.247.31.10  ufw ENABLED (default deny incoming), listeners on
+#                         10050 (agent), 10051 (server), 8080 (web), 5514/tcp
+#                         (rsyslog); converge runs the roles' ufw.yml here
+#   allowed 10.247.31.20  listed as `10.247.31.20/32` in every role's allow list
+#   denied  10.247.31.30  same /24, listed nowhere
+#
+# Why a separate scenario instead of more instances in `ufw_convergence`:
+# every play there is `hosts: all` and its cases build on each other's ufw
+# state; adding client instances would mean re-scoping all of them, and the
+# connection checks need a target whose allow list is fixed, not one the
+# verify cases keep rewriting.
+#
+# Same image digest and systemd settings as the other scenarios. The clients
+# are privileged only because the image boots systemd the same way.
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ../../requirements.yml
+
+driver:
+  name: docker
+
+platforms:
+  - name: ai-support-role-ufw-reachability-target
+    image: geerlingguy/docker-ubuntu2404-ansible@sha256:a92c929b640cd4e5cf73f67fd1e9d0466c58335449fdc37a889c0bb4bbf78e2e
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    groups: [ufwr_target]
+    docker_networks:
+      - name: ai-support-ufw-reachability
+        ipam_config:
+          - subnet: 10.247.31.0/24
+    networks:
+      - name: ai-support-ufw-reachability
+        ipv4_address: 10.247.31.10
+  - name: ai-support-role-ufw-reachability-allowed
+    image: geerlingguy/docker-ubuntu2404-ansible@sha256:a92c929b640cd4e5cf73f67fd1e9d0466c58335449fdc37a889c0bb4bbf78e2e
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    groups: [ufwr_clients]
+    networks:
+      - name: ai-support-ufw-reachability
+        ipv4_address: 10.247.31.20
+  - name: ai-support-role-ufw-reachability-denied
+    image: geerlingguy/docker-ubuntu2404-ansible@sha256:a92c929b640cd4e5cf73f67fd1e9d0466c58335449fdc37a889c0bb4bbf78e2e
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    groups: [ufwr_clients]
+    networks:
+      - name: ai-support-ufw-reachability
+        ipv4_address: 10.247.31.30
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      roles_path: ${MOLECULE_PROJECT_DIRECTORY}/roles
+  inventory:
+    group_vars:
+      all:
+        ufwr_target_ip: 10.247.31.10
+        ufwr_allowed_ip: 10.247.31.20
+        ufwr_denied_ip: 10.247.31.30
+        # port -> role whose ufw.yml opens it (rsyslog: TCP only; a UDP
+        # "connection" cannot be observed this way).
+        ufwr_ports:
+          - {port: 10050, role: zabbix_agent}
+          - {port: 10051, role: zabbix_server}
+          - {port: 8080, role: zabbix_web}
+          - {port: 5514, role: rsyslog_server}
+    host_vars:
+      ai-support-role-ufw-reachability-allowed:
+        ufwr_expect_reachable: true
+      ai-support-role-ufw-reachability-denied:
+        ufwr_expect_reachable: false
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy

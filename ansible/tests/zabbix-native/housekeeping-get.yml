@@ -1,0 +1,23 @@
+---
+# Reads housekeeping through the API as Admin (password zn_try_password) into zn_hk.
+- name: "housekeeping-get : Log in"
+  ansible.builtin.include_tasks: login.yml
+
+- name: "housekeeping-get : Call housekeeping.get"
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ zabbix_web_listen_port | default(8080) }}/api_jsonrpc.php"
+    method: POST
+    body_format: json
+    headers:
+      Host: "{{ zabbix_web_server_name }}"
+      Content-Type: application/json-rpc
+      Authorization: "{{ 'Bearer ' ~ zn_login_token if zabbix_server_version == '7.0' else omit }}"
+    body: >-
+      {{ {'jsonrpc': '2.0', 'method': 'housekeeping.get', 'id': 3, 'params': {'output': 'extend'}}
+         | combine({} if zabbix_server_version == '7.0' else {'auth': zn_login_token}) }}
+  register: zn_hk_raw
+  no_log: true
+
+- name: "housekeeping-get : Store the result"
+  ansible.builtin.set_fact:
+    zn_hk: "{{ zn_hk_raw.json.result }}"

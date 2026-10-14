@@ -1,5 +1,25 @@
 ---
 # Isolated Ubuntu systemd host only. Run local and external DB cases separately.
+#
+# Switches (pass with -e; each case needs a fresh host):
+#   zabbix_server_version=6.0|7.0          LTS (default 7.0)
+#   zabbix_server_db_type=postgresql|mysql zabbix_web_type=nginx|apache
+#   zabbix_server_db_mode=external ...     external DB (host/port/credentials of a provisioned DB)
+#   zabbix_native_timescaledb=true         local PostgreSQL only: preload pg_stat_statements
+#                                          first, then build with zabbix_server_db_timescaledb
+#                                          (do NOT pass zabbix_server_db_timescaledb itself;
+#                                          -e would also override the negative case below)
+#   zabbix_native_api_checks=false         skip the admin password / housekeeping checks
+#
+# Beyond the base flow (install, coexistence with an existing site, rerun, recovery):
+#   * TimescaleDB run: second run changes nothing and keeps the PostgreSQL start time,
+#     hypertables, preload, telemetry, license, version pin, server readiness
+#     (zabbix-native/timescaledb-checks.yml).
+#   * Admin password and housekeeping through the real API, including compression_status 1
+#     succeeding on TimescaleDB and failing otherwise (zabbix-native/api-checks.yml).
+#   * Local PostgreSQL without TimescaleDB: switching the populated DB to TimescaleDB fails
+#     in `database.py --plan` before PostgreSQL or APT is touched
+#     (zabbix-native/plain-to-timescaledb.yml).
 - name: Verify native Zabbix setup and coexistence
   hosts: localhost
   connection: local
@@ -21,7 +41,39 @@
     zabbix_web_db_port: "{{ zabbix_server_db_port }}"
     zabbix_web_db_name: "{{ zabbix_server_db_name }}"
     zabbix_web_db_user: "{{ zabbix_server_db_user }}"
+    zabbix_server_db_timescaledb: "{{ zabbix_native_timescaledb | default(false) | bool }}"
+    zn_local_pg: "{{ zabbix_server_db_type == 'postgresql' and zabbix_server_db_mode | default('local') == 'local' }}"
+    zn_pg_major: "{{ '14' if ansible_distribution_version == '22.04' else '16' }}"
+    zn_p1: "Xq7#vL2pR9!m-first"
+    zn_p2: "Kd4$wN8sT1?z-second"
+    zn_p3: "Hb6%yM3qU5&c-third"
   tasks:
+    - name: Require local PostgreSQL for the TimescaleDB case
+      ansible.builtin.assert:
+        that: not zabbix_server_db_timescaledb or zn_local_pg
+        fail_msg: zabbix_native_timescaledb=true covers the local PostgreSQL build only.
+
+    # An existing preload library must survive TimescaleDB being added (ALTER SYSTEM merge).
+    - name: Install PostgreSQL with an existing preload library
+      when: zabbix_server_db_timescaledb
+      block:
+        - name: Install PostgreSQL
+          ansible.builtin.apt:
+            name: postgresql
+            update_cache: true
+
+        - name: Preload pg_stat_statements in postgresql.conf
+          ansible.builtin.lineinfile:
+            path: "/etc/postgresql/{{ zn_pg_major }}/main/postgresql.conf"
+            regexp: '^#?shared_preload_libraries\s*='
+            line: "shared_preload_libraries = 'pg_stat_statements'"
+
+        - name: Restart PostgreSQL with pg_stat_statements
+          ansible.builtin.service:
+            name: postgresql
+            state: restarted
+            enabled: true
+
     - name: Install an existing nginx site
       ansible.builtin.apt:
         name: nginx
@@ -50,6 +102,15 @@
       ansible.builtin.include_role:
         name: zabbix_server
 
+    - name: Record the PostgreSQL state after the first server run
+      ansible.builtin.include_tasks: zabbix-native/pg-state.yml
+      when: zn_local_pg
+
+    - name: Keep the PostgreSQL state after the first server run
+      ansible.builtin.set_fact:
+        zn_pg_after_first: "{{ zn_pg_state }}"
+      when: zn_local_pg
+
     - name: Set up the frontend
       ansible.builtin.include_role:
         name: zabbix_web
@@ -67,6 +128,10 @@
     - name: Repeat the server setup
       ansible.builtin.include_role:
         name: zabbix_server
+
+    - name: Verify the TimescaleDB build and its idempotence
+      ansible.builtin.include_tasks: zabbix-native/timescaledb-checks.yml
+      when: zabbix_server_db_timescaledb
 
     - name: Repeat the frontend setup
       ansible.builtin.include_role:
@@ -94,3 +159,13 @@
     - name: Require the recovered existing site's body to remain the same
       ansible.builtin.assert:
         that: existing_site_recovered.content == existing_site.content
+
+    - name: Verify the admin password and housekeeping through the API
+      ansible.builtin.include_tasks: zabbix-native/api-checks.yml
+      when: zabbix_native_api_checks | default(true) | bool
+
+    - name: Verify that a populated DB is not switched to TimescaleDB
+      ansible.builtin.include_tasks: zabbix-native/plain-to-timescaledb.yml
+      when:
+        - zn_local_pg
+        - not zabbix_server_db_timescaledb
