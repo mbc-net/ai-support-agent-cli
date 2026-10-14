@@ -414,7 +414,8 @@ describe('Phase 1 監視・ログ系ロール（rsyslog_server / rsyslog_forward
     })
 
 
-    const ufwRoles = ['rsyslog_server', 'zabbix_agent']
+    // zabbix_server / zabbix_web は zabbix_agent の ufw.yml の複製（設計書 §3.6.1）。
+    const ufwRoles = ['rsyslog_server', 'zabbix_agent', 'zabbix_server', 'zabbix_web']
 
     it.each(ufwRoles)('%s: 列挙に ufw show added を使う（status は inactive で何も列挙しない）', (role) => {
       const raw = readRaw(role, 'tasks', 'ufw.yml')
@@ -505,6 +506,129 @@ describe('Phase 1 監視・ログ系ロール（rsyslog_server / rsyslog_forward
       expect(healthIdx).toBeGreaterThanOrEqual(0)
       expect(ufwIdx).toBeGreaterThan(healthIdx)
     })
+
+    // ufw は保存時にアドレスを正規化する（ufw 0.36.2 で実測）:
+    //   `192.168.0.20/32` → `192.168.0.20`、`10.0.0.5/24` → `10.0.0.0/24`。
+    // 入力文字列のまま `ufw show added` と照合すると、追加した直後の自分のルールを
+    // stale と判定して `ufw --force delete` する（実行は成功扱い）。
+    // 実挙動は Molecule シナリオ `ufw_convergence`（ufw を有効化した状態で
+    // tasks_from: ufw を実行し、`ufw show added` の実出力を見る）で検証する。
+    // ここで固定するのは「その実行時テストが外されていないこと」と、
+    // 設計で決めた「ホストビット付き CIDR は ufw を触る前の Validate assert で拒否」だけ。
+    describe('ufw のアドレス正規化（/32・ホストビット付き CIDR）', () => {
+      const ansibleDir = path.join(rolesDir, '..')
+      const scenarioDir = path.join(ansibleDir, 'molecule', 'ufw_convergence')
+      // ufw.yml を持つロールは自動的に対象になる（zabbix_server / zabbix_web に
+      // ufw.yml を足したら、シナリオへの追加漏れがここで赤くなる）。
+      const rolesWithUfw = readdirSync(rolesDir)
+        .filter((role) => existsSync(path.join(rolesDir, role, 'tasks', 'ufw.yml')))
+        .sort()
+
+      it('ufw.yml を持つロールが少なくとも rsyslog_server と zabbix_agent である', () => {
+        expect(rolesWithUfw).toEqual(expect.arrayContaining(['rsyslog_server', 'zabbix_agent']))
+      })
+
+      it('CI の molecule matrix に ufw_convergence シナリオが入っている', () => {
+        const workflow = load(
+          readFileSync(
+            path.join(ansibleDir, '..', '.github', 'workflows', 'ansible-roles.yml'),
+            'utf8',
+          ),
+        ) as { jobs: { molecule: { strategy: { matrix: { scenario: string[] } } } } }
+        expect(workflow.jobs.molecule.strategy.matrix.scenario).toContain('ufw_convergence')
+      })
+
+      it('シナリオは ufw を有効化してから収束させる（無効のままでは実運用の状態を見ていない）', () => {
+        const prepare = readFileSync(path.join(scenarioDir, 'prepare.yml'), 'utf8')
+        expect(prepare).toContain('argv: [ufw, --force, enable]')
+        expect(prepare).toContain("'Status: active' in")
+      })
+
+      it.each(rolesWithUfw)('%s: ufw_convergence の converge と verify で tasks_from: ufw が実行される', (role) => {
+        const converge = load(readFileSync(path.join(scenarioDir, 'converge.yml'), 'utf8')) as Array<{
+          tasks: Task[]
+        }>
+        const included = converge[0].tasks
+          .map((t) => t['ansible.builtin.include_role'] as { name?: string; tasks_from?: string } | undefined)
+          .filter((v): v is { name?: string; tasks_from?: string } => v !== undefined)
+        expect(included).toContainEqual({ name: role, tasks_from: 'ufw' })
+
+        const caseFile = path.join(scenarioDir, `${role}-case.yml`)
+        expect(existsSync(caseFile)).toBe(true)
+        const caseIncludes = flatten(load(readFileSync(caseFile, 'utf8')) as Task[])
+          .map((t) => t['ansible.builtin.include_role'] as { name?: string; tasks_from?: string } | undefined)
+          .filter((v) => v !== undefined)
+        expect(caseIncludes).toContainEqual({ name: role, tasks_from: 'ufw' })
+
+        // verify からこのロールのケースファイルが呼ばれていること。
+        const verify = readFileSync(path.join(scenarioDir, 'verify.yml'), 'utf8')
+        expect(verify).toContain(`${role}-case.yml`)
+      })
+
+      it.each(rolesWithUfw)(
+        '%s: ufw.yml 内で、ルール追加より前に Validate assert がある（ホストビット付き CIDR を ufw に渡さない）',
+        (role) => {
+          // tasks_from: ufw でも、main.yml 経由でも、ufw に触る前に拒否されること。
+          // main.yml の Validate だけに置くと tasks_from: ufw 経路で素通りし、
+          // ufw が 10.0.0.5/24 を 10.0.0.0/24 に書き換えて追加→即削除になる。
+          const tasks = loadTasks(role, 'ufw.yml')
+          const addIdx = tasks.findIndex((t) => /Add the desired ufw rules/i.test(String(t.name ?? '')))
+          const validateIdx = tasks.findIndex(
+            (t) =>
+              moduleOf(t) === 'ansible.builtin.assert'
+              && String(t.name ?? '').startsWith(`${role} : Validate`),
+          )
+          expect(addIdx).toBeGreaterThanOrEqual(0)
+          expect(validateIdx).toBeGreaterThanOrEqual(0)
+          expect(validateIdx).toBeLessThan(addIdx)
+        },
+      )
+
+      it.each(rolesWithUfw)('%s: ufw.yml の Validate がホストビットを算術で判定する', (role) => {
+        // 形式チェック（正規表現）だけでは 10.0.0.5/24 を通してしまう。アドレスを 32 ビット
+        // 整数にして 2^(32-prefix) で割り切れることを見る式が、ufw.yml の assert にあること。
+        const validates = loadTasks(role, 'ufw.yml').filter(
+          (t) => moduleOf(t) === 'ansible.builtin.assert' && String(t.name ?? '').startsWith(`${role} : Validate`),
+        )
+        const that = JSON.stringify(validates.map((t) => (t['ansible.builtin.assert'] as { that: unknown }).that))
+        expect(that).toContain('% (2 ** (32 - ')
+        expect(that).toContain('16777216')
+        // /0 を受け付けない（プレフィックスは 1〜32）
+        expect(that).toContain('(/([1-9]|[12][0-9]|3[0-2]))?')
+      })
+
+      it.each(rolesWithUfw)('%s: desired 側で末尾の /32 を除去し、重複をまとめてから照合・追加する', (role) => {
+        // ufw は `a.b.c.d/32` を `a.b.c.d` として保存する。desired を入力文字列のまま
+        // 組み立てると、追加直後の自分のルールが desired に一致せず stale として削除される。
+        const raw = readRaw(role, 'tasks', 'ufw.yml')
+        const block = (raw.split(`${role}_ufw_desired: >-`)[1] ?? '').split('- name:')[0]
+        expect(block).toContain("map('regex_replace', '/32$', '') | unique")
+        // 追加コマンド・照合パターンはどちらも desired（正規化後）から作る。
+        expect(raw).toContain(`loop: "{{ ${role}_ufw_desired }}"`)
+        expect(raw).toMatch(new RegExp(`for src, proto in ${role}_ufw_desired -`))
+      })
+    })
+
+    // 設計書 §3.6.1 / §7.1.4: zabbix_server / zabbix_web の ufw.yml は zabbix_agent の
+    // ufw.yml を複製して作る（所有マーカーはリテラル直書きの原則があり、補助ロールでの
+    // 共通化はしない）。複製がずれると、片方だけ /32 正規化やコメント全体一致が抜ける
+    // 兄弟経路の非対称が生まれる。ロール名（ポート変数 `<role>_listen_port`・所有マーカー
+    // `ai-support-agent:<role>`・タスク名接頭辞・内部変数名をすべて含む）を正規化すると、
+    // コメントまで含めて完全一致することを要求する（コメント差も許容しない: 説明がずれると
+    // 次の修正で片方だけ直す原因になるため）。
+    it.each(['zabbix_server', 'zabbix_web'])(
+      '%s: tasks/ufw.yml は zabbix_agent の ufw.yml とロール名を正規化すると一致する',
+      (role) => {
+        const normalize = (r: string, text: string): string => text.split(r).join('<ROLE>')
+        const agent = normalize('zabbix_agent', readRaw('zabbix_agent', 'tasks', 'ufw.yml'))
+        const copy = normalize(role, readRaw(role, 'tasks', 'ufw.yml'))
+        expect(copy).toBe(agent)
+        // 正規化が空振りしていない（ロール名・ポート変数・マーカーが実際に置換されている）。
+        expect(agent).toContain('<ROLE>_listen_port')
+        expect(agent).toContain("comment 'ai-support-agent:<ROLE>'")
+        expect(copy).not.toContain('zabbix_agent')
+      },
+    )
   })
 })
 
@@ -518,7 +642,7 @@ describe('レシピから上書きできてはならない値（ガード迂回�
     // 変数だと `""` を渡すだけで `select('search','')` が全行に一致し、
     // SSH を含むホスト上の全ルールが「このロールの所有」と判定される。
     // desired が空なら、それが全部削除される（実測: 空パターンは無関係な 2/2 行に一致）。
-    for (const role of ['rsyslog_server', 'zabbix_agent']) {
+    for (const role of ['rsyslog_server', 'zabbix_agent', 'zabbix_server', 'zabbix_web']) {
       const defaults = loadYaml(role, 'defaults', 'main.yml') as Record<string, unknown>
       expect(defaults).not.toHaveProperty(`${role}_ufw_comment`)
 

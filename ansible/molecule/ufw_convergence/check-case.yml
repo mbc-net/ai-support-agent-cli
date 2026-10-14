@@ -1,0 +1,78 @@
+---
+# Judge one case against the REAL `ufw show added` output.
+#
+# Every expectation is an exact line as ufw itself stores it (or, for
+# `absent`, a regex that must match no line). Nothing here rewrites the ufw
+# output or the role input to make them comparable: if a role's own rule is
+# not listed afterwards, the case fails — that is the whole point.
+#
+# Problems are collected into `ufwc_failures` rather than asserted one by one,
+# so a single verify run reports every failing case (verify.yml asserts the
+# list is empty at the end).
+#
+# Inputs: ufwc_case, ufwc_role, ufwc_before, ufwc_run_failed,
+#         ufwc_failed_task_name, ufwc_failed_task_action, ufwc_decoy_lines.
+- name: "verify({{ ufwc_case.id }}) : Enumerate the ufw rules after the run"
+  ansible.builtin.command:
+    argv: [ufw, show, added]
+  register: ufwc_after
+  changed_when: false
+
+- name: "verify({{ ufwc_case.id }}) : Collect the problems with this case"
+  ansible.builtin.set_fact:
+    ufwc_case_problems_raw: >-
+      {%- set out = [] -%}
+      {%- set expect = ufwc_case.expect | default('converge') -%}
+      {%- if expect == 'converge' and ufwc_run_failed -%}
+      {%-   set _ = out.append('the run failed at task "' ~ ufwc_failed_task_name ~ '"') -%}
+      {%- endif -%}
+      {%- if expect == 'reject' -%}
+      {%-   if not ufwc_run_failed -%}
+      {%-     set _ = out.append('the run was ACCEPTED, but it must be rejected by a Validate assert before ufw is touched') -%}
+      {%-   elif ufwc_failed_task_action not in ['assert', 'ansible.builtin.assert']
+              or 'Validate' not in ufwc_failed_task_name
+              or not ufwc_failed_task_name.startswith(ufwc_role ~ ' : ') -%}
+      {%-     set _ = out.append('the run failed, but not at a "' ~ ufwc_role ~ ' : Validate ..." assert (failed task: "'
+                                 ~ ufwc_failed_task_name ~ '", action: ' ~ ufwc_failed_task_action ~ ')') -%}
+      {%-   endif -%}
+      {%-   if ufwc_after.stdout_lines != ufwc_before.stdout_lines -%}
+      {%-     set _ = out.append('ufw was modified although the input is invalid: before='
+                                 ~ (ufwc_before.stdout_lines | to_json) ~ ' after=' ~ (ufwc_after.stdout_lines | to_json)) -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {%- for line in (ufwc_case.present | default([])) + ufwc_decoy_lines -%}
+      {%-   if line not in ufwc_after.stdout_lines -%}
+      {%-     set _ = out.append('missing rule: ' ~ line) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- for pattern in ufwc_case.absent | default([]) -%}
+      {%-   for line in ufwc_after.stdout_lines -%}
+      {%-     if line is search(pattern) -%}
+      {%-       set _ = out.append('rule that must be gone is still present: ' ~ line) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+# The template above renders to a JSON string (a leading `{%- set -%}` block
+# keeps ansible-core 2.16 from converting it back to a list), so decode it.
+- name: "verify({{ ufwc_case.id }}) : Decode the problem list"
+  ansible.builtin.set_fact:
+    ufwc_case_problems: >-
+      {{ ufwc_case_problems_raw | from_json
+         if ufwc_case_problems_raw is string else ufwc_case_problems_raw }}
+
+- name: "verify({{ ufwc_case.id }}) : Report the case result"
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'PASS' if ufwc_case_problems | length == 0 else 'FAIL' }}
+      [{{ ufwc_case.id }}] {{ ufwc_case.description }}
+      {{ '' if ufwc_case_problems | length == 0 else ('— ' ~ (ufwc_case_problems | join(' / '))) }}
+      | ufw show added: {{ ufwc_after.stdout_lines | to_json }}
+
+- name: "verify({{ ufwc_case.id }}) : Record the case result"
+  ansible.builtin.set_fact:
+    ufwc_results: "{{ ufwc_results + [{'id': ufwc_case.id, 'ok': ufwc_case_problems | length == 0}] }}"
+    ufwc_failures: >-
+      {{ ufwc_failures + ([ufwc_case.id ~ ': ' ~ (ufwc_case_problems | join(' / '))]
+                          if ufwc_case_problems | length > 0 else []) }}

@@ -1,0 +1,51 @@
+---
+# Run each role's ufw convergence on the target with the allowed client written
+# as `<ip>/32` — the form ufw rewrites when it stores the rule, and the form
+# that the normalisation defect silently deleted again. A second, unrelated
+# CIDR (outside the clients' network) rides along so the run also has a rule
+# stored exactly as written.
+- name: Converge
+  hosts: ufwr_target
+  become: true
+  gather_facts: false
+
+  vars:
+    ufwr_sources:
+      - "{{ ufwr_allowed_ip }}/32"
+      - 10.99.0.0/24
+
+  tasks:
+    - name: "Converge : zabbix_agent ufw convergence"
+      ansible.builtin.include_role:
+        name: zabbix_agent
+        tasks_from: ufw
+      vars:
+        zabbix_agent_listen_port: 10050
+        zabbix_agent_allowed_sources: "{{ ufwr_sources }}"
+
+    - name: "Converge : zabbix_server ufw convergence"
+      ansible.builtin.include_role:
+        name: zabbix_server
+        tasks_from: ufw
+      vars:
+        zabbix_server_listen_port: 10051
+        zabbix_server_allowed_sources: "{{ ufwr_sources }}"
+
+    - name: "Converge : zabbix_web ufw convergence"
+      ansible.builtin.include_role:
+        name: zabbix_web
+        tasks_from: ufw
+      vars:
+        zabbix_web_listen_port: 8080
+        zabbix_web_allowed_sources: "{{ ufwr_sources }}"
+
+    - name: "Converge : rsyslog_server ufw convergence (tcp)"
+      ansible.builtin.include_role:
+        name: rsyslog_server
+        tasks_from: ufw
+      vars:
+        rsyslog_server_port: 5514
+        rsyslog_server_tcp_enabled: true
+        rsyslog_server_udp_enabled: false
+        rsyslog_server_allow_all_senders: false
+        rsyslog_server_allowed_senders: "{{ ufwr_sources }}"

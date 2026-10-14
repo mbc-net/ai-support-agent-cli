@@ -99,9 +99,24 @@ tasks ツリー自体を構文チェックしたいときは、一時的に **�
 - `default` … `ssh_key` ロール
 - `os_init` … `os_init` ロール（ユーザー作成・apt upgrade・ufw 設定。ufw の
   `changed_when` 冪等化後に idempotence 達成。下記「findings」参照）
+- `rsyslog_server` / `rsyslog_forward` … 各ロール
+- `ufw_convergence` … ポートを開けるロールの **ufw 収束だけ**
+  （`include_role: {name: <role>, tasks_from: ufw}`。現状 `zabbix_agent`・`zabbix_server`・`zabbix_web` と
+  `rsyslog_server`）。`prepare.yml` で ufw を**有効化**し、各ケース後の
+  `ufw show added` の実出力を「ufw が保存する形の行」と完全一致で照合する。
+  ufw は保存時にアドレスを正規化する（`192.168.0.20/32` → `192.168.0.20`、
+  `10.0.0.5/24` → `10.0.0.0/24`。ufw 0.36.2 で実測）ため、入力文字列のまま
+  照合するロールは追加直後の自分のルールを stale として削除する。これを
+  `/32` 混在・再実行（idempotence）・ポート変更・空リスト・他ロール/囮ルールの保持・
+  ホストビット付き CIDR の拒否（ufw を触る前の `<role> : Validate ...` assert で
+  失敗し、ufw が無変更であること）で検証する。zabbix_agent 本体はコンテナで
+  検証できない（CI ワークフロー冒頭のコメント参照）が、`tasks/ufw.yml` は単体で
+  完結するためここで実行できる。ufw.yml を持つロールを追加したら
+  `<role>-case.yml` を足して `converge.yml` / `verify.yml` / `prepare.yml`（囮）に
+  加える（jest `monitoring-log-roles.spec.ts` が追加漏れを検出する）。
 
-CI（`.github/workflows/ansible-roles.yml`）の `molecule` ジョブは両シナリオを
-matrix で回す（`molecule test -s default` と `molecule test -s os_init`）。
+CI（`.github/workflows/ansible-roles.yml`）の `molecule` ジョブは上記の全シナリオを
+matrix で回す（`molecule test -s <scenario>`）。
 
 ```bash
 # ansible/ ディレクトリから、または npm script 経由で

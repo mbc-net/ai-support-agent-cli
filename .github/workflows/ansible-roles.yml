@@ -6,7 +6,8 @@ name: Ansible Roles
 #
 # HONEST COVERAGE: the `molecule` job exercises only the container-safe,
 # idempotent roles, one per scenario (a matrix over `default` = ssh_key,
-# `os_init`, `rsyslog_server` and `rsyslog_forward`). Each scenario's `idempotence` step requires a zero-change second
+# `os_init`, `rsyslog_server` and `rsyslog_forward`; `ufw_convergence` runs only
+# the ufw task files of the roles that open ports). Each scenario's `idempotence` step requires a zero-change second
 # converge. Roles that depend on a real kernel / block devices / privileged host
 # or on live enrolment secrets — k3s (disk partitioning + gVisor), docker
 # (docker-in-docker), gitlab_runner / github_runner / tailscale (registration
@@ -21,6 +22,14 @@ name: Ansible Roles
 # nothing to observe, so a scenario would assert nothing while looking green.
 # It is verified on a real VM instead (design doc
 # admin-docs/docs/specifications/server-setup-monitoring-app-roles.md section 7).
+# Its ufw convergence alone (tasks/ufw.yml) IS container-safe and runs in the
+# `ufw_convergence` scenario, together with those of rsyslog_server,
+# zabbix_server and zabbix_web, against an
+# ENABLED ufw — judged by the real `ufw show added` output (ufw normalises
+# `a.b.c.d/32` to `a.b.c.d` when it stores a rule).
+# `ufw_reachability` runs the same ufw task files on a target container and
+# opens real TCP connections from an allowed client (listed as `<ip>/32`) and
+# a denied client on the same Docker network.
 
 on:
   push:
@@ -99,6 +108,10 @@ jobs:
       - name: Sentry supervisor unit tests
         run: python3 ansible/tests/test_sentry_setup.py -v
 
+      # Fake JSON-RPC server (6.0 body auth / 7.0 Bearer); no external services needed.
+      - name: Zabbix API helper unit tests
+        run: python3 ansible/tests/test_zabbix_api.py -v
+
       - name: Sentry role syntax check
         env:
           ANSIBLE_ROLES_PATH: ansible/roles
@@ -116,7 +129,7 @@ jobs:
       matrix:
         # One container-safe, idempotent role per scenario. Add new scenarios
         # here as roles gain Molecule coverage (see ansible/DEVELOPING.md).
-        scenario: [default, os_init, rsyslog_server, rsyslog_forward]
+        scenario: [default, os_init, rsyslog_server, rsyslog_forward, ufw_convergence, ufw_reachability]
     steps:
       - uses: actions/checkout@v4
 

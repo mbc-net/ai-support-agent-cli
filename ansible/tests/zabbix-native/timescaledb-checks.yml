@@ -1,0 +1,95 @@
+---
+# TimescaleDB build checks (design doc §4.1, test plan §7.1.4). Runs after the second
+# zabbix_server run of zabbix-native.yml. Inputs: zn_pg_after_first (pg-state.yml output
+# taken after the first run).
+- name: "timescaledb : Read the PostgreSQL state after the second run"
+  ansible.builtin.include_tasks: pg-state.yml
+
+- name: "timescaledb : The second run changed nothing and did not restart PostgreSQL"
+  ansible.builtin.assert:
+    that:
+      - not zabbix_server_ts_pending.changed
+      - not zabbix_server_db_result.changed
+      - (zabbix_server_db_plan.stdout | from_json).state == 'ready'
+      - zn_pg_state.started == zn_pg_after_first.started
+    fail_msg: >-
+      ts_pending={{ zabbix_server_ts_pending.changed }} db={{ zabbix_server_db_result.changed }}
+      plan={{ zabbix_server_db_plan.stdout | default('') }}
+      started {{ zn_pg_after_first.started }} -> {{ zn_pg_state.started }}
+
+- name: "timescaledb : Read hypertables, TimescaleDB settings and the extension version"
+  ansible.builtin.command:
+    argv:
+      - psql
+      - -XAt
+      - -d
+      - "{{ zabbix_server_db_name }}"
+      - -c
+      - "SELECT string_agg(hypertable_name, ',' ORDER BY hypertable_name) FROM timescaledb_information.hypertables"
+      - -c
+      - SHOW shared_preload_libraries
+      - -c
+      - SHOW timescaledb.telemetry_level
+      - -c
+      - SHOW timescaledb.license
+      - -c
+      - "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'"
+      - -c
+      - "SELECT db_extension FROM config"
+  become_user: postgres
+  register: zn_ts_db
+  changed_when: false
+
+- name: "timescaledb : Read the installed TimescaleDB packages"
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - -W
+      - -f=${Package}|${Version}\n
+      - "timescaledb-2-postgresql-{{ zn_pg_major }}"
+      - "timescaledb-2-loader-postgresql-{{ zn_pg_major }}"
+  register: zn_ts_pkgs
+  changed_when: false
+
+- name: "timescaledb : Read the APT pin"
+  ansible.builtin.slurp:
+    src: /etc/apt/preferences.d/ai-support-timescaledb
+  register: zn_ts_pin
+
+- name: "timescaledb : Hypertables, preload, telemetry, license and version pin are as designed"
+  vars:
+    zn_ts_expected_hypertables:
+      "6.0": [history, history_log, history_str, history_text, history_uint, trends, trends_uint]
+      "7.0": [auditlog, history, history_bin, history_log, history_str, history_text, history_uint, trends, trends_uint]
+    zn_ts_versions: "{{ zn_ts_pkgs.stdout_lines | map('regex_replace', '^[^|]*[|]', '') | unique | list }}"
+    zn_ts_pin_text: "{{ zn_ts_pin.content | b64decode }}"
+  ansible.builtin.assert:
+    that:
+      - zn_ts_db.stdout_lines[0] == zn_ts_expected_hypertables[zabbix_server_version] | join(',')
+      - zn_ts_db.stdout_lines[1].split(',') | map('trim') | select('equalto', 'pg_stat_statements') | list | length == 1
+      - zn_ts_db.stdout_lines[1].split(',') | map('trim') | select('equalto', 'timescaledb') | list | length == 1
+      - zn_ts_db.stdout_lines[2] == 'off'
+      - zn_ts_db.stdout_lines[3] == 'timescale'
+      - zn_ts_db.stdout_lines[4] is match('^2\.(1[3-9]|2[0-8])\.')
+      - zn_ts_db.stdout_lines[5] == 'timescaledb'
+      - zn_ts_pkgs.stdout_lines | length == 2
+      - zn_ts_versions | length == 1
+      - zn_ts_versions[0].startswith(zn_ts_db.stdout_lines[4] ~ '~ubuntu' ~ ansible_distribution_version)
+      - ('Pin: version ' ~ zn_ts_versions[0]) in zn_ts_pin_text
+      - "'Pin-Priority: 1001' in zn_ts_pin_text"
+    fail_msg: "db={{ zn_ts_db.stdout_lines }} pkgs={{ zn_ts_pkgs.stdout_lines }} pin={{ zn_ts_pin_text }}"
+
+- name: "timescaledb : Read the server service state"
+  ansible.builtin.command:
+    argv: [systemctl, is-active, zabbix-server]
+  register: zn_ts_active
+  changed_when: false
+
+- name: "timescaledb : Run the readiness check"
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, /usr/local/lib/ai-support-zabbix-ready.py, "10051", "{{ zabbix_server_version }}"]
+  changed_when: false
+
+- name: "timescaledb : The server is active"
+  ansible.builtin.assert:
+    that: zn_ts_active.stdout == 'active'

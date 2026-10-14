@@ -21,12 +21,53 @@
       - zabbix_server_db_mode != 'local' or zabbix_server_db_port | int == (5432 if zabbix_server_db_type == 'postgresql' else 3306)
       - zabbix_server_listen_port | string is match('^[0-9]+\Z')
       - zabbix_server_listen_port | int > 0 and zabbix_server_listen_port | int < 65536
+      # ufw の許可元（§3.6.1）。ufw.yml にも同じ検証があるが、パッケージ導入より前に
+      # 落とすためここでも検証する。`is boolean` で型まで見る（"yes" や null を通さない）。
+      - zabbix_server_ufw_manage is boolean
+      - zabbix_server_allow_no_sources is boolean
+      - >-
+        zabbix_server_allowed_sources is sequence and zabbix_server_allowed_sources is not string
+        and zabbix_server_allowed_sources is not mapping
+      - zabbix_server_allowed_sources | reject('string') | list | length == 0
+      # オクテット 0〜255（先頭ゼロなし）、プレフィックス 1〜32（/0 は全開放なので拒否）。
+      - >-
+        zabbix_server_allowed_sources
+        | reject('match', '^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}(/([1-9]|[12][0-9]|3[0-2]))?\Z')
+        | list | length == 0
+      # ホストビット付き CIDR（例 10.0.0.5/24）は拒否する。ufw は 10.0.0.0/24 に正規化して
+      # 保存するため、書いた範囲と開く範囲が食い違う。計算は下の vars（上の検証を通った値だけが届く）。
+      - zabbix_server_ufw_host_bit_sources | trim | length == 0
+      - not zabbix_server_ufw_manage or (zabbix_server_allowed_sources | length) > 0 or zabbix_server_allow_no_sources
+      # TimescaleDB（設計書 §4.1）。`is boolean` で型まで見る（文字列 "true" や null を通さない）。
+      - zabbix_server_db_timescaledb is boolean
+      - not zabbix_server_db_timescaledb or zabbix_server_db_type == 'postgresql'
     fail_msg: >-
       Zabbix Server requires Ubuntu 22.04/24.04, package, LTS 6.0/7.0,
       PostgreSQL/MySQL and local/external mode. Provide a dedicated DB/user,
       a nonempty single-line printable ASCII password (no outer spaces),
       and valid host/ports. Local DB uses localhost and the default DB port.
       External DB/user must already exist with schema-creation grants.
+      zabbix_server_allowed_sources must be a list of IPv4 addresses or network-address CIDRs
+      (prefix 1-32; a CIDR with host bits set such as 10.0.0.5/24 is rejected, write
+      10.0.0.0/24), zabbix_server_ufw_manage and zabbix_server_allow_no_sources must be booleans,
+      and an empty zabbix_server_allowed_sources with zabbix_server_ufw_manage true needs
+      zabbix_server_allow_no_sources true.
+      zabbix_server_db_timescaledb must be a boolean (true/false, not a string) and true
+      requires zabbix_server_db_type postgresql.
+  # assert の that は式しか書けず、要素ごとの算術（ホストビットの判定）はループ構文が要るため
+  # task vars で計算する。that の評価は先頭から順で最初の偽で止まり、task vars は参照時に
+  # 評価されるので、ここへ届くのはリスト・文字列・アドレス形式の検証を通った値だけである。
+  # この名前はレシピから上書きできないよう、ガードの予約内部変数に載せている。
+  vars:
+    zabbix_server_ufw_host_bit_sources: >-
+      {%- set out = [] -%}
+      {%- for src in zabbix_server_allowed_sources | select('search', '/') -%}
+      {%-   set o = src.split('/')[0].split('.') | map('int') | list -%}
+      {%-   if (o[0] * 16777216 + o[1] * 65536 + o[2] * 256 + o[3]) % (2 ** (32 - (src.split('/')[1] | int))) != 0 -%}
+      {%-     set _ = out.append(src) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out | join(',') }}
 
 - name: "zabbix_server : Read an existing server package version"
   ansible.builtin.command:
@@ -110,10 +151,37 @@
           {{ {'engine': zabbix_server_db_type, 'host': zabbix_server_db_host,
               'port': zabbix_server_db_port | int, 'database': zabbix_server_db_name,
               'user': zabbix_server_db_user, 'password': zabbix_server_db_password,
-              'version': zabbix_server_version} | to_json }}
+              'version': zabbix_server_version,
+              'timescaledb': zabbix_server_db_timescaledb} | to_json }}
         dest: "{{ zabbix_server_db_credentials.path }}"
         mode: "0600"
       diff: false
+
+    # 読み取り専用の状態判定（ロックを取らない・DB を変更しない）。PostgreSQL の設定変更・
+    # 再起動（timescaledb.yml）より前に、既存 DB に対する不正な指定を落とす（設計書 §4.1）:
+    # 通常 DB に true、TimescaleDB 化済み DB に false、ハイパーテーブルが不完全、Apache 版など。
+    - name: "zabbix_server : Check the DB state before changing PostgreSQL (read-only)"
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, /usr/local/lib/ai-support-zabbix-database.py, "{{ zabbix_server_db_credentials.path }}", --plan]
+      register: zabbix_server_db_plan
+      changed_when: false
+      ignore_errors: true
+      no_log: true
+      when: zabbix_server_db_type == 'postgresql'
+
+    - name: "zabbix_server : Fail if the DB state does not match the recipe (password-safe diagnostic)"
+      ansible.builtin.fail:
+        msg: >-
+          DB state check failed. {{ zabbix_server_db_plan.stderr | default('Check DB connectivity and grants.') }}
+      when:
+        - zabbix_server_db_type == 'postgresql'
+        - zabbix_server_db_plan.rc | default(1) != 0
+
+    - name: "zabbix_server : Set up TimescaleDB on the local PostgreSQL"
+      ansible.builtin.include_tasks: timescaledb.yml
+      when:
+        - zabbix_server_db_mode == 'local'
+        - zabbix_server_db_timescaledb
 
     - name: "zabbix_server : Temporarily allow MySQL SQL functions for an empty DB"
       ansible.mysql.mysql_variables:
@@ -207,3 +275,22 @@
   retries: 20
   delay: 3
   until: zabbix_server_ready.rc == 0
+
+# ufw 収束（設計書 §3.6 / §3.6.1）。readiness 確認の後に置く: サーバーが実際に統計
+# リクエストへ応答できる状態になってから許可元を開ける。所有マーカー・照合の規則は
+# tasks/ufw.yml を参照（zabbix_agent の ufw.yml の複製。共通化しない理由も同ファイルと設計書）。
+- name: "zabbix_server : Warn that the server port is not opened by this role"
+  ansible.builtin.debug:
+    msg: >-
+      zabbix_server_allowed_sources is empty, so port {{ zabbix_server_listen_port }}/tcp
+      is NOT opened by this role (any rule this role opened earlier is closed). If agents,
+      proxies or the web frontend connect from other hosts, list them in
+      zabbix_server_allowed_sources; set zabbix_server_allow_no_sources: false to make an
+      empty list fail instead.
+  when:
+    - zabbix_server_ufw_manage | bool
+    - zabbix_server_allowed_sources | length == 0
+
+- name: "zabbix_server : Converge the firewall rules"
+  ansible.builtin.include_tasks: ufw.yml
+  when: zabbix_server_ufw_manage | bool

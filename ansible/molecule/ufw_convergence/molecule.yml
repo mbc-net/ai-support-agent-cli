@@ -1,0 +1,75 @@
+---
+# Molecule "ufw_convergence" scenario: runs ONLY the ufw convergence task files
+# (`include_role: {name: <role>, tasks_from: ufw}`) of the roles that open ports
+# with ufw, against a real ufw that is ENABLED, and judges the result by the
+# actual `ufw show added` output.
+#
+# WHY A SEPARATE SCENARIO (and why tasks_from: ufw):
+#   * zabbix_agent cannot run end to end in a container (its post-restart check
+#     reads the journal and needs a reachable Zabbix server — see the comment at
+#     the top of .github/workflows/ansible-roles.yml), so its ufw convergence was
+#     never executed by any test. Its ufw.yml is self-contained (installs ufw,
+#     computes the desired set, adds, deletes) and can be run on its own.
+#   * The rsyslog_server scenario does exercise ufw.yml, but with ufw left
+#     DISABLED and with assertions that only look for substrings such as
+#     '10.99.0.0/24' — it never checks that a `/32` sender's rule survives.
+#
+# THE DEFECT THIS GUARDS: ufw normalises addresses when it stores a rule.
+# `ufw allow from 192.168.0.20/32 ...` is listed by `ufw show added` as
+# `allow from 192.168.0.20 ...` (no /32), and `10.0.0.5/24` becomes
+# `10.0.0.0/24` ("WARN: Rule changed after normalization"; measured with
+# ufw 0.36.2 on Ubuntu 24.04). A role that matches the stored rules against the
+# input string as written decides its own freshly added rule is stale and
+# deletes it with `ufw --force delete` in the same run, while reporting success.
+#
+# ROLES COVERED: zabbix_agent, rsyslog_server, zabbix_server, zabbix_web (the
+# last two are copies of zabbix_agent's ufw.yml). ADDING MORE ROLES: add a
+# `<role>-case.yml` (same contract as zabbix_agent-case.yml), call it from
+# converge.yml and verify.yml, and add that role's decoy rule to prepare.yml
+# (the jest spec monitoring-log-roles.spec.ts flags a role with tasks/ufw.yml
+# that is missing here).
+#
+# The image is pinned by manifest DIGEST, same digest as the other scenarios.
+# Bump all together in a reviewed PR.
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ../../requirements.yml
+
+driver:
+  name: docker
+
+platforms:
+  - name: ai-support-role-ufw-convergence-ubuntu2404
+    image: geerlingguy/docker-ubuntu2404-ansible@sha256:a92c929b640cd4e5cf73f67fd1e9d0466c58335449fdc37a889c0bb4bbf78e2e
+    # ufw drives iptables and needs privileged to be ENABLED (`ufw --force
+    # enable`). systemd settings match the other scenarios.
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      roles_path: ${MOLECULE_PROJECT_DIRECTORY}/roles
+
+verifier:
+  name: ansible
+
+scenario:
+  # `idempotence` matters here: with the normalisation defect every converge
+  # re-adds the `/32` rule and deletes it again, so the second converge reports
+  # changes.
+  test_sequence:
+    - dependency
+    - destroy
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy

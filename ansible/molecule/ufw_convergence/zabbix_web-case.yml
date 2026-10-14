@@ -1,0 +1,37 @@
+---
+# One verify case for zabbix_web's ufw convergence (default port 8080/tcp;
+# a case may set `port` to exercise a listen-port change).
+# Same contract as zabbix_agent-case.yml.
+- name: "verify({{ ufwc_case.id }}) : Snapshot the ufw rules before the run"
+  ansible.builtin.command:
+    argv: [ufw, show, added]
+  register: ufwc_before
+  changed_when: false
+
+- name: "verify({{ ufwc_case.id }}) : Reset the run outcome"
+  ansible.builtin.set_fact:
+    ufwc_run_failed: false
+    ufwc_failed_task_name: ""
+    ufwc_failed_task_action: ""
+
+- name: "verify({{ ufwc_case.id }}) : Run the zabbix_web ufw convergence"
+  when: ufwc_case.run | default(true)
+  block:
+    - name: "verify({{ ufwc_case.id }}) : Include zabbix_web tasks_from ufw"
+      ansible.builtin.include_role:
+        name: zabbix_web
+        tasks_from: ufw
+      vars:
+        zabbix_web_listen_port: "{{ ufwc_case.port | default(8080) }}"
+        zabbix_web_allowed_sources: "{{ ufwc_case.sources }}"
+  rescue:
+    - name: "verify({{ ufwc_case.id }}) : Record that the run failed and where"
+      ansible.builtin.set_fact:
+        ufwc_run_failed: true
+        ufwc_failed_task_name: "{{ ansible_failed_task.name | default('') }}"
+        ufwc_failed_task_action: "{{ ansible_failed_task.action | default('') }}"
+
+- name: "verify({{ ufwc_case.id }}) : Judge the case"
+  ansible.builtin.include_tasks: check-case.yml
+  vars:
+    ufwc_role: zabbix_web
