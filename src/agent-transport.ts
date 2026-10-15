@@ -563,7 +563,10 @@ async function processCommand(
           toolPolicy: 'marketplace_read_only',
         }
       : detail.payload
-    logger.debug(`${deps.prefix} Command detail [${commandId}]: type=${detail.type}, payload=${JSON.stringify(trustedPayload).substring(0, LOG_PAYLOAD_LIMIT)}`)
+    // Backup requests have not passed validation yet: even a rejected request
+    // can contain credentials. Do not serialize their payloads to debug logs.
+    const backupCommand = detail.type === 'backup_inspect' || detail.type === 'backup_export' || detail.type === 'backup_verify'
+    logger.debug(`${deps.prefix} Command detail [${commandId}]: type=${detail.type}${backupCommand ? '' : `, payload=${JSON.stringify(trustedPayload).substring(0, LOG_PAYLOAD_LIMIT)}`}`)
     const result = await executeCommand(detail.type, trustedPayload, {
       commandId,
       client: deps.client,
@@ -605,7 +608,7 @@ async function processCommand(
           }
         : undefined,
     })
-    logger.debug(`${deps.prefix} Command result [${commandId}]: success=${result.success}, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, LOG_RESULT_LIMIT)}`)
+    logger.debug(`${deps.prefix} Command result [${commandId}]: success=${result.success}${backupCommand ? '' : `, data=${JSON.stringify(result.success ? result.data : result.error).substring(0, LOG_RESULT_LIMIT)}`}`)
     const persisted = savePendingResult(
       commandId,
       deps.agentId,

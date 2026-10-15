@@ -752,6 +752,29 @@ describe('processCommand の実行中判定（inFlightCommands から導出）',
     expect(state.inFlightCommands.size).toBe(0)
   })
 
+  it.each(['backup_inspect', 'backup_export', 'backup_verify'])('does not log unvalidated backup payloads or result bodies (%s)', async (type) => {
+    const { executeCommand } = require('../src/commands')
+    const { logger } = require('../src/logger')
+    executeCommand.mockResolvedValue({ success: false, error: 'private-result-marker' })
+    const deps = createMockDeps({
+      client: {
+        getCommand: jest.fn().mockResolvedValue({ type, payload: { password: 'private-payload-marker' } }),
+        submitResult: jest.fn().mockResolvedValue(undefined),
+        getAssignmentGeneration: jest.fn(), clearAssignment: jest.fn(),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    await handleNotification(deps, state, createMockCtx(state), {
+      id: 'n-backup', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
+      content: { commandId: 'cmd-backup', agentId: 'agent-1', tenantCode: 'test', projectCode: 'TEST_PROJ', type },
+    })
+    expect(executeCommand).toHaveBeenCalled()
+    const logs = JSON.stringify(logger.debug.mock.calls)
+    expect(logs).not.toContain('private-payload-marker')
+    expect(logs).not.toContain('private-result-marker')
+  })
+
   it('forces the Marketplace tool policy from the trusted Slack command userId', async () => {
     const { executeCommand } = require('../src/commands')
     const deps = createMockDeps({

@@ -28,6 +28,9 @@ export type AgentCommandType =
   | 'server_setup_cancel'
   | 'ssh_exec'
   | 'tls_cert_check'
+  | 'backup_inspect'
+  | 'backup_export'
+  | 'backup_verify'
 
 export type AgentCommandStatus =
   | 'PENDING'
@@ -184,3 +187,6 @@ export type CommandDispatch =
   | { type: 'server_setup_cancel'; payload: ServerSetupCancelPayload }
   | { type: 'ssh_exec'; payload: SshExecPayload }
   | { type: 'tls_cert_check'; payload: TlsCertCheckPayload }
+  | { type: 'backup_inspect'; payload: Record<string, unknown> }
+  | { type: 'backup_export'; payload: Record<string, unknown> }
+  | { type: 'backup_verify'; payload: Record<string, unknown> }
