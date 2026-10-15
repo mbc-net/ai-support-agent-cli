@@ -330,6 +330,21 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     }
   },
 
+  backup_inspect: async ({ p, opts }) => {
+    const { executeBackupInspect } = await import('../backup/backup-inspect-command')
+    return executeBackupInspect(p, opts.serverConfig?.capabilities?.backup_executor === true)
+  },
+
+  backup_export: async ({ p, opts }) => {
+    const { executeBackupExport } = await import('../backup/backup-export-command')
+    return executeBackupExport(p, opts.serverConfig?.capabilities?.backup_executor === true, opts.commandId)
+  },
+
+  backup_verify: async ({ p, opts }) => {
+    const { executeBackupVerify } = await import('../backup/backup-verify-command')
+    return executeBackupVerify(p, opts.serverConfig?.capabilities?.backup_executor === true, opts.commandId)
+  },
+
   tls_cert_check: async ({ p }) => {
     // Loaded lazily: agents that never monitor certificates should not pay the
     // module cost. No credentials are involved — the handshake reads the
