@@ -32,6 +32,7 @@ import {
   type WrapperScriptBaseOptions,
 } from './wrapper-helpers'
 import {
+  buildCredentialEnvLines,
   buildDockerRunWithLogRotate,
   INSTALL_NEW_VERSION_BASH,
   LOAD_NVM_BASH,
@@ -316,18 +317,7 @@ export function generateWrapperScript(
     // is defense in depth.
     `  -e AI_SUPPORT_AGENT_PROJECT_DIR_MAP=${shellQuote(`${opts.projectCode}=${containerProjectDir}`)} \\`,
   ]
-  if (opts.anthropicApiKey) {
-    envLines.push(`  -e ${ENV_VARS.ANTHROPIC_API_KEY}=${shellQuote(opts.anthropicApiKey)} \\`)
-  }
-  if (opts.claudeCodeOauthToken) {
-    envLines.push(`  -e ${ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN}=${shellQuote(opts.claudeCodeOauthToken)} \\`)
-  }
-  if (opts.codexApiKey) {
-    envLines.push(`  -e ${ENV_VARS.CODEX_API_KEY}=${shellQuote(opts.codexApiKey)} \\`)
-  }
-  if (opts.codexAccessToken) {
-    envLines.push(`  -e ${ENV_VARS.CODEX_ACCESS_TOKEN}=${shellQuote(opts.codexAccessToken)} \\`)
-  }
+  envLines.push(...buildCredentialEnvLines(opts))
 
   const containerArgs = [
     'ai-support-agent', 'start', CLI_FLAG_NO_DOCKER,

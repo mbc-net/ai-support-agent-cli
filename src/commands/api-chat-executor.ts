@@ -38,7 +38,7 @@ import {
   type HistoryMessage,
   successResult,
 } from '../types'
-import { getErrorMessage, parseString, truncateString } from '../utils'
+import { parseString, truncateString } from '../utils'
 import { createActivityTimeout } from '../utils/activity-timeout'
 import { safeJsonParse } from '../utils/json-parse'
 import { StreamLineParser } from '../utils/stream-parser'
@@ -235,18 +235,7 @@ export async function executeApiChatCommand(
 
     return successResult(fullText)
   } catch (error) {
-    const failure = await handleChatError(error, commandId, 'api-chat', sendChunk)
-    // error チャンク自体の配信にも失敗した場合は、その事実を結果へ載せる。
-    // 載せないとリトライ除外（TERMINAL_CHUNK_UNDELIVERED_ERROR の一致）が効かず、
-    // LLM 実行とツールの副作用が丸ごと二重に走る（チャンク送信 API が広範囲に
-    // 失敗している状況では、成功パスだけでなくこの catch 経路も同時に踏む）。
-    // 元の例外も失わないよう併記する。
-    if (hasTerminalDeliveryFailure()) {
-      return errorResult(
-        `${TERMINAL_CHUNK_UNDELIVERED_ERROR} (元のエラー: ${getErrorMessage(error)})`,
-      )
-    }
-    return failure
+    return handleChatError(error, commandId, 'api-chat', sendChunk, hasTerminalDeliveryFailure)
   }
 }
 

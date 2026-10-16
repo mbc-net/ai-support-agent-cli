@@ -1,4 +1,5 @@
 import {
+  buildCredentialEnvLines,
   buildDockerRunWithLogRotate,
   LOAD_NVM_BASH,
   REDACT_SECRETS_BASH,
@@ -177,5 +178,27 @@ describe('LOAD_NVM_BASH', () => {
 
   it('is exactly the shared three-line invariant (no trailing comment/PATH)', () => {
     expect(LOAD_NVM_BASH.split('\n')).toHaveLength(3)
+  })
+})
+
+
+describe('buildCredentialEnvLines', () => {
+  it('omits missing and empty credentials', () => {
+    expect(buildCredentialEnvLines({})).toEqual([])
+    expect(buildCredentialEnvLines({ anthropicApiKey: '', claudeCodeOauthToken: '', codexApiKey: '', codexAccessToken: '' })).toEqual([])
+  })
+
+  it('keeps the credential order and quotes shell metacharacters', () => {
+    expect(buildCredentialEnvLines({
+      anthropicApiKey: 'anthropic key',
+      claudeCodeOauthToken: '$token',
+      codexApiKey: 'codex;key',
+      codexAccessToken: 'access`token`',
+    })).toEqual([
+      "  -e ANTHROPIC_API_KEY='anthropic key' " + String.fromCharCode(92),
+      "  -e CLAUDE_CODE_OAUTH_TOKEN='$token' " + String.fromCharCode(92),
+      "  -e CODEX_API_KEY='codex;key' " + String.fromCharCode(92),
+      "  -e CODEX_ACCESS_TOKEN='access`token`' " + String.fromCharCode(92),
+    ])
   })
 })
