@@ -1,4 +1,24 @@
+import { ENV_VARS } from '../../constants'
+import type { AgentCredentialEnv } from './agent-credential-env'
 import { shellQuote } from './wrapper-helpers'
+
+/** Docker ラッパーへ渡す認証情報。未設定・空文字は従来どおり出力しない。 */
+export function buildCredentialEnvLines(opts: AgentCredentialEnv): string[] {
+  const envLines: string[] = []
+  if (opts.anthropicApiKey) {
+    envLines.push(`  -e ${ENV_VARS.ANTHROPIC_API_KEY}=${shellQuote(opts.anthropicApiKey)} \\`)
+  }
+  if (opts.claudeCodeOauthToken) {
+    envLines.push(`  -e ${ENV_VARS.CLAUDE_CODE_OAUTH_TOKEN}=${shellQuote(opts.claudeCodeOauthToken)} \\`)
+  }
+  if (opts.codexApiKey) {
+    envLines.push(`  -e ${ENV_VARS.CODEX_API_KEY}=${shellQuote(opts.codexApiKey)} \\`)
+  }
+  if (opts.codexAccessToken) {
+    envLines.push(`  -e ${ENV_VARS.CODEX_ACCESS_TOKEN}=${shellQuote(opts.codexAccessToken)} \\`)
+  }
+  return envLines
+}
 
 /**
  * Bash `redact_secrets()` function embedded in the update-and-restart scripts

@@ -345,10 +345,19 @@ export async function handleChatError(
   commandId: string,
   logTag: string,
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>,
+  hasTerminalDeliveryFailure?: () => boolean,
 ): Promise<CommandResult> {
   const errorMessage = getErrorMessage(error)
   logger.error(`[${logTag}] Chat command failed [${commandId}]: ${errorMessage}`)
   await sendChunk('error', errorMessage)
+  // 配信結果は送信後に評価する。終端チャンク未達を結果へ残し、LLMやツールの
+  // 副作用が再試行で二重実行されるのを防ぐ。元の例外も従来どおり併記する。
+  if (hasTerminalDeliveryFailure?.()) {
+    return {
+      success: false,
+      error: `${TERMINAL_CHUNK_UNDELIVERED_ERROR} (元のエラー: ${getErrorMessage(error)})`,
+    }
+  }
   return { success: false, error: errorMessage }
 }
 
