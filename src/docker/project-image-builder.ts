@@ -10,10 +10,10 @@ import { getDockerContextDir } from './dockerfile-path'
 import { getProjectImageTag } from './dockerfile-path'
 import { logger, getProjectColor, makeLinePrefixer } from '../logger'
 import { ApiClient } from '../api-client'
-import { DOCKER_MAX_SESSION_LOG_BYTES, DOCKER_MAX_LOG_CHUNK_BYTES } from '../constants'
+import { DockerLogBuffer } from './docker-log-buffer'
 import { buildDockerEnv } from './dockerfile-generator'
 import { makeSessionId, getDockerPath } from './docker-utils'
-import { appendWithLimit, toError } from '../utils'
+import { toError } from '../utils'
 
 /**
  * Build a per-project Docker image using the given Dockerfile.
@@ -36,31 +36,11 @@ export async function buildProjectImage(
   logger.info(`[docker] Building project image: ${imageTag}`)
 
   const sessionId = makeSessionId()
-  let seq = 0
-  let fullLog = ''
-  let logTruncated = false
-  let buf = ''
-
-  const flush = async (): Promise<void> => {
-    if (!buf) return
-    const text = buf
-    buf = ''
-    if (!logTruncated) {
-      const appended = appendWithLimit(fullLog, text, DOCKER_MAX_SESSION_LOG_BYTES)
-      fullLog = appended.result
-      if (appended.truncated) {
-        logTruncated = true
-        logger.warn('[docker] Build log exceeded 2 MB limit; remaining output will not be saved to S3')
-      }
-    }
-    if (apiClient) {
-      for (let offset = 0; offset < text.length; offset += DOCKER_MAX_LOG_CHUNK_BYTES) {
-        const slice = text.slice(offset, offset + DOCKER_MAX_LOG_CHUNK_BYTES)
-        await apiClient.submitLogChunk({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, seq: ++seq, text: slice })
-          .catch((e: unknown) => logger.warn(`[docker] Failed to send log chunk: ${e}`))
-      }
-    }
-  }
+  const logBuffer = new DockerLogBuffer(
+    () => logger.warn('[docker] Build log exceeded 2 MB limit; remaining output will not be saved to S3'),
+    apiClient ? (seq, text) => apiClient.submitLogChunk({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, seq, text })
+      .catch((e: unknown) => logger.warn(`[docker] Failed to send log chunk: ${e}`)) : undefined,
+  )
 
   let buildError: Error | undefined
   await new Promise<void>((resolve, reject) => {
@@ -74,9 +54,9 @@ export async function buildProjectImage(
     const onData = (d: Buffer): void => {
       const text = d.toString()
       writePrefixed(text)
-      buf += text
-      if (buf.length > 4096) {
-        void flush()
+      logBuffer.append(text)
+      if (logBuffer.bufferedLength > 4096) {
+        void logBuffer.flush()
       }
     }
     proc.stdout?.on('data', onData)
@@ -88,10 +68,10 @@ export async function buildProjectImage(
     })
   }).catch((e: unknown) => { buildError = toError(e) })
 
-  await flush()
+  await logBuffer.flush()
 
-  if (apiClient && fullLog) {
-    await apiClient.saveSessionLog({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, content: fullLog })
+  if (apiClient && logBuffer.content) {
+    await apiClient.saveSessionLog({ agentId: agentId ?? '', projectCode, logType: 'docker-build', sessionId, content: logBuffer.content })
       .catch((e: unknown) => logger.warn(`[docker] Failed to upload build log to S3: ${e}`))
   }
 
