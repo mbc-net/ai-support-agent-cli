@@ -72,6 +72,8 @@ function boundErrorOutput(output: string, limit: number): string {
 
 /** Options for E2E test execution */
 export interface ExecuteE2eTestOptions extends AgentExecutionContext {
+  onChildProcess?: (child: import('child_process').ChildProcess) => void
+  onTerminationUnconfirmed?: () => void
   payload: Record<string, unknown>
   commandId: string
   client: ApiClient
@@ -94,7 +96,63 @@ export interface ExecuteE2eTestOptions extends AgentExecutionContext {
  * playwrightScript がある場合は @playwright/test サブプロセスで直接実行（高速）、
  * ない場合は従来のAI実行フローを使用する。
  */
-export async function executeE2eTest(
+export async function executeE2eTest(options: ExecuteE2eTestOptions): Promise<CommandResult> {
+  const executionId = parseString(options.payload.executionId)
+  const active = new Set<import('child_process').ChildProcess>()
+  let terminationUnconfirmed = false
+  const sessions = new Set<string>()
+  const onChildProcess = (child: import('child_process').ChildProcess): void => {
+    active.add(child)
+    // A killed direct child does not prove its browser descendants stopped.
+    if (typeof child.kill === 'function') {
+      const kill = child.kill.bind(child)
+      child.kill = (...args) => {
+        terminationUnconfirmed = true
+        return kill(...args)
+      }
+    }
+    child.once('close', (_code, signal) => {
+      if (signal || child.killed) terminationUnconfirmed = true
+      active.delete(child)
+    })
+    child.once('error', () => { if (child.pid === undefined) active.delete(child) })
+  }
+  let result: CommandResult
+  try {
+    result = await executeE2eTestInner({
+      ...options,
+      onChildProcess,
+      onTerminationUnconfirmed: () => { terminationUnconfirmed = true },
+      getOrCreateBrowserSession: options.getOrCreateBrowserSession && (async sessionId => {
+        sessions.add(sessionId)
+        await options.getOrCreateBrowserSession!(sessionId)
+      }),
+      closeBrowserSession: options.closeBrowserSession && (async sessionId => {
+        // Failed closure remains unconfirmed, including sessions created by tools.
+        sessions.add(sessionId)
+        await options.closeBrowserSession!(sessionId)
+        sessions.delete(sessionId)
+      }),
+    })
+  } catch {
+    terminationUnconfirmed = true
+    // Transport code will submit this terminal command result before any ACK.
+    result = errorResult('E2E execution failed')
+  } finally {
+    // A returned/failed runner can still have a live child (e.g. forced timeout).
+    // Never turn a detach or unconfirmed kill into a cutover drain acknowledgement.
+    if (active.size || sessions.size || terminationUnconfirmed) {
+      logger.error('[e2e_test] Child termination is unconfirmed; configuration admission remains active')
+      if (active.size) result = errorResult('E2E child termination is unconfirmed')
+    }
+  }
+  if (!active.size && !sessions.size && !terminationUnconfirmed && executionId && options.commandId && options.agentId) {
+    result.e2eConfigurationCompletion = { executionId }
+  }
+  return result
+}
+
+async function executeE2eTestInner(
   options: ExecuteE2eTestOptions,
 ): Promise<CommandResult> {
   // tenantCode/projectCode come from the agent itself (transport deps / oneshot
@@ -141,6 +199,18 @@ export async function executeE2eTest(
 
   const testCaseId = parseString(payload.testCaseId) ?? undefined
 
+  // Every mode must pass command-bound admission, including jobs without an
+  // environment. Otherwise old AI/script jobs could start after cutover.
+  let environmentVariables: Record<string, string>
+  try {
+    environmentVariables = await client.getE2eEnvironmentVariables(options.commandId, agentId)
+  } catch {
+    const message = 'E2E configuration admission or variable retrieval failed'
+    logger.error(`[e2e_test] ${message}`)
+    await reportExecutionStatus(client, tenantCode, projectCode, executionId, 'error', Date.now() - startTime, message, testCaseId)
+    return errorResult(message)
+  }
+
   // API にステータス running を報告
   await reportExecutionStatus(
     client, tenantCode, projectCode, executionId, 'running',
@@ -161,6 +231,7 @@ export async function executeE2eTest(
       targetUrl: targetUrl ?? undefined,
       environmentId: environmentId ?? undefined,
       basicAuth,
+      environmentVariables,
       startTime,
     })
   }
@@ -271,6 +342,7 @@ function parseBasicAuth(value: unknown, executionId: string): E2eBasicAuth | und
 
 /** Playwright subprocess モードのパラメータ */
 interface PlaywrightSubprocessModeParams extends ExecuteE2eTestOptions {
+  environmentVariables: Record<string, string>
   /** Validated non-empty at the entry point (executeE2eTest). */
   tenantCode: string
   projectCode: string
@@ -293,25 +365,11 @@ async function executePlaywrightSubprocessMode(
   params: PlaywrightSubprocessModeParams,
 ): Promise<CommandResult> {
   const {
-    client, tenantCode, projectCode, executionId, testCaseId, playwrightScript, targetUrl, environmentId, basicAuth,
+    client, tenantCode, projectCode, executionId, testCaseId, playwrightScript, targetUrl, basicAuth,
     startTime,
   } = params
 
-  let environmentVariables: Record<string, string> | undefined
-  if (environmentId) {
-    try {
-      environmentVariables = await client.getE2eEnvironmentVariables(environmentId)
-    } catch (err: unknown) {
-      const errorMessage = toErrorMessage(err)
-      logger.error(`[e2e_test] Failed to fetch E2E environment variables [${executionId}] environmentId=${environmentId}: ${errorMessage}`)
-      await reportExecutionStatus(
-        client, tenantCode, projectCode, executionId,
-        'error', Date.now() - startTime,
-        `Failed to fetch E2E environment variables: ${errorMessage}`, testCaseId,
-      )
-      return errorResult(`Failed to fetch E2E environment variables: ${errorMessage}`)
-    }
-  }
+  const { environmentVariables } = params
 
   // Basic 認証（HTTP Basic）の資格情報を解決する。password は payload に含まれず、
   // E2E シークレット変数マップ（environmentVariables）から passwordVariableKey で
@@ -356,6 +414,7 @@ async function executePlaywrightSubprocessMode(
   let subprocessResult
   try {
     subprocessResult = await runPlaywrightSubprocess({
+      onChildProcess: params.onChildProcess,
       script: playwrightScript,
       executionId,
       baseUrl: targetUrl,
@@ -366,6 +425,7 @@ async function executePlaywrightSubprocessMode(
       httpCredentials,
     })
   } catch (err: unknown) {
+    params.onTerminationUnconfirmed?.()
     const errorMessage = toErrorMessage(err)
     logger.error(`[e2e_test] Playwright subprocess error: ${errorMessage}`)
     await reportExecutionStatus(
@@ -483,6 +543,7 @@ async function executePlaywrightSubprocessMode(
     : producedNoResult ? undefined : 'failed'
   // A timeout means the run was cut short: even recovered partial results are
   // not the full evidence.
+  if (subprocessResult.timedOut || producedNoResult) params.onTerminationUnconfirmed?.()
   const evidenceIncomplete = stepReportNote !== undefined || producedNoResult || Boolean(subprocessResult.timedOut)
 
   await reportExecutionStatus(
@@ -631,12 +692,20 @@ async function executeAiMode(
 
     result = await executeChatCommand({
       payload: chatPayload,
+      onChildProcess: child => {
+        options.onChildProcess?.(child)
+        // A later retry succeeding cannot prove an earlier CLI attempt cleaned up.
+        child.once('close', code => {
+          if (code !== 0) options.onTerminationUnconfirmed?.()
+        })
+      },
       commandId,
       client: options.client,
       ...forwardAgentExecutionContext(options),
     })
   } catch (err: unknown) {
     const errorMessage = toErrorMessage(err)
+    options.onTerminationUnconfirmed?.()
     logger.error(`[e2e_test] Chat execution failed: ${errorMessage}`)
 
     await reportExecutionStatus(
@@ -649,14 +718,17 @@ async function executeAiMode(
     if (options.closeBrowserSession) {
       try {
         await options.closeBrowserSession(browserSessionId)
-      } catch (closeErr: unknown) {
-        logger.warn(`[e2e_test] Failed to close E2E browser session [${browserSessionId}]: ${toErrorMessage(closeErr)}`)
+      } catch {
+        options.onTerminationUnconfirmed?.()
+        logger.warn('[e2e_test] Failed to close E2E browser session; configuration admission remains active')
       }
     }
   }
 
   const duration = Date.now() - startTime
 
+  // Chat runners convert exceptions to error results; those are not teardown proof.
+  if (!result.success) options.onTerminationUnconfirmed?.()
   const finalStatus = result.success ? 'passed' : 'failed'
   await reportExecutionStatus(
     client, tenantCode, projectCode, executionId,
@@ -704,9 +776,10 @@ async function executeScriptMode(
 
   let scriptResult: PlaywrightRunnerResult
   try {
-    scriptResult = await runPlaywrightScript(playwrightScript, executionId, agentRootDir)
+    scriptResult = await runPlaywrightScript(playwrightScript, executionId, agentRootDir, params.onChildProcess)
   } catch (err: unknown) {
     const errorMessage = toErrorMessage(err)
+    params.onTerminationUnconfirmed?.()
     logger.error(`[e2e_test] Script execution error: ${errorMessage}`)
 
     await reportExecutionStatus(
@@ -717,6 +790,7 @@ async function executeScriptMode(
   }
 
   const duration = Date.now() - startTime
+  if (scriptResult.totalSteps === 0) params.onTerminationUnconfirmed?.()
   const status = scriptResult.success ? 'passed' : 'failed'
 
   await reportExecutionStatus(

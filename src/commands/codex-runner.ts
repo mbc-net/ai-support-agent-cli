@@ -44,6 +44,7 @@ export interface CodexHandle {
 }
 
 export interface RunCodexOptions {
+  onChildProcess?: (child: import('child_process').ChildProcess) => void
   message: string
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>
   addDirs?: string[]
@@ -218,6 +219,7 @@ export function runCodex(options: RunCodexOptions): CodexHandle {
       env,
       ...(cwd ? { cwd } : {}),
     })
+    options.onChildProcess?.(child)
 
     killFn = makeKillFn(child, 'codex')
 

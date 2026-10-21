@@ -362,7 +362,7 @@ export interface E2eSupportFilesResponse {
  * E2E 実行トリガー payload に載る Basic 認証（HTTP Basic）情報。
  *
  * 平文パスワードは payload に含めない設計で、`passwordVariableKey` は E2E
- * シークレット変数マップ（`getE2eEnvironmentVariables(environmentId)` が返す
+ * シークレット変数マップ（`getE2eEnvironmentVariables(commandId, agentId)` が返す
  * 復号済み map）のキー名を指す。agent はそのキーで password を解決し、
  * Playwright の `use.httpCredentials` に env 参照で注入する。
  */

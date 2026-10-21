@@ -16,6 +16,7 @@ import { logger } from '../logger'
 import type { E2eSupportFile } from '../types'
 
 export interface PlaywrightSubprocessOptions {
+  onChildProcess?: (child: import('child_process').ChildProcess) => void
   script: string
   executionId: string
   baseUrl?: string
@@ -757,7 +758,7 @@ export async function runPlaywrightSubprocess(
     // Run Playwright subprocess
     const { errorOutput, timedOut } = await spawnPlaywright(
       specFile, configFile, resultFile, baseUrl, timeoutMs, envVars, executionId, patchModulePath,
-      httpCredentials,
+      httpCredentials, options.onChildProcess,
     )
 
     const timeoutNote = `Playwright subprocess timed out after ${timeoutMs}ms`
@@ -852,6 +853,7 @@ function spawnPlaywright(
   executionId: string,
   patchModulePath: string | undefined,
   httpCredentials: { username: string; password: string } | undefined,
+  onChildProcess?: (child: import('child_process').ChildProcess) => void,
 ): Promise<SpawnPlaywrightOutcome> {
   return new Promise((resolve, reject) => {
     // Resolve the agent's bundled node_modules so the spec can import @playwright/test
@@ -911,6 +913,8 @@ function spawnPlaywright(
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
+
+    onChildProcess?.(child)
 
     let stderrOutput = ''
     child.stderr?.on('data', (chunk: Buffer) => {

@@ -20,6 +20,7 @@ jest.mock('../../../../src/mcp/tools/browser/browser-session', () => {
           onClosed?.()
           return Promise.resolve()
         }),
+        requireConfirmedClosure: jest.fn(),
         isActive: jest.fn().mockReturnValue(true),
       }
     }),
@@ -34,6 +35,14 @@ describe('BrowserSessionManager', () => {
   })
 
   describe('getOrCreate', () => {
+    it('enables strict lifecycle before exposing an E2E session', async () => {
+      const session = await manager.getOrCreate('e2e-1', true)
+      expect(session.requireConfirmedClosure).toHaveBeenCalledTimes(1)
+      ;(session.close as jest.Mock).mockRejectedValueOnce(new Error('closure unconfirmed'))
+      await expect(manager.close('e2e-1', true)).rejects.toThrow('closure unconfirmed')
+      expect(manager.get('e2e-1')).toBe(session)
+    })
+
     it('should create a new session', async () => {
       const session = await manager.getOrCreate('session-1')
       expect(session).toBeDefined()

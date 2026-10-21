@@ -412,3 +412,9 @@ localの実行・管理と開発／テストの管理セッションは最大8�
 自動更新はしません。実行用リースは別管理のままです。
 通信切断後は表示されたIDを `env status --operation-id <ID> --purpose <用途>` で確認し、
 同じ要求を再送する場合だけ同じ `--operation-id` を使用します。再送可能期間は24時間です。
+
+## E2E configuration migration
+
+Deploy the API with command-scoped E2E configuration endpoints before deploying this agent. Every E2E execution mode performs a command-bound admission check before starting; the agent never falls back to the old environment-only endpoint. Completion uses a separate acknowledgement after terminal command-result submission. Failed acknowledgements retain the original result for retry.
+
+Configuration admission remains active when a child is still running, termination used a signal/kill/timeout, or browser-session cleanup failed. Normal completion relies on the supported runner's ordinary browser/worker teardown; scripts must not detach background processes. Historical jobs and independently detached descendants require verified operator shutdown before v2 migration. A terminal execution status alone is not proof that those processes stopped.

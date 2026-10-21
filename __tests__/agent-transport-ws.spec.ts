@@ -928,6 +928,7 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
       capturedOptions = options
       // Exercise the callbacks exactly as e2e-test-executor.ts would.
       await options.getOrCreateBrowserSession?.('e2e-exec-1')
+      state.vsCodeWs = undefined
       await options.closeBrowserSession?.('e2e-exec-1')
       return { success: true, data: 'ok' }
     })
@@ -953,7 +954,8 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
     expect(mockVsCodeWs.openLiveViewSession).toHaveBeenCalledTimes(1)
     expect(mockVsCodeWs.openLiveViewSession).toHaveBeenCalledWith('e2e-exec-1')
     expect(mockVsCodeWs.browserSessionManager.close).toHaveBeenCalledTimes(1)
-    expect(mockVsCodeWs.browserSessionManager.close).toHaveBeenCalledWith('e2e-exec-1')
+    expect(mockVsCodeWs.browserSessionManager.getOrCreate).toHaveBeenCalledWith('e2e-exec-1', true)
+    expect(mockVsCodeWs.browserSessionManager.close).toHaveBeenCalledWith('e2e-exec-1', true)
   })
 
   it('should pass undefined getOrCreateBrowserSession/closeBrowserSession when vsCodeWs is not connected', async () => {

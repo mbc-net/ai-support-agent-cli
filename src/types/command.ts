@@ -55,9 +55,14 @@ export interface PendingCommand {
   createdAt: number
 }
 
-export type CommandResult =
+export type CommandResult = (
   | { success: true; data: unknown }
   | { success: false; error: string; data?: unknown }
+) & {
+  /** Internal agent proof: attached only after E2E child processes have closed.
+   * Persisted with pending results, stripped before submitting the result body. */
+  e2eConfigurationCompletion?: { executionId: string }
+}
 
 export function successResult(data: unknown): CommandResult {
   return { success: true, data }

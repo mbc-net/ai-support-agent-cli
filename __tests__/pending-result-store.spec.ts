@@ -34,6 +34,20 @@ describe('pending-result-store', () => {
 
   const mockResult = { success: true as const, data: 'test output' }
 
+  it('keeps the original E2E result and completion proof after failed ACK, then replays both', async () => {
+    const result = { success: true as const, data: { status: 'passed' }, e2eConfigurationCompletion: { executionId: 'exec-1' } }
+    const submit = jest.fn().mockRejectedValueOnce(new Error('E2E configuration completion acknowledgement failed')).mockResolvedValueOnce(undefined)
+    MockApiClient.mockImplementation(() => ({ submitResult: submit, setTenantCode: jest.fn() }) as unknown as ApiClient)
+    savePendingResult('cmd-1', 'agent-1', result, 'http://api', 'tok', 'tenant-1')
+    await submitPendingResults()
+    const saved = JSON.parse(fs.readFileSync(path.join(tempDir, 'pending-results', 'cmd-1.json'), 'utf8'))
+    expect(saved.result).toEqual(result)
+    await submitPendingResults()
+    expect(submit).toHaveBeenNthCalledWith(1, 'cmd-1', result, 'agent-1')
+    expect(submit).toHaveBeenNthCalledWith(2, 'cmd-1', result, 'agent-1')
+    expect(fs.existsSync(path.join(tempDir, 'pending-results', 'cmd-1.json'))).toBe(false)
+  })
+
   describe('savePendingResult', () => {
     it('should save a pending result file', () => {
       savePendingResult('cmd-1', 'agent-1', mockResult, 'http://api', 'tok', 'tenant-1')

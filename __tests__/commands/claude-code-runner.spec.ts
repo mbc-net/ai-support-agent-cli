@@ -952,7 +952,9 @@ describe('claude-code-runner', () => {
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
 
-      const handle = runClaudeCode({ message: 'hello', sendChunk })
+      const onChildProcess = jest.fn()
+      const handle = runClaudeCode({ message: 'hello', sendChunk, onChildProcess })
+      expect(onChildProcess).toHaveBeenCalledWith(mockProcess)
 
       // Send NDJSON lines
       mockProcess.emitStdout('data', Buffer.from(makeAssistantLine('response text') + '\n'))

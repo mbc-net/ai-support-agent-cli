@@ -518,11 +518,20 @@ export class ApiClient {
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting result for command: ${commandId}`)
+    const { e2eConfigurationCompletion, ...wireResult } = result
     await this.postVoid(
       API_ENDPOINTS.COMMAND_RESULT(this.tenantCode, commandId),
-      result,
+      wireResult,
       { params: { agentId }, headers: this.assignmentHeaders(commandId) },
     )
+    if (e2eConfigurationCompletion) {
+      try {
+        await this.completeE2eConfiguration(commandId, e2eConfigurationCompletion.executionId, agentId)
+      } catch {
+        // Keep the original result in the pending store. Never log ACK bodies.
+        throw new Error('E2E configuration completion acknowledgement failed')
+      }
+    }
   }
 
   async reportConnectionStatus(
@@ -643,13 +652,32 @@ export class ApiClient {
     return this.get<BrowserCredentials>(API_ENDPOINTS.BROWSER_CREDENTIALS(this.tenantCode), { params: { name } })
   }
 
-  async getE2eEnvironmentVariables(environmentId: string): Promise<Record<string, string>> {
-    logger.debug(`Fetching E2E environment variables for: ${environmentId}`)
-    const response = await this.get<E2eEnvironmentVariablesResponse>(
-      API_ENDPOINTS.E2E_ENV_VARIABLES(this.tenantCode),
-      { params: { environmentId } },
+  async getE2eEnvironmentVariables(commandId: string, agentId: string): Promise<Record<string, string>> {
+    const response = await this.getCommandScopedResource<E2eEnvironmentVariablesResponse>(
+      commandId, agentId, API_ENDPOINTS.E2E_ENV_VARIABLES(this.tenantCode, commandId),
+      `Fetching E2E environment variables for command: ${commandId}`,
     )
+    if (!response || !response.variables || typeof response.variables !== 'object' ||
+        Array.isArray(response.variables) || Object.values(response.variables).some(value => typeof value !== 'string')) {
+      throw new Error('Invalid E2E configuration response')
+    }
     return response.variables
+  }
+
+  async completeE2eConfiguration(commandId: string, executionId: string, agentId: string): Promise<void> {
+    this.validateCommandId(commandId)
+    try {
+      // Retry via the persisted result, after reconfirming terminal state. Do not
+      // pass response errors to generic retry logging (they may contain secrets).
+      const { data } = await this.client.post<{ completed: boolean }>(
+        API_ENDPOINTS.E2E_CONFIGURATION_COMPLETE(this.tenantCode, commandId),
+        { executionId },
+        { params: { agentId }, headers: this.assignmentHeaders(commandId) },
+      )
+      if (data?.completed !== true) throw new Error('Invalid acknowledgement')
+    } catch {
+      throw new Error('E2E configuration completion acknowledgement failed')
+    }
   }
 
   /**

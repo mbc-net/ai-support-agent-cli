@@ -365,7 +365,9 @@ describe('codex-runner', () => {
       spawn.mockReturnValue(mockProcess)
 
       const sendChunk = jest.fn().mockResolvedValue(undefined)
-      const handle = runCodex({ message: 'hello', sendChunk })
+      const onChildProcess = jest.fn()
+      const handle = runCodex({ message: 'hello', sendChunk, onChildProcess })
+      expect(onChildProcess).toHaveBeenCalledWith(mockProcess)
 
       mockProcess.emitStdout('data', Buffer.from(JSON.stringify({
         type: 'item.completed',
