@@ -567,6 +567,7 @@ async function processCommand(
     // can contain credentials. Do not serialize their payloads to debug logs.
     const backupCommand = detail.type === 'backup_inspect' || detail.type === 'backup_export' || detail.type === 'backup_verify'
     logger.debug(`${deps.prefix} Command detail [${commandId}]: type=${detail.type}${backupCommand ? '' : `, payload=${JSON.stringify(trustedPayload).substring(0, LOG_PAYLOAD_LIMIT)}`}`)
+    const e2eBrowserOwner = ctx.transportState.vsCodeWs
     const result = await executeCommand(detail.type, trustedPayload, {
       commandId,
       client: deps.client,
@@ -594,17 +595,18 @@ async function processCommand(
       // ライブビュー配信開始（session.startLiveView）と browser_ready 送信まで行う。
       // browserSessionManager.getOrCreate を直接呼ぶだけでは、Web側のライブ
       // プレビューが browser_frame を一切受信できず「起動中」のまま止まる。
-      getOrCreateBrowserSession: ctx.transportState.vsCodeWs
+      getOrCreateBrowserSession: e2eBrowserOwner
         ? async (sessionId: string) => {
-            await ctx.transportState.vsCodeWs?.openLiveViewSession(sessionId)
+            await e2eBrowserOwner.browserSessionManager.getOrCreate(sessionId, true)
+            await e2eBrowserOwner.openLiveViewSession(sessionId)
           }
         : undefined,
       // BrowserSessionManager.close() は内部で session.close() → stopLiveView()
       // を呼ぶため、ライブビュー配信の停止・ブラウザリソースの解放は直接呼び出しで
       // 完結している（openLiveViewSession 側と対称的な専用クローズAPIは不要）。
-      closeBrowserSession: ctx.transportState.vsCodeWs
+      closeBrowserSession: e2eBrowserOwner
         ? async (sessionId: string) => {
-            await ctx.transportState.vsCodeWs?.browserSessionManager.close(sessionId)
+            await e2eBrowserOwner.browserSessionManager.close(sessionId, true)
           }
         : undefined,
     })

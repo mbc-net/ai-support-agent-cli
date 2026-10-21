@@ -119,6 +119,7 @@ function runPlaywrightProcess(
   agentRootDir: string,
   specFile: string,
   executionId: string,
+  onChildProcess?: (child: import('child_process').ChildProcess) => void,
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const playwrightBin = path.join(agentRootDir, 'node_modules', '.bin', 'playwright')
@@ -136,6 +137,8 @@ function runPlaywrightProcess(
       cwd: agentRootDir,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
+
+    onChildProcess?.(proc)
 
     let stdoutData = ''
     let stderrData = ''
@@ -175,6 +178,7 @@ export async function runPlaywrightScript(
   scriptContent: string,
   executionId: string,
   agentRootDir: string,
+  onChildProcess?: (child: import('child_process').ChildProcess) => void,
 ): Promise<PlaywrightRunnerResult> {
   if (!VALID_EXECUTION_ID.test(executionId)) {
     throw new Error(`Invalid executionId: must match /^[a-zA-Z0-9_-]+$/`)
@@ -187,7 +191,7 @@ export async function runPlaywrightScript(
   fs.writeFileSync(specFile, scriptContent, 'utf-8')
 
   try {
-    const { stdout, stderr, exitCode } = await runPlaywrightProcess(agentRootDir, specFile, executionId)
+    const { stdout, stderr, exitCode } = await runPlaywrightProcess(agentRootDir, specFile, executionId, onChildProcess)
 
     let results: PlaywrightTestResult[] = []
     let passed = 0

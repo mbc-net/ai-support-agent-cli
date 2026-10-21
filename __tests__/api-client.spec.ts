@@ -745,6 +745,11 @@ describe('ApiClient', () => {
   })
 
   describe('getE2eEnvironmentVariables', () => {
+    it.each([{}, { variables: [] }, { variables: { TOKEN: 123 } }])('rejects malformed preflight response without fallback', async data => {
+      mockInstance.get.mockResolvedValue({ data })
+      await expect(client.getE2eEnvironmentVariables('cmd-1', 'agent-1')).rejects.toThrow('Invalid E2E configuration response')
+      expect(mockInstance.get).toHaveBeenCalledTimes(1)
+    })
     it('should fetch E2E environment variables by environmentId and return the variables map', async () => {
       mockInstance.get.mockResolvedValue({
         data: {
@@ -753,11 +758,11 @@ describe('ApiClient', () => {
         },
       })
 
-      const result = await client.getE2eEnvironmentVariables('env-1')
+      const result = await client.getE2eEnvironmentVariables('cmd-1', 'agent-1')
       expect(result).toEqual({ API_TOKEN: 'tok-123', DB_PASSWORD: 's3cr3t' })
       expect(mockInstance.get).toHaveBeenCalledWith(
-        '/api/test_tenant/agent/e2e-env-variables',
-        { params: { environmentId: 'env-1' } },
+        '/api/test_tenant/agent/commands/cmd-1/e2e-env-variables',
+        { params: { agentId: 'agent-1' }, headers: {} },
       )
     })
 
@@ -766,8 +771,36 @@ describe('ApiClient', () => {
         data: { environmentId: 'env-2', variables: {} },
       })
 
-      const result = await client.getE2eEnvironmentVariables('env-2')
+      const result = await client.getE2eEnvironmentVariables('cmd-2', 'agent-1')
       expect(result).toEqual({})
+    })
+  })
+
+  describe('E2E completion after terminal result submission', () => {
+    beforeEach(() => mockInstance.post.mockReset())
+    const result = { success: true as const, data: { status: 'passed' }, e2eConfigurationCompletion: { executionId: 'exec-1' } }
+    it('strips the internal proof and acknowledges only after result submission succeeds', async () => {
+      mockInstance.post.mockResolvedValueOnce({ data: {} }).mockResolvedValueOnce({ data: { completed: true } })
+      await client.submitResult('cmd-1', result, 'agent-1')
+      expect(mockInstance.post).toHaveBeenNthCalledWith(1, '/api/test_tenant/agent/commands/cmd-1/result',
+        { success: true, data: { status: 'passed' } }, expect.any(Object))
+      expect(mockInstance.post).toHaveBeenNthCalledWith(2, '/api/test_tenant/agent/commands/cmd-1/e2e-configuration-complete',
+        { executionId: 'exec-1' }, { params: { agentId: 'agent-1' }, headers: {} })
+      expect(result.e2eConfigurationCompletion).toEqual({ executionId: 'exec-1' })
+    })
+    it('never acknowledges when the result submission fails', async () => {
+      mockInstance.post.mockRejectedValue(new Error('result delivery unknown'))
+      await expect(client.submitResult('cmd-1', result, 'agent-1')).rejects.toThrow()
+      expect(mockInstance.post.mock.calls.every(call => call[0].endsWith('/result'))).toBe(true)
+    })
+    it('rejects failed or malformed ACK without exposing its response and allows replay of the original result', async () => {
+      mockInstance.post.mockResolvedValueOnce({ data: {} }).mockRejectedValueOnce(new Error('SECRET-ACK'))
+      await expect(client.submitResult('cmd-1', result, 'agent-1')).rejects.toThrow('E2E configuration completion acknowledgement failed')
+      mockInstance.post.mockResolvedValueOnce({ data: {} }).mockResolvedValueOnce({ data: { completed: true } })
+      await client.submitResult('cmd-1', result, 'agent-1')
+      expect(mockInstance.post.mock.calls[0][1]).toEqual(mockInstance.post.mock.calls[2][1])
+      mockInstance.post.mockResolvedValueOnce({ data: {} }).mockResolvedValueOnce({ data: { completed: false } })
+      await expect(client.submitResult('cmd-1', result, 'agent-1')).rejects.toThrow('E2E configuration completion acknowledgement failed')
     })
   })
 
