@@ -52,7 +52,8 @@ export function detectAgentRuntime(
 /**
  * Apply class for one capability in one runtime.
  *
- * `rdp` is the only key today and its class depends purely on the runtime:
+ * Backup execution needs no sidecar and takes effect immediately. RDP's class
+ * depends on the runtime:
  *
  * - **host** — `guacd` は接続要求時に遅延起動できる（`guacd-runtime.ts`）。
  *   接続時に読まれるのは `GUACD_HOST` / `GUACD_PORT` だけなので、起動後に用意して
@@ -64,9 +65,10 @@ export function detectAgentRuntime(
  *   ワークロードに足す手段が存在しない。
  */
 export function resolveCapabilityApplyClass(
-  _key: AgentCapabilityKey,
+  key: AgentCapabilityKey,
   runtime: AgentRuntime,
 ): CapabilityApplyClass {
+  if (key === 'backup_executor') return 'immediate'
   switch (runtime) {
     case 'host':
       return 'immediate'
@@ -95,6 +97,8 @@ export function isCapabilityAlreadyWired(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   switch (key) {
+    case 'backup_executor':
+      return true
     case 'rdp':
       return Boolean(env.GUACD_HOST)
   }

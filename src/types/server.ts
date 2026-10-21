@@ -148,6 +148,8 @@ export type ChatMode = 'agent' | 'builtin'
 export const AGENT_CAPABILITY_KEYS = [
   /** Web RDP relaying. OR-composed with the `--rdp` start-up flag. */
   'rdp',
+  /** Tenant-side backup inspection and execution, explicitly declared only. */
+  'backup_executor',
 ] as const
 
 export type AgentCapabilityKey = (typeof AGENT_CAPABILITY_KEYS)[number]

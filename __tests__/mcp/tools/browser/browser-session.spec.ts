@@ -180,6 +180,53 @@ describe('BrowserSession', () => {
       await expect(session.close()).resolves.not.toThrow()
     })
 
+    it('waits for an in-flight launch before strict closure and prevents reopening', async () => {
+      const session = new BrowserSession()
+      session.requireConfirmedClosure()
+      let launch!: (browser: unknown) => void
+      mockPlaywright.chromium.launch.mockImplementationOnce(() => new Promise(resolve => { launch = resolve }))
+      const opening = session.getPage()
+      const closing = session.close(true)
+      expect(mockBrowser.close).not.toHaveBeenCalled()
+      await expect(session.getPage()).rejects.toThrow('closing or closed')
+      launch(mockBrowser)
+      await opening
+      await closing
+      expect(mockBrowser.close).toHaveBeenCalledTimes(1)
+      expect(session.isActive()).toBe(false)
+      await expect(session.getPage()).rejects.toThrow('closing or closed')
+    })
+
+    it('waits for concurrent closure and keeps strict mode for idle-style calls', async () => {
+      const session = new BrowserSession()
+      await session.getPage()
+      session.requireConfirmedClosure()
+      let fail!: (error: Error) => void
+      mockBrowser.close.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject }))
+      const idleClose = session.close()
+      const strictClose = session.close(true)
+      fail(new Error('close failed'))
+      await expect(idleClose).rejects.toThrow('closure is unconfirmed')
+      await expect(strictClose).rejects.toThrow('closure is unconfirmed')
+      expect(session.isActive()).toBe(true)
+      expect(mockBrowser.close).toHaveBeenCalledTimes(1)
+    })
+
+    it('retains the browser and keeps strict close failure sticky', async () => {
+      const session = new BrowserSession()
+      const onClosed = jest.fn()
+      ;(session as any).onClosed = onClosed
+      await session.getPage()
+      mockBrowser.close.mockRejectedValueOnce(new Error('secret close failure'))
+      await expect(session.close(true)).rejects.toThrow('Browser session closure is unconfirmed')
+      expect(session.isActive()).toBe(true)
+      expect(onClosed).not.toHaveBeenCalled()
+      await expect(session.close(true)).rejects.toThrow('closure is unconfirmed')
+      expect(session.isActive()).toBe(true)
+      expect(mockBrowser.close).toHaveBeenCalledTimes(1)
+      expect(onClosed).not.toHaveBeenCalled()
+    })
+
     it('should handle browser.close() errors gracefully', async () => {
       const session = new BrowserSession()
       await session.getPage()

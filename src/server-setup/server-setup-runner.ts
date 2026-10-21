@@ -34,31 +34,47 @@ import {
   AGENT_MODE_ONESHOT,
   ENV_VARS,
   ONESHOT_ENV_VARS,
-  SERVER_SETUP_MAX_PROGRESS_MESSAGE_LENGTH,
-  SERVER_SETUP_MAX_PROGRESS_TASK_NAME_LENGTH,
-  TAILSCALE_SOCKS_PORT,
 } from '../constants'
 import { logger } from '../logger'
 import { inspectSentryTasks } from './sentry-policy'
+import {
+  buildInventory,
+  normalizePrivateKeyMaterial,
+  validateSshCredential,
+  validateCredentialForTargetOs,
+} from './server-setup-connection'
+export { validateSshCredential, validateCredentialForTargetOs } from './server-setup-connection'
+
+import {
+  generatePlaybook,
+  SENTRY_STATE_CODE,
+  SUDO_PROBE_REGISTER_VAR,
+  WIN_WHOAMI_REGISTER_VAR,
+} from './server-setup-playbook'
+export {
+  generatePlaybook,
+  sentryPreflightTask,
+  SUDO_PROBE_REGISTER_VAR,
+  WIN_WHOAMI_REGISTER_VAR,
+} from './server-setup-playbook'
+
 import { resolveInstanceId } from '../replica-identity'
 import {
   type CommandResult,
   errorResult,
-  isSupportedSshAuthType,
-  unsupportedSshAuthTypeMessage,
   type ServerSetupExecPayload,
   type SelfRestartDeclarationAck,
   type ServerSetupProgressEvent,
-  type ServerSetupTaskResult,
   type ServerSetupVariablesResponse,
   type SshExecCredential,
   successResult,
 } from '../types'
 import { getErrorMessage, sweepStaleEntries } from '../utils'
-import { type AnsibleProgressEvent, startProgressTailer } from './progress-tailer'
+import { startProgressTailer } from './progress-tailer'
+import { parseAnsibleOutput, toProgressPayload } from './ansible-output'
+export { parseAnsibleOutput, toProgressPayload } from './ansible-output'
 import { createSelfRestartDeclarer } from './self-restart-declaration'
 import { resolveKnownHostsPath } from '../utils/known-hosts-store'
-import { isValidPort } from '../utils/port'
 import { redactSecretValues } from '../utils/secret-redaction'
 
 import {
@@ -103,212 +119,6 @@ const LONG_RUNNING_ROLES: ReadonlySet<string> = new Set(['sentry', 'win_updates'
 
 /** Task keys whose value is a nested task list (`block` / `rescue` / `always`). */
 const NESTED_TASK_LIST_KEYS = ['block', 'rescue', 'always'] as const
-
-/**
- * System-generated OS precheck task, prepended to every generated play (before
- * the tenant admin's body tasks). Tagged `always` so it runs regardless of any
- * task-level tags a body task might carry. Ubuntu 22.04/24.04/26.04 LTS is the
- * MVP scope (matching the bundled roles' assumptions) — a fixed allowlist, not
- * a general ">= 22.04" rule, so a future LTS (e.g. 28.04) still needs an
- * explicit addition here before it is accepted.
- */
-const PRECHECK_TASK: Record<string, unknown> = {
-  name: 'precheck : Verify supported OS',
-  'ansible.builtin.fail': {
-    msg:
-      'Unsupported OS: {{ ansible_distribution }} {{ ansible_distribution_version }}. '
-      + 'Only Ubuntu 22.04/24.04/26.04 LTS are supported by server setup execution.',
-  },
-  when:
-    "ansible_distribution != 'Ubuntu' or ansible_distribution_version not in ['22.04', '24.04', '26.04']",
-  tags: 'always',
-}
-
-/**
- * System-generated task that installs the `acl` package on the target, run as
- * root (it inherits the play's `become: true` — deliberately NOT `become:false`
- * like the no-escalation precheck tasks above) after the NOPASSWD-sudo assert
- * has already proved root escalation is possible.
- *
- * Why this is mandatory: every bundled role that switches to an unprivileged
- * `become_user` different from the SSH connection user
- * (nvm/claude_cli/codex/ai_support_agent/database) triggers Ansible's
- * become-to-unprivileged temp-file handoff, which grants that user access to
- * the AnsiballZ temp files via `setfacl`. `setfacl` ships in the `acl`
- * package, which a fresh Ubuntu host does NOT have installed. Without it —
- * and with no `pipelining`/`allow_world_readable_tmpfiles` fallback configured
- * — the first such task fails with "Failed to set permissions on the temporary
- * files Ansible needs to create when becoming an unprivileged user ... chmod:
- * invalid operator (expected +, -, or =, but found A)" (the `chmod ... A`
- * being Ansible's ACL-style fallback that GNU chmod rejects once setfacl is
- * unavailable). Installing `acl` here — before any body task — is the remedy
- * Ansible's own docs list first for this exact error, and fixes it structurally
- * for every role regardless of which the recipe body includes.
- *
- * Placed after `PRECHECK_TASK` so an unsupported OS fails the run before we
- * attempt apt; `cache_valid_time` avoids a redundant `apt update` when a role
- * (e.g. os_init/nvm) has already refreshed the cache in the same run.
- */
-const ENSURE_ACL_TASK: Record<string, unknown> = {
-  name: 'precheck : Ensure acl (setfacl) is installed',
-  'ansible.builtin.apt': {
-    name: 'acl',
-    state: 'present',
-    update_cache: true,
-    cache_valid_time: 3600,
-  },
-  tags: 'always',
-}
-
-/**
- * System-generated fact-gathering task, run explicitly with `become: false`.
- * The play disables the implicit `gather_facts` (see `generatePlaybook`)
- * because that implicit task inherits the play's `become: true` — and the
- * fact-gathering module (`ansible.legacy.setup`) then fails outright on any
- * host whose SSH user lacks NOPASSWD sudo ("interactive authentication is
- * required"), before `PRECHECK_TASK` or any body task ever runs. The facts
- * this runner depends on (`ansible_distribution`/`ansible_distribution_version`,
- * read from `/etc/os-release`) do not require root, so gathering them without
- * privilege escalation is sufficient.
- */
-const GATHER_FACTS_TASK: Record<string, unknown> = {
-  name: 'precheck : Gather facts (no privilege escalation)',
-  'ansible.builtin.setup': {},
-  become: false,
-  tags: 'always',
-}
-
-/**
- * `register` name for `SUDO_PRECHECK_PROBE_TASK`'s result. Ansible's `-e`
- * extra-vars (which is exactly how project `ANSIBLE#` variables reach the
- * play — see `runServerSetup`'s `extra-vars.json` write) **always** win over
- * a `register`ed variable, regardless of evaluation order. If a tenant admin
- * happened to name a project variable the same as this register target, its
- * value would silently shadow the probe result and corrupt
- * `SUDO_PRECHECK_ASSERT_TASK`'s `when` condition. This name is namespaced and
- * long enough to make an accidental collision practically impossible, and
- * `validateNoReservedVariableCollision` rejects the run outright (rather than
- * silently misbehaving) on the astronomically unlikely case a project
- * variable is named exactly this.
- */
-export const SUDO_PROBE_REGISTER_VAR = '__ai_support_agent_server_setup_sudo_probe'
-
-/**
- * Probes whether the SSH user can escalate via sudo without a password,
- * without itself escalating (`become: false`) and without failing the play
- * on a non-zero result (`failed_when: false`) — the result is inspected by
- * `SUDO_PRECHECK_ASSERT_TASK` instead, so the failure is reported with a
- * clear, actionable message rather than surfacing as an opaque module
- * execution failure.
- */
-const SUDO_PRECHECK_PROBE_TASK: Record<string, unknown> = {
-  name: 'precheck : Probe passwordless sudo',
-  'ansible.builtin.command': { cmd: 'sudo -n true' },
-  become: false,
-  changed_when: false,
-  failed_when: false,
-  register: SUDO_PROBE_REGISTER_VAR,
-  tags: 'always',
-}
-
-/**
- * Fails the play with an actionable message when `SUDO_PRECHECK_PROBE_TASK`
- * reported a non-zero return code (sudo required a password). Every bundled
- * role runs privileged tasks (apt/user/ufw/etc.), so NOPASSWD sudo is a hard
- * prerequisite for server setup — this is a deliberate design constraint, not
- * a feature this runner supports working around.
- */
-const SUDO_PRECHECK_ASSERT_TASK: Record<string, unknown> = {
-  name: 'precheck : Verify passwordless sudo',
-  'ansible.builtin.fail': {
-    msg:
-      'Passwordless (NOPASSWD) sudo is required for server setup, but the SSH '
-      + "user '{{ ansible_user }}' cannot escalate without a password on "
-      + '{{ inventory_hostname }}. Grant NOPASSWD sudo to this user (e.g. a '
-      + 'sudoers entry) and retry. Server setup does not support '
-      + 'password-based sudo.',
-  },
-  when: `${SUDO_PROBE_REGISTER_VAR}.rc | default(1) != 0`,
-  become: false,
-  tags: 'always',
-}
-
-/**
- * `register` name for {@link WIN_WHOAMI_PROBE_TASK}'s result. Namespaced for the
- * same reason as {@link SUDO_PROBE_REGISTER_VAR}: extra-vars always outrank a
- * `register`ed variable, so a project (`ANSIBLE#`) variable of this name would
- * silently replace the probe result. Such a variable is rejected up front
- * (`runServerSetup` / the local runner), whatever the target OS.
- */
-export const WIN_WHOAMI_REGISTER_VAR = '__ai_support_agent_server_setup_win_whoami'
-
-/**
- * Windows OS precheck (replaces the Ubuntu `PRECHECK_TASK`). Windows Server
- * 2019 / 2022 / 2025 are identified by the build number, the third field of
- * `ansible_distribution_version` (P0 measured `10.0.20348.0` on Server 2022;
- * `ansible_distribution` is English even on the Japanese edition, so the
- * product name is not used). Build 17763 is shared with Windows 10 1809
- * (client), so `ansible_os_installation_type` must also be `Server` or
- * `Server Core` (P0 measured `Server` on Server 2022, admin-docs
- * `server-setup-windows-openssh.md` §10; `Server Core` is admitted because it
- * is common on servers and runs OpenSSH the same way, but was not measured in
- * P0). Placed right after fact gathering so a non-Windows host fails here
- * with a clear message instead of in `win_whoami`.
- */
-const WINDOWS_PRECHECK_TASK: Record<string, unknown> = {
-  name: 'precheck : Verify supported OS',
-  'ansible.builtin.fail': {
-    msg:
-      'Unsupported OS: {{ ansible_distribution | default(\'unknown\') }} {{ ansible_distribution_version | default(\'\') }} '
-      + '(installation type: {{ ansible_os_installation_type | default(\'unknown\') }}). '
-      + 'Only Windows Server 2019/2022/2025 (build 17763/20348/26100, installation type Server or Server Core) are supported by server setup '
-      + 'execution on Windows hosts; client editions are not supported.',
-  },
-  when:
-    "ansible_os_family != 'Windows' or "
-    + "(ansible_os_installation_type | default('')) not in ['Server', 'Server Core'] or "
-    + "((ansible_distribution_version | default('')).split('.') | length) < 3 or "
-    + "(ansible_distribution_version | default('')).split('.')[2] not in ['17763', '20348', '26100']",
-  tags: 'always',
-}
-
-/**
- * Reads the connection user's token. Windows plays run with `become: false`
- * (an administrator logging in with a key gets an already-elevated session —
- * confirmed in P0 for both the built-in Administrator and another local
- * administrator), so this replaces the Linux NOPASSWD-sudo probe.
- */
-const WIN_WHOAMI_PROBE_TASK: Record<string, unknown> = {
-  name: 'precheck : Inspect the connection user token',
-  'ansible.windows.win_whoami': {},
-  changed_when: false,
-  register: WIN_WHOAMI_REGISTER_VAR,
-  tags: 'always',
-}
-
-/**
- * Fails the play unless the token has the Administrators group
- * (S-1-5-32-544) Enabled and a High Mandatory Level label (S-1-16-12288) —
- * the state P0 observed for administrator key logins. A filtered (UAC) token
- * carries Administrators as deny-only and a Medium label, and would fail here.
- */
-const WIN_ELEVATION_ASSERT_TASK: Record<string, unknown> = {
-  name: 'precheck : Verify the connection user is an elevated administrator',
-  'ansible.builtin.assert': {
-    that: [
-      `${WIN_WHOAMI_REGISTER_VAR}.groups | selectattr('sid', 'equalto', 'S-1-5-32-544') | selectattr('attributes', 'contains', 'Enabled') | list | length > 0`,
-      `${WIN_WHOAMI_REGISTER_VAR}.label.sid == 'S-1-16-12288'`,
-    ],
-    fail_msg:
-      "Server setup on Windows requires the SSH user '{{ ansible_user }}' to log in as an elevated local "
-      + 'administrator (Administrators group enabled, High Mandatory Level) on {{ inventory_hostname }}. '
-      + 'Add the user to the local Administrators group, register its public key in '
-      + 'C:\\ProgramData\\ssh\\administrators_authorized_keys, and keep the default '
-      + '"Match Group administrators" block in sshd_config.',
-    quiet: true,
-  },
-  tags: 'always',
-}
 
 /**
  * Reserved extra-var carrying **this agent process's** replica instance id
@@ -556,68 +366,6 @@ export async function fetchServerSetupVariables(
  * here cannot be hijacked.
  */
 
-const SENTRY_SCRIPT = '/usr/local/lib/ai-support-sentry/sentry_setup.py'
-const SENTRY_PREFLIGHT_CODE = "import os,subprocess,sys; p='" + SENTRY_SCRIPT + "'; sys.exit(subprocess.call(['/usr/bin/python3',p,'preflight',sys.argv[1]]) if os.path.exists(p) else 0)"
-const SENTRY_STATE_CODE = "import os,subprocess,sys; p='" + SENTRY_SCRIPT + "'; sys.exit(subprocess.call(['/usr/bin/python3',p]+sys.argv[1:]) if os.path.exists(p) else (print('{\"settled\":true,\"phase\":\"absent\"}') or 0))"
-export function sentryPreflightTask(operation = 'install'): Record<string, unknown> {
-  return { name: 'precheck : Verify Sentry host has no unresolved operation',
-    'ansible.builtin.command': {argv: ['/usr/bin/python3', '-c', SENTRY_PREFLIGHT_CODE, operation]}, changed_when: false }
-}
-
-/**
- * Windows play (admin-docs `server-setup-windows-openssh.md` §5.4): `become:
- * false`, the same explicit fact gathering, then the Windows OS precheck and
- * the elevated-administrator check — no sudo probe, no Ubuntu precheck, no
- * Sentry preflight (it needs `/usr/bin/python3`) and no `acl` install.
- */
-function generateWindowsPlaybook(bodyTasks: readonly Record<string, unknown>[]): string {
-  return dump([
-    {
-      name: 'AI Support Agent server setup',
-      hosts: 'all',
-      become: false,
-      gather_facts: false,
-      tasks: [
-        GATHER_FACTS_TASK,
-        WINDOWS_PRECHECK_TASK,
-        WIN_WHOAMI_PROBE_TASK,
-        WIN_ELEVATION_ASSERT_TASK,
-        ...bodyTasks,
-      ],
-    },
-  ])
-}
-
-export function generatePlaybook(
-  bodyTasks: readonly Record<string, unknown>[],
-  targetOs: AnsibleTargetOs = 'linux',
-): string {
-  if (targetOs === 'windows') return generateWindowsPlaybook(bodyTasks)
-  const sentry = inspectSentryTasks(bodyTasks)
-  const recovery = sentry && sentry.operation !== 'install'
-  const playbook: Record<string, unknown>[] = [
-    {
-      name: 'AI Support Agent server setup',
-      hosts: 'all',
-      become: true,
-      // The implicit gather_facts task would inherit become:true and fail on
-      // any host lacking NOPASSWD sudo; facts are gathered explicitly instead
-      // (see GATHER_FACTS_TASK below).
-      gather_facts: false,
-      tasks: [
-        GATHER_FACTS_TASK,
-        SUDO_PRECHECK_PROBE_TASK,
-        SUDO_PRECHECK_ASSERT_TASK,
-        PRECHECK_TASK,
-        sentryPreflightTask(sentry?.operation),
-        ...(recovery ? [] : [ENSURE_ACL_TASK]),
-        ...bodyTasks,
-      ],
-    },
-  ]
-  return dump(playbook)
-}
-
 /** Names of every role included by `tasks`, including those nested in `block`/`rescue`/`always`. */
 function collectIncludedRoleNames(tasks: readonly unknown[], into: Set<string> = new Set()): Set<string> {
   for (const item of tasks) {
@@ -655,201 +403,6 @@ export function resolveAnsibleTimeoutMs(tasks: readonly unknown[]): number {
 // codex-runner.ts). Re-exported here (see import above) so existing imports from this
 // module keep working.
 export { redactSecretValues }
-
-/**
- * Plain hostname or dotted-decimal IPv4 address: letters/digits/hyphens/dots
- * only — no whitespace, quotes, `=`, or other characters that could be
- * (mis)parsed as an extra inventory variable assignment.
- */
-const HOSTNAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/
-/**
- * Portable username: letters/digits/underscore/dot/hyphen, not starting with
- * `-` (could be read as an option) or `.`. The dot admits the common Windows
- * `john.doe` form; the value only ever becomes `ansible_user`, which Ansible
- * passes to ssh as an argv `-o User=...` (never through a shell).
- */
-const USERNAME_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/
-
-
-/**
- * Reject a fetched SSH credential whose hostname/username/port isn't a plain,
- * unambiguous value. Without this, a hostname or username containing e.g. a
- * space or an embedded `ansible_connection=local` could — once written into
- * the inventory — be parsed as *additional* inventory variables for the host,
- * redirecting the `become: true` playbook run away from the intended target.
- *
- * When `connectionType === 'tailscale'`, `tailnetHostname` is what actually
- * gets written to `ansible_host` (see `buildInventory`), so it is held to the
- * exact same `HOSTNAME_RE` standard as `hostname`. `socksPort`, when present,
- * is validated as a port number the same way `port` already is.
- */
-export function validateSshCredential(credential: SshExecCredential): string | null {
-  if (!HOSTNAME_RE.test(credential.hostname)) {
-    return `SSH credential hostname is not a valid hostname/IP address: ${JSON.stringify(credential.hostname)}`
-  }
-  if (!USERNAME_RE.test(credential.username)) {
-    return `SSH credential username contains disallowed characters: ${JSON.stringify(credential.username)}`
-  }
-  if (!isValidPort(credential.port)) {
-    return `SSH credential port is out of range: ${JSON.stringify(credential.port)}`
-  }
-  // `authType` decides whether `privateKey` (an overloaded field — see
-  // `buildInventory`'s doc comment) is treated as SSH key material or a
-  // plaintext password. An unrecognized value must never silently fall back
-  // to the key path (フォールバック禁止) — that is exactly how a
-  // password-authType host got its password written to disk as if it were
-  // key material, producing `error in libcrypto` when OpenSSH tried to parse it.
-  // Shared with commands/ssh-executor.ts's executeSshCommand via
-  // isSupportedSshAuthType so the two guards cannot silently drift apart.
-  if (!isSupportedSshAuthType(credential.authType)) {
-    return unsupportedSshAuthTypeMessage(credential.authType)
-  }
-  if (!credential.privateKey) {
-    return `SSH credential privateKey is empty for authType ${JSON.stringify(credential.authType)}`
-  }
-  if (credential.connectionType === 'tailscale') {
-    if (typeof credential.tailnetHostname !== 'string' || !HOSTNAME_RE.test(credential.tailnetHostname)) {
-      return `SSH credential tailnetHostname is not a valid hostname/IP address: ${JSON.stringify(credential.tailnetHostname)}`
-    }
-    if (credential.socksPort !== undefined && !isValidPort(credential.socksPort)) {
-      return `SSH credential socksPort is out of range: ${JSON.stringify(credential.socksPort)}`
-    }
-  }
-  return null
-}
-
-/**
- * Cross-check a fetched SSH credential against the target OS the run was
- * dispatched for (admin-docs `server-setup-windows-openssh.md` §4 ⑧ / §5.2).
- *
- * - The credential's `os` (absent = Linux) must equal `targetOs`. The api
- *   decides `targetOs` at dispatch time, but the credential is read later, so
- *   a host whose OS setting changed in between (TOCTOU) is caught here.
- * - Windows hosts are supported over direct SSH with public-key auth only:
- *   `authType` must be `privateKey`, and the credential must carry **no**
- *   `connectionType` key at all — the api puts it in the response only for
- *   Tailscale and SSM routes.
- *
- * Returns a user-facing reason, or `null` when the credential fits.
- */
-export function validateCredentialForTargetOs(
-  credential: SshExecCredential,
-  targetOs: AnsibleTargetOs,
-): string | null {
-  const rawOs: unknown = credential.os
-  if (rawOs !== undefined && rawOs !== 'linux' && rawOs !== 'windows') {
-    return `SSH credential os is not supported: ${JSON.stringify(rawOs)} (expected "windows" or no value for Linux)`
-  }
-  const hostOs: AnsibleTargetOs = rawOs ?? 'linux'
-  if (hostOs !== targetOs) {
-    return `Target OS mismatch: this run was dispatched for target OS '${targetOs}', but SSH host `
-      + `'${credential.hostId}' is now configured as '${hostOs}'. The host's OS setting may have changed `
-      + 'after the run was started; check the host and recipe OS settings and start the run again.'
-  }
-  if (targetOs !== 'windows') return null
-  if (credential.authType !== 'privateKey') {
-    return `Server setup on Windows hosts requires public-key authentication, but SSH host `
-      + `'${credential.hostId}' uses authType ${JSON.stringify(credential.authType)}. Switch the host to `
-      + 'private key authentication and register the public key in C:\\ProgramData\\ssh\\administrators_authorized_keys.'
-  }
-  if (Object.prototype.hasOwnProperty.call(credential, 'connectionType')) {
-    return 'Server setup on Windows hosts supports only a direct SSH connection, but the credential for SSH host '
-      + `'${credential.hostId}' carries connectionType ${JSON.stringify(credential.connectionType)} `
-      + '(Tailscale / SSM routes are not supported for Windows). Change the host to a direct SSH connection.'
-  }
-  return null
-}
-
-/**
- * Normalize private-key material before it is written to the on-disk `id_rsa`
- * file that ansible hands to the OpenSSH `ssh` client.
- *
- * OpenSSH's key parser is strict about framing: an OpenSSH-format key (ed25519
- * and modern RSA) whose file lacks a trailing newline, or that carries CRLF
- * line endings, is rejected with `Load key "...": error in libcrypto`, after
- * which the connection falls back to `Permission denied (publickey,password)`.
- * The store→retrieve path (web Textarea → JSON.stringify → KMS → JSON.parse)
- * preserves newlines losslessly and never *adds* one, so a key an admin pasted
- * without a final newline reaches this writer without one. This normalizes to
- * LF-only line endings terminated by exactly one `\n`, regardless of how the
- * key was pasted. Applied only to key material — a plaintext password
- * (`authType === 'password'`) is never written to this file (see
- * `buildInventory`'s doc comment) and must not be reshaped.
- *
- * `\r\n?` (not a bare `\r` delete) converts both CRLF and lone-CR line endings
- * to LF: CR-only line endings are valid PEM per RFC 7468, so deleting bare CRs
- * would *join* those lines and corrupt the key. Sibling util `normalizePemKey`
- * (src/utils/pem-key.ts, used by ssh-config-setup) also guarantees a trailing
- * newline; keep the two in sync if either is changed.
- */
-function normalizePrivateKeyMaterial(privateKey: string): string {
-  return privateKey.replace(/\r\n?/g, '\n').replace(/\s+$/, '') + '\n'
-}
-
-/** Inventory variables added for Windows hosts (admin-docs `server-setup-windows-openssh.md` §5.3). */
-const WINDOWS_CONNECTION_VARS = {
-  ansible_connection: 'ssh',
-  ansible_shell_type: 'powershell',
-} as const
-
-/**
- * Build a minimal single-host Ansible inventory as JSON — written with a
- * `.yml` extension because plain JSON is valid YAML, so ansible-core's bundled
- * `yaml` inventory plugin (which matches by extension) parses it unambiguously.
- *
- * `StrictHostKeyChecking=accept-new` (TOFU): the host key is trusted and
- * recorded on first connection, but a *later* run against the same
- * `credential.hostname` with a *different* key is rejected.
- *
- * Tailscale routing: when `credential.connectionType === 'tailscale'`, the
- * actual destination is `credential.tailnetHostname`, reached through the ECS
- * oneshot task's `tailscaled --socks5-server` sidecar; `ansible_ssh_common_args`
- * gets an additional `ProxyCommand` routing the SSH TCP stream through
- * `127.0.0.1:<socksPort>` via `nc`'s SOCKS5 client mode.
- *
- * Auth: `credential.privateKey` is an overloaded field (see
- * `commands/ssh-executor.ts`'s doc comment) that holds either SSH key
- * material or a plaintext password, depending on `credential.authType`.
- * `authType === 'password'` sets `ansible_ssh_pass` (consumed by Ansible's
- * `ssh` connection plugin via the `sshpass` binary) and omits
- * `ansible_ssh_private_key_file` entirely — `keyPath` is only meaningful, and
- * only written to disk by the caller, in the key case.
- */
-function buildInventory(
-  credential: SshExecCredential,
-  keyPath: string,
-  knownHostsPath: string,
-  targetOs: AnsibleTargetOs,
-): string {
-  const isTailscale = credential.connectionType === 'tailscale'
-  const ansibleHost = isTailscale ? (credential.tailnetHostname as string) : credential.hostname
-  const socksPort = credential.socksPort ?? TAILSCALE_SOCKS_PORT
-  const proxyCommandArg = isTailscale
-    ? ` -o ProxyCommand="nc -X 5 -x 127.0.0.1:${socksPort} %h %p"`
-    : ''
-  const commonArgs = `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${knownHostsPath}${proxyCommandArg}`
-  const authVars = credential.authType === 'password'
-    ? { ansible_ssh_pass: credential.privateKey }
-    : { ansible_ssh_private_key_file: keyPath }
-  const inventory = {
-    target: {
-      hosts: {
-        [credential.hostname]: {
-          ansible_host: ansibleHost,
-          ansible_port: credential.port,
-          ansible_user: credential.username,
-          ...authVars,
-          ansible_ssh_common_args: commonArgs,
-          // Windows OpenSSH with PowerShell as the default shell (a host
-          // prerequisite). Fixed by the agent; `ansible_*` stays reserved in
-          // the guard, so a recipe cannot change it.
-          ...(targetOs === 'windows' ? WINDOWS_CONNECTION_VARS : {}),
-        },
-      },
-    },
-  }
-  return JSON.stringify(inventory)
-}
 
 /**
  * Reject project variables that collide with a generated precheck's `register`
@@ -1117,152 +670,6 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: 
       }
     }
   })
-}
-
-interface AnsibleJsonHostResult {
-  failed?: boolean
-  changed?: boolean
-  skipped?: boolean
-  unreachable?: boolean
-  msg?: string
-}
-
-/**
- * Turn raw callback events into the wire form the API stores, redacting on the
- * way.
- *
- * The `end` mapping goes through the same `taskResultFrom` the authoritative
- * results use, so a task cannot be summarised one way mid-run and another way
- * once the run finishes — Ansible's result semantics stay in one place instead
- * of being reimplemented in the API.
- *
- * Redaction is applied here because progress leaves the agent *before* the
- * run's stdout is redacted. The callback already withholds `msg` for `no_log`
- * tasks and for anything that did not fail, but that only guards the task's own
- * parameters: a secret can still surface in an unrelated task's failure message
- * or be embedded in an operator-authored task name.
- */
-/**
- * Cut `text` down to `limit` characters, marking that it was cut.
- *
- * The API rejects an over-long field by failing validation for the *whole*
- * request, and the tailer has already advanced past those events by then — so
- * an un-truncated field does not just lose itself, it loses its entire batch
- * silently. Truncating here keeps the batch deliverable, and the marker keeps
- * the loss visible (the untruncated text still reaches `executionLogs` through
- * the authoritative result).
- */
-function truncateForApi(text: string, limit: number): string {
-  if (text.length <= limit) return text
-  const marker = '… (truncated)'
-  return text.slice(0, Math.max(0, limit - marker.length)) + marker
-}
-
-export function toProgressPayload(
-  events: AnsibleProgressEvent[],
-  secretValues: string[],
-): ServerSetupProgressEvent[] {
-  const redact = (text: string): string =>
-    secretValues.length === 0 ? text : redactSecretValues(text, secretValues)
-  return events.map((event) => {
-    // Redact *before* truncating: cutting first could split a secret so that
-    // neither half matches the redaction needle, leaking the remaining part.
-    const name = truncateForApi(
-      redact(event.name),
-      SERVER_SETUP_MAX_PROGRESS_TASK_NAME_LENGTH,
-    )
-    if (event.phase === 'start') return { seq: event.seq, phase: 'start', name }
-    const result = taskResultFrom(event.name, [event.result ?? {}])
-    return {
-      seq: event.seq,
-      phase: 'end',
-      name,
-      status: result.status,
-      changed: result.changed,
-      message: truncateForApi(
-        redact(result.message),
-        SERVER_SETUP_MAX_PROGRESS_MESSAGE_LENGTH,
-      ),
-    }
-  })
-}
-
-interface AnsibleJsonTask {
-  task?: { name?: string }
-  hosts?: Record<string, AnsibleJsonHostResult>
-}
-
-interface AnsibleJsonPlay {
-  tasks?: AnsibleJsonTask[]
-}
-
-interface AnsibleJsonOutput {
-  plays?: AnsibleJsonPlay[]
-}
-
-interface ParsedAnsibleOutput {
-  taskResults: ServerSetupTaskResult[]
-  /**
-   * True when `rawOutput` was empty or not valid JSON at all — as opposed to
-   * parsing successfully into an object that merely lacks tasks.
-   * `runServerSetup` must never report `successResult` on top of this: an
-   * empty/unparseable stdout despite a `0` exit code means the `json` callback
-   * plugin never ran, so there is no reliable signal that anything actually
-   * happened.
-   */
-  outputUnparseable: boolean
-}
-
-/**
- * Derive one `ServerSetupTaskResult` from a task's per-host results.
- * `unreachable` is folded into `failed` (with a sensible default message), so
- * the reported status set stays `ok`/`failed`/`skipped`.
- */
-function taskResultFrom(name: string, results: AnsibleJsonHostResult[]): ServerSetupTaskResult {
-  const changed = results.some((r) => r.changed === true)
-  const failedResult = results.find((r) => r.failed === true || r.unreachable === true)
-  if (failedResult) {
-    const message =
-      failedResult.msg ?? (failedResult.unreachable === true ? 'host unreachable' : `${name} failed`)
-    return { name, status: 'failed', changed, message }
-  }
-  if (results.length > 0 && results.every((r) => r.skipped === true)) {
-    return { name, status: 'skipped', changed: false, message: `${name} skipped` }
-  }
-  return { name, status: 'ok', changed, message: `${name} completed` }
-}
-
-/**
- * Parse the `ansible-playbook --stdout-callback=json`-style output into one
- * result **per task** (the previous per-stepType grouping is gone). Tasks with
- * no name and no host results are skipped entirely.
- */
-export function parseAnsibleOutput(rawOutput: string): ParsedAnsibleOutput {
-  let parsed: AnsibleJsonOutput | null = null
-  let outputUnparseable = false
-  if (!rawOutput || !rawOutput.trim()) {
-    outputUnparseable = true
-  } else {
-    try {
-      parsed = JSON.parse(rawOutput) as AnsibleJsonOutput
-    } catch {
-      parsed = null
-      outputUnparseable = true
-    }
-  }
-
-  const taskResults: ServerSetupTaskResult[] = []
-  for (const play of parsed?.plays ?? []) {
-    for (const task of play.tasks ?? []) {
-      const name = task.task?.name ?? ''
-      const hostResults = Object.values(task.hosts ?? {})
-      // A task with neither a name nor any host result carries no information.
-      if (!name && hostResults.length === 0) continue
-      taskResults.push(taskResultFrom(name || 'task', hostResults))
-    }
-  }
-
-  return { taskResults, outputUnparseable }
 }
 
 /** Prefix shared by every per-run temp dir `runServerSetup` creates via `mkdtempSync`. */
