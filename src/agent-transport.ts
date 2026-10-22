@@ -620,6 +620,7 @@ async function processCommand(
       deps.tenantCode,
       // 再起動後の再送でフェンシングを通すため、実行時の指名世代も保存する。
       deps.client.getAssignmentGeneration(commandId),
+      deps.client.getServerSetupInstanceId(commandId),
     )
     try {
       await deps.client.submitResult(commandId, result, deps.agentId)
@@ -685,6 +686,7 @@ async function processCommand(
       deps.token,
       deps.tenantCode,
       deps.client.getAssignmentGeneration(commandId),
+      deps.client.getServerSetupInstanceId(commandId),
     )
     try {
       await deps.client.submitResult(commandId, failureResult, deps.agentId)

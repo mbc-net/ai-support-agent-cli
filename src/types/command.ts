@@ -62,6 +62,13 @@ export type CommandResult = (
   /** Internal agent proof: attached only after E2E child processes have closed.
    * Persisted with pending results, stripped before submitting the result body. */
   e2eConfigurationCompletion?: { executionId: string }
+  /** Runner-observed proof, persisted for retry but never part of the ordinary result. */
+  serverSetupConfigurationCompletion?: {
+    executionId: string
+    evidence:
+      | { kind: 'completed'; sshHostId: string; processClosed: true }
+      | { kind: 'sentry-settled'; sshHostId: string; runId: string; settled: true; active: false }
+  }
 }
 
 export function successResult(data: unknown): CommandResult {
