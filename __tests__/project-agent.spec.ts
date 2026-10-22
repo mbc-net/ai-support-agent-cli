@@ -138,6 +138,7 @@ describe('ProjectAgent', () => {
       getCommand: jest.fn(),
       submitResult: jest.fn().mockResolvedValue(undefined),
       getAssignmentGeneration: jest.fn(),
+      getServerSetupInstanceId: jest.fn(),
       clearAssignment: jest.fn(),
       getVersionInfo: jest.fn().mockResolvedValue({ latestVersion: '0.0.2', minimumVersion: '0.0.0', channel: 'latest', channels: {} }),
       reportConnectionStatus: jest.fn().mockResolvedValue(undefined),

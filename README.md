@@ -418,3 +418,44 @@ localの実行・管理と開発／テストの管理セッションは最大8�
 Deploy the API with command-scoped E2E configuration endpoints before deploying this agent. Every E2E execution mode performs a command-bound admission check before starting; the agent never falls back to the old environment-only endpoint. Completion uses a separate acknowledgement after terminal command-result submission. Failed acknowledgements retain the original result for retry.
 
 Configuration admission remains active when a child is still running, termination used a signal/kill/timeout, or browser-session cleanup failed. Normal completion relies on the supported runner's ordinary browser/worker teardown; scripts must not detach background processes. Historical jobs and independently detached descendants require verified operator shutdown before v2 migration. A terminal execution status alone is not proof that those processes stopped.
+
+### Server setup configuration completion
+
+Server setup result delivery and configuration admission closure are separate acknowledgements.
+The agent persists runner-observed completion evidence alongside a pending result, submits the
+ordinary result first, then submits `/agent/commands/:id/server-setup-configuration-complete`.
+A lost acknowledgement retains the original result, evidence, instance identity and assignment
+for retry. The API must support identical result replays after accepting a terminal result.
+Tokens are not extended by this protocol; expired credentials require operator reconciliation.
+
+Automatic ordinary completion currently covers direct synchronous debug/assert/set_fact,
+copy/file/lineinfile/blockinfile/replace/stat/get_url/group/user/wait_for and authorized_key
+modules, after successful Ansible process completion and valid task output. Async/poll/notify
+and arbitrary validation commands are excluded. Shell/command tasks and unaudited bundled
+roles remain unresolved even when the UI reports success. Their remote termination must be
+reconciled before configuration cutover. An intended service daemon continuing to run is
+not itself an unfinished recipe task; extending automatic coverage requires auditing the
+recipe's task lifecycle rather than requiring every service to stop.
+
+Sentry completion uses the dedicated remote-state probe, requiring an explicit `settled: true`,
+`active: false` and a matching installation run ID. Standalone successful recovery operations
+retain the observed remote run ID for host-scoped server reconciliation. Mixed recipes must
+also have synchronously certifiable companion tasks and finish locally without timeout or
+cancellation. SSH loss, missing probe fields, local process termination alone, and UI terminal
+status are never evidence of remote Sentry termination.
+
+Each setup claim also carries `x-server-setup-instance-id`, generated before command
+retrieval and retained with the pending result. Recovered results restore the original
+identity; a restarted process must not fetch and execute the command again. Resident
+assignment generation and replica identity continue to be checked independently.
+The runner records `data.serverSetupLocalTermination` only after the Ansible child's
+observed `close` event, excluding spawn failures; an execFile error callback alone is insufficient. This is
+local termination evidence, including after a timeout/cancel that actually closed the
+child; it cannot establish remote termination. Recovery of an earlier Sentry admission
+must combine its authenticated saved local proof with appropriately scoped remote proof.
+Legacy executions without that evidence remain blocked for operator reconciliation.
+
+Sentry admission closure additionally requires the original Ansible run to finish successfully.
+A settled remote snapshot after cancellation, timeout or other failed execution does not
+exclude an already-dispatched delayed remote start. Such admissions remain unresolved
+until stronger remote fencing or independently verified operational termination is available.

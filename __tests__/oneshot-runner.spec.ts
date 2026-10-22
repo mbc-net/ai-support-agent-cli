@@ -18,6 +18,7 @@ jest.mock('../src/logger', () => ({
 
 const mockGetCommand = jest.fn()
 const mockSubmitResult = jest.fn()
+const mockRestoreServerSetupInstance = jest.fn()
 const mockSetTenantCode = jest.fn()
 const mockSetProjectCode = jest.fn()
 const mockApiClientCtor = jest.fn()
@@ -26,6 +27,8 @@ jest.mock('../src/api-client', () => ({
   ApiClient: class {
     getCommand = mockGetCommand
     submitResult = mockSubmitResult
+    getServerSetupInstanceId = jest.fn(() => "setup-instance")
+    restoreServerSetupInstance = mockRestoreServerSetupInstance
     setTenantCode = mockSetTenantCode
     setProjectCode = mockSetProjectCode
     constructor(...args: unknown[]) {
@@ -37,6 +40,15 @@ jest.mock('../src/api-client', () => ({
 const mockExecuteCommand = jest.fn()
 jest.mock('../src/commands', () => ({
   executeCommand: (...args: unknown[]) => mockExecuteCommand(...args),
+}))
+
+const mockLoadPendingResults = jest.fn(() => [])
+const mockSavePendingResult = jest.fn(() => true)
+const mockRemovePendingResult = jest.fn()
+jest.mock('../src/pending-result-store', () => ({
+  loadPendingResults: () => mockLoadPendingResults(),
+  savePendingResult: (...args: unknown[]) => mockSavePendingResult(...args),
+  removePendingResult: (...args: unknown[]) => mockRemovePendingResult(...args),
 }))
 
 import { readOneshotEnv, runOneshot, runOneshotFromEnv } from '../src/oneshot-runner'
@@ -88,6 +100,27 @@ describe('readOneshotEnv', () => {
 })
 
 describe('runOneshot', () => {
+  it('persists server setup results and retries completion without executing again', async () => {
+    mockGetCommand.mockResolvedValueOnce({commandId: 'cmd-123', type: 'server_setup_exec', payload: {}})
+    const result = {success: true, data: 'done', serverSetupConfigurationCompletion: {executionId: 'exec-1', evidence: {kind: 'completed', sshHostId: 'host-1', processClosed: true}}}
+    mockExecuteCommand.mockResolvedValueOnce(result)
+    mockSubmitResult.mockRejectedValueOnce(new Error('lost completion response')).mockResolvedValueOnce(undefined)
+    expect(await runOneshot(validEnv())).toBe(0)
+    expect(mockSavePendingResult).toHaveBeenCalledWith('cmd-123', 'ecs-agent-1', result, 'https://api.example.com', SECRET_TOKEN, 'mbc', undefined, 'setup-instance')
+    expect(mockSubmitResult).toHaveBeenCalledTimes(2)
+    expect(mockExecuteCommand).toHaveBeenCalledTimes(1)
+    expect(mockRemovePendingResult).toHaveBeenCalledWith('cmd-123')
+  })
+  it('recovers a persisted oneshot result before attempting command retrieval', async () => {
+    const result = {success: true, data: 'done'}
+    mockLoadPendingResults.mockReturnValueOnce([{commandId: 'cmd-123', agentId: 'ecs-agent-1', tenantCode: 'mbc', apiUrl: 'https://api.example.com', token: SECRET_TOKEN, serverSetupInstanceId: 'old-instance', result}] as never)
+    expect(await runOneshot(validEnv())).toBe(0)
+    expect(mockGetCommand).not.toHaveBeenCalled()
+    expect(mockRestoreServerSetupInstance).toHaveBeenCalledWith('cmd-123', 'old-instance')
+    expect(mockExecuteCommand).not.toHaveBeenCalled()
+    expect(mockSubmitResult).toHaveBeenCalledWith('cmd-123', result, 'ecs-agent-1')
+  })
+
   it('fetches, executes, submits, and returns 0 on success', async () => {
     const code = await runOneshot(validEnv())
 

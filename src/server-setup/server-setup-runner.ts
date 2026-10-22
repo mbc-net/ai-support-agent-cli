@@ -531,6 +531,8 @@ function checkWindowsCollections(env: NodeJS.ProcessEnv): Promise<string | null>
 }
 
 interface AnsibleRunResult {
+  /** Observed ChildProcess close, never inferred from execFile error callbacks. */
+  processClosed: boolean
   /** Process exit code. `0` on success; best-effort `1` when no numeric code is available. */
   code: number
   stdout: string
@@ -586,6 +588,12 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: 
     // stop request). Read from the execFile callback's closure to distinguish an
     // operator-requested abort from execFile's own `timeout` firing, which Node
     // reports identically (`killed: true` + the kill signal).
+    let closeObserved = false
+    const complete = (outcome: Omit<AnsibleRunResult, 'processClosed'>): void => {
+      // execFile registers its close listener first. Finish after all listeners
+      // of that event ran, but do not wait indefinitely after a failed kill.
+      void Promise.resolve().then(() => resolve({...outcome, processClosed: closeObserved}))
+    }
     let cancelRequested = false
     let finished = false
     let polling = false
@@ -611,7 +619,7 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: 
           // The playbook ran to completion. Even if a cancel arrived late, the
           // run did succeed — reporting it as cancelled would be as untrue as
           // the timeout message this flag exists to prevent.
-          resolve({ code: 0, stdout: stdoutStr, stderr: stderrStr, timedOut: false, cancelled: false, spawnError: null })
+          complete({ code: 0, stdout: stdoutStr, stderr: stderrStr, timedOut: false, cancelled: false, spawnError: null })
           return
         }
 
@@ -633,7 +641,7 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: 
             ? getErrorMessage(error)
             : null
 
-        resolve({
+        complete({
           code: numericCode ?? 1,
           stdout: stdoutStr,
           stderr: stderrStr,
@@ -643,6 +651,7 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: 
         })
       },
     )
+    child.once('close', () => { closeObserved = true })
     if (commandId) {
       getProcessManager().register(commandId, {
         cancel: () => {
@@ -804,6 +813,28 @@ export interface ExecuteServerSetupAnsibleInput {
  * caller to have gated the body — so the local dev path cannot bypass the task
  * guard.
  */
+// A successful local process cannot prove arbitrary shell/role background work ended.
+// Only these direct modules have a bounded synchronous task lifecycle. Service daemons
+// are intended side effects; shell supervisors and unreviewed roles need remote evidence.
+const SYNCHRONOUS_COMPLETION_MODULES = new Set([
+  'ansible.builtin.debug', 'ansible.builtin.assert', 'ansible.builtin.set_fact',
+  'ansible.builtin.copy', 'ansible.builtin.file', 'ansible.builtin.lineinfile',
+  'ansible.builtin.blockinfile', 'ansible.builtin.replace', 'ansible.builtin.stat',
+  'ansible.builtin.get_url', 'ansible.builtin.group', 'ansible.builtin.user',
+  'ansible.builtin.wait_for', 'ansible.posix.authorized_key',
+])
+function hasSynchronousCompletion(tasks: readonly Record<string, unknown>[]): boolean {
+  return tasks.length > 0 && tasks.every(task =>
+    !('async' in task) && !('poll' in task) && !('notify' in task) &&
+    Object.keys(task).some(key => {
+      const module = key.includes('.') ? key : `ansible.builtin.${key}`
+      if (!SYNCHRONOUS_COMPLETION_MODULES.has(module)) return false
+      const args = task[key]
+      // copy/lineinfile/blockinfile validation can execute an arbitrary remote command.
+      return !args || typeof args !== 'object' || !('validate' in args)
+    }))
+}
+
 export async function executeServerSetupAnsible(
   input: ExecuteServerSetupAnsibleInput,
 ): Promise<CommandResult> {
@@ -822,6 +853,11 @@ export async function executeServerSetupAnsible(
   // order (roles/callback, then known_hosts) matches the original production
   // sequence.
   let sentry: ReturnType<typeof inspectSentryTasks> = null
+  let localProcessClosed = false
+  let completion: CommandResult['serverSetupConfigurationCompletion']
+  let synchronousTasks = false
+  let sentryCompanionsSynchronous = false
+  let hasSentryCompanions = false
   let sentryReport: Record<string, unknown> = {settled: false, stopState: 'unconfirmed'}
   let rolesPath: string
   let callbackPluginsPath: string
@@ -903,6 +939,13 @@ export async function executeServerSetupAnsible(
         }
       }
       sentry = sentryInspection
+      synchronousTasks = hasSynchronousCompletion(guardResult.normalizedTasks)
+      const companions = guardResult.normalizedTasks.filter(task => {
+        const role = task['ansible.builtin.include_role'] ?? task.include_role
+        return !role || typeof role !== 'object' || (role as {name?: unknown}).name !== 'sentry'
+      })
+      hasSentryCompanions = companions.length > 0
+      sentryCompanionsSynchronous = !hasSentryCompanions || hasSynchronousCompletion(companions)
       const timeoutMs = resolveAnsibleTimeoutMs(guardResult.normalizedTasks)
 
       // Stage the shared files the body distributes, before anything is run.
@@ -1123,6 +1166,8 @@ export async function executeServerSetupAnsible(
         await progressTailer?.stop()
       }
       const { code, stdout: rawStdout, stderr: rawStderr, timedOut, cancelled, spawnError } = runOutcome
+      // Error callbacks (including failed kills) may run before close.
+      localProcessClosed = runOutcome.processClosed && spawnError === null
 
       if (sentry) {
         const probePath = path.join(tmpDir, 'sentry-result.yml')
@@ -1138,12 +1183,21 @@ export async function executeServerSetupAnsible(
             ANSIBLE_CALLBACK_PLUGINS: callbackPluginsPath, ANSIBLE_VERBOSITY: undefined,
             ANSIBLE_DEBUG: undefined, ANSIBLE_DIFF_ALWAYS: undefined, AI_SUPPORT_AGENT_PROGRESS_FILE: undefined,
           }, undefined, 7 * 60 * 1000)
-          if (probe.code === 0) {
+          if (probe.processClosed && probe.code === 0 && !probe.timedOut && !probe.cancelled && !probe.spawnError) {
             const parsed = JSON.parse(probe.stdout)
             const hosts = parsed.plays?.[0]?.tasks?.[0]?.hosts ?? {}
             const remote = Object.values(hosts)[0] as {stdout?: string, failed?: boolean, unreachable?: boolean} | undefined
             if (remote?.stdout && !remote.failed && !remote.unreachable) {
               const value = JSON.parse(remote.stdout)
+              if (localProcessClosed && code === 0 && !timedOut && !cancelled && !spawnError &&
+                  Object.keys(hosts).length === 1 && value.settled === true && value.active === false &&
+                  typeof value.run_id === 'string' && value.run_id.length > 0 &&
+                  sentryCompanionsSynchronous &&
+                  (!hasSentryCompanions || (code === 0 && !cancelled && !timedOut && !spawnError)) &&
+                  (value.run_id === executionId || (sentry.operation !== 'install' && code === 0 && !cancelled && !timedOut && !spawnError))) {
+                completion = {executionId, evidence: {kind: 'sentry-settled', sshHostId: input.sshHostId,
+                  runId: value.run_id, settled: true, active: false}}
+              }
               if (value.run_id === executionId || sentry.operation !== 'install' || value.phase === 'absent') {
                 sentryReport = {settled: value.settled === true && !value.active,
                   stopState: !value.active && value.stop_state === 'confirmed' ? 'confirmed' : undefined,
@@ -1226,6 +1280,9 @@ export async function executeServerSetupAnsible(
       }
 
       logger.success(`[server-setup] Completed: executionId=${executionId}`)
+      if (localProcessClosed && !sentry && synchronousTasks && taskResults.every(task => task.status !== 'failed')) {
+        completion = {executionId, evidence: {kind: 'completed', sshHostId: input.sshHostId, processClosed: true}}
+      }
       return successResult({ stepResults: taskResults })
     })()
   } catch (error) {
@@ -1245,7 +1302,14 @@ export async function executeServerSetupAnsible(
     const data = typeof result.data === 'string' ? JSON.parse(result.data) : (result.data ?? {})
     result = {...result, data: JSON.stringify({...data, sentry: sentryReport})}
   }
-  return result
+  if (localProcessClosed) {
+    const data = typeof result.data === 'string' ? JSON.parse(result.data) : (result.data ?? {})
+    const withProof = {...data as Record<string, unknown>, serverSetupLocalTermination: {
+      processClosed: true, executionId, sshHostId: input.sshHostId,
+    }}
+    result = {...result, data: typeof result.data === 'string' ? JSON.stringify(withProof) : withProof}
+  }
+  return completion ? {...result, serverSetupConfigurationCompletion: completion} : result
 }
 
 /**
