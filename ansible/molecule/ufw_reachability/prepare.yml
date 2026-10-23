@@ -1,0 +1,77 @@
+---
+# Target: install and ENABLE ufw (default deny incoming), start a TCP listener
+# on every port in ufwr_ports. Then prove from BOTH clients that ufw blocks
+# them before any role has run — otherwise a later "connected" would not show
+# that a role's rule is what let the allowed client in.
+- name: Prepare the target
+  hosts: ufwr_target
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "prepare : Install ufw"
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+        update_cache: true
+
+    # The molecule driver talks to the container through `docker exec`, so
+    # default-deny incoming does not cut Ansible's connection.
+    - name: "prepare : Enable ufw"
+      ansible.builtin.command:
+        argv: [ufw, --force, enable]
+      changed_when: true
+
+    - name: "prepare : Read the ufw status"
+      ansible.builtin.command:
+        argv: [ufw, status, verbose]
+      register: ufwr_status
+      changed_when: false
+
+    - name: "prepare : Assert ufw is active and denies incoming by default"
+      ansible.builtin.assert:
+        that:
+          - "'Status: active' in ufwr_status.stdout"
+          - "'deny (incoming)' in ufwr_status.stdout"
+        fail_msg: "ufw is not enforcing in the container: {{ ufwr_status.stdout }}"
+
+    # Transient systemd units: accept, answer, close. Stand-ins for the real
+    # daemons (the roles' ufw.yml does not care what listens).
+    - name: "prepare : Start a TCP listener on each port"
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - --unit=ufwr-listen-{{ item.port }}
+          - /usr/bin/python3
+          - -c
+          - |
+            import socket, sys
+            server = socket.create_server(('0.0.0.0', int(sys.argv[1])), reuse_port=True)
+            while True:
+                connection, _ = server.accept()
+                connection.close()
+          - "{{ item.port }}"
+      loop: "{{ ufwr_ports }}"
+      loop_control:
+        label: "{{ item.port }}"
+      changed_when: true
+
+    - name: "prepare : Wait for the listeners"
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ item.port }}"
+        timeout: 30
+      loop: "{{ ufwr_ports }}"
+      loop_control:
+        label: "{{ item.port }}"
+
+- name: Prove ufw blocks both clients before converge
+  hosts: ufwr_clients
+  gather_facts: false
+
+  tasks:
+    - name: "prepare : Every port times out from every client"
+      ansible.builtin.include_tasks: probe.yml
+      vars:
+        ufwr_probe_label: before converge
+        ufwr_probe_expect: timeout

@@ -15,11 +15,54 @@
         zabbix_server_db_host: "{{ zabbix_validation_case.host | default('localhost') }}"
         zabbix_server_db_port: "{{ zabbix_validation_case.port | default(5432) }}"
         zabbix_server_version: "{{ zabbix_validation_case.version | default('7.0') }}"
+        zabbix_server_allowed_sources: "{{ zabbix_validation_case.sources | default([]) }}"
+        zabbix_server_ufw_manage: "{{ zabbix_validation_case.ufw_manage | default(true) }}"
+        zabbix_server_allow_no_sources: "{{ zabbix_validation_case.allow_no_sources | default(true) }}"
+        zabbix_server_db_timescaledb: "{{ zabbix_validation_case.timescaledb | default(false) }}"
         zabbix_web_db_password: "{{ zabbix_validation_case.password | default('test-password') }}"
         zabbix_web_db_type: postgresql
         zabbix_web_server_name: "{{ zabbix_validation_case.name | default('zabbix.test') }}"
         zabbix_web_listen_port: "{{ zabbix_validation_case.port | default(8080) }}"
         zabbix_web_php_timezone: "{{ zabbix_validation_case.timezone | default('Asia/Tokyo') }}"
+        zabbix_web_allowed_sources: "{{ zabbix_validation_case.sources | default([]) }}"
+        zabbix_web_ufw_manage: "{{ zabbix_validation_case.ufw_manage | default(true) }}"
+        zabbix_web_allow_no_sources: "{{ zabbix_validation_case.allow_no_sources | default(true) }}"
+        zabbix_web_admin_password: "{{ zabbix_validation_case.admin_password | default('') }}"
+        zabbix_web_admin_previous_password: "{{ zabbix_validation_case.previous_password | default('') }}"
+        zabbix_web_housekeeping: "{{ zabbix_validation_case.housekeeping | default({}) }}"
+      when: zabbix_validation_case.literal_null is not defined
+
+    # Ansible 2.17 以前はテンプレートの結果が None なら空文字列になる（"{{ x }}" で null を
+    # 渡すと "" が届き、「管理しない」として受理される）。`is string` による null の拒否は
+    # vars に null をリテラルで書いたときにだけ効くため、そのケースはここで直接渡す。
+    - name: Include the role with a literal null admin password
+      ansible.builtin.include_role:
+        name: zabbix_web
+      vars:
+        zabbix_web_db_password: test-password
+        zabbix_web_db_type: postgresql
+        zabbix_web_server_name: zabbix.test
+        zabbix_web_admin_password: null
+      when: zabbix_validation_case.literal_null | default('') == 'admin_password'
+
+    - name: Include the role with a literal null previous admin password
+      ansible.builtin.include_role:
+        name: zabbix_web
+      vars:
+        zabbix_web_db_password: test-password
+        zabbix_web_db_type: postgresql
+        zabbix_web_server_name: zabbix.test
+        zabbix_web_admin_password: Abcdefgh1
+        zabbix_web_admin_previous_password: null
+      when: zabbix_validation_case.literal_null | default('') == 'previous_password'
+
+    - name: Include the role with a literal null TimescaleDB flag
+      ansible.builtin.include_role:
+        name: zabbix_server
+      vars:
+        zabbix_server_db_password: test-password
+        zabbix_server_db_timescaledb: null
+      when: zabbix_validation_case.literal_null | default('') == 'timescaledb'
 
     - name: Mark unexpected acceptance
       ansible.builtin.set_fact:
@@ -30,6 +73,9 @@
       ansible.builtin.assert:
         that:
           - "'Validate branch and required variables' in ansible_failed_task.name"
+          # expect があるケースは、意図した条件で落ちたことまで確認する（別の条件で
+          # 偶然落ちて素通りするのを防ぐ）。assertion は失敗した that の式そのもの。
+          - (zabbix_validation_case.expect | default('')) in (ansible_failed_result.assertion | default(''))
 
 - name: Fail if a malformed configuration was accepted
   ansible.builtin.assert:

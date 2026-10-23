@@ -38,5 +38,8 @@ if __name__ == '__main__':
     try:
         ready(sys.argv[1], sys.argv[2])
     except Exception:
-        print('Zabbix statistics readiness check failed; check service, DB connectivity and StatsAllowedIP.', file=sys.stderr)
+        print('Zabbix statistics readiness check failed; check service, DB connectivity and StatsAllowedIP. '
+              'With TimescaleDB, Zabbix server refuses to start on an unsupported TimescaleDB version '
+              '(an older Zabbix 6.0 minor may not accept a newer TimescaleDB); check /var/log/zabbix/zabbix_server.log.',
+              file=sys.stderr)
         sys.exit(1)

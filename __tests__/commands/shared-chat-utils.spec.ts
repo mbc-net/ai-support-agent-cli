@@ -1,5 +1,5 @@
 import type { ApiClient } from '../../src/api-client'
-import { buildPageContextNotice, combineSystemPrompts, createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, parsePageContext, resolveChunkBatchConfig, sendFileAttachmentChunk } from '../../src/commands/shared-chat-utils'
+import { buildPageContextNotice, combineSystemPrompts, createChunkSender, formatHistoryForClaudeCode, handleChatError, parseHistory, parsePageContext, resolveChunkBatchConfig, sendFileAttachmentChunk, TERMINAL_CHUNK_UNDELIVERED_ERROR } from '../../src/commands/shared-chat-utils'
 import type { ChatFileInfo } from '../../src/types'
 
 jest.mock('../../src/logger')
@@ -652,5 +652,30 @@ describe('shared-chat-utils', () => {
 
       expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('cmd-log-id'))
     })
+  })
+})
+
+
+describe('handleChatError terminal delivery', () => {
+  it('checks delivery only after the error chunk is sent', async () => {
+    let failed = false
+    const sendChunk = jest.fn(async () => { failed = true })
+    const checkDelivery = jest.fn(() => failed)
+    const result = await handleChatError(new Error('original'), 'command', 'chat', sendChunk, checkDelivery)
+    expect(sendChunk).toHaveBeenCalledWith('error', 'original')
+    expect(checkDelivery).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ success: false, error: `${TERMINAL_CHUNK_UNDELIVERED_ERROR} (元のエラー: original)` })
+  })
+
+  it('keeps the original failure when the error chunk is delivered', async () => {
+    expect(await handleChatError('original', 'command', 'api-chat', jest.fn().mockResolvedValue(undefined), () => false))
+      .toEqual({ success: false, error: 'original' })
+  })
+
+  it('preserves send rejection without evaluating delivery state', async () => {
+    const sendError = new Error('send failed')
+    const checkDelivery = jest.fn(() => true)
+    await expect(handleChatError('original', 'command', 'chat', jest.fn().mockRejectedValue(sendError), checkDelivery)).rejects.toBe(sendError)
+    expect(checkDelivery).not.toHaveBeenCalled()
   })
 })

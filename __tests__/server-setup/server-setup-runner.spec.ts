@@ -53,6 +53,7 @@ jest.mock('../../src/utils/known-hosts-store', () => ({
 }))
 
 import * as path from 'path'
+import { EventEmitter } from 'events'
 
 import { load } from 'js-yaml'
 
@@ -182,6 +183,7 @@ function resolveExecFile(exitCode: number, stdout: string, stderr = ''): void {
     )
     callback(error, stdout, stderr)
   }
+  mockExecFile.mock.results.at(-1)?.value?.emit?.('close', exitCode, null)
 }
 
 function resolveExecFileWithError(
@@ -192,6 +194,7 @@ function resolveExecFileWithError(
   const call = mockExecFile.mock.calls[mockExecFile.mock.calls.length - 1]
   const callback = call[call.length - 1] as (error: unknown, stdout: string, stderr: string) => void
   callback(error, stdout, stderr)
+  mockExecFile.mock.results.at(-1)?.value?.emit?.('close', null, error.signal ?? null)
 }
 
 async function flushUntilExecFileCalled(): Promise<void> {
@@ -215,11 +218,53 @@ function writtenFile(suffix: string): string | undefined {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  mockExecFile.mockReturnValue(Object.assign(new EventEmitter(), {kill: jest.fn()}))
   mockMkdtempSync.mockImplementation((...args: Parameters<typeof actualFs.mkdtempSync>) => actualFs.mkdtempSync(...args))
   mockWriteFileSync.mockImplementation((...args: Parameters<typeof actualFs.writeFileSync>) => actualFs.writeFileSync(...args))
   mockRmSync.mockImplementation((...args: Parameters<typeof actualFs.rmSync>) => actualFs.rmSync(...args))
   mockExistsSync.mockImplementation((...args: Parameters<typeof actualFs.existsSync>) => actualFs.existsSync(...args))
   mockResolveKnownHostsPath.mockReturnValue(KNOWN_HOSTS_PATH)
+})
+
+describe('configuration completion proof', () => {
+  it('does not infer process closure from an execFile callback before close', async () => {
+    const pending = runServerSetup(makePayload({body: '- debug:\n    msg: done'}), {commandId: 'cmd-1', client: makeClient()})
+    await flushUntilExecFileCalled()
+    const call = mockExecFile.mock.calls.at(-1)!
+    call.at(-1)(Object.assign(new Error('kill EPERM'), {code: 'EPERM', killed: true}), 'partial output', '')
+    const result = await pending
+    expect(result.serverSetupConfigurationCompletion).toBeUndefined()
+    expect(result.data).toBeUndefined()
+  })
+
+  it('requires close even when execFile reports successful synchronous output', async () => {
+    const pending = runServerSetup(makePayload({body: '- debug:\n    msg: done'}), {commandId: 'cmd-1', client: makeClient()})
+    await flushUntilExecFileCalled()
+    mockExecFile.mock.calls.at(-1)!.at(-1)(null, ansibleJsonOutput([{name: 'debug'}]), '')
+    const result = await pending
+    expect(result.serverSetupConfigurationCompletion).toBeUndefined()
+    expect((result.data as Record<string, unknown>).serverSetupLocalTermination).toBeUndefined()
+  })
+
+  it.each(['ansible.builtin.debug', 'debug'])('certifies synchronous %s after successful process completion', async module => {
+    const pending = runServerSetup(makePayload({body: `- ${module}:\n    msg: done`}), {commandId: 'cmd-1', client: makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{name: 'debug'}]))
+    expect((await pending).serverSetupConfigurationCompletion).toEqual({executionId: 'exec-1',
+      evidence: {kind: 'completed', sshHostId: 'host-1', processClosed: true}})
+  })
+  it.each(['- ansible.builtin.shell: sleep 300 &', '- include_role:\n    name: ai_support_agent', '- ansible.builtin.copy:\n    content: data\n    dest: /tmp/proof-test\n    validate: /bin/sh -c %s'])('does not certify unbounded remote work: %s', async body => {
+    const pending = runServerSetup(makePayload({body}), {commandId: 'cmd-1', client: makeClient()})
+    await flushUntilExecFileCalled()
+    if (mockExecFile.mock.calls.length) resolveExecFile(0, ansibleJsonOutput([{name: 'unbounded'}]))
+    expect((await pending).serverSetupConfigurationCompletion).toBeUndefined()
+  })
+  it('does not certify transport failure', async () => {
+    const pending = runServerSetup(makePayload({body: '- ansible.builtin.debug:\n    msg: done'}), {commandId: 'cmd-1', client: makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(4, ansibleJsonOutput([{name: 'debug', unreachable: true}]))
+    expect((await pending).serverSetupConfigurationCompletion).toBeUndefined()
+  })
 })
 
 describe('resolveRouteMode', () => {
@@ -625,6 +670,7 @@ describe('runServerSetup - success path', () => {
 
     // Per-task results (facts gathered, sudo verified, OS precheck skipped, the two body steps changed).
     expect(result.data).toEqual({
+      serverSetupLocalTermination: {processClosed: true, executionId: 'exec-1', sshHostId: 'host-1'},
       stepResults: [
         { name: 'precheck : Gather facts (no privilege escalation)', status: 'ok', changed: false, message: 'precheck : Gather facts (no privilege escalation) completed' },
         { name: 'precheck : Probe passwordless sudo', status: 'ok', changed: false, message: 'precheck : Probe passwordless sudo completed' },
@@ -702,7 +748,7 @@ describe('runServerSetup - success path', () => {
     expect(result.success).toBe(false)
     if (!result.success) {
       expect(result.error).toContain('could not be parsed as JSON')
-      expect(result.data).toBeUndefined()
+      expect(result.data).toEqual({serverSetupLocalTermination: {processClosed: true, executionId: 'exec-1', sshHostId: 'host-1'}})
     }
   })
 
@@ -755,6 +801,7 @@ describe('runServerSetup - failure path', () => {
       expect(result.error).toContain('fatal: [203.0.113.10]: FAILED!')
       expect(result.error).toContain('E: Unable to locate package docker-ce')
       expect(result.data).toEqual({
+      serverSetupLocalTermination: {processClosed: true, executionId: 'exec-1', sshHostId: 'host-1'},
         stepResults: [
           { name: 'os_init : Update apt cache', status: 'ok', changed: true, message: 'os_init : Update apt cache completed' },
           { name: 'docker : Install Docker Engine and compose plugin', status: 'failed', changed: false, message: 'E: Unable to locate package docker-ce' },
@@ -932,7 +979,7 @@ describe('runServerSetup - ansible-playbook timeout', () => {
     expect(result.success).toBe(false)
     if (!result.success) {
       expect(result.error.toLowerCase()).toContain('timed out')
-      expect(result.data).toBeUndefined()
+      expect(result.data).toEqual({serverSetupLocalTermination: {processClosed: true, executionId: 'exec-1', sshHostId: 'host-1'}})
     }
     const tmpDir = mockMkdtempSync.mock.results[0].value as string
     expect(mockRmSync).toHaveBeenCalledWith(tmpDir, { recursive: true, force: true })
@@ -970,7 +1017,7 @@ describe('runServerSetup - cancellation is not a timeout', () => {
   /** ProcessManager 経由で中断し、Node が返すのと同じ形の error でコールバックを呼ぶ。 */
   async function runAndCancel(errorMessage: string): Promise<string> {
     const kill = jest.fn()
-    mockExecFile.mockReturnValue({ kill })
+    mockExecFile.mockReturnValue(Object.assign(new EventEmitter(), {kill}))
     const client = makeClient()
     const runPromise = runServerSetup(makePayload(), { commandId: 'cmd-cancel', client })
     await flushUntilExecFileCalled()
@@ -1108,7 +1155,7 @@ describe('runServerSetup - ansible-playbook spawn failure', () => {
     expect(result.success).toBe(false)
     if (!result.success) {
       expect(result.error).toContain('ansible-playbook exited with code 1')
-      expect(result.data).toEqual({ stepResults: [] })
+      expect(result.data).toEqual({ stepResults: [], serverSetupLocalTermination: {processClosed: true, executionId: 'exec-1', sshHostId: 'host-1'} })
     }
   })
 })
@@ -2622,6 +2669,43 @@ describe('Sentry supervised execution', () => {
     const result = await pending
     expect(result.success).toBe(true)
     expect(JSON.parse(result.data as string).sentry).toMatchObject({settled: true, publicationState: 'pending'})
+    expect(result.serverSetupConfigurationCompletion).toEqual({executionId: 'exec-1', evidence: {kind: 'sentry-settled', sshHostId: 'host-1', runId: 'exec-1', settled: true, active: false}})
+  })
+
+  it.each([
+    {run_id: 'exec-1', settled: true},
+    {run_id: 'exec-1', settled: true, active: true},
+    {run_id: 'other-install', settled: true, active: false},
+    {run_id: 'exec-1', settled: false, active: false},
+  ])('rejects incomplete or mismatched authoritative evidence: %j', async remote => {
+    const pending = runServerSetup(makePayload({body: body()}), {commandId: 'sentry-2', client: makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(0, ansibleJsonOutput([{name: 'sentry : installation'}]))
+    await waitForProbe()
+    resolveExecFile(0, remoteOutput(remote))
+    expect((await pending).serverSetupConfigurationCompletion).toBeUndefined()
+  })
+
+  it('does not certify a settled remote when the main child never closed', async () => {
+    const pending = runServerSetup(makePayload({body: body()}), {commandId: 'sentry-no-close', client: makeClient()})
+    await flushUntilExecFileCalled()
+    mockExecFile.mock.calls.at(-1)!.at(-1)(Object.assign(new Error('kill EPERM'), {killed: true}), '', '')
+    await waitForProbe()
+    resolveExecFile(0, remoteOutput({run_id: 'exec-1', settled: true, active: false}))
+    const result = await pending
+    expect(result.serverSetupConfigurationCompletion).toBeUndefined()
+    expect(JSON.parse(result.data as string).serverSetupLocalTermination).toBeUndefined()
+  })
+
+  it('keeps a timed-out Sentry admission unresolved despite local close and a settled remote snapshot', async () => {
+    const pending = runServerSetup(makePayload({body: body()}), {commandId: 'sentry-timeout', client: makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFileWithError(Object.assign(new Error('timeout'), {killed: true, signal: 'SIGTERM'}))
+    await waitForProbe()
+    resolveExecFile(0, remoteOutput({run_id: 'exec-1', settled: true, active: false}))
+    const result = await pending
+    expect(result.serverSetupConfigurationCompletion).toBeUndefined()
+    expect(JSON.parse(result.data as string).serverSetupLocalTermination).toEqual({executionId: 'exec-1', sshHostId: 'host-1', processClosed: true})
   })
 
   it('keeps an unreachable remote outcome unresolved even after local success', async () => {
@@ -2632,6 +2716,7 @@ describe('Sentry supervised execution', () => {
     resolveExecFile(4, '')
     const result = await pending
     expect(JSON.parse(result.data as string).sentry).toEqual({settled: false, stopState: 'unconfirmed'})
+    expect(JSON.parse(result.data as string).serverSetupLocalTermination).toEqual({processClosed: true, executionId: 'exec-1', sshHostId: 'host-1'})
   })
 
   it.each(['stop', 'diagnose'])('preserves confirmed termination after standalone %s without allowing migration replay', async operation => {
@@ -2657,7 +2742,7 @@ describe('Sentry supervised execution', () => {
 
   it('polls an ECS stop request and confirms the remote installer stopped', async () => {
     const kill = jest.fn()
-    mockExecFile.mockReturnValue({kill})
+    mockExecFile.mockReturnValue(Object.assign(new EventEmitter(), {kill}))
     const client = makeClient()
     const control = jest.fn().mockResolvedValue({stopRequested: true})
     Object.assign(client, {getServerSetupControl: control})
@@ -2678,7 +2763,7 @@ describe('Sentry supervised execution', () => {
 
   it('ignores a late stop lookup after Ansible finishes and leaves the remote probe running', async () => {
     const kill = jest.fn()
-    mockExecFile.mockReturnValue({kill})
+    mockExecFile.mockReturnValue(Object.assign(new EventEmitter(), {kill}))
     let reply!: (value: {stopRequested: boolean}) => void
     const client = makeClient()
     Object.assign(client, {getServerSetupControl: jest.fn().mockImplementation(() => new Promise(resolve => {reply = resolve}))})
@@ -2697,7 +2782,7 @@ describe('Sentry supervised execution', () => {
     jest.useFakeTimers()
     try {
       const kill = jest.fn()
-      mockExecFile.mockReturnValue({kill})
+      mockExecFile.mockReturnValue(Object.assign(new EventEmitter(), {kill}))
       let reply!: (value: {stopRequested: boolean}) => void
       const control = jest.fn().mockRejectedValueOnce(new Error('temporary outage'))
         .mockImplementation(() => new Promise(resolve => {reply = resolve}))
@@ -2724,7 +2809,7 @@ describe('Sentry supervised execution', () => {
   })
 
   it('confirms remote cancellation without treating an interrupted migration as retryable', async () => {
-    mockExecFile.mockReturnValue({kill: jest.fn()})
+    mockExecFile.mockReturnValue(Object.assign(new EventEmitter(), {kill: jest.fn()}))
     const pending = runServerSetup(makePayload({body: body()}), {commandId: 'sentry-cancel', client: makeClient()})
     await flushUntilExecFileCalled()
     expect(cancelProcess('sentry-cancel')).toBe(true)

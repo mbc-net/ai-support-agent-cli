@@ -1,0 +1,14 @@
+---
+# Reads the local PostgreSQL start time and shared_preload_libraries into zn_pg_state.
+- name: "pg-state : Read the PostgreSQL start time and preload libraries"
+  ansible.builtin.command:
+    argv: [psql, -XAt, -c, SELECT pg_postmaster_start_time(), -c, SHOW shared_preload_libraries]
+  become_user: postgres
+  register: zn_pg_state_raw
+  changed_when: false
+
+- name: "pg-state : Store the PostgreSQL state"
+  ansible.builtin.set_fact:
+    zn_pg_state:
+      started: "{{ zn_pg_state_raw.stdout_lines[0] }}"
+      preload: "{{ zn_pg_state_raw.stdout_lines[1] | default('') }}"

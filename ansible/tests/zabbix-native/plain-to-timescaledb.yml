@@ -1,0 +1,71 @@
+---
+# An existing, populated non-TimescaleDB DB with zabbix_server_db_timescaledb: true must be
+# rejected by `database.py --plan` BEFORE timescaledb.yml touches PostgreSQL or APT
+# (design doc §4.1, test plan §7.1.4). Local PostgreSQL only.
+- name: "plain-to-timescaledb : Read the PostgreSQL state before"
+  ansible.builtin.include_tasks: pg-state.yml
+
+- name: "plain-to-timescaledb : Keep the state before"
+  ansible.builtin.set_fact:
+    zn_plain_before: "{{ zn_pg_state }}"
+
+- name: "plain-to-timescaledb : Run zabbix_server with TimescaleDB on the populated DB (must fail)"
+  block:
+    - name: "plain-to-timescaledb : Include zabbix_server with zabbix_server_db_timescaledb true"
+      ansible.builtin.include_role:
+        name: zabbix_server
+      vars:
+        zabbix_server_db_timescaledb: true
+
+    - name: "plain-to-timescaledb : Unexpected success"
+      ansible.builtin.fail:
+        msg: TimescaleDB on a populated non-TimescaleDB DB must fail.
+  rescue:
+    - name: "plain-to-timescaledb : Failed at the read-only plan check"
+      ansible.builtin.assert:
+        that:
+          - "'Fail if the DB state does not match the recipe' in ansible_failed_task.name"
+          - zabbix_server_db_plan.rc != 0
+        fail_msg: "Failed at {{ ansible_failed_task.name }}: {{ ansible_failed_result.msg | default('') }}"
+
+- name: "plain-to-timescaledb : Read the PostgreSQL state after"
+  ansible.builtin.include_tasks: pg-state.yml
+
+- name: "plain-to-timescaledb : Look for the Timescale repository, key and pin"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /etc/apt/sources.list.d/timescaledb.sources
+    - /etc/apt/keyrings/timescaledb.asc
+    - /etc/apt/preferences.d/ai-support-timescaledb
+  register: zn_plain_files
+
+- name: "plain-to-timescaledb : Look for TimescaleDB packages"
+  ansible.builtin.command:
+    argv: [bash, -c, "dpkg-query -W -f='${Package} ${Status}\\n' 'timescaledb-*' 2>/dev/null | grep ' installed$' || true"]
+  register: zn_plain_pkgs
+  changed_when: false
+
+- name: "plain-to-timescaledb : PostgreSQL was not restarted and nothing Timescale was added"
+  ansible.builtin.assert:
+    that:
+      - zn_pg_state.started == zn_plain_before.started
+      - zn_pg_state.preload == zn_plain_before.preload
+      - "'timescaledb' not in zn_pg_state.preload"
+      - zn_plain_files.results | selectattr('stat.exists') | list | length == 0
+      - zn_plain_pkgs.stdout | trim == ''
+    fail_msg: >-
+      started {{ zn_plain_before.started }} -> {{ zn_pg_state.started }},
+      preload {{ zn_plain_before.preload }} -> {{ zn_pg_state.preload }},
+      files {{ zn_plain_files.results | selectattr('stat.exists') | map(attribute='item') | list }},
+      packages {{ zn_plain_pkgs.stdout }}
+
+- name: "plain-to-timescaledb : Read the server service state"
+  ansible.builtin.command:
+    argv: [systemctl, is-active, zabbix-server]
+  register: zn_plain_active
+  changed_when: false
+
+- name: "plain-to-timescaledb : The existing server keeps running"
+  ansible.builtin.assert:
+    that: zn_plain_active.stdout == 'active'

@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto'
 import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios'
 
 import { AGENT_RELEASE_REQUEST_TIMEOUT_MS, AGENT_VERSION, API_BASE_DELAY_MS, API_ENDPOINTS, API_MAX_RETRIES, API_REQUEST_TIMEOUT, DEFAULT_API_URL, ENV_VARS, SERVER_SETUP_MAX_PROGRESS_EVENTS_PER_REQUEST } from './constants'
@@ -72,6 +73,7 @@ export class ApiClient {
    * command, so a replica whose assignment was revoked cannot write results or
    * fetch credentials with a stale generation.
    */
+  private readonly serverSetupInstances = new Map<string, string>()
   private readonly assignmentGenerations: Map<string, number>
 
   /**
@@ -347,10 +349,12 @@ export class ApiClient {
   async getCommand(commandId: string, agentId: string): Promise<AgentCommand> {
     this.validateCommandId(commandId)
     logger.debug(`Fetching command: ${commandId}`)
+    if (!this.serverSetupInstances.has(commandId)) this.serverSetupInstances.set(commandId, randomUUID())
     const command = await this.get<AgentCommand>(
       API_ENDPOINTS.COMMAND(this.tenantCode, commandId),
-      { params: { agentId } },
+      { params: { agentId }, headers: this.assignmentHeaders(commandId) },
     )
+    if (command.type !== 'server_setup_exec') this.serverSetupInstances.delete(commandId)
     // The server assigns exactly one replica to each command and returns the
     // assignment generation (a fencing token). Every later request for this
     // command must carry it back, so a replica that was re-assigned away
@@ -376,6 +380,16 @@ export class ApiClient {
   /** Forget a command's assignment generation (call when execution ends). */
   clearAssignment(commandId: string): void {
     this.assignmentGenerations.delete(commandId)
+    this.serverSetupInstances.delete(commandId)
+  }
+
+  getServerSetupInstanceId(commandId: string): string | undefined {
+    return this.serverSetupInstances.get(commandId)
+  }
+
+  /** Restore only the identity persisted with this execution's result. */
+  restoreServerSetupInstance(commandId: string, instanceId: string): void {
+    this.serverSetupInstances.set(commandId, instanceId)
   }
 
   /** The assignment generation currently held for a command, if any. */
@@ -404,11 +418,11 @@ export class ApiClient {
    * assigning — those keep the pre-assignment behaviour.
    */
   private assignmentHeaders(commandId: string): Record<string, string> {
-    if (!this.sendsReplicaIdentity) return {}
+    const instance = this.serverSetupInstances.get(commandId)
+    const headers: Record<string, string> = instance ? {'x-server-setup-instance-id': instance} : {}
     const generation = this.assignmentGenerations.get(commandId)
-    return generation === undefined
-      ? {}
-      : { 'x-agent-assignment-generation': String(generation) }
+    if (this.sendsReplicaIdentity && generation !== undefined) headers['x-agent-assignment-generation'] = String(generation)
+    return headers
   }
 
   /** Read stop requests using the same command ownership as credential lookups. */
@@ -518,11 +532,33 @@ export class ApiClient {
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting result for command: ${commandId}`)
+    const { e2eConfigurationCompletion, serverSetupConfigurationCompletion, ...wireResult } = result
     await this.postVoid(
       API_ENDPOINTS.COMMAND_RESULT(this.tenantCode, commandId),
-      result,
+      wireResult,
       { params: { agentId }, headers: this.assignmentHeaders(commandId) },
     )
+    if (serverSetupConfigurationCompletion) {
+      try {
+        const { data } = await this.client.post<{ success: boolean }>(
+          API_ENDPOINTS.SERVER_SETUP_CONFIGURATION_COMPLETE(this.tenantCode, commandId),
+          serverSetupConfigurationCompletion,
+          { params: { agentId }, headers: this.assignmentHeaders(commandId) },
+        )
+        if (data?.success !== true) throw new Error('Invalid acknowledgement')
+      } catch {
+        // The pending store retains the original result and proof. Do not expose ACK bodies.
+        throw new Error('Server setup configuration completion acknowledgement failed')
+      }
+    }
+    if (e2eConfigurationCompletion) {
+      try {
+        await this.completeE2eConfiguration(commandId, e2eConfigurationCompletion.executionId, agentId)
+      } catch {
+        // Keep the original result in the pending store. Never log ACK bodies.
+        throw new Error('E2E configuration completion acknowledgement failed')
+      }
+    }
   }
 
   async reportConnectionStatus(
@@ -643,13 +679,32 @@ export class ApiClient {
     return this.get<BrowserCredentials>(API_ENDPOINTS.BROWSER_CREDENTIALS(this.tenantCode), { params: { name } })
   }
 
-  async getE2eEnvironmentVariables(environmentId: string): Promise<Record<string, string>> {
-    logger.debug(`Fetching E2E environment variables for: ${environmentId}`)
-    const response = await this.get<E2eEnvironmentVariablesResponse>(
-      API_ENDPOINTS.E2E_ENV_VARIABLES(this.tenantCode),
-      { params: { environmentId } },
+  async getE2eEnvironmentVariables(commandId: string, agentId: string): Promise<Record<string, string>> {
+    const response = await this.getCommandScopedResource<E2eEnvironmentVariablesResponse>(
+      commandId, agentId, API_ENDPOINTS.E2E_ENV_VARIABLES(this.tenantCode, commandId),
+      `Fetching E2E environment variables for command: ${commandId}`,
     )
+    if (!response || !response.variables || typeof response.variables !== 'object' ||
+        Array.isArray(response.variables) || Object.values(response.variables).some(value => typeof value !== 'string')) {
+      throw new Error('Invalid E2E configuration response')
+    }
     return response.variables
+  }
+
+  async completeE2eConfiguration(commandId: string, executionId: string, agentId: string): Promise<void> {
+    this.validateCommandId(commandId)
+    try {
+      // Retry via the persisted result, after reconfirming terminal state. Do not
+      // pass response errors to generic retry logging (they may contain secrets).
+      const { data } = await this.client.post<{ completed: boolean }>(
+        API_ENDPOINTS.E2E_CONFIGURATION_COMPLETE(this.tenantCode, commandId),
+        { executionId },
+        { params: { agentId }, headers: this.assignmentHeaders(commandId) },
+      )
+      if (data?.completed !== true) throw new Error('Invalid acknowledgement')
+    } catch {
+      throw new Error('E2E configuration completion acknowledgement failed')
+    }
   }
 
   /**

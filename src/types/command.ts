@@ -28,6 +28,9 @@ export type AgentCommandType =
   | 'server_setup_cancel'
   | 'ssh_exec'
   | 'tls_cert_check'
+  | 'backup_inspect'
+  | 'backup_export'
+  | 'backup_verify'
 
 export type AgentCommandStatus =
   | 'PENDING'
@@ -52,9 +55,21 @@ export interface PendingCommand {
   createdAt: number
 }
 
-export type CommandResult =
+export type CommandResult = (
   | { success: true; data: unknown }
   | { success: false; error: string; data?: unknown }
+) & {
+  /** Internal agent proof: attached only after E2E child processes have closed.
+   * Persisted with pending results, stripped before submitting the result body. */
+  e2eConfigurationCompletion?: { executionId: string }
+  /** Runner-observed proof, persisted for retry but never part of the ordinary result. */
+  serverSetupConfigurationCompletion?: {
+    executionId: string
+    evidence:
+      | { kind: 'completed'; sshHostId: string; processClosed: true }
+      | { kind: 'sentry-settled'; sshHostId: string; runId: string; settled: true; active: false }
+  }
+}
 
 export function successResult(data: unknown): CommandResult {
   return { success: true, data }
@@ -184,3 +199,6 @@ export type CommandDispatch =
   | { type: 'server_setup_cancel'; payload: ServerSetupCancelPayload }
   | { type: 'ssh_exec'; payload: SshExecPayload }
   | { type: 'tls_cert_check'; payload: TlsCertCheckPayload }
+  | { type: 'backup_inspect'; payload: Record<string, unknown> }
+  | { type: 'backup_export'; payload: Record<string, unknown> }
+  | { type: 'backup_verify'; payload: Record<string, unknown> }

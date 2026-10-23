@@ -47,6 +47,7 @@ export type { PolicyContext }
 
 /** runClaudeCode のオプション */
 export interface RunClaudeCodeOptions {
+  onChildProcess?: (child: import('child_process').ChildProcess) => void
   message: string
   sendChunk: (type: ChatChunkType, content: string) => Promise<void>
   allowedTools?: string[]
@@ -139,6 +140,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): ClaudeCodeHandle {
       env,
       ...(cwd ? { cwd } : {}),
     })
+    options.onChildProcess?.(child)
 
     logger.debug(`[chat] claude CLI spawned (pid=${child.pid}, cmd=claude ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')})`)
 

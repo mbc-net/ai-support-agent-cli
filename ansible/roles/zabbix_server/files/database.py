@@ -3,6 +3,20 @@
 
 The caller supplies a root-only JSON credentials file, never argv credentials.
 Errors deliberately omit driver/CLI output, which can contain credentials/SQL.
+
+Modes (argv[2:]):
+  (none)         initialize an empty DB, then verify completion
+  --plan         read-only state check (no lock, no writes). Run before any
+                 PostgreSQL setting change or restart so that a wrong
+                 zabbix_server_db_timescaledb for an existing DB fails first
+  --verify-only  verify completion without initializing
+
+TimescaleDB (PostgreSQL only, design doc section 4.1): the packaged server.sql
+ends with its own COMMIT, so server.sql and the TimescaleDB script cannot share
+one psql --single-transaction. They are imported in two atomic steps instead,
+with the marker table TIMESCALE_MARKER created in the first step and dropped in
+the second. A failure in the second step leaves the marker, and the next run
+retries only the TimescaleDB step.
 """
 import gzip
 import hashlib
@@ -17,6 +31,17 @@ import tempfile
 
 class DatabaseSetupError(Exception):
     pass
+
+
+TIMESCALE_MARKER = '_ai_support_zabbix_timescaledb_pending'
+# Relative to the engine directory (/usr/share/zabbix-sql-scripts/postgresql).
+TIMESCALE_SCRIPTS = {'6.0': 'timescaledb.sql', '7.0': 'timescaledb/schema.sql'}
+# Hypertables both LTS scripts create. 7.0 also creates history_bin and auditlog;
+# the full expected set is always read from the packaged script.
+BASE_HYPERTABLES = {'history', 'history_uint', 'history_str', 'history_log', 'history_text', 'trends', 'trends_uint'}
+MANUAL_MIGRATION = ('Converting an existing Zabbix DB to TimescaleDB is not automated: stop Zabbix server and frontend, '
+                    'back up the DB, run CREATE EXTENSION timescaledb CASCADE as postgres and the packaged TimescaleDB '
+                    'script as the Zabbix DB user, then start Zabbix (see ZABBIX.md).')
 
 
 def lock_name(database):
@@ -60,6 +85,16 @@ def expected_tables(schema):
     return set(re.findall(r'CREATE\s+TABLE\s+["`]?([a-z_][a-z_0-9]*)', schema, re.IGNORECASE))
 
 
+def expected_hypertables(script):
+    return set(re.findall(r"create_hypertable\(\s*'(\w+)'", script))
+
+
+def read_sql(path):
+    opener = gzip.open if str(path).endswith('.gz') else open
+    with opener(path, 'rt', encoding='utf-8') as source:
+        return source.read()
+
+
 def inspect(connection, config, tables, importing=False):
     actual = table_names(connection, config['engine'])
     if not actual:
@@ -76,16 +111,79 @@ def inspect(connection, config, tables, importing=False):
             cursor.execute('SELECT COUNT(*) FROM ' + table)
             if cursor.fetchone()[0] < 1:
                 raise DatabaseSetupError('Initial DB seed data is missing. Inspect and restore the DB before retrying.')
-    return 'ready'
+    return 'timescaledb_pending' if config['engine'] == 'postgresql' and TIMESCALE_MARKER in actual else 'ready'
 
 
-def import_schema(config, schema):
+def timescale_info(connection):
+    """Read the TimescaleDB extension, license and hypertables. Read-only."""
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT extversion FROM pg_catalog.pg_extension WHERE extname='timescaledb'")
+        row = cursor.fetchone()
+        if row is None:
+            return {'extension': False, 'extversion': None, 'license': None, 'hypertables': set()}
+        # NULL instead of an error when the library is not loaded.
+        cursor.execute("SELECT current_setting('timescaledb.license', true)")
+        license_name = cursor.fetchone()[0]
+        cursor.execute("SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_schema='public'")
+        return {'extension': True, 'extversion': row[0], 'license': license_name,
+                'hypertables': {r[0] for r in cursor.fetchall()}}
+
+
+def db_extension(connection):
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT db_extension FROM config')
+        values = {row[0] or '' for row in cursor.fetchall()}
+    if len(values) != 1:
+        raise DatabaseSetupError('Unexpected Zabbix config rows. Inspect and restore the DB before retrying.')
+    return values.pop()
+
+
+def require_community(info):
+    if not info['extension']:
+        raise DatabaseSetupError('zabbix_server_db_timescaledb is true but the timescaledb extension does not exist in the Zabbix DB. '
+                                 'For an external DB, ask the DBA to run CREATE EXTENSION timescaledb (Community edition) in it first.')
+    if info['license'] != 'timescale':
+        raise DatabaseSetupError('The TimescaleDB extension is not the Community edition (timescaledb.license is not timescale). '
+                                 'The Apache edition has no compression and is not supported by this role.')
+
+
+def classify_timescale(connection, state, info, expected):
+    """Return 'plain' or 'timescaledb' for an initialized PostgreSQL DB, or raise."""
+    extension_name = db_extension(connection)
+    hypertables = info['hypertables']
+    if state == 'timescaledb_pending':
+        if extension_name or hypertables:
+            raise DatabaseSetupError('An interrupted TimescaleDB initialization left an inconsistent DB. Inspect and restore the DB before retrying.')
+        return 'pending'
+    if not extension_name and not hypertables:
+        return 'plain'
+    if extension_name == 'timescaledb' and not info['extension']:
+        raise DatabaseSetupError('config.db_extension is timescaledb but the timescaledb extension is missing. Restore the extension or the DB before retrying.')
+    if extension_name == 'timescaledb' and expected().issubset(hypertables):
+        return 'timescaledb'
+    raise DatabaseSetupError('Incomplete or inconsistent TimescaleDB setup (config.db_extension and hypertables do not match). '
+                             'Inspect and restore the DB manually before retrying.')
+
+
+def check_policy(kind, info, want):
+    """Apply the design's decision table to an initialized DB."""
+    if kind == 'plain' and want:
+        raise DatabaseSetupError('zabbix_server_db_timescaledb is true but the DB already holds a regular (non-TimescaleDB) Zabbix schema. '
+                                 + MANUAL_MIGRATION)
+    if kind in ('timescaledb', 'pending') and not want:
+        raise DatabaseSetupError('The DB is a TimescaleDB Zabbix DB (or an interrupted TimescaleDB initialization). '
+                                 'Set zabbix_server_db_timescaledb: true; disabling TimescaleDB is not supported by this role.')
+    if want:
+        require_community(info)
+
+
+def import_sql(config, sql_text):
     # CLI clients perform SQL parsing. Do not split scripts on semicolons:
     # MySQL triggers and routines contain delimiters of their own.
     with tempfile.TemporaryDirectory(prefix='ai-support-zabbix-db-') as directory:
         credentials = Path(directory) / 'credentials'
-        sql = Path(directory) / 'server.sql'
-        sql.write_text(schema, encoding='utf-8')
+        sql = Path(directory) / 'import.sql'
+        sql.write_text(sql_text, encoding='utf-8')
         sql.chmod(0o600)
         env = os.environ.copy()
         if config['engine'] == 'postgresql':
@@ -114,38 +212,91 @@ def import_schema(config, schema):
             raise DatabaseSetupError('SQL import failed. Check DB privileges and SQL compatibility; MySQL also requires log_bin_trust_function_creators=1 when binary logging is enabled. Inspect/restore the DB before retrying.')
 
 
-def bootstrap(config, schema_path, verify_only=False):
+def import_schema(config, schema):
+    import_sql(config, schema)
+
+
+def bootstrap(config, schema_path, verify_only=False, plan=False):
     connection = None
+    want = bool(config.get('timescaledb', False))
+    script_cache = {}
+
+    def timescale_script():
+        if 'text' not in script_cache:
+            path = Path(schema_path).parent / TIMESCALE_SCRIPTS[config['version']]
+            try:
+                script_cache['text'] = read_sql(path)
+            except OSError:
+                raise DatabaseSetupError('The packaged TimescaleDB SQL script is missing.') from None
+            if not BASE_HYPERTABLES.issubset(expected_hypertables(script_cache['text'])):
+                raise DatabaseSetupError('The packaged TimescaleDB SQL script does not create the expected hypertables.')
+        return script_cache['text']
+
+    def expected():
+        return expected_hypertables(timescale_script())
+
     try:
-        with gzip.open(schema_path, 'rt', encoding='utf-8') as source:
-            schema = source.read()
+        if want and config['engine'] != 'postgresql':
+            raise DatabaseSetupError('zabbix_server_db_timescaledb requires PostgreSQL.')
+        schema = read_sql(schema_path)
         tables = expected_tables(schema)
         if not {'dbversion', 'users', 'config', 'hosts', 'items'}.issubset(tables):
             raise DatabaseSetupError('The packaged SQL script is not a complete Zabbix server schema.')
+        if want:
+            timescale_script()
         connection = connect(config)
-        with connection.cursor() as cursor:
-            if config['engine'] == 'postgresql':
-                cursor.execute('SELECT pg_try_advisory_lock(hashtext(%s))', (lock_name(config['database']),))
-            else:
-                cursor.execute('SELECT GET_LOCK(%s, 0)', (lock_name(config['database']),))
-            if not cursor.fetchone()[0]:
-                raise DatabaseSetupError('Another Zabbix DB setup is running. Retry after it completes.')
+        if not plan:
+            with connection.cursor() as cursor:
+                if config['engine'] == 'postgresql':
+                    cursor.execute('SELECT pg_try_advisory_lock(hashtext(%s))', (lock_name(config['database']),))
+                else:
+                    cursor.execute('SELECT GET_LOCK(%s, 0)', (lock_name(config['database']),))
+                if not cursor.fetchone()[0]:
+                    raise DatabaseSetupError('Another Zabbix DB setup is running. Retry after it completes.')
         state = inspect(connection, config, tables)
-        if state == 'ready':
-            return {'changed': False, 'state': state}
+        info = timescale_info(connection) if config['engine'] == 'postgresql' else None
+        result = {'changed': False, 'state': state, 'timescaledb': want}
+        if info is not None:
+            result.update(extversion=info['extversion'], license=info['license'])
+
+        if state != 'empty' and info is not None:
+            check_policy(classify_timescale(connection, state, info, expected), info, want)
+        elif state == 'empty' and want and info['extension']:
+            # In local mode the extension is created after --plan; check it early when it already exists.
+            require_community(info)
+
+        if plan or state == 'ready':
+            return result
         if verify_only:
-            raise DatabaseSetupError('The DB is empty; it has not been initialized.')
-        if config['engine'] == 'mysql':
-            # DDL cannot roll back. A marker also catches failures AFTER the
-            # dbversion/seed rows have been written, including final SQL errors.
-            with connection.cursor() as cursor:
-                cursor.execute('CREATE TABLE _ai_support_zabbix_import (id integer)')
-        import_schema(config, schema)
-        inspect(connection, config, tables, importing=True)
-        if config['engine'] == 'mysql':
-            with connection.cursor() as cursor:
-                cursor.execute('DROP TABLE _ai_support_zabbix_import')
-        return {'changed': True, 'state': 'ready'}
+            raise DatabaseSetupError('The DB is empty; it has not been initialized.' if state == 'empty'
+                                     else 'The TimescaleDB initialization has not completed.')
+        if want:
+            require_community(info)
+        if state == 'empty':
+            if config['engine'] == 'mysql':
+                # DDL cannot roll back. A marker also catches failures AFTER the
+                # dbversion/seed rows have been written, including final SQL errors.
+                with connection.cursor() as cursor:
+                    cursor.execute('CREATE TABLE _ai_support_zabbix_import (id integer)')
+            # PostgreSQL: one transaction, so a failure leaves an empty DB. With
+            # TimescaleDB the marker is committed together with the schema.
+            import_schema(config, ('CREATE TABLE ' + TIMESCALE_MARKER + ' (id integer);\n' if want else '') + schema)
+            inspect(connection, config, tables, importing=True)
+            if config['engine'] == 'mysql':
+                with connection.cursor() as cursor:
+                    cursor.execute('DROP TABLE _ai_support_zabbix_import')
+        if want:
+            # The TimescaleDB script has no transaction statements of its own,
+            # so it and the marker removal commit (or roll back) together.
+            import_sql(config, timescale_script() + '\n;\nDROP TABLE ' + TIMESCALE_MARKER + ';\n')
+            if inspect(connection, config, tables) != 'ready':
+                raise DatabaseSetupError('The TimescaleDB initialization did not complete. Inspect the DB before retrying.')
+            info = timescale_info(connection)
+            if classify_timescale(connection, 'ready', info, expected) != 'timescaledb':
+                raise DatabaseSetupError('The TimescaleDB initialization did not create the expected hypertables. Inspect the DB before retrying.')
+            result.update(extversion=info['extversion'], license=info['license'])
+        result.update(changed=True, state='ready')
+        return result
     except DatabaseSetupError:
         raise
     except Exception:
@@ -153,7 +304,7 @@ def bootstrap(config, schema_path, verify_only=False):
     finally:
         if connection is not None:
             try:
-                if config['engine'] == 'mysql':
+                if config['engine'] == 'mysql' and not plan:
                     with connection.cursor() as cursor:
                         cursor.execute('SELECT RELEASE_LOCK(%s)', (lock_name(config['database']),))
             except Exception:
@@ -168,7 +319,7 @@ if __name__ == '__main__':
     try:
         config = json.loads(Path(sys.argv[1]).read_text())
         schema_path = '/usr/share/zabbix-sql-scripts/' + ('postgresql' if config['engine'] == 'postgresql' else 'mysql') + '/server.sql.gz'
-        print(json.dumps(bootstrap(config, schema_path, '--verify-only' in sys.argv[2:])))
+        print(json.dumps(bootstrap(config, schema_path, '--verify-only' in sys.argv[2:], '--plan' in sys.argv[2:])))
     except Exception as error:
         message = str(error) if isinstance(error, DatabaseSetupError) else 'DB setup failed; check the root-only credentials file and packaged SQL script.'
         print(message, file=sys.stderr)

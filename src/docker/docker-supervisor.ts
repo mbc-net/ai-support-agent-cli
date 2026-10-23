@@ -30,8 +30,6 @@ import {
   DOCKER_MARKER_CUSTOMIZATION_HASH,
   DOCKER_MARKER_REBUILD_NEEDED,
   DOCKER_MARKER_REGISTERED_AGENT_ID,
-  DOCKER_MAX_LOG_CHUNK_BYTES,
-  DOCKER_MAX_SESSION_LOG_BYTES,
   DOCKER_RESTART_EXIT_CODE,
   DOCKER_UPDATE_EXIT_CODE,
   SHUTDOWN_GRACE_PERIOD_SECONDS,
@@ -42,8 +40,9 @@ import { removePidFile } from '../pid-manager'
 import { projectKey as toProjectKey } from '../project-key'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
-import { appendWithLimit, atomicWriteFile, getErrorMessage } from '../utils'
+import { atomicWriteFile, getErrorMessage } from '../utils'
 import { readMarkerFile } from '../utils/marker-file'
+import { DockerLogBuffer } from './docker-log-buffer'
 import { CONTAINER_START_ARGV, buildDockerUserArgs } from './docker-args'
 import type { DockerRunOptions } from './docker-runner'
 import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, resolveImageTag, getDockerPath } from './docker-utils'
@@ -428,10 +427,6 @@ export class DockerSupervisor {
     const projectApiClient = this.createProjectApiClient(project)
     if (projectApiClient) {
       const sessionId = makeSessionId()
-      let seq = 0
-      let fullLog = ''
-      let logTruncated = false
-      let buf = ''
       const apiClient = projectApiClient
       const supervisor = this
       const getAgentId = (): string => supervisor.getProjectAgentId(project) ?? ''
@@ -456,41 +451,27 @@ export class DockerSupervisor {
         // Directory watch may fail if projectConfigHostDir doesn't exist yet — ignore
       }
 
-      const flush = async (): Promise<void> => {
-        if (!buf) return
-        const text = buf
-        buf = ''
-        if (!logTruncated) {
-          const appended = appendWithLimit(fullLog, text, DOCKER_MAX_SESSION_LOG_BYTES)
-          fullLog = appended.result
-          if (appended.truncated) {
-            logTruncated = true
-            logger.warn(`[docker] Container log for ${key} exceeded 2 MB limit; remaining output will not be saved to S3`)
-          }
-        }
-        // 1 フラッシュのテキストが API 上限を超える場合は分割して送信
-        for (let offset = 0; offset < text.length; offset += DOCKER_MAX_LOG_CHUNK_BYTES) {
-          const slice = text.slice(offset, offset + DOCKER_MAX_LOG_CHUNK_BYTES)
-          await apiClient.submitLogChunk({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, seq: ++seq, text: slice })
-            .catch((e: unknown) => logger.warn(`[docker] log chunk failed: ${e}`))
-        }
-      }
+      const logBuffer = new DockerLogBuffer(
+        () => logger.warn(`[docker] Container log for ${key} exceeded 2 MB limit; remaining output will not be saved to S3`),
+        (seq, text) => apiClient.submitLogChunk({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, seq, text })
+          .catch((e: unknown) => logger.warn(`[docker] log chunk failed: ${e}`)),
+      )
 
-      const flushTimer = setInterval(() => { void flush() }, DOCKER_LOG_FLUSH_INTERVAL_MS).unref()
+      const flushTimer = setInterval(() => { void logBuffer.flush() }, DOCKER_LOG_FLUSH_INTERVAL_MS).unref()
 
       const writeStdout = makeLinePrefixer(logPrefix, (s) => process.stdout.write(s))
       const writeStderr = makeLinePrefixer(logPrefix, (s) => process.stderr.write(s))
-      child.stdout?.on('data', (d: Buffer) => { const t = d.toString(); writeStdout(t); buf += t })
-      child.stderr?.on('data', (d: Buffer) => { const t = d.toString(); writeStderr(t); buf += t })
+      child.stdout?.on('data', (d: Buffer) => { const t = d.toString(); writeStdout(t); logBuffer.append(t) })
+      child.stderr?.on('data', (d: Buffer) => { const t = d.toString(); writeStderr(t); logBuffer.append(t) })
 
       child.on('close', () => {
         registeredIdWatcher.close()
         clearInterval(flushTimer)
         void (async () => {
           try {
-            await flush()
-            if (fullLog) {
-              await apiClient.saveSessionLog({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, content: fullLog })
+            await logBuffer.flush()
+            if (logBuffer.content) {
+              await apiClient.saveSessionLog({ agentId: getAgentId(), projectCode: project.projectCode, logType: 'container', sessionId, content: logBuffer.content })
                 .catch((e: unknown) => logger.warn(`[docker] S3 upload failed: ${e}`))
             }
           } catch /* istanbul ignore next */ {

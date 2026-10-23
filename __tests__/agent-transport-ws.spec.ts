@@ -68,7 +68,7 @@ function createMockDeps(overrides?: Partial<TransportDeps>): TransportDeps {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn(),
-      getAssignmentGeneration: jest.fn(),
+      getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
       clearAssignment: jest.fn(),
     } as unknown as TransportDeps['client'],
     agentId: 'agent-1',
@@ -553,7 +553,7 @@ describe('startHeartbeat', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn(),
         submitResult: jest.fn(),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -721,7 +721,7 @@ describe('processCommand の実行中判定（inFlightCommands から導出）',
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: { command: 'echo hello' } }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -752,6 +752,29 @@ describe('processCommand の実行中判定（inFlightCommands から導出）',
     expect(state.inFlightCommands.size).toBe(0)
   })
 
+  it.each(['backup_inspect', 'backup_export', 'backup_verify'])('does not log unvalidated backup payloads or result bodies (%s)', async (type) => {
+    const { executeCommand } = require('../src/commands')
+    const { logger } = require('../src/logger')
+    executeCommand.mockResolvedValue({ success: false, error: 'private-result-marker' })
+    const deps = createMockDeps({
+      client: {
+        getCommand: jest.fn().mockResolvedValue({ type, payload: { password: 'private-payload-marker' } }),
+        submitResult: jest.fn().mockResolvedValue(undefined),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(), clearAssignment: jest.fn(),
+      } as unknown as TransportDeps['client'],
+    })
+    const state = createMockState()
+    await handleNotification(deps, state, createMockCtx(state), {
+      id: 'n-backup', table: 't', pk: 'pk', sk: 'sk', tenantCode: 'test',
+      action: NOTIFICATION_ACTION.AGENT_COMMAND,
+      content: { commandId: 'cmd-backup', agentId: 'agent-1', tenantCode: 'test', projectCode: 'TEST_PROJ', type },
+    })
+    expect(executeCommand).toHaveBeenCalled()
+    const logs = JSON.stringify(logger.debug.mock.calls)
+    expect(logs).not.toContain('private-payload-marker')
+    expect(logs).not.toContain('private-result-marker')
+  })
+
   it('forces the Marketplace tool policy from the trusted Slack command userId', async () => {
     const { executeCommand } = require('../src/commands')
     const deps = createMockDeps({
@@ -769,7 +792,7 @@ describe('processCommand の実行中判定（inFlightCommands から導出）',
           },
         }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -813,7 +836,7 @@ describe('processCommand の実行中判定（inFlightCommands から導出）',
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -891,7 +914,7 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'e2e_test', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -905,6 +928,7 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
       capturedOptions = options
       // Exercise the callbacks exactly as e2e-test-executor.ts would.
       await options.getOrCreateBrowserSession?.('e2e-exec-1')
+      state.vsCodeWs = undefined
       await options.closeBrowserSession?.('e2e-exec-1')
       return { success: true, data: 'ok' }
     })
@@ -930,7 +954,8 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
     expect(mockVsCodeWs.openLiveViewSession).toHaveBeenCalledTimes(1)
     expect(mockVsCodeWs.openLiveViewSession).toHaveBeenCalledWith('e2e-exec-1')
     expect(mockVsCodeWs.browserSessionManager.close).toHaveBeenCalledTimes(1)
-    expect(mockVsCodeWs.browserSessionManager.close).toHaveBeenCalledWith('e2e-exec-1')
+    expect(mockVsCodeWs.browserSessionManager.getOrCreate).toHaveBeenCalledWith('e2e-exec-1', true)
+    expect(mockVsCodeWs.browserSessionManager.close).toHaveBeenCalledWith('e2e-exec-1', true)
   })
 
   it('should pass undefined getOrCreateBrowserSession/closeBrowserSession when vsCodeWs is not connected', async () => {
@@ -941,7 +966,7 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'e2e_test', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -997,7 +1022,7 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'e2e_test', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1045,7 +1070,7 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'e2e_test', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1143,7 +1168,7 @@ describe('handleNotification: agent-log and unknown actions', () => {
       getPendingCommands: jest.fn().mockResolvedValue([]),
       getCommand: jest.fn(),
       submitResult: jest.fn(),
-      getAssignmentGeneration: jest.fn(),
+      getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
       clearAssignment: jest.fn(),
       getPendingAlerts: jest.fn().mockResolvedValue({ items: [], total: 0 }),
       getAlert: jest.fn().mockResolvedValue(null),
@@ -1285,7 +1310,7 @@ describe('startSubscriptionMode', () => {
         getPendingCommands,
         getCommand: jest.fn(),
         submitResult: jest.fn(),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1381,7 +1406,7 @@ describe('startSubscriptionMode', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn(),
         submitResult: jest.fn(),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1425,7 +1450,7 @@ describe('startSubscriptionMode', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1469,7 +1494,7 @@ describe('startHeartbeat: configHash mismatch triggers sync', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn(),
         submitResult: jest.fn(),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1509,7 +1534,7 @@ describe('startHeartbeat: configHash mismatch triggers sync', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn(),
         submitResult: jest.fn(),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1550,7 +1575,7 @@ describe('startHeartbeat: configHash mismatch triggers sync', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn(),
         submitResult: jest.fn(),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1822,7 +1847,7 @@ describe('handleNotification: agent-command filtering branches', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1887,7 +1912,7 @@ describe('checkPendingCommands', () => {
         ]),
         getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1914,7 +1939,7 @@ describe('checkPendingCommands', () => {
         ]),
         getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1937,7 +1962,7 @@ describe('checkPendingCommands', () => {
         getPendingCommands: jest.fn().mockRejectedValue(new Error('network failure')),
         getCommand: jest.fn(),
         submitResult: jest.fn(),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -1986,7 +2011,7 @@ describe('graceful shutdown drain: draining=true short-circuits command intake',
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -2023,7 +2048,7 @@ describe('graceful shutdown drain: draining=true short-circuits command intake',
         ]),
         getCommand: jest.fn(),
         submitResult: jest.fn(),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -2075,7 +2100,7 @@ describe('processCommand: submitResult failure in error handler (line 343)', () 
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
         submitResult: jest.fn().mockRejectedValue(new Error('submit also failed')),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -2232,7 +2257,7 @@ describe('startHeartbeat: activeChatMode undefined branch (line 119)', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn(),
         submitResult: jest.fn(),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -2319,7 +2344,7 @@ describe('handleNotification: null content branch (line 201)', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -2450,7 +2475,7 @@ describe('processCommand: failed result branches (lines 322-329)', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockResolvedValue({ type: 'shell', payload: {} }),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -2527,7 +2552,7 @@ describe('multi-replica behaviour', () => {
         // 409 = another replica of the same logical agent won the claim.
         getCommand: jest.fn().mockRejectedValue(httpError(409)),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -2584,7 +2609,7 @@ describe('multi-replica behaviour', () => {
           .mockResolvedValue([{ commandId: 'cmd-long', type: 'shell' }]),
         getCommand,
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -2618,7 +2643,7 @@ describe('multi-replica behaviour', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn().mockRejectedValue(httpError(500)),
         submitResult: jest.fn().mockResolvedValue(undefined),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
       } as unknown as TransportDeps['client'],
     })
@@ -2650,7 +2675,7 @@ describe('multi-replica behaviour', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn(),
         submitResult: jest.fn(),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
         getInstanceId: jest.fn().mockReturnValue('pod-a'),
       } as unknown as TransportDeps['client'],
@@ -2677,7 +2702,7 @@ describe('multi-replica behaviour', () => {
         getPendingCommands: jest.fn().mockResolvedValue([]),
         getCommand: jest.fn(),
         submitResult: jest.fn(),
-        getAssignmentGeneration: jest.fn(),
+        getAssignmentGeneration: jest.fn(), getServerSetupInstanceId: jest.fn(),
         clearAssignment: jest.fn(),
         getInstanceId: jest.fn().mockReturnValue('pod-a'),
       } as unknown as TransportDeps['client'],

@@ -14,6 +14,7 @@ import { ApiClient } from './api-client'
 import { executeCommand } from './commands'
 import { CONTAINER_WORKSPACE_ROOT, ONESHOT_ENV_VARS } from './constants'
 import { logger } from './logger'
+import { loadPendingResults, savePendingResult, removePendingResult } from './pending-result-store'
 import { type AgentCommand, type AgentCommandType, type CommandResult, errorResult } from './types'
 import { getErrorMessage } from './utils'
 
@@ -115,7 +116,24 @@ export async function runOneshot(env: NodeJS.ProcessEnv = process.env): Promise<
   client.setTenantCode(tenantCode)
   client.setProjectCode(projectCode)
 
+  let persistServerSetupResult = false
   const submit = async (result: CommandResult): Promise<boolean> => {
+    if (persistServerSetupResult) {
+      savePendingResult(commandId, agentId, result, apiBaseUrl, oneshotEnv.token, tenantCode, undefined, client.getServerSetupInstanceId(commandId))
+      // Retry the same result/proof, never the command. ECS task storage can be
+      // ephemeral, so perform bounded retries before giving up this container.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await client.submitResult(commandId, result, agentId)
+          removePendingResult(commandId)
+          return true
+        } catch {
+          // No response bodies or credentials in logs.
+        }
+      }
+      logger.error('[oneshot] Failed to submit server setup result; retained for recovery')
+      return false
+    }
     try {
       await client.submitResult(commandId, result, agentId)
       return true
@@ -123,6 +141,16 @@ export async function runOneshot(env: NodeJS.ProcessEnv = process.env): Promise<
       logger.error(`[oneshot] Failed to submit result: ${getErrorMessage(error)}`)
       return false
     }
+  }
+
+  const pending = loadPendingResults().find(item => item.commandId === commandId &&
+    item.agentId === agentId && item.tenantCode === tenantCode &&
+    item.apiUrl === apiBaseUrl && item.token === oneshotEnv.token)
+  if (pending) {
+    persistServerSetupResult = true
+    if (pending.serverSetupInstanceId) client.restoreServerSetupInstance(commandId, pending.serverSetupInstanceId)
+    const submitted = await submit(pending.result)
+    return submitted && pending.result.success ? 0 : 1
   }
 
   let command: AgentCommand
@@ -154,6 +182,7 @@ export async function runOneshot(env: NodeJS.ProcessEnv = process.env): Promise<
     payload.cwd = ONESHOT_DEFAULT_CWD
   }
 
+  persistServerSetupResult = command.type === 'server_setup_exec'
   logger.info(`[oneshot] Executing command: type=${command.type}`)
   const result = await executeCommand(command.type, payload, {
     commandId,

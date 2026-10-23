@@ -86,6 +86,10 @@ export class BrowserSession {
   private _lastFrameData: string | null = null
   private _currentDeviceId: string | null = null
   private closed = false
+  private strictClosure = false
+  private closureUnconfirmed = false
+  private closePromise?: Promise<void>
+  private pagePromise?: Promise<Page>
   private readonly onClosed?: () => void
   private pendingFileChooser: FileChooser | null = null
   /**
@@ -137,6 +141,17 @@ export class BrowserSession {
    * Get the current page, launching browser if needed.
    */
   async getPage(): Promise<Page> {
+    if (!this.strictClosure) return this.getPageInternal()
+    if (this.closed || this.closureUnconfirmed || this.closePromise) {
+      throw new Error('Browser session is closing or closed')
+    }
+    if (this.pagePromise) return this.pagePromise
+    const opening = this.getPageInternal()
+    this.pagePromise = opening
+    try { return await opening } finally { this.pagePromise = undefined }
+  }
+
+  private async getPageInternal(): Promise<Page> {
     this.resetIdleTimer()
 
     if (this.page) {
@@ -280,9 +295,27 @@ export class BrowserSession {
   /**
    * Close the browser and clean up resources.
    */
-  async close(): Promise<void> {
+  requireConfirmedClosure(): void {
+    this.strictClosure = true
+  }
+
+  async close(strict = false): Promise<void> {
+    if (strict) this.strictClosure = true
+    if (this.closePromise) return this.closePromise
+    if (this.strictClosure && this.closureUnconfirmed) throw new Error('Browser session closure is unconfirmed')
+    const closing = this.closeInternal()
+    this.closePromise = closing
+    try { await closing } finally { this.closePromise = undefined }
+  }
+
+  private async closeInternal(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    // A pending launch/context initialization must settle before closure can
+    // prove that no browser will appear after onClosed removes this session.
+    if (this.strictClosure && this.pagePromise) {
+      try { await this.pagePromise } catch { /* close any partially opened browser below */ }
+    }
     this.pendingFileChooser = null
     this.onFileChooser = null
     // Symmetric with onFileChooser: drop the focus-change callback so a closed
@@ -295,6 +328,11 @@ export class BrowserSession {
       try {
         await this.browser.close()
       } catch (error) {
+        if (this.strictClosure) {
+          this.closed = false
+          this.closureUnconfirmed = true
+          throw new Error('Browser session closure is unconfirmed')
+        }
         logger.debug(`[browser] Error closing browser: ${String(error)}`)
       }
       this.browser = null
@@ -733,7 +771,9 @@ export class BrowserSession {
     if (this.liveViewInterval) return
     this.idleTimer = setTimeout(() => {
       logger.debug('[browser] Idle timeout reached, closing browser')
-      void this.close()
+      void this.close().catch(() => {
+        logger.warn('[browser] Idle browser closure is unconfirmed')
+      })
     }, this.idleTimeoutMs)
   }
 

@@ -24,11 +24,115 @@
       - zabbix_web_listen_port | string is match('^[0-9]+\Z')
       - zabbix_web_listen_port | int > 0 and zabbix_web_listen_port | int < 65536
       - zabbix_web_type != 'apache' or zabbix_web_listen_port | int not in [80, 443]
+      # ufw の許可元（§3.6.1）。ufw.yml にも同じ検証があるが、パッケージ導入より前に
+      # 落とすためここでも検証する。`is boolean` で型まで見る（"yes" や null を通さない）。
+      - zabbix_web_ufw_manage is boolean
+      - zabbix_web_allow_no_sources is boolean
+      - >-
+        zabbix_web_allowed_sources is sequence and zabbix_web_allowed_sources is not string
+        and zabbix_web_allowed_sources is not mapping
+      - zabbix_web_allowed_sources | reject('string') | list | length == 0
+      # オクテット 0〜255（先頭ゼロなし）、プレフィックス 1〜32（/0 は全開放なので拒否）。
+      - >-
+        zabbix_web_allowed_sources
+        | reject('match', '^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}(/([1-9]|[12][0-9]|3[0-2]))?\Z')
+        | list | length == 0
+      # ホストビット付き CIDR（例 10.0.0.5/24）は拒否する。ufw は 10.0.0.0/24 に正規化して
+      # 保存するため、書いた範囲と開く範囲が食い違う。計算は下の vars（上の検証を通った値だけが届く）。
+      - zabbix_web_ufw_host_bit_sources | trim | length == 0
+      - not zabbix_web_ufw_manage or (zabbix_web_allowed_sources | length) > 0 or zabbix_web_allow_no_sources
+      # 管理者パスワード（§4.2）。`is string` で null / true を拒否する。空は「管理しない」。
+      # 'zabbix' は長さでも落ちるが、初期値を受け付けないことを明示するため残す。
+      - zabbix_web_admin_password is string
+      - >-
+        zabbix_web_admin_password | length == 0
+        or (zabbix_web_admin_password is match('^[\x20-\x7e]{8,72}\Z')
+        and zabbix_web_admin_password == zabbix_web_admin_password | trim
+        and zabbix_web_admin_password != 'zabbix')
+      - zabbix_web_admin_previous_password is string
+      - zabbix_web_admin_previous_password is match('^[\x20-\x7e]{0,72}\Z')
+      # ハウスキーピング（§4.2）。キーの allowlist と値の規則は下の task vars のリテラル
+      # （files/zabbix_api.py と同じ）。housekeeping.update は Super admin のみ実行できるため、
+      # 空でなければ管理者パスワードを要求する。
+      - zabbix_web_housekeeping is mapping
+      - zabbix_web_housekeeping_invalid | int == 0
+      - zabbix_web_housekeeping | length == 0 or zabbix_web_admin_password | length > 0
     fail_msg: >-
       Zabbix Web requires Ubuntu 22.04/24.04, package, LTS 6.0/7.0,
       nginx/apache, PostgreSQL/MySQL, a server name, a single-line printable ASCII
       DB password and valid connection ports. Configure the DB with zabbix_server
       first. Apache uses a dedicated Listen port; choose a free port other than 80/443.
+      zabbix_web_allowed_sources must be a list of IPv4 addresses or network-address CIDRs
+      (prefix 1-32; a CIDR with host bits set such as 10.0.0.5/24 is rejected, write
+      10.0.0.0/24), zabbix_web_ufw_manage and zabbix_web_allow_no_sources must be booleans,
+      and an empty zabbix_web_allowed_sources with zabbix_web_ufw_manage true needs
+      zabbix_web_allow_no_sources true.
+      zabbix_web_admin_password must be a string, either empty or 8-72 printable ASCII
+      characters without leading/trailing spaces and not the initial password zabbix;
+      zabbix_web_admin_previous_password must be a string of 0-72 printable ASCII characters.
+      zabbix_web_housekeeping must be a mapping of writable housekeeping keys only
+      (hk_events_mode, hk_events_trigger, hk_events_service, hk_events_internal,
+      hk_events_discovery, hk_events_autoreg, hk_services_mode, hk_services, hk_audit_mode,
+      hk_audit, hk_sessions_mode, hk_sessions, hk_history_mode, hk_history_global, hk_history,
+      hk_trends_mode, hk_trends_global, hk_trends, compression_status, compress_older;
+      db_extension and compression_availability are read-only). Mode, global and
+      compression_status values are 0 or 1 (integer or string, not boolean). Periods are
+      seconds or a number with an s/m/h/d/w suffix (no macros, y/M units or spaces):
+      retention periods 1d-25y, hk_history 0 or 1h-25y, hk_trends 0 or 1d-25y,
+      compress_older 7d-25y. A non-empty zabbix_web_housekeeping requires
+      zabbix_web_admin_password.
+  # assert の that は式しか書けず、要素ごとの算術（ホストビットの判定）はループ構文が要るため
+  # task vars で計算する。that の評価は先頭から順で最初の偽で止まり、task vars は参照時に
+  # 評価されるので、ここへ届くのはリスト・文字列・アドレス形式の検証を通った値だけである。
+  # この名前はレシピから上書きできないよう、ガードの予約内部変数に載せている。
+  vars:
+    zabbix_web_ufw_host_bit_sources: >-
+      {%- set out = [] -%}
+      {%- for src in zabbix_web_allowed_sources | select('search', '/') -%}
+      {%-   set o = src.split('/')[0].split('.') | map('int') | list -%}
+      {%-   if (o[0] * 16777216 + o[1] * 65536 + o[2] * 256 + o[3]) % (2 ** (32 - (src.split('/')[1] | int))) != 0 -%}
+      {%-     set _ = out.append(src) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out | join(',') }}
+    # 不正なハウスキーピング指定の件数（空文字キーも数えるため、名前の連結ではなく件数で返す）。zabbix_web_housekeeping is mapping を
+    # 通った値だけが届く。キーの allowlist（20 個）はここと files/zabbix_api.py のリテラルで持ち、
+    # vars/main.yml には置かない（レシピから上書きされ得るため。設計書 §6.1）。
+    # 期間の上限 25y は Zabbix と同じ 25 × 365 日（788400000 秒）。
+    zabbix_web_housekeeping_invalid: >-
+      {%- set mode_keys = ['hk_events_mode', 'hk_services_mode', 'hk_audit_mode', 'hk_sessions_mode',
+                           'hk_history_mode', 'hk_trends_mode', 'hk_history_global', 'hk_trends_global',
+                           'compression_status'] -%}
+      {%- set period_keys = {'hk_events_trigger': [86400, false], 'hk_events_service': [86400, false],
+                             'hk_events_internal': [86400, false], 'hk_events_discovery': [86400, false],
+                             'hk_events_autoreg': [86400, false], 'hk_services': [86400, false],
+                             'hk_audit': [86400, false], 'hk_sessions': [86400, false],
+                             'hk_history': [3600, true], 'hk_trends': [86400, true],
+                             'compress_older': [604800, false]} -%}
+      {%- set units = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 604800} -%}
+      {%- set out = [] -%}
+      {%- for key, value in zabbix_web_housekeeping.items() -%}
+      {%-   if key in mode_keys -%}
+      {%-     if value is boolean or not ((value is integer and value in [0, 1]) or (value is string and value in ['0', '1'])) -%}
+      {%-       set _ = out.append(key) -%}
+      {%-     endif -%}
+      {%-   elif key in period_keys -%}
+      {%-     set ns = namespace(secs=-1) -%}
+      {%-     if value is boolean -%}
+      {%-       set ns.secs = -1 -%}
+      {%-     elif value is integer -%}
+      {%-       set ns.secs = value -%}
+      {%-     elif value is string and value is match('^[0-9]{1,10}[smhdw]?\Z') -%}
+      {%-       set ns.secs = (value[:-1] | int) * units[value[-1]] if value[-1] in units else value | int -%}
+      {%-     endif -%}
+      {%-     if not ((period_keys[key][1] and ns.secs == 0) or (ns.secs >= period_keys[key][0] and ns.secs <= 788400000)) -%}
+      {%-       set _ = out.append(key) -%}
+      {%-     endif -%}
+      {%-   else -%}
+      {%-     set _ = out.append(key | string) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out | length }}
 
 - name: "zabbix_web : Read existing frontend and server package versions"
   ansible.builtin.command:
@@ -317,3 +421,42 @@
         state: absent
       when: zabbix_web_rollback_complete | default(false)
       # Keep the root-only backup if rollback itself failed, for manual recovery.
+
+# ufw 収束（設計書 §3.6 / §3.6.1）。フロントエンド設定のロールバック block の外・後に置く:
+#   * ufw の失敗はフロントエンド設定のロールバック対象ではない（設定は正常に反映済みで、
+#     巻き戻す理由が無い）。block の中に置くと ufw の失敗で正しい設定まで戻してしまう。
+#   * 管理者パスワードの変更（設計書 §4.2）は、この ufw より前に置く（下の api.yml）。
+#     初期パスワードのまま外部へ開けない順序にするため、ufw は main.yml の末尾に置く。
+#
+# 管理者パスワード・ハウスキーピング（設計書 §4.2）。ロールバック block の外・後に置く:
+#   * 失敗の原因は設定ファイルではなく、フロントエンド設定のロールバックで直る種類の失敗ではない
+#   * user.update は単一の API 呼び出しで部分的な状態が残らず、戻す先は初期パスワードになる
+# ufw より前に置くので、パスワード変更に失敗した実行では 8080 を新たに開けない。
+- name: "zabbix_web : Converge the admin password and housekeeping"
+  ansible.builtin.include_tasks: api.yml
+  when: zabbix_web_admin_password | length > 0 or zabbix_web_housekeeping | length > 0
+
+- name: "zabbix_web : Warn that the initial admin password may be exposed"
+  ansible.builtin.debug:
+    msg: >-
+      zabbix_web_admin_password is empty while zabbix_web_allowed_sources is set, so the
+      Zabbix frontend may be reachable with the initial Admin password. Set
+      zabbix_web_admin_password from an ANSIBLE# secret variable to manage it with this role.
+  when:
+    - zabbix_web_admin_password | length == 0
+    - zabbix_web_allowed_sources | length > 0
+
+- name: "zabbix_web : Warn that the web port is not opened by this role"
+  ansible.builtin.debug:
+    msg: >-
+      zabbix_web_allowed_sources is empty, so port {{ zabbix_web_listen_port }}/tcp
+      is NOT opened by this role (any rule this role opened earlier is closed). List the
+      operator networks in zabbix_web_allowed_sources; set zabbix_web_allow_no_sources: false
+      to make an empty list fail instead.
+  when:
+    - zabbix_web_ufw_manage | bool
+    - zabbix_web_allowed_sources | length == 0
+
+- name: "zabbix_web : Converge the firewall rules"
+  ansible.builtin.include_tasks: ufw.yml
+  when: zabbix_web_ufw_manage | bool

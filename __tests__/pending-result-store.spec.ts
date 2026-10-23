@@ -34,6 +34,50 @@ describe('pending-result-store', () => {
 
   const mockResult = { success: true as const, data: 'test output' }
 
+  it('keeps the original E2E result and completion proof after failed ACK, then replays both', async () => {
+    const result = { success: true as const, data: { status: 'passed' }, e2eConfigurationCompletion: { executionId: 'exec-1' } }
+    const submit = jest.fn().mockRejectedValueOnce(new Error('E2E configuration completion acknowledgement failed')).mockResolvedValueOnce(undefined)
+    MockApiClient.mockImplementation(() => ({ submitResult: submit, setTenantCode: jest.fn() }) as unknown as ApiClient)
+    savePendingResult('cmd-1', 'agent-1', result, 'http://api', 'tok', 'tenant-1')
+    await submitPendingResults()
+    const saved = JSON.parse(fs.readFileSync(path.join(tempDir, 'pending-results', 'cmd-1.json'), 'utf8'))
+    expect(saved.result).toEqual(result)
+    await submitPendingResults()
+    expect(submit).toHaveBeenNthCalledWith(1, 'cmd-1', result, 'agent-1')
+    expect(submit).toHaveBeenNthCalledWith(2, 'cmd-1', result, 'agent-1')
+    expect(fs.existsSync(path.join(tempDir, 'pending-results', 'cmd-1.json'))).toBe(false)
+  })
+
+  it('retains server setup proof and original assignment across restart and completion response loss', async () => {
+    const result = {success: true as const, data: 'done', serverSetupConfigurationCompletion: {
+      executionId: 'exec-1', evidence: {kind: 'completed' as const, sshHostId: 'host-1', processClosed: true as const},
+    }}
+    const submit = jest.fn().mockRejectedValueOnce(new Error('Server setup configuration completion acknowledgement failed')).mockResolvedValueOnce(undefined)
+    const restore = jest.fn()
+    MockApiClient.mockImplementation(() => ({submitResult: submit, setTenantCode: jest.fn(), restoreAssignment: restore}) as unknown as ApiClient)
+    savePendingResult('cmd-1', 'agent-1', result, 'http://api', 'tok', 'tenant-1', 7)
+    const original = loadPendingResults()[0]
+    await submitPendingResults()
+    expect(loadPendingResults()[0].result).toEqual(result)
+    await submitPendingResults()
+    expect(submit).toHaveBeenNthCalledWith(2, 'cmd-1', result, 'agent-1')
+    expect(MockApiClient).toHaveBeenLastCalledWith('http://api', 'tok', {instanceId: original.instanceId})
+    expect(restore).toHaveBeenCalledWith('cmd-1', 7)
+    expect(loadPendingResults()).toEqual([])
+  })
+
+  it('restores the unassigned setup instance without claiming a resident replica', async () => {
+    const submit = jest.fn().mockResolvedValue(undefined)
+    const restore = jest.fn()
+    MockApiClient.mockImplementation(() => ({submitResult: submit, setTenantCode: jest.fn(), restoreServerSetupInstance: restore}) as unknown as ApiClient)
+    savePendingResult('cmd-setup', 'agent-1', mockResult, 'http://api', 'tok', 'tenant-1', undefined, 'exec-instance-1')
+    expect(loadPendingResults()[0].serverSetupInstanceId).toBe('exec-instance-1')
+    await submitPendingResults()
+    expect(MockApiClient).toHaveBeenCalledWith('http://api', 'tok', {withoutReplicaIdentity: true})
+    expect(restore).toHaveBeenCalledWith('cmd-setup', 'exec-instance-1')
+    expect(submit).toHaveBeenCalledWith('cmd-setup', mockResult, 'agent-1')
+  })
+
   describe('savePendingResult', () => {
     it('should save a pending result file', () => {
       savePendingResult('cmd-1', 'agent-1', mockResult, 'http://api', 'tok', 'tenant-1')

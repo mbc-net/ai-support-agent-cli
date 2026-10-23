@@ -13,3 +13,34 @@ zabbix_web_db_port: "{{ 5432 if zabbix_web_db_type == 'postgresql' else 3306 }}"
 zabbix_web_db_name: zabbix
 zabbix_web_db_user: zabbix
 zabbix_web_db_password: ""
+
+# ufw で zabbix_web_listen_port（既定 8080/tcp）へ許可する送信元の IPv4 / CIDR リスト。
+# 接続元はブラウザでアクセスする運用者の端末・踏み台・リバースプロキシ。
+# ホスト名は ufw が受け付けないため不可。`/32` は付けても付けなくてもよい（ufw は
+# `a.b.c.d/32` を `a.b.c.d` として保存するため、ロールが `/32` を取り除いてから照合する）。
+# ホストビットが立った CIDR（例 10.0.0.5/24）は拒否する（10.0.0.0/24 と書くこと）。
+# 空リストは「このロールが開けたルールをすべて閉じる」であり、「ufw に触れない」ではない
+# （それは zabbix_web_ufw_manage: false）。
+zabbix_web_allowed_sources: []
+zabbix_web_ufw_manage: true
+# 空リスト ＋ ufw_manage: true を失敗させないための明示フラグ。zabbix_agent（既定 false）と
+# 既定が逆なのは既存レシピとの互換のため。zabbix_web はもともと ufw に触れず、ポート開放は
+# レシピ作成者が別途行う前提だった。既定を false にすると、変数を 1 つも足していない既存
+# レシピが次回の実行で失敗する（既存 API への必須フィールド追加と同じ破壊的変更）。
+# そのため既定は true とし、空リストのときは「8080 はこのロールでは開放されていない」と
+# 毎回 debug で警告する。新規レシピは false を明示して厳格にすること。
+zabbix_web_allow_no_sources: true
+
+# Zabbix の Admin ユーザーに設定するパスワード（設計書 §4.2）。ANSIBLE# の秘匿変数で渡すこと。
+# 空なら何もしない（既存レシピ互換。初期パスワードのまま残る）。印字可能 ASCII 8〜72 文字・
+# 前後空白なし・初期値以外。設定すると、新パスワード → zabbix_web_admin_previous_password →
+# 初期値の順でログインを試し、必要なら Zabbix API で変更する。ユーザー名と初期値はヘルパー内の
+# リテラルであり、変数では変えられない。
+zabbix_web_admin_password: ""
+# ローテーション用。いま有効なパスワード（変更前の値）を渡す。空なら試さない。
+zabbix_web_admin_previous_password: ""
+# Zabbix のハウスキーピング設定（housekeeping API）のうち、変更したいキーだけを書く辞書。
+# 空なら何もしない。書けるキーは 20 個（tasks/main.yml の assert と files/zabbix_api.py に
+# 同じリテラルがある）。空でなければ zabbix_web_admin_password が必須。
+#   例: {hk_history_global: 1, hk_history: 90d, hk_trends_global: 1, hk_trends: 365d}
+zabbix_web_housekeeping: {}

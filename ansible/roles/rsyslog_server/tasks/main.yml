@@ -125,6 +125,15 @@
       # （rsyslog の $AllowedSender も IPv4 の /0 を受け付けない）。意味で検証する。
       - item.split('/')[0].split('.') | map('int') | select('>', 255) | list | length == 0
       - (item.split('/') | length == 1) or ((item.split('/')[1] | int) >= 1 and (item.split('/')[1] | int) <= 32)
+      # ホストビット付き CIDR（例 10.0.0.5/24）は拒否する。ufw は 10.0.0.0/24 に正規化して
+      # 保存するため、書いた範囲と開く範囲が食い違う（tasks/ufw.yml 冒頭のコメント参照）。
+      - >-
+        (item.split('/') | length == 1)
+        or ((item.split('/')[0].split('.')[0] | int) * 16777216
+            + (item.split('/')[0].split('.')[1] | int) * 65536
+            + (item.split('/')[0].split('.')[2] | int) * 256
+            + (item.split('/')[0].split('.')[3] | int))
+           % (2 ** (32 - (item.split('/')[1] | int))) == 0
     fail_msg: >-
       rsyslog_server_allowed_senders must contain IPv4 addresses or CIDRs only
       (got {{ item | to_json }}). Anything else is written verbatim into the

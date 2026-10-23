@@ -1,0 +1,67 @@
+---
+# 管理者パスワードとハウスキーピングを Zabbix API で収束させる（設計書 §4.2）。
+# main.yml がフロントエンド設定のロールバック block の外・後、かつ ufw より前で include する。
+#
+# パスワードは argv・環境変数に載せず、root 専用の一時ファイル（0600）経由でヘルパーへ渡す。
+# ヘルパーの実行は no_log（結果にパスワードが入り得るため）＋ ignore_errors で完走させ、
+# 直後の fail がパスワードを含まない stderr で失敗理由を出す（zabbix_server の DB 初期化と同じ形）。
+# ユーザー名 Admin と初期値はヘルパー内のリテラルであり、変数では差し替えられない。
+- name: "zabbix_web : Install the Zabbix API helper"
+  ansible.builtin.copy:
+    src: zabbix_api.py
+    dest: /usr/local/lib/ai-support-zabbix-api.py
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: "zabbix_web : Apply the admin password and housekeeping"
+  block:
+    - name: "zabbix_web : Create a private API credentials file"
+      ansible.builtin.tempfile:
+        state: file
+        prefix: ai-support-zabbix-api-
+      register: zabbix_web_api_credentials
+
+    # copy の content はモジュールの引数仕様で伏字化されるため no_log は付けない
+    # （付けると失敗理由だけが消える）。diff: false で差分表示も止める。
+    - name: "zabbix_web : Write API connection parameters"
+      ansible.builtin.copy:
+        content: >-
+          {{ {'port': zabbix_web_listen_port | int, 'server_name': zabbix_web_server_name,
+              'version': zabbix_web_version, 'password': zabbix_web_admin_password,
+              'previous_password': zabbix_web_admin_previous_password,
+              'housekeeping': zabbix_web_housekeeping} | to_json }}
+        dest: "{{ zabbix_web_api_credentials.path }}"
+        mode: "0600"
+      diff: false
+
+    - name: "zabbix_web : Set the admin password and housekeeping through the API"
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, /usr/local/lib/ai-support-zabbix-api.py, "{{ zabbix_web_api_credentials.path }}"]
+      register: zabbix_web_api_result
+      changed_when: "'\"changed\": true' in zabbix_web_api_result.stdout"
+      ignore_errors: true
+      no_log: true
+
+    - name: "zabbix_web : Fail if the API step did not complete (password-safe diagnostic)"
+      ansible.builtin.fail:
+        msg: >-
+          Zabbix API step failed (exit {{ zabbix_web_api_result.rc | default('unknown') }}).
+          {{ zabbix_web_api_result.stderr | default('') }}
+          {% if zabbix_web_api_result.rc | default(0) == 3 %}
+          Pass the current Admin password as zabbix_web_admin_previous_password, or set
+          zabbix_web_admin_password to empty to stop managing it with this role. Also check
+          that the Admin user is not disabled, deleted or temporarily blocked; every retry adds
+          failed logins, so fix the cause before running again.
+          {% elif zabbix_web_api_result.rc | default(0) == 4 %}
+          Try logging in with zabbix_web_admin_password before retrying; if it works, the next
+          run reports no change. Do not retry repeatedly, every retry adds failed logins.
+          {% endif %}
+      when: zabbix_web_api_result.rc | default(1) != 0
+
+  always:
+    - name: "zabbix_web : Remove API connection parameters"
+      ansible.builtin.file:
+        path: "{{ zabbix_web_api_credentials.path }}"
+        state: absent
+      when: zabbix_web_api_credentials.path is defined

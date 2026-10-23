@@ -81,6 +81,7 @@ function parseAgentChatModeOverride(value: unknown): AgentChatMode | undefined {
 
 /** Options for executeChatCommand */
 export interface ExecuteChatCommandOptions extends AgentExecutionContext {
+  onChildProcess?: (child: import('child_process').ChildProcess) => void
   payload: ChatPayload
   commandId: string
   client: ApiClient
@@ -147,7 +148,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
       case 'api':
         return executeApiChatCommand(payload, commandId, client, serverConfig, agentId, { projectDir, tenantCode })
       case 'codex': {
-        const result = await executeCliChat('codex', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, hasFallbackCandidate)
+        const result = await executeCliChat('codex', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, hasFallbackCandidate, options.onChildProcess)
         if (result.success || !isRuntimeUnavailable('codex', result) || !hasFallbackCandidate) return result
         const fallbackError = String(result.error ?? '')
         logger.warn(`[chat] codex unavailable, falling back to ${modes[i + 1]}: ${fallbackError}`)
@@ -156,7 +157,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
       }
       case 'claude_code':
       default: {
-        const result = await executeCliChat('claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, hasFallbackCandidate)
+        const result = await executeCliChat('claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, hasFallbackCandidate, options.onChildProcess)
         if (result.success || !isRuntimeUnavailable('claude_code', result) || !hasFallbackCandidate) return result
         const fallbackError = String(result.error ?? '')
         logger.warn(`[chat] claude_code unavailable, falling back to ${modes[i + 1]}: ${fallbackError}`)
@@ -166,7 +167,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
     }
   }
 
-  return lastResult ?? executeCliChat(mode === 'codex' ? 'codex' : 'claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort)
+  return lastResult ?? executeCliChat(mode === 'codex' ? 'codex' : 'claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, false, options.onChildProcess)
 }
 
 function resolveSlackMarketplaceModes(
@@ -256,6 +257,7 @@ async function executeCliChat(
   tenantCode?: string,
   browserLocalPort?: number,
   suppressRuntimeUnavailableError = false,
+  onChildProcess?: (child: import('child_process').ChildProcess) => void,
 ): Promise<CommandResult> {
   let lastResult: CommandResult = { success: false, error: 'Chat command failed after all retry attempts' }
 
@@ -266,7 +268,7 @@ async function executeCliChat(
     }
 
     const result = await executeCliChatOnce(
-      mode, payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, suppressRuntimeUnavailableError,
+      mode, payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, suppressRuntimeUnavailableError, onChildProcess,
     )
 
     if (result.success) return result
@@ -310,6 +312,7 @@ async function executeCliChatOnce(
   tenantCode?: string,
   browserLocalPort?: number,
   suppressRuntimeUnavailableError = false,
+  onChildProcess?: (child: import('child_process').ChildProcess) => void,
 ): Promise<CommandResult> {
   const message = parseString(payload.message)
   if (!message) {
@@ -504,6 +507,7 @@ async function executeCliChatOnce(
     logger.debug(`[chat] serverConfig.claudeCodeConfig: ${JSON.stringify(serverConfig?.claudeCodeConfig ?? null)}`)
     const conversationIdStr = conversationId ?? undefined
     const runnerOptions = {
+      onChildProcess,
       message: messageWithHistory,
       sendChunk,
       addDirs,
@@ -599,18 +603,7 @@ async function executeCliChatOnce(
     if (suppressRuntimeUnavailableError && isRuntimeUnavailableErrorMessage(mode, getErrorMessage(error))) {
       return errorResult(getErrorMessage(error))
     }
-    const failure = await handleChatError(error, commandId, 'chat', sendChunk)
-    // error チャンク自体の配信にも失敗した場合は、その事実を結果へ載せる。
-    // 載せないとリトライ除外（TERMINAL_CHUNK_UNDELIVERED_ERROR の一致）が効かず、
-    // LLM 実行とツールの副作用が丸ごと二重に走る（チャンク送信 API が広範囲に
-    // 失敗している状況では、成功パスだけでなくこの catch 経路も同時に踏む）。
-    // 元の例外も失わないよう併記する。
-    if (hasTerminalDeliveryFailure()) {
-      return errorResult(
-        `${TERMINAL_CHUNK_UNDELIVERED_ERROR} (元のエラー: ${getErrorMessage(error)})`,
-      )
-    }
-    return failure
+    return handleChatError(error, commandId, 'chat', sendChunk, hasTerminalDeliveryFailure)
   }
 }
 

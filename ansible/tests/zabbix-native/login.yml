@@ -1,0 +1,20 @@
+---
+# Logs in as Admin with zn_try_password through the frontend API.
+# Sets zn_login_ok (bool) and zn_login_token.
+- name: "login : Try an Admin login through the API"
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ zabbix_web_listen_port | default(8080) }}/api_jsonrpc.php"
+    method: POST
+    body_format: json
+    headers:
+      Host: "{{ zabbix_web_server_name }}"
+      Content-Type: application/json-rpc
+    body: {jsonrpc: "2.0", method: user.login, params: {username: Admin, password: "{{ zn_try_password }}"}, id: 1}
+  register: zn_login
+  no_log: true
+
+- name: "login : Record the login result"
+  ansible.builtin.set_fact:
+    zn_login_ok: "{{ 'result' in zn_login.json }}"
+    zn_login_token: "{{ zn_login.json.result | default('') }}"
+  no_log: true

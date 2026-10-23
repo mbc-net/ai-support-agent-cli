@@ -1,3 +1,4 @@
+import { EventEmitter } from 'events'
 import { executeE2eTest, type ExecuteE2eTestOptions } from '../../src/commands/e2e-test-executor'
 import * as chatExecutor from '../../src/commands/chat-executor'
 import * as playwrightTestRunner from '../../src/browser/playwright-test-runner'
@@ -32,11 +33,14 @@ const mockClient = {
   reportE2eTestStep: jest.fn(),
   getE2eEnvironmentVariables: jest.fn(),
   getE2eSupportFiles: jest.fn(),
+  completeE2eConfiguration: jest.fn(),
 } as any
 
 describe('e2e-test-executor', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    mockClient.completeE2eConfiguration.mockResolvedValue(undefined)
+    mockClient.getE2eEnvironmentVariables.mockReset().mockResolvedValue({})
     // Default: no shared support files registered for the project
     mockClient.getE2eSupportFiles.mockResolvedValue([])
   })
@@ -61,6 +65,133 @@ describe('e2e-test-executor', () => {
       project: { projectCode: 'MBC_01' },
     } as any,
   }
+
+  it('acknowledges completion after AI execution has settled', async () => {
+    let finish!: (value: any) => void
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const pending = executeE2eTest(baseOptions)
+    await new Promise(resolve => setImmediate(resolve))
+    expect(mockClient.completeE2eConfiguration).not.toHaveBeenCalled()
+    finish({ success: true, data: 'done' })
+    const result = await pending
+    expect(result.e2eConfigurationCompletion).toEqual({ executionId: 'exec-1' })
+    expect(mockClient.completeE2eConfiguration).not.toHaveBeenCalled()
+  })
+
+  it('does not acknowledge a detached or force-resolved child without close', async () => {
+    const child = Object.assign(new EventEmitter(), { pid: 1234 })
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockImplementationOnce(async options => {
+      options.onChildProcess(child)
+      return { success: true, data: 'returned before exit' }
+    })
+    const result = await executeE2eTest(baseOptions)
+    expect(result.success).toBe(false)
+    expect(mockClient.completeE2eConfiguration).not.toHaveBeenCalled()
+    expect(result.e2eConfigurationCompletion).toBeUndefined()
+  })
+
+  it.each(['kill', 'signal', 'killed'])('withholds proof after %s even when direct child closes', async cause => {
+    const child = Object.assign(new EventEmitter(), { pid: 1234, kill: jest.fn(() => true), killed: false })
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockImplementationOnce(async options => {
+      options.onChildProcess(child)
+      if (cause === 'kill') child.kill()
+      if (cause === 'killed') child.killed = true
+      child.emit('close', 0, cause === 'signal' ? 'SIGKILL' : null)
+      return { success: true, data: 'done' }
+    })
+    const result = await executeE2eTest(baseOptions)
+    expect(result.success).toBe(true)
+    expect(result.e2eConfigurationCompletion).toBeUndefined()
+  })
+
+  it('withholds proof when browser session closure fails', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValueOnce({ success: true, data: 'done' })
+    const result = await executeE2eTest({ ...baseOptions,
+      getOrCreateBrowserSession: jest.fn().mockResolvedValue(undefined),
+      closeBrowserSession: jest.fn().mockRejectedValue(new Error('secret close error')),
+    })
+    expect(result.success).toBe(true)
+    expect(result.e2eConfigurationCompletion).toBeUndefined()
+    expect(JSON.stringify(result)).not.toContain('secret')
+  })
+
+  it('keeps a failed AI attempt unconfirmed even when a retry succeeds', async () => {
+    const child = Object.assign(new EventEmitter(), { pid: 1234 })
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockImplementationOnce(async options => {
+      options.onChildProcess(child)
+      child.emit('close', 1, null)
+      return { success: true, data: 'retry passed' }
+    })
+    expect((await executeE2eTest(baseOptions)).e2eConfigurationCompletion).toBeUndefined()
+  })
+
+  it('withholds proof when an AI runner converts its exception to an error result', async () => {
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockResolvedValueOnce({ success: false, error: 'runner failed' })
+    expect((await executeE2eTest(baseOptions)).e2eConfigurationCompletion).toBeUndefined()
+  })
+
+  it('withholds proof when a runner throws after direct child close', async () => {
+    const child = Object.assign(new EventEmitter(), { pid: 1234 })
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockImplementationOnce(async options => {
+      options.onChildProcess(child)
+      child.emit('close', 1, null)
+      throw new Error('runner failed')
+    })
+    expect((await executeE2eTest(baseOptions)).e2eConfigurationCompletion).toBeUndefined()
+  })
+
+  it('withholds proof when Playwright produces no test results after close', async () => {
+    const child = Object.assign(new EventEmitter(), { pid: 1234 })
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockImplementationOnce(async options => {
+      options.onChildProcess(child)
+      child.emit('close', 1, null)
+      return { success: false, totalTests: 0, passedTests: 0, failedTests: 0, steps: [] }
+    })
+    const result = await executeE2eTest({ ...baseOptions, payload: { ...baseOptions.payload, executionMethod: 'playwright', playwrightScript: 'script' } })
+    expect(result.e2eConfigurationCompletion).toBeUndefined()
+  })
+
+  it('marks a closed child for acknowledgement after result submission', async () => {
+    const child = Object.assign(new EventEmitter(), { pid: 1234 })
+    ;(chatExecutor.executeChatCommand as jest.Mock).mockImplementationOnce(async options => {
+      options.onChildProcess(child)
+      child.emit('close', 0)
+      return { success: true, data: 'done' }
+    })
+    const result = await executeE2eTest(baseOptions)
+    expect(result.success).toBe(true)
+    expect(result.e2eConfigurationCompletion).toEqual({ executionId: 'exec-1' })
+    expect(mockClient.completeE2eConfiguration).not.toHaveBeenCalled()
+  })
+
+  it.each(['playwright', 'script', 'hybrid'])('requires actual child close in %s mode', async executionMethod => {
+    const child = Object.assign(new EventEmitter(), { pid: 1234 })
+    const fakeResult = { success: true, totalTests: 0, passedTests: 0, failedTests: 0, steps: [], results: [], totalSteps: 0, passed: 0, failed: 0 }
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockImplementationOnce(async options => {
+      options.onChildProcess(child)
+      return fakeResult
+    })
+    ;(playwrightTestRunner.runPlaywrightScript as jest.Mock).mockImplementationOnce(async (_script, _id, _dir, observe) => {
+      observe(child)
+      return fakeResult
+    })
+    const result = await executeE2eTest({ ...baseOptions, payload: { ...baseOptions.payload, executionMethod, playwrightScript: 'test script' } })
+    expect(result.success).toBe(false)
+    expect(result.e2eConfigurationCompletion).toBeUndefined()
+    ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockReset()
+    ;(playwrightTestRunner.runPlaywrightScript as jest.Mock).mockReset()
+  })
+
+  it.each(['ai', 'script', 'hybrid', 'playwright'])('blocks %s before any execution when admission is closed or old-generation', async executionMethod => {
+    mockClient.getE2eEnvironmentVariables.mockRejectedValueOnce(new Error('SECRET-old-generation'))
+    const result = await executeE2eTest({ ...baseOptions, payload: { ...baseOptions.payload, executionMethod, playwrightScript: 'test script' } })
+    expect(result.success).toBe(false)
+    expect(JSON.stringify(result)).not.toContain('SECRET-old-generation')
+    expect(result.e2eConfigurationCompletion).toEqual({ executionId: 'exec-1' })
+    expect(chatExecutor.executeChatCommand).not.toHaveBeenCalled()
+    expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).not.toHaveBeenCalled()
+    expect(playwrightTestRunner.runPlaywrightScript).not.toHaveBeenCalled()
+  })
 
   it('should return error if executionId is missing', async () => {
     const options = {
@@ -655,7 +786,7 @@ describe('e2e-test-executor', () => {
     expect(playwrightTestRunner.runPlaywrightScript).toHaveBeenCalledWith(
       'script content',
       'exec-1',
-      '/custom/project/dir',
+      '/custom/project/dir', expect.any(Function),
     )
   })
 
@@ -2121,7 +2252,7 @@ describe('e2e-test-executor', () => {
     )
   })
 
-  it('should pull environment variables by environmentId and forward them to runPlaywrightSubprocess as envVars', async () => {
+  it('should pull environment variables by commandId and forward them to runPlaywrightSubprocess as envVars', async () => {
     ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
       success: true,
       totalTests: 1,
@@ -2144,13 +2275,13 @@ describe('e2e-test-executor', () => {
 
     await executeE2eTest(options)
 
-    expect(mockClient.getE2eEnvironmentVariables).toHaveBeenCalledWith('env-1')
+    expect(mockClient.getE2eEnvironmentVariables).toHaveBeenCalledWith('cmd-1', 'agent-1')
     expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
       expect.objectContaining({ envVars: { API_KEY: 'abc123', STAGE: 'staging' } }),
     )
   })
 
-  it('should not pull and pass undefined envVars to runPlaywrightSubprocess when environmentId is not provided', async () => {
+  it('preflights command admission and passes empty envVars when environmentId is absent', async () => {
     ;(playwrightSubprocessExecutor.runPlaywrightSubprocess as jest.Mock).mockResolvedValue({
       success: true,
       totalTests: 1,
@@ -2171,9 +2302,9 @@ describe('e2e-test-executor', () => {
 
     await executeE2eTest(options)
 
-    expect(mockClient.getE2eEnvironmentVariables).not.toHaveBeenCalled()
+    expect(mockClient.getE2eEnvironmentVariables).toHaveBeenCalledWith('cmd-1', 'agent-1')
     expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).toHaveBeenCalledWith(
-      expect.objectContaining({ envVars: undefined }),
+      expect.objectContaining({ envVars: {} }),
     )
   })
 
@@ -2196,7 +2327,8 @@ describe('e2e-test-executor', () => {
 
     expect(result.success).toBe(false)
     if (!result.success) {
-      expect(result.error).toContain('KMS throttled')
+      expect(result.error).toContain('configuration admission')
+      expect(result.error).not.toContain('KMS throttled')
     }
     // The Playwright subprocess must not run when env variable pull fails.
     expect(playwrightSubprocessExecutor.runPlaywrightSubprocess).not.toHaveBeenCalled()
@@ -2207,13 +2339,12 @@ describe('e2e-test-executor', () => {
       'exec-1',
       expect.objectContaining({ status: 'error' }),
     )
-    // The pull-failure log must carry executionId and environmentId for triage.
+    // The pull-failure log must not contain arbitrary server error details.
     const pullFailureLog = errorSpy.mock.calls
       .map((call) => String(call[0]))
-      .find((msg) => msg.includes('Failed to fetch E2E environment variables'))
+      .find((msg) => msg.includes('configuration admission'))
     expect(pullFailureLog).toBeDefined()
-    expect(pullFailureLog).toContain('[exec-1]')
-    expect(pullFailureLog).toContain('environmentId=env-1')
+    expect(pullFailureLog).not.toContain('KMS throttled')
     errorSpy.mockRestore()
   })
 
@@ -2589,7 +2720,7 @@ describe('e2e-test-executor', () => {
     const result = await executeE2eTest(options)
 
     expect(result.success).toBe(true)
-    expect(mockClient.getE2eEnvironmentVariables).not.toHaveBeenCalled()
+    expect(mockClient.getE2eEnvironmentVariables).toHaveBeenCalledWith('cmd-1', 'agent-1')
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining("environmentId is only supported for executionMethod='playwright'"),
     )
@@ -2648,7 +2779,7 @@ describe('e2e-test-executor', () => {
 
     await executeE2eTest(options)
 
-    expect(mockClient.getE2eEnvironmentVariables).not.toHaveBeenCalled()
+    expect(mockClient.getE2eEnvironmentVariables).toHaveBeenCalledWith('cmd-1', 'agent-1')
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining("environmentId is only supported for executionMethod='playwright'"),
     )

@@ -12,14 +12,18 @@ export class BrowserSessionManager {
   /**
    * Get an existing session or create a new one.
    */
-  async getOrCreate(sessionId: string): Promise<BrowserSession> {
+  async getOrCreate(sessionId: string, strictClosure = false): Promise<BrowserSession> {
     const existing = this.sessions.get(sessionId)
-    if (existing) return existing
+    if (existing) {
+      if (strictClosure) existing.requireConfirmedClosure()
+      return existing
+    }
 
     const session = new BrowserSession(undefined, () => {
       this.removeSession(sessionId)
       logger.debug(`[browser-manager] Session self-closed and removed: ${sessionId}`)
     })
+    if (strictClosure) session.requireConfirmedClosure()
     this.sessions.set(sessionId, session)
     logger.debug(`[browser-manager] Session created: ${sessionId}`)
     return session
@@ -59,10 +63,10 @@ export class BrowserSessionManager {
   /**
    * Close and remove a session.
    */
-  async close(sessionId: string): Promise<void> {
+  async close(sessionId: string, strict = false): Promise<void> {
     const session = this.sessions.get(sessionId)
     if (!session) return
-    await session.close()
+    await session.close(strict)
     // onClosed callback handles removal from sessions and conversationMap
     logger.debug(`[browser-manager] Session closed: ${sessionId}`)
   }

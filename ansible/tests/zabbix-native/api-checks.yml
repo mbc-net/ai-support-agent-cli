@@ -1,0 +1,273 @@
+---
+# Admin password and housekeeping (design doc §4.2, test plan §7.1.4) against the real
+# frontend built by zabbix-native.yml. Runs the whole zabbix_web role each time, the way a
+# recipe would. Leaves the Admin password at zn_p2.
+#
+# Expected housekeeping changes are literals, not recomputed from housekeeping.get, so
+# the helper's own comparison is not used to judge itself:
+#   hk_audit           default 365d on 6.0 / 7.0 -> 30d: always changes
+#   hk_events_trigger  default 365d -> 365d: never changes
+#   hk_history         default 31d on 7.0, 90d on 6.0 -> 90d: changes on 7.0 only
+#   hk_history_global / hk_trends_global
+#                      default 0 -> 1, but the official TimescaleDB schema script already
+#                      sets both to 1: changes only on a non-TimescaleDB DB
+- name: "api : Read the TimescaleDB state of this run"
+  ansible.builtin.set_fact:
+    zn_api_timescaledb: "{{ zabbix_native_timescaledb | default(false) | bool }}"
+    zn_hk_desired:
+      hk_history_global: 1
+      hk_trends_global: "1"
+      hk_history: 90d
+      hk_audit: 2592000
+      hk_events_trigger: 365d
+
+- name: "api : The frontend API step was skipped without a password or housekeeping"
+  ansible.builtin.assert:
+    that: zabbix_web_api_result is not defined
+
+# --- Admin password -----------------------------------------------------------
+- name: "api : Set the admin password P1 from the initial password"
+  ansible.builtin.include_role:
+    name: zabbix_web
+  vars:
+    zabbix_web_admin_password: "{{ zn_p1 }}"
+
+- name: "api : The first apply changed the password"
+  ansible.builtin.assert:
+    that:
+      - zabbix_web_api_result.rc == 0
+      - zabbix_web_api_result.changed
+      - (zabbix_web_api_result.stdout | from_json).password_changed
+
+- name: "api : Log in with P1"
+  ansible.builtin.include_tasks: login.yml
+  vars:
+    zn_try_password: "{{ zn_p1 }}"
+
+- name: "api : P1 works"
+  ansible.builtin.assert:
+    that: zn_login_ok | bool
+
+- name: "api : Log in with Admin/zabbix"
+  ansible.builtin.include_tasks: login.yml
+  vars:
+    zn_try_password: zabbix
+
+- name: "api : The initial password is rejected"
+  ansible.builtin.assert:
+    that: not (zn_login_ok | bool)
+
+- name: "api : Re-apply P1"
+  ansible.builtin.include_role:
+    name: zabbix_web
+  vars:
+    zabbix_web_admin_password: "{{ zn_p1 }}"
+
+- name: "api : Re-applying the same password is not a change"
+  ansible.builtin.assert:
+    that:
+      - zabbix_web_api_result.rc == 0
+      - not zabbix_web_api_result.changed
+
+- name: "api : Log in with P1 for an out-of-band change"
+  ansible.builtin.include_tasks: login.yml
+  vars:
+    zn_try_password: "{{ zn_p1 }}"
+
+# Simulates an operator changing the password in the UI: the role no longer knows it.
+- name: "api : Change the password to a third value P3 out of band"
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ zabbix_web_listen_port | default(8080) }}/api_jsonrpc.php"
+    method: POST
+    body_format: json
+    headers:
+      Host: "{{ zabbix_web_server_name }}"
+      Content-Type: application/json-rpc
+      Authorization: "{{ 'Bearer ' ~ zn_login_token if zabbix_server_version == '7.0' else omit }}"
+    body: >-
+      {{ {'jsonrpc': '2.0', 'method': 'user.update', 'id': 2,
+          'params': {'userid': '1', 'passwd': zn_p3}
+                    | combine({'current_passwd': zn_p1} if zabbix_server_version == '7.0' else {})}
+         | combine({} if zabbix_server_version == '7.0' else {'auth': zn_login_token}) }}
+  register: zn_oob
+  no_log: true
+
+- name: "api : The out-of-band change worked"
+  ansible.builtin.assert:
+    that: "'result' in zn_oob.json"
+
+- name: "api : Apply P2 without the previous password (must fail with exit 3)"
+  block:
+    - name: "api : Include zabbix_web with P2 only"
+      ansible.builtin.include_role:
+        name: zabbix_web
+      vars:
+        zabbix_web_admin_password: "{{ zn_p2 }}"
+
+    - name: "api : Unexpected success"
+      ansible.builtin.fail:
+        msg: Applying P2 without zabbix_web_admin_previous_password must fail.
+  rescue:
+    - name: "api : Failed in the password-safe diagnostic with exit 3"
+      ansible.builtin.assert:
+        that:
+          - "'password-safe diagnostic' in ansible_failed_task.name"
+          - zabbix_web_api_result.rc == 3
+          - "'zabbix_web_admin_previous_password' in ansible_failed_result.msg"
+
+- name: "api : Apply P2 with the previous password P3"
+  ansible.builtin.include_role:
+    name: zabbix_web
+  vars:
+    zabbix_web_admin_password: "{{ zn_p2 }}"
+    zabbix_web_admin_previous_password: "{{ zn_p3 }}"
+
+- name: "api : The rotation changed the password"
+  ansible.builtin.assert:
+    that:
+      - zabbix_web_api_result.rc == 0
+      - (zabbix_web_api_result.stdout | from_json).password_changed
+
+- name: "api : Log in with P2"
+  ansible.builtin.include_tasks: login.yml
+  vars:
+    zn_try_password: "{{ zn_p2 }}"
+
+- name: "api : P2 works"
+  ansible.builtin.assert:
+    that: zn_login_ok | bool
+
+# --- Housekeeping -------------------------------------------------------------
+- name: "api : Apply housekeeping for the first time"
+  ansible.builtin.include_role:
+    name: zabbix_web
+  vars:
+    zabbix_web_admin_password: "{{ zn_p2 }}"
+    zabbix_web_housekeeping: "{{ zn_hk_desired }}"
+
+- name: "api : Only the differing keys were updated"
+  ansible.builtin.assert:
+    that:
+      - zabbix_web_api_result.changed
+      - not (zabbix_web_api_result.stdout | from_json).password_changed
+      - >-
+        (zabbix_web_api_result.stdout | from_json).housekeeping_changed | sort
+        == (['hk_audit']
+            + (['hk_history'] if zabbix_server_version == '7.0' else [])
+            + ([] if zn_api_timescaledb else ['hk_history_global', 'hk_trends_global'])) | sort
+    fail_msg: "Got {{ zabbix_web_api_result.stdout }}"
+
+- name: "api : Apply the same housekeeping again"
+  ansible.builtin.include_role:
+    name: zabbix_web
+  vars:
+    zabbix_web_admin_password: "{{ zn_p2 }}"
+    zabbix_web_housekeeping: "{{ zn_hk_desired }}"
+
+- name: "api : The second apply is not a change"
+  ansible.builtin.assert:
+    that:
+      - not zabbix_web_api_result.changed
+      - (zabbix_web_api_result.stdout | from_json).housekeeping_changed == []
+
+- name: "api : Read housekeeping through the API"
+  ansible.builtin.include_tasks: housekeeping-get.yml
+  vars:
+    zn_try_password: "{{ zn_p2 }}"
+
+- name: "api : The values were applied"
+  ansible.builtin.assert:
+    that:
+      - zn_hk.hk_history_global == '1'
+      - zn_hk.hk_trends_global == '1'
+      - zn_hk.hk_history == '90d'
+      - zn_hk.hk_audit == '2592000'
+      - zn_hk.hk_events_trigger == '365d'
+    fail_msg: "Got {{ zn_hk }}"
+
+# --- Compression (TimescaleDB only) --------------------------------------------
+- name: "api : Compression on a non-TimescaleDB database (must fail with exit 2)"
+  when: not zn_api_timescaledb
+  block:
+    - name: "api : Include zabbix_web with compression_status 1"
+      ansible.builtin.include_role:
+        name: zabbix_web
+      vars:
+        zabbix_web_admin_password: "{{ zn_p2 }}"
+        zabbix_web_housekeeping: {compression_status: 1}
+
+    - name: "api : Unexpected success"
+      ansible.builtin.fail:
+        msg: compression_status 1 must fail on a non-TimescaleDB database.
+  rescue:
+    - name: "api : Failed with exit 2 and a TimescaleDB message"
+      ansible.builtin.assert:
+        that:
+          - zabbix_web_api_result.rc == 2
+          - "'TimescaleDB' in ansible_failed_result.msg"
+
+# The official TimescaleDB schema script turns compression on, so switch it off first to
+# make enabling it an actual change.
+- name: "api : Compression on a TimescaleDB database"
+  when: zn_api_timescaledb
+  block:
+    - name: "api : Turn compression off"
+      ansible.builtin.include_role:
+        name: zabbix_web
+      vars:
+        zabbix_web_admin_password: "{{ zn_p2 }}"
+        zabbix_web_housekeeping: {compression_status: 0}
+
+    - name: "api : Turning compression off changed only compression_status"
+      ansible.builtin.assert:
+        that: (zabbix_web_api_result.stdout | from_json).housekeeping_changed == ['compression_status']
+        fail_msg: "Got {{ zabbix_web_api_result.stdout }}"
+
+    - name: "api : Turn compression on with compress_older 14d"
+      ansible.builtin.include_role:
+        name: zabbix_web
+      vars:
+        zabbix_web_admin_password: "{{ zn_p2 }}"
+        zabbix_web_housekeeping: {compression_status: 1, compress_older: 14d}
+
+    - name: "api : Turning compression on succeeded and changed both keys"
+      ansible.builtin.assert:
+        that:
+          - zabbix_web_api_result.rc == 0
+          - (zabbix_web_api_result.stdout | from_json).housekeeping_changed | sort == ['compress_older', 'compression_status']
+        fail_msg: "Got {{ zabbix_web_api_result.stdout }}"
+
+    - name: "api : Turn compression on again"
+      ansible.builtin.include_role:
+        name: zabbix_web
+      vars:
+        zabbix_web_admin_password: "{{ zn_p2 }}"
+        zabbix_web_housekeeping: {compression_status: 1, compress_older: 14d}
+
+    - name: "api : Re-applying compression is not a change"
+      ansible.builtin.assert:
+        that: not zabbix_web_api_result.changed
+
+    - name: "api : Read housekeeping after enabling compression"
+      ansible.builtin.include_tasks: housekeeping-get.yml
+      vars:
+        zn_try_password: "{{ zn_p2 }}"
+
+    - name: "api : Compression is on in the Zabbix configuration"
+      ansible.builtin.assert:
+        that:
+          - zn_hk.db_extension == 'timescaledb'
+          - zn_hk.compression_status == '1'
+          - zn_hk.compress_older == '14d'
+        fail_msg: "Got {{ zn_hk }}"
+
+# --- Leftovers -------------------------------------------------------------------
+- name: "api : Look for leftover API credentials files"
+  ansible.builtin.find:
+    paths: /tmp
+    patterns: "ai-support-zabbix-api-*"
+  register: zn_api_leftovers
+
+- name: "api : No credentials file is left behind"
+  ansible.builtin.assert:
+    that: zn_api_leftovers.matched == 0

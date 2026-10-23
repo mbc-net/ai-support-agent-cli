@@ -1,0 +1,43 @@
+---
+# The allowed client (listed as /32) reaches every port; the denied client in
+# the same /24 reaches none. prepare.yml already showed both timing out before
+# converge, so the difference is the roles' rules.
+- name: Verify the stored rules on the target
+  hosts: ufwr_target
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "verify : Read the stored rules"
+      ansible.builtin.command:
+        argv: [ufw, show, added]
+      register: ufwr_added
+      changed_when: false
+
+    # ufw stores `a.b.c.d/32` as `a.b.c.d`; that stored rule is what must survive.
+    - name: "verify : Each role kept its rule for the allowed client"
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('ufw allow from ' ~ ufwr_allowed_ip ~ ' to any port ' ~ item.port
+             ~ " proto tcp comment 'ai-support-agent:" ~ item.role ~ "'")
+            in ufwr_added.stdout_lines
+        fail_msg: "{{ item.role }}: rule for {{ ufwr_allowed_ip }} port {{ item.port }} missing. Got: {{ ufwr_added.stdout_lines }}"
+      loop: "{{ ufwr_ports }}"
+      loop_control:
+        label: "{{ item.port }} ({{ item.role }})"
+
+    - name: "verify : No rule mentions the denied client"
+      ansible.builtin.assert:
+        that: ufwr_added.stdout_lines | select('search', ufwr_denied_ip | regex_escape) | list | length == 0
+
+- name: Verify reachability from the clients
+  hosts: ufwr_clients
+  gather_facts: false
+
+  tasks:
+    - name: "verify : Allowed connects, denied times out"
+      ansible.builtin.include_tasks: probe.yml
+      vars:
+        ufwr_probe_label: after converge
+        ufwr_probe_expect: "{{ 'connected' if ufwr_expect_reachable else 'timeout' }}"

@@ -2178,9 +2178,11 @@ describe('runPlaywrightSubprocess', () => {
         })
         return child
       }) as any)
+      const observed = new Set()
+      const onChildProcess = (process: any) => { observed.add(process); process.once('close', () => observed.delete(process)) }
       const executionId = uniqueExecutionId('force-resolve')
 
-      const resultPromise = runPlaywrightSubprocess({
+      const resultPromise = runPlaywrightSubprocess({ onChildProcess,
         script: "await page.goto('/')",
         executionId,
         timeoutMs: 100,
@@ -2197,6 +2199,7 @@ describe('runPlaywrightSubprocess', () => {
 
       jest.useRealTimers()
       const result = await resultPromise
+      expect(observed.has(child)).toBe(true)
       expect(result.timedOut).toBe(true)
       expect(result.success).toBe(false)
       expect(result.errorOutput).toMatch(/timed out/i)
