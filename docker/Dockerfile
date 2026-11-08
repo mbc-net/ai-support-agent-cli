@@ -120,6 +120,11 @@ RUN ansible-galaxy collection install \
     -p /usr/share/ansible/collections \
     && chmod -R a+rX /usr/share/ansible/collections
 
+# Opt-in isolated controller for the validated Zabbix roles. Default runtime is unchanged.
+COPY scripts/install-zabbix-controller.sh /usr/local/sbin/install-zabbix-controller
+ARG INSTALL_ZABBIX_CONTROLLER=false
+RUN if [ "$INSTALL_ZABBIX_CONTROLLER" = true ]; then sh /usr/local/sbin/install-zabbix-controller; fi
+
 # =============================================================================
 # Layer 3: System CLIs — external binary downloads (stable, rarely changes)
 # Combined into as few RUN steps as possible to minimise layer count while

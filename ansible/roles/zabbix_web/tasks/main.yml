@@ -3,10 +3,16 @@
   ansible.builtin.assert:
     that:
       - ansible_distribution | default('') == 'Ubuntu'
-      - ansible_distribution_version | default('') in ['22.04', '24.04']
+      - ansible_distribution_version | default('') in ['22.04', '24.04', '26.04']
       - ansible_architecture | default('') in ['x86_64', 'aarch64']
       - zabbix_web_install_method == 'package'
-      - zabbix_web_version in ['6.0', '7.0']
+      - zabbix_web_version in ['6.0', '7.0', '8.0']
+      # 8.0 needs PHP >= 8.2 and PostgreSQL >= 15 and is validated on 26.04 only.
+      - ansible_distribution_version == '26.04' or zabbix_web_version in ['6.0', '7.0']
+      - ansible_distribution_version != '26.04' or zabbix_web_version in ['7.0', '8.0']
+      # Python 3.14 on 26.04 requires a supported controller. This guard runs
+      # after fact gathering; callers must select that controller before setup.
+      - ansible_distribution_version != '26.04' or ansible_version.full is version('2.20', '>=')
       - zabbix_web_type in ['nginx', 'apache']
       - zabbix_web_db_type in ['postgresql', 'mysql']
       - zabbix_web_server_name is string and zabbix_web_server_name is match('^[A-Za-z0-9][A-Za-z0-9.-]*\Z')
@@ -24,6 +30,12 @@
       - zabbix_web_listen_port | string is match('^[0-9]+\Z')
       - zabbix_web_listen_port | int > 0 and zabbix_web_listen_port | int < 65536
       - zabbix_web_type != 'apache' or zabbix_web_listen_port | int not in [80, 443]
+      # 待受アドレス（defaults 参照）。空 = 全 interface、"127.0.0.1" = loopback のみ。
+      # 確認処理（ログイン画面・API ヘルパー）が 127.0.0.1 へ接続するため他の値は拒否する。
+      - zabbix_web_listen_address is string
+      - zabbix_web_listen_address in ['', '127.0.0.1']
+      - zabbix_web_listen_address | length == 0 or zabbix_web_type == 'nginx'
+      - zabbix_web_listen_address | length == 0 or zabbix_web_allowed_sources | length == 0
       # ufw の許可元（§3.6.1）。ufw.yml にも同じ検証があるが、パッケージ導入より前に
       # 落とすためここでも検証する。`is boolean` で型まで見る（"yes" や null を通さない）。
       - zabbix_web_ufw_manage is boolean
@@ -58,10 +70,13 @@
       - zabbix_web_housekeeping_invalid | int == 0
       - zabbix_web_housekeeping | length == 0 or zabbix_web_admin_password | length > 0
     fail_msg: >-
-      Zabbix Web requires Ubuntu 22.04/24.04, package, LTS 6.0/7.0,
+      Zabbix Web requires Ubuntu 22.04/24.04 with LTS 6.0/7.0, or Ubuntu 26.04
+      with LTS 7.0/8.0 and ansible-core 2.20 or newer; package install only.
       nginx/apache, PostgreSQL/MySQL, a server name, a single-line printable ASCII
       DB password and valid connection ports. Configure the DB with zabbix_server
       first. Apache uses a dedicated Listen port; choose a free port other than 80/443.
+      zabbix_web_listen_address must be empty or 127.0.0.1 (nginx only) and 127.0.0.1
+      cannot be combined with zabbix_web_allowed_sources.
       zabbix_web_allowed_sources must be a list of IPv4 addresses or network-address CIDRs
       (prefix 1-32; a CIDR with host bits set such as 10.0.0.5/24 is rejected, write
       10.0.0.0/24), zabbix_web_ufw_manage and zabbix_web_allow_no_sources must be booleans,
@@ -146,17 +161,30 @@
     that:
       - >-
         zabbix_web_installed_version.stdout_lines | reject('equalto', '')
-        | reject('match', '^(1:)?' ~ (zabbix_web_version | regex_escape) ~ '\.')
+        | reject('match', '^([0-9]+:)?' ~ (zabbix_web_version | regex_escape) ~ '\.')
         | list | length == 0
     fail_msg: >-
       Existing Zabbix frontend/server packages use another LTS. Do not change
       their shared repository or upgrade them through this setup. Align Web
       with Server and use the official backed-up upgrade procedure first.
 
+# Ubuntu 26.04 ships PHP 8.5 and PostgreSQL 18. Existing older 7.0
+# packages must be upgraded deliberately, not silently retained by state: present.
+- name: "zabbix_web : Require the validated patch baseline on Ubuntu 26.04"
+  ansible.builtin.assert:
+    that:
+      - >-
+        zabbix_web_installed_version.stdout_lines | reject('equalto', '')
+        | map('regex_replace', '^[0-9]+:', '') | map('regex_replace', '-.*$', '')
+        | select('version', zabbix_web_min_patch, '<') | list | length == 0
+    fail_msg: >-
+      Ubuntu 26.04 requires Zabbix {{ zabbix_web_min_patch }} or newer in the {{ zabbix_web_version }}
+      series for this setup. Upgrade existing older packages through the backed-up update procedure.
+  when: ansible_distribution_version == '26.04'
+
 - name: "zabbix_web : Install the official repository package"
   ansible.builtin.apt:
-    deb: >-
-      https://repo.zabbix.com/zabbix/{{ zabbix_web_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}/pool/main/z/zabbix-release/zabbix-release_latest_{{ zabbix_web_version }}+ubuntu{{ ansible_distribution_version }}_all.deb
+    deb: "{{ zabbix_web_release_deb }}"
     state: present
   register: zabbix_web_repo_pkg
 
@@ -164,8 +192,8 @@
   ansible.builtin.copy:
     content: |
       Types: deb
-      URIs: https://repo.zabbix.com/zabbix/{{ zabbix_web_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}
-      Suites: {{ 'noble' if ansible_distribution_version == '24.04' else 'jammy' }}
+      URIs: {{ zabbix_web_repo_uri }}
+      Suites: {{ {'22.04': 'jammy', '24.04': 'noble', '26.04': 'resolute'}[ansible_distribution_version] }}
       Components: main
       Signed-By: /usr/share/keyrings/zabbix.gpg
     dest: /etc/apt/sources.list.d/zabbix.sources
@@ -178,18 +206,55 @@
     path: /etc/apt/sources.list.d/zabbix.list
     state: absent
 
+# The 8.0 zabbix-release package also ships zabbix-unstable.sources (Enabled: no).
+# It is a package conffile, so it is verified rather than rewritten: rc 0 = disabled,
+# rc 2 = absent; anything else (e.g. enabled by hand) stops before packages install.
+- name: "zabbix_web : Require the packaged unstable repository source to stay disabled"
+  ansible.builtin.command:
+    argv: [grep, -qx, 'Enabled: no', /etc/apt/sources.list.d/zabbix-unstable.sources]
+  register: zabbix_web_unstable_source
+  changed_when: false
+  failed_when: zabbix_web_unstable_source.rc not in [0, 2]
+  when: zabbix_web_version == '8.0'
+
 - name: "zabbix_web : Install the frontend, web server and PHP driver"
   ansible.builtin.apt:
     name:
-      - "zabbix-frontend-php=1:{{ zabbix_web_version }}.*"
-      - "{{ 'zabbix-nginx-conf' if zabbix_web_type == 'nginx' else 'zabbix-apache-conf' }}=1:{{ zabbix_web_version }}.*"
+      - "zabbix-frontend-php={{ zabbix_web_pkg_epoch }}:{{ zabbix_web_version }}.*"
+      - "{{ 'zabbix-nginx-conf' if zabbix_web_type == 'nginx' else 'zabbix-apache-conf' }}={{ zabbix_web_pkg_epoch }}:{{ zabbix_web_version }}.*"
       - "{{ 'nginx' if zabbix_web_type == 'nginx' else 'apache2' }}"
       - "php{{ zabbix_web_php_version }}-fpm"
       - "php{{ zabbix_web_php_version }}-cli"
       - "php{{ zabbix_web_php_version }}-{{ 'pgsql' if zabbix_web_db_type == 'postgresql' else 'mysql' }}"
+      # ss reads the actual listener (Apply / listener checks).
+      - iproute2
     state: present
     update_cache: true
     policy_rc_d: 101
+
+- name: "zabbix_web : Read installed packages after provisioning on Ubuntu 26.04"
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, '-f=${Version}\n', zabbix-frontend-php, "{{ 'zabbix-nginx-conf' if zabbix_web_type == 'nginx' else 'zabbix-apache-conf' }}"]
+  register: zabbix_web_installed_version
+  changed_when: false
+  when: ansible_distribution_version == '26.04'
+
+- name: "zabbix_web : Verify installed patch baseline before configuration on Ubuntu 26.04"
+  ansible.builtin.assert:
+    that:
+      - zabbix_web_installed_version.stdout_lines | length == 2
+      - >-
+        zabbix_web_installed_version.stdout_lines
+        | reject('match', '^' ~ zabbix_web_pkg_epoch ~ ':' ~ (zabbix_web_version | regex_escape) ~ '\.[0-9]+-')
+        | list | length == 0
+      - >-
+        zabbix_web_installed_version.stdout_lines
+        | map('regex_replace', '^[0-9]+:', '') | map('regex_replace', '-.*$', '')
+        | select('version', zabbix_web_min_patch, '<') | list | length == 0
+    fail_msg: >-
+      Installed Zabbix packages must be {{ zabbix_web_min_patch }} or newer in the {{ zabbix_web_version }} series.
+      No database initialization or frontend configuration has been performed.
+  when: ansible_distribution_version == '26.04'
 
 - name: "zabbix_web : Disable the packaged nginx virtual host"
   ansible.builtin.file:
@@ -344,10 +409,31 @@
         enabled: true
         state: started
 
+    - name: "zabbix_web : Read the web listener before applying"
+      ansible.builtin.command:
+        argv: [ss, -H, -lnt, "sport = :{{ zabbix_web_listen_port }}"]
+      register: zabbix_web_listener_before
+      changed_when: false
+      when: zabbix_web_type == 'nginx'
+
+    # A reload cannot move an nginx listener between the wildcard and a specific address on
+    # the same port (either direction): the new bind fails with EADDRINUSE and nginx keeps
+    # running the old configuration (observed on Ubuntu 26.04). Restart only when the port is
+    # served but not on the configured local address; other vhost changes keep the graceful
+    # reload so other sites on the same server are not interrupted. Other listeners on the port
+    # (e.g. [::]:<port> of another server block) do not force a restart; with a loopback address
+    # the listener assert after the health check still rejects them. No listener = reload adds it.
     - name: "zabbix_web : Apply the web configuration"
       ansible.builtin.service:
         name: "{{ 'nginx' if zabbix_web_type == 'nginx' else 'apache2' }}"
-        state: reloaded
+        state: "{{ 'restarted' if zabbix_web_listener_differs else 'reloaded' }}"
+      vars:
+        # ss -H -lnt columns: State Recv-Q Send-Q Local Peer. Compare the Local column only.
+        zabbix_web_listener_differs: >-
+          {{ zabbix_web_type == 'nginx'
+             and (zabbix_web_listener_before.stdout_lines | length) > 0
+             and ((zabbix_web_listen_address or '0.0.0.0') ~ ':' ~ (zabbix_web_listen_port | string))
+                 not in (zabbix_web_listener_before.stdout_lines | map('split') | map(attribute=3) | list) }}
 
     - name: "zabbix_web : Verify the login page, not the setup wizard or a DB error"
       ansible.builtin.uri:
@@ -365,6 +451,23 @@
         - "'name=\"name\"' in (zabbix_web_health.content | default(''))"
         - "'name=\"password\"' in (zabbix_web_health.content | default(''))"
         - "'setup.php' not in (zabbix_web_health.location | default(''))"
+
+    - name: "zabbix_web : Read the actual web listener"
+      ansible.builtin.command:
+        argv: [ss, -H, -lnt, "sport = :{{ zabbix_web_listen_port }}"]
+      register: zabbix_web_listener
+      changed_when: false
+      when: zabbix_web_listen_address | length > 0
+
+    - name: "zabbix_web : Require the actual web listener to match zabbix_web_listen_address"
+      ansible.builtin.assert:
+        that:
+          - zabbix_web_listener.stdout_lines | length == 1
+          - zabbix_web_listener.stdout_lines[0].split()[3] == zabbix_web_listen_address ~ ':' ~ (zabbix_web_listen_port | string)
+        fail_msg: >-
+          The web server does not listen only on {{ zabbix_web_listen_address }}:{{ zabbix_web_listen_port }}.
+          The previous frontend settings are restored.
+      when: zabbix_web_listen_address | length > 0
 
     - name: "zabbix_web : Mark successful frontend setup"
       ansible.builtin.set_fact:
@@ -400,7 +503,7 @@
     - name: "zabbix_web : Restore previous web service state and loaded configuration"
       ansible.builtin.service:
         name: "{{ 'nginx' if zabbix_web_type == 'nginx' else 'apache2' }}"
-        state: "{{ 'reloaded' if zabbix_web_services.ansible_facts.services[('nginx' if zabbix_web_type == 'nginx' else 'apache2') ~ '.service'].state == 'running' else 'stopped' }}"
+        state: "{{ ('restarted' if zabbix_web_vhost.changed | default(false) else 'reloaded') if zabbix_web_services.ansible_facts.services[('nginx' if zabbix_web_type == 'nginx' else 'apache2') ~ '.service'].state == 'running' else 'stopped' }}"
         enabled: "{{ (zabbix_web_services.ansible_facts.services[('nginx' if zabbix_web_type == 'nginx' else 'apache2') ~ '.service'].status == 'enabled') if zabbix_web_services.ansible_facts.services[('nginx' if zabbix_web_type == 'nginx' else 'apache2') ~ '.service'].status in ['enabled', 'disabled'] else omit }}"
       when: zabbix_web_activation_started | default(false)
 

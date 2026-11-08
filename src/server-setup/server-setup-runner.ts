@@ -1,3 +1,5 @@
+import { createHash } from 'crypto'
+import { ZABBIX_AGENT_RECIPE_BODY_SHA256, ZABBIX_AGENT_RECIPE_VARIABLES } from './zabbix-agent-recipe'
 /**
  * Runner for the `server_setup_exec` command (git-artifact-platform model).
  *
@@ -24,6 +26,7 @@
  */
 
 import { execFile } from 'child_process'
+import { selectZabbixController, verifyZabbixController } from './zabbix-controller'
 import { getProcessManager } from '../commands/process-manager'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { dump } from 'js-yaml'
@@ -580,7 +583,7 @@ function parseOptionalUidOrGid(value: string | undefined): number | undefined {
  * agent host* (e.g. via allow-listed `ansible.builtin.command`/`shell`),
  * independent of `become: true`'s escalation on the *target* host over SSH.
  */
-function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: string, timeoutMs = ANSIBLE_TIMEOUT_MS, readStopRequest?: () => Promise<boolean>): Promise<AnsibleRunResult> {
+function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: string, timeoutMs = ANSIBLE_TIMEOUT_MS, readStopRequest?: () => Promise<boolean>, executable = 'ansible-playbook'): Promise<AnsibleRunResult> {
   const uid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_UID])
   const gid = parseOptionalUidOrGid(process.env[ENV_VARS.SERVER_SETUP_ANSIBLE_GID])
   return new Promise((resolve) => {
@@ -599,7 +602,7 @@ function runAnsiblePlaybook(args: string[], env: NodeJS.ProcessEnv, commandId?: 
     let polling = false
     let controlTimer: NodeJS.Timeout | undefined
     const child = execFile(
-      'ansible-playbook',
+      executable,
       args,
       {
         env,
@@ -840,6 +843,12 @@ export async function executeServerSetupAnsible(
 ): Promise<CommandResult> {
   const { executionId, body, mode, targetOs, credential, variables, secretNames, tenantCode, sshHostId, commandId, client, onProgress, onAwaitingSelfRestart } = input
 
+  const approvedZabbixRecipe = createHash('sha256').update(body).digest('hex') === ZABBIX_AGENT_RECIPE_BODY_SHA256
+  if (approvedZabbixRecipe && (
+    Object.keys(variables).sort().join(',') !== [...ZABBIX_AGENT_RECIPE_VARIABLES].sort().join(',') ||
+    !secretNames.includes('ZABBIX_PSK')
+  )) return errorResult('Approved Zabbix recipe requires exactly its five fixed variables and a secret PSK; extra-vars overrides are refused')
+
   // Fail closed before anything touches the disk: an absent/unknown OS must
   // never silently become a Linux run.
   if (targetOs !== 'linux' && targetOs !== 'windows') {
@@ -924,6 +933,9 @@ export async function executeServerSetupAnsible(
         )
       }
 
+      const controller = selectZabbixController(guardResult.normalizedTasks, process.env[ENV_VARS.ZABBIX_CONTROLLER])
+      await verifyZabbixController(controller)
+
       const sentryInspection = inspectSentryTasks(guardResult.normalizedTasks)
       const sharedFileSources = collectSharedFileSources(guardResult.normalizedTasks)
       if (targetOs === 'windows') {
@@ -940,6 +952,7 @@ export async function executeServerSetupAnsible(
       }
       sentry = sentryInspection
       synchronousTasks = hasSynchronousCompletion(guardResult.normalizedTasks)
+        || approvedZabbixRecipe
       const companions = guardResult.normalizedTasks.filter(task => {
         const role = task['ansible.builtin.include_role'] ?? task.include_role
         return !role || typeof role !== 'object' || (role as {name?: unknown}).name !== 'sentry'
@@ -1158,7 +1171,7 @@ export async function executeServerSetupAnsible(
         // inherited value can never redirect a run's progress at another path;
         // `undefined` both clears that and leaves the channel off.
         AI_SUPPORT_AGENT_PROGRESS_FILE: progressPath,
-      }, commandId, timeoutMs, sentry ? input.readStopRequest : undefined)
+      }, commandId, timeoutMs, sentry ? input.readStopRequest : undefined, controller)
       } finally {
         // Stop before the temp dir (and the progress file inside it) is
         // removed. `stop()` also drains whatever ansible wrote between the
@@ -1182,7 +1195,7 @@ export async function executeServerSetupAnsible(
             ...process.env, ANSIBLE_CONFIG: ansibleCfgPath, ANSIBLE_STDOUT_CALLBACK: 'json',
             ANSIBLE_CALLBACK_PLUGINS: callbackPluginsPath, ANSIBLE_VERBOSITY: undefined,
             ANSIBLE_DEBUG: undefined, ANSIBLE_DIFF_ALWAYS: undefined, AI_SUPPORT_AGENT_PROGRESS_FILE: undefined,
-          }, undefined, 7 * 60 * 1000)
+          }, undefined, 7 * 60 * 1000, undefined, controller)
           if (probe.processClosed && probe.code === 0 && !probe.timedOut && !probe.cancelled && !probe.spawnError) {
             const parsed = JSON.parse(probe.stdout)
             const hosts = parsed.plays?.[0]?.tasks?.[0]?.hosts ?? {}

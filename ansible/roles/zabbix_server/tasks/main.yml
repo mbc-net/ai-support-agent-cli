@@ -3,10 +3,16 @@
   ansible.builtin.assert:
     that:
       - ansible_distribution | default('') == 'Ubuntu'
-      - ansible_distribution_version | default('') in ['22.04', '24.04']
+      - ansible_distribution_version | default('') in ['22.04', '24.04', '26.04']
       - ansible_architecture | default('') in ['x86_64', 'aarch64']
       - zabbix_server_install_method == 'package'
-      - zabbix_server_version in ['6.0', '7.0']
+      - zabbix_server_version in ['6.0', '7.0', '8.0']
+      # 8.0 needs PHP >= 8.2 and PostgreSQL >= 15 and is validated on 26.04 only.
+      - ansible_distribution_version == '26.04' or zabbix_server_version in ['6.0', '7.0']
+      - ansible_distribution_version != '26.04' or zabbix_server_version in ['7.0', '8.0']
+      # Python 3.14 on 26.04 requires a supported controller. This guard runs
+      # after fact gathering; callers must select that controller before setup.
+      - ansible_distribution_version != '26.04' or ansible_version.full is version('2.20', '>=')
       - zabbix_server_db_type in ['postgresql', 'mysql']
       - zabbix_server_db_mode in ['local', 'external']
       - zabbix_server_db_host is string and zabbix_server_db_host is match('^[A-Za-z0-9][A-Za-z0-9.:-]*\Z')
@@ -40,9 +46,11 @@
       - not zabbix_server_ufw_manage or (zabbix_server_allowed_sources | length) > 0 or zabbix_server_allow_no_sources
       # TimescaleDB（設計書 §4.1）。`is boolean` で型まで見る（文字列 "true" や null を通さない）。
       - zabbix_server_db_timescaledb is boolean
+      - ansible_distribution_version != '26.04' or not zabbix_server_db_timescaledb
       - not zabbix_server_db_timescaledb or zabbix_server_db_type == 'postgresql'
     fail_msg: >-
-      Zabbix Server requires Ubuntu 22.04/24.04, package, LTS 6.0/7.0,
+      Zabbix Server requires Ubuntu 22.04/24.04 with LTS 6.0/7.0, or Ubuntu 26.04
+      with LTS 7.0/8.0 and ansible-core 2.20 or newer; package install only.
       PostgreSQL/MySQL and local/external mode. Provide a dedicated DB/user,
       a nonempty single-line printable ASCII password (no outer spaces),
       and valid host/ports. Local DB uses localhost and the default DB port.
@@ -53,7 +61,8 @@
       and an empty zabbix_server_allowed_sources with zabbix_server_ufw_manage true needs
       zabbix_server_allow_no_sources true.
       zabbix_server_db_timescaledb must be a boolean (true/false, not a string) and true
-      requires zabbix_server_db_type postgresql.
+      requires zabbix_server_db_type postgresql. TimescaleDB on Ubuntu 26.04
+      is not supported by this role; use plain PostgreSQL.
   # assert の that は式しか書けず、要素ごとの算術（ホストビットの判定）はループ構文が要るため
   # task vars で計算する。that の評価は先頭から順で最初の偽で止まり、task vars は参照時に
   # 評価されるので、ここへ届くのはリスト・文字列・アドレス形式の検証を通った値だけである。
@@ -81,16 +90,29 @@
     that:
       - >-
         zabbix_server_installed_version.stdout_lines | reject('equalto', '')
-        | reject('match', '^(1:)?' ~ (zabbix_server_version | regex_escape) ~ '\.')
+        | reject('match', '^([0-9]+:)?' ~ (zabbix_server_version | regex_escape) ~ '\.')
         | list | length == 0
     fail_msg: >-
       Existing Zabbix packages have another LTS version. Back up the DB and
       use the official upgrade procedure first; this setup does not change LTS.
 
+# Ubuntu 26.04 ships PHP 8.5 and PostgreSQL 18. Existing older 7.0
+# packages must be upgraded deliberately, not silently retained by state: present.
+- name: "zabbix_server : Require the validated patch baseline on Ubuntu 26.04"
+  ansible.builtin.assert:
+    that:
+      - >-
+        zabbix_server_installed_version.stdout_lines | reject('equalto', '')
+        | map('regex_replace', '^[0-9]+:', '') | map('regex_replace', '-.*$', '')
+        | select('version', zabbix_server_min_patch, '<') | list | length == 0
+    fail_msg: >-
+      Ubuntu 26.04 requires Zabbix {{ zabbix_server_min_patch }} or newer in the {{ zabbix_server_version }}
+      series for this setup. Upgrade existing older packages through the backed-up update procedure.
+  when: ansible_distribution_version == '26.04'
+
 - name: "zabbix_server : Install the official repository package"
   ansible.builtin.apt:
-    deb: >-
-      https://repo.zabbix.com/zabbix/{{ zabbix_server_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}/pool/main/z/zabbix-release/zabbix-release_latest_{{ zabbix_server_version }}+ubuntu{{ ansible_distribution_version }}_all.deb
+    deb: "{{ zabbix_server_release_deb }}"
     state: present
   register: zabbix_server_repo_pkg
 
@@ -98,8 +120,8 @@
   ansible.builtin.copy:
     content: |
       Types: deb
-      URIs: https://repo.zabbix.com/zabbix/{{ zabbix_server_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}
-      Suites: {{ 'noble' if ansible_distribution_version == '24.04' else 'jammy' }}
+      URIs: {{ zabbix_server_repo_uri }}
+      Suites: {{ {'22.04': 'jammy', '24.04': 'noble', '26.04': 'resolute'}[ansible_distribution_version] }}
       Components: main
       Signed-By: /usr/share/keyrings/zabbix.gpg
     dest: /etc/apt/sources.list.d/zabbix.sources
@@ -112,11 +134,22 @@
     path: /etc/apt/sources.list.d/zabbix.list
     state: absent
 
+# The 8.0 zabbix-release package also ships zabbix-unstable.sources (Enabled: no).
+# It is a package conffile, so it is verified rather than rewritten: rc 0 = disabled,
+# rc 2 = absent; anything else (e.g. enabled by hand) stops before packages install.
+- name: "zabbix_server : Require the packaged unstable repository source to stay disabled"
+  ansible.builtin.command:
+    argv: [grep, -qx, 'Enabled: no', /etc/apt/sources.list.d/zabbix-unstable.sources]
+  register: zabbix_server_unstable_source
+  changed_when: false
+  failed_when: zabbix_server_unstable_source.rc not in [0, 2]
+  when: zabbix_server_version == '8.0'
+
 - name: "zabbix_server : Install the selected server and SQL scripts"
   ansible.builtin.apt:
     name:
-      - "{{ 'zabbix-server-pgsql' if zabbix_server_db_type == 'postgresql' else 'zabbix-server-mysql' }}=1:{{ zabbix_server_version }}.*"
-      - "zabbix-sql-scripts=1:{{ zabbix_server_version }}.*"
+      - "{{ 'zabbix-server-pgsql' if zabbix_server_db_type == 'postgresql' else 'zabbix-server-mysql' }}={{ zabbix_server_pkg_epoch }}:{{ zabbix_server_version }}.*"
+      - "zabbix-sql-scripts={{ zabbix_server_pkg_epoch }}:{{ zabbix_server_version }}.*"
       - "{{ 'postgresql-client' if zabbix_server_db_type == 'postgresql' else 'mysql-client' }}"
       - "{{ 'python3-psycopg2' if zabbix_server_db_type == 'postgresql' else 'python3-pymysql' }}"
       - iproute2
@@ -124,6 +157,30 @@
     update_cache: true
     policy_rc_d: 101
   notify: Restart zabbix server
+
+- name: "zabbix_server : Read installed packages after provisioning on Ubuntu 26.04"
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, '-f=${Version}\n', "{{ 'zabbix-server-pgsql' if zabbix_server_db_type == 'postgresql' else 'zabbix-server-mysql' }}", zabbix-sql-scripts]
+  register: zabbix_server_installed_version
+  changed_when: false
+  when: ansible_distribution_version == '26.04'
+
+- name: "zabbix_server : Verify installed patch baseline before configuration on Ubuntu 26.04"
+  ansible.builtin.assert:
+    that:
+      - zabbix_server_installed_version.stdout_lines | length == 2
+      - >-
+        zabbix_server_installed_version.stdout_lines
+        | reject('match', '^' ~ zabbix_server_pkg_epoch ~ ':' ~ (zabbix_server_version | regex_escape) ~ '\.[0-9]+-')
+        | list | length == 0
+      - >-
+        zabbix_server_installed_version.stdout_lines
+        | map('regex_replace', '^[0-9]+:', '') | map('regex_replace', '-.*$', '')
+        | select('version', zabbix_server_min_patch, '<') | list | length == 0
+    fail_msg: >-
+      Installed Zabbix packages must be {{ zabbix_server_min_patch }} or newer in the {{ zabbix_server_version }} series.
+      No database initialization or frontend configuration has been performed.
+  when: ansible_distribution_version == '26.04'
 
 - name: "zabbix_server : Provision the local database"
   ansible.builtin.include_tasks: local-db.yml

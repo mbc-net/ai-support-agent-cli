@@ -36,6 +36,7 @@
       # retries を直に決める値なので範囲を切る。未検証だと `86400` で 28800 回リトライ
       # （delay 3 秒）＝1 日ハングする実行を作れてしまい、非数値だと黙って 1 回だけの
       # 試行に潰れる（このロールの他の公開変数はすべて検証済みで、ここだけ抜けていた）。
+      - zabbix_agent_manage_packages is boolean
       - zabbix_agent_allow_no_sources is boolean
       # 空の許可リスト ＋ ufw 管理 ON は、届かないエージェントを失敗せずに作る。
       # 「開けない」ことが意図なら明示させる（rsyslog_server の allow_all_senders と同じ形）。
@@ -55,6 +56,8 @@
         (zabbix_agent_active_check_verify_seconds | int) >= 3
         and (zabbix_agent_active_check_verify_seconds | int) <= 600
       - (zabbix_agent_version | default('')) in ['6.0', '7.0']
+      - (ansible_distribution_version | default('')) != '26.04' or zabbix_agent_version == '7.0'
+      - (ansible_distribution_version | default('')) != '26.04' or ansible_version.full is version('2.20', '>=')
       - (zabbix_agent_variant | default('')) in ['agent2', 'agent']
       - (zabbix_agent_tls_connect | default('')) in ['unencrypted', 'psk']
       - (zabbix_agent_tls_accept | default('')) in ['unencrypted', 'psk']
@@ -98,7 +101,8 @@
       opening is what you mean. This role targets Ubuntu only (the repository package
       URL is built for it), and Zabbix 6.0 has no release package for Ubuntu newer than
       24.04 — use zabbix_agent_version: '7.0' there (measured against repo.zabbix.com on
-      2026-08-27).
+      2026-08-27). Ubuntu 26.04 requires ansible-core 2.20 or newer; select the
+      controller before fact gathering (the bundled legacy controller does not support Python 3.14).
 
 # Asserted together: a half-configured PSK either fails to start (agent refuses
 # a psk mode with no key) or, worse, is read as "encryption requested" by a
@@ -113,13 +117,13 @@
       - zabbix_agent_psk_identity is string
       - zabbix_agent_psk_identity is match('^[A-Za-z0-9._:-]+$')
       - zabbix_agent_psk is string
-      - zabbix_agent_psk is match('^[0-9a-fA-F]{32,}$')
+      - zabbix_agent_psk is match('^(?:[0-9a-fA-F]{2}){16,256}\\Z')
     fail_msg: >-
       zabbix_agent_tls_connect / zabbix_agent_tls_accept requested 'psk', so
       zabbix_agent_psk_identity and zabbix_agent_psk must both be set
       zabbix_agent_psk_identity must be [A-Za-z0-9._:-] only (it is written into
       the agent config, where a newline would add directives such as
-      UserParameter=), and zabbix_agent_psk must be at least 32 hex digits
+      UserParameter=), and zabbix_agent_psk must be 32 to 512 hex digits with an even length
       (it should reference an ANSIBLE# secret variable).
   when: zabbix_agent_tls_connect == 'psk' or zabbix_agent_tls_accept == 'psk'
 
@@ -199,14 +203,62 @@
 # cannot be reached at all.) A previous version asserted `'https://repo.zabbix.com/'
 # in zabbix_agent_repo_url` with the variable defined in that assert's own
 # `vars:` — a tautology that could never fail and protected nothing.
+# Server/Web on the same host share /etc/apt/sources.list.d/zabbix.sources. Repointing it to
+# the agent's series (e.g. 7.0 next to an 8.0 server) would break their pinned packages.
+# db:Status-Abbrev: 2nd char n = not installed, c = only config files left (rc); anything
+# else is on disk. Held packages show as "hi" (the foundation recipe holds them).
+- name: "zabbix_agent : Read Zabbix server and frontend packages sharing the repository"
+  when: zabbix_agent_manage_packages
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, '-f=${db:Status-Abbrev} ${Version}\n', zabbix-server-pgsql, zabbix-server-mysql, zabbix-frontend-php]
+  register: zabbix_agent_shared_packages
+  changed_when: false
+  failed_when: zabbix_agent_shared_packages.rc not in [0, 1]
+
+- name: "zabbix_agent : Refuse to repoint the repository shared with another Zabbix series"
+  when: zabbix_agent_manage_packages
+  ansible.builtin.assert:
+    that:
+      - >-
+        zabbix_agent_shared_packages.stdout_lines | select('match', '^.[^nc]')
+        | map('regex_replace', '^\\S+ +', '')
+        | reject('match', '^([0-9]+:)?' ~ (zabbix_agent_version | regex_escape) ~ '\.')
+        | list | length == 0
+    fail_msg: >-
+      Zabbix server or frontend packages of another series are installed on this host and share
+      its Zabbix repository source. Use the same series for zabbix_agent_version, or leave the
+      installed agent untouched (zabbix_agent_manage_packages: false).
+
 - name: "zabbix_agent : Install the Zabbix repository package"
+  when: zabbix_agent_manage_packages
   ansible.builtin.apt:
     deb: >-
-      https://repo.zabbix.com/zabbix/{{ zabbix_agent_version }}/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_{{ zabbix_agent_version }}+ubuntu{{ ansible_distribution_version }}_all.deb
+      https://repo.zabbix.com/zabbix/{{ zabbix_agent_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}/pool/main/z/zabbix-release/zabbix-release_latest_{{ zabbix_agent_version }}+ubuntu{{ ansible_distribution_version }}_all.deb
     state: present
     # 同上。7.0 → 6.0 ではリポジトリパッケージ自体も降格になる。
     allow_downgrade: true
   register: zabbix_agent_repo_pkg
+
+# The release deb can retain the amd64 source even on ARM64; converge resolute explicitly.
+- name: "zabbix_agent : Converge the Ubuntu 26.04 repository source"
+  ansible.builtin.copy:
+    content: |
+      Types: deb
+      URIs: https://repo.zabbix.com/zabbix/{{ zabbix_agent_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}
+      Suites: resolute
+      Components: main
+      Signed-By: /usr/share/keyrings/zabbix.gpg
+    dest: /etc/apt/sources.list.d/zabbix.sources
+    owner: root
+    group: root
+    mode: "0644"
+  when: zabbix_agent_manage_packages and ansible_distribution_version == '26.04'
+
+- name: "zabbix_agent : Remove the retired Ubuntu 26.04 repository source"
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/zabbix.list
+    state: absent
+  when: zabbix_agent_manage_packages and ansible_distribution_version == '26.04'
 
 # `state: latest` rather than `present`: with `present` an already-installed
 # agent is left alone, so pointing the role at a different LTS (6.0 -> 7.0)
@@ -214,6 +266,7 @@
 # pinned by which repository is configured above, so `latest` converges within
 # that LTS rather than tracking upstream freely.
 - name: "zabbix_agent : Install the Zabbix agent"
+  when: zabbix_agent_manage_packages
   ansible.builtin.apt:
     name: "{{ 'zabbix-agent2' if zabbix_agent_variant == 'agent2' else 'zabbix-agent' }}"
     state: latest
@@ -228,6 +281,7 @@
 # Both bind the same port, so the retired one either keeps the port and blocks
 # the new agent, or quietly keeps reporting alongside it.
 - name: "zabbix_agent : Stop and disable the other agent flavour"
+  when: zabbix_agent_manage_packages
   ansible.builtin.service:
     name: "{{ 'zabbix-agent' if zabbix_agent_variant == 'agent2' else 'zabbix-agent2' }}"
     state: stopped
@@ -236,6 +290,7 @@
   failed_when: false
 
 - name: "zabbix_agent : Remove the other agent flavour"
+  when: zabbix_agent_manage_packages
   ansible.builtin.apt:
     name: "{{ 'zabbix-agent' if zabbix_agent_variant == 'agent2' else 'zabbix-agent2' }}"
     state: absent

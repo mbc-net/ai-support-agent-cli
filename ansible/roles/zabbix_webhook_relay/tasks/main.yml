@@ -1,0 +1,145 @@
+---
+# Loopback-only webhook relay (design: mbc-server-maintenance docs/zabbix/webhook-relay.md D1-D9).
+- name: "zabbix_webhook_relay : Validate branch and required variables"
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution | default('') == 'Ubuntu'
+      - ansible_distribution_version | default('') == '26.04'
+      # Python 3.14 on 26.04 requires the dedicated 2.20 controller (selected before facts).
+      - ansible_version.full is version('2.20', '>=')
+      - zabbix_webhook_relay_upstream_host is string
+      # Lowercase FQDN: 2+ labels of 1-63 chars, no leading/trailing hyphen, the last label
+      # (TLD) starts with a letter (rejects IP literals), at most 253 chars, no scheme/port/path.
+      # Same rule as recipe 30-webhook-relay.yaml.
+      - zabbix_webhook_relay_upstream_host | length <= 253
+      - >-
+        zabbix_webhook_relay_upstream_host
+        is match('^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?\Z')
+      - zabbix_webhook_relay_upstream_port | string is match('^[0-9]{1,5}\Z')
+      - zabbix_webhook_relay_upstream_port | int >= 1 and zabbix_webhook_relay_upstream_port | int <= 65535
+      - zabbix_webhook_relay_listen_port | string is match('^[0-9]{1,5}\Z')
+      - zabbix_webhook_relay_listen_port | int >= 1024 and zabbix_webhook_relay_listen_port | int <= 65535
+    fail_msg: >-
+      zabbix_webhook_relay requires Ubuntu 26.04 with ansible-core 2.20 or newer,
+      zabbix_webhook_relay_upstream_host as a lowercase FQDN (no IP literal, scheme, port or path),
+      zabbix_webhook_relay_upstream_port 1-65535 and zabbix_webhook_relay_listen_port 1024-65535.
+
+- name: "zabbix_webhook_relay : Install nginx, the CA bundle and ss"
+  ansible.builtin.apt:
+    name: [nginx, ca-certificates, iproute2]
+    state: present
+    update_cache: true
+
+- name: "zabbix_webhook_relay : Read the existing relay configuration"
+  ansible.builtin.stat:
+    path: /etc/nginx/conf.d/ai-support-zabbix-webhook-relay.conf
+  register: zabbix_webhook_relay_previous
+
+- name: "zabbix_webhook_relay : Prepare a private rollback copy"
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: ai-support-zabbix-webhook-relay-
+  register: zabbix_webhook_relay_rollback_dir
+
+- name: "zabbix_webhook_relay : Configure the relay with rollback"
+  block:
+    - name: "zabbix_webhook_relay : Save the existing relay configuration"
+      ansible.builtin.copy:
+        src: /etc/nginx/conf.d/ai-support-zabbix-webhook-relay.conf
+        dest: "{{ zabbix_webhook_relay_rollback_dir.path }}/relay.conf"
+        remote_src: true
+        mode: "0600"
+      when: zabbix_webhook_relay_previous.stat.exists
+
+    - name: "zabbix_webhook_relay : Deploy the relay server"
+      ansible.builtin.template:
+        src: relay.conf.j2
+        dest: /etc/nginx/conf.d/ai-support-zabbix-webhook-relay.conf
+        owner: root
+        group: root
+        mode: "0644"
+      register: zabbix_webhook_relay_config
+
+    - name: "zabbix_webhook_relay : Validate the complete nginx configuration"
+      ansible.builtin.command:
+        argv: [nginx, -t]
+      changed_when: false
+
+    - name: "zabbix_webhook_relay : Start nginx"
+      ansible.builtin.service:
+        name: nginx
+        enabled: true
+        state: started
+
+    # The relay only listens on loopback ports of its own, so a reload never has to move
+    # an existing listener between the wildcard and a specific address.
+    - name: "zabbix_webhook_relay : Apply the relay configuration"
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+      when: zabbix_webhook_relay_config.changed
+
+    - name: "zabbix_webhook_relay : Read the relay listener"
+      ansible.builtin.command:
+        argv: [ss, -H, -lnt, "sport = :{{ zabbix_webhook_relay_listen_port }}"]
+      register: zabbix_webhook_relay_listener
+      changed_when: false
+      until: zabbix_webhook_relay_listener.stdout_lines | length > 0
+      retries: 5
+      delay: 1
+
+    - name: "zabbix_webhook_relay : Require the relay to listen only on loopback"
+      ansible.builtin.assert:
+        that:
+          - zabbix_webhook_relay_listener.stdout_lines | length == 1
+          - >-
+            zabbix_webhook_relay_listener.stdout_lines[0].split()[3]
+            == '127.0.0.1:' ~ (zabbix_webhook_relay_listen_port | string)
+        fail_msg: >-
+          The webhook relay must be the only listener on 127.0.0.1:{{ zabbix_webhook_relay_listen_port }}.
+          The previous relay configuration is restored.
+
+    # GET is rejected before any upstream connection is made, so this never reaches the API.
+    - name: "zabbix_webhook_relay : Verify the relay rejects non-POST requests locally"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ zabbix_webhook_relay_listen_port }}/webhooks/zabbix/relay-check/relay-check"
+        method: GET
+        status_code: 403
+        follow_redirects: none
+      register: zabbix_webhook_relay_probe
+
+  rescue:
+    - name: "zabbix_webhook_relay : Restore the previous relay configuration"
+      ansible.builtin.copy:
+        src: "{{ zabbix_webhook_relay_rollback_dir.path }}/relay.conf"
+        dest: /etc/nginx/conf.d/ai-support-zabbix-webhook-relay.conf
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      when: zabbix_webhook_relay_previous.stat.exists
+
+    - name: "zabbix_webhook_relay : Remove a newly created relay configuration"
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/ai-support-zabbix-webhook-relay.conf
+        state: absent
+      when: not zabbix_webhook_relay_previous.stat.exists
+
+    - name: "zabbix_webhook_relay : Reload nginx with the restored configuration"
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+      failed_when: false
+
+    - name: "zabbix_webhook_relay : Report the relay configuration failure"
+      ansible.builtin.fail:
+        msg: >-
+          Webhook relay setup failed; the previous relay configuration was restored.
+          Check nginx -t, the listener on 127.0.0.1:{{ zabbix_webhook_relay_listen_port }} and
+          that the upstream host resolves.
+
+  always:
+    - name: "zabbix_webhook_relay : Remove the private rollback copy"
+      ansible.builtin.file:
+        path: "{{ zabbix_webhook_relay_rollback_dir.path }}"
+        state: absent

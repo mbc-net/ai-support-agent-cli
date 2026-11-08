@@ -43,7 +43,7 @@
     zabbix_web_db_user: "{{ zabbix_server_db_user }}"
     zabbix_server_db_timescaledb: "{{ zabbix_native_timescaledb | default(false) | bool }}"
     zn_local_pg: "{{ zabbix_server_db_type == 'postgresql' and zabbix_server_db_mode | default('local') == 'local' }}"
-    zn_pg_major: "{{ '14' if ansible_distribution_version == '22.04' else '16' }}"
+    zn_pg_major: "{{ {'22.04': '14', '24.04': '16', '26.04': '18'}[ansible_distribution_version] }}"
     zn_p1: "Xq7#vL2pR9!m-first"
     zn_p2: "Kd4$wN8sT1?z-second"
     zn_p3: "Hb6%yM3qU5&c-third"
@@ -143,7 +143,7 @@
         state: stopped
         enabled: false
       loop:
-        - "php{{ '8.1' if ansible_distribution_version == '22.04' else '8.3' }}-fpm"
+        - "php{{ {'22.04': '8.1', '24.04': '8.3', '26.04': '8.5'}[ansible_distribution_version] }}-fpm"
         - "{{ 'apache2' if zabbix_web_type | default('nginx') == 'apache' else 'nginx' }}"
 
     - name: Recover stopped services

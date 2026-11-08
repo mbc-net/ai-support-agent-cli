@@ -1,0 +1,11 @@
+---
+# Webhook のローカル中継（設計: mbc-server-maintenance docs/zabbix/webhook-relay.md D1〜D9）。
+# Zabbix の HttpRequest は TLS 証明書を検証せずリダイレクトを追従するため、Webhook は
+# http://127.0.0.1:<listen_port> へ送り、この nginx が証明書を検証して上流の AI API へ転送する。
+
+# 上流（AI API）の FQDN。必須。小文字の FQDN のみ（IP リテラル・単一ラベル・末尾ドット不可）。
+zabbix_webhook_relay_upstream_host: ""
+# 上流の HTTPS ポート。
+zabbix_webhook_relay_upstream_port: 443
+# 中継の待受ポート（127.0.0.1 のみ）。1024〜65535。
+zabbix_webhook_relay_listen_port: 18081
