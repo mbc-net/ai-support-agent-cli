@@ -71,6 +71,9 @@ class WebhookRelayTest(unittest.TestCase):
             ({'zabbix_webhook_relay_listen_port': 1023}, False),
             ({'zabbix_webhook_relay_listen_port': 65536}, False),
             ({'zabbix_webhook_relay_listen_port': '18081x'}, False),
+            # zero-padded ports would render as-is and never match the ss listener check
+            ({'zabbix_webhook_relay_listen_port': '09999'}, False),
+            ({'zabbix_webhook_relay_upstream_port': '0443'}, False),
             ({'zabbix_webhook_relay_upstream_port': 0}, False),
             ({'zabbix_webhook_relay_upstream_port': 65536}, False),
             # platform
@@ -95,7 +98,10 @@ class WebhookRelayTest(unittest.TestCase):
         text = self.render()
         lines = [line.strip() for line in text.splitlines()]
         # D3: loopback only, a single listen directive
-        self.assertEqual([line for line in lines if line.startswith('listen')], ['listen 127.0.0.1:18081;'])
+        # default_server: a request for 127.0.0.1:<port> must never fall to another server block
+        # that shares the socket (ss cannot see that, nginx merges them into one listener).
+        self.assertEqual([line for line in lines if line.startswith('listen')],
+                         ['listen 127.0.0.1:18081 default_server;'])
         # D4/D5: fixed upstream with certificate verification and SNI
         for directive in ('proxy_pass https://api.example.com:443;', 'proxy_ssl_verify on;',
                           'proxy_ssl_server_name on;', 'proxy_ssl_name api.example.com;',
@@ -110,11 +116,15 @@ class WebhookRelayTest(unittest.TestCase):
         location = next(line for line in lines if line.startswith('location ~'))
         pattern = re.search(r'"(.+)"', location).group(1)
         identifier = '[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}'
-        self.assertEqual(pattern, f'^/webhooks/zabbix/{identifier}/{identifier}$')
+        # PCRE (nginx) and Python both let "$" match before a final newline; the lookahead keeps a
+        # decoded trailing %0a / %0d from matching and being forwarded upstream.
+        self.assertEqual(pattern, f'^/webhooks/zabbix/{identifier}/{identifier}(?![\\r\\n])$')
         for path, ok in (('/webhooks/zabbix/internal/generation-1', True),
                          ('/webhooks/zabbix/internal/generation-1/x', False),
                          ('/webhooks/zabbix/internal', False), ('/webhooks/zabbix/../x/y', False),
-                         ('/webhooks/zabbix/-a/b', False), ('/other/zabbix/a/b', False)):
+                         ('/webhooks/zabbix/-a/b', False), ('/other/zabbix/a/b', False),
+                         ('/webhooks/zabbix/a/b\n', False), ('/webhooks/zabbix/a/b\r', False),
+                         ('/webhooks/zabbix/a/b\n\n', False)):
             with self.subTest(path=path):
                 self.assertEqual(bool(re.match(pattern, path)), ok)
         # D4: only the normalized, already-validated path is sent upstream, without the query.
@@ -132,6 +142,49 @@ class WebhookRelayTest(unittest.TestCase):
         self.assertIn('=502', error_page.split())
         # D6: no forwarding headers are added
         self.assertFalse([line for line in lines if 'X-Forwarded' in line or 'X-Real-IP' in line])
+
+    def test_only_the_relay_server_block_listens_on_the_port(self):
+        # nginx merges server blocks on the same socket; one with server_name 127.0.0.1 would take
+        # Zabbix's "Host: 127.0.0.1:<port>" requests even though ss shows a single listener.
+        block = next(t for t in self.tasks() if t['name'].endswith('Configure the relay with rollback'))
+        checks = [t for t in block['block'] if 'Report an unreadable nginx configuration' in t['name']
+                  or 'Require no other server block on the relay port' in t['name']]
+        self.assertEqual(len(checks), 2)
+        relay = 'server {\n    listen 127.0.0.1:18081 default_server;\n'
+        cases = [
+            (relay, True),
+            (relay + '# listen 127.0.0.1:18081;\nserver { listen 8080; }\n', True),
+            (relay + 'server { listen 18081; }\n', False),
+            (relay + 'server {\n    listen 127.0.0.1:18081;\n    server_name 127.0.0.1;\n}\n', False),
+            (relay + 'server { listen [::1]:18081; }\n', False),
+            (relay + 'server { listen localhost:18081 ssl; }\n', False),
+            (relay + 'server { listen 180810; }\n', True),
+        ]
+        cases = [(dump, 0, accepted) for dump, accepted in cases] + [(relay, 1, False)]
+        for dump, rc, accepted in cases:
+            play = [{'hosts': 'localhost', 'gather_facts': False, 'connection': 'local',
+                     'vars': {'zabbix_webhook_relay_listen_port': 18081,
+                              'zabbix_webhook_relay_nginx_dump': {'rc': rc, 'stdout': dump}},
+                     'tasks': checks}]
+            with self.subTest(dump=dump, rc=rc), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'play.yml'
+                path.write_text(yaml.safe_dump(play, sort_keys=False))
+                env = dict(os.environ, ANSIBLE_LOCAL_TEMP=tmp, ANSIBLE_NOCOLOR='1')
+                result = subprocess.run([shutil.which('ansible-playbook'), '-i', 'localhost,', str(path)],
+                                        capture_output=True, text=True, env=env, timeout=60)
+                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+
+    def test_second_run_reports_no_change(self):
+        # Bookkeeping tasks must not report "changed" on every run.
+        tasks = self.tasks()
+        tempdir = next(t for t in tasks if 'ansible.builtin.tempfile' in t)
+        self.assertIs(tempdir.get('changed_when'), False)
+        block = next(t for t in tasks if t['name'].endswith('Configure the relay with rollback'))
+        cleanup = next(t for t in block['always'] if 'Remove the private rollback copy' in t['name'])
+        self.assertIs(cleanup.get('changed_when'), False)
+        apt = next(t for t in tasks if 'ansible.builtin.apt' in t)
+        self.assertTrue(apt['ansible.builtin.apt'].get('update_cache'))
+        self.assertIsInstance(apt['ansible.builtin.apt'].get('cache_valid_time'), int)
 
     def test_non_default_ports_render_into_host_header(self):
         lines = [line.strip() for line in self.render(zabbix_webhook_relay_upstream_port=8443).splitlines()]

@@ -23,6 +23,11 @@ describe('dedicated Zabbix controller', () => {
     expect(selectZabbixController(relay, '2.20')).toBe('/opt/ai-support-zabbix-ansible/bin/ansible-playbook')
     expect(() => selectZabbixController([...relay, {'ansible.builtin.include_role': {name: 'database'}}], '2.20')).toThrow('separate recipe')
   })
+  it('ships the administrator installer in the npm package (resident agents)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pkg = require('../../package.json') as {files: string[]}
+    expect(pkg.files).toContain('scripts/install-zabbix-controller.sh')
+  })
   it('handles nested guarded blocks', () => {
     expect(selectZabbixController([{block: tasks}], '2.20')).toContain('/opt/')
   })

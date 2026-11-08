@@ -3521,5 +3521,53 @@ describe('approved Zabbix configuration termination proof', () => {
     const result=await pending
     expect(result.success).toBe(true)
     expect((result.data as Record<string,unknown>).serverSetupLocalTermination).toMatchObject({processClosed:true,executionId:'exec1',sshHostId:'host-1'})
+    // The approval is what unlocks completion evidence for this include_role recipe.
+    expect(result.serverSetupConfigurationCompletion).toEqual({executionId:'exec1',
+      evidence:{kind:'completed',sshHostId:'host-1',processClosed:true}})
+  })
+  // Without a configuration binding the API sends every ANSIBLE# variable of the project,
+  // environment and host. Unrelated ones must not block the reviewed recipe, and must not
+  // reach it either (extra-vars override any role value).
+  it('passes only the five fixed variables and drops unrelated project variables', async () => {
+    const fixture = load(actualFs.readFileSync(path.join(__dirname,'fixtures/zabbix-agent-recipe.yaml'),'utf8')) as {body:string}
+    const pending = executeServerSetupAnsible({executionId:'exec1',body:dump(load(fixture.body)),mode:'resident',targetOs:'linux',credential:CREDENTIAL,
+      variables:{...fixedVariables,OTHER_PROJECT_VAR:'x',db_password:'unrelated-secret-value'},secretNames:['ZABBIX_PSK','db_password'],
+      tenantCode:'acme',sshHostId:'host-1',client:makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(0,ansibleJsonOutput([{name:'Agent configuration applied'}]))
+    const result = await pending
+    expect(result.success).toBe(true)
+    const extraVars = JSON.parse(writtenFile('extra-vars.json') as string) as Record<string,string>
+    for (const name of Object.keys(fixedVariables)) expect(extraVars[name]).toBe(fixedVariables[name as keyof typeof fixedVariables])
+    expect(extraVars).not.toHaveProperty('OTHER_PROJECT_VAR')
+    expect(extraVars).not.toHaveProperty('db_password')
+    expect(JSON.stringify(mockWriteFileSync.mock.calls)).not.toContain('unrelated-secret-value')
+  })
+  it.each(['ZABBIX_EXTRA','zabbix_agent_server_active','ZBX_X'])('still refuses a Zabbix-namespaced variable %s', async key => {
+    const fixture = load(actualFs.readFileSync(path.join(__dirname,'fixtures/zabbix-agent-recipe.yaml'),'utf8')) as {body:string}
+    const result = await executeServerSetupAnsible({executionId:'exec1',body:dump(load(fixture.body)),mode:'resident',targetOs:'linux',credential:CREDENTIAL,
+      variables:{...fixedVariables,[key]:'override'},secretNames:['ZABBIX_PSK'],tenantCode:'acme',sshHostId:'host-1',client:makeClient()})
+    expect(result.success).toBe(false)
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+  it.each(['ZABBIX_PSK','ZABBIX_BINDING_ID'])('refuses the approved recipe when fixed variable %s is missing', async key => {
+    const fixture = load(actualFs.readFileSync(path.join(__dirname,'fixtures/zabbix-agent-recipe.yaml'),'utf8')) as {body:string}
+    const variables: Record<string,string> = {...fixedVariables}
+    delete variables[key]
+    const result = await executeServerSetupAnsible({executionId:'exec1',body:dump(load(fixture.body)),mode:'resident',targetOs:'linux',credential:CREDENTIAL,
+      variables,secretNames:['ZABBIX_PSK'],tenantCode:'acme',sshHostId:'host-1',client:makeClient()})
+    expect(result.success).toBe(false)
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+  it('does not certify the same recipe when its body differs from the reviewed bytes', async () => {
+    const fixture = load(actualFs.readFileSync(path.join(__dirname,'fixtures/zabbix-agent-recipe.yaml'),'utf8')) as {body:string}
+    const body = `${dump(load(fixture.body))}# not the reviewed body\n`
+    const pending = executeServerSetupAnsible({executionId:'exec1',body,mode:'resident',targetOs:'linux',credential:CREDENTIAL,
+      variables:fixedVariables,secretNames:['ZABBIX_PSK'],tenantCode:'acme',sshHostId:'host-1',client:makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(0,ansibleJsonOutput([{name:'Agent configuration applied'}]))
+    const result=await pending
+    expect(result.success).toBe(true)
+    expect(result.serverSetupConfigurationCompletion).toBeUndefined()
   })
 })

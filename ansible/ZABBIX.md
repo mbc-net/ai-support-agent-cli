@@ -50,6 +50,22 @@ x86_64/ARM64、Zabbix LTSの公式パッケージに対応します。OSごと�
 この変更だけで既存 Agent の自動構築経路が Ubuntu 26.04 対応済みになるわけではありません。
 全 Agent runtime の更新・callback 回帰検証は別の作業です。
 
+**専用 controller の導入（常駐 Agent の管理者のみ）:** 固定パス `/opt/ai-support-zabbix-ansible` に ansible-core 2.20.11 の
+venv を作る installer `scripts/install-zabbix-controller.sh` を npm パッケージに同梱しています。
+
+- 前提: Python 3.12 以上と venv（Ubuntu では `python3-venv` パッケージ）。
+- Agent を導入したユーザーの npm から場所を求め、root で実行します。
+  例: `sh <Agent の npm root -g の出力>/@ai-support-agent/cli/scripts/install-zabbix-controller.sh`
+  （root と Agent のユーザーで npm の場所が違う場合があるため、`sudo` の中で `npm root -g` を評価しないこと）。
+- Docker 版 Agent はこの仕組みの対象外です。Docker イメージの既定 Ansible を ansible-core 2.20（Ubuntu 26.04・Python 3.14）へ
+  移行する別作業で対応します。
+- 導入後、Agent の環境変数 `AI_SUPPORT_AGENT_ZABBIX_CONTROLLER=2.20` を設定して Agent を再起動します。
+  未設定なら従来の controller のままです。`2.20` 以外の値は拒否します。controller が無い・版が違う場合は、
+  SSH 接続より前に明確なエラーで止まります（従来の controller へは切り替えません）。
+- 設定すると、Zabbix ロール（`zabbix_agent`・`zabbix_server`・`zabbix_web`・`zabbix_webhook_relay`）を含むレシピは
+  専用 controller で実行されます。**Zabbix ロールと他の同梱ロールを同じレシピに混在させると、対象 OS にかかわらず拒否**
+  します（他ロールは 2.20 で未検証のため）。混在しているレシピは Zabbix 部分を別レシピに分けてください。
+
 Ubuntu 26.04 の TimescaleDB 自動導入は未対応のため、LTS（7.0/8.0）にかかわらず
 `zabbix_server_db_timescaledb: true` を初期検証で拒否します。26.04 では通常の PostgreSQL を使用します。
 既定は7.0、ローカルPostgreSQL、Nginxです。Dockerインストール経路はありません。

@@ -1202,9 +1202,11 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'zabbix_web_unstable_source',
   'zabbix_web_vhost',
   // zabbix_webhook_relay（tasks/main.yml の register）。rollback_dir/previous は復元元、
-  // listener は待受の検証に使う。書き換えられると復元先や loopback 限定の確認を迂回できる。
+  // listener・nginx_dump は待受の検証に使う。書き換えられると復元先や loopback 限定の確認を迂回できる。
+  // nginx_dump は他サイトを含む nginx 全設定なので、debug での読み出しも許さない。
   'zabbix_webhook_relay_config',
   'zabbix_webhook_relay_listener',
+  'zabbix_webhook_relay_nginx_dump',
   'zabbix_webhook_relay_previous',
   'zabbix_webhook_relay_probe',
   'zabbix_webhook_relay_rollback_dir',

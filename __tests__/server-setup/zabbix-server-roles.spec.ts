@@ -542,6 +542,7 @@ describe('Zabbix server and web roles', () => {
     const internalNames = [
       'zabbix_webhook_relay_config',
       'zabbix_webhook_relay_listener',
+      'zabbix_webhook_relay_nginx_dump',
       'zabbix_webhook_relay_previous',
       'zabbix_webhook_relay_probe',
       'zabbix_webhook_relay_rollback_dir',

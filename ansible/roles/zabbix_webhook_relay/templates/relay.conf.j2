@@ -2,14 +2,17 @@
 # Zabbix HttpRequest does not verify TLS certificates and follows redirects; this server
 # verifies the upstream certificate and converts upstream redirects into 502.
 server {
-    listen 127.0.0.1:{{ zabbix_webhook_relay_listen_port }};
+    # default_server covers Host values that match no server_name; the role also asserts (nginx -T)
+    # that no other server block listens on this port.
+    listen 127.0.0.1:{{ zabbix_webhook_relay_listen_port }} default_server;
     server_name "";
     access_log /var/log/nginx/ai-support-zabbix-webhook-relay.access.log;
     error_log /var/log/nginx/ai-support-zabbix-webhook-relay.error.log warn;
     client_max_body_size 4k;
     client_body_buffer_size 4k;
 
-    location ~ "^/webhooks/zabbix/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$" {
+    # "$" also matches before a final newline in PCRE; the lookahead rejects a decoded %0a/%0d.
+    location ~ "^/webhooks/zabbix/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}(?![\r\n])$" {
         limit_except POST {
             deny all;
         }

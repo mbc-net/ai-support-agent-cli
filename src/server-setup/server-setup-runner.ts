@@ -841,13 +841,23 @@ function hasSynchronousCompletion(tasks: readonly Record<string, unknown>[]): bo
 export async function executeServerSetupAnsible(
   input: ExecuteServerSetupAnsibleInput,
 ): Promise<CommandResult> {
-  const { executionId, body, mode, targetOs, credential, variables, secretNames, tenantCode, sshHostId, commandId, client, onProgress, onAwaitingSelfRestart } = input
+  const { executionId, body, mode, targetOs, credential, tenantCode, sshHostId, commandId, client, onProgress, onAwaitingSelfRestart } = input
 
   const approvedZabbixRecipe = createHash('sha256').update(body).digest('hex') === ZABBIX_AGENT_RECIPE_BODY_SHA256
-  if (approvedZabbixRecipe && (
-    Object.keys(variables).sort().join(',') !== [...ZABBIX_AGENT_RECIPE_VARIABLES].sort().join(',') ||
-    !secretNames.includes('ZABBIX_PSK')
-  )) return errorResult('Approved Zabbix recipe requires exactly its five fixed variables and a secret PSK; extra-vars overrides are refused')
+  let { variables, secretNames } = input
+  if (approvedZabbixRecipe) {
+    // Without a configuration binding the API sends every ANSIBLE# variable of the project,
+    // environment and host. Extra-vars override any role value, so the reviewed recipe receives
+    // only its five fixed variables; a Zabbix-namespaced extra is an override attempt and is refused.
+    const fixed = new Set<string>(ZABBIX_AGENT_RECIPE_VARIABLES)
+    const missing = ZABBIX_AGENT_RECIPE_VARIABLES.filter(name => !Object.prototype.hasOwnProperty.call(variables, name))
+    const overrides = Object.keys(variables).filter(name => !fixed.has(name) && /^(zabbix|zbx)_/i.test(name))
+    if (missing.length || overrides.length || !secretNames.includes('ZABBIX_PSK')) {
+      return errorResult(`Approved Zabbix recipe requires its five fixed variables and a secret PSK; extra-vars overrides are refused (missing: ${missing.join(',') || 'none'}; refused: ${overrides.join(',') || 'none'})`)
+    }
+    variables = Object.fromEntries(Object.entries(variables).filter(([name]) => fixed.has(name)))
+    secretNames = secretNames.filter(name => fixed.has(name))
+  }
 
   // Fail closed before anything touches the disk: an absent/unknown OS must
   // never silently become a Linux run.
