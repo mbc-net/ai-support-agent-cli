@@ -83,12 +83,12 @@
     headers:
       Host: "{{ zabbix_web_server_name }}"
       Content-Type: application/json-rpc
-      Authorization: "{{ 'Bearer ' ~ zn_login_token if zabbix_server_version == '7.0' else omit }}"
+      Authorization: "{{ 'Bearer ' ~ zn_login_token if zabbix_server_version is version('7.0', '>=') else omit }}"
     body: >-
       {{ {'jsonrpc': '2.0', 'method': 'user.update', 'id': 2,
           'params': {'userid': '1', 'passwd': zn_p3}
-                    | combine({'current_passwd': zn_p1} if zabbix_server_version == '7.0' else {})}
-         | combine({} if zabbix_server_version == '7.0' else {'auth': zn_login_token}) }}
+                    | combine({'current_passwd': zn_p1} if zabbix_server_version is version('7.0', '>=') else {})}
+         | combine({} if zabbix_server_version is version('7.0', '>=') else {'auth': zn_login_token}) }}
   register: zn_oob
   no_log: true
 
@@ -153,7 +153,7 @@
       - >-
         (zabbix_web_api_result.stdout | from_json).housekeeping_changed | sort
         == (['hk_audit']
-            + (['hk_history'] if zabbix_server_version == '7.0' else [])
+            + (['hk_history'] if zabbix_server_version is version('7.0', '>=') else [])
             + ([] if zn_api_timescaledb else ['hk_history_global', 'hk_trends_global'])) | sort
     fail_msg: "Got {{ zabbix_web_api_result.stdout }}"
 

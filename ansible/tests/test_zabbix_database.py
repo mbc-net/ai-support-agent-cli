@@ -182,6 +182,131 @@ END $$;
 """
 
 
+class FakeCursor:
+    def __init__(self, versions, counts):
+        self.versions, self.counts, self.executed, self.last = versions, counts, [], None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, sql, params=None):
+        self.executed.append(sql)
+        self.last = sql
+
+    def fetchall(self):
+        return self.versions
+
+    def fetchone(self):
+        return (self.counts.get(self.last.rsplit(' ', 1)[-1], 0),)
+
+
+class FakeConnection:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+
+class SeriesLayoutUnitTests(unittest.TestCase):
+    """No database needed. 8.0 moved the SQL scripts and replaced config with settings (7.4)."""
+
+    def test_schema_path_per_lts(self):
+        cases = {('postgresql', '6.0'): '/usr/share/zabbix-sql-scripts/postgresql/server.sql.gz',
+                 ('postgresql', '7.0'): '/usr/share/zabbix-sql-scripts/postgresql/server.sql.gz',
+                 ('mysql', '7.0'): '/usr/share/zabbix-sql-scripts/mysql/server.sql.gz',
+                 ('postgresql', '8.0'): '/usr/share/zabbix/sql-scripts/postgresql/server.sql.gz',
+                 ('mysql', '8.0'): '/usr/share/zabbix/sql-scripts/mysql/server.sql.gz'}
+        for (engine, version), path in cases.items():
+            with self.subTest(engine=engine, version=version):
+                self.assertEqual(db.packaged_schema_path({'engine': engine, 'version': version}), path)
+
+    def test_schema_must_contain_the_series_seed_table(self):
+        schema = 'CREATE TABLE dbversion (a int);\nCREATE TABLE users (a int);\nCREATE TABLE config (a int);\n' \
+                 'CREATE TABLE hosts (a int);\nCREATE TABLE items (a int);\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'server.sql.gz'
+            path.write_bytes(gzip.compress(schema.encode()))
+            config = dict(engine='postgresql', host='127.0.0.1', port=1, database='z', user='z', password='p',
+                          version='8.0', timescaledb=False)
+            with mock.patch.object(db, 'connect') as connect:
+                with self.assertRaisesRegex(db.DatabaseSetupError, 'not a complete Zabbix server schema'):
+                    db.bootstrap(config, str(path))
+                connect.assert_not_called()
+
+    def test_db_extension_reads_the_series_table(self):
+        for version, sql in (('7.0', 'SELECT db_extension FROM config'),
+                             ('8.0', "SELECT value_str FROM settings WHERE name='db_extension'")):
+            with self.subTest(version=version):
+                cursor = FakeCursor([('timescaledb',)], {})
+                self.assertEqual(db.db_extension(FakeConnection(cursor), version), 'timescaledb')
+                self.assertEqual(cursor.executed, [sql])
+                cursor = FakeCursor([(None,)], {})
+                self.assertEqual(db.db_extension(FakeConnection(cursor), version), '')
+
+    def test_db_extension_requires_exactly_one_row(self):
+        for rows in ([], [('',), ('timescaledb',)]):
+            with self.subTest(rows=rows):
+                with self.assertRaises(db.DatabaseSetupError):
+                    db.db_extension(FakeConnection(FakeCursor(rows, {})), '8.0')
+
+    def test_plain_db_is_classified_on_8_0(self):
+        cursor = FakeCursor([('',)], {})
+        kind = db.classify_timescale(FakeConnection(cursor), 'ready', {'extension': False, 'hypertables': set()},
+                                     lambda: set(), '8.0')
+        self.assertEqual(kind, 'plain')
+        self.assertIn("SELECT value_str FROM settings WHERE name='db_extension'", cursor.executed)
+
+    def test_timescaledb_on_8_0_is_rejected_explicitly_before_connecting(self):
+        schema = ''.join('CREATE TABLE %s (a int);\n' % n for n in ('dbversion', 'users', 'settings', 'hosts', 'items'))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'server.sql.gz'
+            path.write_bytes(gzip.compress(schema.encode()))
+            config = dict(engine='postgresql', host='127.0.0.1', port=1, database='z', user='z', password='p',
+                          version='8.0', timescaledb=True)
+            with mock.patch.object(db, 'connect') as connect:
+                with self.assertRaises(db.DatabaseSetupError) as failure:
+                    db.bootstrap(config, str(path))
+                connect.assert_not_called()
+            self.assertIn('TimescaleDB', str(failure.exception))
+            self.assertIn('8.0', str(failure.exception))
+
+    def test_unknown_lts_is_rejected(self):
+        with self.assertRaises(db.DatabaseSetupError):
+            db.packaged_schema_path({'engine': 'postgresql', 'version': '7.4'})
+
+    def inspect(self, version, versions, counts):
+        cursor = FakeCursor(versions, counts)
+        with mock.patch.object(db, 'table_names', return_value={'dbversion', 'users', 'config', 'settings'}):
+            result = db.inspect(FakeConnection(cursor), {'engine': 'postgresql', 'version': version}, {'dbversion'})
+        return result, cursor.executed
+
+    def test_seed_tables_follow_the_series(self):
+        for version, lower, seed in (('7.0', 7000000, 'config'), ('7.0', 7009999, 'config'),
+                                     ('8.0', 8000000, 'settings')):
+            with self.subTest(version=version):
+                result, executed = self.inspect(version, [(lower, lower)], {'users': 1, seed: 1})
+                self.assertEqual(result, 'ready')
+                self.assertIn('SELECT COUNT(*) FROM ' + seed, executed)
+                other = 'settings' if seed == 'config' else 'config'
+                self.assertNotIn('SELECT COUNT(*) FROM ' + other, executed)
+
+    def test_missing_settings_seed_is_rejected_on_8_0(self):
+        with self.assertRaises(db.DatabaseSetupError):
+            self.inspect('8.0', [(8000000, 8000000)], {'users': 1, 'config': 1})
+
+    def test_db_version_must_match_the_series(self):
+        for version, versions in (('8.0', [(7000000, 7000000)]), ('7.0', [(8000000, 8000000)]),
+                                  ('8.0', [(8020000, 8020000)]), ('7.0', [(7040000, 7040000)]),
+                                  ('7.0', [(7010000, 7010000)]), ('7.0', [(6999999, 7000000)])):
+            with self.subTest(version=version, versions=versions):
+                with self.assertRaises(db.DatabaseSetupError):
+                    self.inspect(version, versions, {'users': 1, 'config': 1, 'settings': 1})
+
+
 class TimescaleHelperUnitTests(unittest.TestCase):
     """No database needed."""
 
@@ -287,8 +412,8 @@ class TimescaleBootstrapTests(unittest.TestCase):
         info = db.timescale_info(connection)
         tables = db.table_names(connection, 'postgresql')
         extension = None
-        if 'config' in tables:
-            extension = db.db_extension(connection)
+        if db.SEED_TABLES[self.config['version']][1] in tables:
+            extension = db.db_extension(connection, self.config['version'])
         return {'tables': tables, 'hypertables': info['hypertables'], 'extension': info['extension'],
                 'db_extension': extension}
 

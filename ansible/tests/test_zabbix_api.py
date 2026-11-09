@@ -40,11 +40,11 @@ DEFAULT_HOUSEKEEPING = {
 
 
 class FakeZabbix:
-    """State of one fake frontend. ``auth_mode`` is 'body' (6.0) or 'bearer' (7.0)."""
+    """State of one fake frontend. ``auth_mode`` is 'body' (6.0) or 'bearer' (7.0/8.0)."""
 
     def __init__(self, version='7.0.5', password='zabbix'):
         self.version = version
-        self.auth_mode = 'bearer' if version.startswith('7.') else 'body'
+        self.auth_mode = 'bearer' if not version.startswith('6.') else 'body'
         self.password = password
         self.tokens = set()
         self.issued = []
@@ -200,7 +200,7 @@ class ZabbixApiHelperTest(unittest.TestCase):
     # --- password state machine -------------------------------------------------
 
     def test_new_password_already_valid_is_unchanged(self):
-        for version in ('6.0.30', '7.0.5'):
+        for version in ('6.0.30', '7.0.5', '8.0.0'):
             with self.subTest(version=version):
                 state = FakeZabbix(version, password=NEW)
                 out = self.result(self.converge(state))
@@ -209,7 +209,7 @@ class ZabbixApiHelperTest(unittest.TestCase):
                 self.assertNotIn('user.update', state.methods())
 
     def test_previous_password_is_rotated(self):
-        for version in ('6.0.30', '7.0.5'):
+        for version in ('6.0.30', '7.0.5', '8.0.0'):
             with self.subTest(version=version):
                 state = FakeZabbix(version, password=PREVIOUS)
                 out = self.result(self.converge(state, previous=PREVIOUS))
@@ -217,12 +217,12 @@ class ZabbixApiHelperTest(unittest.TestCase):
                 self.assertEqual(state.password, NEW)
                 self.assertEqual([p['password'] for p in state.params_of('user.login')], [NEW, PREVIOUS, NEW])
                 expected = {'userid': '1', 'passwd': NEW}
-                if version.startswith('7.'):
+                if not version.startswith('6.'):
                     expected['current_passwd'] = PREVIOUS
                 self.assertEqual(state.params_of('user.update'), [expected])
 
     def test_initial_password_is_replaced_with_current_passwd_on_7_0_only(self):
-        for version in ('6.0.30', '7.0.5'):
+        for version in ('6.0.30', '7.0.5', '8.0.0'):
             with self.subTest(version=version):
                 state = FakeZabbix(version, password='zabbix')
                 out = self.result(self.converge(state, previous=PREVIOUS))
@@ -230,7 +230,7 @@ class ZabbixApiHelperTest(unittest.TestCase):
                 self.assertEqual([p['password'] for p in state.params_of('user.login')],
                                  [NEW, PREVIOUS, 'zabbix', NEW])
                 expected = {'userid': '1', 'passwd': NEW}
-                if version.startswith('7.'):
+                if not version.startswith('6.'):
                     expected['current_passwd'] = 'zabbix'
                 self.assertEqual(state.params_of('user.update'), [expected])
                 self.assertEqual(state.params_of('user.get'),

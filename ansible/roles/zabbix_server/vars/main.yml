@@ -1,0 +1,15 @@
+---
+# Derived per-series values (only read after the Validate assert accepted the series).
+# Zabbix 8.0 moved its packages to epoch 2 and to a channel-split repository layout
+# (release/ for zabbix-release, stable/ for packages) that serves amd64 and arm64 from one URI.
+zabbix_server_pkg_epoch: "{{ {'6.0': '1', '7.0': '1', '8.0': '2'}[zabbix_server_version] }}"
+# Minimum validated patch on Ubuntu 26.04 (the only release where 8.0 is accepted).
+zabbix_server_min_patch: "{{ {'7.0': '7.0.32', '8.0': '8.0.0'}[zabbix_server_version] }}"
+zabbix_server_repo_uri: >-
+  {{ 'https://repo.zabbix.com/zabbix/8.0/stable/ubuntu' if zabbix_server_version == '8.0'
+  else 'https://repo.zabbix.com/zabbix/' ~ zabbix_server_version ~ '/'
+  ~ ('ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu') }}
+zabbix_server_release_deb: >-
+  {{ ('https://repo.zabbix.com/zabbix/8.0/release/ubuntu' if zabbix_server_version == '8.0' else zabbix_server_repo_uri)
+  ~ '/pool/main/z/zabbix-release/zabbix-release_latest_' ~ zabbix_server_version
+  ~ '+ubuntu' ~ ansible_distribution_version ~ '_all.deb' }}

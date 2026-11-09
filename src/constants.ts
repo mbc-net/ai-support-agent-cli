@@ -74,6 +74,10 @@ export const ENV_VARS = {
   // true` over SSH. See server-setup-runner.ts's `runAnsiblePlaybook`.
   SERVER_SETUP_ANSIBLE_UID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID',
   SERVER_SETUP_ANSIBLE_GID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_GID',
+  // Opt-in dedicated ansible-core 2.20 controller for recipes that include the bundled
+  // Zabbix roles (required for Ubuntu 26.04 targets). Only "2.20" is accepted; unset keeps
+  // the image's default controller. See src/server-setup/zabbix-controller.ts.
+  ZABBIX_CONTROLLER: 'AI_SUPPORT_AGENT_ZABBIX_CONTROLLER',
   // Third-party CLI credential/config env vars (Claude Code / Codex). These are
   // not namespaced under AI_SUPPORT_AGENT_* — their names are fixed by the
   // external CLI they configure — but are centralized here for the same

@@ -34,7 +34,14 @@ class DatabaseSetupError(Exception):
 
 
 TIMESCALE_MARKER = '_ai_support_zabbix_timescaledb_pending'
-# Relative to the engine directory (/usr/share/zabbix-sql-scripts/postgresql).
+# Packaged SQL script root per LTS. Zabbix 8.0 moved the scripts under /usr/share/zabbix.
+SCHEMA_ROOTS = {'6.0': '/usr/share/zabbix-sql-scripts', '7.0': '/usr/share/zabbix-sql-scripts',
+                '8.0': '/usr/share/zabbix/sql-scripts'}
+# dbversion.mandatory lower bound per LTS (the series spans [lower, lower + 10000)).
+DB_VERSION_LOWER = {'6.0': 6000000, '7.0': 7000000, '8.0': 8000000}
+# Tables that must hold seed rows. Zabbix 7.4 replaced the config table with settings.
+SEED_TABLES = {'6.0': ('users', 'config'), '7.0': ('users', 'config'), '8.0': ('users', 'settings')}
+# Relative to the engine directory (SCHEMA_ROOTS[version]/postgresql).
 TIMESCALE_SCRIPTS = {'6.0': 'timescaledb.sql', '7.0': 'timescaledb/schema.sql'}
 # Hypertables both LTS scripts create. 7.0 also creates history_bin and auditlog;
 # the full expected set is always read from the packaged script.
@@ -42,6 +49,13 @@ BASE_HYPERTABLES = {'history', 'history_uint', 'history_str', 'history_log', 'hi
 MANUAL_MIGRATION = ('Converting an existing Zabbix DB to TimescaleDB is not automated: stop Zabbix server and frontend, '
                     'back up the DB, run CREATE EXTENSION timescaledb CASCADE as postgres and the packaged TimescaleDB '
                     'script as the Zabbix DB user, then start Zabbix (see ZABBIX.md).')
+
+
+def packaged_schema_path(config):
+    if config.get('version') not in SCHEMA_ROOTS:
+        raise DatabaseSetupError('Unsupported Zabbix LTS for the packaged SQL scripts.')
+    return (SCHEMA_ROOTS[config['version']] + '/' + ('postgresql' if config['engine'] == 'postgresql' else 'mysql')
+            + '/server.sql.gz')
 
 
 def lock_name(database):
@@ -104,10 +118,11 @@ def inspect(connection, config, tables, importing=False):
     with connection.cursor() as cursor:
         cursor.execute('SELECT mandatory, optional FROM dbversion')
         versions = cursor.fetchall()
-        lower = {'6.0': 6000000, '7.0': 7000000}[config['version']]
-        if len(versions) != 1 or not (lower <= versions[0][0] <= versions[0][1] < lower + 100000):
+        lower = DB_VERSION_LOWER[config['version']]
+        # XXYYZZZZ numbering: 7.2 is 7020000, so an LTS spans [lower, lower + 10000).
+        if len(versions) != 1 or not (lower <= versions[0][0] <= versions[0][1] < lower + 10000):
             raise DatabaseSetupError('DB version does not match the selected LTS. In-place LTS upgrades/downgrades require a separate backed-up upgrade procedure.')
-        for table in ('users', 'config'):
+        for table in SEED_TABLES[config['version']]:
             cursor.execute('SELECT COUNT(*) FROM ' + table)
             if cursor.fetchone()[0] < 1:
                 raise DatabaseSetupError('Initial DB seed data is missing. Inspect and restore the DB before retrying.')
@@ -129,13 +144,18 @@ def timescale_info(connection):
                 'hypertables': {r[0] for r in cursor.fetchall()}}
 
 
-def db_extension(connection):
+# Zabbix 7.4 replaced the single-row config table with the key-value settings table.
+DB_EXTENSION_QUERIES = {'6.0': 'SELECT db_extension FROM config', '7.0': 'SELECT db_extension FROM config',
+                        '8.0': "SELECT value_str FROM settings WHERE name='db_extension'"}
+
+
+def db_extension(connection, version):
     with connection.cursor() as cursor:
-        cursor.execute('SELECT db_extension FROM config')
-        values = {row[0] or '' for row in cursor.fetchall()}
-    if len(values) != 1:
-        raise DatabaseSetupError('Unexpected Zabbix config rows. Inspect and restore the DB before retrying.')
-    return values.pop()
+        cursor.execute(DB_EXTENSION_QUERIES[version])
+        rows = cursor.fetchall()
+    if len(rows) != 1:
+        raise DatabaseSetupError('Unexpected Zabbix db_extension setting rows. Inspect and restore the DB before retrying.')
+    return rows[0][0] or ''
 
 
 def require_community(info):
@@ -147,9 +167,9 @@ def require_community(info):
                                  'The Apache edition has no compression and is not supported by this role.')
 
 
-def classify_timescale(connection, state, info, expected):
+def classify_timescale(connection, state, info, expected, version):
     """Return 'plain' or 'timescaledb' for an initialized PostgreSQL DB, or raise."""
-    extension_name = db_extension(connection)
+    extension_name = db_extension(connection, version)
     hypertables = info['hypertables']
     if state == 'timescaledb_pending':
         if extension_name or hypertables:
@@ -158,10 +178,10 @@ def classify_timescale(connection, state, info, expected):
     if not extension_name and not hypertables:
         return 'plain'
     if extension_name == 'timescaledb' and not info['extension']:
-        raise DatabaseSetupError('config.db_extension is timescaledb but the timescaledb extension is missing. Restore the extension or the DB before retrying.')
+        raise DatabaseSetupError('The db_extension setting is timescaledb but the timescaledb extension is missing. Restore the extension or the DB before retrying.')
     if extension_name == 'timescaledb' and expected().issubset(hypertables):
         return 'timescaledb'
-    raise DatabaseSetupError('Incomplete or inconsistent TimescaleDB setup (config.db_extension and hypertables do not match). '
+    raise DatabaseSetupError('Incomplete or inconsistent TimescaleDB setup (the db_extension setting and hypertables do not match). '
                              'Inspect and restore the DB manually before retrying.')
 
 
@@ -223,6 +243,8 @@ def bootstrap(config, schema_path, verify_only=False, plan=False):
 
     def timescale_script():
         if 'text' not in script_cache:
+            if config['version'] not in TIMESCALE_SCRIPTS:
+                raise DatabaseSetupError('TimescaleDB is not supported by this role for Zabbix %s.' % config['version'])
             path = Path(schema_path).parent / TIMESCALE_SCRIPTS[config['version']]
             try:
                 script_cache['text'] = read_sql(path)
@@ -240,7 +262,7 @@ def bootstrap(config, schema_path, verify_only=False, plan=False):
             raise DatabaseSetupError('zabbix_server_db_timescaledb requires PostgreSQL.')
         schema = read_sql(schema_path)
         tables = expected_tables(schema)
-        if not {'dbversion', 'users', 'config', 'hosts', 'items'}.issubset(tables):
+        if not {'dbversion', 'hosts', 'items', *SEED_TABLES[config['version']]}.issubset(tables):
             raise DatabaseSetupError('The packaged SQL script is not a complete Zabbix server schema.')
         if want:
             timescale_script()
@@ -260,7 +282,7 @@ def bootstrap(config, schema_path, verify_only=False, plan=False):
             result.update(extversion=info['extversion'], license=info['license'])
 
         if state != 'empty' and info is not None:
-            check_policy(classify_timescale(connection, state, info, expected), info, want)
+            check_policy(classify_timescale(connection, state, info, expected, config['version']), info, want)
         elif state == 'empty' and want and info['extension']:
             # In local mode the extension is created after --plan; check it early when it already exists.
             require_community(info)
@@ -292,7 +314,7 @@ def bootstrap(config, schema_path, verify_only=False, plan=False):
             if inspect(connection, config, tables) != 'ready':
                 raise DatabaseSetupError('The TimescaleDB initialization did not complete. Inspect the DB before retrying.')
             info = timescale_info(connection)
-            if classify_timescale(connection, 'ready', info, expected) != 'timescaledb':
+            if classify_timescale(connection, 'ready', info, expected, config['version']) != 'timescaledb':
                 raise DatabaseSetupError('The TimescaleDB initialization did not create the expected hypertables. Inspect the DB before retrying.')
             result.update(extversion=info['extversion'], license=info['license'])
         result.update(changed=True, state='ready')
@@ -318,8 +340,7 @@ def bootstrap(config, schema_path, verify_only=False, plan=False):
 if __name__ == '__main__':
     try:
         config = json.loads(Path(sys.argv[1]).read_text())
-        schema_path = '/usr/share/zabbix-sql-scripts/' + ('postgresql' if config['engine'] == 'postgresql' else 'mysql') + '/server.sql.gz'
-        print(json.dumps(bootstrap(config, schema_path, '--verify-only' in sys.argv[2:], '--plan' in sys.argv[2:])))
+        print(json.dumps(bootstrap(config, packaged_schema_path(config), '--verify-only' in sys.argv[2:], '--plan' in sys.argv[2:])))
     except Exception as error:
         message = str(error) if isinstance(error, DatabaseSetupError) else 'DB setup failed; check the root-only credentials file and packaged SQL script.'
         print(message, file=sys.stderr)
