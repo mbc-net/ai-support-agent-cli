@@ -155,8 +155,8 @@ describe('Dockerfile bundles a modern neovim + fzf + the plugin set', () => {
   it('builds neovim from source rather than a prebuilt release tarball', () => {
     // Verified against a real build: neovim's official prebuilt arm64 release
     // tarballs (v0.10.4+, the first to ship a separate arm64 asset) require
-    // GLIBC >= 2.38, but this image's base (Debian bookworm) ships GLIBC
-    // 2.36 — the prebuilt binary fails at runtime with
+    // GLIBC >= 2.38, but this image's previous base (Debian bookworm) shipped
+    // GLIBC 2.36 — the prebuilt binary fails at runtime with
     // "version `GLIBC_2.38' not found" on arm64 hosts (e.g. Apple Silicon
     // Docker Desktop, used for local agent CLI runs). Building from source
     // links against whatever glibc the build stage actually has, so it works
@@ -264,8 +264,8 @@ describe('Dockerfile bundles a modern neovim + fzf + the plugin set', () => {
     // Verified against a real build: both the tree-sitter-cli npm package
     // and tree-sitter/tree-sitter's own GitHub release arm64 binary are
     // linked against GLIBC >= 2.39 — the same class of trap as neovim's
-    // prebuilt arm64 tarball above, and this bookworm base only has GLIBC
-    // 2.36. rustc/cargo from apt (bookworm ships 1.63) are old enough that
+    // prebuilt arm64 tarball above (the previous bookworm base only had GLIBC
+    // 2.36). rustc/cargo from apt (bookworm shipped 1.63) were old enough that
     // tree-sitter-cli may not build (MSRV), so rustup installs a current
     // stable toolchain instead, mirroring this Dockerfile's other
     // official-install-script tools (starship, code-server).

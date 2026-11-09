@@ -52,7 +52,7 @@ permissions:
 
 env:
   # Match the production Docker image (docker/Dockerfile) ansible-core pin.
-  ANSIBLE_CORE_SPEC: "ansible-core>=2.16,<2.18"
+  ANSIBLE_CORE_SPEC: "ansible-core>=2.20,<2.21"
   # Pin the Python tooling to a minor-version range (==X.Y.*) so a background
   # release cannot silently change lint rules or the molecule/driver behavior
   # under us. Bumping these is an intentional, reviewed PR — never an implicit
@@ -76,7 +76,8 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # Same Python as the Docker image's controller (Ubuntu 26.04: 3.14).
+          python-version: "3.14"
 
       - name: Install ansible-core + linters
         run: pip install "${ANSIBLE_CORE_SPEC}" "${ANSIBLE_LINT_SPEC}" "${YAMLLINT_SPEC}"
@@ -135,7 +136,8 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # Same Python as the Docker image's controller (Ubuntu 26.04: 3.14).
+          python-version: "3.14"
 
       - name: Install Molecule + docker driver + ansible-core
         run: pip install "${ANSIBLE_CORE_SPEC}" "${MOLECULE_SPEC}" "${MOLECULE_DOCKER_SPEC}" "${DOCKER_PY_SPEC}"
