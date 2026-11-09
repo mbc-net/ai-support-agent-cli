@@ -8,9 +8,9 @@
 #
 # ansible-core itself is NOT a Galaxy collection and is not declared here.
 # Install it into your venv with the same pip constraint the Dockerfile pins
-# for `ansible-core` (currently `>=2.16,<2.18`):
+# for `ansible-core` (currently `>=2.20,<2.21`):
 #
-#     pip install 'ansible-core>=2.16,<2.18' ansible-lint yamllint
+#     pip install 'ansible-core>=2.20,<2.21' ansible-lint yamllint
 #     ansible-galaxy collection install -r ansible/requirements.yml
 #
 # See ansible/DEVELOPING.md for the full workflow.

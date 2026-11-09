@@ -8,7 +8,9 @@ from pathlib import Path
 
 import yaml
 from ansible.parsing.dataloader import DataLoader
-from ansible.template import Templar
+# ansible-core >= 2.19 (data tagging) only templates trusted strings; the
+# repository pins ansible-core 2.20, so the helper is imported directly.
+from ansible.template import Templar, trust_as_template
 
 
 ROLE = Path(__file__).resolve().parents[1] / "roles" / "ai_support_agent_k8s"
@@ -28,7 +30,7 @@ class RdpManifestTests(unittest.TestCase):
     def render(self, **overrides):
         task = next(t for t in read_yaml("tasks/project.yml")
                     if t["name"].endswith("Write the StatefulSet manifest"))
-        text = self.templar(**overrides).template(task["ansible.builtin.copy"]["content"])
+        text = self.templar(**overrides).template(trust_as_template(task["ansible.builtin.copy"]["content"]))
         return yaml.safe_load(text)
 
     def test_rdp_and_persistence_matrix(self):
@@ -82,13 +84,13 @@ class RdpManifestTests(unittest.TestCase):
                 overrides = {key: value} if key.startswith("ai_") else {
                     "item": {"name": "test-agent", key: value}}
                 templar = self.templar(**overrides)
-                self.assertFalse(templar.template("{{ " + task["ansible.builtin.assert"]["that"][0] + " }}"))
+                self.assertFalse(templar.template(trust_as_template("{{ " + task["ansible.builtin.assert"]["that"][0] + " }}")))
             image_key = "ai_support_agent_k8s_guacd_image" if key.startswith("ai_") else "guacd_image"
             for value in ("evil/guacd:latest", "guacamole/guacd:1.5.5\n", "guacamole/guacd:1.5.5\nextra: injected"):
                 overrides = {image_key: value} if key.startswith("ai_") else {
                     "item": {"name": "test-agent", image_key: value}}
                 templar = self.templar(**overrides)
-                self.assertFalse(templar.template("{{ " + task["ansible.builtin.assert"]["that"][1] + " }}"))
+                self.assertFalse(templar.template(trust_as_template("{{ " + task["ansible.builtin.assert"]["that"][1] + " }}")))
 
 
 if __name__ == "__main__":

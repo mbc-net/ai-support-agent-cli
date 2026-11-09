@@ -2,13 +2,13 @@
 Listen {{ zabbix_web_listen_port }}
 <VirtualHost *:{{ zabbix_web_listen_port }}>
     ServerName {{ zabbix_web_server_name }}
-    DocumentRoot /usr/share/zabbix
+    DocumentRoot {{ zabbix_web_ui_root }}
     DirectoryIndex index.php
-    <Directory /usr/share/zabbix>
+    <Directory {{ zabbix_web_ui_root }}>
         Require all granted
         AllowOverride None
     </Directory>
-    <DirectoryMatch "/usr/share/zabbix/(conf|include|locale|vendor)">
+    <DirectoryMatch "{{ zabbix_web_ui_root }}/(api|conf|include|locale|vendor)">
         Require all denied
     </DirectoryMatch>
     <FilesMatch "^\.">

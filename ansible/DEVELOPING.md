@@ -24,8 +24,8 @@ Zabbix Server／管理画面の対応構成、設定、復旧、専用DBテス�
 python -m venv .venv
 . .venv/bin/activate
 
-# ansible-core は Dockerfile の pip 制約に一致させる（現在 >=2.16,<2.18）
-pip install 'ansible-core>=2.16,<2.18' ansible-lint yamllint
+# ansible-core は Dockerfile の pip 制約に一致させる（現在 >=2.20,<2.21。本番イメージは Python 3.14）
+pip install 'ansible-core>=2.20,<2.21' ansible-lint yamllint
 
 # Galaxy コレクションは版まで requirements.yml に固定済み
 #（ansible.mysql / community.postgresql / ansible.posix — Dockerfile と一致）

@@ -40,4 +40,25 @@ describe('docker/Dockerfile COPY sources are all registered for config-dir sync'
 
     expect(unregistered).toEqual([])
   })
+
+  // The build context is the config dir, which only ever receives the synced docker/ assets.
+  // A COPY from anywhere else (e.g. scripts/) breaks `docker build` for every user.
+  it('every COPY source in the Dockerfile comes from docker/ (the only synced directory)', () => {
+    const dockerfileContent = fs.readFileSync(DOCKERFILE, 'utf-8')
+    const sources = dockerfileContent
+      .split('\n')
+      .filter((line) => /^(COPY|ADD)\s/.test(line))
+      .flatMap((line) => {
+        const args = line.trim().split(/\s+/).slice(1)
+        const flags = args.filter((arg) => arg.startsWith('--'))
+        // A multi-stage COPY reads from another image, not from the build context.
+        if (flags.some((flag) => flag.startsWith('--from='))) return []
+        const rest = args.filter((arg) => !arg.startsWith('--'))
+        // JSON form: COPY ["src", ..., "dest"]
+        const parts = rest[0]?.startsWith('[') ? (JSON.parse(rest.join(' ')) as string[]) : rest
+        return parts.slice(0, -1)
+      })
+    expect(sources.length).toBeGreaterThan(0)
+    expect(sources.filter((src) => !src.startsWith('docker/'))).toEqual([])
+  })
 })

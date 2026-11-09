@@ -462,7 +462,7 @@ describe('rdp-trusted-ca', () => {
       fs.rmSync(outside, { recursive: true, force: true })
     })
 
-    it('既定の標準バンドルはエージェントイメージ（Debian の ca-certificates）のもの', () => {
+    it('既定の標準バンドルはエージェントイメージ（Ubuntu の ca-certificates）のもの', () => {
       expect(AGENT_SYSTEM_CA_BUNDLE_PATH).toBe('/etc/ssl/certs/ca-certificates.crt')
     })
 

@@ -1,0 +1,122 @@
+name: "Zabbix 20: 既存Agentの固定binding PSK再設定"
+targetOs: linux
+body: |
+  - name: Validate fixed binding and target
+    ansible.builtin.assert:
+      that:
+      - ansible_distribution == 'Ubuntu'
+      - ansible_distribution_version in ['22.04', '24.04', '26.04']
+      - ZABBIX_BINDING_ID is defined and ZABBIX_BINDING_ID is string and ZABBIX_BINDING_ID is match('^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,123}\Z')
+      - ZABBIX_EXPECTED_MACHINE_ID is defined and ZABBIX_EXPECTED_MACHINE_ID is string and ZABBIX_EXPECTED_MACHINE_ID
+        is match('^[0-9a-f]{32}\Z')
+      - ZABBIX_SERVER_ACTIVE is defined and ZABBIX_SERVER_ACTIVE is string and ZABBIX_SERVER_ACTIVE is match('^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?\Z')
+      - ''':'' not in ZABBIX_SERVER_ACTIVE or 1 <= (ZABBIX_SERVER_ACTIVE.split('':'')[-1] | int) <= 65535'
+      fail_msg: Trusted binding, target machine-id and one active server endpoint are required
+  - name: Validate mandatory binding PSK
+    no_log: true
+    ansible.builtin.assert:
+      that:
+      - ZABBIX_PSK_IDENTITY is defined and ZABBIX_PSK_IDENTITY is string and ZABBIX_PSK_IDENTITY is match('^[A-Za-z0-9._:-]{1,128}\Z')
+      - ZABBIX_PSK is defined and ZABBIX_PSK is string and ZABBIX_PSK is match('^[0-9a-fA-F]{64}\Z')
+  - name: Read target machine-id
+    ansible.builtin.command:
+      argv:
+      - cat
+      - /etc/machine-id
+    register: zbx_agent_machine_id
+  - name: Reject a different target before any modification
+    ansible.builtin.assert:
+      that: zbx_agent_machine_id.stdout | trim == ZABBIX_EXPECTED_MACHINE_ID
+  - name: Inspect installed Agent and Includes without changing services
+    ansible.builtin.command:
+      argv:
+      - python3
+      - -c
+      - "import glob, json, os, pathlib, re, subprocess, tarfile, tempfile\nbase = pathlib.Path('/etc/zabbix')\nif\
+        \ base.is_symlink(): raise SystemExit('Symbolic configuration directory requires manual review')\npackages\
+        \ = []\nfor package, variant in [('zabbix-agent', 'agent'), ('zabbix-agent2', 'agent2')]:\n    p = subprocess.run(['dpkg-query',\
+        \ '-W', '-f=${db:Status-Status} ${Version}', package], capture_output=True, text=True)\n    if p.returncode\
+        \ == 0 and p.stdout.startswith('installed '):\n        version = p.stdout.split()[1].split(':')[-1]\n    \
+        \    if not re.match(r'^(6\\.0|7\\.0)\\.', version): raise SystemExit('Unsupported installed Agent LTS')\n\
+        \        packages.append((variant, version[:3]))\nif len(packages) != 1: raise SystemExit('Exactly one installed\
+        \ Agent variant is required; no services changed')\nvariant, version = packages[0]\nconf = base / ('zabbix_agent2.conf'\
+        \ if variant == 'agent2' else 'zabbix_agentd.conf')\nif not conf.is_file() or conf.is_symlink(): raise SystemExit('Regular\
+        \ existing configuration required')\n# Inspect every active Include recursively, including paths outside the\
+        \ standard directory.\nseen = set()\ndef inspect(path):\n    path = pathlib.Path(path)\n    if path.is_symlink()\
+        \ or not path.resolve().is_relative_to(base): raise SystemExit('External or symbolic Include requires manual\
+        \ review')\n    if str(path) in seen: raise SystemExit('Recursive/duplicate Include requires manual review')\n\
+        \    seen.add(str(path))\n    for line in path.read_text().splitlines():\n        line = line.strip()\n  \
+        \      if not line or line.startswith('#'): continue\n        if line.startswith('Include='):\n          \
+        \  pattern = line.split('=', 1)[1].strip()\n            if not pattern.startswith('/etc/zabbix/'): raise SystemExit('Nonstandard\
+        \ Include requires manual review')\n            for child in glob.glob(pattern): inspect(child)\n        elif\
+        \ line.startswith(('TLSPSKFile=', 'TLSKeyFile=', 'TLSCertFile=', 'TLSCAFile=')):\n            secret_path\
+        \ = pathlib.Path(line.split('=', 1)[1].strip())\n            if secret_path.is_symlink() or not secret_path.resolve().is_relative_to(base):\
+        \ raise SystemExit('External TLS file requires manual backup/review')\n        elif path != conf and not re.fullmatch(r'Plugins\\\
+        .[A-Za-z0-9_]+\\.System\\.Path=/usr/sbin/zabbix-agent2-plugin-[A-Za-z0-9_-]+', line):\n            raise SystemExit('Custom\
+        \ Include directives require manual review; no configuration changed')\ninspect(conf)\n# Every running Agent\
+        \ process must belong to the one packaged systemd service.\nunit = 'zabbix-agent2.service' if variant == 'agent2'\
+        \ else 'zabbix-agent.service'\nservice = subprocess.run(['systemctl', 'show', unit, '-p', 'FragmentPath',\
+        \ '-p', 'DropInPaths'], capture_output=True, text=True)\nfields = dict(line.split('=', 1) for line in service.stdout.splitlines()\
+        \ if '=' in line)\nif service.returncode or fields.get('DropInPaths') or fields.get('FragmentPath') not in\
+        \ ('/usr/lib/systemd/system/' + unit, '/lib/systemd/system/' + unit):\n    raise SystemExit('Custom Agent\
+        \ systemd unit/drop-in requires manual review')\nenvironment = pathlib.Path('/etc/default') / unit.removesuffix('.service')\n\
+        if environment.exists() and any(line.strip() and not line.lstrip().startswith('#') for line in environment.read_text().splitlines()):\n\
+        \    raise SystemExit('Custom Agent environment requires manual review')\n\nfor proc in pathlib.Path('/proc').iterdir():\n\
+        \    if not proc.name.isdigit(): continue\n    try:\n        exe = (proc / 'exe').resolve()\n        if exe.name\
+        \ not in ('zabbix_agentd', 'zabbix_agent2'): continue\n        if str(exe) not in ('/usr/sbin/zabbix_agentd',\
+        \ '/usr/sbin/zabbix_agent2') or unit not in (proc / 'cgroup').read_text().strip().split('/'):\n          \
+        \  raise SystemExit('Extra/nonstandard Agent process requires manual review')\n    except (FileNotFoundError,\
+        \ PermissionError): continue\nprint(json.dumps({'variant': variant, 'version': version}))\n"
+    register: zbx_agent_existing
+  - name: Reject unsupported installed version on Ubuntu 26.04
+    ansible.builtin.assert:
+      that: ansible_distribution_version != '26.04' or (zbx_agent_existing.stdout | from_json).version == '7.0'
+  - name: Create private original configuration backup directory
+    ansible.builtin.file:
+      path: /var/backups/ai-support-zabbix/{{ ZABBIX_BINDING_ID }}
+      state: directory
+      owner: root
+      group: root
+      mode: '0700'
+  - name: Save original config and PSK once before reconfiguration
+    no_log: true
+    ansible.builtin.command:
+      argv:
+      - python3
+      - -c
+      - "import os, pathlib, tarfile, tempfile, sys\nfolder = pathlib.Path('/var/backups/ai-support-zabbix') / sys.argv[1]\n\
+        if folder.is_symlink() or folder.parent.is_symlink(): raise SystemExit('Symbolic backup path refused')\nfinal\
+        \ = folder / 'original.tar.gz'\nif final.is_symlink(): raise SystemExit('Symbolic backup refused')\nif final.exists():\n\
+        \    with tarfile.open(final, 'r:gz') as archive: archive.getmembers()\nelse:\n    fd, name = tempfile.mkstemp(prefix='.original-',\
+        \ dir=folder)\n    os.close(fd)\n    try:\n        with tarfile.open(name, 'w:gz', dereference=False) as archive:\
+        \ archive.add('/etc/zabbix', arcname='zabbix')\n        os.replace(name, final)\n    finally:\n        if\
+        \ os.path.exists(name): os.unlink(name)\n"
+      - '{{ ZABBIX_BINDING_ID }}'
+  - name: Restrict original backup access
+    ansible.builtin.file:
+      path: /var/backups/ai-support-zabbix/{{ ZABBIX_BINDING_ID }}/original.tar.gz
+      owner: root
+      group: root
+      mode: '0600'
+  - name: Apply the fixed binding PSK without package upgrades
+    no_log: true
+    ansible.builtin.include_role:
+      name: zabbix_agent
+    vars:
+      zabbix_agent_manage_packages: false
+      zabbix_agent_version: '{{ (zbx_agent_existing.stdout | from_json).version }}'
+      zabbix_agent_variant: '{{ (zbx_agent_existing.stdout | from_json).variant }}'
+      zabbix_agent_server: 127.0.0.1
+      zabbix_agent_server_active: '{{ ZABBIX_SERVER_ACTIVE }}'
+      zabbix_agent_hostname: ais-{{ ZABBIX_BINDING_ID }}
+      zabbix_agent_tls_connect: psk
+      zabbix_agent_tls_accept: psk
+      zabbix_agent_psk_identity: '{{ ZABBIX_PSK_IDENTITY }}'
+      zabbix_agent_psk: '{{ ZABBIX_PSK }}'
+      zabbix_agent_ufw_manage: false
+      zabbix_agent_allowed_sources: []
+      zabbix_agent_allow_no_sources: true
+  - name: Report configuration only; collection is confirmed by the control plane
+    ansible.builtin.debug:
+      msg: Agent configuration applied. Confirm fresh required items for this binding/configuration generation before
+        enabling notifications.

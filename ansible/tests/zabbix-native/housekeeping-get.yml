@@ -11,10 +11,10 @@
     headers:
       Host: "{{ zabbix_web_server_name }}"
       Content-Type: application/json-rpc
-      Authorization: "{{ 'Bearer ' ~ zn_login_token if zabbix_server_version == '7.0' else omit }}"
+      Authorization: "{{ 'Bearer ' ~ zn_login_token if zabbix_server_version is version('7.0', '>=') else omit }}"
     body: >-
       {{ {'jsonrpc': '2.0', 'method': 'housekeeping.get', 'id': 3, 'params': {'output': 'extend'}}
-         | combine({} if zabbix_server_version == '7.0' else {'auth': zn_login_token}) }}
+         | combine({} if zabbix_server_version is version('7.0', '>=') else {'auth': zn_login_token}) }}
   register: zn_hk_raw
   no_log: true
 
