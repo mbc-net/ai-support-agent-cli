@@ -43,12 +43,16 @@ x86_64/ARM64、Zabbix LTSの公式パッケージに対応します。OSごと�
   Zabbix の採番は XXYYZZZZ で、7.2 は 7020000 です。以前は `+100000` の範囲で判定しており、
   7.0 を指定して 7.2/7.4 の DB を受け入れていた不具合を同時に修正しました。
 
-**Ubuntu 26.04 の実行条件:** 標準 Python 3.14 を扱える専用の ansible-core 2.20 以降が必要です。
-同梱 Agent Docker の `ansible-core>=2.16,<2.18` はそのままでは使用できません。
+**Ubuntu 26.04 の実行条件:** 標準 Python 3.14 を扱える ansible-core 2.20 以降の controller が必要です。
+
+- **Docker 版 Agent:** イメージ（`docker/Dockerfile`、ubuntu:26.04・Python 3.14）の既定 Ansible が
+  `ansible-core>=2.20,<2.21` なので、そのまま 26.04 の接続先を扱えます。下の専用 controller は不要で、
+  `AI_SUPPORT_AGENT_ZABBIX_CONTROLLER` も設定しません。2.17 系を同梱していた旧イメージ（node:24-slim ベース）では
+  使用できないため、Agent イメージを更新してから実行してください。
+- **常駐 Agent:** controller はホストに入っている Ansible です。2.20 未満なら下の専用 controller を導入します。
+
 ロール内にも旧 controller の拒否を追加していますが、fact 収集はロールより前なので、
-その段階で失敗する可能性があります。必ず実行開始前に controller を選択してください。
-この変更だけで既存 Agent の自動構築経路が Ubuntu 26.04 対応済みになるわけではありません。
-全 Agent runtime の更新・callback 回帰検証は別の作業です。
+その段階で失敗する可能性があります。必ず実行開始前に 2.20 以降の controller を用意してください。
 
 **専用 controller の導入（常駐 Agent の管理者のみ）:** 固定パス `/opt/ai-support-zabbix-ansible` に ansible-core 2.20.11 の
 venv を作る installer `scripts/install-zabbix-controller.sh` を npm パッケージに同梱しています。
@@ -57,8 +61,7 @@ venv を作る installer `scripts/install-zabbix-controller.sh` を npm パッ�
 - Agent を導入したユーザーの npm から場所を求め、root で実行します。
   例: `sh <Agent の npm root -g の出力>/@ai-support-agent/cli/scripts/install-zabbix-controller.sh`
   （root と Agent のユーザーで npm の場所が違う場合があるため、`sudo` の中で `npm root -g` を評価しないこと）。
-- Docker 版 Agent はこの仕組みの対象外です。Docker イメージの既定 Ansible を ansible-core 2.20（Ubuntu 26.04・Python 3.14）へ
-  移行する別作業で対応します。
+- Docker 版 Agent はこの仕組みの対象外です（イメージの既定 Ansible が ansible-core 2.20 のため不要）。
 - 導入後、Agent の環境変数 `AI_SUPPORT_AGENT_ZABBIX_CONTROLLER=2.20` を設定して Agent を再起動します。
   未設定なら従来の controller のままです。`2.20` 以外の値は拒否します。controller が無い・版が違う場合は、
   SSH 接続より前に明確なエラーで止まります（従来の controller へは切り替えません）。
