@@ -30,14 +30,14 @@ describe('Dockerfile: shell prompt / ls / cat replacements', () => {
     expect(content).toMatch(/&& starship --version\b/)
   })
 
-  it('installs eza (dual-arch GitHub release binary, not available via apt on bookworm)', () => {
+  it('installs eza (dual-arch GitHub release binary pinned to EZA_VERSION)', () => {
     expect(content).toMatch(
       /eza_\$\{?EZA_ARCH\}?-unknown-linux-gnu\.tar\.gz|eza_aarch64-unknown-linux-gnu\.tar\.gz/,
     )
     expect(content).toMatch(/&& eza --version\b/)
   })
 
-  it('installs bat via apt (Debian ships the binary as /usr/bin/batcat, not /usr/bin/bat)', () => {
+  it('installs bat via apt (Debian/Ubuntu ship the binary as /usr/bin/batcat, not /usr/bin/bat)', () => {
     expect(content).toMatch(/apt-get install -y --no-install-recommends[\s\S]*?\bbat\b/)
   })
 
@@ -46,7 +46,7 @@ describe('Dockerfile: shell prompt / ls / cat replacements', () => {
     // terminal session spawns bash with `--rcfile <tmp>/.bashrc` (see
     // terminal-session.ts / sandbox-init-script.ts's buildBashRcContent,
     // which sources ~/.bashrc, not /etc/profile.d). Verified empirically:
-    // Debian's bash still sources /etc/bash.bashrc even with --rcfile set,
+    // Debian/Ubuntu bash still sources /etc/bash.bashrc even with --rcfile set,
     // so that is the file that must carry this setup.
     expect(content).toMatch(/COPY docker\/bashrc-extra\.sh \/tmp\/bashrc-extra\.sh/)
     expect(content).toMatch(/cat \/tmp\/bashrc-extra\.sh >> \/etc\/bash\.bashrc\b/)

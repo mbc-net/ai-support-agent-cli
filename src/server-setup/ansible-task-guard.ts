@@ -23,6 +23,15 @@ import windowsGuardJson from './windows-guard.json'
  * API 保存時（レシピ作成/更新）は安全側に倒し `mode: 'ecs'`（厳格側）で検証してよい
  * （早期 UX フィードバック）。権威判定は agent 実行時に `dispatchMode` に応じたモードで行う。
  *
+ * ## 本ファイル中の「ansible-core 2.17 で実測」について
+ * 以下のコメントにある挙動の実測は、エージェントイメージが ansible-core 2.17（2.17.14）を
+ * 同梱していた時期のもの。現在のイメージ・CI は ansible-core 2.20 で、2.19 以降は data tagging
+ * により信頼されていない文字列はテンプレート展開されないなど、テンプレート処理が変わっている。
+ * **2.20 で同じ挙動を再実測したわけではない。** ただしここでの拒否はいずれも「その挙動が起こり
+ * 得る」ことを根拠にした fail-closed の判定で、2.20 で挙動が起こらなくなっても拒否が誤りになる
+ * ことはない（正当なレシピの書き方を狭めるだけ）。拒否を緩める変更をするときは、その時点の
+ * ansible-core で挙動を再実測してから行うこと。
+ *
  * ## `include_role` スニペット（組み込みステップ）
  * 組み込みステップ（os_init/ssh_key/docker/nvm/claude_cli/codex/ai_support_agent/
  * ai_support_agent_k8s/web_server/database/dns_tls/gitlab_runner/github_runner/
