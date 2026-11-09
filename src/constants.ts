@@ -75,8 +75,10 @@ export const ENV_VARS = {
   SERVER_SETUP_ANSIBLE_UID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID',
   SERVER_SETUP_ANSIBLE_GID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_GID',
   // Opt-in dedicated ansible-core 2.20 controller for recipes that include the bundled
-  // Zabbix roles (required for Ubuntu 26.04 targets). Only "2.20" is accepted; unset keeps
-  // the image's default controller. See src/server-setup/zabbix-controller.ts.
+  // Zabbix roles, for resident agents whose host Ansible is older than 2.20 (Ubuntu 26.04
+  // targets need 2.20). The Docker image already ships ansible-core 2.20 and leaves this
+  // unset. Only "2.20" is accepted; unset keeps the default controller. See
+  // src/server-setup/zabbix-controller.ts.
   ZABBIX_CONTROLLER: 'AI_SUPPORT_AGENT_ZABBIX_CONTROLLER',
   // Third-party CLI credential/config env vars (Claude Code / Codex). These are
   // not namespaced under AI_SUPPORT_AGENT_* — their names are fixed by the
