@@ -55,7 +55,7 @@ jest.mock('../../src/utils/known-hosts-store', () => ({
 import * as path from 'path'
 import { EventEmitter } from 'events'
 
-import { load } from 'js-yaml'
+import { dump, load } from 'js-yaml'
 
 import {
   cleanupStaleServerSetupDirs,
@@ -3474,5 +3474,100 @@ describe('runServerSetup - windows collection check (output shapes)', () => {
 describe('resolveAnsibleTimeoutMs - malformed entries', () => {
   it('ignores non-task entries and role specs without a string name', () => {
     expect(resolveAnsibleTimeoutMs([null, 'x', ['y'], { include_role: null }, { include_role: { name: 1 } }])).toBe(30 * 60 * 1000)
+  })
+})
+
+
+describe('dedicated Zabbix controller execution', () => {
+  const profileEnv = 'AI_SUPPORT_AGENT_ZABBIX_CONTROLLER'
+  afterEach(() => { delete process.env[profileEnv] })
+  it('preflights and executes the same fixed controller without secret argv', async () => {
+    process.env[profileEnv] = '2.20'
+    const pending = executeServerSetupAnsible({
+      executionId: 'zabbix-controller-test', body: '- ansible.builtin.include_role:\n    name: zabbix_agent',
+      mode: 'resident', targetOs: 'linux', credential: CREDENTIAL, variables: {ZABBIX_PSK:'secret-key'},
+      secretNames: ['ZABBIX_PSK'], tenantCode: 'acme', sshHostId:'host-1', client:makeClient(),
+    })
+    await flushUntilExecFileCalled()
+    expect(mockExecFile.mock.calls[0][1]).toEqual(['--version'])
+    resolveExecFile(0, 'ansible-playbook [core 2.20.11]')
+    for (let i=0; i<100 && mockExecFile.mock.calls.length<2; i++) await Promise.resolve()
+    expect(mockExecFile.mock.calls[1][0]).toEqual(mockExecFile.mock.calls[0][0])
+    expect(mockExecFile.mock.calls[1][0]).toBe('/opt/ai-support-zabbix-ansible/bin/ansible-playbook')
+    expect(JSON.stringify(mockExecFile.mock.calls[1][1])).not.toContain('secret-key')
+    resolveExecFile(0, ansibleJsonOutput([{name:'zabbix_agent : configured'}]))
+    expect((await pending).success).toBe(true)
+  })
+})
+
+
+describe('approved Zabbix configuration termination proof', () => {
+  const fixedVariables={ZABBIX_BINDING_ID:'b1',ZABBIX_SERVER_ACTIVE:'127.0.0.1:10051',ZABBIX_PSK_IDENTITY:'ais-b1',ZABBIX_PSK:'a'.repeat(64),ZABBIX_EXPECTED_MACHINE_ID:'a'.repeat(32)}
+  it.each(['zabbix_agent_psk','zbx_agent_existing'])('refuses extra-vars override %s before spawning',async key=> {
+    const fixture=load(actualFs.readFileSync(path.join(__dirname,'fixtures/zabbix-agent-recipe.yaml'),'utf8')) as {body:string}
+    const pending=executeServerSetupAnsible({executionId:'exec1',body:dump(load(fixture.body)),mode:'resident',targetOs:'linux',credential:CREDENTIAL,variables:{...fixedVariables,[key]:'override'},secretNames:['ZABBIX_PSK'],tenantCode:'acme',sshHostId:'host-1',client:makeClient()})
+    await flushUntilExecFileCalled()
+    if(mockExecFile.mock.calls.length)resolveExecFile(0,ansibleJsonOutput([{name:'configured'}]))
+    expect((await pending).success).toBe(false)
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+  it('certifies the real reviewed combined recipe only after process closure', async () => {
+    const fixture = load(actualFs.readFileSync(path.join(__dirname,'fixtures/zabbix-agent-recipe.yaml'),'utf8')) as {body:string}
+    const body = dump(load(fixture.body))
+    const pending = executeServerSetupAnsible({executionId:'exec1',body,mode:'resident',targetOs:'linux',credential:CREDENTIAL,
+      variables:fixedVariables,secretNames:['ZABBIX_PSK'],tenantCode:'acme',sshHostId:'host-1',client:makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(0,ansibleJsonOutput([{name:'Agent configuration applied'}]))
+    const result=await pending
+    expect(result.success).toBe(true)
+    expect((result.data as Record<string,unknown>).serverSetupLocalTermination).toMatchObject({processClosed:true,executionId:'exec1',sshHostId:'host-1'})
+    // The approval is what unlocks completion evidence for this include_role recipe.
+    expect(result.serverSetupConfigurationCompletion).toEqual({executionId:'exec1',
+      evidence:{kind:'completed',sshHostId:'host-1',processClosed:true}})
+  })
+  // Without a configuration binding the API sends every ANSIBLE# variable of the project,
+  // environment and host. Unrelated ones must not block the reviewed recipe, and must not
+  // reach it either (extra-vars override any role value).
+  it('passes only the five fixed variables and drops unrelated project variables', async () => {
+    const fixture = load(actualFs.readFileSync(path.join(__dirname,'fixtures/zabbix-agent-recipe.yaml'),'utf8')) as {body:string}
+    const pending = executeServerSetupAnsible({executionId:'exec1',body:dump(load(fixture.body)),mode:'resident',targetOs:'linux',credential:CREDENTIAL,
+      variables:{...fixedVariables,OTHER_PROJECT_VAR:'x',db_password:'unrelated-secret-value'},secretNames:['ZABBIX_PSK','db_password'],
+      tenantCode:'acme',sshHostId:'host-1',client:makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(0,ansibleJsonOutput([{name:'Agent configuration applied'}]))
+    const result = await pending
+    expect(result.success).toBe(true)
+    const extraVars = JSON.parse(writtenFile('extra-vars.json') as string) as Record<string,string>
+    for (const name of Object.keys(fixedVariables)) expect(extraVars[name]).toBe(fixedVariables[name as keyof typeof fixedVariables])
+    expect(extraVars).not.toHaveProperty('OTHER_PROJECT_VAR')
+    expect(extraVars).not.toHaveProperty('db_password')
+    expect(JSON.stringify(mockWriteFileSync.mock.calls)).not.toContain('unrelated-secret-value')
+  })
+  it.each(['ZABBIX_EXTRA','zabbix_agent_server_active','ZBX_X'])('still refuses a Zabbix-namespaced variable %s', async key => {
+    const fixture = load(actualFs.readFileSync(path.join(__dirname,'fixtures/zabbix-agent-recipe.yaml'),'utf8')) as {body:string}
+    const result = await executeServerSetupAnsible({executionId:'exec1',body:dump(load(fixture.body)),mode:'resident',targetOs:'linux',credential:CREDENTIAL,
+      variables:{...fixedVariables,[key]:'override'},secretNames:['ZABBIX_PSK'],tenantCode:'acme',sshHostId:'host-1',client:makeClient()})
+    expect(result.success).toBe(false)
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+  it.each(['ZABBIX_PSK','ZABBIX_BINDING_ID'])('refuses the approved recipe when fixed variable %s is missing', async key => {
+    const fixture = load(actualFs.readFileSync(path.join(__dirname,'fixtures/zabbix-agent-recipe.yaml'),'utf8')) as {body:string}
+    const variables: Record<string,string> = {...fixedVariables}
+    delete variables[key]
+    const result = await executeServerSetupAnsible({executionId:'exec1',body:dump(load(fixture.body)),mode:'resident',targetOs:'linux',credential:CREDENTIAL,
+      variables,secretNames:['ZABBIX_PSK'],tenantCode:'acme',sshHostId:'host-1',client:makeClient()})
+    expect(result.success).toBe(false)
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
+  it('does not certify the same recipe when its body differs from the reviewed bytes', async () => {
+    const fixture = load(actualFs.readFileSync(path.join(__dirname,'fixtures/zabbix-agent-recipe.yaml'),'utf8')) as {body:string}
+    const body = `${dump(load(fixture.body))}# not the reviewed body\n`
+    const pending = executeServerSetupAnsible({executionId:'exec1',body,mode:'resident',targetOs:'linux',credential:CREDENTIAL,
+      variables:fixedVariables,secretNames:['ZABBIX_PSK'],tenantCode:'acme',sshHostId:'host-1',client:makeClient()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(0,ansibleJsonOutput([{name:'Agent configuration applied'}]))
+    const result=await pending
+    expect(result.success).toBe(true)
+    expect(result.serverSetupConfigurationCompletion).toBeUndefined()
   })
 })

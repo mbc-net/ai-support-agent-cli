@@ -191,6 +191,7 @@
     "win_updates": "windows",
     "zabbix_agent": "linux",
     "zabbix_server": "linux",
-    "zabbix_web": "linux"
+    "zabbix_web": "linux",
+    "zabbix_webhook_relay": "linux"
   }
 }

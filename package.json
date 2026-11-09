@@ -37,6 +37,7 @@
     "!ansible/**/__pycache__/**",
     "!ansible/**/*.pyc",
     "playwright.subprocess.config.js",
+    "scripts/install-zabbix-controller.sh",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"

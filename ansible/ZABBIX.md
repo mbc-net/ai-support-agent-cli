@@ -6,7 +6,68 @@
 
 ## 対応構成
 
-Ubuntu 22.04/24.04、x86_64/ARM64、Zabbix 6.0/7.0 LTSの公式パッケージに対応します。
+x86_64/ARM64、Zabbix LTSの公式パッケージに対応します。OSごとに選べるLTSが異なります。
+
+| Ubuntu | `zabbix_server_version` / `zabbix_web_version` | PHP | PostgreSQL（ローカルDB） |
+|---|---|---|---|
+| 22.04 | 6.0 / 7.0 | 8.1 | 14 |
+| 24.04 | 6.0 / 7.0 | 8.3 | 16 |
+| 26.04 | 7.0 / 8.0 | 8.5 | 18 |
+
+- 8.0 は PHP 8.2 以上・PostgreSQL 15 以上を要求し、このロールでは 26.04 でしか検証していないため、
+  22.04/24.04 で 8.0 を指定すると初期検証で拒否します。26.04 では 6.0 を拒否します（26.04 向けの release パッケージが無いため）。
+- 26.04 では、既存の Server/Web パッケージと導入直後のパッケージが検証済みパッチ未満なら拒否します
+  （7.0 は 7.0.32、8.0 は 8.0.0）。既存パッケージが下限未満の場合は通常セットアップで変更しません。
+  導入直後は必要な2パッケージが揃い、選択した系列・epoch（後述）であることも確認し、DB初期化・Web設定より前に止めます。
+  新規構築では構築時の最新パッチを確認してください。厳密なパッチ固定はこのロールでは未対応です。
+- `zabbix_agent` は従来どおり 6.0/7.0 のみで、26.04 では 7.0 だけを受け付けます。
+  7.0 の Agent を 8.0 の Server へ接続する構成は未検証です。
+
+**Zabbix 8.0 で変わる点（ロール内で吸収済み・変数では変えられない）:**
+
+| 項目 | 6.0 / 7.0 | 8.0 |
+|---|---|---|
+| パッケージの epoch | `1:`（例 `1:7.0.32-2+ubuntu26.04`） | `2:`（例 `2:8.0.0-1+ubuntu26.04`） |
+| パッケージのリポジトリ | `https://repo.zabbix.com/zabbix/<LTS>/ubuntu`（ARM64 は `ubuntu-arm64`） | `https://repo.zabbix.com/zabbix/8.0/stable/ubuntu`（ARM64 も同じ URI） |
+| `zabbix-release` の取得元 | 上と同じリポジトリの `pool/main/z/zabbix-release/` | `https://repo.zabbix.com/zabbix/8.0/release/ubuntu/pool/main/z/zabbix-release/` |
+| 公式SQLスクリプト | `/usr/share/zabbix-sql-scripts/<engine>/` | `/usr/share/zabbix/sql-scripts/<engine>/` |
+| 初期データの確認対象 | `users` と `config` | `users` と `settings`（7.4 で `config` がキー・値形式の `settings` に置き換わった） |
+| フロントエンドの DocumentRoot | `/usr/share/zabbix` | `/usr/share/zabbix/ui`（7.2 以降は ui/ へ移動し、旧パスには「Manual intervention is required」を返すスタブだけが残る） |
+
+- 8.0 の `zabbix-release` パッケージは `zabbix.sources` に加えて `zabbix-unstable.sources`（`Enabled: no`）を置きます。
+  パッケージの設定ファイルなので書き換えず、`Enabled: no` の行があることだけを確認します。
+  手で有効化されている場合は、Zabbix パッケージの導入より前に失敗します（ファイルが無い場合は通過）。
+- 既存パッケージの LTS 照合は epoch に依存しません（`1:`・`2:`・epoch なしのいずれも系列で判定）。
+  導入直後の検証は `^<epoch>:<LTS>.` の形まで確認するため、7.0 を指定して 8.0 のパッケージ（またはその逆）が入っていれば失敗します。
+- DB の LTS 照合（`dbversion`）は `[下限, 下限+10000)` の範囲で判定します（6.0=6000000、7.0=7000000、8.0=8000000）。
+  Zabbix の採番は XXYYZZZZ で、7.2 は 7020000 です。以前は `+100000` の範囲で判定しており、
+  7.0 を指定して 7.2/7.4 の DB を受け入れていた不具合を同時に修正しました。
+
+**Ubuntu 26.04 の実行条件:** 標準 Python 3.14 を扱える専用の ansible-core 2.20 以降が必要です。
+同梱 Agent Docker の `ansible-core>=2.16,<2.18` はそのままでは使用できません。
+ロール内にも旧 controller の拒否を追加していますが、fact 収集はロールより前なので、
+その段階で失敗する可能性があります。必ず実行開始前に controller を選択してください。
+この変更だけで既存 Agent の自動構築経路が Ubuntu 26.04 対応済みになるわけではありません。
+全 Agent runtime の更新・callback 回帰検証は別の作業です。
+
+**専用 controller の導入（常駐 Agent の管理者のみ）:** 固定パス `/opt/ai-support-zabbix-ansible` に ansible-core 2.20.11 の
+venv を作る installer `scripts/install-zabbix-controller.sh` を npm パッケージに同梱しています。
+
+- 前提: Python 3.12 以上と venv（Ubuntu では `python3-venv` パッケージ）。
+- Agent を導入したユーザーの npm から場所を求め、root で実行します。
+  例: `sh <Agent の npm root -g の出力>/@ai-support-agent/cli/scripts/install-zabbix-controller.sh`
+  （root と Agent のユーザーで npm の場所が違う場合があるため、`sudo` の中で `npm root -g` を評価しないこと）。
+- Docker 版 Agent はこの仕組みの対象外です。Docker イメージの既定 Ansible を ansible-core 2.20（Ubuntu 26.04・Python 3.14）へ
+  移行する別作業で対応します。
+- 導入後、Agent の環境変数 `AI_SUPPORT_AGENT_ZABBIX_CONTROLLER=2.20` を設定して Agent を再起動します。
+  未設定なら従来の controller のままです。`2.20` 以外の値は拒否します。controller が無い・版が違う場合は、
+  SSH 接続より前に明確なエラーで止まります（従来の controller へは切り替えません）。
+- 設定すると、Zabbix ロール（`zabbix_agent`・`zabbix_server`・`zabbix_web`・`zabbix_webhook_relay`）を含むレシピは
+  専用 controller で実行されます。**Zabbix ロールと他の同梱ロールを同じレシピに混在させると、対象 OS にかかわらず拒否**
+  します（他ロールは 2.20 で未検証のため）。混在しているレシピは Zabbix 部分を別レシピに分けてください。
+
+Ubuntu 26.04 の TimescaleDB 自動導入は未対応のため、LTS（7.0/8.0）にかかわらず
+`zabbix_server_db_timescaledb: true` を初期検証で拒否します。26.04 では通常の PostgreSQL を使用します。
 既定は7.0、ローカルPostgreSQL、Nginxです。Dockerインストール経路はありません。
 ServerとWebは別ホストにも配置できます。
 
@@ -58,6 +119,43 @@ DB初期化への同時実行はDBのアドバイザリロックで拒否しま�
 既存サイトの設定ファイルは編集しません。Webサーバー種別を切り替える場合は、旧ロールが
 管理していたvhostの整理と80番ポートの競合確認を別途行ってください。
 Apacheでは独立したListenを定義するため、既存のListenと重ならないポート（80/443以外）を指定します。
+vhost では `api/`・`conf/`・`include/`・`locale/`・`vendor/` ディレクトリへのアクセスを拒否します
+（`api/` は 8.0 公式 nginx 設定に合わせて追加。API の入口 `api_jsonrpc.php` は別ファイルで、拒否されません）。
+
+### 待受アドレス（`zabbix_web_listen_address`）
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `zabbix_web_listen_address` | `""` | Nginx の待受アドレス。空なら従来どおり全 interface（`listen 8080;`） |
+
+- 指定できるのは空か `127.0.0.1` だけです。それ以外（`10.0.0.5`・`127.0.0.2`・`0.0.0.0` など）は初期検証で拒否します。
+  ログイン画面の確認と、管理者パスワード・ハウスキーピングの API ヘルパーが `127.0.0.1:<zabbix_web_listen_port>` へ接続するためです。
+  `127.0.0.1` を指定すると `listen 127.0.0.1:<port>;` になります。
+- Nginx のみです。`zabbix_web_type: apache` と組み合わせると初期検証で拒否します。
+- 指定するときは `zabbix_web_allowed_sources` を空にしてください（ループバックだけで待ち受けるのに ufw で開けるのは矛盾するため拒否します）。
+  外部からは SSH トンネルやリバースプロキシで到達する構成を想定しています。
+- 指定時は設定反映・ログイン確認の後に `ss` で実際の待受を読み、そのポートの待受が指定アドレスの1件だけであることを確認します。
+  一致しなければ失敗し、フロントエンド設定を復元します。
+
+**Nginx の reload では待受を縮小できません。** 同じポートで全 interface から特定アドレスへ変えると、
+reload は `bind() to 127.0.0.1:8080 failed (98: Address already in use)` で失敗し、Nginx は旧設定のまま動き続けます
+（2026-11-08 に KAGOYA の Ubuntu 26.04 実機で再現）。逆方向（特定アドレスから全 interface）も同じ理由で失敗します。
+そのため Nginx では、反映前に `ss` で実際の待受を読み、**そのポートに待受があるのに、設定したローカルアドレス
+（空なら `0.0.0.0:<port>`、`127.0.0.1` なら `127.0.0.1:<port>`）の待受が無いときだけ restart** します。
+
+- 設定どおりの待受があれば、vhost の他の変更（ルートや拒否ディレクトリなど）は従来どおり reload です。
+  同じポートに別の待受（別 server ブロックの `[::]:<port>` など）があっても restart しません。
+  ただし `127.0.0.1` 指定時は、ログイン確認後の待受確認が「`127.0.0.1:<port>` の1件だけ」を要求するため、
+  別の待受があれば失敗して設定を復元します（外部公開になっているため）。
+- まだ何も待ち受けていない（初回導入）ときも reload です（reload で新しいソケットが追加されるため）。
+- 設定ファイルだけ縮小済みで Nginx が旧待受のまま動いている状態も、この判定で restart して復旧します
+  （2026-11-08 に実機で再現し、restart で `127.0.0.1:8080` だけになることを確認）。
+- Apache は待受アドレスを変えないため従来どおり reload です。
+
+失敗時の復元では、vhost を変更していれば restart します。
+**restart は同じ Nginx で動いている他のサイトも一時停止させます。** 待受を変える実行は、影響を確認してから行ってください。
+
+Web ロールは `ss` のために `iproute2` を導入します。
 
 外部公開する管理画面はTLS終端を用意してください。管理者（`Admin`）のパスワードは
 `zabbix_web_admin_password`で設定できます（下記「管理者パスワード」）。
@@ -130,6 +228,7 @@ Zabbixのフロントエンドは初期管理者`Admin`／パスワード`zabbix
   渡し、実行後に削除します。コマンド引数・環境変数・実行ログには出しません。
 - APIはループバック（`http://127.0.0.1:<zabbix_web_listen_port>/api_jsonrpc.php`、Hostヘッダは
   `zabbix_web_server_name`）へ接続します。APIのバージョンが`zabbix_web_version`と違えば失敗します。
+  8.0 の認証は 7.0 と同じ `Authorization: Bearer` で、パスワード変更時の `current_passwd` も 7.0 と同じ扱いです。
 
 ## ハウスキーピング
 
@@ -263,8 +362,11 @@ MySQLは`ZABBIX_TEST_ENGINE=mysql`に切り替えます。テスト対象は
 `zabbix_test` DBと`zabbix_test`ユーザーです。テストはそのDBのテーブルを削除します。
 公式SQLパッケージがない場合、その全体投入テストはスキップされます。
 
+DBを使わない版別の単体試験（8.0 のSQLスクリプトのパス、`settings`による初期データ確認と`db_extension`の読み方、
+`dbversion` の範囲で 7.2/7.4・8.2 の DB を拒否すること）も`tests/test_zabbix_database.py`に含まれ、専用DBなしで実行されます。
+
 `tests/test_zabbix_api.py`は管理者パスワード・ハウスキーピングのヘルパーを、6.0（本文の`auth`）と
-7.0（`Authorization: Bearer`）を模した偽のJSON-RPCサーバーに向けて実行します。外部環境は不要です。
+7.0/8.0（`Authorization: Bearer`）を模した偽のJSON-RPCサーバーに向けて実行します。外部環境は不要です。
 全ケースで、出力にパスワードとトークン（平文・Base64）が無いことも確認します。
 
 ```sh
@@ -322,3 +424,25 @@ Web/PHPサービスの復旧を確認します。外部DB構成では、払い�
 
 引き継ぎ時の 53 ファイルのコピー・差分・SHA-256 と今回の検証ログは、作業端末の
 `/private/tmp/zabbix-takeover-20261014/` に保存した（一時領域なので永続保管ではない）。
+
+
+### Ubuntu 26.04 の分岐検証
+
+`tests/test_zabbix_platform.py` は実際のロールの初期 assert と repository/PHP の
+Jinja テンプレートを `ansible-playbook` で評価します。パッケージ・サービスは変更しません。
+対応 controller と旧 controller を別々の venv に用意して実行します。
+
+```sh
+# 現在の PATH は ansible-core 2.20 以降の venv
+ZABBIX_TEST_LEGACY_ANSIBLE=/path/to/ansible-2.16/bin/ansible-playbook \
+  python -m unittest discover -s ansible/tests -p test_zabbix_platform.py -v
+```
+
+22.04/24.04 の継続受理、26.04 の受理、旧 controller・6.0・TimescaleDB の拒否、
+既存パッチの下限と resolute/PHP 8.5 の選択を確認します。
+8.0 については、26.04 での受理と 22.04/24.04 での拒否、epoch を含む導入後の版検証
+（`1:8.0.0` や `2:7.0.32` を拒否）、8.0 のリポジトリ URI・release パッケージ URL（amd64/arm64 とも同じ）、
+`zabbix-unstable.sources` の確認タスク、UI のルート（`/usr/share/zabbix/ui`）と `api/` の拒否、
+`zabbix_web_listen_address` の入力検証と Nginx テンプレートの `listen` 行を確認します。
+実ホストの構築成功はこの検証とは別に `tests/zabbix-native.yml` で確認してください。
+8.0 の実機検証の記録は `tests/ZABBIX-2604-VALIDATION.md` にあります。

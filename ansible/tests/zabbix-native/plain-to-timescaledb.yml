@@ -1,7 +1,8 @@
 ---
 # An existing, populated non-TimescaleDB DB with zabbix_server_db_timescaledb: true must be
 # rejected by `database.py --plan` BEFORE timescaledb.yml touches PostgreSQL or APT
-# (design doc §4.1, test plan §7.1.4). Local PostgreSQL only.
+# (design doc §4.1, test plan §7.1.4). Local PostgreSQL only. Ubuntu 26.04
+# rejects TimescaleDB even earlier, in the platform validation.
 - name: "plain-to-timescaledb : Read the PostgreSQL state before"
   ansible.builtin.include_tasks: pg-state.yml
 
@@ -21,7 +22,15 @@
       ansible.builtin.fail:
         msg: TimescaleDB on a populated non-TimescaleDB DB must fail.
   rescue:
+    - name: "plain-to-timescaledb : Ubuntu 26.04 rejected TimescaleDB before any mutation"
+      ansible.builtin.assert:
+        that:
+          - "'Validate branch and required variables' in ansible_failed_task.name"
+          - "ansible_failed_result.assertion == \"ansible_distribution_version != '26.04' or not zabbix_server_db_timescaledb\""
+      when: ansible_distribution_version == '26.04'
+
     - name: "plain-to-timescaledb : Failed at the read-only plan check"
+      when: ansible_distribution_version != '26.04'
       ansible.builtin.assert:
         that:
           - "'Fail if the DB state does not match the recipe' in ansible_failed_task.name"

@@ -782,7 +782,7 @@ describe('テンプレートへ入る値の書式検証（設定ファイル注�
     expect(raw).not.toContain('\\n]')
     expect(raw).toContain("zabbix_agent_psk_identity is match('^[A-Za-z0-9._:-]+$')")
     // PSK は Zabbix が要求する16進文字列
-    expect(raw).toContain("zabbix_agent_psk is match('^[0-9a-fA-F]{32,}$')")
+    expect(raw).toContain("zabbix_agent_psk is match('^(?:[0-9a-fA-F]{2}){16,256}\\\\Z')")
   })
 
   it('テンプレートが参照する変数はすべて assert で「書式を」縛られている', () => {

@@ -4,6 +4,13 @@ zabbix_web_version: "7.0"
 zabbix_web_type: nginx
 zabbix_web_server_name: ""
 zabbix_web_listen_port: 8080
+# nginx の待受アドレス。空は従来どおり全 interface（`listen <port>;`）、"127.0.0.1" は
+# 初回起動から loopback だけで待ち受ける。それ以外は拒否する（ログイン画面の確認と
+# 管理者パスワード変更の API ヘルパーが 127.0.0.1 へ接続するため）。
+# nginx の reload では同じポートの wildcard 待受を特定アドレスへ縮小できない
+# （bind が EADDRINUSE で失敗し旧設定のまま動き続ける）ため、vhost を後から書き換えないこと。
+# apache では未対応。指定するときは zabbix_web_allowed_sources を空にする。
+zabbix_web_listen_address: ""
 zabbix_web_php_timezone: Asia/Tokyo
 zabbix_web_zbx_server_host: localhost
 zabbix_web_zbx_server_port: 10051

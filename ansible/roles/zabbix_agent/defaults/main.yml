@@ -64,3 +64,6 @@ zabbix_agent_allow_no_sources: false
 # 判定すると壊れた設定を成功として報告してしまう。ログが空でなくなるまで待ち、
 # この時間を過ぎても空ならば失敗させる。
 zabbix_agent_active_check_verify_seconds: 30
+
+# False configures an existing package without upgrade/removal; recipe must preflight it.
+zabbix_agent_manage_packages: true
