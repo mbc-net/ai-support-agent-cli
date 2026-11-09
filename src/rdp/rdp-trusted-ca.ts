@@ -297,7 +297,7 @@ function lstatExists(p: string): boolean {
 }
 
 /**
- * エージェントのイメージの標準 CA バンドル（node:24-slim ＋ Debian の
+ * エージェントのイメージの標準 CA バンドル（ubuntu:26.04 ＋ Ubuntu の
  * ca-certificates。docker/Dockerfile の apt install で入る）。
  */
 export const AGENT_SYSTEM_CA_BUNDLE_PATH = '/etc/ssl/certs/ca-certificates.crt'

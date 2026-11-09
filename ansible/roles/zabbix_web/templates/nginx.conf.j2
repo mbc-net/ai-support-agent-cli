@@ -1,14 +1,14 @@
 # Managed by ai-support-agent. Separate from other sites and the default vhost.
 server {
-    listen {{ zabbix_web_listen_port }};
+    listen {{ (zabbix_web_listen_address ~ ':') if zabbix_web_listen_address else '' }}{{ zabbix_web_listen_port }};
     server_name {{ zabbix_web_server_name }};
-    root /usr/share/zabbix;
+    root {{ zabbix_web_ui_root }};
     index index.php;
     client_max_body_size 16m;
     location / {
         try_files $uri $uri/ =404;
     }
-    location ~ ^/(conf|include|locale|vendor)/ {
+    location ~ ^/(api|conf|include|locale|vendor)/ {
         deny all;
     }
     location ~ /\. {

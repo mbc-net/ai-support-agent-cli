@@ -14,6 +14,7 @@ interface CapturedRequest {
 
 let server: http.Server
 let baseUrl: string
+let requests: CapturedRequest[] = []
 let lastReq: CapturedRequest
 
 /** Configurable response for the test server */
@@ -35,6 +36,7 @@ beforeAll((done) => {
         headers: req.headers,
         body,
       }
+      requests.push(lastReq)
       res.writeHead(nextResponse.status, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(nextResponse.body))
     })
@@ -54,12 +56,28 @@ afterAll((done) => {
 })
 
 beforeEach(() => {
+  requests = []
   nextResponse = { status: 200, body: {} }
   requestCount = 0
 })
 
 describe('ApiClient integration (real axios + real HTTP)', () => {
   const TEST_TOKEN = 'test_tenant:tokenId:rawToken'
+
+  it('accepts the API success acknowledgement after delivering a setup result over HTTP', async () => {
+    nextResponse = {status: 200, body: {success: true}}
+    const client = new ApiClient(baseUrl, TEST_TOKEN, {withoutReplicaIdentity: true})
+    client.restoreServerSetupInstance('cmd-setup', '22222222-2222-4222-8222-222222222222')
+    const proof = {executionId: 'exec-1', evidence: {kind: 'completed' as const, sshHostId: 'host-1', processClosed: true as const}}
+    await client.submitResult('cmd-setup', {success: true, data: 'done', serverSetupConfigurationCompletion: proof}, 'agent-1')
+    expect(requests.map(request => request.url)).toEqual([
+      '/api/test_tenant/agent/commands/cmd-setup/result?agentId=agent-1',
+      '/api/test_tenant/agent/commands/cmd-setup/server-setup-configuration-complete?agentId=agent-1',
+    ])
+    expect(JSON.parse(requests[0].body)).toEqual({success: true, data: 'done'})
+    expect(JSON.parse(requests[1].body)).toEqual(proof)
+    expect(requests.every(request => request.headers['x-server-setup-instance-id'] === '22222222-2222-4222-8222-222222222222')).toBe(true)
+  })
 
   it('should send a real HTTP POST when register() is called', async () => {
     const registerResponse = { agentId: 'agent-1', appsyncUrl: 'wss://test', appsyncApiKey: 'key' }

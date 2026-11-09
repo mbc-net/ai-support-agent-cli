@@ -1,2 +1,19 @@
 ---
-zabbix_web_php_version: "{{ '8.1' if ansible_distribution_version == '22.04' else '8.3' }}"
+zabbix_web_php_version: "{{ {'22.04': '8.1', '24.04': '8.3', '26.04': '8.5'}[ansible_distribution_version] }}"
+# Derived per-series values (only read after the Validate assert accepted the series).
+# Zabbix 8.0 moved its packages to epoch 2 and to a channel-split repository layout
+# (release/ for zabbix-release, stable/ for packages) that serves amd64 and arm64 from one URI.
+zabbix_web_pkg_epoch: "{{ {'6.0': '1', '7.0': '1', '8.0': '2'}[zabbix_web_version] }}"
+# Minimum validated patch on Ubuntu 26.04 (the only release where 8.0 is accepted).
+zabbix_web_min_patch: "{{ {'7.0': '7.0.32', '8.0': '8.0.0'}[zabbix_web_version] }}"
+zabbix_web_repo_uri: >-
+  {{ 'https://repo.zabbix.com/zabbix/8.0/stable/ubuntu' if zabbix_web_version == '8.0'
+  else 'https://repo.zabbix.com/zabbix/' ~ zabbix_web_version ~ '/'
+  ~ ('ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu') }}
+zabbix_web_release_deb: >-
+  {{ ('https://repo.zabbix.com/zabbix/8.0/release/ubuntu' if zabbix_web_version == '8.0' else zabbix_web_repo_uri)
+  ~ '/pool/main/z/zabbix-release/zabbix-release_latest_' ~ zabbix_web_version
+  ~ '+ubuntu' ~ ansible_distribution_version ~ '_all.deb' }}
+# Frontend document root. Zabbix 7.2+ packages moved the PHP files to /usr/share/zabbix/ui;
+# the old path keeps only stubs that answer "Manual intervention is required".
+zabbix_web_ui_root: "{{ {'6.0': '/usr/share/zabbix', '7.0': '/usr/share/zabbix', '8.0': '/usr/share/zabbix/ui'}[zabbix_web_version] }}"

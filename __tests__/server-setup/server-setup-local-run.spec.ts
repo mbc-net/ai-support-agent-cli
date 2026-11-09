@@ -21,6 +21,8 @@ jest.mock('../../src/logger', () => ({
   },
 }))
 
+import { EventEmitter } from 'events'
+
 const mockExecFile = jest.fn()
 jest.mock('child_process', () => ({
   execFile: (...args: unknown[]) => mockExecFile(...args),
@@ -161,6 +163,7 @@ function resolveExecFile(exitCode: number, stdout: string, stderr = ''): void {
     )
     callback(error, stdout, stderr)
   }
+  mockExecFile.mock.results.at(-1)?.value?.emit?.('close', exitCode, null)
 }
 
 async function flushUntilExecFileCalled(): Promise<void> {
@@ -176,6 +179,7 @@ function writtenFile(suffix: string): string | undefined {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  mockExecFile.mockReturnValue(Object.assign(new EventEmitter(), {kill: jest.fn()}))
   mockMkdtempSync.mockImplementation((...args: Parameters<typeof actualFs.mkdtempSync>) => actualFs.mkdtempSync(...args))
   mockWriteFileSync.mockImplementation((...args: Parameters<typeof actualFs.writeFileSync>) => actualFs.writeFileSync(...args))
   mockRmSync.mockImplementation((...args: Parameters<typeof actualFs.rmSync>) => actualFs.rmSync(...args))

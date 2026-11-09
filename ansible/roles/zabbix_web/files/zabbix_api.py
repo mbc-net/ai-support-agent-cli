@@ -146,7 +146,7 @@ def validate_config(config):
     for field in ('server_name', 'version', 'password', 'previous_password'):
         if not isinstance(config.get(field), str):
             raise HelperError('Invalid helper input: %s must be a string.' % field)
-    if config['version'] not in ('6.0', '7.0'):
+    if config['version'] not in ('6.0', '7.0', '8.0'):
         raise HelperError('Unsupported Zabbix version.')
     password = config['password']
     if not re.match(r'^[\x20-\x7e]{8,72}\Z', password) or password != password.strip() \

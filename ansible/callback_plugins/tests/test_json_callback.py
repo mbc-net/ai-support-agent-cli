@@ -8,7 +8,7 @@ what reaches callback plugins — so this plugin must apply its own
 censorship, and these tests exist to prove it actually does.
 
 Run with (requires ansible-core installed — see docker/Dockerfile's pinned
-`ansible-core>=2.16,<2.18`, or `pip install 'ansible-core>=2.16,<2.18'` into
+`ansible-core>=2.20,<2.21`, or `pip install 'ansible-core>=2.20,<2.21'` into
 a local virtualenv):
 
     python3 ansible/callback_plugins/tests/test_json_callback.py -v

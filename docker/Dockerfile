@@ -1,17 +1,28 @@
-FROM node:24-slim
+FROM ubuntu:26.04
 
 # =============================================================================
 # Layer 1: OS packages (most stable — rarely changes)
 # =============================================================================
-# Bust cache when Debian GPG signatures expire (bump this date to force full rebuild)
-ARG APT_CACHE_BUST=2026-05-21
+# Bump this date to force a full rebuild of the apt layers (e.g. to pick up a
+# batch of Ubuntu security updates on an otherwise cached build host).
+ARG APT_CACHE_BUST=2026-11-09
+# Build-time only (ARG, not ENV): keeps apt/debconf from prompting (e.g.
+# tzdata's region question) without leaking DEBIAN_FRONTEND into the runtime
+# environment of the agent or of images derived from this one.
+ARG DEBIAN_FRONTEND=noninteractive
 # `apt-get update` is retried (3 attempts, 5s/15s backoff) at every occurrence in
-# this file to absorb transient DNS/network failures reaching deb.debian.org
-# (e.g. Docker daemon DNS hiccups on Ubuntu 24.04+ hosts) that would otherwise
-# abort the whole build on the first hit.
+# this file to absorb transient DNS/network failures reaching the Ubuntu
+# archive (e.g. Docker daemon DNS hiccups on Ubuntu 24.04+ hosts) that would
+# otherwise abort the whole build on the first hit.
 RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
     && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip git openssh-client vim jq \
+    # xz-utils: the Node.js release tarball below is .tar.xz. tzdata: the
+    # agent forwards the host TZ (volume-mount-builder.ts) and libc needs
+    # /usr/share/zoneinfo to honour it. adduser: shipped in the previous
+    # Debian-based image, kept so derived per-project images can rely on it.
+    # (ubuntu:26.04 ships none of the three; node:24-slim had tzdata/adduser.)
+    xz-utils tzdata adduser \
     # sshpass: Ansible's `ssh` connection plugin shells out to this for
     # ansible_ssh_pass (password-authType server_setup_exec hosts); without
     # it, ansible-playbook fails to authenticate against password-only hosts.
@@ -20,16 +31,19 @@ RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get updat
     gnupg apt-transport-https \
     # Build tools for native addons (node-pty)
     make g++ \
-    # Network diagnostic tools (for server troubleshooting)
-    iputils-ping net-tools dnsutils whois traceroute netcat-openbsd iproute2 \
+    # Network diagnostic tools (for server troubleshooting). Ubuntu 26.04 no
+    # longer has the `dnsutils` transitional package; bind9-dnsutils is the
+    # real package that ships dig/nslookup/host.
+    iputils-ping net-tools bind9-dnsutils whois traceroute netcat-openbsd iproute2 \
     # Terminal multiplexer (auto-attached for each agent console session)
     tmux \
     # fzf-lua (nvim plugin) shells out to this for fuzzy file/grep/buffer search
     fzf \
-    # cat replacement with syntax highlighting (Debian ships the binary as
-    # /usr/bin/batcat, not /usr/bin/bat, due to a package name clash)
+    # cat replacement with syntax highlighting (Debian/Ubuntu ship the binary
+    # as /usr/bin/batcat, not /usr/bin/bat, due to a package name clash)
     bat \
-    # Python 3 + pip (for document processing tools and node-gyp)
+    # Python 3 + pip (for document processing tools, ansible-core and node-gyp).
+    # Ubuntu 26.04's python3 is 3.14.
     python3 python3-pip python3-venv \
     # Pandoc (universal document converter: docx/pdf/html/markdown/etc.)
     pandoc \
@@ -39,8 +53,8 @@ RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get updat
     locales \
     # Japanese fonts (for Playwright Chromium to render Japanese websites)
     fonts-noto-cjk \
-    && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
-    && locale-gen \
+    && locale-gen en_US.UTF-8 \
+    && locale -a | grep -qx 'en_US.utf8' \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
@@ -52,6 +66,55 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 # never comes. core.pager=cat makes these commands print directly, with no
 # pager and no risk of blocking the session.
 RUN git config --system core.pager cat
+
+# =============================================================================
+# Layer 1b: Node.js runtime + the `node` user (mirrors the former node:24 base)
+# =============================================================================
+# The image used to be `FROM node:24-slim`. Ubuntu 26.04's own nodejs package
+# is Node 22, so Node 24 is installed from the official nodejs.org release
+# tarball into /usr/local exactly like the node:24 images do: node/npm/npx/
+# corepack end up in /usr/local/bin and npm's global prefix stays /usr/local
+# (Layer 6 and src/docker/docker-utils.ts rely on
+# /usr/local/lib/node_modules/@ai-support-agent/cli). Pinned and verified: the
+# SHA-256 values are the ones published in nodejs.org's SHASUMS256.txt for
+# this release and were cross-checked by downloading and hashing each tarball.
+# NODE_VERSION / YARN_VERSION are exported like the node images do, and Yarn
+# classic is installed because the node:24 images shipped it.
+ARG NODE_VERSION=24.22.2
+ARG NODE_SHA256_X64=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75
+ARG NODE_SHA256_ARM64=eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8
+ARG YARN_VERSION=1.22.22
+ENV NODE_VERSION=${NODE_VERSION} YARN_VERSION=${YARN_VERSION}
+RUN ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in \
+         amd64) NODE_ARCH="x64"; NODE_SHA256="$NODE_SHA256_X64" ;; \
+         arm64) NODE_ARCH="arm64"; NODE_SHA256="$NODE_SHA256_ARM64" ;; \
+         *) echo "ERROR: unsupported architecture for Node.js: $ARCH" >&2; exit 1 ;; \
+       esac \
+    && curl -fSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
+        -o /tmp/node.tar.xz \
+    && echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
+    && rm -f /tmp/node.tar.xz /usr/local/CHANGELOG.md /usr/local/LICENSE /usr/local/README.md \
+    && ln -s /usr/local/bin/node /usr/local/bin/nodejs \
+    && [ "$(node --version)" = "v${NODE_VERSION}" ] \
+    && npm --version \
+    && npm install -g "yarn@${YARN_VERSION}" \
+    && npm cache clean --force \
+    && [ "$(yarn --version)" = "${YARN_VERSION}" ]
+# node:24 images ship a `node` user (uid/gid 1000, HOME /home/node, bash).
+# ubuntu:26.04 instead ships `ubuntu` with the same uid/gid 1000, so rename it
+# rather than add a second account: when docker-runner.ts passes
+# `--user 1000:1000` (the usual first user on a Linux host), the container
+# user must still resolve to `node` with /home/node, which is CONTAINER_HOME
+# (src/constants.ts) and the mount target for ~/.claude, ~/.codex, ~/.aws, ...
+# The checks fail the build if the result differs from the old base.
+RUN usermod -l node -d /home/node -m -c '' ubuntu \
+    && groupmod -n node ubuntu \
+    && [ "$(getent passwd node)" = "node:x:1000:1000::/home/node:/bin/bash" ] \
+    && [ "$(getent group node)" = "node:x:1000:" ] \
+    && ! getent passwd ubuntu \
+    && [ -d /home/node ] && [ ! -e /home/ubuntu ]
 
 # =============================================================================
 # Layer 2: Python tools (stable — version-pinned)
@@ -68,7 +131,10 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     # Excel (.xlsx): read and write
     openpyxl==3.* \
     # HTML/XML parsing (for document content extraction)
-    beautifulsoup4==4.* lxml==5.* \
+    beautifulsoup4==4.* \
+    # lxml 6: lxml 5.x has no CPython 3.14 wheel and fails to build from source
+    # on Ubuntu 26.04 (verified); 6.x ships 3.14 wheels.
+    lxml==6.* \
     # Character encoding detection (for legacy files)
     chardet==5.* \
     # Server setup execution: runs a dynamically generated playbook (built by
@@ -81,7 +147,14 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     # semver-ish compatibility promise) rather than the previous unbounded `2.*`,
     # which could silently pick up a future major ansible-core release with
     # changed callback internals.
-    'ansible-core>=2.16,<2.18'
+    # 2.20 (not the former 2.16/2.17): ansible-core 2.17 does not support the
+    # image's Python 3.14 as a controller (2.20 is the first line that does),
+    # and the bundled Zabbix roles for Ubuntu 26.04 hosts need a >= 2.20
+    # controller. Kept to a single minor line (<2.21) for the same
+    # internal-API reason as above; patch releases are bug/security fixes.
+    # Managed hosts need Python >= 3.9 under 2.20 (Ubuntu 20.04 / Debian 10
+    # hosts are no longer reachable from this controller).
+    'ansible-core>=2.20,<2.21'
 
 # Ansible collections used by ansible/roles/database/tasks/main.yml to set the
 # MySQL root / PostgreSQL postgres admin password via a proper module
@@ -106,7 +179,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # Pinned to exact versions — the same ones as `collections` in
 # src/server-setup/windows-guard.json, whose per-module argument allowlists were
 # surveyed against them (checked by __tests__/server-setup/ansible-collections-sync.spec.ts).
-# Both require ansible-core >=2.16, so the ansible-core pin above is unchanged.
+# Both require ansible-core >=2.16, so they are satisfied by the 2.20 pin above
+# (all five collections verified to install under ansible-core 2.20).
 # Installed to /usr/share/ansible/collections — one of ansible-core's default
 # collection search paths regardless of the runtime user's $HOME — so the
 # collections are found no matter which UID the container ultimately runs as
@@ -139,18 +213,16 @@ RUN curl -fSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o
     && dpkg -i /tmp/session-manager-plugin.deb \
     && rm /tmp/session-manager-plugin.deb
 
-# Neovim, built from source (pinned tag) — Debian bookworm's apt "neovim"
-# package is 0.7.x, too old for the nvim-treesitter main-branch API
-# (require("nvim-treesitter").install() / vim.treesitter.start()) used by
-# docker/nvim/init.lua. A prebuilt release tarball was tried first and
-# rejected: neovim's official arm64 release tarballs (v0.10.4+, the first to
-# ship a separate arm64 asset) are linked against GLIBC >= 2.38, but this
-# image's Debian bookworm base ships GLIBC 2.36 — the binary fails at
-# container runtime with "version `GLIBC_2.38' not found" on arm64 hosts
-# (verified against a real build; this affects local agent CLI runs on Apple
-# Silicon Docker Desktop, not just ECS). Building from source links against
-# whatever glibc this build stage actually has, so one Dockerfile path works
-# on both amd64 and arm64 with no version-specific compatibility trap.
+# Neovim, built from source (pinned tag) — Ubuntu 26.04's apt "neovim"
+# package is 0.11.x, too old for the nvim-treesitter main-branch API used by
+# docker/nvim/init.lua (see the v0.12 note below). Building from source
+# rather than using neovim's prebuilt release tarballs links the binary
+# against the glibc this build stage actually has, so it can never require a
+# newer glibc than the base image provides. That is not hypothetical: on the
+# previous Debian bookworm base (glibc 2.36) the prebuilt arm64 tarball
+# failed at runtime with "version `GLIBC_2.38' not found" (Apple Silicon
+# Docker Desktop). One Dockerfile path works on both amd64 and arm64 with no
+# base-version-specific compatibility trap.
 #
 # Pinned to v0.12.4, not v0.10.4: verified against a real build that
 # nvim-treesitter's main branch (pinned by commit below) calls
@@ -184,14 +256,15 @@ RUN git clone --depth 1 --branch "${NVIM_VERSION}" https://github.com/neovim/neo
 # tree-sitter CLI — nvim-treesitter's parser install shells out to this to
 # compile grammars (verified against a real build: without it, parser
 # install fails with "Error during \"tree-sitter build\": ENOENT ...
-# 'tree-sitter'"). Built from source via cargo: both the tree-sitter-cli npm
-# package and tree-sitter/tree-sitter's own GitHub release arm64 binary are
-# linked against GLIBC >= 2.39 (verified against a real build) — the same
-# class of trap as neovim's prebuilt arm64 tarball above. rustc/cargo from
-# apt (bookworm ships 1.63) are old enough that tree-sitter-cli may fail to
-# build (MSRV), so rustup installs a toolchain first, mirroring this
-# Dockerfile's other official-install-script tools (starship, code-server
-# below). Both the toolchain and the crate are pinned to exact versions
+# 'tree-sitter'"). Built from source via cargo, for the same reason as neovim
+# above: the prebuilt tree-sitter-cli binaries (npm package / GitHub release)
+# are linked against whatever glibc upstream's CI had (>= 2.39 at the time
+# this was written), which a base image is not guaranteed to provide. The
+# toolchain comes from rustup rather than apt so its version is pinned here
+# explicitly instead of drifting with the distro's rustc (and so a distro
+# rustc older than tree-sitter-cli's MSRV can never break the build),
+# mirroring this Dockerfile's other official-install-script tools (starship,
+# code-server below). Both the toolchain and the crate are pinned to exact versions
 # verified against a real build — not "stable"/unpinned "latest" — since the
 # nvim-treesitter commit above was pinned specifically for compatibility
 # with THIS build; an unpinned toolchain/crate bump could silently break that
@@ -248,10 +321,11 @@ RUN curl -sS https://starship.rs/install.sh | sh -s -- --yes --version v1.26.0 \
 # 固定パスをSTARSHIP_CONFIGで明示する（/etc/tmux.confと同じパターン）。
 ENV STARSHIP_CONFIG=/etc/starship.toml
 
-# eza (ls replacement with icons) — not packaged for Debian bookworm, so a
-# dual-arch GitHub release binary is downloaded instead (verified against a
-# real build: unlike neovim's arm64 tarball, eza's aarch64-unknown-linux-gnu
-# release does NOT require a newer glibc than this image's bookworm base).
+# eza (ls replacement with icons) — a dual-arch GitHub release binary pinned
+# to EZA_VERSION. (Introduced when the base was Debian bookworm, which did not
+# package eza; Ubuntu 26.04 packages 0.23.4, but the pinned upstream release
+# is kept so the base-image migration does not also change the eza version.
+# The release binary links against an older glibc than Ubuntu 26.04's 2.43.)
 ARG EZA_VERSION=v0.23.5
 RUN ARCH=$(dpkg --print-architecture) \
     && if [ "$ARCH" = "arm64" ]; then EZA_ARCH="aarch64"; else EZA_ARCH="x86_64"; fi \
@@ -264,8 +338,9 @@ RUN ARCH=$(dpkg --print-architecture) \
     && eza --version
 
 # lazygit (TUI git client, shelled out to by the lazygit.nvim plugin in
-# docker/nvim/init.lua) — not packaged for Debian bookworm, so a dual-arch
-# GitHub release binary is downloaded, following the same pattern as eza above.
+# docker/nvim/init.lua) — Ubuntu 26.04's lazygit package is 0.57, older than
+# the release pinned here, so a dual-arch GitHub release binary is
+# downloaded, following the same pattern as eza above.
 #
 # Code review (second opinion) flagged that the download had no integrity
 # check: if the GitHub release asset or the delivery path were ever tampered
@@ -318,7 +393,7 @@ RUN ARCH=$(dpkg --print-architecture) \
     && tailscaled --version \
     && tailscale version
 
-# Apply starship/eza/bat to every interactive bash session. Debian's bash
+# Apply starship/eza/bat to every interactive bash session. Debian/Ubuntu bash
 # sources /etc/bash.bashrc even when invoked with --rcfile (verified against
 # a real container) — unlike /etc/profile.d/*.sh, which only runs for LOGIN
 # shells and would never fire for the agent's real terminal session (bash
@@ -327,10 +402,14 @@ COPY docker/bashrc-extra.sh /tmp/bashrc-extra.sh
 RUN cat /tmp/bashrc-extra.sh >> /etc/bash.bashrc && rm /tmp/bashrc-extra.sh
 
 # MSSQL tools (amd64 only — kept separate due to conditional apt-get)
+# Microsoft's Ubuntu 26.04 ("resolute") repository is signed with the 2025
+# key (microsoft-2025.asc); the older microsoft.asc fails with
+# NO_PUBKEY EE4D7792F748182B. curl -f turns an HTTP error into a build
+# failure instead of piping an error page into gpg.
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then \
-      curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /usr/share/keyrings/microsoft.gpg \
-      && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
+      curl -fsSL https://packages.microsoft.com/keys/microsoft-2025.asc | gpg --dearmor > /usr/share/keyrings/microsoft.gpg \
+      && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/26.04/prod resolute main" \
           > /etc/apt/sources.list.d/mssql-release.list \
       && (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
       && ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18 unixodbc-dev \
@@ -338,48 +417,25 @@ RUN ARCH=$(dpkg --print-architecture) && \
     fi
 ENV PATH="$PATH:/opt/mssql-tools18/bin"
 
-# GitHub CLI + GitLab CLI (combined to reduce apt-get update calls)
-# Re-install debian-archive-keyring to refresh GPG keys before apt-get update.
-# This prevents "invalid signature" errors when this layer runs on a cached
-# base where the Debian signing keys have been rotated since the cache was built.
-# The SECOND apt-get update (right before installing gh) tries the strict path
-# first; only if it fails AND apt reports the degraded-base symptom ("invalid
-# signature" on every repo — a Docker Desktop cached-base gpgv failure) does it
-# set DEGRADED and install gh with --allow-unauthenticated. Gating on that exact
-# symptom keeps full signature verification on healthy hosts and for every other
-# kind of failure (network, bad URL, a genuine tampered-package signature
-# mismatch) — those still surface as a hard build failure instead of silently
-# installing an unauthenticated package. Each fall-back path logs a WARNING to
-# stderr, and `gh --version` / `glab --version` at the end turn a broken or
-# missing binary into a loud build failure. Without this the build hard-failed
-# with exit 100 on a degraded base (the first update above is already tolerant;
-# leaving the second strict made the mitigation incomplete).
-RUN (apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false \
-        || (sleep 5 && apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false) \
-        || (sleep 15 && apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false) \
-        || true) \
-    && apt-get install -y --allow-unauthenticated debian-archive-keyring \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+# GitHub CLI + GitLab CLI (combined into one layer)
+# gh comes from GitHub's signed apt repository with full signature
+# verification — there is deliberately no unauthenticated fall-back. (The
+# Debian-based image re-installed debian-archive-keyring and, when apt output
+# contained "invalid signature", installed gh with --allow-unauthenticated.
+# That was dropped with the move to Ubuntu 26.04: the keyring refresh
+# addressed Debian archive-key rotation, which does not apply to
+# ubuntu-keyring; apt 3.2 no longer prints "At least one invalid signature
+# was encountered" (it reports "OpenPGP signature verification failed: ...
+# The following signatures were invalid: BADSIG ..."), so the probe could
+# never fire; and a BADSIG is exactly what a tampered repository looks like,
+# so it could not tell a broken builder from an attack.) A failed signature
+# check now fails the build.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
-    && DEGRADED="" \
-    && if apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update); then \
-           : ; \
-       else \
-           echo "WARNING: gh: strict package-list refresh failed; probing for degraded base GPG (invalid signature)" >&2 ; \
-           UPD_OUT="$(apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false 2>&1)" ; \
-           echo "$UPD_OUT" ; \
-           if echo "$UPD_OUT" | grep -q "invalid signature"; then \
-               echo "WARNING: gh: degraded base GPG detected; continuing in degraded (unauthenticated) mode" >&2 ; \
-               DEGRADED=1 ; \
-           fi ; \
-       fi \
-    && if [ -n "$DEGRADED" ]; then \
-           apt-get install -y --no-install-recommends --allow-unauthenticated gh ; \
-       else \
-           apt-get install -y --no-install-recommends gh ; \
-       fi \
+    && (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
+    && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/* \
     && ARCH=$(dpkg --print-architecture) \
     && GLAB_VERSION=$(curl -sL "https://gitlab.com/api/v4/projects/34675721/releases/permalink/latest" | sed -n 's/.*"tag_name":"v\([^"]*\)".*/\1/p') \
@@ -423,8 +479,17 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 # `xvfb : Depends: xserver-common (>= ...) but it is not going to be installed`
 # / `held broken packages`. amd64 carried the same defect and only happened to
 # succeed. Retry chain matches every other apt step in this file.
+#
+# The playwright used for install-deps is pinned (PLAYWRIGHT_DEPS_VERSION)
+# instead of whatever `npx --yes playwright` resolves to on the day of the
+# build: `install-deps` only knows the distributions its own release lists,
+# and playwright 1.58-1.60 refuse ubuntu26.04 ("not supported") while 1.62+
+# support it (verified). Keep it >= the floor of the "playwright" range in
+# package.json (__tests__/docker/dockerfile-ubuntu-base.spec.ts checks this),
+# so the OS libraries match the playwright that Layer 6 installs.
+ARG PLAYWRIGHT_DEPS_VERSION=1.65.0
 RUN (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) \
-    && npx --yes playwright install-deps chromium \
+    && npx --yes "playwright@${PLAYWRIGHT_DEPS_VERSION}" install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
 # =============================================================================

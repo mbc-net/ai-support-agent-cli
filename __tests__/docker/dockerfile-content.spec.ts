@@ -120,15 +120,11 @@ describe('Dockerfile content validation', () => {
     })
 
     describe('apt-get update retry on transient network/DNS failure', () => {
-      // Transient DNS/network hiccups against deb.debian.org make a single
+      // Transient DNS/network hiccups against the Ubuntu archive make a single
       // `apt-get update` failure abort the whole build. Every occurrence must
       // retry with backoff instead of running bare.
       const BARE_RETRY_CHAIN =
         'apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)'
-      const KEYRING_REFRESH_FLAGS =
-        '--allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false'
-      const KEYRING_REFRESH_RETRY_CHAIN =
-        `apt-get update ${KEYRING_REFRESH_FLAGS} || (sleep 5 && apt-get update ${KEYRING_REFRESH_FLAGS}) || (sleep 15 && apt-get update ${KEYRING_REFRESH_FLAGS}) || true`
 
       let normalized: string
 
@@ -141,20 +137,13 @@ describe('Dockerfile content validation', () => {
           .trim()
       })
 
-      it('retries the main OS packages, neovim build deps, libclang-dev, MSSQL tools, gh/glab final apt-get update, and Playwright browser deps (3 attempts, 5s/15s backoff)', () => {
+      it('retries the main OS packages, neovim build deps, libclang-dev, MSSQL tools, gh, and Playwright browser deps (3 attempts, 5s/15s backoff)', () => {
         const occurrences = normalized.split(BARE_RETRY_CHAIN).length - 1
         expect(occurrences).toBe(6)
       })
 
-      it('retries the GitHub/GitLab CLI keyring-refresh apt-get update while preserving the tolerant `|| true` fallback', () => {
-        expect(normalized).toContain(KEYRING_REFRESH_RETRY_CHAIN)
-      })
-
       it('does not leave any apt-get update call without a retry chain', () => {
-        // 7 locations (6 bare-retry + 1 keyring-refresh) x 3 attempts (1
-        // initial + 2 retries) = 21, plus one extra
-        // `--allow-insecure-repositories` fallback attempt on the pre-gh update
-        // (see the "degraded apt signature" describe below) = 22.
+        // 6 locations x 3 attempts (1 initial + 2 retries) = 18.
         // Strip comment lines first: the Dockerfile mentions "apt-get update"
         // in comments ("reduce apt-get update calls", "before apt-get update").
         const codeOnly = content
@@ -162,7 +151,7 @@ describe('Dockerfile content validation', () => {
           .filter((line) => !line.trim().startsWith('#'))
           .join('\n')
         const totalUpdateCalls = (codeOnly.match(/apt-get update\b/g) || []).length
-        expect(totalUpdateCalls).toBe(22)
+        expect(totalUpdateCalls).toBe(18)
       })
     })
 
@@ -223,7 +212,7 @@ describe('Dockerfile content validation', () => {
 
       it('installs Playwright browser dependencies behind the same retry chain as every other apt step', () => {
         const playwrightRun = runInstructions(content).find(({ body }) =>
-          body.includes('playwright install-deps'),
+          / install-deps chromium\b/.test(body),
         )
         expect(playwrightRun).toBeDefined()
         const normalizedRun = (playwrightRun?.body ?? '')
@@ -235,23 +224,16 @@ describe('Dockerfile content validation', () => {
       })
     })
 
-    describe('gh/glab install tolerates degraded apt signature verification', () => {
-      // When this layer runs on a cached base whose Debian signing keys have
-      // rotated (or whose GPG state is otherwise degraded — a recurring Docker
-      // Desktop symptom), apt reports "At least one invalid signature was
-      // encountered" for EVERY repo, including the Debian base repos. The FIRST
-      // apt-get update in this RUN block already tolerates that with
-      // `--allow-insecure-repositories ... || true`, but the SECOND update (run
-      // right before installing gh) and the `apt-get install gh` were left on
-      // the strict path, so they hard-fail the whole image build with exit 100.
-      //
-      // The fix must NOT blindly weaken security: it degrades to
-      // --allow-unauthenticated ONLY when the strict update actually fails with
-      // the "invalid signature" symptom (a degraded base gpgv). Every other kind
-      // of failure — network, bad URL, a genuine tampered-package signature
-      // mismatch — must still surface as a hard build failure. Fall-backs log a
-      // WARNING to stderr, and gh/glab are smoke-checked so a broken or missing
-      // binary fails the build loudly instead of shipping green.
+    describe('gh/glab install keeps apt signature verification strict', () => {
+      // The Debian-based image re-installed debian-archive-keyring and, when
+      // apt's output contained "invalid signature", installed gh with
+      // --allow-unauthenticated. On Ubuntu 26.04 that path is gone for good:
+      // apt 3.2 reports a bad signature as "OpenPGP signature verification
+      // failed: ... The following signatures were invalid: BADSIG ..."
+      // (verified in an ubuntu:26.04 container against a tampered local
+      // repository), so the old probe could never match, and a BADSIG is also
+      // exactly what a tampered repository produces. A signature failure must
+      // fail the build instead of degrading to an unauthenticated install.
 
       let normalized: string
 
@@ -262,36 +244,22 @@ describe('Dockerfile content validation', () => {
           .trim()
       })
 
-      it('probes for the "invalid signature" symptom before degrading, and only sets DEGRADED on that exact symptom', () => {
-        // The strict update failure path captures apt output and only flags
-        // DEGRADED when the known degraded-base symptom is present.
+      it('never installs anything with --allow-unauthenticated or refreshes the index with --allow-insecure-repositories', () => {
+        const codeOnly = content
+          .split('\n')
+          .filter((line) => !line.trim().startsWith('#'))
+          .join('\n')
+        expect(codeOnly).not.toMatch(/--allow-unauthenticated/)
+        expect(codeOnly).not.toMatch(/--allow-insecure-repositories/)
+        expect(codeOnly).not.toMatch(/Acquire::Check-Valid-Until=false/)
+      })
+
+      it('installs gh from the signed cli.github.com repository after a retried strict apt-get update', () => {
+        expect(normalized).toMatch(
+          /signed-by=\/usr\/share\/keyrings\/githubcli-archive-keyring\.gpg\] https:\/\/cli\.github\.com\/packages stable main/,
+        )
         expect(normalized).toContain(
-          'UPD_OUT="$(apt-get update --allow-insecure-repositories -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false 2>&1)"',
-        )
-        expect(normalized).toMatch(
-          /if echo "\$UPD_OUT" \| grep -q "invalid signature"; then/,
-        )
-        expect(normalized).toMatch(/DEGRADED=1/)
-      })
-
-      it('installs gh with --allow-unauthenticated ONLY inside the DEGRADED branch (never unconditionally)', () => {
-        // The unauthenticated install must appear exactly once, gated by the
-        // DEGRADED flag; the else branch keeps full authentication.
-        const unauthGhCount = (
-          normalized.match(/--allow-unauthenticated gh\b/g) || []
-        ).length
-        expect(unauthGhCount).toBe(1)
-        expect(normalized).toMatch(
-          /if \[ -n "\$DEGRADED" \]; then apt-get install -y --no-install-recommends --allow-unauthenticated gh ; else apt-get install -y --no-install-recommends gh ; fi/,
-        )
-      })
-
-      it('logs a WARNING to stderr on every fall-back so degraded installs are visible in the build log', () => {
-        expect(normalized).toMatch(
-          /echo "WARNING: gh: degraded base GPG detected; continuing in degraded \(unauthenticated\) mode" >&2/,
-        )
-        expect(normalized).toMatch(
-          /echo "WARNING: gh: strict package-list refresh failed; probing for degraded base GPG \(invalid signature\)" >&2/,
+          '&& (apt-get update || (sleep 5 && apt-get update) || (sleep 15 && apt-get update)) && apt-get install -y --no-install-recommends gh ',
         )
       })
 
@@ -309,7 +277,7 @@ describe('Dockerfile content validation', () => {
       // vi/vim, typing `vi`/`vim` in the agent shell still launches apt's vim
       // instead of nvim. Registering nvim at priority 60 (higher than
       // vim.basic's 30) makes update-alternatives select it automatically.
-      // Verified in a minimal Debian bookworm container: after
+      // Verified in a minimal Debian bookworm container (the previous base): after
       // `apt-get install vim` + this update-alternatives call,
       // `update-alternatives --display vi`/`vim` both point at nvim.
       it('registers /opt/nvim/bin/nvim as the vi alternative at a priority higher than apt vim.basic (30)', () => {
@@ -397,7 +365,7 @@ describe('Dockerfile content validation', () => {
       // lazygit.nvim (bundled in docker/nvim/init.lua) launches the `lazygit`
       // TUI as an external process — it is not an nvim plugin dependency that
       // lazy.nvim can install, so the real binary must be present on PATH.
-      // Debian bookworm does not package lazygit, so (mirroring eza above) a
+      // Ubuntu 26.04 only packages an older lazygit (0.57), so (mirroring eza) a
       // dual-arch GitHub release tarball is downloaded and pinned to an exact
       // version rather than "latest".
       it('pins LAZYGIT_VERSION to an exact version (not "latest")', () => {
@@ -439,7 +407,9 @@ describe('Dockerfile content validation', () => {
         // The checksum verification must run after the download and before
         // extraction, not after the fact.
         const downloadIdx = normalized.indexOf('lazygit.tar.gz')
-        const verifyIdx = normalized.indexOf('sha256sum -c -')
+        // Match the lazygit-specific check: the Dockerfile verifies other
+        // downloads (Node.js, tailscale) with `sha256sum -c -` as well.
+        const verifyIdx = normalized.indexOf('/tmp/lazygit.tar.gz" | sha256sum -c -')
         const extractIdx = normalized.indexOf('tar -xzf /tmp/lazygit.tar.gz')
         expect(downloadIdx).toBeGreaterThan(-1)
         expect(verifyIdx).toBeGreaterThan(downloadIdx)

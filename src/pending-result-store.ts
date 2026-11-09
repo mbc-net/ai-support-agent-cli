@@ -79,6 +79,7 @@ export interface PendingResult {
    * 同一 Pod のクラッシュ→再起動という最も典型的なケースで結果が失われる。
    */
   assignmentGeneration?: number
+  serverSetupInstanceId?: string
 }
 
 function getPendingDir(): string {
@@ -97,6 +98,7 @@ export function savePendingResult(
   token: string,
   tenantCode: string,
   assignmentGeneration?: number,
+  serverSetupInstanceId?: string,
 ): boolean {
   const filePath = path.join(getPendingDir(), `${commandId}.json`)
   try {
@@ -111,6 +113,7 @@ export function savePendingResult(
       savedAt: nowIso(),
       instanceId: resolveInstanceId(),
       ...(assignmentGeneration !== undefined && { assignmentGeneration }),
+      ...(serverSetupInstanceId !== undefined && {serverSetupInstanceId}),
     }
     atomicWriteJson(filePath, data)
     return true
@@ -234,6 +237,7 @@ export async function submitPendingResults(
           pending.assignmentGeneration as number,
         )
       }
+      if (pending.serverSetupInstanceId) client.restoreServerSetupInstance(pending.commandId, pending.serverSetupInstanceId)
       client.setTenantCode(pending.tenantCode)
       await client.submitResult(pending.commandId, pending.result, pending.agentId)
       removePendingResult(pending.commandId)

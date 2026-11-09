@@ -529,4 +529,58 @@ describe('Zabbix server and web roles', () => {
       expect(helper).toContain("TIMESCALE_MARKER = '_ai_support_zabbix_timescaledb_pending'")
     })
   })
+
+  describe('Webhook ローカル中継（mbc-server-maintenance docs/zabbix/webhook-relay.md）', () => {
+    type Task = Record<string, any>
+    const opts = { mode: 'resident', targetOs: 'linux' } as const
+    const role = 'zabbix_webhook_relay'
+    const flatten = (tasks: Task[]): Task[] =>
+      tasks.flatMap((t) => [t, ...['block', 'rescue', 'always'].flatMap((k) => (Array.isArray(t[k]) ? flatten(t[k]) : []))])
+    const tasks = flatten(load(readFileSync(path.join(roleDir, role, 'tasks/main.yml'), 'utf8')) as Task[])
+    const defaults = load(readFileSync(path.join(roleDir, role, 'defaults/main.yml'), 'utf8')) as Record<string, unknown>
+    const publicNames = ['zabbix_webhook_relay_listen_port', 'zabbix_webhook_relay_upstream_host', 'zabbix_webhook_relay_upstream_port']
+    const internalNames = [
+      'zabbix_webhook_relay_config',
+      'zabbix_webhook_relay_listener',
+      'zabbix_webhook_relay_nginx_dump',
+      'zabbix_webhook_relay_previous',
+      'zabbix_webhook_relay_probe',
+      'zabbix_webhook_relay_rollback_dir',
+    ]
+
+    it('公開変数は defaults と一致し、レシピの include_role で渡せる', () => {
+      expect(Object.keys(defaults).sort()).toEqual(publicNames)
+      expect([...INCLUDE_ROLE_ALLOWED_VARS[role]].sort()).toEqual(publicNames)
+      const result = validateAnsibleTasks(
+        [{
+          'ansible.builtin.include_role': { name: role },
+          vars: {
+            zabbix_webhook_relay_upstream_host: '{{ ZABBIX_WEBHOOK_UPSTREAM_HOST }}',
+            zabbix_webhook_relay_upstream_port: 443,
+            zabbix_webhook_relay_listen_port: 18081,
+          },
+        }],
+        opts,
+      )
+      expect(result.ok).toBe(true)
+    })
+
+    it.each(internalNames)('%s はレシピから上書き・参照・書き込みできない', (name) => {
+      // rollback_dir を上書きされると復元元を、listener / probe を上書きされると loopback 確認を迂回できる。
+      expect(validateAnsibleTasks([{ 'ansible.builtin.include_role': { name: role }, vars: { [name]: 'x' } }], opts).ok).toBe(false)
+      expect(validateAnsibleTasks([{ 'ansible.builtin.debug': { msg: `{{ ${name} }}` } }], opts).ok).toBe(false)
+      expect(validateAnsibleTasks([{ 'ansible.builtin.set_fact': { [name]: 'fake' } }], opts).ok).toBe(false)
+      expect(validateAnsibleTasks([{ 'ansible.builtin.command': 'true', register: name }], opts).ok).toBe(false)
+    })
+
+    it('ロール内で実際に使う register / set_fact 名がテストの一覧と一致する', () => {
+      // ロールに register を足して上の一覧（とガード）への追記を忘れると、ここで赤になる。
+      const names = new Set<string>()
+      for (const t of tasks) {
+        if (typeof t.register === 'string') names.add(t.register)
+        for (const k of Object.keys(t['ansible.builtin.set_fact'] ?? {})) names.add(k)
+      }
+      expect([...names].sort()).toEqual(internalNames)
+    })
+  })
 })

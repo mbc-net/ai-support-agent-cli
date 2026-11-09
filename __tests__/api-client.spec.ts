@@ -30,6 +30,29 @@ describe('ApiClient', () => {
     jest.restoreAllMocks()
   })
 
+  it('binds unassigned setup claims and every sensitive request to one execution instance', async () => {
+    mockInstance.get.mockResolvedValue({data: {commandId: 'cmd-1', type: 'server_setup_exec', payload: {}}})
+    await client.getCommand('cmd-1', 'agent-1')
+    const identity = client.getServerSetupInstanceId('cmd-1')
+    expect(identity).toMatch(/^[0-9a-f-]{36}$/)
+    expect(mockInstance.get).toHaveBeenLastCalledWith('/api/test_tenant/agent/commands/cmd-1', {
+      params: {agentId: 'agent-1'}, headers: {'x-server-setup-instance-id': identity},
+    })
+    await client.getServerSetupVariables('cmd-1', 'agent-1')
+    expect(mockInstance.get.mock.calls.at(-1)[1].headers['x-server-setup-instance-id']).toBe(identity)
+    await client.getServerSetupSshCredential('cmd-1', 'agent-1')
+    expect(mockInstance.get.mock.calls.at(-1)[1].headers['x-server-setup-instance-id']).toBe(identity)
+    mockInstance.post.mockResolvedValue({data: {success: true}})
+    await client.submitResult('cmd-1', {success: true, data: 'done', serverSetupConfigurationCompletion: {
+      executionId: 'exec-1', evidence: {kind: 'completed', sshHostId: 'host-1', processClosed: true},
+    }}, 'agent-1')
+    expect(mockInstance.post.mock.calls.slice(-2).every(call => call[2].headers['x-server-setup-instance-id'] === identity)).toBe(true)
+    const recovered = new ApiClient('http://localhost:3030', 'test_tenant:tokenId:rawToken', {withoutReplicaIdentity: true})
+    recovered.restoreServerSetupInstance('cmd-1', identity!)
+    await recovered.submitResult('cmd-1', {success: true, data: 'done'}, 'agent-1')
+    expect(mockInstance.post.mock.calls.at(-1)[2].headers['x-server-setup-instance-id']).toBe(identity)
+  })
+
   describe('setTenantCode', () => {
     it('should update the tenant code used in API paths', async () => {
       mockInstance.get.mockResolvedValue({ data: {} })
@@ -804,6 +827,39 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('server setup completion after terminal result submission', () => {
+    beforeEach(() => mockInstance.post.mockReset())
+    const result = { success: true as const, data: { status: 'passed' }, serverSetupConfigurationCompletion: {
+      executionId: 'exec-1', evidence: { kind: 'completed' as const, sshHostId: 'host-1', processClosed: true as const },
+    } }
+    it('strips internal proof, submits result first, and preserves proof for retries', async () => {
+      mockInstance.post.mockResolvedValueOnce({data: {}}).mockResolvedValueOnce({data: {success: true}})
+      await client.submitResult('cmd-1', result, 'agent-1')
+      expect(mockInstance.post).toHaveBeenNthCalledWith(1, '/api/test_tenant/agent/commands/cmd-1/result',
+        {success: true, data: {status: 'passed'}}, expect.any(Object))
+      expect(mockInstance.post).toHaveBeenNthCalledWith(2, '/api/test_tenant/agent/commands/cmd-1/server-setup-configuration-complete',
+        result.serverSetupConfigurationCompletion, {params: {agentId: 'agent-1'}, headers: {}})
+    })
+    it('replays identical result after lost completion response and rejects malformed acknowledgement', async () => {
+      mockInstance.post.mockResolvedValueOnce({data: {}}).mockRejectedValueOnce(new Error('SECRET'))
+      await expect(client.submitResult('cmd-1', result, 'agent-1')).rejects.toThrow('Server setup configuration completion acknowledgement failed')
+      mockInstance.post.mockResolvedValueOnce({data: {}}).mockResolvedValueOnce({data: {success: true}})
+      await client.submitResult('cmd-1', result, 'agent-1')
+      expect(mockInstance.post.mock.calls[0][1]).toEqual(mockInstance.post.mock.calls[2][1])
+      mockInstance.post.mockResolvedValueOnce({data: {}}).mockResolvedValueOnce({data: {success: false}})
+      await expect(client.submitResult('cmd-1', result, 'agent-1')).rejects.toThrow('Server setup configuration completion acknowledgement failed')
+    })
+    it.each([{}, {completed: true}, {success: 'true'}, null])('rejects missing or nonboolean success acknowledgement: %j', async acknowledgement => {
+      mockInstance.post.mockResolvedValueOnce({data: {}}).mockResolvedValueOnce({data: acknowledgement})
+      await expect(client.submitResult('cmd-1', result, 'agent-1')).rejects.toThrow('Server setup configuration completion acknowledgement failed')
+    })
+    it('does not complete when result acknowledgement is lost', async () => {
+      mockInstance.post.mockRejectedValue(new Error('offline'))
+      await expect(client.submitResult('cmd-1', result, 'agent-1')).rejects.toThrow()
+      expect(mockInstance.post.mock.calls.every(call => call[0].endsWith('/result'))).toBe(true)
+    })
+  })
+
   describe('getE2eSupportFiles', () => {
     it('should fetch E2E support files for a project and return the files array', async () => {
       mockInstance.get.mockResolvedValue({
@@ -901,7 +957,7 @@ describe('ApiClient', () => {
       expect(result.type).toBe('execute_command')
       expect(mockInstance.get).toHaveBeenCalledWith(
         '/api/test_tenant/agent/commands/cmd-1',
-        { params: { agentId: 'agent-1' } },
+        { params: { agentId: 'agent-1' }, headers: {'x-server-setup-instance-id': expect.any(String)} },
       )
     })
   })

@@ -75,7 +75,7 @@
       - zn_ts_pkgs.stdout_lines | length == 2
       - zn_ts_versions | length == 1
       - zn_ts_versions[0].startswith(zn_ts_db.stdout_lines[4] ~ '~ubuntu' ~ ansible_distribution_version)
-      - ('Pin: version ' ~ zn_ts_versions[0]) in zn_ts_pin_text
+      - "('Pin: version ' ~ zn_ts_versions[0]) in zn_ts_pin_text"
       - "'Pin-Priority: 1001' in zn_ts_pin_text"
     fail_msg: "db={{ zn_ts_db.stdout_lines }} pkgs={{ zn_ts_pkgs.stdout_lines }} pin={{ zn_ts_pin_text }}"
 

@@ -109,14 +109,15 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          # Same Python as the Docker image's controller (Ubuntu 26.04: 3.14).
+          python-version: '3.14'
 
       # Pinned to the same range as docker/Dockerfile's `ansible-core` install,
       # since CallbackBase's v2_runner_on_*/v2_playbook_on_stats hooks (used by
       # ansible/callback_plugins/json.py) are internal APIs, not covered by
       # ansible-core's semver-ish compatibility promise.
       - name: Install ansible-core
-        run: pip install 'ansible-core>=2.16,<2.18'
+        run: pip install 'ansible-core>=2.20,<2.21'
 
       # Collections used by ansible/roles/database/tasks/main.yml. Not
       # exercised by test_json_callback.py itself (it only loads json.py

@@ -74,6 +74,12 @@ export const ENV_VARS = {
   // true` over SSH. See server-setup-runner.ts's `runAnsiblePlaybook`.
   SERVER_SETUP_ANSIBLE_UID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_UID',
   SERVER_SETUP_ANSIBLE_GID: 'AI_SUPPORT_AGENT_SERVER_SETUP_ANSIBLE_GID',
+  // Opt-in dedicated ansible-core 2.20 controller for recipes that include the bundled
+  // Zabbix roles, for resident agents whose host Ansible is older than 2.20 (Ubuntu 26.04
+  // targets need 2.20). The Docker image already ships ansible-core 2.20 and leaves this
+  // unset. Only "2.20" is accepted; unset keeps the default controller. See
+  // src/server-setup/zabbix-controller.ts.
+  ZABBIX_CONTROLLER: 'AI_SUPPORT_AGENT_ZABBIX_CONTROLLER',
   // Third-party CLI credential/config env vars (Claude Code / Codex). These are
   // not namespaced under AI_SUPPORT_AGENT_* — their names are fixed by the
   // external CLI they configure — but are centralized here for the same
@@ -311,6 +317,7 @@ export const API_ENDPOINTS = {
     `/api/${tenantCode}/agent/commands/${commandId}/ssh-exec-credential`,
   BROWSER_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/browser-credentials`,
   E2E_ENV_VARIABLES: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}/e2e-env-variables`,
+  SERVER_SETUP_CONFIGURATION_COMPLETE: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}/server-setup-configuration-complete`,
   E2E_CONFIGURATION_COMPLETE: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}/e2e-configuration-complete`,
   // プロジェクト共有の E2E サポートファイル（Playwright spec から相対 import されるヘルパー群）。
   // projectCode はサーバー側が agent トークンから解決するため URL に含めない（E2E_ENV_VARIABLES と同方式）
