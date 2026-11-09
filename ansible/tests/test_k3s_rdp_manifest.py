@@ -8,13 +8,9 @@ from pathlib import Path
 
 import yaml
 from ansible.parsing.dataloader import DataLoader
-from ansible.template import Templar
-
-try:  # ansible-core >= 2.19 (data tagging): only trusted strings are templated.
-    from ansible.template import trust_as_template
-except ImportError:  # ansible-core <= 2.18 templates every string.
-    def trust_as_template(value):
-        return value
+# ansible-core >= 2.19 (data tagging) only templates trusted strings; the
+# repository pins ansible-core 2.20, so the helper is imported directly.
+from ansible.template import Templar, trust_as_template
 
 
 ROLE = Path(__file__).resolve().parents[1] / "roles" / "ai_support_agent_k8s"

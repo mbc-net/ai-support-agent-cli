@@ -169,15 +169,21 @@ describe('docker/Dockerfile — Ubuntu 26.04 base', () => {
       expect(new Set(pythonVersions)).toEqual(new Set(['3.14']))
     })
 
-    it('every test image under ansible/tests pins the same ansible-core range as the image', () => {
+    it('every test image under ansible/tests installs ansible-core only with the same range as the image', () => {
       const testDockerfiles = fs
         .readdirSync(path.resolve(__dirname, '../../ansible/tests'))
         .filter((name) => name.startsWith('Dockerfile'))
       expect(testDockerfiles.length).toBeGreaterThan(0)
       for (const name of testDockerfiles) {
-        const content = fs.readFileSync(path.resolve(__dirname, '../../ansible/tests', name), 'utf-8')
-        const specs = content.match(/ansible-core[<>=!~][^'"\s]*/g) ?? []
-        expect({name, specs: [...new Set(specs)]}).toEqual({name, specs: specs.length ? ['ansible-core>=2.20,<2.21'] : []})
+        const testCode = normalizedCode(fs.readFileSync(path.resolve(__dirname, '../../ansible/tests', name), 'utf-8'))
+        // Every package argument naming ansible / ansible-core, pinned or not
+        // (paths such as /opt/ansible and commands such as ansible-playbook
+        // are not package arguments and do not match).
+        const packages = [...testCode.matchAll(/(?<=\s)['"]?(ansible(?:-core)?(?:[<>=!~][^'"\s]*)?)['"]?(?=\s|$)/g)].map((m) => m[1])
+        // These images exist to run ansible-core, so each must install it, and
+        // only with the image's range: an unpinned `ansible-core` or the full
+        // `ansible` package fails here.
+        expect({name, packages}).toEqual({name, packages: ['ansible-core>=2.20,<2.21']})
       }
     })
   })
