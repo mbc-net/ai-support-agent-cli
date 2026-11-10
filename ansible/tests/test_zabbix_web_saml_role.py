@@ -152,6 +152,9 @@ class SamlRoleTest(unittest.TestCase):
             (saml_vars(zabbix_web_saml_sign={'messages': 'yes'}), 'zabbix_web_saml_sign_check'),
             (saml_vars(zabbix_web_saml_sign={'encrypt': True}), 'zabbix_web_saml_sign_check'),
             (saml_vars(zabbix_web_saml_sign=['messages']), 'zabbix_web_saml_sign_check'),
+            (saml_vars(zabbix_web_saml_sign={'messages': False, 'assertions': False}), 'zabbix_web_saml_sign_check'),
+            ({'zabbix_web_api_token': TOKEN, 'zabbix_web_admin_lockdown': True}, 'not zabbix_web_admin_lockdown or'),
+            (saml_vars(zabbix_web_admin_lockdown_delete_tokens='yes'), 'zabbix_web_admin_lockdown_delete_tokens is boolean'),
             (saml_vars(zabbix_web_saml_idp_certificates=[]), 'zabbix_web_saml_certificates_check'),
             (saml_vars(zabbix_web_saml_idp_certificates=[CERT_A, CERT_A, CERT_B]),
              'zabbix_web_saml_certificates_check'),
@@ -336,6 +339,37 @@ class SamlRoleTest(unittest.TestCase):
                 self.assertEqual(result.returncode != 0, stops, result.stdout)
                 done = Path(tmp) / 'done'
                 self.assertEqual(done.read_text() if done.exists() else None, marker)
+
+    def test_saml_directory_is_removed_and_warnings_follow_the_state(self):
+        tasks = self.tasks()
+        names = [t['name'] for t in tasks]
+        block = next(i for i, t in enumerate(tasks) if 'block' in t and 'rescue' in t)
+        remove = names.index('zabbix_web : Remove SAML certificates after SAML is disabled')
+        self.assertGreater(remove, block)
+        self.assertEqual(tasks[remove]['ansible.builtin.file'], {'path': '/etc/zabbix/web/saml', 'state': 'absent'})
+        warn_names = ('zabbix_web : Warn that SAML stays enabled in the database without an API token',
+                      'zabbix_web : Warn while SAML runs without the Admin lockdown or with legacy users allowed',
+                      'zabbix_web : Warn that the one-time service user token file still exists')
+        warns = [copy.deepcopy(tasks[names.index(n)]) for n in warn_names]
+        cases = [  # (variables, expected warnings)
+            ({}, []),
+            ({'zabbix_web_saml_dir': {'stat': {'exists': True}}}, [0]),
+            ({'zabbix_web_saml_dir': {'stat': {'exists': True}}, 'zabbix_web_api_token': TOKEN}, []),
+            (saml_vars(zabbix_web_saml_token_file={'stat': {'exists': False}}), [1]),
+            (saml_vars(zabbix_web_admin_lockdown=True, zabbix_web_saml_token_file={'stat': {'exists': False}}), []),
+            (saml_vars(zabbix_web_admin_lockdown=True, zabbix_web_saml_allow_legacy_users=True,
+                       zabbix_web_saml_token_file={'stat': {'exists': True}}), [1, 2]),
+        ]
+        for extra, expected in cases:
+            with self.subTest(extra=str(extra)[:100]):
+                variables = self.base_vars()
+                variables.update(extra)
+                result = self.run_play(variables, warns)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                shown = [i for i, n in enumerate(warn_names)
+                         if 'TASK [%s]' % n in result.stdout
+                         and 'skipping' not in result.stdout.split('TASK [%s]' % n)[1].split('TASK [')[0]]
+                self.assertEqual(shown, expected, result.stdout)
 
     def test_api_input_carries_the_saml_settings_only_when_needed(self):
         api = yaml.safe_load((ROLE / 'tasks/api.yml').read_text())

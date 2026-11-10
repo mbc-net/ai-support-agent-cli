@@ -779,6 +779,7 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
   ]),
   zabbix_web: new Set([
     'zabbix_web_admin_lockdown',
+    'zabbix_web_admin_lockdown_delete_tokens',
     'zabbix_web_admin_password',
     'zabbix_web_admin_previous_password',
     'zabbix_web_allow_no_sources',
@@ -1181,10 +1182,12 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   // *_check は検証結果そのもの、installed_version は版の下限の判定に使う。書き換えられると検査を迂回できる。
   'zabbix_web_saml_autologout_seconds',
   'zabbix_web_saml_certificates_check',
+  'zabbix_web_saml_dir',
   'zabbix_web_saml_installed_version',
   'zabbix_web_saml_jit_check',
   'zabbix_web_saml_local_users_check',
   'zabbix_web_saml_sign_check',
+  'zabbix_web_saml_token_file',
   // vars/main.yml の派生値と、include_role 以外のタスクに付いた `vars:` の名前。
   // どちらもロールが自分で計算する値であり、`set_fact` は task レベル `vars:` より
   // 優先度が高いのでレシピから上書きできてしまう（`rsyslog_server_reserved_log_dirs`

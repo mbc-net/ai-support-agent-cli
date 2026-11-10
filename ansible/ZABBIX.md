@@ -303,19 +303,33 @@ Zabbix の画面のログインを外部の SAML 2.0 IdP に任せ、パスワ�
 - 役割の名前・グループの名前・メディア種別の名前は既存のものを引きます（見つからなければ失敗）。無効化用のグループ
   （`deprovisioned_group`）だけは、無ければ無効の状態で作ります。既にあって有効なら失敗します。
 - **Super admin は SAML では渡しません。** Super admin の種類の役割（名前に関わらず）を対応に書くと失敗します。
-- **手動の利用者の検査:** 内部の（SAML の userdirectory に属さない）利用者に `@` を含む名前があると、SAML を有効に
-  する前に失敗します（Zabbix は SAML の利用者名で同じ名前の内部の利用者にもログインさせ、その利用者の今の役割
-  のまま入れてしまうため）。件数だけを出します。`zabbix_web_saml_allow_legacy_users: true` の間だけこの検査を
-  外します（IdP の検証期間に、アサーションが検証の利用者 1 人にしか出ない間だけ使い、その利用者の email が
-  内部の利用者の名前と一致しないことを人が確かめる）。**内部の利用者（サービス用・break-glass 用など）の名前に
-  `@` を使わないでください**（検査はロールの実行のときだけです）。
+- **SAML で渡す役割は API を使えないこと:** JIT の利用者が API トークンを作ると、そのトークンは IdP で拒否された後も
+  利用者を削除するまで使えます。そのため対応に書く役割は、**API へのアクセス**（`api.access`）と**API トークンの管理**
+  （`manage_api_tokens`）の両方が無効でなければ失敗します。既定の User role・Admin role は両方とも有効なので、
+  そのままでは使えません。画面の Users → User roles で既定の役割を複製し、「API access」の Enabled と
+  「Access to actions」の「Manage API tokens」を外した役割（例 `SSO user`・`SSO admin`）を作って対応に書いてください。
+  API では `role.create` の `rules` に `{"api.access": 0, "actions": [{"name": "manage_api_tokens", "status": 0}]}` を渡します。
+- **手動の利用者の検査:** SAML の userdirectory に属さない利用者（内部の利用者と、LDAP など他の userdirectory の利用者）に
+  `@` を含む名前があると、SAML を有効にしません（Zabbix は SAML の利用者名で同じ名前の利用者にもログインさせ、その
+  利用者の今の役割のまま入れてしまうため）。件数だけを出します。前の実行で SAML が有効になっていた場合は、
+  `saml_auth_enabled` を 0 に戻してから失敗します（fail closed。メッセージに実際の状態を出します）。
+  `zabbix_web_saml_allow_legacy_users: true` の間だけこの検査を外します（IdP の検証期間に、アサーションが検証の
+  利用者 1 人にしか出ない間だけ使い、その利用者の email が他の利用者の名前と一致しないことを人が確かめる）。
+  **内部の利用者（サービス用・break-glass 用など）の名前に `@` を使わないでください**（検査はロールの実行のときだけです）。
+- **前提: IdP が送る利用者名（`username_attribute`）は email の形（`@` を含む）だけです。** この検査は `@` を含む名前だけを
+  見るので、IdP が `@` の無い利用者名を送る構成では、同じ名前の内部の利用者を検出できません（その構成では使わないでください）。
+- `zabbix_web_saml_sign` は `messages` か `assertions` の少なくとも一方を true にします（両方 false だと署名の無い応答を受け付けるため拒否）。
+- 毎回の警告: SAML が有効で `zabbix_web_admin_lockdown` が false か `zabbix_web_saml_allow_legacy_users` が true の間は、
+  導入が終わっていないことを警告します。`zabbix_web_api_token` があるのに `/var/lib/ai-support-zabbix/service-user-token`
+  が残っていれば警告します（ファイルを消してください）。
 
 ### 変数
 
 | 変数 | 既定 | 説明 |
 |---|---|---|
 | `zabbix_web_api_token` | `""` | サービス用の利用者の API トークン（64 桁の 16 進）。ANSIBLE# の秘匿変数で渡す。空でなければヘルパーはこれだけを使い、`Admin` でログインせず、`zabbix_web_admin_password` の収束もしない |
-| `zabbix_web_admin_lockdown` | `false` | `Admin` を画面のログインが無効のグループへ加え、乱数のパスワードにする。`zabbix_web_api_token` が必須 |
+| `zabbix_web_admin_lockdown` | `false` | `Admin` を画面のログインが無効のグループへ加え、乱数のパスワードにする。`zabbix_web_api_token` と `zabbix_web_saml_enabled: true` が必須 |
+| `zabbix_web_admin_lockdown_delete_tokens` | `false` | true のときだけ、処置で `Admin` の API トークンを消す（false でトークンがあれば失敗） |
 | `zabbix_web_saml_enabled` | `false` | SAML を収束させる。`zabbix_web_api_token`（初回の bootstrap だけは `zabbix_web_admin_password`）が必須 |
 | `zabbix_web_saml_public_url` | `""` | 公開 URL。`https://`、末尾 `/`、クエリ・断片なし（例 `https://zabbix.example.com/`） |
 | `zabbix_web_saml_idp_entityid` | `""` | IdP の entity ID（https の URL か URN、1024 文字以下） |
@@ -339,7 +353,7 @@ Zabbix の画面のログインを外部の SAML 2.0 IdP に任せ、パスワ�
 | `enabled` | `false` | 初回のログインで利用者を作る |
 | `group_name_attribute` / `user_name_attribute` / `user_lastname_attribute` | `groups` / `name` / `""` | グループ・名・姓の属性 |
 | `deprovisioned_group` | （JIT では必須） | 役割を失った JIT の利用者を移すグループ。無ければ無効の状態で作る |
-| `groups` | （JIT では 1 件以上） | `[{saml_group, role, user_groups: [名前]}]`。`saml_group` は `*` を含まない完全な名前、`role` は Super admin 以外 |
+| `groups` | （JIT では 1 件以上） | `[{saml_group, role, user_groups: [名前]}]`。`saml_group` は `*` を含まない完全な名前、`role` は Super admin 以外で、API の利用と API トークンの管理を無効にした役割 |
 | `media` | `[]` | `[{name, mediatype, attribute}]`（任意） |
 
 レシピの例（値は例です）:
@@ -365,20 +379,22 @@ Zabbix の画面のログインを外部の SAML 2.0 IdP に任せ、パスワ�
       enabled: true
       deprovisioned_group: SAML deprovisioned
       groups:
-        - {saml_group: admin, role: Admin role, user_groups: [SSO admins]}
-        - {saml_group: operator, role: User role, user_groups: [SSO operators]}
-        - {saml_group: viewer, role: User role, user_groups: [SSO viewers]}
+        - {saml_group: admin, role: SSO admin, user_groups: [SSO admins]}
+        - {saml_group: operator, role: SSO user, user_groups: [SSO operators]}
+        - {saml_group: viewer, role: SSO user, user_groups: [SSO viewers]}
 ```
 
-- 役割の対応の例: IdP の `admin` → Admin role、`operator` → User role（ホストグループに読み書きの権限を持つ
-  グループ）、`viewer` → User role（読み取りの権限だけのグループ）。権限はユーザーグループで決まるので、
-  対応に書くグループは事前に画面か API で作ってください。
+- 役割の対応の例: IdP の `admin` → `SSO admin`（Admin role を複製し API を外したもの）、`operator` → `SSO user`
+  （User role を複製し API を外したもの。ホストグループに読み書きの権限を持つグループ）、`viewer` → `SSO user`
+  （読み取りの権限だけのグループ）。権限はユーザーグループで決まるので、対応に書く役割とグループは事前に画面か API で作ってください。
 - `autologout`: JIT で作られた利用者の既定は 15m です。ロールは実行のたびに SAML の userdirectory の利用者だけを
   この値へ揃えます（内部の利用者には触れません）。新しく JIT で作られた利用者は、次のロールの実行までは 15m のままです。
   JIT の利用者は API で利用者名・役割・グループ・パスワードを変えられないため、すぐ止めるには利用者の削除（下記）が要ります。
 - SAML を無効に戻すとき（`zabbix_web_saml_enabled: false`、`zabbix_web_api_token` あり）は `saml_auth_enabled` を 0 に
   するだけで、userdirectory・利用者は消しません。`zabbix_web_api_token` を指定している間は、このロールが SAML の
   オン・オフを管理します（画面で SAML を有効にしていても、`zabbix_web_saml_enabled: false` なら無効にします）。
+  無効に戻した実行では `zabbix.conf.php` から `$SSO` を外し、`/etc/zabbix/web/saml/`（証明書と SP の鍵）を消します。
+  トークン無しで無効に戻したときは DB の SAML のスイッチを変えられないので、そのことを警告します。
 
 ### 導入の順番
 
@@ -401,6 +417,12 @@ Zabbix の画面のログインを外部の SAML 2.0 IdP に任せ、パスワ�
    加え（`Zabbix administrators` などのグループ自体は変えない）、誰にも渡さない乱数のパスワードにします
    （画面が無効でも API の `user.login` は通るため、乱数のパスワードは必須です）。`Admin` が既にそのグループに
    いれば何もしません。`zabbix_web_admin_password` は以後使いません（レシピから外してください）。
+   - `zabbix_web_saml_enabled: true` とトークンが必須です（SAML が無いと画面に誰も入れなくなるため拒否）。
+   - `Admin` の API トークンは処置の後も使えるので、`Admin` がトークンを持っていれば件数を出して何も変えずに失敗します
+     （毎回確かめます）。`zabbix_web_admin_lockdown_delete_tokens: true` のときだけ消します。
+   - 冪等の判定は「`Admin` がそのグループにいるか」だけです。**break-glass などで `Admin` のパスワードを変えないで
+     ください**（グループにいる限り、次の実行は乱数に戻しません）。`Admin` をグループから外した場合は、次の実行で
+     グループに戻し、パスワードも乱数にし直します。
 
 Super admin は `ai-support-automation` と（使えない）`Admin` だけになり、SSO では渡りません。
 
@@ -426,13 +448,16 @@ python3 -c 'import hashlib,sys; print(hashlib.sha256("\n".join(sorted(sys.argv[1
   は（大小文字に関わらず）含められません。hash が合わなければ何も変えずに失敗します（書き間違いの防止）。
 - 見つかった利用者名の集合が `targets` と**大小文字まで**一致しなければ、何も変えずに失敗します（MySQL の照合順序は
   大小文字を区別しないことがあるため）。`delete` で 1 人も見つからなければ完了とみなし、印だけを作ります。
-- 処理の順は「この手続き → 手動の利用者の検査 → SAML の有効化」です。
+- 処理の順は「SAML の前提の読み取りの確認（役割・グループ・メディア種別・無効化用のグループ）→ この手続き →
+  手動の利用者の検査 → SAML の有効化」です。前提が揃っていなければ、利用者を消す前に失敗します。
 - 完了すると DB のグローバルマクロ `{$AI_SUPPORT_SAML_LOCAL_USERS_DONE}`（値 `<expected_sha256>:<mode>`）を印にし、
   ホストにも目印 `/var/lib/ai-support-zabbix/saml-local-users.done` を置きます（判定は DB の印だけで行うので、
   作り直したホストや同じ DB の別のフロントエンドでも繰り返されません）。印と同じ指定なら何もしません。
   印と違う指定なら何も変えずに失敗します（前回と別の手続きを黙って重ねない）。
 - **完了後は `mode` を `""` に戻してください**（以後この手続きの API 呼び出し自体が起きません）。
-- `scramble` は 1 人ずつ乱数のパスワードにします（値はどこにも出しません）。途中で失敗すると印は作らず、処理済みの件数を出します。
+- `scramble` は、まず対象の利用者の API トークンを消し（パスワードを変えてもトークンは使えるため。件数を出す）、
+  1 人ずつ乱数のパスワードにします（値はどこにも出しません）。途中で失敗すると印は作らず、処理済みの件数を出します。
+  `delete` では利用者と一緒にトークンも消えます。
   次の実行は見つかった名前の不一致で止まるので、`targets` を残りに直して `expected_sha256` を作り直してください。
 - **所有物（`delete`）:** Zabbix は所有物のある利用者の削除を全体ごと拒否します。ヘルパーは削除の前に数えます。
   - マップ・ダッシュボード: `transfer_maps_dashboards: true` のときだけサービス用の利用者へ移してから削除します（既定は失敗）。
@@ -460,12 +485,30 @@ JIT の利用者のセッションは IdP では切れず、`autologout` か削�
    api dashboard.get '{"output":["dashboardid","name"],"filter":{"userid":"<userid>"}}'
    api report.get '{"output":["reportid","name","userid"],"selectUsers":"extend"}'
    api action.get '{"output":["actionid","name"],"selectOperations":"extend","selectRecoveryOperations":"extend","selectUpdateOperations":"extend"}'
+   api token.get '{"output":["tokenid","name","status","expires_at"],"userids":["<userid>"]}'
    ```
 
-2. 所有物を処理する: マップとダッシュボードだけはサービス用の利用者へ移してよい（`map.update`・`dashboard.update`
+2. **API トークンを最初に消す:** `api token.delete '["<tokenid>", ...]'`。トークンは IdP の拒否とも画面のセッションとも
+   無関係に使えるので、所有物の処理より前に止めます（SAML で渡す役割は API を無効にしているので通常は 0 件ですが、
+   役割の変更や手動の作成に備えて毎回確かめます）。
+3. 所有物を処理する: マップとダッシュボードだけはサービス用の利用者へ移してよい（`map.update`・`dashboard.update`
    の `userid`）。定期レポートとアクションの送信先は上の「所有物」のとおりに扱う。
-3. `user.delete`。開いていた画面のセッションは直後に無効になります。次のログインで JIT が新しい利用者として作り直します
-   （そのとき `autologout` は 15m に戻り、次のロールの実行で揃います）。
+4. `user.delete`。開いていた画面のセッションは直後に無効になり、残っていたトークンも消えます。次のログインで JIT が
+   新しい利用者として作り直します（そのとき `autologout` は 15m に戻り、次のロールの実行で揃います）。
+
+### サービス用の利用者のトークンの交換
+
+`zabbix_web_api_token` には期限がありません（必要なら `token.update` で `expires_at` を付けられますが、切れるとロールの
+実行が止まるので、付けるなら交換の予定と合わせてください）。漏えいの疑いや定期の交換では次の順に行います。
+
+1. 今のトークンで新しいトークンを作る: `api token.create '{"name":"ai-support-automation role helper <日付>","userid":"<サービス用の利用者の userid>"}'`
+   → `api token.generate '["<新しい tokenid>"]'`（値は一度だけ表示されるので、そのまま秘匿変数へ）。
+2. 秘匿変数 `zabbix_web_api_token` を新しい値に替え、ロールを 1 回実行して通ることを確かめる。
+3. 古いトークンを消す: `api token.delete '["<古い tokenid>"]'`（新しいトークンのヘッダファイルで実行）。
+
+break-glass には、ロールが使う `zabbix_web_api_token` とは**別の**トークン（同じサービス用の利用者に名前を分けて作る）を
+使うことを推奨します。break-glass 用は持ち主だけが持ち、レシピや自動実行の秘匿変数には入れません。こうすると
+自動実行のトークンを交換・失効させても break-glass に影響せず、どちらが使われたかを監査ログで区別できます。
 
 ### 証明書の交換
 
@@ -478,18 +521,25 @@ JIT の利用者のセッションは IdP では切れず、`autologout` か削�
 パスワードのログインの経路は常設しません。IdP が使えないときだけ、break-glass 用の SSH の鍵と API トークンを
 持つ人（持ち主だけが持つ。ほかの人には渡さない）が次の手順で行います。
 
-1. 作業記録を始める（開始時刻）。
+1. 作業記録を始める（開始時刻）。**このロールを含む定期・AI の自動実行を止めます**（作業中にロールが SAML を
+   有効に戻したり、`Admin` の処置をやり直したりしないため）。SAML を無効にしたまましばらく運用するなら、レシピの
+   `zabbix_web_saml_enabled` も `false` にしてから自動実行を戻します。
 2. SSH のポート転送で上流のポート（`zabbix_web_listen_port`）へつなぐ（前段の CDN・WAF を通らない）。
-3. API トークンは手元の写しから、サーバーの root だけが読める一時ファイル（0600）に置いて使い、作業の最後に消す
-   （コマンド引数・環境変数に載せない。上の `curl -H @<ファイル>` の形）。
+3. break-glass 用の API トークン（上の「トークンの交換」の別のトークン）は手元の写しから、サーバーの root だけが読める
+   一時ファイル（0600）に置いて使い、作業の最後に消す（コマンド引数・環境変数に載せない。上の `curl -H @<ファイル>` の形）。
 4. **SAML を無効にするのは必要なときだけ:** `authentication.update {"saml_auth_enabled": 0}`。
+   **API トークンが使えない場合**（失効・DB の不整合など）だけ、DB の設定を直接変えます（作業記録に残す）:
+   7.0 は `UPDATE config SET saml_auth_enabled=0;`、8.0 は `UPDATE settings SET value_int=0 WHERE name='saml_auth_enabled';`
+   （`psql`/`mysql` で Zabbix の DB に接続して実行。戻すときは 1 にする）。
 5. 一時の内部の利用者を作る: 名前は `breakglass-<日付>`（**`@` を含めない**）、必要な最小の役割で、
    **Super admin role は使わない**（Super admin role の利用者を消すには画面の使える有効な Super admin が
    ほかに要りますが、`Admin` とサービス用の利用者は画面が無効なので消せなくなります）。Super admin の作業は画面ではなく
    API トークンで行う。パスワードは乱数でその場だけ使う。
-6. Zabbix の利用者には期限が無いので、作業の終わりに一時の利用者を削除し、記録の終了時刻と Zabbix の監査ログの
-   削除の時刻を照合する。4 をした場合は SAML を戻し（`saml_auth_enabled: 1`、またはロールの再実行）、一時ファイルを消し、
-   監査ログを記録に写す。
+6. Zabbix の利用者には期限が無いので、作業の終わりに一時の利用者を削除し、
+   `api user.get '{"output":["userid"],"search":{"username":"breakglass-"}}'` が 0 件を返すことを確かめ、記録の
+   終了時刻と Zabbix の監査ログの削除の時刻を照合する。`Admin` のパスワードは変えない（変えた場合は `Admin` を
+   API-only のグループから外さない限りロールは乱数に戻さないので、`user.update` で乱数にし直す）。4 をした場合は
+   SAML を戻し（`saml_auth_enabled: 1`、またはロールの再実行）、一時ファイルを消し、監査ログを記録に写し、止めた自動実行を戻す。
 
 ## TimescaleDB
 

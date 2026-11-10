@@ -1,8 +1,7 @@
 #!/usr/bin/python3
 """Converge the Zabbix Admin password, housekeeping and SAML through the frontend API.
 
-Design: admin-docs server-setup-monitoring-app-roles.md section 4.2 (password, housekeeping)
-and ansible/ZABBIX.md "SAML" (service user, SAML, one-time local user procedure).
+Usage is documented in ansible/ZABBIX.md (admin password, housekeeping, SAML and API token).
 
 The caller supplies a root-only JSON file (never argv / environment) with:
   port, server_name, version, password, previous_password, housekeeping
@@ -115,6 +114,7 @@ JIT_DEFAULTS = {'enabled': False, 'group_name_attribute': 'groups', 'user_name_a
                 'user_lastname_attribute': '', 'deprovisioned_group': '', 'groups': [], 'media': []}
 LOCAL_USER_MODES = ('', 'delete', 'scramble')
 MAX_TARGETS = 200
+EMAIL_LIKE = re.compile(r"[^\s\"'@]+@[^\s\"']+")
 
 
 class HelperError(Exception):
@@ -330,12 +330,16 @@ def validate_saml(saml, version):
             not all(isinstance(v, bool) for v in sign.values()):
         raise HelperError('saml sign keys are messages, assertions, authn_requests, logout_requests, '
                           'logout_responses with boolean values.')
+    sign = dict(SIGN_DEFAULTS, **sign)
+    if not (sign['messages'] or sign['assertions']):
+        raise HelperError('saml sign needs messages or assertions (or both) to be true; otherwise an unsigned '
+                          'response would be accepted.')
     autologout = saml.get('autologout', '')
     if autologout != '':
         seconds = autologout_seconds(autologout)
         if seconds is None or not 90 <= seconds <= DAY:
             raise HelperError('saml autologout must be empty or a period between 90s and 1d.')
-    return dict(saml, slo_url=slo_url, sign=dict(SIGN_DEFAULTS, **sign), autologout=autologout,
+    return dict(saml, slo_url=slo_url, sign=sign, autologout=autologout,
                 allow_legacy_users=saml.get('allow_legacy_users', False),
                 jit=validate_jit(saml.get('jit', {})),
                 local_users=validate_local_users(saml.get('local_users', {})))
@@ -365,16 +369,22 @@ def validate_config(config):
     if not re.match(r'^[\x20-\x7e]{0,72}\Z', config['previous_password']):
         raise HelperError('zabbix_web_admin_previous_password must be 0-72 printable ASCII characters.')
     lockdown = _boolean(config.get('admin_lockdown', False), 'admin_lockdown must be a boolean.')
+    delete_admin_tokens = _boolean(config.get('admin_lockdown_delete_tokens', False),
+                                   'admin_lockdown_delete_tokens must be a boolean.')
     if lockdown and not api_token:
         raise HelperError('zabbix_web_admin_lockdown requires zabbix_web_api_token.')
     saml = validate_saml(config.get('saml'), config['version'])
+    if lockdown and not (saml and saml['enabled']):
+        # Without SAML nobody could sign in to the frontend any more.
+        raise HelperError('zabbix_web_admin_lockdown requires zabbix_web_saml_enabled.')
     token_output_path = config.get('token_output_path', '')
     if not isinstance(token_output_path, str) or (token_output_path and not token_output_path.startswith('/')):
         raise HelperError('Invalid helper input: token_output_path must be an absolute path.')
     if saml and saml['enabled'] and not api_token and not token_output_path:
         raise HelperError('Invalid helper input: token_output_path is required for the bootstrap.')
     return {'housekeeping': validate_housekeeping(config.get('housekeeping', {})), 'api_token': api_token,
-            'admin_lockdown': lockdown, 'saml': saml, 'token_output_path': token_output_path}
+            'admin_lockdown': lockdown, 'admin_lockdown_delete_tokens': delete_admin_tokens, 'saml': saml,
+            'token_output_path': token_output_path}
 
 
 class Client:
@@ -425,7 +435,8 @@ class Client:
         if not isinstance(error, dict):
             return 'unknown error'
         parts = [str(error.get(k)) for k in ('message', 'data') if error.get(k) not in (None, '')]
-        return self.redact(' '.join(parts) or 'unknown error')
+        # API errors may quote user names (e.g. 'User "x" is map "y" owner.'); hide e-mail-like names.
+        return EMAIL_LIKE.sub('***', self.redact(' '.join(parts) or 'unknown error'))
 
     def require(self, method, params, token):
         result, error = self.call(method, params, token)
@@ -601,7 +612,7 @@ def user_by_name(client, token, username, **extra):
     return rows[0] if rows else None
 
 
-# --- MR12-Z2: service user bootstrap ----------------------------------------------------------
+# --- service user bootstrap ----------------------------------------------------------
 
 def bootstrap_service_user(client, token, output_path, redact):
     """Create the API-only service user and its token once. Returns a result fragment.
@@ -651,28 +662,53 @@ def bootstrap_service_user(client, token, output_path, redact):
         raise HelperError('Zabbix API token.generate returned an unexpected result.')
     value = generated[0]['token']
     redact.add(value)
+    created = False
     try:
         descriptor = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
         with os.fdopen(descriptor, 'w', encoding='ascii') as handle:
             handle.write(value + '\n')
     except OSError as error:
+        if created:
+            # Do not leave a partial token file behind; the next bootstrap refuses an existing file.
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
         raise HelperError('Could not write the service user token file (%s). The token was created but not '
                           'stored; run the bootstrap again.' % type(error).__name__) from None
     create_marker(client, token, SERVICE_MARKER, SERVICE_USERNAME)
     return {'service_user_bootstrapped': True}
 
 
-# --- MR12-Z2: Admin lockdown ------------------------------------------------------------------
+# --- Admin lockdown ------------------------------------------------------------------
 
-def lockdown_admin(client, token, redact):
-    """Add Admin to the API-only group with a random password. Done once Admin is in the group."""
+def tokens_of(client, token, userids):
+    """tokenids of the API tokens owned by the given users."""
+    ids = set(map(str, userids))
+    rows = client.require_list('token.get', {'output': ['tokenid', 'userid'], 'userids': sorted(ids)}, token)
+    return [row['tokenid'] for row in rows if str(row.get('userid')) in ids]
+
+
+def lockdown_admin(client, token, redact, delete_tokens):
+    """Add Admin to the API-only group with a random password. Done once Admin is in the group.
+
+    API tokens of Admin keep working after the lockdown, so they are refused (checked on every run)
+    unless delete_tokens allows deleting them.
+    """
     groupid, _ = ensure_service_group(client, token, create=False)
     admin = user_by_name(client, token, USERNAME, selectUsrgrps=['usrgrpid'])
     if admin is None:
         raise HelperError('Zabbix API user.get did not return the Admin user.')
+    admin_tokens = tokens_of(client, token, [admin['userid']])
+    if admin_tokens and not delete_tokens:
+        raise HelperError('Admin owns %d API token(s), which keep working after the lockdown. Delete them, or set '
+                          'zabbix_web_admin_lockdown_delete_tokens: true. Nothing was changed.' % len(admin_tokens))
+    if admin_tokens:
+        client.require('token.delete', admin_tokens, token)
     groups = [str(g.get('usrgrpid')) for g in admin.get('usrgrps', [])]
     if str(groupid) in groups:
-        return False
+        return bool(admin_tokens)
     password = random_password()
     redact.add(password)
     client.require('user.update', {'userid': admin['userid'], 'passwd': password,
@@ -680,7 +716,7 @@ def lockdown_admin(client, token, redact):
     return True
 
 
-# --- MR12-Z1: one-time local user procedure ---------------------------------------------------
+# --- one-time local user procedure ---------------------------------------------------
 
 def owned_objects(client, token, userids):
     """Counts of what blocks user.delete: maps, dashboards, reports and action recipients."""
@@ -741,6 +777,10 @@ def apply_local_users_once(client, token, local_users):
         raise HelperError('Admin and the service user cannot be targets.')
     userids = [row['userid'] for row in found]
     if mode == 'scramble':
+        # A new password does not end existing API tokens; delete them before scrambling.
+        target_tokens = tokens_of(client, token, userids)
+        if target_tokens:
+            client.require('token.delete', target_tokens, token)
         done = 0
         try:
             for userid in userids:
@@ -752,7 +792,8 @@ def apply_local_users_once(client, token, local_users):
             raise HelperError('%s (%d of %d users were scrambled; no marker was created).'
                               % (error, done, len(userids))) from None
         create_marker(client, token, LOCAL_USERS_MARKER, marker_value)
-        return {'local_users': {'deleted': 0, 'scrambled': done}, 'local_users_marker': marker_value,
+        return {'local_users': {'deleted': 0, 'scrambled': done, 'tokens_deleted': len(target_tokens)},
+                'local_users_marker': marker_value,
                 'local_users_changed': True}
     maps, dashboards, reports, actions = owned_objects(client, token, userids)
     if reports or actions:
@@ -782,14 +823,29 @@ def apply_local_users_once(client, token, local_users):
             'local_users_marker': marker_value, 'local_users_changed': True}
 
 
-# --- MR12-Z1: SAML ----------------------------------------------------------------------------
+# --- SAML ----------------------------------------------------------------------------
 
 def _flag(value):
     return 1 if value else 0
 
 
+def token_capable(rules):
+    """True when a role allows API access or managing API tokens (role.get selectRules output)."""
+    if not isinstance(rules, dict):
+        return True
+    if str(rules.get('api.access', '1')) != '0':
+        return True
+    actions = {str(row.get('name')): str(row.get('status')) for row in rules.get('actions') or []
+               if isinstance(row, dict)}
+    return actions.get('manage_api_tokens', str(rules.get('actions.default_access', '1'))) != '0'
+
+
 def desired_userdirectory(client, token, saml):
-    """The userdirectory fields to converge. Certificates are never sent (file storage)."""
+    """The userdirectory fields to converge (read-only lookups). Certificates are never sent (file storage).
+
+    Returns (fields, deprovisioned group name or None). Everything that could make the SAML setup fail is
+    checked here, before the one-time local user procedure changes anything.
+    """
     sign = saml['sign']
     jit = saml['jit']
     fields = {
@@ -808,6 +864,7 @@ def desired_userdirectory(client, token, saml):
     roles = {}
     role_names = sorted({entry['role'] for entry in jit['groups']})
     for row in client.require_list('role.get', {'output': ['roleid', 'name', 'type'],
+                                                'selectRules': ['api.access', 'actions', 'actions.default_access'],
                                                 'filter': {'name': role_names}}, token):
         if row.get('name') in role_names:
             if row['name'] in roles:
@@ -820,6 +877,10 @@ def desired_userdirectory(client, token, saml):
         if str(row.get('type')) == USER_TYPE_SUPER_ADMIN:
             raise HelperError('User role "%s" is a Super admin role; Super admin is never granted through SAML.'
                               % name)
+        # API tokens of JIT users keep working after the IdP denies them, until the user is deleted.
+        if token_capable(row.get('rules')):
+            raise HelperError('User role "%s" allows API access or managing API tokens; roles mapped through SAML '
+                              'must have both disabled (see ZABBIX.md).' % name)
     group_names = sorted({name for entry in jit['groups'] for name in entry['user_groups']})
     groups = usergroups_by_name(client, token, group_names)
     missing = [name for name in group_names if name not in groups]
@@ -844,19 +905,26 @@ def desired_userdirectory(client, token, saml):
         'provision_media': [{'name': entry['name'], 'mediatypeid': mediatypes[entry['mediatype']]['mediatypeid'],
                              'attribute': entry['attribute']} for entry in jit['media']],
     })
-    return fields, deprovisioned_group(client, token, jit['deprovisioned_group'])
+    check_deprovisioned_group(client, token, jit['deprovisioned_group'])
+    return fields, jit['deprovisioned_group']
+
+
+def check_deprovisioned_group(client, token, name):
+    """The existing disabled group for deprovisioned JIT users, or None when it must be created."""
+    group = usergroups_by_name(client, token, [name]).get(name)
+    if group is not None and str(group.get('users_status')) != GROUP_STATUS_DISABLED:
+        raise HelperError('User group "%s" (deprovisioned_group) exists but is enabled; it must be disabled. '
+                          'Nothing was changed.' % name)
+    return group
 
 
 def deprovisioned_group(client, token, name):
     """usrgrpid of the disabled group for deprovisioned JIT users; created (disabled) when missing."""
-    group = usergroups_by_name(client, token, [name]).get(name)
+    group = check_deprovisioned_group(client, token, name)
     if group is None:
         result = client.require('usergroup.create', {'name': name, 'users_status': int(GROUP_STATUS_DISABLED)},
                                 token)
         return result['usrgrpids'][0]
-    if str(group.get('users_status')) != GROUP_STATUS_DISABLED:
-        raise HelperError('User group "%s" (deprovisioned_group) exists but is enabled; it must be disabled. '
-                          'Nothing was changed.' % name)
     return group['usrgrpid']
 
 
@@ -885,16 +953,17 @@ def userdirectory_difference(current, fields):
     return changed
 
 
-def legacy_manual_users(client, token):
-    """Number of internal users (userdirectoryid 0) whose name looks like an e-mail address."""
+def legacy_manual_users(client, token, saml_userdirectoryid):
+    """Number of non-SAML users (internal or another user directory such as LDAP) with an e-mail-like name."""
     rows = client.require_list('user.get', {'output': ['userid', 'username', 'userdirectoryid'],
                                             'search': {'username': '@'}}, token)
-    return len([row for row in rows if '@' in str(row.get('username')) and str(row.get('userdirectoryid')) == '0'])
+    return len([row for row in rows if '@' in str(row.get('username'))
+                and str(row.get('userdirectoryid')) != str(saml_userdirectoryid)])
 
 
-def converge_saml(client, token, saml):
+def converge_saml(client, token, saml, fields, deprovisioned):
     """Converge the SAML userdirectory, the manual user check and authentication. Returns a fragment."""
-    fields, disabled_usrgrpid = desired_userdirectory(client, token, saml)
+    disabled_usrgrpid = deprovisioned_group(client, token, deprovisioned) if deprovisioned is not None else None
     directories = client.require_list('userdirectory.get', {
         'output': 'extend', 'selectProvisionGroups': 'extend', 'selectProvisionMedia': 'extend',
         'filter': {'idp_type': IDP_TYPE_SAML}}, token)
@@ -911,19 +980,25 @@ def converge_saml(client, token, saml):
         if update:
             client.require('userdirectory.update', dict(update, userdirectoryid=userdirectoryid), token)
             changed.append('userdirectory')
-    # Users with the same name as an e-mail address can sign in through SAML with their old role
-    # (index_sso.php logs in by name regardless of the user directory), so refuse to enable SAML.
-    if not saml['allow_legacy_users']:
-        count = legacy_manual_users(client, token)
-        if count:
-            raise HelperError('%d internal (non-SAML) user(s) have an "@" in their name and could sign in '
-                              'through SAML with their current role. Delete them with '
-                              'zabbix_web_saml_local_users first (zabbix_web_saml_allow_legacy_users: true is '
-                              'only for the validation period). SAML login was not enabled.' % count)
     auth = client.require('authentication.get', {'output': ['saml_auth_enabled', 'saml_case_sensitive',
                                                             'saml_jit_status', 'disabled_usrgrpid']}, token)
     if not isinstance(auth, dict):
         raise HelperError('Zabbix API authentication.get returned an unexpected result.')
+    # Users with the same name as an e-mail address can sign in through SAML with their old role
+    # (the frontend logs in by name regardless of the user directory), so SAML must not stay enabled.
+    if not saml['allow_legacy_users']:
+        count = legacy_manual_users(client, token, userdirectoryid)
+        if count:
+            if str(auth.get('saml_auth_enabled')) != '0':
+                # Fail closed: SAML may still be on from an earlier run (e.g. the validation period).
+                client.require('authentication.update', {'saml_auth_enabled': 0}, token)
+                state = 'SAML login was enabled and has been disabled now'
+            else:
+                state = 'SAML login stays disabled'
+            raise HelperError('%d non-SAML user(s) have an "@" in their name and could sign in through SAML with '
+                              'their current role. Delete them with zabbix_web_saml_local_users first '
+                              '(zabbix_web_saml_allow_legacy_users: true is only for the validation period). %s.'
+                              % (count, state))
     desired = {'saml_auth_enabled': 1, 'saml_case_sensitive': _flag(saml['case_sensitive']),
                'saml_jit_status': _flag(saml['jit']['enabled'])}
     if disabled_usrgrpid is not None:
@@ -998,11 +1073,13 @@ def run(config, redact):
     changed_keys = converge_housekeeping(client, plan['housekeeping'], token)
     result = {'changed': bool(changed_keys), 'password_changed': False, 'housekeeping_changed': changed_keys}
     if saml_enabled:
-        # Order: one-time procedure (delete before enable) -> manual user check -> enable SAML.
+        # Order: read-only SAML prerequisites -> one-time procedure (delete before enable) ->
+        # manual user check -> enable SAML.
+        fields, deprovisioned = desired_userdirectory(client, token, saml)
         fragment = apply_local_users_once(client, token, saml['local_users'])
         result['changed'] |= fragment.pop('local_users_changed', False)
         result.update(fragment)
-        fragment = converge_saml(client, token, saml)
+        fragment = converge_saml(client, token, saml, fields, deprovisioned)
         result['changed'] |= bool(fragment['saml_changed']) or bool(fragment['autologout_updated'])
         result.update(fragment)
     elif saml is not None:
@@ -1010,7 +1087,7 @@ def run(config, redact):
         result['changed'] |= bool(fragment['saml_changed'])
         result.update(fragment)
     if plan['admin_lockdown']:
-        locked = lockdown_admin(client, token, redact)
+        locked = lockdown_admin(client, token, redact, plan['admin_lockdown_delete_tokens'])
         result['changed'] |= locked
         result['admin_locked_down'] = locked
     return result

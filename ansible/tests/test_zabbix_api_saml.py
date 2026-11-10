@@ -55,9 +55,9 @@ def saml_config(**overrides):
         'sign': {'messages': True, 'assertions': True, 'authn_requests': False, 'logout_requests': False,
                  'logout_responses': False},
         'jit': {'enabled': True, 'deprovisioned_group': 'SAML deprovisioned',
-                'groups': [{'saml_group': 'admin', 'role': 'Admin role', 'user_groups': ['MBC admins']},
-                           {'saml_group': 'operator', 'role': 'User role', 'user_groups': ['MBC operators']},
-                           {'saml_group': 'viewer', 'role': 'User role', 'user_groups': ['MBC viewers']}]},
+                'groups': [{'saml_group': 'admin', 'role': 'SSO admin', 'user_groups': ['MBC admins']},
+                           {'saml_group': 'operator', 'role': 'SSO user', 'user_groups': ['MBC operators']},
+                           {'saml_group': 'viewer', 'role': 'SSO user', 'user_groups': ['MBC viewers']}]},
         'autologout': '1h',
         'allow_legacy_users': False,
         'local_users': {'mode': '', 'targets': [], 'expected_sha256': ''},
@@ -84,10 +84,17 @@ class FakeSaml(FakeZabbix):
         self.api_tokens = {}
         self.secret_values = []
         self.fail_methods = {}
-        self.roles = {'1': {'roleid': '1', 'name': 'User role', 'type': '1'},
-                      '2': {'roleid': '2', 'name': 'Admin role', 'type': '2'},
-                      '3': {'roleid': '3', 'name': 'Super admin role', 'type': '3'},
-                      '4': {'roleid': '4', 'name': 'Guest role', 'type': '1'}}
+        # The default roles allow the API; roles mapped through SAML must not (api.access and
+        # manage_api_tokens disabled), like the SSO roles below.
+        no_api = {'api.access': '0', 'actions': [{'name': 'manage_api_tokens', 'status': '0'}],
+                  'actions.default_access': '1'}
+        api = {'api.access': '1', 'actions': [], 'actions.default_access': '1'}
+        self.roles = {'1': {'roleid': '1', 'name': 'User role', 'type': '1', 'rules': api},
+                      '2': {'roleid': '2', 'name': 'Admin role', 'type': '2', 'rules': api},
+                      '3': {'roleid': '3', 'name': 'Super admin role', 'type': '3', 'rules': api},
+                      '4': {'roleid': '4', 'name': 'Guest role', 'type': '1', 'rules': api},
+                      '5': {'roleid': '5', 'name': 'SSO user', 'type': '1', 'rules': no_api},
+                      '6': {'roleid': '6', 'name': 'SSO admin', 'type': '2', 'rules': copy.deepcopy(no_api)}}
         self.groups = {'7': {'usrgrpid': '7', 'name': 'Zabbix administrators', 'gui_access': '0', 'users_status': '0'},
                        '11': {'usrgrpid': '11', 'name': 'MBC admins', 'gui_access': '0', 'users_status': '0'},
                        '12': {'usrgrpid': '12', 'name': 'MBC operators', 'gui_access': '0', 'users_status': '0'},
@@ -190,7 +197,11 @@ class FakeSaml(FakeZabbix):
         return {'usrgrpids': [groupid]}
 
     def m_role_get(self, params, token):
-        return [dict(r) for r in self.roles.values() if self.matches(r['name'], params['filter']['name'])]
+        rows = [copy.deepcopy(r) for r in self.roles.values() if self.matches(r['name'], params['filter']['name'])]
+        for row in rows:
+            if 'selectRules' not in params:
+                del row['rules']
+        return rows
 
     def m_mediatype_get(self, params, token):
         return [dict(m) for m in self.mediatypes.values() if self.matches(m['name'], params['filter']['name'])]
@@ -258,8 +269,9 @@ class FakeSaml(FakeZabbix):
         return {'userids': params}
 
     def m_token_get(self, params, token):
-        return [{'tokenid': t['tokenid'], 'name': t['name']} for t in self.tokens_api.values()
-                if t['userid'] in params['userids'] and self.matches(t['name'], params['filter']['name'])]
+        return [{'tokenid': t['tokenid'], 'name': t['name'], 'userid': t['userid']} for t in self.tokens_api.values()
+                if t['userid'] in params['userids']
+                and ('filter' not in params or self.matches(t['name'], params['filter']['name']))]
 
     def m_token_delete(self, params, token):
         for tokenid in params:
@@ -351,10 +363,10 @@ class FakeSaml(FakeZabbix):
 
 class SamlHelperTest(unittest.TestCase):
     def run_helper(self, state, *, saml=None, api_token='', password=NEW, lockdown=False, housekeeping=None,
-                   token_path=None, version=None):
+                   token_path=None, version=None, delete_admin_tokens=False):
         config = {'port': None, 'server_name': SERVER_NAME, 'version': version or state.version[:3],
                   'password': password, 'previous_password': '', 'housekeeping': housekeeping or {},
-                  'api_token': api_token, 'admin_lockdown': lockdown,
+                  'api_token': api_token, 'admin_lockdown': lockdown, 'admin_lockdown_delete_tokens': delete_admin_tokens,
                   'token_output_path': token_path or os.path.join(self.tmp.name, 'service-user-token'),
                   'saml': saml}
         with Server(state) as server, tempfile.TemporaryDirectory() as directory:
@@ -391,7 +403,7 @@ class SamlHelperTest(unittest.TestCase):
         reads = ('.get', 'apiinfo.version', 'user.login', 'user.logout')
         return [m for m in state.methods() if not m.endswith(reads) and m not in reads]
 
-    # --- MR12-Z2: service user bootstrap ------------------------------------------------------
+    # --- service user bootstrap ------------------------------------------------------
 
     def test_bootstrap_creates_a_passwordless_api_only_service_user_and_token_once(self):
         for version in ('7.0.32', '8.0.0'):
@@ -448,6 +460,30 @@ class SamlHelperTest(unittest.TestCase):
         self.assertNotEqual(list(state.tokens_api), first)
         self.assertIn('token.delete', state.methods())
 
+    def test_a_failed_token_file_write_leaves_no_partial_file(self):
+        helper = load_helper_module()
+        state = FakeSaml()
+        path = os.path.join(self.tmp.name, 'partial-token')
+        original = helper.os.fdopen
+
+        def broken(descriptor, *args, **kwargs):
+            os.close(descriptor)
+            raise OSError('disk full')
+
+        with Server(state) as server:
+            client = helper.Client(server.port, SERVER_NAME, helper.Redactor())
+            helper.check_version(client, '7.0')
+            session = client.login(NEW)
+            helper.os.fdopen = broken
+            try:
+                with self.assertRaises(helper.HelperError) as raised:
+                    helper.bootstrap_service_user(client, session, path, client.redact)
+            finally:
+                helper.os.fdopen = original
+        self.assertIn('OSError', str(raised.exception))
+        self.assertFalse(os.path.exists(path))
+        self.assertIsNone(state.marker(SERVICE_MARKER))
+
     def test_bootstrap_refuses_a_service_user_with_other_groups(self):
         state = FakeSaml()
         state.add_user(SERVICE, roleid='3', groups=['7'])
@@ -460,7 +496,7 @@ class SamlHelperTest(unittest.TestCase):
         self.failed(self.run_helper(state, saml=saml_config()), 'must have frontend access disabled')
         self.assertEqual(self.writes(state), [])
 
-    # --- MR12-Z2: API token mode ---------------------------------------------------------------
+    # --- API token mode ---------------------------------------------------------------
 
     def test_token_mode_never_logs_in_and_uses_bearer(self):
         state = FakeSaml(api_token=API_TOKEN)
@@ -492,7 +528,7 @@ class SamlHelperTest(unittest.TestCase):
                 self.failed(self.run_helper(state, **kwargs), text)
                 self.assertEqual(state.calls, [])
 
-    # --- MR12-Z1: SAML convergence -------------------------------------------------------------
+    # --- SAML convergence -------------------------------------------------------------
 
     def test_saml_is_created_with_nameid_and_without_certificates_then_idempotent(self):
         for version in ('7.0.32', '8.0.0'):
@@ -509,9 +545,9 @@ class SamlHelperTest(unittest.TestCase):
                 self.assertEqual((created['sign_messages'], created['sign_assertions'], created['sign_authn_requests']),
                                  (1, 1, 0))
                 self.assertEqual(created['provision_groups'], [
-                    {'name': 'admin', 'roleid': '2', 'user_groups': [{'usrgrpid': '11'}]},
-                    {'name': 'operator', 'roleid': '1', 'user_groups': [{'usrgrpid': '12'}]},
-                    {'name': 'viewer', 'roleid': '1', 'user_groups': [{'usrgrpid': '13'}]}])
+                    {'name': 'admin', 'roleid': '6', 'user_groups': [{'usrgrpid': '11'}]},
+                    {'name': 'operator', 'roleid': '5', 'user_groups': [{'usrgrpid': '12'}]},
+                    {'name': 'viewer', 'roleid': '5', 'user_groups': [{'usrgrpid': '13'}]}])
                 disabled = next(g for g in state.groups.values() if g['name'] == 'SAML deprovisioned')
                 self.assertEqual(disabled['users_status'], '1')
                 self.assertEqual(state.auth, {'saml_auth_enabled': '1', 'saml_case_sensitive': '1',
@@ -574,13 +610,85 @@ class SamlHelperTest(unittest.TestCase):
         state = FakeSaml(api_token=API_TOKEN)
         state.add_user('alice@example.com')
         proc = self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config())
-        self.failed(proc, '1 internal (non-SAML) user(s)')
+        self.failed(proc, '1 non-SAML user(s)')
+        self.assertIn('SAML login stays disabled', proc.stderr)
         self.assertEqual(state.auth['saml_auth_enabled'], '0')
         self.assertNotIn('authentication.update', state.methods())
         # The validation-period exception.
         self.ok(self.run_helper(state, api_token=API_TOKEN, password='',
                                 saml=saml_config(allow_legacy_users=True)))
         self.assertEqual(state.auth['saml_auth_enabled'], '1')
+
+    def test_legacy_users_fail_closed_when_saml_is_already_enabled(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        state.add_user('alice@example.com')
+        # Enabled during the validation period with allow_legacy_users.
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(allow_legacy_users=True)))
+        self.assertEqual(state.auth['saml_auth_enabled'], '1')
+        state.calls.clear()
+        proc = self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config())
+        self.failed(proc, 'SAML login was enabled and has been disabled now')
+        self.assertEqual(state.auth['saml_auth_enabled'], '0')
+        self.assertEqual(state.params_of('authentication.update'), [{'saml_auth_enabled': 0}])
+
+    def test_users_of_other_directories_with_email_names_block(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        state.add_user('ldap.user@example.com', userdirectoryid='77')  # e.g. an LDAP user directory
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config()), '1 non-SAML user(s)')
+
+    def test_roles_that_allow_api_tokens_are_never_mapped(self):
+        for label, rules in (
+                ('default role with API access', None),
+                ('manage_api_tokens allowed', {'api.access': '0', 'actions': [{'name': 'manage_api_tokens', 'status': '1'}],
+                                               'actions.default_access': '0'}),
+                ('manage_api_tokens by default access', {'api.access': '0', 'actions': [], 'actions.default_access': '1'})):
+            with self.subTest(label):
+                state = FakeSaml(api_token=API_TOKEN)
+                config = saml_config()
+                if rules is None:
+                    config['jit']['groups'][1]['role'] = 'User role'
+                else:
+                    state.roles['6']['rules'] = rules
+                self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=config),
+                            'allows API access or managing API tokens')
+                self.assertEqual(self.writes(state), [])
+
+    def test_saml_prerequisites_are_checked_before_users_are_deleted(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        self.people(state)
+        config = self.local(['alice@example.com', 'bob@example.com'])
+        config['jit']['groups'][0]['role'] = 'No such role'
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=config), 'User role(s) not found')
+        self.assertEqual(self.writes(state), [])
+        self.assertEqual(len([u for u in state.users.values() if '@' in u['username']]), 2)
+
+    def test_scramble_deletes_the_targets_api_tokens(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        alice, bob = self.people(state)
+        state.tokens_api['910'] = {'tokenid': '910', 'name': 'script', 'userid': alice, 'token': 'f' * 64}
+        state.tokens_api['911'] = {'tokenid': '911', 'name': 'keep', 'userid': '1', 'token': '9' * 64}
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='',
+                                      saml=self.local(['alice@example.com', 'bob@example.com'], mode='scramble')
+                                      | {'allow_legacy_users': True}))
+        self.assertEqual(out['local_users']['tokens_deleted'], 1)
+        self.assertEqual(list(state.tokens_api), ['911'])
+        methods = state.methods()
+        self.assertLess(methods.index('token.delete'), methods.index('user.update'))
+
+    def test_signature_of_messages_or_assertions_is_required(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='',
+                                    saml=saml_config(sign={'messages': False, 'assertions': False})),
+                    'needs messages or assertions')
+        self.assertEqual(state.calls, [])
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(sign={'messages': False})))
+
+    def test_api_errors_do_not_print_email_like_user_names(self):
+        helper = load_helper_module()
+        client = helper.Client(1, 'x', helper.Redactor())
+        text = client.describe({'message': 'Invalid params.', 'data': 'User "alice@example.com" is map "m" owner.'})
+        self.assertNotIn('alice@example.com', text)
+        self.assertIn('is map "m" owner', text)
 
     def test_jit_users_with_email_names_do_not_block(self):
         state = FakeSaml(api_token=API_TOKEN)
@@ -659,7 +767,7 @@ class SamlHelperTest(unittest.TestCase):
                 self.assertEqual(proc.returncode, 2, label)
                 self.assertEqual(state.calls, [])
 
-    # --- MR12-Z1: one-time local user procedure ----------------------------------------------
+    # --- one-time local user procedure ----------------------------------------------
 
     def local(self, targets, mode='delete', **extra):
         return saml_config(local_users=dict({'mode': mode, 'targets': targets, 'expected_sha256': sha(targets)},
@@ -763,7 +871,7 @@ class SamlHelperTest(unittest.TestCase):
         out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='',
                                       saml=self.local(['alice@example.com', 'bob@example.com'], mode='scramble')
                                       | {'allow_legacy_users': True}))
-        self.assertEqual(out['local_users'], {'deleted': 0, 'scrambled': 2})
+        self.assertEqual(out['local_users'], {'deleted': 0, 'scrambled': 2, 'tokens_deleted': 0})
         self.assertEqual(len({state.users[alice]['passwd'], state.users[bob]['passwd']}), 2)
         self.assertGreaterEqual(len(state.users[alice]['passwd']), 64)
         self.assertEqual(state.marker(LOCAL_MARKER).split(':')[1], 'scramble')
@@ -821,17 +929,17 @@ class SamlHelperTest(unittest.TestCase):
         proc = subprocess.run([sys.executable, '-c', documented, *names], capture_output=True, text=True, check=True)
         self.assertEqual(proc.stdout.strip(), expected)
 
-    # --- MR12-Z2: Admin lockdown -------------------------------------------------------------
+    # --- Admin lockdown -------------------------------------------------------------
 
     def test_admin_lockdown_adds_the_api_only_group_and_a_random_password_once(self):
         state = FakeSaml(password=NEW, api_token=API_TOKEN)
-        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', lockdown=True))
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', lockdown=True, saml=saml_config()))
         self.assertTrue(out['admin_locked_down'])
         service_group = next(g['usrgrpid'] for g in state.groups.values() if g['name'] == SERVICE_GROUP)
         self.assertEqual(state.users['1']['usrgrps'], ['7', service_group])
         self.assertNotEqual(state.password, NEW)
         state.calls.clear()
-        again = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', lockdown=True))
+        again = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', lockdown=True, saml=saml_config()))
         self.assertFalse(again['admin_locked_down'])
         self.assertFalse(again['changed'])
         self.assertEqual(self.writes(state), [])
@@ -839,8 +947,36 @@ class SamlHelperTest(unittest.TestCase):
     def test_admin_lockdown_requires_the_service_group(self):
         state = FakeSaml(api_token=API_TOKEN)
         state.groups = {k: v for k, v in state.groups.items() if v['name'] != SERVICE_GROUP}
-        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', lockdown=True), 'does not exist')
-        self.assertEqual(self.writes(state), [])
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', lockdown=True, saml=saml_config()), 'does not exist')
+        self.assertNotIn('user.update', state.methods())
+        self.assertNotIn('token.delete', state.methods())
+
+    def test_admin_lockdown_requires_saml(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        for saml in (None, {'enabled': False}):
+            with self.subTest(saml=saml):
+                state.calls.clear()
+                self.failed(self.run_helper(state, api_token=API_TOKEN, password='', lockdown=True, saml=saml),
+                            'requires zabbix_web_saml_enabled')
+                self.assertEqual(state.calls, [])
+
+    def test_admin_tokens_block_the_lockdown_unless_deletion_is_allowed(self):
+        state = FakeSaml(password=NEW, api_token=API_TOKEN)
+        state.tokens_api['900'] = {'tokenid': '900', 'name': 'old script', 'userid': '1', 'token': 'c' * 64}
+        state.tokens_api['901'] = {'tokenid': '901', 'name': 'other', 'userid': '1', 'token': 'd' * 64}
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', lockdown=True, saml=saml_config()),
+                    'Admin owns 2 API token(s)')
+        self.assertNotIn('user.update', state.methods())
+        self.assertEqual(state.password, NEW)
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', lockdown=True, saml=saml_config(),
+                                      delete_admin_tokens=True))
+        self.assertTrue(out['admin_locked_down'])
+        self.assertEqual(state.params_of('token.delete'), [['900', '901']])
+        self.assertEqual([t for t in state.tokens_api.values() if t['userid'] == '1'], [])
+        # A token created after the lockdown is caught on the next run as well.
+        state.tokens_api['902'] = {'tokenid': '902', 'name': 'late', 'userid': '1', 'token': 'e' * 64}
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', lockdown=True, saml=saml_config()),
+                    'Admin owns 1 API token(s)')
 
 
 if __name__ == '__main__':

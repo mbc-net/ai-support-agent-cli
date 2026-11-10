@@ -344,7 +344,7 @@ describe('Zabbix server and web roles', () => {
     const flatten = (tasks: Task[]): Task[] =>
       tasks.flatMap((t) => [t, ...['block', 'rescue', 'always'].flatMap((k) => (Array.isArray(t[k]) ? flatten(t[k]) : []))])
     const publicNames = [
-      'zabbix_web_admin_lockdown', 'zabbix_web_api_token', 'zabbix_web_saml_allow_legacy_users',
+      'zabbix_web_admin_lockdown', 'zabbix_web_admin_lockdown_delete_tokens', 'zabbix_web_api_token', 'zabbix_web_saml_allow_legacy_users',
       'zabbix_web_saml_autologout', 'zabbix_web_saml_case_sensitive', 'zabbix_web_saml_enabled',
       'zabbix_web_saml_idp_certificates', 'zabbix_web_saml_idp_entityid', 'zabbix_web_saml_jit',
       'zabbix_web_saml_local_users', 'zabbix_web_saml_nameid_format', 'zabbix_web_saml_public_url',
@@ -355,6 +355,7 @@ describe('Zabbix server and web roles', () => {
     const internalNames = [
       'zabbix_web_saml_autologout_seconds', 'zabbix_web_saml_certificates_check', 'zabbix_web_saml_installed_version',
       'zabbix_web_saml_jit_check', 'zabbix_web_saml_local_users_check', 'zabbix_web_saml_sign_check',
+      'zabbix_web_saml_dir', 'zabbix_web_saml_token_file',
     ]
 
     it('公開変数は defaults と一致し、既定は無効・空で、レシピの include_role で渡せる', () => {
@@ -366,6 +367,7 @@ describe('Zabbix server and web roles', () => {
       expect(d.zabbix_web_saml_enabled).toBe(false)
       expect(d.zabbix_web_api_token).toBe('')
       expect(d.zabbix_web_admin_lockdown).toBe(false)
+      expect(d.zabbix_web_admin_lockdown_delete_tokens).toBe(false)
       expect(d.zabbix_web_saml_allow_legacy_users).toBe(false)
       expect(d.zabbix_web_saml_nameid_format).toBe('urn:oasis:names:tc:SAML:2.0:nameid-format:persistent')
       expect(d.zabbix_web_saml_sign).toEqual({ messages: true, assertions: true, authn_requests: false, logout_requests: false, logout_responses: false })
@@ -422,6 +424,7 @@ describe('Zabbix server and web roles', () => {
         'zabbix_web_saml_enabled is boolean',
         'zabbix_web_saml_local_users is mapping',
         "zabbix_web_saml_local_users.mode | default('') == '' or zabbix_web_saml_enabled",
+        'not zabbix_web_admin_lockdown or (zabbix_web_api_token | length > 0 and zabbix_web_saml_enabled)',
       ]
       const samlConditions = args.that.filter((c) => c.includes('zabbix_web_saml_') && !always.includes(c))
       expect(samlConditions.length).toBeGreaterThan(15)

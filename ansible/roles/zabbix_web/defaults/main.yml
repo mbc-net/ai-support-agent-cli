@@ -62,8 +62,10 @@ zabbix_web_housekeeping: {}
 # zabbix_web_admin_password で実行する（サービス用の利用者とトークンを作る bootstrap）。
 zabbix_web_api_token: ""
 # true なら Admin を画面のログインが無効のグループへ加え、誰にも渡さない乱数のパスワードにする
-# （Admin が既にそのグループにいれば何もしない）。zabbix_web_api_token が必須。
+# （Admin が既にそのグループにいれば何もしない）。zabbix_web_api_token と zabbix_web_saml_enabled が必須。
 zabbix_web_admin_lockdown: false
+# Admin の API トークンは処置の後も使えるので、Admin がトークンを持つと処置は失敗する。true のときだけ消す。
+zabbix_web_admin_lockdown_delete_tokens: false
 
 # SAML 2.0 のログイン（Zabbix 7.0.32 以上・8.0.0 以上）。true のとき下の変数を検査して収束させる。
 # false に戻すと（zabbix_web_api_token があれば）saml_auth_enabled を 0 にするだけで、
@@ -88,14 +90,15 @@ zabbix_web_saml_idp_certificates: []
 zabbix_web_saml_sp_certificate: ""
 zabbix_web_saml_sp_private_key: ""
 # 書いたキーだけが既定値を上書きする。キーは messages, assertions, authn_requests,
-# logout_requests, logout_responses（boolean）。
+# logout_requests, logout_responses（boolean）。messages か assertions の少なくとも一方は true。
 zabbix_web_saml_sign: {messages: true, assertions: true, authn_requests: false, logout_requests: false, logout_responses: false}
 zabbix_web_saml_username_attribute: username
 zabbix_web_saml_case_sensitive: true
 # JIT（初回のログインで利用者を作る）。キーは enabled, group_name_attribute（既定 groups）,
 # user_name_attribute（既定 name）, user_lastname_attribute（既定 ""）, deprovisioned_group
 # （JIT のとき必須。無ければ無効のグループとして作る）, groups, media（任意）。
-# groups は [{saml_group, role, user_groups: [グループ名]}]。role に Super admin の役割は使えない。
+# groups は [{saml_group, role, user_groups: [グループ名]}]。role に Super admin の役割と、API の利用か
+# API トークンの管理を許す役割（既定の User role・Admin role を含む）は使えない（ZABBIX.md）。
 zabbix_web_saml_jit: {enabled: false}
 # 空でなければ SAML の userdirectory の利用者（JIT の利用者）の autologout を毎回この値にする
 # （90s〜1d。例 1h）。

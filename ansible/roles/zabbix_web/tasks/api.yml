@@ -45,6 +45,7 @@
               'previous_password': zabbix_web_admin_previous_password,
               'housekeeping': zabbix_web_housekeeping,
               'api_token': zabbix_web_api_token, 'admin_lockdown': zabbix_web_admin_lockdown,
+              'admin_lockdown_delete_tokens': zabbix_web_admin_lockdown_delete_tokens,
               'token_output_path': '/var/lib/ai-support-zabbix/service-user-token',
               'saml': {'enabled': zabbix_web_saml_enabled,
                        'idp_entityid': zabbix_web_saml_idp_entityid, 'sso_url': zabbix_web_saml_sso_url,
