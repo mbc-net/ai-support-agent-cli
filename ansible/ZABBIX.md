@@ -523,7 +523,9 @@ break-glass には、ロールが使う `zabbix_web_api_token` とは**別の**�
 
 1. 作業記録を始める（開始時刻）。**このロールを含む定期・AI の自動実行を止めます**（作業中にロールが SAML を
    有効に戻したり、`Admin` の処置をやり直したりしないため）。SAML を無効にしたまましばらく運用するなら、レシピの
-   `zabbix_web_saml_enabled` も `false` にしてから自動実行を戻します。
+   `zabbix_web_saml_enabled` も `false` にしてから自動実行を戻します。このとき `zabbix_web_admin_lockdown` も `false`
+   にしてください（`Admin` の処置は元に戻らずそのまま残りますが、SAML 無効で lockdown が true だと先頭の検査で
+   ロールの実行全体が止まります）。
 2. SSH のポート転送で上流のポート（`zabbix_web_listen_port`）へつなぐ（前段の CDN・WAF を通らない）。
 3. break-glass 用の API トークン（上の「トークンの交換」の別のトークン）は手元の写しから、サーバーの root だけが読める
    一時ファイル（0600）に置いて使い、作業の最後に消す（コマンド引数・環境変数に載せない。上の `curl -H @<ファイル>` の形）。
@@ -531,6 +533,10 @@ break-glass には、ロールが使う `zabbix_web_api_token` とは**別の**�
    **API トークンが使えない場合**（失効・DB の不整合など）だけ、DB の設定を直接変えます（作業記録に残す）:
    7.0 は `UPDATE config SET saml_auth_enabled=0;`、8.0 は `UPDATE settings SET value_int=0 WHERE name='saml_auth_enabled';`
    （`psql`/`mysql` で Zabbix の DB に接続して実行。戻すときは 1 にする）。
+   SQL を実行する前に DB を退避し、8.0 の表・列の名前は実際のサーバーのスキーマで確かめてください。
+   **この DB の手順は SAML を止めるだけで、入る手段は作りません**（パスワードを持つ利用者はおらず、API も使えないため）。
+   入る手段の本命は、ロール用とは別の break-glass 用トークンです。ロール用と break-glass 用の両方のトークンが
+   使えないときの復旧（DB の退避からの復元や、新しいトークンを入れる事前に試した SQL など）は、別の手順として用意してください。
 5. 一時の内部の利用者を作る: 名前は `breakglass-<日付>`（**`@` を含めない**）、必要な最小の役割で、
    **Super admin role は使わない**（Super admin role の利用者を消すには画面の使える有効な Super admin が
    ほかに要りますが、`Admin` とサービス用の利用者は画面が無効なので消せなくなります）。Super admin の作業は画面ではなく
