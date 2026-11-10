@@ -281,7 +281,9 @@ describe('Zabbix server and web roles', () => {
       expect(apiIdx).toBeGreaterThan(blockIdx)
       expect(apiIdx).toBeLessThan(warnIdx)
       expect(apiIdx).toBeLessThan(ufwIdx)
-      expect(tasks[apiIdx].when).toBe('zabbix_web_admin_password | length > 0 or zabbix_web_housekeeping | length > 0')
+      expect(tasks[apiIdx].when).toBe(
+        'zabbix_web_admin_password | length > 0 or zabbix_web_housekeeping | length > 0 or zabbix_web_api_token | length > 0',
+      )
       expect(flatten([tasks[blockIdx]]).some((t) => JSON.stringify(t).includes('api.yml'))).toBe(false)
     })
 
@@ -331,6 +333,119 @@ describe('Zabbix server and web roles', () => {
       // パスワードは argv・環境変数に載せない。
       expect(JSON.stringify(run)).not.toContain('admin_password')
       expect(run.environment).toBeUndefined()
+    })
+  })
+
+  describe('API トークン・SAML（ansible/ZABBIX.md「SAML（SSO）」）', () => {
+    type Task = Record<string, any>
+    const opts = { mode: 'resident', targetOs: 'linux' } as const
+    const loadTasks = (file = 'main.yml'): Task[] =>
+      load(readFileSync(path.join(roleDir, 'zabbix_web/tasks', file), 'utf8')) as Task[]
+    const flatten = (tasks: Task[]): Task[] =>
+      tasks.flatMap((t) => [t, ...['block', 'rescue', 'always'].flatMap((k) => (Array.isArray(t[k]) ? flatten(t[k]) : []))])
+    const publicNames = [
+      'zabbix_web_admin_lockdown', 'zabbix_web_admin_lockdown_delete_tokens', 'zabbix_web_api_token', 'zabbix_web_saml_allow_legacy_users',
+      'zabbix_web_saml_autologout', 'zabbix_web_saml_case_sensitive', 'zabbix_web_saml_enabled',
+      'zabbix_web_saml_idp_certificates', 'zabbix_web_saml_idp_entityid', 'zabbix_web_saml_jit',
+      'zabbix_web_saml_local_users', 'zabbix_web_saml_nameid_format', 'zabbix_web_saml_public_url',
+      'zabbix_web_saml_sign', 'zabbix_web_saml_slo_url', 'zabbix_web_saml_sp_certificate',
+      'zabbix_web_saml_sp_entityid', 'zabbix_web_saml_sp_private_key', 'zabbix_web_saml_sso_url',
+      'zabbix_web_saml_username_attribute',
+    ]
+    const internalNames = [
+      'zabbix_web_saml_autologout_seconds', 'zabbix_web_saml_certificates_check', 'zabbix_web_saml_installed_version',
+      'zabbix_web_saml_jit_check', 'zabbix_web_saml_local_users_check', 'zabbix_web_saml_sign_check',
+      'zabbix_web_saml_dir', 'zabbix_web_saml_token_file',
+    ]
+
+    it('公開変数は defaults と一致し、既定は無効・空で、レシピの include_role で渡せる', () => {
+      const text = readFileSync(path.join(roleDir, 'zabbix_web/defaults/main.yml'), 'utf8')
+      const d = load(text) as Record<string, unknown>
+      const names = Object.keys(d).filter((k) => /^zabbix_web_(saml_|api_token|admin_lockdown)/.test(k))
+      expect(names.sort()).toEqual([...publicNames].sort())
+      for (const name of publicNames) expect(INCLUDE_ROLE_ALLOWED_VARS.zabbix_web.has(name)).toBe(true)
+      expect(d.zabbix_web_saml_enabled).toBe(false)
+      expect(d.zabbix_web_api_token).toBe('')
+      expect(d.zabbix_web_admin_lockdown).toBe(false)
+      expect(d.zabbix_web_admin_lockdown_delete_tokens).toBe(false)
+      expect(d.zabbix_web_saml_allow_legacy_users).toBe(false)
+      expect(d.zabbix_web_saml_nameid_format).toBe('urn:oasis:names:tc:SAML:2.0:nameid-format:persistent')
+      expect(d.zabbix_web_saml_sign).toEqual({ messages: true, assertions: true, authn_requests: false, logout_requests: false, logout_responses: false })
+      expect(d.zabbix_web_saml_jit).toEqual({ enabled: false })
+      expect(d.zabbix_web_saml_local_users).toEqual({ mode: '', targets: [], expected_sha256: '', transfer_maps_dashboards: false })
+      // 公開リポジトリ: 例の URL は example.com だけを使う。
+      for (const host of text.match(/https:\/\/[A-Za-z0-9.-]+/g) ?? []) expect(host).toMatch(/\.example\.com$/)
+      const result = validateAnsibleTasks(
+        [{
+          'ansible.builtin.include_role': { name: 'zabbix_web' },
+          vars: {
+            zabbix_web_db_password: '{{ ZABBIX_DB_PASSWORD }}',
+            zabbix_web_api_token: '{{ ZABBIX_API_TOKEN }}',
+            zabbix_web_saml_enabled: true,
+            zabbix_web_saml_public_url: 'https://zabbix.example.com/',
+            zabbix_web_saml_jit: { enabled: true, deprovisioned_group: 'SAML deprovisioned', groups: [{ saml_group: 'viewer', role: 'User role', user_groups: ['Viewers'] }] },
+          },
+        }],
+        opts,
+      )
+      expect(result.ok).toBe(true)
+    })
+
+    it('API トークンと SP の秘密鍵の変数名は常に秘匿扱いで、参照したレシピのタスクに no_log が付く', () => {
+      for (const name of ['zabbix_web_api_token', 'zabbix_web_saml_sp_private_key']) {
+        const result = validate(dump([{ 'ansible.builtin.debug': { msg: `{{ ${name} }}` } }]), opts)
+        expect(result.ok).toBe(true)
+        expect((result.normalizedTasks?.[0] as Task).no_log).toBe(true)
+      }
+    })
+
+    it.each(internalNames)('%s はレシピから上書き・参照・書き込みできない', (name) => {
+      expect(validateAnsibleTasks([{ 'ansible.builtin.include_role': { name: 'zabbix_web' }, vars: { [name]: 'ok' } }], opts).ok).toBe(false)
+      expect(validateAnsibleTasks([{ 'ansible.builtin.debug': { msg: `{{ ${name} }}` } }], opts).ok).toBe(false)
+      expect(validateAnsibleTasks([{ 'ansible.builtin.set_fact': { [name]: 'ok' } }], opts).ok).toBe(false)
+      expect(validateAnsibleTasks([{ 'ansible.builtin.command': 'true', register: name }], opts).ok).toBe(false)
+    })
+
+    it('ロール内で実際に使う SAML の内部名がテストの一覧と一致する', () => {
+      const names = new Set<string>()
+      for (const file of ['main.yml', 'api.yml']) {
+        for (const t of flatten(loadTasks(file))) {
+          if (typeof t.register === 'string' && /^zabbix_web_saml_/.test(t.register)) names.add(t.register)
+          for (const k of Object.keys(t.vars ?? {})) if (/^zabbix_web_saml_/.test(k)) names.add(k)
+        }
+      }
+      expect([...names].sort()).toEqual([...internalNames].sort())
+    })
+
+    it('SAML の検査は先頭の Validate assert にあり、SAML の値の条件は zabbix_web_saml_enabled で短絡する', () => {
+      const first = loadTasks()[0]
+      const args = first['ansible.builtin.assert'] as { that: string[]; fail_msg: string }
+      const always = [
+        'zabbix_web_saml_enabled is boolean',
+        'zabbix_web_saml_local_users is mapping',
+        "zabbix_web_saml_local_users.mode | default('') == '' or zabbix_web_saml_enabled",
+        'not zabbix_web_admin_lockdown or (zabbix_web_api_token | length > 0 and zabbix_web_saml_enabled)',
+      ]
+      const samlConditions = args.that.filter((c) => c.includes('zabbix_web_saml_') && !always.includes(c))
+      expect(samlConditions.length).toBeGreaterThan(15)
+      for (const cond of samlConditions) expect(cond.startsWith('not zabbix_web_saml_enabled or')).toBe(true)
+      expect(args.that).toContain("not zabbix_web_saml_enabled or zabbix_web_version in ['7.0', '8.0']")
+      expect(args.fail_msg).not.toContain('{{')
+    })
+
+    it('ヘルパーへの入力に API トークンを含め、bootstrap の後は失敗で止まり、SP の秘密鍵は渡さない', () => {
+      const api = loadTasks('api.yml')
+      const block = api.find((t) => Array.isArray(t.block)) as Task
+      const write = block.block.find((t: Task) => t['ansible.builtin.copy']?.dest === '{{ zabbix_web_api_credentials.path }}')
+      expect(write['ansible.builtin.copy'].content).toContain('zabbix_web_api_token')
+      expect(write['ansible.builtin.copy'].content).not.toContain('zabbix_web_saml_sp_private_key')
+      const stop = block.block.find((t: Task) => /Stop after the service user bootstrap/.test(t.name))
+      expect(stop['ansible.builtin.fail']).toBeDefined()
+      expect(String(stop['ansible.builtin.fail'].msg)).not.toContain('{{')
+      const run = block.block.find((t: Task) => t.register === 'zabbix_web_api_result')
+      expect(JSON.stringify(run)).not.toContain('api_token')
+      const dir = api.find((t) => /private state directory/.test(t.name ?? '')) as Task
+      expect(dir['ansible.builtin.file']).toMatchObject({ path: '/var/lib/ai-support-zabbix', owner: 'root', group: 'root', mode: '0700' })
     })
   })
 
