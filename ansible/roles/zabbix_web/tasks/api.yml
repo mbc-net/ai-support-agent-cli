@@ -6,6 +6,8 @@
 # ヘルパーの実行は no_log（結果にパスワードが入り得るため）＋ ignore_errors で完走させ、
 # 直後の fail がパスワードを含まない stderr で失敗理由を出す（zabbix_server の DB 初期化と同じ形）。
 # ユーザー名 Admin と初期値はヘルパー内のリテラルであり、変数では差し替えられない。
+# zabbix_web_api_token があればヘルパーはトークンだけを使い、Admin のパスワードは収束させない。
+# SAML（userdirectory・authentication・1 回だけの手続き・Admin の処置）も同じヘルパーで収束させる。
 - name: "zabbix_web : Install the Zabbix API helper"
   ansible.builtin.copy:
     src: zabbix_api.py
@@ -13,6 +15,17 @@
     owner: root
     group: root
     mode: "0700"
+
+# SAML・API トークン（ZABBIX.md「SAML（SSO）」）。bootstrap で作るサービス用の利用者の API トークンと、
+# 1 回だけの手続きのホストの目印（判定の正は DB のグローバルマクロ）を置く root 専用のディレクトリ。
+- name: "zabbix_web : Create the private state directory for SAML"
+  ansible.builtin.file:
+    path: /var/lib/ai-support-zabbix
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: zabbix_web_saml_enabled
 
 - name: "zabbix_web : Apply the admin password and housekeeping"
   block:
@@ -30,7 +43,20 @@
           {{ {'port': zabbix_web_listen_port | int, 'server_name': zabbix_web_server_name,
               'version': zabbix_web_version, 'password': zabbix_web_admin_password,
               'previous_password': zabbix_web_admin_previous_password,
-              'housekeeping': zabbix_web_housekeeping} | to_json }}
+              'housekeeping': zabbix_web_housekeeping,
+              'api_token': zabbix_web_api_token, 'admin_lockdown': zabbix_web_admin_lockdown,
+              'admin_lockdown_delete_tokens': zabbix_web_admin_lockdown_delete_tokens,
+              'token_output_path': '/var/lib/ai-support-zabbix/service-user-token',
+              'saml': {'enabled': zabbix_web_saml_enabled,
+                       'idp_entityid': zabbix_web_saml_idp_entityid, 'sso_url': zabbix_web_saml_sso_url,
+                       'slo_url': zabbix_web_saml_slo_url, 'sp_entityid': zabbix_web_saml_sp_entityid,
+                       'nameid_format': zabbix_web_saml_nameid_format,
+                       'username_attribute': zabbix_web_saml_username_attribute,
+                       'case_sensitive': zabbix_web_saml_case_sensitive, 'sign': zabbix_web_saml_sign,
+                       'jit': zabbix_web_saml_jit, 'autologout': zabbix_web_saml_autologout,
+                       'allow_legacy_users': zabbix_web_saml_allow_legacy_users,
+                       'local_users': zabbix_web_saml_local_users}
+                      if zabbix_web_saml_enabled or zabbix_web_api_token | length > 0 else none} | to_json }}
         dest: "{{ zabbix_web_api_credentials.path }}"
         mode: "0600"
       diff: false
@@ -58,6 +84,26 @@
           run reports no change. Do not retry repeatedly, every retry adds failed logins.
           {% endif %}
       when: zabbix_web_api_result.rc | default(1) != 0
+
+    # bootstrap（Admin のパスワードでの初回）はサービス用の利用者と API トークンを作って止まる。
+    # SAML はトークンを秘匿変数へ移した次の実行で設定する（失敗で止め、設定済みと誤認させない）。
+    - name: "zabbix_web : Stop after the service user bootstrap"
+      ansible.builtin.fail:
+        msg: >-
+          The API-only service user ai-support-automation and its API token were created. The token
+          was written once to /var/lib/ai-support-zabbix/service-user-token (root, 0600). Store it as
+          the ANSIBLE# secret variable zabbix_web_api_token, delete the file and run again.
+          SAML was not configured in this run.
+      when: (zabbix_web_api_result.stdout | from_json).service_user_bootstrapped | default(false)
+
+    - name: "zabbix_web : Record the completed one-time local user procedure on the host"
+      ansible.builtin.copy:
+        content: "{{ (zabbix_web_api_result.stdout | from_json).local_users_marker }}\n"
+        dest: /var/lib/ai-support-zabbix/saml-local-users.done
+        owner: root
+        group: root
+        mode: "0600"
+      when: (zabbix_web_api_result.stdout | from_json).local_users_marker is defined
 
   always:
     - name: "zabbix_web : Remove API connection parameters"

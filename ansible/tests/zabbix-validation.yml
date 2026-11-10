@@ -75,6 +75,17 @@
         - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: {hk_audit: -1}, expect: zabbix_web_housekeeping_invalid}
         - {role: zabbix_web, admin_password: Abcdefgh1, housekeeping: [hk_audit], expect: zabbix_web_housekeeping is mapping}
         - {role: zabbix_web, housekeeping: {hk_audit: 31d}, expect: "zabbix_web_housekeeping | length == 0 or zabbix_web_admin_password | length > 0"}
+        # API トークン・SAML（ZABBIX.md「SAML（SSO）」）。いずれも先頭の Validate assert で落ちること。
+        - {role: zabbix_web, api_token: "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789", expect: zabbix_web_api_token is match}
+        - {role: zabbix_web, lockdown: true, expect: "not zabbix_web_admin_lockdown or"}
+        - {role: zabbix_web, saml: "yes", expect: zabbix_web_saml_enabled is boolean}
+        - {role: zabbix_web, saml: true, web_version: "6.0", api_token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", expect: "zabbix_web_version in ['7.0', '8.0']"}
+        - {role: zabbix_web, saml: true, expect: "zabbix_web_api_token | length > 0 or zabbix_web_admin_password | length > 0"}
+        - {role: zabbix_web, saml: true, api_token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", public_url: "http://zabbix.example.com/", expect: zabbix_web_saml_public_url}
+        - {role: zabbix_web, saml: true, api_token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", jit: {enabled: true, deprovisioned_group: Disabled, groups: [{saml_group: admin, role: Super admin role, user_groups: [Admins]}]}, expect: zabbix_web_saml_jit_check}
+        - {role: zabbix_web, local_users: {mode: delete, targets: [a@example.com], expected_sha256: ""}, expect: "zabbix_web_saml_local_users.mode | default('') == '' or zabbix_web_saml_enabled"}
+        - {role: zabbix_web, saml: true, api_token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", local_users: {mode: delete, targets: [], expected_sha256: ""}, expect: zabbix_web_saml_local_users_check}
+        - {role: zabbix_web, saml: true, api_token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", local_users: {mode: delete, targets: [a@example.com], expected_sha256: "0000000000000000000000000000000000000000000000000000000000000000"}, expect: "hash('sha256') == zabbix_web_saml_local_users.expected_sha256"}
         # TimescaleDB（設計書 §4.1）。いずれも先頭の Validate assert で落ちること。
         - {role: zabbix_server, type: mysql, port: 3306, timescaledb: true, expect: "not zabbix_server_db_timescaledb or zabbix_server_db_type == 'postgresql'"}
         - {role: zabbix_server, timescaledb: "true", expect: zabbix_server_db_timescaledb is boolean}
