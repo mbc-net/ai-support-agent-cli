@@ -48,6 +48,63 @@ zabbix_web_admin_password: ""
 zabbix_web_admin_previous_password: ""
 # Zabbix のハウスキーピング設定（housekeeping API）のうち、変更したいキーだけを書く辞書。
 # 空なら何もしない。書けるキーは 20 個（tasks/main.yml の assert と files/zabbix_api.py に
-# 同じリテラルがある）。空でなければ zabbix_web_admin_password が必須。
+# 同じリテラルがある）。空でなければ zabbix_web_admin_password か zabbix_web_api_token が必須。
 #   例: {hk_history_global: 1, hk_history: 90d, hk_trends_global: 1, hk_trends: 365d}
 zabbix_web_housekeeping: {}
+
+# ---- API トークン・SAML（ZABBIX.md「SAML（SSO）」）----------------------------------------
+# 既定はすべて無効・空で、何も設定しなければ従来どおりに動く。
+#
+# サービス用の利用者 ai-support-automation（画面のログインを無効にしたグループだけに属する、
+# パスワード無しの Super admin）の API トークン。ANSIBLE# の秘匿変数で渡すこと（64 桁の 16 進）。
+# 空でなければヘルパーはこのトークンだけで API を使い、Admin のパスワードでのログインと
+# zabbix_web_admin_password の収束をしない。zabbix_web_saml_enabled のときの初回だけは空にして
+# zabbix_web_admin_password で実行する（サービス用の利用者とトークンを作る bootstrap）。
+zabbix_web_api_token: ""
+# true なら Admin を画面のログインが無効のグループへ加え、誰にも渡さない乱数のパスワードにする
+# （Admin が既にそのグループにいれば何もしない）。zabbix_web_api_token が必須。
+zabbix_web_admin_lockdown: false
+
+# SAML 2.0 のログイン（Zabbix 7.0.32 以上・8.0.0 以上）。true のとき下の変数を検査して収束させる。
+# false に戻すと（zabbix_web_api_token があれば）saml_auth_enabled を 0 にするだけで、
+# userdirectory・利用者は消さない。
+zabbix_web_saml_enabled: false
+# 利用者が開く公開の URL（https、末尾 /、クエリ・断片なし。例 https://zabbix.example.com/）。
+# $SSO['SETTINGS']['baseurl'] になる（use_proxy_headers: false、strict: true）。
+zabbix_web_saml_public_url: ""
+# IdP の entity ID（https の URL か URN、1024 文字以下）と SSO の URL（https）。SLO は空のまま。
+zabbix_web_saml_idp_entityid: ""
+zabbix_web_saml_sso_url: ""
+zabbix_web_saml_slo_url: ""
+# SP（Zabbix）の entity ID。IdP の登録と一致させる（1〜1024 文字の印字可能 ASCII、空白なし）。
+zabbix_web_saml_sp_entityid: ""
+# 必ず API に送る（Zabbix の既定は空文字で、IdP によっては拒否される）。
+zabbix_web_saml_nameid_format: "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
+# IdP の署名の証明書（PEM、1〜2 件）。1 件目を idp.crt に、全部を x509certMulti に入れる
+# （交換の間は新旧の 2 件を置く）。
+zabbix_web_saml_idp_certificates: []
+# SP の証明書と秘密鍵（PEM）。sign の authn_requests・logout_* のどれかが true のとき必須。
+# 秘密鍵は ANSIBLE# の秘匿変数で渡すこと。空ならファイルを消す。
+zabbix_web_saml_sp_certificate: ""
+zabbix_web_saml_sp_private_key: ""
+# 書いたキーだけが既定値を上書きする。キーは messages, assertions, authn_requests,
+# logout_requests, logout_responses（boolean）。
+zabbix_web_saml_sign: {messages: true, assertions: true, authn_requests: false, logout_requests: false, logout_responses: false}
+zabbix_web_saml_username_attribute: username
+zabbix_web_saml_case_sensitive: true
+# JIT（初回のログインで利用者を作る）。キーは enabled, group_name_attribute（既定 groups）,
+# user_name_attribute（既定 name）, user_lastname_attribute（既定 ""）, deprovisioned_group
+# （JIT のとき必須。無ければ無効のグループとして作る）, groups, media（任意）。
+# groups は [{saml_group, role, user_groups: [グループ名]}]。role に Super admin の役割は使えない。
+zabbix_web_saml_jit: {enabled: false}
+# 空でなければ SAML の userdirectory の利用者（JIT の利用者）の autologout を毎回この値にする
+# （90s〜1d。例 1h）。
+zabbix_web_saml_autologout: ""
+# true の間だけ「手動の利用者に @ を含む名前がいれば SAML を有効にしない」検査を外す。
+# 検証期間だけ使い、1 回だけの削除の後に必ず false に戻す。
+zabbix_web_saml_allow_legacy_users: false
+# 既存の個人の利用者を 1 回だけ削除（delete）か乱数のパスワード（scramble）にする手続き。
+# targets は明示の利用者名の一覧、expected_sha256 はその hash（ZABBIX.md の計算方法）。
+# 完了すると DB のグローバルマクロ {$AI_SUPPORT_SAML_LOCAL_USERS_DONE} が印になる。
+# 完了後は mode を "" に戻すこと。
+zabbix_web_saml_local_users: {mode: "", targets: [], expected_sha256: "", transfer_maps_dashboards: false}

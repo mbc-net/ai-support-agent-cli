@@ -68,7 +68,52 @@
       # 空でなければ管理者パスワードを要求する。
       - zabbix_web_housekeeping is mapping
       - zabbix_web_housekeeping_invalid | int == 0
-      - zabbix_web_housekeeping | length == 0 or zabbix_web_admin_password | length > 0
+      - zabbix_web_housekeeping | length == 0 or zabbix_web_admin_password | length > 0 or zabbix_web_api_token | length > 0
+      # API トークンと SAML（ZABBIX.md「SAML（SSO）」）。既定値ではすべて真になり、従来の動作は変わらない。
+      # 同じ規則を files/zabbix_api.py にも持つ。SAML の条件は zabbix_web_saml_enabled のときだけ評価される。
+      - zabbix_web_api_token is string and zabbix_web_api_token is match('^([0-9a-f]{64})?\Z')
+      - zabbix_web_admin_lockdown is boolean
+      - not zabbix_web_admin_lockdown or zabbix_web_api_token | length > 0
+      - zabbix_web_saml_enabled is boolean
+      - not zabbix_web_saml_enabled or zabbix_web_version in ['7.0', '8.0']
+      - not zabbix_web_saml_enabled or zabbix_web_api_token | length > 0 or zabbix_web_admin_password | length > 0
+      - >-
+        not zabbix_web_saml_enabled or (zabbix_web_saml_public_url is string
+        and zabbix_web_saml_public_url is match('^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/([A-Za-z0-9._~-]+/)*\Z'))
+      - >-
+        not zabbix_web_saml_enabled or (zabbix_web_saml_idp_entityid is string
+        and zabbix_web_saml_idp_entityid | length <= 1024
+        and (zabbix_web_saml_idp_entityid is match('^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[\x21-\x7e]*)?\Z')
+        or zabbix_web_saml_idp_entityid is match('^urn:[A-Za-z0-9][A-Za-z0-9-]{0,31}:[\x21-\x7e]+\Z')))
+      - >-
+        not zabbix_web_saml_enabled or (zabbix_web_saml_sso_url is string and zabbix_web_saml_sso_url | length <= 2048
+        and zabbix_web_saml_sso_url is match('^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[\x21-\x7e]*)?\Z'))
+      - >-
+        not zabbix_web_saml_enabled or (zabbix_web_saml_slo_url is string and zabbix_web_saml_slo_url | length <= 2048
+        and zabbix_web_saml_slo_url is match('^(https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[\x21-\x7e]*)?)?\Z'))
+      - not zabbix_web_saml_enabled or (zabbix_web_saml_sp_entityid is string and zabbix_web_saml_sp_entityid is match('^[\x21-\x7e]{1,1024}\Z'))
+      - >-
+        not zabbix_web_saml_enabled or zabbix_web_saml_nameid_format in
+        ['urn:oasis:names:tc:SAML:2.0:nameid-format:persistent', 'urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified']
+      - >-
+        not zabbix_web_saml_enabled or (zabbix_web_saml_username_attribute is string
+        and zabbix_web_saml_username_attribute is match('^[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z'))
+      - not zabbix_web_saml_enabled or (zabbix_web_saml_case_sensitive is boolean and zabbix_web_saml_allow_legacy_users is boolean)
+      - not zabbix_web_saml_enabled or zabbix_web_saml_sign_check | trim == 'ok'
+      - not zabbix_web_saml_enabled or zabbix_web_saml_certificates_check | trim == 'ok'
+      - >-
+        not zabbix_web_saml_enabled or (zabbix_web_saml_autologout is string
+        and (zabbix_web_saml_autologout == '' or (zabbix_web_saml_autologout is match('^[0-9]{1,5}[smhd]?\Z')
+        and zabbix_web_saml_autologout_seconds | int >= 90 and zabbix_web_saml_autologout_seconds | int <= 86400)))
+      - not zabbix_web_saml_enabled or zabbix_web_saml_jit_check | trim == 'ok'
+      - zabbix_web_saml_local_users is mapping
+      - zabbix_web_saml_local_users.mode | default('') == '' or zabbix_web_saml_enabled
+      - not zabbix_web_saml_enabled or zabbix_web_saml_local_users_check | trim == 'ok'
+      # 計算は ZABBIX.md の手順と同じ（バイト順に並べて改行で結合、末尾の改行なし）。YAML の二重引用符の
+      # \n は改行文字になる。対象は印字可能 ASCII に限っているので、大小文字を区別する並びがバイト順と一致する。
+      - "not zabbix_web_saml_enabled or zabbix_web_saml_local_users.mode | default('') == ''
+        or zabbix_web_saml_local_users.targets | sort(case_sensitive=true) | join('\n') | hash('sha256')
+        == zabbix_web_saml_local_users.expected_sha256"
     fail_msg: >-
       Zabbix Web requires Ubuntu 22.04/24.04 with LTS 6.0/7.0, or Ubuntu 26.04
       with LTS 7.0/8.0 and ansible-core 2.20 or newer; package install only.
@@ -95,7 +140,26 @@
       seconds or a number with an s/m/h/d/w suffix (no macros, y/M units or spaces):
       retention periods 1d-25y, hk_history 0 or 1h-25y, hk_trends 0 or 1d-25y,
       compress_older 7d-25y. A non-empty zabbix_web_housekeeping requires
-      zabbix_web_admin_password.
+      zabbix_web_admin_password or zabbix_web_api_token.
+      zabbix_web_api_token must be empty or 64 lowercase hex characters; zabbix_web_admin_lockdown
+      is a boolean that requires zabbix_web_api_token. zabbix_web_saml_enabled is a boolean; SAML
+      needs zabbix_web_version 7.0 or 8.0, zabbix_web_api_token (or zabbix_web_admin_password for
+      the one-time service user bootstrap), an https zabbix_web_saml_public_url ending with a slash
+      and without query or fragment, an https URL or URN zabbix_web_saml_idp_entityid (max 1024),
+      an https zabbix_web_saml_sso_url, an empty or https zabbix_web_saml_slo_url, a printable ASCII
+      zabbix_web_saml_sp_entityid without spaces (1-1024), one of the persistent (SAML 2.0) or
+      unspecified (SAML 1.1) NameID format URNs, a valid zabbix_web_saml_username_attribute, boolean
+      zabbix_web_saml_case_sensitive and zabbix_web_saml_allow_legacy_users, a mapping
+      zabbix_web_saml_sign with only messages, assertions, authn_requests, logout_requests and
+      logout_responses (booleans), one or two PEM certificates in zabbix_web_saml_idp_certificates,
+      both or neither of zabbix_web_saml_sp_certificate and zabbix_web_saml_sp_private_key (PEM,
+      unencrypted key; required when authn_requests or a logout signature is on), an empty or
+      90s-1d zabbix_web_saml_autologout, and a valid zabbix_web_saml_jit (with JIT: attributes,
+      a deprovisioned_group and at least one groups entry of saml_group without "*", a role that
+      is not Super admin role and user_groups). zabbix_web_saml_local_users is a mapping whose mode
+      is empty, delete or scramble (only with SAML); a mode needs 1-200 unique targets (printable
+      ASCII without spaces, max 100, not Admin or the service user) and expected_sha256 equal to
+      the sha256 of the targets sorted by bytes and joined with newlines (see ZABBIX.md).
   # assert の that は式しか書けず、要素ごとの算術（ホストビットの判定）はループ構文が要るため
   # task vars で計算する。that の評価は先頭から順で最初の偽で止まり、task vars は参照時に
   # 評価されるので、ここへ届くのはリスト・文字列・アドレス形式の検証を通った値だけである。
@@ -148,6 +212,135 @@
       {%-   endif -%}
       {%- endfor -%}
       {{ out | length }}
+    # SAML の入れ子の値の検査（files/zabbix_api.py と同じ規則）。zabbix_web_saml_enabled のときだけ
+    # that から参照される。正しければ ok、そうでなければ不正な項目の名前（値は返さない）を返す
+    # （空文字の結果は ansible-core 2.19 以降で None になり得るため、空を「正しい」に使わない）。
+    zabbix_web_saml_sign_check: >-
+      {%- set out = [] -%}
+      {%- set sign = zabbix_web_saml_sign -%}
+      {%- if sign is not mapping -%}
+      {%-   set _ = out.append('sign') -%}
+      {%- elif sign | list | difference(['messages', 'assertions', 'authn_requests', 'logout_requests', 'logout_responses']) | length > 0 -%}
+      {%-   set _ = out.append('sign keys') -%}
+      {%- elif sign.values() | reject('boolean') | list | length > 0 -%}
+      {%-   set _ = out.append('sign values') -%}
+      {%- endif -%}
+      {{ out | join(',') or 'ok' }}
+    zabbix_web_saml_certificates_check: >-
+      {%- set out = [] -%}
+      {%- set certs = zabbix_web_saml_idp_certificates -%}
+      {%- set cert_pem = '^-----BEGIN CERTIFICATE-----\n([A-Za-z0-9+/=]{1,76}\n)+-----END CERTIFICATE-----\n?\Z' -%}
+      {%- set key_pem = '^-----BEGIN (RSA |EC )?PRIVATE KEY-----\n([A-Za-z0-9+/=]{1,76}\n)+-----END (RSA |EC )?PRIVATE KEY-----\n?\Z' -%}
+      {%- if certs is string or certs is mapping or certs is not sequence or certs | length < 1 or certs | length > 2 -%}
+      {%-   set _ = out.append('idp_certificates') -%}
+      {%- elif certs | reject('string') | list | length > 0 or certs | reject('match', cert_pem) | list | length > 0 -%}
+      {%-   set _ = out.append('idp_certificates') -%}
+      {%- endif -%}
+      {%- set sp_cert = zabbix_web_saml_sp_certificate -%}
+      {%- set sp_key = zabbix_web_saml_sp_private_key -%}
+      {%- set sp_needed = zabbix_web_saml_sign.authn_requests | default(false) or zabbix_web_saml_sign.logout_requests | default(false)
+                          or zabbix_web_saml_sign.logout_responses | default(false) -%}
+      {%- if sp_cert is not string or sp_key is not string -%}
+      {%-   set _ = out.append('sp') -%}
+      {%- elif (sp_cert == '') != (sp_key == '') or (sp_cert == '' and sp_needed) -%}
+      {%-   set _ = out.append('sp') -%}
+      {%- elif sp_cert != '' and not (sp_cert is match(cert_pem) and sp_key is match(key_pem)) -%}
+      {%-   set _ = out.append('sp') -%}
+      {%- endif -%}
+      {{ out | join(',') or 'ok' }}
+    zabbix_web_saml_autologout_seconds: >-
+      {{ (zabbix_web_saml_autologout[:-1] | int) * {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[zabbix_web_saml_autologout[-1]]
+         if zabbix_web_saml_autologout[-1] in ['s', 'm', 'h', 'd'] else zabbix_web_saml_autologout | int }}
+    zabbix_web_saml_jit_check: >-
+      {%- set out = [] -%}
+      {%- set jit = zabbix_web_saml_jit -%}
+      {%- set attribute = '^[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z' -%}
+      {%- set optional_attribute = '^([A-Za-z][A-Za-z0-9_.:-]{0,127})?\Z' -%}
+      {%- set object_name = '^[\x21-\x7e]([\x20-\x7e]{0,62}[\x21-\x7e])?\Z' -%}
+      {%- set saml_group = '^[\x21-\x29\x2b-\x7e]([\x20-\x29\x2b-\x7e]{0,253}[\x21-\x29\x2b-\x7e])?\Z' -%}
+      {%- if jit is not mapping or jit | list | difference(['enabled', 'group_name_attribute', 'user_name_attribute',
+            'user_lastname_attribute', 'deprovisioned_group', 'groups', 'media']) | length > 0 -%}
+      {%-   set _ = out.append('jit') -%}
+      {%- elif jit.enabled | default(false) is not boolean -%}
+      {%-   set _ = out.append('jit.enabled') -%}
+      {%- elif jit.enabled | default(false) -%}
+      {%-   set group_attribute = jit.group_name_attribute | default('groups') -%}
+      {%-   set name_attribute = jit.user_name_attribute | default('name') -%}
+      {%-   set lastname_attribute = jit.user_lastname_attribute | default('') -%}
+      {%-   set deprovisioned = jit.deprovisioned_group | default('') -%}
+      {%-   if group_attribute is not string or group_attribute is not match(attribute) -%}
+      {%-     set _ = out.append('jit.group_name_attribute') -%}
+      {%-   endif -%}
+      {%-   if name_attribute is not string or name_attribute is not match(optional_attribute) -%}
+      {%-     set _ = out.append('jit.user_name_attribute') -%}
+      {%-   endif -%}
+      {%-   if lastname_attribute is not string or lastname_attribute is not match(optional_attribute) -%}
+      {%-     set _ = out.append('jit.user_lastname_attribute') -%}
+      {%-   endif -%}
+      {%-   if deprovisioned is not string or deprovisioned is not match(object_name)
+              or deprovisioned == 'AI support automation (API only)' -%}
+      {%-     set _ = out.append('jit.deprovisioned_group') -%}
+      {%-   endif -%}
+      {%-   set groups = jit.groups | default([]) -%}
+      {%-   if groups is string or groups is mapping or groups is not sequence or groups | length == 0 -%}
+      {%-     set _ = out.append('jit.groups') -%}
+      {%-   else -%}
+      {%-     for entry in groups -%}
+      {%-       if entry is not mapping or entry | list | sort != ['role', 'saml_group', 'user_groups'] -%}
+      {%-         set _ = out.append('jit.groups') -%}
+      {%-       elif entry.saml_group is not string or entry.saml_group is not match(saml_group)
+                  or entry.role is not string or entry.role is not match(object_name) or entry.role == 'Super admin role' -%}
+      {%-         set _ = out.append('jit.groups') -%}
+      {%-       elif entry.user_groups is string or entry.user_groups is mapping or entry.user_groups is not sequence
+                  or entry.user_groups | length == 0 or entry.user_groups | reject('string') | list | length > 0
+                  or entry.user_groups | reject('match', object_name) | list | length > 0
+                  or entry.user_groups | unique(case_sensitive=true) | list | length != entry.user_groups | length
+                  or deprovisioned in entry.user_groups or 'AI support automation (API only)' in entry.user_groups -%}
+      {%-         set _ = out.append('jit.groups') -%}
+      {%-       endif -%}
+      {%-     endfor -%}
+      {%-     if out | length == 0 and groups | map(attribute='saml_group') | unique(case_sensitive=true) | list | length != groups | length -%}
+      {%-       set _ = out.append('jit.groups') -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%-   set media = jit.media | default([]) -%}
+      {%-   if media is string or media is mapping or media is not sequence -%}
+      {%-     set _ = out.append('jit.media') -%}
+      {%-   else -%}
+      {%-     for entry in media -%}
+      {%-       if entry is not mapping or entry | list | sort != ['attribute', 'mediatype', 'name']
+                  or entry.name is not string or entry.name is not match(object_name)
+                  or entry.mediatype is not string or entry.mediatype is not match(object_name)
+                  or entry.attribute is not string or entry.attribute is not match(attribute) -%}
+      {%-         set _ = out.append('jit.media') -%}
+      {%-       endif -%}
+      {%-     endfor -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ out | unique | join(',') or 'ok' }}
+    zabbix_web_saml_local_users_check: >-
+      {%- set out = [] -%}
+      {%- set local = zabbix_web_saml_local_users -%}
+      {%- set mode = local.mode | default('') -%}
+      {%- set targets = local.targets | default([]) -%}
+      {%- if local | list | difference(['mode', 'targets', 'expected_sha256', 'transfer_maps_dashboards']) | length > 0 -%}
+      {%-   set _ = out.append('local_users') -%}
+      {%- elif mode is not string or mode not in ['', 'delete', 'scramble'] -%}
+      {%-   set _ = out.append('local_users.mode') -%}
+      {%- elif local.transfer_maps_dashboards | default(false) is not boolean -%}
+      {%-   set _ = out.append('local_users.transfer_maps_dashboards') -%}
+      {%- elif mode != '' -%}
+      {%-   if targets is string or targets is mapping or targets is not sequence or targets | length < 1 or targets | length > 200
+              or targets | reject('string') | list | length > 0 or targets | reject('match', '^[\x21-\x7e]{1,100}\Z') | list | length > 0
+              or targets | map('lower') | select('in', ['admin', 'ai-support-automation']) | list | length > 0
+              or targets | unique(case_sensitive=true) | list | length != targets | length -%}
+      {%-     set _ = out.append('local_users.targets') -%}
+      {%-   endif -%}
+      {%-   if local.expected_sha256 | default('') is not string or local.expected_sha256 | default('') is not match('^[0-9a-f]{64}\Z') -%}
+      {%-     set _ = out.append('local_users.expected_sha256') -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ out | join(',') or 'ok' }}
 
 - name: "zabbix_web : Read existing frontend and server package versions"
   ansible.builtin.command:
@@ -256,6 +449,30 @@
       No database initialization or frontend configuration has been performed.
   when: ansible_distribution_version == '26.04'
 
+# SAML（ZABBIX.md「SAML（SSO）」）は Ubuntu の版に関わらず検証済みのパッチ以上に限る
+# （CVE-2024-36466 は SSO を使う 7.0.0 が対象。下限はロールの検証済みの 7.0.32・8.0.0）。
+# ヘルパーも apiinfo.version の完全な版で同じ下限を確かめる。
+- name: "zabbix_web : Read the installed frontend package for the SAML version floor"
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, '-f=${Version}\n', zabbix-frontend-php]
+  register: zabbix_web_saml_installed_version
+  changed_when: false
+  when: zabbix_web_saml_enabled
+
+- name: "zabbix_web : Require the SAML version floor before configuration"
+  ansible.builtin.assert:
+    that:
+      - zabbix_web_saml_installed_version.stdout_lines | length == 1
+      - >-
+        zabbix_web_saml_installed_version.stdout_lines
+        | map('regex_replace', '^[0-9]+:', '') | map('regex_replace', '-.*$', '')
+        | select('version', zabbix_web_min_patch, '<') | list | length == 0
+    fail_msg: >-
+      SAML requires zabbix-frontend-php {{ zabbix_web_min_patch }} or newer in the {{ zabbix_web_version }}
+      series (CVE-2024-36466). Upgrade through the backed-up update procedure first. No frontend
+      configuration has been performed.
+  when: zabbix_web_saml_enabled
+
 - name: "zabbix_web : Disable the packaged nginx virtual host"
   ansible.builtin.file:
     path: /etc/nginx/conf.d/zabbix.conf
@@ -284,6 +501,55 @@
       - "exit(in_array($argv[1], timezone_identifiers_list(DateTimeZone::ALL_WITH_BC), true) ? 0 : 1);"
       - "{{ zabbix_web_php_timezone }}"
   changed_when: false
+
+# SAML の証明書はファイルに置く（7.0 は DB に置けず、8.0 も $SSO['CERT_STORAGE'] = 'file' で揃える）。
+# zabbix.conf.php が参照するまでは使われないので、ロールバック block の前に置く。
+- name: "zabbix_web : Converge SAML certificate files"
+  when: zabbix_web_saml_enabled
+  block:
+    - name: "zabbix_web : Create the SAML certificate directory"
+      ansible.builtin.file:
+        path: /etc/zabbix/web/saml
+        state: directory
+        owner: root
+        group: www-data
+        mode: "0750"
+
+    - name: "zabbix_web : Write the IdP certificate"
+      ansible.builtin.copy:
+        content: "{{ zabbix_web_saml_idp_certificates[0] | trim }}\n"
+        dest: /etc/zabbix/web/saml/idp.crt
+        owner: root
+        group: www-data
+        mode: "0640"
+
+    - name: "zabbix_web : Write the SP certificate"
+      ansible.builtin.copy:
+        content: "{{ zabbix_web_saml_sp_certificate | trim }}\n"
+        dest: /etc/zabbix/web/saml/sp.crt
+        owner: root
+        group: www-data
+        mode: "0640"
+      when: zabbix_web_saml_sp_certificate | length > 0
+
+    # copy の content はモジュールの引数仕様で伏字化されるので no_log は付けない（付けると失敗理由
+    # だけが消える）。ループにすると item として値が出力されるので 1 件ずつ書く。diff も止める。
+    - name: "zabbix_web : Write the SP private key"
+      ansible.builtin.copy:
+        content: "{{ zabbix_web_saml_sp_private_key | trim }}\n"
+        dest: /etc/zabbix/web/saml/sp.key
+        owner: root
+        group: www-data
+        mode: "0640"
+      diff: false
+      when: zabbix_web_saml_sp_certificate | length > 0
+
+    - name: "zabbix_web : Remove unused SP certificate and private key"
+      ansible.builtin.file:
+        path: "/etc/zabbix/web/saml/{{ item }}"
+        state: absent
+      loop: [sp.crt, sp.key]
+      when: zabbix_web_saml_sp_certificate | length == 0
 
 - name: "zabbix_web : Prepare frontend rollback"
   ansible.builtin.tempfile:
@@ -363,6 +629,26 @@
           $ZBX_SERVER_PORT = '{{ zabbix_web_zbx_server_port }}';
           $ZBX_SERVER_NAME = '{{ zabbix_web_server_name }}';
           $IMAGE_FORMAT_DEFAULT = IMAGE_FORMAT_PNG;
+          {% if zabbix_web_saml_enabled %}
+          // SAML (ZABBIX.md). Certificates are files on 7.0 and 8.0 (8.0 would default to the database);
+          // baseurl is fixed and proxy headers are not trusted. Certificate bodies are validated base64.
+          $SSO['CERT_STORAGE'] = 'file';
+          $SSO['IDP_CERT'] = '/etc/zabbix/web/saml/idp.crt';
+          {% if zabbix_web_saml_sp_certificate | length > 0 %}
+          $SSO['SP_KEY'] = '/etc/zabbix/web/saml/sp.key';
+          $SSO['SP_CERT'] = '/etc/zabbix/web/saml/sp.crt';
+          {% endif %}
+          $SSO['SETTINGS'] = [
+              'baseurl' => base64_decode('{{ zabbix_web_saml_public_url | b64encode }}'),
+              'use_proxy_headers' => false,
+              'strict' => true,
+              'idp' => ['x509certMulti' => ['signing' => [
+          {% for cert in zabbix_web_saml_idp_certificates %}
+                  '{{ cert | regex_replace('-----(BEGIN|END) CERTIFICATE-----', '') | regex_replace('[^A-Za-z0-9+/=]', '') }}',
+          {% endfor %}
+              ]]],
+          ];
+          {% endif %}
         dest: /etc/zabbix/web/zabbix.conf.php
         owner: root
         group: www-data
@@ -531,13 +817,15 @@
 #   * 管理者パスワードの変更（設計書 §4.2）は、この ufw より前に置く（下の api.yml）。
 #     初期パスワードのまま外部へ開けない順序にするため、ufw は main.yml の末尾に置く。
 #
-# 管理者パスワード・ハウスキーピング（設計書 §4.2）。ロールバック block の外・後に置く:
+# 管理者パスワード・ハウスキーピング（設計書 §4.2）と、API トークン・SAML（ZABBIX.md「SAML（SSO）」。
+# SAML は zabbix_web_api_token か zabbix_web_admin_password を必須にしているので、この条件で include される）。
+# ロールバック block の外・後に置く:
 #   * 失敗の原因は設定ファイルではなく、フロントエンド設定のロールバックで直る種類の失敗ではない
 #   * user.update は単一の API 呼び出しで部分的な状態が残らず、戻す先は初期パスワードになる
 # ufw より前に置くので、パスワード変更に失敗した実行では 8080 を新たに開けない。
 - name: "zabbix_web : Converge the admin password and housekeeping"
   ansible.builtin.include_tasks: api.yml
-  when: zabbix_web_admin_password | length > 0 or zabbix_web_housekeeping | length > 0
+  when: zabbix_web_admin_password | length > 0 or zabbix_web_housekeeping | length > 0 or zabbix_web_api_token | length > 0
 
 - name: "zabbix_web : Warn that the initial admin password may be exposed"
   ansible.builtin.debug:
