@@ -115,9 +115,19 @@
       - "not zabbix_web_saml_enabled or zabbix_web_saml_local_users.mode | default('') == ''
         or zabbix_web_saml_local_users.targets | sort(case_sensitive=true) | join('\n') | hash('sha256')
         == zabbix_web_saml_local_users.expected_sha256"
+      - >-
+        zabbix_web_locales is sequence and zabbix_web_locales is not string
+        and zabbix_web_locales is not mapping
+      - zabbix_web_locales | reject('string') | list | length == 0
+      - zabbix_web_locales | reject('match', '^[a-z]{2,3}_[A-Z]{2}\.UTF-8\Z') | list | length == 0
+      - zabbix_web_locales | length <= 16
+      - zabbix_web_locales | unique(case_sensitive=true) | list | length == zabbix_web_locales | length
+      - zabbix_web_locales | length == 0 or ansible_distribution_version == '26.04'
     fail_msg: >-
       Zabbix Web requires Ubuntu 22.04/24.04 with LTS 6.0/7.0, or Ubuntu 26.04
       with LTS 7.0/8.0 and ansible-core 2.20 or newer; package install only.
+      zabbix_web_locales must be a list of at most 16 unique locale strings such as
+      ja_JP.UTF-8 (not ja_JP.utf8); non-empty lists require Ubuntu 26.04.
       nginx/apache, PostgreSQL/MySQL, a server name, a single-line printable ASCII
       DB password and valid connection ports. Configure the DB with zabbix_server
       first. Apache uses a dedicated Listen port; choose a free port other than 80/443.
@@ -379,6 +389,42 @@
       series for this setup. Upgrade existing older packages through the backed-up update procedure.
   when: ansible_distribution_version == '26.04'
 
+# Installing locales here could rebuild the archive through its postinst.
+# Check all prerequisites before changing repositories or packages.
+- name: "zabbix_web : Check locale prerequisites"
+  when: zabbix_web_locales | length > 0
+  block:
+    - name: "zabbix_web : Read the locales package status"
+      ansible.builtin.command:
+        argv: [dpkg-query, -W, '-f=${Status}', locales]
+      register: zabbix_web_locale_package
+      changed_when: false
+      failed_when: zabbix_web_locale_package.rc not in [0, 1]
+
+    - name: "zabbix_web : Require locales to be installed beforehand"
+      ansible.builtin.assert:
+        that:
+          - zabbix_web_locale_package.rc == 0
+          - zabbix_web_locale_package.stdout == 'install ok installed'
+        fail_msg: >-
+          Install the locales package beforehand and verify existing locales are preserved.
+          This role does not install locales because its postinst can rebuild the locale archive.
+
+    - name: "zabbix_web : Require supported locale names"
+      ansible.builtin.command:
+        argv: [grep, -qxF, "{{ item }} UTF-8", /usr/share/i18n/SUPPORTED]
+      loop: "{{ zabbix_web_locales }}"
+      register: zabbix_web_locale_supported
+      changed_when: false
+      failed_when: zabbix_web_locale_supported.rc not in [0, 1]
+
+    - name: "zabbix_web : Assert all locale names are supported"
+      ansible.builtin.assert:
+        that:
+          - zabbix_web_locale_supported.results | rejectattr('rc', 'equalto', 0) | list | length == 0
+        fail_msg: >-
+          Locales not found in /usr/share/i18n/SUPPORTED: {{ zabbix_web_locale_supported.results | selectattr('rc', 'equalto', 1) | map(attribute='item') | join(', ') }}
+
 - name: "zabbix_web : Install the official repository package"
   ansible.builtin.apt:
     deb: "{{ zabbix_web_release_deb }}"
@@ -476,6 +522,75 @@
       series (CVE-2024-36466). Upgrade through the backed-up update procedure first. No frontend
       configuration has been performed.
   when: zabbix_web_saml_enabled
+
+# Ubuntu 26.04 locale-gen with arguments adds only the requested locales.
+# Never call it without arguments: existing DB collations must remain available.
+- name: "zabbix_web : Ensure requested frontend locales are available"
+  when: zabbix_web_locales | length > 0
+  block:
+    - name: "zabbix_web : Read locales before generation"
+      ansible.builtin.command:
+        argv: [locale, -a]
+      register: zabbix_web_locale_before
+      changed_when: false
+
+    - name: "zabbix_web : Check active locale registrations"
+      ansible.builtin.command:
+        argv: [grep, -qE, "^[[:space:]]*{{ item | replace('.', '[.]') }}[[:space:]]+UTF-8[[:space:]]*$", /etc/locale.gen]
+      loop: "{{ zabbix_web_locales }}"
+      register: zabbix_web_locale_listed
+      changed_when: false
+      failed_when: zabbix_web_locale_listed.rc not in [0, 1]
+
+    - name: "zabbix_web : Generate missing locales with explicit arguments"
+      ansible.builtin.command:
+        argv: [locale-gen, "{{ item }}"]
+      vars:
+        zabbix_web_locale_missing: >-
+          {{ (zabbix_web_locales | map('replace', '.UTF-8', '.utf8')
+              | difference(zabbix_web_locale_before.stdout_lines)
+              | map('replace', '.utf8', '.UTF-8') | list)
+             | union(zabbix_web_locale_listed.results | selectattr('rc', 'equalto', 1)
+                     | map(attribute='item') | list) }}
+      loop: "{{ zabbix_web_locale_missing }}"
+      register: zabbix_web_locale_generated
+      changed_when: true
+
+    - name: "zabbix_web : Read locales after generation"
+      ansible.builtin.command:
+        argv: [locale, -a]
+      register: zabbix_web_locale_after
+      changed_when: false
+
+    - name: "zabbix_web : Verify requested and existing locales are preserved"
+      ansible.builtin.assert:
+        that:
+          - >-
+            zabbix_web_locales | map('replace', '.UTF-8', '.utf8')
+            | difference(zabbix_web_locale_after.stdout_lines) | length == 0
+          - zabbix_web_locale_before.stdout_lines | difference(zabbix_web_locale_after.stdout_lines) | length == 0
+        fail_msg: Requested locales must exist and all previously available locales must be preserved.
+
+    - name: "zabbix_web : Verify persistent locale registrations"
+      ansible.builtin.command:
+        argv: [grep, -qE, "^[[:space:]]*{{ item | replace('.', '[.]') }}[[:space:]]+UTF-8[[:space:]]*$", /etc/locale.gen]
+      loop: "{{ zabbix_web_locales }}"
+      register: zabbix_web_locale_registered
+      changed_when: false
+      failed_when: zabbix_web_locale_registered.rc != 0
+
+    # Read after generation so first runs and interrupted runs both activate the archive.
+    - name: "zabbix_web : Read PHP-FPM start time"
+      ansible.builtin.command:
+        argv: [systemctl, show, "php{{ zabbix_web_php_version }}-fpm", -P, ExecMainStartTimestamp, --timestamp=unix]
+      register: zabbix_web_locale_fpm_started
+      changed_when: false
+
+    - name: "zabbix_web : Read locale archive modification time"
+      ansible.builtin.command:
+        argv: [stat, -c, '%Y', /usr/lib/locale/locale-archive]
+      register: zabbix_web_locale_archive_mtime
+      changed_when: false
 
 - name: "zabbix_web : Disable the packaged nginx virtual host"
   ansible.builtin.file:
@@ -691,7 +806,12 @@
       ansible.builtin.service:
         name: "php{{ zabbix_web_php_version }}-fpm"
         state: restarted
-      when: zabbix_web_pool.changed or zabbix_web_frontend.changed
+      when: >-
+        zabbix_web_pool.changed or zabbix_web_frontend.changed or
+        (zabbix_web_locales | length > 0 and
+         (zabbix_web_locale_fpm_started.stdout | trim | length == 0 or
+          (zabbix_web_locale_fpm_started.stdout | trim | regex_replace('^@', '') | int)
+          <= (zabbix_web_locale_archive_mtime.stdout | int)))
 
     - name: "zabbix_web : Enable and start the selected web server"
       ansible.builtin.service:

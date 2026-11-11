@@ -27,6 +27,121 @@ describe('Zabbix server and web roles', () => {
     expect(JSON.stringify(tasks[0])).toContain("['local', 'external']")
   })
 
+  describe('Web display locales', () => {
+    type Task = Record<string, any>
+    const opts = { mode: 'resident', targetOs: 'linux' } as const
+    const flatten = (tasks: Task[]): Task[] =>
+      tasks.flatMap((task) => [task, ...['block', 'rescue', 'always'].flatMap((key) => flatten(task[key] ?? []))])
+    const loadTasks = (): Task[] => load(readFileSync(path.join(roleDir, 'zabbix_web/tasks/main.yml'), 'utf8')) as Task[]
+    const internalNames = ['package', 'supported', 'before', 'listed', 'missing', 'generated', 'after', 'registered', 'fpm_started', 'archive_mtime']
+      .map((suffix) => `zabbix_web_locale_${suffix}`)
+
+    it('accepts a public locale list and defaults to no locale changes', () => {
+      expect(validateAnsibleTasks([{
+        'ansible.builtin.include_role': { name: 'zabbix_web' },
+        vars: { zabbix_web_locales: ['ja_JP.UTF-8', 'en_US.UTF-8'] },
+      }], opts).ok).toBe(true)
+      const defaults = load(readFileSync(path.join(roleDir, 'zabbix_web/defaults/main.yml'), 'utf8')) as Task
+      expect(defaults.zabbix_web_locales).toEqual([])
+    })
+
+    it.each(internalNames)('%s cannot be overridden, read or written by recipes', (name) => {
+      expect(validateAnsibleTasks([{ 'ansible.builtin.include_role': { name: 'zabbix_web' }, vars: { [name]: [] } }], opts).ok).toBe(false)
+      expect(validateAnsibleTasks([{ 'ansible.builtin.debug': { msg: `{{ ${name} }}` } }], opts).ok).toBe(false)
+      expect(validateAnsibleTasks([{ 'ansible.builtin.set_fact': { [name]: 'fake' } }], opts).ok).toBe(false)
+    })
+
+    it('validates locales in the first Validate task before installing the frontend, with the OS gate last', () => {
+      const tasks = loadTasks()
+      expect(tasks[0].name).toBe('zabbix_web : Validate branch and required variables')
+      expect(tasks[0].when).toBeUndefined()
+      expect(tasks.findIndex((task) => task.name.includes('Install the frontend'))).toBeGreaterThan(0)
+      const that = tasks[0]['ansible.builtin.assert'].that as string[]
+      const localeChecks = that.filter((condition) => condition.includes('zabbix_web_locales'))
+      expect(localeChecks).toHaveLength(6)
+      expect(localeChecks[0]).toContain('zabbix_web_locales is sequence')
+      expect(localeChecks[0]).toContain('zabbix_web_locales is not string')
+      expect(localeChecks[0]).toContain('zabbix_web_locales is not mapping')
+      expect(localeChecks[1]).toContain("reject('string')")
+      expect(localeChecks[2]).toContain("reject('match', '^[a-z]{2,3}_[A-Z]{2}\\.UTF-8\\Z')")
+      expect(localeChecks[3]).toContain('length <= 16')
+      expect(localeChecks[4]).toContain('unique')
+      expect(that[that.length - 1]).toBe("zabbix_web_locales | length == 0 or ansible_distribution_version == '26.04'")
+    })
+
+    it('checks the preinstalled locales package and SUPPORTED before repository installation without apt installing locales', () => {
+      const tasks = flatten(loadTasks())
+      const repoIndex = tasks.findIndex((task) => task.name.includes('Install the official repository'))
+      const packageIndex = tasks.findIndex((task) => task.register === 'zabbix_web_locale_package')
+      const supportedIndex = tasks.findIndex((task) => task.register === 'zabbix_web_locale_supported')
+      expect(packageIndex).toBeGreaterThan(0)
+      expect(supportedIndex).toBeGreaterThan(packageIndex)
+      expect(supportedIndex).toBeLessThan(repoIndex)
+      expect(tasks[packageIndex]['ansible.builtin.command'].argv).toEqual(['dpkg-query', '-W', '-f=${Status}', 'locales'])
+      expect(tasks.slice(packageIndex + 1, supportedIndex).some((task) => JSON.stringify(task['ansible.builtin.assert'] ?? '').includes('install ok installed'))).toBe(true)
+      expect(tasks[supportedIndex]['ansible.builtin.command'].argv).toEqual(['grep', '-qxF', '{{ item }} UTF-8', '/usr/share/i18n/SUPPORTED'])
+      for (const task of tasks.filter((task) => task['ansible.builtin.apt'])) {
+        expect(JSON.stringify(task['ansible.builtin.apt'])).not.toMatch(/\blocales\b/)
+      }
+    })
+
+    it('allows grep rc 0/1 and immediately asserts all locales are supported with missing names in the diagnostic', () => {
+      const prerequisites = loadTasks().find((task) => task.name === 'zabbix_web : Check locale prerequisites')
+      expect(prerequisites.when).toBe('zabbix_web_locales | length > 0')
+      const tasks = prerequisites.block as Task[]
+      const supportedIndex = tasks.findIndex((task) => task.register === 'zabbix_web_locale_supported')
+      expect(supportedIndex).toBeGreaterThanOrEqual(0)
+      const grep = tasks[supportedIndex]
+      expect(grep.loop).toBe('{{ zabbix_web_locales }}')
+      expect(grep.changed_when).toBe(false)
+      expect(grep.failed_when).toBe('zabbix_web_locale_supported.rc not in [0, 1]')
+      expect(grep.ignore_errors).toBeUndefined()
+      const check = tasks[supportedIndex + 1]
+      expect(check.when).toBeUndefined()
+      expect(check.register).toBeUndefined()
+      expect(check['ansible.builtin.assert'].that).toEqual([
+        "zabbix_web_locale_supported.results | rejectattr('rc', 'equalto', 0) | list | length == 0",
+      ])
+      expect(check['ansible.builtin.assert'].fail_msg).toBe(
+        "Locales not found in /usr/share/i18n/SUPPORTED: {{ zabbix_web_locale_supported.results | selectattr('rc', 'equalto', 1) | map(attribute='item') | join(', ') }}",
+      )
+    })
+
+    it('only generates locales with an explicit argument and verifies registration with the literal-dot grep expression', () => {
+      const tasks = flatten(loadTasks())
+      const generators = tasks.filter((task) => JSON.stringify(task['ansible.builtin.command'] ?? '').includes('locale-gen'))
+      expect(generators).toHaveLength(1)
+      expect(generators[0]['ansible.builtin.command'].argv).toEqual(['locale-gen', '{{ item }}'])
+      expect(generators[0].loop).toContain('zabbix_web_locale_missing')
+      const pattern = "^[[:space:]]*{{ item | replace('.', '[.]') }}[[:space:]]+UTF-8[[:space:]]*$"
+      for (const name of ['listed', 'registered']) {
+        const task = tasks.find((candidate) => candidate.register === `zabbix_web_locale_${name}`)
+        expect(task?.['ansible.builtin.command'].argv).toEqual(['grep', '-qE', pattern, '/etc/locale.gen'])
+      }
+    })
+
+    it('keeps the PHP-FPM locale restart inside rollback with skipped-result protection and unix timestamp normalization', () => {
+      const tasks = loadTasks()
+      const transaction = tasks.find((task) => task.rescue && flatten(task.block ?? []).some((entry) => entry.name.includes('Apply changed PHP settings')))
+      expect(transaction).toBeDefined()
+      const restart = flatten(transaction!.block).find((task) => task.name.includes('Apply changed PHP settings'))!
+      expect(restart.when).toContain('zabbix_web_locales | length > 0 and')
+      expect(restart.when).toContain("regex_replace('^@', '')")
+      expect(restart.when).toContain('<=')
+      expect(restart.when).toContain('zabbix_web_locale_archive_mtime.stdout')
+      const allTasks = flatten(tasks)
+      const generatedIndex = allTasks.findIndex((task) => task.register === 'zabbix_web_locale_generated')
+      const registeredIndex = allTasks.findIndex((task) => task.register === 'zabbix_web_locale_registered')
+      const transactionIndex = allTasks.indexOf(transaction!)
+      for (const suffix of ['fpm_started', 'archive_mtime']) {
+        const index = allTasks.findIndex((task) => task.register === `zabbix_web_locale_${suffix}`)
+        expect(index).toBeGreaterThan(generatedIndex)
+        expect(index).toBeGreaterThan(registeredIndex)
+        expect(index).toBeLessThan(transactionIndex)
+      }
+    })
+  })
+
   describe('ufw 許可元（設計書 §3.6.1）', () => {
     type Task = Record<string, any>
     const opts = { mode: 'resident', targetOs: 'linux' } as const
