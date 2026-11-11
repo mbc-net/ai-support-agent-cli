@@ -35,6 +35,7 @@ import os
 import re
 import secrets
 import sys
+import unicodedata
 
 # Literals on purpose: recipe variables must not be able to redirect these.
 USERNAME = 'Admin'
@@ -115,11 +116,25 @@ JIT_DEFAULTS = {'enabled': False, 'group_name_attribute': 'groups', 'user_name_a
 LOCAL_USER_MODES = ('', 'delete', 'scramble')
 # Managed user groups (saml.user_groups). Host group permissions only; template group rights are never sent.
 USER_GROUP_PERMISSIONS = {'read': 2, 'read-write': 3}
+PERMISSION_NAMES = {'0': 'deny', '2': 'read', '3': 'read-write'}
+PERMISSION_DENY = '0'
 USER_GROUP_KEYS = {'name', 'permission', 'hostgroups'}
+USER_GROUP_OPTIONAL_KEYS = {'exclude_hostgroups', 'replace_denied'}
 ALL_HOSTGROUPS = 'all'
-# The built-in group of the Super admins; never managed by this helper (compared case-insensitively).
-ADMINISTRATORS_GROUP = 'Zabbix administrators'
-HOSTGROUP_NAME_PATTERN = re.compile(r'^[\x21-\x7e]([\x20-\x7e]{0,253}[\x21-\x7e])?\Z')
+# Built-in groups (Super admins, guests, disabled users, frontend access and debug switches); never managed
+# by this helper (compared case-insensitively).
+BUILTIN_GROUPS = ('Zabbix administrators', 'Guests', 'Disabled', 'No access to the frontend', 'Internal',
+                  'Enabled debug mode')
+# Host group names may use any Unicode letters (e.g. Japanese): 1-255 characters, no leading/trailing whitespace
+# and no control, format, surrogate or private-use characters (Unicode categories Cc, Cf, Cs, Co, from Unicode
+# 15.1) and no line/paragraph separators. tasks/main.yml has the same literal pattern; unassigned code points
+# (Cn) are refused here only (see hostgroup_name), as the role assert has no Unicode database.
+HOSTGROUP_FORBIDDEN = (r'\x00-\x1f\x7f-\x9f\xad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f'
+                       r'\u2028-\u202e\u2060-\u2064\u2066-\u206f\ud800-\uf8ff\ufeff\ufff9-\ufffb\U000110bd\U000110cd'
+                       r'\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f'
+                       r'\U000f0000-\U000ffffd\U00100000-\U0010fffd')
+HOSTGROUP_NAME_PATTERN = re.compile(r'^[^\s%s]([^%s]{0,253}[^\s%s])?\Z'
+                                    % (HOSTGROUP_FORBIDDEN, HOSTGROUP_FORBIDDEN, HOSTGROUP_FORBIDDEN))
 MAX_TARGETS = 200
 EMAIL_LIKE = re.compile(r"[^\s\"'@]+@[^\s\"']+")
 
@@ -222,6 +237,14 @@ def _string(value, pattern, message, max_length=None):
     return value
 
 
+def hostgroup_name(value, message):
+    """A host group name (HOSTGROUP_NAME_PATTERN, and no unassigned code point either)."""
+    _string(value, HOSTGROUP_NAME_PATTERN, message)
+    if any(unicodedata.category(char) == 'Cn' for char in value):
+        raise HelperError(message)
+    return value
+
+
 def _boolean(value, message):
     if not isinstance(value, bool):
         raise HelperError(message)
@@ -311,25 +334,28 @@ def validate_local_users(local_users):
 def validate_user_groups(user_groups, jit):
     """The user groups whose host group permissions this helper converges. Raises on invalid input.
 
-    Each entry is {name, permission: read|read-write, hostgroups: 'all' | [host group names]}. The API-only
-    service group, the deprovisioned group and Zabbix administrators are refused (case-insensitively, as a
-    MySQL collation may match them), and so are duplicate names.
+    Each entry is {name, permission: read|read-write, hostgroups: 'all' | [host group names]} with the optional
+    exclude_hostgroups (names left out of "all"; only with "all") and replace_denied (boolean; allows replacing
+    existing deny rights). The API-only service group, the deprovisioned group and the built-in groups are
+    refused (case-insensitively, as a MySQL collation may match them), and so are duplicate names.
     """
     if not isinstance(user_groups, list):
         raise HelperError('saml user_groups must be a list.')
-    protected = {SERVICE_GROUP.lower(), ADMINISTRATORS_GROUP.lower()}
+    protected = {SERVICE_GROUP.lower()} | {name.lower() for name in BUILTIN_GROUPS}
     deprovisioned = jit.get('deprovisioned_group') if isinstance(jit, dict) else None
     if isinstance(deprovisioned, str) and deprovisioned:
         protected.add(deprovisioned.lower())
     seen = set()
     result = []
     for entry in user_groups:
-        if not isinstance(entry, dict) or set(entry) != USER_GROUP_KEYS:
-            raise HelperError('Each saml user_groups entry needs exactly name, permission and hostgroups.')
+        if not isinstance(entry, dict) or not USER_GROUP_KEYS <= set(entry) or \
+                set(entry) - USER_GROUP_KEYS - USER_GROUP_OPTIONAL_KEYS:
+            raise HelperError('Each saml user_groups entry needs name, permission and hostgroups, and may only add '
+                              'exclude_hostgroups and replace_denied.')
         name = _string(entry['name'], OBJECT_NAME_PATTERN, 'saml user_groups name must name a user group.')
         if name.lower() in protected:
-            raise HelperError('saml user_groups must not contain the API-only, deprovisioned or Zabbix administrators '
-                              'group.')
+            raise HelperError('saml user_groups must not contain the API-only, deprovisioned or a built-in group '
+                              '(%s).' % ', '.join(BUILTIN_GROUPS))
         if name.lower() in seen:
             raise HelperError('saml user_groups names must be unique.')
         seen.add(name.lower())
@@ -340,10 +366,23 @@ def validate_user_groups(user_groups, jit):
             if not isinstance(hostgroups, list) or not hostgroups:
                 raise HelperError('saml user_groups hostgroups must be "all" or a non-empty list of host group names.')
             for hostgroup in hostgroups:
-                _string(hostgroup, HOSTGROUP_NAME_PATTERN, 'saml user_groups hostgroups must name host groups.')
+                hostgroup_name(hostgroup, 'saml user_groups hostgroups must name host groups.')
             if len(set(hostgroups)) != len(hostgroups):
                 raise HelperError('saml user_groups hostgroups contain duplicates.')
-        result.append({'name': name, 'permission': entry['permission'], 'hostgroups': hostgroups})
+        exclude = entry.get('exclude_hostgroups', [])
+        if 'exclude_hostgroups' in entry:
+            if hostgroups != ALL_HOSTGROUPS:
+                raise HelperError('saml user_groups exclude_hostgroups is only allowed with hostgroups: all.')
+            if not isinstance(exclude, list):
+                raise HelperError('saml user_groups exclude_hostgroups must be a list of host group names.')
+            for hostgroup in exclude:
+                hostgroup_name(hostgroup, 'saml user_groups exclude_hostgroups must name host groups.')
+            if len(set(exclude)) != len(exclude):
+                raise HelperError('saml user_groups exclude_hostgroups contain duplicates.')
+        replace_denied = _boolean(entry.get('replace_denied', False),
+                                  'saml user_groups replace_denied must be a boolean.')
+        result.append({'name': name, 'permission': entry['permission'], 'hostgroups': hostgroups,
+                       'exclude_hostgroups': list(exclude), 'replace_denied': replace_denied})
     return result
 
 
@@ -984,10 +1023,12 @@ def plan_user_groups(client, token, user_groups):
     """Read-only: what converge_user_groups changes so that the listed groups have exactly the listed rights.
 
     Returns {'create': [{name, hostgroup_rights}], 'update': [{usrgrpid, name, hostgroup_rights}],
-    'hostgroups': {host group name: groupid}}. "all" means every host group that exists at this run.
-    Missing host groups fail here, before anything is changed. No request is made for an empty list.
+    'hostgroups': {host group name: groupid}, 'diff': {group name: rights_difference}}. "all" means every host
+    group that exists at this run, minus exclude_hostgroups. Missing host groups, disabled or frontend-disabled
+    groups and deny rights that would be replaced without replace_denied fail here, before anything is changed.
+    No request is made for an empty list.
     """
-    plan = {'create': [], 'update': [], 'hostgroups': {}}
+    plan = {'create': [], 'update': [], 'hostgroups': {}, 'diff': {}}
     if not user_groups:
         return plan
     hostgroups = {}
@@ -998,13 +1039,17 @@ def plan_user_groups(client, token, user_groups):
             raise HelperError('Host group "%s" exists more than once.' % row['name'])
         hostgroups[row['name']] = str(row['groupid'])
     plan['hostgroups'] = hostgroups
-    missing = sorted({name for entry in user_groups if entry['hostgroups'] != ALL_HOSTGROUPS
-                      for name in entry['hostgroups'] if name not in hostgroups})
+    hostgroup_names = {groupid: name for name, groupid in hostgroups.items()}
+    missing = sorted({name for entry in user_groups
+                      for name in (entry['exclude_hostgroups'] if entry['hostgroups'] == ALL_HOSTGROUPS
+                                   else entry['hostgroups'])
+                      if name not in hostgroups})
     if missing:
         raise HelperError('Host group(s) not found: %s. Nothing was changed.'
                           % ', '.join(json.dumps(n) for n in missing))
     names = [entry['name'] for entry in user_groups]
-    rows = client.require_list('usergroup.get', {'output': ['usrgrpid', 'name'], 'selectHostGroupRights': 'extend',
+    rows = client.require_list('usergroup.get', {'output': ['usrgrpid', 'name', 'gui_access', 'users_status'],
+                                                 'selectHostGroupRights': 'extend',
                                                  'filter': {'name': sorted(names)}}, token)
     wanted = {name.lower(): name for name in names}
     current = {}
@@ -1018,24 +1063,61 @@ def plan_user_groups(client, token, user_groups):
             # A case-insensitive collation: the listed name would collide with this group.
             raise HelperError('User group "%s" exists with another letter case. Nothing was changed.'
                               % wanted[name.lower()])
+    for row in current.values():
+        if str(row.get('users_status')) == GROUP_STATUS_DISABLED or \
+                str(row.get('gui_access')) == GROUP_GUI_ACCESS_DISABLED:
+            raise HelperError('User group "%s" is disabled or has frontend access disabled; it is not managed through '
+                              'saml user_groups. Nothing was changed.' % row['name'])
     for entry in user_groups:
         if entry['hostgroups'] == ALL_HOSTGROUPS:
-            ids = set(hostgroups.values())
+            excluded = {hostgroups[name] for name in entry['exclude_hostgroups']}
+            ids = set(hostgroups.values()) - excluded
         else:
             ids = {hostgroups[name] for name in entry['hostgroups']}
         permission = USER_GROUP_PERMISSIONS[entry['permission']]
         rights = [{'id': groupid, 'permission': permission} for groupid in sorted(ids, key=lambda i: (len(i), i))]
+        desired = {groupid: str(permission) for groupid in ids}
         row = current.get(entry['name'])
         if row is None:
             plan['create'].append({'name': entry['name'], 'hostgroup_rights': rights})
+            plan['diff'][entry['name']] = rights_difference({}, desired, hostgroup_names, created=True)
             continue
         existing = row.get('hostgroup_rights')
         if not isinstance(existing, list) or not all(isinstance(right, dict) for right in existing):
             raise HelperError('Zabbix API usergroup.get returned unexpected host group rights.')
         pairs = [(str(right.get('id')), str(right.get('permission'))) for right in existing]
-        if sorted(pairs) != sorted((groupid, str(permission)) for groupid in ids):
-            plan['update'].append({'usrgrpid': row['usrgrpid'], 'name': entry['name'], 'hostgroup_rights': rights})
+        if sorted(pairs) == sorted(desired.items()):
+            continue
+        before = dict(pairs)
+        denied = sorted(hostgroup_names.get(groupid, 'id ' + groupid) for groupid, value in before.items()
+                        if value == PERMISSION_DENY)
+        if denied and not entry['replace_denied']:
+            raise HelperError('User group "%s" has deny rights on %d host group(s) (%s) that the listed rights would '
+                              'remove or change. Set replace_denied: true on this entry to allow it. Nothing was '
+                              'changed.' % (entry['name'], len(denied), ', '.join(json.dumps(n) for n in denied)))
+        plan['update'].append({'usrgrpid': row['usrgrpid'], 'name': entry['name'], 'hostgroup_rights': rights})
+        plan['diff'][entry['name']] = rights_difference(before, desired, hostgroup_names)
     return plan
+
+
+def rights_difference(before, after, hostgroup_names, created=False):
+    """Added, removed and changed host group rights by host group name (permission names, no secrets)."""
+    def label(groupid):
+        return hostgroup_names.get(groupid, 'id ' + groupid)
+
+    def permission(value):
+        return PERMISSION_NAMES.get(value, value)
+
+    return {
+        'created': created,
+        'added': sorted(({'hostgroup': label(i), 'permission': permission(after[i])} for i in after if i not in before),
+                        key=lambda row: row['hostgroup']),
+        'removed': sorted(({'hostgroup': label(i), 'permission': permission(before[i])}
+                           for i in before if i not in after), key=lambda row: row['hostgroup']),
+        'changed': sorted(({'hostgroup': label(i), 'before': permission(before[i]), 'after': permission(after[i])}
+                           for i in after if i in before and before[i] != after[i]),
+                          key=lambda row: row['hostgroup']),
+    }
 
 
 def converge_user_groups(client, token, plan):
@@ -1225,18 +1307,20 @@ def run(config, redact):
     changed_keys = converge_housekeeping(client, plan['housekeeping'], token)
     result = {'changed': bool(changed_keys), 'password_changed': False, 'housekeeping_changed': changed_keys}
     if saml_enabled:
-        # Order: read-only prerequisites (user group plan, SAML names) -> one-time procedure (delete before
-        # enable) -> user groups -> provision group IDs -> manual user check -> enable SAML.
+        # Order: read-only prerequisites (user group plan, SAML names) -> user groups (re-runnable) ->
+        # one-time procedure (irreversible; delete before enable) -> provision group IDs -> manual user check ->
+        # enable SAML.
         groups_plan = plan_user_groups(client, token, saml['user_groups'])
         fields, deprovisioned, usrgrpids = desired_userdirectory(
             client, token, saml, frozenset(entry['name'] for entry in groups_plan['create']))
-        fragment = apply_local_users_once(client, token, saml['local_users'])
-        result['changed'] |= fragment.pop('local_users_changed', False)
-        result.update(fragment)
         changed_groups = converge_user_groups(client, token, groups_plan)
         if saml['user_groups']:
             result['user_groups_changed'] = changed_groups
+            result['user_groups_diff'] = {name: groups_plan['diff'][name] for name in changed_groups}
             result['changed'] |= bool(changed_groups)
+        fragment = apply_local_users_once(client, token, saml['local_users'])
+        result['changed'] |= fragment.pop('local_users_changed', False)
+        result.update(fragment)
         resolve_provision_groups(client, token, fields, usrgrpids)
         fragment = converge_saml(client, token, saml, fields, deprovisioned)
         result['changed'] |= bool(fragment['saml_changed']) or bool(fragment['autologout_updated'])

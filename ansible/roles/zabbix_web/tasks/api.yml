@@ -106,6 +106,13 @@
         mode: "0600"
       when: (zabbix_web_api_result.stdout | from_json).local_users_marker is defined
 
+    # ヘルパーの実行は no_log なので、変えたユーザーグループの権限の差（ホストグループ名と権限の前後だけ。
+    # 秘匿値を含まない）をここで表示する（ZABBIX.md「ユーザーグループ」）。
+    - name: "zabbix_web : Show the user group rights that were changed"
+      ansible.builtin.debug:
+        msg: "{{ (zabbix_web_api_result.stdout | from_json).user_groups_diff }}"
+      when: (zabbix_web_api_result.stdout | from_json).user_groups_diff | default({}) | length > 0
+
   always:
     - name: "zabbix_web : Remove API connection parameters"
       ansible.builtin.file:
