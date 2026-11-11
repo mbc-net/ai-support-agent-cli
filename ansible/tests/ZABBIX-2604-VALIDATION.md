@@ -1,8 +1,79 @@
 # Ubuntu 26.04 Zabbix ロール検証
 
 作業ブランチ: `feature/zabbix-rebuild-2604`。ベース: `6b24b48d64325b14a3571006a113b0cbefdc900f`。
-本番デプロイ・コミットは未実施。最新の記録は 2026-11-08（Zabbix 8.0 対応）で、
-2026-11-03〜04 の Zabbix 7.0 の記録は末尾の「過去の記録」に残す。
+本番デプロイ・コミットは未実施。最新の記録は 2026-11-11（表示言語 `zabbix_web_locales`）で、
+その次が 2026-11-08（Zabbix 8.0 対応）。2026-11-03〜04 の Zabbix 7.0 の記録は末尾の「過去の記録」に残す。
+
+## 2026-11-11: 表示言語（zabbix_web_locales）
+
+作業ブランチ（worktree）: `agent-worktrees/zabbix-web-locales`（未コミットのロール変更をそのまま検証）。
+本番・実サーバーには一切接続していない。すべて手元の Mac（Docker 29、arm64）のコンテナで実施した。
+
+### 検証環境
+
+本番（mbc-zabbix-01）の 2026-11-11 時点のロケール状態を再現した Ubuntu 26.04 / systemd コンテナ。
+
+- イメージ `zabbix-locale-2604:local`: `ubuntu:26.04` に systemd・python3・`locales`・iproute2・curl と
+  ansible-core 2.20.11（venv `/opt/ansible`）・community.postgresql 4.x を導入（後から ansible.mysql 5.x・ansible.posix 1.x も追加）。
+  `/etc/locale.gen` は `en_US.UTF-8 UTF-8` だけを有効にして `locale-gen`、`/etc/default/locale` は `LANG=en_US.UTF-8`。
+  `locale -a` は `C / C.utf8 / POSIX / en_US.utf8`（本番と同じ）。
+- PostgreSQL 18 は `LANG=en_US.UTF-8` で導入し、全 DB の `datcollate`/`datctype` が `en_US.UTF-8`（本番と同じ）。
+- ロールで Zabbix 8.0 を構築（`zabbix_server` → `zabbix_web`。nginx、`listen_address 127.0.0.1`、port 8080、
+  `ufw_manage: false`、管理者パスワード指定）。この状態を `docker commit` してイメージ `zabbix-locale-2604:base` とし、
+  シナリオごとに新しいコンテナを起動した。PHP-FPM のプールはロールの `pm = ondemand`（idle 10s）、マスターの環境に LANG/LC_* 無し（本番と同じ）。
+- 実測版: libc6/locales 2.43-2ubuntu2.4、zabbix-server-pgsql/zabbix-frontend-php 2:8.0.0-1+ubuntu26.04、
+  php8.5-fpm 8.5.4-0ubuntu1.5、nginx 1.28.3-2ubuntu1.12、postgresql-18 18.6-0ubuntu0.26.04.1、Python 3.14、ansible-core 2.20.11。
+- 確認用に `/usr/share/zabbix/ui/loctest.php`（`setlocale(LC_MONETARY, 'ja_JP.UTF-8', 'ja_JP.utf8')` の結果とワーカーの PID を返す。
+  Zabbix の言語判定と同じ呼び出し）を置き、nginx → PHP-FPM（ロールのプール）経由で叩いた。
+
+実行コマンド（コンテナ内、`/work/ansible` に worktree の `ansible/` を読み取り専用でマウント）:
+
+```sh
+cd /work/ansible
+ANSIBLE_ROLES_PATH=/work/ansible/roles /opt/ansible/bin/ansible-playbook -i localhost, web.yml -e '{"zl":["ja_JP.UTF-8"]}'
+# web.yml: hosts localhost / connection local / become、include_role zabbix_web、
+#          vars: zabbix_web_locales: "{{ zl | default([]) }}"
+```
+
+未設定時の確認（項目 9）の時点で、構築直後の frontend のユーザー設定には
+`Japanese (ja_JP)` が `is_disabled: true` で並び、「You are not able to choose some of the languages, because locales
+for them are not installed on the web server.」が表示されていた（本番の症状を再現）。
+
+### 結果（計画のフェーズ3 の項目番号）
+
+| 項目 | 結果 | 根拠 |
+|---|---|---|
+| 1. 生成・既存の保持・登録 | 合格 | 初回 `ok=53 changed=9 failed=0`。`Generate missing locales` が `changed (item=ja_JP.UTF-8)`。実行後 `locale -a` = `C C.utf8 POSIX en_US.utf8 ja_JP.utf8`、`/etc/locale.gen` の有効行 = `en_US.UTF-8 UTF-8` と `ja_JP.UTF-8 UTF-8`（`# ja_JP.UTF-8 UTF-8` のコメント行が `locale-gen` によって有効化された）、`/usr/lib/locale/locale-archive` あり（3,064,432 → 4,152,224 バイト）。`DEBIAN_FRONTEND=noninteractive dpkg-reconfigure locales` は rc=0 で `en_US.UTF-8` と `ja_JP.UTF-8` の両方を再生成し、`/etc/locale.gen` の sha256 は不変、`locale -a` も両方残った。`/etc/default/locale` は `LANG=en_US.UTF-8` のまま |
+| 2. DB 接続 | 合格 | 生成後に PostgreSQL と Zabbix Server を再起動して新規接続にした。`zabbix_server.log` に `database connection re-established`、`dbversion 08000000` の確認、`pg_stat_activity` に zabbix の接続 30 本。`psql -h 127.0.0.1 -U zabbix` で `users` を読めた。全 DB の照合順序は `en_US.UTF-8` のまま。Web は Admin でログイン（302）しダッシュボードを表示 |
+| 3. PHP-FPM 再起動の要否 | **再起動が必要**（条件は残す） | 手で `locale-gen ja_JP.UTF-8` を実行（再起動なし）。生成前から 2 秒間隔で叩き続けたワーカー（同じ PID）は生成後も 20 回連続で `false`。idle で終了した後に、再起動していないマスターから fork された新しいワーカーも `false`。同時刻の `php` CLI（新しいプロセス）は `ja_JP.UTF-8`。`systemctl restart php8.5-fpm` の後は `'ja_JP.UTF-8'`。マスターは起動時に locale-archive を mmap しており（`/proc/<pid>/maps`）、`locale-gen` は同じ inode のまま archive を伸長していた。ロール経由でも、生成前のワーカーは `false` のまま、ロールの再起動後のワーカーは `'ja_JP.UTF-8'` |
+| 4. 言語一覧と日本語表示 | 合格 | ロール実行後、API `user.update` で Admin の `lang` を `ja_JP` に変更。ユーザー設定の一覧は `日本語 (ja_JP)`（`is_disabled` 無し）、警告文なし、ページタイトル `プロファイル`・`ダッシュボード`、`<html lang="ja">` |
+| 5. 中断 → 再実行 | 合格 | `/usr/local/sbin/stat` に必ず失敗する代替を置き、`Read locale archive modification time` で失敗させた（`locale-gen` の後・再起動の前。`ok=23 changed=1 failed=1`）。この時点で ja_JP は生成済み・登録済み、PHP-FPM は未再起動で `loctest.php` は `false`。代替を消して再実行すると `Generate` は skip、`Apply changed PHP settings and clear cached frontend config` が changed（MainPID 62 → 2207）、`loctest.php` は `'ja_JP.UTF-8'`。3 回目は生成・再起動とも skip |
+| 6. 存在しないロケール | 合格（2026-11-11 に現行ロールで再測定） | `xx_YY.UTF-8` は `Require supported locale names`（`grep -qxF "xx_YY.UTF-8 UTF-8" /usr/share/i18n/SUPPORTED`、rc=1 を許容して `ok`）の次の `Assert all locale names are supported` で失敗し、`msg` は `Locales not found in /usr/share/i18n/SUPPORTED: xx_YY.UTF-8`（`ok=9 changed=0 failed=1`。リポジトリ導入 `Install the official repository package` より前）。`zabbix-locale-2604:base` から起動した新しいコンテナで、実行前後の `/etc/locale.gen` の sha256・`locale -a`・archive の mtime/サイズ・`/etc/apt/sources.list.d`・`dpkg -l` の sha256・PHP-FPM の MainPID がすべて同一 |
+| 7. 冪等性と表記ゆれ | 合格（注記あり） | 2 回目: `Generate` skip・再起動 skip・MainPID 不変（`changed=7` はロケール未指定の再実行と同じ既存タスク: 一時ファイル・nginx 反映・API 接続ファイル）。以下はいずれも 1 回で収束し、その次の実行で生成・再起動とも skip: (a) archive にあるが `/etc/locale.gen` に無い → `locale-gen` が rc=0 で末尾に `ja_JP.UTF-8 UTF-8` を追記、再起動 1 回。(b) archive にあり `# ja_JP.UTF-8 UTF-8` だけがある → `locale-gen` がその行を有効化、再起動 1 回。(c) 有効行が `  ja_JP.UTF-8<TAB>UTF-8  ` → 登録済みと判定され生成・再起動とも skip。(d) (c) の行のまま archive から削除（`localedef --delete-from-archive ja_JP.utf8`）→ 生成と再起動 1 回。このとき `locale-gen` は空白・タブ入りの行を自分のものと認識せず、`ja_JP.UTF-8 UTF-8` を**別の行として追記**した（有効行が 2 行になる。生成結果に害はない）。既存ロケールの再生成で `localedef` が非 0 になる事象は起きず、計画の代替案（登録だけ行う方式）は不要。`dpkg-reconfigure locales` で archive が更新された直後の実行は、生成なしで再起動だけ 1 回行い、その次は skip |
+| 8. `no_log` 付き `include_role` | 合格（`fail_msg` は見える） | `include_role` に `no_log: true` を付けて `-vvv` で 4 通り実行: 成功（5,110 行）、Validate 失敗（`ja_JP.utf8`）、`SUPPORTED` 失敗（`xx_YY.UTF-8`）、`locales` 未導入（`dpkg --remove --force-depends locales` 後）。全ログ（このほかの全実行ログを含む）に DB パスワード・管理者パスワードの平文と base64 のいずれも 0 件。`no_log` は include の行（`included: zabbix_web ... (censored due to no_log)`）にしか効かず、ロール内のタスクには継承されない。そのため Validate の `fail_msg`（`zabbix_web_locales must be a list ...` を含む全文）と `Install the locales package beforehand ...` はそのまま表示された。`SUPPORTED` 失敗は 2026-11-11 に現行ロールで再測定し、`Locales not found in /usr/share/i18n/SUPPORTED: xx_YY.UTF-8` が表示された（361 行。DB パスワード・管理者パスワードの平文・base64 とも 0 件）。秘密値を扱うロール内タスクは自身の `no_log` で伏せられており、ロール内への `no_log` 追加作業は不要 |
+| 9. ロケール未指定 | 合格（2026-11-11 に現行ロールで再測定） | `zabbix-locale-2604:base` から起動した新しいコンテナで `zabbix_web_locales` 未指定（既定 `[]`）の実行（`ok=41 changed=7 failed=0 skipped=34`）。追加した 12 タスクはすべて `skipping`: 前提確認 4（`Read the locales package status`・`Require locales to be installed beforehand`・`Require supported locale names`・`Assert all locale names are supported`）と生成ブロック 8（`Read locales before generation`・`Check active locale registrations`・`Generate missing locales with explicit arguments`・`Read locales after generation`・`Verify requested and existing locales are preserved`・`Verify persistent locale registrations`・`Read PHP-FPM start time`・`Read locale archive modification time`）。再起動タスク `Apply changed PHP settings and clear cached frontend config` も条件評価のエラーなく `skipping`（未登録の `zabbix_web_locale_fpm_started` を参照しない）。changed の 7 件はロケールと無関係の既存タスク（frontend のロールバック準備・設定退避・設定適用・退避の削除・API 接続ファイルの作成/書込/削除）。実行前後で `/etc/locale.gen` の sha256・`locale -a`・archive の mtime/サイズ/inode・`/etc/apt/sources.list.d`・`dpkg -l` の sha256・PHP-FPM の MainPID と起動時刻がすべて同一 |
+| 10. `zabbix-validation.yml` の負例 | 合格（全 87 ケース、2026-11-11 に現行ロールで再測定） | 87 ケース（既存 78 ＋ ロケール 9。新規の文字列でない要素 `[1]` を含む）。Ubuntu 22.04 / ARM64（イメージ `zabbix-native-setup-test:2204`、ansible-core 2.17.14。collection は `zabbix-locale-2604:base` の community.postgresql 4.2.1・ansible.mysql 5.2.0・ansible.posix 1.6.2 を `/usr/share/ansible/collections` に読み取り専用でマウント）で全 87 ケース: `ok=436 changed=0 failed=0 skipped=6 rescued=87`。rescue 内の `Require rejection by the initial validation task`（`Validate branch and required variables` で、`expect` を含む assertion により落ちたことの確認）が 87 回とも `ok`。`[1]` は `reject('string')` を含む assertion（文字列でない要素が 0 件であること）で拒否。Ubuntu 26.04（ansible-core 2.20.11）ではロケール形式の 8 ケース（`[1]` を追加）だけを抜き出した写し（22.04 前提の OS 条件ケースと、26.04 では受理されて導入まで進む他ケースを除外）で `ok=41 changed=0 failed=0 rescued=8`。`[1]` も同じ assertion で拒否 |
+
+計画のフェーズ3 項目 10（recipe 11 の事前確認）は今回の範囲外で未実施。
+
+### 補足の観察
+
+- `locales` パッケージを `dpkg --remove` すると `/usr/lib/locale/locale-archive` ごと消え、`locale -a` は
+  `C C.utf8 POSIX` だけになった。ロールが `locales` を導入・削除しない判断と整合する（本番で `locales` を触らないこと）。
+- 生成後の初回実行・中断後の再実行・archive 更新後の実行の 3 つで、PHP-FPM の再起動が 1 回ずつ起きる。
+  いずれも `pm = ondemand` のため、再起動していないマスターから fork される新しいワーカーでも反映されないことを確認済み。
+
+### ロールの不具合
+
+検出なし。軽微な改善候補だった `SUPPORTED` 失敗時の表示（`non-zero return code` だけで理由が出ない）は対応済み:
+`grep` は rc 0/1 を許容して register し、続く `Assert all locale names are supported` が
+`Locales not found in /usr/share/i18n/SUPPORTED: ...` で失敗する（項目 6・8 で再測定）。
+
+### 生ログ（ローカル一時証跡）
+
+`/private/tmp/claude-501/-Users-koichi-murakami-code-ai-support-agent-ai-support-agent/1fedf829-0b01-4e54-8dc8-308f10c665d2/scratchpad/locale-phase3/logs/`
+（`01-server.log`〜`61-validation-2604-locales.log`、再測定の `70-web-xx-rerun.log`・`72-nolog-xx-vvv-rerun.log`・`70-before.txt`/`70-after.txt`/`72-after.txt`・
+`80-web-nolocale-current.log`・`80-before.txt`/`80-after.txt`・`81-validation-2204-87.log`・`82-validation-2604-locales8.log`、`03-poll.log`・`10-poll-a.log` はワーカーの PID と `setlocale` 結果の時系列）。
 
 ## 2026-11-08: Zabbix 8.0 対応と KAGOYA amd64 実機検証
 
