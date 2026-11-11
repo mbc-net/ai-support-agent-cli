@@ -12,6 +12,10 @@ zabbix_web_listen_port: 8080
 # apache では未対応。指定するときは zabbix_web_allowed_sources を空にする。
 zabbix_web_listen_address: ""
 zabbix_web_php_timezone: Asia/Tokyo
+# 表示言語として利用可能にするロケール（Ubuntu 26.04、locales 事前導入が必要）。
+# ja_JP.UTF-8 形式の文字列リスト、最大 16 件・重複不可。既定 [] は何もしない。
+# 生成したロケールは、このリストから外しても削除しない。
+zabbix_web_locales: []
 zabbix_web_zbx_server_host: localhost
 zabbix_web_zbx_server_port: 10051
 zabbix_web_db_type: ""

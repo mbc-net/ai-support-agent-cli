@@ -86,6 +86,19 @@
         - {role: zabbix_web, local_users: {mode: delete, targets: [a@example.com], expected_sha256: ""}, expect: "zabbix_web_saml_local_users.mode | default('') == '' or zabbix_web_saml_enabled"}
         - {role: zabbix_web, saml: true, api_token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", local_users: {mode: delete, targets: [], expected_sha256: ""}, expect: zabbix_web_saml_local_users_check}
         - {role: zabbix_web, saml: true, api_token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", local_users: {mode: delete, targets: [a@example.com], expected_sha256: "0000000000000000000000000000000000000000000000000000000000000000"}, expect: "hash('sha256') == zabbix_web_saml_local_users.expected_sha256"}
+        # ロケール。形式・件数の検証が Ubuntu 26.04 制限より先に評価されることも確認する。
+        - {role: zabbix_web, locales: "ja_JP.UTF-8", expect: zabbix_web_locales is sequence}
+        - {role: zabbix_web, locales: [1], expect: "reject('string')"}
+        - {role: zabbix_web, locales: ["ja_JP"], expect: "reject('match'"}
+        - {role: zabbix_web, locales: ["ja_JP.utf8"], expect: "reject('match'"}
+        - {role: zabbix_web, locales: ["../x"], expect: "reject('match'"}
+        - {role: zabbix_web, locales: ["ja_JP.UTF-8\n"], expect: "reject('match'"}
+        - {role: zabbix_web, locales: ["ja_JP.UTF-8", "ja_JP.UTF-8"], expect: unique}
+        - role: zabbix_web
+          locales: [aa_AA.UTF-8, ab_AA.UTF-8, ac_AA.UTF-8, ad_AA.UTF-8, ae_AA.UTF-8, af_AA.UTF-8, ag_AA.UTF-8, ah_AA.UTF-8, ai_AA.UTF-8, aj_AA.UTF-8, ak_AA.UTF-8, al_AA.UTF-8, am_AA.UTF-8, an_AA.UTF-8, ao_AA.UTF-8, ap_AA.UTF-8, aq_AA.UTF-8]
+          expect: zabbix_web_locales | length <= 16
+        # 正しい形式でも、検証用 Ubuntu 22.04 では OS 条件で拒否する。
+        - {role: zabbix_web, locales: ["ja_JP.UTF-8"], expect: "zabbix_web_locales | length == 0 or ansible_distribution_version == '26.04'"}
         # TimescaleDB（設計書 §4.1）。いずれも先頭の Validate assert で落ちること。
         - {role: zabbix_server, type: mysql, port: 3306, timescaledb: true, expect: "not zabbix_server_db_timescaledb or zabbix_server_db_type == 'postgresql'"}
         - {role: zabbix_server, timescaledb: "true", expect: zabbix_server_db_timescaledb is boolean}

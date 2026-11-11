@@ -125,6 +125,40 @@ Apacheでは独立したListenを定義するため、既存のListenと重な�
 vhost では `api/`・`conf/`・`include/`・`locale/`・`vendor/` ディレクトリへのアクセスを拒否します
 （`api/` は 8.0 公式 nginx 設定に合わせて追加。API の入口 `api_jsonrpc.php` は別ファイルで、拒否されません）。
 
+### 表示言語用ロケール（`zabbix_web_locales`）
+
+`zabbix_web_locales` は管理画面で利用者が選べる表示言語のために生成するロケールのリストです。
+既定は `[]`（何もしない）です。例えば `zabbix_web_locales: ["ja_JP.UTF-8"]` を指定します。
+管理画面の既定言語は変更しません。各利用者がユーザー設定で言語を選びます。
+
+- 各要素は文字列で、形式は `^[a-z]{2,3}_[A-Z]{2}\.UTF-8\Z`、最大 16 件、重複不可です。
+  `ja_JP`・`ja_JP.utf8`・改行入りの値は拒否します。
+- 非空の指定は **Ubuntu 26.04 のみ**対応します。22.04 / 24.04 の `locale-gen` は既存 archive を
+  作り直す恐れがあり未検証のため、先頭の `Validate branch and required variables` で停止します。
+  `fail_msg` は `zabbix_web_locales` の形式・件数・重複禁止と Ubuntu 26.04 の制限を案内します。
+- **`locales` パッケージの事前導入が必要**です。ロールはリポジトリ導入前に導入済みか確認し、
+  未導入なら事前導入を案内して停止します。パッケージ導入時の postinst が引数なしの `locale-gen` で
+  既存ロケールを失わせる恐れがあるため、このロールから `locales` を apt で導入しません。
+- `/usr/share/i18n/SUPPORTED` にないロケールもリポジトリ導入前に拒否します。不足分は引数付きの
+  `locale-gen` で生成し、`/etc/locale.gen` の有効行への登録と生成前の全ロケールの残存を確認します。
+  **生成したロケールは、変数から外しても削除しません。**
+- PHP-FPM の起動時刻が locale archive の更新時刻以前（同じ秒を含む）、または未起動なら、
+  既存のロールバック block 内で再起動します。生成後に中断した場合も再実行で反映します。
+  この再起動で Web が一時停止します。
+  再起動は必須です（2026-11-11 に Ubuntu 26.04 / Zabbix 8.0 の検証コンテナで実測。
+  生成前から動いている PHP-FPM のワーカーも、再起動していないマスターから生成後に fork された
+  新しいワーカーも `setlocale` が false のままで、再起動後に初めて成功しました）。
+  生成後に中断した場合の再実行での再起動と、2 回目以降に生成・再起動が走らないことも同日に確認しました。
+  `dpkg-reconfigure locales` などで archive が更新された後の最初の実行でも、生成はせずに 1 回だけ再起動します。
+  詳細は `tests/ZABBIX-2604-VALIDATION.md` の「2026-11-11: 表示言語（zabbix_web_locales）」を参照してください。
+
+`include_role` に `no_log: true` を付けても、ロール内のタスクには継承されません（伏せられるのは
+include の行だけ）。そのため Validate やロケール確認の assert の `fail_msg` はそのまま表示されます。
+秘密値（DB パスワード・管理者パスワード）は、ロール内で扱うタスク自身の `no_log` により、
+`-vvv` を含む出力に平文・base64 のいずれも現れません（2026-11-11 実測）。
+`/usr/share/i18n/SUPPORTED` にないロケールは、`Assert all locale names are supported` の失敗として
+`Locales not found in /usr/share/i18n/SUPPORTED: <ロケール名>` と表示されます（2026-11-11 実測）。
+
 ### 待受アドレス（`zabbix_web_listen_address`）
 
 | 変数 | 既定 | 説明 |
@@ -692,7 +726,7 @@ Web/PHPサービスの復旧を確認します。外部DB構成では、払い�
 | api: Zabbix・Ansible ガードの Jest 5 suite | 1,088 件成功 |
 | web: Zabbix スニペットの Jest 1 suite | 10 件成功 |
 | `python3 -m unittest discover -s ansible/tests -p 'test_zabbix*.py' -v` | 28 件成功、24 件スキップ（専用 DB・復旧用 fixture が必要） |
-| `tests/zabbix-validation.yml`（既存 Ubuntu 22.04 / ARM64 検証コンテナ） | 不正入力 68 ケースを意図した箇所で拒否。`ok=341 changed=0 failed=0 rescued=68` |
+| `tests/zabbix-validation.yml`（既存 Ubuntu 22.04 / ARM64 検証コンテナ） | 過去の実測は 68 ケースを意図した箇所で拒否（`ok=341 changed=0 failed=0 rescued=68`）。追加後は 87 ケース（既存 78 ＋ ロケール 9。文字列でない要素 `[1]` を含む）。2026-11-11 に ansible-core 2.17.14 の Ubuntu 22.04 / ARM64 コンテナで再実行し、87 ケースすべてを意図した条件で拒否（`ok=436 changed=0 failed=0 skipped=6 rescued=87`）。26.04（ansible-core 2.20.11）ではロケール形式の 8 ケースだけを抜き出して実行し `rescued=8 changed=0` |
 | `tests/zabbix-native.yml --syntax-check` | 成功。ただし動的 include 内の実行検証ではない |
 | agent / web / admin-docs の `npm run build`、api の `npm run build:prod` | すべて成功 |
 | api / agent の変数一覧の突合 | 公開変数 Server 14・Web 20、Zabbix 予約内部変数 67、常時秘匿変数 2 が一致 |

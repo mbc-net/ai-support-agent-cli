@@ -24,6 +24,7 @@
         zabbix_web_server_name: "{{ zabbix_validation_case.name | default('zabbix.test') }}"
         zabbix_web_listen_port: "{{ zabbix_validation_case.port | default(8080) }}"
         zabbix_web_php_timezone: "{{ zabbix_validation_case.timezone | default('Asia/Tokyo') }}"
+        zabbix_web_locales: "{{ zabbix_validation_case.locales | default([]) }}"
         zabbix_web_allowed_sources: "{{ zabbix_validation_case.sources | default([]) }}"
         zabbix_web_ufw_manage: "{{ zabbix_validation_case.ufw_manage | default(true) }}"
         zabbix_web_allow_no_sources: "{{ zabbix_validation_case.allow_no_sources | default(true) }}"
