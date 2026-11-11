@@ -813,6 +813,7 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
     'zabbix_web_saml_sp_entityid',
     'zabbix_web_saml_sp_private_key',
     'zabbix_web_saml_sso_url',
+    'zabbix_web_saml_user_groups',
     'zabbix_web_saml_username_attribute',
     'zabbix_web_server_name',
     'zabbix_web_type',
@@ -1189,6 +1190,7 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'zabbix_web_saml_local_users_check',
   'zabbix_web_saml_sign_check',
   'zabbix_web_saml_token_file',
+  'zabbix_web_saml_user_groups_check',
   // vars/main.yml の派生値と、include_role 以外のタスクに付いた `vars:` の名前。
   // どちらもロールが自分で計算する値であり、`set_fact` は task レベル `vars:` より
   // 優先度が高いのでレシピから上書きできてしまう（`rsyslog_server_reserved_log_dirs`

@@ -55,7 +55,8 @@
                        'case_sensitive': zabbix_web_saml_case_sensitive, 'sign': zabbix_web_saml_sign,
                        'jit': zabbix_web_saml_jit, 'autologout': zabbix_web_saml_autologout,
                        'allow_legacy_users': zabbix_web_saml_allow_legacy_users,
-                       'local_users': zabbix_web_saml_local_users}
+                       'local_users': zabbix_web_saml_local_users,
+                       'user_groups': zabbix_web_saml_user_groups}
                       if zabbix_web_saml_enabled or zabbix_web_api_token | length > 0 else none} | to_json }}
         dest: "{{ zabbix_web_api_credentials.path }}"
         mode: "0600"
@@ -104,6 +105,13 @@
         group: root
         mode: "0600"
       when: (zabbix_web_api_result.stdout | from_json).local_users_marker is defined
+
+    # ヘルパーの実行は no_log なので、変えたユーザーグループの権限の差（ホストグループ名と権限の前後だけ。
+    # 秘匿値を含まない）をここで表示する（ZABBIX.md「ユーザーグループ」）。
+    - name: "zabbix_web : Show the user group rights that were changed"
+      ansible.builtin.debug:
+        msg: "{{ (zabbix_web_api_result.stdout | from_json).user_groups_diff }}"
+      when: (zabbix_web_api_result.stdout | from_json).user_groups_diff | default({}) | length > 0
 
   always:
     - name: "zabbix_web : Remove API connection parameters"

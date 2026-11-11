@@ -29,6 +29,9 @@ SERVICE_GROUP = 'AI support automation (API only)'
 LOCAL_MARKER = '{$AI_SUPPORT_SAML_LOCAL_USERS_DONE}'
 SERVICE_MARKER = '{$AI_SUPPORT_SERVICE_USER_DONE}'
 PERSISTENT = 'urn:oasis:names:tc:SAML:2.0:nameid-format:persistent'
+# SSO responders does not exist yet (created by the helper); SSO viewers exists in FakeSaml without rights.
+USER_GROUPS = [{'name': 'SSO responders', 'permission': 'read-write', 'hostgroups': 'all'},
+               {'name': 'SSO viewers', 'permission': 'read', 'hostgroups': ['Linux servers', 'Web/Frontend']}]
 
 
 def sha(targets):
@@ -55,9 +58,9 @@ def saml_config(**overrides):
         'sign': {'messages': True, 'assertions': True, 'authn_requests': False, 'logout_requests': False,
                  'logout_responses': False},
         'jit': {'enabled': True, 'deprovisioned_group': 'SAML deprovisioned',
-                'groups': [{'saml_group': 'admin', 'role': 'SSO admin', 'user_groups': ['MBC admins']},
-                           {'saml_group': 'operator', 'role': 'SSO user', 'user_groups': ['MBC operators']},
-                           {'saml_group': 'viewer', 'role': 'SSO user', 'user_groups': ['MBC viewers']}]},
+                'groups': [{'saml_group': 'admin', 'role': 'SSO admin', 'user_groups': ['SSO admins']},
+                           {'saml_group': 'operator', 'role': 'SSO user', 'user_groups': ['SSO operators']},
+                           {'saml_group': 'viewer', 'role': 'SSO user', 'user_groups': ['SSO viewers']}]},
         'autologout': '1h',
         'allow_legacy_users': False,
         'local_users': {'mode': '', 'targets': [], 'expected_sha256': ''},
@@ -74,7 +77,7 @@ class FakeSaml(FakeZabbix):
         'mediatype.get', 'user.get', 'user.create', 'user.update', 'user.delete', 'token.get', 'token.delete',
         'token.create', 'token.generate', 'userdirectory.get', 'userdirectory.create', 'userdirectory.update',
         'authentication.get', 'authentication.update', 'map.get', 'map.update', 'dashboard.get',
-        'dashboard.update', 'report.get', 'action.get',
+        'dashboard.update', 'report.get', 'action.get', 'hostgroup.get', 'usergroup.update',
     }
 
     def __init__(self, version='7.0.32', password=NEW, api_token=None):
@@ -96,11 +99,14 @@ class FakeSaml(FakeZabbix):
                       '5': {'roleid': '5', 'name': 'SSO user', 'type': '1', 'rules': no_api},
                       '6': {'roleid': '6', 'name': 'SSO admin', 'type': '2', 'rules': copy.deepcopy(no_api)}}
         self.groups = {'7': {'usrgrpid': '7', 'name': 'Zabbix administrators', 'gui_access': '0', 'users_status': '0'},
-                       '11': {'usrgrpid': '11', 'name': 'MBC admins', 'gui_access': '0', 'users_status': '0'},
-                       '12': {'usrgrpid': '12', 'name': 'MBC operators', 'gui_access': '0', 'users_status': '0'},
-                       '13': {'usrgrpid': '13', 'name': 'MBC viewers', 'gui_access': '0', 'users_status': '0'}}
+                       '11': {'usrgrpid': '11', 'name': 'SSO admins', 'gui_access': '0', 'users_status': '0'},
+                       '12': {'usrgrpid': '12', 'name': 'SSO operators', 'gui_access': '0', 'users_status': '0'},
+                       '13': {'usrgrpid': '13', 'name': 'SSO viewers', 'gui_access': '0', 'users_status': '0'}}
         self.users = {'1': {'userid': '1', 'username': 'Admin', 'roleid': '3', 'userdirectoryid': '0',
                             'autologout': '15m', 'usrgrps': ['7']}}
+        for group in self.groups.values():
+            group['hostgroup_rights'] = []
+        self.hostgroups = {'2': 'Linux servers', '4': 'Web/Frontend', '5': 'Databases'}
         self.mediatypes = {'1': {'mediatypeid': '1', 'name': 'Email'}}
         self.macros = []
         self.tokens_api = {}
@@ -120,8 +126,12 @@ class FakeSaml(FakeZabbix):
     def add_group(self, name, gui_access='0', users_status='0'):
         groupid = self.new_id()
         self.groups[groupid] = {'usrgrpid': groupid, 'name': name, 'gui_access': gui_access,
-                                'users_status': users_status}
+                                'users_status': users_status, 'hostgroup_rights': []}
         return groupid
+
+    def rights_of(self, name):
+        group = next(g for g in self.groups.values() if g['name'] == name)
+        return sorted((r['id'], r['permission']) for r in group['hostgroup_rights'])
 
     def add_user(self, username, userdirectoryid='0', autologout='15m', groups=('11',), roleid='1'):
         userid = self.new_id()
@@ -189,12 +199,41 @@ class FakeSaml(FakeZabbix):
         rows = list(self.groups.values())
         if 'filter' in params:
             rows = [g for g in rows if self.matches(g['name'], params['filter']['name'])]
-        return [dict(g) for g in rows][:params.get('limit', len(rows))]
+        out = []
+        for group in rows:
+            row = {k: v for k, v in group.items() if k != 'hostgroup_rights'}
+            if 'selectHostGroupRights' in params:
+                row['hostgroup_rights'] = copy.deepcopy(group['hostgroup_rights'])
+            out.append(row)
+        return out[:params.get('limit', len(out))]
+
+    def stored_rights(self, params):
+        if 'templategroup_rights' in params:
+            raise ValueError('Template group rights must never be sent in these tests.')
+        rights = []
+        for right in params.get('hostgroup_rights', []):
+            if str(right['id']) not in self.hostgroups or right['permission'] not in (0, 2, 3):
+                raise ValueError('Invalid parameter "/1/hostgroup_rights".')
+            rights.append({'id': str(right['id']), 'permission': str(right['permission'])})
+        return rights
 
     def m_usergroup_create(self, params, token):
+        if any(self.matches(g['name'], params['name']) for g in self.groups.values()):
+            raise ValueError('User group "%s" already exists.' % params['name'])
+        rights = self.stored_rights(params)
         groupid = self.add_group(params['name'], str(params.get('gui_access', 0)),
                                  str(params.get('users_status', 0)))
+        self.groups[groupid]['hostgroup_rights'] = rights
         return {'usrgrpids': [groupid]}
+
+    def m_usergroup_update(self, params, token):
+        if set(params) - {'usrgrpid', 'hostgroup_rights'}:
+            raise ValueError('Only hostgroup_rights is updated in these tests.')
+        self.groups[params['usrgrpid']]['hostgroup_rights'] = self.stored_rights(params)
+        return {'usrgrpids': [params['usrgrpid']]}
+
+    def m_hostgroup_get(self, params, token):
+        return [{'groupid': groupid, 'name': name} for groupid, name in self.hostgroups.items()]
 
     def m_role_get(self, params, token):
         rows = [copy.deepcopy(r) for r in self.roles.values() if self.matches(r['name'], params['filter']['name'])]
@@ -928,6 +967,288 @@ class SamlHelperTest(unittest.TestCase):
                       'key=lambda s: s.encode())).encode()).hexdigest())')
         proc = subprocess.run([sys.executable, '-c', documented, *names], capture_output=True, text=True, check=True)
         self.assertEqual(proc.stdout.strip(), expected)
+
+    # --- managed user groups ----------------------------------------------------------
+
+    def grouped(self, user_groups=None, **overrides):
+        """SAML input with managed user groups; the JIT operator maps to the group created by the helper."""
+        config = saml_config(user_groups=USER_GROUPS if user_groups is None else user_groups, **overrides)
+        config['jit']['groups'][1]['user_groups'] = ['SSO responders']
+        return config
+
+    def test_user_groups_are_created_and_converged_before_provisioning_then_idempotent(self):
+        for version in ('7.0.32', '8.0.0'):
+            with self.subTest(version=version):
+                state = FakeSaml(version, api_token=API_TOKEN)
+                out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()))
+                self.assertTrue(out['changed'])
+                self.assertEqual(out['user_groups_changed'], ['SSO responders', 'SSO viewers'])
+                self.assertEqual(state.rights_of('SSO responders'), [('2', '3'), ('4', '3'), ('5', '3')])
+                self.assertEqual(state.rights_of('SSO viewers'), [('2', '2'), ('4', '2')])
+                self.assertEqual(out['user_groups_diff'], {
+                    'SSO responders': {'created': True, 'removed': [], 'changed': [], 'added': [
+                        {'hostgroup': 'Databases', 'permission': 'read-write'},
+                        {'hostgroup': 'Linux servers', 'permission': 'read-write'},
+                        {'hostgroup': 'Web/Frontend', 'permission': 'read-write'}]},
+                    'SSO viewers': {'created': False, 'removed': [], 'changed': [], 'added': [
+                        {'hostgroup': 'Linux servers', 'permission': 'read'},
+                        {'hostgroup': 'Web/Frontend', 'permission': 'read'}]}})
+                created = next(g for g in state.groups.values() if g['name'] == 'SSO responders')
+                self.assertEqual((created['gui_access'], created['users_status']), ('0', '0'))
+                provision = state.directories[0]['provision_groups']
+                self.assertEqual(provision[1], {'name': 'operator', 'roleid': '5',
+                                                'user_groups': [{'usrgrpid': created['usrgrpid']}]})
+                methods = state.methods()
+                self.assertLess(methods.index('usergroup.update'), methods.index('userdirectory.create'))
+                state.calls.clear()
+                again = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()))
+                self.assertEqual(again, {'changed': False, 'password_changed': False, 'housekeeping_changed': [],
+                                         'user_groups_changed': [], 'user_groups_diff': {}, 'saml_changed': [],
+                                         'autologout_updated': 0})
+                self.assertEqual(self.writes(state), [])
+
+    def test_only_rights_that_differ_are_set_exactly_as_listed_and_reported(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()))
+        viewers = next(g for g in state.groups.values() if g['name'] == 'SSO viewers')
+        viewers['hostgroup_rights'] = [{'id': '2', 'permission': '3'}, {'id': '5', 'permission': '2'}]
+        state.calls.clear()
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()))
+        self.assertEqual(out['user_groups_changed'], ['SSO viewers'])
+        self.assertTrue(out['changed'])
+        self.assertEqual(out['user_groups_diff'], {'SSO viewers': {
+            'created': False,
+            'added': [{'hostgroup': 'Web/Frontend', 'permission': 'read'}],
+            'removed': [{'hostgroup': 'Databases', 'permission': 'read'}],
+            'changed': [{'hostgroup': 'Linux servers', 'before': 'read-write', 'after': 'read'}]}})
+        self.assertEqual(state.params_of('usergroup.update'), [
+            {'usrgrpid': viewers['usrgrpid'], 'hostgroup_rights': [{'id': '2', 'permission': 2},
+                                                                   {'id': '4', 'permission': 2}]}])
+        self.assertNotIn('usergroup.create', state.methods())
+        self.assertEqual(state.rights_of('SSO viewers'), [('2', '2'), ('4', '2')])
+
+    def test_deny_rights_are_replaced_only_with_replace_denied(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        viewers = next(g for g in state.groups.values() if g['name'] == 'SSO viewers')
+        viewers['hostgroup_rights'] = [{'id': '2', 'permission': '2'}, {'id': '4', 'permission': '0'},
+                                       {'id': '5', 'permission': '0'}]
+        proc = self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped())
+        self.failed(proc, 'User group "SSO viewers" has deny rights on 2 host group(s)')
+        self.assertIn('"Databases", "Web/Frontend"', proc.stderr)
+        self.assertEqual(self.writes(state), [])
+        user_groups = [USER_GROUPS[0], dict(USER_GROUPS[1], replace_denied=True)]
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped(user_groups)))
+        self.assertEqual(out['user_groups_diff']['SSO viewers'], {
+            'created': False, 'added': [],
+            'removed': [{'hostgroup': 'Databases', 'permission': 'deny'}],
+            'changed': [{'hostgroup': 'Web/Frontend', 'before': 'deny', 'after': 'read'}]})
+        self.assertEqual(state.rights_of('SSO viewers'), [('2', '2'), ('4', '2')])
+        # Without deny rights left, replace_denied is no longer needed.
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()))
+
+    def test_all_means_every_host_group_at_each_run(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()))
+        state.hostgroups['17'] = 'Windows servers'
+        state.calls.clear()
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()))
+        self.assertEqual(out['user_groups_changed'], ['SSO responders'])
+        self.assertEqual(out['user_groups_diff']['SSO responders']['added'],
+                         [{'hostgroup': 'Windows servers', 'permission': 'read-write'}])
+        self.assertEqual(state.rights_of('SSO responders'), [('17', '3'), ('2', '3'), ('4', '3'), ('5', '3')])
+        self.assertEqual(state.rights_of('SSO viewers'), [('2', '2'), ('4', '2')])
+
+    def test_exclude_hostgroups_leaves_host_groups_out_of_all(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        user_groups = [dict(USER_GROUPS[0], exclude_hostgroups=['Databases']), USER_GROUPS[1]]
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped(user_groups)))
+        self.assertEqual(state.rights_of('SSO responders'), [('2', '3'), ('4', '3')])
+        state.hostgroups['17'] = 'Windows servers'
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped(user_groups)))
+        self.assertEqual(state.rights_of('SSO responders'), [('17', '3'), ('2', '3'), ('4', '3')])
+        state.calls.clear()
+        missing = [dict(USER_GROUPS[0], exclude_hostgroups=['Databases', 'No such hosts']), USER_GROUPS[1]]
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped(missing)),
+                    'Host group(s) not found: "No such hosts"')
+        self.assertEqual(self.writes(state), [])
+
+    def test_unicode_host_group_names_are_accepted(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        state.hostgroups['30'] = '監視対象/本番'
+        state.hostgroups['31'] = '検証用'
+        user_groups = [dict(USER_GROUPS[0], exclude_hostgroups=['検証用']),
+                       dict(USER_GROUPS[1], hostgroups=['監視対象/本番'])]
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped(user_groups)))
+        self.assertEqual(state.rights_of('SSO responders'), [('2', '3'), ('30', '3'), ('4', '3'), ('5', '3')])
+        self.assertEqual(state.rights_of('SSO viewers'), [('30', '2')])
+        self.assertEqual(out['user_groups_diff']['SSO viewers']['added'],
+                         [{'hostgroup': '監視対象/本番', 'permission': 'read'}])
+        self.assertFalse(self.ok(self.run_helper(state, api_token=API_TOKEN, password='',
+                                                 saml=self.grouped(user_groups)))['changed'])
+
+    def test_user_groups_converge_without_jit(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        config = saml_config(jit={'enabled': False}, user_groups=USER_GROUPS)
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=config))
+        self.assertEqual(out['user_groups_changed'], ['SSO responders', 'SSO viewers'])
+        self.assertEqual((state.directories[0]['provision_status'], state.directories[0]['provision_groups']), ('0', []))
+        self.assertEqual(state.auth['saml_jit_status'], '0')
+        again = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=config))
+        self.assertFalse(again['changed'])
+
+    def test_disabled_or_frontend_disabled_groups_are_not_managed(self):
+        for field, value in (('users_status', '1'), ('gui_access', '3')):
+            with self.subTest(field=field):
+                state = FakeSaml(api_token=API_TOKEN)
+                next(g for g in state.groups.values() if g['name'] == 'SSO viewers')[field] = value
+                self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()),
+                            'is disabled or has frontend access disabled')
+                self.assertEqual(self.writes(state), [])
+
+    def test_host_group_names_are_matched_case_sensitively(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        user_groups = [dict(USER_GROUPS[1], hostgroups=['linux servers'])]
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(user_groups=user_groups)),
+                    'Host group(s) not found: "linux servers"')
+        self.assertEqual(self.writes(state), [])
+
+    def test_duplicate_host_group_names_fail_without_writes(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        state.hostgroups['9'] = 'Linux servers'
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()),
+                    'Host group "Linux servers" exists more than once')
+        self.assertEqual(self.writes(state), [])
+
+    def test_user_groups_converge_before_the_one_time_procedure(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        self.people(state)
+        targets = ['alice@example.com', 'bob@example.com']
+        config = self.grouped(local_users={'mode': 'delete', 'targets': targets, 'expected_sha256': sha(targets)})
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=config))
+        methods = state.methods()
+        self.assertLess(methods.index('usergroup.create'), methods.index('user.delete'))
+        self.assertLess(methods.index('usergroup.update'), methods.index('user.delete'))
+        # A failed group change stops before the irreversible deletion.
+        state = FakeSaml(api_token=API_TOKEN)
+        self.people(state)
+        state.fail_methods['usergroup.update'] = 1
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=config),
+                    '1 of 2 user groups were changed')
+        self.assertNotIn('user.delete', state.methods())
+        self.assertIsNone(state.marker(LOCAL_MARKER))
+        self.assertEqual(len([u for u in state.users.values() if '@' in u['username']]), 2)
+
+    def test_without_user_groups_nothing_about_them_is_read_or_reported(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config()))
+        self.assertNotIn('user_groups_changed', out)
+        self.assertNotIn('hostgroup.get', state.methods())
+        self.assertNotIn('usergroup.update', state.methods())
+
+    def test_missing_host_groups_fail_before_the_one_time_procedure(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        self.people(state)
+        targets = ['alice@example.com', 'bob@example.com']
+        user_groups = [dict(USER_GROUPS[1], hostgroups=['Linux servers', 'No such hosts'])]
+        config = saml_config(user_groups=user_groups, local_users={'mode': 'delete', 'targets': targets,
+                                                                   'expected_sha256': sha(targets)})
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=config),
+                    'Host group(s) not found: "No such hosts"')
+        self.assertEqual(self.writes(state), [])
+        self.assertEqual(len([u for u in state.users.values() if '@' in u['username']]), 2)
+
+    def test_saml_names_are_checked_before_the_one_time_procedure_with_planned_groups(self):
+        # A JIT group that is neither listed nor existing still fails before anything changes.
+        state = FakeSaml(api_token=API_TOKEN)
+        self.people(state)
+        targets = ['alice@example.com', 'bob@example.com']
+        config = self.grouped(local_users={'mode': 'delete', 'targets': targets, 'expected_sha256': sha(targets)})
+        config['jit']['groups'][2]['user_groups'] = ['SSO auditors']
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=config),
+                    'User group(s) not found: "SSO auditors"')
+        self.assertEqual(self.writes(state), [])
+        self.assertEqual(len([u for u in state.users.values() if '@' in u['username']]), 2)
+
+    def test_a_listed_name_in_another_letter_case_fails_without_writes(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        state.case_insensitive = True  # a MySQL collation
+        state.add_group('sso responders')
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()),
+                    'exists with another letter case')
+        self.assertEqual(self.writes(state), [])
+
+    def test_a_failed_group_change_reports_progress_and_the_rerun_resolves_ids(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        state.fail_methods['usergroup.update'] = 1
+        self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()),
+                    '1 of 2 user groups were changed')
+        self.assertNotIn('userdirectory.create', state.methods())
+        created = next(g for g in state.groups.values() if g['name'] == 'SSO responders')
+        state.calls.clear()
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=self.grouped()))
+        self.assertEqual(out['user_groups_changed'], ['SSO viewers'])
+        self.assertEqual([p['name'] for p in state.params_of('usergroup.create')], ['SAML deprovisioned'])
+        self.assertEqual(state.rights_of('SSO viewers'), [('2', '2'), ('4', '2')])
+        provision = {row['name']: row['user_groups'] for row in state.directories[0]['provision_groups']}
+        self.assertEqual(provision, {'admin': [{'usrgrpid': '11'}], 'operator': [{'usrgrpid': created['usrgrpid']}],
+                                     'viewer': [{'usrgrpid': '13'}]})
+
+    def test_invalid_user_groups_are_rejected_before_any_request(self):
+        cases = {
+            'not a list': 'all',
+            'unknown key': [dict(USER_GROUPS[0], users=[])],
+            'missing key': [{'name': 'SSO viewers', 'permission': 'read'}],
+            'administrators': [dict(USER_GROUPS[0], name='Zabbix administrators')],
+            'administrators other case': [dict(USER_GROUPS[0], name='zabbix ADMINISTRATORS')],
+            'service group': [dict(USER_GROUPS[0], name=SERVICE_GROUP)],
+            'deprovisioned group': [dict(USER_GROUPS[0], name='saml deprovisioned')],
+            'duplicate names': [USER_GROUPS[0], dict(USER_GROUPS[1], name='sso RESPONDERS')],
+            'long name': [dict(USER_GROUPS[0], name='a' * 65)],
+            'permission': [dict(USER_GROUPS[0], permission='write')],
+            'numeric permission': [dict(USER_GROUPS[0], permission=3)],
+            'list permission': [dict(USER_GROUPS[0], permission=['read'])],
+            'hostgroups other word': [dict(USER_GROUPS[0], hostgroups='All')],
+            'empty hostgroups': [dict(USER_GROUPS[0], hostgroups=[])],
+            'duplicate hostgroups': [dict(USER_GROUPS[0], hostgroups=['Databases', 'Databases'])],
+            'hostgroup with space': [dict(USER_GROUPS[0], hostgroups=['Databases '])],
+            'hostgroup not a string': [dict(USER_GROUPS[0], hostgroups=[5])],
+            'exclude without all': [dict(USER_GROUPS[1], exclude_hostgroups=['Databases'])],
+            'exclude not a list': [dict(USER_GROUPS[0], exclude_hostgroups='Databases')],
+            'exclude duplicates': [dict(USER_GROUPS[0], exclude_hostgroups=['Databases', 'Databases'])],
+            'exclude not a string': [dict(USER_GROUPS[0], exclude_hostgroups=[5])],
+            'replace_denied string': [dict(USER_GROUPS[0], replace_denied='yes')],
+            'hostgroup too long': [dict(USER_GROUPS[1], hostgroups=['監' * 256])],
+            'hostgroup leading space': [dict(USER_GROUPS[1], hostgroups=[' 監視'])],
+            'hostgroup trailing ideographic space': [dict(USER_GROUPS[1], hostgroups=['監視' + chr(0x3000)])],
+            'hostgroup with a control character': [dict(USER_GROUPS[1], hostgroups=['監' + chr(0x07) + '視'])],
+            'hostgroup with a newline': [dict(USER_GROUPS[1], hostgroups=['Linux\nservers'])],
+            'hostgroup with a format character': [dict(USER_GROUPS[1], hostgroups=['監' + chr(0x200b) + '視'])],
+            'hostgroup with a bidi override': [dict(USER_GROUPS[1], hostgroups=['ab' + chr(0x202e) + 'cd'])],
+            'hostgroup with a private use character': [dict(USER_GROUPS[1], hostgroups=['ab' + chr(0xe000)])],
+            'hostgroup with an unassigned code point': [dict(USER_GROUPS[1], hostgroups=['ab' + chr(0x0378) + 'cd'])],
+            'exclude with a control character': [dict(USER_GROUPS[0], exclude_hostgroups=['ab' + chr(0x1f)])],
+            'exclude with trailing space': [dict(USER_GROUPS[0], exclude_hostgroups=['検証用 '])],
+            'optional key only': [{'name': 'SSO viewers', 'permission': 'read', 'replace_denied': True}],
+            **{'built-in ' + name: [dict(USER_GROUPS[0], name=name)]
+               for name in ('GUESTS', 'disabled', 'No access to the Frontend', 'internal', 'Enabled Debug Mode')},
+        }
+        for label, user_groups in cases.items():
+            with self.subTest(label):
+                state = FakeSaml(api_token=API_TOKEN)
+                proc = self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(user_groups=user_groups))
+                self.assertEqual(proc.returncode, 2, label)
+                self.assertIn('saml user_groups', proc.stderr)
+                self.assertEqual(state.calls, [])
+
+    def test_the_deprovisioned_group_is_refused_with_or_without_jit(self):
+        for jit in ({'enabled': False, 'deprovisioned_group': 'Old leavers'},
+                    dict(saml_config()['jit'], deprovisioned_group='Old leavers')):
+            with self.subTest(enabled=jit['enabled']):
+                state = FakeSaml(api_token=API_TOKEN)
+                config = saml_config(jit=jit, user_groups=[dict(USER_GROUPS[0], name='old LEAVERS')])
+                self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=config),
+                            'must not contain the API-only, deprovisioned or a built-in group')
+                self.assertEqual(state.calls, [])
 
     # --- Admin lockdown -------------------------------------------------------------
 

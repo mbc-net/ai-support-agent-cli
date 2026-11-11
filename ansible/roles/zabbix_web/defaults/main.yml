@@ -104,6 +104,14 @@ zabbix_web_saml_case_sensitive: true
 # groups は [{saml_group, role, user_groups: [グループ名]}]。role に Super admin の役割と、API の利用か
 # API トークンの管理を許す役割（既定の User role・Admin role を含む）は使えない（ZABBIX.md）。
 zabbix_web_saml_jit: {enabled: false}
+# ユーザーグループとホストグループの権限の収束（zabbix_web_saml_enabled のときだけ。ZABBIX.md）。
+# [{name, permission: read | read-write, hostgroups: all | [ホストグループ名]}]。任意で exclude_hostgroups
+# （all から除く名前。all のときだけ）と replace_denied（既存の deny の権限の置き換えを許す。既定 false）。
+# 列挙したグループだけを扱い、無ければ作り、ホストグループの権限を列挙したとおりに揃える（テンプレート
+# グループの権限・所属は変えない）。all は実行のたびの全ホストグループ（後から作ったものにも広がる）。
+# 無いホストグループの名前は失敗する。サービス用・無効化用のグループと Zabbix の組み込みのグループ
+# （Zabbix administrators, Guests, Disabled など）は書けない。空なら何もしない。
+zabbix_web_saml_user_groups: []
 # 空でなければ SAML の userdirectory の利用者（JIT の利用者）の autologout を毎回この値にする
 # （90s〜1d。例 1h）。
 zabbix_web_saml_autologout: ""
