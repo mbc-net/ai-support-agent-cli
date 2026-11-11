@@ -55,7 +55,8 @@
                        'case_sensitive': zabbix_web_saml_case_sensitive, 'sign': zabbix_web_saml_sign,
                        'jit': zabbix_web_saml_jit, 'autologout': zabbix_web_saml_autologout,
                        'allow_legacy_users': zabbix_web_saml_allow_legacy_users,
-                       'local_users': zabbix_web_saml_local_users}
+                       'local_users': zabbix_web_saml_local_users,
+                       'user_groups': zabbix_web_saml_user_groups}
                       if zabbix_web_saml_enabled or zabbix_web_api_token | length > 0 else none} | to_json }}
         dest: "{{ zabbix_web_api_credentials.path }}"
         mode: "0600"

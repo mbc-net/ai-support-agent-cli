@@ -113,6 +113,13 @@ SIGN_DEFAULTS = {'messages': True, 'assertions': True, 'authn_requests': False,
 JIT_DEFAULTS = {'enabled': False, 'group_name_attribute': 'groups', 'user_name_attribute': 'name',
                 'user_lastname_attribute': '', 'deprovisioned_group': '', 'groups': [], 'media': []}
 LOCAL_USER_MODES = ('', 'delete', 'scramble')
+# Managed user groups (saml.user_groups). Host group permissions only; template group rights are never sent.
+USER_GROUP_PERMISSIONS = {'read': 2, 'read-write': 3}
+USER_GROUP_KEYS = {'name', 'permission', 'hostgroups'}
+ALL_HOSTGROUPS = 'all'
+# The built-in group of the Super admins; never managed by this helper (compared case-insensitively).
+ADMINISTRATORS_GROUP = 'Zabbix administrators'
+HOSTGROUP_NAME_PATTERN = re.compile(r'^[\x21-\x7e]([\x20-\x7e]{0,253}[\x21-\x7e])?\Z')
 MAX_TARGETS = 200
 EMAIL_LIKE = re.compile(r"[^\s\"'@]+@[^\s\"']+")
 
@@ -301,6 +308,45 @@ def validate_local_users(local_users):
     return local_users
 
 
+def validate_user_groups(user_groups, jit):
+    """The user groups whose host group permissions this helper converges. Raises on invalid input.
+
+    Each entry is {name, permission: read|read-write, hostgroups: 'all' | [host group names]}. The API-only
+    service group, the deprovisioned group and Zabbix administrators are refused (case-insensitively, as a
+    MySQL collation may match them), and so are duplicate names.
+    """
+    if not isinstance(user_groups, list):
+        raise HelperError('saml user_groups must be a list.')
+    protected = {SERVICE_GROUP.lower(), ADMINISTRATORS_GROUP.lower()}
+    deprovisioned = jit.get('deprovisioned_group') if isinstance(jit, dict) else None
+    if isinstance(deprovisioned, str) and deprovisioned:
+        protected.add(deprovisioned.lower())
+    seen = set()
+    result = []
+    for entry in user_groups:
+        if not isinstance(entry, dict) or set(entry) != USER_GROUP_KEYS:
+            raise HelperError('Each saml user_groups entry needs exactly name, permission and hostgroups.')
+        name = _string(entry['name'], OBJECT_NAME_PATTERN, 'saml user_groups name must name a user group.')
+        if name.lower() in protected:
+            raise HelperError('saml user_groups must not contain the API-only, deprovisioned or Zabbix administrators '
+                              'group.')
+        if name.lower() in seen:
+            raise HelperError('saml user_groups names must be unique.')
+        seen.add(name.lower())
+        if not isinstance(entry['permission'], str) or entry['permission'] not in USER_GROUP_PERMISSIONS:
+            raise HelperError('saml user_groups permission must be read or read-write.')
+        hostgroups = entry['hostgroups']
+        if hostgroups != ALL_HOSTGROUPS:
+            if not isinstance(hostgroups, list) or not hostgroups:
+                raise HelperError('saml user_groups hostgroups must be "all" or a non-empty list of host group names.')
+            for hostgroup in hostgroups:
+                _string(hostgroup, HOSTGROUP_NAME_PATTERN, 'saml user_groups hostgroups must name host groups.')
+            if len(set(hostgroups)) != len(hostgroups):
+                raise HelperError('saml user_groups hostgroups contain duplicates.')
+        result.append({'name': name, 'permission': entry['permission'], 'hostgroups': hostgroups})
+    return result
+
+
 def validate_saml(saml, version):
     if saml is None:
         return None
@@ -339,10 +385,11 @@ def validate_saml(saml, version):
         seconds = autologout_seconds(autologout)
         if seconds is None or not 90 <= seconds <= DAY:
             raise HelperError('saml autologout must be empty or a period between 90s and 1d.')
+    jit = validate_jit(saml.get('jit', {}))
     return dict(saml, slo_url=slo_url, sign=sign, autologout=autologout,
-                allow_legacy_users=saml.get('allow_legacy_users', False),
-                jit=validate_jit(saml.get('jit', {})),
-                local_users=validate_local_users(saml.get('local_users', {})))
+                allow_legacy_users=saml.get('allow_legacy_users', False), jit=jit,
+                local_users=validate_local_users(saml.get('local_users', {})),
+                user_groups=validate_user_groups(saml.get('user_groups', []), jit))
 
 
 def validate_config(config):
@@ -840,11 +887,13 @@ def token_capable(rules):
     return actions.get('manage_api_tokens', str(rules.get('actions.default_access', '1'))) != '0'
 
 
-def desired_userdirectory(client, token, saml):
+def desired_userdirectory(client, token, saml, planned_groups=frozenset()):
     """The userdirectory fields to converge (read-only lookups). Certificates are never sent (file storage).
 
-    Returns (fields, deprovisioned group name or None). Everything that could make the SAML setup fail is
-    checked here, before the one-time local user procedure changes anything.
+    Returns (fields, deprovisioned group name or None, {user group name: usrgrpid}). Everything that could make
+    the SAML setup fail is checked here, before the one-time local user procedure changes anything. User groups
+    in planned_groups (created later by converge_user_groups) may be missing now; the user group names in
+    provision_groups are replaced with their IDs by resolve_provision_groups once they exist.
     """
     sign = saml['sign']
     jit = saml['jit']
@@ -860,7 +909,7 @@ def desired_userdirectory(client, token, saml):
         'provision_status': _flag(jit['enabled']),
     }
     if not jit['enabled']:
-        return fields, None
+        return fields, None, {}
     roles = {}
     role_names = sorted({entry['role'] for entry in jit['groups']})
     for row in client.require_list('role.get', {'output': ['roleid', 'name', 'type'],
@@ -883,7 +932,7 @@ def desired_userdirectory(client, token, saml):
                               'must have both disabled (see ZABBIX.md).' % name)
     group_names = sorted({name for entry in jit['groups'] for name in entry['user_groups']})
     groups = usergroups_by_name(client, token, group_names)
-    missing = [name for name in group_names if name not in groups]
+    missing = [name for name in group_names if name not in groups and name not in planned_groups]
     if missing:
         raise HelperError('User group(s) not found: %s.' % ', '.join(json.dumps(n) for n in missing))
     media_names = sorted({entry['mediatype'] for entry in jit['media']})
@@ -900,13 +949,116 @@ def desired_userdirectory(client, token, saml):
         'group_name': jit['group_name_attribute'], 'user_username': jit['user_name_attribute'],
         'user_lastname': jit['user_lastname_attribute'],
         'provision_groups': [{'name': entry['saml_group'], 'roleid': roles[entry['role']]['roleid'],
-                              'user_groups': [{'usrgrpid': groups[name]['usrgrpid']} for name in entry['user_groups']]}
-                             for entry in jit['groups']],
+                              'user_groups': list(entry['user_groups'])} for entry in jit['groups']],
         'provision_media': [{'name': entry['name'], 'mediatypeid': mediatypes[entry['mediatype']]['mediatypeid'],
                              'attribute': entry['attribute']} for entry in jit['media']],
     })
     check_deprovisioned_group(client, token, jit['deprovisioned_group'])
-    return fields, jit['deprovisioned_group']
+    return fields, jit['deprovisioned_group'], {name: row['usrgrpid'] for name, row in groups.items()}
+
+
+def resolve_provision_groups(client, token, fields, usrgrpids):
+    """Replace the user group names in provision_groups with their usrgrpids (after converge_user_groups).
+
+    Only the names that did not exist during desired_userdirectory are read again.
+    """
+    if 'provision_groups' not in fields:
+        return fields
+    names = sorted({name for entry in fields['provision_groups'] for name in entry['user_groups']})
+    pending = [name for name in names if name not in usrgrpids]
+    if pending:
+        found = usergroups_by_name(client, token, pending)
+        missing = [name for name in pending if name not in found]
+        if missing:
+            raise HelperError('User group(s) not found: %s.' % ', '.join(json.dumps(n) for n in missing))
+        usrgrpids = dict(usrgrpids, **{name: row['usrgrpid'] for name, row in found.items()})
+    fields['provision_groups'] = [
+        dict(entry, user_groups=[{'usrgrpid': usrgrpids[name]} for name in entry['user_groups']])
+        for entry in fields['provision_groups']]
+    return fields
+
+
+# --- managed user groups ---------------------------------------------------------------
+
+def plan_user_groups(client, token, user_groups):
+    """Read-only: what converge_user_groups changes so that the listed groups have exactly the listed rights.
+
+    Returns {'create': [{name, hostgroup_rights}], 'update': [{usrgrpid, name, hostgroup_rights}],
+    'hostgroups': {host group name: groupid}}. "all" means every host group that exists at this run.
+    Missing host groups fail here, before anything is changed. No request is made for an empty list.
+    """
+    plan = {'create': [], 'update': [], 'hostgroups': {}}
+    if not user_groups:
+        return plan
+    hostgroups = {}
+    for row in client.require_list('hostgroup.get', {'output': ['groupid', 'name']}, token):
+        if not isinstance(row.get('name'), str) or row.get('groupid') in (None, ''):
+            raise HelperError('Zabbix API hostgroup.get returned an unexpected result.')
+        if row['name'] in hostgroups:
+            raise HelperError('Host group "%s" exists more than once.' % row['name'])
+        hostgroups[row['name']] = str(row['groupid'])
+    plan['hostgroups'] = hostgroups
+    missing = sorted({name for entry in user_groups if entry['hostgroups'] != ALL_HOSTGROUPS
+                      for name in entry['hostgroups'] if name not in hostgroups})
+    if missing:
+        raise HelperError('Host group(s) not found: %s. Nothing was changed.'
+                          % ', '.join(json.dumps(n) for n in missing))
+    names = [entry['name'] for entry in user_groups]
+    rows = client.require_list('usergroup.get', {'output': ['usrgrpid', 'name'], 'selectHostGroupRights': 'extend',
+                                                 'filter': {'name': sorted(names)}}, token)
+    wanted = {name.lower(): name for name in names}
+    current = {}
+    for row in rows:
+        name = row.get('name')
+        if name in names:
+            if name in current:
+                raise HelperError('User group "%s" exists more than once.' % name)
+            current[name] = row
+        elif isinstance(name, str) and name.lower() in wanted:
+            # A case-insensitive collation: the listed name would collide with this group.
+            raise HelperError('User group "%s" exists with another letter case. Nothing was changed.'
+                              % wanted[name.lower()])
+    for entry in user_groups:
+        if entry['hostgroups'] == ALL_HOSTGROUPS:
+            ids = set(hostgroups.values())
+        else:
+            ids = {hostgroups[name] for name in entry['hostgroups']}
+        permission = USER_GROUP_PERMISSIONS[entry['permission']]
+        rights = [{'id': groupid, 'permission': permission} for groupid in sorted(ids, key=lambda i: (len(i), i))]
+        row = current.get(entry['name'])
+        if row is None:
+            plan['create'].append({'name': entry['name'], 'hostgroup_rights': rights})
+            continue
+        existing = row.get('hostgroup_rights')
+        if not isinstance(existing, list) or not all(isinstance(right, dict) for right in existing):
+            raise HelperError('Zabbix API usergroup.get returned unexpected host group rights.')
+        pairs = [(str(right.get('id')), str(right.get('permission'))) for right in existing]
+        if sorted(pairs) != sorted((groupid, str(permission)) for groupid in ids):
+            plan['update'].append({'usrgrpid': row['usrgrpid'], 'name': entry['name'], 'hostgroup_rights': rights})
+    return plan
+
+
+def converge_user_groups(client, token, plan):
+    """Create the missing groups and set the host group rights of the others exactly as listed.
+
+    Only hostgroup_rights is sent: template group rights, members and frontend access are left alone.
+    Returns the names of the changed groups.
+    """
+    changed = []
+    total = len(plan['create']) + len(plan['update'])
+    try:
+        for entry in plan['create']:
+            client.require('usergroup.create', {'name': entry['name'], 'hostgroup_rights': entry['hostgroup_rights']},
+                           token)
+            changed.append(entry['name'])
+        for entry in plan['update']:
+            client.require('usergroup.update', {'usrgrpid': entry['usrgrpid'],
+                                                'hostgroup_rights': entry['hostgroup_rights']}, token)
+            changed.append(entry['name'])
+    except HelperError as error:
+        raise HelperError('%s (%d of %d user groups were changed; run again to finish).'
+                          % (error, len(changed), total)) from None
+    return changed
 
 
 def check_deprovisioned_group(client, token, name):
@@ -1073,12 +1225,19 @@ def run(config, redact):
     changed_keys = converge_housekeeping(client, plan['housekeeping'], token)
     result = {'changed': bool(changed_keys), 'password_changed': False, 'housekeeping_changed': changed_keys}
     if saml_enabled:
-        # Order: read-only SAML prerequisites -> one-time procedure (delete before enable) ->
-        # manual user check -> enable SAML.
-        fields, deprovisioned = desired_userdirectory(client, token, saml)
+        # Order: read-only prerequisites (user group plan, SAML names) -> one-time procedure (delete before
+        # enable) -> user groups -> provision group IDs -> manual user check -> enable SAML.
+        groups_plan = plan_user_groups(client, token, saml['user_groups'])
+        fields, deprovisioned, usrgrpids = desired_userdirectory(
+            client, token, saml, frozenset(entry['name'] for entry in groups_plan['create']))
         fragment = apply_local_users_once(client, token, saml['local_users'])
         result['changed'] |= fragment.pop('local_users_changed', False)
         result.update(fragment)
+        changed_groups = converge_user_groups(client, token, groups_plan)
+        if saml['user_groups']:
+            result['user_groups_changed'] = changed_groups
+            result['changed'] |= bool(changed_groups)
+        resolve_provision_groups(client, token, fields, usrgrpids)
         fragment = converge_saml(client, token, saml, fields, deprovisioned)
         result['changed'] |= bool(fragment['saml_changed']) or bool(fragment['autologout_updated'])
         result.update(fragment)

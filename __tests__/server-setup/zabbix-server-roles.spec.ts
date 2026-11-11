@@ -465,12 +465,12 @@ describe('Zabbix server and web roles', () => {
       'zabbix_web_saml_local_users', 'zabbix_web_saml_nameid_format', 'zabbix_web_saml_public_url',
       'zabbix_web_saml_sign', 'zabbix_web_saml_slo_url', 'zabbix_web_saml_sp_certificate',
       'zabbix_web_saml_sp_entityid', 'zabbix_web_saml_sp_private_key', 'zabbix_web_saml_sso_url',
-      'zabbix_web_saml_username_attribute',
+      'zabbix_web_saml_user_groups', 'zabbix_web_saml_username_attribute',
     ]
     const internalNames = [
       'zabbix_web_saml_autologout_seconds', 'zabbix_web_saml_certificates_check', 'zabbix_web_saml_installed_version',
       'zabbix_web_saml_jit_check', 'zabbix_web_saml_local_users_check', 'zabbix_web_saml_sign_check',
-      'zabbix_web_saml_dir', 'zabbix_web_saml_token_file',
+      'zabbix_web_saml_dir', 'zabbix_web_saml_token_file', 'zabbix_web_saml_user_groups_check',
     ]
 
     it('公開変数は defaults と一致し、既定は無効・空で、レシピの include_role で渡せる', () => {
@@ -488,6 +488,7 @@ describe('Zabbix server and web roles', () => {
       expect(d.zabbix_web_saml_sign).toEqual({ messages: true, assertions: true, authn_requests: false, logout_requests: false, logout_responses: false })
       expect(d.zabbix_web_saml_jit).toEqual({ enabled: false })
       expect(d.zabbix_web_saml_local_users).toEqual({ mode: '', targets: [], expected_sha256: '', transfer_maps_dashboards: false })
+      expect(d.zabbix_web_saml_user_groups).toEqual([])
       // 公開リポジトリ: 例の URL は example.com だけを使う。
       for (const host of text.match(/https:\/\/[A-Za-z0-9.-]+/g) ?? []) expect(host).toMatch(/\.example\.com$/)
       const result = validateAnsibleTasks(
@@ -499,6 +500,7 @@ describe('Zabbix server and web roles', () => {
             zabbix_web_saml_enabled: true,
             zabbix_web_saml_public_url: 'https://zabbix.example.com/',
             zabbix_web_saml_jit: { enabled: true, deprovisioned_group: 'SAML deprovisioned', groups: [{ saml_group: 'viewer', role: 'User role', user_groups: ['Viewers'] }] },
+            zabbix_web_saml_user_groups: [{ name: 'Viewers', permission: 'read', hostgroups: 'all' }],
           },
         }],
         opts,

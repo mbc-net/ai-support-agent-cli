@@ -44,6 +44,7 @@
         zabbix_web_saml_idp_certificates:
           - "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIU\n-----END CERTIFICATE-----\n"
         zabbix_web_saml_jit: "{{ zabbix_validation_case.jit | default({'enabled': false}) }}"
+        zabbix_web_saml_user_groups: "{{ zabbix_validation_case.user_groups | default([]) }}"
         zabbix_web_saml_local_users: "{{ zabbix_validation_case.local_users | default({'mode': '', 'targets': [], 'expected_sha256': ''}) }}"
       when: zabbix_validation_case.literal_null is not defined
 

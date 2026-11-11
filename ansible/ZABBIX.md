@@ -336,6 +336,7 @@ Zabbix の画面のログインを外部の SAML 2.0 IdP に任せ、パスワ�
   2 回目以降は差分が無ければ何も更新しません。
 - 役割の名前・グループの名前・メディア種別の名前は既存のものを引きます（見つからなければ失敗）。無効化用のグループ
   （`deprovisioned_group`）だけは、無ければ無効の状態で作ります。既にあって有効なら失敗します。
+  `zabbix_web_saml_user_groups` に書いたグループは、無くてもヘルパーが作るので、対応に書けます（下記）。
 - **Super admin は SAML では渡しません。** Super admin の種類の役割（名前に関わらず）を対応に書くと失敗します。
 - **SAML で渡す役割は API を使えないこと:** JIT の利用者が API トークンを作ると、そのトークンは IdP で拒否された後も
   利用者を削除するまで使えます。そのため対応に書く役割は、**API へのアクセス**（`api.access`）と**API トークンの管理**
@@ -376,6 +377,7 @@ Zabbix の画面のログインを外部の SAML 2.0 IdP に任せ、パスワ�
 | `zabbix_web_saml_username_attribute` | `username` | 利用者名の属性 |
 | `zabbix_web_saml_case_sensitive` | `true` | 利用者名の大小文字を区別する |
 | `zabbix_web_saml_jit` | `{enabled: false}` | JIT（下記） |
+| `zabbix_web_saml_user_groups` | `[]` | ユーザーグループとホストグループの権限の収束（下記「ユーザーグループ」）。空なら何もしない |
 | `zabbix_web_saml_autologout` | `""` | 空でなければ、JIT の利用者の `autologout` を毎回この値にする（90s〜1d。例 `1h`） |
 | `zabbix_web_saml_allow_legacy_users` | `false` | 手動の利用者の検査を外す（検証期間だけ） |
 | `zabbix_web_saml_local_users` | `{mode: "", targets: [], expected_sha256: "", transfer_maps_dashboards: false}` | 既存の個人の利用者の 1 回だけの手続き（下記） |
@@ -416,11 +418,17 @@ Zabbix の画面のログインを外部の SAML 2.0 IdP に任せ、パスワ�
         - {saml_group: admin, role: SSO admin, user_groups: [SSO admins]}
         - {saml_group: operator, role: SSO user, user_groups: [SSO operators]}
         - {saml_group: viewer, role: SSO user, user_groups: [SSO viewers]}
+    zabbix_web_saml_user_groups:
+      - {name: SSO admins, permission: read-write, hostgroups: all}
+      - {name: SSO operators, permission: read-write, hostgroups: all}
+      - {name: SSO viewers, permission: read, hostgroups: [Linux servers, Web servers]}
 ```
 
 - 役割の対応の例: IdP の `admin` → `SSO admin`（Admin role を複製し API を外したもの）、`operator` → `SSO user`
   （User role を複製し API を外したもの。ホストグループに読み書きの権限を持つグループ）、`viewer` → `SSO user`
-  （読み取りの権限だけのグループ）。権限はユーザーグループで決まるので、対応に書く役割とグループは事前に画面か API で作ってください。
+  （読み取りの権限だけのグループ）。権限はユーザーグループで決まります。役割は事前に画面か API で作ってください
+  （役割はこのロールでは作りません）。グループは `zabbix_web_saml_user_groups` に書けばロールが作って権限を揃えます。
+  書かないグループは事前に作ってください。
 - `autologout`: JIT で作られた利用者の既定は 15m です。ロールは実行のたびに SAML の userdirectory の利用者だけを
   この値へ揃えます（内部の利用者には触れません）。新しく JIT で作られた利用者は、次のロールの実行までは 15m のままです。
   JIT の利用者は API で利用者名・役割・グループ・パスワードを変えられないため、すぐ止めるには利用者の削除（下記）が要ります。
@@ -429,6 +437,49 @@ Zabbix の画面のログインを外部の SAML 2.0 IdP に任せ、パスワ�
   オン・オフを管理します（画面で SAML を有効にしていても、`zabbix_web_saml_enabled: false` なら無効にします）。
   無効に戻した実行では `zabbix.conf.php` から `$SSO` を外し、`/etc/zabbix/web/saml/`（証明書と SP の鍵）を消します。
   トークン無しで無効に戻したときは DB の SAML のスイッチを変えられないので、そのことを警告します。
+
+### ユーザーグループ（`zabbix_web_saml_user_groups`）
+
+JIT の対応に書くユーザーグループと、そのホストグループの権限をロールで収束させます。`zabbix_web_saml_enabled: true` と
+`zabbix_web_api_token` のある実行だけで使います（SAML が無効の実行と、初回の bootstrap では何もしません）。空（既定）なら
+ヘルパーはホストグループもユーザーグループの権限も読まず、結果にも何も足しません。
+
+| キー | 説明 |
+|---|---|
+| `name` | ユーザーグループの名前（1〜64 文字の印字可能 ASCII、前後に空白なし）。大小文字を区別せずに一意 |
+| `permission` | `read`（読み取り）か `read-write`（読み書き） |
+| `hostgroups` | `all` か、ホストグループの名前の一覧（1 件以上、重複なし、1〜255 文字の印字可能 ASCII） |
+
+- **扱うのは書いたグループだけです。** 書いていないグループは読みも変えもしません。グループを一覧から外しても、
+  そのグループと権限は残ります（消すときは画面か API で消してください）。
+- グループが無ければ作ります（画面のログインと状態は Zabbix の既定のまま）。あれば、ホストグループの権限
+  （`hostgroup_rights`）を**書いたとおりに**揃えます。書いていないホストグループの権限（拒否を含む）は外します。
+  テンプレートグループの権限・所属する利用者・画面のログインの設定は送らないので変わりません。
+  2 回目以降は差分が無ければ何も更新しません（結果の `user_groups_changed` は変えたグループの名前）。
+- **`all` は実行のたびの全ホストグループです。** 作成の時点ではなく、ロールを実行するたびにその時点のホストグループを
+  すべて読み、権限をそれに揃えます。ホストグループを足したら、次の実行で `all` のグループに権限が付きます。
+  サブグループを含める画面の指定（include subgroups）は使わず、1 件ずつ権限を持たせます。
+- 書いたホストグループの名前が無ければ、何も変えずに失敗します（大小文字を区別して比べます）。
+- 書けないグループ（大小文字を区別せずに比べます）: サービス用のグループ `AI support automation (API only)`、
+  JIT の `deprovisioned_group`、`Zabbix administrators`。
+- MySQL の照合順序などで、書いた名前と大小文字だけが違うグループが既にあれば、何も変えずに失敗します。
+- 順番: 読み取りの検査（ホストグループ・ユーザーグループの計画、役割・グループ・メディア種別の名前）をすべて
+  済ませてから、1 回だけの手続き → ユーザーグループの作成・更新 → userdirectory・`authentication` の収束、の順に変えます。
+  JIT の対応には、このロールがこの実行で作るグループの名前も書けます。
+- 役割（User role など）はこのロールでは作りも変えもしません。
+- SAML の `groups` に複数の対応が該当した利用者（例 `admin` と `viewer` の両方）は、該当したすべての対応の
+  ユーザーグループに入ることを想定しています。どの役割が付くかは Zabbix の仕様によります。このロールの試験は
+  偽の API で行っており、実際の Zabbix での複数該当の挙動はまだ確かめていません。複数の役割を同時に渡す運用では、
+  導入の前に検証用の Zabbix で、付く役割とユーザーグループを確かめてください。
+
+**初回の手順（既に画面や API で作ったグループがある場合）:**
+
+1. 今のグループの名前・ホストグループの権限を画面（Users → User groups → Host permissions）で確かめ、
+   同じ内容を `zabbix_web_saml_user_groups` に書きます（`all` は「その時点の全ホストグループ」になる点に注意）。
+2. ロールを実行し、結果の `user_groups_changed` が空であること（権限が変わらないこと）を確かめます。
+   空でなければ、そのグループの権限が書いた内容に変わったということです。意図どおりか画面で確かめてください。
+   変える前に差を見たいときは、検証用の環境で先に実行します。
+3. 以後、グループと権限の変更はレシピで行います（画面で変えても、次の実行で書いた内容に戻ります）。
 
 ### 導入の順番
 
@@ -688,7 +739,7 @@ python3 ansible/tests/test_zabbix_api.py -v
 ```
 
 SAML・API トークンのヘルパー（bootstrap、トークンでの実行、userdirectory・authentication の収束、手動の利用者の検査、
-1 回だけの手続きと DB の印、所有物、`Admin` の処置、版の下限）は `tests/test_zabbix_api_saml.py` で、同じ形の偽の
+1 回だけの手続きと DB の印、所有物、`Admin` の処置、版の下限、ユーザーグループの収束）は `tests/test_zabbix_api_saml.py` で、同じ形の偽の
 JSON-RPC サーバーに向けて試します。ロールの検査（先頭の assert）・SAML の版の下限・`zabbix.conf.php` と証明書の
 生成は `tests/test_zabbix_web_saml_role.py` が ansible-playbook で実際に評価します（パッケージ・サービスには触れません）。
 

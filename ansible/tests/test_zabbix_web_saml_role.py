@@ -28,6 +28,8 @@ CERT_A = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIU\nQUJDREVGRw==\n-----
 CERT_B = '-----BEGIN CERTIFICATE-----\nMIIBtDCCAVqgAwIBAgIU\n-----END CERTIFICATE-----'
 KEY = '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----\n'
 TOKEN = '0123456789abcdef' * 4
+USER_GROUPS = [{'name': 'SSO operators', 'permission': 'read-write', 'hostgroups': 'all'},
+               {'name': 'SSO viewers', 'permission': 'read', 'hostgroups': ['Linux servers', 'Web/Frontend']}]
 
 
 def sha(targets):
@@ -118,6 +120,8 @@ class SamlRoleTest(unittest.TestCase):
                         zabbix_web_admin_lockdown=True, zabbix_web_saml_idp_entityid='urn:example:idp',
                         zabbix_web_saml_public_url='https://zabbix.example.com:8443/zabbix/'),
                         accepted=True, os_version=os_version, version=version, legacy=legacy)
+                    self.validate(saml_vars(zabbix_web_saml_user_groups=USER_GROUPS), accepted=True,
+                                  os_version=os_version, version=version, legacy=legacy)
                     # The bootstrap run uses the Admin password instead of the token.
                     self.validate(saml_vars(zabbix_web_api_token='', zabbix_web_admin_password='Abcdefgh1'),
                                   accepted=True, os_version=os_version, version=version, legacy=legacy)
@@ -181,6 +185,36 @@ class SamlRoleTest(unittest.TestCase):
              'zabbix_web_saml_jit_check'),
             (saml_vars(zabbix_web_saml_jit=jit_with(saml_group='operator')), 'zabbix_web_saml_jit_check'),
             (saml_vars(zabbix_web_saml_jit=dict(jit_with(), deprovisioned_group='')), 'zabbix_web_saml_jit_check'),
+            (saml_vars(zabbix_web_saml_user_groups='all'), 'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups={'name': 'SSO viewers'}), 'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], extra=1)]), 'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[{'name': 'SSO viewers', 'permission': 'read'}]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], name='')]), 'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], name='a' * 65)]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], name='zabbix Administrators')]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], name='AI support automation (API only)')]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], name='saml Deprovisioned')]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[USER_GROUPS[0], dict(USER_GROUPS[1], name='sso Operators')]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], permission='write')]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], permission=3)]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], hostgroups='All')]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], hostgroups=[])]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], hostgroups=['Linux servers', 'Linux servers'])]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], hostgroups=[' Linux servers'])]),
+             'zabbix_web_saml_user_groups_check'),
+            (saml_vars(zabbix_web_saml_user_groups=[dict(USER_GROUPS[0], hostgroups=[1])]),
+             'zabbix_web_saml_user_groups_check'),
             ({'zabbix_web_saml_local_users': local}, "zabbix_web_saml_local_users.mode | default('') == '' or"),
             ({'zabbix_web_saml_local_users': 'delete'}, 'zabbix_web_saml_local_users is mapping'),
             (saml_vars(zabbix_web_saml_local_users=dict(local, mode='disable')),
@@ -390,7 +424,15 @@ class SamlRoleTest(unittest.TestCase):
                     self.assertIsNone(data['saml'])
                 else:
                     self.assertEqual(data['saml']['enabled'], expected)
+                    self.assertEqual(data['saml']['user_groups'], [])
                     self.assertNotIn('sp_private_key', str(data))
+            task['ansible.builtin.copy']['dest'] = str(Path(tmp) / 'groups.json')
+            variables = self.base_vars()
+            variables.update(saml_vars(zabbix_web_saml_user_groups=USER_GROUPS))
+            result = self.run_play(variables, [task])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            data = json.loads((Path(tmp) / 'groups.json').read_text())
+            self.assertEqual(data['saml']['user_groups'], USER_GROUPS)
 
 
 if __name__ == '__main__':

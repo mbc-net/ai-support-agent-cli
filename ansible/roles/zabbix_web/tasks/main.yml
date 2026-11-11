@@ -107,6 +107,7 @@
         and (zabbix_web_saml_autologout == '' or (zabbix_web_saml_autologout is match('^[0-9]{1,5}[smhd]?\Z')
         and zabbix_web_saml_autologout_seconds | int >= 90 and zabbix_web_saml_autologout_seconds | int <= 86400)))
       - not zabbix_web_saml_enabled or zabbix_web_saml_jit_check | trim == 'ok'
+      - not zabbix_web_saml_enabled or zabbix_web_saml_user_groups_check | trim == 'ok'
       - zabbix_web_saml_local_users is mapping
       - zabbix_web_saml_local_users.mode | default('') == '' or zabbix_web_saml_enabled
       - not zabbix_web_saml_enabled or zabbix_web_saml_local_users_check | trim == 'ok'
@@ -168,7 +169,10 @@
       unencrypted key; required when authn_requests or a logout signature is on), an empty or
       90s-1d zabbix_web_saml_autologout, and a valid zabbix_web_saml_jit (with JIT: attributes,
       a deprovisioned_group and at least one groups entry of saml_group without "*", a role that
-      is not Super admin role and user_groups). zabbix_web_saml_local_users is a mapping whose mode
+      is not Super admin role and user_groups). zabbix_web_saml_user_groups is a list of entries with
+      exactly name (a user group other than the API-only, deprovisioned or Zabbix administrators group;
+      unique ignoring case), permission (read or read-write) and hostgroups (all or a non-empty list of
+      unique host group names in printable ASCII). zabbix_web_saml_local_users is a mapping whose mode
       is empty, delete or scramble (only with SAML); a mode needs 1-200 unique targets (printable
       ASCII without spaces, max 100, not Admin or the service user) and expected_sha256 equal to
       the sha256 of the targets sorted by bytes and joined with newlines (see ZABBIX.md).
@@ -329,6 +333,39 @@
       {%-         set _ = out.append('jit.media') -%}
       {%-       endif -%}
       {%-     endfor -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ out | unique | join(',') or 'ok' }}
+    # 管理するユーザーグループ（files/zabbix_api.py の validate_user_groups と同じ規則）。保護するグループの名前と
+    # 重複は大小文字を区別せずに比べる（MySQL の照合順序では大小文字の違うグループに当たり得るため）。
+    zabbix_web_saml_user_groups_check: >-
+      {%- set out = [] -%}
+      {%- set groups = zabbix_web_saml_user_groups -%}
+      {%- set object_name = '^[\x21-\x7e]([\x20-\x7e]{0,62}[\x21-\x7e])?\Z' -%}
+      {%- set hostgroup_name = '^[\x21-\x7e]([\x20-\x7e]{0,253}[\x21-\x7e])?\Z' -%}
+      {%- set deprovisioned = zabbix_web_saml_jit.deprovisioned_group | default('') if zabbix_web_saml_jit is mapping else '' -%}
+      {%- set protected = ['ai support automation (api only)', 'zabbix administrators']
+                          + ([deprovisioned | lower] if deprovisioned is string and deprovisioned != '' else []) -%}
+      {%- if groups is string or groups is mapping or groups is not sequence -%}
+      {%-   set _ = out.append('user_groups') -%}
+      {%- else -%}
+      {%-   for entry in groups -%}
+      {%-     if entry is not mapping or entry | list | sort != ['hostgroups', 'name', 'permission'] -%}
+      {%-       set _ = out.append('user_groups') -%}
+      {%-     elif entry.name is not string or entry.name is not match(object_name) or entry.name | lower in protected -%}
+      {%-       set _ = out.append('user_groups.name') -%}
+      {%-     elif entry.permission is not string or entry.permission not in ['read', 'read-write'] -%}
+      {%-       set _ = out.append('user_groups.permission') -%}
+      {%-     elif entry.hostgroups is string and entry.hostgroups == 'all' -%}
+      {%-     elif entry.hostgroups is string or entry.hostgroups is mapping or entry.hostgroups is not sequence
+                or entry.hostgroups | length == 0 or entry.hostgroups | reject('string') | list | length > 0
+                or entry.hostgroups | reject('match', hostgroup_name) | list | length > 0
+                or entry.hostgroups | unique(case_sensitive=true) | list | length != entry.hostgroups | length -%}
+      {%-       set _ = out.append('user_groups.hostgroups') -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   if out | length == 0 and groups | map(attribute='name') | map('lower') | unique | list | length != groups | length -%}
+      {%-     set _ = out.append('user_groups.name') -%}
       {%-   endif -%}
       {%- endif -%}
       {{ out | unique | join(',') or 'ok' }}
