@@ -425,7 +425,12 @@ def validate_saml(saml, version):
         if seconds is None or not 90 <= seconds <= DAY:
             raise HelperError('saml autologout must be empty or a period between 90s and 1d.')
     jit = validate_jit(saml.get('jit', {}))
-    return dict(saml, slo_url=slo_url, sign=sign, autologout=autologout,
+    # SCIM on the SAML user directory: only for the MBC PULL sync (zabbix_mbc_pull.py), which changes JIT users
+    # through /api_scim.php because the JSON-RPC API refuses to change their role and groups.
+    scim = _boolean(saml.get('scim', False), 'saml scim must be a boolean.')
+    if scim and not jit['enabled']:
+        raise HelperError('saml scim (zabbix_web_mbc_pull) requires JIT provisioning.')
+    return dict(saml, slo_url=slo_url, sign=sign, autologout=autologout, scim=scim,
                 allow_legacy_users=saml.get('allow_legacy_users', False), jit=jit,
                 local_users=validate_local_users(saml.get('local_users', {})),
                 user_groups=validate_user_groups(saml.get('user_groups', []), jit))
@@ -946,6 +951,7 @@ def desired_userdirectory(client, token, saml, planned_groups=frozenset()):
         'sign_logout_responses': _flag(sign['logout_responses']),
         'encrypt_nameid': 0, 'encrypt_assertions': 0,
         'provision_status': _flag(jit['enabled']),
+        'scim_status': _flag(saml['scim']),
     }
     if not jit['enabled']:
         return fields, None, {}

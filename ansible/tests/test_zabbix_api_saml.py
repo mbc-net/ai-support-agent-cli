@@ -616,6 +616,27 @@ class SamlHelperTest(unittest.TestCase):
         self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config()))
         self.assertEqual(state.params_of('userdirectory.update')[-1]['nameid_format'], PERSISTENT)
 
+    def test_scim_is_off_by_default_and_follows_the_mbc_pull_switch(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config()))
+        self.assertEqual(state.params_of('userdirectory.create')[0]['scim_status'], 0)
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(scim=True)))
+        self.assertEqual(out['saml_changed'], ['userdirectory'])
+        self.assertEqual(state.params_of('userdirectory.update')[-1], {'userdirectoryid': state.directories[0]
+                                                                      ['userdirectoryid'], 'scim_status': 1})
+        state.calls.clear()
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(scim=True)))
+        self.assertEqual(self.writes(state), [])
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(scim=False)))
+        self.assertEqual(state.params_of('userdirectory.update')[-1]['scim_status'], 0)
+        for scim, jit in (('yes', None), (True, {'enabled': False})):
+            config = saml_config(scim=scim)
+            if jit is not None:
+                config['jit'] = jit
+            calls = len(state.calls)
+            self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=config), 'saml scim')
+            self.assertEqual(state.methods()[calls:], [])
+
     def test_super_admin_roles_are_never_mapped(self):
         state = FakeSaml(api_token=API_TOKEN)
         state.roles['9'] = {'roleid': '9', 'name': 'Custom root', 'type': '3'}
