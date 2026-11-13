@@ -548,6 +548,8 @@ class SamlRoleTest(unittest.TestCase):
         without = self.render_template('nginx.conf.j2', saml_vars())
         self.assertNotIn('api_scim', without)
         self.assertNotIn('\n\n', without.rstrip('\n'))
+        # Same bytes as before the sync existed (it ended with a blank line), so existing hosts see no change.
+        self.assertTrue(without.endswith('    }\n}\n\n'), repr(without[-12:]))
         enabled = self.render_template('nginx.conf.j2', self.pull_vars(scim_port=18090))
         main, scim = enabled[:enabled.index('# SCIM')], enabled[enabled.index('# SCIM'):]
         # The frontend server block (the one a reverse proxy forwards to) is unchanged and has no SCIM.

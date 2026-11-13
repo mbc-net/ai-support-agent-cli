@@ -22,6 +22,7 @@ server {
         fastcgi_read_timeout 300;
     }
 }
+
 {% if (zabbix_web_mbc_pull | default({})).enabled | default(false) %}
 # SCIM, used only by the MBC PULL sync (ai-support-zabbix-mbc-pull) on this host. A separate listener on
 # 127.0.0.1 only: a reverse proxy in front of the frontend port never reaches it (do not forward to this port).
