@@ -11,6 +11,7 @@ import base64
 import copy
 import hashlib
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -552,8 +553,15 @@ class SamlRoleTest(unittest.TestCase):
         self.assertTrue(without.endswith('    }\n}\n\n'), repr(without[-12:]))
         enabled = self.render_template('nginx.conf.j2', self.pull_vars(scim_port=18090))
         main, scim = enabled[:enabled.index('# SCIM')], enabled[enabled.index('# SCIM'):]
-        # The frontend server block (the one a reverse proxy forwards to) is unchanged and has no SCIM.
-        self.assertEqual(main.rstrip('\n'), without.rstrip('\n'))
+        # The frontend server block (the one a reverse proxy forwards to) only gains a 404 for /api_scim.php:
+        # Zabbix also reads the SCIM endpoint from a client "Path-Info" header, so with SCIM enabled the script
+        # itself must not be reachable there (found against a real Zabbix 7.0.32, ZABBIX-MBC-PULL-VALIDATION.md).
+        guard = ('    location = /api_scim.php {\n        return 404;\n    }\n')
+        self.assertIn(guard, main)
+        self.assertLess(main.index(guard), main.index('    location ~ \\.php$ {'))
+        self.assertEqual(re.sub(r'(?m)^    # .*\n', '', main.replace(guard, '')).rstrip('\n'), without.rstrip('\n'))
+        self.assertNotIn('fastcgi_split_path_info', main)
+        self.assertNotIn('PATH_INFO $fastcgi_path_info', main)
         self.assertIn('    listen 127.0.0.1:18090;\n', scim)
         self.assertEqual(scim.count('listen '), 1)
         self.assertIn('location ^~ /api_scim.php/ {\n        allow 127.0.0.1;\n        deny all;\n', scim)

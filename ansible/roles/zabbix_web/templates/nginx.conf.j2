@@ -14,6 +14,14 @@ server {
     location ~ /\. {
         deny all;
     }
+{% if (zabbix_web_mbc_pull | default({})).enabled | default(false) %}
+    # The MBC PULL sync enables SCIM, and Zabbix also takes the SCIM endpoint from a client "Path-Info"
+    # request header (CHttpRequest maps HTTP_PATH_INFO to PATH-INFO), so /api_scim.php itself is closed here;
+    # only the loopback SCIM server below serves it.
+    location = /api_scim.php {
+        return 404;
+    }
+{% endif %}
     location ~ \.php$ {
         try_files $uri =404;
         include fastcgi_params;

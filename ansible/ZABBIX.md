@@ -644,7 +644,8 @@ SAML では、IdP で外した利用の権限・役割は、その人が次に�
   （`/api_scim.php`。IdP が JIT の利用者を変えるための Zabbix の正規の経路）を使います。有効にすると、ロールは SAML の
   userdirectory の SCIM（`scim_status`）を有効にし、nginx の vhost に **SCIM だけの別の server**（`127.0.0.1:<scim_port>`
   だけで待ち受け、`/api_scim.php/` を `127.0.0.1` からだけ受け付ける）を足します。画面・API の server
-  （`zabbix_web_listen_port`）には SCIM を出しません。無効のときは足さず、vhost は従来と同じです。
+  （`zabbix_web_listen_port`）には SCIM を出しません（Zabbix は SCIM の endpoint を利用者が送る `Path-Info` の
+  要求ヘッダーからも読むため、その server では `/api_scim.php` 自体も 404 にします）。無効のときは足さず、vhost は従来と同じです。
   - **前段のリバースプロキシを `scim_port` へ転送しないでください。** nginx は送信元のアドレス（`127.0.0.1`）でしか
     区別できないため、同じホストのプロキシがこのポートへ転送すると、外からの要求も `127.0.0.1` からに見えます
     （SSH のポート転送も同じです）。画面のポートへの転送には SCIM が無いので影響しません。
