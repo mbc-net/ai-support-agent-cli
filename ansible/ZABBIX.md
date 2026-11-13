@@ -597,11 +597,18 @@ SAML では、IdP で外した利用の権限・役割は、その人が次に�
 - MBC 側でアプリの PULL が有効で、PULL の鍵（`<keyId>.<secret>`。`keyId` は `k` と 24 桁の 16 進、`secret` は 43 文字の
   base64url）を発行済みであること。サーバーから `sso.mbc-net.com` の `/pull/v1/applications/` へ HTTPS で届くこと
   （MBC 側の WAF の許可を含む）。
-- IdP がログインで `groups` の属性に送る役割の名前と、PULL の応答の `roles` が同じ名前であること（MBC SSO はそうなっています）。
+- **IdP と PULL の結果が一致すること（必須）:** Zabbix の SAML のログイン（`index_sso.php`）は SCIM の設定に関わらず、
+  ログインのたびにアサーションの `groups` から役割とグループを計算し直し、SCIM のグループの所属もアサーションの
+  `groups` で置き換えます（無効化用のグループにいる人も戻します）。そのため同期が正しく働くのは、IdP が
+  (1) ログインで `groups` に PULL の `roles` と同じ役割を送り、(2) PULL が返さない人（割り当ての無い人）のログインを
+  拒否する場合だけです。MBC SSO は、SAML の発行の条件と PULL の条件を同じ関数（`evaluateApplicationSubject`）で
+  決めているので、両方を満たします。満たさない IdP では、ログインのたびに同期の変更が元に戻り、次の周期で
+  同期がまた変える、を繰り返します（無効にした人がログインで戻る、役割が周期ごとに入れ替わる）。このときは
+  journal に「change(s) repeat a change applied in the last 24 hours」の警告と `reapplied` の件数が出ます。
 
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `zabbix_web_mbc_pull` | `{enabled: false, url: "", application_id: "", interval: 300}` | `enabled`（真偽値）、`url`（`https://sso.mbc-net.com` だけ。末尾 `/` は可）、`application_id`（MBC のアプリの ID。英小文字・数字・単独の `-`、英字で始まる 1〜40 文字）、`interval`（実行の間隔の秒。整数 120〜3600） |
+| `zabbix_web_mbc_pull` | `{enabled: false, url: "", application_id: "", interval: 300, scim_port: 18080}` | `enabled`（真偽値）、`url`（`https://sso.mbc-net.com` だけ。末尾 `/` は可）、`application_id`（MBC のアプリの ID。英小文字・数字・単独の `-`、英字で始まる 1〜40 文字）、`interval`（実行の間隔の秒。整数 120〜3600）、`scim_port`（SCIM 専用の `127.0.0.1` の待受のポート。整数 1024〜65535、`zabbix_web_listen_port` 以外で、ほかのサービスが使っていないもの） |
 | `zabbix_web_mbc_pull_key` | `""` | PULL の鍵。ANSIBLE# の秘匿変数で渡す（常に秘匿扱い）。`enabled: true` のとき必須 |
 
 ```yaml
@@ -610,6 +617,7 @@ SAML では、IdP で外した利用の権限・役割は、その人が次に�
       url: https://sso.mbc-net.com
       application_id: zabbix
       interval: 300
+      scim_port: 18080
     zabbix_web_mbc_pull_key: "{{ ZABBIX_MBC_PULL_KEY }}"
 ```
 
@@ -634,11 +642,22 @@ SAML では、IdP で外した利用の権限・役割は、その人が次に�
 - **書き込みの経路:** JIT の利用者の役割・グループは JSON-RPC の API（`user.update`）では変えられません
   （`cannot update readonly parameter "usrgrps" of provisioned user`）。そのため Zabbix 自身の SCIM の endpoint
   （`/api_scim.php`。IdP が JIT の利用者を変えるための Zabbix の正規の経路）を使います。有効にすると、ロールは SAML の
-  userdirectory の SCIM（`scim_status`）を有効にし、nginx の vhost に `/api_scim.php/` を **127.0.0.1 からだけ**受け付ける
-  location を足します（無効のときは足さず、vhost は従来と同じです）。SCIM の認証はサービス用の利用者の API トークンです。
+  userdirectory の SCIM（`scim_status`）を有効にし、nginx の vhost に **SCIM だけの別の server**（`127.0.0.1:<scim_port>`
+  だけで待ち受け、`/api_scim.php/` を `127.0.0.1` からだけ受け付ける）を足します。画面・API の server
+  （`zabbix_web_listen_port`）には SCIM を出しません。無効のときは足さず、vhost は従来と同じです。
+  - **前段のリバースプロキシを `scim_port` へ転送しないでください。** nginx は送信元のアドレス（`127.0.0.1`）でしか
+    区別できないため、同じホストのプロキシがこのポートへ転送すると、外からの要求も `127.0.0.1` からに見えます
+    （SSH のポート転送も同じです）。画面のポートへの転送には SCIM が無いので影響しません。
+  - SCIM は、Zabbix の**どの有効な API トークンでも**認証されます（権限は持ち主の利用者のもの。JIT の利用者を変えるには
+    Super admin が要る）。同期はサービス用の利用者（`ai-support-automation`、Super admin、画面は無効）のトークンを使います。
+    ほかに Super admin の利用者やトークンを作らないでください（break-glass 用の別のトークンも同じ利用者に作る）。
   役割は SCIM のグループ（名前は `saml_group`）の所属として送り、役割とグループは Zabbix が対応から計算します
-  （ログインと同じ計算）。所属を外すのを先、足すのを後にします（途中で失敗しても権限が増えたままにはならず、
-  一時的に無効化用のグループに入ることがあるだけです。次の周期で揃います）。
+  （ログインと同じ計算）。**所属を足すのを先、外すのを後**にします。役割が A から B へ変わる人は、2 つの要求の間だけ
+  A と B の両方を持ちます（外すのに失敗すれば次の周期まで）。逆の順では「役割なし」を経由し、Zabbix がその人を
+  無効化用のグループへ移して画面のセッションを切ってしまうためです。正常に終わった実行の後は、全員がちょうど
+  PULL の役割だけを持ちます。応答に無い人の無効化は、ほかの変更より先に行います。
+- 読んだ後・変える前に削除された利用者（SCIM の `PATCH /Users` が 404）は飛ばして件数（`vanished`）だけを出します。
+  それ以外の SCIM の失敗は、その時点で止めます（次の周期で続きから揃います）。
 - `zabbix_web_saml_jit.groups` の対応を変えた後、所属が変わらない人の役割・グループは同期では直さず、その人の次のログインで
   直ります（件数を `drift` として journal に警告します）。
 
@@ -661,21 +680,28 @@ SAML では、IdP で外した利用の権限・役割は、その人が次に�
 **確かめ方:** `systemctl list-timers ai-support-zabbix-mbc-pull.timer` と `journalctl -u ai-support-zabbix-mbc-pull`。
 各回の最後に件数だけの JSON を出します（`pull_users`・`managed`・`enabled`・`present`・`absent`・`deprovision`・`restore`・
 `role_changes`・`already_deprovisioned`・`protected`・`skipped_disabled`・`not_provisioned`・`unmapped_roles_only`・`drift`・
-`scim_writes`・`changed`、`applicationId`・`keyId`）。鍵・トークン・`Authorization`・利用者名・`subject`・利用者 ID は出しません。
+`reapplied`・`vanished`・`scim_writes`・`changed`、`applicationId`・`keyId`）。`reapplied` は、過去 24 時間に適用したのと
+同じ変更（同じ人の同じ無効化・所属の変更）をまた適用した件数で、0 でなければ上の「IdP と PULL の結果が一致すること」を
+満たしていない疑いがあります。判定には `/var/lib/ai-support-zabbix/mbc-pull.state`（root 0600。乱数の salt を付けた
+hash と時刻だけで、利用者名・利用者 ID は含まない）を使います。鍵・トークン・`Authorization`・利用者名・`subject`・利用者 ID は出しません。
 すぐ 1 回動かすときは `systemctl start ai-support-zabbix-mbc-pull.service`（鍵の頻度の制限に注意）。
 
 **ファイル:** `/usr/local/lib/ai-support-zabbix-mbc-pull.py`（root 0700。標準ライブラリだけで、JSON-RPC の client は
 `/usr/local/lib/ai-support-zabbix-api.py` のものを使う）、`/var/lib/ai-support-zabbix/mbc-pull.json`（設定。root 0600）、
 `/var/lib/ai-support-zabbix/mbc-pull.credentials`（PULL の鍵と `zabbix_web_api_token`。root 0600）、
+`/var/lib/ai-support-zabbix/mbc-pull.state`（上記。スクリプトが書く）、
 `/etc/systemd/system/ai-support-zabbix-mbc-pull.service`・`.timer`。service は root で動きますが、capability を持たず、
-ファイルシステムは読み取りだけです（`ProtectSystem=strict` など）。鍵とトークンは引数・環境変数に載せません。
+ファイルシステムは `/var/lib/ai-support-zabbix` 以外は読み取りだけです（`ProtectSystem=strict` など）。鍵とトークンは引数・環境変数に載せません。
 
 **鍵の入れ替え:** MBC の「PULLの鍵」で新しい鍵を発行 → 秘匿変数 `zabbix_web_mbc_pull_key` を替えてロールを実行 →
 journal で次の回が終了コード 0 で終わることを確かめる → 古い鍵を失効。`zabbix_web_api_token` を交換したときも、
 ロールを実行すれば鍵のファイルが新しいトークンに書き換わります。
 
-**無効に戻す:** `enabled: false` で実行すると、timer を止め、unit・スクリプト・設定と鍵のファイルを消し、SCIM を無効にし、
-vhost から `/api_scim.php/` を外します。同期で無効化用のグループへ移した利用者はそのままです（次のログインで戻ります）。
+**無効に戻す:** `enabled: false` で実行すると、timer を止め、unit・スクリプト・設定・鍵・状態のファイルを消し、SCIM を
+無効にし、vhost から SCIM の server を外します。SCIM を無効に戻すのは API なので、**この実行にも `zabbix_web_api_token`
+が要ります**（同期が入っているホストでトークンが空なら、ロールは何も変える前に失敗します）。`zabbix_web_saml_enabled:
+false` に戻したときも、ヘルパーは SCIM を無効にします。同期で無効化用のグループへ移した利用者はそのままです
+（次のログインで戻ります）。
 
 ### 利用者をすぐ止める（急ぐ失効）
 

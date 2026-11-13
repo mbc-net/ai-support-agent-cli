@@ -114,7 +114,7 @@
       # MBC SSO の割り当ての同期（ZABBIX.md「MBC SSO の割り当ての同期（PULL）」）。既定では無効で、すべて真になる。
       # 同じ規則を files/zabbix_mbc_pull.py にも持つ。origin は MBC SSO の 1 つだけ（スクリプトのリテラルと同じ）。
       - zabbix_web_mbc_pull is mapping
-      - zabbix_web_mbc_pull | list | difference(['enabled', 'url', 'application_id', 'interval']) | length == 0
+      - zabbix_web_mbc_pull | list | difference(['enabled', 'url', 'application_id', 'interval', 'scim_port']) | length == 0
       - zabbix_web_mbc_pull.enabled | default(false) is boolean
       - zabbix_web_mbc_pull_key is string
       - >-
@@ -135,6 +135,12 @@
         not zabbix_web_mbc_pull.enabled | default(false)
         or (zabbix_web_mbc_pull.interval | default(300) is integer and zabbix_web_mbc_pull.interval | default(300) is not boolean
         and zabbix_web_mbc_pull.interval | default(300) >= 120 and zabbix_web_mbc_pull.interval | default(300) <= 3600)
+      # SCIM は前段のプロキシが転送しない専用の 127.0.0.1 の待受で受ける（ZABBIX.md）。
+      - >-
+        not zabbix_web_mbc_pull.enabled | default(false)
+        or (zabbix_web_mbc_pull.scim_port | default(18080) is integer and zabbix_web_mbc_pull.scim_port | default(18080) is not boolean
+        and zabbix_web_mbc_pull.scim_port | default(18080) >= 1024 and zabbix_web_mbc_pull.scim_port | default(18080) <= 65535
+        and zabbix_web_mbc_pull.scim_port | default(18080) != zabbix_web_listen_port | int)
       # 計算は ZABBIX.md の手順と同じ（バイト順に並べて改行で結合、末尾の改行なし）。YAML の二重引用符の
       # \n は改行文字になる。対象は印字可能 ASCII に限っているので、大小文字を区別する並びがバイト順と一致する。
       - "not zabbix_web_saml_enabled or zabbix_web_saml_local_users.mode | default('') == ''
@@ -207,7 +213,8 @@
       zabbix_web_mbc_pull_key is a string; enabled needs zabbix_web_saml_enabled with JIT, zabbix_web_api_token,
       zabbix_web_type nginx, url https://sso.mbc-net.com, an application_id of 1-40 characters (a-z, 0-9 and
       single hyphens, starting with a letter), zabbix_web_mbc_pull_key of the form keyId.secret (k + 24 hex
-      characters, a dot, 43 base64url characters) and an integer interval of 120-3600 seconds.
+      characters, a dot, 43 base64url characters), an integer interval of 120-3600 seconds and an integer
+      scim_port of 1024-65535 other than zabbix_web_listen_port.
   # assert の that は式しか書けず、要素ごとの算術（ホストビットの判定）はループ構文が要るため
   # task vars で計算する。that の評価は先頭から順で最初の偽で止まり、task vars は参照時に
   # 評価されるので、ここへ届くのはリスト・文字列・アドレス形式の検証を通った値だけである。
@@ -441,6 +448,29 @@
       {%-   endif -%}
       {%- endif -%}
       {{ out | join(',') or 'ok' }}
+
+# MBC SSO の割り当ての同期を無効に戻す実行は、SAML の userdirectory の SCIM を API で無効に戻す（api.yml）。
+# zabbix_web_api_token が空だと戻せず SCIM が有効のまま残るので、同期が入っているホストでは何も変える前に止める。
+- name: "zabbix_web : Read whether the MBC PULL sync is installed"
+  ansible.builtin.stat:
+    path: /etc/systemd/system/ai-support-zabbix-mbc-pull.timer
+    get_checksum: false
+    get_mime: false
+  register: zabbix_web_mbc_pull_installed
+  when:
+    - not zabbix_web_mbc_pull.enabled
+    - zabbix_web_api_token | length == 0
+
+- name: "zabbix_web : Require the API token for the run that disables the MBC PULL sync"
+  ansible.builtin.fail:
+    msg: >-
+      The MBC PULL sync is installed on this host and zabbix_web_mbc_pull.enabled is false, but
+      zabbix_web_api_token is empty, so SCIM on the SAML user directory could not be switched off.
+      Nothing was changed. Keep zabbix_web_api_token set for the run that disables the sync.
+  when:
+    - not zabbix_web_mbc_pull.enabled
+    - zabbix_web_api_token | length == 0
+    - zabbix_web_mbc_pull_installed.stat.exists | default(false)
 
 - name: "zabbix_web : Read existing frontend and server package versions"
   ansible.builtin.command:

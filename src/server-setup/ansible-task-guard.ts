@@ -1193,8 +1193,9 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'zabbix_web_saml_sign_check',
   'zabbix_web_saml_token_file',
   'zabbix_web_saml_user_groups_check',
-  // zabbix_web の MBC SSO の割り当ての同期（tasks/mbc_pull.yml の register）。unit の変更・timer の有無・削除の
-  // 結果で、systemd の再読み込みと timer の再起動を決める。
+  // zabbix_web の MBC SSO の割り当ての同期（tasks/mbc_pull.yml と main.yml の register）。unit の変更・timer の有無・
+  // 削除の結果で、systemd の再読み込み・timer の再起動・トークン無しで無効に戻す実行の停止を決める。
+  'zabbix_web_mbc_pull_installed',
   'zabbix_web_mbc_pull_removed',
   'zabbix_web_mbc_pull_timer',
   'zabbix_web_mbc_pull_units',

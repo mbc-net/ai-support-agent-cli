@@ -6,8 +6,10 @@ from a systemd timer:
 
     ai-support-zabbix-mbc-pull.py <settings JSON> <credentials JSON>
 
-settings (root-only, 0600): port, server_name, version, url, application_id
+settings (root-only, 0600): port, scim_port, server_name, version, url, application_id
 credentials (root-only, 0600): pull_key (<keyId>.<secret>), zabbix_api_token (the service user's API token)
+state (mbc-pull.state next to the settings file, root-only, 0600, written by the script): salted hashes of the
+changes applied in the last 24 hours, to detect changes that something else (a SAML login) keeps undoing
 
 One run:
   1. GET <url>/pull/v1/applications/<application_id>/assignments. Anything but a well-formed 200 for this
@@ -21,17 +23,22 @@ One run:
      that is a saml_group of the JIT mapping; everybody else is "absent".
   4. Safety cap: if the run would deprovision every enabled managed user (also 1 of 1 and users: []), or more than
      half of them and more than one, nothing is changed.
-  5. Apply through Zabbix's own SCIM endpoint (/api_scim.php on the loopback vhost). The JSON-RPC API refuses to
+  5. Apply through Zabbix's own SCIM endpoint (/api_scim.php on a dedicated loopback-only listener, scim_port, that
+     a reverse proxy in front of the frontend port never forwards to). The JSON-RPC API refuses to
      change the role or the user groups of provisioned users, so the SCIM endpoint (the supported way for an IdP to
      change JIT users) is used; Zabbix then computes the user groups and the role from the JIT mapping exactly as on
      login:
        * absent and enabled -> PATCH /Users active=false (moved to the deprovisioned group, role removed; the user
          record, media and SCIM memberships stay)
        * present -> the SCIM group memberships of the mapped saml_group names are set to the user's roles
-         (removals first, then additions), which re-provisions the user from the mapping
+         (additions first, then removals, so that a role change never passes through "no role" = deprovisioned;
+         between the two steps the user holds the old and the new roles), which re-provisions the user from the
+         mapping
        * present and deprovisioned with unchanged memberships -> PATCH /Users active=true (Zabbix re-maps the
          stored memberships)
-  6. Verify by reading the users again.
+  6. Verify by reading the users again, and count the changes that repeat one applied in the last 24 hours
+     ("reapplied"): a SAML login recomputes the user's groups from the assertion, so repeats mean that the IdP sends
+     other roles than the PULL API or lets unassigned users in (see ZABBIX.md).
 
 Exit codes: 0 done (also "nothing to do"), 2 invalid input or a Zabbix error, 5 the PULL API did not return a
 usable response (nothing was changed), 6 the safety cap refused the run (nothing was changed).
@@ -42,13 +49,16 @@ identifier (username, subject or user ID): only counts, the applicationId and th
 Standard library only: the target host runs the distribution python3. The Zabbix JSON-RPC client is the one of
 the zabbix_web API helper (ai-support-zabbix-api.py), loaded from the same directory.
 """
+import hashlib
 import http.client
 import importlib.util
 import json
 import os
 import re
+import secrets
 import ssl
 import sys
+import time
 
 
 def _load_helper():
@@ -93,6 +103,8 @@ SCIM_USER_SCHEMA = 'urn:ietf:params:scim:schemas:core:2.0:User'
 SCIM_GROUP_SCHEMA = 'urn:ietf:params:scim:schemas:core:2.0:Group'
 SCIM_PATCH_SCHEMA = 'urn:ietf:params:scim:api:messages:2.0:PatchOp'
 SCIM_LIST_SCHEMA = 'urn:ietf:params:scim:api:messages:2.0:ListResponse'
+STATE_FILE = 'mbc-pull.state'
+STATE_WINDOW = 24 * 3600
 ID_PATTERN = re.compile(r'^[0-9]{1,20}\Z')
 
 USER_TYPE_SUPER_ADMIN = helper.USER_TYPE_SUPER_ADMIN
@@ -102,6 +114,10 @@ EXIT_OK = 0
 EXIT_ERROR = helper.EXIT_ERROR
 EXIT_PULL = 5
 EXIT_SAFETY = 6
+
+
+class UserVanished(Exception):
+    """SCIM PATCH /Users answered 404: the user was deleted (or left the SAML directory) after the read."""
 
 
 class PullUnavailable(HelperError):
@@ -117,13 +133,17 @@ def validate_input(settings, credentials):
     """Return the validated settings and secrets. Only field names are reported, never values."""
     if not isinstance(settings, dict) or not isinstance(credentials, dict):
         raise HelperError('Invalid input: the settings and credentials must be JSON objects.')
-    if set(settings) != {'port', 'server_name', 'version', 'url', 'application_id'}:
-        raise HelperError('Invalid input: settings need exactly port, server_name, version, url and application_id.')
+    if set(settings) != {'port', 'scim_port', 'server_name', 'version', 'url', 'application_id'}:
+        raise HelperError('Invalid input: settings need exactly port, scim_port, server_name, version, url and '
+                          'application_id.')
     if set(credentials) != {'pull_key', 'zabbix_api_token'}:
         raise HelperError('Invalid input: credentials need exactly pull_key and zabbix_api_token.')
-    port = settings['port']
-    if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
-        raise HelperError('Invalid input: port must be a TCP port.')
+    port, scim_port = settings['port'], settings['scim_port']
+    for value in (port, scim_port):
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 < value < 65536:
+            raise HelperError('Invalid input: port and scim_port must be TCP ports.')
+    if port == scim_port:
+        raise HelperError('Invalid input: scim_port must differ from port.')
     server_name = settings['server_name']
     if not isinstance(server_name, str) or not SERVER_NAME_PATTERN.match(server_name):
         raise HelperError('Invalid input: server_name must be a host name.')
@@ -146,8 +166,9 @@ def validate_input(settings, credentials):
     token = credentials['zabbix_api_token']
     if not isinstance(token, str) or not helper.API_TOKEN_PATTERN.match(token):
         raise HelperError('Invalid input: zabbix_api_token must be a Zabbix API token (64 hex characters).')
-    return {'port': port, 'server_name': server_name, 'version': settings['version'], 'host': match.group(1),
-            'application_id': application_id, 'pull_key': pull_key, 'key_id': key_match.group(1), 'token': token}
+    return {'port': port, 'scim_port': scim_port, 'server_name': server_name, 'version': settings['version'],
+            'host': match.group(1), 'application_id': application_id, 'pull_key': pull_key,
+            'key_id': key_match.group(1), 'token': token}
 
 
 # --- PULL API ------------------------------------------------------------------------------------
@@ -321,6 +342,8 @@ class Scim:
         finally:
             connection.close()
         # The error "detail" may quote user names; only the status is reported.
+        if status == 404 and method == 'PATCH' and resource == 'Users':
+            raise UserVanished()
         if status != 200:
             raise HelperError('Zabbix SCIM %s %s returned HTTP %d.' % (method, resource, status))
         if method != 'GET':
@@ -355,15 +378,21 @@ class Scim:
         return groups
 
     def set_active(self, userid, active):
-        self.call('PATCH', 'Users', userid, {'schemas': [SCIM_PATCH_SCHEMA],
-                                             'Operations': [{'op': 'replace', 'path': 'active', 'value': active}]})
+        """False when the user no longer exists (404); other errors raise."""
+        try:
+            self.call('PATCH', 'Users', userid, {'schemas': [SCIM_PATCH_SCHEMA],
+                                                 'Operations': [{'op': 'replace', 'path': 'active', 'value': active}]})
+        except UserVanished:
+            return False
+        return True
 
     def change_members(self, groupid, op, userids):
         self.call('PATCH', 'Groups', groupid, {'schemas': [SCIM_PATCH_SCHEMA], 'Operations': [
             {'op': op, 'path': 'members', 'value': [{'value': userid} for userid in sorted(userids)]}]})
 
     def create_group(self, name, members):
-        """members: [(userid, username)]. Only used for a name that GET Groups did not list."""
+        """members: [(userid, username)]. Only for a name GET Groups did not list: POST on an existing name would
+        replace all its members, so the caller re-reads the groups right before."""
         self.call('POST', 'Groups', None, {'schemas': [SCIM_GROUP_SCHEMA], 'displayName': name,
                                            'members': [{'value': u, 'display': n} for u, n in sorted(members)]})
 
@@ -441,19 +470,71 @@ def safety_cap_exceeded(enabled, to_disable):
     return to_disable >= enabled or (to_disable > 1 and to_disable * 2 > enabled)
 
 
-def apply_plan(scim, plan, scim_groups):
-    """Deprovision first (removes access), then membership removals, additions and restores."""
+def apply_plan(scim, plan, scim_groups, applied):
+    """Deprovision first (removes access), then membership additions, removals and restores.
+
+    Additions come before removals: a role change A -> B then passes through A+B (both roles, for the moment between
+    two requests, or until the next run if the removal fails) instead of through "no role", which Zabbix turns into
+    a deprovisioned user with ended sessions. At the end of a successful run every user holds exactly the PULL roles.
+    Every applied change is appended to ``applied`` (as an internal key with user IDs; never printed). Returns the
+    number of users that no longer exist (SCIM 404 on PATCH /Users), which are skipped.
+    """
+    vanished = 0
     for userid in plan['deprovision']:
-        scim.set_active(userid, False)
-    for name in sorted(plan['remove']):
-        scim.change_members(scim_groups[name][0], 'remove', plan['remove'][name])
+        if scim.set_active(userid, False):
+            applied.append('deprovision:%s' % userid)
+        else:
+            vanished += 1
     for name in sorted(plan['add']):
+        if name not in scim_groups:
+            scim_groups.update(scim.groups())
         if name in scim_groups:
             scim.change_members(scim_groups[name][0], 'add', plan['add'][name])
         else:
             scim.create_group(name, [(u, plan['usernames'][u]) for u in plan['add'][name]])
+        applied.extend('add:%s:%s' % (name, u) for u in plan['add'][name])
+    for name in sorted(plan['remove']):
+        scim.change_members(scim_groups[name][0], 'remove', plan['remove'][name])
+        applied.extend('remove:%s:%s' % (name, u) for u in plan['remove'][name])
     for userid in plan['restore']:
-        scim.set_active(userid, True)
+        if scim.set_active(userid, True):
+            applied.append('restore:%s' % userid)
+        else:
+            vanished += 1
+    return vanished
+
+
+def load_state(path):
+    """{'salt': str, 'applied': {hash: epoch}} from the state file; a fresh state when missing or unreadable."""
+    try:
+        with open(path, encoding='utf-8') as handle:
+            state = json.load(handle)
+        if isinstance(state, dict) and isinstance(state.get('salt'), str) and len(state['salt']) == 32 \
+                and isinstance(state.get('applied'), dict) \
+                and all(isinstance(v, int) and not isinstance(v, bool) for v in state['applied'].values()):
+            return state
+    except (OSError, ValueError):
+        pass
+    return {'salt': secrets.token_hex(16), 'applied': {}}
+
+
+def record_changes(path, state, applied, now):
+    """Count the changes that repeat one of the last 24 hours, then store this run's changes (hashes only)."""
+    recent = {h: t for h, t in state['applied'].items() if now - t < STATE_WINDOW}
+    hashes = {hashlib.sha256((state['salt'] + change).encode()).hexdigest() for change in applied}
+    reapplied = len(hashes & set(recent))
+    recent.update({h: now for h in hashes})
+    data = json.dumps({'salt': state['salt'], 'applied': recent}, sort_keys=True)
+    temporary = path + '.tmp'
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(data)
+        os.replace(temporary, path)
+        saved = True
+    except OSError:
+        saved = False
+    return reapplied, saved
 
 
 def verify(client, token, plan):
@@ -477,7 +558,7 @@ def verify(client, token, plan):
 
 # --- run -------------------------------------------------------------------------------------------
 
-def run(settings, credentials, redact, connect_pull=None, connect_scim=None):
+def run(settings, credentials, redact, connect_pull=None, connect_scim=None, state_path=None, now=None):
     """Returns (exit code, summary). The summary holds counts, applicationId and keyId only."""
     config = validate_input(settings, credentials)
     redact.add(config['pull_key'])
@@ -499,7 +580,7 @@ def run(settings, credentials, redact, connect_pull=None, connect_scim=None):
         raise HelperError('The Zabbix API token was rejected (expired, disabled or deleted): %s'
                           % client.describe(error))
     state = read_zabbix(client, token)
-    scim = Scim(config['port'], config['server_name'], token, connect_scim)
+    scim = Scim(config['scim_port'], config['server_name'], token, connect_scim)
     scim_groups = scim.groups()
     plan = plan_changes(assignments, state, scim_groups)
     counts = plan['counts']
@@ -512,13 +593,21 @@ def run(settings, credentials, redact, connect_pull=None, connect_scim=None):
                             'than half and more than one). Nothing was changed. Check the MBC application, its roles '
                             'and the JIT mapping.' % (len(plan['deprovision']), counts['enabled']))
         return EXIT_SAFETY, summary
+    applied = []
+    history = load_state(state_path) if state_path else None
     try:
-        apply_plan(scim, plan, scim_groups)
+        summary['vanished'] = apply_plan(scim, plan, scim_groups, applied)
     except HelperError as failure:
+        if history is not None:
+            record_changes(state_path, history, applied, int(now or time.time()))
         raise HelperError('%s (%d SCIM change(s) were applied before the failure; the next run continues).'
                           % (failure, scim.writes)) from None
     summary['scim_writes'] = scim.writes
     summary['changed'] = scim.writes > 0
+    if history is not None:
+        summary['reapplied'], saved = record_changes(state_path, history, applied, int(now or time.time()))
+        if not saved:
+            summary['warning'] = 'Could not write the state file; repeated changes are not detected.'
     still_enabled, still_disabled, drift = verify(client, token, plan)
     summary['drift'] = drift
     if still_enabled or still_disabled:
@@ -541,7 +630,8 @@ def main(argv):
     try:
         if len(argv) != 3:
             raise HelperError('Usage: ai-support-zabbix-mbc-pull.py <settings JSON> <credentials JSON>')
-        code, summary = run(read_json(argv[1], 'settings'), read_json(argv[2], 'credentials'), redact)
+        code, summary = run(read_json(argv[1], 'settings'), read_json(argv[2], 'credentials'), redact,
+                            state_path=os.path.join(os.path.dirname(os.path.abspath(argv[1])), STATE_FILE))
     except HelperError as error:
         print(redact(str(error)), file=sys.stderr)
         return error.code
@@ -550,6 +640,16 @@ def main(argv):
         return EXIT_ERROR
     if 'error' in summary:
         print(redact(summary['error']), file=sys.stderr)
+    if summary.get('warning'):
+        print(summary['warning'], file=sys.stderr)
+    if summary.get('reapplied'):
+        print('%d change(s) repeat a change applied in the last 24 hours: something else undoes them, usually a SAML '
+              'login whose groups differ from the PULL roles or of a user the PULL API does not list. Check that the '
+              'IdP sends the PULL roles and refuses unassigned users (ZABBIX.md).' % summary['reapplied'],
+              file=sys.stderr)
+    if summary.get('vanished'):
+        print('%d user(s) were deleted while the run was in progress and were skipped.' % summary['vanished'],
+              file=sys.stderr)
     if summary.get('drift'):
         print('%d present user(s) do not have the role and user groups of their JIT mapping (for example after the '
               'mapping was changed); Zabbix corrects them at their next login.' % summary['drift'], file=sys.stderr)

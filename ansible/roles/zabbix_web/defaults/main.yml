@@ -130,7 +130,9 @@ zabbix_web_saml_local_users: {mode: "", targets: [], expected_sha256: "", transf
 # グループを揃え、応答に無い利用者を無効化用のグループへ移す（削除はしない）。zabbix_web_saml_enabled・
 # JIT・zabbix_web_api_token・zabbix_web_type: nginx が必須。SAML の userdirectory の SCIM を有効にする。
 # キーは enabled（boolean）, url（MBC SSO の origin。ZABBIX.md）, application_id（MBC のアプリの ID）,
-# interval（120〜3600 秒）。false に戻すと timer・スクリプト・設定と鍵のファイルを消し、SCIM を無効にする。
-zabbix_web_mbc_pull: {enabled: false, url: "", application_id: "", interval: 300}
+# interval（120〜3600 秒）, scim_port（SCIM 専用の 127.0.0.1 の待受。1024〜65535、zabbix_web_listen_port 以外。
+# 前段のリバースプロキシをこのポートへ転送しないこと）。false に戻すと timer・スクリプト・設定・鍵・状態の
+# ファイルを消し、SCIM を無効にする（その実行にも zabbix_web_api_token が要る）。
+zabbix_web_mbc_pull: {enabled: false, url: "", application_id: "", interval: 300, scim_port: 18080}
 # PULL の鍵（<keyId>.<secret>）。ANSIBLE# の秘匿変数で渡すこと。root 専用（0600）のファイルにだけ書く。
 zabbix_web_mbc_pull_key: ""

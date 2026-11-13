@@ -629,6 +629,15 @@ class SamlHelperTest(unittest.TestCase):
         self.assertEqual(self.writes(state), [])
         self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(scim=False)))
         self.assertEqual(state.params_of('userdirectory.update')[-1]['scim_status'], 0)
+        # Disabling SAML (with the sync) also switches SCIM off.
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(scim=True)))
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml={'enabled': False}))
+        self.assertEqual(out['saml_changed'], ['userdirectory', 'authentication'])
+        self.assertEqual(state.directories[0]['scim_status'], '0')
+        state.calls.clear()
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml={'enabled': False}))
+        self.assertEqual(out['saml_changed'], [])
+        self.assertEqual(self.writes(state), [])
         for scim, jit in (('yes', None), (True, {'enabled': False})):
             config = saml_config(scim=scim)
             if jit is not None:

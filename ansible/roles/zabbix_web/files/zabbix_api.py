@@ -1269,13 +1269,20 @@ def converge_autologout(client, token, userdirectoryid, autologout):
 
 
 def disable_saml(client, token):
+    changed = []
+    # SCIM (the MBC PULL sync) is switched off with SAML: it would otherwise stay usable on the user directory.
+    for row in client.require_list('userdirectory.get', {'output': ['userdirectoryid', 'scim_status'],
+                                                         'filter': {'idp_type': IDP_TYPE_SAML}}, token):
+        if str(row.get('scim_status')) == '1':
+            client.require('userdirectory.update', {'userdirectoryid': row['userdirectoryid'], 'scim_status': 0}, token)
+            changed.append('userdirectory')
     auth = client.require('authentication.get', {'output': ['saml_auth_enabled']}, token)
     if not isinstance(auth, dict):
         raise HelperError('Zabbix API authentication.get returned an unexpected result.')
-    if str(auth.get('saml_auth_enabled')) == '0':
-        return {'saml_changed': []}
-    client.require('authentication.update', {'saml_auth_enabled': 0}, token)
-    return {'saml_changed': ['authentication']}
+    if str(auth.get('saml_auth_enabled')) != '0':
+        client.require('authentication.update', {'saml_auth_enabled': 0}, token)
+        changed.append('authentication')
+    return {'saml_changed': changed}
 
 
 def run(config, redact):

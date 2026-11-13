@@ -14,8 +14,21 @@ server {
     location ~ /\. {
         deny all;
     }
+    location ~ \.php$ {
+        try_files $uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_pass unix:/run/php/ai-support-zabbix.sock;
+        fastcgi_read_timeout 300;
+    }
+}
 {% if (zabbix_web_mbc_pull | default({})).enabled | default(false) %}
-    # SCIM, used only by the MBC PULL sync (ai-support-zabbix-mbc-pull) on this host. Loopback only.
+# SCIM, used only by the MBC PULL sync (ai-support-zabbix-mbc-pull) on this host. A separate listener on
+# 127.0.0.1 only: a reverse proxy in front of the frontend port never reaches it (do not forward to this port).
+server {
+    listen 127.0.0.1:{{ zabbix_web_mbc_pull.scim_port | int }};
+    server_name {{ zabbix_web_server_name }};
+    root {{ zabbix_web_ui_root }};
     location ^~ /api_scim.php/ {
         allow 127.0.0.1;
         deny all;
@@ -25,13 +38,8 @@ server {
         fastcgi_param PATH_INFO $fastcgi_path_info;
         fastcgi_pass unix:/run/php/ai-support-zabbix.sock;
     }
-{% endif %}
-    location ~ \.php$ {
-        try_files $uri =404;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        fastcgi_pass unix:/run/php/ai-support-zabbix.sock;
-        fastcgi_read_timeout 300;
+    location / {
+        return 404;
     }
 }
-
+{% endif %}

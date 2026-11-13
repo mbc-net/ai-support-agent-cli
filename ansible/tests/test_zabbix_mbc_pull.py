@@ -68,6 +68,7 @@ class FakeMbc(FakeSaml):
         self.scim_groups = {}
         self.scim_calls = []
         self.scim_fail = {}
+        self.scim_vanish = set()
 
     # --- fixtures -------------------------------------------------------------------------
 
@@ -142,6 +143,9 @@ class FakeMbc(FakeSaml):
                                         'members': [{'value': u, 'display': self.users[u]['username']}
                                                     for u in sorted(g['members'])]}
                                        for gid, g in self.scim_groups.items()]}
+        if (method, resource) == ('PATCH', 'Users') and ident in self.scim_vanish:
+            self.users.pop(ident, None)
+            return 404, {'detail': 'No permissions to referred object or it does not exist!'}
         if (method, resource) == ('PATCH', 'Users'):
             if ident not in saml_users or body.get('schemas') != [PATCH]:
                 return 404, {'detail': 'No permissions to referred object or it does not exist!'}
@@ -181,9 +185,9 @@ class FakeMbc(FakeSaml):
 
 
 class MbcServer:
-    """JSON-RPC on /api_jsonrpc.php and SCIM on /api_scim.php/... on 127.0.0.1."""
+    """JSON-RPC on /api_jsonrpc.php (the frontend port) or SCIM on /api_scim.php/... (the SCIM port) on 127.0.0.1."""
 
-    def __init__(self, state):
+    def __init__(self, state, scim=False):
         class Handler(BaseHTTPRequestHandler):
             def dispatch(handler):  # noqa: N805
                 length = int(handler.headers.get('Content-Length', 0) or 0)
@@ -191,11 +195,11 @@ class MbcServer:
                 body = json.loads(raw) if raw else None
                 path = urlsplit(handler.path).path
                 with state.lock:
-                    if path == '/api_jsonrpc.php' and handler.command == 'POST':
+                    if path == '/api_jsonrpc.php' and handler.command == 'POST' and not scim:
                         reply = state.handle(body, handler.headers)
                         reply.update(jsonrpc='2.0', id=body.get('id'))
                         code = 200
-                    elif path.startswith('/api_scim.php/'):
+                    elif path.startswith('/api_scim.php/') and scim:
                         code, reply = state.scim(handler.command, path, body, handler.headers)
                     else:
                         code, reply = 404, {}
@@ -259,9 +263,14 @@ class FakePull:
 
 
 class PullSyncTest(unittest.TestCase):
-    def settings(self, port, **overrides):
-        settings = {'port': port, 'server_name': SERVER_NAME, 'version': '7.0', 'url': 'https://sso.mbc-net.com',
-                    'application_id': APP}
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state_file = os.path.join(self.tmp.name, 'mbc-pull.state')
+
+    def settings(self, port, scim_port=None, **overrides):
+        settings = {'port': port, 'scim_port': scim_port or port + 1, 'server_name': SERVER_NAME, 'version': '7.0',
+                    'url': 'https://sso.mbc-net.com', 'application_id': APP}
         settings.update(overrides)
         return settings
 
@@ -273,9 +282,10 @@ class PullSyncTest(unittest.TestCase):
     def sync(self, state, fake, settings=None, credentials=None):
         """Run main() in-process; returns (exit code, summary or None, stdout + stderr)."""
         out, err = io.StringIO(), io.StringIO()
-        with MbcServer(state) as server, tempfile.TemporaryDirectory() as directory:
+        directory = self.tmp.name
+        with MbcServer(state) as server, MbcServer(state, scim=True) as scim_server:
             paths = []
-            for name, data in (('settings.json', settings or self.settings(server.port)),
+            for name, data in (('settings.json', settings or self.settings(server.port, scim_server.port)),
                                ('credentials.json', credentials or self.credentials())):
                 path = os.path.join(directory, name)
                 with open(path, 'w', encoding='utf-8') as handle:
@@ -355,16 +365,103 @@ class PullSyncTest(unittest.TestCase):
         self.assertFalse(summary['changed'])
         self.assertEqual(summary['already_deprovisioned'], 1)
 
-    def test_role_change_removes_before_adding(self):
+    def test_role_change_adds_before_removing_and_never_deprovisions(self):
         state = FakeMbc()
         userid = state.add_jit(subject('alice'), ['operator'])
         users = self.team(state)
         users[subject('alice')] = ['viewer']
+        seen = []
+        original = state.provision
+        state.provision = lambda u: (original(u), seen.append(state.user(u)) if u == userid else None)
         code, _, _ = self.sync(state, FakePull(users))
         self.assertEqual(code, 0)
         ops = [(c['body']['Operations'][0]['op'], state.scim_groups[c['id']]['name']) for c in state.scim_writes()]
-        self.assertEqual(ops, [('remove', 'operator'), ('add', 'viewer')])
+        self.assertEqual(ops, [('add', 'viewer'), ('remove', 'operator')])
+        # In between the user holds both roles, never "no role" (deprovisioned, sessions ended).
+        self.assertEqual(seen, [('5', ['12', '13']), ('5', ['13'])])
         self.assertEqual(state.user(userid), ('5', ['13']))
+
+    def test_a_failing_addition_leaves_the_user_with_the_old_role(self):
+        state = FakeMbc()
+        userid = state.add_jit(subject('alice'), ['operator'])
+        users = self.team(state)
+        users[subject('alice')] = ['viewer']
+        state.scim_fail[('PATCH', 'Groups')] = 1
+        code, _, output = self.sync(state, FakePull(users))
+        self.assertEqual(code, 2)
+        self.assertIn('0 SCIM change(s) were applied', output)
+        self.assertEqual(state.user(userid), ('5', ['12']))
+        # The next run finishes the change.
+        code, _, _ = self.sync(state, FakePull(users))
+        self.assertEqual(code, 0)
+        self.assertEqual(state.user(userid), ('5', ['13']))
+
+    def test_changes_undone_by_logins_are_reported_as_reapplied(self):
+        state = FakeMbc()
+        leaver = state.add_jit(subject('bob'), ['viewer'])
+        users = self.team(state)
+        code, summary, _ = self.sync(state, FakePull(users))
+        self.assertEqual((code, summary['deprovision'], summary['reapplied']), (0, 1, 0))
+        self.assertEqual(os.stat(self.state_file).st_mode & 0o777, 0o600)
+        with open(self.state_file, encoding='utf-8') as handle:
+            text = handle.read()
+        self.assertNotIn('bob', text)
+        self.assertNotIn('"%s"' % leaver, text)
+        # A steady state repeats nothing.
+        code, summary, output = self.sync(state, FakePull(users))
+        self.assertEqual((code, summary['reapplied']), (0, 0))
+        self.assertNotIn('repeat', output)
+        # A SAML login of the unassigned user re-provisions them from the assertion; the next run repeats.
+        state.provision(leaver)
+        code, summary, output = self.sync(state, FakePull(users))
+        self.assertEqual((code, summary['deprovision'], summary['reapplied']), (0, 1, 1))
+        self.assertIn('1 change(s) repeat a change applied in the last 24 hours', output)
+        # Older than 24 hours: not a repeat.
+        load, record = pull.load_state, pull.record_changes
+        history = load(self.state_file)
+        self.assertEqual(record(self.state_file, history, ['deprovision:%s' % leaver],
+                                max(history['applied'].values()) + 24 * 3600)[0], 0)
+        self.assertEqual(load(os.path.join(self.tmp.name, 'missing'))['applied'], {})
+
+    def test_an_unwritable_state_file_only_warns(self):
+        state = FakeMbc()
+        state.add_jit(subject('bob'), ['viewer'])
+        os.mkdir(self.state_file + '.tmp')
+        code, summary, output = self.sync(state, FakePull(self.team(state)))
+        self.assertEqual(code, 0)
+        self.assertEqual(summary['deprovision'], 1)
+        self.assertIn('Could not write the state file', output)
+
+    def test_users_deleted_during_the_run_are_skipped(self):
+        state = FakeMbc()
+        gone = state.add_jit(subject('bob'), ['viewer'])
+        users = self.team(state)
+        state.scim_vanish.add(gone)
+        code, summary, output = self.sync(state, FakePull(users))
+        self.assertEqual(code, 0, output)
+        self.assertEqual(summary['vanished'], 1)
+        self.assertIn('deleted while the run was in progress', output)
+
+    def test_a_group_created_after_the_read_is_patched_not_replaced(self):
+        class Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def groups(self):
+                return {'operator': ('77', {'9'})}
+
+            def change_members(self, groupid, op, userids):
+                self.calls.append(('patch', groupid, op, sorted(userids)))
+
+            def create_group(self, name, members):
+                self.calls.append(('post', name))
+
+        scim = Recorder()
+        plan = {'deprovision': [], 'restore': [], 'remove': {}, 'add': {'operator': {'5'}}, 'usernames': {'5': 'x'}}
+        applied = []
+        self.assertEqual(pull.apply_plan(scim, plan, {}, applied), 0)
+        self.assertEqual(scim.calls, [('patch', '77', 'add', ['5'])])
+        self.assertEqual(applied, ['add:operator:5'])
 
     def test_several_roles_get_every_mapped_group_and_the_highest_role(self):
         state = FakeMbc()
@@ -611,7 +708,8 @@ class PullSyncTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIsNone(summary)
         self.assertIn('Zabbix SCIM PATCH Groups returned HTTP 500', output)
-        self.assertIn('1 SCIM change(s) were applied', output)
+        # Deprovisioning alice and creating the admin SCIM group (POST) succeeded; removing bob from operator failed.
+        self.assertIn('2 SCIM change(s) were applied', output)
         self.assertNotIn('Injected failure', output)
 
     def test_a_rejected_zabbix_token_fails_before_scim(self):
@@ -638,6 +736,8 @@ class PullSyncTest(unittest.TestCase):
             ({'port': True}, {}),
             ({'server_name': 'bad name'}, {}),
             ({'extra': 1}, {}),
+            ({'scim_port': 1}, {}),
+            ({'scim_port': 0}, {}),
             ({}, {'pull_key': 'k123.' + 'x' * 43}),
             ({}, {'pull_key': KEY_ID + '.' + 'x' * 42}),
             ({}, {'pull_key': KEY_ID.upper() + '.' + SECRET}),

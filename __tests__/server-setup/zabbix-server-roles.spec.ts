@@ -575,11 +575,11 @@ describe('Zabbix server and web roles', () => {
       load(readFileSync(path.join(roleDir, 'zabbix_web/tasks', file), 'utf8')) as Task[]
     const flatten = (tasks: Task[]): Task[] =>
       tasks.flatMap((t) => [t, ...['block', 'rescue', 'always'].flatMap((k) => (Array.isArray(t[k]) ? flatten(t[k]) : []))])
-    const internalNames = ['zabbix_web_mbc_pull_removed', 'zabbix_web_mbc_pull_timer', 'zabbix_web_mbc_pull_units']
+    const internalNames = ['zabbix_web_mbc_pull_installed', 'zabbix_web_mbc_pull_removed', 'zabbix_web_mbc_pull_timer', 'zabbix_web_mbc_pull_units']
 
     it('公開変数は既定で無効・空で、レシピの include_role で渡せ、鍵は常に秘匿扱い', () => {
       const d = load(readFileSync(path.join(roleDir, 'zabbix_web/defaults/main.yml'), 'utf8')) as Record<string, unknown>
-      expect(d.zabbix_web_mbc_pull).toEqual({ enabled: false, url: '', application_id: '', interval: 300 })
+      expect(d.zabbix_web_mbc_pull).toEqual({ enabled: false, url: '', application_id: '', interval: 300, scim_port: 18080 })
       expect(d.zabbix_web_mbc_pull_key).toBe('')
       for (const name of ['zabbix_web_mbc_pull', 'zabbix_web_mbc_pull_key']) expect(INCLUDE_ROLE_ALLOWED_VARS.zabbix_web.has(name)).toBe(true)
       const result = validate(dump([{ 'ansible.builtin.debug': { msg: '{{ zabbix_web_mbc_pull_key }}' } }]), opts)
@@ -594,7 +594,8 @@ describe('Zabbix server and web roles', () => {
     })
 
     it('ロール内の register は一覧と一致し、include は api.yml の後で条件なし', () => {
-      const names = flatten(loadTasks('mbc_pull.yml')).map((t) => t.register).filter((r) => typeof r === 'string')
+      const names = flatten([...loadTasks('mbc_pull.yml'), ...loadTasks()]).map((t) => t.register)
+        .filter((r) => typeof r === 'string' && r.startsWith('zabbix_web_mbc_pull_'))
       expect([...new Set(names)].sort()).toEqual([...internalNames].sort())
       const tasks = loadTasks()
       const apiIdx = tasks.findIndex((t) => t['ansible.builtin.include_tasks'] === 'api.yml')
