@@ -1,0 +1,14 @@
+# Managed by ai-support-agent (zabbix_web role). MBC SSO PULL assignment sync; see ansible/ZABBIX.md.
+# The PULL API allows 6 requests per minute per key and serves one request at a time: every run is
+# delayed by a fresh random 0-60 s so that hosts and applications do not hit it at the same moment.
+[Unit]
+Description=Run the MBC SSO PULL assignment sync every {{ zabbix_web_mbc_pull.interval | int }} seconds
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec={{ zabbix_web_mbc_pull.interval | int }}s
+RandomizedDelaySec=60
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

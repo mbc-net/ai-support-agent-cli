@@ -542,6 +542,8 @@ describe('Zabbix server and web roles', () => {
         'zabbix_web_saml_local_users is mapping',
         "zabbix_web_saml_local_users.mode | default('') == '' or zabbix_web_saml_enabled",
         'not zabbix_web_admin_lockdown or (zabbix_web_api_token | length > 0 and zabbix_web_saml_enabled)',
+        // The MBC PULL sync requires SAML with JIT (its own switch short-circuits it).
+        "not zabbix_web_mbc_pull.enabled | default(false) or (zabbix_web_saml_enabled and zabbix_web_saml_jit.enabled | default(false) is true)",
       ]
       const samlConditions = args.that.filter((c) => c.includes('zabbix_web_saml_') && !always.includes(c))
       expect(samlConditions.length).toBeGreaterThan(15)
@@ -563,6 +565,56 @@ describe('Zabbix server and web roles', () => {
       expect(JSON.stringify(run)).not.toContain('api_token')
       const dir = api.find((t) => /private state directory/.test(t.name ?? '')) as Task
       expect(dir['ansible.builtin.file']).toMatchObject({ path: '/var/lib/ai-support-zabbix', owner: 'root', group: 'root', mode: '0700' })
+    })
+  })
+
+  describe('MBC SSO の割り当ての同期（ansible/ZABBIX.md「MBC SSO の割り当ての同期（PULL）」）', () => {
+    type Task = Record<string, any>
+    const opts = { mode: 'resident', targetOs: 'linux' } as const
+    const loadTasks = (file = 'main.yml'): Task[] =>
+      load(readFileSync(path.join(roleDir, 'zabbix_web/tasks', file), 'utf8')) as Task[]
+    const flatten = (tasks: Task[]): Task[] =>
+      tasks.flatMap((t) => [t, ...['block', 'rescue', 'always'].flatMap((k) => (Array.isArray(t[k]) ? flatten(t[k]) : []))])
+    const internalNames = ['zabbix_web_mbc_pull_removed', 'zabbix_web_mbc_pull_timer', 'zabbix_web_mbc_pull_units']
+
+    it('公開変数は既定で無効・空で、レシピの include_role で渡せ、鍵は常に秘匿扱い', () => {
+      const d = load(readFileSync(path.join(roleDir, 'zabbix_web/defaults/main.yml'), 'utf8')) as Record<string, unknown>
+      expect(d.zabbix_web_mbc_pull).toEqual({ enabled: false, url: '', application_id: '', interval: 300 })
+      expect(d.zabbix_web_mbc_pull_key).toBe('')
+      for (const name of ['zabbix_web_mbc_pull', 'zabbix_web_mbc_pull_key']) expect(INCLUDE_ROLE_ALLOWED_VARS.zabbix_web.has(name)).toBe(true)
+      const result = validate(dump([{ 'ansible.builtin.debug': { msg: '{{ zabbix_web_mbc_pull_key }}' } }]), opts)
+      expect(result.ok).toBe(true)
+      expect((result.normalizedTasks?.[0] as Task).no_log).toBe(true)
+    })
+
+    it.each(internalNames)('%s はレシピから上書き・参照・書き込みできない', (name) => {
+      expect(validateAnsibleTasks([{ 'ansible.builtin.include_role': { name: 'zabbix_web' }, vars: { [name]: 'ok' } }], opts).ok).toBe(false)
+      expect(validateAnsibleTasks([{ 'ansible.builtin.debug': { msg: `{{ ${name} }}` } }], opts).ok).toBe(false)
+      expect(validateAnsibleTasks([{ 'ansible.builtin.command': 'true', register: name }], opts).ok).toBe(false)
+    })
+
+    it('ロール内の register は一覧と一致し、include は api.yml の後で条件なし', () => {
+      const names = flatten(loadTasks('mbc_pull.yml')).map((t) => t.register).filter((r) => typeof r === 'string')
+      expect([...new Set(names)].sort()).toEqual([...internalNames].sort())
+      const tasks = loadTasks()
+      const apiIdx = tasks.findIndex((t) => t['ansible.builtin.include_tasks'] === 'api.yml')
+      const pullIdx = tasks.findIndex((t) => t['ansible.builtin.include_tasks'] === 'mbc_pull.yml')
+      expect(pullIdx).toBeGreaterThan(apiIdx)
+      expect(tasks[pullIdx].when).toBeUndefined()
+    })
+
+    it('鍵とトークンは root 0600 のファイルにだけ書き（copy の content は伏字化される）、unit の引数・環境変数に載せない', () => {
+      const tasks = flatten(loadTasks('mbc_pull.yml'))
+      const credentials = tasks.find((t) => t['ansible.builtin.copy']?.dest === '/var/lib/ai-support-zabbix/mbc-pull.credentials') as Task
+      expect(credentials['ansible.builtin.copy']).toMatchObject({ owner: 'root', group: 'root', mode: '0600' })
+      expect(credentials.no_log).toBeUndefined()
+      expect(credentials.diff).toBe(false)
+      expect(credentials['ansible.builtin.copy'].content).toContain('zabbix_web_mbc_pull_key')
+      for (const t of tasks.filter((x) => x !== credentials && !Array.isArray(x.block))) expect(JSON.stringify(t)).not.toMatch(/mbc_pull_key|api_token/)
+      const unit = readFileSync(path.join(roleDir, 'zabbix_web/templates/mbc-pull.service.j2'), 'utf8')
+      expect(unit).not.toMatch(/\{\{|^Restart=/m)
+      const timer = readFileSync(path.join(roleDir, 'zabbix_web/templates/mbc-pull.timer.j2'), 'utf8')
+      expect(timer).toContain('RandomizedDelaySec=60')
     })
   })
 

@@ -14,6 +14,18 @@ server {
     location ~ /\. {
         deny all;
     }
+{% if (zabbix_web_mbc_pull | default({})).enabled | default(false) %}
+    # SCIM, used only by the MBC PULL sync (ai-support-zabbix-mbc-pull) on this host. Loopback only.
+    location ^~ /api_scim.php/ {
+        allow 127.0.0.1;
+        deny all;
+        fastcgi_split_path_info ^(/api_scim\.php)(/.+)$;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root/api_scim.php;
+        fastcgi_param PATH_INFO $fastcgi_path_info;
+        fastcgi_pass unix:/run/php/ai-support-zabbix.sock;
+    }
+{% endif %}
     location ~ \.php$ {
         try_files $uri =404;
         include fastcgi_params;

@@ -28,6 +28,8 @@ CERT_A = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIU\nQUJDREVGRw==\n-----
 CERT_B = '-----BEGIN CERTIFICATE-----\nMIIBtDCCAVqgAwIBAgIU\n-----END CERTIFICATE-----'
 KEY = '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----\n'
 TOKEN = '0123456789abcdef' * 4
+PULL = {'enabled': False, 'url': 'https://sso.mbc-net.com', 'application_id': 'zabbix', 'interval': 300}
+PULL_KEY = 'k' + '0123456789abcdef01234567' + '.' + 'A' * 40 + '-_z'
 USER_GROUPS = [{'name': 'SSO operators', 'permission': 'read-write', 'hostgroups': 'all'},
                {'name': 'SSO viewers', 'permission': 'read', 'hostgroups': ['Linux servers', 'Web/Frontend']}]
 
@@ -476,6 +478,102 @@ class SamlRoleTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             data = json.loads((Path(tmp) / 'groups.json').read_text())
             self.assertEqual(data['saml']['user_groups'], USER_GROUPS)
+            self.assertEqual(data['saml']['scim'], False)
+            variables.update(zabbix_web_mbc_pull=dict(PULL, enabled=True), zabbix_web_mbc_pull_key=PULL_KEY)
+            result = self.run_play(variables, [task])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            data = json.loads((Path(tmp) / 'groups.json').read_text())
+            self.assertEqual(data['saml']['scim'], True)
+            self.assertNotIn(PULL_KEY, str(data))
+
+    # --- MBC SSO PULL sync -----------------------------------------------------------------------
+
+    def pull_vars(self, **pull):
+        return saml_vars(zabbix_web_mbc_pull=dict(PULL, enabled=True, **pull), zabbix_web_mbc_pull_key=PULL_KEY)
+
+    def test_mbc_pull_input_is_validated_by_the_first_assert(self):
+        self.validate({'zabbix_web_mbc_pull': dict(PULL, enabled=False)}, accepted=True)
+        self.validate(self.pull_vars(), accepted=True)
+        self.validate(self.pull_vars(url='https://sso.mbc-net.com/', application_id='zabbix-mbc', interval=3600),
+                      accepted=True)
+        cases = [
+            ({'zabbix_web_mbc_pull': 'on'}, 'zabbix_web_mbc_pull is mapping'),
+            ({'zabbix_web_mbc_pull': dict(PULL, extra=1)}, "difference(['enabled', 'url', 'application_id', 'interval'])"),
+            ({'zabbix_web_mbc_pull': dict(PULL, enabled='yes')}, 'zabbix_web_mbc_pull.enabled | default(false) is boolean'),
+            ({'zabbix_web_mbc_pull_key': None}, 'zabbix_web_mbc_pull_key is string'),
+            ({'zabbix_web_mbc_pull': dict(PULL, enabled=True), 'zabbix_web_mbc_pull_key': PULL_KEY},
+             'zabbix_web_saml_jit.enabled | default(false) is true'),
+            (dict(self.pull_vars(), zabbix_web_saml_jit={'enabled': False}), 'zabbix_web_saml_jit.enabled'),
+            (dict(self.pull_vars(), zabbix_web_type='apache'), "zabbix_web_type == 'nginx'"),
+            (dict(self.pull_vars(), zabbix_web_api_token='', zabbix_web_admin_password='Abcdefgh1'),
+             "zabbix_web_type == 'nginx'"),
+            (self.pull_vars(url='http://sso.mbc-net.com'), 'zabbix_web_mbc_pull.url'),
+            (self.pull_vars(url='https://sso.example.com'), 'zabbix_web_mbc_pull.url'),
+            (self.pull_vars(url='https://sso.mbc-net.com/pull/v1'), 'zabbix_web_mbc_pull.url'),
+            (self.pull_vars(application_id=''), 'zabbix_web_mbc_pull.application_id'),
+            (self.pull_vars(application_id='Zabbix'), 'zabbix_web_mbc_pull.application_id'),
+            (self.pull_vars(application_id='a/b'), 'zabbix_web_mbc_pull.application_id'),
+            (self.pull_vars(application_id='a' * 41), 'zabbix_web_mbc_pull.application_id'),
+            (dict(self.pull_vars(), zabbix_web_mbc_pull_key=''), 'zabbix_web_mbc_pull_key is match'),
+            (dict(self.pull_vars(), zabbix_web_mbc_pull_key=PULL_KEY + 'x'), 'zabbix_web_mbc_pull_key is match'),
+            (dict(self.pull_vars(), zabbix_web_mbc_pull_key=PULL_KEY.replace('.', ':')),
+             'zabbix_web_mbc_pull_key is match'),
+            (self.pull_vars(interval=60), 'zabbix_web_mbc_pull.interval'),
+            (self.pull_vars(interval=3601), 'zabbix_web_mbc_pull.interval'),
+            (self.pull_vars(interval='300'), 'zabbix_web_mbc_pull.interval'),
+            (self.pull_vars(interval=True), 'zabbix_web_mbc_pull.interval'),
+        ]
+        for extra, rejection in cases:
+            with self.subTest(rejection=rejection, extra=str(extra.get('zabbix_web_mbc_pull'))[:120]):
+                result = self.validate(extra, accepted=False, rejection=rejection)
+                self.assertNotIn(PULL_KEY.split('.')[1], result.stdout)
+
+    def render_template(self, src, extra):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {'ansible.builtin.template': {'src': str(ROLE / 'templates' / src), 'dest': str(Path(tmp) / 'out')}}
+            variables = self.base_vars()
+            variables.update(yaml.safe_load((ROLE / 'vars/main.yml').read_text()), ansible_distribution_version='26.04')
+            variables.update(extra)
+            result = self.run_play(variables, [task])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return (Path(tmp) / 'out').read_text()
+
+    def test_mbc_pull_opens_scim_on_loopback_only_when_enabled(self):
+        without = self.render_template('nginx.conf.j2', saml_vars())
+        self.assertNotIn('api_scim', without)
+        self.assertNotIn('\n\n', without.rstrip('\n'))
+        enabled = self.render_template('nginx.conf.j2', self.pull_vars())
+        self.assertIn('location ^~ /api_scim.php/ {\n        allow 127.0.0.1;\n        deny all;\n', enabled)
+        self.assertIn('fastcgi_param PATH_INFO $fastcgi_path_info;', enabled)
+        self.assertEqual(enabled.replace(enabled[enabled.index('    # SCIM'):enabled.index('    location ~ \\.php$')], ''),
+                         without)
+        timer = self.render_template('mbc-pull.timer.j2', self.pull_vars(interval=600))
+        self.assertIn('OnUnitActiveSec=600s\n', timer)
+        self.assertIn('RandomizedDelaySec=60\n', timer)
+
+    def test_mbc_pull_settings_hold_no_secret_and_credentials_hold_both(self):
+        tasks = yaml.safe_load((ROLE / 'tasks/mbc_pull.yml').read_text())
+        block = tasks[0]['block']
+        settings = copy.deepcopy(next(t for t in block if 'settings' in t['name']))
+        credentials = copy.deepcopy(next(t for t in block if 'credentials' in t['name']))
+        with tempfile.TemporaryDirectory() as tmp:
+            for task, name in ((settings, 'settings.json'), (credentials, 'credentials.json')):
+                for key in ('owner', 'group'):
+                    task['ansible.builtin.copy'].pop(key)
+                task['ansible.builtin.copy']['dest'] = str(Path(tmp) / name)
+            variables = self.base_vars()
+            variables.update(self.pull_vars())
+            result = self.run_play(variables, [settings, credentials])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn(PULL_KEY.split('.')[1], result.stdout)
+            import json
+            self.assertEqual(json.loads((Path(tmp) / 'settings.json').read_text()),
+                             {'port': 8080, 'server_name': 'zabbix.test', 'version': '8.0',
+                              'url': 'https://sso.mbc-net.com', 'application_id': 'zabbix'})
+            self.assertEqual(json.loads((Path(tmp) / 'credentials.json').read_text()),
+                             {'pull_key': PULL_KEY, 'zabbix_api_token': TOKEN})
+            for name in ('settings.json', 'credentials.json'):
+                self.assertEqual(os.stat(Path(tmp) / name).st_mode & 0o777, 0o600)
 
 
 if __name__ == '__main__':
