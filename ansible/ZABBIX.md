@@ -381,6 +381,7 @@ Zabbix の画面のログインを外部の SAML 2.0 IdP に任せ、パスワ�
 | `zabbix_web_saml_autologout` | `""` | 空でなければ、JIT の利用者の `autologout` を毎回この値にする（90s〜1d。例 `1h`） |
 | `zabbix_web_saml_allow_legacy_users` | `false` | 手動の利用者の検査を外す（検証期間だけ） |
 | `zabbix_web_saml_local_users` | `{mode: "", targets: [], expected_sha256: "", transfer_maps_dashboards: false}` | 既存の個人の利用者の 1 回だけの手続き（下記） |
+| `zabbix_web_mbc_pull` / `zabbix_web_mbc_pull_key` | `{enabled: false, ...}` / `""` | MBC SSO の割り当ての同期（下記「MBC SSO の割り当ての同期（PULL）」） |
 
 `zabbix_web_saml_jit` のキー:
 
@@ -582,6 +583,100 @@ python3 -c 'import hashlib,sys; print(hashlib.sha256("\n".join(sorted(sys.argv[1
   （`Admin` の処置の前に行ってください）。
 - 削除した利用者は戻りません。実行の前に利用者の一覧（名前・グループ・所有物）を退避してください。
 
+### MBC SSO の割り当ての同期（PULL）
+
+SAML では、IdP で外した利用の権限・役割は、その人が次にログインするまで Zabbix に届きません。IdP が MBC SSO の
+場合は、`zabbix_web_mbc_pull` を有効にすると、systemd の timer が MBC SSO の PULL の API
+（`GET https://sso.mbc-net.com/pull/v1/applications/<applicationId>/assignments`）から「このアプリに今ログインできる人と、
+その人の役割」を定期的に取り、SAML の JIT の利用者を揃えます。既定は無効で、何も足さなければ従来どおりに動きます。
+
+**前提:**
+
+- `zabbix_web_saml_enabled: true` と JIT（`zabbix_web_saml_jit.enabled: true`）、`zabbix_web_api_token`、`zabbix_web_type: nginx`
+  （apache は未対応で拒否します）。
+- MBC 側でアプリの PULL が有効で、PULL の鍵（`<keyId>.<secret>`。`keyId` は `k` と 24 桁の 16 進、`secret` は 43 文字の
+  base64url）を発行済みであること。サーバーから `sso.mbc-net.com` の `/pull/v1/applications/` へ HTTPS で届くこと
+  （MBC 側の WAF の許可を含む）。
+- IdP がログインで `groups` の属性に送る役割の名前と、PULL の応答の `roles` が同じ名前であること（MBC SSO はそうなっています）。
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `zabbix_web_mbc_pull` | `{enabled: false, url: "", application_id: "", interval: 300}` | `enabled`（真偽値）、`url`（`https://sso.mbc-net.com` だけ。末尾 `/` は可）、`application_id`（MBC のアプリの ID。英小文字・数字・単独の `-`、英字で始まる 1〜40 文字）、`interval`（実行の間隔の秒。整数 120〜3600） |
+| `zabbix_web_mbc_pull_key` | `""` | PULL の鍵。ANSIBLE# の秘匿変数で渡す（常に秘匿扱い）。`enabled: true` のとき必須 |
+
+```yaml
+    zabbix_web_mbc_pull:
+      enabled: true
+      url: https://sso.mbc-net.com
+      application_id: zabbix
+      interval: 300
+    zabbix_web_mbc_pull_key: "{{ ZABBIX_MBC_PULL_KEY }}"
+```
+
+**同期の規則（1 回の実行）:**
+
+- **対象は MBC のログインで作られた利用者だけ:** SAML の userdirectory に属する利用者（JIT で作られた利用者）です。
+  `Admin`・サービス用の利用者・Super admin の種類の役割の利用者・内部の利用者・LDAP など他の userdirectory の利用者には
+  触れません。無効化用のグループ以外の無効のグループ（管理者が止めた利用者）にいる利用者にも触れません（Zabbix の
+  SAML のログインもその利用者を更新しないため）。
+- **照合:** 応答の `subject` を Zabbix の利用者名と比べます（`zabbix_web_saml_case_sensitive: false` なら大小文字を区別しない）。
+  大小文字を区別しない設定で大小文字だけが違う利用者が 2 人いれば、何も変えずに失敗します。
+- **役割:** 応答の `roles` を `zabbix_web_saml_jit.groups` の `saml_group` として扱います（ログインの `groups` の属性と同じ）。
+  対応に無い役割は無視し、対応する役割が 1 つも無い人は「応答に無い人」と同じに扱います。複数の役割が対応するときは
+  Zabbix の JIT と同じで、対応するすべての `user_groups` に入り、役割は種類の高いもの（Admin が User より上）、
+  同じ種類なら名前の順で先のものになります。
+- **応答にある人:** 役割とグループを JIT のログインと同じに揃えます。無効化用のグループにいる人（前の同期で外れた人など）は
+  戻します（ログインしたときと同じ）。
+- **応答に無い人:** 無効化用のグループ（`deprovisioned_group`）へ移し、役割を外します。Zabbix の JIT の deprovisioning と
+  同じで、利用者・メディア・所有物は残り、**削除はしません**。再び MBC でログインできる状態になれば、次の同期か
+  ログインで戻ります。開いている画面のセッションは、無効のグループに入った時点で使えなくなります。
+- 応答にあるがまだ Zabbix にいない人には何もしません（初回のログインで JIT が作ります）。
+- **書き込みの経路:** JIT の利用者の役割・グループは JSON-RPC の API（`user.update`）では変えられません
+  （`cannot update readonly parameter "usrgrps" of provisioned user`）。そのため Zabbix 自身の SCIM の endpoint
+  （`/api_scim.php`。IdP が JIT の利用者を変えるための Zabbix の正規の経路）を使います。有効にすると、ロールは SAML の
+  userdirectory の SCIM（`scim_status`）を有効にし、nginx の vhost に `/api_scim.php/` を **127.0.0.1 からだけ**受け付ける
+  location を足します（無効のときは足さず、vhost は従来と同じです）。SCIM の認証はサービス用の利用者の API トークンです。
+  役割は SCIM のグループ（名前は `saml_group`）の所属として送り、役割とグループは Zabbix が対応から計算します
+  （ログインと同じ計算）。所属を外すのを先、足すのを後にします（途中で失敗しても権限が増えたままにはならず、
+  一時的に無効化用のグループに入ることがあるだけです。次の周期で揃います）。
+- `zabbix_web_saml_jit.groups` の対応を変えた後、所属が変わらない人の役割・グループは同期では直さず、その人の次のログインで
+  直ります（件数を `drift` として journal に警告します）。
+
+**何も変えない場合:**
+
+- PULL の応答が 200 以外（401・403・404・405・429・5xx、リダイレクトを含む）、タイムアウト・TLS の失敗、JSON でない、
+  `applicationId` が違う、同じ `subject` が 2 回ある、形の違う項目がある（`subject` が `<local>+mbcawssso@<domain>` か
+  `<local>+mbclocal@<domain>` の小文字でない、`roles` が空など）: 終了コード 5。Zabbix には接続しません。
+  再試行はせず、次の周期で取り直します。
+- **安全の上限:** 有効な対象の利用者（無効化用のグループにいない人）の**全員**（1 人中 1 人、`users: []` を含む）、または
+  **半分を超えてかつ 2 人以上**を無効にする実行は、何も変えずに終了コード 6 で警告します（MBC の不具合や設定の誤りで
+  全員が外れるのを防ぐため）。意図して多くの人を外すときは、何回かの周期に分けて MBC 側で外すか、急ぐなら下の
+  「利用者をすぐ止める」の手順で削除してください。
+- SAML・JIT・SCIM が無効、無効化用のグループが無い、対応に `*` の名前がある、トークンが拒否された: 終了コード 2。
+
+**周期と負荷:** `interval` 秒（既定 300 = 5 分）ごとに、毎回 0〜60 秒の乱数だけ遅らせて動きます（PULL の API は鍵ごとに
+1 分 6 回までで、同時に 1 つの要求しか処理しないため、ホストやアプリの間で時刻をずらします）。起動の 3 分後が初回です。
+失敗しても再試行しません（unit に `Restart=` はありません）。
+
+**確かめ方:** `systemctl list-timers ai-support-zabbix-mbc-pull.timer` と `journalctl -u ai-support-zabbix-mbc-pull`。
+各回の最後に件数だけの JSON を出します（`pull_users`・`managed`・`enabled`・`present`・`absent`・`deprovision`・`restore`・
+`role_changes`・`already_deprovisioned`・`protected`・`skipped_disabled`・`not_provisioned`・`unmapped_roles_only`・`drift`・
+`scim_writes`・`changed`、`applicationId`・`keyId`）。鍵・トークン・`Authorization`・利用者名・`subject`・利用者 ID は出しません。
+すぐ 1 回動かすときは `systemctl start ai-support-zabbix-mbc-pull.service`（鍵の頻度の制限に注意）。
+
+**ファイル:** `/usr/local/lib/ai-support-zabbix-mbc-pull.py`（root 0700。標準ライブラリだけで、JSON-RPC の client は
+`/usr/local/lib/ai-support-zabbix-api.py` のものを使う）、`/var/lib/ai-support-zabbix/mbc-pull.json`（設定。root 0600）、
+`/var/lib/ai-support-zabbix/mbc-pull.credentials`（PULL の鍵と `zabbix_web_api_token`。root 0600）、
+`/etc/systemd/system/ai-support-zabbix-mbc-pull.service`・`.timer`。service は root で動きますが、capability を持たず、
+ファイルシステムは読み取りだけです（`ProtectSystem=strict` など）。鍵とトークンは引数・環境変数に載せません。
+
+**鍵の入れ替え:** MBC の「PULLの鍵」で新しい鍵を発行 → 秘匿変数 `zabbix_web_mbc_pull_key` を替えてロールを実行 →
+journal で次の回が終了コード 0 で終わることを確かめる → 古い鍵を失効。`zabbix_web_api_token` を交換したときも、
+ロールを実行すれば鍵のファイルが新しいトークンに書き換わります。
+
+**無効に戻す:** `enabled: false` で実行すると、timer を止め、unit・スクリプト・設定と鍵のファイルを消し、SCIM を無効にし、
+vhost から `/api_scim.php/` を外します。同期で無効化用のグループへ移した利用者はそのままです（次のログインで戻ります）。
+
 ### 利用者をすぐ止める（急ぐ失効）
 
 JIT の利用者のセッションは IdP では切れず、`autologout` か削除まで続きます。すぐ止めるには削除します。
@@ -615,7 +710,8 @@ JIT の利用者のセッションは IdP では切れず、`autologout` か削�
 
 1. 今のトークンで新しいトークンを作る: `api token.create '{"name":"ai-support-automation role helper <日付>","userid":"<サービス用の利用者の userid>"}'`
    → `api token.generate '["<新しい tokenid>"]'`（値は一度だけ表示されるので、そのまま秘匿変数へ）。
-2. 秘匿変数 `zabbix_web_api_token` を新しい値に替え、ロールを 1 回実行して通ることを確かめる。
+2. 秘匿変数 `zabbix_web_api_token` を新しい値に替え、ロールを 1 回実行して通ることを確かめる（`zabbix_web_mbc_pull`
+   を有効にしていれば、同期の鍵のファイルもこの実行で新しいトークンに替わる）。
 3. 古いトークンを消す: `api token.delete '["<古い tokenid>"]'`（新しいトークンのヘッダファイルで実行）。
 
 break-glass には、ロールが使う `zabbix_web_api_token` とは**別の**トークン（同じサービス用の利用者に名前を分けて作る）を
