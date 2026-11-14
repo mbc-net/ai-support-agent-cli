@@ -797,6 +797,8 @@ export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<stri
     'zabbix_web_listen_port',
     'zabbix_web_php_timezone',
     'zabbix_web_locales',
+    'zabbix_web_mbc_pull',
+    'zabbix_web_mbc_pull_key',
     'zabbix_web_saml_allow_legacy_users',
     'zabbix_web_saml_autologout',
     'zabbix_web_saml_case_sensitive',
@@ -1191,6 +1193,12 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'zabbix_web_saml_sign_check',
   'zabbix_web_saml_token_file',
   'zabbix_web_saml_user_groups_check',
+  // zabbix_web の MBC SSO の割り当ての同期（tasks/mbc_pull.yml と main.yml の register）。unit の変更・timer の有無・
+  // 削除の結果で、systemd の再読み込み・timer の再起動・トークン無しで無効に戻す実行の停止を決める。
+  'zabbix_web_mbc_pull_installed',
+  'zabbix_web_mbc_pull_removed',
+  'zabbix_web_mbc_pull_timer',
+  'zabbix_web_mbc_pull_units',
   // vars/main.yml の派生値と、include_role 以外のタスクに付いた `vars:` の名前。
   // どちらもロールが自分で計算する値であり、`set_fact` は task レベル `vars:` より
   // 優先度が高いのでレシピから上書きできてしまう（`rsyslog_server_reserved_log_dirs`
@@ -1296,7 +1304,7 @@ const RESERVED_VAR_NAMES: ReadonlySet<string> = new Set([
 const ALWAYS_SECRET_VAR_NAMES: ReadonlySet<string> = new Set([
   'sentry_admin_password', 'sentry_smtp_password',
   'zabbix_web_admin_password', 'zabbix_web_admin_previous_password',
-  'zabbix_web_api_token', 'zabbix_web_saml_sp_private_key',
+  'zabbix_web_api_token', 'zabbix_web_saml_sp_private_key', 'zabbix_web_mbc_pull_key',
   'ansible_ssh_pass',
   'ansible_password',
   'ansible_ssh_private_key_file',

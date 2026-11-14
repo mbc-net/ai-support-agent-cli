@@ -425,7 +425,12 @@ def validate_saml(saml, version):
         if seconds is None or not 90 <= seconds <= DAY:
             raise HelperError('saml autologout must be empty or a period between 90s and 1d.')
     jit = validate_jit(saml.get('jit', {}))
-    return dict(saml, slo_url=slo_url, sign=sign, autologout=autologout,
+    # SCIM on the SAML user directory: only for the MBC PULL sync (zabbix_mbc_pull.py), which changes JIT users
+    # through /api_scim.php because the JSON-RPC API refuses to change their role and groups.
+    scim = _boolean(saml.get('scim', False), 'saml scim must be a boolean.')
+    if scim and not jit['enabled']:
+        raise HelperError('saml scim (zabbix_web_mbc_pull) requires JIT provisioning.')
+    return dict(saml, slo_url=slo_url, sign=sign, autologout=autologout, scim=scim,
                 allow_legacy_users=saml.get('allow_legacy_users', False), jit=jit,
                 local_users=validate_local_users(saml.get('local_users', {})),
                 user_groups=validate_user_groups(saml.get('user_groups', []), jit))
@@ -946,6 +951,7 @@ def desired_userdirectory(client, token, saml, planned_groups=frozenset()):
         'sign_logout_responses': _flag(sign['logout_responses']),
         'encrypt_nameid': 0, 'encrypt_assertions': 0,
         'provision_status': _flag(jit['enabled']),
+        'scim_status': _flag(saml['scim']),
     }
     if not jit['enabled']:
         return fields, None, {}
@@ -1263,13 +1269,23 @@ def converge_autologout(client, token, userdirectoryid, autologout):
 
 
 def disable_saml(client, token):
+    changed = []
+    # SCIM (the MBC PULL sync) is switched off with SAML: it would otherwise stay usable on the user directory.
+    # SAML user directories (and SCIM) exist from Zabbix 6.4; 6.0 has no userdirectory API at all.
+    rows = client.require_list('userdirectory.get', {'output': ['userdirectoryid', 'scim_status'],
+                                                     'filter': {'idp_type': IDP_TYPE_SAML}}, token) \
+        if client.version >= (6, 4) else []
+    for row in rows:
+        if str(row.get('scim_status')) == '1':
+            client.require('userdirectory.update', {'userdirectoryid': row['userdirectoryid'], 'scim_status': 0}, token)
+            changed.append('userdirectory')
     auth = client.require('authentication.get', {'output': ['saml_auth_enabled']}, token)
     if not isinstance(auth, dict):
         raise HelperError('Zabbix API authentication.get returned an unexpected result.')
-    if str(auth.get('saml_auth_enabled')) == '0':
-        return {'saml_changed': []}
-    client.require('authentication.update', {'saml_auth_enabled': 0}, token)
-    return {'saml_changed': ['authentication']}
+    if str(auth.get('saml_auth_enabled')) != '0':
+        client.require('authentication.update', {'saml_auth_enabled': 0}, token)
+        changed.append('authentication')
+    return {'saml_changed': changed}
 
 
 def run(config, redact):
