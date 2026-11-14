@@ -646,7 +646,8 @@ SAML では、IdP で外した利用の権限・役割は、その人が次に�
   だけで待ち受け、`/api_scim.php/` を `127.0.0.1` からだけ受け付ける）を足します。画面・API の server
   （`zabbix_web_listen_port`）には SCIM を出しません（Zabbix は SCIM の endpoint を利用者が送る `Path-Info` の
   要求ヘッダーからも読むため、その server では `/api_scim.php` 自体を同期の有効・無効に関わらず常に 404 にします。
-  無効に戻す実行では vhost が SCIM の無効化（API）より先に書き換わるので、その間も届かないようにするためです）。
+  無効に戻す実行では vhost が SCIM の無効化（API）より先に書き換わるので、その間も届かないようにするためです。
+  無効に戻すのと同時に `zabbix_web_type: apache` へ移す場合に備えて、Apache の vhost も `/api_scim.php` を常に拒否します）。
   無効のときは SCIM の server を足しません。
   - **前段のリバースプロキシを `scim_port` へ転送しないでください。** nginx は送信元のアドレス（`127.0.0.1`）でしか
     区別できないため、同じホストのプロキシがこのポートへ転送すると、外からの要求も `127.0.0.1` からに見えます
@@ -694,7 +695,14 @@ hash と時刻だけで、利用者名・利用者 ID は含まない）を使�
 安全の上限での停止、timer の停止など）、Zabbix の利用者は変わらないだけで、権限を外された人が有効なまま残ります。journal を
 誰かが見ない限り気付けないので、終了コード 0 で終わった回の時刻を `/var/lib/ai-support-zabbix-mbc-pull/last-success`
 （0644。epoch の数字だけ。ディレクトリは 0755）に書きます。失敗した回（終了コード 2・5・6）は書かないので、このファイルの
-古さで止まったことが分かります。Zabbix サーバーのホスト自身を Zabbix エージェント（`zabbix_agent` ロール。agent・agent2 の
+古さで止まったことが分かります。状態のファイル（`mbc-pull.state`）を書けなかった回も、`reapplied` を数えられなくなるので
+書きません（終了コードは 0 のまま）。
+
+`reapplied`（同じ変更の繰り返し）と `drift`（JIT の対応表どおりでない利用者）は、終了コードを変えません（正当な役割の変更でも
+`reapplied` が 1 になることがあるため）。そのため、終了コード 0 の回は `last-success` の前に、その回の件数を同じディレクトリの
+`reapplied` と `drift`（どちらも 0644、数字だけ）に書きます。IdP が割り当てのない人のログインを通していると、その人は
+ログインのたびに戻り、同期が毎回無効にし直すので、`reapplied` が 0 でなくなります。実行中に利用者が消された件数（`vanished`）は
+正当な操作で起きるので監視しません。Zabbix サーバーのホスト自身を Zabbix エージェント（`zabbix_agent` ロール。agent・agent2 の
 どちらでもよい）で監視し、そのホストに次のアイテムとトリガーを作ってください（`<host>` はホスト名、`960` は
 `interval` が 300 のときの 3 周期分＋乱数の遅れ 60 秒。`interval` を変えたら `3 × interval + 60` に変える）。
 
@@ -703,15 +711,20 @@ hash と時刻だけで、利用者名・利用者 ID は含まない）を使�
 | アイテム | タイプ「Zabbix エージェント」、キー `vfs.file.time[/var/lib/ai-support-zabbix-mbc-pull/last-success,modify]`、データ型「数値（整数）」、単位 `unixtime`、間隔 `1m` |
 | トリガー（止まった） | `now()-last(/<host>/vfs.file.time[/var/lib/ai-support-zabbix-mbc-pull/last-success,modify])>960`、深刻度「重度の障害」 |
 | トリガー（読めない） | `nodata(/<host>/vfs.file.time[/var/lib/ai-support-zabbix-mbc-pull/last-success,modify],30m)=1`（ファイルが無い・有効にした直後から一度も成功していない・エージェントが止まった）、深刻度「重度の障害」 |
+| アイテム | タイプ「Zabbix エージェント」、キー `vfs.file.contents[/var/lib/ai-support-zabbix-mbc-pull/reapplied]`、データ型「数値（整数）」、間隔 `1m` |
+| トリガー（繰り返し） | `max(/<host>/vfs.file.contents[/var/lib/ai-support-zabbix-mbc-pull/reapplied],24h)>0`（24 時間以内に繰り返しがあった）、深刻度「警告」 |
+| アイテム | タイプ「Zabbix エージェント」、キー `vfs.file.contents[/var/lib/ai-support-zabbix-mbc-pull/drift]`、データ型「数値（整数）」、間隔 `1m` |
+| トリガー（対応表とのずれ） | `min(/<host>/vfs.file.contents[/var/lib/ai-support-zabbix-mbc-pull/drift],24h)>0`（24 時間続いている。対応表を変えた後、ログインしていない人が残っている）、深刻度「情報」 |
 
 障害になったら `journalctl -u ai-support-zabbix-mbc-pull` の最後の回の終了コードとメッセージ（上の「何も変えない場合」）を
-見ます。有効にした直後は、最初の成功（起動の 3 分後か、有効にした実行の直後）までアイテムが取得できない状態になります。
+見ます。「繰り返し」の障害では、同じ journal の `repeat a change applied in the last 24 hours` の行と、上の「IdP と PULL の
+結果が一致すること」を確かめます（役割を付けて外す、を 24 時間以内に行っただけなら、そのまま 24 時間で解消します）。有効にした直後は、最初の成功（起動の 3 分後か、有効にした実行の直後）までアイテムが取得できない状態になります。
 
 **ファイル:** `/usr/local/lib/ai-support-zabbix-mbc-pull.py`（root 0700。標準ライブラリだけで、JSON-RPC の client は
 `/usr/local/lib/ai-support-zabbix-api.py` のものを使う）、`/var/lib/ai-support-zabbix/mbc-pull.json`（設定。root 0600）、
 `/var/lib/ai-support-zabbix/mbc-pull.credentials`（PULL の鍵と `zabbix_web_api_token`。root 0600）、
 `/var/lib/ai-support-zabbix/mbc-pull.state`（上記。スクリプトが書く）、
-`/var/lib/ai-support-zabbix-mbc-pull/last-success`（上記の監視用。スクリプトが書く）、
+`/var/lib/ai-support-zabbix-mbc-pull/last-success`・`reapplied`・`drift`（上記の監視用。スクリプトが書く）、
 `/etc/systemd/system/ai-support-zabbix-mbc-pull.service`・`.timer`。service は root で動きますが、capability を持たず、
 ファイルシステムは `/var/lib/ai-support-zabbix` と `/var/lib/ai-support-zabbix-mbc-pull` 以外は読み取りだけです（`ProtectSystem=strict` など）。鍵とトークンは引数・環境変数に載せません。
 

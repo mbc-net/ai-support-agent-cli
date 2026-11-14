@@ -568,6 +568,10 @@ class SamlRoleTest(unittest.TestCase):
         self.assertIn('location ^~ /api_scim.php/ {\n        allow 127.0.0.1;\n        deny all;\n', scim)
         self.assertIn('fastcgi_param PATH_INFO $fastcgi_path_info;', scim)
         self.assertIn('location / {\n        return 404;', scim)
+        # The sync requires nginx, but a run that disables it can switch to Apache before SCIM is switched off.
+        apache = self.render_template('apache.conf.j2', saml_vars())
+        self.assertIn('    <LocationMatch "^/api_scim\\.php">\n        Require all denied\n    </LocationMatch>\n'
+                      '</VirtualHost>', apache)
         timer = self.render_template('mbc-pull.timer.j2', self.pull_vars(interval=600))
         self.assertIn('OnUnitActiveSec=600s\n', timer)
         self.assertIn('RandomizedDelaySec=60\n', timer)

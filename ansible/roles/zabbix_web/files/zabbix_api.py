@@ -35,6 +35,7 @@ import os
 import re
 import secrets
 import sys
+import traceback
 import unicodedata
 
 # Literals on purpose: recipe variables must not be able to redirect these.
@@ -160,6 +161,14 @@ class Redactor:
         for secret in sorted(self.secrets, key=len, reverse=True):
             text = text.replace(secret, '***')
         return text
+
+
+def describe_unexpected(error):
+    """Class name and code locations (file:line) of an unexpected exception. Never the message or the repr: they
+    may quote request data or secrets."""
+    frames = traceback.extract_tb(error.__traceback__)[-5:]
+    where = ', '.join('%s:%d' % (os.path.basename(frame.filename), frame.lineno) for frame in frames)
+    return '%s at %s' % (type(error).__name__, where) if where else type(error).__name__
 
 
 def period_seconds(value):
@@ -1367,8 +1376,8 @@ def main(argv):
     except HelperError as error:
         print(redact(str(error)), file=sys.stderr)
         return error.code
-    except Exception as error:  # pragma: no cover - defensive; never print the repr
-        print('Zabbix API helper failed unexpectedly (%s).' % type(error).__name__, file=sys.stderr)
+    except Exception as error:  # defensive; never print the message or the repr
+        print('Zabbix API helper failed unexpectedly (%s).' % describe_unexpected(error), file=sys.stderr)
         return EXIT_ERROR
 
 

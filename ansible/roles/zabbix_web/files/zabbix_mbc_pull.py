@@ -41,7 +41,10 @@ One run:
      other roles than the PULL API or lets unassigned users in (see ZABBIX.md).
 
 Exit codes: 0 done (also "nothing to do"), 2 invalid input or a Zabbix error, 5 the PULL API did not return a
-usable response (nothing was changed), 6 the safety cap refused the run (nothing was changed).
+usable response (nothing was changed), 6 the safety cap refused the run (nothing was changed). Repeated changes and
+drift do not change the exit code (a legitimate role change can repeat one); a run that exits 0 writes them to the
+monitoring files of STATUS_DIR instead, unless the state file could not be written (then nothing is written there, so
+monitoring reports the sync as stale: repeats are no longer detected).
 
 Nothing written to stdout / stderr contains the PULL key, the Zabbix API token, an Authorization header or a user
 identifier (username, subject or user ID): only counts, the applicationId and the keyId.
@@ -105,9 +108,11 @@ SCIM_PATCH_SCHEMA = 'urn:ietf:params:scim:api:messages:2.0:PatchOp'
 SCIM_LIST_SCHEMA = 'urn:ietf:params:scim:api:messages:2.0:ListResponse'
 STATE_FILE = 'mbc-pull.state'
 STATE_WINDOW = 24 * 3600
-# Epoch of the last run that finished with exit code 0, for the Zabbix agent (ZABBIX.md: monitor its age). Outside
-# the root-only state directory and world-readable; it holds a number only.
-STATUS_FILE = '/var/lib/ai-support-zabbix-mbc-pull/last-success'
+# For the Zabbix agent (ZABBIX.md, "同期の監視"), written after each successful run: the reapplied and drift counts of
+# that run, then its epoch (last-success; its age shows failed or stopped runs). Outside the root-only state directory
+# and world-readable; every file holds a number only.
+STATUS_DIR = '/var/lib/ai-support-zabbix-mbc-pull'
+STATUS_FILES = ('reapplied', 'drift', 'last-success')
 ID_PATTERN = re.compile(r'^[0-9]{1,20}\Z')
 
 USER_TYPE_SUPER_ADMIN = helper.USER_TYPE_SUPER_ADMIN
@@ -623,17 +628,23 @@ def run(settings, credentials, redact, connect_pull=None, connect_scim=None, sta
     return EXIT_OK, summary
 
 
-def write_status(path, now):
-    """Store the epoch of a successful run (0644 despite the unit's UMask). Returns False when it cannot."""
-    temporary = path + '.tmp'
-    try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
-            os.fchmod(handle.fileno(), 0o644)
-            handle.write('%d\n' % now)
-        os.replace(temporary, path)
-    except OSError:
-        return False
+def write_status(directory, summary, now):
+    """Store the counts and the epoch of a successful run, last-success last (0644 despite the unit's UMask).
+
+    Returns False when a file cannot be written.
+    """
+    values = {'reapplied': summary.get('reapplied', 0), 'drift': summary.get('drift', 0), 'last-success': now}
+    for name in STATUS_FILES:
+        path = os.path.join(directory, name)
+        temporary = path + '.tmp'
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+                os.fchmod(handle.fileno(), 0o644)
+                handle.write('%d\n' % values[name])
+            os.replace(temporary, path)
+        except OSError:
+            return False
     return True
 
 
@@ -655,8 +666,8 @@ def main(argv):
     except HelperError as error:
         print(redact(str(error)), file=sys.stderr)
         return error.code
-    except Exception as error:  # pragma: no cover - defensive; never print the repr
-        print('MBC PULL sync failed unexpectedly (%s).' % type(error).__name__, file=sys.stderr)
+    except Exception as error:  # defensive; never print the message or the repr
+        print('MBC PULL sync failed unexpectedly (%s).' % helper.describe_unexpected(error), file=sys.stderr)
         return EXIT_ERROR
     if 'error' in summary:
         print(redact(summary['error']), file=sys.stderr)
@@ -673,8 +684,11 @@ def main(argv):
     if summary.get('drift'):
         print('%d present user(s) do not have the role and user groups of their JIT mapping (for example after the '
               'mapping was changed); Zabbix corrects them at their next login.' % summary['drift'], file=sys.stderr)
-    if code == EXIT_OK and not write_status(STATUS_FILE, int(time.time())):
-        print('Could not write %s; monitoring will report the sync as stale.' % STATUS_FILE, file=sys.stderr)
+    if code == EXIT_OK and summary.get('warning'):
+        print('The run is not recorded in %s: monitoring reports the sync as stale until the state file can be '
+              'written.' % STATUS_DIR, file=sys.stderr)
+    elif code == EXIT_OK and not write_status(STATUS_DIR, summary, int(time.time())):
+        print('Could not write %s; monitoring will report the sync as stale.' % STATUS_DIR, file=sys.stderr)
     print(redact(json.dumps(summary, sort_keys=True)))
     return code
 

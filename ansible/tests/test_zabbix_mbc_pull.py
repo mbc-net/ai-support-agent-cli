@@ -268,10 +268,18 @@ class PullSyncTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.state_file = os.path.join(self.tmp.name, 'mbc-pull.state')
-        self.status_file = os.path.join(self.tmp.name, 'last-success')
-        original = pull.STATUS_FILE
-        pull.STATUS_FILE = self.status_file
-        self.addCleanup(setattr, pull, 'STATUS_FILE', original)
+        self.status_dir = os.path.join(self.tmp.name, 'status')
+        os.mkdir(self.status_dir)
+        self.status_file = os.path.join(self.status_dir, 'last-success')
+        original = pull.STATUS_DIR
+        pull.STATUS_DIR = self.status_dir
+        self.addCleanup(setattr, pull, 'STATUS_DIR', original)
+
+    def status(self, name):
+        path = os.path.join(self.status_dir, name)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
+        with open(path, encoding='utf-8') as handle:
+            return int(handle.read())
 
     def settings(self, port, scim_port=None, **overrides):
         settings = {'port': port, 'scim_port': scim_port or port + 1, 'server_name': SERVER_NAME, 'version': '7.0',
@@ -428,7 +436,7 @@ class PullSyncTest(unittest.TestCase):
                                 max(history['applied'].values()) + 24 * 3600)[0], 0)
         self.assertEqual(load(os.path.join(self.tmp.name, 'missing'))['applied'], {})
 
-    def test_an_unwritable_state_file_only_warns(self):
+    def test_an_unwritable_state_file_keeps_the_exit_code_but_is_not_recorded_as_a_success(self):
         state = FakeMbc()
         state.add_jit(subject('bob'), ['viewer'])
         os.mkdir(self.state_file + '.tmp')
@@ -436,6 +444,24 @@ class PullSyncTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(summary['deprovision'], 1)
         self.assertIn('Could not write the state file', output)
+        # Repeats are no longer detected: monitoring has to see the sync as stale.
+        self.assertIn('monitoring reports the sync as stale', output)
+        self.assertEqual(os.listdir(self.status_dir), [])
+
+    def test_repeated_changes_and_drift_reach_monitoring(self):
+        state = FakeMbc()
+        leaver = state.add_jit(subject('bob'), ['viewer'])
+        users = self.team(state)
+        self.assertEqual(self.sync(state, FakePull(users))[0], 0)
+        self.assertEqual((self.status('reapplied'), self.status('drift')), (0, 0))
+        # The IdP lets the unassigned user in again: the run still exits 0, the count goes to monitoring.
+        state.provision(leaver)
+        self.assertEqual(self.sync(state, FakePull(users))[0], 0)
+        self.assertEqual((self.status('reapplied'), self.status('drift')), (1, 0))
+        # The mapping changed after the last logins (test_drift_is_reported_but_not_forced).
+        state.directories[0]['provision_groups'][2]['user_groups'] = [{'usrgrpid': '12'}]
+        self.assertEqual(self.sync(state, FakePull(users))[0], 0)
+        self.assertEqual((self.status('reapplied'), self.status('drift')), (0, 4))
 
     def test_only_successful_runs_record_their_time_for_monitoring(self):
         state = FakeMbc()
@@ -444,9 +470,7 @@ class PullSyncTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.status_file))
         before = int(time.time())
         self.assertEqual(self.sync(state, FakePull(users))[0], 0)
-        self.assertEqual(os.stat(self.status_file).st_mode & 0o777, 0o644)
-        with open(self.status_file, encoding='utf-8') as handle:
-            recorded = int(handle.read())
+        recorded = self.status('last-success')
         self.assertGreaterEqual(recorded, before)
         # A refused run (safety cap) leaves the last success as it was, so its age grows.
         self.assertEqual(self.sync(state, FakePull({}))[0], 6)
@@ -459,6 +483,24 @@ class PullSyncTest(unittest.TestCase):
         code, _, output = self.sync(state, FakePull(self.team(state)))
         self.assertEqual(code, 0)
         self.assertIn('monitoring will report the sync as stale', output)
+        self.assertFalse(os.path.exists(self.status_file))
+
+    def test_an_unexpected_error_reports_where_it_happened_but_no_message(self):
+        state = FakeMbc()
+        users = self.team(state)
+        original = pull.plan_changes
+
+        def broken(*args):
+            raise KeyError(subject('member0'))
+        pull.plan_changes = broken
+        try:
+            code, summary, output = self.sync(state, FakePull(users))
+        finally:
+            pull.plan_changes = original
+        self.assertEqual((code, summary), (2, None))
+        self.assertRegex(output, r'failed unexpectedly \(KeyError at zabbix_mbc_pull\.py:[0-9]+, .*'
+                                 r'test_zabbix_mbc_pull\.py:[0-9]+\)')
+        self.assertNotIn('member0', output)
 
     def test_a_scim_failure_also_reports_an_unwritable_state_file(self):
         state = FakeMbc()

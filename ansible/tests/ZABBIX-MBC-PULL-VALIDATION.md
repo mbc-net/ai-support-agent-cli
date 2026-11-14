@@ -122,3 +122,10 @@ SCIM が有効なまま画面のポートから届く）を受けて、画面の
 1 回 reload する）。あわせて、終了コード 0 の回の時刻を `/var/lib/ai-support-zabbix-mbc-pull/last-success` に書き、
 Zabbix エージェントで古さを監視する手順を `ZABBIX.md`「同期の監視」に加えた。
 
+2 回目のレビューを受けて、次も変えた（単体試験・テンプレートの試験だけで確認。実機では再検証していない）。
+
+- `reapplied`・`drift` は終了コードを変えないため、終了コード 0 の回はその件数を `/var/lib/ai-support-zabbix-mbc-pull/` の
+  `reapplied`・`drift` に書き、`ZABBIX.md`「同期の監視」にアイテムとトリガーを加えた。状態のファイルを書けなかった回は、
+  繰り返しを数えられないので `last-success` も更新しない（監視は「止まった」と報告する）。
+- Apache の vhost にも `/api_scim.php` を拒否する `LocationMatch` を加えた（同期を無効に戻すのと同時に Apache へ移す場合）。
+- 想定外の例外では、クラス名に加えて失敗した場所（ファイル名と行番号。最大 5 段）を出す。メッセージは出さない。
