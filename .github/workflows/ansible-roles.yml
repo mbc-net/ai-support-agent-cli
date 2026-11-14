@@ -113,6 +113,10 @@ jobs:
       - name: Zabbix API helper unit tests
         run: python3 ansible/tests/test_zabbix_api.py -v
 
+      # Fake PULL connection + fake JSON-RPC/SCIM server; never calls the real PULL API.
+      - name: Zabbix MBC PULL sync unit tests
+        run: python3 ansible/tests/test_zabbix_mbc_pull.py -v
+
       # Renders the k3s agent manifest with ansible-core's own Templar (no cluster).
       - name: k3s RDP manifest rendering tests
         run: python3 ansible/tests/test_k3s_rdp_manifest.py -v
