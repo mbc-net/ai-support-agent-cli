@@ -17,5 +17,11 @@ Listen {{ zabbix_web_listen_port }}
     <FilesMatch "\.php$">
         SetHandler "proxy:unix:/run/php/ai-support-zabbix.sock|fcgi://localhost/"
     </FilesMatch>
+    # SCIM is served only by the nginx loopback server of the MBC PULL sync. Zabbix also takes the SCIM endpoint from
+    # a client "Path-Info" request header, so /api_scim.php stays closed here, also after a run that disables the
+    # sync and switches to Apache while SCIM is still on.
+    <LocationMatch "^/api_scim\.php">
+        Require all denied
+    </LocationMatch>
 </VirtualHost>
 

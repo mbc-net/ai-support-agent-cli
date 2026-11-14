@@ -1,0 +1,108 @@
+---
+# MBC SSO の割り当ての同期（PULL。ZABBIX.md「MBC SSO の割り当ての同期（PULL）」）。main.yml が api.yml の後で
+# include する（api.yml が SAML の userdirectory の SCIM を有効・無効にし、nginx の vhost は前のロールバック block が
+# /api_scim.php/ を loopback にだけ開く）。
+#
+# 鍵と Zabbix の API トークンは argv・環境変数に載せず、root 専用（0600）のファイル経由でスクリプトへ渡す。
+# スクリプトは systemd の timer から動き、ロールの実行の中では動かさない（PULL の API の頻度の制限と、
+# 実行のたびに利用者を変えないため）。結果は `journalctl -u ai-support-zabbix-mbc-pull` で見て、
+# 止まったことは最後の成功の時刻の古さで Zabbix が知らせる（ZABBIX.md「同期の監視」）。
+- name: "zabbix_web : Install and schedule the MBC PULL sync"
+  when: zabbix_web_mbc_pull.enabled | default(false)
+  block:
+    - name: "zabbix_web : Install the MBC PULL sync script"
+      ansible.builtin.copy:
+        src: zabbix_mbc_pull.py
+        dest: /usr/local/lib/ai-support-zabbix-mbc-pull.py
+        owner: root
+        group: root
+        mode: "0700"
+
+    # 最後に成功した時刻（epoch だけ）。Zabbix エージェントが読めるよう、root 専用の状態ディレクトリの外に置く
+    # （ZABBIX.md「同期の監視」）。
+    - name: "zabbix_web : Create the MBC PULL sync status directory"
+      ansible.builtin.file:
+        path: /var/lib/ai-support-zabbix-mbc-pull
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: "zabbix_web : Write the MBC PULL sync settings"
+      ansible.builtin.copy:
+        content: >-
+          {{ {'port': zabbix_web_listen_port | int, 'scim_port': zabbix_web_mbc_pull.scim_port | default(18080) | int,
+              'server_name': zabbix_web_server_name,
+              'version': zabbix_web_version, 'url': zabbix_web_mbc_pull.url,
+              'application_id': zabbix_web_mbc_pull.application_id} | to_json }}
+        dest: /var/lib/ai-support-zabbix/mbc-pull.json
+        owner: root
+        group: root
+        mode: "0600"
+
+    # copy の content はモジュールの引数仕様で伏字化されるため no_log は付けない（付けると失敗理由だけが消える。
+    # api.yml と同じ）。diff: false で差分表示も止める。
+    - name: "zabbix_web : Write the MBC PULL sync credentials"
+      ansible.builtin.copy:
+        content: "{{ {'pull_key': zabbix_web_mbc_pull_key, 'zabbix_api_token': zabbix_web_api_token} | to_json }}"
+        dest: /var/lib/ai-support-zabbix/mbc-pull.credentials
+        owner: root
+        group: root
+        mode: "0600"
+      diff: false
+
+    - name: "zabbix_web : Install the MBC PULL sync systemd units"
+      ansible.builtin.template:
+        src: "mbc-pull.{{ item }}.j2"
+        dest: "/etc/systemd/system/ai-support-zabbix-mbc-pull.{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: [service, timer]
+      register: zabbix_web_mbc_pull_units
+
+    - name: "zabbix_web : Enable and start the MBC PULL sync timer"
+      ansible.builtin.systemd_service:
+        name: ai-support-zabbix-mbc-pull.timer
+        enabled: true
+        state: "{{ 'restarted' if zabbix_web_mbc_pull_units.changed else 'started' }}"
+        daemon_reload: "{{ zabbix_web_mbc_pull_units.changed }}"
+
+# 無効にしたら timer を止め、スクリプト・設定・鍵・状態のファイルと unit を消す（SCIM は api.yml が無効にする。
+# そのため main.yml の先頭近くで、timer が残るのに zabbix_web_api_token が空の実行を止めている）。
+- name: "zabbix_web : Remove the MBC PULL sync"
+  when: not zabbix_web_mbc_pull.enabled | default(false)
+  block:
+    - name: "zabbix_web : Read the MBC PULL sync timer unit"
+      ansible.builtin.stat:
+        path: /etc/systemd/system/ai-support-zabbix-mbc-pull.timer
+        get_checksum: false
+        get_mime: false
+      register: zabbix_web_mbc_pull_timer
+
+    - name: "zabbix_web : Stop and disable the MBC PULL sync timer"
+      ansible.builtin.systemd_service:
+        name: ai-support-zabbix-mbc-pull.timer
+        enabled: false
+        state: stopped
+      when: zabbix_web_mbc_pull_timer.stat.exists
+
+    - name: "zabbix_web : Remove the MBC PULL sync files"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/ai-support-zabbix-mbc-pull.timer
+        - /etc/systemd/system/ai-support-zabbix-mbc-pull.service
+        - /usr/local/lib/ai-support-zabbix-mbc-pull.py
+        - /var/lib/ai-support-zabbix/mbc-pull.json
+        - /var/lib/ai-support-zabbix/mbc-pull.credentials
+        - /var/lib/ai-support-zabbix/mbc-pull.state
+        - /var/lib/ai-support-zabbix/mbc-pull.state.tmp
+        - /var/lib/ai-support-zabbix-mbc-pull
+      register: zabbix_web_mbc_pull_removed
+
+    - name: "zabbix_web : Reload systemd after removing the MBC PULL sync units"
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: zabbix_web_mbc_pull_removed.changed

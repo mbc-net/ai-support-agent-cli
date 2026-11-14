@@ -616,6 +616,36 @@ class SamlHelperTest(unittest.TestCase):
         self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config()))
         self.assertEqual(state.params_of('userdirectory.update')[-1]['nameid_format'], PERSISTENT)
 
+    def test_scim_is_off_by_default_and_follows_the_mbc_pull_switch(self):
+        state = FakeSaml(api_token=API_TOKEN)
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config()))
+        self.assertEqual(state.params_of('userdirectory.create')[0]['scim_status'], 0)
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(scim=True)))
+        self.assertEqual(out['saml_changed'], ['userdirectory'])
+        self.assertEqual(state.params_of('userdirectory.update')[-1], {'userdirectoryid': state.directories[0]
+                                                                      ['userdirectoryid'], 'scim_status': 1})
+        state.calls.clear()
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(scim=True)))
+        self.assertEqual(self.writes(state), [])
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(scim=False)))
+        self.assertEqual(state.params_of('userdirectory.update')[-1]['scim_status'], 0)
+        # Disabling SAML (with the sync) also switches SCIM off.
+        self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml=saml_config(scim=True)))
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml={'enabled': False}))
+        self.assertEqual(out['saml_changed'], ['userdirectory', 'authentication'])
+        self.assertEqual(state.directories[0]['scim_status'], '0')
+        state.calls.clear()
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml={'enabled': False}))
+        self.assertEqual(out['saml_changed'], [])
+        self.assertEqual(self.writes(state), [])
+        for scim, jit in (('yes', None), (True, {'enabled': False})):
+            config = saml_config(scim=scim)
+            if jit is not None:
+                config['jit'] = jit
+            calls = len(state.calls)
+            self.failed(self.run_helper(state, api_token=API_TOKEN, password='', saml=config), 'saml scim')
+            self.assertEqual(state.methods()[calls:], [])
+
     def test_super_admin_roles_are_never_mapped(self):
         state = FakeSaml(api_token=API_TOKEN)
         state.roles['9'] = {'roleid': '9', 'name': 'Custom root', 'type': '3'}
@@ -777,6 +807,13 @@ class SamlHelperTest(unittest.TestCase):
         again = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml={'enabled': False}))
         self.assertFalse(again['changed'])
         self.assertNotIn('authentication.update', state.methods())
+
+    def test_disabling_saml_on_zabbix_6_0_does_not_read_user_directories(self):
+        # Zabbix 6.0 has no userdirectory API (and so no SCIM): the disable path must not call it.
+        state = FakeSaml('6.0.30', api_token=API_TOKEN)
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml={'enabled': False}))
+        self.assertNotIn('userdirectory.get', state.methods())
+        self.assertIn(out['saml_changed'], ([], ['authentication']))
 
     def test_invalid_saml_input_is_rejected_before_any_request(self):
         jit_star = saml_config()
