@@ -1,0 +1,37 @@
+# Managed by ai-support-agent (zabbix_web role). MBC SSO PULL assignment sync; see ansible/ZABBIX.md.
+# Started only by ai-support-zabbix-mbc-pull.timer. No Restart=: a failed run waits for the next timer run.
+[Unit]
+Description=Sync MBC SSO role assignments into the Zabbix SAML users
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/ai-support-zabbix-mbc-pull.py /var/lib/ai-support-zabbix/mbc-pull.json /var/lib/ai-support-zabbix/mbc-pull.credentials
+TimeoutStartSec=5min
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+# The state file (mbc-pull.state: salted hashes of recent changes) is written next to the settings, and the time
+# of the last success (read by the Zabbix agent, see ZABBIX.md) in its own world-readable directory ("-": if that
+# directory is gone the sync still runs and only warns, and monitoring reports it as stale).
+ReadWritePaths=/var/lib/ai-support-zabbix -/var/lib/ai-support-zabbix-mbc-pull
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
