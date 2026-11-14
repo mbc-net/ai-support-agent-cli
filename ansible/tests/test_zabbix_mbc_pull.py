@@ -174,7 +174,15 @@ class FakeMbc(FakeSaml):
             ids = {m['value'] for m in body.get('members', [])}
             if not ids <= saml_users or not all(m.get('display') for m in body.get('members', [])):
                 return 404, {'detail': 'No permissions to referred object or it does not exist!'}
+            existing = [gid for gid, g in self.scim_groups.items() if g['name'] == body['displayName']]
+            if existing and 'members' not in body:
+                # Zabbix (Group::post) turns a POST on an existing name into a PUT, which requires "members".
+                return 400, {'detail': 'Invalid parameter "/": the parameter "members" is missing.'}
             groupid = self.scim_group(body['displayName'])
+            if existing:
+                for userid in self.scim_groups[groupid]['members'] - ids:
+                    self.scim_groups[groupid]['members'].discard(userid)
+                    self.provision(userid)
             self.scim_groups[groupid]['members'] |= ids
             for userid in ids:
                 self.provision(userid)
@@ -523,26 +531,53 @@ class PullSyncTest(unittest.TestCase):
         self.assertEqual(summary['vanished'], 1)
         self.assertIn('deleted while the run was in progress', output)
 
-    def test_a_group_created_after_the_read_is_patched_not_replaced(self):
-        class Recorder:
-            def __init__(self):
-                self.calls = []
+    def recorder(self, reads, post_fails):
+        """A Scim whose GET Groups answers ``reads`` in turn and whose POST fails when ``post_fails``."""
+        calls = []
 
+        class Recorder(pull.Scim):
             def groups(self):
-                return {'operator': ('77', {'9'})}
+                calls.append(('get',))
+                return reads.pop(0)
 
             def change_members(self, groupid, op, userids):
-                self.calls.append(('patch', groupid, op, sorted(userids)))
+                calls.append(('patch', groupid, op, sorted(userids)))
 
-            def create_group(self, name, members):
-                self.calls.append(('post', name))
+            def create_group(self, name):
+                calls.append(('post', name))
+                if post_fails:
+                    raise pull.HelperError('Zabbix SCIM POST Groups returned HTTP 400.')
 
-        scim = Recorder()
-        plan = {'deprovision': [], 'restore': [], 'remove': {}, 'add': {'operator': {'5'}}, 'usernames': {'5': 'x'}}
+        return Recorder(1, SERVER_NAME, API_TOKEN), calls
+
+    def test_a_group_created_after_the_read_is_patched_not_replaced(self):
+        plan = {'deprovision': [], 'restore': [], 'remove': {}, 'add': {'operator': {'5'}}}
+        # Created between the plan and the re-read.
+        scim, calls = self.recorder([{'operator': ('77', {'9'})}], False)
         applied = []
         self.assertEqual(pull.apply_plan(scim, plan, {}, applied), 0)
-        self.assertEqual(scim.calls, [('patch', '77', 'add', ['5'])])
+        self.assertEqual(calls, [('get',), ('patch', '77', 'add', ['5'])])
         self.assertEqual(applied, ['add:operator:5'])
+        # Created by a login between the re-read and the POST: the POST (a PUT without members) is refused, the
+        # group is read again and patched; the login's member stays.
+        scim, calls = self.recorder([{}, {'operator': ('77', {'9'})}], True)
+        self.assertEqual(pull.apply_plan(scim, plan, {}, []), 0)
+        self.assertEqual(calls, [('get',), ('post', 'operator'), ('get',), ('patch', '77', 'add', ['5'])])
+        # A POST that fails while the group still does not exist stops the run.
+        scim, calls = self.recorder([{}, {}], True)
+        with self.assertRaisesRegex(pull.HelperError, 'HTTP 400'):
+            pull.apply_plan(scim, plan, {}, [])
+        self.assertNotIn('patch', [c[0] for c in calls])
+
+    def test_a_post_on_an_existing_group_name_cannot_replace_its_members(self):
+        state = FakeMbc()
+        login = state.add_jit(subject('alice'), ['operator'])
+        groupid = next(gid for gid, g in state.scim_groups.items() if g['name'] == 'operator')
+        with MbcServer(state, scim=True) as server:
+            scim = pull.Scim(server.port, SERVER_NAME, API_TOKEN)
+            with self.assertRaisesRegex(pull.HelperError, 'POST Groups returned HTTP 400'):
+                scim.create_group('operator')
+        self.assertEqual(state.scim_groups[groupid]['members'], {login})
 
     def test_several_roles_get_every_mapped_group_and_the_highest_role(self):
         state = FakeMbc()
@@ -574,9 +609,12 @@ class PullSyncTest(unittest.TestCase):
         self.assertFalse(any(g['name'] == 'operator' for g in state.scim_groups.values()))
         code, _, _ = self.sync(state, FakePull(users))
         self.assertEqual(code, 0)
+        writes = [(c['method'], c['resource']) for c in state.scim_writes()]
         post = [c for c in state.scim_writes() if c['method'] == 'POST']
         self.assertEqual(len(post), 1)
-        self.assertEqual(post[0]['body']['displayName'], 'operator')
+        self.assertEqual(post[0]['body'], {'schemas': [pull.SCIM_GROUP_SCHEMA], 'displayName': 'operator'})
+        # Created empty, then the members are added with PATCH (the additions come before the removals).
+        self.assertEqual(writes[:2], [('POST', 'Groups'), ('PATCH', 'Groups')])
         self.assertEqual(state.user(userid), ('5', ['12']))
 
     def test_non_saml_admin_super_admin_and_admin_disabled_users_are_never_touched(self):

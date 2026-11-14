@@ -129,3 +129,10 @@ Zabbix エージェントで古さを監視する手順を `ZABBIX.md`「同期�
   繰り返しを数えられないので `last-success` も更新しない（監視は「止まった」と報告する）。
 - Apache の vhost にも `/api_scim.php` を拒否する `LocationMatch` を加えた（同期を無効に戻すのと同時に Apache へ移す場合）。
 - 想定外の例外では、クラス名に加えて失敗した場所（ファイル名と行番号。最大 5 段）を出す。メッセージは出さない。
+
+3 回目のレビューを受けて、SCIM のグループを作る手順も変えた（単体試験だけで確認）。Zabbix 7.0・8.0 のソース
+（`ui/include/classes/scim/services/Group.php`）で、SAML ログインが未作成のグループを作ること
+（`createScimGroupsFromSamlAttributes`）と、既存の名前への `POST /Groups` が所属を全置換する PUT になることを確かめた。
+そのため、グループは `members` を付けずに空で作り、読み直してから `PATCH add` で所属を足す。競合して同じ名前のグループが
+先にできていた場合、`members` のない PUT は必須項目の検査で拒否される。同期はそれを読み直して `PATCH` に切り替えるので、
+ログインで付いた所属は消えない。

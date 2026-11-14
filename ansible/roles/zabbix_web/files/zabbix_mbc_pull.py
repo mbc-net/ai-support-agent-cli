@@ -398,11 +398,30 @@ class Scim:
         self.call('PATCH', 'Groups', groupid, {'schemas': [SCIM_PATCH_SCHEMA], 'Operations': [
             {'op': op, 'path': 'members', 'value': [{'value': userid} for userid in sorted(userids)]}]})
 
-    def create_group(self, name, members):
-        """members: [(userid, username)]. Only for a name GET Groups did not list: POST on an existing name would
-        replace all its members, so the caller re-reads the groups right before."""
-        self.call('POST', 'Groups', None, {'schemas': [SCIM_GROUP_SCHEMA], 'displayName': name,
-                                           'members': [{'value': u, 'display': n} for u, n in sorted(members)]})
+    def create_group(self, name):
+        """Create an empty group; the caller then adds the members with PATCH. Zabbix handles a POST on an existing
+        name as a PUT that replaces all its members (Group::post), and a SAML login creates missing groups too
+        (Group::createScimGroupsFromSamlAttributes). Without members, that PUT fails its required "members" check
+        instead of dropping the members a login added between our read and this POST."""
+        self.call('POST', 'Groups', None, {'schemas': [SCIM_GROUP_SCHEMA], 'displayName': name})
+
+    def ensure_group(self, name, groups):
+        """Add the group ``name`` to ``groups`` ({displayName: (id, members)}), creating it when it is missing."""
+        if name not in groups:
+            groups.update(self.groups())
+        if name in groups:
+            return
+        try:
+            self.create_group(name)
+        except HelperError:
+            # A login created it after the read (the POST became a refused PUT); anything else is raised below.
+            groups.update(self.groups())
+            if name not in groups:
+                raise
+            return
+        groups.update(self.groups())
+        if name not in groups:
+            raise HelperError('Zabbix SCIM POST Groups did not create the group.')
 
 
 # --- plan ------------------------------------------------------------------------------------------
@@ -414,7 +433,7 @@ def plan_changes(assignments, state, scim_groups):
     case_sensitive = state['case_sensitive']
     lookup = assignments if case_sensitive else {s.lower(): r for s, r in assignments.items()}
     members = {name: scim_groups[name][1] if name in scim_groups else set() for name in mapping}
-    plan = {'deprovision': [], 'restore': [], 'remove': {}, 'add': {}, 'usernames': {}, 'present': {},
+    plan = {'deprovision': [], 'restore': [], 'remove': {}, 'add': {}, 'present': {},
             'counts': {'managed': 0, 'enabled': 0, 'protected': 0, 'skipped_disabled': 0, 'present': 0,
                        'absent': 0, 'already_deprovisioned': 0, 'unmapped_roles_only': 0, 'drift': 0}}
     counts = plan['counts']
@@ -451,7 +470,6 @@ def plan_changes(assignments, state, scim_groups):
                 plan['deprovision'].append(userid)
             continue
         counts['present'] += 1
-        plan['usernames'][userid] = user['username']
         plan['present'][userid] = wanted
         changed = False
         for name in mapping:
@@ -494,12 +512,8 @@ def apply_plan(scim, plan, scim_groups, applied):
         else:
             vanished += 1
     for name in sorted(plan['add']):
-        if name not in scim_groups:
-            scim_groups.update(scim.groups())
-        if name in scim_groups:
-            scim.change_members(scim_groups[name][0], 'add', plan['add'][name])
-        else:
-            scim.create_group(name, [(u, plan['usernames'][u]) for u in plan['add'][name]])
+        scim.ensure_group(name, scim_groups)
+        scim.change_members(scim_groups[name][0], 'add', plan['add'][name])
         applied.extend('add:%s:%s' % (name, u) for u in plan['add'][name])
     for name in sorted(plan['remove']):
         scim.change_members(scim_groups[name][0], 'remove', plan['remove'][name])
