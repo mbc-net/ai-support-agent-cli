@@ -608,7 +608,7 @@ SAML では、IdP で外した利用の権限・役割は、その人が次に�
 
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `zabbix_web_mbc_pull` | `{enabled: false, url: "", application_id: "", interval: 300, scim_port: 18080}` | `enabled`（真偽値）、`url`（`https://sso.mbc-net.com` だけ。末尾 `/` は可）、`application_id`（MBC のアプリの ID。英小文字・数字・単独の `-`、英字で始まる 1〜40 文字）、`interval`（実行の間隔の秒。整数 120〜3600）、`scim_port`（SCIM 専用の `127.0.0.1` の待受のポート。整数 1024〜65535、`zabbix_web_listen_port` 以外で、ほかのサービスが使っていないもの） |
+| `zabbix_web_mbc_pull` | `{enabled: false, url: "", application_id: "", interval: 300, scim_port: 18080}` | `enabled`（真偽値）、`url`（`https://sso.mbc-net.com` だけ。末尾 `/` は可）、`application_id`（MBC のアプリの ID。英小文字・数字・単独の `-`、英字で始まる 1〜40 文字）、`interval`（実行の間隔の秒。整数 120〜3600）、`scim_port`（SCIM 専用の `127.0.0.1` の待受のポート。整数 1024〜65535、`zabbix_web_listen_port` 以外で、ほかのサービスが使っていないもの）。レシピの値は既定と統合されず丸ごと置き換わりますが、`interval`・`scim_port` を省けば既定（300・18080）を使います |
 | `zabbix_web_mbc_pull_key` | `""` | PULL の鍵。ANSIBLE# の秘匿変数で渡す（常に秘匿扱い）。`enabled: true` のとき必須 |
 
 ```yaml
@@ -645,7 +645,9 @@ SAML では、IdP で外した利用の権限・役割は、その人が次に�
   userdirectory の SCIM（`scim_status`）を有効にし、nginx の vhost に **SCIM だけの別の server**（`127.0.0.1:<scim_port>`
   だけで待ち受け、`/api_scim.php/` を `127.0.0.1` からだけ受け付ける）を足します。画面・API の server
   （`zabbix_web_listen_port`）には SCIM を出しません（Zabbix は SCIM の endpoint を利用者が送る `Path-Info` の
-  要求ヘッダーからも読むため、その server では `/api_scim.php` 自体も 404 にします）。無効のときは足さず、vhost は従来と同じです。
+  要求ヘッダーからも読むため、その server では `/api_scim.php` 自体を同期の有効・無効に関わらず常に 404 にします。
+  無効に戻す実行では vhost が SCIM の無効化（API）より先に書き換わるので、その間も届かないようにするためです）。
+  無効のときは SCIM の server を足しません。
   - **前段のリバースプロキシを `scim_port` へ転送しないでください。** nginx は送信元のアドレス（`127.0.0.1`）でしか
     区別できないため、同じホストのプロキシがこのポートへ転送すると、外からの要求も `127.0.0.1` からに見えます
     （SSH のポート転送も同じです）。画面のポートへの転送には SCIM が無いので影響しません。
@@ -688,19 +690,38 @@ SAML では、IdP で外した利用の権限・役割は、その人が次に�
 hash と時刻だけで、利用者名・利用者 ID は含まない）を使います。鍵・トークン・`Authorization`・利用者名・`subject`・利用者 ID は出しません。
 すぐ 1 回動かすときは `systemctl start ai-support-zabbix-mbc-pull.service`（鍵の頻度の制限に注意）。
 
+**同期の監視（有効にするときに必ず設定する）:** 同期が失敗し続けても（PULL の鍵の失効、`zabbix_web_api_token` の期限切れ、
+安全の上限での停止、timer の停止など）、Zabbix の利用者は変わらないだけで、権限を外された人が有効なまま残ります。journal を
+誰かが見ない限り気付けないので、終了コード 0 で終わった回の時刻を `/var/lib/ai-support-zabbix-mbc-pull/last-success`
+（0644。epoch の数字だけ。ディレクトリは 0755）に書きます。失敗した回（終了コード 2・5・6）は書かないので、このファイルの
+古さで止まったことが分かります。Zabbix サーバーのホスト自身を Zabbix エージェント（`zabbix_agent` ロール。agent・agent2 の
+どちらでもよい）で監視し、そのホストに次のアイテムとトリガーを作ってください（`<host>` はホスト名、`960` は
+`interval` が 300 のときの 3 周期分＋乱数の遅れ 60 秒。`interval` を変えたら `3 × interval + 60` に変える）。
+
+| 種類 | 設定 |
+|---|---|
+| アイテム | タイプ「Zabbix エージェント」、キー `vfs.file.time[/var/lib/ai-support-zabbix-mbc-pull/last-success,modify]`、データ型「数値（整数）」、単位 `unixtime`、間隔 `1m` |
+| トリガー（止まった） | `now()-last(/<host>/vfs.file.time[/var/lib/ai-support-zabbix-mbc-pull/last-success,modify])>960`、深刻度「重度の障害」 |
+| トリガー（読めない） | `nodata(/<host>/vfs.file.time[/var/lib/ai-support-zabbix-mbc-pull/last-success,modify],30m)=1`（ファイルが無い・有効にした直後から一度も成功していない・エージェントが止まった）、深刻度「重度の障害」 |
+
+障害になったら `journalctl -u ai-support-zabbix-mbc-pull` の最後の回の終了コードとメッセージ（上の「何も変えない場合」）を
+見ます。有効にした直後は、最初の成功（起動の 3 分後か、有効にした実行の直後）までアイテムが取得できない状態になります。
+
 **ファイル:** `/usr/local/lib/ai-support-zabbix-mbc-pull.py`（root 0700。標準ライブラリだけで、JSON-RPC の client は
 `/usr/local/lib/ai-support-zabbix-api.py` のものを使う）、`/var/lib/ai-support-zabbix/mbc-pull.json`（設定。root 0600）、
 `/var/lib/ai-support-zabbix/mbc-pull.credentials`（PULL の鍵と `zabbix_web_api_token`。root 0600）、
 `/var/lib/ai-support-zabbix/mbc-pull.state`（上記。スクリプトが書く）、
+`/var/lib/ai-support-zabbix-mbc-pull/last-success`（上記の監視用。スクリプトが書く）、
 `/etc/systemd/system/ai-support-zabbix-mbc-pull.service`・`.timer`。service は root で動きますが、capability を持たず、
-ファイルシステムは `/var/lib/ai-support-zabbix` 以外は読み取りだけです（`ProtectSystem=strict` など）。鍵とトークンは引数・環境変数に載せません。
+ファイルシステムは `/var/lib/ai-support-zabbix` と `/var/lib/ai-support-zabbix-mbc-pull` 以外は読み取りだけです（`ProtectSystem=strict` など）。鍵とトークンは引数・環境変数に載せません。
 
 **鍵の入れ替え:** MBC の「PULLの鍵」で新しい鍵を発行 → 秘匿変数 `zabbix_web_mbc_pull_key` を替えてロールを実行 →
 journal で次の回が終了コード 0 で終わることを確かめる → 古い鍵を失効。`zabbix_web_api_token` を交換したときも、
 ロールを実行すれば鍵のファイルが新しいトークンに書き換わります。
 
 **無効に戻す:** `enabled: false` で実行すると、timer を止め、unit・スクリプト・設定・鍵・状態のファイルを消し、SCIM を
-無効にし、vhost から SCIM の server を外します。SCIM を無効に戻すのは API なので、**この実行にも `zabbix_web_api_token`
+無効にし、vhost から SCIM の server を外し、監視用の `/var/lib/ai-support-zabbix-mbc-pull` を消します（Zabbix に作った
+監視のアイテム・トリガーは手で消してください）。SCIM を無効に戻すのは API なので、**この実行にも `zabbix_web_api_token`
 が要ります**（同期が入っているホストでトークンが空なら、ロールは何も変える前に失敗します）。`zabbix_web_saml_enabled:
 false` に戻したときも、ヘルパーは SCIM を無効にします。同期で無効化用のグループへ移した利用者はそのままです
 （次のログインで戻ります）。

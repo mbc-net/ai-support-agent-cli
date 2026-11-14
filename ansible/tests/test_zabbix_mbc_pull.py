@@ -19,6 +19,7 @@ import ssl
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import importlib.util
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -267,6 +268,10 @@ class PullSyncTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.state_file = os.path.join(self.tmp.name, 'mbc-pull.state')
+        self.status_file = os.path.join(self.tmp.name, 'last-success')
+        original = pull.STATUS_FILE
+        pull.STATUS_FILE = self.status_file
+        self.addCleanup(setattr, pull, 'STATUS_FILE', original)
 
     def settings(self, port, scim_port=None, **overrides):
         settings = {'port': port, 'scim_port': scim_port or port + 1, 'server_name': SERVER_NAME, 'version': '7.0',
@@ -430,6 +435,40 @@ class PullSyncTest(unittest.TestCase):
         code, summary, output = self.sync(state, FakePull(self.team(state)))
         self.assertEqual(code, 0)
         self.assertEqual(summary['deprovision'], 1)
+        self.assertIn('Could not write the state file', output)
+
+    def test_only_successful_runs_record_their_time_for_monitoring(self):
+        state = FakeMbc()
+        users = self.team(state)
+        self.assertEqual(self.sync(state, FakePull(status=503))[0], 5)
+        self.assertFalse(os.path.exists(self.status_file))
+        before = int(time.time())
+        self.assertEqual(self.sync(state, FakePull(users))[0], 0)
+        self.assertEqual(os.stat(self.status_file).st_mode & 0o777, 0o644)
+        with open(self.status_file, encoding='utf-8') as handle:
+            recorded = int(handle.read())
+        self.assertGreaterEqual(recorded, before)
+        # A refused run (safety cap) leaves the last success as it was, so its age grows.
+        self.assertEqual(self.sync(state, FakePull({}))[0], 6)
+        with open(self.status_file, encoding='utf-8') as handle:
+            self.assertEqual(int(handle.read()), recorded)
+
+    def test_an_unwritable_status_file_warns_and_keeps_the_exit_code(self):
+        state = FakeMbc()
+        os.mkdir(self.status_file + '.tmp')
+        code, _, output = self.sync(state, FakePull(self.team(state)))
+        self.assertEqual(code, 0)
+        self.assertIn('monitoring will report the sync as stale', output)
+
+    def test_a_scim_failure_also_reports_an_unwritable_state_file(self):
+        state = FakeMbc()
+        state.add_jit(subject('bob'), ['operator'])
+        users = self.team(state)
+        users[subject('bob')] = ['admin']
+        state.scim_fail[('PATCH', 'Groups')] = 1
+        os.mkdir(self.state_file + '.tmp')
+        code, _, output = self.sync(state, FakePull(users))
+        self.assertEqual(code, 2)
         self.assertIn('Could not write the state file', output)
 
     def test_users_deleted_during_the_run_are_skipped(self):

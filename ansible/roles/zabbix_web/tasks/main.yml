@@ -209,7 +209,7 @@
       is empty, delete or scramble (only with SAML); a mode needs 1-200 unique targets (printable
       ASCII without spaces, max 100, not Admin or the service user) and expected_sha256 equal to
       the sha256 of the targets sorted by bytes and joined with newlines (see ZABBIX.md).
-      zabbix_web_mbc_pull is a mapping with only enabled (boolean), url, application_id and interval, and
+      zabbix_web_mbc_pull is a mapping with only enabled (boolean), url, application_id, interval and scim_port, and
       zabbix_web_mbc_pull_key is a string; enabled needs zabbix_web_saml_enabled with JIT, zabbix_web_api_token,
       zabbix_web_type nginx, url https://sso.mbc-net.com, an application_id of 1-40 characters (a-z, 0-9 and
       single hyphens, starting with a letter), zabbix_web_mbc_pull_key of the form keyId.secret (k + 24 hex
@@ -458,7 +458,7 @@
     get_mime: false
   register: zabbix_web_mbc_pull_installed
   when:
-    - not zabbix_web_mbc_pull.enabled
+    - not zabbix_web_mbc_pull.enabled | default(false)
     - zabbix_web_api_token | length == 0
 
 - name: "zabbix_web : Require the API token for the run that disables the MBC PULL sync"
@@ -468,7 +468,7 @@
       zabbix_web_api_token is empty, so SCIM on the SAML user directory could not be switched off.
       Nothing was changed. Keep zabbix_web_api_token set for the run that disables the sync.
   when:
-    - not zabbix_web_mbc_pull.enabled
+    - not zabbix_web_mbc_pull.enabled | default(false)
     - zabbix_web_api_token | length == 0
     - zabbix_web_mbc_pull_installed.stat.exists | default(false)
 

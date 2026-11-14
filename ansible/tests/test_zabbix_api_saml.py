@@ -808,6 +808,13 @@ class SamlHelperTest(unittest.TestCase):
         self.assertFalse(again['changed'])
         self.assertNotIn('authentication.update', state.methods())
 
+    def test_disabling_saml_on_zabbix_6_0_does_not_read_user_directories(self):
+        # Zabbix 6.0 has no userdirectory API (and so no SCIM): the disable path must not call it.
+        state = FakeSaml('6.0.30', api_token=API_TOKEN)
+        out = self.ok(self.run_helper(state, api_token=API_TOKEN, password='', saml={'enabled': False}))
+        self.assertNotIn('userdirectory.get', state.methods())
+        self.assertIn(out['saml_changed'], ([], ['authentication']))
+
     def test_invalid_saml_input_is_rejected_before_any_request(self):
         jit_star = saml_config()
         jit_star['jit']['groups'][0]['saml_group'] = 'adm*'

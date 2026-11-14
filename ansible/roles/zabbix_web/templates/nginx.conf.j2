@@ -14,14 +14,12 @@ server {
     location ~ /\. {
         deny all;
     }
-{% if (zabbix_web_mbc_pull | default({})).enabled | default(false) %}
-    # The MBC PULL sync enables SCIM, and Zabbix also takes the SCIM endpoint from a client "Path-Info"
-    # request header (CHttpRequest maps HTTP_PATH_INFO to PATH-INFO), so /api_scim.php itself is closed here;
-    # only the loopback SCIM server below serves it.
+    # Only the loopback server of the MBC PULL sync serves SCIM. Zabbix also takes the SCIM endpoint from
+    # a client "Path-Info" request header (CHttpRequest maps HTTP_PATH_INFO to PATH-INFO), so /api_scim.php is
+    # closed here at all times, also while a run that disables the sync has not yet switched SCIM off.
     location = /api_scim.php {
         return 404;
     }
-{% endif %}
     location ~ \.php$ {
         try_files $uri =404;
         include fastcgi_params;
@@ -35,7 +33,7 @@ server {
 # SCIM, used only by the MBC PULL sync (ai-support-zabbix-mbc-pull) on this host. A separate listener on
 # 127.0.0.1 only: a reverse proxy in front of the frontend port never reaches it (do not forward to this port).
 server {
-    listen 127.0.0.1:{{ zabbix_web_mbc_pull.scim_port | int }};
+    listen 127.0.0.1:{{ zabbix_web_mbc_pull.scim_port | default(18080) | int }};
     server_name {{ zabbix_web_server_name }};
     root {{ zabbix_web_ui_root }};
     location ^~ /api_scim.php/ {

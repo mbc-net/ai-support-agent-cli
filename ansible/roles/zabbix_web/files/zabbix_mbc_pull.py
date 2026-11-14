@@ -105,6 +105,9 @@ SCIM_PATCH_SCHEMA = 'urn:ietf:params:scim:api:messages:2.0:PatchOp'
 SCIM_LIST_SCHEMA = 'urn:ietf:params:scim:api:messages:2.0:ListResponse'
 STATE_FILE = 'mbc-pull.state'
 STATE_WINDOW = 24 * 3600
+# Epoch of the last run that finished with exit code 0, for the Zabbix agent (ZABBIX.md: monitor its age). Outside
+# the root-only state directory and world-readable; it holds a number only.
+STATUS_FILE = '/var/lib/ai-support-zabbix-mbc-pull/last-success'
 ID_PATTERN = re.compile(r'^[0-9]{1,20}\Z')
 
 USER_TYPE_SUPER_ADMIN = helper.USER_TYPE_SUPER_ADMIN
@@ -598,10 +601,13 @@ def run(settings, credentials, redact, connect_pull=None, connect_scim=None, sta
     try:
         summary['vanished'] = apply_plan(scim, plan, scim_groups, applied)
     except HelperError as failure:
+        note = ''
         if history is not None:
-            record_changes(state_path, history, applied, int(now or time.time()))
-        raise HelperError('%s (%d SCIM change(s) were applied before the failure; the next run continues).'
-                          % (failure, scim.writes)) from None
+            _, saved = record_changes(state_path, history, applied, int(now or time.time()))
+            if not saved:
+                note = ' Could not write the state file; repeated changes are not detected.'
+        raise HelperError('%s (%d SCIM change(s) were applied before the failure; the next run continues).%s'
+                          % (failure, scim.writes, note)) from None
     summary['scim_writes'] = scim.writes
     summary['changed'] = scim.writes > 0
     if history is not None:
@@ -615,6 +621,20 @@ def run(settings, credentials, redact, connect_pull=None, connect_scim=None, sta
                             'deprovisioned.' % (still_enabled, still_disabled))
         return EXIT_ERROR, summary
     return EXIT_OK, summary
+
+
+def write_status(path, now):
+    """Store the epoch of a successful run (0644 despite the unit's UMask). Returns False when it cannot."""
+    temporary = path + '.tmp'
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            os.fchmod(handle.fileno(), 0o644)
+            handle.write('%d\n' % now)
+        os.replace(temporary, path)
+    except OSError:
+        return False
+    return True
 
 
 def read_json(path, what):
@@ -653,6 +673,8 @@ def main(argv):
     if summary.get('drift'):
         print('%d present user(s) do not have the role and user groups of their JIT mapping (for example after the '
               'mapping was changed); Zabbix corrects them at their next login.' % summary['drift'], file=sys.stderr)
+    if code == EXIT_OK and not write_status(STATUS_FILE, int(time.time())):
+        print('Could not write %s; monitoring will report the sync as stale.' % STATUS_FILE, file=sys.stderr)
     print(redact(json.dumps(summary, sort_keys=True)))
     return code
 

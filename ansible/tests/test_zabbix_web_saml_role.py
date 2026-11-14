@@ -547,19 +547,20 @@ class SamlRoleTest(unittest.TestCase):
 
     def test_mbc_pull_serves_scim_on_a_separate_loopback_listener_only_when_enabled(self):
         without = self.render_template('nginx.conf.j2', saml_vars())
-        self.assertNotIn('api_scim', without)
+        # The frontend server block (the one a reverse proxy forwards to) always returns 404 for /api_scim.php:
+        # Zabbix also reads the SCIM endpoint from a client "Path-Info" header, so the script itself must not be
+        # reachable there (found against a real Zabbix 7.0.32, ZABBIX-MBC-PULL-VALIDATION.md), including during a
+        # run that disables the sync, whose vhost is written before api.yml switches SCIM off.
+        guard = ('    location = /api_scim.php {\n        return 404;\n    }\n')
+        self.assertEqual(re.sub(r'(?m)^    # .*\n', '', without).count('api_scim'), 1)
+        self.assertNotIn('# SCIM', without)
+        self.assertIn(guard, without)
+        self.assertLess(without.index(guard), without.index('    location ~ \\.php$ {'))
         self.assertNotIn('\n\n', without.rstrip('\n'))
-        # Same bytes as before the sync existed (it ended with a blank line), so existing hosts see no change.
         self.assertTrue(without.endswith('    }\n}\n\n'), repr(without[-12:]))
         enabled = self.render_template('nginx.conf.j2', self.pull_vars(scim_port=18090))
         main, scim = enabled[:enabled.index('# SCIM')], enabled[enabled.index('# SCIM'):]
-        # The frontend server block (the one a reverse proxy forwards to) only gains a 404 for /api_scim.php:
-        # Zabbix also reads the SCIM endpoint from a client "Path-Info" header, so with SCIM enabled the script
-        # itself must not be reachable there (found against a real Zabbix 7.0.32, ZABBIX-MBC-PULL-VALIDATION.md).
-        guard = ('    location = /api_scim.php {\n        return 404;\n    }\n')
-        self.assertIn(guard, main)
-        self.assertLess(main.index(guard), main.index('    location ~ \\.php$ {'))
-        self.assertEqual(re.sub(r'(?m)^    # .*\n', '', main.replace(guard, '')).rstrip('\n'), without.rstrip('\n'))
+        self.assertEqual(main.rstrip('\n'), without.rstrip('\n'))
         self.assertNotIn('fastcgi_split_path_info', main)
         self.assertNotIn('PATH_INFO $fastcgi_path_info', main)
         self.assertIn('    listen 127.0.0.1:18090;\n', scim)
@@ -570,6 +571,31 @@ class SamlRoleTest(unittest.TestCase):
         timer = self.render_template('mbc-pull.timer.j2', self.pull_vars(interval=600))
         self.assertIn('OnUnitActiveSec=600s\n', timer)
         self.assertIn('RandomizedDelaySec=60\n', timer)
+
+    def test_mbc_pull_mapping_without_the_optional_keys_uses_the_asserted_defaults(self):
+        # A recipe's mapping replaces the role default as a whole, so interval and scim_port may be missing:
+        # the first assert accepts that with 300 and 18080, and every consumer must render the same values.
+        partial = saml_vars(zabbix_web_mbc_pull={'enabled': True, 'url': PULL['url'],
+                                                 'application_id': PULL['application_id']},
+                            zabbix_web_mbc_pull_key=PULL_KEY)
+        self.validate(partial, accepted=True)
+        self.assertIn('    listen 127.0.0.1:18080;\n', self.render_template('nginx.conf.j2', partial))
+        self.assertIn('OnUnitActiveSec=300s\n', self.render_template('mbc-pull.timer.j2', partial))
+        tasks = yaml.safe_load((ROLE / 'tasks/mbc_pull.yml').read_text())
+        settings = copy.deepcopy(next(t for t in tasks[0]['block'] if 'settings' in t['name']))
+        for key in ('owner', 'group'):
+            settings['ansible.builtin.copy'].pop(key)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings['ansible.builtin.copy']['dest'] = str(Path(tmp) / 'settings.json')
+            variables = self.base_vars()
+            variables.update(partial)
+            result = self.run_play(variables, [settings])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            import json
+            self.assertEqual(json.loads((Path(tmp) / 'settings.json').read_text())['scim_port'], 18080)
+        # Without enabled at all, the role treats the sync as disabled.
+        for when in (tasks[0]['when'], tasks[1]['when']):
+            self.assertIn('zabbix_web_mbc_pull.enabled | default(false)', when)
 
     def test_mbc_pull_settings_hold_no_secret_and_credentials_hold_both(self):
         tasks = yaml.safe_load((ROLE / 'tasks/mbc_pull.yml').read_text())

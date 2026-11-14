@@ -15,8 +15,10 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 ProtectSystem=strict
-# The state file (mbc-pull.state: salted hashes of recent changes) is written next to the settings.
-ReadWritePaths=/var/lib/ai-support-zabbix
+# The state file (mbc-pull.state: salted hashes of recent changes) is written next to the settings, and the time
+# of the last success (read by the Zabbix agent, see ZABBIX.md) in its own world-readable directory ("-": if that
+# directory is gone the sync still runs and only warns, and monitoring reports it as stale).
+ReadWritePaths=/var/lib/ai-support-zabbix -/var/lib/ai-support-zabbix-mbc-pull
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

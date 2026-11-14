@@ -1271,8 +1271,11 @@ def converge_autologout(client, token, userdirectoryid, autologout):
 def disable_saml(client, token):
     changed = []
     # SCIM (the MBC PULL sync) is switched off with SAML: it would otherwise stay usable on the user directory.
-    for row in client.require_list('userdirectory.get', {'output': ['userdirectoryid', 'scim_status'],
-                                                         'filter': {'idp_type': IDP_TYPE_SAML}}, token):
+    # SAML user directories (and SCIM) exist from Zabbix 6.4; 6.0 has no userdirectory API at all.
+    rows = client.require_list('userdirectory.get', {'output': ['userdirectoryid', 'scim_status'],
+                                                     'filter': {'idp_type': IDP_TYPE_SAML}}, token) \
+        if client.version >= (6, 4) else []
+    for row in rows:
         if str(row.get('scim_status')) == '1':
             client.require('userdirectory.update', {'userdirectoryid': row['userdirectoryid'], 'scim_status': 0}, token)
             changed.append('userdirectory')

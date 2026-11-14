@@ -112,3 +112,13 @@ $R -e phase=saml -e zabbix_web_api_token=<token> -e pull_enabled=false
 
 生ログ（ローカル一時証跡）: コンテナ内 `/work2/run-*.log`、8.0 の一括実行の出力 `scratchpad/mbcpull/flow-80.log`。
 コンテナ・イメージは検証後に削除した。
+
+## レビュー後の変更（2026-11-14）
+
+PR のレビュー（同期を無効に戻す実行では、vhost の書き換えが API での SCIM の無効化より先に行われ、API が失敗すると
+SCIM が有効なまま画面のポートから届く）を受けて、画面の server の `location = /api_scim.php { return 404; }` を同期の
+有効・無効に関わらず常に出すように変えた。上の #4・#17 の「無効のときの vhost は従来とバイト単位で同じ」は、この変更で
+「従来の vhost にこの 404 の location だけが加わったもの」に変わる（同期を使わないホストも、次のロールの実行で nginx を
+1 回 reload する）。あわせて、終了コード 0 の回の時刻を `/var/lib/ai-support-zabbix-mbc-pull/last-success` に書き、
+Zabbix エージェントで古さを監視する手順を `ZABBIX.md`「同期の監視」に加えた。
+
