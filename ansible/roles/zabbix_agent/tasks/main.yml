@@ -302,7 +302,7 @@
   ansible.builtin.apt:
     name: >-
       {{ ['zabbix-agent2'] + (zabbix_agent_plugin_packages.stdout_lines | default([])
-         | select('match', '^.[^nc] ') | map('regex_replace', '^[^ ]+ +', '') | list)
+         | select('match', '^.[^nc]') | map('regex_replace', '^[^ ]+ +', '') | list)
          if zabbix_agent_variant == 'agent2' else ['zabbix-agent'] }}
     state: latest
     update_cache: true

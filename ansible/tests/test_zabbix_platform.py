@@ -260,8 +260,11 @@ class PlatformTest(unittest.TestCase):
         # are upgraded with the agent; removed (rc) and unknown (un) entries are not reinstalled.
         cases = [('agent2', [], ['zabbix-agent2']),
                  ('agent2', ['ii  zabbix-agent2-plugin-mongodb', 'rc  zabbix-agent2-plugin-mssql',
-                             'iU  zabbix-agent2-plugin-postgresql', 'un  zabbix-agent2-plugin-ember-plus'],
-                  ['zabbix-agent2', 'zabbix-agent2-plugin-mongodb', 'zabbix-agent2-plugin-postgresql']),
+                             'iU  zabbix-agent2-plugin-postgresql', 'un  zabbix-agent2-plugin-ember-plus',
+                             # reinstall-required (third column R) is the same half-configured class
+                             'iUR zabbix-agent2-plugin-nvidia-gpu'],
+                  ['zabbix-agent2', 'zabbix-agent2-plugin-mongodb', 'zabbix-agent2-plugin-postgresql',
+                   'zabbix-agent2-plugin-nvidia-gpu']),
                  ('agent', ['ii  zabbix-agent2-plugin-mongodb'], ['zabbix-agent'])]
         for variant, lines, expected in cases:
             play = [{'hosts': 'localhost', 'gather_facts': False,
