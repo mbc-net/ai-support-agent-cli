@@ -1136,6 +1136,7 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'zabbix_agent_journal',
   'zabbix_agent_main_pid',
   'zabbix_agent_other_service',
+  'zabbix_agent_plugin_packages',
   'zabbix_agent_psk_socket',
   'zabbix_agent_repo_pkg',
   'zabbix_agent_ufw_add',
@@ -1145,6 +1146,7 @@ export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
   'zabbix_agent_ufw_desired',
   'zabbix_agent_ufw_desired_patterns',
   'zabbix_agent_ufw_stale',
+  'zabbix_agent_unstable_source',
   // zabbix_server（tasks/ufw.yml と、main.yml の Validate assert の task vars）
   'zabbix_server_ufw_add',
   'zabbix_server_ufw_added',
