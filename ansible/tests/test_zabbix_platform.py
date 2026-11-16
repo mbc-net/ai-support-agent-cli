@@ -164,6 +164,8 @@ class PlatformTest(unittest.TestCase):
                 self.play(role, '26.04', version='8.0')
 
     def test_rejects_eight_on_unvalidated_platforms(self):
+        # Server/frontend only: the agent has no PHP/PostgreSQL floor and 8.0 agent packages
+        # exist for every supported release (see test_agent_accepts_eight_on_every_supported_release).
         for release in ('22.04', '24.04'):
             for role in ('zabbix_server', 'zabbix_web'):
                 with self.subTest(role=role, release=release):
@@ -203,6 +205,73 @@ class PlatformTest(unittest.TestCase):
                     result = self.render(role, [f"{role}_repo_uri == '{uri}'", f"{role}_release_deb == '{deb}'",
                                                 f"{role}_pkg_epoch == '{epoch}'"], version=version, arch=arch)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_agent_accepts_eight_on_every_supported_release(self):
+        for release in ('22.04', '24.04'):
+            with self.subTest(release=release):
+                self.play('zabbix_agent', release, version='8.0', core='2.16.19')
+        self.play('zabbix_agent', '26.04', version='8.0')
+
+    def test_agent_rejects_unknown_series(self):
+        self.play('zabbix_agent', '24.04', version='7.4', success=False, rejection='zabbix_agent_version')
+
+    def test_agent_repository_layout_per_series(self):
+        tasks = yaml.safe_load((ROOT / 'roles/zabbix_agent/tasks/main.yml').read_text())
+        deb = next(t for t in tasks if t['name'].endswith('Install the Zabbix repository package'))['ansible.builtin.apt']['deb']
+        repo = next(t for t in tasks if 'Converge the Ubuntu 26.04 repository source' in t['name'])['ansible.builtin.copy']['content']
+        expected = {
+            ('7.0', 'x86_64'): ('https://repo.zabbix.com/zabbix/7.0/ubuntu',
+                                'https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/'
+                                'zabbix-release_latest_7.0+ubuntu26.04_all.deb'),
+            ('7.0', 'aarch64'): ('https://repo.zabbix.com/zabbix/7.0/ubuntu-arm64',
+                                 'https://repo.zabbix.com/zabbix/7.0/ubuntu-arm64/pool/main/z/zabbix-release/'
+                                 'zabbix-release_latest_7.0+ubuntu26.04_all.deb'),
+            ('8.0', 'x86_64'): ('https://repo.zabbix.com/zabbix/8.0/stable/ubuntu',
+                                'https://repo.zabbix.com/zabbix/8.0/release/ubuntu/pool/main/z/zabbix-release/'
+                                'zabbix-release_latest_8.0+ubuntu26.04_all.deb'),
+            ('8.0', 'aarch64'): ('https://repo.zabbix.com/zabbix/8.0/stable/ubuntu',
+                                 'https://repo.zabbix.com/zabbix/8.0/release/ubuntu/pool/main/z/zabbix-release/'
+                                 'zabbix-release_latest_8.0+ubuntu26.04_all.deb'),
+        }
+        for (version, arch), (uri, url) in expected.items():
+            play = [{'hosts': 'localhost', 'gather_facts': False,
+                     'vars': {'zabbix_agent_version': version, 'ansible_distribution_version': '26.04',
+                              'ansible_architecture': arch, 'deb_url': deb, 'repo_content': repo},
+                     'tasks': [{'ansible.builtin.assert': {'that': [f"deb_url == '{url}'",
+                                                                    f"'URIs: {uri}\\n' in repo_content"]}}]}]
+            with self.subTest(version=version, arch=arch):
+                result = self.run_play(play)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_agent_unstable_repository_must_stay_disabled(self):
+        tasks = yaml.safe_load((ROOT / 'roles/zabbix_agent/tasks/main.yml').read_text())
+        task = next(t for t in tasks if 'unstable repository' in t['name'])
+        self.assertEqual(task['ansible.builtin.command']['argv'],
+                         ['grep', '-qx', 'Enabled: no', '/etc/apt/sources.list.d/zabbix-unstable.sources'])
+        self.assertIn("== '8.0'", task['when'])
+        install = next(i for i, t in enumerate(tasks) if t['name'].endswith('Install the Zabbix agent'))
+        self.assertLess(tasks.index(task), install)
+
+    def test_agent_upgrades_installed_plugins_with_the_agent(self):
+        tasks = yaml.safe_load((ROOT / 'roles/zabbix_agent/tasks/main.yml').read_text())
+        install = next(t for t in tasks if t['name'].endswith('Install the Zabbix agent'))
+        self.assertEqual(install['ansible.builtin.apt']['policy_rc_d'], 101)
+        # dpkg-query -f='${db:Status-Abbrev} ${Package}': installed/held/half-configured plugins
+        # are upgraded with the agent; removed (rc) and unknown (un) entries are not reinstalled.
+        cases = [('agent2', [], ['zabbix-agent2']),
+                 ('agent2', ['ii  zabbix-agent2-plugin-mongodb', 'rc  zabbix-agent2-plugin-mssql',
+                             'iU  zabbix-agent2-plugin-postgresql', 'un  zabbix-agent2-plugin-ember-plus'],
+                  ['zabbix-agent2', 'zabbix-agent2-plugin-mongodb', 'zabbix-agent2-plugin-postgresql']),
+                 ('agent', ['ii  zabbix-agent2-plugin-mongodb'], ['zabbix-agent'])]
+        for variant, lines, expected in cases:
+            play = [{'hosts': 'localhost', 'gather_facts': False,
+                     'vars': {'zabbix_agent_variant': variant,
+                              'zabbix_agent_plugin_packages': {'stdout_lines': lines},
+                              'names': install['ansible.builtin.apt']['name'], 'expected': expected},
+                     'tasks': [{'ansible.builtin.assert': {'that': ['names == expected']}}]}]
+            with self.subTest(variant=variant, lines=lines):
+                result = self.run_play(play)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_install_pins_use_the_series_epoch(self):
         for role, task_name in (('zabbix_server', 'Install the selected server and SQL scripts'),

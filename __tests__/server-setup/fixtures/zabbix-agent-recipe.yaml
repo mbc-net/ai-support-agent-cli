@@ -37,7 +37,7 @@ body: |
         \ = []\nfor package, variant in [('zabbix-agent', 'agent'), ('zabbix-agent2', 'agent2')]:\n    p = subprocess.run(['dpkg-query',\
         \ '-W', '-f=${db:Status-Status} ${Version}', package], capture_output=True, text=True)\n    if p.returncode\
         \ == 0 and p.stdout.startswith('installed '):\n        version = p.stdout.split()[1].split(':')[-1]\n    \
-        \    if not re.match(r'^(6\\.0|7\\.0)\\.', version): raise SystemExit('Unsupported installed Agent LTS')\n\
+        \    if not re.match(r'^(6\\.0|7\\.0|8\\.0)\\.', version): raise SystemExit('Unsupported installed Agent LTS')\n\
         \        packages.append((variant, version[:3]))\nif len(packages) != 1: raise SystemExit('Exactly one installed\
         \ Agent variant is required; no services changed')\nvariant, version = packages[0]\nconf = base / ('zabbix_agent2.conf'\
         \ if variant == 'agent2' else 'zabbix_agentd.conf')\nif not conf.is_file() or conf.is_symlink(): raise SystemExit('Regular\
@@ -70,7 +70,7 @@ body: |
     register: zbx_agent_existing
   - name: Reject unsupported installed version on Ubuntu 26.04
     ansible.builtin.assert:
-      that: ansible_distribution_version != '26.04' or (zbx_agent_existing.stdout | from_json).version == '7.0'
+      that: ansible_distribution_version != '26.04' or (zbx_agent_existing.stdout | from_json).version in ['7.0', '8.0']
   - name: Create private original configuration backup directory
     ansible.builtin.file:
       path: /var/backups/ai-support-zabbix/{{ ZABBIX_BINDING_ID }}
