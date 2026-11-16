@@ -1,5 +1,5 @@
 import { createHash } from 'crypto'
-import { ZABBIX_AGENT_RECIPE_BODY_SHA256, ZABBIX_AGENT_RECIPE_VARIABLES } from './zabbix-agent-recipe'
+import { ZABBIX_AGENT_RECIPE_BODY_SHA256S, ZABBIX_AGENT_RECIPE_VARIABLES } from './zabbix-agent-recipe'
 /**
  * Runner for the `server_setup_exec` command (git-artifact-platform model).
  *
@@ -843,7 +843,7 @@ export async function executeServerSetupAnsible(
 ): Promise<CommandResult> {
   const { executionId, body, mode, targetOs, credential, tenantCode, sshHostId, commandId, client, onProgress, onAwaitingSelfRestart } = input
 
-  const approvedZabbixRecipe = createHash('sha256').update(body).digest('hex') === ZABBIX_AGENT_RECIPE_BODY_SHA256
+  const approvedZabbixRecipe = ZABBIX_AGENT_RECIPE_BODY_SHA256S.includes(createHash('sha256').update(body).digest('hex'))
   let { variables, secretNames } = input
   if (approvedZabbixRecipe) {
     // Without a configuration binding the API sends every ANSIBLE# variable of the project,

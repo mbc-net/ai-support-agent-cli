@@ -55,8 +55,8 @@
       - >-
         (zabbix_agent_active_check_verify_seconds | int) >= 3
         and (zabbix_agent_active_check_verify_seconds | int) <= 600
-      - (zabbix_agent_version | default('')) in ['6.0', '7.0']
-      - (ansible_distribution_version | default('')) != '26.04' or zabbix_agent_version == '7.0'
+      - (zabbix_agent_version | default('')) in ['6.0', '7.0', '8.0']
+      - (ansible_distribution_version | default('')) != '26.04' or zabbix_agent_version in ['7.0', '8.0']
       - (ansible_distribution_version | default('')) != '26.04' or ansible_version.full is version('2.20', '>=')
       - (zabbix_agent_variant | default('')) in ['agent2', 'agent']
       - (zabbix_agent_tls_connect | default('')) in ['unencrypted', 'psk']
@@ -89,7 +89,7 @@
       - zabbix_agent_ufw_manage is boolean
     fail_msg: >-
       zabbix_agent is misconfigured. zabbix_agent_version must be an LTS
-      release ('6.0' or '7.0', got {{ zabbix_agent_version | default('') | to_json }});
+      release ('6.0', '7.0' or '8.0', got {{ zabbix_agent_version | default('') | to_json }});
       zabbix_agent_variant must be 'agent2' or 'agent';
       zabbix_agent_tls_connect / zabbix_agent_tls_accept must be 'unencrypted'
       or 'psk'; zabbix_agent_server is required (the Zabbix server this agent
@@ -100,8 +100,8 @@
       to leave ufw alone, or zabbix_agent_allow_no_sources: true to state that closing every
       opening is what you mean. This role targets Ubuntu only (the repository package
       URL is built for it), and Zabbix 6.0 has no release package for Ubuntu newer than
-      24.04 — use zabbix_agent_version: '7.0' there (measured against repo.zabbix.com on
-      2026-08-27). Ubuntu 26.04 requires ansible-core 2.20 or newer; select the
+      24.04 — use zabbix_agent_version: '7.0' or '8.0' there (measured against repo.zabbix.com on
+      2026-08-27 and 2026-11-16). Ubuntu 26.04 requires ansible-core 2.20 or newer; select the
       controller before fact gathering (the bundled legacy controller does not support Python 3.14).
 
 # Asserted together: a half-configured PSK either fails to start (agent refuses
@@ -229,11 +229,16 @@
       its Zabbix repository source. Use the same series for zabbix_agent_version, or leave the
       installed agent untouched (zabbix_agent_manage_packages: false).
 
+# Zabbix 8.0 moved to a channel-split layout: the release package lives under release/ and
+# serves amd64 and arm64 from one URI (same layout as roles/zabbix_server/vars/main.yml).
+# The path is still built only from the enum-checked version and the OS facts.
 - name: "zabbix_agent : Install the Zabbix repository package"
   when: zabbix_agent_manage_packages
   ansible.builtin.apt:
     deb: >-
-      https://repo.zabbix.com/zabbix/{{ zabbix_agent_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}/pool/main/z/zabbix-release/zabbix-release_latest_{{ zabbix_agent_version }}+ubuntu{{ ansible_distribution_version }}_all.deb
+      https://repo.zabbix.com/zabbix/{{ zabbix_agent_version }}/{{ 'release/ubuntu' if zabbix_agent_version == '8.0'
+      else ('ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu') }}/pool/main/z/zabbix-release/zabbix-release_latest_{{
+      zabbix_agent_version }}+ubuntu{{ ansible_distribution_version }}_all.deb
     state: present
     # 同上。7.0 → 6.0 ではリポジトリパッケージ自体も降格になる。
     allow_downgrade: true
@@ -244,7 +249,7 @@
   ansible.builtin.copy:
     content: |
       Types: deb
-      URIs: https://repo.zabbix.com/zabbix/{{ zabbix_agent_version }}/{{ 'ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu' }}
+      URIs: https://repo.zabbix.com/zabbix/{{ zabbix_agent_version }}/{{ 'stable/ubuntu' if zabbix_agent_version == '8.0' else ('ubuntu-arm64' if ansible_architecture == 'aarch64' else 'ubuntu') }}
       Suites: resolute
       Components: main
       Signed-By: /usr/share/keyrings/zabbix.gpg
@@ -260,17 +265,48 @@
     state: absent
   when: zabbix_agent_manage_packages and ansible_distribution_version == '26.04'
 
+# Same check as roles/zabbix_server: the 8.0 release package also ships
+# zabbix-unstable.sources (Enabled: no) on deb822 releases. rc 0 = disabled, rc 2 = absent
+# (22.04 ships a commented .list instead); anything else stops before packages install.
+- name: "zabbix_agent : Require the packaged unstable repository source to stay disabled"
+  ansible.builtin.command:
+    argv: [grep, -qx, 'Enabled: no', /etc/apt/sources.list.d/zabbix-unstable.sources]
+  register: zabbix_agent_unstable_source
+  changed_when: false
+  failed_when: zabbix_agent_unstable_source.rc not in [0, 2]
+  when: zabbix_agent_manage_packages and zabbix_agent_version == '8.0'
+
+# Agent 2 loadable plugins are separate packages that point at their binaries from
+# plugins.d/*.conf. Upgraded alone, the agent is restarted by its postinst while the
+# old plugin configuration still names binaries of the previous series (8.0 moved them
+# from /usr/sbin/zabbix-agent2-plugin/ to /usr/libexec/zabbix/), the config test fails
+# and dpkg leaves every package half-configured. Installed plugins are therefore
+# upgraded in the same transaction, with service starts deferred to the handler.
+- name: "zabbix_agent : Read installed Agent 2 plugin packages"
+  when: zabbix_agent_manage_packages and zabbix_agent_variant == 'agent2'
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, '-f=${db:Status-Abbrev} ${Package}\n', 'zabbix-agent2-plugin-*']
+  register: zabbix_agent_plugin_packages
+  changed_when: false
+  failed_when: zabbix_agent_plugin_packages.rc not in [0, 1]
+
 # `state: latest` rather than `present`: with `present` an already-installed
 # agent is left alone, so pointing the role at a different LTS (6.0 -> 7.0)
 # swaps the repository and then silently keeps the old binary. The version is
 # pinned by which repository is configured above, so `latest` converges within
 # that LTS rather than tracking upstream freely.
+# policy_rc_d 101 keeps the package scripts from (re)starting the agent mid-transaction;
+# the handler and the "enabled and running" task below start it with the final config.
 - name: "zabbix_agent : Install the Zabbix agent"
   when: zabbix_agent_manage_packages
   ansible.builtin.apt:
-    name: "{{ 'zabbix-agent2' if zabbix_agent_variant == 'agent2' else 'zabbix-agent' }}"
+    name: >-
+      {{ ['zabbix-agent2'] + (zabbix_agent_plugin_packages.stdout_lines | default([])
+         | select('match', '^.[^nc]') | map('regex_replace', '^[^ ]+ +', '') | list)
+         if zabbix_agent_variant == 'agent2' else ['zabbix-agent'] }}
     state: latest
     update_cache: true
+    policy_rc_d: 101
     # zabbix_agent_version は 6.0 と 7.0 を双方向に切り替えられる公開変数だが、apt の既定は
     # allow_downgrade: false。7.0 が入ったホストを 6.0 へ戻すとパッケージが降格できず、
     # リポジトリだけ 6.0 を指したまま 7.0 のバイナリが残る——実行は成功するのに版が変わらない。

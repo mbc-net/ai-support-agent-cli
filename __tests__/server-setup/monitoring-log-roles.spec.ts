@@ -271,7 +271,21 @@ describe('Phase 1 監視・ログ系ロール（rsyslog_server / rsyslog_forward
   describe('zabbix_agent', () => {
     it('バージョンは LTS のみ許可する', () => {
       const raw = readRaw('zabbix_agent', 'tasks', 'main.yml')
-      expect(raw).toContain("(zabbix_agent_version | default('')) in ['6.0', '7.0']")
+      expect(raw).toContain("(zabbix_agent_version | default('')) in ['6.0', '7.0', '8.0']")
+    })
+
+    it('8.0 は release/ からリリースパッケージを取り、プラグインと同一トランザクションで更新する', () => {
+      // 8.0 は release/ と stable/ に分かれたレイアウトで、旧来の /8.0/ubuntu/pool は存在しない。
+      // プラグインを残して本体だけ上げると、postinst の再起動が旧パスのプラグイン設定で失敗し
+      // dpkg が中途半端な状態で止まる（実機で確認済み）。
+      const tasks = flatten(loadTasks('zabbix_agent'))
+      const repo = tasks.find((t) => /Install the Zabbix repository package/.test(String(t.name ?? '')))
+      expect(String(((repo as Task)['ansible.builtin.apt'] as Record<string, unknown>).deb))
+        .toContain("'release/ubuntu' if zabbix_agent_version == '8.0'")
+      const install = tasks.find((t) => /Install the Zabbix agent$/.test(String(t.name ?? '')))
+      const apt = (install as Task)['ansible.builtin.apt'] as Record<string, unknown>
+      expect(apt.policy_rc_d).toBe(101)
+      expect(String(apt.name)).toContain('zabbix_agent_plugin_packages')
     })
 
     it('PSK ファイルの配置だけでなく TLSConnect / TLSAccept を設定に書き込む', () => {
@@ -731,8 +745,11 @@ describe('パッケージ状態の収束', () => {
   it('zabbix_agent はバージョン変更が反映されるよう state: latest を使う', () => {
     // state: present だと既にインストール済みのとき何もせず、
     // 6.0 -> 7.0 の切り替えでリポジトリだけ変わって旧バイナリが残る。
-    const raw = readRaw('zabbix_agent', 'tasks', 'main.yml')
-    expect(raw).toMatch(/name: "\{\{ 'zabbix-agent2'[\s\S]{0,80}state: latest/)
+    const install = flatten(loadTasks('zabbix_agent'))
+      .find((t) => /Install the Zabbix agent$/.test(String(t.name ?? '')))
+    const apt = (install as Task)['ansible.builtin.apt'] as Record<string, unknown>
+    expect(String(apt.name)).toContain("['zabbix-agent2']")
+    expect(apt.state).toBe('latest')
   })
 
   it('zabbix_agent は variant 切り替え時に旧フレーバを停止・削除する', () => {
