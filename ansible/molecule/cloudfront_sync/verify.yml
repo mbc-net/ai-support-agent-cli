@@ -1,0 +1,25 @@
+---
+- name: Verify actual UFW nginx and systemd transactions on a disposable host
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Copy isolated transaction verifier
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/live_verify.py"
+        dest: /var/lib/cloudfront-sync/private/live_verify.py
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Exercise real daemon and firewall rollback paths
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, /var/lib/cloudfront-sync/private/live_verify.py]
+      register: cloudfront_sync_live_result
+      changed_when: true
+
+    - name: Require a successful real service verification report
+      ansible.builtin.assert:
+        that:
+          - (cloudfront_sync_live_result.stdout | from_json).real_ufw_nginx_systemd
+          - (cloudfront_sync_live_result.stdout | from_json).live_checks == 'passed'

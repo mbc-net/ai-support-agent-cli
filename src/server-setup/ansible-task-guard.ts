@@ -425,6 +425,7 @@ const INCLUDE_ROLE_MODULE_KEYS: ReadonlySet<string> = new Set([
  * 存在を作成前に検知して fail する（roles/e2e_runner_k8s 参照）。
  */
 export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
+  'cloudfront_sync',
   'sentry',
   'os_init',
   'ssh_key',
@@ -486,6 +487,19 @@ export const INCLUDE_ROLE_ALLOWED_ROLES: ReadonlySet<string> = new Set([
  * 空集合（`docker`）は「レシピから渡せる変数が無い」という意味であり、誤りではない。
  */
 export const INCLUDE_ROLE_ALLOWED_VARS: Readonly<Record<string, ReadonlySet<string>>> = {
+  cloudfront_sync: new Set([
+    'cloudfront_sync_host_address',
+    'cloudfront_sync_firewall_backend',
+    'cloudfront_sync_ports',
+    'cloudfront_sync_nginx_enabled',
+    'cloudfront_sync_nginx_shared_dir',
+    'cloudfront_sync_nginx_bundles',
+    'cloudfront_sync_max_changes',
+    'cloudfront_sync_min_ratio',
+    'cloudfront_sync_notify_unit',
+    'cloudfront_sync_timer_enabled',
+    'cloudfront_sync_approve_token',
+  ]),
   keycloak: new Set([
     'keycloak_version',
     'keycloak_postgres_version',
@@ -906,8 +920,11 @@ const INCLUDE_ROLE_ALLOWED_PARAM_KEYS: ReadonlySet<string> = new Set(['name'])
  * 実名リストは実ロールから機械的に導出し、構造テストが一致（載せ忘れ・残骸の両方向）を
  * 検査するので、接頭辞を落としても取りこぼしは増えない。
  */
+// CloudFront is a new dedicated private namespace: unlike legacy public role
+// prefixes, `_cloudfront_sync_` has never been a recipe input namespace. Reserve
+// all future internal names as well, without changing legacy-prefix behavior.
 function isBundledRoleInternalName(name: string): boolean {
-  return name === 'sentry_execution_id' || BUNDLED_ROLE_INTERNAL_VARS.has(name)
+  return name.startsWith('_cloudfront_sync_') || name === 'sentry_execution_id' || BUNDLED_ROLE_INTERNAL_VARS.has(name)
 }
 
 /**
@@ -935,6 +952,8 @@ function isBundledRoleInternalName(name: string): boolean {
  * 実名リストへ揃えた**（{@link isBundledRoleInternalName} 参照）。
  */
 export const BUNDLED_ROLE_INTERNAL_VARS: ReadonlySet<string> = new Set([
+  '_cloudfront_sync_parameters',
+  '_cloudfront_sync_install_result',
   // keycloak
   'keycloak_config_result',
   'keycloak_db_start_result',
@@ -1554,7 +1573,7 @@ function validateWindowsModuleArgs(
 
 /** 予約語・マジック変数名かどうかを判定する（`ansible_` プレフィックス or 完全一致）。 */
 function isReservedVarName(name: string): boolean {
-  return name.startsWith('ansible_') || RESERVED_VAR_NAMES.has(name)
+  return name.startsWith('_cloudfront_sync_') || name.startsWith('ansible_') || RESERVED_VAR_NAMES.has(name)
 }
 
 /** 値を再帰的に走査し、lookup/query参照が無いかを調べる。 */
@@ -2604,7 +2623,7 @@ export function validateAnsibleTasks(
     // あるので、読めるままだとレシピが自分のタスクでそれを出力でき、`no_log` は
     // 付かない（`referencesSecretVar` はテナントの秘匿変数名しか知らない）。
     for (const name of collectJinjaReferencedNames(task)) {
-      if (BUNDLED_ROLE_INTERNAL_VARS.has(name)) {
+      if (name.startsWith('_cloudfront_sync_') || BUNDLED_ROLE_INTERNAL_VARS.has(name)) {
         violations.push({
           taskIndex,
           key: name,
