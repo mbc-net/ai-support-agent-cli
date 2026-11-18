@@ -10,6 +10,11 @@ import { t } from '../i18n'
 import { logger } from '../logger'
 import { getErrorMessage } from '../utils'
 import { computeUnifiedDiff } from '../utils/unified-diff'
+import {
+  DOCKER_ASSET_MAX_BYTES,
+  pathExistsNoFollow,
+  readRegularFileNoFollow,
+} from '../utils/marker-file'
 
 export function registerDockerCommands(program: Command): void {
   program
@@ -20,7 +25,15 @@ export function registerDockerCommands(program: Command): void {
       const { buildImage } = await import('../docker/docker-runner')
       const dockerfilePath = opts.dockerfile ? path.resolve(opts.dockerfile) : undefined
       logger.info(t('docker.building'))
-      buildImage(AGENT_VERSION, dockerfilePath)
+      try {
+        // Refuses a ~/.ai-support-agent/Dockerfile that is not a regular file
+        // (design §7.7); that and any other build failure fail the command.
+        buildImage(AGENT_VERSION, dockerfilePath)
+      } catch (err: unknown) {
+        logger.error(getErrorMessage(err))
+        process.exitCode = 1
+        return
+      }
       logger.success(t('docker.buildComplete', { version: AGENT_VERSION }))
     })
 
@@ -53,7 +66,15 @@ export function registerDockerCommands(program: Command): void {
       const allowPull = opts.imagePull !== false && config?.dockerImagePull !== 'never'
       // ensureImage() resolves the npm-installed version itself, which is the
       // same version the service wrapper used to decide the image was missing.
-      ensureImage(dockerfilePath, allowPull)
+      try {
+        // A local build refuses a ~/.ai-support-agent/Dockerfile that is not a
+        // regular file (buildImage, design §7.7); an existing image or a pull
+        // does not read it at all.
+        ensureImage(dockerfilePath, allowPull)
+      } catch (err: unknown) {
+        logger.error(getErrorMessage(err))
+        process.exitCode = 1
+      }
     })
 
   program
@@ -65,14 +86,26 @@ export function registerDockerCommands(program: Command): void {
 
       // Resolve target: argument > config.dockerfilePath > configDir/Dockerfile
       let resolvedTarget: string | undefined
+      // Only the config-dir copy is read without following a symlink: a path
+      // the user names explicitly (argument or config) is their own choice.
+      let targetIsConfigCopy = false
       if (customPath) {
         resolvedTarget = path.resolve(customPath)
       } else if (config?.dockerfilePath) {
         resolvedTarget = path.resolve(config.dockerfilePath)
       } else {
         const configDockerfile = getConfigDockerfilePath()
-        if (fs.existsSync(configDockerfile)) {
+        let present: boolean
+        try {
+          present = pathExistsNoFollow(configDockerfile)
+        } catch (err: unknown) {
+          logger.error(t('docker.diffTargetUnreadable', { path: configDockerfile, message: getErrorMessage(err) }))
+          process.exitCode = 1
+          return
+        }
+        if (present) {
           resolvedTarget = configDockerfile
+          targetIsConfigCopy = true
         }
       }
 
@@ -81,7 +114,7 @@ export function registerDockerCommands(program: Command): void {
         return
       }
 
-      if (!fs.existsSync(resolvedTarget)) {
+      if (!targetIsConfigCopy && !fs.existsSync(resolvedTarget)) {
         logger.error(t('docker.diffTargetNotFound', { path: resolvedTarget }))
         return
       }
@@ -94,7 +127,23 @@ export function registerDockerCommands(program: Command): void {
         return
       }
 
-      const targetContent = fs.readFileSync(resolvedTarget, 'utf-8')
+      let targetContent: string
+      if (targetIsConfigCopy) {
+        try {
+          const content = readRegularFileNoFollow(resolvedTarget, DOCKER_ASSET_MAX_BYTES)
+          if (content === undefined) {
+            logger.error(t('docker.diffTargetNotFound', { path: resolvedTarget }))
+            return
+          }
+          targetContent = content.toString('utf-8')
+        } catch (err: unknown) {
+          logger.error(t('docker.diffTargetUnreadable', { path: resolvedTarget, message: getErrorMessage(err) }))
+          process.exitCode = 1
+          return
+        }
+      } else {
+        targetContent = fs.readFileSync(resolvedTarget, 'utf-8')
+      }
 
       if (defaultContent === targetContent) {
         logger.success(t('docker.diffIdentical'))

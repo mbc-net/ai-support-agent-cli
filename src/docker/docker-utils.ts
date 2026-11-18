@@ -15,6 +15,8 @@ import { t } from '../i18n'
 import { logger } from '../logger'
 import { sanitizeNameSegment, toErrorMessage } from '../utils'
 import { dateParts } from '../utils/date-parts'
+import { getBuildSnapshotsDir, prepareSnapshotsDir } from '../utils/path-utils'
+import { DOCKER_ASSET_MAX_BYTES, UnsafeFileError, snapshotDockerfile } from '../utils/marker-file'
 
 export const IMAGE_NAME = 'ai-support-agent'
 
@@ -120,16 +122,36 @@ export function imageExists(version: string): boolean {
 }
 
 export function buildImage(version: string, customDockerfile?: string): void {
-  const { dockerfilePath, contextDir } = resolveDockerfile(customDockerfile)
-  logger.info(t('docker.building'))
-  if (customDockerfile) {
-    logger.info(t('docker.usingCustomDockerfile', { path: dockerfilePath }))
+  const { dockerfilePath, contextDir, fromConfigDir } = resolveDockerfile(customDockerfile)
+  // ~/.ai-support-agent/Dockerfile is built from a private copy taken without
+  // following a symlink (design §7.7): `docker build -f` would follow one, and
+  // a check followed by building the original path could be raced.
+  let snapshot: ReturnType<typeof snapshotDockerfile>
+  if (fromConfigDir) {
+    try {
+      prepareSnapshotsDir()
+      snapshot = snapshotDockerfile(dockerfilePath, DOCKER_ASSET_MAX_BYTES, getBuildSnapshotsDir())
+    } catch (error) {
+      if (error instanceof UnsafeFileError) {
+        throw new Error(t('docker.configDockerfileRefused', { path: dockerfilePath, reason: error.message }))
+      }
+      throw error
+    }
+    if (!snapshot) throw new Error(`Dockerfile not found: ${dockerfilePath}`)
   }
-  execFileSync(
-    getDockerPath(),
-    ['build', '-t', `${IMAGE_NAME}:${version}`, '--pull=false', '--build-arg', `AGENT_VERSION=${version}`, '-f', dockerfilePath, contextDir],
-    { stdio: 'inherit' },
-  )
+  try {
+    logger.info(t('docker.building'))
+    if (customDockerfile) {
+      logger.info(t('docker.usingCustomDockerfile', { path: dockerfilePath }))
+    }
+    execFileSync(
+      getDockerPath(),
+      ['build', '-t', `${IMAGE_NAME}:${version}`, '--pull=false', '--build-arg', `AGENT_VERSION=${version}`, '-f', snapshot?.path ?? dockerfilePath, contextDir],
+      { stdio: 'inherit' },
+    )
+  } finally {
+    snapshot?.cleanup()
+  }
   logger.success(t('docker.buildComplete'))
 }
 

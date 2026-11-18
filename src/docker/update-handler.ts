@@ -10,6 +10,7 @@ import * as path from 'path'
 
 import { getConfigDir } from '../config-manager'
 import { logger } from '../logger'
+import { pathExistsNoFollow, readMarkerFile } from '../utils/marker-file'
 import { isValidVersion } from '../utils/version'
 import { performUpdate, reExecProcess } from '../update-checker'
 import { resetInstalledVersionCache } from './version-manager'
@@ -30,7 +31,15 @@ export async function installUpdateAndRestart(projectConfigDir?: string): Promis
   for (const dir of searchDirs) {
     try {
       const versionFile = path.join(dir, 'update-version.json')
-      const raw = fs.readFileSync(versionFile, 'utf-8')
+      // Written by the container into its project config dir: never follow a
+      // symlink there or block on a FIFO (design §7.7). A refused file is
+      // logged by readMarkerFile and skipped like a missing one; unlink below
+      // removes a symlink itself, never its target.
+      const raw = readMarkerFile(versionFile)
+      if (raw === undefined) {
+        if (pathExistsNoFollow(versionFile)) fs.unlinkSync(versionFile)
+        continue
+      }
       const parsed = JSON.parse(raw) as { version?: string }
       if (parsed.version && isValidVersion(parsed.version)) {
         newVersion = parsed.version

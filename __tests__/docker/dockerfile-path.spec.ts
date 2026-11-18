@@ -8,7 +8,15 @@ jest.mock('../../src/config-manager', () => ({
   getConfigDir: jest.fn().mockReturnValue('/mock/config'),
 }))
 
+// The no-follow existence check is tested against the real filesystem in
+// __tests__/utils/marker-file.spec.ts; here it forwards to the mocked fs.
+jest.mock('../../src/utils/marker-file', () => ({
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  pathExistsNoFollow: jest.fn((p: string) => (require('fs') as typeof import('fs')).existsSync(p)),
+}))
+
 import { existsSync } from 'fs'
+import { pathExistsNoFollow } from '../../src/utils/marker-file'
 import { getDockerfilePath, getDockerContextDir, getConfigDockerfilePath, getProjectDockerfilePath, getProjectImageTag, resolveDockerfile } from '../../src/docker/dockerfile-path'
 
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>
@@ -69,6 +77,7 @@ describe('dockerfile-path', () => {
       const result = resolveDockerfile('/custom/path/Dockerfile')
       expect(result.dockerfilePath).toBe('/custom/path/Dockerfile')
       expect(result.contextDir).toBe('/custom/path')
+      expect(result.fromConfigDir).toBe(false)
     })
 
     it('should throw when customPath is provided but does not exist', () => {
@@ -81,6 +90,16 @@ describe('dockerfile-path', () => {
       const result = resolveDockerfile()
       expect(result.dockerfilePath).toBe('/mock/config/Dockerfile')
       expect(result.contextDir).toBe('/mock/config')
+      expect(result.fromConfigDir).toBe(true)
+      expect(pathExistsNoFollow).toHaveBeenCalledWith('/mock/config/Dockerfile')
+    })
+
+    it('treats a dangling symlink at the configDir Dockerfile as present (refused later), not as absent', () => {
+      // existsSync follows the link and says "absent"; the lstat-based check does not.
+      mockExistsSync.mockReturnValue(false)
+      ;(pathExistsNoFollow as jest.Mock).mockReturnValueOnce(true)
+      const result = resolveDockerfile()
+      expect(result).toEqual({ dockerfilePath: '/mock/config/Dockerfile', contextDir: '/mock/config', fromConfigDir: true })
     })
 
     it('should fall back to bundled default when no customPath and configDir file does not exist', () => {
@@ -93,6 +112,7 @@ describe('dockerfile-path', () => {
       const contextDir = getDockerContextDir()
       expect(result.dockerfilePath).toBe(join(contextDir, 'docker', 'Dockerfile'))
       expect(result.contextDir).toBe(contextDir)
+      expect(result.fromConfigDir).toBe(false)
     })
 
     it('should use undefined customPath and return configDir path when it exists', () => {
