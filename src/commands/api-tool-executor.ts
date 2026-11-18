@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { isMainThread } from 'worker_threads'
 
-import picomatch from 'picomatch'
+import { compileSafeGlob } from './safe-glob'
 
 import {
   API_TOOL_GLOB_MAX_RESULTS,
@@ -371,7 +371,7 @@ export async function grepTool(input: Record<string, unknown>, sandboxRoots: str
   let globMatcher: ((str: string) => boolean) | undefined
   if (globPattern) {
     try {
-      globMatcher = picomatch(globPattern, { dot: true, strictBrackets: true })
+      globMatcher = compileSafeGlob(globPattern)
     } catch (error) {
       return { output: `Error: invalid glob pattern: ${getErrorMessage(error)}`, isError: true }
     }
@@ -468,7 +468,7 @@ export async function globTool(input: Record<string, unknown>, sandboxRoots: str
   }
   let matcher: (str: string) => boolean
   try {
-    matcher = picomatch(pattern, { dot: true, strictBrackets: true })
+    matcher = compileSafeGlob(pattern)
   } catch (error) {
     return { output: `Error: invalid glob pattern: ${getErrorMessage(error)}`, isError: true }
   }

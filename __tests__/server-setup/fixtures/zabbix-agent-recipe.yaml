@@ -1,4 +1,4 @@
-name: "Zabbix 20: 既存Agentの固定binding PSK再設定"
+name: 'Zabbix 20: 既存Agentの固定binding PSK再設定'
 targetOs: linux
 body: |
   - name: Validate fixed binding and target
@@ -45,14 +45,25 @@ body: |
         \ standard directory.\nseen = set()\ndef inspect(path):\n    path = pathlib.Path(path)\n    if path.is_symlink()\
         \ or not path.resolve().is_relative_to(base): raise SystemExit('External or symbolic Include requires manual\
         \ review')\n    if str(path) in seen: raise SystemExit('Recursive/duplicate Include requires manual review')\n\
-        \    seen.add(str(path))\n    for line in path.read_text().splitlines():\n        line = line.strip()\n  \
-        \      if not line or line.startswith('#'): continue\n        if line.startswith('Include='):\n          \
-        \  pattern = line.split('=', 1)[1].strip()\n            if not pattern.startswith('/etc/zabbix/'): raise SystemExit('Nonstandard\
-        \ Include requires manual review')\n            for child in glob.glob(pattern): inspect(child)\n        elif\
-        \ line.startswith(('TLSPSKFile=', 'TLSKeyFile=', 'TLSCertFile=', 'TLSCAFile=')):\n            secret_path\
-        \ = pathlib.Path(line.split('=', 1)[1].strip())\n            if secret_path.is_symlink() or not secret_path.resolve().is_relative_to(base):\
-        \ raise SystemExit('External TLS file requires manual backup/review')\n        elif path != conf and not re.fullmatch(r'Plugins\\\
-        .[A-Za-z0-9_]+\\.System\\.Path=/usr/sbin/zabbix-agent2-plugin-[A-Za-z0-9_-]+', line):\n            raise SystemExit('Custom\
+        \    seen.add(str(path))\n    if path == base / 'zabbix_agent2.d/90-rundeck-monitor-buffer.conf':\n      \
+        \  # Only the reviewed, fixed local buffer settings are admitted here.\n        expected = ['EnablePersistentBuffer=1',\n\
+        \                    'PersistentBufferFile=/var/lib/zabbix/agent2-buffer/buffer.db',\n                   \
+        \ 'PersistentBufferPeriod=24h']\n        if variant != 'agent2' or path.parent.is_symlink():\n           \
+        \ raise SystemExit('Reviewed buffer Include requires Agent 2 and a regular directory')\n        for entry\
+        \ in (base, path.parent, path):\n            st = entry.stat()\n            if st.st_uid != 0 or st.st_mode\
+        \ & 0o022:\n                raise SystemExit('Reviewed buffer Include requires root-owned non-writable paths')\n\
+        \        if not path.is_file() or path.stat().st_size > 4096:\n            raise SystemExit('Reviewed buffer\
+        \ Include is not a bounded regular file')\n        actual = [line.strip() for line in path.read_text().splitlines()\n\
+        \                  if line.strip() and not line.lstrip().startswith('#')]\n        if actual != expected:\n\
+        \            raise SystemExit('Reviewed buffer Include content differs; no configuration changed')\n     \
+        \   return\n    for line in path.read_text().splitlines():\n        line = line.strip()\n        if not line\
+        \ or line.startswith('#'): continue\n        if line.startswith('Include='):\n            pattern = line.split('=',\
+        \ 1)[1].strip()\n            if not pattern.startswith('/etc/zabbix/'): raise SystemExit('Nonstandard Include\
+        \ requires manual review')\n            for child in glob.glob(pattern): inspect(child)\n        elif line.startswith(('TLSPSKFile=',\
+        \ 'TLSKeyFile=', 'TLSCertFile=', 'TLSCAFile=')):\n            secret_path = pathlib.Path(line.split('=', 1)[1].strip())\n\
+        \            if secret_path.is_symlink() or not secret_path.resolve().is_relative_to(base): raise SystemExit('External\
+        \ TLS file requires manual backup/review')\n        elif path != conf and not re.fullmatch(r'Plugins\\.[A-Za-z0-9_]+\\\
+        .System\\.Path=/usr/sbin/zabbix-agent2-plugin-[A-Za-z0-9_-]+', line):\n            raise SystemExit('Custom\
         \ Include directives require manual review; no configuration changed')\ninspect(conf)\n# Every running Agent\
         \ process must belong to the one packaged systemd service.\nunit = 'zabbix-agent2.service' if variant == 'agent2'\
         \ else 'zabbix-agent.service'\nservice = subprocess.run(['systemctl', 'show', unit, '-p', 'FragmentPath',\
@@ -70,7 +81,8 @@ body: |
     register: zbx_agent_existing
   - name: Reject unsupported installed version on Ubuntu 26.04
     ansible.builtin.assert:
-      that: ansible_distribution_version != '26.04' or (zbx_agent_existing.stdout | from_json).version in ['7.0', '8.0']
+      that: ansible_distribution_version != '26.04' or (zbx_agent_existing.stdout | from_json).version in ['7.0',
+        '8.0']
   - name: Create private original configuration backup directory
     ansible.builtin.file:
       path: /var/backups/ai-support-zabbix/{{ ZABBIX_BINDING_ID }}
