@@ -728,6 +728,16 @@ describe('api-tool-executor', () => {
     })
   })
 
+  describe('GHSA-fc5q-39xc-vjpf regression through the real Worker', () => {
+    it.each(['Glob', 'Grep'])('finishes adversarial repeated extglob for %s without a Worker timeout', async (tool) => {
+      fs.writeFileSync(path.join(reposDir, 'a'.repeat(48) + 'b'), 'needle')
+      const input = tool === 'Glob' ? { pattern: '+(*a)' } : { pattern: 'needle', glob: '+(*a)' }
+      const result = await executeReadOnlyTool(tool, input, [reposDir])
+      expect(result.isError).toBe(false)
+      expect(result.output).toBe(tool === 'Glob' ? 'No files found' : 'No matches found')
+    }, API_TOOL_WORKER_TIMEOUT_MS + 5000)
+  })
+
   describe('executeReadOnlyTool (public dispatch entry point)', () => {
     it('returns is_error for an unknown tool name', async () => {
       const result = await executeReadOnlyTool('Bash', { command: 'ls' }, [reposDir])
