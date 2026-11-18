@@ -1,0 +1,80 @@
+---
+# One trusted helper holds the update lock across staging, validation, plan/apply
+# and timer configuration. Separate copy/systemd tasks cannot keep that lock.
+- name: "cloudfront_sync : Validate the target and public variable types"
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution is defined and ansible_facts.distribution == 'Ubuntu'
+      - (ansible_facts.distribution_version | default('')) in ['22.04', '24.04', '26.04']
+      - cloudfront_sync_host_address is string
+      - cloudfront_sync_firewall_backend in ['ufw', 'none']
+      - cloudfront_sync_ports is sequence and cloudfront_sync_ports is not string
+      - cloudfront_sync_nginx_enabled is boolean
+      - cloudfront_sync_nginx_shared_dir is string
+      - cloudfront_sync_nginx_bundles is sequence and cloudfront_sync_nginx_bundles is not string
+      - cloudfront_sync_max_changes is integer and cloudfront_sync_max_changes is not boolean
+      - cloudfront_sync_min_ratio is number and cloudfront_sync_min_ratio is not boolean
+      - cloudfront_sync_notify_unit is string
+      - cloudfront_sync_timer_enabled is boolean
+      - cloudfront_sync_approve_token is string
+    fail_msg: >-
+      cloudfront_sync requires Ubuntu 22.04, 24.04 or 26.04 and correctly typed
+      variables. CFSYNC JSON strings must be converted using from_json in task vars.
+      No host, firewall or nginx change has been attempted by this role.
+
+- name: "cloudfront_sync : Validate and install the bundled synchronization transaction"
+  vars:
+    _cloudfront_sync_parameters:
+      config:
+        host_address: "{{ cloudfront_sync_host_address }}"
+        firewall:
+          backend: "{{ cloudfront_sync_firewall_backend }}"
+          ports: "{{ cloudfront_sync_ports }}"
+        nginx:
+          enabled: "{{ cloudfront_sync_nginx_enabled }}"
+          shared_dir: "{{ cloudfront_sync_nginx_shared_dir }}"
+          bundles: "{{ cloudfront_sync_nginx_bundles }}"
+        limits:
+          max_changes: "{{ cloudfront_sync_max_changes }}"
+          min_ratio: "{{ cloudfront_sync_min_ratio }}"
+        notify_unit: "{{ cloudfront_sync_notify_unit }}"
+      timer_enabled: "{{ cloudfront_sync_timer_enabled }}"
+      approve_token: "{{ cloudfront_sync_approve_token }}"
+      assets:
+        engine: "{{ lookup('ansible.builtin.file', role_path ~ '/files/cloudfront-sync.py') }}"
+        service: "{{ lookup('ansible.builtin.template', role_path ~ '/templates/cloudfront-sync.service.j2') }}"
+        timer: "{{ lookup('ansible.builtin.template', role_path ~ '/templates/cloudfront-sync.timer.j2') }}"
+        monitor: "{{ lookup('ansible.builtin.file', role_path ~ '/files/zabbix-template.json') }}"
+  block:
+    - name: "cloudfront_sync : Validate inputs and bundled assets before changing the host"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - "{{ lookup('ansible.builtin.file', role_path ~ '/files/install_cloudfront_sync.py') }}"
+          - --validate-only
+        stdin: "{{ _cloudfront_sync_parameters | to_json }}"
+      check_mode: false
+      changed_when: false
+      no_log: "{{ cloudfront_sync_approve_token | length > 0 }}"
+
+    - name: "cloudfront_sync : Install, plan or explicitly apply, and configure the timer"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - "{{ lookup('ansible.builtin.file', role_path ~ '/files/install_cloudfront_sync.py') }}"
+        stdin: "{{ _cloudfront_sync_parameters | to_json }}"
+      register: _cloudfront_sync_install_result
+      changed_when: >-
+        _cloudfront_sync_install_result.rc == 0
+        and ((_cloudfront_sync_install_result.stdout | from_json).changed | bool)
+      when: not ansible_check_mode
+      no_log: "{{ cloudfront_sync_approve_token | length > 0 }}"
+
+    - name: "cloudfront_sync : Show the plan for operator review"
+      ansible.builtin.debug:
+        msg: "{{ (_cloudfront_sync_install_result.stdout | from_json).plan }}"
+      when:
+        - not ansible_check_mode
+        - cloudfront_sync_approve_token | length == 0

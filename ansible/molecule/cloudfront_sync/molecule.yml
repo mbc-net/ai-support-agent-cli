@@ -1,0 +1,32 @@
+---
+# Container integration is useful evidence, but it does not replace the approved
+# Ubuntu 22.04/24.04/26.04 VM release gate or production notification validation.
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ../../requirements.yml
+
+driver:
+  name: docker
+
+platforms:
+  - name: ai-support-role-cloudfront-sync-ubuntu2404
+    image: geerlingguy/docker-ubuntu2404-ansible@sha256:a92c929b640cd4e5cf73f67fd1e9d0466c58335449fdc37a889c0bb4bbf78e2e
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      roles_path: ${MOLECULE_PROJECT_DIRECTORY}/roles
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence: [dependency, destroy, create, prepare, converge, idempotence, verify, destroy]

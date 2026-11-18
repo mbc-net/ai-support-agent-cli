@@ -1,0 +1,42 @@
+---
+- name: Prepare a disposable CloudFront synchronization test host
+  hosts: all
+  become: true
+  tasks:
+    - name: Install real system services and firewall tools
+      ansible.builtin.apt:
+        name: [python3, ufw, nginx, iproute2, openssh-server, ca-certificates]
+        state: present
+        update_cache: true
+
+    - name: Mark this isolated host as disposable
+      ansible.builtin.copy:
+        content: "CloudFront sync isolated verification only\n"
+        dest: /run/cloudfront-sync-disposable-test
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Create sshd runtime directory
+      ansible.builtin.file:
+        path: /run/sshd
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Keep SSH allowed before enabling the firewall
+      ansible.builtin.command:
+        argv: [ufw, allow, 22/tcp]
+      changed_when: false
+
+    - name: Enable the real UFW firewall in the isolated host
+      ansible.builtin.command:
+        argv: [ufw, --force, enable]
+      changed_when: false
+
+    - name: Start nginx and sshd
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+      loop: [nginx, ssh]

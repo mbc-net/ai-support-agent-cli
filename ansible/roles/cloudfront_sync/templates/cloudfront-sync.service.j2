@@ -1,0 +1,19 @@
+[Unit]
+Description=Synchronize CloudFront origin-facing ranges
+Wants=network-online.target
+After=network-online.target
+{% if cloudfront_sync_notify_unit %}
+OnFailure={{ cloudfront_sync_notify_unit }}
+{% endif %}
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/libexec/cloudfront-sync/cloudfront-sync.py --config /etc/cloudfront-sync/config.json sync
+TimeoutStartSec=5min
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+RestrictSUIDSGID=true

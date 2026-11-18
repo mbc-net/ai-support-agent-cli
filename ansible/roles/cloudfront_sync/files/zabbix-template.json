@@ -1,0 +1,171 @@
+{
+  "zabbix_export": {
+    "version": "7.0",
+    "template_groups": [
+      {
+        "uuid": "a248325b62e04fc8b4f47f0df3d7ce21",
+        "name": "Templates/Applications"
+      }
+    ],
+    "templates": [
+      {
+        "uuid": "2d470d161bc441408efdc53a52711b79",
+        "template": "CloudFront range sync by Zabbix agent 2",
+        "name": "CloudFront range sync by Zabbix agent 2",
+        "description": "Import and link explicitly. Requires Agent 2 systemd plugin. Monitoring macro defaults to0 until the timer and problem/recovery path are verified. Status is public; never grant the agent access to private state.",
+        "groups": [
+          {
+            "name": "Templates/Applications"
+          }
+        ],
+        "items": [
+          {
+            "uuid": "15cf63cd790949f2b361f5744611cf9d",
+            "name": "CloudFront sync status",
+            "type": "ZABBIX_ACTIVE",
+            "key": "vfs.file.contents[/var/lib/cloudfront-sync/status.json]",
+            "delay": "1m",
+            "value_type": "TEXT",
+            "history": "7d",
+            "trends": "0"
+          },
+          {
+            "uuid": "faee26c82722416991b274d868897586",
+            "name": "CloudFront sync initialized",
+            "type": "DEPENDENT",
+            "key": "cloudfront.sync.initialized",
+            "delay": "0",
+            "value_type": "UNSIGNED",
+            "master_item": {
+              "key": "vfs.file.contents[/var/lib/cloudfront-sync/status.json]"
+            },
+            "preprocessing": [
+              {
+                "type": "JAVASCRIPT",
+                "parameters": [
+                  "var value = JSON.parse(value)[\"initialized\"]; return value === true ? 1 : (value === false || value === null ? 0 : value);"
+                ]
+              }
+            ]
+          },
+          {
+            "uuid": "15c80fe408e04c15b9a4c3097553a346",
+            "name": "CloudFront sync last_success",
+            "type": "DEPENDENT",
+            "key": "cloudfront.sync.last_success",
+            "delay": "0",
+            "value_type": "UNSIGNED",
+            "master_item": {
+              "key": "vfs.file.contents[/var/lib/cloudfront-sync/status.json]"
+            },
+            "preprocessing": [
+              {
+                "type": "JAVASCRIPT",
+                "parameters": [
+                  "var value = JSON.parse(value)[\"last_success\"]; return value === true ? 1 : (value === false || value === null ? 0 : value);"
+                ]
+              }
+            ]
+          },
+          {
+            "uuid": "aeb8ee37172848b39571314f44b00fb3",
+            "name": "CloudFront sync approval_required",
+            "type": "DEPENDENT",
+            "key": "cloudfront.sync.approval_required",
+            "delay": "0",
+            "value_type": "UNSIGNED",
+            "master_item": {
+              "key": "vfs.file.contents[/var/lib/cloudfront-sync/status.json]"
+            },
+            "preprocessing": [
+              {
+                "type": "JAVASCRIPT",
+                "parameters": [
+                  "var value = JSON.parse(value)[\"approval_required\"]; return value === true ? 1 : (value === false || value === null ? 0 : value);"
+                ]
+              }
+            ]
+          },
+          {
+            "uuid": "2001e2b6c5b44e4b9ef867313c7f624f",
+            "name": "CloudFront sync recovery_failed",
+            "type": "DEPENDENT",
+            "key": "cloudfront.sync.recovery_failed",
+            "delay": "0",
+            "value_type": "UNSIGNED",
+            "master_item": {
+              "key": "vfs.file.contents[/var/lib/cloudfront-sync/status.json]"
+            },
+            "preprocessing": [
+              {
+                "type": "JAVASCRIPT",
+                "parameters": [
+                  "var value = JSON.parse(value)[\"recovery_failed\"]; return value === true ? 1 : (value === false || value === null ? 0 : value);"
+                ]
+              }
+            ]
+          },
+          {
+            "uuid": "f0f6ab55688c433683e52e5ee4ba168c",
+            "name": "CloudFront sync unit state",
+            "type": "ZABBIX_ACTIVE",
+            "key": "systemd.unit.info[cloudfront-sync.service,ActiveState]",
+            "delay": "1m",
+            "value_type": "CHAR",
+            "history": "7d",
+            "trends": "0"
+          }
+        ],
+        "macros": [
+          {
+            "macro": "{$CFSYNC.MONITORING.ENABLED}",
+            "value": "0",
+            "description": "Set1 only after timer and notification validation."
+          },
+          {
+            "macro": "{$CFSYNC.MAX.SUCCESS.AGE}",
+            "value": "10800",
+            "description": "Maximum age of successful sync in seconds."
+          }
+        ]
+      }
+    ],
+    "triggers": [
+      {
+        "uuid": "7759692889c045d9a021fe30e7180ca7",
+        "expression": "{$CFSYNC.MONITORING.ENABLED}=1 and (last(/CloudFront range sync by Zabbix agent 2/systemd.unit.info[cloudfront-sync.service,ActiveState])=\"failed\")",
+        "name": "CloudFront synchronization unit failed",
+        "priority": "HIGH",
+        "manual_close": "YES"
+      },
+      {
+        "uuid": "1c6a01c01ed8461db243056b26443d37",
+        "expression": "{$CFSYNC.MONITORING.ENABLED}=1 and (last(/CloudFront range sync by Zabbix agent 2/cloudfront.sync.initialized)=1 and (now()-last(/CloudFront range sync by Zabbix agent 2/cloudfront.sync.last_success))>{$CFSYNC.MAX.SUCCESS.AGE})",
+        "name": "CloudFront synchronization has not succeeded recently",
+        "priority": "WARNING",
+        "manual_close": "YES"
+      },
+      {
+        "uuid": "6e8f1276faab41448de567ecd1f104e3",
+        "expression": "{$CFSYNC.MONITORING.ENABLED}=1 and (nodata(/CloudFront range sync by Zabbix agent 2/vfs.file.contents[/var/lib/cloudfront-sync/status.json],5m)=1)",
+        "name": "CloudFront synchronization status is unavailable",
+        "priority": "WARNING",
+        "manual_close": "YES"
+      },
+      {
+        "uuid": "a657060a3eda45108e0ac6d55aecc488",
+        "expression": "{$CFSYNC.MONITORING.ENABLED}=1 and (last(/CloudFront range sync by Zabbix agent 2/cloudfront.sync.approval_required)=1)",
+        "name": "CloudFront range change awaits approval",
+        "priority": "WARNING",
+        "manual_close": "YES"
+      },
+      {
+        "uuid": "53db958318904c7496dbfcbb3aec0770",
+        "expression": "{$CFSYNC.MONITORING.ENABLED}=1 and (last(/CloudFront range sync by Zabbix agent 2/cloudfront.sync.recovery_failed)=1)",
+        "name": "CloudFront synchronization recovery failed",
+        "priority": "DISASTER",
+        "manual_close": "YES"
+      }
+    ]
+  }
+}

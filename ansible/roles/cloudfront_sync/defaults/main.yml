@@ -1,0 +1,12 @@
+---
+cloudfront_sync_host_address: ""
+cloudfront_sync_firewall_backend: ufw
+cloudfront_sync_ports: [443]
+cloudfront_sync_nginx_enabled: false
+cloudfront_sync_nginx_shared_dir: /etc/nginx/cloudfront
+cloudfront_sync_nginx_bundles: []
+cloudfront_sync_max_changes: 10
+cloudfront_sync_min_ratio: 0.8
+cloudfront_sync_notify_unit: ""
+cloudfront_sync_timer_enabled: false
+cloudfront_sync_approve_token: ""

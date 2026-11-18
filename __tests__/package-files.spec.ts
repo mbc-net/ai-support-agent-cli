@@ -43,4 +43,12 @@ describe('package files', () => {
     expect(files).toContain('ansible/callback_plugins/json.py')
     expect(files.some((f) => f.startsWith('ansible/callback_plugins/tests/'))).toBe(false)
   })
+
+  it('ships the CloudFront engine, installer and monitoring template without development tests', () => {
+    const files = packedFilePaths()
+    expect(files).toContain('ansible/roles/cloudfront_sync/files/cloudfront-sync.py')
+    expect(files).toContain('ansible/roles/cloudfront_sync/files/install_cloudfront_sync.py')
+    expect(files).toContain('ansible/roles/cloudfront_sync/files/zabbix-template.json')
+    expect(files.some((f) => f.startsWith('ansible/roles/cloudfront_sync/files/tests/'))).toBe(false)
+  })
 })

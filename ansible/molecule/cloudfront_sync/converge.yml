@@ -1,0 +1,20 @@
+---
+- name: Install CloudFront synchronization in plan-only mode
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    CFSYNC_NGINX_ENABLED: "false"
+    CFSYNC_PORTS: "[443]"
+    CFSYNC_NGINX_BUNDLES: "[]"
+  tasks:
+    - name: Run the bundled role with a JSON host variable
+      ansible.builtin.include_role:
+        name: cloudfront_sync
+      vars:
+        cloudfront_sync_host_address: "{{ ansible_facts.default_ipv4.address }}"
+        cloudfront_sync_firewall_backend: ufw
+        cloudfront_sync_nginx_enabled: "{{ CFSYNC_NGINX_ENABLED | from_json }}"
+        cloudfront_sync_ports: "{{ CFSYNC_PORTS | from_json }}"
+        cloudfront_sync_nginx_bundles: "{{ CFSYNC_NGINX_BUNDLES | from_json }}"
+        cloudfront_sync_timer_enabled: false
