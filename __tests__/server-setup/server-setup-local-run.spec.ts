@@ -1029,3 +1029,30 @@ describe('executeServerSetupAnsible - targetOs is required (fail-closed)', () =>
     expect(mockExecFile).not.toHaveBeenCalled()
   })
 })
+
+
+describe('CloudFront internal extra-vars protection', () => {
+  it.each(['_cloudfront_sync_parameters', '_cloudfront_sync_future_result'])(
+    'rejects %s before local-run creates files or invokes Ansible', async name => {
+      virtualFiles['vars.json'] = JSON.stringify({ [name]: 'forged' })
+      const result = await runServerSetupLocalRun(baseOptions({ extraVarsPath: '/tmp/vars.json' }))
+      expect(result.success).toBe(false)
+      if (!result.success) expect(result.error).toContain('reserved')
+      expect(mockExecFile).not.toHaveBeenCalled()
+      expect(mockMkdtempSync).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['ecs', 'resident'] as const)('rejects direct core calls in %s mode before touching disk', async mode => {
+    const credential = buildLocalCredential(baseOptions())
+    const result = await executeServerSetupAnsible({
+      executionId: 'cf-test', body: VALID_BODY, mode, targetOs: 'linux', credential,
+      variables: { _cloudfront_sync_parameters: 'forged' }, secretNames: [],
+      tenantCode: 'acme', sshHostId: 'cf-host',
+    })
+    expect(result.success).toBe(false)
+    if (!result.success) expect(result.error).toContain('reserved')
+    expect(mockExecFile).not.toHaveBeenCalled()
+    expect(mockMkdtempSync).not.toHaveBeenCalled()
+  })
+})

@@ -27,6 +27,9 @@ name: Ansible Roles
 # zabbix_server and zabbix_web, against an
 # ENABLED ufw — judged by the real `ufw show added` output (ufw normalises
 # `a.b.c.d/32` to `a.b.c.d` when it stores a rule).
+# `cloudfront_sync` exercises real UFW/nginx/systemd with fixture AWS retrieval
+# and real syntax/reload/partial-firewall failures and crash recovery. This
+# container evidence does not replace the three Ubuntu VM release checks.
 # `ufw_reachability` runs the same ufw task files on a target container and
 # opens real TCP connections from an allowed client (listed as `<ip>/32`) and
 # a denied client on the same Docker network.
@@ -106,6 +109,12 @@ jobs:
           ansible-playbook --syntax-check -i "localhost," \
             ansible/molecule/default/converge.yml
 
+      - name: CloudFront engine and installation transaction unit tests
+        run: python3 -m unittest discover -s ansible/roles/cloudfront_sync/files/tests -p 'test_*.py' -v
+
+      - name: CloudFront real-VM harness safety tests
+        run: python3 -m unittest discover -s ansible/molecule/cloudfront_sync/tests -p 'test_*.py' -v
+
       - name: Sentry supervisor unit tests
         run: python3 ansible/tests/test_sentry_setup.py -v
 
@@ -138,7 +147,7 @@ jobs:
       matrix:
         # One container-safe, idempotent role per scenario. Add new scenarios
         # here as roles gain Molecule coverage (see ansible/DEVELOPING.md).
-        scenario: [default, os_init, rsyslog_server, rsyslog_forward, ufw_convergence, ufw_reachability]
+        scenario: [default, os_init, rsyslog_server, rsyslog_forward, ufw_convergence, ufw_reachability, cloudfront_sync]
     steps:
       - uses: actions/checkout@v4
 

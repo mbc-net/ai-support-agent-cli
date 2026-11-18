@@ -33,6 +33,7 @@
     "!ansible/DEVELOPING.md",
     "!ansible/requirements.yml",
     "!ansible/callback_plugins/tests/**",
+    "!ansible/roles/cloudfront_sync/files/tests/**",
     "!ansible/tests/**",
     "!ansible/**/__pycache__/**",
     "!ansible/**/*.pyc",

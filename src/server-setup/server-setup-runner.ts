@@ -417,6 +417,12 @@ export { redactSecretValues }
  * @returns a user-facing reason, or `null` when there is no collision.
  */
 export function findReservedVariableCollision(variables: Record<string, string>): string | null {
+  // Extra-vars outrank task vars, register and set_fact. Check the whole private
+  // namespace so newly introduced internal names cannot become an injection path.
+  const cloudfrontInternal = Object.keys(variables).find(name => name.toLowerCase().startsWith('_cloudfront_sync_'))
+  if (cloudfrontInternal) {
+    return `Project variable name '${cloudfrontInternal}' is reserved for CloudFront synchronization internals. Rename this project variable and retry.`
+  }
   if (Object.prototype.hasOwnProperty.call(variables, SUDO_PROBE_REGISTER_VAR)) {
     return `Project variable name '${SUDO_PROBE_REGISTER_VAR}' is reserved for server setup's internal `
       + 'passwordless-sudo precheck and cannot be used. Rename this project variable and retry.'
@@ -842,6 +848,11 @@ export async function executeServerSetupAnsible(
   input: ExecuteServerSetupAnsibleInput,
 ): Promise<CommandResult> {
   const { executionId, body, mode, targetOs, credential, tenantCode, sshHostId, commandId, client, onProgress, onAwaitingSelfRestart } = input
+
+  // Authoritative check at the shared core as well as the API/local wrappers:
+  // direct callers must never reach temp files or Ansible with internal extras.
+  const reservedError = findReservedVariableCollision(input.variables)
+  if (reservedError) return errorResult(reservedError)
 
   const approvedZabbixRecipe = ZABBIX_AGENT_RECIPE_BODY_SHA256S.includes(createHash('sha256').update(body).digest('hex'))
   let { variables, secretNames } = input
