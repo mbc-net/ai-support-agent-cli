@@ -162,6 +162,7 @@
     }
   },
   "roleTargetOs": {
+    "cloudfront_sync": "linux",
     "ai_support_agent": "linux",
     "ai_support_agent_k8s": "linux",
     "claude_cli": "linux",

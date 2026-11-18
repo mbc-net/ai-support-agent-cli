@@ -47,3 +47,25 @@ Instead, please use [GitHub Security Advisories](https://github.com/mbc-net/ai-s
 ## Disclosure
 
 We follow coordinated disclosure. We will work with you to understand and address the issue before any public disclosure.
+
+## Dependency mitigation: picomatch (2026-11-18)
+
+[GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)
+reports exponential backtracking in repeated extglobs. No patched stable
+picomatch release was available when this mitigation was prepared.
+
+Production Glob and Grep use minimatch 11's non-regex matcher instead of
+picomatch. The existing Worker isolation and timeout remain in place for
+untrusted search inputs. Production dependencies contain no picomatch.
+
+Jest/ts-jest still depend on picomatch for development-time test discovery.
+The exception in `.github/npm-audit-exclusions.json` is limited to this advisory
+and expires on 2026-12-18. The unchanged audit gate checks on every run that no
+patched stable release exists and that the advisory is absent from production
+dependencies; it fails if either condition changes. Remove the exception and
+update the test dependencies when a patched release becomes available.
+
+Validation: `node .github/scripts/npm-audit-gate.js --audit-level=high`,
+`npm audit --omit=dev`, and the Glob/Grep security and compatibility tests.
+This mitigation does not claim that all lower-severity development or production
+dependency advisories have been resolved.
