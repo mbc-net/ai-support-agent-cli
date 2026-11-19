@@ -13,6 +13,8 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
+import * as os from 'os'
+import { execFileSync } from 'child_process'
 
 const DOCKERFILE = path.resolve(__dirname, '../../docker/Dockerfile')
 const PACKAGE_JSON = path.resolve(__dirname, '../../package.json')
@@ -49,6 +51,32 @@ describe('docker/Dockerfile — Ubuntu 26.04 base', () => {
   it('builds FROM ubuntu:26.04 (the only FROM in the file)', () => {
     const froms = content.split('\n').filter((line) => /^FROM\s/.test(line))
     expect(froms).toEqual(['FROM ubuntu:26.04'])
+  })
+
+  it('normalizes only arm64 Ubuntu sources before the first package update', () => {
+    const normalization = code.indexOf('RUN if [ "$(dpkg --print-architecture)" = arm64 ]')
+    expect(normalization).toBeGreaterThan(-1)
+    expect(normalization).toBeLessThan(code.indexOf('apt-get update'))
+    expect(code).toContain('http://ports.ubuntu.com/ubuntu-ports/')
+    expect(code).toContain('/etc/apt/sources.list.d/ubuntu.sources; fi')
+  })
+
+  it.each(['arm64', 'amd64'])('preserves suites and signing settings when normalizing %s', (arch) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ubuntu-sources-'))
+    const sources = path.join(directory, 'ubuntu.sources')
+    const original = 'URIs: http://archive.ubuntu.com/ubuntu/\nSuites: resolute resolute-updates\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\nURIs: http://security.ubuntu.com/ubuntu/\nSuites: resolute-security\n'
+    try {
+      fs.writeFileSync(sources, original)
+      const block = content.replace(/\\\n/g, ' ').split('\n').find(line => line.startsWith('RUN if [ "$(dpkg --print-architecture)"'))!
+      const shell = block.slice(4).replace('sed -i ', process.platform === 'darwin' ? "sed -i '' " : 'sed -i ').replace('$(dpkg --print-architecture)', arch).replace('/etc/apt/sources.list.d/ubuntu.sources', sources)
+      execFileSync('sh', ['-eu', '-c', shell])
+      const expected = arch === 'arm64' ? original.replace(/http:\/\/(archive|security)\.ubuntu\.com\/ubuntu\//g, 'http://ports.ubuntu.com/ubuntu-ports/') : original
+      expect(fs.readFileSync(sources, 'utf8')).toBe(expected)
+      execFileSync('sh', ['-eu', '-c', shell])
+      expect(fs.readFileSync(sources, 'utf8')).toBe(expected)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   describe('Node.js runtime (replaces the node:24 base image)', () => {

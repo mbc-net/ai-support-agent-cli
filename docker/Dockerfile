@@ -10,6 +10,13 @@ ARG APT_CACHE_BUST=2026-11-09
 # tzdata's region question) without leaking DEBIAN_FRONTEND into the runtime
 # environment of the agent or of images derived from this one.
 ARG DEBIAN_FRONTEND=noninteractive
+# Some Ubuntu ARM64 image revisions inherit the amd64 archive endpoints.
+# Keep the official ARM64 archive for all suites, including security updates.
+# Preserve Signed-By and package signature verification; CA roots are installed below.
+RUN if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+    sed -i -e 's|^URIs: http://archive\.ubuntu\.com/ubuntu/$|URIs: http://ports.ubuntu.com/ubuntu-ports/|' \
+           -e 's|^URIs: http://security\.ubuntu\.com/ubuntu/$|URIs: http://ports.ubuntu.com/ubuntu-ports/|' \
+        /etc/apt/sources.list.d/ubuntu.sources; fi
 # `apt-get update` is retried (3 attempts, 5s/15s backoff) at every occurrence in
 # this file to absorb transient DNS/network failures reaching the Ubuntu
 # archive (e.g. Docker daemon DNS hiccups on Ubuntu 24.04+ hosts) that would
